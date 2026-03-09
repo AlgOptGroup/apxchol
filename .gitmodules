@@ -1,0 +1,9 @@
+[submodule "extern/Laplacians.jl"]
+	path = extern/Laplacians.jl
+	url = https://github.com/danspielman/Laplacians.jl.git
+[submodule "extern/SDDM2023"]
+	path = extern/SDDM2023
+	url = https://github.com/rjkyng/SDDM2023.git
+[submodule "extern/rchol"]
+	path = extern/rchol
+	url = https://github.com/ut-padas/rchol.git

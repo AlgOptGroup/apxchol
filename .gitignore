@@ -1,0 +1,25 @@
+# Build outputs
+build/
+cmake-build-*/
+
+# IDE
+.idea/
+
+# Data & results (download/generate locally)
+data/
+results/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.dylib
+
+# Editor backups
+*~
+*.swp
+*.swo
