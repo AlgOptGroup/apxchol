@@ -5,15 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if (MSVC)
-    add_compile_options(/W4 /permissive-)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic -O2)
+if (NOT MSVC)
+    add_compile_options(-Wall -Wextra -Wpedantic)
+    if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        add_compile_options(-march=native)
+    endif()
 endif()
 
 # ── Eigen ────────────────────────────────────────────
-# Prefer system Eigen; fall back to FetchContent.
-find_package(Eigen3 3.3 CONFIG QUIET HINTS /usr/share/eigen3/cmake)
+find_package(Eigen3 3.3 CONFIG QUIET)
 if (NOT Eigen3_FOUND)
     include(FetchContent)
     FetchContent_Declare(eigen
@@ -24,28 +24,18 @@ if (NOT Eigen3_FOUND)
     FetchContent_MakeAvailable(eigen)
 endif()
 
-# ── Core library ─────────────────────────────────────
+# ── Core library: graph generators + I/O + ApxChol preconditioner ─
+# The preconditioner template (laplacian_preconditioner.h) is header-only.
 add_library(laplacian_core
-        src/graphs.cpp
-        src/simple_solver.cpp
-        src/mmio.cpp
+    src/graphs.cpp
+    src/mmio.cpp
+    src/simple_solver.cpp
 )
 target_link_libraries(laplacian_core PUBLIC Eigen3::Eigen)
 target_include_directories(laplacian_core PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# ── Main executable ──────────────────────────────────
-add_executable(laplacian_solver
-        src/main.cpp
-)
-target_link_libraries(laplacian_solver PRIVATE laplacian_core)
-
-# ── Benchmark executable ─────────────────────────────
-add_executable(benchmark
-        src/benchmark.cpp
-)
-target_link_libraries(benchmark PRIVATE laplacian_core)
-
+# ── Tests ────────────────────────────────────────────
 enable_testing()
 add_subdirectory(tests)

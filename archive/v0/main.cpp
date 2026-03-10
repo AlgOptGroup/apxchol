@@ -9,9 +9,9 @@
 #include <Eigen/Sparse>
 #include <Eigen/IterativeLinearSolvers>
 
-#include "../include/graphs.h"
-#include "../include/simple_solver.h"
-#include "../include/solver.h"
+#include "graphs.h"
+#include "simple_solver.h"
+#include "solver.h"
 
 class lap_preconditioner {
 public:

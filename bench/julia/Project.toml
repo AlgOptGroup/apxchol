@@ -1,9 +1,0 @@
-[deps]
-Laplacians = "65a12bc0-c476-11e8-3485-4b1e5a1e1e7a"
-SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
-LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
-MatrixMarket = "4d4711f2-db25-561a-b6b3-d35e7d4047d4"
-Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
-Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
-DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"

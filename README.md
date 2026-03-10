@@ -1,33 +1,33 @@
 # Scalable Approximate Cholesky for Laplacian Systems
 
-Benchmark suite comparing approximate Cholesky preconditioners for solving
-Laplacian/SDDM linear systems. Includes our C++17 implementation alongside
-reference implementations from UC Berkeley (RCHOL) and Spielman's group
-(Laplacians.jl).
+C++17 library providing a CRTP preconditioner template for Laplacian/SDDM
+linear systems, compatible with Eigen's PCG solver. Includes graph generators,
+Matrix Market I/O, and a standalone benchmark suite comparing against RCHOL,
+GPU-RCHOL, CHOLMOD, and Laplacians.jl.
 
 ## Repository Structure
 
 ```
-├── src/                  # Our C++ implementation
-│   ├── simple_solver.cpp # Approximate Cholesky (greedy IS + random clique sampling)
-│   ├── benchmark.cpp     # C++ benchmark harness (PCG with various preconditioners)
+├── include/
+│   ├── laplacian_preconditioner.h  # CRTP template — plug into Eigen's PCG
+│   ├── graphs.h                    # Graph generator interfaces
+│   └── mmio.h                      # Matrix Market loader
+├── src/
 │   ├── graphs.cpp        # Graph generators (grid, checkerboard, Erdős-Rényi)
-│   ├── mmio.cpp          # Matrix Market loader
-│   └── main.cpp          # Quick demo driver
-├── include/              # Headers
-├── tests/                # GoogleTest suite
-│   ├── test_sanity.cpp
-│   └── test_solver.cpp   # Solver correctness & convergence tests
-├── bench/                # External solver benchmarks
-│   ├── julia/            # Laplacians.jl benchmark driver
-│   └── rchol/            # RCHOL benchmark driver & build integration
-├── extern/               # Git submodules (external code)
-│   ├── Laplacians.jl/    # Spielman et al. — Julia approxChol
-│   ├── rchol/            # UC Berkeley — C++ randomized Cholesky
-│   └── SDDM2023/        # Kyng et al. — benchmark framework reference
+│   └── mmio.cpp          # Matrix Market loader
+├── tests/                # GoogleTest suite (9 tests)
+├── archive/v0/           # Frozen v0 snapshot of ApxChol (self-contained, buildable)
+├── benchmarks/           # Benchmark suite (links against core library)
+│   ├── CMakeLists.txt    # Own build system — FetchContent for solver deps
+│   ├── src/              # Benchmark driver (links core library for graphs/solver)
+│   ├── julia/            # Laplacians.jl benchmark driver (4 Julia solvers)
+│   ├── run.sh            # Run benchmarks (--bench, --solver, --quick, --append)
+│   ├── run_gpu_rchol.py  # GPU RCHOL benchmark wrapper
+│   ├── plot.py           # Generate PDF+PNG charts from CSV
+│   ├── update_readme.py  # Auto-update results table
+│   └── README.md         # Benchmark docs & auto-updated results
 ├── scripts/
 │   ├── setup_all.sh      # One-shot build + install everything
-│   ├── run_benchmarks.sh # Run all benchmarks, collect CSV results
 │   └── download_graphs.sh# Fetch SuiteSparse test matrices
 └── data/matrices/        # Downloaded test matrices (gitignored)
 ```
@@ -35,19 +35,51 @@ reference implementations from UC Berkeley (RCHOL) and Spielman's group
 ## Quick Start
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/AlgOptGroup/Scalable-Approximate-Cholesky.git
-cd Scalable-Approximate-Cholesky
+git clone <repo-url>
+cd laplacian_solver
 
-# Full setup (builds everything, installs Julia deps, downloads matrices)
-bash scripts/setup_all.sh
-
-# Or manually:
+# Build core library + tests (only needs Eigen)
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ctest --output-on-failure
+cd ..
+
+# Benchmarks are a separate standalone project (FetchContent pulls all deps)
+cd benchmarks
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc) benchmark
+cd ../..
+bash benchmarks/run.sh          # full suite (CSV + PDF charts)
+bash benchmarks/run.sh --quick  # quick smoke test
 ```
+
+## Preconditioner Interface
+
+The core library provides a CRTP base template `laplacian_preconditioner<Derived>`
+that integrates directly with Eigen's `ConjugateGradient` solver. Implement
+`apply(const VectorXd&)` in your derived class:
+
+```cpp
+#include "laplacian_preconditioner.h"
+
+class my_preconditioner
+    : public laplacian_preconditioner<my_preconditioner> {
+public:
+    using laplacian_preconditioner::laplacian_preconditioner;
+    Eigen::VectorXd apply(const Eigen::VectorXd& rhs) const {
+        // Your M^{-1} * rhs implementation
+    }
+};
+
+// Use with Eigen's PCG:
+Eigen::ConjugateGradient<SpMat, Eigen::Lower|Eigen::Upper, my_preconditioner> cg;
+cg.compute(L);
+Eigen::VectorXd x = cg.solve(b);
+```
+
+The base class automatically handles zero-mean centering for Laplacian solves.
 
 ## Solvers Compared
 
@@ -55,75 +87,70 @@ ctest --output-on-failure
 - **ApxChol+PCG**: Approximate Cholesky via greedy independent-set elimination
   with random clique sampling, used as PCG preconditioner.
 
+### External: RCHOL (UT Austin / NC State, C++)
+- **RCHOL+PCG [Chen20]**: Randomized incomplete Cholesky (Chen, Liang, Biros 2020).
+  Fetched via FetchContent in benchmarks.
+- **RCHOL+MKL [Chen20]**: Same factorization, MKL sparse BLAS for tri-solves.
+- **pRCHOL+PCG [Chen20;par]**: Parallel RCHOL with METIS graph partitioning.
+
+### External: CHOLMOD (SuiteSparse)
+- **CHOLMOD**: Supernodal sparse Cholesky direct solver (regularization + iterative refinement → 1e-16 residuals on Laplacians).
+
+### External: AMGCL (header-only C++)
+- ~~**AMG+CG**~~: Excluded from default benchmarks — smoothed_aggregation + spai0
+  does not converge on graph Laplacians. Available via `--solver amgcl`.
+
 ### External: Laplacians.jl (Julia)
-- **AC** (approxChol): Degree-ordered approximate Cholesky (Kyng & Sachdeva 2016)
-- **AC2**: Robust variant with split/merge parameters
-- **CG**: Conjugate gradients baseline
-- **Cholesky**: Direct exact factorization via SuiteSparse
+- **AC [Kyng16;Jl]**: ApproxChol — degree-ordered approximate Cholesky (Kyng & Sachdeva 2016)
+- **AC2 [Kyng16;Jl]**: Robust variant with split/merge parameters
+- **CG [Julia]**: Conjugate gradients baseline
+- **Chol [Julia]**: Direct Cholesky via SuiteSparse
 
-### External: RCHOL (UC Berkeley, C++)
-- **RCHOL**: Randomized incomplete Cholesky (Chen, Liang, Biros 2020)
-  - Paper: https://arxiv.org/abs/2011.07769
-  - Sequential C++ with optional OpenMP parallelism (needs METIS)
+### Baseline (Eigen)
+- **CG [Eigen]**: CG with diagonal preconditioner
+- **LDLT [Eigen]**: Eigen sparse direct solver (regularization + iterative refinement for machine precision on Laplacians)
 
-### Note on GPU RCHOL
-The GPU-parallel version (Liang et al. 2025, arXiv:2505.02977) has no public
-repository. The ut-padas/rchol README states "We do not support GPUs."
+### GPU RCHOL
+- **GPU-RCHOL+PCG [Liang25]**: GPU-parallel RCHOL (Liang et al. 2025,
+  arXiv:2505.02977) via CUDA cusparse/cublas. Benchmarked via Python wrapper.
+  Source: https://github.com/Tianyu-Liang/Parallel-Randomized-Cholesky
+  Built via `-DBUILD_GPU_RCHOL=ON` (FetchContent, requires CUDA 12.4+).
 
 ## Benchmark Protocol
 
 Following the SDDM2023 framework (arXiv:2303.00709):
 
 - **Tolerance**: 1e-8 relative residual
-- **Metrics**: setup time, solve time, total time, PCG iterations, ‖Ax−b‖/‖b‖, fill-in ratio
-- **Test instances**:
-  - Grid Laplacians (uniform weights)
-  - Checkerboard grids (varying condition number κ and tile size)
-  - Erdős-Rényi random graphs
-  - SuiteSparse Matrix Market files (real-world)
+- **Repetitions**: C++ solvers use `--repeat 3` (median of 3 runs); Julia uses JIT warmup on a tiny graph before the timed run
+- **Metrics**: setup time, solve time, total time, PCG iterations, ‖Ax−b‖/‖b‖, fill-in
+- **Test instances**: Grid, checkerboard, Erdős-Rényi, SDDM2023 families, SuiteSparse matrices
+- **CSV schema**: `solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz`
 
-All solvers output CSV with a common schema:
-```
-solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz
-```
-
-### Running Benchmarks
-
-```bash
-# C++ benchmark (our solver + Eigen baselines)
-bash scripts/run_benchmarks.sh
-
-# Julia benchmark (Laplacians.jl)
-julia --project=bench/julia bench/julia/bench_laplacians.jl --csv --graph checkerboard --n 500
-
-# RCHOL benchmark (if built successfully)
-build/bench_rchol --csv --n 100 --kappa 1000 --tile 4
-```
+See [benchmarks/README.md](benchmarks/README.md) for detailed results and charts.
 
 ## Dependencies
 
-### Required
+### Core library (no submodules, no heavy deps)
 - C++17 compiler (GCC ≥ 9 or Clang ≥ 10)
 - CMake ≥ 3.16
-- Eigen3
+- Eigen3 (auto-detected; fetched via FetchContent if missing)
 
-### Optional
-- **Julia ≥ 1.6** — for Laplacians.jl benchmarks
-- **METIS** — for parallel RCHOL (`pacman -S metis` / `apt install libmetis-dev`)
-- **CHOLMOD/SuiteSparse** — for direct solver comparison
+### Benchmarks (standalone, all deps via FetchContent)
+The benchmark suite has its own CMakeLists.txt and fetches all dependencies
+(RCHOL, AMGCL) at configure time — no git submodules needed.
+
+- **Boost** (headers only, for AMGCL)
+- **CHOLMOD/SuiteSparse** (optional, system library)
+- **MKL** (optional, for MKL-accelerated RCHOL)
+- **METIS** (optional, for parallel RCHOL)
+- **Julia ≥ 1.6** (optional, for Laplacians.jl benchmarks)
+- **Python 3 + matplotlib + pandas** (optional, for plot generation)
 
 ## Tests
 
 ```bash
-cd build && ctest --output-on-failure
+cd build && ctest --output-on-failure   # 9 tests
 ```
-
-Tests verify:
-- Graph generators produce valid symmetric adjacency structures
-- Laplacian matrices have correct properties (row-sums zero, symmetric, positive diagonal)
-- ApxChol preconditioner produces finite solutions
-- ApxChol+PCG converges to tolerance on grid, checkerboard, and ER graphs
-- Solution verification: check ‖Lx−b‖/‖b‖
 
 ## References
 
@@ -133,6 +160,7 @@ Tests verify:
   [arXiv:2011.07769](https://arxiv.org/abs/2011.07769)
 - Kyng et al. (2023). SDDM Solver Benchmarks.
   [arXiv:2303.00709](https://arxiv.org/abs/2303.00709)
-- Liang et al. (2025). Parallel GPU Randomized Cholesky.
+- Liang et al. (2025). Parallel GPU-Accelerated Randomized Cholesky.
   [arXiv:2505.02977](https://arxiv.org/abs/2505.02977)
 - Spielman. [Laplacians.jl](https://github.com/danspielman/Laplacians.jl)
+- Demidov. [AMGCL](https://github.com/ddemidov/amgcl)

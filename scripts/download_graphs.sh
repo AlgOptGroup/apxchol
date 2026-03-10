@@ -24,6 +24,12 @@ MATRICES=(
     # 2D/3D FEM (coordinate, symmetric)
     "Wissgott/parabolic_fem"    # 525825 FEM
     "MaxPlanck/shallow_water1"  # 81920 shallow water
+    # GPU RCHOL paper (Liang et al.) benchmark matrices
+    "McRae/ecology1"            # 1000000 ecology model
+    "McRae/ecology2"            # 999999 ecology model
+    "GHS_psdef/apache2"         # 715176 structural
+    "AMD/G3_circuit"            # 1585478 circuit simulation
+    "MaxPlanck/shallow_water2"  # 81920 shallow water (variant)
 )
 
 for entry in "${MATRICES[@]}"; do
@@ -42,8 +48,12 @@ for entry in "${MATRICES[@]}"; do
 
     if curl -fsSL "$url" -o "$tmpdir/archive.tar.gz"; then
         tar xzf "$tmpdir/archive.tar.gz" -C "$tmpdir"
-        # The .mtx file is usually at name/name.mtx inside the archive
-        mtx=$(find "$tmpdir" -name "*.mtx" | head -1)
+        # The matrix file is usually at name/name.mtx inside the archive
+        # Prefer exact match over other .mtx files (e.g. name_b.mtx is the RHS)
+        mtx=$(find "$tmpdir" -name "${name}.mtx" | head -1)
+        if [[ -z "$mtx" ]]; then
+            mtx=$(find "$tmpdir" -name "*.mtx" | head -1)
+        fi
         if [[ -n "$mtx" ]]; then
             cp "$mtx" "$outfile"
             echo "[ok] $outfile ($(wc -l < "$outfile") lines)"

@@ -1,6 +1,8 @@
 # Build outputs
 build/
 cmake-build-*/
+benchmarks/build/
+CMakeFiles/
 
 # IDE
 .idea/
@@ -8,6 +10,7 @@ cmake-build-*/
 # Data & results (download/generate locally)
 data/
 results/
+benchmarks/results/
 
 # OS files
 .DS_Store
@@ -19,7 +22,14 @@ Thumbs.db
 *.so
 *.dylib
 
+# Python
+__pycache__/
+*.pyc
+
 # Editor backups
 *~
 *.swp
 *.swo
+
+# Binary artifacts
+main

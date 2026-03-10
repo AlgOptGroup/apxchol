@@ -204,10 +204,10 @@ function run_approxchol(adj, L, b, graph_name, tol, maxiter; variant=:ac)
     # Build preconditioner
     if variant == :ac2
         params = ApproxCholParams(:deg, 5, 2, 2)
-        sname = "AC2(Julia)"
+        sname = "AC2 [Kyng16;Jl]"
     else
         params = ApproxCholParams(:deg)
-        sname = "AC(Julia)"
+        sname = "AC [Kyng16;Jl]"
     end
 
     pcg_its = Int[]
@@ -256,7 +256,7 @@ function run_cg_julia(L, b, graph_name, tol, maxiter)
     r .-= mean(r)
     rel_res = norm(r) / max(norm(b), 1e-16)
 
-    return BenchResult("CG(Julia)", graph_name, n, nnz_L,
+    return BenchResult("CG [Julia]", graph_name, n, nnz_L,
         0.0, t, t, iters, rel_res, 0.0, t / nnz_L * 1e6)
 end
 
@@ -279,7 +279,7 @@ function run_cholesky_julia(L, b, graph_name)
     r .-= mean(r)
     rel_res = norm(r) / max(norm(b), 1e-16)
 
-    return BenchResult("Chol(Julia)", graph_name, n, nnz_L,
+    return BenchResult("Chol [Julia]", graph_name, n, nnz_L,
         t_setup, t_solve, t_setup + t_solve,
         1, rel_res, 0.0, (t_setup + t_solve) / nnz_L * 1e6)
 end
@@ -340,6 +340,27 @@ function main()
     end
 
     pf = opts["csv"] ? print_result_csv : print_result_pretty
+
+    # JIT warmup: run each solver once on a tiny graph so the timed run
+    # doesn't include compilation overhead
+    warmup_adj = grid_graph_adj(5, 5)
+    warmup_L = lap(warmup_adj)
+    warmup_b = randn(MersenneTwister(0), size(warmup_L, 1))
+    warmup_b = warmup_L * warmup_b
+    warmup_b .-= mean(warmup_b)
+    for s in solvers_to_run
+        try
+            if s == "ac"
+                run_approxchol(warmup_adj, warmup_L, warmup_b, "warmup", 1e-6, 100; variant=:ac)
+            elseif s == "ac2"
+                run_approxchol(warmup_adj, warmup_L, warmup_b, "warmup", 1e-6, 100; variant=:ac2)
+            elseif s == "cg"
+                run_cg_julia(warmup_L, warmup_b, "warmup", 1e-6, 100)
+            elseif s == "chol"
+                run_cholesky_julia(warmup_L, warmup_b, "warmup")
+            end
+        catch; end
+    end
 
     for s in solvers_to_run
         try
