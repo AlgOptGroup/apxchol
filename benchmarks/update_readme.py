@@ -24,20 +24,24 @@ def format_residual(r):
     return f"{r:.2e}"
 
 
+EXCLUDE_SOLVERS = {"AMG+CG [AMGCL]", "CG+ICC [Eigen]", "pRCHOL+PCG [Chen20;par]", "AC [Kyng16;Jl]"}
+
+
 def generate_table(df):
     """Generate a markdown summary table from benchmark CSV."""
+    df = df[~df["solver"].isin(EXCLUDE_SOLVERS)]
     lines = []
 
-    # Summary: best result per solver on largest checkerboard
-    mask = df["graph"].str.contains("checker", na=False) & df["graph"].str.contains("k1000_t4", na=False)
+    # Summary: best result per solver on largest checkerboard κ=1
+    mask = df["graph"].str.contains("checker", na=False) & df["graph"].str.contains("k1_t4", na=False)
     sub = df[mask].copy()
     if sub.empty:
-        return "No checkerboard (κ=1000) results found.\n"
+        return "No checkerboard (κ=1) results found.\n"
 
     largest_n = sub["n"].max()
     sub = sub[sub["n"] == largest_n].sort_values("total_s")
 
-    lines.append(f"### Checkerboard Grid (n={largest_n}, κ=1000, tile=4)\n")
+    lines.append(f"### Checkerboard Grid (n={largest_n:,}, κ=1, tile=4)\n")
     lines.append("| Solver | Setup | Solve | Total | Iters | Rel. Residual | µs/nnz |")
     lines.append("|--------|-------|-------|-------|------:|---------------|-------:|")
 
@@ -51,24 +55,6 @@ def generate_table(df):
             f"| {format_residual(row['rel_res'])} "
             f"| {row['us_per_nnz']:.2f} |"
         )
-
-    # Grid scaling table
-    grid_mask = df["graph"].str.startswith("grid_", na=False)
-    if grid_mask.any():
-        grid = df[grid_mask].copy()
-        lines.append("")
-        lines.append("### Grid Laplacian (uniform weights)")
-        lines.append("")
-        lines.append("| Solver | n | Total | Iters | Rel. Residual |")
-        lines.append("|--------|--:|------:|------:|---------------|")
-        for _, row in grid.sort_values(["n", "solver"]).iterrows():
-            lines.append(
-                f"| {row['solver']} "
-                f"| {int(row['n'])} "
-                f"| {format_time(row['total_s'])} "
-                f"| {int(row['iters'])} "
-                f"| {format_residual(row['rel_res'])} |"
-            )
 
     return "\n".join(lines) + "\n"
 

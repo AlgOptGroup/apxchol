@@ -41,10 +41,29 @@ SOLVER_COLORS = {
 }
 
 # Solvers excluded from ALL charts
-EXCLUDE_SOLVERS = {"AMG+CG [AMGCL]", "CG+ICC [Eigen]"}
+EXCLUDE_SOLVERS = {"AMG+CG [AMGCL]", "CG+ICC [Eigen]", "pRCHOL+PCG [Chen20;par]", "AC [Kyng16;Jl]"}
 
 # Solvers excluded from bar comparison charts (extreme outliers)
 BAR_EXCLUDE_SOLVERS = {"GPU-RCHOL+PCG [Liang25]"}
+
+# Solver-specific maxiter thresholds — hitting maxiter = not converged
+# (CG maxiter=500, GPU maxiter=300; others always converge before limit)
+SOLVER_MAXITER = {
+    "CG [Eigen]": 500,
+    "GPU-RCHOL+PCG [Liang25]": 300,
+}
+
+# Families where CG scaling is misleading — exclude from scaling charts
+# (maxiter hits, or erratic per-nnz cost from cache effects + growing iter count)
+CG_BAD_FAMILIES = {"chimera", "wchimera", "aniso", "wgrid", "uniform_grid"}
+
+# Solvers excluded from SDDM parameter sweep charts (too many maxiter hits)
+SDDM_PARAM_EXCLUDE = {"CG [Eigen]", "GPU-RCHOL+PCG [Liang25]"}
+
+def _hit_maxiter(row):
+    """Return True if this row hit its solver's iteration limit."""
+    limit = SOLVER_MAXITER.get(row["solver"])
+    return limit is not None and row["iters"] >= limit
 
 
 def solver_color(name):
@@ -54,7 +73,8 @@ def solver_color(name):
 def save_fig(fig, outdir, name):
     fig.tight_layout()
     for ext in ("pdf", "png"):
-        fig.savefig(os.path.join(outdir, f"{name}.{ext}"), dpi=150)
+        fig.savefig(os.path.join(outdir, f"{name}.{ext}"), dpi=150,
+                    bbox_inches="tight")
     plt.close(fig)
     print(f"  -> {name}.{{pdf,png}}")
 
@@ -77,10 +97,10 @@ def load_csv(paths):
     return df
 
 
-def _checker_k1000_t4(df):
-    """Filter to checkerboard κ=1000, tile=4 only."""
+def _checker_k1_t4(df):
+    """Filter to checkerboard κ=1, tile=4 only (baseline kappa)."""
     return df[df["graph"].str.contains("checker", na=False)
-              & df["graph"].str.match(r".*k1000_t4$", na=False)].copy()
+              & df["graph"].str.match(r".*k1_t4$", na=False)].copy()
 
 
 def _dedup_by_graph(df):
@@ -90,42 +110,7 @@ def _dedup_by_graph(df):
     return df.loc[df.groupby(["solver", "graph"])["total_s"].idxmin()]
 
 
-# ══════════════════════════════════════════════════════
-# Scaling charts — one per graph family
-# ══════════════════════════════════════════════════════
 
-def _plot_scaling(df, outdir, name, title):
-    df = _dedup_by_graph(df)
-    if df.empty:
-        return
-    fig, ax = plt.subplots()
-    for solver, grp in df.groupby("solver"):
-        grp = grp.sort_values("n")
-        ax.plot(grp["n"], grp["total_s"], "o-", label=solver,
-                color=solver_color(solver), markersize=5)
-    ax.set_xlabel("Problem size (n)")
-    ax.set_ylabel("Total time (s)")
-    ax.set_title(f"Scaling \u2014 {title}")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.legend(fontsize=8, ncol=2)
-    save_fig(fig, outdir, name)
-
-
-def plot_scaling_checker(df, outdir):
-    _plot_scaling(_checker_k1000_t4(df), outdir,
-                  "scaling_checkerboard", "Checkerboard (\u03ba=1000, tile=4)")
-
-
-def plot_scaling_grid(df, outdir):
-    sub = df[df["graph"].str.match(r"grid_\d+$", na=False)]
-    _plot_scaling(sub, outdir, "scaling_grid", "Uniform Grid Laplacian")
-
-
-def plot_scaling_erdos(df, outdir):
-    sub = df[df["graph"].str.contains("erdos", na=False)]
-    _plot_scaling(sub, outdir, "scaling_erdos",
-                  "Erdős–Rényi (varying p, ~1M edges)")
 
 
 # ══════════════════════════════════════════════════════
@@ -195,7 +180,7 @@ def _plot_bar_ax(ax, sub, title):
 
 
 def plot_bar_comparison(df, outdir):
-    sub = _checker_k1000_t4(df)
+    sub = _checker_k1_t4(df)
     if sub.empty:
         return
     sub = sub[~sub["solver"].isin(BAR_EXCLUDE_SOLVERS)]
@@ -205,7 +190,7 @@ def plot_bar_comparison(df, outdir):
 
     fig, ax = plt.subplots(figsize=(11, max(4, len(sub) * 0.45)))
     _plot_bar_ax(ax, sub,
-                 f"Setup + Solve Breakdown \u2014 checker n={int(largest_n)}, \u03ba=1000")
+                 f"Setup + Solve Breakdown \u2014 checker n={int(largest_n)}, \u03ba=1")
     ax.legend(["Setup", "Solve"], fontsize=9)
     save_fig(fig, outdir, "bar_comparison")
 
@@ -215,7 +200,7 @@ def plot_bar_comparison(df, outdir):
 # ══════════════════════════════════════════════════════
 
 def plot_residual(df, outdir):
-    sub = _checker_k1000_t4(df)
+    sub = _checker_k1_t4(df)
     if sub.empty:
         return
     largest_n = sub["n"].max()
@@ -227,7 +212,7 @@ def plot_residual(df, outdir):
     colors = [solver_color(s) for s in sub["solver"]]
     ax.barh(sub["solver"], sub["rel_res"], color=colors)
     ax.set_xlabel("Relative residual ||Ax\u2212b||/||b||")
-    ax.set_title(f"Solution Accuracy \u2014 checker n={int(largest_n)}, \u03ba=1000")
+    ax.set_title(f"Solution Accuracy \u2014 checker n={int(largest_n)}, \u03ba=1")
     ax.set_xscale("log")
     ax.axvline(1e-8, color="red", ls="--", alpha=0.5, label="tol=1e\u207b\u2078")
     ax.legend(fontsize=9)
@@ -239,14 +224,14 @@ def plot_residual(df, outdir):
 # ══════════════════════════════════════════════════════
 
 def plot_efficiency(df, outdir):
-    sub = _checker_k1000_t4(df)
-    # Only solvers that converge reasonably
-    sub = sub[sub["rel_res"] < 1e-2].copy()
+    sub = _checker_k1_t4(df)
+    # Exclude solvers that hit maxiter (non-convergence)
+    sub = sub[~sub.apply(_hit_maxiter, axis=1)].copy()
     if sub.empty:
         return
 
-    # Aggregate: median and IQR per (solver, n)
-    agg = sub.groupby(["solver", "n"]).agg(
+    # Aggregate: median and IQR per (solver, nnz)
+    agg = sub.groupby(["solver", "nnz"]).agg(
         med=("us_per_nnz", "median"),
         q25=("us_per_nnz", lambda x: x.quantile(0.25)),
         q75=("us_per_nnz", lambda x: x.quantile(0.75)),
@@ -254,53 +239,22 @@ def plot_efficiency(df, outdir):
 
     fig, ax = plt.subplots()
     for solver, grp in agg.groupby("solver"):
-        grp = grp.sort_values("n")
-        ax.plot(grp["n"], grp["med"], "o-", label=solver,
+        grp = grp.sort_values("nnz")
+        ax.plot(grp["nnz"], grp["med"], "o-", label=solver,
                 color=solver_color(solver), markersize=4, alpha=0.9)
         # IQR shaded band
-        ax.fill_between(grp["n"], grp["q25"], grp["q75"],
+        ax.fill_between(grp["nnz"], grp["q25"], grp["q75"],
                          color=solver_color(solver), alpha=0.15)
-    ax.set_xlabel("Problem size (n)")
+    ax.set_xlabel("nnz")
     ax.set_ylabel("\u00b5s / nnz (median)")
-    ax.set_title("Efficiency \u2014 checker \u03ba=1000 (median \u00b1 IQR)")
+    ax.set_title("Efficiency \u2014 checker \u03ba=1 (median \u00b1 IQR)")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.legend(fontsize=8, ncol=2)
     save_fig(fig, outdir, "efficiency")
 
 
-# ══════════════════════════════════════════════════════
-# Time per edge (TVE) — SDDM2023 core metric
-# ══════════════════════════════════════════════════════
 
-def plot_time_per_edge(df, outdir):
-    df = df.copy()
-    df["tve"] = df["total_s"] / (df["nnz"] / 2)
-
-    configs = [
-        ("checkerboard", r"checker_\d+_k1000_t4$", "\u03ba=1000, tile=4"),
-        ("grid", r"grid_\d+$", "uniform weights"),
-        ("erdos_renyi", r"erdos_", "varying p, ~1M edges"),
-    ]
-    for family, pattern, subtitle in configs:
-        fam_df = df[df["graph"].str.match(pattern, na=False)]
-        fam_df = _dedup_by_graph(fam_df)
-        if fam_df.empty:
-            continue
-
-        fig, ax = plt.subplots()
-        for solver, grp in fam_df.groupby("solver"):
-            grp = grp.sort_values("n")
-            ax.plot(grp["n"], grp["tve"], "o-", label=solver,
-                    color=solver_color(solver), markersize=5)
-        ax.set_xlabel("Problem size (n)")
-        ax.set_ylabel("Time per edge (s)")
-        nice = family.replace("_", " ").title()
-        ax.set_title(f"Time per Edge \u2014 {nice} ({subtitle})")
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.legend(fontsize=8, ncol=2)
-        save_fig(fig, outdir, f"tve_{family}")
 
 
 # ══════════════════════════════════════════════════════
@@ -309,35 +263,62 @@ def plot_time_per_edge(df, outdir):
 
 GPU_PAPER_MATRICES = {"parabolic_fem", "ecology1", "ecology2", "apache2", "G3_circuit"}
 
+# Known GPU failures — exclude from charts (crashes or degenerate results)
+GPU_FAILURES = {
+    ("GPU-RCHOL+PCG [Liang25]", "apache2"),    # CUDA illegal memory access (linear elimination tree)
+    ("GPU-RCHOL+PCG [Liang25]", "G3_circuit"),  # tree depth ~1.46M → extremely slow / garbage factor
+}
+
 
 def plot_gpu_paper(df, outdir):
-    """Horizontal bar chart comparing solvers on GPU RCHOL paper matrices."""
+    """Per-matrix horizontal bar charts for GPU RCHOL paper matrices."""
     gpu_df = df[df["graph"].isin(GPU_PAPER_MATRICES)].copy()
     if gpu_df.empty:
         return
+    # Filter known GPU failures
+    gpu_df = gpu_df[~gpu_df.apply(
+        lambda r: (r["solver"], r["graph"]) in GPU_FAILURES, axis=1)]
     gpu_df = _dedup_by_graph(gpu_df)
-    gpu_df["tve"] = gpu_df["total_s"] / (gpu_df["nnz"] / 2).replace(0, np.nan)
 
     matrices = sorted(gpu_df["graph"].unique())
-    solvers = sorted(gpu_df["solver"].unique())
-    x = np.arange(len(matrices))
-    width = 0.8 / max(len(solvers), 1)
+    for mat in matrices:
+        sub = gpu_df[gpu_df["graph"] == mat]
+        sub = sub.loc[sub.groupby("solver")["total_s"].idxmin()]
+        fig, ax = plt.subplots(figsize=(11, max(4, len(sub) * 0.45)))
+        _plot_bar_ax(ax, sub, f"Setup + Solve \u2014 {mat}")
+        ax.legend(["Setup", "Solve"], fontsize=9)
+        save_fig(fig, outdir, f"gpu_bar_{mat}")
 
-    fig, ax = plt.subplots(figsize=(max(10, len(matrices) * 2), 6))
-    for i, solver in enumerate(solvers):
-        vals = []
-        for mat in matrices:
-            row = gpu_df[(gpu_df["graph"] == mat) & (gpu_df["solver"] == solver)]
-            vals.append(row["tve"].values[0] if len(row) else np.nan)
-        ax.bar(x + i * width, vals, width, label=solver,
-               color=solver_color(solver), alpha=0.85)
-    ax.set_xticks(x + width * len(solvers) / 2)
-    ax.set_xticklabels(matrices, rotation=30, ha="right")
-    ax.set_ylabel("Time per edge (s)")
-    ax.set_yscale("log")
-    ax.set_title("GPU RCHOL Paper Matrices \u2014 Solver Comparison (time per edge)")
-    ax.legend(fontsize=7, ncol=2)
-    save_fig(fig, outdir, "gpu_paper_comparison")
+    # Combined: one panel per matrix
+    ncols = min(len(matrices), 3)
+    nrows = (len(matrices) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(8 * ncols, 5 * nrows))
+    if nrows * ncols == 1:
+        axes = np.array([[axes]])
+    elif nrows == 1:
+        axes = axes[np.newaxis, :]
+    elif ncols == 1:
+        axes = axes[:, np.newaxis]
+
+    for idx, mat in enumerate(matrices):
+        r, c = divmod(idx, ncols)
+        ax = axes[r, c]
+        sub = gpu_df[gpu_df["graph"] == mat]
+        sub = sub.loc[sub.groupby("solver")["total_s"].idxmin()]
+        _plot_bar_ax(ax, sub, mat)
+
+    for idx in range(len(matrices), nrows * ncols):
+        r, c = divmod(idx, ncols)
+        axes[r, c].set_visible(False)
+
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor="#999999", alpha=0.7, label="Setup"),
+                       Patch(facecolor="#4488cc", alpha=1.0, label="Solve")]
+    fig.legend(handles=legend_elements, loc="lower center", ncol=2, fontsize=10,
+               bbox_to_anchor=(0.5, -0.02))
+    fig.suptitle("GPU RCHOL Paper Matrices \u2014 Setup + Solve Comparison",
+                 fontsize=14, y=1.01)
+    save_fig(fig, outdir, "combined_gpu_paper")
 
 
 # ══════════════════════════════════════════════════════
@@ -373,29 +354,63 @@ def _prepare_sddm(df):
 
 
 def _plot_sddm_scaling_ax(ax, fam_df, xlabel="n"):
-    """Plot time-per-edge scaling on a given axes. Averages chimera instances."""
+    """Plot time-per-edge scaling on a given axes.
+    For chimera/wchimera uses nnz as x-axis (instances differ wildly in density).
+    Excludes CG from families where it mostly doesn't converge.
+    Marks maxiter hits with × markers."""
     if fam_df.empty:
         return
-    # For chimera/wchimera: group by (solver, n) and take median across instances
-    agg = fam_df.groupby(["solver", "n"]).agg(tve=("tve", "median")).reset_index()
-    for solver, grp in agg.groupby("solver"):
-        grp = grp.sort_values("n")
-        ax.plot(grp["n"], grp["tve"], "o-", label=solver,
-                color=solver_color(solver), markersize=4, linewidth=1.5)
-    ax.set_xlabel(xlabel)
+    family = fam_df["family"].iloc[0] if "family" in fam_df.columns else ""
+    use_nnz = family in ("chimera", "wchimera")
+    xcol = "nnz" if use_nnz else "n"
+    real_xlabel = "nnz" if use_nnz else xlabel
+
+    # Exclude CG from families where it mostly hits maxiter
+    plot_df = fam_df
+    if family in CG_BAD_FAMILIES:
+        plot_df = fam_df[fam_df["solver"] != "CG [Eigen]"]
+
+    has_nonconv = False
+    for solver, grp in plot_df.groupby("solver"):
+        grp = grp.sort_values(xcol)
+        color = solver_color(solver)
+        ax.plot(grp[xcol], grp["tve"], "o-", label=solver,
+                color=color, markersize=4, linewidth=1.5)
+        nconv = grp[grp.apply(_hit_maxiter, axis=1)]
+        if not nconv.empty:
+            has_nonconv = True
+            ax.scatter(nconv[xcol], nconv["tve"], marker="x", c=color,
+                       s=60, zorder=5, linewidths=2)
+    if has_nonconv:
+        ax.scatter([], [], marker="x", c="black", s=60, linewidths=2,
+                   label="\u00d7 = hit maxiter")
+    ax.set_xlabel(real_xlabel)
     ax.set_ylabel("Time per edge (s)")
     ax.set_xscale("log")
     ax.set_yscale("log")
 
 
 def _plot_sddm_params_ax(ax, fam_df, param_col, xlabel="param"):
-    """Plot time-per-edge vs parameter on a given axes."""
+    """Plot time-per-edge vs parameter on a given axes.
+    Uses only the largest size (nnz2M) for cleaner charts.
+    Excludes CG and GPU (too many maxiter hits on param sweeps)."""
     if fam_df.empty:
         return
+    # Filter to largest size only and exclude noisy solvers
+    fam_df = fam_df.copy()
+    fam_df["size"] = fam_df["graph_base"].str.extract(r"(nnz\w+?)_")[0]
+    sizes = sorted(fam_df["size"].dropna().unique())
+    if sizes:
+        fam_df = fam_df[fam_df["size"] == sizes[-1]]  # largest size
+    fam_df = fam_df[~fam_df["solver"].isin(SDDM_PARAM_EXCLUDE)]
+    if fam_df.empty:
+        return
+
     for solver, grp in fam_df.groupby("solver"):
         grp = grp.sort_values(param_col)
+        color = solver_color(solver)
         ax.plot(grp[param_col], grp["tve"], "o-", label=solver,
-                color=solver_color(solver), markersize=4, linewidth=1.5)
+                color=color, markersize=4, linewidth=1.5)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Time per edge (s)")
     ax.set_xscale("log")
@@ -425,9 +440,9 @@ def plot_sddm_combined(df, outdir):
 
     # ── Row 2: Parameter sweeps + performance profile ──
     param_configs = [
-        ("checkered", r"_b(\d+)_", "block count", "Checkered Grid (blocks)"),
-        ("aniso", r"_s([\d.eE+-]+)$", "stretch", "Anisotropic Grid (stretch)"),
-        ("wgrid", r"_w([\d.eE+-]+)$", "weight", "Weighted Grid (weight)"),
+        ("checkered", r"_b(\d+)_", "block count", "Checkered Grid (blocks, nnz\u22482M)"),
+        ("aniso", r"_s([\d.eE+-]+)$", "stretch", "Anisotropic Grid (stretch, nnz\u22482M)"),
+        ("wgrid", r"_w([\d.eE+-]+)$", "weight", "Weighted Grid (weight, nnz\u22482M)"),
     ]
     for col, (family, extract_re, xlabel, title) in enumerate(param_configs):
         ax = axes[1, col]
@@ -500,9 +515,9 @@ def plot_sddm_params(df, outdir):
         return
 
     param_configs = [
-        ("aniso", "stretch", r"_s([\d.eE+-]+)$", "Anisotropic Grid \u2014 stretch"),
-        ("wgrid", "weight", r"_w([\d.eE+-]+)$", "Weighted Grid \u2014 weight"),
-        ("checkered", "blocks", r"_b(\d+)_", "Checkered Grid \u2014 block count"),
+        ("aniso", "stretch", r"_s([\d.eE+-]+)$", "Anisotropic Grid \u2014 stretch (nnz\u22482M)"),
+        ("wgrid", "weight", r"_w([\d.eE+-]+)$", "Weighted Grid \u2014 weight (nnz\u22482M)"),
+        ("checkered", "blocks", r"_b(\d+)_", "Checkered Grid \u2014 block count (nnz\u22482M)"),
     ]
     for family, param_name, extract_re, title in param_configs:
         fam_df = sddm[sddm["family"] == family].copy()
@@ -578,33 +593,49 @@ def plot_sddm_bar_comparison(df, outdir):
 
 def plot_combined_scaling(df, outdir):
     """Combined 1\u00d73 panel: checker + grid + erdos scaling with shared legend."""
+    # CG excluded from checker/grid (75% maxiter); kept in erdos (0% maxiter)
+    no_cg = df[df["solver"] != "CG [Eigen]"]
     configs = [
-        (_checker_k1000_t4(df), "Checkerboard (\u03ba=1000)"),
-        (df[df["graph"].str.match(r"grid_\d+$", na=False)], "Uniform Grid"),
+        (_checker_k1_t4(no_cg), "Checkerboard (\u03ba=1)"),
+        (no_cg[no_cg["graph"].str.match(r"grid_\d+$", na=False)], "Uniform Grid"),
         (df[df["graph"].str.contains("erdos", na=False)], "Erd\u0151s\u2013R\u00e9nyi"),
     ]
+    # Filter out empty panels
+    configs = [(sub, title) for sub, title in configs if not _dedup_by_graph(sub).empty]
+    if not configs:
+        return
 
-    fig, axes = plt.subplots(1, 3, figsize=(22, 6), sharey=True)
+    ncols = len(configs)
+    fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols + 1, 6), sharey=True)
+    if ncols == 1:
+        axes = [axes]
     seen = {}
+    has_nonconv = False
     for ax, (sub, title) in zip(axes, configs):
         sub = _dedup_by_graph(sub)
-        if sub.empty:
-            ax.set_visible(False)
-            continue
         for solver, grp in sub.groupby("solver"):
-            grp = grp.sort_values("n")
-            line, = ax.plot(grp["n"], grp["total_s"], "o-",
-                            color=solver_color(solver), markersize=5)
+            grp = grp.sort_values("nnz")
+            color = solver_color(solver)
+            line, = ax.plot(grp["nnz"], grp["total_s"], "o-",
+                            color=color, markersize=5)
             if solver not in seen:
                 seen[solver] = line
-        ax.set_xlabel("Problem size (n)")
+            nconv = grp[grp.apply(_hit_maxiter, axis=1)]
+            if not nconv.empty:
+                has_nonconv = True
+                ax.scatter(nconv["nnz"], nconv["total_s"], marker="x", c=color,
+                           s=60, zorder=5, linewidths=2)
+        ax.set_xlabel("nnz")
         ax.set_title(title)
         ax.set_xscale("log")
         ax.set_yscale("log")
     axes[0].set_ylabel("Total time (s)")
 
+    if has_nonconv:
+        seen["\u00d7 = hit maxiter"] = ax.scatter([], [], marker="x",
+            c="black", s=60, linewidths=2)
     fig.legend(seen.values(), seen.keys(),
-               loc="lower center", ncol=5, fontsize=9,
+               loc="lower center", ncol=min(len(seen), 6), fontsize=9,
                bbox_to_anchor=(0.5, -0.06))
     fig.suptitle("Scaling Comparison", fontsize=14, y=1.01)
     save_fig(fig, outdir, "combined_scaling")
@@ -668,7 +699,7 @@ def main():
 
     base_outdir = os.path.join(os.path.dirname(csv_paths[0]), "plots")
     dirs = {}
-    for sub in ("scaling", "comparison", "tve", "gpu", "sddm", "combined"):
+    for sub in ("comparison", "gpu", "sddm", "combined"):
         d = os.path.join(base_outdir, sub)
         os.makedirs(d, exist_ok=True)
         dirs[sub] = d
@@ -677,21 +708,12 @@ def main():
     print(f"Solvers: {sorted(df['solver'].unique())}")
     print(f"Generating plots in {base_outdir}/")
 
-    # Scaling
-    plot_scaling_checker(df, dirs["scaling"])
-    plot_scaling_grid(df, dirs["scaling"])
-    plot_scaling_erdos(df, dirs["scaling"])
-
-    # Comparison / analysis
-    plot_iterations(df, dirs["comparison"])
+    # Comparison / analysis (checker-based)
     plot_bar_comparison(df, dirs["comparison"])
     plot_residual(df, dirs["comparison"])
     plot_efficiency(df, dirs["comparison"])
 
-    # Time per edge
-    plot_time_per_edge(df, dirs["tve"])
-
-    # GPU paper
+    # GPU paper matrices
     plot_gpu_paper(df, dirs["gpu"])
 
     # SDDM2023

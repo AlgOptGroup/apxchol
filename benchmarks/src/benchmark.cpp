@@ -446,6 +446,7 @@ struct Args {
     bool csv = false;
     unsigned seed = 42;
     int repeat = 1;
+    int threads = 0;  // 0 = auto-detect
 };
 
 static Args parse_args(int argc, char** argv) {
@@ -465,6 +466,7 @@ static Args parse_args(int argc, char** argv) {
         else if (arg == "--tol")   a.tol = std::stod(next());
         else if (arg == "--maxiter") a.maxiter = std::stoi(next());
         else if (arg == "--repeat")  a.repeat = std::max(1, std::stoi(next()));
+        else if (arg == "--threads") a.threads = std::stoi(next());
         else if (arg == "--seed")  a.seed = static_cast<unsigned>(std::stoul(next()));
         else if (arg == "--csv")   a.csv = true;
         else if (arg == "--solver") {
@@ -788,7 +790,7 @@ static BenchResult run_rchol_parallel(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
     const std::string& graph_name,
-    double tol, int maxiter)
+    double tol, int maxiter, int forced_threads = 0)
 {
     BenchResult r;
     r.solver_name = "pRCHOL+PCG [Chen20;par]";
@@ -807,13 +809,25 @@ static BenchResult run_rchol_parallel(
     SparseCSR G;
     std::vector<size_t> perm;
 
+    // Skip pRCHOL on very dense graphs — METIS segfaults on dense random graphs
+    double density = static_cast<double>(r.nnz) / (static_cast<double>(N) * N);
+    if (density > 0.01) {
+        r.solver_name = "pRCHOL+PCG [Chen20;par] FAIL: too dense for METIS";
+        r.setup_time = 0;
+        r.solve_time = 0;
+        r.total_time = 0;
+        r.iterations = 0;
+        r.rel_residual = -1;
+        return r;
+    }
+
     Timer t;
     t.start();
     {
         std::streambuf* old = std::cout.rdbuf();
         std::ostringstream devnull;
         std::cout.rdbuf(devnull.rdbuf());
-        int nthreads = std::thread::hardware_concurrency();
+        int nthreads = forced_threads > 0 ? forced_threads : std::thread::hardware_concurrency();
         if (nthreads < 1) nthreads = 4;
         // Round down to nearest power of 2 (RCHOL requires it)
         nthreads = 1 << static_cast<int>(std::log2(nthreads));
@@ -821,6 +835,7 @@ static BenchResult run_rchol_parallel(
         while (nthreads > 1 && nthreads > N / 16)
             nthreads /= 2;
         if (nthreads < 1) nthreads = 1;
+        r.solver_name = "pRCHOL+PCG [Chen20;par] t=" + std::to_string(nthreads);
         rchol(A, G, perm, nthreads);
         std::cout.rdbuf(old);
     }
@@ -1116,7 +1131,7 @@ int main(int argc, char** argv) {
 #ifdef HAVE_METIS
     if (args.solvers.count("rchol_par")) {
         try {
-            print(median_run([&]() { return run_rchol_parallel(L, b, graph_name, args.tol, args.maxiter); }, R));
+            print(median_run([&]() { return run_rchol_parallel(L, b, graph_name, args.tol, args.maxiter, args.threads); }, R));
         } catch (const std::exception& e) {
             std::cerr << "[skip] pRCHOL failed: " << e.what() << "\n";
         }

@@ -10,7 +10,7 @@
 #   bash benchmarks/run.sh --append results/prev.csv    # append to existing CSV
 #
 # Bench sets: grid, checker, erdos, tile, julia, gpu, mtx, gpu_paper, sddm2023
-# Solvers: apxchol, cg, ldlt, rchol, rchol_mkl, rchol_par, cholmod, amgcl, icc
+# Solvers: apxchol, cg, ldlt, rchol_mkl, cholmod, amgcl
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -69,6 +69,9 @@ else
 fi
 LATEST="$RESULTS_DIR/latest.csv"
 
+# Solvers to skip for the current batch (set before calling run(), reset after)
+SKIP_SOLVERS=""
+
 run() {
     # Run each solver in its own process to isolate crashes (e.g., METIS segfault)
     # --repeat 3 takes the median of 3 runs to reduce noise (cold-cache, freq. scaling)
@@ -76,8 +79,11 @@ run() {
         echo "[run] $* $SOLVER_FLAG" >&2
         "$BENCH" "$@" --csv --repeat 3 $SOLVER_FLAG 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
     else
-        local ALL_SOLVERS="apxchol cg ldlt rchol rchol_mkl rchol_par cholmod amgcl icc"
+        local ALL_SOLVERS="apxchol cg ldlt rchol_mkl cholmod amgcl"
         for S in $ALL_SOLVERS; do
+            if [[ -n "$SKIP_SOLVERS" && " $SKIP_SOLVERS " == *" $S "* ]]; then
+                continue
+            fi
             "$BENCH" "$@" --csv --repeat 3 --solver "$S" 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
         done
         echo "[run] $*" >&2
@@ -94,11 +100,12 @@ if $QUICK; then
     # (vertex_count, edge_probability) pairs — target ~100K edges each
     ER_CONFIGS=("500 0.8" "1000 0.2" "2000 0.05" "3000 0.022" "5000 0.008")
 else
-    GRID_SIZES=(50 100 200 300 500 700 1000)
-    CHECKER_SIZES=(50 100 200 300 500 700 1000)
-    KAPPAS=(1 10 100 1000 10000 100000)
-    # (vertex_count, edge_probability) pairs — target ~1M edges each
-    ER_CONFIGS=("500 0.8" "1000 0.5" "2000 0.2" "3000 0.1" "5000 0.04" "10000 0.02")
+    # Full mode: grid n up to 3000 → n²=9M vertices, ~36M nnz
+    GRID_SIZES=(100 200 500 1000 1500 2000 3000)
+    CHECKER_SIZES=(100 200 500 1000 1500 2000 3000)
+    KAPPAS=(1 100000)
+    # (vertex_count, edge_probability) — scaling from ~200 edges to ~10K×0.02=1M edges
+    ER_CONFIGS=("500 0.8" "1000 0.5" "3000 0.1" "5000 0.04" "10000 0.02")
 fi
 
 # ── Bench sets ───────────────────────────────────────
@@ -109,23 +116,55 @@ for SET in "${SETS[@]}"; do
     grid)
         echo "=== Grid graphs ==="
         for N in "${GRID_SIZES[@]}"; do
+            # Skip slow solvers on large grids: LDLT is O(n^3/2), CG hits maxiter
+            if (( N >= 2000 )); then
+                SKIP_SOLVERS="ldlt cg"
+            elif (( N >= 1500 )); then
+                SKIP_SOLVERS="cg"
+            else
+                SKIP_SOLVERS=""
+            fi
             run --graph grid --n "$N"
         done
+        SKIP_SOLVERS=""
         ;;
     checker)
         echo "=== Checkerboard graphs (varying κ) ==="
         for N in "${CHECKER_SIZES[@]}"; do
-            for KAPPA in "${KAPPAS[@]}"; do
-                run --graph checkerboard --n "$N" --kappa "$KAPPA" --tile 4
-            done
+            if (( N >= 2000 )); then
+                SKIP_SOLVERS="ldlt cg"
+            elif (( N >= 1500 )); then
+                SKIP_SOLVERS="cg"
+            else
+                SKIP_SOLVERS="cg"
+            fi
+            # Non-CG solvers: kappa barely matters, run at kappa=1 only
+            run --graph checkerboard --n "$N" --kappa 1 --tile 4
+            # CG: sensitive to kappa (~4x variation), run at multiple kappas
+            if (( N < 1500 )); then
+                for KAPPA in "${KAPPAS[@]}"; do
+                    "$BENCH" --graph checkerboard --n "$N" --kappa "$KAPPA" --tile 4 \
+                        --csv --repeat 3 --solver cg 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+                done
+            fi
         done
+        SKIP_SOLVERS=""
         ;;
     erdos)
         echo "=== Erdős-Rényi ==="
         for CFG in "${ER_CONFIGS[@]}"; do
             read -r N P <<< "$CFG"
+            # Dense ER graphs cause fill-in explosion in direct solvers
+            if (( N >= 10000 )); then
+                SKIP_SOLVERS="ldlt cholmod"
+            elif (( N >= 5000 )); then
+                SKIP_SOLVERS="ldlt"
+            else
+                SKIP_SOLVERS=""
+            fi
             run --graph erdos --n "$N" --er-p "$P"
         done
+        SKIP_SOLVERS=""
         ;;
     tile)
         echo "=== Checkerboard (varying tile) ==="
@@ -139,20 +178,18 @@ for SET in "${SETS[@]}"; do
         JULIA_BENCH="$SCRIPT_DIR/julia/bench_laplacians.jl"
         if command -v julia &>/dev/null && [[ -f "$JULIA_BENCH" ]]; then
             echo "=== Julia (Laplacians.jl) ==="
-            # Checkerboard with varying kappa
+            # Checkerboard at kappa=1 (AC2 is kappa-insensitive)
             for N in "${CHECKER_SIZES[@]}"; do
-                for KAPPA in "${KAPPAS[@]}"; do
-                    echo "[run] julia checker n=$N kappa=$KAPPA" >&2
-                    julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                        --graph checkerboard --n "$N" --kappa "$KAPPA" --tile 4 --csv 2>/dev/null \
-                        | tail -n +2 >> "$OUTFILE" || echo "[warn] Julia failed checker n=$N k=$KAPPA" >&2
-                done
+                echo "[run] julia checker n=$N kappa=1" >&2
+                julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
+                    --graph checkerboard --n "$N" --kappa 1 --tile 4 --solver ac2 --csv 2>/dev/null \
+                    | tail -n +2 >> "$OUTFILE" || echo "[warn] Julia failed checker n=$N" >&2
             done
             # Grid
             for N in "${GRID_SIZES[@]}"; do
                 echo "[run] julia grid n=$N" >&2
                 julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                    --graph grid --n "$N" --csv 2>/dev/null \
+                    --graph grid --n "$N" --solver ac2 --csv 2>/dev/null \
                     | tail -n +2 >> "$OUTFILE" || echo "[warn] Julia failed grid n=$N" >&2
             done
             # Erdős-Rényi
@@ -160,7 +197,7 @@ for SET in "${SETS[@]}"; do
                 read -r N P <<< "$CFG"
                 echo "[run] julia erdos n=$N p=$P" >&2
                 julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                    --graph erdos --n "$N" --er-p "$P" --csv 2>/dev/null \
+                    --graph erdos --n "$N" --er-p "$P" --solver ac2 --csv 2>/dev/null \
                     | tail -n +2 >> "$OUTFILE" || echo "[warn] Julia failed erdos n=$N p=$P" >&2
             done
         else
@@ -173,12 +210,10 @@ for SET in "${SETS[@]}"; do
         if [[ -x "$GPU_DRIVER" ]] && command -v python3 &>/dev/null; then
             echo "=== GPU RCHOL (Liang et al.) ==="
             for N in "${CHECKER_SIZES[@]}"; do
-                for KAPPA in "${KAPPAS[@]}"; do
-                    echo "[run] gpu_rchol checker n=$N kappa=$KAPPA" >&2
-                    python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
-                        --graph checkerboard --n "$N" --kappa "$KAPPA" --tile 4 2>/dev/null \
-                        | tail -n +1 >> "$OUTFILE" || echo "[warn] GPU RCHOL failed n=$N k=$KAPPA" >&2
-                done
+                echo "[run] gpu_rchol checker n=$N kappa=1" >&2
+                python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
+                    --graph checkerboard --n "$N" --kappa 1 --tile 4 2>/dev/null \
+                    | tail -n +1 >> "$OUTFILE" || echo "[warn] GPU RCHOL failed n=$N k=1" >&2
             done
             for N in "${GRID_SIZES[@]}"; do
                 echo "[run] gpu_rchol grid n=$N" >&2
@@ -203,9 +238,15 @@ for SET in "${SETS[@]}"; do
             for mtx in "$DATA_DIR"/*.mtx; do
                 [[ -f "$mtx" ]] || continue
                 n=$(grep -v '^%' "$mtx" | head -1 | awk '{print $1}')
-                if (( n > 200000 )); then
+                if (( n > 2000000 )); then
                     echo "[skip] $mtx (n=$n too large)" >&2
                     continue
+                fi
+                # Skip LDLT on large matrices (O(n^3/2) too slow)
+                if (( n >= 30000 )); then
+                    SKIP_SOLVERS="ldlt"
+                else
+                    SKIP_SOLVERS=""
                 fi
                 run --mtx "$mtx"
             done
@@ -221,8 +262,11 @@ for SET in "${SETS[@]}"; do
             for NAME in $GPU_PAPER_MATRICES; do
                 mtx="$DATA_DIR/${NAME}.mtx"
                 [[ -f "$mtx" ]] || { echo "[skip] $NAME.mtx not found (run scripts/download_graphs.sh)" >&2; continue; }
+                # All GPU paper matrices are large (n>=500K), skip LDLT
+                SKIP_SOLVERS="ldlt"
                 run --mtx "$mtx"
             done
+            SKIP_SOLVERS=""
             # Julia solvers on GPU paper matrices
             JULIA_BENCH="$SCRIPT_DIR/julia/bench_laplacians.jl"
             if command -v julia &>/dev/null && [[ -f "$JULIA_BENCH" ]]; then
@@ -232,7 +276,7 @@ for SET in "${SETS[@]}"; do
                     [[ -f "$mtx" ]] || continue
                     echo "[run] julia mtx $NAME" >&2
                     julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                        --mtx "$mtx" --csv 2>/dev/null \
+                        --mtx "$mtx" --solver ac2 --csv 2>/dev/null \
                         | tail -n +2 >> "$OUTFILE" || true
                 done
             fi
@@ -260,24 +304,35 @@ for SET in "${SETS[@]}"; do
             echo "=== SDDM2023 instances (C++) ==="
             for mtx in "$SDDM_DIR"/*.mtx; do
                 [[ -f "$mtx" ]] || continue
-                n=$(grep -v '^%' "$mtx" | head -1 | awk '{print $1}')
-                if (( n > 500000 )); then
-                    echo "[skip] $(basename "$mtx") (n=$n too large for default run)" >&2
+                read -r n _ nnz <<< "$(grep -v '^%' "$mtx" | head -1)"
+                if (( n > 2000000 )); then
+                    echo "[skip] $(basename "$mtx") (n=$n too large)" >&2
                     continue
+                fi
+                if (( nnz > 10000000 )); then
+                    echo "[skip] $(basename "$mtx") (nnz=$nnz too large)" >&2
+                    continue
+                fi
+                # Skip LDLT on large SDDM instances (O(n^3/2) too slow)
+                if (( n >= 30000 )); then
+                    SKIP_SOLVERS="ldlt"
+                else
+                    SKIP_SOLVERS=""
                 fi
                 run --mtx "$mtx"
             done
+            SKIP_SOLVERS=""
             # Julia solvers on SDDM2023 instances
             JULIA_BENCH="$SCRIPT_DIR/julia/bench_laplacians.jl"
             if command -v julia &>/dev/null && [[ -f "$JULIA_BENCH" ]]; then
                 echo "=== SDDM2023 instances (Julia) ==="
                 for mtx in "$SDDM_DIR"/*.mtx; do
                     [[ -f "$mtx" ]] || continue
-                    n=$(grep -v '^%' "$mtx" | head -1 | awk '{print $1}')
-                    if (( n > 500000 )); then continue; fi
+                    read -r n _ nnz <<< "$(grep -v '^%' "$mtx" | head -1)"
+                    if (( n > 2000000 || nnz > 10000000 )); then continue; fi
                     echo "[run] julia mtx $(basename "$mtx")" >&2
                     julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                        --mtx "$mtx" --csv 2>/dev/null \
+                        --mtx "$mtx" --solver ac2 --csv 2>/dev/null \
                         | tail -n +2 >> "$OUTFILE" || true
                 done
             fi
@@ -288,8 +343,8 @@ for SET in "${SETS[@]}"; do
                 echo "=== SDDM2023 instances (GPU RCHOL) ==="
                 for mtx in "$SDDM_DIR"/*.mtx; do
                     [[ -f "$mtx" ]] || continue
-                    n=$(grep -v '^%' "$mtx" | head -1 | awk '{print $1}')
-                    if (( n > 500000 )); then continue; fi
+                    read -r n _ nnz <<< "$(grep -v '^%' "$mtx" | head -1)"
+                    if (( n > 2000000 || nnz > 10000000 )); then continue; fi
                     echo "[run] gpu_rchol mtx $(basename "$mtx")" >&2
                     python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
                         --mtx "$mtx" 2>/dev/null \
@@ -327,7 +382,7 @@ if command -v python3 &>/dev/null && [[ -f "$SCRIPT_DIR/plot.py" ]]; then
     mkdir -p "$EMBED_DIR"
     cp "$OUTFILE" "$EMBED_DIR/results.csv"
     if [[ -d "$RESULTS_DIR/plots" ]]; then
-        cp "$RESULTS_DIR/plots/"*.png "$EMBED_DIR/" 2>/dev/null
+        find "$RESULTS_DIR/plots" -name "*.png" -exec cp {} "$EMBED_DIR/" \;
     fi
     echo "Embedded results: $EMBED_DIR/"
 fi
