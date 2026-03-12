@@ -166,14 +166,14 @@ run_gpu() {
 if $QUICK; then
     GRID_SIZES=(50 100 150 200 300)
     CHECKER_SIZES=(50 100 150 200 300)
-    KAPPAS=(1 10 100 1000 10000)
+    KAPPAS=(100 1000 10000)
     # (vertex_count, edge_probability) pairs — target ~100K edges each
     ER_CONFIGS=("500 0.8" "1000 0.2" "2000 0.05" "3000 0.022" "5000 0.008")
 else
     # Full mode: grid n up to 3000 → n²=9M vertices, ~36M nnz
     GRID_SIZES=(100 200 500 1000 1500 2000 3000)
     CHECKER_SIZES=(100 200 500 1000 1500 2000 3000)
-    KAPPAS=(1 100000)
+    KAPPAS=(100000)
     # (vertex_count, edge_probability) — scaling from ~200 edges to ~10K×0.02=1M edges
     ER_CONFIGS=("500 0.8" "1000 0.5" "3000 0.1" "5000 0.04" "10000 0.02")
 fi
@@ -210,10 +210,10 @@ for SET in "${SETS[@]}"; do
             else
                 SKIP_SOLVERS="cg"
             fi
-            # Non-CG solvers: kappa barely matters, run at kappa=1 only
-            run --graph checkerboard --n "$N" --kappa 1 --tile 4
-            run_julia --graph checkerboard --n "$N" --kappa 1 --tile 4
-            run_gpu --graph checkerboard --n "$N" --kappa 1 --tile 4
+            # Non-CG solvers: run at kappa=100000 (kappa=1 ≡ grid, already benchmarked)
+            run --graph checkerboard --n "$N" --kappa 100000 --tile 4
+            run_julia --graph checkerboard --n "$N" --kappa 100000 --tile 4
+            run_gpu --graph checkerboard --n "$N" --kappa 100000 --tile 4
             # CG: sensitive to kappa (~4x variation), run at multiple kappas
             if (( N < 1500 )); then
                 for KAPPA in "${KAPPAS[@]}"; do

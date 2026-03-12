@@ -97,10 +97,14 @@ def load_csv(paths):
     return df
 
 
-def _checker_k1_t4(df):
-    """Filter to checkerboard κ=1, tile=4 only (baseline kappa)."""
-    return df[df["graph"].str.contains("checker", na=False)
-              & df["graph"].str.match(r".*k1_t4$", na=False)].copy()
+def _grid(df):
+    """Filter to uniform grid graphs."""
+    return df[df["graph"].str.match(r"grid_\d+$", na=False)].copy()
+
+
+def _checker_k100000_t4(df):
+    """Filter to checkerboard κ=100000, tile=4."""
+    return df[df["graph"].str.match(r"checker_\d+_k100000_t4$", na=False)].copy()
 
 
 def _dedup_by_graph(df):
@@ -180,7 +184,7 @@ def _plot_bar_ax(ax, sub, title):
 
 
 def plot_bar_comparison(df, outdir):
-    sub = _checker_k1_t4(df)
+    sub = _grid(df)
     if sub.empty:
         return
     sub = sub[~sub["solver"].isin(BAR_EXCLUDE_SOLVERS)]
@@ -190,7 +194,7 @@ def plot_bar_comparison(df, outdir):
 
     fig, ax = plt.subplots(figsize=(11, max(4, len(sub) * 0.45)))
     _plot_bar_ax(ax, sub,
-                 f"Setup + Solve Breakdown \u2014 checker n={int(largest_n)}, \u03ba=1")
+                 f"Setup + Solve Breakdown \u2014 grid n={int(largest_n)}")
     ax.legend(["Setup", "Solve"], fontsize=9)
     save_fig(fig, outdir, "bar_comparison")
 
@@ -200,7 +204,7 @@ def plot_bar_comparison(df, outdir):
 # ══════════════════════════════════════════════════════
 
 def plot_residual(df, outdir):
-    sub = _checker_k1_t4(df)
+    sub = _grid(df)
     if sub.empty:
         return
     largest_n = sub["n"].max()
@@ -212,7 +216,7 @@ def plot_residual(df, outdir):
     colors = [solver_color(s) for s in sub["solver"]]
     ax.barh(sub["solver"], sub["rel_res"], color=colors)
     ax.set_xlabel("Relative residual ||Ax\u2212b||/||b||")
-    ax.set_title(f"Solution Accuracy \u2014 checker n={int(largest_n)}, \u03ba=1")
+    ax.set_title(f"Solution Accuracy \u2014 grid n={int(largest_n)}")
     ax.set_xscale("log")
     ax.axvline(1e-8, color="red", ls="--", alpha=0.5, label="tol=1e\u207b\u2078")
     ax.legend(fontsize=9)
@@ -224,7 +228,7 @@ def plot_residual(df, outdir):
 # ══════════════════════════════════════════════════════
 
 def plot_efficiency(df, outdir):
-    sub = _checker_k1_t4(df)
+    sub = _grid(df)
     # Exclude solvers that hit maxiter (non-convergence)
     sub = sub[~sub.apply(_hit_maxiter, axis=1)].copy()
     if sub.empty:
@@ -247,7 +251,7 @@ def plot_efficiency(df, outdir):
                          color=solver_color(solver), alpha=0.15)
     ax.set_xlabel("nnz")
     ax.set_ylabel("\u00b5s / nnz (median)")
-    ax.set_title("Efficiency \u2014 checker \u03ba=1 (median \u00b1 IQR)")
+    ax.set_title("Efficiency \u2014 grid (median \u00b1 IQR)")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.legend(fontsize=8, ncol=2)
@@ -596,7 +600,7 @@ def plot_combined_scaling(df, outdir):
     # CG excluded from checker/grid (75% maxiter); kept in erdos (0% maxiter)
     no_cg = df[df["solver"] != "CG [Eigen]"]
     configs = [
-        (_checker_k1_t4(no_cg), "Checkerboard (\u03ba=1)"),
+        (_checker_k100000_t4(no_cg), "Checkerboard (\u03ba=10\u2075)"),
         (no_cg[no_cg["graph"].str.match(r"grid_\d+$", na=False)], "Uniform Grid"),
         (df[df["graph"].str.contains("erdos", na=False)], "Erd\u0151s\u2013R\u00e9nyi"),
     ]

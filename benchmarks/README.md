@@ -7,15 +7,18 @@ Comparative benchmarks for Laplacian/SDDM linear system solvers.
 | Solver | Type | Implementation | Source |
 |--------|------|----------------|--------|
 | **ApxChol+PCG [Kyng16]** | Approximate Cholesky preconditioner + PCG | Ours (C++) | `benchmarks/src/` |
+| **RCHOL+PCG [Chen20]** | Randomized Cholesky + PCG (Eigen) | [ut-padas/rchol](https://github.com/ut-padas/rchol) | FetchContent |
 | **RCHOL+MKL [Chen20]** | Randomized Cholesky + PCG (MKL sparse BLAS) | [ut-padas/rchol](https://github.com/ut-padas/rchol) + MKL | FetchContent |
+| **RCHOL+MKL1 [Chen20]** | RCHOL+MKL single-threaded | [ut-padas/rchol](https://github.com/ut-padas/rchol) + MKL | FetchContent |
 | **CG [Eigen]** | Conjugate gradient (diagonal precond.) | Eigen | — |
 | **LDLT [Eigen]** | Sparse direct LDL^T | Eigen | — |
 | **CHOLMOD [SuiteSparse]** | Supernodal sparse Cholesky (direct) | [SuiteSparse](https://people.engr.tamu.edu/davis/suitesparse.html) | System library |
 | **GPU-RCHOL+PCG [Liang25]** | GPU parallel RCHOL + PCG | [Tianyu-Liang/Parallel-Randomized-Cholesky](https://github.com/Tianyu-Liang/Parallel-Randomized-Cholesky) | FetchContent (CUDA) |
+| **AC [Kyng16;Jl]** | ApproxChol (Julia reference) | [Laplacians.jl](https://github.com/danspielman/Laplacians.jl) | `benchmarks/julia/` |
 | **AC2 [Kyng16;Jl]** | ApproxChol (Julia, augmented params) | [Laplacians.jl](https://github.com/danspielman/Laplacians.jl) | `benchmarks/julia/` |
 
 *Excluded*: AMG+CG [AMGCL] (broken on Laplacians), CG+ICC [Eigen] (hits iteration cap),
-pRCHOL+PCG (always worse than single-thread RCHOL), AC [Kyng16;Jl] (superseded by AC2).
+pRCHOL+PCG (always worse than single-thread RCHOL).
 
 ## Benchmark Protocol
 
@@ -23,10 +26,10 @@ Following [SDDM2023](https://arxiv.org/abs/2303.00709):
 
 - **Tolerance**: 1e-8 relative residual (‖Ax−b‖/‖b‖)
 - **Repetitions**: 3 runs, median taken
-- **Condition numbers**: κ ∈ {1, 100000}
+- **Condition numbers**: κ = 10⁵ (for checkerboard)
 - **Graph families**:
   - Grid Laplacians (uniform weights, up to 9M vertices)
-  - Checkerboard grids (κ=1, tile=4, up to 9M vertices)
+  - Checkerboard grids (κ=10⁵, tile=4, up to 9M vertices)
   - Erdős-Rényi random graphs (up to ~1M edges)
   - SDDM2023 suite: uniform grid, chimera, weighted chimera, Sachdeva star,
     anisotropic grid, weighted grid, checkered grid (parameter sweeps at nnz≈2M)
@@ -59,11 +62,11 @@ bash benchmarks/run.sh --quick --solver rchol_mkl,apxchol
 bash benchmarks/run.sh --bench erdos --append benchmarks/results/latest.csv
 
 # Individual solver via the binary
-benchmarks/build/benchmark --graph checkerboard --n 500 --kappa 1 --solver apxchol --csv --repeat 3
+benchmarks/build/benchmark --graph checkerboard --n 500 --kappa 100000 --solver apxchol --csv --repeat 3
 ```
 
-**Bench sets**: `grid`, `checker`, `erdos`, `julia`, `gpu`, `gpu_paper`, `sddm2023`, `mtx`
-**Solvers**: `apxchol`, `cg`, `ldlt`, `rchol_mkl`, `cholmod`, `amgcl`
+**Bench sets**: `grid`, `checker`, `erdos`, `tile`, `mtx`, `gpu_paper`, `sddm2023`
+**Solvers**: `apxchol`, `cg`, `ldlt`, `rchol`, `rchol_mkl`, `rchol_mkl1`, `cholmod`, `amgcl`, `ac`, `ac2`, `gpu_rchol`
 
 ## Results
 
@@ -79,7 +82,7 @@ PNG plots, **committed to the repo** so charts are visible on GitHub.
 
 ![Combined Scaling](latest/combined/combined_scaling.png)
 
-#### Efficiency (µs/nnz on checker κ=1)
+#### Efficiency (µs/nnz on grids)
 
 ![Efficiency](latest/comparison/efficiency.png)
 
@@ -102,7 +105,7 @@ PNG plots, **committed to the repo** so charts are visible on GitHub.
 ### All Generated Charts
 
 **Comparison** (`latest/comparison/`):
-- `bar_comparison.png` — Setup/solve time breakdown at largest checker size
+- `bar_comparison.png` — Setup/solve time breakdown at largest grid size
 - `efficiency.png` — µs per nonzero scaling (median ± IQR)
 - `residual.png` — Solution accuracy with tol=1e-8 reference line
 
@@ -157,17 +160,8 @@ Preconditioners" ([arXiv:2505.02977](https://arxiv.org/abs/2505.02977)).
   and ecology matrices.
 
 <!-- BENCHMARK_RESULTS_START -->
-*Last updated: 2026-03-12 20:39:59*
+*Last updated: 2026-03-12 21:45:57*
 
-### Checkerboard Grid (n=9,000,000, κ=1, tile=4)
 
-| Solver | Setup | Solve | Total | Iters | Rel. Residual | µs/nnz |
-|--------|-------|-------|-------|------:|---------------|-------:|
-| RCHOL+PCG [Chen20] | 6.87s | 15.61s | 22.48s | 54 | 1.0e-08 | 0.50 |
-| RCHOL+MKL1 [Chen20] | 7.62s | 15.21s | 22.83s | 53 | 9.1e-09 | 0.51 |
-| RCHOL+MKL [Chen20] | 7.67s | 15.90s | 23.58s | 54 | 9.5e-09 | 0.52 |
-| AC2 [Kyng16;Jl] | 23.40s | 15.24s | 38.64s | 0 | 8.5e-09 | 0.86 |
-| ApxChol+PCG [Kyng16] | 40.17s | 15.83s | 56.01s | 55 | 9.0e-09 | 1.24 |
-| CHOLMOD [SuiteSparse] | 57.52s | 3.74s | 61.26s | 1 | 1.2e-16 | 1.36 |
 
 <!-- BENCHMARK_RESULTS_END -->
