@@ -5,12 +5,16 @@
 #   bash benchmarks/run.sh                              # full suite (all bench sets, all solvers)
 #   bash benchmarks/run.sh --quick                      # quick smoke test (smaller sizes)
 #   bash benchmarks/run.sh --bench grid,checker         # only grid + checkerboard
-#   bash benchmarks/run.sh --solver apxchol,rchol       # only these solvers
+#   bash benchmarks/run.sh --solver apxchol,rchol_mkl   # only these C++ solvers
+#   bash benchmarks/run.sh --solver ac,ac2              # only Julia solvers
+#   bash benchmarks/run.sh --solver gpu_rchol           # only GPU RCHOL
 #   bash benchmarks/run.sh --bench checker --solver cg  # specific combo
 #   bash benchmarks/run.sh --append results/prev.csv    # append to existing CSV
 #
-# Bench sets: grid, checker, erdos, tile, julia, gpu, mtx, gpu_paper, sddm2023
-# Solvers: apxchol, cg, ldlt, rchol_mkl, cholmod, amgcl
+# Bench sets: grid, checker, erdos, tile, mtx, gpu_paper, sddm2023
+# Solvers (C++):  apxchol, cg, ldlt, rchol, rchol_mkl, rchol_mkl1, cholmod, amgcl
+# Solvers (Julia): ac, ac2
+# Solvers (GPU):   gpu_rchol
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -46,14 +50,41 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Default: all bench sets
-if [[ -z "$BENCH_SETS" ]]; then
-    BENCH_SETS="grid,checker,erdos,julia,gpu,mtx,gpu_paper,sddm2023"
+ALL_BENCH_SETS="grid,checker,erdos,tile,mtx,gpu_paper,sddm2023"
+if [[ -z "$BENCH_SETS" || "$BENCH_SETS" == "all" ]]; then
+    BENCH_SETS="$ALL_BENCH_SETS"
+fi
+
+# ── Classify solvers into C++, Julia, GPU ────────────
+ALL_CPP_SOLVERS="apxchol cg ldlt rchol rchol_mkl rchol_mkl1 cholmod amgcl"
+ALL_JULIA_SOLVERS="ac ac2"
+ALL_GPU_SOLVERS="gpu_rchol"
+
+# Parse SOLVER_ARG into separate lists
+CPP_SOLVERS=""
+JULIA_SOLVERS=""
+RUN_GPU_RCHOL=false
+
+if [[ -z "$SOLVER_ARG" ]]; then
+    # Default: run everything
+    CPP_SOLVERS="$ALL_CPP_SOLVERS"
+    JULIA_SOLVERS="$ALL_JULIA_SOLVERS"
+    RUN_GPU_RCHOL=true
+else
+    IFS=',' read -ra REQUESTED <<< "$SOLVER_ARG"
+    for S in "${REQUESTED[@]}"; do
+        case "$S" in
+            ac|ac2)       JULIA_SOLVERS="$JULIA_SOLVERS${JULIA_SOLVERS:+,}$S" ;;
+            gpu_rchol)    RUN_GPU_RCHOL=true ;;
+            *)            CPP_SOLVERS="$CPP_SOLVERS${CPP_SOLVERS:+ }$S" ;;
+        esac
+    done
 fi
 
 # Build solver flag for the C++ benchmark binary
 SOLVER_FLAG=""
-if [[ -n "$SOLVER_ARG" ]]; then
-    SOLVER_FLAG="--solver $SOLVER_ARG"
+if [[ -n "$CPP_SOLVERS" ]]; then
+    SOLVER_FLAG="--solver $(echo "$CPP_SOLVERS" | tr ' ' ',')"
 fi
 
 # ── Output file ──────────────────────────────────────
@@ -75,12 +106,22 @@ SKIP_SOLVERS=""
 run() {
     # Run each solver in its own process to isolate crashes (e.g., METIS segfault)
     # --repeat 3 takes the median of 3 runs to reduce noise (cold-cache, freq. scaling)
+    [[ -z "$CPP_SOLVERS" ]] && return 0
     if [[ -n "$SOLVER_FLAG" ]]; then
-        echo "[run] $* $SOLVER_FLAG" >&2
-        "$BENCH" "$@" --csv --repeat 3 $SOLVER_FLAG 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+        # Filter out skipped solvers from the explicit list
+        local filtered="$CPP_SOLVERS"
+        if [[ -n "$SKIP_SOLVERS" ]]; then
+            for S in $SKIP_SOLVERS; do
+                filtered=$(echo "$filtered" | sed "s/\b$S\b//g" | xargs)
+            done
+        fi
+        [[ -z "$filtered" ]] && return 0
+        echo "[run] $* --solver $(echo "$filtered" | tr ' ' ',')" >&2
+        for S in $filtered; do
+            "$BENCH" "$@" --csv --repeat 3 --solver "$S" 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+        done
     else
-        local ALL_SOLVERS="apxchol cg ldlt rchol_mkl cholmod amgcl"
-        for S in $ALL_SOLVERS; do
+        for S in $ALL_CPP_SOLVERS; do
             if [[ -n "$SKIP_SOLVERS" && " $SKIP_SOLVERS " == *" $S "* ]]; then
                 continue
             fi
@@ -88,6 +129,35 @@ run() {
         done
         echo "[run] $*" >&2
     fi
+}
+
+JULIA_BENCH="$SCRIPT_DIR/julia/bench_laplacians.jl"
+HAS_JULIA=false
+command -v julia &>/dev/null && [[ -f "$JULIA_BENCH" ]] && HAS_JULIA=true
+
+run_julia() {
+    # Run Julia solvers (ac, ac2) with the given graph arguments
+    [[ -z "$JULIA_SOLVERS" ]] && return 0
+    $HAS_JULIA || return 0
+    echo "[run] julia $*" >&2
+    julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
+        "$@" --solver "$JULIA_SOLVERS" --csv 2>/dev/null \
+        | tail -n +2 >> "$OUTFILE" || echo "[warn] Julia failed: $*" >&2
+}
+
+GPU_RCHOL_SCRIPT="$SCRIPT_DIR/run_gpu_rchol.py"
+GPU_DRIVER="$BUILD_DIR/gpu_rchol_gpu_driver"
+HAS_GPU=false
+[[ -x "$GPU_DRIVER" ]] && command -v python3 &>/dev/null && HAS_GPU=true
+
+run_gpu() {
+    # Run GPU RCHOL with the given graph arguments
+    $RUN_GPU_RCHOL || return 0
+    $HAS_GPU || return 0
+    echo "[run] gpu_rchol $*" >&2
+    python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
+        "$@" 2>/dev/null \
+        | tail -n +1 >> "$OUTFILE" || echo "[warn] GPU RCHOL failed: $*" >&2
 }
 
 # ── Size configurations ──────────────────────────────
@@ -125,6 +195,8 @@ for SET in "${SETS[@]}"; do
                 SKIP_SOLVERS=""
             fi
             run --graph grid --n "$N"
+            run_julia --graph grid --n "$N"
+            run_gpu --graph grid --n "$N"
         done
         SKIP_SOLVERS=""
         ;;
@@ -140,6 +212,8 @@ for SET in "${SETS[@]}"; do
             fi
             # Non-CG solvers: kappa barely matters, run at kappa=1 only
             run --graph checkerboard --n "$N" --kappa 1 --tile 4
+            run_julia --graph checkerboard --n "$N" --kappa 1 --tile 4
+            run_gpu --graph checkerboard --n "$N" --kappa 1 --tile 4
             # CG: sensitive to kappa (~4x variation), run at multiple kappas
             if (( N < 1500 )); then
                 for KAPPA in "${KAPPAS[@]}"; do
@@ -163,6 +237,8 @@ for SET in "${SETS[@]}"; do
                 SKIP_SOLVERS=""
             fi
             run --graph erdos --n "$N" --er-p "$P"
+            run_julia --graph erdos --n "$N" --er-p "$P"
+            run_gpu --graph erdos --n "$N" --er-p "$P"
         done
         SKIP_SOLVERS=""
         ;;
@@ -173,64 +249,6 @@ for SET in "${SETS[@]}"; do
         for TILE in "${TILES[@]}"; do
             run --graph checkerboard --n 300 --kappa 1000 --tile "$TILE"
         done
-        ;;
-    julia)
-        JULIA_BENCH="$SCRIPT_DIR/julia/bench_laplacians.jl"
-        if command -v julia &>/dev/null && [[ -f "$JULIA_BENCH" ]]; then
-            echo "=== Julia (Laplacians.jl) ==="
-            # Checkerboard at kappa=1 (AC2 is kappa-insensitive)
-            for N in "${CHECKER_SIZES[@]}"; do
-                echo "[run] julia checker n=$N kappa=1" >&2
-                julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                    --graph checkerboard --n "$N" --kappa 1 --tile 4 --solver ac2 --csv 2>/dev/null \
-                    | tail -n +2 >> "$OUTFILE" || echo "[warn] Julia failed checker n=$N" >&2
-            done
-            # Grid
-            for N in "${GRID_SIZES[@]}"; do
-                echo "[run] julia grid n=$N" >&2
-                julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                    --graph grid --n "$N" --solver ac2 --csv 2>/dev/null \
-                    | tail -n +2 >> "$OUTFILE" || echo "[warn] Julia failed grid n=$N" >&2
-            done
-            # Erdős-Rényi
-            for CFG in "${ER_CONFIGS[@]}"; do
-                read -r N P <<< "$CFG"
-                echo "[run] julia erdos n=$N p=$P" >&2
-                julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                    --graph erdos --n "$N" --er-p "$P" --solver ac2 --csv 2>/dev/null \
-                    | tail -n +2 >> "$OUTFILE" || echo "[warn] Julia failed erdos n=$N p=$P" >&2
-            done
-        else
-            echo "[skip] Julia not available or bench script missing" >&2
-        fi
-        ;;
-    gpu)
-        GPU_RCHOL_SCRIPT="$SCRIPT_DIR/run_gpu_rchol.py"
-        GPU_DRIVER="$BUILD_DIR/gpu_rchol_gpu_driver"
-        if [[ -x "$GPU_DRIVER" ]] && command -v python3 &>/dev/null; then
-            echo "=== GPU RCHOL (Liang et al.) ==="
-            for N in "${CHECKER_SIZES[@]}"; do
-                echo "[run] gpu_rchol checker n=$N kappa=1" >&2
-                python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
-                    --graph checkerboard --n "$N" --kappa 1 --tile 4 2>/dev/null \
-                    | tail -n +1 >> "$OUTFILE" || echo "[warn] GPU RCHOL failed n=$N k=1" >&2
-            done
-            for N in "${GRID_SIZES[@]}"; do
-                echo "[run] gpu_rchol grid n=$N" >&2
-                python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
-                    --graph grid --n "$N" 2>/dev/null \
-                    | tail -n +1 >> "$OUTFILE" || echo "[warn] GPU RCHOL failed grid n=$N" >&2
-            done
-            for CFG in "${ER_CONFIGS[@]}"; do
-                read -r N P <<< "$CFG"
-                echo "[run] gpu_rchol erdos n=$N p=$P" >&2
-                python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
-                    --graph erdos --n "$N" --er-p "$P" 2>/dev/null \
-                    | tail -n +1 >> "$OUTFILE" || echo "[warn] GPU RCHOL failed erdos n=$N p=$P" >&2
-            done
-        else
-            echo "[skip] GPU RCHOL driver not built or python3 missing" >&2
-        fi
         ;;
     mtx)
         if [[ -d "$DATA_DIR" ]]; then
@@ -258,42 +276,17 @@ for SET in "${SETS[@]}"; do
         # GPU RCHOL paper matrices — large SuiteSparse/FEM (ecology, apache2, G3_circuit, etc.)
         GPU_PAPER_MATRICES="parabolic_fem ecology1 ecology2 apache2 G3_circuit"
         if [[ -d "$DATA_DIR" ]]; then
-            echo "=== GPU RCHOL Paper Matrices (C++) ==="
+            echo "=== GPU RCHOL Paper Matrices ==="
             for NAME in $GPU_PAPER_MATRICES; do
                 mtx="$DATA_DIR/${NAME}.mtx"
                 [[ -f "$mtx" ]] || { echo "[skip] $NAME.mtx not found (run scripts/download_graphs.sh)" >&2; continue; }
                 # All GPU paper matrices are large (n>=500K), skip LDLT
                 SKIP_SOLVERS="ldlt"
                 run --mtx "$mtx"
+                run_julia --mtx "$mtx"
+                run_gpu --mtx "$mtx"
             done
             SKIP_SOLVERS=""
-            # Julia solvers on GPU paper matrices
-            JULIA_BENCH="$SCRIPT_DIR/julia/bench_laplacians.jl"
-            if command -v julia &>/dev/null && [[ -f "$JULIA_BENCH" ]]; then
-                echo "=== GPU RCHOL Paper Matrices (Julia) ==="
-                for NAME in $GPU_PAPER_MATRICES; do
-                    mtx="$DATA_DIR/${NAME}.mtx"
-                    [[ -f "$mtx" ]] || continue
-                    echo "[run] julia mtx $NAME" >&2
-                    julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                        --mtx "$mtx" --solver ac2 --csv 2>/dev/null \
-                        | tail -n +2 >> "$OUTFILE" || true
-                done
-            fi
-            # GPU RCHOL on its own paper matrices
-            GPU_RCHOL_SCRIPT="$SCRIPT_DIR/run_gpu_rchol.py"
-            GPU_DRIVER="$BUILD_DIR/gpu_rchol_gpu_driver"
-            if [[ -x "$GPU_DRIVER" ]] && command -v python3 &>/dev/null; then
-                echo "=== GPU RCHOL Paper Matrices (GPU RCHOL) ==="
-                for NAME in $GPU_PAPER_MATRICES; do
-                    mtx="$DATA_DIR/${NAME}.mtx"
-                    [[ -f "$mtx" ]] || continue
-                    echo "[run] gpu_rchol mtx $NAME" >&2
-                    python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
-                        --mtx "$mtx" 2>/dev/null \
-                        | tail -n +1 >> "$OUTFILE" || true
-                done
-            fi
         else
             echo "[skip] No data/matrices directory (run scripts/download_graphs.sh)" >&2
         fi
@@ -301,7 +294,7 @@ for SET in "${SETS[@]}"; do
     sddm2023)
         SDDM_DIR="$PROJECT_DIR/data/sddm2023"
         if [[ -d "$SDDM_DIR" ]] && ls "$SDDM_DIR"/*.mtx &>/dev/null; then
-            echo "=== SDDM2023 instances (C++) ==="
+            echo "=== SDDM2023 instances ==="
             for mtx in "$SDDM_DIR"/*.mtx; do
                 [[ -f "$mtx" ]] || continue
                 read -r n _ nnz <<< "$(grep -v '^%' "$mtx" | head -1)"
@@ -320,43 +313,16 @@ for SET in "${SETS[@]}"; do
                     SKIP_SOLVERS=""
                 fi
                 run --mtx "$mtx"
+                run_julia --mtx "$mtx"
+                run_gpu --mtx "$mtx"
             done
             SKIP_SOLVERS=""
-            # Julia solvers on SDDM2023 instances
-            JULIA_BENCH="$SCRIPT_DIR/julia/bench_laplacians.jl"
-            if command -v julia &>/dev/null && [[ -f "$JULIA_BENCH" ]]; then
-                echo "=== SDDM2023 instances (Julia) ==="
-                for mtx in "$SDDM_DIR"/*.mtx; do
-                    [[ -f "$mtx" ]] || continue
-                    read -r n _ nnz <<< "$(grep -v '^%' "$mtx" | head -1)"
-                    if (( n > 2000000 || nnz > 10000000 )); then continue; fi
-                    echo "[run] julia mtx $(basename "$mtx")" >&2
-                    julia --project="$SCRIPT_DIR/julia" "$JULIA_BENCH" \
-                        --mtx "$mtx" --solver ac2 --csv 2>/dev/null \
-                        | tail -n +2 >> "$OUTFILE" || true
-                done
-            fi
-            # GPU RCHOL on SDDM2023 instances
-            GPU_RCHOL_SCRIPT="$SCRIPT_DIR/run_gpu_rchol.py"
-            GPU_DRIVER="$BUILD_DIR/gpu_rchol_gpu_driver"
-            if [[ -x "$GPU_DRIVER" ]] && command -v python3 &>/dev/null; then
-                echo "=== SDDM2023 instances (GPU RCHOL) ==="
-                for mtx in "$SDDM_DIR"/*.mtx; do
-                    [[ -f "$mtx" ]] || continue
-                    read -r n _ nnz <<< "$(grep -v '^%' "$mtx" | head -1)"
-                    if (( n > 2000000 || nnz > 10000000 )); then continue; fi
-                    echo "[run] gpu_rchol mtx $(basename "$mtx")" >&2
-                    python3 "$GPU_RCHOL_SCRIPT" --build-dir "$BUILD_DIR" \
-                        --mtx "$mtx" 2>/dev/null \
-                        | tail -n +1 >> "$OUTFILE" || true
-                done
-            fi
         else
             echo "[skip] No SDDM2023 instances. Run: julia --project=benchmarks/julia scripts/generate_sddm_instances.jl" >&2
         fi
         ;;
     *)
-        echo "[warn] Unknown bench set: $SET (valid: grid,checker,erdos,tile,julia,gpu,mtx,gpu_paper,sddm2023)" >&2
+        echo "[warn] Unknown bench set: $SET (valid: grid,checker,erdos,tile,mtx,gpu_paper,sddm2023)" >&2
         ;;
     esac
 done
@@ -382,7 +348,12 @@ if command -v python3 &>/dev/null && [[ -f "$SCRIPT_DIR/plot.py" ]]; then
     mkdir -p "$EMBED_DIR"
     cp "$OUTFILE" "$EMBED_DIR/results.csv"
     if [[ -d "$RESULTS_DIR/plots" ]]; then
-        find "$RESULTS_DIR/plots" -name "*.png" -exec cp {} "$EMBED_DIR/" \;
+        for sub in comparison gpu sddm combined; do
+            if [[ -d "$RESULTS_DIR/plots/$sub" ]]; then
+                mkdir -p "$EMBED_DIR/$sub"
+                cp "$RESULTS_DIR/plots/$sub/"*.png "$EMBED_DIR/$sub/" 2>/dev/null
+            fi
+        done
     fi
     echo "Embedded results: $EMBED_DIR/"
 fi

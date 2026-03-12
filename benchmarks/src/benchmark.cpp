@@ -486,6 +486,7 @@ static Args parse_args(int argc, char** argv) {
             , "rchol"
 #ifdef HAVE_MKL
             , "rchol_mkl"
+            , "rchol_mkl1"
 #endif
 #ifdef HAVE_METIS
             , "rchol_par"
@@ -552,9 +553,9 @@ static BenchResult run_rchol(
     r.nnz = static_cast<int>(L.nonZeros());
     int N = r.n;
 
-    // RCHOL needs strictly SDD — add small diagonal shift
+    // RCHOL needs strictly SDD — add small diagonal shift (only for factorization)
     Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm(L);
-    double eps = 1e-4;
+    double eps = 1e-6;
     for (int k = 0; k < Lrm.outerSize(); ++k)
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Lrm, k); it; ++it)
             if (it.row() == it.col()) it.valueRef() += eps;
@@ -645,22 +646,28 @@ static BenchResult run_rchol_mkl(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
     const std::string& graph_name,
-    double tol, int maxiter)
+    double tol, int maxiter, int mkl_threads = 0)
 {
     BenchResult r;
-    r.solver_name = "RCHOL+MKL [Chen20]";
+    r.solver_name = mkl_threads == 1 ? "RCHOL+MKL1 [Chen20]" : "RCHOL+MKL [Chen20]";
     r.graph_name = graph_name;
     r.n = static_cast<int>(L.rows());
     r.nnz = static_cast<int>(L.nonZeros());
     int N = r.n;
 
+    // Convert to row-major CSR
     Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm(L);
-    double eps = 1e-4;
+
+    // Original (unshifted) matrix for SpMV in PCG
+    SparseCSR A_orig = eigen_to_csr(Lrm);
+
+    // Shift diagonal for RCHOL factorization (needs strictly SDD)
+    double eps = 1e-6;
     for (int k = 0; k < Lrm.outerSize(); ++k)
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Lrm, k); it; ++it)
             if (it.row() == it.col()) it.valueRef() += eps;
 
-    SparseCSR A = eigen_to_csr(Lrm);
+    SparseCSR A_shifted = eigen_to_csr(Lrm);
     SparseCSR G;
 
     Timer t;
@@ -669,24 +676,28 @@ static BenchResult run_rchol_mkl(
         std::streambuf* old = std::cout.rdbuf();
         std::ostringstream devnull;
         std::cout.rdbuf(devnull.rdbuf());
-        rchol(A, G);
+        rchol(A_shifted, G);
         std::cout.rdbuf(old);
     }
     r.setup_time = t.elapsed();
-    r.fillin = 2.0 * static_cast<double>(G.nnz()) / static_cast<double>(A.nnz());
+    r.fillin = 2.0 * static_cast<double>(G.nnz()) / static_cast<double>(A_shifted.nnz());
 
     // Create MKL sparse handles
-    MklSparse mklA, mklG;
-    mklA.init(A);
+    MklSparse mklL, mklG;
+    mklL.init(A_orig);   // ORIGINAL matrix for SpMV (not shifted!)
     mklG.init(G);
 
-    matrix_descr desA;
-    desA.type = SPARSE_MATRIX_TYPE_GENERAL;
+    matrix_descr desL;
+    desL.type = SPARSE_MATRIX_TYPE_GENERAL;
 
     matrix_descr desG;
     desG.type = SPARSE_MATRIX_TYPE_TRIANGULAR;
     desG.mode = SPARSE_FILL_MODE_UPPER;
     desG.diag = SPARSE_DIAG_NON_UNIT;
+
+    // Set MKL thread count for solve phase
+    int old_threads = mkl_get_max_threads();
+    if (mkl_threads > 0) mkl_set_num_threads(mkl_threads);
 
     // MKL PCG
     t.start();
@@ -712,8 +723,8 @@ static BenchResult run_rchol_mkl(
             cblas_daxpy(N, 1.0, z.data(), 1, p.data(), 1);
         }
 
-        // Ap = A * p
-        mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, mklA.handle, desA,
+        // Ap = L * p  (using ORIGINAL matrix, not shifted)
+        mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, mklL.handle, desL,
                          p.data(), 0.0, Ap.data());
 
         double d1 = cblas_ddot(N, p.data(), 1, rv.data(), 1);
@@ -730,6 +741,9 @@ static BenchResult run_rchol_mkl(
     }
     r.solve_time = t.elapsed();
     r.total_time = r.setup_time + r.solve_time;
+
+    // Restore MKL thread count
+    mkl_set_num_threads(old_threads);
 
     Eigen::VectorXd xe = Eigen::Map<Eigen::VectorXd>(x.data(), N);
     xe.array() -= xe.mean();
@@ -800,7 +814,7 @@ static BenchResult run_rchol_parallel(
     int N = r.n;
 
     Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm(L);
-    double eps = 1e-4;
+    double eps = 1e-6;
     for (int k = 0; k < Lrm.outerSize(); ++k)
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Lrm, k); it; ++it)
             if (it.row() == it.col()) it.valueRef() += eps;
@@ -1127,6 +1141,8 @@ int main(int argc, char** argv) {
 #ifdef HAVE_MKL
     if (args.solvers.count("rchol_mkl"))
         print(median_run([&]() { return run_rchol_mkl(L, b, graph_name, args.tol, args.maxiter); }, R));
+    if (args.solvers.count("rchol_mkl1"))
+        print(median_run([&]() { return run_rchol_mkl(L, b, graph_name, args.tol, args.maxiter, 1); }, R));
 #endif
 #ifdef HAVE_METIS
     if (args.solvers.count("rchol_par")) {

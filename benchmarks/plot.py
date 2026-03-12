@@ -41,7 +41,7 @@ SOLVER_COLORS = {
 }
 
 # Solvers excluded from ALL charts
-EXCLUDE_SOLVERS = {"AMG+CG [AMGCL]", "CG+ICC [Eigen]", "pRCHOL+PCG [Chen20;par]", "AC [Kyng16;Jl]"}
+EXCLUDE_SOLVERS = {"AMG+CG [AMGCL]", "CG+ICC [Eigen]", "pRCHOL+PCG [Chen20;par]"}
 
 # Solvers excluded from bar comparison charts (extreme outliers)
 BAR_EXCLUDE_SOLVERS = {"GPU-RCHOL+PCG [Liang25]"}

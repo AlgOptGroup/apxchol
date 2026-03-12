@@ -157,13 +157,15 @@ Preconditioners" ([arXiv:2505.02977](https://arxiv.org/abs/2505.02977)).
   and ecology matrices.
 
 <!-- BENCHMARK_RESULTS_START -->
-*Last updated: 2026-03-11 23:19:56*
+*Last updated: 2026-03-12 20:39:59*
 
 ### Checkerboard Grid (n=9,000,000, κ=1, tile=4)
 
 | Solver | Setup | Solve | Total | Iters | Rel. Residual | µs/nnz |
 |--------|-------|-------|-------|------:|---------------|-------:|
-| RCHOL+MKL [Chen20] | 7.31s | 16.01s | 23.31s | 47 | 2.2e-05 | 0.52 |
+| RCHOL+PCG [Chen20] | 6.87s | 15.61s | 22.48s | 54 | 1.0e-08 | 0.50 |
+| RCHOL+MKL1 [Chen20] | 7.62s | 15.21s | 22.83s | 53 | 9.1e-09 | 0.51 |
+| RCHOL+MKL [Chen20] | 7.67s | 15.90s | 23.58s | 54 | 9.5e-09 | 0.52 |
 | AC2 [Kyng16;Jl] | 23.40s | 15.24s | 38.64s | 0 | 8.5e-09 | 0.86 |
 | ApxChol+PCG [Kyng16] | 40.17s | 15.83s | 56.01s | 55 | 9.0e-09 | 1.24 |
 | CHOLMOD [SuiteSparse] | 57.52s | 3.74s | 61.26s | 1 | 1.2e-16 | 1.36 |
