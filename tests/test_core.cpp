@@ -5,166 +5,97 @@
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
-#include <Eigen/IterativeLinearSolvers>
 
-#include "graphs.h"
-#include "laplacian_preconditioner.h"
+#include "apxchol/graph.h"
+#include "apxchol/adj_list_graph.h"
 
 // ── Helpers ──────────────────────────────────────────
 
-static Eigen::SparseMatrix<double>
-build_laplacian(const std::vector<std::vector<Edge>>& adj) {
-    using T = Eigen::Triplet<double>;
-    int n = static_cast<int>(adj.size());
-    std::vector<T> trips;
-    for (int i = 0; i < n; ++i) {
-        double deg = 0;
-        for (auto& e : adj[i]) {
-            deg += e.w;
-            trips.emplace_back(i, e.to, -e.w / 2);
-            trips.emplace_back(e.to, i, -e.w / 2);
+static apxchol::adj_list_graph make_path(int n) {
+    apxchol::adj_list_graph G(n);
+    for (int i = 0; i + 1 < n; ++i)
+        G.add_edge(i, i + 1, 1.0);
+    return G;
+}
+
+static apxchol::adj_list_graph make_grid(int rows, int cols) {
+    apxchol::adj_list_graph G(rows * cols);
+    auto id = [cols](int r, int c) { return r * cols + c; };
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < cols; ++c) {
+            if (r + 1 < rows) G.add_edge(id(r, c), id(r + 1, c), 1.0);
+            if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), 1.0);
         }
-        trips.emplace_back(i, i, deg);
-    }
-    Eigen::SparseMatrix<double> L(n, n);
-    L.setFromTriplets(trips.begin(), trips.end());
-    return L;
+    return G;
 }
 
-// ── Trivial preconditioner for testing template ──────
+// ── Graph tests ──────────────────────────────────────
 
-class diagonal_preconditioner
-    : public laplacian_preconditioner<diagonal_preconditioner> {
-public:
-    diagonal_preconditioner() = default;
-
-    explicit diagonal_preconditioner(const Eigen::SparseMatrix<double>& L)
-        : diag_inv_(L.rows()) {
-        for (int k = 0; k < L.outerSize(); ++k)
-            for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
-                if (it.row() == it.col())
-                    diag_inv_[k] = (it.value() > 0) ? (1.0 / it.value()) : 1.0;
-        n_ = L.rows();
-    }
-
-    Eigen::VectorXd apply(const Eigen::VectorXd& rhs) const {
-        return diag_inv_.asDiagonal() * rhs;
-    }
-
-private:
-    Eigen::VectorXd diag_inv_;
-};
-
-// ── Graph generator tests ────────────────────────────
-
-TEST(Graphs, GridGraphSymmetric) {
-    auto adj = grid_graph(10, 10);
-    EXPECT_EQ(adj.size(), 100u);
-    for (int u = 0; u < (int)adj.size(); ++u)
-        for (auto& e : adj[u]) {
-            bool found = false;
-            for (auto& re : adj[e.to])
-                if (re.to == u) { found = true; break; }
-            EXPECT_TRUE(found) << "Missing reverse edge " << e.to << " -> " << u;
-        }
+TEST(AdjListGraph, BasicConstruction) {
+    apxchol::adj_list_graph G(5);
+    G.add_edge(0, 1, 2.0);
+    G.add_edge(1, 2, 3.0);
+    EXPECT_EQ(G.n(), 5);
+    EXPECT_EQ(G.m(), 2);  // 2 undirected edges
 }
 
-TEST(Graphs, CheckerboardWeights) {
-    auto adj = grid_graph_checkerboard(4, 4, 100.0, 1.0, 2);
-    for (auto& row : adj)
-        for (auto& e : row)
-            EXPECT_GT(e.w, 0.0);
+TEST(AdjListGraph, TraverseXor) {
+    apxchol::adj_list_graph G(3);
+    G.add_edge(0, 2, 1.0);
+    auto& e = G.get_edge(0);
+    EXPECT_EQ(e.traverse(0), 2);
+    EXPECT_EQ(e.traverse(2), 0);
 }
 
-TEST(Graphs, ErdosRenyiBasic) {
-    auto adj = erdos_renyi_graph(100, 0.1, 42);
-    EXPECT_EQ(adj.size(), 100u);
-    int total_edges = 0;
-    for (auto& row : adj) total_edges += row.size();
-    EXPECT_GT(total_edges, 0);
+TEST(AdjListGraph, ForNeighbors) {
+    auto G = make_path(4);  // 0-1-2-3
+    std::vector<std::pair<int, double>> nbrs;
+    G.for_neighbors(1, [&](int u, double w) { nbrs.push_back({u, w}); });
+    EXPECT_EQ(nbrs.size(), 2u);
 }
 
-TEST(Graphs, ErdosRenyiEdgeCount) {
-    // E[m] = n*(n-1)/2 * p; for n=1000, p=0.01 => ~5000 edges
-    auto adj = erdos_renyi_graph(1000, 0.01, 99);
-    int total = 0;
-    for (auto& row : adj) total += row.size();
-    int m = total / 2;
-    EXPECT_GT(m, 2000);
-    EXPECT_LT(m, 8000);
+TEST(AdjListGraph, WeightedDegree) {
+    apxchol::adj_list_graph G(3);
+    G.add_edge(0, 1, 2.0);
+    G.add_edge(0, 2, 5.0);
+    EXPECT_DOUBLE_EQ(G.weighted_degree(0), 7.0);
+    EXPECT_DOUBLE_EQ(G.weighted_degree(1), 2.0);
 }
 
-// ── Laplacian matrix properties ──────────────────────
+// ── Laplacian tests ──────────────────────────────────
 
 TEST(Laplacian, RowSumsZero) {
-    auto adj = grid_graph(10, 10);
-    auto L = build_laplacian(adj);
+    auto G = make_grid(10, 10);
+    auto L = G.laplacian();
     Eigen::VectorXd ones = Eigen::VectorXd::Ones(L.rows());
-    Eigen::VectorXd result = L * ones;
-    EXPECT_LT(result.norm(), 1e-12);
+    Eigen::VectorXd res = L * ones;
+    EXPECT_LT(res.norm(), 1e-12);
 }
 
 TEST(Laplacian, Symmetric) {
-    auto adj = grid_graph_checkerboard(10, 10, 100.0, 1.0, 2);
-    auto L = build_laplacian(adj);
+    auto G = make_grid(8, 8);
+    auto L = G.laplacian();
     Eigen::SparseMatrix<double> diff = L - Eigen::SparseMatrix<double>(L.transpose());
     EXPECT_LT(diff.norm(), 1e-12);
 }
 
 TEST(Laplacian, PositiveDiagonal) {
-    auto adj = grid_graph(10, 10);
-    auto L = build_laplacian(adj);
+    auto G = make_grid(5, 5);
+    auto L = G.laplacian();
     for (int k = 0; k < L.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
             if (it.row() == it.col())
                 EXPECT_GE(it.value(), 0.0);
+        }
 }
 
-// ── Preconditioner template tests ────────────────────
-
-TEST(Preconditioner, TemplateCompiles) {
-    auto adj = grid_graph(10, 10);
-    auto L = build_laplacian(adj);
-    diagonal_preconditioner P(L);
-    Eigen::VectorXd b = Eigen::VectorXd::Random(L.rows());
-    b.array() -= b.mean();
-    Eigen::VectorXd x = P.solve(b);
-    EXPECT_EQ(x.size(), b.size());
-    // Output should be zero-mean
-    EXPECT_NEAR(x.mean(), 0.0, 1e-12);
-}
-
-TEST(Preconditioner, DiagonalPCGConverges) {
-    auto adj = grid_graph(20, 20);
-    auto L = build_laplacian(adj);
-    int n = L.rows();
-
-    // Generate RHS from known solution
-    std::mt19937_64 rng(42);
-    std::normal_distribution<double> N(0, 1);
-    Eigen::VectorXd g(n);
-    for (int i = 0; i < n; ++i) g[i] = N(rng);
-    Eigen::VectorXd b = L * g;
-    b.array() -= b.mean();
-    b /= b.norm();
-
-    // Use template-based preconditioner with Eigen's PCG
-    diagonal_preconditioner P(L);
-    Eigen::ConjugateGradient<
-        Eigen::SparseMatrix<double>,
-        Eigen::Lower | Eigen::Upper,
-        diagonal_preconditioner> cg;
-    cg.setMaxIterations(500);
-    cg.setTolerance(1e-8);
-    cg.preconditioner() = P;
-    cg.compute(L);
-    Eigen::VectorXd x = cg.solve(b);
-
-    x.array() -= x.mean();
-    Eigen::VectorXd r = b - L * x;
-    r.array() -= r.mean();
-    double rel_res = r.norm() / b.norm();
-
-    EXPECT_LT(rel_res, 1e-6);
-    EXPECT_LT(cg.iterations(), 400);
+TEST(Laplacian, PathGraph) {
+    auto G = make_path(3);  // 0-1-2, weights 1.0
+    auto L = G.laplacian();
+    // L should be [[1,-1,0],[-1,2,-1],[0,-1,1]]
+    EXPECT_EQ(L.rows(), 3);
+    EXPECT_NEAR(L.coeff(0, 0), 1.0, 1e-15);
+    EXPECT_NEAR(L.coeff(1, 1), 2.0, 1e-15);
+    EXPECT_NEAR(L.coeff(0, 1), -1.0, 1e-15);
+    EXPECT_NEAR(L.coeff(0, 2), 0.0, 1e-15);
 }

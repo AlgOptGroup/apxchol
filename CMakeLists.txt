@@ -24,17 +24,22 @@ if (NOT Eigen3_FOUND)
     FetchContent_MakeAvailable(eigen)
 endif()
 
-# ── Core library: graph generators + I/O + ApxChol preconditioner ─
-# The preconditioner template (laplacian_preconditioner.h) is header-only.
+# ── Core library: ApxChol preconditioner + graph I/O ──
 add_library(laplacian_core
-    src/graphs.cpp
-    src/mmio.cpp
-    src/simple_solver.cpp
+    src/graph.cpp
+    src/adj_list_graph.cpp
+    src/factorization.cpp
+    src/preconditioner.cpp
+    src/solver.cpp
 )
 target_link_libraries(laplacian_core PUBLIC Eigen3::Eigen)
 target_include_directories(laplacian_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+# ── CLI solver ───────────────────────────────────────
+add_executable(laplacian_solver src/main.cpp)
+target_link_libraries(laplacian_solver PRIVATE laplacian_core)
 
 # ── Tests ────────────────────────────────────────────
 enable_testing()
