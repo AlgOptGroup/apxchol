@@ -54,13 +54,11 @@ find_is_result find_independent_set(graph<Incidence>& G,
     static std::vector<char> near_boundary;
     static std::vector<index_t> degrees;
 
-    if (chosen.size() < size_t(G.n())) {
-        size_t nn = G.n();
-        chosen.resize(nn, 0);
-        block_of.resize(nn);
-        near_boundary.resize(nn, 0);
-        degrees.resize(nn);
-    }
+    size_t nn = G.n();
+    chosen.resize(nn, 0);
+    block_of.resize(nn);
+    near_boundary.resize(nn, 0);
+    degrees.resize(nn);
 
     // Phase 1: Prune dead edges and compute degrees (parallel).
     double total_degree = 0;
