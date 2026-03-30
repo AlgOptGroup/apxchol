@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -168,7 +169,7 @@ template<typename Incidence>
 static constexpr const char* storage_name();
 template<> constexpr const char* storage_name<apxchol::vec_incidence>()            { return "vec"; }
 template<> constexpr const char* storage_name<apxchol::forward_star_incidence>()   { return "fwd_star"; }
-template<> constexpr const char* storage_name<apxchol::small_vec_incidence>()      { return "svec12"; }
+template<> constexpr const char* storage_name<apxchol::small_vec_incidence>()      { return "svec4"; }
 template<> constexpr const char* storage_name<apxchol::bstr_incidence>()             { return "bstr"; }
 
 enum class output_mode { table, csv, profile };
@@ -195,6 +196,7 @@ int main(int argc, char* argv[]) {
     bool sweep_deg = false;
     bool sweep_threads = false;
     bool sweep_sso = false;
+    int grid_side = 2000;
     const char* graph_filter = nullptr;
     const char* storage_filter = nullptr;
     for (int i = 1; i < argc; ++i) {
@@ -204,6 +206,8 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--sweep-deg") == 0)   sweep_deg = true;
         if (std::strcmp(argv[i], "--sweep-threads") == 0) sweep_threads = true;
         if (std::strcmp(argv[i], "--sweep-sso") == 0)   sweep_sso = true;
+        if (std::strcmp(argv[i], "--grid-side") == 0 && i + 1 < argc)
+            grid_side = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--graph") == 0 && i + 1 < argc)
             graph_filter = argv[++i];
         if (std::strcmp(argv[i], "--storage") == 0 && i + 1 < argc)
@@ -316,10 +320,11 @@ int main(int argc, char* argv[]) {
                             F.peak_graph_bytes / (1024.0 * 1024.0));
             }
         };
-        run_sweep("vec",      [] { return make_grid<apxchol::vec_incidence>(2000, 2000); });
-        run_sweep("fwd_star", [] { return make_grid<apxchol::forward_star_incidence>(2000, 2000); });
-        run_sweep("svec12",   [] { return make_grid<apxchol::small_vec_incidence>(2000, 2000); });
-        run_sweep("bstr",     [] { return make_grid<apxchol::bstr_incidence>(2000, 2000); });
+        std::printf("grid side = %d, n = %d\n", grid_side, grid_side * grid_side);
+        run_sweep("vec",      [=] { return make_grid<apxchol::vec_incidence>(grid_side, grid_side); });
+        run_sweep("fwd_star", [=] { return make_grid<apxchol::forward_star_incidence>(grid_side, grid_side); });
+        run_sweep("svec4",    [=] { return make_grid<apxchol::small_vec_incidence>(grid_side, grid_side); });
+        run_sweep("bstr",     [=] { return make_grid<apxchol::bstr_incidence>(grid_side, grid_side); });
         return 0;
     }
 
@@ -329,10 +334,11 @@ int main(int argc, char* argv[]) {
                     "sso_cap", "find_is", "merge_is", "compute",
                     "apply", "elim", "total(ms)", "peak MB");
         std::printf("%s\n", std::string(80, '-').c_str());
-        auto run_sso = [](auto tag) {
+        std::printf("grid side = %d, n = %d\n\n", grid_side, grid_side * grid_side);
+        auto run_sso = [=](auto tag) {
             constexpr std::size_t N = decltype(tag)::value;
             apxchol::checkpoint cp;
-            auto G = make_grid<apxchol::small_vec_incidence_n<N>>(2000, 2000);
+            auto G = make_grid<apxchol::small_vec_incidence_n<N>>(grid_side, grid_side);
             auto F = apxchol::factorize(G, {}, &cp);
 
             double find_is_ms  = cp.total("setup.find_is")            * 1000;
