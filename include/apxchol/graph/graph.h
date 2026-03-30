@@ -130,12 +130,12 @@ public:
     }
 
     template<typename F>
-    void for_active_neighbors(node_index v, F&& cb) {
-        adj_.filter(v, [&](edge_index idx) {
-            return active_[edges_[idx].traverse(v)];
-        }, [&](edge_index idx) {
-            cb(edges_[idx].traverse(v), edges_[idx].w);
-        });
+    void for_active_neighbors(node_index v, F&& cb) const {
+        for (auto idx : adj_[v]) {
+            auto target = edges_[idx].traverse(v);
+            if (active_[target])
+                cb(target, edges_[idx].w);
+        }
     }
 
 private:

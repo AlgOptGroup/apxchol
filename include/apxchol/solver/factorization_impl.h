@@ -25,8 +25,6 @@ namespace apxchol {
 
 namespace detail {
 
-// ── Algorithm constants (defaults; overridden by factor_options) ──
-
 struct factor_col {
     node_index vertex;
     std::vector<std::pair<node_index, double>> entries; // (neighbor, L_value)
@@ -82,12 +80,8 @@ find_is_result find_independent_set(graph<Incidence>& G,
     double avg_degree = total_degree / static_cast<double>(active.size());
     double degree_threshold = opts.degree_multiplier * avg_degree;
 
-    int nt = 1;
     #ifdef _OPENMP
-    nt = omp_get_max_threads();
-    #endif
-
-    if (nt > 1 && active.size() > opts.omp_threshold) {
+    if (omp_get_max_threads() > 1 && active.size() > opts.omp_threshold) {
         // ── Block-greedy parallel IS ──
         #pragma omp parallel
         {
@@ -145,7 +139,9 @@ find_is_result find_independent_set(graph<Incidence>& G,
             auto v = active[i];
             if (near_boundary[v] == 2) chosen[v] = 0;
         }
-    } else {
+    } else
+    #endif
+    {
         // ── Serial greedy ──
         for (size_t i = 0; i < active.size(); ++i) {
             if (degrees[i] > degree_threshold) continue;
