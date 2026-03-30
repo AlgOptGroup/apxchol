@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <string>
 
 template<>
@@ -27,8 +28,7 @@ struct std::char_traits<apxchol::edge_index> {
     static constexpr void assign(char_type& r, const char_type& a) noexcept { r = a; }
 
     static constexpr char_type* assign(char_type* p, std::size_t n, char_type a) noexcept {
-        std::fill_n(p, n, a);
-        return p;
+        return std::fill_n(p, n, a) - n;
     }
 
     static constexpr bool eq(char_type a, char_type b) noexcept { return a == b; }
@@ -40,9 +40,8 @@ struct std::char_traits<apxchol::edge_index> {
     }
 
     static constexpr std::size_t length(const char_type* s) {
-        const char_type* p = s;
-        while (*p != char_type{}) ++p;
-        return static_cast<std::size_t>(p - s);
+        return static_cast<std::size_t>(
+            std::ranges::find(s, std::unreachable_sentinel, char_type{}) - s);
     }
 
     static constexpr const char_type* find(const char_type* s, std::size_t n, const char_type& a) {
@@ -51,14 +50,13 @@ struct std::char_traits<apxchol::edge_index> {
     }
 
     static constexpr char_type* move(char_type* d, const char_type* s, std::size_t n) {
-        if (d < s)       std::copy_n(s, n, d);
-        else if (d > s)  std::copy_backward(s, s + n, d + n);
+        if (d < s)       return std::copy_n(s, n, d) - n;
+        if (d > s)       return std::copy_backward(s, s + n, d + n);
         return d;
     }
 
     static constexpr char_type* copy(char_type* d, const char_type* s, std::size_t n) {
-        std::copy_n(s, n, d);
-        return d;
+        return std::copy_n(s, n, d) - n;
     }
 
     static constexpr char_type  to_char_type(int_type c) noexcept { return static_cast<char_type>(c); }
