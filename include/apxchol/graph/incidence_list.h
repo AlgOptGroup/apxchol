@@ -73,19 +73,15 @@ struct contiguous_incidence {
     /// Calls on_keep(idx) for each surviving element.
     void filter(index_t v, auto&& pred, auto&& on_keep) {
         auto& list = adj_[v];
-        auto out = list.begin();
-        for (auto it = list.begin(); it != list.end(); ++it) {
-            if (pred(*it)) {
-                on_keep(*it);
-                if (out != it) *out = std::move(*it);
-                ++out;
-            }
-        }
-        list.erase(out, list.end());
+        list.erase(std::remove_if(list.begin(), list.end(),
+            [&](edge_index idx) { return !pred(idx); }), list.end());
+        for (auto idx : list) on_keep(idx);
     }
 
     void filter(index_t v, auto&& pred) {
-        filter(v, pred, [](edge_index) {});
+        auto& list = adj_[v];
+        list.erase(std::remove_if(list.begin(), list.end(),
+            [&](edge_index idx) { return !pred(idx); }), list.end());
     }
 
     /// Approximate memory usage in bytes (heap only).
