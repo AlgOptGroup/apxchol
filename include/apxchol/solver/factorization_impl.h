@@ -37,25 +37,44 @@ struct find_is_result {
     double avg_degree;
 };
 
+/// Scratch space for find_independent_set, allocated once in factorize.
+struct find_is_scratch {
+    std::vector<char> chosen;
+    std::vector<int> block_of;
+    std::vector<char> near_boundary;
+    std::vector<int> degrees;
+
+    void init(index_t n) {
+        chosen.assign(n, 0);
+        block_of.resize(n);
+        near_boundary.assign(n, 0);
+        degrees.resize(n);
+    }
+};
+
 // Select low-degree active vertices for elimination.
 //
-// Prunes dead edges and computes degrees (parallel), then uses a serial
-// greedy scan: each eligible vertex (degree ≤ threshold) joins the IS
-// if none of its active neighbors are already chosen.
-//
-// The greedy scan is inherently sequential but produces a larger IS than
-// fully-parallel methods (Luby's gives ≈1/(d+1) fraction vs ≈1/2 for
-// greedy on the eligible set), reducing overall round count.  Since the
-// dominant parallel work (prune+degree, merge, elimination) is elsewhere,
-// the serial scan cost is acceptable.
+// Phase 1: Prune dead edges and compute degrees (parallel).
+// Multi-threaded path (block-greedy):
+//   Partition active vertices into per-thread blocks.  Each thread runs
+//   serial greedy IS on its block, checking only within-block chosen
+//   state (no cross-thread data races).  A fast serial pass then removes
+//   the small number of cross-block boundary conflicts.
+//   IS size ≈ serial greedy → same round count; IS selection parallelized.
+// Single-threaded path:
+//   Serial greedy scan — no overhead.
 template<incidence_storage Incidence>
 find_is_result find_independent_set(graph<Incidence>& G,
                                     std::span<const node_index> active,
-                                    const factor_options& opts) {
+                                    const factor_options& opts,
+                                    unsigned /*round*/,
+                                    find_is_scratch& scratch) {
     if (active.empty()) return {{}, 0.0};
 
-    // Prune dead edges and compute degrees in a single pass (parallel).
-    std::vector<int> degrees(active.size());
+    const auto n = G.n();
+
+    // Phase 1: Prune dead edges and compute degrees (parallel).
+    auto* degrees = scratch.degrees.data();
     double total_degree = 0;
     #pragma omp parallel reduction(+:total_degree) if(active.size() > opts.omp_threshold)
     {
@@ -65,25 +84,119 @@ find_is_result find_independent_set(graph<Incidence>& G,
             total_degree += degrees[i];
         }
     }
-    double degree_threshold = opts.degree_multiplier * total_degree
-                            / static_cast<double>(active.size());
+    double avg_degree = total_degree / static_cast<double>(active.size());
+    double degree_threshold = opts.degree_multiplier * avg_degree;
 
-    std::vector<char> chosen(G.n(), 0);
-    for (size_t i = 0; i < active.size(); ++i) {
-        if (degrees[i] > degree_threshold)
-            continue;
-        auto v = active[i];
-        bool ok = true;
-        G.for_active_neighbors(v, [&](node_index u, double) {
-            if (chosen[u]) ok = false;
-        });
-        if (ok) chosen[v] = 1;
+    auto* chosen = scratch.chosen.data();
+
+    int nt = 1;
+    #ifdef _OPENMP
+    nt = omp_get_max_threads();
+    #endif
+
+    if (nt > 1 && active.size() > opts.omp_threshold) {
+        // ── Block-greedy parallel IS ──
+        auto* block_of = scratch.block_of.data();
+        auto* near_boundary = scratch.near_boundary.data();
+
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nthreads = omp_get_num_threads();
+            auto bs = active.size() * static_cast<size_t>(tid) / nthreads;
+            auto be = active.size() * static_cast<size_t>(tid + 1) / nthreads;
+
+            for (size_t i = bs; i < be; ++i)
+                block_of[active[i]] = tid;
+
+            #pragma omp barrier
+
+            for (size_t i = bs; i < be; ++i) {
+                if (degrees[i] > degree_threshold) continue;
+                auto v = active[i];
+                bool ok = true;
+                bool boundary = false;
+                G.for_active_neighbors(v, [&](node_index u, double) {
+                    if (block_of[u] == tid) {
+                        if (ok && chosen[u]) ok = false;
+                    } else {
+                        boundary = true;
+                    }
+                });
+                if (ok) {
+                    chosen[v] = 1;
+                    if (boundary) near_boundary[v] = 1;
+                }
+            }
+        }
+
+        // Fix cross-block conflicts (parallel — each vertex independent).
+        // Flag removals in near_boundary (reuse: 1=boundary, 2=remove).
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < active.size(); ++i) {
+            auto v = active[i];
+            if (!chosen[v] || !near_boundary[v]) continue;
+            int my_block = block_of[v];
+            bool conflict = false;
+            G.for_active_neighbors(v, [&](node_index u, double) {
+                if (!conflict && chosen[u] && u < v && block_of[u] != my_block)
+                    conflict = true;
+            });
+            if (conflict) near_boundary[v] = 2;
+        }
+
+        // Apply removals.
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < active.size(); ++i) {
+            auto v = active[i];
+            if (near_boundary[v] == 2) chosen[v] = 0;
+        }
+    } else {
+        // ── Serial greedy ──
+        for (size_t i = 0; i < active.size(); ++i) {
+            if (degrees[i] > degree_threshold) continue;
+            auto v = active[i];
+            bool ok = true;
+            G.for_active_neighbors(v, [&](node_index u, double) {
+                if (chosen[u]) ok = false;
+            });
+            if (ok) chosen[v] = 1;
+        }
     }
 
     std::vector<node_index> is;
-    for (auto v : active)
-        if (chosen[v]) is.push_back(v);
-    return {std::move(is), total_degree / static_cast<double>(active.size())};
+
+    #ifdef _OPENMP
+    if (nt > 1 && active.size() > opts.omp_threshold) {
+        // Parallel IS collection: thread-local gather + concatenate.
+        // active[] is sorted → per-thread ranges are contiguous → order preserved.
+        std::vector<std::vector<node_index>> local_is(nt);
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nthreads = omp_get_num_threads();
+            auto bs = active.size() * static_cast<size_t>(tid) / nthreads;
+            auto be = active.size() * static_cast<size_t>(tid + 1) / nthreads;
+            for (size_t i = bs; i < be; ++i)
+                if (chosen[active[i]]) local_is[tid].push_back(active[i]);
+        }
+        for (auto& v : local_is)
+            is.insert(is.end(), v.begin(), v.end());
+    } else
+    #endif
+    {
+        for (auto v : active)
+            if (chosen[v]) is.push_back(v);
+    }
+
+    // Reset scratch for next round (only touched entries, parallel).
+    #pragma omp parallel for schedule(static) if(active.size() > opts.omp_threshold)
+    for (size_t i = 0; i < active.size(); ++i) {
+        scratch.chosen[active[i]] = 0;
+        scratch.near_boundary[active[i]] = 0;
+    }
+
+    return {std::move(is), avg_degree};
 }
 
 // Eliminate vertices in the IS: record L-columns, add clique edges.
@@ -239,12 +352,18 @@ factorization factorize(const graph<Incidence>& G,
 
     std::mt19937 rng(opts.seed);
 
+    // Scratch space for find_is — allocated once, reused every round.
+    detail::find_is_scratch scratch;
+    scratch.init(n);
+
     // Active vertex list — filtered in-place after each round.
     std::vector<node_index> active(n);
     std::iota(active.begin(), active.end(), node_index{0});
 
+    unsigned round = 0;
     while (active.size() > 1) {
-        auto [is, avg_deg] = detail::find_independent_set(work, active, opts);
+        auto [is, avg_deg] = detail::find_independent_set(work, active, opts, round, scratch);
+        ++round;
         if (cp) (*cp)("find_is");
 
         // Stop if IS is empty or too small to make meaningful progress.
