@@ -50,8 +50,8 @@ struct std::char_traits<apxchol::edge_index> {
     }
 
     static constexpr char_type* move(char_type* d, const char_type* s, std::size_t n) {
-        if (d < s)       return std::copy_n(s, n, d) - n;
-        if (d > s)       return std::copy_backward(s, s + n, d + n);
+        if (d < s)  return std::copy_n(s, n, d) - n;
+        if (d > s)  return std::copy_backward(s, s + n, d + n);
         return d;
     }
 
