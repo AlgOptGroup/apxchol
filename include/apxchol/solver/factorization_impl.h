@@ -44,8 +44,11 @@ struct find_is_result {
 template<incidence_storage Incidence>
 find_is_result find_independent_set(graph<Incidence>& G,
                                     std::span<const node_index> active,
-                                    const factor_options& opts) {
+                                    const factor_options& opts,
+                                    checkpoint* cp = nullptr) {
     if (active.empty()) return {{}, 0.0};
+
+    if (cp) { cp->descend("find_is"); cp->tick(); }
 
     // Scratch arrays: persist across calls (static lifetime).
     // Only the main thread calls this; OMP regions inside access by index.
@@ -69,6 +72,7 @@ find_is_result find_independent_set(graph<Incidence>& G,
     }
     double avg_degree = total_degree / double(active.size());
     double degree_threshold = opts.degree_multiplier * avg_degree;
+    if (cp) (*cp)("prune");
 
     #ifdef _OPENMP
     if (omp_get_max_threads() > 1 && active.size() > opts.omp_threshold) {
@@ -144,6 +148,7 @@ find_is_result find_independent_set(graph<Incidence>& G,
             if (ok) chosen[v] = 1;
         }
     }
+    if (cp) (*cp)("select");
 
     std::vector<node_index> is;
 
@@ -178,10 +183,10 @@ find_is_result find_independent_set(graph<Incidence>& G,
         chosen[active[i]] = 0;
         near_boundary[active[i]] = 0;
     }
+    if (cp) { (*cp)("collect"); cp->ascend(); }
 
     return {std::move(is), avg_degree};
 }
-
 // Eliminate vertices in the IS: record L-columns, add clique edges.
 // IS vertices are pairwise non-adjacent, enabling parallel processing.
 // The computation phase (gather neighbors, build factor column, sample
@@ -372,8 +377,7 @@ factorization factorize(const graph<Incidence>& G,
     std::ranges::iota(active, node_index{0});
 
     while (active.size() > 1) {
-        auto [is, avg_deg] = detail::find_independent_set(work, active, opts);
-        if (cp) (*cp)("find_is");
+        auto [is, avg_deg] = detail::find_independent_set(work, active, opts, cp);
 
         result.rounds.push_back({active.size(), is.size(), avg_deg});
 

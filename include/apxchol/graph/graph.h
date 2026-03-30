@@ -93,15 +93,6 @@ public:
         });
     }
 
-    /// Remove edges to inactive vertices from v's incidence list.
-    /// O(degree) cleanup that speeds up future traversals.
-    /// For forward_star, relinks the chain in-place (no pool growth).
-    void prune_inactive_edges(node_index v) {
-        adj_.filter(v, [&](edge_index idx) {
-            return active_[edges_[idx].traverse(v)];
-        });
-    }
-
     /// Prune dead edges and return surviving (active) degree in one pass.
     index_t prune_and_degree(node_index v) {
         index_t count = 0;
