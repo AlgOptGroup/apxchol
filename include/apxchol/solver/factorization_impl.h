@@ -348,17 +348,17 @@ factorization factorize(const graph<Incidence>& G,
 
     // Active vertex list — filtered in-place after each round.
     std::vector<node_index> active(n);
-    std::iota(active.begin(), active.end(), node_index{0});
+    std::ranges::iota(active, node_index{0});
 
     while (active.size() > 1) {
         auto [is, avg_deg] = detail::find_independent_set(work, active, opts);
         if (cp) (*cp)("find_is");
 
         // Stop if IS is empty or too small to make meaningful progress.
-        // A tiny IS (< 0.1% of active) indicates the degree threshold is
-        // too restrictive for this graph structure, and continuing would
-        // produce O(n) rounds of O(1) eliminations.
-        if (is.empty() || is.size() * 1000 < active.size()) break;
+        // With degree_multiplier=2, Markov guarantees IS ≥ ~1/(4·avg_deg+2)
+        // of active vertices; falling below min_is_fraction indicates a
+        // degenerate graph structure.
+        if (is.empty() || is.size() < active.size() * opts.min_is_fraction) break;
 
         result.rounds.push_back({
             static_cast<int>(active.size()),

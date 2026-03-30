@@ -71,7 +71,7 @@ TYPED_TEST(GraphTest, DeactivateAndMerge) {
     // After prune_and_degree, only active neighbors remain.
     G.prune_and_degree(1);
     int count = 0;
-    for (auto [target, w] : G.neighbors(1)) ++count;
+    for (auto _ : G.neighbors(1)) ++count;
     EXPECT_EQ(count, 1);  // only vertex 3
 
     // Add a parallel edge and merge
