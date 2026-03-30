@@ -217,24 +217,10 @@ void eliminate_set(graph<Incidence>& G,
     // Merge parallel edges on IS vertices for consistent weights.
     // IS vertices are pairwise non-adjacent → disjoint edge sets → safe to parallelize.
     // merge_parallel_edges uses filter (no pool growth), so forward_star is safe.
-    // Thread-local merge buffers avoid per-call allocation.
-    using merge_buf_t = typename graph<Incidence>::merge_info;
-    #ifdef _OPENMP
-    if (is.size() > opts.omp_threshold) {
-        #pragma omp parallel
-        {
-            std::vector<merge_buf_t> merge_buf;
-            #pragma omp for schedule(static)
-            for (size_t i = 0; i < is.size(); ++i)
-                G.merge_parallel_edges(is[i], merge_buf);
-        }
-    } else
-    #endif
-    {
-        std::vector<merge_buf_t> merge_buf;
-        for (size_t i = 0; i < is.size(); ++i)
-            G.merge_parallel_edges(is[i], merge_buf);
-    }
+    // Buffer is thread_local inside merge_parallel_edges — capacity retained across calls.
+    #pragma omp parallel for schedule(static) if(is.size() > opts.omp_threshold)
+    for (size_t i = 0; i < is.size(); ++i)
+        G.merge_parallel_edges(is[i]);
     if (cp) (*cp)("merge_is");
 
     const size_t n_is = is.size();

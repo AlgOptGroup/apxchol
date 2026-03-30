@@ -40,14 +40,6 @@ struct forward_star {
     void reserve(index_t m) { nodes_.reserve(m); }
     void clear(index_t v) { head_[v] = npos; }
 
-    template<std::ranges::input_range R>
-        requires std::convertible_to<std::ranges::range_value_t<R>, T>
-    void replace(index_t v, R&& values) {
-        head_[v] = npos;
-        for (const auto& val : values)
-            push(v, val);
-    }
-
     /// Remove chain elements where pred(data) is false, by relinking.
     /// Calls on_keep(data) for each surviving element.
     /// O(chain length), no allocation, no pool growth.

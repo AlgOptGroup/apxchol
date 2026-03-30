@@ -10,7 +10,6 @@
 ///   operator[](v) const       — range of edge_index for vertex v
 ///   push(v, idx)              — append edge_index to vertex v
 ///   clear(v)                  — clear vertex v's list
-///   replace(v, range)          — replace vertex v's list
 ///   filter(v, pred)           — erase entries where pred is false
 ///   filter(v, pred, on_keep)  — same, calling on_keep for survivors
 ///   memory_bytes() const      — approximate heap usage in bytes
@@ -40,14 +39,13 @@ namespace detail {
 /// Concept for incidence list storage backends.
 template<typename T>
 concept incidence_storage = requires(T t, const T ct, index_t n, index_t v,
-                                      edge_index idx, std::span<const edge_index> s,
+                                      edge_index idx,
                                       detail::edge_pred pred, detail::edge_visit visit) {
     t.init(n);
     { ct[v] } -> std::ranges::input_range;
     requires std::same_as<std::ranges::range_value_t<decltype(ct[v])>, edge_index>;
     t.push(v, idx);
     t.clear(v);
-    t.replace(v, s);
     t.filter(v, pred);
     t.filter(v, pred, visit);
     { ct.memory_bytes() } -> std::convertible_to<std::size_t>;
@@ -69,12 +67,6 @@ struct contiguous_incidence {
 
     void push(index_t v, edge_index idx) { adj_[v].push_back(idx); }
     void clear(index_t v) { adj_[v].clear(); }
-
-    template<std::ranges::input_range R>
-        requires std::convertible_to<std::ranges::range_value_t<R>, edge_index>
-    void replace(index_t v, R&& indices) {
-        adj_[v].assign(std::ranges::begin(indices), std::ranges::end(indices));
-    }
 
     /// Remove elements from v's list where pred(idx) is false.
     /// Calls on_keep(idx) for each surviving element.

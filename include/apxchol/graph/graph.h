@@ -58,15 +58,10 @@ public:
         adj_.clear(v);
     }
 
-    void merge_parallel_edges(node_index v) {
-        std::vector<merge_info> buf;
-        merge_parallel_edges(v, buf);
-    }
-
     struct merge_info { node_index xor_to; edge_index idx; double w; };
 
-    void merge_parallel_edges(node_index v, std::vector<merge_info>& buf) {
-        // Collect active edges into the caller-provided buffer.
+    void merge_parallel_edges(node_index v) {
+        thread_local static std::vector<merge_info> buf;
         buf.clear();
         for (auto idx : adj_[v])
             if (active_[edges_[idx].traverse(v)])
