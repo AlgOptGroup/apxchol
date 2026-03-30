@@ -71,8 +71,6 @@ find_is_result find_independent_set(graph<Incidence>& G,
                                     find_is_scratch& scratch) {
     if (active.empty()) return {{}, 0.0};
 
-    const auto n = G.n();
-
     // Phase 1: Prune dead edges and compute degrees (parallel).
     auto* degrees = scratch.degrees.data();
     double total_degree = 0;

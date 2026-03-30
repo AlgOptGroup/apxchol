@@ -24,7 +24,15 @@
 #include <type_traits>
 #include <vector>
 
-/// char_traits specialization enabling std::basic_string<edge_index> as SSO container.
+// ── char_traits<edge_index> ──
+// libstdc++ provides a default char_traits primary template for any type,
+// but libc++ (LLVM ≥ 15) intentionally leaves it undefined — only
+// char/wchar_t/char8_t/char16_t/char32_t have specializations.
+// We provide an explicit specialization so basic_string<edge_index> works
+// on both standard libraries.  Note: specializing std templates for
+// non-program-defined types (like int32_t) is technically non-conforming
+// per [namespace.std] p2, but is harmless in practice.
+#if defined(_LIBCPP_VERSION)
 template<>
 struct std::char_traits<apxchol::edge_index> {
     using char_type  = apxchol::edge_index;
@@ -69,6 +77,7 @@ struct std::char_traits<apxchol::edge_index> {
     static constexpr int_type   eof()       noexcept { return -1; }
     static constexpr int_type   not_eof(int_type e) noexcept { return eq_int_type(e, eof()) ? 0 : e; }
 };
+#endif
 
 namespace apxchol {
 

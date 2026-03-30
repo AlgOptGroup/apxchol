@@ -194,20 +194,28 @@ int main(int argc, char* argv[]) {
     bool sweep_omp = false;
     bool sweep_deg = false;
     bool sweep_threads = false;
+    bool sweep_sso = false;
     const char* graph_filter = nullptr;
+    const char* storage_filter = nullptr;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--csv") == 0)      mode = output_mode::csv;
         if (std::strcmp(argv[i], "--profile") == 0)   mode = output_mode::profile;
         if (std::strcmp(argv[i], "--sweep-omp") == 0)   sweep_omp = true;
         if (std::strcmp(argv[i], "--sweep-deg") == 0)   sweep_deg = true;
         if (std::strcmp(argv[i], "--sweep-threads") == 0) sweep_threads = true;
+        if (std::strcmp(argv[i], "--sweep-sso") == 0)   sweep_sso = true;
         if (std::strcmp(argv[i], "--graph") == 0 && i + 1 < argc)
             graph_filter = argv[++i];
+        if (std::strcmp(argv[i], "--storage") == 0 && i + 1 < argc)
+            storage_filter = argv[++i];
     }
 
-    // Helper: should we run this graph name?
+    // Helper: should we run this graph/storage name?
     auto should_run = [&](const char* name) {
         return !graph_filter || std::strstr(name, graph_filter);
+    };
+    auto should_run_storage = [&](const char* name) {
+        return !storage_filter || std::strstr(name, storage_filter);
     };
 
     // ── OMP threshold sweep: grid2000 × fwd_star only ──
@@ -278,18 +286,53 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // ── Thread scaling sweep: grid2000 × fwd_star, sub-stage breakdown ──
+    // ── Thread scaling sweep: grid2000 × selectable storages, sub-stage breakdown ──
     if (sweep_threads) {
-        std::printf("%-8s %10s %10s %10s %10s %10s %10s\n",
-                    "threads", "find_is", "merge_is", "compute",
-                    "apply", "elim", "total(ms)");
-        std::printf("%s\n", std::string(72, '-').c_str());
-        for (int t : {1, 2, 4, 8, 16, 32}) {
+        auto run_sweep = [&](const char* sname, auto build_fn) {
+            if (!should_run_storage(sname)) return;
+            std::printf("\n=== %s ===\n", sname);
+            std::printf("%-8s %10s %10s %10s %10s %10s %10s %8s\n",
+                        "threads", "find_is", "merge_is", "compute",
+                        "apply", "elim", "total(ms)", "peak MB");
+            std::printf("%s\n", std::string(80, '-').c_str());
+            for (int t : {1, 2, 4, 8, 16, 32}) {
 #ifdef _OPENMP
-            omp_set_num_threads(t);
+                omp_set_num_threads(t);
 #endif
+                apxchol::checkpoint cp;
+                auto G = build_fn();
+                auto F = apxchol::factorize(G, {}, &cp);
+
+                double find_is_ms  = cp.total("setup.find_is")            * 1000;
+                double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;
+                double compute_ms  = cp.total("setup.eliminate.compute")  * 1000;
+                double apply_ms    = cp.total("setup.eliminate.apply")    * 1000;
+                double elim_ms     = cp.total("setup.eliminate")          * 1000;
+                double total_ms    = cp.total("setup")                    * 1000;
+
+                std::printf("%-8d %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %8.1f\n",
+                            t, find_is_ms, merge_is_ms, compute_ms,
+                            apply_ms, elim_ms, total_ms,
+                            F.peak_graph_bytes / (1024.0 * 1024.0));
+            }
+        };
+        run_sweep("vec",      [] { return make_grid<apxchol::vec_incidence>(2000, 2000); });
+        run_sweep("fwd_star", [] { return make_grid<apxchol::forward_star_incidence>(2000, 2000); });
+        run_sweep("svec12",   [] { return make_grid<apxchol::small_vec_incidence>(2000, 2000); });
+        run_sweep("bstr",     [] { return make_grid<apxchol::bstr_incidence>(2000, 2000); });
+        return 0;
+    }
+
+    // ── SSO capacity sweep: grid2000 × small_vec_incidence_n<N> ──
+    if (sweep_sso) {
+        std::printf("%-8s %10s %10s %10s %10s %10s %10s %8s\n",
+                    "sso_cap", "find_is", "merge_is", "compute",
+                    "apply", "elim", "total(ms)", "peak MB");
+        std::printf("%s\n", std::string(80, '-').c_str());
+        auto run_sso = [](auto tag) {
+            constexpr std::size_t N = decltype(tag)::value;
             apxchol::checkpoint cp;
-            auto G = make_grid<apxchol::forward_star_incidence>(2000, 2000);
+            auto G = make_grid<apxchol::small_vec_incidence_n<N>>(2000, 2000);
             auto F = apxchol::factorize(G, {}, &cp);
 
             double find_is_ms  = cp.total("setup.find_is")            * 1000;
@@ -299,10 +342,19 @@ int main(int argc, char* argv[]) {
             double elim_ms     = cp.total("setup.eliminate")          * 1000;
             double total_ms    = cp.total("setup")                    * 1000;
 
-            std::printf("%-8d %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f\n",
-                        t, find_is_ms, merge_is_ms, compute_ms,
-                        apply_ms, elim_ms, total_ms);
-        }
+            std::printf("%-8zu %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %8.1f\n",
+                        N, find_is_ms, merge_is_ms, compute_ms,
+                        apply_ms, elim_ms, total_ms,
+                        F.peak_graph_bytes / (1024.0 * 1024.0));
+        };
+        run_sso(std::integral_constant<std::size_t, 0>{});
+        run_sso(std::integral_constant<std::size_t, 2>{});
+        run_sso(std::integral_constant<std::size_t, 4>{});
+        run_sso(std::integral_constant<std::size_t, 6>{});
+        run_sso(std::integral_constant<std::size_t, 8>{});
+        run_sso(std::integral_constant<std::size_t, 12>{});
+        run_sso(std::integral_constant<std::size_t, 16>{});
+        run_sso(std::integral_constant<std::size_t, 24>{});
         return 0;
     }
 
