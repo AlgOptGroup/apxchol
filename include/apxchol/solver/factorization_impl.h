@@ -198,6 +198,68 @@ find_is_result find_independent_set(graph<Incidence>& G,
 // clique edges) runs in parallel with per-thread RNGs; graph mutation
 // (add_edge, deactivate) is deferred and applied sequentially because
 // the forward_star node pool is shared.
+
+// Deferred clique edge for batched application.
+struct deferred_edge { node_index u, v; double w; };
+
+// Core per-vertex elimination: gather neighbors, build L-column, sample
+// clique edges via Kyng-Sachdeva random sparsification.
+// Caller must merge parallel edges for v before calling this.
+template<typename Incidence>
+void process_vertex(graph<Incidence>& G,
+                    node_index v,
+                    factor_col& col,
+                    std::mt19937& gen,
+                    std::vector<deferred_edge>& edges_out,
+                    std::vector<std::pair<node_index, double>>& valid,
+                    std::vector<double>& prefix) {
+    valid.clear();
+    double deg = 0.0;
+    for (auto [u, w] : G.neighbors(v)) {
+        valid.emplace_back(u, w);
+        deg += w;
+    }
+
+    if (valid.empty()) {
+        col = {v, {}};
+        return;
+    }
+
+    std::sort(valid.begin(), valid.end(),
+              [](const auto& a, const auto& b) { return a.second < b.second; });
+
+    double sqrt_deg = std::sqrt(deg);
+    col.vertex = v;
+    col.entries.reserve(valid.size());
+    for (const auto& [u, w] : valid)
+        col.entries.emplace_back(u, w / sqrt_deg);
+
+    prefix.resize(valid.size());
+    prefix[0] = valid[0].second;
+    for (size_t i = 1; i < valid.size(); ++i)
+        prefix[i] = prefix[i - 1] + valid[i].second;
+
+    for (size_t i = 0; i + 1 < valid.size(); ++i) {
+        double suffix_sum = prefix.back() - prefix[i];
+        if (suffix_sum <= 0.0) continue;
+
+        std::uniform_real_distribution<double> U(0.0, suffix_sum);
+        double r = U(gen);
+
+        auto it = std::upper_bound(
+            prefix.begin() + static_cast<ptrdiff_t>(i) + 1,
+            prefix.end(),
+            prefix[i] + r);
+        size_t j = static_cast<size_t>(it - prefix.begin());
+        if (j >= valid.size()) j = valid.size() - 1;
+
+        auto [va, wa] = valid[i];
+        auto [vb, wb] = valid[j];
+        double w = wa * wb / (wa + wb); // harmonic-mean weight
+        edges_out.push_back({va, vb, w});
+    }
+}
+
 template<typename Incidence>
 void eliminate_set(graph<Incidence>& G,
                    const std::vector<node_index>& is,
@@ -207,73 +269,13 @@ void eliminate_set(graph<Incidence>& G,
                    checkpoint* cp = nullptr) {
     // Merge parallel edges on IS vertices for consistent weights.
     // IS vertices are pairwise non-adjacent → disjoint edge sets → safe to parallelize.
-    // merge_parallel_edges uses filter (no pool growth), so forward_star is safe.
-    // Buffer is thread_local inside merge_parallel_edges — capacity retained across calls.
     #pragma omp parallel for schedule(static) if(is.size() > opts.omp_threshold)
     for (size_t i = 0; i < is.size(); ++i)
         G.merge_parallel_edges(is[i]);
     if (cp) (*cp)("merge_is");
 
     const size_t n_is = is.size();
-
-    // Per-IS-vertex factor columns, indexed by position in IS.
     std::vector<factor_col> local_cols(n_is);
-
-    // Deferred clique edges: (endpoint_a, endpoint_b, weight).
-    struct deferred_edge { node_index u, v; double w; };
-
-    // Core per-vertex logic: gather neighbors, build L-column, sample clique.
-    auto process_vertex = [&](size_t k, std::mt19937& gen,
-                              std::vector<deferred_edge>& edges_out,
-                              std::vector<std::pair<node_index, double>>& valid,
-                              std::vector<double>& prefix) {
-        auto u = is[k];
-        valid.clear();
-        double deg = 0.0;
-        for (auto [v, w] : G.neighbors(u)) {
-            valid.emplace_back(v, w);
-            deg += w;
-        }
-
-        if (valid.empty()) {
-            local_cols[k] = {u, {}};
-            return;
-        }
-
-        std::sort(valid.begin(), valid.end(),
-                  [](const auto& a, const auto& b) { return a.second < b.second; });
-
-        double sqrt_deg = std::sqrt(deg);
-        local_cols[k].vertex = u;
-        local_cols[k].entries.reserve(valid.size());
-        for (const auto& [v, w] : valid)
-            local_cols[k].entries.emplace_back(v, w / sqrt_deg);
-
-        prefix.resize(valid.size());
-        prefix[0] = valid[0].second;
-        for (size_t i = 1; i < valid.size(); ++i)
-            prefix[i] = prefix[i - 1] + valid[i].second;
-
-        for (size_t i = 0; i + 1 < valid.size(); ++i) {
-            double suffix_sum = prefix.back() - prefix[i];
-            if (suffix_sum <= 0.0) continue;
-
-            std::uniform_real_distribution<double> U(0.0, suffix_sum);
-            double r = U(gen);
-
-            auto it = std::upper_bound(
-                prefix.begin() + static_cast<ptrdiff_t>(i) + 1,
-                prefix.end(),
-                prefix[i] + r);
-            size_t j = static_cast<size_t>(it - prefix.begin());
-            if (j >= valid.size()) j = valid.size() - 1;
-
-            auto [va, wa] = valid[i];
-            auto [vb, wb] = valid[j];
-            double w = wa * wb / (wa + wb); // harmonic-mean weight
-            edges_out.push_back({va, vb, w});
-        }
-    };
 
     #ifdef _OPENMP
     if (n_is > opts.omp_threshold) {
@@ -293,11 +295,11 @@ void eliminate_set(graph<Incidence>& G,
 
             #pragma omp for schedule(static)
             for (size_t k = 0; k < n_is; ++k)
-                process_vertex(k, local_rng, edge_buffers[tid], valid, prefix);
+                process_vertex(G, is[k], local_cols[k], local_rng,
+                               edge_buffers[tid], valid, prefix);
         }
         if (cp) (*cp)("compute");
 
-        // Apply deferred results: move factor columns, add clique edges, deactivate.
         for (auto& col : local_cols)
             factor_cols.push_back(std::move(col));
         for (auto& buf : edge_buffers)
@@ -315,7 +317,8 @@ void eliminate_set(graph<Incidence>& G,
         std::vector<deferred_edge> vertex_edges;
         for (size_t k = 0; k < n_is; ++k) {
             vertex_edges.clear();
-            process_vertex(k, rng, vertex_edges, valid, prefix);
+            process_vertex(G, is[k], local_cols[k], rng,
+                           vertex_edges, valid, prefix);
             factor_cols.push_back(std::move(local_cols[k]));
             for (auto [u, v, w] : vertex_edges)
                 G.add_edge(u, v, w);
@@ -323,6 +326,134 @@ void eliminate_set(graph<Incidence>& G,
         }
         if (cp) { (*cp)("compute"); cp->tick(); }
     }
+}
+
+// Sequential fallback: eliminate all remaining vertices one by one.
+// Used when IS fraction drops below threshold — avoids the O(|active|)
+// IS-finding scan when only a few vertices can be chosen anyway.
+template<typename Incidence>
+void eliminate_remaining(graph<Incidence>& G,
+                         std::span<const node_index> active,
+                         std::vector<factor_col>& factor_cols,
+                         std::mt19937& rng) {
+    std::vector<std::pair<node_index, double>> valid;
+    std::vector<double> prefix;
+    std::vector<deferred_edge> edges;
+    factor_col col;
+    for (auto v : active) {
+        G.merge_parallel_edges(v);
+        edges.clear();
+        col.entries.clear();
+        process_vertex(G, v, col, rng, edges, valid, prefix);
+        factor_cols.push_back(std::move(col));
+        for (auto [a, b, w] : edges)
+            G.add_edge(a, b, w);
+        G.deactivate(v);
+    }
+}
+
+// Build elimination-order permutation and assemble L in CSC format.
+//
+// factor_cols: one entry per eliminated vertex (in elimination order).
+// active: remaining un-eliminated vertices (appended to order).
+// n: total number of vertices in the original graph.
+inline void build_csc(factorization& result,
+                      const std::vector<factor_col>& factor_cols,
+                      std::span<const node_index> active,
+                      index_t n,
+                      checkpoint* cp) {
+    // Build elimination order: eliminated vertices first, then remaining.
+    std::vector<node_index> order;
+    order.reserve(n);
+    for (const auto& col : factor_cols)
+        order.push_back(col.vertex);
+    for (auto v : active)
+        order.push_back(v);
+
+    // Permutation: map[original_vertex] = new_index.
+    std::vector<index_t> perm(n);
+    for (index_t i = 0; i < n; ++i)
+        perm[order[i]] = i;
+
+    if (cp) (*cp)("permutation");
+
+    // Count exact number of off-diagonal entries for precise reservation.
+    index_t total_offdiag = 0;
+    for (const auto& col : factor_cols)
+        total_offdiag += static_cast<index_t>(col.entries.size());
+
+    const index_t nnz = total_offdiag + n; // off-diagonal + one diagonal per column
+
+    // Build sparse L in CSC format directly — no triplets, no setFromTriplets.
+    // Each factor column maps to a permuted column; entries are sorted by
+    // permuted row index to satisfy Eigen's compressed format.
+    result.L.resize(n, n);
+    result.L.reserve(nnz);
+
+    // Step 1: Count entries per column (off-diag + 1 diagonal each).
+    std::vector<index_t> col_counts(n, 1); // every column has a diagonal
+    for (const auto& col : factor_cols)
+        col_counts[perm[col.vertex]] += static_cast<index_t>(col.entries.size());
+
+    // Step 2: Build outer pointer array (cumulative sum).
+    auto* outerPtr = result.L.outerIndexPtr();
+    outerPtr[0] = 0;
+    for (index_t c = 0; c < n; ++c)
+        outerPtr[c + 1] = outerPtr[c] + col_counts[c];
+
+    // Step 3: Allocate inner indices + values arrays.
+    result.L.resizeNonZeros(nnz);
+    auto* innerIdx = result.L.innerIndexPtr();
+    auto* values   = result.L.valuePtr();
+
+    // Step 4: Fill each column (diagonal + off-diag entries sorted by row).
+    std::vector<index_t> write_pos(n);
+    for (index_t c = 0; c < n; ++c)
+        write_pos[c] = outerPtr[c];
+
+    std::vector<double> diag(n, 0.0);
+    std::vector<std::pair<index_t, double>> col_entries;
+
+    for (const auto& col : factor_cols) {
+        index_t perm_col = perm[col.vertex];
+
+        // Accumulate diagonal and prepare sorted off-diagonal entries.
+        col_entries.clear();
+        for (const auto& [nbr, val] : col.entries) {
+            col_entries.emplace_back(perm[nbr], -val);
+            diag[perm_col] += val;
+        }
+        std::sort(col_entries.begin(), col_entries.end());
+
+        // Diagonal first (smallest row index for lower-triangular format).
+        auto pos = write_pos[perm_col];
+        innerIdx[pos] = perm_col;
+        values[pos]   = diag[perm_col];
+        ++pos;
+
+        // Off-diagonal entries in sorted row order.
+        for (auto [row, val] : col_entries) {
+            innerIdx[pos] = row;
+            values[pos]   = val;
+            ++pos;
+        }
+        write_pos[perm_col] = pos;
+    }
+
+    // Remaining columns (un-eliminated vertices) — diagonal only.
+    for (index_t c = 0; c < n; ++c) {
+        if (write_pos[c] == outerPtr[c]) {
+            innerIdx[write_pos[c]] = c;
+            values[write_pos[c]]   = 0.0;
+            ++write_pos[c];
+        }
+    }
+
+    result.L.makeCompressed();
+
+    result.perm.resize(n);
+    result.perm.indices() = Eigen::Map<Eigen::Matrix<index_t, Eigen::Dynamic, 1>>(perm.data(), n);
+    if (cp) (*cp)("assembly");
 }
 
 } // namespace detail
@@ -354,11 +485,14 @@ factorization factorize(const graph<Incidence>& G,
         auto [is, avg_deg] = detail::find_independent_set(work, active, opts);
         if (cp) (*cp)("find_is");
 
-        // Stop if IS is empty or too small to make meaningful progress.
-        // With degree_multiplier=2, Markov guarantees IS ≥ ~1/(4·avg_deg+2)
-        // of active vertices; falling below min_is_fraction indicates a
-        // degenerate graph structure.
-        if (is.empty() || is.size() < active.size() * opts.min_is_fraction) break;
+        // If IS is empty or too small, the IS-finding overhead exceeds the
+        // benefit of batch elimination.  Fall back to sequential elimination
+        // of all remaining vertices.
+        if (is.empty() || is.size() < active.size() * opts.min_is_fraction) {
+            detail::eliminate_remaining(work, active, factor_cols, rng);
+            active.clear();
+            break;
+        }
 
         result.rounds.push_back({
             static_cast<int>(active.size()),
@@ -377,107 +511,7 @@ factorization factorize(const graph<Incidence>& G,
         std::erase_if(active, [&](node_index v) { return !work.is_active(v); });
     }
 
-    // Build elimination order + append remaining active vertex
-    std::vector<node_index> order;
-    order.reserve(n);
-    for (const auto& col : factor_cols)
-        order.push_back(col.vertex);
-    for (auto v : active)
-        order.push_back(v);
-
-    // Build permutation: map[original_vertex] = new_index
-    std::vector<index_t> map(n);
-    for (index_t i = 0; i < n; ++i)
-        map[order[i]] = i;
-
-    if (cp) (*cp)("permutation");
-
-    // Count exact number of off-diagonal entries for precise reservation.
-    index_t total_offdiag = 0;
-    for (const auto& col : factor_cols)
-        total_offdiag += static_cast<index_t>(col.entries.size());
-
-    const index_t nnz = total_offdiag + n; // off-diagonal + one diagonal per column
-
-    // Build sparse L in CSC format directly — no triplets, no setFromTriplets.
-    // Each factor column maps to a permuted column; entries are sorted by
-    // permuted row index to satisfy Eigen's compressed format.
-    result.L.resize(n, n);
-    result.L.reserve(nnz);
-
-    // Step 1: Count entries per column (off-diag + 1 diagonal each).
-    // Columns from factor_cols have (entries.size() + 1) nonzeros.
-    // Remaining active columns have just a diagonal (1 nonzero).
-    std::vector<index_t> col_counts(n, 1); // every column has a diagonal
-    for (const auto& col : factor_cols)
-        col_counts[map[col.vertex]] += static_cast<index_t>(col.entries.size());
-
-    // Step 2: Build outer pointer array (cumulative sum).
-    auto* outerPtr = result.L.outerIndexPtr();
-    outerPtr[0] = 0;
-    for (index_t c = 0; c < n; ++c)
-        outerPtr[c + 1] = outerPtr[c] + col_counts[c];
-
-    // Step 3: Allocate inner indices + values arrays.
-    result.L.resizeNonZeros(nnz);
-    auto* innerIdx = result.L.innerIndexPtr();
-    auto* values   = result.L.valuePtr();
-
-    // Step 4: Fill each column (diagonal + off-diag entries sorted by row).
-    // We process columns in order; position tracking uses col_counts as write cursor.
-    // First, set all columns to their start position.
-    std::vector<index_t> write_pos(n);
-    for (index_t c = 0; c < n; ++c)
-        write_pos[c] = outerPtr[c];
-
-    // Compute diagonals while filling off-diagonal entries.
-    std::vector<double> diag(n, 0.0);
-
-    // Buffer for sorting entries within each column.
-    std::vector<std::pair<index_t, double>> col_entries;
-
-    for (const auto& col : factor_cols) {
-        index_t perm_col = map[col.vertex];
-
-        // Accumulate diagonal and prepare sorted off-diagonal entries.
-        col_entries.clear();
-        for (const auto& [nbr, val] : col.entries) {
-            col_entries.emplace_back(map[nbr], -val);
-            diag[perm_col] += val;
-        }
-        std::sort(col_entries.begin(), col_entries.end());
-
-        // Write diagonal first (it has the smallest row index = perm_col for lower-tri,
-        // but neighbors have higher permuted indices). So diagonal comes first.
-        auto pos = write_pos[perm_col];
-        innerIdx[pos] = perm_col;
-        values[pos]   = diag[perm_col]; // placeholder, will be final value
-        ++pos;
-
-        // Write off-diagonal entries in sorted row order.
-        for (auto [row, val] : col_entries) {
-            innerIdx[pos] = row;
-            values[pos]   = val;
-            ++pos;
-        }
-        write_pos[perm_col] = pos;
-    }
-
-    // Fill remaining columns (active vertices with no factor column) — diagonal only.
-    for (index_t c = 0; c < n; ++c) {
-        if (write_pos[c] == outerPtr[c]) {
-            // This column has only a diagonal entry (no off-diag).
-            innerIdx[write_pos[c]] = c;
-            values[write_pos[c]]   = diag[c]; // 0.0 for non-eliminated vertices
-            ++write_pos[c];
-        }
-    }
-
-    result.L.makeCompressed();
-
-    result.perm.resize(n);
-    result.perm.indices() = Eigen::Map<Eigen::Matrix<index_t, Eigen::Dynamic, 1>>(map.data(), n);
-    if (cp) (*cp)("assembly");
+    detail::build_csc(result, factor_cols, active, n, cp);
 
     if (cp) cp->ascend();
 
