@@ -380,17 +380,13 @@ factorization factorize(const graph<Incidence>& G,
         auto [is, avg_deg] = detail::find_independent_set(work, active, opts);
         if (cp) (*cp)("find_is");
 
+        result.rounds.push_back({active.size(), is.size(), avg_deg});
+
         // If IS is too small, the IS-finding overhead exceeds the benefit
         // of batch elimination.  Fall back to sequential elimination of all
         // remaining vertices (handled after the loop).
         if (is.size() < active.size() * opts.min_is_fraction)
             break;
-
-        result.rounds.push_back({
-            active.size(),
-            is.size(),
-            avg_deg
-        });
 
         detail::eliminate_set(work, is, factor_cols, rng, opts, cp);
 
