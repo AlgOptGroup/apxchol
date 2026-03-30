@@ -21,9 +21,9 @@ struct factorization {
 
     // Per-round statistics (populated when checkpoint is provided)
     struct round_stats {
-        int active;     // active vertices at start of round
-        int is_size;    // IS size chosen
-        double avg_deg; // average degree of active vertices
+        index_t active;  // active vertices at start of round
+        index_t is_size; // IS size chosen
+        double avg_deg;  // average degree of active vertices
     };
     std::vector<round_stats> rounds;
 };

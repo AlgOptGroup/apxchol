@@ -387,8 +387,8 @@ factorization factorize(const graph<Incidence>& G,
             break;
 
         result.rounds.push_back({
-            static_cast<int>(active.size()),
-            static_cast<int>(is.size()),
+            static_cast<index_t>(active.size()),
+            static_cast<index_t>(is.size()),
             avg_deg
         });
 

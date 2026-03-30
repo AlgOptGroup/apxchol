@@ -269,7 +269,7 @@ int main(int argc, char* argv[]) {
                 auto F = apxchol::factorize(G, opts, &cp);
 
                 // IS profile stats
-                int rounds = static_cast<int>(F.rounds.size());
+                auto rounds = F.rounds.size();
                 double avg_is = 0, avg_deg = 0;
                 for (auto& rs : F.rounds) {
                     avg_is  += rs.is_size;
@@ -281,7 +281,7 @@ int main(int argc, char* argv[]) {
                 double elim_ms     = cp.total("setup.eliminate")   * 1000;
                 double fact_ms     = cp.total("setup")             * 1000;
 
-                std::printf("%-8.1f %8d %8.0f %8.1f %10.2f %10.2f %10.2f %10lld %10d\n",
+                std::printf("%-8.1f %8zu %8.0f %8.1f %10.2f %10.2f %10.2f %10lld %10d\n",
                             mult, rounds, avg_is, avg_deg,
                             find_is_ms, elim_ms, fact_ms,
                             static_cast<long long>(F.L.nonZeros()), G.n());
