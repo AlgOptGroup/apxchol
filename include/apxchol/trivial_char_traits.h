@@ -1,7 +1,7 @@
 #pragma once
-/// char_traits specialization for trivially copyable types.
+/// char_traits<edge_index> — satisfies the CharTraits named requirement.
 ///
-/// Enables std::basic_string<T> as an SSO-capable dynamic array.
+/// Enables std::basic_string<edge_index> as an SSO-capable dynamic array.
 /// The standard only mandates char_traits for char/wchar_t/char8_t/char16_t/char32_t;
 /// libstdc++ provides a default primary template but libc++ does not.
 /// We always provide our own for portability.
@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <string>
 
 template<>
@@ -27,7 +26,7 @@ struct std::char_traits<apxchol::edge_index> {
 
     static constexpr void assign(char_type& r, const char_type& a) noexcept { r = a; }
 
-    static constexpr char_type* assign(char_type* p, std::size_t n, char_type a) {
+    static constexpr char_type* assign(char_type* p, std::size_t n, char_type a) noexcept {
         std::fill_n(p, n, a);
         return p;
     }
@@ -35,48 +34,36 @@ struct std::char_traits<apxchol::edge_index> {
     static constexpr bool eq(char_type a, char_type b) noexcept { return a == b; }
     static constexpr bool lt(char_type a, char_type b) noexcept { return a < b; }
 
+    static constexpr int compare(const char_type* a, const char_type* b, std::size_t n) {
+        auto r = std::lexicographical_compare_three_way(a, a + n, b, b + n);
+        return r < 0 ? -1 : r > 0 ? 1 : 0;
+    }
+
+    static constexpr std::size_t length(const char_type* s) {
+        const char_type* p = s;
+        while (*p != char_type{}) ++p;
+        return static_cast<std::size_t>(p - s);
+    }
+
+    static constexpr const char_type* find(const char_type* s, std::size_t n, const char_type& a) {
+        auto it = std::find(s, s + n, a);
+        return it == s + n ? nullptr : it;
+    }
+
     static constexpr char_type* move(char_type* d, const char_type* s, std::size_t n) {
-        if (std::is_constant_evaluated()) {
-            // constexpr path: manual overlap-safe copy
-            if (d < s) std::copy_n(s, n, d);
-            else       std::copy_backward(s, s + n, d + n);
-        } else {
-            std::memmove(d, s, n * sizeof(char_type));
-        }
+        if (d < s)       std::copy_n(s, n, d);
+        else if (d > s)  std::copy_backward(s, s + n, d + n);
         return d;
     }
 
     static constexpr char_type* copy(char_type* d, const char_type* s, std::size_t n) {
-        if (std::is_constant_evaluated())
-            std::copy_n(s, n, d);
-        else
-            std::memcpy(d, s, n * sizeof(char_type));
+        std::copy_n(s, n, d);
         return d;
-    }
-
-    static constexpr int compare(const char_type* a, const char_type* b, std::size_t n) {
-        for (std::size_t i = 0; i < n; ++i) {
-            if (a[i] < b[i]) return -1;
-            if (b[i] < a[i]) return  1;
-        }
-        return 0;
-    }
-
-    static constexpr std::size_t length(const char_type* s) {
-        std::size_t n = 0;
-        while (s[n] != char_type{}) ++n;
-        return n;
-    }
-
-    static constexpr const char_type* find(const char_type* s, std::size_t n, const char_type& a) {
-        for (std::size_t i = 0; i < n; ++i)
-            if (s[i] == a) return s + i;
-        return nullptr;
     }
 
     static constexpr char_type  to_char_type(int_type c) noexcept { return static_cast<char_type>(c); }
     static constexpr int_type   to_int_type(char_type c) noexcept { return static_cast<int_type>(c); }
     static constexpr bool       eq_int_type(int_type a, int_type b) noexcept { return a == b; }
     static constexpr int_type   eof()     noexcept { return -1; }
-    static constexpr int_type   not_eof(int_type e) noexcept { return eq_int_type(e, eof()) ? 0 : e; }
+    static constexpr int_type   not_eof(int_type e) noexcept { return e != eof() ? e : 0; }
 };
