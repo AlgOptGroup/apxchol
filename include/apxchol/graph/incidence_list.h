@@ -11,6 +11,10 @@
 ///   push(v, idx)              — append edge_index to vertex v
 ///   clear(v)                  — clear vertex v's list
 ///   replace(v, range)          — replace vertex v's list
+///   filter(v, pred)           — erase entries where pred is false
+///   filter(v, pred, on_keep)  — same, calling on_keep for survivors
+///   memory_bytes() const      — approximate heap usage in bytes
+///   tag                       — static constexpr graph_storage value
 
 #include "apxchol/types.h"
 #include "apxchol/trivial_char_traits.h"
@@ -19,6 +23,7 @@
 #include <boost/container/small_vector.hpp>
 #include <concepts>
 #include <cstddef>
+#include <functional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -45,6 +50,8 @@ concept incidence_storage = requires(T t, const T ct, index_t n, index_t v,
     t.replace(v, s);
     t.filter(v, pred);
     t.filter(v, pred, visit);
+    { ct.memory_bytes() } -> std::convertible_to<std::size_t>;
+    { T::tag } -> std::convertible_to<const graph_storage&>;
 };
 
 /// Default small-buffer capacity for small_vec_incidence.
@@ -73,15 +80,13 @@ struct contiguous_incidence {
     /// Calls on_keep(idx) for each surviving element.
     void filter(index_t v, auto&& pred, auto&& on_keep) {
         auto& list = adj_[v];
-        list.erase(std::remove_if(list.begin(), list.end(),
-            [&](edge_index idx) { return !pred(idx); }), list.end());
+        list.erase(std::ranges::remove_if(list, std::not_fn(pred)).begin(),
+                   list.end());
         for (auto idx : list) on_keep(idx);
     }
 
     void filter(index_t v, auto&& pred) {
-        auto& list = adj_[v];
-        list.erase(std::remove_if(list.begin(), list.end(),
-            [&](edge_index idx) { return !pred(idx); }), list.end());
+        filter(v, pred, [](edge_index) {});
     }
 
     /// Approximate memory usage in bytes (heap only).
