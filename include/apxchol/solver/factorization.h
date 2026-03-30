@@ -2,7 +2,6 @@
 #include "apxchol/graph/conversions.h"
 #include <Eigen/Sparse>
 #include <cstddef>
-#include <span>
 
 namespace apxchol {
 
@@ -65,9 +64,10 @@ struct factor_col {
 };
 
 // Build elimination-order permutation and assemble L in CSC format.
+// Precondition: factor_cols contains exactly one entry per vertex (all
+// n vertices have been eliminated before this call).
 void build_csc(factorization& result,
                const std::vector<factor_col>& factor_cols,
-               std::span<const node_index> active,
                index_t n,
                checkpoint* cp);
 

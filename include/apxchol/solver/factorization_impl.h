@@ -262,6 +262,8 @@ void eliminate_set(graph<Incidence>& G,
                    std::mt19937& rng,
                    const factor_options& opts,
                    checkpoint* cp = nullptr) {
+    if (cp) { cp->descend("eliminate"); cp->tick(); }
+
     // Merge parallel edges on IS vertices for consistent weights.
     // IS vertices are pairwise non-adjacent → disjoint edge sets → safe to parallelize.
     #pragma omp parallel for schedule(static) if(is.size() > opts.omp_threshold)
@@ -319,8 +321,10 @@ void eliminate_set(graph<Incidence>& G,
                 G.add_edge(u, v, w);
             G.deactivate(is[k]);
         }
-        if (cp) { (*cp)("compute"); cp->tick(); }
+        if (cp) (*cp)("compute");
     }
+
+    if (cp) cp->ascend();
 }
 
 // Sequential fallback: eliminate all remaining vertices one by one.
@@ -378,12 +382,9 @@ factorization factorize(const graph<Incidence>& G,
 
         // If IS is empty or too small, the IS-finding overhead exceeds the
         // benefit of batch elimination.  Fall back to sequential elimination
-        // of all remaining vertices.
-        if (is.empty() || is.size() < active.size() * opts.min_is_fraction) {
-            detail::eliminate_remaining(work, active, factor_cols, rng);
-            active.clear();
+        // of all remaining vertices (handled after the loop).
+        if (is.empty() || is.size() < active.size() * opts.min_is_fraction)
             break;
-        }
 
         result.rounds.push_back({
             static_cast<int>(active.size()),
@@ -391,10 +392,7 @@ factorization factorize(const graph<Incidence>& G,
             avg_deg
         });
 
-        checkpoint* elim_cp = nullptr;
-        if (cp) { cp->descend("eliminate"); cp->tick(); elim_cp = cp; }
-        detail::eliminate_set(work, is, factor_cols, rng, opts, elim_cp);
-        if (cp) cp->ascend();
+        detail::eliminate_set(work, is, factor_cols, rng, opts, cp);
 
         result.peak_graph_bytes = std::max(result.peak_graph_bytes,
                                            work.memory_bytes());
@@ -402,7 +400,12 @@ factorization factorize(const graph<Incidence>& G,
         std::erase_if(active, [&](node_index v) { return !work.is_active(v); });
     }
 
-    detail::build_csc(result, factor_cols, active, n, cp);
+    // Eliminate any remaining vertices (0 or 1 after the while loop,
+    // or all remaining when the IS-fraction fallback triggered above).
+    if (!active.empty())
+        detail::eliminate_remaining(work, active, factor_cols, rng);
+
+    detail::build_csc(result, factor_cols, n, cp);
 
     if (cp) cp->ascend();
 

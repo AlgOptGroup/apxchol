@@ -3,7 +3,6 @@
 #include "apxchol/checkpoint.h"
 #include <algorithm>
 #include <numeric>
-#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -76,29 +75,18 @@ static void assemble_csc(Eigen::SparseMatrix<double>& L,
         write_pos[perm_col] = pos;
     }
 
-    // Remaining columns (un-eliminated vertices) — diagonal only.
-    for (index_t c = 0; c < n; ++c) {
-        if (write_pos[c] == outerPtr[c]) {
-            innerIdx[write_pos[c]] = c;
-            values[write_pos[c]]   = 0.0;
-        }
-    }
-
     L.makeCompressed();
 }
 
 void build_csc(factorization& result,
                const std::vector<factor_col>& factor_cols,
-               std::span<const node_index> active,
                index_t n,
                checkpoint* cp) {
-    // Build elimination order: eliminated vertices first, then remaining.
+    // Build elimination order from factor_cols (all n vertices).
     std::vector<node_index> order;
     order.reserve(n);
     for (const auto& col : factor_cols)
         order.push_back(col.vertex);
-    for (auto v : active)
-        order.push_back(v);
 
     // Permutation: map[original_vertex] = new_index.
     std::vector<index_t> perm(n);
