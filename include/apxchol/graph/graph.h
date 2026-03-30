@@ -103,8 +103,8 @@ public:
     }
 
     /// Prune dead edges and return surviving (active) degree in one pass.
-    int prune_and_degree(node_index v) {
-        int count = 0;
+    index_t prune_and_degree(node_index v) {
+        index_t count = 0;
         adj_.filter(v, [&](edge_index idx) {
             return active_[edges_[idx].traverse(v)];
         }, [&](edge_index) { ++count; });

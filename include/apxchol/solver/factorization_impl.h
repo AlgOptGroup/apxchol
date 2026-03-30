@@ -52,14 +52,14 @@ find_is_result find_independent_set(graph<Incidence>& G,
     static std::vector<char> chosen;
     static std::vector<int> block_of;
     static std::vector<char> near_boundary;
-    static std::vector<int> degrees;
+    static std::vector<index_t> degrees;
 
-    if (chosen.size() < static_cast<size_t>(G.n())) {
-        auto n = static_cast<size_t>(G.n());
-        chosen.resize(n, 0);
-        block_of.resize(n);
-        near_boundary.resize(n, 0);
-        degrees.resize(n);
+    if (chosen.size() < size_t(G.n())) {
+        size_t nn = G.n();
+        chosen.resize(nn, 0);
+        block_of.resize(nn);
+        near_boundary.resize(nn, 0);
+        degrees.resize(nn);
     }
 
     // Phase 1: Prune dead edges and compute degrees (parallel).
@@ -72,7 +72,7 @@ find_is_result find_independent_set(graph<Incidence>& G,
             total_degree += degrees[i];
         }
     }
-    double avg_degree = total_degree / static_cast<double>(active.size());
+    double avg_degree = total_degree / double(active.size());
     double degree_threshold = opts.degree_multiplier * avg_degree;
 
     #ifdef _OPENMP
@@ -82,8 +82,8 @@ find_is_result find_independent_set(graph<Incidence>& G,
         {
             int tid = omp_get_thread_num();
             int nthreads = omp_get_num_threads();
-            auto bs = active.size() * static_cast<size_t>(tid) / nthreads;
-            auto be = active.size() * static_cast<size_t>(tid + 1) / nthreads;
+            auto bs = active.size() * size_t(tid) / nthreads;
+            auto be = active.size() * size_t(tid + 1) / nthreads;
 
             for (size_t i = bs; i < be; ++i)
                 block_of[active[i]] = tid;
@@ -168,8 +168,8 @@ find_is_result find_independent_set(graph<Incidence>& G,
             tid = omp_get_thread_num();
             nthreads = omp_get_num_threads();
             #endif
-            auto bs = active.size() * static_cast<size_t>(tid) / nthreads;
-            auto be = active.size() * static_cast<size_t>(tid + 1) / nthreads;
+            auto bs = active.size() * size_t(tid) / nthreads;
+            auto be = active.size() * size_t(tid + 1) / nthreads;
             for (size_t i = bs; i < be; ++i)
                 if (chosen[active[i]]) local_is[tid].push_back(active[i]);
         }
@@ -242,10 +242,10 @@ void process_vertex(graph<Incidence>& G,
         double r = U(gen);
 
         auto it = std::upper_bound(
-            prefix.begin() + static_cast<ptrdiff_t>(i) + 1,
+            prefix.begin() + ptrdiff_t(i) + 1,
             prefix.end(),
             prefix[i] + r);
-        size_t j = static_cast<size_t>(it - prefix.begin());
+        size_t j = it - prefix.begin();
         if (j >= valid.size()) j = valid.size() - 1;
 
         auto [va, wa] = valid[i];
