@@ -168,15 +168,22 @@ find_is_result find_independent_set(graph<Incidence>& G,
 
     std::vector<node_index> is;
 
-    #ifdef _OPENMP
-    if (nt > 1 && active.size() > opts.omp_threshold) {
-        // Parallel IS collection: thread-local gather + concatenate.
-        // active[] is sorted → per-thread ranges are contiguous → order preserved.
-        std::vector<std::vector<node_index>> local_is(nt);
+    // Collect IS vertices from chosen[] into is[].
+    // Thread-local gather preserves ordering (active[] is sorted →
+    // per-thread ranges are contiguous).
+    {
+        int nt_collect = 1;
+        #ifdef _OPENMP
+        nt_collect = omp_get_max_threads();
+        #endif
+        std::vector<std::vector<node_index>> local_is(nt_collect);
         #pragma omp parallel
         {
-            int tid = omp_get_thread_num();
-            int nthreads = omp_get_num_threads();
+            int tid = 0, nthreads = 1;
+            #ifdef _OPENMP
+            tid = omp_get_thread_num();
+            nthreads = omp_get_num_threads();
+            #endif
             auto bs = active.size() * static_cast<size_t>(tid) / nthreads;
             auto be = active.size() * static_cast<size_t>(tid + 1) / nthreads;
             for (size_t i = bs; i < be; ++i)
@@ -184,11 +191,6 @@ find_is_result find_independent_set(graph<Incidence>& G,
         }
         for (auto& v : local_is)
             is.insert(is.end(), v.begin(), v.end());
-    } else
-    #endif
-    {
-        for (auto v : active)
-            if (chosen[v]) is.push_back(v);
     }
 
     // Reset scratch for next round (only touched entries, parallel).

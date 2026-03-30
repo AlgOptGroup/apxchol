@@ -63,16 +63,14 @@ public:
     void merge_parallel_edges(node_index v) {
         thread_local static std::vector<merge_info> buf;
         buf.clear();
-        for (auto idx : adj_[v])
-            if (active_[edges_[idx].traverse(v)])
-                buf.push_back({edges_[idx].to, idx, edges_[idx].w});
+        // Prune dead edges and collect survivors into buf in one pass.
+        adj_.filter(v, [&](edge_index idx) {
+            return active_[edges_[idx].traverse(v)];
+        }, [&](edge_index idx) {
+            buf.push_back({edges_[idx].to, idx, edges_[idx].w});
+        });
 
-        if (buf.size() < 2) {
-            adj_.filter(v, [&](edge_index idx) {
-                return active_[edges_[idx].traverse(v)];
-            });
-            return;
-        }
+        if (buf.size() < 2) return;
 
         std::ranges::sort(buf, {}, &merge_info::xor_to);
 
@@ -89,9 +87,9 @@ public:
             edges_[buf[first].idx].w = sum;
         }
 
-        // Filter out dead edges and zeroed-weight duplicates.
+        // Filter out zeroed-weight duplicates (dead edges already removed above).
         adj_.filter(v, [&](edge_index idx) {
-            return edges_[idx].w > 0.0 && active_[edges_[idx].traverse(v)];
+            return edges_[idx].w > 0.0;
         });
     }
 
@@ -131,20 +129,13 @@ public:
              + active_.capacity() * sizeof(char);
     }
 
-    int active_degree(node_index v) const {
-        int deg = 0;
-        for (auto e : neighbors(v))
-            if (active_[e.to]) ++deg;
-        return deg;
-    }
-
     template<typename F>
-    void for_active_neighbors(node_index v, F&& cb) const {
-        for (auto idx : adj_[v]) {
-            auto target = edges_[idx].traverse(v);
-            if (active_[target])
-                cb(target, edges_[idx].w);
-        }
+    void for_active_neighbors(node_index v, F&& cb) {
+        adj_.filter(v, [&](edge_index idx) {
+            return active_[edges_[idx].traverse(v)];
+        }, [&](edge_index idx) {
+            cb(edges_[idx].traverse(v), edges_[idx].w);
+        });
     }
 
 private:
