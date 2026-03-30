@@ -2,6 +2,7 @@
 #include "apxchol/graph/conversions.h"
 #include <Eigen/Sparse>
 #include <cstddef>
+#include <span>
 
 namespace apxchol {
 
@@ -55,6 +56,22 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
                         graph_storage storage,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
+
+namespace detail {
+
+struct factor_col {
+    node_index vertex;
+    std::vector<std::pair<node_index, double>> entries; // (neighbor, L_value)
+};
+
+// Build elimination-order permutation and assemble L in CSC format.
+void build_csc(factorization& result,
+               const std::vector<factor_col>& factor_cols,
+               std::span<const node_index> active,
+               index_t n,
+               checkpoint* cp);
+
+} // namespace detail
 
 } // namespace apxchol
 

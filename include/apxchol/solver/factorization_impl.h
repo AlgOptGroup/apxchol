@@ -25,11 +25,6 @@ namespace apxchol {
 
 namespace detail {
 
-struct factor_col {
-    node_index vertex;
-    std::vector<std::pair<node_index, double>> entries; // (neighbor, L_value)
-};
-
 struct find_is_result {
     std::vector<node_index> is;
     double avg_degree;
@@ -350,110 +345,6 @@ void eliminate_remaining(graph<Incidence>& G,
             G.add_edge(a, b, w);
         G.deactivate(v);
     }
-}
-
-// Build elimination-order permutation and assemble L in CSC format.
-//
-// factor_cols: one entry per eliminated vertex (in elimination order).
-// active: remaining un-eliminated vertices (appended to order).
-// n: total number of vertices in the original graph.
-inline void build_csc(factorization& result,
-                      const std::vector<factor_col>& factor_cols,
-                      std::span<const node_index> active,
-                      index_t n,
-                      checkpoint* cp) {
-    // Build elimination order: eliminated vertices first, then remaining.
-    std::vector<node_index> order;
-    order.reserve(n);
-    for (const auto& col : factor_cols)
-        order.push_back(col.vertex);
-    for (auto v : active)
-        order.push_back(v);
-
-    // Permutation: map[original_vertex] = new_index.
-    std::vector<index_t> perm(n);
-    for (index_t i = 0; i < n; ++i)
-        perm[order[i]] = i;
-
-    if (cp) (*cp)("permutation");
-
-    // Count exact number of off-diagonal entries for precise reservation.
-    index_t total_offdiag = 0;
-    for (const auto& col : factor_cols)
-        total_offdiag += static_cast<index_t>(col.entries.size());
-
-    const index_t nnz = total_offdiag + n; // off-diagonal + one diagonal per column
-
-    // Build sparse L in CSC format directly — no triplets, no setFromTriplets.
-    // Each factor column maps to a permuted column; entries are sorted by
-    // permuted row index to satisfy Eigen's compressed format.
-    result.L.resize(n, n);
-    result.L.reserve(nnz);
-
-    // Step 1: Count entries per column (off-diag + 1 diagonal each).
-    std::vector<index_t> col_counts(n, 1); // every column has a diagonal
-    for (const auto& col : factor_cols)
-        col_counts[perm[col.vertex]] += static_cast<index_t>(col.entries.size());
-
-    // Step 2: Build outer pointer array (cumulative sum).
-    auto* outerPtr = result.L.outerIndexPtr();
-    outerPtr[0] = 0;
-    for (index_t c = 0; c < n; ++c)
-        outerPtr[c + 1] = outerPtr[c] + col_counts[c];
-
-    // Step 3: Allocate inner indices + values arrays.
-    result.L.resizeNonZeros(nnz);
-    auto* innerIdx = result.L.innerIndexPtr();
-    auto* values   = result.L.valuePtr();
-
-    // Step 4: Fill each column (diagonal + off-diag entries sorted by row).
-    std::vector<index_t> write_pos(n);
-    for (index_t c = 0; c < n; ++c)
-        write_pos[c] = outerPtr[c];
-
-    std::vector<double> diag(n, 0.0);
-    std::vector<std::pair<index_t, double>> col_entries;
-
-    for (const auto& col : factor_cols) {
-        index_t perm_col = perm[col.vertex];
-
-        // Accumulate diagonal and prepare sorted off-diagonal entries.
-        col_entries.clear();
-        for (const auto& [nbr, val] : col.entries) {
-            col_entries.emplace_back(perm[nbr], -val);
-            diag[perm_col] += val;
-        }
-        std::sort(col_entries.begin(), col_entries.end());
-
-        // Diagonal first (smallest row index for lower-triangular format).
-        auto pos = write_pos[perm_col];
-        innerIdx[pos] = perm_col;
-        values[pos]   = diag[perm_col];
-        ++pos;
-
-        // Off-diagonal entries in sorted row order.
-        for (auto [row, val] : col_entries) {
-            innerIdx[pos] = row;
-            values[pos]   = val;
-            ++pos;
-        }
-        write_pos[perm_col] = pos;
-    }
-
-    // Remaining columns (un-eliminated vertices) — diagonal only.
-    for (index_t c = 0; c < n; ++c) {
-        if (write_pos[c] == outerPtr[c]) {
-            innerIdx[write_pos[c]] = c;
-            values[write_pos[c]]   = 0.0;
-            ++write_pos[c];
-        }
-    }
-
-    result.L.makeCompressed();
-
-    result.perm.resize(n);
-    result.perm.indices() = Eigen::Map<Eigen::Matrix<index_t, Eigen::Dynamic, 1>>(perm.data(), n);
-    if (cp) (*cp)("assembly");
 }
 
 } // namespace detail
