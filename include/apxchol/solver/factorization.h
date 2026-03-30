@@ -30,7 +30,7 @@ struct factorization {
 
 struct factor_options {
     unsigned seed = 42;
-    double degree_multiplier = 3.0;  // IS degree threshold = multiplier × avg_degree
+    double degree_multiplier = 2.0;  // IS degree threshold = multiplier × avg_degree
     size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP
 };
 

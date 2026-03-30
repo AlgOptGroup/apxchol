@@ -3,9 +3,9 @@
 ///
 /// Included from factorization.h so that third-party code can use custom
 /// incidence_storage backends without modifying our explicit-instantiation list.
-/// The three built-in backends (vec, forward_star, small_vec) are pre-instantiated
-/// in factorization.cpp; any other backend will be instantiated on demand when
-/// the user includes <apxchol/solver/factorization.h>.
+/// The four built-in backends (vec, forward_star, small_vec, bstr) are
+/// pre-instantiated in factorization.cpp; any other backend will be
+/// instantiated on demand when the user includes <apxchol/solver/factorization.h>.
 
 #include "apxchol/solver/factorization.h"
 #include "apxchol/graph/graph.h"
@@ -67,7 +67,6 @@ template<incidence_storage Incidence>
 find_is_result find_independent_set(graph<Incidence>& G,
                                     std::span<const node_index> active,
                                     const factor_options& opts,
-                                    unsigned /*round*/,
                                     find_is_scratch& scratch) {
     if (active.empty()) return {{}, 0.0};
 
@@ -378,10 +377,8 @@ factorization factorize(const graph<Incidence>& G,
     std::vector<node_index> active(n);
     std::iota(active.begin(), active.end(), node_index{0});
 
-    unsigned round = 0;
     while (active.size() > 1) {
-        auto [is, avg_deg] = detail::find_independent_set(work, active, opts, round, scratch);
-        ++round;
+        auto [is, avg_deg] = detail::find_independent_set(work, active, opts, scratch);
         if (cp) (*cp)("find_is");
 
         // Stop if IS is empty or too small to make meaningful progress.
