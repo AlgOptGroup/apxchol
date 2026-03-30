@@ -62,13 +62,10 @@ find_is_result find_independent_set(graph<Incidence>& G,
 
     // Phase 1: Prune dead edges and compute degrees (parallel).
     double total_degree = 0;
-    #pragma omp parallel reduction(+:total_degree) if(active.size() > opts.omp_threshold)
-    {
-        #pragma omp for schedule(static)
-        for (size_t i = 0; i < active.size(); ++i) {
-            degrees[i] = G.prune_and_degree(active[i]);
-            total_degree += degrees[i];
-        }
+    #pragma omp parallel for reduction(+:total_degree) schedule(static) if(active.size() > opts.omp_threshold)
+    for (size_t i = 0; i < active.size(); ++i) {
+        degrees[i] = G.prune_and_degree(active[i]);
+        total_degree += degrees[i];
     }
     double avg_degree = total_degree / double(active.size());
     double degree_threshold = opts.degree_multiplier * avg_degree;
