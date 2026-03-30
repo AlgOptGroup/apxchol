@@ -37,21 +37,6 @@ struct find_is_result {
     double avg_degree;
 };
 
-/// Scratch space for find_independent_set, allocated once in factorize.
-struct find_is_scratch {
-    std::vector<char> chosen;
-    std::vector<int> block_of;
-    std::vector<char> near_boundary;
-    std::vector<int> degrees;
-
-    void init(index_t n) {
-        chosen.assign(n, 0);
-        block_of.resize(n);
-        near_boundary.assign(n, 0);
-        degrees.resize(n);
-    }
-};
-
 // Select low-degree active vertices for elimination.
 //
 // Phase 1: Prune dead edges and compute degrees (parallel).
@@ -66,12 +51,25 @@ struct find_is_scratch {
 template<incidence_storage Incidence>
 find_is_result find_independent_set(graph<Incidence>& G,
                                     std::span<const node_index> active,
-                                    const factor_options& opts,
-                                    find_is_scratch& scratch) {
+                                    const factor_options& opts) {
     if (active.empty()) return {{}, 0.0};
 
+    // Scratch arrays: persist across calls (static lifetime).
+    // Only the main thread calls this; OMP regions inside access by index.
+    static std::vector<char> chosen;
+    static std::vector<int> block_of;
+    static std::vector<char> near_boundary;
+    static std::vector<int> degrees;
+
+    if (chosen.size() < static_cast<size_t>(G.n())) {
+        auto n = static_cast<size_t>(G.n());
+        chosen.resize(n, 0);
+        block_of.resize(n);
+        near_boundary.resize(n, 0);
+        degrees.resize(n);
+    }
+
     // Phase 1: Prune dead edges and compute degrees (parallel).
-    auto* degrees = scratch.degrees.data();
     double total_degree = 0;
     #pragma omp parallel reduction(+:total_degree) if(active.size() > opts.omp_threshold)
     {
@@ -84,8 +82,6 @@ find_is_result find_independent_set(graph<Incidence>& G,
     double avg_degree = total_degree / static_cast<double>(active.size());
     double degree_threshold = opts.degree_multiplier * avg_degree;
 
-    auto* chosen = scratch.chosen.data();
-
     int nt = 1;
     #ifdef _OPENMP
     nt = omp_get_max_threads();
@@ -93,9 +89,6 @@ find_is_result find_independent_set(graph<Incidence>& G,
 
     if (nt > 1 && active.size() > opts.omp_threshold) {
         // ── Block-greedy parallel IS ──
-        auto* block_of = scratch.block_of.data();
-        auto* near_boundary = scratch.near_boundary.data();
-
         #pragma omp parallel
         {
             int tid = omp_get_thread_num();
@@ -196,8 +189,8 @@ find_is_result find_independent_set(graph<Incidence>& G,
     // Reset scratch for next round (only touched entries, parallel).
     #pragma omp parallel for schedule(static) if(active.size() > opts.omp_threshold)
     for (size_t i = 0; i < active.size(); ++i) {
-        scratch.chosen[active[i]] = 0;
-        scratch.near_boundary[active[i]] = 0;
+        chosen[active[i]] = 0;
+        near_boundary[active[i]] = 0;
     }
 
     return {std::move(is), avg_degree};
@@ -357,16 +350,12 @@ factorization factorize(const graph<Incidence>& G,
 
     std::mt19937 rng(opts.seed);
 
-    // Scratch space for find_is — allocated once, reused every round.
-    detail::find_is_scratch scratch;
-    scratch.init(n);
-
     // Active vertex list — filtered in-place after each round.
     std::vector<node_index> active(n);
     std::iota(active.begin(), active.end(), node_index{0});
 
     while (active.size() > 1) {
-        auto [is, avg_deg] = detail::find_independent_set(work, active, opts, scratch);
+        auto [is, avg_deg] = detail::find_independent_set(work, active, opts);
         if (cp) (*cp)("find_is");
 
         // Stop if IS is empty or too small to make meaningful progress.
