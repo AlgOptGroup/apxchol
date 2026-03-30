@@ -1,28 +1,35 @@
-#include "apxchol/factorization.h"
+#include "apxchol/solver/factorization.h"
+#include "apxchol/graph/graph.h"
+#include "apxchol/checkpoint.h"
 #include <stdexcept>
 
 namespace apxchol {
 
+// Pre-compiled instantiations for the three built-in backends.
+// Other backends (custom containers, different SSO sizes, etc.) are
+// instantiated on demand via the template definitions in factorization_impl.h.
+template factorization factorize<vec_incidence>(
+    const graph<vec_incidence>&, const factor_options&, checkpoint*);
+template factorization factorize<forward_star_incidence>(
+    const graph<forward_star_incidence>&, const factor_options&, checkpoint*);
+template factorization factorize<small_vec_incidence>(
+    const graph<small_vec_incidence>&, const factor_options&, checkpoint*);
+
 factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        const factor_options& /*opts*/) {
-    const int n = static_cast<int>(L.rows());
-    if (n != L.cols())
+                        graph_storage storage,
+                        const factor_options& opts,
+                        checkpoint* cp) {
+    if (L.rows() != L.cols())
         throw std::invalid_argument("factorize: matrix must be square");
 
-    // TODO: implement Kyng-Sachdeva approximate Gaussian elimination
-    //
-    // Algorithm outline (arXiv:1605.02353):
-    //   1. Build adjacency from L
-    //   2. While vertices remain:
-    //      a. Find independent set S of low-degree vertices
-    //      b. For each v in S, eliminate v:
-    //         - Sample a random neighbor proportional to edge weight
-    //         - Form a clique on remaining neighbors with sampled weights
-    //         - Record column of L factor
-    //      c. Update adjacency (Schur complement)
-    //   3. Permute and assemble sparse lower-triangular factor
-
-    throw std::runtime_error("factorize: not yet implemented");
+    switch (storage) {
+    case graph_storage::forward_star:
+        return factorize<graph<forward_star_incidence>>(L, opts, cp);
+    case graph_storage::small_vec:
+        return factorize<graph<small_vec_incidence>>(L, opts, cp);
+    default:
+        return factorize<graph<vec_incidence>>(L, opts, cp);
+    }
 }
 
 } // namespace apxchol
