@@ -20,6 +20,6 @@ using edge_index = index_t;
 
 /// graph_storage enumerates the available incidence list backends
 /// for runtime dispatch (CLI, factor_options).
-enum class graph_storage { vec, forward_star, small_vec };
+enum class graph_storage { vec, forward_star, small_vec, bstr };
 
 } // namespace apxchol

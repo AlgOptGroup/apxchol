@@ -83,6 +83,7 @@ struct bench_result {
     double build_ms;
     double factor_ms;
     double total_ms;
+    double peak_MB; // peak graph memory in MB
     // Profile breakdown (filled when --profile)
     double find_is_ms  = 0;
     double eliminate_ms = 0;
@@ -109,7 +110,8 @@ static bench_result run_one(const char* sname, const char* graph_name,
 
     bench_result r{sname, graph_name, G.n(), G.m(),
                    static_cast<long long>(F.L.nonZeros()),
-                   build_ms, factor_ms, build_ms + factor_ms};
+                   build_ms, factor_ms, build_ms + factor_ms,
+                   F.peak_graph_bytes / (1024.0 * 1024.0)};
 
     // Extract profile breakdown from checkpoint
     r.find_is_ms   = cp.total("setup.find_is")   * 1000;
@@ -123,42 +125,43 @@ static bench_result run_one(const char* sname, const char* graph_name,
 // ── Output ───────────────────────────────────────────
 
 static void print_header() {
-    std::printf("%-12s %-10s %8s %10s %10s %10s %10s %10s\n",
+    std::printf("%-12s %-10s %8s %10s %10s %10s %10s %10s %8s\n",
                 "storage", "graph", "n", "m",
-                "nnz(L)", "build(ms)", "fact(ms)", "total(ms)");
-    std::printf("%s\n", std::string(82, '-').c_str());
+                "nnz(L)", "build(ms)", "fact(ms)", "total(ms)", "peak MB");
+    std::printf("%s\n", std::string(92, '-').c_str());
 }
 
 static void print_result(const bench_result& r) {
-    std::printf("%-12s %-10s %8d %10d %10lld %10.2f %10.2f %10.2f\n",
+    std::printf("%-12s %-10s %8d %10d %10lld %10.2f %10.2f %10.2f %8.1f\n",
                 r.storage, r.graph_type, r.n, r.m, r.nnz_L,
-                r.build_ms, r.factor_ms, r.total_ms);
+                r.build_ms, r.factor_ms, r.total_ms, r.peak_MB);
 }
 
 static void print_profile_header() {
-    std::printf("%-12s %-10s %8s %10s %10s %10s %10s %10s %10s\n",
+    std::printf("%-12s %-10s %8s %10s %10s %10s %10s %10s %10s %8s\n",
                 "storage", "graph", "n", "nnz(L)",
-                "find_is", "elim", "perm", "assembly", "total(ms)");
-    std::printf("%s\n", std::string(94, '-').c_str());
+                "find_is", "elim", "perm", "assembly", "total(ms)", "peak MB");
+    std::printf("%s\n", std::string(104, '-').c_str());
 }
 
 static void print_profile_result(const bench_result& r) {
-    std::printf("%-12s %-10s %8d %10lld %10.2f %10.2f %10.2f %10.2f %10.2f\n",
+    std::printf("%-12s %-10s %8d %10lld %10.2f %10.2f %10.2f %10.2f %10.2f %8.1f\n",
                 r.storage, r.graph_type, r.n, r.nnz_L,
                 r.find_is_ms, r.eliminate_ms, r.perm_ms, r.assembly_ms,
-                r.factor_ms);
+                r.factor_ms, r.peak_MB);
 }
 
 static void print_csv_header() {
     std::printf("storage,graph,n,m,nnz_L,build_ms,factor_ms,total_ms,"
-                "find_is_ms,eliminate_ms,perm_ms,assembly_ms\n");
+                "find_is_ms,eliminate_ms,perm_ms,assembly_ms,peak_MB\n");
 }
 
 static void print_csv(const bench_result& r) {
-    std::printf("%s,%s,%d,%d,%lld,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+    std::printf("%s,%s,%d,%d,%lld,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n",
                 r.storage, r.graph_type, r.n, r.m, r.nnz_L,
                 r.build_ms, r.factor_ms, r.total_ms,
-                r.find_is_ms, r.eliminate_ms, r.perm_ms, r.assembly_ms);
+                r.find_is_ms, r.eliminate_ms, r.perm_ms, r.assembly_ms,
+                r.peak_MB);
 }
 
 template<typename Incidence>
@@ -166,6 +169,7 @@ static constexpr const char* storage_name();
 template<> constexpr const char* storage_name<apxchol::vec_incidence>()            { return "vec"; }
 template<> constexpr const char* storage_name<apxchol::forward_star_incidence>()   { return "fwd_star"; }
 template<> constexpr const char* storage_name<apxchol::small_vec_incidence>()      { return "svec12"; }
+template<> constexpr const char* storage_name<apxchol::bstr_incidence>()             { return "bstr"; }
 
 enum class output_mode { table, csv, profile };
 
@@ -176,11 +180,12 @@ static void run_all_storages(const char* graph_name, Builder&& build_fn,
     auto r1 = run_one<apxchol::vec_incidence>(storage_name<apxchol::vec_incidence>(), graph_name, build_fn, opts);
     auto r2 = run_one<apxchol::forward_star_incidence>(storage_name<apxchol::forward_star_incidence>(), graph_name, build_fn, opts);
     auto r3 = run_one<apxchol::small_vec_incidence>(storage_name<apxchol::small_vec_incidence>(), graph_name, build_fn, opts);
+    auto r4 = run_one<apxchol::bstr_incidence>(storage_name<apxchol::bstr_incidence>(), graph_name, build_fn, opts);
 
     auto out = mode == output_mode::csv     ? print_csv
              : mode == output_mode::profile ? print_profile_result
              :                                print_result;
-    out(r1); out(r2); out(r3);
+    out(r1); out(r2); out(r3); out(r4);
     if (mode == output_mode::table || mode == output_mode::profile) std::printf("\n");
 }
 
@@ -189,13 +194,21 @@ int main(int argc, char* argv[]) {
     bool sweep_omp = false;
     bool sweep_deg = false;
     bool sweep_threads = false;
+    const char* graph_filter = nullptr;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--csv") == 0)      mode = output_mode::csv;
         if (std::strcmp(argv[i], "--profile") == 0)   mode = output_mode::profile;
         if (std::strcmp(argv[i], "--sweep-omp") == 0)   sweep_omp = true;
         if (std::strcmp(argv[i], "--sweep-deg") == 0)   sweep_deg = true;
         if (std::strcmp(argv[i], "--sweep-threads") == 0) sweep_threads = true;
+        if (std::strcmp(argv[i], "--graph") == 0 && i + 1 < argc)
+            graph_filter = argv[++i];
     }
+
+    // Helper: should we run this graph name?
+    auto should_run = [&](const char* name) {
+        return !graph_filter || std::strstr(name, graph_filter);
+    };
 
     // ── OMP threshold sweep: grid2000 × fwd_star only ──
     if (sweep_omp) {
@@ -236,7 +249,7 @@ int main(int argc, char* argv[]) {
                         "find_is", "elim", "fact(ms)", "nnz(L)", "n");
             std::printf("%s\n", std::string(90, '-').c_str());
 
-            for (double mult : {0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 8.0}) {
+            for (double mult : {1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 8.0}) {
                 apxchol::factor_options opts;
                 opts.degree_multiplier = mult;
                 apxchol::checkpoint cp;
@@ -301,6 +314,7 @@ int main(int argc, char* argv[]) {
     for (int side : {100, 500, 1000, 1500, 2000}) {
         char name[32];
         std::snprintf(name, sizeof(name), "grid%d", side);
+        if (!should_run(name)) continue;
         run_all_storages(name, [side]<typename Incidence>() {
             return make_grid<Incidence>(side, side);
         }, mode);
@@ -313,6 +327,7 @@ int main(int argc, char* argv[]) {
             std::snprintf(name, sizeof(name), "path%dM", n / 1000000);
         else
             std::snprintf(name, sizeof(name), "path%dk", n / 1000);
+        if (!should_run(name)) continue;
         run_all_storages(name, [n]<typename Incidence>() {
             return make_path<Incidence>(n);
         }, mode);
@@ -325,6 +340,7 @@ int main(int argc, char* argv[]) {
             std::snprintf(name, sizeof(name), "star%dM", n / 1000000);
         else
             std::snprintf(name, sizeof(name), "star%dk", n / 1000);
+        if (!should_run(name)) continue;
         run_all_storages(name, [n]<typename Incidence>() {
             return make_star<Incidence>(n);
         }, mode);
@@ -335,6 +351,7 @@ int main(int argc, char* argv[]) {
             {1000, 0.05}, {5000, 0.02}, {10000, 0.012}, {20000, 0.008}}) {
         char name[32];
         std::snprintf(name, sizeof(name), "rgg%d", n);
+        if (!should_run(name)) continue;
         run_all_storages(name, [n, r]<typename Incidence>() {
             return make_rgg<Incidence>(n, r);
         }, mode);

@@ -16,6 +16,9 @@ struct factorization {
     Eigen::SparseMatrix<double> L;                          // lower-triangular factor
     Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, index_t> perm;
 
+    // Peak graph memory during factorization (bytes, heap only).
+    std::size_t peak_graph_bytes = 0;
+
     // Per-round statistics (populated when checkpoint is provided)
     struct round_stats {
         int active;     // active vertices at start of round

@@ -68,6 +68,12 @@ struct forward_star {
 
     std::size_t size() const { return head_.size(); }
 
+    /// Approximate memory usage in bytes (heap only).
+    std::size_t memory_bytes() const {
+        return head_.capacity() * sizeof(index_t)
+             + nodes_.capacity() * sizeof(node);
+    }
+
     template<typename Fs>
     struct iterator_ {
         using fs_type       = std::remove_reference_t<Fs>;

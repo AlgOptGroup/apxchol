@@ -59,22 +59,27 @@ public:
     }
 
     void merge_parallel_edges(node_index v) {
-        // Collect active edges into a local buffer with pre-read weights.
-        struct edge_info { node_index xor_to; edge_index idx; double w; };
-        std::vector<edge_info> buf;
+        std::vector<merge_info> buf;
+        merge_parallel_edges(v, buf);
+    }
+
+    struct merge_info { node_index xor_to; edge_index idx; double w; };
+
+    void merge_parallel_edges(node_index v, std::vector<merge_info>& buf) {
+        // Collect active edges into the caller-provided buffer.
+        buf.clear();
         for (auto idx : adj_[v])
             if (active_[edges_[idx].traverse(v)])
                 buf.push_back({edges_[idx].to, idx, edges_[idx].w});
 
         if (buf.size() < 2) {
-            // No merging possible — just prune dead edges.
             adj_.filter(v, [&](edge_index idx) {
                 return active_[edges_[idx].traverse(v)];
             });
             return;
         }
 
-        std::ranges::sort(buf, {}, &edge_info::xor_to);
+        std::ranges::sort(buf, {}, &merge_info::xor_to);
 
         // Accumulate weight into first of each group; zero the rest.
         for (size_t i = 0; i < buf.size();) {
@@ -90,7 +95,6 @@ public:
         }
 
         // Filter out dead edges and zeroed-weight duplicates.
-        // No pool allocation — safe for concurrent use on disjoint vertex sets.
         adj_.filter(v, [&](edge_index idx) {
             return edges_[idx].w > 0.0 && active_[edges_[idx].traverse(v)];
         });
@@ -119,6 +123,19 @@ public:
     bool is_active(node_index v) const { return active_[v]; }
     index_t num_active() const { return num_active_; }
 
+    /// Raw access to adjacency list and edge pool (for tight inner loops).
+    auto adj(node_index v) const { return adj_[v]; }
+    node_index edge_target(edge_index idx, node_index from) const {
+        return edges_[idx].traverse(from);
+    }
+
+    /// Approximate heap memory usage in bytes.
+    std::size_t memory_bytes() const {
+        return edges_.capacity() * sizeof(edge)
+             + adj_.memory_bytes()
+             + active_.capacity() * sizeof(char);
+    }
+
     int active_degree(node_index v) const {
         int deg = 0;
         for (auto e : neighbors(v))
@@ -128,9 +145,10 @@ public:
 
     template<typename F>
     void for_active_neighbors(node_index v, F&& cb) const {
-        for (auto e : neighbors(v)) {
-            if (active_[e.to])
-                cb(e.to, e.w);
+        for (auto idx : adj_[v]) {
+            auto target = edges_[idx].traverse(v);
+            if (active_[target])
+                cb(target, edges_[idx].w);
         }
     }
 
