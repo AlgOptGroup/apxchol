@@ -67,9 +67,11 @@ TYPED_TEST(GraphTest, DeactivateAndMerge) {
     EXPECT_FALSE(G.is_active(0));
     EXPECT_EQ(G.num_active(), 3);
 
-    // Vertex 1 should no longer see vertex 0
+    // Vertex 1's neighbor list still contains vertex 0 (deactivated but not pruned).
+    // After prune_and_degree, only active neighbors remain.
+    G.prune_and_degree(1);
     int count = 0;
-    G.for_active_neighbors(1, [&](int, double) { ++count; });
+    for (auto [target, w] : G.neighbors(1)) ++count;
     EXPECT_EQ(count, 1);  // only vertex 3
 
     // Add a parallel edge and merge

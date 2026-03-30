@@ -230,10 +230,10 @@ void eliminate_set(graph<Incidence>& G,
         auto u = is[k];
         valid.clear();
         double deg = 0.0;
-        G.for_active_neighbors(u, [&](node_index v, double w) {
+        for (auto [v, w] : G.neighbors(u)) {
             valid.emplace_back(v, w);
             deg += w;
-        });
+        }
 
         if (valid.empty()) {
             local_cols[k] = {u, {}};

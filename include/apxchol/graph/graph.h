@@ -129,14 +129,6 @@ public:
              + active_.capacity() * sizeof(char);
     }
 
-    template<typename F>
-    void for_active_neighbors(node_index v, F&& cb) const {
-        for (auto idx : adj_[v]) {
-            auto target = edges_[idx].traverse(v);
-            if (active_[target])
-                cb(target, edges_[idx].w);
-        }
-    }
 
 private:
     index_t n_ = 0;
