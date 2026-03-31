@@ -276,3 +276,106 @@ TEST(Solve, TimingsReported) {
     EXPECT_GT(res.timings.total("setup"), 0.0);
     EXPECT_GT(res.timings.total("solve"), 0.0);
 }
+
+// ── SDDM support tests ────────────────────────────────
+
+/// Build an SDDM matrix: grid Laplacian + positive diagonal perturbation.
+static Eigen::SparseMatrix<double> sddm_grid(int rows, int cols, double excess) {
+    auto L = grid_laplacian(rows, cols);
+    const int n = rows * cols;
+    // Add excess to diagonal (makes it strictly diagonally dominant).
+    for (int i = 0; i < n; ++i)
+        L.coeffRef(i, i) += excess;
+    return L;
+}
+
+TYPED_TEST(SolveTest, SDDMGridConverges) {
+    auto M = sddm_grid(10, 10, 2.0);
+    Eigen::VectorXd b = Eigen::VectorXd::Random(100);
+    auto res = this->solve_with(M, b);
+    EXPECT_LT(res.residual, 1e-5);
+}
+
+TYPED_TEST(SolveTest, SDDMLargeExcessConverges) {
+    auto M = sddm_grid(10, 10, 100.0);
+    Eigen::VectorXd b = Eigen::VectorXd::Random(100);
+    auto res = this->solve_with(M, b);
+    EXPECT_LT(res.residual, 1e-5);
+}
+
+TYPED_TEST(FactorizeTest, SDDMFlagSet) {
+    auto M = sddm_grid(5, 5, 1.0);
+    auto F = this->factorize_with(M);
+    EXPECT_TRUE(F.sddm);
+}
+
+TYPED_TEST(FactorizeTest, LaplacianFlagNotSet) {
+    auto L = grid_laplacian(5, 5);
+    auto F = this->factorize_with(L);
+    EXPECT_FALSE(F.sddm);
+}
+
+TYPED_TEST(FactorizeTest, SDDMFullRankDiagonal) {
+    auto M = sddm_grid(5, 5, 1.0);
+    auto F = this->factorize_with(M);
+    // All n diagonal entries should be positive (including the last).
+    const int n = F.L.rows();
+    for (int i = 0; i < n; ++i)
+        EXPECT_GT(F.L.coeff(i, i), 0.0) << "zero diagonal at " << i;
+}
+
+// ── Comprehensive IS × elimination convergence tests ──
+
+struct StrategyCombo {
+    apxchol::is_strategy is;
+    apxchol::elimination_strategy elim;
+    const char* name;
+};
+
+class StrategyConvergenceTest
+    : public ::testing::TestWithParam<StrategyCombo> {};
+
+static const StrategyCombo all_combos[] = {
+    {apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree,   "bg_tree"},
+    {apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::star,   "bg_star"},
+    {apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::clique, "bg_clique"},
+    {apxchol::is_strategy::luby,         apxchol::elimination_strategy::tree,   "luby_tree"},
+    {apxchol::is_strategy::luby,         apxchol::elimination_strategy::star,   "luby_star"},
+    {apxchol::is_strategy::luby,         apxchol::elimination_strategy::clique, "luby_clique"},
+    {apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::tree,   "bk_tree"},
+    {apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::star,   "bk_star"},
+    {apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::clique, "bk_clique"},
+    {apxchol::is_strategy::rootset,      apxchol::elimination_strategy::tree,   "root_tree"},
+    {apxchol::is_strategy::rootset,      apxchol::elimination_strategy::star,   "root_star"},
+    {apxchol::is_strategy::rootset,      apxchol::elimination_strategy::clique, "root_clique"},
+};
+
+TEST_P(StrategyConvergenceTest, GridConverges) {
+    auto [is, elim, name] = GetParam();
+    auto L = grid_laplacian(15, 15);
+    auto b = apxchol::generate_test_rhs(225);
+    auto res = apxchol::solve(L, b,
+        {.tol = 1e-6, .max_iter = 1000,
+         .storage = apxchol::graph_storage::forward_star,
+         .factor_opts = {.seed = 42, .is_select = is, .elim = elim}});
+    EXPECT_LT(res.residual, 1e-4)
+        << "strategy " << name << " failed: iters=" << res.iterations
+        << " residual=" << res.residual;
+}
+
+TEST_P(StrategyConvergenceTest, SDDMConverges) {
+    auto [is, elim, name] = GetParam();
+    auto M = sddm_grid(10, 10, 2.0);
+    Eigen::VectorXd b = Eigen::VectorXd::Random(100);
+    auto res = apxchol::solve(M, b,
+        {.tol = 1e-6, .max_iter = 1000,
+         .storage = apxchol::graph_storage::forward_star,
+         .factor_opts = {.seed = 42, .is_select = is, .elim = elim}});
+    EXPECT_LT(res.residual, 1e-4)
+        << "strategy " << name << " failed on SDDM: iters=" << res.iterations
+        << " residual=" << res.residual;
+}
+
+INSTANTIATE_TEST_SUITE_P(AllStrategies, StrategyConvergenceTest,
+    ::testing::ValuesIn(all_combos),
+    [](const auto& info) { return info.param.name; });

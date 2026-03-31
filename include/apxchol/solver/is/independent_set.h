@@ -33,6 +33,7 @@
 ///   - block_greedy_is  (is_block_greedy.h)  — default, fastest in practice
 ///   - luby_is          (is_luby.h)          — hash-priority local minimum
 ///   - baumann_kyng_is  (is_baumann_kyng.h)  — random-sample isolated vertices
+///   - rootset_is       (is_rootset.h)       — Blelloch rootset peeling (exact greedy)
 ///
 /// Usage as library (compile-time choice):
 ///   #include <apxchol/solver/is_luby.h>

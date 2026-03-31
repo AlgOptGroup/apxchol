@@ -245,6 +245,9 @@ int main(int argc, char* argv[]) {
     const char* graph_filter = nullptr;
     const char* storage_filter = nullptr;
     const char* is_filter = nullptr;
+    const char* elim_filter = nullptr;
+    const char* min_is_frac_str = nullptr;
+    const char* bk_const_str = nullptr;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--csv") == 0)      mode = output_mode::csv;
         if (std::strcmp(argv[i], "--profile") == 0)   mode = output_mode::profile;
@@ -261,6 +264,12 @@ int main(int argc, char* argv[]) {
             storage_filter = argv[++i];
         if (std::strcmp(argv[i], "--is") == 0 && i + 1 < argc)
             is_filter = argv[++i];
+        if (std::strcmp(argv[i], "--elimination") == 0 && i + 1 < argc)
+            elim_filter = argv[++i];
+        if (std::strcmp(argv[i], "--min-is-frac") == 0 && i + 1 < argc)
+            min_is_frac_str = argv[++i];
+        if (std::strcmp(argv[i], "--bk-constant") == 0 && i + 1 < argc)
+            bk_const_str = argv[++i];
     }
 
     // Parse IS strategy from --is flag.
@@ -270,8 +279,22 @@ int main(int argc, char* argv[]) {
             base_opts.is_select = apxchol::is_strategy::luby;
         else if (std::strcmp(is_filter, "baumann_kyng") == 0)
             base_opts.is_select = apxchol::is_strategy::baumann_kyng;
+        else if (std::strcmp(is_filter, "rootset") == 0)
+            base_opts.is_select = apxchol::is_strategy::rootset;
         else
             base_opts.is_select = apxchol::is_strategy::block_greedy;
+    }
+    if (min_is_frac_str)
+        base_opts.min_is_fraction = std::atof(min_is_frac_str);
+    if (bk_const_str)
+        base_opts.bk_sampling_constant = std::atof(bk_const_str);
+    if (elim_filter) {
+        if (std::strcmp(elim_filter, "star") == 0)
+            base_opts.elim = apxchol::elimination_strategy::star;
+        else if (std::strcmp(elim_filter, "clique") == 0)
+            base_opts.elim = apxchol::elimination_strategy::clique;
+        else
+            base_opts.elim = apxchol::elimination_strategy::tree;
     }
 
     // Helper: should we run this graph/storage name?

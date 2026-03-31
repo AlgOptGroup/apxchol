@@ -56,7 +56,7 @@ if [[ -z "$BENCH_SETS" || "$BENCH_SETS" == "all" ]]; then
 fi
 
 # ── Classify solvers into C++, Julia, GPU ────────────
-ALL_CPP_SOLVERS="apxchol cg ldlt rchol rchol_mkl rchol_mkl1 cholmod amgcl"
+ALL_CPP_SOLVERS="apxchol apxchol_v1 cg ldlt rchol rchol_mkl rchol_mkl1 cholmod amgcl"
 ALL_JULIA_SOLVERS="ac ac2"
 ALL_GPU_SOLVERS="gpu_rchol"
 

@@ -13,6 +13,9 @@ inline constexpr int    default_max_iter = 200;
 struct solve_options {
     double tol       = default_tol;
     int    max_iter  = default_max_iter;
+    /// Check every N iterations whether residual improved by ≥50%.
+    /// If not, declare stagnation and stop early.  0 = disabled.
+    int    stagnation_window = 50;
     graph_storage storage = graph_storage::forward_star;
     factor_options factor_opts;
 };

@@ -1,7 +1,9 @@
 #include "apxchol/solver/factorization.h"
-#include "apxchol/solver/is_block_greedy.h"
-#include "apxchol/solver/is_luby.h"
-#include "apxchol/solver/is_baumann_kyng.h"
+#include "apxchol/solver/elimination/elimination.h"
+#include "apxchol/solver/is/block_greedy.h"
+#include "apxchol/solver/is/luby.h"
+#include "apxchol/solver/is/baumann_kyng.h"
+#include "apxchol/solver/is/rootset.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
 #include <algorithm>
@@ -50,23 +52,20 @@ static void assemble_csc(Eigen::SparseMatrix<double>& L,
     for (index_t c = 0; c < n; ++c)
         write_pos[c] = outerPtr[c];
 
-    std::vector<double> diag(n, 0.0);
     std::vector<std::pair<index_t, double>> col_entries;
 
     for (const auto& col : factor_cols) {
         index_t perm_col = perm[col.vertex];
 
         col_entries.clear();
-        for (const auto& [nbr, val] : col.entries) {
+        for (const auto& [nbr, val] : col.entries)
             col_entries.emplace_back(perm[nbr], -val);
-            diag[perm_col] += val;
-        }
         std::sort(col_entries.begin(), col_entries.end());
 
-        // Diagonal first (smallest row index for lower-triangular format).
+        // Diagonal entry (stored explicitly for SDDM correctness).
         auto pos = write_pos[perm_col];
         innerIdx[pos] = perm_col;
-        values[pos]   = diag[perm_col];
+        values[pos]   = col.diag;
         ++pos;
 
         // Off-diagonal entries in sorted row order.

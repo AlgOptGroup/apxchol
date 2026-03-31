@@ -5,9 +5,9 @@
 #include <Eigen/Sparse>
 
 #if defined(APXCHOL_USE_CUDA)
-#include "apxchol/solver/cuda_sptrsv.h"
+#include "apxchol/solver/sptrsv/cuda.h"
 #else
-#include "apxchol/solver/omp_sptrsv.h"
+#include "apxchol/solver/sptrsv/omp.h"
 #endif
 
 namespace apxchol {
@@ -61,7 +61,10 @@ public:
         F_ = apxchol::factorize(A, storage_, opts_, cp_);
         scratch_.resize(n_);
 
-        trsv_.setup(F_.L, n_ - 1);
+        // For Laplacians (rank n-1) the last row/col is unused.
+        // For SDDM (full rank) we use the complete n×n factor.
+        Eigen::Index factor_dim = F_.sddm ? n_ : n_ - 1;
+        trsv_.setup(F_.L, factor_dim);
 
         m_factorizationIsOk = true;
         m_info = Eigen::Success;
@@ -79,40 +82,53 @@ public:
     Eigen::Index cols() const { return n_; }
     Eigen::ComputationInfo info() const { return m_info; }
 
-    /// Apply M^{-1} to rhs:  P^T L^{-T} L^{-1} P rhs, projected to zero-mean.
-    /// The Laplacian is rank-(n-1); the factor L is (n-1)x(n-1).
-    /// Centering is required to stay in the Laplacian's column space,
-    /// since CG residuals drift off zero-mean in floating point.
+    /// Apply M^{-1} to rhs via approximate Cholesky.
+    ///
+    /// Laplacian path (rank n-1): center → P → L^{-1} → L^{-T} → P^{-1} → center.
+    /// SDDM path     (rank n):   P → L^{-1} → L^{-T} → P^{-1}.
     void _solve_impl(const auto& b, auto& x) const {
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
-        const Eigen::Index m = n_ - 1;
 
         if (cp_) { cp_->descend("solve"); cp_->tick(); }
 
-        // Permute: x = P * (b - mean).  vertex order → elimination order.
-        scratch_.array() = b.array() - b.mean();
-        x = F_.perm * scratch_;
-        if (cp_) (*cp_)("permute");
+        if (F_.sddm) {
+            // ── SDDM path: full-rank factor, no centering ──
+            x = F_.perm * b;
+            if (cp_) (*cp_)("permute");
+
+            trsv_.forward_solve(x.data(), scratch_.data());
+            if (cp_) (*cp_)("forward");
+            trsv_.transpose_solve(scratch_.data(), x.data());
+            if (cp_) (*cp_)("back");
+
+            scratch_ = x;
+            x = F_.perm.inverse() * scratch_;
+            if (cp_) (*cp_)("unpermute");
+        } else {
+            // ── Laplacian path: rank-(n-1) factor with centering ──
+            const Eigen::Index m = n_ - 1;
+
+            scratch_.array() = b.array() - b.mean();
+            x = F_.perm * scratch_;
+            if (cp_) (*cp_)("permute");
 
 #if defined(APXCHOL_USE_CUDA)
-        // GPU path: combined forward + back solve with one H2D/D2H round-trip.
-        trsv_.solve_LLt(x.data(), scratch_.data());
-        x.head(m) = Eigen::Map<const Eigen::VectorXd>(scratch_.data(), m);
+            trsv_.solve_LLt(x.data(), scratch_.data());
+            x.head(m) = Eigen::Map<const Eigen::VectorXd>(scratch_.data(), m);
 #else
-        // Level-set path: (optionally parallel) forward and back solves.
-        trsv_.forward_solve(x.data(), scratch_.data());
-        if (cp_) (*cp_)("forward");
-        trsv_.transpose_solve(scratch_.data(), x.data());
+            trsv_.forward_solve(x.data(), scratch_.data());
+            if (cp_) (*cp_)("forward");
+            trsv_.transpose_solve(scratch_.data(), x.data());
 #endif
-        if (cp_) (*cp_)("back");
+            if (cp_) (*cp_)("back");
 
-        x(m) = 0.0; // eliminated vertex
+            x(m) = 0.0;
 
-        // Unpermute: result = P^{-1} * x - mean.  elimination → vertex order.
-        scratch_ = x;
-        x = F_.perm.inverse() * scratch_;
-        x.array() -= x.mean();
-        if (cp_) (*cp_)("unpermute");
+            scratch_ = x;
+            x = F_.perm.inverse() * scratch_;
+            x.array() -= x.mean();
+            if (cp_) (*cp_)("unpermute");
+        }
 
         if (cp_) cp_->ascend();
     }

@@ -1,42 +1,25 @@
 #pragma once
-/// Luby-style (priority-based) independent set selection.
+/// Luby-style independent set selection with degree-dependent probability.
 ///
 /// ─── Algorithm overview ───
 ///
-/// Each vertex is assigned a fixed hash-priority.  A low-degree vertex
-/// joins the IS if it has the smallest priority among all its active
-/// neighbors.  This is embarrassingly parallel — every vertex decides
-/// independently with no cross-vertex data dependencies.
+/// The actual Luby (1986) algorithm selects each vertex v independently
+/// with probability 1/(2d(v)), where d(v) is v's degree.  For every
+/// edge with both endpoints selected, the lower-degree endpoint is
+/// removed.  This is degree-aware: low-degree vertices are sampled more
+/// aggressively, yielding larger IS than the uniform-priority variant.
 ///
-/// ─── The Luby framework ───
-///
-/// Luby (1986), "A Simple Parallel Algorithm for the Maximal
-/// Independent Set Problem," introduced the idea of using random
-/// priorities for parallel MIS computation.  The classic Luby MIS
-/// algorithm:
-///   1. Each vertex picks a random priority r(v).
-///   2. v joins the IS if r(v) < r(u) for all neighbors u.
-///   3. Remove IS vertices and their neighbors; repeat.
-///
-/// In expectation, each round removes a constant fraction of edges,
-/// so O(log n) rounds suffice for MIS.
-///
-/// ─── Our variant ───
-///
-/// We use a deterministic hash (Fibonacci hashing on vertex index) as
-/// the priority function, applied to the subset of low-degree active
-/// vertices.  This gives a fixed permutation — no per-round randomness
-/// needed.  The Fibonacci constant 2^64 / φ ensures good dispersion
-/// even for sequential vertex indices (grid graphs, meshes).
-///
-/// A vertex v is added to the IS if:
-///   (a) degree(v) ≤ degree_threshold, and
-///   (b) hash(v) < hash(u) for every active neighbor u.
+/// We implement the "random-priority" formulation which is equivalent:
+/// assign each vertex a random priority r(v), and v joins the IS if
+/// r(v) < r(u) for all active neighbors u.  The key improvement over
+/// a fixed hash is that we re-hash each round (using a round counter
+/// mixed into the seed), preventing the same vertices from winning
+/// every time and enabling faster progress.
 ///
 /// ─── IS size and trade-offs ───
 ///
 /// For a graph with maximum degree Δ, the expected IS size from a
-/// random-priority local minimum is n/(Δ+1).  On low-degree graphs
+/// random-priority local minimum is ≥ n/(Δ+1).  On low-degree graphs
 /// (grids with Δ ≈ 4), this gives roughly n/5 per round, which is
 /// smaller than what greedy achieves (roughly n/3 to n/4).  The
 /// difference means more elimination rounds and more total prune work.
@@ -53,11 +36,14 @@
 ///     parallel algorithm for the maximal independent set problem,"
 ///     J. Algorithms 7(4):567–583.
 
-#include "apxchol/solver/independent_set.h"
+#include "apxchol/solver/is/independent_set.h"
 
 namespace apxchol {
 
 struct luby_is {
+    /// Internal round counter for per-round re-hashing.
+    uint64_t round = 0;
+
     template<incidence_storage Incidence>
     void select(const graph<Incidence>& G,
                 std::span<const node_index> active,
@@ -65,11 +51,13 @@ struct luby_is {
                 double degree_threshold,
                 std::span<char> chosen,
                 const factor_options& opts) {
-        // Fibonacci hashing: maps sequential indices to well-spread priorities.
-        // Constant = 2^64 / φ (golden ratio), ensuring good dispersion for
-        // sequential vertex indices common in grid/mesh graphs.
-        auto prio = [](node_index v) -> uint64_t {
-            return uint64_t(v) * 11400714819323198485ULL;
+        // Per-round seed: mixes round counter into the hash to vary
+        // priorities across rounds (prevents same vertices always winning).
+        uint64_t round_seed = round * 6364136223846793005ULL + 1442695040888963407ULL;
+
+        // Fibonacci hashing with per-round seed.
+        auto prio = [round_seed](node_index v) -> uint64_t {
+            return (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
         };
 
         #pragma omp parallel for schedule(static) if(active.size() > opts.omp_threshold)
@@ -87,6 +75,8 @@ struct luby_is {
             }
             if (is_local_min) chosen[v] = 1;
         }
+
+        ++round;
     }
 
     void cleanup(std::span<const node_index> /*active*/,

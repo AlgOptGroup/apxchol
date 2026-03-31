@@ -53,17 +53,12 @@
 /// O(m log³ n) work.  For practical performance on moderate-size PDE
 /// graphs, block_greedy_is is faster due to larger IS per round.
 
-#include "apxchol/solver/independent_set.h"
+#include "apxchol/solver/is/independent_set.h"
 #include <cmath>
 
 namespace apxchol {
 
 struct baumann_kyng_is {
-    /// Sampling constant: each low-degree vertex is sampled with
-    /// probability c / √m_active.  Default c = 2.0 balances IS size
-    /// (≈ |active| · c · e^{−c} / √m) against isolation probability.
-    double sampling_constant = 2.0;
-
     /// Internal round counter (incremented each call to select).
     uint64_t round = 0;
 
@@ -74,15 +69,12 @@ struct baumann_kyng_is {
                 double degree_threshold,
                 std::span<char> chosen,
                 const factor_options& opts) {
-        // Count active edges to compute √m for sampling rate.
-        uint64_t total_deg = 0;
-        for (size_t i = 0; i < active.size(); ++i)
-            total_deg += degrees[i];
-        double m_active = double(total_deg) / 2.0;  // undirected: each edge counted twice
-        double sqrt_m = std::sqrt(std::max(m_active, 1.0));
-
-        // Sampling probability: p = c / √m, clamped to [0, 1].
-        double p = std::min(sampling_constant / sqrt_m, 1.0);
+        // Sampling probability: p = 1 / (c · d_max), clamped to [0, 1].
+        // Yves Baumann suggested using 1/d, 1/(2d), 1/(3d) to adapt to
+        // actual graph structure rather than the paper's 1/√m.
+        double c = opts.bk_sampling_constant;
+        double d_max = std::max(degree_threshold, 1.0);
+        double p = std::min(1.0 / (c * d_max), 1.0);
 
         // Hash threshold: sample vertex if hash(v, round) < p * 2^64.
         // Use a per-round seed mixed into the hash to vary sampling across rounds.
@@ -103,7 +95,13 @@ struct baumann_kyng_is {
 
         // Phase 2: un-mark sampled vertices that have a sampled neighbor
         // (not isolated in the induced subgraph of the sample).
-        // We mark non-isolated as chosen[v] = 2, then fix up.
+        //
+        // The paper's ExtractIS uses strict isolation (remove both endpoints),
+        // but this gives IS ≈ n·p·(1-p)^d — on regular grids with p≈0.4,
+        // this is only ~0.6% of vertices, triggering immediate sequential
+        // fallback.  Using index tie-breaking keeps the lower-indexed
+        // endpoint (equivalent to random-priority within the sample),
+        // giving IS ≈ |S|/(d_S+1) ≈ 16%, which sustains the parallel loop.
         #pragma omp parallel for schedule(static) if(active.size() > opts.omp_threshold)
         for (size_t i = 0; i < active.size(); ++i) {
             auto v = active[i];

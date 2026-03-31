@@ -18,6 +18,13 @@ static const std::map<std::string, is_strategy> is_strategy_map = {
     {"block_greedy",  is_strategy::block_greedy},
     {"luby",          is_strategy::luby},
     {"baumann_kyng",  is_strategy::baumann_kyng},
+    {"rootset",       is_strategy::rootset},
+};
+
+static const std::map<std::string, elimination_strategy> elimination_strategy_map = {
+    {"tree",    elimination_strategy::tree},
+    {"star",    elimination_strategy::star},
+    {"clique",  elimination_strategy::clique},
 };
 
 static void setup_logging(bool quiet, bool verbose) {
@@ -79,6 +86,9 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--omp-threshold", cfg.solve_opts.factor_opts.omp_threshold,
                    "Min active vertices before engaging OpenMP")
         ->capture_default_str();
+    app.add_option("--stagnation-window", cfg.solve_opts.stagnation_window,
+                   "Check convergence every N iters, stop if <50% improvement (0=disable)")
+        ->capture_default_str();
 
     std::string graph_storage_str = "vec";
     app.add_option("--graph-storage", graph_storage_str,
@@ -88,9 +98,15 @@ run_config parse_args(int argc, char* argv[]) {
 
     std::string is_strategy_str = "block_greedy";
     app.add_option("--is", is_strategy_str,
-                   "Independent set strategy (block_greedy, luby, baumann_kyng)")
+                   "Independent set strategy (block_greedy, luby, baumann_kyng, rootset)")
         ->capture_default_str()
-        ->check(CLI::IsMember({"block_greedy", "luby", "baumann_kyng"}));
+        ->check(CLI::IsMember({"block_greedy", "luby", "baumann_kyng", "rootset"}));
+
+    std::string elim_strategy_str = "tree";
+    app.add_option("--elimination", elim_strategy_str,
+                   "Elimination strategy (tree, star, clique)")
+        ->capture_default_str()
+        ->check(CLI::IsMember({"tree", "star", "clique"}));
 
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");
@@ -108,6 +124,7 @@ run_config parse_args(int argc, char* argv[]) {
     if (!output_str.empty()) cfg.output_path  = output_str;
     cfg.solve_opts.storage = graph_storage_map.at(graph_storage_str);
     cfg.solve_opts.factor_opts.is_select = is_strategy_map.at(is_strategy_str);
+    cfg.solve_opts.factor_opts.elim = elimination_strategy_map.at(elim_strategy_str);
 
     setup_logging(quiet, verbose);
     return cfg;

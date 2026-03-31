@@ -1,6 +1,5 @@
 #pragma once
 #include "apxchol/graph/incidence_list.h"
-#include <algorithm>
 #include <ranges>
 #include <vector>
 
@@ -27,7 +26,7 @@ public:
     graph() = default;
 
     explicit graph(index_t n)
-        : n_(n), m_(0), num_active_(n), active_(n, true) {
+        : n_(n), m_(0), num_active_(n), active_(n, true), excess_(n, 0.0) {
         adj_.init(n);
     }
 
@@ -58,39 +57,33 @@ public:
         adj_.clear(v);
     }
 
-    struct merge_info { node_index xor_to; edge_index idx; double w; };
-
+    /// Merge parallel edges to the same neighbor into one, accumulating weights.
+    /// Uses a vertex-indexed bucket (thread_local, lazily grown to n) for O(d)
+    /// deduplication instead of O(d log d) sorting.
     void merge_parallel_edges(node_index v) {
-        thread_local static std::vector<merge_info> buf;
-        buf.clear();
-        // Prune dead edges and collect survivors into buf in one pass.
+        // first[u] = pool index of the surviving representative edge to neighbor u,
+        // or npos if no edge to u has been seen yet this call.
+        static constexpr edge_index npos = edge_index(-1);
+        thread_local static std::vector<edge_index> first;
+        thread_local static std::vector<node_index> touched;
+        if (first.size() < size_t(n_)) first.assign(n_, npos);
+        touched.clear();
+
+        // Single pass: prune dead neighbours + deduplicate + accumulate.
         adj_.filter(v, [&](edge_index idx) {
-            return active_[edges_[idx].traverse(v)];
-        }, [&](edge_index idx) {
-            buf.push_back({edges_[idx].to, idx, edges_[idx].w});
-        });
-
-        if (buf.size() < 2) return;
-
-        std::ranges::sort(buf, {}, &merge_info::xor_to);
-
-        // Accumulate weight into first of each group; zero the rest.
-        for (size_t i = 0; i < buf.size();) {
-            auto xor_to = buf[i].xor_to;
-            double sum = buf[i].w;
-            size_t first = i++;
-            while (i < buf.size() && buf[i].xor_to == xor_to) {
-                sum += buf[i].w;
-                edges_[buf[i].idx].w = 0;
-                ++i;
+            auto u = edges_[idx].traverse(v);         // decoded neighbor
+            if (!active_[u]) return false;             // dead neighbour
+            if (first[u] == npos) {
+                first[u] = idx;                       // first edge to this neighbour
+                touched.push_back(u);
+                return true;                          // keep in adj list
             }
-            edges_[buf[first].idx].w = sum;
-        }
-
-        // Filter out zeroed-weight duplicates (dead edges already removed above).
-        adj_.filter(v, [&](edge_index idx) {
-            return edges_[idx].w > 0.0;
+            edges_[first[u]].w += edges_[idx].w;      // accumulate into representative
+            return false;                             // discard duplicate
         });
+
+        // Reset bucket via touched list — O(degree), not O(n).
+        for (auto t : touched) first[t] = npos;
     }
 
     /// Prune dead edges and return surviving (active) degree in one pass.
@@ -113,11 +106,18 @@ public:
         return edges_[idx].traverse(from);
     }
 
+    /// Per-vertex excess diagonal (for SDDM matrices).
+    /// For a pure Laplacian this is zero everywhere.
+    /// For SDDM,  excess[v] = M[v,v] - sum of incident edge weights.
+    double  excess(node_index v) const { return excess_[v]; }
+    double& excess(node_index v)       { return excess_[v]; }
+
     /// Approximate heap memory usage in bytes.
     std::size_t memory_bytes() const {
         return edges_.capacity() * sizeof(edge)
              + adj_.memory_bytes()
-             + active_.capacity() * sizeof(char);
+             + active_.capacity() * sizeof(char)
+             + excess_.capacity() * sizeof(double);
     }
 
 
@@ -128,6 +128,7 @@ private:
     std::vector<edge> edges_;
     Incidence adj_;
     std::vector<char> active_;
+    std::vector<double> excess_;
 };
 
 } // namespace apxchol

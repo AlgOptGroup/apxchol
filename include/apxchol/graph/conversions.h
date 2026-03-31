@@ -31,16 +31,39 @@ Eigen::SparseMatrix<double> laplacian(const G& g) {
     return L;
 }
 
-/// Build a graph from a Laplacian matrix.
+/// Build a graph from a Laplacian or SDDM matrix.
+///
+/// Off-diagonal entries become weighted edges (negated).
+/// Any excess diagonal (row sum > 0, i.e. SDDM) is stored
+/// per-vertex in graph::excess() for use during factorization.
 template<typename G = graph<>>
 G make_graph(const Eigen::SparseMatrix<double>& L) {
-    G g(static_cast<index_t>(L.rows()));
+    const auto n = static_cast<index_t>(L.rows());
+    G g(n);
+
+    // Phase 1: extract edges and diagonal.
+    std::vector<double> diag(n, 0.0);
     for (index_t k = 0; k < static_cast<index_t>(L.outerSize()); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
             if (it.row() > it.col())
                 g.add_edge(static_cast<node_index>(it.row()),
                            static_cast<node_index>(it.col()),
                            -it.value());
+            else if (it.row() == it.col())
+                diag[k] = it.value();
+        }
+
+    // Phase 2: excess = diag − weighted degree.  Zero for pure Laplacians.
+    // Use relative tolerance to avoid false SDDM detection from
+    // floating-point accumulation differences across storage backends.
+    for (index_t v = 0; v < n; ++v) {
+        double wdeg = 0.0;
+        for (auto [u, w] : g.neighbors(static_cast<node_index>(v)))
+            wdeg += w;
+        double excess = diag[v] - wdeg;
+        g.excess(static_cast<node_index>(v)) =
+            excess > diag[v] * 1e-12 ? excess : 0.0;
+    }
     return g;
 }
 

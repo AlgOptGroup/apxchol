@@ -40,6 +40,11 @@
 #include "simple_solver.h"
 #include "mmio.h"
 
+#ifdef HAVE_APXCHOL_V1
+#include "apxchol/solver/solve.h"
+#include "apxchol/solver/factor_options.h"
+#endif
+
 #ifdef HAVE_RCHOL
 #include "sparse.hpp"
 #include "rchol.hpp"
@@ -284,6 +289,38 @@ static BenchResult run_apxchol(
     return r;
 }
 
+#ifdef HAVE_APXCHOL_V1
+static BenchResult run_apxchol_v1(
+    const Eigen::SparseMatrix<double>& L,
+    const Eigen::VectorXd& b,
+    const std::string& graph_name,
+    const std::string& combo_name,
+    apxchol::is_strategy is,
+    apxchol::elimination_strategy elim,
+    double tol, int maxiter)
+{
+    BenchResult r;
+    r.solver_name = combo_name;
+    r.graph_name = graph_name;
+    r.n = static_cast<int>(L.rows());
+    r.nnz = static_cast<int>(L.nonZeros());
+
+    auto res = apxchol::solve(L, b,
+        {.tol = tol, .max_iter = maxiter,
+         .storage = apxchol::graph_storage::forward_star,
+         .factor_opts = {.seed = 42, .is_select = is, .elim = elim}});
+
+    r.setup_time = res.timings.total("setup");
+    r.solve_time = res.timings.total("solve");
+    r.total_time = r.setup_time + r.solve_time;
+    r.iterations = static_cast<int>(res.iterations);
+    r.rel_residual = res.residual;
+    r.fillin = 0.0;  // not tracked in v1 solve_result
+    r.us_per_nnz = r.total_time / r.nnz * 1e6;
+    return r;
+}
+#endif
+
 static BenchResult run_cg_no_precond(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
@@ -482,6 +519,9 @@ static Args parse_args(int argc, char** argv) {
     }
     if (a.solvers.empty() || a.solvers.count("all"))
         a.solvers = {"apxchol", "cg", "ldlt"
+#ifdef HAVE_APXCHOL_V1
+            , "apxchol_v1"
+#endif
 #ifdef HAVE_RCHOL
             , "rchol"
 #ifdef HAVE_MKL
@@ -1125,6 +1165,29 @@ int main(int argc, char** argv) {
             return r;
         }, R));
     }
+
+#ifdef HAVE_APXCHOL_V1
+    if (args.solvers.count("apxchol_v1")) {
+        // Best combos from empirical testing on SuiteSparse matrices.
+        struct V1Combo {
+            const char* name;
+            apxchol::is_strategy is;
+            apxchol::elimination_strategy elim;
+        };
+        static const V1Combo v1_combos[] = {
+            {"ApxChol-v1 bg+tree",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree},
+            {"ApxChol-v1 bg+star",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::star},
+            {"ApxChol-v1 luby+tree", apxchol::is_strategy::luby,         apxchol::elimination_strategy::tree},
+            {"ApxChol-v1 root+tree", apxchol::is_strategy::rootset,      apxchol::elimination_strategy::tree},
+        };
+        for (const auto& combo : v1_combos) {
+            print(median_run([&]() {
+                return run_apxchol_v1(L, b, graph_name, combo.name, combo.is, combo.elim,
+                                      args.tol, args.maxiter);
+            }, R));
+        }
+    }
+#endif
 
     if (args.solvers.count("cg"))
         print(median_run([&]() { return run_cg_no_precond(L, b, graph_name, args.tol, args.maxiter); }, R));

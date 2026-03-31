@@ -20,6 +20,10 @@ struct factorization {
     Eigen::SparseMatrix<double> L;                          // lower-triangular factor
     Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, index_t> perm;
 
+    // True when the input was SDDM (positive row sums) rather than
+    // a pure Laplacian.  Affects preconditioner rank and centering.
+    bool sddm = false;
+
     // Peak graph memory during factorization (bytes, heap only).
     std::size_t peak_graph_bytes = 0;
 
@@ -70,6 +74,7 @@ namespace detail {
 
 struct factor_col {
     node_index vertex;
+    double diag = 0.0;   // L diagonal: sqrt(total_deg) including SDDM excess
     std::vector<std::pair<node_index, double>> entries; // (neighbor, L_value)
 };
 

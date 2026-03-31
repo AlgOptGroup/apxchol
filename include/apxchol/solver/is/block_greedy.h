@@ -69,24 +69,35 @@
 ///
 /// ─── Relation to prior work ───
 ///
-/// Partitioning into blocks and running local greedy is a standard
-/// parallelization pattern for graph algorithms, related to:
-///   • Jones & Plassmann (1993), "A Scalable Parallel Graph Coloring
-///     Algorithm" — uses random priorities; our approach uses spatial
-///     partitioning instead, exploiting vertex-list locality.
-///   • Çatalyürek et al. (2012), "Graph Coloring Algorithms for
-///     Multi-core and Massively Multithreaded Architectures" — surveys
-///     speculative parallel coloring with conflict resolution.
-///   • Hasenplaugh et al. (2014), "Ordering Heuristics for Parallel
-///     Graph Coloring" — analyzes greedy coloring parallelization.
+/// Blelloch, Fineman & Shun (2012) proved that sequential greedy MIS
+/// under a random vertex ordering has O(log²n) dependence depth WHP.
+/// Their "rootset" algorithm (GBBS: RandomGreedy) peels the dependence
+/// DAG layer by layer, reproducing the *exact* sequential greedy IS.
+/// However, it requires O(log²n) synchronous rounds per IS computation
+/// on a *static* graph — the priority DAG is computed once from a fixed
+/// random permutation.
+///
+/// In our setting the graph changes each elimination round (Schur
+/// complement adds fill edges), so the Blelloch approach does not
+/// apply directly — there is no fixed graph on which to build a
+/// priority DAG.  Instead, we run a fresh single-pass parallel greedy
+/// on the current graph.  Block partitioning approximates the first
+/// ≈T layers of a random-order dependence DAG in a single pass,
+/// which is why the IS quality is close to sequential greedy.
+///
+/// Reference:
+///   • Blelloch, Fineman & Shun (2012), "Greedy Sequential Maximal
+///     Independent Set and Matching are Parallel on Average,"
+///     arXiv:1202.3205 / SPAA '12.
 ///
 /// The contribution here is adapting this pattern for the approximate
-/// Cholesky context where (a) the degree threshold provides a natural
-/// candidate filter, (b) the graph has strong spatial locality from
-/// PDE discretizations, and (c) block partitioning of the active list
-/// aligns with cache-line boundaries for minimal false sharing.
+/// Cholesky context where (a) the graph changes each round due to fill,
+/// (b) the degree threshold provides a natural candidate filter,
+/// (c) the graph has strong spatial locality from PDE discretizations,
+/// and (d) block partitioning of the active list aligns with cache-line
+/// boundaries for minimal false sharing.
 
-#include "apxchol/solver/independent_set.h"
+#include "apxchol/solver/is/independent_set.h"
 
 namespace apxchol {
 

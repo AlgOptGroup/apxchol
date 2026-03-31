@@ -1,26 +1,65 @@
 #include "apxchol/solver/solve.h"
-#include <Eigen/IterativeLinearSolvers>
+#include <cmath>
 
 namespace apxchol {
 
 solve_result solve(const Eigen::SparseMatrix<double>& L,
                    const Eigen::VectorXd& b,
                    const solve_options& opts) {
-    Eigen::ConjugateGradient<
-        Eigen::SparseMatrix<double>, Eigen::Lower, apx_cholesky> cg;
-    cg.setTolerance(opts.tol);
-    cg.setMaxIterations(opts.max_iter);
-    cg.preconditioner().set_options(opts.factor_opts);
-    cg.preconditioner().set_storage(opts.storage);
-
+    // Build preconditioner.
+    apx_cholesky precond;
     solve_result res;
-    cg.preconditioner().set_checkpoint(&res.timings);
+    precond.set_options(opts.factor_opts);
+    precond.set_storage(opts.storage);
+    precond.set_checkpoint(&res.timings);
+    precond.compute(L);
 
-    cg.compute(L);
-    res.x = cg.solve(b);
+    // Preconditioned CG with stagnation detection.
+    const Eigen::Index n = L.rows();
+    const double bnorm = b.norm();
+    if (bnorm == 0.0) { res.x = Eigen::VectorXd::Zero(n); return res; }
 
-    res.iterations = cg.iterations();
-    res.residual = cg.error();
+    Eigen::VectorXd x = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd r = b;                         // r = b - L*0 = b
+    Eigen::VectorXd z(n), p(n), Ap(n);
+
+    z = precond.solve(r);
+    p = z;
+    double rz = r.dot(z);
+
+    double prev_check_residual = 1.0;
+    const int check_interval = opts.stagnation_window;
+
+    for (int i = 0; i < opts.max_iter; ++i) {
+        Ap.noalias() = L.selfadjointView<Eigen::Lower>() * p;
+        double pAp = p.dot(Ap);
+        if (pAp <= 0.0) break;
+        double alpha = rz / pAp;
+
+        x += alpha * p;
+        r -= alpha * Ap;
+
+        double rnorm = r.norm() / bnorm;
+        res.iterations = i + 1;
+        res.residual = rnorm;
+
+        if (rnorm < opts.tol) break;
+
+        // Stagnation detection: if residual hasn't improved sufficiently
+        // over the last check_interval iterations, stop early.
+        if (check_interval > 0 && (i + 1) % check_interval == 0) {
+            if (rnorm > prev_check_residual * 0.5) break;
+            prev_check_residual = rnorm;
+        }
+
+        z = precond.solve(r);
+        double rz_new = r.dot(z);
+        double beta = rz_new / rz;
+        p = z + beta * p;
+        rz = rz_new;
+    }
+
+    res.x = std::move(x);
     return res;
 }
 

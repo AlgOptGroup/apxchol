@@ -21,6 +21,10 @@ set(BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(PARENT_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 set(PARENT_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
+# ── Legacy v0 sources (graphs, simple_solver, mmio) ──
+set(ARCHIVE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../archive/v0)
+set(ARCHIVE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../archive/v0)
+
 # ── Eigen ────────────────────────────────────────────
 find_package(Eigen3 3.3 CONFIG QUIET)
 if (NOT Eigen3_FOUND)
@@ -32,14 +36,14 @@ if (NOT Eigen3_FOUND)
     FetchContent_MakeAvailable(eigen)
 endif()
 
-# ── Core library (shared sources from parent project) ─
+# ── Core library (legacy v0 solver) ───────────────────
 add_library(laplacian_core STATIC
-    ${PARENT_SRC}/graphs.cpp
-    ${PARENT_SRC}/simple_solver.cpp
-    ${PARENT_SRC}/mmio.cpp
+    ${ARCHIVE_SRC}/graphs.cpp
+    ${ARCHIVE_SRC}/simple_solver.cpp
+    ${ARCHIVE_SRC}/mmio.cpp
 )
 target_link_libraries(laplacian_core PUBLIC Eigen3::Eigen)
-target_include_directories(laplacian_core PUBLIC ${PARENT_INCLUDE})
+target_include_directories(laplacian_core PUBLIC ${ARCHIVE_INCLUDE})
 
 # ══════════════════════════════════════════════════════
 # External solver dependencies (all fetched at configure time)
@@ -262,16 +266,36 @@ if (BUILD_GPU_RCHOL)
 endif()
 
 # ══════════════════════════════════════════════════════
+# ApxChol v1 (C++23 solver — multiple IS × elimination combos)
+# ══════════════════════════════════════════════════════
+find_package(OpenMP QUIET)
+
+add_library(apxchol_v1 STATIC
+    ${PARENT_SRC}/factorization.cpp
+    ${PARENT_SRC}/solve.cpp
+)
+target_compile_features(apxchol_v1 PUBLIC cxx_std_23)
+target_link_libraries(apxchol_v1 PUBLIC Eigen3::Eigen)
+target_include_directories(apxchol_v1 PUBLIC ${PARENT_INCLUDE})
+if (OpenMP_CXX_FOUND)
+    target_link_libraries(apxchol_v1 PUBLIC OpenMP::OpenMP_CXX)
+endif()
+# Boost needed for small_vector incidence backend
+find_package(Boost QUIET)
+if (Boost_FOUND)
+    target_include_directories(apxchol_v1 PUBLIC ${Boost_INCLUDE_DIRS})
+endif()
+
+# ══════════════════════════════════════════════════════
 # Benchmark executable
 # ══════════════════════════════════════════════════════
 add_executable(benchmark src/benchmark.cpp)
-target_link_libraries(benchmark PRIVATE laplacian_core rchol_lib)
+target_link_libraries(benchmark PRIVATE laplacian_core rchol_lib apxchol_v1)
 target_include_directories(benchmark PRIVATE ${AMGCL_INCLUDE})
-target_compile_definitions(benchmark PRIVATE HAVE_RCHOL)
+target_compile_definitions(benchmark PRIVATE HAVE_RCHOL HAVE_APXCHOL_V1)
+target_compile_features(benchmark PRIVATE cxx_std_23)
 
-find_package(Boost QUIET)
 if (Boost_FOUND)
-    target_include_directories(benchmark PRIVATE ${Boost_INCLUDE_DIRS})
     target_compile_definitions(benchmark PRIVATE HAVE_AMGCL)
     message(STATUS "Boost found — AMGCL solver enabled")
 else()
