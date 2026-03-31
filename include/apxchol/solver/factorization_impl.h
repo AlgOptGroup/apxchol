@@ -8,6 +8,9 @@
 /// instantiated on demand when the user includes <apxchol/solver/factorization.h>.
 
 #include "apxchol/solver/factorization.h"
+#include "apxchol/solver/is_block_greedy.h"
+#include "apxchol/solver/is_luby.h"
+#include "apxchol/solver/is_baumann_kyng.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
 #include <algorithm>
@@ -24,169 +27,6 @@
 namespace apxchol {
 
 namespace detail {
-
-struct find_is_result {
-    std::vector<node_index> is;
-    double avg_degree;
-};
-
-// Select low-degree active vertices for elimination.
-//
-// Phase 1: Prune dead edges and compute degrees (parallel).
-// Multi-threaded path (block-greedy):
-//   Partition active vertices into per-thread blocks.  Each thread runs
-//   serial greedy IS on its block, checking only within-block chosen
-//   state (no cross-thread data races).  A fast serial pass then removes
-//   the small number of cross-block boundary conflicts.
-//   IS size ≈ serial greedy → same round count; IS selection parallelized.
-// Single-threaded path:
-//   Serial greedy scan — no overhead.
-template<incidence_storage Incidence>
-find_is_result find_independent_set(graph<Incidence>& G,
-                                    std::span<const node_index> active,
-                                    const factor_options& opts,
-                                    checkpoint* cp = nullptr) {
-    if (active.empty()) return {{}, 0.0};
-
-    if (cp) { cp->descend("find_is"); cp->tick(); }
-
-    // Scratch arrays: persist across calls (static lifetime).
-    // Only the main thread calls this; OMP regions inside access by index.
-    static std::vector<char> chosen;
-    static std::vector<int> block_of;
-    static std::vector<char> near_boundary;
-    static std::vector<index_t> degrees;
-
-    size_t nn = G.n();
-    chosen.resize(nn, 0);
-    block_of.resize(nn);
-    near_boundary.resize(nn, 0);
-    degrees.resize(nn);
-
-    // Phase 1: Prune dead edges and compute degrees (parallel).
-    double total_degree = 0;
-    #pragma omp parallel for reduction(+:total_degree) schedule(static) if(active.size() > opts.omp_threshold)
-    for (size_t i = 0; i < active.size(); ++i) {
-        degrees[i] = G.prune_and_degree(active[i]);
-        total_degree += degrees[i];
-    }
-    double avg_degree = total_degree / double(active.size());
-    double degree_threshold = opts.degree_multiplier * avg_degree;
-    if (cp) (*cp)("prune");
-
-    #ifdef _OPENMP
-    if (omp_get_max_threads() > 1 && active.size() > opts.omp_threshold) {
-        // ── Block-greedy parallel IS ──
-        #pragma omp parallel
-        {
-            int tid = omp_get_thread_num();
-            int nthreads = omp_get_num_threads();
-            auto bs = active.size() * size_t(tid) / nthreads;
-            auto be = active.size() * size_t(tid + 1) / nthreads;
-
-            for (size_t i = bs; i < be; ++i)
-                block_of[active[i]] = tid;
-
-            #pragma omp barrier
-
-            for (size_t i = bs; i < be; ++i) {
-                if (degrees[i] > degree_threshold) continue;
-                auto v = active[i];
-                bool ok = true;
-                bool boundary = false;
-                for (auto idx : G.adj(v)) {
-                    auto u = G.edge_target(idx, v);
-                    if (!G.is_active(u)) continue;
-                    if (block_of[u] == tid) {
-                        if (ok && chosen[u]) ok = false;
-                    } else {
-                        boundary = true;
-                    }
-                    if (!ok && boundary) break;
-                }
-                if (ok) {
-                    chosen[v] = 1;
-                    if (boundary) near_boundary[v] = 1;
-                }
-            }
-        }
-
-        // Fix cross-block conflicts (parallel — each vertex independent).
-        // Flag removals in near_boundary (reuse: 1=boundary, 2=remove).
-        #pragma omp parallel for schedule(static)
-        for (size_t i = 0; i < active.size(); ++i) {
-            auto v = active[i];
-            if (!chosen[v] || !near_boundary[v]) continue;
-            int my_block = block_of[v];
-            for (auto idx : G.adj(v)) {
-                auto u = G.edge_target(idx, v);
-                if (G.is_active(u) && chosen[u] && u < v && block_of[u] != my_block) {
-                    near_boundary[v] = 2;
-                    break;
-                }
-            }
-        }
-
-        // Apply removals.
-        #pragma omp parallel for schedule(static)
-        for (size_t i = 0; i < active.size(); ++i) {
-            auto v = active[i];
-            if (near_boundary[v] == 2) chosen[v] = 0;
-        }
-    } else
-    #endif
-    {
-        // ── Serial greedy ──
-        for (size_t i = 0; i < active.size(); ++i) {
-            if (degrees[i] > degree_threshold) continue;
-            auto v = active[i];
-            bool ok = true;
-            for (auto idx : G.adj(v)) {
-                auto u = G.edge_target(idx, v);
-                if (G.is_active(u) && chosen[u]) { ok = false; break; }
-            }
-            if (ok) chosen[v] = 1;
-        }
-    }
-    if (cp) (*cp)("select");
-
-    std::vector<node_index> is;
-
-    // Collect IS vertices from chosen[] into is[].
-    // Thread-local gather preserves ordering (active[] is sorted →
-    // per-thread ranges are contiguous).
-    {
-        int nt_collect = 1;
-        #ifdef _OPENMP
-        nt_collect = omp_get_max_threads();
-        #endif
-        std::vector<std::vector<node_index>> local_is(nt_collect);
-        #pragma omp parallel
-        {
-            int tid = 0, nthreads = 1;
-            #ifdef _OPENMP
-            tid = omp_get_thread_num();
-            nthreads = omp_get_num_threads();
-            #endif
-            auto bs = active.size() * size_t(tid) / nthreads;
-            auto be = active.size() * size_t(tid + 1) / nthreads;
-            for (size_t i = bs; i < be; ++i)
-                if (chosen[active[i]]) local_is[tid].push_back(active[i]);
-        }
-        for (auto& v : local_is)
-            is.insert(is.end(), v.begin(), v.end());
-    }
-
-    // Reset scratch for next round (only touched entries, parallel).
-    #pragma omp parallel for schedule(static) if(active.size() > opts.omp_threshold)
-    for (size_t i = 0; i < active.size(); ++i) {
-        chosen[active[i]] = 0;
-        near_boundary[active[i]] = 0;
-    }
-    if (cp) { (*cp)("collect"); cp->ascend(); }
-
-    return {std::move(is), avg_degree};
-}
 // Eliminate vertices in the IS: record L-columns, add clique edges.
 // IS vertices are pairwise non-adjacent, enabling parallel processing.
 // The computation phase (gather neighbors, build factor column, sample
@@ -353,7 +193,7 @@ void eliminate_remaining(graph<Incidence>& G,
 
 } // namespace detail
 
-template<incidence_storage Incidence>
+template<typename ISSelector, incidence_storage Incidence>
 factorization factorize(const graph<Incidence>& G,
                         const factor_options& opts,
                         checkpoint* cp) {
@@ -372,12 +212,14 @@ factorization factorize(const graph<Incidence>& G,
 
     std::mt19937 rng(opts.seed);
 
+    ISSelector selector;
+
     // Active vertex list — filtered in-place after each round.
     std::vector<node_index> active(n);
     std::ranges::iota(active, node_index{0});
 
     while (active.size() > 1) {
-        auto [is, avg_deg] = detail::find_independent_set(work, active, opts, cp);
+        auto [is, avg_deg] = detail::find_independent_set(selector, work, active, opts, cp);
 
         result.rounds.push_back({active.size(), is.size(), avg_deg});
 

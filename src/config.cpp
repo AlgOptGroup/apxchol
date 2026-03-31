@@ -14,6 +14,12 @@ static const std::map<std::string, graph_storage> graph_storage_map = {
     {"small_vec",    graph_storage::small_vec},
 };
 
+static const std::map<std::string, is_strategy> is_strategy_map = {
+    {"block_greedy",  is_strategy::block_greedy},
+    {"luby",          is_strategy::luby},
+    {"baumann_kyng",  is_strategy::baumann_kyng},
+};
+
 static void setup_logging(bool quiet, bool verbose) {
     if (verbose) {
         spdlog::set_level(spdlog::level::debug);
@@ -80,6 +86,12 @@ run_config parse_args(int argc, char* argv[]) {
         ->capture_default_str()
         ->check(CLI::IsMember({"vec", "forward_star", "small_vec"}));
 
+    std::string is_strategy_str = "block_greedy";
+    app.add_option("--is", is_strategy_str,
+                   "Independent set strategy (block_greedy, luby, baumann_kyng)")
+        ->capture_default_str()
+        ->check(CLI::IsMember({"block_greedy", "luby", "baumann_kyng"}));
+
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");
     auto* v_flag = app.add_flag("-v,--verbose", verbose, "Verbose output");
@@ -95,6 +107,7 @@ run_config parse_args(int argc, char* argv[]) {
     if (!rhs_str.empty())    cfg.rhs_path     = rhs_str;
     if (!output_str.empty()) cfg.output_path  = output_str;
     cfg.solve_opts.storage = graph_storage_map.at(graph_storage_str);
+    cfg.solve_opts.factor_opts.is_select = is_strategy_map.at(is_strategy_str);
 
     setup_logging(quiet, verbose);
     return cfg;

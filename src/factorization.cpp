@@ -1,4 +1,7 @@
 #include "apxchol/solver/factorization.h"
+#include "apxchol/solver/is_block_greedy.h"
+#include "apxchol/solver/is_luby.h"
+#include "apxchol/solver/is_baumann_kyng.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
 #include <algorithm>
@@ -104,15 +107,29 @@ void build_csc(factorization& result,
 
 } // namespace detail
 
-// Pre-compiled instantiations for the three built-in backends.
-// Other backends (custom containers, different SSO sizes, etc.) are
-// instantiated on demand via the template definitions in factorization_impl.h.
-template factorization factorize<vec_incidence>(
+// Pre-compiled instantiations for the three built-in backends with block_greedy_is.
+// Other backends or IS selectors are instantiated on demand via factorization_impl.h.
+template factorization factorize<block_greedy_is, vec_incidence>(
     const graph<vec_incidence>&, const factor_options&, checkpoint*);
-template factorization factorize<forward_star_incidence>(
+template factorization factorize<block_greedy_is, forward_star_incidence>(
     const graph<forward_star_incidence>&, const factor_options&, checkpoint*);
-template factorization factorize<small_vec_incidence>(
+template factorization factorize<block_greedy_is, small_vec_incidence>(
     const graph<small_vec_incidence>&, const factor_options&, checkpoint*);
+
+// Runtime-dispatch helper: dispatch IS strategy for a given graph type.
+template<incidence_storage Incidence>
+static factorization factorize_with_strategy(const graph<Incidence>& G,
+                                             const factor_options& opts,
+                                             checkpoint* cp) {
+    switch (opts.is_select) {
+    case is_strategy::luby:
+        return factorize<luby_is>(G, opts, cp);
+    case is_strategy::baumann_kyng:
+        return factorize<baumann_kyng_is>(G, opts, cp);
+    default:
+        return factorize<block_greedy_is>(G, opts, cp);
+    }
+}
 
 factorization factorize(const Eigen::SparseMatrix<double>& L,
                         graph_storage storage,
@@ -122,12 +139,18 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
         throw std::invalid_argument("factorize: matrix must be square");
 
     switch (storage) {
-    case graph_storage::forward_star:
-        return factorize<graph<forward_star_incidence>>(L, opts, cp);
-    case graph_storage::small_vec:
-        return factorize<graph<small_vec_incidence>>(L, opts, cp);
-    default:
-        return factorize<graph<vec_incidence>>(L, opts, cp);
+    case graph_storage::forward_star: {
+        auto G = make_graph<graph<forward_star_incidence>>(L);
+        return factorize_with_strategy(G, opts, cp);
+    }
+    case graph_storage::small_vec: {
+        auto G = make_graph<graph<small_vec_incidence>>(L);
+        return factorize_with_strategy(G, opts, cp);
+    }
+    default: {
+        auto G = make_graph<graph<vec_incidence>>(L);
+        return factorize_with_strategy(G, opts, cp);
+    }
     }
 }
 

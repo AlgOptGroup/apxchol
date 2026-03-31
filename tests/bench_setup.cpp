@@ -226,6 +226,7 @@ int main(int argc, char* argv[]) {
     int grid_side = 2000;
     const char* graph_filter = nullptr;
     const char* storage_filter = nullptr;
+    const char* is_filter = nullptr;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--csv") == 0)      mode = output_mode::csv;
         if (std::strcmp(argv[i], "--profile") == 0)   mode = output_mode::profile;
@@ -240,6 +241,19 @@ int main(int argc, char* argv[]) {
             graph_filter = argv[++i];
         if (std::strcmp(argv[i], "--storage") == 0 && i + 1 < argc)
             storage_filter = argv[++i];
+        if (std::strcmp(argv[i], "--is") == 0 && i + 1 < argc)
+            is_filter = argv[++i];
+    }
+
+    // Parse IS strategy from --is flag.
+    apxchol::factor_options base_opts;
+    if (is_filter) {
+        if (std::strcmp(is_filter, "luby") == 0)
+            base_opts.is_select = apxchol::is_strategy::luby;
+        else if (std::strcmp(is_filter, "baumann_kyng") == 0)
+            base_opts.is_select = apxchol::is_strategy::baumann_kyng;
+        else
+            base_opts.is_select = apxchol::is_strategy::block_greedy;
     }
 
     // Helper: should we run this graph/storage name?
@@ -256,7 +270,7 @@ int main(int argc, char* argv[]) {
                     "omp_thresh", "n", "find_is", "elim", "fact(ms)", "nnz(L)");
         std::printf("%s\n", std::string(64, '-').c_str());
         for (size_t thresh : {500UL, 1000UL, 2000UL, 5000UL, 10000UL, 50000UL}) {
-            apxchol::factor_options opts;
+            auto opts = base_opts;
             opts.omp_threshold = thresh;
             auto r = run_one<apxchol::forward_star_incidence>(
                 "fwd_star", "grid2000",
@@ -290,7 +304,7 @@ int main(int argc, char* argv[]) {
             std::printf("%s\n", std::string(90, '-').c_str());
 
             for (double mult : {1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 8.0}) {
-                apxchol::factor_options opts;
+                auto opts = base_opts;
                 opts.degree_multiplier = mult;
                 apxchol::checkpoint cp;
                 auto G = builder();
@@ -333,7 +347,7 @@ int main(int argc, char* argv[]) {
 #endif
                 apxchol::checkpoint cp;
                 auto G = build_fn();
-                auto F = apxchol::factorize(G, {}, &cp);
+                auto F = apxchol::factorize(G, base_opts, &cp);
 
                 double find_is_ms  = cp.total("setup.find_is")            * 1000;
                 double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;
@@ -367,7 +381,7 @@ int main(int argc, char* argv[]) {
             constexpr std::size_t N = decltype(tag)::value;
             apxchol::checkpoint cp;
             auto G = make_grid<apxchol::small_vec_incidence_n<N>>(grid_side, grid_side);
-            auto F = apxchol::factorize(G, {}, &cp);
+            auto F = apxchol::factorize(G, base_opts, &cp);
 
             double find_is_ms  = cp.total("setup.find_is")            * 1000;
             double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;
@@ -403,7 +417,7 @@ int main(int argc, char* argv[]) {
         if (!should_run(name)) continue;
         run_all_storages(name, [side]<typename Incidence>() {
             return make_grid<Incidence>(side, side);
-        }, mode, should_run_storage);
+        }, mode, should_run_storage, base_opts);
     }
 
     // Path graphs: linear chain
@@ -416,7 +430,7 @@ int main(int argc, char* argv[]) {
         if (!should_run(name)) continue;
         run_all_storages(name, [n]<typename Incidence>() {
             return make_path<Incidence>(n);
-        }, mode, should_run_storage);
+        }, mode, should_run_storage, base_opts);
     }
 
     // Star graphs: one hub
@@ -429,7 +443,7 @@ int main(int argc, char* argv[]) {
         if (!should_run(name)) continue;
         run_all_storages(name, [n]<typename Incidence>() {
             return make_star<Incidence>(n);
-        }, mode, should_run_storage);
+        }, mode, should_run_storage, base_opts);
     }
 
     // Random geometric graphs
@@ -440,7 +454,7 @@ int main(int argc, char* argv[]) {
         if (!should_run(name)) continue;
         run_all_storages(name, [n, r]<typename Incidence>() {
             return make_rgg<Incidence>(n, r);
-        }, mode, should_run_storage);
+        }, mode, should_run_storage, base_opts);
     }
 
     return 0;

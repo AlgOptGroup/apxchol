@@ -1,11 +1,15 @@
 #pragma once
 #include "apxchol/graph/conversions.h"
+#include "apxchol/solver/factor_options.h"
 #include <Eigen/Sparse>
 #include <cstddef>
 
 namespace apxchol {
 
 struct checkpoint;
+
+// Forward-declare the default IS selector (defined in is_block_greedy.h).
+struct block_greedy_is;
 
 /// Result of the approximate Cholesky factorization.
 ///
@@ -28,15 +32,13 @@ struct factorization {
     std::vector<round_stats> rounds;
 };
 
-struct factor_options {
-    unsigned seed = 42;
-    double degree_multiplier = 2.0;  // IS degree threshold = multiplier × avg_degree
-    double min_is_fraction = 0.05;   // fall back to sequential when IS < 5% of active
-    size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP
-};
-
 /// Compute approximate Cholesky factorization of a graph Laplacian.
-template<incidence_storage Incidence>
+///
+/// ISSelector controls the independent-set selection strategy.
+/// Defaults to block_greedy_is; callers can substitute luby_is or
+/// baumann_kyng_is (see is_*.h headers) at compile time:
+///   auto F = factorize<luby_is>(G, opts);
+template<typename ISSelector = block_greedy_is, incidence_storage Incidence>
 factorization factorize(const graph<Incidence>& G,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
@@ -50,7 +52,8 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
     return factorize(G, opts, cp);
 }
 
-/// Runtime-dispatch overload: picks the graph backend from graph_storage enum.
+/// Runtime-dispatch overload: picks graph backend from graph_storage enum
+/// and IS selector from factor_options::is_select.
 factorization factorize(const Eigen::SparseMatrix<double>& L,
                         graph_storage storage,
                         const factor_options& opts = {},
