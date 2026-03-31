@@ -160,8 +160,8 @@ Preconditioners" ([arXiv:2505.02977](https://arxiv.org/abs/2505.02977)).
   and ecology matrices.
 
 <!-- BENCHMARK_RESULTS_START -->
-*Last updated: 2026-03-12 21:45:57*
+*Last updated: 2026-03-31 23:31:08*
 
-
+No checkerboard (κ=1) results found.
 
 <!-- BENCHMARK_RESULTS_END -->

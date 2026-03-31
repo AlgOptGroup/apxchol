@@ -43,6 +43,9 @@
 #ifdef HAVE_APXCHOL_V1
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/factor_options.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #endif
 
 #ifdef HAVE_RCHOL
@@ -483,7 +486,7 @@ struct Args {
     bool csv = false;
     unsigned seed = 42;
     int repeat = 1;
-    int threads = 0;  // 0 = auto-detect
+    int threads = 0;  // 0 = use current OMP setting
 };
 
 static Args parse_args(int argc, char** argv) {
@@ -1168,21 +1171,34 @@ int main(int argc, char** argv) {
 
 #ifdef HAVE_APXCHOL_V1
     if (args.solvers.count("apxchol_v1")) {
-        // Best combos from empirical testing on SuiteSparse matrices.
         struct V1Combo {
             const char* name;
             apxchol::is_strategy is;
             apxchol::elimination_strategy elim;
         };
         static const V1Combo v1_combos[] = {
-            {"ApxChol-v1 bg+tree",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree},
-            {"ApxChol-v1 bg+star",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::star},
-            {"ApxChol-v1 luby+tree", apxchol::is_strategy::luby,         apxchol::elimination_strategy::tree},
-            {"ApxChol-v1 root+tree", apxchol::is_strategy::rootset,      apxchol::elimination_strategy::tree},
+            {"bg+tree",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree},
+            {"bg+star",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::star},
+            {"luby+tree", apxchol::is_strategy::luby,         apxchol::elimination_strategy::tree},
+            {"root+tree", apxchol::is_strategy::rootset,      apxchol::elimination_strategy::tree},
         };
+        // Thread count: if --threads is set, use that; otherwise current OMP setting.
+        int tc = args.threads;
+        if (tc <= 0) {
+#ifdef _OPENMP
+            tc = omp_get_max_threads();
+#else
+            tc = 1;
+#endif
+        }
+#ifdef _OPENMP
+        omp_set_num_threads(tc);
+#endif
         for (const auto& combo : v1_combos) {
+            std::string label = std::string("v1 ") + combo.name
+                + " [" + std::to_string(tc) + "t]";
             print(median_run([&]() {
-                return run_apxchol_v1(L, b, graph_name, combo.name, combo.is, combo.elim,
+                return run_apxchol_v1(L, b, graph_name, label, combo.is, combo.elim,
                                       args.tol, args.maxiter);
             }, R));
         }

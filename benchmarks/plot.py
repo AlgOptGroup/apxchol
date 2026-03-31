@@ -27,10 +27,16 @@ plt.rcParams.update({
 
 SOLVER_COLORS = {
     "ApxChol+PCG [Kyng16]":     "#1f77b4",
-    "ApxChol-v1 bg+tree":       "#0b5394",
-    "ApxChol-v1 bg+star":       "#3d85c6",
-    "ApxChol-v1 luby+tree":     "#6fa8dc",
-    "ApxChol-v1 root+tree":     "#9fc5e8",
+    # v1 combos at 1 thread (lighter shades)
+    "v1 bg+tree [1t]":          "#a4c8e8",
+    "v1 bg+star [1t]":          "#b8d4ed",
+    "v1 luby+tree [1t]":        "#cce0f2",
+    "v1 root+tree [1t]":        "#e0ecf7",
+    # v1 combos at 16 threads (saturated shades)
+    "v1 bg+tree [16t]":         "#0b5394",
+    "v1 bg+star [16t]":         "#3d85c6",
+    "v1 luby+tree [16t]":       "#6fa8dc",
+    "v1 root+tree [16t]":       "#9fc5e8",
     "CG [Eigen]":               "#aec7e8",
     "LDLT [Eigen]":             "#2ca02c",
     "RCHOL+PCG [Chen20]":       "#d62728",

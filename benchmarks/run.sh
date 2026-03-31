@@ -118,14 +118,27 @@ run() {
         [[ -z "$filtered" ]] && return 0
         echo "[run] $* --solver $(echo "$filtered" | tr ' ' ',')" >&2
         for S in $filtered; do
-            "$BENCH" "$@" --csv --repeat 3 --solver "$S" 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+            if [[ "$S" == "apxchol_v1" ]]; then
+                # Run v1 combos at 1 thread and 16 threads
+                for T in 1 16; do
+                    "$BENCH" "$@" --csv --repeat 3 --solver "$S" --threads "$T" 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+                done
+            else
+                "$BENCH" "$@" --csv --repeat 3 --solver "$S" 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+            fi
         done
     else
         for S in $ALL_CPP_SOLVERS; do
             if [[ -n "$SKIP_SOLVERS" && " $SKIP_SOLVERS " == *" $S "* ]]; then
                 continue
             fi
-            "$BENCH" "$@" --csv --repeat 3 --solver "$S" 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+            if [[ "$S" == "apxchol_v1" ]]; then
+                for T in 1 16; do
+                    "$BENCH" "$@" --csv --repeat 3 --solver "$S" --threads "$T" 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+                done
+            else
+                "$BENCH" "$@" --csv --repeat 3 --solver "$S" 2>/dev/null | tail -n +2 >> "$OUTFILE" || true
+            fi
         done
         echo "[run] $*" >&2
     fi
