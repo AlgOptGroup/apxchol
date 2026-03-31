@@ -116,20 +116,17 @@ template factorization factorize<block_greedy_is, forward_star_incidence>(
 template factorization factorize<block_greedy_is, small_vec_incidence>(
     const graph<small_vec_incidence>&, const factor_options&, checkpoint*);
 
-// Runtime-dispatch helper: dispatch IS strategy for a given graph type.
-template<incidence_storage Incidence>
-static factorization factorize_with_strategy(const graph<Incidence>& G,
-                                             const factor_options& opts,
-                                             checkpoint* cp) {
-    switch (opts.is_select) {
-    case is_strategy::luby:
-        return factorize<luby_is>(G, opts, cp);
-    case is_strategy::baumann_kyng:
-        return factorize<baumann_kyng_is>(G, opts, cp);
-    default:
-        return factorize<block_greedy_is>(G, opts, cp);
-    }
-}
+// Explicit instantiations for factorize_with_strategy (all 4 backends).
+// Definition lives in factorization_impl.h for on-demand instantiation of
+// other backends (e.g. small_vec_incidence_n<N>).
+template factorization factorize_with_strategy<vec_incidence>(
+    const graph<vec_incidence>&, const factor_options&, checkpoint*);
+template factorization factorize_with_strategy<forward_star_incidence>(
+    const graph<forward_star_incidence>&, const factor_options&, checkpoint*);
+template factorization factorize_with_strategy<small_vec_incidence>(
+    const graph<small_vec_incidence>&, const factor_options&, checkpoint*);
+template factorization factorize_with_strategy<bstr_incidence>(
+    const graph<bstr_incidence>&, const factor_options&, checkpoint*);
 
 factorization factorize(const Eigen::SparseMatrix<double>& L,
                         graph_storage storage,

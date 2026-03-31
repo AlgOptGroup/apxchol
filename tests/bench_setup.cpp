@@ -94,6 +94,10 @@ struct bench_result {
     double build_adj_ms = 0;
     double perm_ms     = 0;
     double assembly_ms = 0;
+    // IS quality stats
+    size_t rounds      = 0;
+    double avg_is_size = 0;
+    double avg_degree  = 0;
 };
 
 template<typename Incidence, typename Builder>
@@ -108,7 +112,7 @@ static bench_result run_one(const char* sname, const char* graph_name,
     auto t1 = Clock::now();
 
     apxchol::checkpoint cp;
-    auto F = apxchol::factorize(G, opts, &cp);
+    auto F = apxchol::factorize_with_strategy(G, opts, &cp);
     auto t2 = Clock::now();
 
     double build_ms  = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -118,6 +122,17 @@ static bench_result run_one(const char* sname, const char* graph_name,
                    static_cast<long long>(F.L.nonZeros()),
                    build_ms, factor_ms, build_ms + factor_ms,
                    F.peak_graph_bytes / (1024.0 * 1024.0)};
+
+    // IS quality stats
+    r.rounds = F.rounds.size();
+    for (auto& rs : F.rounds) {
+        r.avg_is_size += rs.is_size;
+        r.avg_degree  += rs.avg_deg;
+    }
+    if (r.rounds > 0) {
+        r.avg_is_size /= r.rounds;
+        r.avg_degree  /= r.rounds;
+    }
 
     // Extract profile breakdown from checkpoint
     r.find_is_ms   = cp.total("setup.find_is")           * 1000;
@@ -150,16 +165,18 @@ static void print_result(const bench_result& r) {
 }
 
 static void print_profile_header() {
-    std::printf("%-12s %-10s %8s %10s %10s %10s %10s %10s %10s %10s %10s %10s %8s\n",
+    std::printf("%-12s %-10s %8s %10s %6s %8s %8s %10s %10s %10s %10s %10s %10s %10s %10s %8s\n",
                 "storage", "graph", "n", "nnz(L)",
+                "rnds", "avg_IS", "avg_deg",
                 "find_is", "merge_is", "compute", "apply",
                 "build_adj", "perm", "assembly", "total(ms)", "peak MB");
-    std::printf("%s\n", std::string(138, '-').c_str());
+    std::printf("%s\n", std::string(170, '-').c_str());
 }
 
 static void print_profile_result(const bench_result& r) {
-    std::printf("%-12s %-10s %8d %10lld %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %8.1f\n",
+    std::printf("%-12s %-10s %8d %10lld %6zu %8.0f %8.1f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %8.1f\n",
                 r.storage, r.graph_type, r.n, r.nnz_L,
+                r.rounds, r.avg_is_size, r.avg_degree,
                 r.find_is_ms, r.merge_is_ms, r.compute_ms, r.apply_ms,
                 r.build_adj_ms, r.perm_ms, r.assembly_ms,
                 r.factor_ms, r.peak_MB);
@@ -199,8 +216,9 @@ static void run_all_storages(const char* graph_name, Builder&& build_fn,
         apxchol::checkpoint cp;
         auto r = run_one<Inc>(sname, graph_name, build_fn, opts, &cp);
         if (mode == output_mode::report) {
-            std::printf("=== %s %s (n=%d, nnz(L)=%lld) ===\n",
-                        sname, graph_name, r.n, r.nnz_L);
+            std::printf("=== %s %s (n=%d, nnz(L)=%lld, rounds=%zu, avg_IS=%.0f, avg_deg=%.1f) ===\n",
+                        sname, graph_name, r.n, r.nnz_L,
+                        r.rounds, r.avg_is_size, r.avg_degree);
             std::cout << cp.report() << '\n';
         } else if (mode == output_mode::csv) {
             print_csv(r);
@@ -308,7 +326,7 @@ int main(int argc, char* argv[]) {
                 opts.degree_multiplier = mult;
                 apxchol::checkpoint cp;
                 auto G = builder();
-                auto F = apxchol::factorize(G, opts, &cp);
+                auto F = apxchol::factorize_with_strategy(G, opts, &cp);
 
                 // IS profile stats
                 auto rounds = F.rounds.size();
@@ -347,7 +365,7 @@ int main(int argc, char* argv[]) {
 #endif
                 apxchol::checkpoint cp;
                 auto G = build_fn();
-                auto F = apxchol::factorize(G, base_opts, &cp);
+                auto F = apxchol::factorize_with_strategy(G, base_opts, &cp);
 
                 double find_is_ms  = cp.total("setup.find_is")            * 1000;
                 double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;
@@ -381,7 +399,7 @@ int main(int argc, char* argv[]) {
             constexpr std::size_t N = decltype(tag)::value;
             apxchol::checkpoint cp;
             auto G = make_grid<apxchol::small_vec_incidence_n<N>>(grid_side, grid_side);
-            auto F = apxchol::factorize(G, base_opts, &cp);
+            auto F = apxchol::factorize_with_strategy(G, base_opts, &cp);
 
             double find_is_ms  = cp.total("setup.find_is")            * 1000;
             double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;

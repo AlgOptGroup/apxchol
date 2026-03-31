@@ -249,4 +249,18 @@ factorization factorize(const graph<Incidence>& G,
     return result;
 }
 
+template<incidence_storage Incidence>
+factorization factorize_with_strategy(const graph<Incidence>& G,
+                                      const factor_options& opts,
+                                      checkpoint* cp) {
+    switch (opts.is_select) {
+    case is_strategy::luby:
+        return factorize<luby_is>(G, opts, cp);
+    case is_strategy::baumann_kyng:
+        return factorize<baumann_kyng_is>(G, opts, cp);
+    default:
+        return factorize<block_greedy_is>(G, opts, cp);
+    }
+}
+
 } // namespace apxchol
