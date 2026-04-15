@@ -1,135 +1,162 @@
 #pragma once
-/// Baumann-Kyng independent set selection via random sampling.
+/// Baumann-Kyng independent set via random sampling + priority IS.
 ///
-/// ─── Algorithm overview ───
+/// Faithfully follows the O(|sample|) per-round work bound from:
+///   Baumann & Kyng (2024), "A Framework for Parallelizing
+///   Approximate Gaussian Elimination," SPAA '24.
 ///
-/// This implements the IS selection framework from:
+/// ─── How it differs from the shared prune → select pipeline ───
 ///
-///   Baumann Y. & Kyng R. (2024), "A Framework for Parallelizing
-///   Approximate Gaussian Elimination," SPAA '24, pp. 195–206.
-///   DOI: 10.1145/3626183.3659987
+/// BG's pipeline does O(|active| · d / T) per round: it prunes ALL
+/// vertices, then runs greedy IS on ALL vertices.  With ~d rounds
+/// to eliminate all vertices, total IS-selection work = O(n·d²/T).
 ///
-/// The key insight: for a graph with m edges where all candidate
-/// vertices have degree ≤ √m, a uniform random sample of ≈ n / √m
-/// vertices contains a constant fraction of isolated vertices (in the
-/// induced subgraph of the sample).  These isolated vertices form an
-/// independent set in the original graph.
+/// BK samples O(n/(c·d)) vertices per round at probability p = 1/(c·d).
+/// Only sampled vertices' adj lists are accessed or pruned.
+/// Per-round heavy work: O(|sample| · d / T) = O(n / (c·T)).
+/// Over ~c·d rounds, total IS-selection work = O(n·d/T) = O(m/T).
 ///
-/// ─── Algorithm (simplified) ───
+/// Dead edges on non-sampled vertices accumulate but each dead edge
+/// is scanned at most once more (when its owner is next sampled and
+/// pruned), so total dead-edge work is O(m) amortized.
 ///
-/// The paper's Algorithm 3 "ExtractIS":
-///   1. Fix a random permutation π over low-degree active vertices.
-///   2. In iteration k, take the k-th prefix of size ≈ |active| / √m.
-///   3. Build the induced subgraph on the prefix.
-///   4. Return isolated vertices (degree 0 in induced subgraph) as IS.
+/// ─── Priority IS (replaces isolation) ───
 ///
-/// Our implementation simplifies this to a single round: sample each
-/// low-degree vertex independently with probability p = c / √m (for a
-/// tunable constant c), then check which sampled vertices have no
-/// sampled neighbors.
+/// The paper uses isolation (degree 0 in induced subgraph).  We use
+/// priority-based IS: a sampled vertex v enters IS if it has the
+/// lowest hash-priority among all its sampled+active neighbors.
+/// This is Luby's algorithm restricted to the sample.
 ///
-/// ─── IS size ───
+///   Advantages over isolation:
+///   - IS ≈ n·p/(p·d+1) = n/(d·(c+1)), same as greedy.
+///     Isolation gives n·p·e^{-p·d} ≈ n·e^{-1/c} / (c·d), smaller.
+///   - Inherently parallel (no block_of, no barriers, no fixup).
+///     Each vertex's check depends only on neighbors' hashes.
 ///
-/// For maximum degree Δ ≤ √m, each sampled vertex is isolated in the
-/// induced subgraph with probability ≥ (1 − p)^Δ ≈ e^{−Δp}.  With
-/// p = c/√m and Δ ≤ √m, this gives isolation probability ≥ e^{−c}.
+/// ─── Eliminating O(|active|) overhead ───
 ///
-/// Expected IS size per round ≈ |active| · p · e^{−c} = |active| · c · e^{−c} / √m.
-///
-/// This is asymptotically optimal for sub-linear depth (O(√m) rounds
-/// suffice to eliminate all vertices), but produces smaller IS per
-/// round than greedy or block-greedy for practical graphs.
-///
-/// ─── Implementation notes ───
-///
-/// We use a per-round deterministic hash (seeded by round counter) to
-/// decide which vertices are "sampled," avoiding explicit permutation
-/// storage.  The sampling constant c is exposed as a tunable parameter.
-///
-/// ─── When to use ───
-///
-/// This strategy is primarily of theoretical interest — it matches the
-/// SPAA '24 paper's analysis and achieves O(√m log³ n) depth with
-/// O(m log³ n) work.  For practical performance on moderate-size PDE
-/// graphs, block_greedy_is is faster due to larger IS per round.
+/// The key to O(|sample|) per round: NO phase touches ALL active
+/// vertices.  Specifically:
+///   - No block_of assignment (priority IS doesn't need blocks)
+///   - No barrier (each vertex's check is independent)
+///   - No fixup pass (no cross-block conflicts)
+///   - No chosen[] cleanup (we don't use a global chosen[] array)
+///   - No collect_is scan (IS is built inline during the sample loop)
+///   - Only cost: O(|active|/T) to scan active[] and hash-filter.
+///     Each non-sampled vertex costs ~2ns (load index + hash + branch).
 
 #include "apxchol/solver/is/independent_set.h"
-#include <cmath>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace apxchol {
 
 struct baumann_kyng_is {
-    /// Internal round counter (incremented each call to select).
     uint64_t round = 0;
+    double est_avg_degree = 0.0;
+
+    static constexpr bool has_custom_find_is = true;
 
     template<incidence_storage Incidence>
-    void select(const graph<Incidence>& G,
-                std::span<const node_index> active,
-                std::span<const index_t> degrees,
-                double degree_threshold,
-                std::span<char> chosen,
-                const factor_options& opts) {
-        // Sampling probability: p = 1 / (c · d_max), clamped to [0, 1].
-        // Yves Baumann suggested using 1/d, 1/(2d), 1/(3d) to adapt to
-        // actual graph structure rather than the paper's 1/√m.
-        double c = opts.bk_sampling_constant;
-        double d_max = std::max(degree_threshold, 1.0);
-        double p = std::min(1.0 / (c * d_max), 1.0);
+    detail::find_is_result find_is(graph<Incidence>& G,
+                                   std::span<const node_index> active,
+                                   const factor_options& opts,
+                                   checkpoint* cp = nullptr) {
+        if (active.empty()) return {{}, 0.0};
+        if (cp) { cp->descend("find_is"); cp->tick(); }
 
-        // Hash threshold: sample vertex if hash(v, round) < p * 2^64.
-        // Use a per-round seed mixed into the hash to vary sampling across rounds.
-        uint64_t threshold = (p >= 1.0) ? UINT64_MAX
-                           : uint64_t(p * double(UINT64_MAX));
-        uint64_t round_seed = round * 6364136223846793005ULL + 1442695040888963407ULL;
+        const double c = opts.bk_sampling_constant;
+        // Degree estimate: previous round's sample-based estimate (unbiased),
+        // or 2·m/n for round 0.  Updated after each round from sampled vertices.
+        if (round == 0)
+            est_avg_degree = 2.0 * G.m() / double(active.size());
+        double d_est = std::max(est_avg_degree, 1.0);
+        double degree_threshold = opts.degree_multiplier * d_est;
+        double p = std::min(1.0 / (c * d_est), 1.0);
+        uint64_t hash_thresh = (p >= 1.0) ? UINT64_MAX
+                             : uint64_t(p * double(UINT64_MAX));
 
-        // Phase 1: mark sampled vertices.
-        // We store sampling state in chosen[] temporarily:
-        //   chosen[v] = 1 means "sampled" (candidate for IS).
-        #pragma omp parallel for schedule(static) if(active.size() > opts.omp_threshold)
-        for (size_t i = 0; i < active.size(); ++i) {
-            if (degrees[i] > degree_threshold) continue;
-            auto v = active[i];
-            uint64_t h = (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
-            if (h <= threshold) chosen[v] = 1;
-        }
+        uint64_t round_seed = opts.seed
+            ^ (round * 6364136223846793005ULL + 1442695040888963407ULL);
+        auto prio = [round_seed](node_index v) -> uint64_t {
+            return (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
+        };
 
-        // Phase 2: un-mark sampled vertices that have a sampled neighbor
-        // (not isolated in the induced subgraph of the sample).
-        //
-        // The paper's ExtractIS uses strict isolation (remove both endpoints),
-        // but this gives IS ≈ n·p·(1-p)^d — on regular grids with p≈0.4,
-        // this is only ~0.6% of vertices, triggering immediate sequential
-        // fallback.  Using index tie-breaking keeps the lower-indexed
-        // endpoint (equivalent to random-priority within the sample),
-        // giving IS ≈ |S|/(d_S+1) ≈ 16%, which sustains the parallel loop.
-        #pragma omp parallel for schedule(static) if(active.size() > opts.omp_threshold)
-        for (size_t i = 0; i < active.size(); ++i) {
-            auto v = active[i];
-            if (chosen[v] != 1) continue;
-            for (auto idx : G.adj(v)) {
-                auto u = G.edge_target(idx, v);
-                if (G.is_active(u) && chosen[u] >= 1) {
-                    // Both endpoints sampled — not isolated.
-                    // Use index tie-break: higher index loses.
-                    if (u < v) { chosen[v] = 2; break; }
-                }
+        // Thread-local IS vectors — no shared chosen[] array needed.
+        int nt = 1;
+        #ifdef _OPENMP
+        nt = omp_get_max_threads();
+        #endif
+        std::vector<std::vector<node_index>> local_is(nt);
+
+        double sample_degree_sum = 0;
+        long long sample_count = 0;
+
+        #pragma omp parallel reduction(+:sample_degree_sum, sample_count) \
+            if(active.size() > opts.omp_threshold)
+        {
+            int tid = 0, nthreads = 1;
+            #ifdef _OPENMP
+            tid = omp_get_thread_num();
+            nthreads = omp_get_num_threads();
+            #endif
+            size_t bs = active.size() * size_t(tid) / nthreads;
+            size_t be = active.size() * size_t(tid + 1) / nthreads;
+
+            auto& my_is = local_is[tid];
+
+            for (size_t i = bs; i < be; ++i) {
+                auto v = active[i];
+                uint64_t pv = prio(v);
+                if (pv > hash_thresh) continue;  // not sampled — O(1), no adj access
+
+                // Fused prune + priority IS check in a single chain walk.
+                // v enters IS if no sampled active neighbor has lower prio.
+                bool ok = true;
+                index_t deg = G.prune_and_visit(v, [&](node_index u) {
+                    if (ok) {
+                        uint64_t pu = prio(u);
+                        if (pu <= hash_thresh && pu < pv)
+                            ok = false;
+                    }
+                });
+                sample_degree_sum += deg;
+                ++sample_count;
+
+                if (deg > degree_threshold) continue;
+                if (ok) my_is.push_back(v);
             }
         }
 
-        // Phase 3: clear non-isolated markers.
-        #pragma omp parallel for schedule(static) if(active.size() > opts.omp_threshold)
-        for (size_t i = 0; i < active.size(); ++i) {
-            auto v = active[i];
-            if (chosen[v] == 2) chosen[v] = 0;
-        }
+        if (cp) (*cp)("sample_prune_select");
 
+        // Update degree estimate from sampled vertices.
+        if (sample_count > 0)
+            est_avg_degree = sample_degree_sum / double(sample_count);
+
+        // Merge thread-local IS: O(|IS|), no O(|active|) scan.
+        std::vector<node_index> is;
+        for (auto& v : local_is)
+            is.insert(is.end(), v.begin(), v.end());
+
+        if (cp) { (*cp)("collect"); cp->ascend(); }
         ++round;
+
+        return {std::move(is), est_avg_degree};
     }
 
-    void cleanup(std::span<const node_index> /*active*/,
-                 const factor_options& /*opts*/) {
-        // No selector-specific scratch to reset.
-    }
+    // Stubs — unused with has_custom_find_is = true.
+    template<incidence_storage Incidence>
+    void select(const graph<Incidence>&,
+                std::span<const node_index>,
+                std::span<const index_t>,
+                double, std::span<char>,
+                const factor_options&) {}
+
+    void cleanup(std::span<const node_index>,
+                 const factor_options&) {}
 };
 
 } // namespace apxchol

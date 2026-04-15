@@ -95,6 +95,21 @@ public:
         return count;
     }
 
+    /// Prune dead edges and call visitor(target_vertex) for each survivor.
+    /// Returns degree (number of surviving edges).
+    template<typename Visitor>
+    index_t prune_and_visit(node_index v, Visitor&& visit) {
+        index_t count = 0;
+        adj_.filter(v, [&](edge_index idx) {
+            auto u = edges_[idx].traverse(v);
+            if (!active_[u]) return false;
+            visit(u);
+            ++count;
+            return true;
+        });
+        return count;
+    }
+
     // ── active-aware queries ──
 
     bool is_active(node_index v) const { return active_[v]; }

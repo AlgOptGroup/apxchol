@@ -119,6 +119,8 @@ inline std::vector<node_index> collect_is(
 
 // ── Orchestrator: prune → select → collect. ──
 // ISSelector must satisfy the selector interface described above.
+// Selectors with has_custom_find_is = true bypass the shared pipeline
+// and provide their own O(|sample|) implementation.
 template<typename ISSelector, incidence_storage Incidence>
 find_is_result find_independent_set(ISSelector& selector,
                                     graph<Incidence>& G,
@@ -126,6 +128,13 @@ find_is_result find_independent_set(ISSelector& selector,
                                     const factor_options& opts,
                                     checkpoint* cp = nullptr) {
     if (active.empty()) return {{}, 0.0};
+
+    // Fast path: selector provides its own find_is (e.g. BK with O(|sample|) cost).
+    if constexpr (requires { ISSelector::has_custom_find_is; }) {
+        if constexpr (ISSelector::has_custom_find_is) {
+            return selector.find_is(G, active, opts, cp);
+        }
+    }
 
     if (cp) { cp->descend("find_is"); cp->tick(); }
 
