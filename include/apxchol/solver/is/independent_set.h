@@ -71,7 +71,12 @@ double prune_active_edges(graph<Incidence>& G,
                           std::span<index_t> degrees,
                           const factor_options& opts) {
     double total_degree = 0;
-    #pragma omp parallel for reduction(+:total_degree) schedule(static) if(active.size() > opts.omp_threshold)
+    // Dynamic schedule: prune_and_degree walks each vertex's adjacency list,
+    // so per-iteration cost is proportional to (currently-stored) degree.
+    // With static scheduling a single thread getting the few high-degree
+    // vertices stalls the rest; dynamic with chunk=256 amortizes the
+    // scheduling overhead while keeping load balanced.
+    #pragma omp parallel for reduction(+:total_degree) schedule(dynamic, 256) if(active.size() > opts.omp_threshold)
     for (size_t i = 0; i < active.size(); ++i) {
         degrees[i] = G.prune_and_degree(active[i]);
         total_degree += degrees[i];

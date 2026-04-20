@@ -35,6 +35,7 @@ struct cli_options {
     bool sweep_threads = false;
     bool profile = false;
     bool bench_trsv = false;
+    double min_is_frac = 0.05;
 };
 
 [[noreturn]] void usage(const char* argv0) {
@@ -98,6 +99,8 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.profile = true;
         } else if (arg == "--bench-trsv") {
             opts.bench_trsv = true;
+        } else if (arg == "--min-is-frac" && i + 1 < argc) {
+            opts.min_is_frac = std::atof(argv[++i]);
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
         } else {
@@ -250,6 +253,7 @@ int main(int argc, char* argv[]) {
         factor_options opts;
         opts.is_select = cli.is_select;
         opts.elim = cli.elimination;
+        opts.min_is_fraction = cli.min_is_frac;
 
         // ── Thread scaling sweep mode ────────────────────────
         if (cli.sweep_threads) {

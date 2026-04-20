@@ -18,6 +18,8 @@ namespace detail {
 // Fill the Eigen CSC arrays for the lower-triangular factor L.
 // Each factor_col maps to a permuted column; entries are sorted by
 // permuted row index to satisfy Eigen's compressed-column format.
+// Each factor_col writes to a distinct permuted column (perm is a true
+// permutation), so the per-column writes are embarrassingly parallel.
 static void assemble_csc(Eigen::SparseMatrix<double>& L,
                          const std::vector<factor_col>& factor_cols,
                          const std::vector<index_t>& perm,
@@ -47,34 +49,33 @@ static void assemble_csc(Eigen::SparseMatrix<double>& L,
     auto* innerIdx = L.innerIndexPtr();
     auto* values   = L.valuePtr();
 
-    // Fill each column (diagonal + off-diag entries sorted by row).
-    std::vector<index_t> write_pos(n);
-    for (index_t c = 0; c < n; ++c)
-        write_pos[c] = outerPtr[c];
+    // Fill each column in parallel: each factor_col writes to its own
+    // distinct permuted-column slot, so there are no cross-thread conflicts.
+    const std::ptrdiff_t nc = static_cast<std::ptrdiff_t>(factor_cols.size());
+    #pragma omp parallel
+    {
+        std::vector<std::pair<index_t, double>> col_entries;
+        #pragma omp for schedule(dynamic, 256)
+        for (std::ptrdiff_t i = 0; i < nc; ++i) {
+            const auto& col = factor_cols[i];
+            index_t perm_col = perm[col.vertex];
 
-    std::vector<std::pair<index_t, double>> col_entries;
+            col_entries.clear();
+            col_entries.reserve(col.entries.size());
+            for (const auto& [nbr, val] : col.entries)
+                col_entries.emplace_back(perm[nbr], -val);
+            std::sort(col_entries.begin(), col_entries.end());
 
-    for (const auto& col : factor_cols) {
-        index_t perm_col = perm[col.vertex];
-
-        col_entries.clear();
-        for (const auto& [nbr, val] : col.entries)
-            col_entries.emplace_back(perm[nbr], -val);
-        std::sort(col_entries.begin(), col_entries.end());
-
-        // Diagonal entry (stored explicitly for SDDM correctness).
-        auto pos = write_pos[perm_col];
-        innerIdx[pos] = perm_col;
-        values[pos]   = col.diag;
-        ++pos;
-
-        // Off-diagonal entries in sorted row order.
-        for (auto [row, val] : col_entries) {
-            innerIdx[pos] = row;
-            values[pos]   = val;
+            auto pos = outerPtr[perm_col];
+            innerIdx[pos] = perm_col;
+            values[pos]   = col.diag;
             ++pos;
+            for (auto [row, val] : col_entries) {
+                innerIdx[pos] = row;
+                values[pos]   = val;
+                ++pos;
+            }
         }
-        write_pos[perm_col] = pos;
     }
 
     L.makeCompressed();

@@ -131,7 +131,7 @@ void eliminate_set(const Eliminator& elim,
             std::vector<std::pair<node_index, double>> valid;
             std::vector<double> prefix;
 
-            #pragma omp for schedule(static)
+            #pragma omp for schedule(dynamic, 64)
             for (size_t k = 0; k < n_is; ++k)
                 process_vertex(elim, G, is[k], local_cols[k], local_rng,
                                edge_buffers[tid], valid, prefix,
