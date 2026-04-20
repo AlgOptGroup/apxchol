@@ -264,6 +264,7 @@ factorization factorize_impl(const Eliminator& elim,
     // or all remaining when the IS-fraction fallback triggered above).
     if (!active.empty())
         detail::eliminate_remaining(elim, work, active, factor_cols, rng);
+    if (cp) (*cp)("elim_remaining");
 
     detail::build_csc(result, factor_cols, n, cp);
 

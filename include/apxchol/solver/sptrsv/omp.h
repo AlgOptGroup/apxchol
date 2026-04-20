@@ -138,12 +138,11 @@ public:
             for (index_t k = 0; k < level_sz; ++k) {
                 index_t j = level[k];
                 double sum = 0.0;
-                // Gather from rows k > j in column j of L.
-                for (index_t p = csc_col_ptr_[j]; p < csc_col_ptr_[j + 1]; ++p) {
-                    index_t row = csc_row_idx_[p];
-                    if (row > j)
-                        sum += csc_vals_[p] * y_out[row];
-                }
+                // In L's CSC, column j has diagonal at index csc_col_ptr_[j]
+                // (row j), followed by off-diagonal rows k > j.
+                // Skip the diagonal entry and gather from k > j only.
+                for (index_t p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
+                    sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
                 y_out[j] = (y_out[j] - sum) / diag_[j];
             }
         }

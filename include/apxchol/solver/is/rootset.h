@@ -106,22 +106,60 @@ struct rootset_is {
         std::vector<node_index> removed;
         std::vector<node_index> next_frontier;
 
+        const size_t omp_thr = opts.omp_threshold;
+
         while (!frontier.empty()) {
+            const size_t fsz = frontier.size();
+
             // Mark frontier vertices as IS.
-            for (auto v : frontier) {
+            #pragma omp parallel for schedule(static) if(fsz > omp_thr)
+            for (size_t i = 0; i < fsz; ++i) {
+                auto v = frontier[i];
                 chosen[v] = 1;
                 dead[v] = 1;
             }
 
             // Find blocked vertices: eligible active neighbors of IS
             // vertices that are still undecided.
+            // Use atomic CAS on dead[] to avoid duplicates across threads.
             removed.clear();
-            for (auto r : frontier) {
-                for (auto idx : G.adj(r)) {
-                    auto u = G.edge_target(idx, r);
-                    if (G.is_active(u) && eligible[u] && !dead[u]) {
-                        dead[u] = 1;
-                        removed.push_back(u);
+            #ifdef _OPENMP
+            if (fsz > omp_thr) {
+                // Thread-local buffers collected at the end.
+                int nthreads = omp_get_max_threads();
+                std::vector<std::vector<node_index>> thr_removed(nthreads);
+                #pragma omp parallel
+                {
+                    int tid = omp_get_thread_num();
+                    auto& local = thr_removed[tid];
+                    #pragma omp for schedule(dynamic, 64)
+                    for (size_t i = 0; i < fsz; ++i) {
+                        auto r = frontier[i];
+                        for (auto idx : G.adj(r)) {
+                            auto u = G.edge_target(idx, r);
+                            if (G.is_active(u) && eligible[u]) {
+                                char expected = 0;
+                                if (__atomic_compare_exchange_n(
+                                        &dead[u], &expected, char(1),
+                                        /*weak=*/false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                                    local.push_back(u);
+                            }
+                        }
+                    }
+                }
+                for (auto& v : thr_removed)
+                    removed.insert(removed.end(), v.begin(), v.end());
+            } else
+            #endif
+            {
+                for (auto r : frontier) {
+                    for (auto idx : G.adj(r)) {
+                        auto u = G.edge_target(idx, r);
+                        if (G.is_active(u) && eligible[u] && !dead[u]) {
+                            dead[u] = 1;
+                            removed.push_back(u);
+                        }
                     }
                 }
             }
@@ -129,15 +167,45 @@ struct rootset_is {
             // Decrement priorities: for each blocked vertex u, its later
             // eligible neighbors w (hash(u) < hash(w)) were counting u as
             // an undecided earlier neighbor.  Now u is decided → decrement.
+            const size_t rsz = removed.size();
             next_frontier.clear();
-            for (auto u : removed) {
-                auto hu = hash_fn(u);
-                for (auto idx : G.adj(u)) {
-                    auto w = G.edge_target(idx, u);
-                    if (G.is_active(w) && eligible[w] && !dead[w]
-                        && hu < hash_fn(w)) {
-                        if (--pri[w] == 0)
-                            next_frontier.push_back(w);
+            #ifdef _OPENMP
+            if (rsz > omp_thr) {
+                int nthreads = omp_get_max_threads();
+                std::vector<std::vector<node_index>> thr_next(nthreads);
+                #pragma omp parallel
+                {
+                    int tid = omp_get_thread_num();
+                    auto& local = thr_next[tid];
+                    #pragma omp for schedule(dynamic, 64)
+                    for (size_t i = 0; i < rsz; ++i) {
+                        auto u = removed[i];
+                        auto hu = hash_fn(u);
+                        for (auto idx : G.adj(u)) {
+                            auto w = G.edge_target(idx, u);
+                            if (G.is_active(w) && eligible[w] && !dead[w]
+                                && hu < hash_fn(w)) {
+                                if (__atomic_sub_fetch(&pri[w], 1,
+                                                      __ATOMIC_RELAXED) == 0)
+                                    local.push_back(w);
+                            }
+                        }
+                    }
+                }
+                for (auto& v : thr_next)
+                    next_frontier.insert(next_frontier.end(), v.begin(), v.end());
+            } else
+            #endif
+            {
+                for (auto u : removed) {
+                    auto hu = hash_fn(u);
+                    for (auto idx : G.adj(u)) {
+                        auto w = G.edge_target(idx, u);
+                        if (G.is_active(w) && eligible[w] && !dead[w]
+                            && hu < hash_fn(w)) {
+                            if (--pri[w] == 0)
+                                next_frontier.push_back(w);
+                        }
                     }
                 }
             }

@@ -24,3 +24,6 @@ gtest_discover_tests(unit_tests)
 
 add_executable(bench_setup bench_setup.cpp)
 target_link_libraries(bench_setup PRIVATE laplacian_core)
+
+add_executable(analyze_factor analyze_factor.cpp)
+target_link_libraries(analyze_factor PRIVATE laplacian_core)
