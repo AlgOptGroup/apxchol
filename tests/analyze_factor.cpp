@@ -16,6 +16,7 @@
 
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/factorization.h"
+#include "apxchol/solver/sptrsv/omp.h"
 
 namespace {
 
@@ -33,6 +34,7 @@ struct cli_options {
     elimination_strategy elimination = elimination_strategy::tree;
     bool sweep_threads = false;
     bool profile = false;
+    bool bench_trsv = false;
 };
 
 [[noreturn]] void usage(const char* argv0) {
@@ -94,6 +96,8 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.sweep_threads = true;
         } else if (arg == "--profile") {
             opts.profile = true;
+        } else if (arg == "--bench-trsv") {
+            opts.bench_trsv = true;
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
         } else {
@@ -296,6 +300,58 @@ int main(int argc, char* argv[]) {
             std::printf("rounds=%zu nnz(L)=%lld\n",
                         F.rounds.size(),
                         static_cast<long long>(F.L.nonZeros()));
+            return 0;
+        }
+
+        // ── Triangular-solver microbenchmark ─────────────────
+        if (cli.bench_trsv) {
+            using Clock = std::chrono::high_resolution_clock;
+            auto F = apxchol::factorize(A, cli.storage, opts);
+            const Eigen::Index m = F.sddm ? A.rows() : A.rows() - 1;
+            apxchol::omp_sptrsv trsv;
+            trsv.setup(F.L, m);
+            const int reps = 20;
+            std::vector<double> rhs(F.L.rows(), 1.0), tmp(F.L.rows()), out(F.L.rows());
+
+            std::printf("matrix: %s\n", cli.input_path.c_str());
+            std::printf("is=%s  fwd_levels=%d  bck_levels=%d\n",
+                        is_name(cli.is_select),
+                        trsv.num_fwd_levels(), trsv.num_bck_levels());
+            std::printf("\n%-7s %14s %14s %14s %14s\n",
+                        "thr", "fwd_levelset", "fwd_syncfree",
+                        "bck_levelset", "bck_syncfree");
+            std::printf("%s\n", std::string(70, '-').c_str());
+
+            for (int t : {1, 2, 4, 8, 16, 32}) {
+#ifdef _OPENMP
+                omp_set_num_threads(t);
+#endif
+                // Warm up.
+                trsv.forward_solve_levelset(rhs.data(), tmp.data());
+                trsv.transpose_solve_levelset(tmp.data(), out.data());
+
+                auto bench = [&](auto solve) {
+                    auto t0 = Clock::now();
+                    for (int r = 0; r < reps; ++r)
+                        solve(rhs.data(), tmp.data());
+                    auto t1 = Clock::now();
+                    return std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
+                };
+                double fl = bench([&](const double* a, double* b) {
+                    trsv.forward_solve_levelset(a, b);
+                });
+                double fs = bench([&](const double* a, double* b) {
+                    trsv.forward_solve_syncfree(a, b);
+                });
+                double bl = bench([&](const double* a, double* b) {
+                    trsv.transpose_solve_levelset(a, b);
+                });
+                double bs = bench([&](const double* a, double* b) {
+                    trsv.transpose_solve_syncfree(a, b);
+                });
+                std::printf("%-7d %14.3f %14.3f %14.3f %14.3f\n",
+                            t, fl, fs, bl, bs);
+            }
             return 0;
         }
 
