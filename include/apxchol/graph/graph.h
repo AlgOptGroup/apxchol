@@ -57,6 +57,67 @@ public:
         adj_.clear(v);
     }
 
+    // ── Bulk parallel apply (forward_star fast path) ─────────────
+    //
+    // Used by eliminate_set to atomically commit per-thread deferred
+    // edge buffers, excess updates, and IS-vertex deactivations
+    // without serializing on graph mutation.  Only enabled for the
+    // forward_star backend, where the underlying linked list supports
+    // lock-free CAS prepending.
+    //
+    // Pre: IS vertices are pairwise non-adjacent and disjoint from
+    //      neighbors written via excess/edges → no head_[] conflict
+    //      between deactivations and atomic pushes.
+
+    /// Reserve `N` slots in the edge pool; returns starting `edge_index`.
+    /// Caller fills slots in parallel.  Used together with `reserve_adj_pool`
+    /// and `link_edge_atomic` for lock-free bulk insertion.
+    edge_index reserve_edge_pool(index_t N) {
+        auto start = static_cast<edge_index>(edges_.size());
+        edges_.resize(start + N);
+        m_ += N;  // bookkeeping; queried via m()
+        return start;
+    }
+
+    /// Reserve `extra` adjacency-list slots (forward_star only).
+    template<typename I = Incidence>
+        requires std::same_as<I, forward_star_incidence>
+    index_t reserve_adj_pool(index_t extra) {
+        return adj_.reserve_pool(extra);
+    }
+
+    /// Write edge data at a pre-allocated pool slot.  Lock-free; safe
+    /// to call concurrently from different threads on different slots.
+    void write_edge_at(edge_index slot, node_index u, node_index v, double w) {
+        edges_[slot] = {u ^ v, w};
+    }
+
+    /// Atomically prepend `e_slot` to vertex v's adjacency chain at
+    /// pre-allocated adjacency slot `a_slot` (forward_star only).
+    template<typename I = Incidence>
+        requires std::same_as<I, forward_star_incidence>
+    void adj_push_atomic(node_index v, index_t a_slot, edge_index e_slot) {
+        adj_.push_atomic(v, a_slot, e_slot);
+    }
+
+    /// Atomically add `delta` to excess[v]; safe under data races on v.
+    void atomic_add_excess(node_index v, double delta) {
+        #pragma omp atomic
+        excess_[v] += delta;
+    }
+
+    /// Mark vertex inactive without decrementing num_active_; the
+    /// caller must invoke `bulk_decrement_active(k)` once after the
+    /// parallel batch.  Adjacency chain is cleared (head reset to npos).
+    void set_inactive_unchecked(node_index v) {
+        active_[v] = false;
+        adj_.clear(v);
+    }
+
+    /// Apply a bulk decrement to `num_active_` after a parallel batch
+    /// of `set_inactive_unchecked` calls.
+    void bulk_decrement_active(index_t k) { num_active_ -= k; }
+
     /// Merge parallel edges to the same neighbor into one, accumulating weights.
     /// Uses a vertex-indexed bucket (thread_local, lazily grown to n) for O(d)
     /// deduplication instead of O(d log d) sorting.

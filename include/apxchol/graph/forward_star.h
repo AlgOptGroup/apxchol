@@ -40,6 +40,40 @@ struct forward_star {
     void reserve(index_t m) { nodes_.reserve(m); }
     void clear(index_t v) { head_[v] = npos; }
 
+    // ── Lock-free batched insertion ───────────────────────────
+    //
+    // Two-step parallel push for use after a serial pre-allocation:
+    //   1. Caller invokes `reserve_pool(N)` to grow `nodes_` by N
+    //      slots and obtain the starting index.
+    //   2. Multiple threads call `push_atomic(v, slot, data)` with
+    //      distinct `slot` values from that range, prepending each
+    //      pre-allocated node to head_[v] via a CAS loop.
+    // After all atomic pushes complete, head_[v] points at the most
+    // recent insertion (LIFO order; non-deterministic across runs).
+
+    /// Reserve `extra` slots in the node pool; returns starting index.
+    /// The pool grows once, so subsequent `push_atomic` calls do not
+    /// race on `nodes_` resizing.
+    index_t reserve_pool(index_t extra) {
+        index_t start = static_cast<index_t>(nodes_.size());
+        nodes_.resize(start + extra);
+        return start;
+    }
+
+    /// Lock-free prepend of the pre-allocated node at `slot` to
+    /// vertex v's chain.  Multiple threads may call this concurrently
+    /// for the same v with distinct slots; the CAS retries on conflict.
+    /// Pre: nodes_[slot] is in the range returned by `reserve_pool`.
+    void push_atomic(index_t v, index_t slot, const T& data) {
+        nodes_[slot].data = data;
+        index_t old = __atomic_load_n(&head_[v], __ATOMIC_RELAXED);
+        do {
+            nodes_[slot].next = old;
+        } while (!__atomic_compare_exchange_n(
+            &head_[v], &old, slot,
+            /*weak=*/false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+    }
+
     /// Remove chain elements where pred(data) is false, by relinking.
     /// Calls on_keep(data) for each surviving element.
     /// O(chain length), no allocation, no pool growth.

@@ -10,6 +10,11 @@
 #include <Eigen/Sparse>
 #include <fast_matrix_market/app/Eigen.hpp>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#include "apxchol/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 
 namespace {
@@ -26,6 +31,8 @@ struct cli_options {
     graph_storage storage = graph_storage::forward_star;
     is_strategy is_select = is_strategy::block_greedy;
     elimination_strategy elimination = elimination_strategy::tree;
+    bool sweep_threads = false;
+    bool profile = false;
 };
 
 [[noreturn]] void usage(const char* argv0) {
@@ -83,6 +90,10 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.is_select = parse_is(require_value("--is"));
         } else if (arg == "--elimination") {
             opts.elimination = parse_elimination(require_value("--elimination"));
+        } else if (arg == "--sweep-threads") {
+            opts.sweep_threads = true;
+        } else if (arg == "--profile") {
+            opts.profile = true;
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
         } else {
@@ -235,6 +246,58 @@ int main(int argc, char* argv[]) {
         factor_options opts;
         opts.is_select = cli.is_select;
         opts.elim = cli.elimination;
+
+        // ── Thread scaling sweep mode ────────────────────────
+        if (cli.sweep_threads) {
+            std::printf("matrix: %s\n", cli.input_path.c_str());
+            std::printf("storage=%s is=%s elimination=%s\n",
+                        storage_name(cli.storage), is_name(cli.is_select),
+                        elimination_name(cli.elimination));
+            std::printf("A: n=%d nnz=%lld\n",
+                        static_cast<int>(A.rows()),
+                        static_cast<long long>(A.nonZeros()));
+            std::printf("\n%-7s %10s %10s %10s %10s %10s %10s %10s %10s %10s\n",
+                        "thr", "find_is", "merge_is", "compute", "apply",
+                        "elim", "elim_rem", "assembly",
+                        "factor", "iters");
+            std::printf("%s\n", std::string(110, '-').c_str());
+
+            for (int t : {1, 2, 4, 8, 16, 32}) {
+#ifdef _OPENMP
+                omp_set_num_threads(t);
+#endif
+                apxchol::checkpoint cp;
+                auto F = apxchol::factorize(A, cli.storage, opts, &cp);
+                double find_is_ms  = cp.total("setup.find_is")           * 1000;
+                double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;
+                double compute_ms  = cp.total("setup.eliminate.compute") * 1000;
+                double apply_ms    = cp.total("setup.eliminate.apply")   * 1000;
+                double elim_ms     = cp.total("setup.eliminate")         * 1000;
+                double elim_rem_ms = cp.total("setup.elim_remaining")    * 1000;
+                double asm_ms      = cp.total("setup.assembly")          * 1000;
+                double factor_ms   = cp.total("setup")                   * 1000;
+                std::printf("%-7d %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10zu\n",
+                            t, find_is_ms, merge_is_ms, compute_ms, apply_ms,
+                            elim_ms, elim_rem_ms, asm_ms, factor_ms,
+                            F.rounds.size());
+            }
+            return 0;
+        }
+
+        // ── Profile-only mode ────────────────────────────────
+        if (cli.profile) {
+            std::printf("matrix: %s\n", cli.input_path.c_str());
+            std::printf("storage=%s is=%s elimination=%s\n",
+                        storage_name(cli.storage), is_name(cli.is_select),
+                        elimination_name(cli.elimination));
+            apxchol::checkpoint cp;
+            auto F = apxchol::factorize(A, cli.storage, opts, &cp);
+            std::cout << cp.report() << '\n';
+            std::printf("rounds=%zu nnz(L)=%lld\n",
+                        F.rounds.size(),
+                        static_cast<long long>(F.L.nonZeros()));
+            return 0;
+        }
 
         factorization F = apxchol::factorize(A, cli.storage, opts);
         const index_t m = static_cast<index_t>(F.sddm ? A.rows() : A.rows() - 1);

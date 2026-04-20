@@ -33,3 +33,5 @@ __pycache__/
 
 # Binary artifacts
 main
+.codex/
+.codex

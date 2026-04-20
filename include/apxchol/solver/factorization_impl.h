@@ -141,14 +141,56 @@ void eliminate_set(const Eliminator& elim,
 
         for (auto& col : local_cols)
             factor_cols.push_back(std::move(col));
-        for (auto& buf : edge_buffers)
-            for (auto [u, v, w] : buf)
-                G.add_edge(u, v, w);
-        for (auto& buf : excess_buffers)
-            for (auto [v, delta] : buf)
-                G.excess(v) += delta;
-        for (auto u : is)
-            G.deactivate(u);
+
+        // ── Apply phase ──
+        // For forward_star storage, fully parallelize edge linking,
+        // excess updates, and IS deactivation using lock-free CAS
+        // on per-vertex chain heads + atomic excess accumulation.
+        // Other backends keep the legacy serial apply.
+        if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
+            // Prefix-sum offsets per thread → distinct slot ranges.
+            std::vector<size_t> e_offsets(num_threads + 1, 0);
+            for (int t = 0; t < num_threads; ++t)
+                e_offsets[t + 1] = e_offsets[t] + edge_buffers[t].size();
+            const size_t N_edges = e_offsets[num_threads];
+
+            edge_index e_start = G.reserve_edge_pool(static_cast<index_t>(N_edges));
+            index_t a_start = G.reserve_adj_pool(static_cast<index_t>(2 * N_edges));
+
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                size_t base = e_offsets[tid];
+                const auto& ebuf = edge_buffers[tid];
+                for (size_t i = 0; i < ebuf.size(); ++i) {
+                    auto [u, v, w] = ebuf[i];
+                    edge_index es = e_start + static_cast<edge_index>(base + i);
+                    index_t as_u = a_start + static_cast<index_t>(2 * (base + i));
+                    index_t as_v = as_u + 1;
+                    G.write_edge_at(es, u, v, w);
+                    G.adj_push_atomic(u, as_u, es);
+                    G.adj_push_atomic(v, as_v, es);
+                }
+                for (auto [v, delta] : excess_buffers[tid])
+                    G.atomic_add_excess(v, delta);
+            }
+
+            // Deactivate IS in parallel (disjoint vertices, distinct
+            // head_[] entries from those touched by atomic pushes).
+            #pragma omp parallel for schedule(static)
+            for (size_t k = 0; k < n_is; ++k)
+                G.set_inactive_unchecked(is[k]);
+            G.bulk_decrement_active(static_cast<index_t>(n_is));
+        } else {
+            for (auto& buf : edge_buffers)
+                for (auto [u, v, w] : buf)
+                    G.add_edge(u, v, w);
+            for (auto& buf : excess_buffers)
+                for (auto [v, delta] : buf)
+                    G.excess(v) += delta;
+            for (auto u : is)
+                G.deactivate(u);
+        }
         if (cp) (*cp)("apply");
     } else
     #endif
