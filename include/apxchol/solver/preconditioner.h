@@ -96,9 +96,14 @@ public:
             x = F_.perm * b;
             if (cp_) (*cp_)("permute");
 
+#if defined(APXCHOL_USE_CUDA)
+            trsv_.solve_LLt(x.data(), scratch_.data());
+            x = scratch_;
+#else
             trsv_.forward_solve(x.data(), scratch_.data());
             if (cp_) (*cp_)("forward");
             trsv_.transpose_solve(scratch_.data(), x.data());
+#endif
             if (cp_) (*cp_)("back");
 
             scratch_ = x;
