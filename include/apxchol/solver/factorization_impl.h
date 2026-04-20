@@ -13,6 +13,7 @@
 #include "apxchol/solver/is/luby.h"
 #include "apxchol/solver/is/baumann_kyng.h"
 #include "apxchol/solver/is/rootset.h"
+#include "apxchol/solver/is/hybrid.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
 #include <algorithm>
@@ -355,6 +356,8 @@ factorization factorize_with_strategy(const graph<Incidence>& G,
         return factorize<baumann_kyng_is>(G, opts, cp);
     case is_strategy::rootset:
         return factorize<rootset_is>(G, opts, cp);
+    case is_strategy::hybrid:
+        return factorize<hybrid_is>(G, opts, cp);
     default:
         return factorize<block_greedy_is>(G, opts, cp);
     }

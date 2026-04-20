@@ -6,7 +6,7 @@
 namespace apxchol {
 
 /// Enumerate available IS selection strategies for runtime dispatch.
-enum class is_strategy { block_greedy, luby, baumann_kyng, rootset };
+enum class is_strategy { block_greedy, luby, baumann_kyng, rootset, hybrid };
 
 /// Enumerate available elimination (clique sampling) strategies for runtime dispatch.
 enum class elimination_strategy { tree, star, clique };

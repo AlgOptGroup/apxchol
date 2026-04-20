@@ -1181,6 +1181,8 @@ int main(int argc, char** argv) {
             {"bg+star",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::star},
             {"luby+tree", apxchol::is_strategy::luby,         apxchol::elimination_strategy::tree},
             {"root+tree", apxchol::is_strategy::rootset,      apxchol::elimination_strategy::tree},
+            {"bk+tree",   apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::tree},
+            {"hybrid+tree", apxchol::is_strategy::hybrid,     apxchol::elimination_strategy::tree},
         };
         // Thread count: if --threads is set, use that; otherwise current OMP setting.
         int tc = args.threads;

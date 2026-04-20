@@ -19,6 +19,7 @@ static const std::map<std::string, is_strategy> is_strategy_map = {
     {"luby",          is_strategy::luby},
     {"baumann_kyng",  is_strategy::baumann_kyng},
     {"rootset",       is_strategy::rootset},
+    {"hybrid",        is_strategy::hybrid},
 };
 
 static const std::map<std::string, elimination_strategy> elimination_strategy_map = {

@@ -41,7 +41,7 @@ struct cli_options {
 [[noreturn]] void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s <matrix.mtx> [--graph-storage vec|forward_star|small_vec]"
-                 " [--is block_greedy|luby|baumann_kyng|rootset]"
+                 " [--is block_greedy|luby|baumann_kyng|rootset|hybrid]"
                  " [--elimination tree|star|clique]\n",
                  argv0);
     std::exit(1);
@@ -59,6 +59,7 @@ is_strategy parse_is(const std::string& s) {
     if (s == "luby") return is_strategy::luby;
     if (s == "baumann_kyng") return is_strategy::baumann_kyng;
     if (s == "rootset") return is_strategy::rootset;
+    if (s == "hybrid") return is_strategy::hybrid;
     throw std::invalid_argument("unknown IS strategy: " + s);
 }
 
@@ -225,6 +226,7 @@ const char* is_name(is_strategy s) {
     case is_strategy::luby: return "luby";
     case is_strategy::baumann_kyng: return "baumann_kyng";
     case is_strategy::rootset: return "rootset";
+    case is_strategy::hybrid: return "hybrid";
     default: return "unknown";
     }
 }
