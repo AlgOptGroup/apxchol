@@ -11,6 +11,18 @@ enum class is_strategy { block_greedy, luby, baumann_kyng, rootset, hybrid };
 /// Enumerate available elimination (clique sampling) strategies for runtime dispatch.
 enum class elimination_strategy { tree, star, clique };
 
+/// Enumerate orderings applied to the initial active vertex list.
+/// Affects which vertices the greedy IS scan visits first; downstream
+/// effects: IS size per round, total round count, and (most importantly
+/// for sparse triangular solve) the level count of the resulting factor.
+enum class vertex_order {
+    natural,      // vertex index order (input order)
+    random,       // Fisher-Yates shuffle, rng-seeded
+    random_hash,  // sort by splitmix64(id ^ seed)
+    degree_asc,   // ascending initial degree (low degree first)
+    degree_desc   // descending initial degree
+};
+
 struct factor_options {
     unsigned seed = 42;
     double degree_multiplier = 2.0;  // IS degree threshold = multiplier × avg_degree
@@ -18,6 +30,7 @@ struct factor_options {
     size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP
     is_strategy is_select = is_strategy::block_greedy;  // IS selection strategy (runtime dispatch)
     elimination_strategy elim = elimination_strategy::tree;  // Elimination strategy (runtime dispatch)
+    vertex_order order = vertex_order::natural;          // Initial active-list ordering
     double bk_sampling_constant = 0.3;  // BK: sample prob = 1/(c·d_max); lower c → larger IS
 };
 

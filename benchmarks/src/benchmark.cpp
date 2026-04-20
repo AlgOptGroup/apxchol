@@ -300,6 +300,7 @@ static BenchResult run_apxchol_v1(
     const std::string& combo_name,
     apxchol::is_strategy is,
     apxchol::elimination_strategy elim,
+    apxchol::vertex_order order,
     double tol, int maxiter)
 {
     BenchResult r;
@@ -311,7 +312,7 @@ static BenchResult run_apxchol_v1(
     auto res = apxchol::solve(L, b,
         {.tol = tol, .max_iter = maxiter,
          .storage = apxchol::graph_storage::forward_star,
-         .factor_opts = {.seed = 42, .is_select = is, .elim = elim}});
+         .factor_opts = {.seed = 42, .is_select = is, .elim = elim, .order = order}});
 
     r.setup_time = res.timings.total("setup");
     r.solve_time = res.timings.total("solve");
@@ -1175,14 +1176,24 @@ int main(int argc, char** argv) {
             const char* name;
             apxchol::is_strategy is;
             apxchol::elimination_strategy elim;
+            apxchol::vertex_order order = apxchol::vertex_order::natural;
         };
+        using vo = apxchol::vertex_order;
         static const V1Combo v1_combos[] = {
-            {"bg+tree",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree},
-            {"bg+star",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::star},
-            {"luby+tree", apxchol::is_strategy::luby,         apxchol::elimination_strategy::tree},
-            {"root+tree", apxchol::is_strategy::rootset,      apxchol::elimination_strategy::tree},
-            {"bk+tree",   apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::tree},
-            {"hybrid+tree", apxchol::is_strategy::hybrid,     apxchol::elimination_strategy::tree},
+            {"bg+tree",        apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree},
+            {"bg+star",        apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::star},
+            {"luby+tree",      apxchol::is_strategy::luby,         apxchol::elimination_strategy::tree},
+            {"root+tree",      apxchol::is_strategy::rootset,      apxchol::elimination_strategy::tree},
+            {"bk+tree",        apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::tree},
+            {"hybrid+tree",    apxchol::is_strategy::hybrid,       apxchol::elimination_strategy::tree},
+            {"bg+tree/rand",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree, vo::random},
+            {"bg+tree/hash",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree, vo::random_hash},
+            {"bg+tree/dasc",   apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree, vo::degree_asc},
+            {"bg+tree/ddesc",  apxchol::is_strategy::block_greedy, apxchol::elimination_strategy::tree, vo::degree_desc},
+            {"bk+tree/rand",   apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::tree, vo::random},
+            {"bk+tree/hash",   apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::tree, vo::random_hash},
+            {"bk+tree/dasc",   apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::tree, vo::degree_asc},
+            {"bk+tree/ddesc",  apxchol::is_strategy::baumann_kyng, apxchol::elimination_strategy::tree, vo::degree_desc},
         };
         // Thread count: if --threads is set, use that; otherwise current OMP setting.
         int tc = args.threads;
@@ -1200,7 +1211,7 @@ int main(int argc, char** argv) {
             std::string label = std::string("v1 ") + combo.name
                 + " [" + std::to_string(tc) + "t]";
             print(median_run([&]() {
-                return run_apxchol_v1(L, b, graph_name, label, combo.is, combo.elim,
+                return run_apxchol_v1(L, b, graph_name, label, combo.is, combo.elim, combo.order,
                                       args.tol, args.maxiter);
             }, R));
         }

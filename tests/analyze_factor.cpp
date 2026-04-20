@@ -26,12 +26,14 @@ using apxchol::factorization;
 using apxchol::graph_storage;
 using apxchol::index_t;
 using apxchol::is_strategy;
+using apxchol::vertex_order;
 
 struct cli_options {
     std::string input_path;
     graph_storage storage = graph_storage::forward_star;
     is_strategy is_select = is_strategy::block_greedy;
     elimination_strategy elimination = elimination_strategy::tree;
+    vertex_order order = vertex_order::natural;
     bool sweep_threads = false;
     bool profile = false;
     bool bench_trsv = false;
@@ -70,6 +72,15 @@ elimination_strategy parse_elimination(const std::string& s) {
     throw std::invalid_argument("unknown elimination strategy: " + s);
 }
 
+vertex_order parse_order(const std::string& s) {
+    if (s == "natural")     return vertex_order::natural;
+    if (s == "random")      return vertex_order::random;
+    if (s == "random_hash") return vertex_order::random_hash;
+    if (s == "degree_asc")  return vertex_order::degree_asc;
+    if (s == "degree_desc") return vertex_order::degree_desc;
+    throw std::invalid_argument("unknown vertex order: " + s);
+}
+
 cli_options parse_args(int argc, char* argv[]) {
     if (argc < 2) usage(argv[0]);
     if (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")
@@ -94,6 +105,8 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.is_select = parse_is(require_value("--is"));
         } else if (arg == "--elimination") {
             opts.elimination = parse_elimination(require_value("--elimination"));
+        } else if (arg == "--order") {
+            opts.order = parse_order(require_value("--order"));
         } else if (arg == "--sweep-threads") {
             opts.sweep_threads = true;
         } else if (arg == "--profile") {
@@ -255,6 +268,7 @@ int main(int argc, char* argv[]) {
         factor_options opts;
         opts.is_select = cli.is_select;
         opts.elim = cli.elimination;
+        opts.order = cli.order;
         opts.min_is_fraction = cli.min_is_frac;
 
         // ── Thread scaling sweep mode ────────────────────────

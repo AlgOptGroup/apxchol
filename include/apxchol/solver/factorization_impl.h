@@ -219,6 +219,49 @@ void eliminate_set(const Eliminator& elim,
     if (cp) cp->ascend();
 }
 
+// Apply opts.order to the initial active list.  Called once before the
+// elimination loop; subsequent rounds just filter in place, preserving
+// the relative order chosen here.
+template<typename Incidence>
+void apply_vertex_order(std::vector<node_index>& active,
+                        const graph<Incidence>& G,
+                        const factor_options& opts) {
+    using vo = vertex_order;
+    auto splitmix = [](uint64_t x) {
+        x += 0x9e3779b97f4a7c15ULL;
+        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+        return x ^ (x >> 31);
+    };
+    switch (opts.order) {
+        case vo::natural:
+            return;
+        case vo::random: {
+            std::mt19937 rng(opts.seed ^ 0xa5a5a5a5u);
+            std::ranges::shuffle(active, rng);
+            return;
+        }
+        case vo::random_hash: {
+            uint64_t s = opts.seed;
+            std::ranges::sort(active, {}, [&](node_index v) {
+                return splitmix(uint64_t(v) ^ s);
+            });
+            return;
+        }
+        case vo::degree_asc:
+            std::ranges::sort(active, {}, [&](node_index v) {
+                return std::ranges::distance(G.neighbors(v));
+            });
+            return;
+        case vo::degree_desc:
+            std::ranges::sort(active, [&](node_index a, node_index b) {
+                return std::ranges::distance(G.neighbors(a))
+                     > std::ranges::distance(G.neighbors(b));
+            });
+            return;
+    }
+}
+
 // Sequential fallback: eliminate all remaining vertices one by one.
 // Used when IS fraction drops below threshold — avoids the O(|active|)
 // IS-finding scan when only a few vertices can be chosen anyway.
@@ -283,6 +326,7 @@ factorization factorize_impl(const Eliminator& elim,
     // Active vertex list — filtered in-place after each round.
     std::vector<node_index> active(n);
     std::ranges::iota(active, node_index{0});
+    detail::apply_vertex_order(active, work, opts);
 
     // Selectors with O(|sample|) per-round work (e.g. baumann_kyng) can
     // keep chipping away even with a tiny IS — their cost does not scale
