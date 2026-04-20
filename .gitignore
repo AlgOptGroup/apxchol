@@ -2,6 +2,7 @@
 build/
 cmake-build-*/
 benchmarks/build/
+benchmarks/build_*/
 CMakeFiles/
 
 # IDE
