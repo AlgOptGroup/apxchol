@@ -14,6 +14,7 @@
 #include "apxchol/solver/is/baumann_kyng.h"
 #include "apxchol/solver/is/rootset.h"
 #include "apxchol/solver/is/hybrid.h"
+#include "apxchol/solver/is/independent_set.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
 #include <algorithm>
@@ -105,13 +106,6 @@ void eliminate_set(const Eliminator& elim,
                    checkpoint* cp = nullptr) {
     if (cp) { cp->descend("eliminate"); cp->tick(); }
 
-    // Merge parallel edges on IS vertices for consistent weights.
-    // IS vertices are pairwise non-adjacent → disjoint edge sets → safe to parallelize.
-    #pragma omp parallel for schedule(static) if(is.size() > opts.omp_threshold)
-    for (size_t i = 0; i < is.size(); ++i)
-        G.merge_parallel_edges(is[i]);
-    if (cp) (*cp)("merge_is");
-
     const size_t n_is = is.size();
     std::vector<factor_col> local_cols(n_is);
 
@@ -125,64 +119,98 @@ void eliminate_set(const Eliminator& elim,
         std::vector<std::vector<deferred_edge>> edge_buffers(num_threads);
         std::vector<std::vector<std::pair<node_index, double>>> excess_buffers(num_threads);
 
-        #pragma omp parallel
-        {
-            int tid = omp_get_thread_num();
-            std::mt19937 local_rng(seeds[tid]);
-            std::vector<std::pair<node_index, double>> valid;
-            std::vector<double> prefix;
-
-            #pragma omp for schedule(dynamic, 64)
-            for (size_t k = 0; k < n_is; ++k)
-                process_vertex(elim, G, is[k], local_cols[k], local_rng,
-                               edge_buffers[tid], valid, prefix,
-                               excess_buffers[tid]);
-        }
-        if (cp) (*cp)("compute");
-
-        for (auto& col : local_cols)
-            factor_cols.push_back(std::move(col));
-
-        // ── Apply phase ──
-        // For forward_star storage, fully parallelize edge linking,
-        // excess updates, and IS deactivation using lock-free CAS
-        // on per-vertex chain heads + atomic excess accumulation.
-        // Other backends keep the legacy serial apply.
         if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
-            // Prefix-sum offsets per thread → distinct slot ranges.
+            // Mega-fused parallel region: merge_is + compute + apply +
+            // deactivate all under one fork-join.  On BK with ~1k+ rounds
+            // this saves ~3 fork-joins/round × ~50µs ≈ 150ms.
             std::vector<size_t> e_offsets(num_threads + 1, 0);
-            for (int t = 0; t < num_threads; ++t)
-                e_offsets[t + 1] = e_offsets[t] + edge_buffers[t].size();
-            const size_t N_edges = e_offsets[num_threads];
-
-            edge_index e_start = G.reserve_edge_pool(static_cast<index_t>(N_edges));
-            index_t a_start = G.reserve_adj_pool(static_cast<index_t>(2 * N_edges));
+            edge_index e_start = 0;
+            index_t a_start = 0;
 
             #pragma omp parallel
             {
                 int tid = omp_get_thread_num();
-                size_t base = e_offsets[tid];
-                const auto& ebuf = edge_buffers[tid];
-                for (size_t i = 0; i < ebuf.size(); ++i) {
-                    auto [u, v, w] = ebuf[i];
-                    edge_index es = e_start + static_cast<edge_index>(base + i);
-                    index_t as_u = a_start + static_cast<index_t>(2 * (base + i));
-                    index_t as_v = as_u + 1;
-                    G.write_edge_at(es, u, v, w);
-                    G.adj_push_atomic(u, as_u, es);
-                    G.adj_push_atomic(v, as_v, es);
-                }
-                for (auto [v, delta] : excess_buffers[tid])
-                    G.atomic_add_excess(v, delta);
-            }
+                std::mt19937 local_rng(seeds[tid]);
+                std::vector<std::pair<node_index, double>> valid;
+                std::vector<double> prefix;
 
-            // Deactivate IS in parallel (disjoint vertices, distinct
-            // head_[] entries from those touched by atomic pushes).
-            #pragma omp parallel for schedule(static)
-            for (size_t k = 0; k < n_is; ++k)
-                G.set_inactive_unchecked(is[k]);
+                #pragma omp for schedule(static)
+                for (size_t i = 0; i < n_is; ++i)
+                    G.merge_parallel_edges(is[i]);
+                // implicit barrier — merged weights visible before compute
+
+                #pragma omp for schedule(dynamic, 64)
+                for (size_t k = 0; k < n_is; ++k)
+                    process_vertex(elim, G, is[k], local_cols[k], local_rng,
+                                   edge_buffers[tid], valid, prefix,
+                                   excess_buffers[tid]);
+                // implicit barrier — edge_buffers populated before prefix-sum
+
+                // Single thread does prefix-sum + pool reservation.
+                #pragma omp single
+                {
+                    for (int t = 0; t < num_threads; ++t)
+                        e_offsets[t + 1] = e_offsets[t] + edge_buffers[t].size();
+                    const size_t N_edges = e_offsets[num_threads];
+                    e_start = G.reserve_edge_pool(static_cast<index_t>(N_edges));
+                    a_start = G.reserve_adj_pool(static_cast<index_t>(2 * N_edges));
+                }
+                // implicit barrier after single — offsets/pools visible
+
+                // Apply phase: each thread writes to its slot range,
+                // pushes onto adj chains via CAS, atomic-adds excess.
+                {
+                    size_t base = e_offsets[tid];
+                    const auto& ebuf = edge_buffers[tid];
+                    for (size_t i = 0; i < ebuf.size(); ++i) {
+                        auto [u, v, w] = ebuf[i];
+                        edge_index es = e_start + static_cast<edge_index>(base + i);
+                        index_t as_u = a_start + static_cast<index_t>(2 * (base + i));
+                        index_t as_v = as_u + 1;
+                        G.write_edge_at(es, u, v, w);
+                        G.adj_push_atomic(u, as_u, es);
+                        G.adj_push_atomic(v, as_v, es);
+                    }
+                    for (auto [v, delta] : excess_buffers[tid])
+                        G.atomic_add_excess(v, delta);
+                }
+
+                // Deactivate IS in parallel (disjoint vertices, distinct
+                // head_[] entries from those touched by atomic pushes).
+                #pragma omp for schedule(static) nowait
+                for (size_t k = 0; k < n_is; ++k)
+                    G.set_inactive_unchecked(is[k]);
+            }
             G.bulk_decrement_active(static_cast<index_t>(n_is));
+
+            for (auto& col : local_cols)
+                factor_cols.push_back(std::move(col));
+
+            if (cp) { (*cp)("merge_is"); (*cp)("compute"); (*cp)("apply"); }
         } else {
+            // Legacy backends: separate parallel + serial apply.
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                std::mt19937 local_rng(seeds[tid]);
+                std::vector<std::pair<node_index, double>> valid;
+                std::vector<double> prefix;
+
+                #pragma omp for schedule(static)
+                for (size_t i = 0; i < n_is; ++i)
+                    G.merge_parallel_edges(is[i]);
+
+                #pragma omp for schedule(dynamic, 64) nowait
+                for (size_t k = 0; k < n_is; ++k)
+                    process_vertex(elim, G, is[k], local_cols[k], local_rng,
+                                   edge_buffers[tid], valid, prefix,
+                                   excess_buffers[tid]);
+            }
+            if (cp) { (*cp)("merge_is"); (*cp)("compute"); }
+
+            for (auto& col : local_cols)
+                factor_cols.push_back(std::move(col));
+
             for (auto& buf : edge_buffers)
                 for (auto [u, v, w] : buf)
                     G.add_edge(u, v, w);
@@ -191,8 +219,8 @@ void eliminate_set(const Eliminator& elim,
                     G.excess(v) += delta;
             for (auto u : is)
                 G.deactivate(u);
+            if (cp) (*cp)("apply");
         }
-        if (cp) (*cp)("apply");
     } else
     #endif
     {
@@ -202,6 +230,7 @@ void eliminate_set(const Eliminator& elim,
         std::vector<deferred_edge> vertex_edges;
         std::vector<std::pair<node_index, double>> excess_updates;
         for (size_t k = 0; k < n_is; ++k) {
+            G.merge_parallel_edges(is[k]);
             vertex_edges.clear();
             excess_updates.clear();
             process_vertex(elim, G, is[k], local_cols[k], rng,
@@ -213,7 +242,7 @@ void eliminate_set(const Eliminator& elim,
                 G.excess(v) += delta;
             G.deactivate(is[k]);
         }
-        if (cp) (*cp)("compute");
+        if (cp) { (*cp)("merge_is"); (*cp)("compute"); }
     }
 
     if (cp) cp->ascend();
@@ -262,15 +291,20 @@ void apply_vertex_order(std::vector<node_index>& active,
     }
 }
 
-// Sequential fallback: eliminate all remaining vertices one by one.
+// Eliminate remaining vertices after the main IS-elimination loop.
 // Used when IS fraction drops below threshold — avoids the O(|active|)
 // IS-finding scan when only a few vertices can be chosen anyway.
+//
+// (An earlier version tried parallel BK rounds on the residual, but the
+// per-round fork-join cost outweighed the gain on the large, high-degree
+// residuals BG hands us; serial peel was strictly faster.)
 template<typename Eliminator, typename Incidence>
 void eliminate_remaining(const Eliminator& elim,
                          graph<Incidence>& G,
-                         std::span<const node_index> active,
+                         std::vector<node_index>& active,
                          std::vector<factor_col>& factor_cols,
-                         std::mt19937& rng) {
+                         std::mt19937& rng,
+                         const factor_options& /*opts*/) {
     std::vector<std::pair<node_index, double>> valid;
     std::vector<double> prefix;
     std::vector<deferred_edge> edges;
@@ -289,6 +323,7 @@ void eliminate_remaining(const Eliminator& elim,
             G.excess(u) += delta;
         G.deactivate(v);
     }
+    active.clear();
 }
 
 } // namespace detail
@@ -364,7 +399,7 @@ factorization factorize_impl(const Eliminator& elim,
     // Eliminate any remaining vertices (0 or 1 after the while loop,
     // or all remaining when the IS-fraction fallback triggered above).
     if (!active.empty())
-        detail::eliminate_remaining(elim, work, active, factor_cols, rng);
+        detail::eliminate_remaining(elim, work, active, factor_cols, rng, opts);
     if (cp) (*cp)("elim_remaining");
 
     detail::build_csc(result, factor_cols, n, cp);
