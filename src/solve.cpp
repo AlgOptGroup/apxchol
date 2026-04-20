@@ -3,9 +3,20 @@
 
 namespace apxchol {
 
+namespace {
+// Eigen's parallel SpMV requires Eigen::initParallel() to be called
+// once per process before any threaded operation.  Calling it from a
+// function-local static keeps it lazy and thread-safe.
+inline void ensure_eigen_parallel() {
+    static const bool dummy = []{ Eigen::initParallel(); return true; }();
+    (void)dummy;
+}
+} // namespace
+
 solve_result solve(const Eigen::SparseMatrix<double>& L,
                    const Eigen::VectorXd& b,
                    const solve_options& opts) {
+    ensure_eigen_parallel();
     // Build preconditioner.
     apx_cholesky precond;
     solve_result res;
