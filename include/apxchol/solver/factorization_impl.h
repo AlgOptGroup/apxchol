@@ -283,6 +283,18 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<node_index> active(n);
     std::ranges::iota(active, node_index{0});
 
+    // Selectors with O(|sample|) per-round work (e.g. baumann_kyng) can
+    // keep chipping away even with a tiny IS — their cost does not scale
+    // with |active|, so the BG-style fallback to serial elimination is
+    // strictly worse (it loses parallelism in eliminate_set and produces
+    // worse fill-in).  Selectors with O(|active|) find_is (block_greedy,
+    // luby, rootset) genuinely benefit from the fallback once IS is small.
+    constexpr bool selector_is_sample_bounded = [] {
+        if constexpr (requires { ISSelector::has_custom_find_is; })
+            return ISSelector::has_custom_find_is;
+        return false;
+    }();
+
     while (active.size() > 1) {
         auto [is, avg_deg] = detail::find_independent_set(selector, work, active, opts, cp);
 
@@ -290,8 +302,10 @@ factorization factorize_impl(const Eliminator& elim,
 
         // If IS is too small, the IS-finding overhead exceeds the benefit
         // of batch elimination.  Fall back to sequential elimination of all
-        // remaining vertices (handled after the loop).
-        if (is.size() < active.size() * opts.min_is_fraction)
+        // remaining vertices (handled after the loop).  Skipped for
+        // sample-bounded selectors (see comment above).
+        if (!selector_is_sample_bounded &&
+            is.size() < active.size() * opts.min_is_fraction)
             break;
 
         detail::eliminate_set(elim, work, is, factor_cols, rng, opts, cp);
