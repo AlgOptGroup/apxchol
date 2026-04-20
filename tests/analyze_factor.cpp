@@ -317,6 +317,48 @@ int main(int argc, char* argv[]) {
             std::printf("is=%s  fwd_levels=%d  bck_levels=%d\n",
                         is_name(cli.is_select),
                         trsv.num_fwd_levels(), trsv.num_bck_levels());
+
+            // Derive per-level work distribution from L11 + the level structure
+            // is hard from outside; instead expose summary via a single warmup
+            // pass that times an empty-walk variant.  For now, print L stats:
+            {
+                Eigen::SparseMatrix<double> L11 = F.L.topLeftCorner(m, m);
+                L11.makeCompressed();
+                long long nnz = L11.nonZeros();
+                long long off_diag = nnz - m;
+                std::printf("L11: m=%lld nnz=%lld off_diag=%lld\n",
+                            (long long)m, nnz, off_diag);
+                // Column-length histogram.
+                std::vector<long long> col_len(m);
+                long long max_col = 0, sum_col = 0;
+                for (Eigen::Index j = 0; j < m; ++j) {
+                    long long c = L11.outerIndexPtr()[j+1] - L11.outerIndexPtr()[j] - 1;
+                    col_len[j] = c; sum_col += c; if (c > max_col) max_col = c;
+                }
+                std::sort(col_len.begin(), col_len.end());
+                std::printf("col_len: max=%lld p50=%lld p90=%lld p99=%lld mean=%.1f\n",
+                            max_col,
+                            col_len[m*50/100], col_len[m*90/100], col_len[m*99/100],
+                            (double)sum_col / m);
+            }
+
+            // Per-direction level work distribution.
+            for (bool fwd : {true, false}) {
+                std::vector<int> sizes;
+                std::vector<long long> work;
+                trsv.level_stats(fwd, sizes, work);
+                long long total_w = std::accumulate(work.begin(), work.end(), 0LL);
+                int max_sz = sizes.empty() ? 0 : *std::max_element(sizes.begin(), sizes.end());
+                long long max_w = work.empty() ? 0 : *std::max_element(work.begin(), work.end());
+                int big = 0;            // levels with size > kSpTRSVOMPThreshold
+                long long big_w = 0;
+                for (size_t l = 0; l < sizes.size(); ++l)
+                    if (sizes[l] > 1024) { ++big; big_w += work[l]; }
+                std::printf("%s_levels: count=%zu total_work=%lld max_sz=%d max_w=%lld "
+                            "big_levels=%d big_work_frac=%.3f\n",
+                            fwd ? "fwd" : "bck", sizes.size(), total_w, max_sz, max_w,
+                            big, total_w ? (double)big_w / total_w : 0.0);
+            }
             std::printf("\n%-7s %14s %14s %14s %14s\n",
                         "thr", "fwd_levelset", "fwd_syncfree",
                         "bck_levelset", "bck_syncfree");

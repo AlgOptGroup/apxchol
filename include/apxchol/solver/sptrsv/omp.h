@@ -168,13 +168,33 @@ public:
 
         for (const auto& level : fwd_levels_) {
             const index_t level_sz = static_cast<index_t>(level.size());
-            #pragma omp parallel for schedule(static) if(level_sz > kSpTRSVOMPThreshold)
-            for (index_t k = 0; k < level_sz; ++k) {
-                index_t i = level[k];
-                double sum = 0.0;
-                for (index_t p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
-                    sum += csr_vals_[p] * y_out[csr_col_idx_[p]];
-                y_out[i] = (y_out[i] - sum) / diag_[i];
+            if (level_sz <= kSpTRSVOMPThreshold) {
+                for (index_t k = 0; k < level_sz; ++k) {
+                    index_t i = level[k];
+                    if (k + 4 < level_sz) {
+                        index_t ip = level[k + 1];
+                        __builtin_prefetch(&csr_col_idx_[csr_row_ptr_[ip]]);
+                        __builtin_prefetch(&csr_vals_[csr_row_ptr_[ip]]);
+                    }
+                    double sum = 0.0;
+                    for (index_t p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
+                        sum += csr_vals_[p] * y_out[csr_col_idx_[p]];
+                    y_out[i] = (y_out[i] - sum) / diag_[i];
+                }
+            } else {
+                #pragma omp parallel for schedule(static)
+                for (index_t k = 0; k < level_sz; ++k) {
+                    index_t i = level[k];
+                    if (k + 4 < level_sz) {
+                        index_t ip = level[k + 1];
+                        __builtin_prefetch(&csr_col_idx_[csr_row_ptr_[ip]]);
+                        __builtin_prefetch(&csr_vals_[csr_row_ptr_[ip]]);
+                    }
+                    double sum = 0.0;
+                    for (index_t p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
+                        sum += csr_vals_[p] * y_out[csr_col_idx_[p]];
+                    y_out[i] = (y_out[i] - sum) / diag_[i];
+                }
             }
         }
     }
@@ -185,16 +205,42 @@ public:
         // Process backward levels from depth 0 (no dependencies) upward.
         for (const auto& level : bck_levels_) {
             const index_t level_sz = static_cast<index_t>(level.size());
-            #pragma omp parallel for schedule(static) if(level_sz > kSpTRSVOMPThreshold)
-            for (index_t k = 0; k < level_sz; ++k) {
-                index_t j = level[k];
-                double sum = 0.0;
-                // In L's CSC, column j has diagonal at index csc_col_ptr_[j]
-                // (row j), followed by off-diagonal rows k > j.
-                // Skip the diagonal entry and gather from k > j only.
-                for (index_t p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
-                    sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
-                y_out[j] = (y_out[j] - sum) / diag_[j];
+            // No `if` clause: the OMP parallel-region construct itself
+            // costs several µs per level even when the `if` is false; with
+            // thousands of small backward levels (typical for BG/luby/BK)
+            // that overhead dominated solve time on 1 thread.  We use the
+            // num_threads-clamp to fall back to serial for tiny levels
+            // without instantiating a new parallel region.
+            if (level_sz <= kSpTRSVOMPThreshold) {
+                for (index_t k = 0; k < level_sz; ++k) {
+                    index_t j = level[k];
+                    // Prefetch the next column's metadata + values to hide
+                    // memory latency on the consecutive walk.
+                    if (k + 4 < level_sz) {
+                        index_t jp = level[k + 4];
+                        __builtin_prefetch(&csc_col_ptr_[jp]);
+                        __builtin_prefetch(&csc_row_idx_[csc_col_ptr_[level[k + 1]]]);
+                        __builtin_prefetch(&csc_vals_[csc_col_ptr_[level[k + 1]]]);
+                    }
+                    double sum = 0.0;
+                    for (index_t p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
+                        sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
+                    y_out[j] = (y_out[j] - sum) / diag_[j];
+                }
+            } else {
+                #pragma omp parallel for schedule(static)
+                for (index_t k = 0; k < level_sz; ++k) {
+                    index_t j = level[k];
+                    if (k + 4 < level_sz) {
+                        index_t jp = level[k + 1];
+                        __builtin_prefetch(&csc_row_idx_[csc_col_ptr_[jp]]);
+                        __builtin_prefetch(&csc_vals_[csc_col_ptr_[jp]]);
+                    }
+                    double sum = 0.0;
+                    for (index_t p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
+                        sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
+                    y_out[j] = (y_out[j] - sum) / diag_[j];
+                }
             }
         }
     }
@@ -289,6 +335,24 @@ public:
 
     int num_fwd_levels() const { return static_cast<int>(fwd_levels_.size()); }
     int num_bck_levels() const { return static_cast<int>(bck_levels_.size()); }
+
+    // Diagnostics: per-level row/col counts and per-level off-diagonal nnz.
+    void level_stats(bool fwd, std::vector<int>& sizes, std::vector<long long>& work) const {
+        const auto& levels = fwd ? fwd_levels_ : bck_levels_;
+        sizes.clear(); work.clear();
+        sizes.reserve(levels.size()); work.reserve(levels.size());
+        for (const auto& lvl : levels) {
+            long long w = 0;
+            for (index_t v : lvl) {
+                if (fwd)
+                    w += (csr_row_ptr_[v + 1] - csr_row_ptr_[v] - 1);
+                else
+                    w += (csc_col_ptr_[v + 1] - csc_col_ptr_[v] - 1);
+            }
+            sizes.push_back(static_cast<int>(lvl.size()));
+            work.push_back(w);
+        }
+    }
     bool ready() const { return ready_; }
 
 private:
