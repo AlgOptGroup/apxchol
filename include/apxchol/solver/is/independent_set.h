@@ -76,10 +76,26 @@ double prune_active_edges(graph<Incidence>& G,
     // With static scheduling a single thread getting the few high-degree
     // vertices stalls the rest; dynamic with chunk=256 amortizes the
     // scheduling overhead while keeping load balanced.
+    //
+    // If forward_star + filter_append, set up the parallel-append arena so
+    // each thread's filter() allocates survivor slots via atomic-reserve
+    // instead of racing on push_back.
+    if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
+        if (G.adj_filter_append_enabled()
+            && active.size() > opts.omp_threshold) {
+            G.begin_parallel_append_adj();
+        }
+    }
     #pragma omp parallel for reduction(+:total_degree) schedule(dynamic, 256) if(active.size() > opts.omp_threshold)
     for (size_t i = 0; i < active.size(); ++i) {
         degrees[i] = G.prune_and_degree(active[i]);
         total_degree += degrees[i];
+    }
+    if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
+        if (G.adj_filter_append_enabled()
+            && active.size() > opts.omp_threshold) {
+            G.end_parallel_append_adj();
+        }
     }
     return total_degree / double(active.size());
 }

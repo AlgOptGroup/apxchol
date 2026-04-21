@@ -121,6 +121,25 @@ public:
         requires std::same_as<I, forward_star_incidence>
     void set_adj_filter_append(bool on) { adj_.set_filter_append(on); }
 
+    template<typename I = Incidence>
+        requires std::same_as<I, forward_star_incidence>
+    bool adj_filter_append_enabled() const { return adj_.filter_append(); }
+
+    /// Pre-size the adjacency pool for a parallel-append phase.  Every
+    /// filter() call inside the parallel region will CAS-reserve its
+    /// survivor slot via __atomic_fetch_add, avoiding push_back races.
+    /// Must be paired with end_parallel_append_adj() after the region.
+    /// Forward_star + filter_append mode only.
+    template<typename I = Incidence>
+        requires std::same_as<I, forward_star_incidence>
+    void begin_parallel_append_adj() {
+        adj_.begin_parallel_append(adj_.live_count());
+    }
+
+    template<typename I = Incidence>
+        requires std::same_as<I, forward_star_incidence>
+    void end_parallel_append_adj() { adj_.end_parallel_append(); }
+
     /// Atomically add `delta` to excess[v]; safe under data races on v.
     void atomic_add_excess(node_index v, double delta) {
         #pragma omp atomic

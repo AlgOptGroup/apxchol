@@ -88,11 +88,13 @@ struct forward_star {
     ///    dead (reclaimed by next compact()).  Trades pool growth for
     ///    immediate chain locality.
     void filter(index_t v, auto&& pred, auto&& on_keep) {
-        // Append mode is serial-only: it grows nodes_ via push_back, which
-        // races with concurrent filter() calls on the shared pool.  Inside
-        // a parallel region, fall back to the in-place re-link path.
+        // Append mode inside a parallel region requires a caller-provided
+        // begin_parallel_append() to pre-size the pool and expose an atomic
+        // free-slot counter.  Without that we can't use push_back safely,
+        // so fall back to in-place re-link.
 #ifdef _OPENMP
-        bool can_append = filter_append_ && !omp_in_parallel();
+        bool can_append = filter_append_ &&
+                          (!omp_in_parallel() || parallel_append_active_);
 #else
         bool can_append = filter_append_;
 #endif
@@ -118,6 +120,40 @@ struct forward_star {
     void set_filter_append(bool on) { filter_append_ = on; }
     bool filter_append() const { return filter_append_; }
 
+    // ── Parallel-safe append ─────────────────────────────────
+    //
+    // begin_parallel_append(ub) resizes the pool by `ub` (upper bound on
+    // survivors across all chains) and installs an atomic free-slot
+    // pointer.  While active, filter() in append mode allocates slots via
+    // __atomic_fetch_add instead of push_back -- parallel-safe, no
+    // reallocation races.  Caller MUST invoke end_parallel_append() after
+    // the parallel region to shrink the pool back to the actual tail.
+    //
+    // Total live count across all chains is the exact upper bound; use
+    // live_count() (or count_live() internally) to compute it cheaply.
+    void begin_parallel_append(index_t upper_bound) {
+        parallel_tail_ = static_cast<index_t>(nodes_.size());
+        nodes_.resize(parallel_tail_ + upper_bound);
+        parallel_append_active_ = true;
+    }
+
+    void end_parallel_append() {
+        if (!parallel_append_active_) return;
+        nodes_.resize(parallel_tail_);
+        parallel_append_active_ = false;
+    }
+
+    /// Count of nodes reachable from any head[v] -- exact upper bound for
+    /// begin_parallel_append.  O(live edges) serial, but trivially
+    /// parallelisable by the caller if needed.
+    index_t live_count() const {
+        std::size_t kept = 0;
+        for (index_t v = 0; v < static_cast<index_t>(head_.size()); ++v)
+            for (index_t cur = head_[v]; cur != npos; cur = nodes_[cur].next)
+                ++kept;
+        return static_cast<index_t>(kept);
+    }
+
   private:
     void filter_append_impl(index_t v, auto&& pred, auto&& on_keep) {
         // Walk old chain, snapshot head, sever it, then re-emit survivors
@@ -133,8 +169,15 @@ struct forward_star {
             T data = nodes_[cur].data;
             if (pred(data)) {
                 on_keep(data);
-                nodes_.push_back({data, npos});
-                index_t slot = static_cast<index_t>(nodes_.size()) - 1;
+                index_t slot;
+                if (parallel_append_active_) {
+                    slot = __atomic_fetch_add(&parallel_tail_, 1,
+                                              __ATOMIC_RELAXED);
+                    nodes_[slot] = {data, npos};
+                } else {
+                    nodes_.push_back({data, npos});
+                    slot = static_cast<index_t>(nodes_.size()) - 1;
+                }
                 if (new_head == npos) new_head = slot;
                 else nodes_[new_tail].next = slot;
                 new_tail = slot;
@@ -232,6 +275,8 @@ private:
     std::vector<index_t> head_;
     std::vector<node> nodes_;
     bool filter_append_ = false;
+    bool parallel_append_active_ = false;
+    index_t parallel_tail_ = 0;  // atomic when parallel_append_active_
 };
 
 } // namespace apxchol

@@ -67,10 +67,11 @@ struct factor_options {
     // the pool with each chain laid out contiguously.  Eliminates the
     // pointer-chase fragmentation that accumulates over many filter() calls.
     //
-    // 0.0 disables; default 0.5 = compact when only 50% of slots are live.
-    // (Empirically 0.5–0.75 wins ~25-30% setup time on Yves IPM matrices.)
+    // 0.0 disables; default 0.75 = compact when only 75% of slots are live.
+    // (Empirically 0.75 wins ~25-30% setup time on Yves IPM matrices; going
+    //  higher pays too much compaction overhead for too little memory won.)
     // forward_star storage only; vec/small_vec ignore this option.
-    double fs_compact_threshold = 0.5;
+    double fs_compact_threshold = 0.75;
 
     // forward_star: when true, filter() writes survivors contiguously at the
     // end of the node pool instead of doing in-place re-link.  Trades pool
