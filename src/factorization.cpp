@@ -144,6 +144,10 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
         auto G = make_graph<graph<small_vec_incidence>>(L);
         return factorize_with_strategy(G, opts, cp);
     }
+    case graph_storage::bstr: {
+        auto G = make_graph<graph<bstr_incidence>>(L);
+        return factorize_with_strategy(G, opts, cp);
+    }
     default: {
         auto G = make_graph<graph<vec_incidence>>(L);
         return factorize_with_strategy(G, opts, cp);

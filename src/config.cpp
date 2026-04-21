@@ -12,6 +12,7 @@ static const std::map<std::string, graph_storage> graph_storage_map = {
     {"vec",          graph_storage::vec},
     {"forward_star", graph_storage::forward_star},
     {"small_vec",    graph_storage::small_vec},
+    {"bstr",         graph_storage::bstr},
 };
 
 static const std::map<std::string, is_strategy> is_strategy_map = {
@@ -93,9 +94,9 @@ run_config parse_args(int argc, char* argv[]) {
 
     std::string graph_storage_str = "vec";
     app.add_option("--graph-storage", graph_storage_str,
-                   "Graph storage backend (vec, forward_star, small_vec)")
+                   "Graph storage backend (vec, forward_star, small_vec, bstr)")
         ->capture_default_str()
-        ->check(CLI::IsMember({"vec", "forward_star", "small_vec"}));
+        ->check(CLI::IsMember({"vec", "forward_star", "small_vec", "bstr"}));
 
     std::string is_strategy_str = "block_greedy";
     app.add_option("--is", is_strategy_str,

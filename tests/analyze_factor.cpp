@@ -53,6 +53,7 @@ graph_storage parse_storage(const std::string& s) {
     if (s == "vec") return graph_storage::vec;
     if (s == "forward_star") return graph_storage::forward_star;
     if (s == "small_vec") return graph_storage::small_vec;
+    if (s == "bstr") return graph_storage::bstr;
     throw std::invalid_argument("unknown graph storage: " + s);
 }
 
@@ -229,6 +230,7 @@ const char* storage_name(graph_storage s) {
     case graph_storage::vec: return "vec";
     case graph_storage::forward_star: return "forward_star";
     case graph_storage::small_vec: return "small_vec";
+    case graph_storage::bstr: return "bstr";
     default: return "unknown";
     }
 }
