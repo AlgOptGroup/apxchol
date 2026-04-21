@@ -459,6 +459,17 @@ factorization factorize_impl(const Eliminator& elim,
                                            work.memory_bytes());
 
         std::erase_if(active, [&](node_index v) { return !work.is_active(v); });
+
+        // Auto-compact forward_star adjacency pool when fragmentation
+        // crosses the configured threshold.  Avoids unbounded pointer-
+        // chase as filter() leaves orphan nodes in nodes_.
+        if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
+            if (opts.fs_compact_threshold > 0.0 &&
+                work.adj_live_fraction() < opts.fs_compact_threshold) {
+                work.compact_adj();
+                if (cp) (*cp)("compact_adj");
+            }
+        }
     }
 
     // Eliminate any remaining vertices (0 or 1 after the while loop,

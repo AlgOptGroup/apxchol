@@ -92,6 +92,53 @@ struct forward_star {
         filter(v, pred, [](const T&) {});
     }
 
+    /// Rebuild the entire pool so each vertex's chain is laid out contiguously
+    /// in nodes_ in adjacency order.  After many filter() calls, chains
+    /// fragment: nodes_[head_[v]].next can jump arbitrarily through the pool,
+    /// killing prefetch.  compact() fixes this by walking each chain once
+    /// and re-emitting survivors into a fresh contiguous buffer.
+    ///
+    /// Cost: O(total_surviving_edges).  Reclaims memory from filtered-out
+    /// nodes — pool size after compact() == surviving edges + 1 sentinel.
+    void compact() {
+        // Count survivors first to pre-size the new pool exactly.
+        std::size_t kept = 1;  // sentinel
+        for (index_t v = 0; v < static_cast<index_t>(head_.size()); ++v)
+            for (index_t cur = head_[v]; cur != npos; cur = nodes_[cur].next)
+                ++kept;
+
+        std::vector<node> new_nodes;
+        new_nodes.reserve(kept);
+        new_nodes.resize(1);  // sentinel at index 0 (== npos)
+        std::vector<index_t> new_head(head_.size(), npos);
+
+        for (index_t v = 0; v < static_cast<index_t>(head_.size()); ++v) {
+            index_t prev = npos;
+            for (index_t cur = head_[v]; cur != npos; cur = nodes_[cur].next) {
+                new_nodes.push_back({nodes_[cur].data, npos});
+                index_t new_idx = static_cast<index_t>(new_nodes.size()) - 1;
+                if (prev == npos)
+                    new_head[v] = new_idx;
+                else
+                    new_nodes[prev].next = new_idx;
+                prev = new_idx;
+            }
+        }
+        head_ = std::move(new_head);
+        nodes_ = std::move(new_nodes);
+    }
+
+    /// Pool occupancy ratio — fraction of pool slots actually reachable
+    /// from a head[].  After many filter() calls this drops.  Use as a
+    /// trigger heuristic for compact().
+    double live_fraction() const {
+        std::size_t kept = 0;
+        for (index_t v = 0; v < static_cast<index_t>(head_.size()); ++v)
+            for (index_t cur = head_[v]; cur != npos; cur = nodes_[cur].next)
+                ++kept;
+        return nodes_.size() > 1 ? double(kept) / double(nodes_.size() - 1) : 1.0;
+    }
+
     std::size_t size() const { return head_.size(); }
 
     /// Approximate memory usage in bytes (heap only).

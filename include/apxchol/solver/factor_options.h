@@ -62,6 +62,15 @@ struct factor_options {
     // - bk_serial: sample √|active| vertices, pivot on the lowest-degree
     //   sample.  Cheap heuristic that approximates min_degree.
     residual_peel_strategy residual_peel = residual_peel_strategy::natural;
+    // forward_star adjacency-pool compaction trigger.  After every round,
+    // if the live fraction of nodes_ falls below this threshold, rebuild
+    // the pool with each chain laid out contiguously.  Eliminates the
+    // pointer-chase fragmentation that accumulates over many filter() calls.
+    //
+    // 0.0 disables; default 0.5 = compact when only 50% of slots are live.
+    // (Empirically 0.5–0.75 wins ~25-30% setup time on Yves IPM matrices.)
+    // forward_star storage only; vec/small_vec ignore this option.
+    double fs_compact_threshold = 0.5;
 };
 
 } // namespace apxchol

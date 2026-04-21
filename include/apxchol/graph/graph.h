@@ -100,6 +100,19 @@ public:
         adj_.push_atomic(v, a_slot, e_slot);
     }
 
+    /// Compact adjacency pool (forward_star only).  Walks each chain,
+    /// re-emits survivors into a fresh contiguous buffer.  Restores
+    /// cache-friendly traversal after long sequences of filter() calls
+    /// have fragmented the chains.
+    template<typename I = Incidence>
+        requires std::same_as<I, forward_star_incidence>
+    void compact_adj() { adj_.compact(); }
+
+    /// Pool occupancy ratio (forward_star only).  Used as auto-compact trigger.
+    template<typename I = Incidence>
+        requires std::same_as<I, forward_star_incidence>
+    double adj_live_fraction() const { return adj_.live_fraction(); }
+
     /// Atomically add `delta` to excess[v]; safe under data races on v.
     void atomic_add_excess(node_index v, double delta) {
         #pragma omp atomic
