@@ -15,6 +15,9 @@
 #include <span>
 #include <utility>
 #include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace apxchol {
 
@@ -74,10 +77,29 @@ struct forward_star {
             /*weak=*/false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
     }
 
-    /// Remove chain elements where pred(data) is false, by relinking.
+    /// Remove chain elements where pred(data) is false.
     /// Calls on_keep(data) for each surviving element.
-    /// O(chain length), no allocation, no pool growth.
+    ///
+    /// Two implementations selected by `set_filter_append`:
+    ///  * in-place (default): re-link around dead nodes.  O(L), no allocation.
+    ///    Survivors stay where they are -> chain may fragment after many calls.
+    ///  * append: walk the chain, push each survivor at the end of nodes_ as a
+    ///    fresh contiguous run, then point head_[v] at it.  Old slots become
+    ///    dead (reclaimed by next compact()).  Trades pool growth for
+    ///    immediate chain locality.
     void filter(index_t v, auto&& pred, auto&& on_keep) {
+        // Append mode is serial-only: it grows nodes_ via push_back, which
+        // races with concurrent filter() calls on the shared pool.  Inside
+        // a parallel region, fall back to the in-place re-link path.
+#ifdef _OPENMP
+        bool can_append = filter_append_ && !omp_in_parallel();
+#else
+        bool can_append = filter_append_;
+#endif
+        if (can_append) {
+            filter_append_impl(v, pred, on_keep);
+            return;
+        }
         index_t* prev = &head_[v];
         while (*prev != npos) {
             if (pred(nodes_[*prev].data)) {
@@ -91,6 +113,38 @@ struct forward_star {
     void filter(index_t v, auto&& pred) {
         filter(v, pred, [](const T&) {});
     }
+
+    /// Switch filter() to append-on-survive mode (see filter() docs).
+    void set_filter_append(bool on) { filter_append_ = on; }
+    bool filter_append() const { return filter_append_; }
+
+  private:
+    void filter_append_impl(index_t v, auto&& pred, auto&& on_keep) {
+        // Walk old chain, snapshot head, sever it, then re-emit survivors
+        // contiguously at the end of nodes_.
+        index_t cur = head_[v];
+        head_[v] = npos;
+        index_t new_head = npos;
+        index_t new_tail = npos;
+        while (cur != npos) {
+            index_t nxt = nodes_[cur].next;
+            // Snapshot the data before push_back may invalidate references
+            // into nodes_ via reallocation.
+            T data = nodes_[cur].data;
+            if (pred(data)) {
+                on_keep(data);
+                nodes_.push_back({data, npos});
+                index_t slot = static_cast<index_t>(nodes_.size()) - 1;
+                if (new_head == npos) new_head = slot;
+                else nodes_[new_tail].next = slot;
+                new_tail = slot;
+            }
+            cur = nxt;
+        }
+        head_[v] = new_head;
+    }
+
+  public:
 
     /// Rebuild the entire pool so each vertex's chain is laid out contiguously
     /// in nodes_ in adjacency order.  After many filter() calls, chains
@@ -177,6 +231,7 @@ struct forward_star {
 private:
     std::vector<index_t> head_;
     std::vector<node> nodes_;
+    bool filter_append_ = false;
 };
 
 } // namespace apxchol

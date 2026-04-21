@@ -407,6 +407,10 @@ factorization factorize_impl(const Eliminator& elim,
     factorization result;
     graph<Incidence> work(G);
 
+    if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
+        if (opts.fs_filter_append) work.set_adj_filter_append(true);
+    }
+
     // Detect SDDM: any vertex with positive excess means the matrix
     // is positive definite (not just semidefinite like a Laplacian).
     // Note: make_graph already filters out FP noise (excess < diag * 1e-12),

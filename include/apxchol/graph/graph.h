@@ -113,6 +113,14 @@ public:
         requires std::same_as<I, forward_star_incidence>
     double adj_live_fraction() const { return adj_.live_fraction(); }
 
+    /// Switch forward_star adjacency to append-on-filter mode.  When on,
+    /// every filter() call writes survivors contiguously at the end of the
+    /// pool (instead of in-place re-link).  Pool grows; reclaim with
+    /// compact_adj() periodically.  Forward_star only.
+    template<typename I = Incidence>
+        requires std::same_as<I, forward_star_incidence>
+    void set_adj_filter_append(bool on) { adj_.set_filter_append(on); }
+
     /// Atomically add `delta` to excess[v]; safe under data races on v.
     void atomic_add_excess(node_index v, double delta) {
         #pragma omp atomic

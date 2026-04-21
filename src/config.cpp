@@ -29,6 +29,14 @@ static const std::map<std::string, elimination_strategy> elimination_strategy_ma
     {"clique",  elimination_strategy::clique},
 };
 
+static const std::map<std::string, vertex_order> vertex_order_map = {
+    {"natural",     vertex_order::natural},
+    {"random",      vertex_order::random},
+    {"random_hash", vertex_order::random_hash},
+    {"degree_asc",  vertex_order::degree_asc},
+    {"degree_desc", vertex_order::degree_desc},
+};
+
 static void setup_logging(bool quiet, bool verbose) {
     if (verbose) {
         spdlog::set_level(spdlog::level::debug);
@@ -110,6 +118,20 @@ run_config parse_args(int argc, char* argv[]) {
         ->capture_default_str()
         ->check(CLI::IsMember({"tree", "star", "clique"}));
 
+    std::string order_str = "natural";
+    app.add_option("--order", order_str,
+                   "Initial vertex ordering (natural, random, random_hash, degree_asc, degree_desc)")
+        ->capture_default_str()
+        ->check(CLI::IsMember({"natural", "random", "random_hash", "degree_asc", "degree_desc"}));
+
+    app.add_option("--fs-compact", cfg.solve_opts.factor_opts.fs_compact_threshold,
+                   "forward_star auto-compact threshold (live_fraction; 0=off)")
+        ->capture_default_str();
+
+    app.add_flag("--fs-filter-append,!--no-fs-filter-append",
+                 cfg.solve_opts.factor_opts.fs_filter_append,
+                 "forward_star: append survivors at pool end on filter (off by default)");
+
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");
     auto* v_flag = app.add_flag("-v,--verbose", verbose, "Verbose output");
@@ -127,6 +149,7 @@ run_config parse_args(int argc, char* argv[]) {
     cfg.solve_opts.storage = graph_storage_map.at(graph_storage_str);
     cfg.solve_opts.factor_opts.is_select = is_strategy_map.at(is_strategy_str);
     cfg.solve_opts.factor_opts.elim = elimination_strategy_map.at(elim_strategy_str);
+    cfg.solve_opts.factor_opts.order = vertex_order_map.at(order_str);
 
     setup_logging(quiet, verbose);
     return cfg;

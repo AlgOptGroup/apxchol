@@ -45,6 +45,7 @@ struct cli_options {
     long long parallel_residual_threshold = -1;  // <0 = leave default (disabled)
     apxchol::residual_peel_strategy residual_peel = apxchol::residual_peel_strategy::natural;
     double fs_compact_threshold = -1.0;  // <0 = leave default
+    int fs_filter_append = -1;  // <0 = leave default; 0 off; 1 on
 };
 
 [[noreturn]] void usage(const char* argv0) {
@@ -166,6 +167,8 @@ cli_options parse_args(int argc, char* argv[]) {
             else { std::fprintf(stderr, "unknown --residual-peel: %s\n", s.c_str()); usage(argv[0]); }
         } else if (arg == "--fs-compact" && i + 1 < argc) {
             opts.fs_compact_threshold = std::atof(argv[++i]);
+        } else if (arg == "--fs-filter-append" && i + 1 < argc) {
+            opts.fs_filter_append = std::atoi(argv[++i]) ? 1 : 0;
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
         } else {
@@ -327,6 +330,8 @@ int main(int argc, char* argv[]) {
         opts.residual_peel = cli.residual_peel;
         if (cli.fs_compact_threshold >= 0.0)
             opts.fs_compact_threshold = cli.fs_compact_threshold;
+        if (cli.fs_filter_append >= 0)
+            opts.fs_filter_append = (cli.fs_filter_append != 0);
 
         // ── Thread scaling sweep mode ────────────────────────
         if (cli.sweep_threads) {

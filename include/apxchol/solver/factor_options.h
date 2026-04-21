@@ -71,6 +71,12 @@ struct factor_options {
     // (Empirically 0.5–0.75 wins ~25-30% setup time on Yves IPM matrices.)
     // forward_star storage only; vec/small_vec ignore this option.
     double fs_compact_threshold = 0.5;
+
+    // forward_star: when true, filter() writes survivors contiguously at the
+    // end of the node pool instead of doing in-place re-link.  Trades pool
+    // growth (reclaimed by compact_adj()) for per-chain locality without
+    // waiting for a global compact pass.  forward_star only.
+    bool fs_filter_append = false;
 };
 
 } // namespace apxchol
