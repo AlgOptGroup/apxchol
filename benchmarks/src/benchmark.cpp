@@ -311,7 +311,7 @@ static BenchResult run_apxchol_v1(
 
     auto res = apxchol::solve(L, b,
         {.tol = tol, .max_iter = maxiter,
-         .storage = apxchol::graph_storage::forward_star,
+         .storage = apxchol::graph_storage::vec,
          .factor_opts = {.seed = 42, .is_select = is, .elim = elim, .order = order}});
 
     r.setup_time = res.timings.total("setup");
