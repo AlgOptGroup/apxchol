@@ -2,6 +2,7 @@
 /// Configurable options for the approximate Cholesky factorization.
 
 #include <cstddef>
+#include <limits>
 
 namespace apxchol {
 
@@ -32,6 +33,18 @@ struct factor_options {
     elimination_strategy elim = elimination_strategy::tree;  // Elimination strategy (runtime dispatch)
     vertex_order order = vertex_order::natural;          // Initial active-list ordering
     double bk_sampling_constant = 0.3;  // BK: sample prob = 1/(c·d_max); lower c → larger IS
+
+    // When the main IS-finding loop bails out (IS < min_is_fraction · active),
+    // optionally parallelize the residual peel by switching to BK rounds until
+    // active shrinks below this threshold, then serial peel the tail.
+    //
+    // Default SIZE_MAX = disabled (always serial peel).  Empirically the
+    // serial peel wins on the dense, high-degree residuals BG produces:
+    // BK rounds on the residual eliminate only ~100 vertices each, so the
+    // 100s of fork-join overheads add up to more than the serial peel cost.
+    // Set to a small value (e.g. 256) to enable for graphs with low-degree
+    // or near-IS-shaped residuals.
+    size_t parallel_residual_threshold = std::numeric_limits<size_t>::max();
 };
 
 } // namespace apxchol

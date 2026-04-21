@@ -16,7 +16,10 @@
 
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/factorization.h"
+#include "apxchol/solver/factorization_impl.h"
 #include "apxchol/solver/sptrsv/omp.h"
+#include "apxchol/graph/incidence_list.h"
+#include "apxchol/graph/conversions.h"
 
 namespace {
 
@@ -38,6 +41,8 @@ struct cli_options {
     bool profile = false;
     bool bench_trsv = false;
     double min_is_frac = 0.05;
+    int sso_cap = -1;  // when >=0, override storage with small_vec_incidence_n<sso_cap>
+    long long parallel_residual_threshold = -1;  // <0 = leave default (disabled)
 };
 
 [[noreturn]] void usage(const char* argv0) {
@@ -71,6 +76,36 @@ elimination_strategy parse_elimination(const std::string& s) {
     if (s == "star") return elimination_strategy::star;
     if (s == "clique") return elimination_strategy::clique;
     throw std::invalid_argument("unknown elimination strategy: " + s);
+}
+
+// Runtime dispatch over a fixed set of SSO capacities for
+// small_vec_incidence_n<N>.  Each case instantiates the full
+// factorize_with_strategy<small_vec_incidence_n<N>> tree.
+factorization factorize_with_sso(const Eigen::SparseMatrix<double>& A,
+                                  int sso,
+                                  const factor_options& opts,
+                                  apxchol::checkpoint* cp = nullptr) {
+    auto run = [&](auto N_const) {
+        constexpr std::size_t N = decltype(N_const)::value;
+        using Inc = apxchol::small_vec_incidence_n<N>;
+        auto G = apxchol::make_graph<apxchol::graph<Inc>>(A);
+        return apxchol::factorize_with_strategy(G, opts, cp);
+    };
+    switch (sso) {
+        case 0:  return run(std::integral_constant<std::size_t, 0>{});
+        case 2:  return run(std::integral_constant<std::size_t, 2>{});
+        case 4:  return run(std::integral_constant<std::size_t, 4>{});
+        case 8:  return run(std::integral_constant<std::size_t, 8>{});
+        case 12: return run(std::integral_constant<std::size_t, 12>{});
+        case 16: return run(std::integral_constant<std::size_t, 16>{});
+        case 24: return run(std::integral_constant<std::size_t, 24>{});
+        case 32: return run(std::integral_constant<std::size_t, 32>{});
+        case 48: return run(std::integral_constant<std::size_t, 48>{});
+        case 64: return run(std::integral_constant<std::size_t, 64>{});
+        default:
+            throw std::invalid_argument(
+                "--sso-cap must be one of 0,2,4,8,12,16,24,32,48,64");
+    }
 }
 
 vertex_order parse_order(const std::string& s) {
@@ -116,6 +151,11 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.bench_trsv = true;
         } else if (arg == "--min-is-frac" && i + 1 < argc) {
             opts.min_is_frac = std::atof(argv[++i]);
+        } else if (arg == "--sso-cap" && i + 1 < argc) {
+            opts.sso_cap = std::atoi(argv[++i]);
+            opts.storage = graph_storage::small_vec;
+        } else if (arg == "--parallel-residual-threshold" && i + 1 < argc) {
+            opts.parallel_residual_threshold = std::atoll(argv[++i]);
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
         } else {
@@ -272,6 +312,8 @@ int main(int argc, char* argv[]) {
         opts.elim = cli.elimination;
         opts.order = cli.order;
         opts.min_is_fraction = cli.min_is_frac;
+        if (cli.parallel_residual_threshold >= 0)
+            opts.parallel_residual_threshold = static_cast<size_t>(cli.parallel_residual_threshold);
 
         // ── Thread scaling sweep mode ────────────────────────
         if (cli.sweep_threads) {
@@ -293,7 +335,7 @@ int main(int argc, char* argv[]) {
                 omp_set_num_threads(t);
 #endif
                 apxchol::checkpoint cp;
-                auto F = apxchol::factorize(A, cli.storage, opts, &cp);
+                auto F = (cli.sso_cap >= 0 ? factorize_with_sso(A, cli.sso_cap, opts, &cp) : apxchol::factorize(A, cli.storage, opts, &cp));
                 double find_is_ms  = cp.total("setup.find_is")           * 1000;
                 double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;
                 double compute_ms  = cp.total("setup.eliminate.compute") * 1000;
@@ -317,7 +359,7 @@ int main(int argc, char* argv[]) {
                         storage_name(cli.storage), is_name(cli.is_select),
                         elimination_name(cli.elimination));
             apxchol::checkpoint cp;
-            auto F = apxchol::factorize(A, cli.storage, opts, &cp);
+            auto F = (cli.sso_cap >= 0 ? factorize_with_sso(A, cli.sso_cap, opts, &cp) : apxchol::factorize(A, cli.storage, opts, &cp));
             std::cout << cp.report() << '\n';
             std::printf("rounds=%zu nnz(L)=%lld\n",
                         F.rounds.size(),
@@ -328,7 +370,7 @@ int main(int argc, char* argv[]) {
         // ── Triangular-solver microbenchmark ─────────────────
         if (cli.bench_trsv) {
             using Clock = std::chrono::high_resolution_clock;
-            auto F = apxchol::factorize(A, cli.storage, opts);
+            auto F = (cli.sso_cap >= 0 ? factorize_with_sso(A, cli.sso_cap, opts) : apxchol::factorize(A, cli.storage, opts));
             const Eigen::Index m = F.sddm ? A.rows() : A.rows() - 1;
             apxchol::omp_sptrsv trsv;
             trsv.setup(F.L, m);
@@ -419,7 +461,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        factorization F = apxchol::factorize(A, cli.storage, opts);
+        factorization F = (cli.sso_cap >= 0 ? factorize_with_sso(A, cli.sso_cap, opts) : apxchol::factorize(A, cli.storage, opts));
         const index_t m = static_cast<index_t>(F.sddm ? A.rows() : A.rows() - 1);
         Eigen::SparseMatrix<double> L11 = F.L.topLeftCorner(m, m);
         L11.makeCompressed();

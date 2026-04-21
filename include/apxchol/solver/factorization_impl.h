@@ -398,6 +398,26 @@ factorization factorize_impl(const Eliminator& elim,
 
     // Eliminate any remaining vertices (0 or 1 after the while loop,
     // or all remaining when the IS-fraction fallback triggered above).
+    //
+    // Parallel residual peel: when the main loop bailed with a large
+    // residual, switch to BK rounds.  BK is sample-bounded so it does
+    // not hit the same fallback, and each round eliminates a large
+    // batch in parallel via the same eliminate_set machinery — far
+    // cheaper than the serial process_vertex peel for high-degree
+    // residuals (~30k vertices, avg deg ~200 on Yves IPM matrices).
+    if (active.size() > opts.parallel_residual_threshold) {
+        baumann_kyng_is bk_selector;
+        while (active.size() > opts.parallel_residual_threshold) {
+            auto [bk_is, bk_avg_deg] = detail::find_independent_set(
+                bk_selector, work, active, opts, cp);
+            if (bk_is.empty()) break;
+            result.rounds.push_back({active.size(), bk_is.size(), bk_avg_deg});
+            detail::eliminate_set(elim, work, bk_is, factor_cols, rng, opts, cp);
+            result.peak_graph_bytes = std::max(result.peak_graph_bytes,
+                                               work.memory_bytes());
+            std::erase_if(active, [&](node_index v) { return !work.is_active(v); });
+        }
+    }
     if (!active.empty())
         detail::eliminate_remaining(elim, work, active, factor_cols, rng, opts);
     if (cp) (*cp)("elim_remaining");
