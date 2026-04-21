@@ -304,13 +304,14 @@ void eliminate_remaining(const Eliminator& elim,
                          std::vector<node_index>& active,
                          std::vector<factor_col>& factor_cols,
                          std::mt19937& rng,
-                         const factor_options& /*opts*/) {
+                         const factor_options& opts) {
     std::vector<std::pair<node_index, double>> valid;
     std::vector<double> prefix;
     std::vector<deferred_edge> edges;
     std::vector<std::pair<node_index, double>> excess_updates;
     factor_col col;
-    for (auto v : active) {
+
+    auto peel_one = [&](node_index v) {
         G.merge_parallel_edges(v);
         edges.clear();
         excess_updates.clear();
@@ -322,6 +323,70 @@ void eliminate_remaining(const Eliminator& elim,
         for (auto [u, delta] : excess_updates)
             G.excess(u) += delta;
         G.deactivate(v);
+    };
+
+    if (opts.residual_peel == residual_peel_strategy::min_degree) {
+        // Greedy min-degree using a binary heap with lazy revalidation.
+        // Initial pass: compute degree for every active vertex once.
+        // Each pop revalidates by recomputing degree via prune_and_degree;
+        // if the stored degree no longer matches the live degree (a neighbour
+        // was eliminated or a clique edge raised it), re-push with the fresh
+        // value and continue popping.  Amortised cost: O((|active| + Δ) log)
+        // where Δ is the total degree growth caused by clique fill-in.
+        using entry = std::pair<index_t, node_index>;  // (degree, vertex)
+        std::vector<entry> heap;
+        heap.reserve(active.size());
+        for (auto v : active) {
+            if (!G.is_active(v)) continue;
+            heap.emplace_back(G.prune_and_degree(v), v);
+        }
+        std::make_heap(heap.begin(), heap.end(), std::greater<entry>{});
+
+        while (!heap.empty()) {
+            std::pop_heap(heap.begin(), heap.end(), std::greater<entry>{});
+            auto [stored_d, v] = heap.back();
+            heap.pop_back();
+            if (!G.is_active(v)) continue;
+            index_t cur_d = G.prune_and_degree(v);
+            if (cur_d != stored_d) {
+                heap.emplace_back(cur_d, v);
+                std::push_heap(heap.begin(), heap.end(), std::greater<entry>{});
+                continue;
+            }
+            peel_one(v);
+        }
+        active.clear();
+    } else if (opts.residual_peel == residual_peel_strategy::bk_serial) {
+        // BK-style sampling: pick ~√|active| candidates, peel min-degree one.
+        std::uniform_int_distribution<size_t> pick(0, 0);
+        while (!active.empty()) {
+            // Compact dead entries lazily.
+            while (!active.empty() && !G.is_active(active.back()))
+                active.pop_back();
+            if (active.empty()) break;
+
+            size_t k = std::max<size_t>(1, static_cast<size_t>(std::sqrt(double(active.size()))));
+            k = std::min(k, active.size());
+            size_t best_idx = 0;
+            index_t best_deg = std::numeric_limits<index_t>::max();
+            pick.param(std::uniform_int_distribution<size_t>::param_type(0, active.size() - 1));
+            for (size_t s = 0; s < k; ++s) {
+                size_t i = pick(rng);
+                if (!G.is_active(active[i])) continue;
+                index_t d = G.prune_and_degree(active[i]);
+                if (d < best_deg) { best_deg = d; best_idx = i; }
+            }
+            node_index v = active[best_idx];
+            active[best_idx] = active.back();
+            active.pop_back();
+            if (!G.is_active(v)) continue;
+            peel_one(v);
+        }
+    } else {
+        // natural order — fastest, no extra scan.
+        for (auto v : active)
+            peel_one(v);
+        active.clear();
     }
     active.clear();
 }

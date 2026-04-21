@@ -24,6 +24,15 @@ enum class vertex_order {
     degree_desc   // descending initial degree
 };
 
+/// Strategy for the serial residual peel that runs after the main parallel
+/// IS-finding loop bails out.  All strategies are serial; they differ only
+/// in pivot order.
+enum class residual_peel_strategy {
+    natural,     // peel in original active-list order (cheapest, current default)
+    min_degree,  // pick min current-degree vertex each step (best fill-in)
+    bk_serial    // sample √|active| vertices and peel the min-degree one
+};
+
 struct factor_options {
     unsigned seed = 42;
     double degree_multiplier = 2.0;  // IS degree threshold = multiplier × avg_degree
@@ -45,6 +54,14 @@ struct factor_options {
     // Set to a small value (e.g. 256) to enable for graphs with low-degree
     // or near-IS-shaped residuals.
     size_t parallel_residual_threshold = std::numeric_limits<size_t>::max();
+
+    // Pivot ordering strategy for the serial residual peel (eliminate_remaining).
+    // - natural    (default): O(|active|) per step, no extra work.
+    // - min_degree: O(|active| log |active|) total, picks lowest-degree pivot
+    //   each step.  Tends to reduce final nnz(L) on dense residuals.
+    // - bk_serial: sample √|active| vertices, pivot on the lowest-degree
+    //   sample.  Cheap heuristic that approximates min_degree.
+    residual_peel_strategy residual_peel = residual_peel_strategy::natural;
 };
 
 } // namespace apxchol

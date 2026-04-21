@@ -43,6 +43,7 @@ struct cli_options {
     double min_is_frac = 0.05;
     int sso_cap = -1;  // when >=0, override storage with small_vec_incidence_n<sso_cap>
     long long parallel_residual_threshold = -1;  // <0 = leave default (disabled)
+    apxchol::residual_peel_strategy residual_peel = apxchol::residual_peel_strategy::natural;
 };
 
 [[noreturn]] void usage(const char* argv0) {
@@ -156,6 +157,12 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.storage = graph_storage::small_vec;
         } else if (arg == "--parallel-residual-threshold" && i + 1 < argc) {
             opts.parallel_residual_threshold = std::atoll(argv[++i]);
+        } else if (arg == "--residual-peel" && i + 1 < argc) {
+            std::string s = argv[++i];
+            if (s == "natural")    opts.residual_peel = apxchol::residual_peel_strategy::natural;
+            else if (s == "min_degree") opts.residual_peel = apxchol::residual_peel_strategy::min_degree;
+            else if (s == "bk_serial")  opts.residual_peel = apxchol::residual_peel_strategy::bk_serial;
+            else { std::fprintf(stderr, "unknown --residual-peel: %s\n", s.c_str()); usage(argv[0]); }
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
         } else {
@@ -314,6 +321,7 @@ int main(int argc, char* argv[]) {
         opts.min_is_fraction = cli.min_is_frac;
         if (cli.parallel_residual_threshold >= 0)
             opts.parallel_residual_threshold = static_cast<size_t>(cli.parallel_residual_threshold);
+        opts.residual_peel = cli.residual_peel;
 
         // ── Thread scaling sweep mode ────────────────────────
         if (cli.sweep_threads) {
@@ -361,8 +369,14 @@ int main(int argc, char* argv[]) {
             apxchol::checkpoint cp;
             auto F = (cli.sso_cap >= 0 ? factorize_with_sso(A, cli.sso_cap, opts, &cp) : apxchol::factorize(A, cli.storage, opts, &cp));
             std::cout << cp.report() << '\n';
-            std::printf("rounds=%zu nnz(L)=%lld\n",
-                        F.rounds.size(),
+            double avg_is = 0, avg_deg = 0;
+            if (!F.rounds.empty()) {
+                for (auto& r : F.rounds) { avg_is += r.is_size; avg_deg += r.avg_deg; }
+                avg_is /= F.rounds.size();
+                avg_deg /= F.rounds.size();
+            }
+            std::printf("rounds=%zu avg_is=%.1f avg_deg=%.1f nnz(L)=%lld\n",
+                        F.rounds.size(), avg_is, avg_deg,
                         static_cast<long long>(F.L.nonZeros()));
             return 0;
         }
