@@ -56,49 +56,50 @@ namespace apxchol::detail {
 /// Deferred clique edge for batched application after parallel elimination.
 struct deferred_edge { node_index u, v; double w; };
 
-/// Tree elimination: random spanning tree of the clique.
+/// Tree elimination: spanning tree of the clique.
 ///
 /// For each neighbor i = 0..d-2, sample one neighbor j from the suffix
 /// {i+1, ..., d-1} with probability proportional to edge weight.
 /// The resulting d-1 edges form a random spanning tree of the clique
 /// on v's neighbors.  Edge weight = w_i·w_j / (w_i + w_j) (harmonic mean).
 ///
-/// This is the practical variant used in LAMG-style solvers and produces
-/// a connected approximation of the Schur complement clique.
-struct tree_elimination {
-    void sample_clique(std::span<const std::pair<node_index, double>> valid,
-                       double /*deg*/,
-                       std::mt19937& gen,
-                       std::vector<deferred_edge>& edges_out,
-                       std::vector<double>& prefix) const {
-        if (valid.size() < 2) return;
+    struct tree_elimination {
+        void sample_clique(std::span<const std::pair<node_index, double>> valid,
+                           double deg,
+                           std::mt19937& gen,
+                           std::vector<deferred_edge>& edges_out,
+                           std::vector<double>& prefix) const {
+            if (valid.size() < 2 || deg <= 0.0) return;
 
-        prefix.resize(valid.size());
-        prefix[0] = valid[0].second;
-        for (size_t i = 1; i < valid.size(); ++i)
-            prefix[i] = prefix[i - 1] + valid[i].second;
+            prefix.resize(valid.size());
+            prefix[0] = valid[0].second;
+            for (size_t i = 1; i < valid.size(); ++i)
+                prefix[i] = prefix[i - 1] + valid[i].second;
 
-        for (size_t i = 0; i + 1 < valid.size(); ++i) {
-            double suffix_sum = prefix.back() - prefix[i];
-            if (suffix_sum <= 0.0) continue;
+            for (size_t i = 0; i + 1 < valid.size(); ++i) {
+                const double suffix_sum = prefix.back() - prefix[i];
+                if (suffix_sum <= 0.0) continue;
 
-            std::uniform_real_distribution<double> U(0.0, suffix_sum);
-            double r = U(gen);
+                std::uniform_real_distribution<double> U(0.0, suffix_sum);
+                const double r = U(gen);
 
-            auto it = std::upper_bound(
-                prefix.begin() + ptrdiff_t(i) + 1,
-                prefix.end(),
-                prefix[i] + r);
-            size_t j = it - prefix.begin();
-            if (j >= valid.size()) j = valid.size() - 1;
+                auto it = std::upper_bound(
+                    prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1,
+                    prefix.end(),
+                    prefix[i] + r);
 
-            auto [va, wa] = valid[i];
-            auto [vb, wb] = valid[j];
-            double w = wa * wb / (wa + wb);
-            edges_out.push_back({va, vb, w});
+                size_t j = static_cast<size_t>(it - prefix.begin());
+                if (j >= valid.size()) j = valid.size() - 1;
+
+                auto [va, wa] = valid[i];
+                auto [vb, wb] = valid[j];
+                (void)wb;
+
+                const double w = wa * suffix_sum / deg;
+                edges_out.push_back({va, vb, w});
+            }
         }
-    }
-};
+    };
 
 /// IID elimination: Kyng-Sachdeva Algorithm 2 (CliqueSample).
 ///
