@@ -1,0 +1,27 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "com-Amazon",
+    "solver": "parac_physics",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 334863,
+    "nnz": 2186603,
+    "setup_s": 0.24324904741845702,
+    "solve_s": 0.18302368200000002,
+    "total_s": 0.42627272941845706,
+    "iters": 38,
+    "rel_res": 8.0767112e-09,
+    "max_vram_mb": 696.0
+  },
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "complete"
+}

@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "bk+tree[bstr]",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "coAuthorsDBLP",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 299067,
+    "nnz": 2254419,
+    "setup_s": 0.2715653,
+    "solve_s": 1.052366,
+    "total_s": 1.323931,
+    "iters": 31,
+    "rel_res": 9.443583e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.5873,
+    "solve_rss_mb": 216.3,
+    "max_rss_mb": 270.2
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

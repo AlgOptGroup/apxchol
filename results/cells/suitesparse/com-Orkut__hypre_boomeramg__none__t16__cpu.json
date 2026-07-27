@@ -1,0 +1,25 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "com-Orkut",
+    "solver": "hypre_boomeramg",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "fail_reason": "SIGSEGV in hypre_BoomerAMGBuildExtPIInterpHost (all 16 OMP threads, write faults, one sign-extended negative index 0xfffffffe...): HYPRE_Int=int32 overflow in the ext+i interpolation fill on com-Orkut's coarse level. Needs Hypre BIGINT/MIXEDINT build or a fill-bounding config (/cut). Diagnosed from systemd-coredump 803424, 2026-06-12 19:22:48."
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "aafcc82dbc2e512bb24e567f998c3065daf34c53",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T17:37:07"
+  },
+  "schema": 1,
+  "status": "failed"
+}

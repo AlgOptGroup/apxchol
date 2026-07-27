@@ -1,0 +1,36 @@
+{
+  "cell": {
+    "config": "cut",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "apache2",
+    "solver": "hypre_boomeramg_gpu",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 715176,
+    "nnz": 4817870,
+    "setup_s": 0.3887468,
+    "solve_s": 0.03141264,
+    "total_s": 0.4201594,
+    "iters": 12,
+    "rel_res": 9.64115e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.0872,
+    "solve_rss_mb": 738.6,
+    "max_rss_mb": 848.4,
+    "max_vram_mb": 578.0
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "595df64fa7618066e3bcd6db7df830c12b8172b6",
+    "note": "FAIR gpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T21:19:50"
+  },
+  "schema": 1,
+  "status": "complete"
+}

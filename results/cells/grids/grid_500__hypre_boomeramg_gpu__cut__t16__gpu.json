@@ -1,0 +1,36 @@
+{
+  "cell": {
+    "config": "cut",
+    "device": "gpu",
+    "family": "grids",
+    "matrix_id": "grid_500",
+    "solver": "hypre_boomeramg_gpu",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 250000,
+    "nnz": 1248000,
+    "setup_s": 0.1306368,
+    "solve_s": 0.01574129,
+    "total_s": 0.1463781,
+    "iters": 12,
+    "rel_res": 6.303372e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.1173,
+    "solve_rss_mb": 585.4,
+    "max_rss_mb": 645.0,
+    "max_vram_mb": 444.0
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "3887ad1882aaf535feaf84339949886f263a0741",
+    "note": "FAIR gpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-13T00:26:35"
+  },
+  "schema": 1,
+  "status": "complete"
+}

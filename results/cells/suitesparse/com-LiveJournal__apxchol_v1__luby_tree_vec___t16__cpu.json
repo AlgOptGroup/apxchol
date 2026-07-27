@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "luby+tree[vec]",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "com-LiveJournal",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 3997962,
+    "nnz": 73360340,
+    "setup_s": 21.51805,
+    "solve_s": 22.57372,
+    "total_s": 44.09177,
+    "iters": 33,
+    "rel_res": 6.500855e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.601,
+    "solve_rss_mb": 5534.2,
+    "max_rss_mb": 9777.2
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

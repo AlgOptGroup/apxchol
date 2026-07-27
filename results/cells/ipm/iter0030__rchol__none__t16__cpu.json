@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "ipm",
+    "matrix_id": "iter0030",
+    "solver": "rchol",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 524288,
+    "nnz": 7867398,
+    "setup_s": 2.813682,
+    "solve_s": 6.165411,
+    "total_s": 8.979093,
+    "iters": 45,
+    "rel_res": 7.381263e-09,
+    "fillin": 2.7107,
+    "us_per_nnz": 1.1413,
+    "solve_rss_mb": 1593.3,
+    "max_rss_mb": 2042.8
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "ddcab69231b033024e7b09e0cb0a6fec84c2f0dc",
+    "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-16T22:26:42"
+  },
+  "schema": 1,
+  "status": "complete"
+}

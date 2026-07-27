@@ -1,0 +1,55 @@
+# Wheels-only PyPI publishing (no sdist — python/CMakeLists.txt references
+# ../src, so the package only builds from a full checkout).
+# Trigger: publishing a GitHub release (or manual dispatch to dry-run the build
+# job). Uses PyPI Trusted Publishing (OIDC), configured on pypi.org under
+# "Publishing" with: owner=AlgOptGroup, repo=apxchol,
+# workflow=publish.yml, environment=pypi. No API tokens needed.
+name: publish-pypi
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: manylinux wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.2
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS_LINUX: x86_64
+          # Portable codegen — distributed wheels must not be -march=native
+          # (SIGILL on older CPUs); python/CMakeLists.txt keys off this env var.
+          CIBW_ENVIRONMENT: APXCHOL_PORTABLE_BUILD=1
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest {project}/python/tests -q
+        with:
+          package-dir: python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: wheelhouse/*.whl
+
+  publish:
+    name: upload to PyPI (wheels only)
+    needs: wheels
+    # workflow_dispatch only dry-runs the wheels job; uploads happen on a release.
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

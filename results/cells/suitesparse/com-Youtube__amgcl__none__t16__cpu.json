@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "com-Youtube",
+    "solver": "amgcl",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1134890,
+    "nnz": 7110138,
+    "setup_s": 2.990097,
+    "solve_s": 5.491645,
+    "total_s": 8.481742,
+    "iters": 69,
+    "rel_res": 6.936597e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 1.1929,
+    "solve_rss_mb": 1493.9,
+    "max_rss_mb": 2202.3
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

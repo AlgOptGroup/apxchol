@@ -1,0 +1,37 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "grids",
+    "matrix_id": "grid_5000",
+    "solver": "parac",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 25000000,
+    "nnz": 124980000,
+    "setup_s": 13.134335,
+    "solve_s": 44.811,
+    "total_s": 57.945335,
+    "iters": 72,
+    "rel_res": 9.63324e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.4636,
+    "amd_reorder_s": 9.799367,
+    "factor_s": 1.95976,
+    "prep_s": 1.375208,
+    "max_rss_mb": 38261.3
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "2cdce45ea2e2a8f8451930c3ecf08dab6e91f856",
+    "note": "ParAC FAIR (grids/IPM pure, SS reg_rel=1e-6, AMD-reordered, true 1e-8, MKL serial, 16 cores)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T23:20:13"
+  },
+  "schema": 1,
+  "status": "complete"
+}

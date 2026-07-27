@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "apxchol: scalable approximate Cholesky preconditioning for Laplacian and SDDM systems"
+abstract: >-
+  A C++23 library implementing a parallel approximate-Cholesky preconditioner
+  (Kyng-Sachdeva-style elimination with tree-based clique sampling) for graph
+  Laplacian and SDDM linear systems, with an Eigen-compatible interface, OpenMP
+  and cuSPARSE triangular-solve backends, a CLI solver, and Python and Octave
+  bindings.
+authors:
+  - family-names: Kulkov
+    given-names: Oleksandr
+    affiliation: "ETH Zürich"
+  - family-names: Baumann
+    given-names: Yves
+    affiliation: "ETH Zürich"
+  - family-names: Kyng
+    given-names: Rasmus
+    affiliation: "ETH Zürich"
+repository-code: "https://github.com/AlgOptGroup/apxchol"
+version: "0.2.1"
+license: BSD-4-Clause
+date-released: "2026-07-27"
+keywords:
+  - Laplacian solver
+  - SDDM
+  - approximate Cholesky
+  - preconditioner
+  - conjugate gradient
+  - sparse linear algebra

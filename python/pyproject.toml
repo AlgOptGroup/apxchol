@@ -1,0 +1,39 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "apxchol"
+version = "0.2.1"
+description = "CPU approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.21", "scipy>=1.7"]
+authors = [{name = "Oleksandr Kulkov"}]
+keywords = ["laplacian", "preconditioner", "cholesky", "sparse", "pcg"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/AlgOptGroup/apxchol"
+Repository = "https://github.com/AlgOptGroup/apxchol"
+Issues = "https://github.com/AlgOptGroup/apxchol/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.scikit-build]
+cmake.version = ">=3.16"
+wheel.packages = ["apxchol"]
+build-dir = "build/{wheel_tag}"

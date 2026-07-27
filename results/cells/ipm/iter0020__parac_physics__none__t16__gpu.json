@@ -1,0 +1,27 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "ipm",
+    "matrix_id": "iter0020",
+    "solver": "parac_physics",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 524288,
+    "nnz": 7867398,
+    "setup_s": 0.23690897351367185,
+    "solve_s": 0.840289673,
+    "total_s": 1.0771986465136718,
+    "iters": 46,
+    "rel_res": 7.7235767e-09,
+    "max_vram_mb": 1812.0
+  },
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "complete"
+}

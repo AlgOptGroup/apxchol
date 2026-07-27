@@ -1,0 +1,27 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "G3_circuit",
+    "solver": "parac_physics",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1585478,
+    "nnz": 7660822,
+    "setup_s": 0.49792650100952146,
+    "solve_s": 0.200147964,
+    "total_s": 0.6980744650095214,
+    "iters": 57,
+    "rel_res": 7.5862888e-09,
+    "max_vram_mb": 1824.0
+  },
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "complete"
+}

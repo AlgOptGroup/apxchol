@@ -1,0 +1,23 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "com-Orkut",
+    "solver": "rchol_par",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {},
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "aafcc82dbc2e512bb24e567f998c3065daf34c53",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T16:08:54"
+  },
+  "schema": 1,
+  "status": "timeout"
+}

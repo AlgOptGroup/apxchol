@@ -1,0 +1,39 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "ecology1",
+    "solver": "parac_physics",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1000000,
+    "nnz": 4996000,
+    "setup_s": 0.620118,
+    "solve_s": 1.338,
+    "total_s": 1.958118,
+    "iters": 54,
+    "rel_res": 9.07946e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.3919,
+    "amd_reorder_s": 0.46391,
+    "factor_s": 0.08671,
+    "prep_s": 0.069498,
+    "n_components_solved": 1,
+    "n_components_total": 1,
+    "max_rss_mb": 1604.3
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e",
+    "note": "ParAC FAIR vs ORIGINAL L (no reg-rel): GRAPH reads the per-component Dirichlet-pinned P; PHYSICS reads the giant component's pure L (single-node trim grounding, Hypre-style split on disconnected). Both use a per-component-consistent pin-zeroed RHS in the patched driver, so the residual is scored vs the original singular L (verified ~1e-12). AMD-reordered, true 1e-8, MKL serial, 16 cores",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-13T22:09:25"
+  },
+  "schema": 1,
+  "status": "complete"
+}

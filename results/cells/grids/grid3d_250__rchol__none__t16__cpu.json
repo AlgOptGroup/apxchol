@@ -1,0 +1,26 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "grids",
+    "matrix_id": "grid3d_250",
+    "solver": "rchol",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "returncode": null,
+    "stderr_tail": "Graph: grid3d_250, n=15625000, nnz=109000000\n"
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "ddcab69231b033024e7b09e0cb0a6fec84c2f0dc",
+    "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-16T22:26:42"
+  },
+  "schema": 1,
+  "status": "timeout"
+}

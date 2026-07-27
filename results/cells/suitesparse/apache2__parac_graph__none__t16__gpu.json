@@ -1,0 +1,27 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "apache2",
+    "solver": "parac_graph",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 715176,
+    "nnz": 4817864,
+    "setup_s": 0.2072844134638672,
+    "solve_s": 0.123372383,
+    "total_s": 0.3306567964638672,
+    "iters": 40,
+    "rel_res": 7.9743204e-09,
+    "max_vram_mb": 1226.0
+  },
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "complete"
+}

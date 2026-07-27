@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "root+tree[vec_pool]",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "com-Youtube",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1134890,
+    "nnz": 7110138,
+    "setup_s": 1.159466,
+    "solve_s": 0.8221864,
+    "total_s": 1.981652,
+    "iters": 22,
+    "rel_res": 5.222803e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.2787,
+    "solve_rss_mb": 706.1,
+    "max_rss_mb": 900.3
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

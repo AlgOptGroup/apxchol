@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "luby+tree[svec]",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "G3_circuit",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1585478,
+    "nnz": 7660826,
+    "setup_s": 1.004737,
+    "solve_s": 1.130413,
+    "total_s": 2.13515,
+    "iters": 39,
+    "rel_res": 9.244707e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.2787,
+    "solve_rss_mb": 679.2,
+    "max_rss_mb": 994.9
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "bk+tree[vec_pool]",
+    "device": "cpu",
+    "family": "ipm",
+    "matrix_id": "iter0030",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 524288,
+    "nnz": 7867398,
+    "setup_s": 1.006065,
+    "solve_s": 0.9105719,
+    "total_s": 1.916636,
+    "iters": 43,
+    "rel_res": 8.520743e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.2436,
+    "solve_rss_mb": 534.2,
+    "max_rss_mb": 964.2
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "f013c44719a39ca9ba4c7864005d556d5cbe2154",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T02:03:29"
+  },
+  "schema": 1,
+  "status": "complete"
+}

@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "bk+tree[vec_pool]",
+    "device": "cpu",
+    "family": "grids",
+    "matrix_id": "grid3d_250",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 15625000,
+    "nnz": 109000000,
+    "setup_s": 19.72861,
+    "solve_s": 13.37456,
+    "total_s": 33.10317,
+    "iters": 33,
+    "rel_res": 8.958094e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.3037,
+    "solve_rss_mb": 7762.5,
+    "max_rss_mb": 14471.4
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

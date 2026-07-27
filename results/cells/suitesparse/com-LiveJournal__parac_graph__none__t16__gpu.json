@@ -1,0 +1,18 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "com-LiveJournal",
+    "solver": "parac_graph",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {},
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "failed"
+}

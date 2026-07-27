@@ -1,0 +1,33 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "kron_g500-logn16",
+    "solver": "ac",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 65536,
+    "nnz": 4967463,
+    "setup_s": 2.003312,
+    "solve_s": 0.9150005,
+    "total_s": 2.918312,
+    "iters": 9,
+    "rel_res": 6.331465e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.5875
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

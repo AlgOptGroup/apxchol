@@ -1,0 +1,36 @@
+{
+  "cell": {
+    "config": "bk+tree[vec_pool]",
+    "device": "gpu",
+    "family": "grids",
+    "matrix_id": "grid3d_100",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1000000,
+    "nnz": 6940000,
+    "setup_s": 0.7070265,
+    "solve_s": 0.1564028,
+    "total_s": 0.8634293,
+    "iters": 28,
+    "rel_res": 9.660723e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.1244,
+    "solve_rss_mb": 984.3,
+    "max_rss_mb": 1398.5,
+    "max_vram_mb": 698.0
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "595df64fa7618066e3bcd6db7df830c12b8172b6",
+    "note": "FAIR gpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T21:19:50"
+  },
+  "schema": 1,
+  "status": "complete"
+}

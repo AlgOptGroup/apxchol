@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "root+tree[vec]",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "apache2",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 715176,
+    "nnz": 4817870,
+    "setup_s": 0.6361775,
+    "solve_s": 0.3886725,
+    "total_s": 1.02485,
+    "iters": 24,
+    "rel_res": 8.182932e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.2127,
+    "solve_rss_mb": 431.8,
+    "max_rss_mb": 632.6
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

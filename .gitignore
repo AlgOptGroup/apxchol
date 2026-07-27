@@ -1,0 +1,57 @@
+# Build outputs (any dir starting with "build", e.g. build/, build64/, build-cuda/)
+build*/
+cmake-build-*/
+benchmarks/build*/
+CMakeFiles/
+compile_commands.json
+
+# IDE / editor
+.idea/
+.vscode/
+
+# Data & results (download/generate locally)
+data/
+# results/ is generated locally, EXCEPT results/cells/ -- the per-cell benchmark store
+# is the source-of-truth the committed benchmarks/latest/ charts are rendered from, so
+# it is tracked for reproducibility (small: ~0.8MB of JSON). Sweeps will churn these diffs.
+results/*
+!results/cells/
+benchmarks/results/
+scripts/baselines/
+
+# Machine-local paths to out-of-tree tools (benchmark runners / benchmark CMake)
+benchmarks/paths_local.py
+benchmarks/paths_local.cmake
+# Julia Manifest pins absolute paths of local checkouts -- Project.toml is the
+# portable source of truth; regenerate with Pkg.instantiate().
+benchmarks/julia/Manifest.toml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.dylib
+*.mex
+*.mexa64
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Editor backups
+*~
+*.swp
+*.swo
+
+# Tool state (matches both the .codex file and a .codex/ directory)
+.codex
+
+# Local tool state (worktrees, session state)
+.claude/
+benchmarks/cmg/octave-workspace

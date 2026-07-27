@@ -1,0 +1,27 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "coPapersDBLP",
+    "solver": "parac_physics",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 540486,
+    "nnz": 31031906,
+    "setup_s": 3.3891670532028813,
+    "solve_s": 0.617655701,
+    "total_s": 4.006822754202881,
+    "iters": 22,
+    "rel_res": 6.0597624e-09,
+    "max_vram_mb": 6880.0
+  },
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "complete"
+}

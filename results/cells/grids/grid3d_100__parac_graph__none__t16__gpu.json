@@ -1,0 +1,27 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "grids",
+    "matrix_id": "grid3d_100",
+    "solver": "parac_graph",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1000000,
+    "nnz": 6940000,
+    "setup_s": 0.3402952666954346,
+    "solve_s": 0.267443329,
+    "total_s": 0.6077385956954346,
+    "iters": 32,
+    "rel_res": 6.5392399e-09,
+    "max_vram_mb": 1644.0
+  },
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "595df64fa7618066e3bcd6db7df830c12b8172b6"
+  },
+  "schema": 1,
+  "status": "complete"
+}

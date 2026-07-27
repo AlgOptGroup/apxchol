@@ -1,0 +1,18 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "grids",
+    "matrix_id": "grid_5000",
+    "solver": "parac_physics",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {},
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "failed"
+}

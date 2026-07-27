@@ -1,0 +1,27 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "ecology1",
+    "solver": "parac_physics",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1000000,
+    "nnz": 4995996,
+    "setup_s": 0.3139764878927002,
+    "solve_s": 0.109333214,
+    "total_s": 0.42330970189270023,
+    "iters": 62,
+    "rel_res": 9.4799006e-09,
+    "max_vram_mb": 1266.0
+  },
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "complete"
+}

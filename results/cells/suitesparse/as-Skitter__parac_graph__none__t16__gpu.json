@@ -1,0 +1,27 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "as-Skitter",
+    "solver": "parac_graph",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1696415,
+    "nnz": 23885463,
+    "setup_s": 11.27027305184265,
+    "solve_s": 2.949089355,
+    "total_s": 14.21936240684265,
+    "iters": 36,
+    "rel_res": 5.6910149e-09,
+    "max_vram_mb": 5204.0
+  },
+  "provenance": {
+    "source": "parac_runner.py",
+    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+  },
+  "schema": 1,
+  "status": "complete"
+}

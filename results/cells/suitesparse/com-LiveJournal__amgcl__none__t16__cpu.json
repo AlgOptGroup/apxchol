@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "com-LiveJournal",
+    "solver": "amgcl",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 3997962,
+    "nnz": 73360340,
+    "setup_s": 31.38469,
+    "solve_s": 256.338,
+    "total_s": 287.7227,
+    "iters": 431,
+    "rel_res": 9.738291e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 3.922,
+    "solve_rss_mb": 11444.3,
+    "max_rss_mb": 19027.3
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "aafcc82dbc2e512bb24e567f998c3065daf34c53",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T17:37:07"
+  },
+  "schema": 1,
+  "status": "complete"
+}

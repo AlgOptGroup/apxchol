@@ -1,0 +1,36 @@
+{
+  "cell": {
+    "config": "bk+tree[vec_pool]",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "coPapersDBLP",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 540486,
+    "nnz": 31031944,
+    "setup_s": 3.744293,
+    "solve_s": 0.731348,
+    "total_s": 4.475641,
+    "iters": 52,
+    "rel_res": 7.400036e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.1442,
+    "solve_rss_mb": 1929.1,
+    "max_rss_mb": 3042.7,
+    "max_vram_mb": 1130.0
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "595df64fa7618066e3bcd6db7df830c12b8172b6",
+    "note": "FAIR gpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T21:19:50"
+  },
+  "schema": 1,
+  "status": "complete"
+}

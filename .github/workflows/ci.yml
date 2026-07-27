@@ -1,0 +1,98 @@
+# Build + TEST CI for the library and the CPU bindings. Kept lean and
+# path-filtered so it only runs when C++/build/package files change, not on
+# doc/chart commits.
+#
+# Three jobs, each builds AND runs its test suite:
+#   library  — root CMake project, the full gtest suite (ctest)
+#   python   — manylinux wheel build + pytest (also the PORTABILITY check: the
+#              old-glibc environment the release wheels are built in)
+#   octave   — mkoctfile MEX + the 6-case Octave test suite
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'CMakeLists.txt'
+      - 'python/**'
+      - 'octave/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'CMakeLists.txt'
+      - 'python/**'
+      - 'octave/**'
+      - '.github/workflows/ci.yml'
+
+permissions:
+  contents: read
+
+# A newer push to the same ref cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  library:
+    name: library (build + ctest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          # g++-14: the core uses C++23 "deducing this" (explicit object
+          # parameter), which needs GCC >= 14 — newer than the runner default.
+          sudo apt-get install -y g++-14 libeigen3-dev libomp-dev ninja-build
+      - name: Configure + build (Release)
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_C_COMPILER=gcc-14
+          cmake --build build -j"$(nproc)"
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure
+
+  python:
+    name: python (manylinux wheel + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # One Python only (cp312) — same manylinux path as the release wheels, so
+      # it catches the old-environment portability breaks ubuntu-latest can't,
+      # and runs the package test suite inside the built wheel.
+      - name: Build wheel + run pytest
+        uses: pypa/cibuildwheel@v3.2
+        env:
+          CIBW_BUILD: "cp312-manylinux_x86_64"
+          CIBW_ENVIRONMENT: APXCHOL_PORTABLE_BUILD=1
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest {project}/python/tests -v
+        with:
+          package-dir: python
+
+  octave:
+    name: octave (mkoctfile + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          # g++-14 for the C++23 core (mkoctfile honors the CXX env var below).
+          # octave-dev (not liboctave-dev) provides mkoctfile on Ubuntu 24.04.
+          sudo apt-get install -y g++-14 octave octave-dev libeigen3-dev
+      - name: Build MEX + run tests
+        env:
+          CXX: g++-14
+        run: |
+          cd octave
+          ./build.sh
+          octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"

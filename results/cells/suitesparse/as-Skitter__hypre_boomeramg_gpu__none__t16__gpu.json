@@ -1,0 +1,23 @@
+{
+  "cell": {
+    "config": "",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "as-Skitter",
+    "solver": "hypre_boomeramg_gpu",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {},
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "35d9a31ed5a81097c4888d2c2d237f5df081c92e",
+    "note": "FAIR gpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T12:48:57"
+  },
+  "schema": 1,
+  "status": "oom"
+}

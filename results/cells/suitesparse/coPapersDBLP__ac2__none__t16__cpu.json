@@ -1,0 +1,33 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "coPapersDBLP",
+    "solver": "ac2",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 540486,
+    "nnz": 31031944,
+    "setup_s": 21.95911,
+    "solve_s": 1.533263,
+    "total_s": 23.49237,
+    "iters": 16,
+    "rel_res": 9.058919e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.757
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

@@ -1,0 +1,33 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "G3_circuit",
+    "solver": "ac",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 1585478,
+    "nnz": 7660826,
+    "setup_s": 2.499114,
+    "solve_s": 2.265194,
+    "total_s": 4.764308,
+    "iters": 38,
+    "rel_res": 7.528469e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.6219
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

@@ -1,0 +1,36 @@
+{
+  "cell": {
+    "config": "bg+tree[vec_pool]",
+    "device": "gpu",
+    "family": "suitesparse",
+    "matrix_id": "apache2",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 715176,
+    "nnz": 4817870,
+    "setup_s": 0.3663704,
+    "solve_s": 0.1091484,
+    "total_s": 0.4755188,
+    "iters": 25,
+    "rel_res": 7.746595e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.0987,
+    "solve_rss_mb": 945.6,
+    "max_rss_mb": 1076.4,
+    "max_vram_mb": 564.0
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "595df64fa7618066e3bcd6db7df830c12b8172b6",
+    "note": "FAIR gpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-12T21:19:50"
+  },
+  "schema": 1,
+  "status": "complete"
+}

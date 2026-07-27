@@ -1,0 +1,35 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "grids",
+    "matrix_id": "grid_5000",
+    "solver": "amgcl",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {
+    "n": 25000000,
+    "nnz": 124980000,
+    "setup_s": 5.39239,
+    "solve_s": 7.182633,
+    "total_s": 12.57502,
+    "iters": 14,
+    "rel_res": 9.764804e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.1006,
+    "solve_rss_mb": 14050.0,
+    "max_rss_mb": 14477.0
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "complete"
+}

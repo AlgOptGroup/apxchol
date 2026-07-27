@@ -1,0 +1,23 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "grids",
+    "matrix_id": "grid3d_200",
+    "solver": "rchol_par",
+    "threads": 16
+  },
+  "matrix_meta": {},
+  "metrics": {},
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
+    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-06-11T17:43:44"
+  },
+  "schema": 1,
+  "status": "timeout"
+}
