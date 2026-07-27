@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(apxchol VERSION 0.2.1 LANGUAGES CXX)
+project(apxchol VERSION 0.2.2 LANGUAGES CXX)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)

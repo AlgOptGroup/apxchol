@@ -33,7 +33,7 @@ try:
 
     __version__ = _pkg_version("apxchol")
 except Exception:                      # not installed as a distribution
-    __version__ = "0.2.1+local"
+    __version__ = "0.2.2+local"
 
 
 @dataclass(frozen=True)

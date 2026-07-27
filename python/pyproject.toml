@@ -4,13 +4,17 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "apxchol"
-version = "0.2.1"
+version = "0.2.2"
 description = "CPU approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.21", "scipy>=1.7"]
-authors = [{name = "Oleksandr Kulkov"}]
+authors = [
+    {name = "Oleksandr Kulkov"},
+    {name = "Yves Baumann"},
+    {name = "Rasmus Kyng"},
+]
 keywords = ["laplacian", "preconditioner", "cholesky", "sparse", "pcg"]
 classifiers = [
     "Programming Language :: Python :: 3",
