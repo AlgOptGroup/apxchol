@@ -169,17 +169,30 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
     }
 
     // Phase 2: excess = diag − weighted degree.  Zero for pure Laplacians.
-    // Use relative tolerance to avoid false SDDM detection from
-    // floating-point accumulation differences across storage backends.
-    // Per-vertex reads of g.neighbors are independent → safe in parallel.
+    //
+    // The weighted degree MUST come from the exact fp64 input values, not
+    // from a re-walk of the stored edges: under APXCHOL_POOL_FP32 the
+    // vec_pool slabs hold fp32-quantized weights, so exact diag[v] minus a
+    // quantized wdeg leaves ≈1e-8·diag of phantom excess — far above the
+    // 1e-12 gate — and a pure Laplacian gets misclassified as SDDM.
+    //
+    // L is symmetric (Laplacian/SDDM contract), so column v contains every
+    // neighbor of v: summing −L(u,v) over the full column yields each
+    // vertex's exact weighted degree with a fixed accumulation order
+    // (Eigen's sorted inner order) — deterministic across thread counts
+    // and identical for all storage backends. Per-column work is
+    // independent → safe in parallel.
+    //
+    // The relative 1e-12 tolerance absorbs fp accumulation-order ulps
+    // (column-sum order vs. the ingestion order that built diag[]).
     #pragma omp parallel for schedule(static) if(n > 16384)
-    for (node_index v = 0; v < n; ++v) {
+    for (node_index k = 0; k < outer; ++k) {
         double wdeg = 0.0;
-        for (auto [u, w] : g.neighbors(static_cast<node_index>(v)))
-            wdeg += w;
-        double excess = diag[v] - wdeg;
-        g.excess(static_cast<node_index>(v)) =
-            excess > diag[v] * 1e-12 ? excess : 0.0;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
+            if (it.row() != it.col())
+                wdeg -= it.value();
+        const double excess = diag[k] - wdeg;
+        g.excess(k) = excess > diag[k] * 1e-12 ? excess : 0.0;
     }
     return g;
 }

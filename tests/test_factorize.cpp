@@ -370,6 +370,54 @@ TYPED_TEST(FactorizeTest, LaplacianFlagNotSet) {
     EXPECT_FALSE(F.sddm);
 }
 
+// Build a weighted grid Laplacian DIRECTLY from fp64 triplets. Deliberately
+// bypasses weighted_grid_laplacian/graph<>: under APXCHOL_POOL_FP32 the graph
+// edge pool stores weights in fp32, so routing the weights through graph<>
+// would silently quantize them and mask the regression tested below.
+static Eigen::SparseMatrix<double> fp64_weighted_grid_laplacian(
+        int rows, int cols, double w_horiz, double w_vert) {
+    const int n = rows * cols;
+    auto id = [cols](int r, int c) { return r * cols + c; };
+    std::vector<Eigen::Triplet<double>> trips;
+    std::vector<double> deg(n, 0.0);
+    auto edge = [&](int u, int v, double w) {
+        trips.emplace_back(u, v, -w);
+        trips.emplace_back(v, u, -w);
+        deg[u] += w;
+        deg[v] += w;
+    };
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < cols; ++c) {
+            if (r + 1 < rows) edge(id(r, c), id(r + 1, c), w_vert);
+            if (c + 1 < cols) edge(id(r, c), id(r, c + 1), w_horiz);
+        }
+    for (int i = 0; i < n; ++i) trips.emplace_back(i, i, deg[i]);
+    Eigen::SparseMatrix<double> L(n, n);
+    L.setFromTriplets(trips.begin(), trips.end());
+    return L;
+}
+
+// Regression (fp32-quantized wdeg vs exact diag): make_graph used to compute
+// the excess test's weighted degree by re-walking the stored edge weights,
+// which are fp32-quantized under APXCHOL_POOL_FP32. Exact fp64 diag minus a
+// quantized wdeg left phantom excess ≈1e-8·diag — above the 1e-12 gate — so a
+// pure Laplacian whose weights are not fp32-representable (0.01, 2/101) was
+// misclassified as SDDM. The excess must come from the exact fp64 input.
+TYPED_TEST(FactorizeTest, NonFp32ExactWeightsLaplacianNotSDDM) {
+    auto L = fp64_weighted_grid_laplacian(10, 10, 0.01, 2.0 / 101.0);
+    auto F = this->factorize_with(L);
+    EXPECT_FALSE(F.sddm);
+}
+
+// Positive control for the regression above: with the same non-fp32-exact
+// weights, a genuinely SDDM matrix must still be detected.
+TYPED_TEST(FactorizeTest, NonFp32ExactWeightsSDDMFlagStillSet) {
+    auto L = fp64_weighted_grid_laplacian(10, 10, 0.01, 2.0 / 101.0);
+    L.coeffRef(0, 0) += 0.5;
+    auto F = this->factorize_with(L);
+    EXPECT_TRUE(F.sddm);
+}
+
 TYPED_TEST(FactorizeTest, SDDMFullRankDiagonal) {
     auto M = sddm_grid(5, 5, 1.0);
     auto F = this->factorize_with(M);
