@@ -97,6 +97,13 @@ private:
     /// Shared tail of factorize()/set_factor(): SpTRSV setup from F_.
     void install_factor() {
         scratch_.resize(n_);
+#if !defined(APXCHOL_USE_CUDA)
+        // Second scratch buffer (CPU path only, +8n bytes RSS): receives the
+        // transpose-solve output so the final unpermute gathers straight from
+        // it, eliminating the serial full-n `scratch_ = x` staging copy that
+        // _solve_impl used to pay per PCG iteration.
+        scratch2_.resize(n_);
+#endif
 
         // For Laplacians (rank n-1) the last row/col is unused.
         // For SDDM (full rank) we use the complete n×n factor.
@@ -198,15 +205,22 @@ public:
 #if defined(APXCHOL_USE_CUDA)
             trsv_.solve_LLt(x.data(), scratch_.data());
             x = scratch_;
-#else
-            trsv_.forward_solve(x.data(), scratch_.data());
-            if (cp_) (*cp_)("forward");
-            trsv_.transpose_solve(scratch_.data(), x.data());
-#endif
             if (cp_) (*cp_)("back");
 
             scratch_ = x;
             permute_from(scratch_, x);
+#else
+            trsv_.forward_solve(x.data(), scratch_.data());
+            if (cp_) (*cp_)("forward");
+            // The transpose solve writes scratch2_ (not x) so the unpermute
+            // below can gather straight from it — this removes the serial
+            // full-n `scratch_ = x` staging copy the old flow paid to keep
+            // the gather's src and dst distinct.
+            trsv_.transpose_solve(scratch_.data(), scratch2_.data());
+            if (cp_) (*cp_)("back");
+
+            permute_from(scratch2_, x);
+#endif
             if (cp_) (*cp_)("unpermute");
         } else {
             // ── Laplacian path: rank-(n-1) factor with centering ──
@@ -219,17 +233,25 @@ public:
 #if defined(APXCHOL_USE_CUDA)
             trsv_.solve_LLt(x.data(), scratch_.data());
             x.head(m) = Eigen::Map<const Eigen::VectorXd>(scratch_.data(), m);
-#else
-            trsv_.forward_solve(x.data(), scratch_.data());
-            if (cp_) (*cp_)("forward");
-            trsv_.transpose_solve(scratch_.data(), x.data());
-#endif
             if (cp_) (*cp_)("back");
 
             x(m) = 0.0;
 
             scratch_ = x;
             permute_from(scratch_, x);
+#else
+            trsv_.forward_solve(x.data(), scratch_.data());
+            if (cp_) (*cp_)("forward");
+            // As in the SDDM path: transpose-solve into scratch2_ and gather
+            // from it, instead of solving into x and paying a serial
+            // `scratch_ = x` copy before the unpermute.
+            trsv_.transpose_solve(scratch_.data(), scratch2_.data());
+            if (cp_) (*cp_)("back");
+
+            scratch2_(m) = 0.0;
+
+            permute_from(scratch2_, x);
+#endif
             x.array() -= x.mean();
             if (cp_) (*cp_)("unpermute");
         }
@@ -244,6 +266,11 @@ private:
     checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
     mutable Eigen::VectorXd scratch_;
+#if !defined(APXCHOL_USE_CUDA)
+    // Transpose-solve output staging for the CPU _solve_impl (see
+    // install_factor); unused (never resized) under CUDA.
+    mutable Eigen::VectorXd scratch2_;
+#endif
     Eigen::Index n_ = 0;
     Eigen::ComputationInfo m_info = Eigen::Success;
     bool m_analysisIsOk = false;
