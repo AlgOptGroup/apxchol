@@ -112,7 +112,9 @@ void process_vertex(const Eliminator& elim,
 
     if (nbrs.empty()) {
         double d = G.excess(v);
-        col = {v, d > 0.0 ? std::sqrt(d) : 1.0, {}};
+        col.vertex = v;
+        col.diag   = static_cast<sptrsv_value_t>(d > 0.0 ? std::sqrt(d) : 1.0);
+        col.entries.clear();
         return;
     }
 
@@ -120,7 +122,7 @@ void process_vertex(const Eliminator& elim,
     if (total_deg <= 0.0) total_deg = 1.0;
     double sqrt_deg = std::sqrt(total_deg);
     col.vertex = v;
-    col.diag = sqrt_deg;
+    col.diag = static_cast<sptrsv_value_t>(sqrt_deg);
     col.entries.reserve(nbrs.size());
     for (const auto& [u, w] : nbrs)
         col.entries.emplace_back(u, static_cast<sptrsv_value_t>(w / sqrt_deg));
@@ -850,6 +852,9 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<node_index>().swap(pre_eligible);
 
     detail::build_csc(result, factor_cols, n, cp);
+    // The per-column lists are consumed: free them here (n small vectors + the
+    // header array), not at return.
+    std::vector<detail::factor_col>().swap(factor_cols);
 
     // Optional debugging hook: print final nnz(L) when env var is set.
     // Useful for comparing factor fill across option settings without touching

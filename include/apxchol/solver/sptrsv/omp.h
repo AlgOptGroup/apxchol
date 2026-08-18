@@ -620,9 +620,19 @@ private:
             csc_vals_[k]    = static_cast<sptrsv_value_t>(L11_vals[k]);
         }
         mark("csc_copy");
-        // Last read of L11 (hence of an aliased input factor): the level sets and
-        // counters below only use the SpTRSV's own arrays.
+        // Last read of L11 -- whichever of the input factor, the Laplacian-path
+        // copy or the compacted (drop) copy the L11_* pointers aliased. The
+        // level sets and counters below use only the SpTRSV's own arrays, so
+        // release all three sources HERE rather than at return (nnz-sized;
+        // swap-with-empty / reset, since `v = {}` / clear() keep the capacity).
         if (consumed) consumed->release_values();
+        std::vector<edge_index>().swap(L11_outer_local);
+        std::vector<node_index>().swap(L11_inner_local);
+        std::vector<sptrsv_value_t>().swap(L11_vals_local);
+        std::vector<edge_index>().swap(drop_outer);
+        drop_inner.reset();
+        drop_vals.reset();
+        L11_outer = nullptr; L11_inner = nullptr; L11_vals = nullptr;
 
         // ── Level sets ──────────────────────────────────────────
         // Round-as-level (DEFAULT when round boundaries are available;
@@ -1051,6 +1061,28 @@ public:
     const auto& csc_col_ptr() const { return csc_col_ptr_; }
     const auto& csc_row_idx() const { return csc_row_idx_; }
     const auto& csc_vals()    const { return csc_vals_; }
+
+    /// Bytes held by this object's arrays (capacities, heap only): CSR + CSC +
+    /// level sets + round bounds + sync-free counters. After setup() this is
+    /// everything the SpTRSV keeps -- setup's transients (L11 copy, compacted
+    /// copy, transpose bucket, scratch) are all released before it returns
+    /// (guarded by tests/test_sptrsv_memory.cpp).
+    std::size_t memory_bytes() const {
+        std::size_t b = csr_row_ptr_.capacity() * sizeof(edge_index)
+                      + csr_col_idx_.capacity() * sizeof(node_index)
+                      + csr_vals_.capacity()    * sizeof(sptrsv_value_t)
+                      + csc_col_ptr_.capacity() * sizeof(edge_index)
+                      + csc_row_idx_.capacity() * sizeof(node_index)
+                      + csc_vals_.capacity()    * sizeof(sptrsv_value_t)
+                      + round_bounds_.capacity() * sizeof(node_index)
+                      + bck_unsolved_init_.capacity() * sizeof(int)
+                      + bck_unsolved_.capacity() * sizeof(int);
+        for (const auto* lv : {&fwd_levels_, &bck_levels_}) {
+            b += lv->capacity() * sizeof(std::vector<node_index>);
+            for (const auto& l : *lv) b += l.capacity() * sizeof(node_index);
+        }
+        return b;
+    }
 
 private:
     node_index m_ = 0;
