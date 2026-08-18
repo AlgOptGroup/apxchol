@@ -43,21 +43,27 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 
 /// RAII wrapper for the GPU sparse triangular solve of the factor: three
 /// backends behind one interface.
-///   * cuSPARSE SpSV (default): copies L11 to device once, runs the analysis
-///     once, then fast GPU-parallel forward/back solves.
+///   * Our sync-free DATAFLOW kernel (the DEFAULT on the fp32 build -- the
+///     AUTO choice; env APXCHOL_GPU_SPTRSV=dataflow names it explicitly;
+///     cuda_dataflow.h): CSR of L (forward) + CSR of L^T (back) on device
+///     (no level schedules) plus 8 B/row of epoch-tagged {value, epoch}
+///     words, two O(n) warp-batch tables and four control ints -- ONE
+///     persistent launch per sweep, rows claimed in natural (forward) /
+///     reverse (back) order, consumers poll their neighbours' tagged words.
+///     No analysis buffer, O(n) state. Faster than cuSPARSE on grid_2000 /
+///     iter0040 (measured, gpu_pcg_loop ms/iter: 1.08 -> 0.98 iter0040,
+///     3.54 -> 3.20 grid_2000), bit-deterministic run to run and across
+///     grid sizes. Same fp16 storage option as the level-set backend; fp32
+///     build only (dataflow_supported()).
+///   * cuSPARSE SpSV (env APXCHOL_GPU_SPTRSV=cusparse; the AUTO choice on the
+///     fp64 build, where the dataflow kernel does not exist): copies L11 to
+///     device once, runs the analysis once (O(nnz) scratch), then
+///     GPU-parallel forward/back solves. Not deterministic run to run.
 ///   * Our O(n)-schedule level-set kernels (env APXCHOL_GPU_SPTRSV=levelset,
-///     cuda_levelset.h): CSR of L (forward) + CSR of L^T (back) on device, one
-///     launch per level -- memory-frugal (no O(nnz) analysis buffer), with the
-///     opt-in FP16 factor storage (APXCHOL_GPU_SPTRSV_FP16=1, below).
-///   * Our sync-free DATAFLOW kernel (env APXCHOL_GPU_SPTRSV=dataflow,
-///     cuda_dataflow.h): the same two CSRs as the level-set backend (no
-///     level schedules) plus 8 B/row of epoch-tagged {value, epoch} words,
-///     two O(n) warp-batch tables and four control ints -- ONE persistent
-///     launch per sweep instead of one per level, rows claimed in natural
-///     (forward) / reverse (back) order, consumers poll their neighbours'
-///     tagged words. Same fp16 storage option; fp32 build only. Faster than
-///     cuSPARSE on grid_2000 / iter0040 (measured), bit-deterministic run to
-///     run and across grid sizes.
+///     cuda_levelset.h): the same two CSRs, one launch per level --
+///     memory-frugal (no O(nnz) analysis buffer), deterministic, with the
+///     opt-in FP16 factor storage (APXCHOL_GPU_SPTRSV_FP16=1, below); the
+///     fp64 build's AUTO fallback when cuSPARSE's buffers do not fit.
 ///
 /// cuSPARSE SpSV requires CSR (not CSC).  Eigen stores column-major (CSC).
 /// We exploit the identity  CSC(L) == CSR(L^T):  the same three arrays
@@ -66,25 +72,39 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 ///   - Forward  solve  L  * y = x  ↔  TRANSPOSE    on L^T
 ///   - Back     solve  L^T* z = y  ↔  NON_TRANSPOSE on L^T
 ///
-/// BACKEND SELECTION (per setup): env APXCHOL_GPU_SPTRSV=cusparse|levelset|
-/// dataflow is an explicit override; APXCHOL_GPU_SPTRSV_FP16=1 without one
-/// (or with =cusparse) selects levelset (below), with =dataflow the fp16
-/// dataflow kernel. Otherwise AUTO (never dataflow -- opt-in): cuSPARSE is preferred, but its two SpSV analyses need
-/// O(nnz) device scratch (~23 B/nnz each on this toolkit -- 128 MB on
-/// iter0040, 766 MB on grid_2000, several GB on the giant social factors),
-/// which is exactly what OOMs com-Orkut on a 16 GB card. So setup, once the
-/// factor is on the device, asks cuSPARSE for both buffer sizes
-/// (cusparseSpSV_bufferSize, no allocation), and picks cuSPARSE only if
-/// bufFwd + bufBck fits into the free device memory minus a 10%-of-total
-/// safety margin minus what the caller says it still needs to allocate
-/// afterwards (set_reserve_bytes(): apxchol::solve passes the GPU-resident
-/// PCG's operator + vectors, which are allocated AFTER this setup -- on
-/// com-Orkut that is what turns "cuSPARSE fits by 0.2 GB" into the level-set
-/// choice); else the O(n)-schedule level-set backend (its extra cost is one
-/// more CSR copy of the factor, nnz*(4+value) bytes, plus 8 B/row).
-/// The decision is printed under APXCHOL_VERBOSE. This is the library-side
-/// version of the sweep's "retry with APXCHOL_GPU_SPTRSV=levelset after an
-/// OOM" (benchmarks/sweep_fair.py), which is now redundant.
+/// BACKEND SELECTION (per setup): env APXCHOL_GPU_SPTRSV=dataflow|cusparse|
+/// levelset is an explicit override -- exactly that backend, no fallback
+/// (=cusparse together with APXCHOL_GPU_SPTRSV_FP16=1 is impossible, cuSPARSE
+/// has no fp16 SpSV: a stderr note, then the AUTO choice). Unset (or any
+/// other value) = AUTO:
+///   * fp32 SpTRSV build (APXCHOL_SPTRSV_FP32=ON, the default): the DATAFLOW
+///     backend, unconditionally -- it has no analysis buffer (its device
+///     state is the two CSRs the level-set backend needs anyway plus 8 B/row
+///     + O(n) batch tables), so nothing to fit and nothing to decide; with
+///     APXCHOL_GPU_SPTRSV_FP16=1 the fp16 dataflow kernel. Faster than
+///     cuSPARSE on every measured workload and deterministic.
+///   * fp64 SpTRSV build (APXCHOL_SPTRSV_FP32=OFF; dataflow_supported() is
+///     false): the pre-dataflow OOM-aware rule -- cuSPARSE, unless its two
+///     SpSV analyses' O(nnz) device scratch (~23 B/nnz each on this toolkit
+///     -- 128 MB on iter0040, 766 MB on grid_2000, several GB on the giant
+///     social factors, which is exactly what OOMs com-Orkut on a 16 GB card)
+///     does not fit. Setup, once the factor is on the device, asks cuSPARSE
+///     for both buffer sizes (cusparseSpSV_bufferSize, no allocation), and
+///     picks cuSPARSE only if bufFwd + bufBck fits into the free device
+///     memory minus a 10%-of-total safety margin minus what the caller says
+///     it still needs to allocate afterwards (set_reserve_bytes():
+///     apxchol::solve passes the GPU-resident PCG's operator + vectors,
+///     which are allocated AFTER this setup); else the O(n)-schedule
+///     level-set backend (its extra cost is one more CSR copy of the factor,
+///     nnz*(4+value) bytes, plus 8 B/row). With APXCHOL_GPU_SPTRSV_FP16=1
+///     the level-set backend directly (the only fp16-capable one there).
+/// The decision is printed under APXCHOL_VERBOSE ("[apxchol] GPU SpTRSV
+/// backend: ..."; backend_reason() / backend_forced() / backend_name()).
+/// The OOM-aware rule is kept ONLY for the fp64 build's AUTO: on the fp32
+/// build an explicit =cusparse gets cuSPARSE with no fitting check (as
+/// before), and AUTO never asks cuSPARSE for anything. benchmarks/
+/// sweep_fair.py's "retry with APXCHOL_GPU_SPTRSV=levelset after an OOM" is
+/// redundant on both builds.
 ///
 /// COMPACTING FACTOR DROP (both backends): setup runs THE compacting drop
 /// (factor_drop.h -- the very implementation omp_sptrsv::setup runs on the
@@ -145,33 +165,38 @@ public:
     ~cuda_sptrsv() { destroy(); }
 
     // Env resolution of the runtime modes (read at every setup()):
-    //   APXCHOL_GPU_SPTRSV=levelset|cusparse|dataflow (unset = AUTO),
-    //   APXCHOL_GPU_SPTRSV_FP16=1 (default off; implies levelset unless
-    //   dataflow was asked for).
+    //   APXCHOL_GPU_SPTRSV=dataflow|cusparse|levelset (unset = AUTO: dataflow
+    //   on the fp32 build, the OOM-aware cuSPARSE/level-set rule on fp64),
+    //   APXCHOL_GPU_SPTRSV_FP16=1 (default off; kernel backends only -- with
+    //   =cusparse it is a stderr note + AUTO).
     static bool fp16_from_env() {
         const char* e = std::getenv("APXCHOL_GPU_SPTRSV_FP16");
         return e && std::atoi(e) != 0;
     }
-    // The env's explicit choice: +2 = dataflow forced, +1 = levelset forced
-    // (or fp16 without dataflow), -1 = cusparse forced, 0 = unset / anything
-    // else = AUTO (see the class comment).
+    // The env's explicit choice: +2 = dataflow forced, +1 = levelset forced,
+    // -1 = cusparse forced (fp16 off), 0 = unset / anything else = AUTO (see
+    // the class comment; auto_prefers_dataflow() says which AUTO).
     static int backend_from_env() {
         const char* be = std::getenv("APXCHOL_GPU_SPTRSV");
         const std::string s(be ? be : "");
         if (s == "dataflow") return +2;
-        if (fp16_from_env()) return +1;
         if (s == "levelset") return +1;
-        if (s == "cusparse") return -1;
+        if (s == "cusparse") return fp16_from_env() ? 0 : -1;   // no fp16 SpSV in cuSPARSE: AUTO
         return 0;
     }
     static bool levelset_from_env() { return backend_from_env() == 1; }
     static bool dataflow_from_env() { return backend_from_env() == 2; }
-    // Safety margin of the AUTO decision: cuSPARSE is chosen only if its
-    // analysis buffers fit into free - kAutoMarginFraction * total - reserve.
+    /// What AUTO resolves to on this build: true = the dataflow backend (fp32
+    /// SpTRSV build), false = the fp64 build's cuSPARSE-if-it-fits rule.
+    static bool auto_prefers_dataflow() { return dataflow_supported(); }
+    // Safety margin of the fp64 build's AUTO decision: cuSPARSE is chosen only
+    // if its analysis buffers fit into free - kAutoMarginFraction * total -
+    // reserve.
     static constexpr double kAutoMarginFraction = 0.10;
     /// Device bytes the caller will allocate AFTER setup() (the GPU-resident
-    /// PCG's operator + vectors); the AUTO backend decision keeps them free.
-    /// Survives setup()/destroy(); default 0.
+    /// PCG's operator + vectors); the fp64 build's AUTO backend decision keeps
+    /// them free (the dataflow AUTO of the fp32 build has nothing to fit and
+    /// ignores it). Survives setup()/destroy(); default 0.
     void set_reserve_bytes(std::size_t bytes) { reserve_bytes_ = bytes; }
     std::size_t reserve_bytes() const { return reserve_bytes_; }
     // APXCHOL_LOWPREC_DIAG_COMP for the fp16 storage: ON unless "=0" (the CPU
@@ -193,17 +218,23 @@ public:
         destroy();
         m_ = static_cast<int64_t>(m);
 
-        // Runtime modes (env, per setup).
+        // Runtime modes (env, per setup). AUTO (be_env == 0) is the dataflow
+        // backend on the fp32 build (nothing to fit, nothing to decide); on
+        // the fp64 build it starts on cuSPARSE and is decided below (fp16:
+        // straight to the level-set, the only fp16-capable backend there).
+        // use_dataflow_ implies use_levelset_ (the dataflow backend shares
+        // the level-set's device arrays).
         fp16_ = fp16_from_env();
         const int be_env = backend_from_env();
         backend_forced_ = be_env != 0;
-        use_dataflow_   = be_env == 2;
-        use_levelset_   = be_env > 0;          // AUTO (0) starts on cuSPARSE, decided below; dataflow is a level-set variant here
+        use_dataflow_   = be_env == 2 || (be_env == 0 && auto_prefers_dataflow());
+        use_levelset_   = be_env > 0 || use_dataflow_ || (be_env == 0 && fp16_);
         {
             const char* be = std::getenv("APXCHOL_GPU_SPTRSV");
             if (fp16_ && be && std::string(be) == "cusparse")
                 std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPTRSV_FP16=1: cuSPARSE SpSV has no fp16 value type"
-                                     " (CUSPARSE_STATUS_NOT_SUPPORTED); using the level-set backend\n");
+                                     " (CUSPARSE_STATUS_NOT_SUPPORTED); using the AUTO backend (%s)\n",
+                                     use_dataflow_ ? "dataflow" : "level-set");
         }
         backend_reason_.clear();
         const bool   fp16_flush_subnormal = fp16_flush_subnormal_from_env();
@@ -247,8 +278,12 @@ public:
         h_stage_.resize(static_cast<size_t>(m_));
 
         if (fp16_) {
-            backend_reason_ = use_dataflow_ ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow, APXCHOL_GPU_SPTRSV_FP16=1)"
-                                            : "level-set (APXCHOL_GPU_SPTRSV_FP16=1)";
+            backend_reason_ = use_dataflow_
+                ? (backend_forced_ ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow, APXCHOL_GPU_SPTRSV_FP16=1)"
+                                   : "dataflow (auto: the fp32 build's default; APXCHOL_GPU_SPTRSV_FP16=1 storage)")
+                : (backend_forced_ ? "level-set (APXCHOL_GPU_SPTRSV=levelset, APXCHOL_GPU_SPTRSV_FP16=1)"
+                                   : "level-set (auto: APXCHOL_GPU_SPTRSV_FP16=1 on the fp64 build -- cuSPARSE has no fp16 SpSV,"
+                                     " the dataflow kernel needs the fp32 build)");
             if (std::getenv("APXCHOL_VERBOSE"))
                 std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s\n", backend_reason_.c_str());
             // FP16 per-column-scaled storage (cuda_host.h contract): values of
@@ -287,8 +322,10 @@ public:
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_vals_, LT.vals.get(), nnz_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
             if (!use_levelset_) {
                 // cuSPARSE descriptors + the two SpSV buffer-size queries (no
-                // allocation yet). AUTO: keep cuSPARSE only if its analysis
-                // buffers fit next to what is already resident, with the margin.
+                // allocation yet). AUTO (fp64 build only -- the fp32 build's
+                // AUTO is the dataflow backend and never gets here): keep
+                // cuSPARSE only if its analysis buffers fit next to what is
+                // already resident, with the margin.
                 cusparse_prepare();
                 if (!backend_forced_) {
                     size_t mf = 0, mt = 0;
@@ -319,7 +356,11 @@ public:
                     backend_reason_ = "cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)";
                 }
             } else {
-                backend_reason_ = use_dataflow_ ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow)" : "level-set (APXCHOL_GPU_SPTRSV=levelset)";
+                backend_reason_ = use_dataflow_
+                    ? (backend_forced_ ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
+                                       : "dataflow (auto: the fp32 build's default -- no analysis buffer, O(n) state;"
+                                         " APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)")
+                    : "level-set (APXCHOL_GPU_SPTRSV=levelset)";
             }
             if (std::getenv("APXCHOL_VERBOSE"))
                 std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s\n", backend_reason_.c_str());
@@ -427,8 +468,9 @@ public:
     /// Runtime modes resolved at the last setup(): the backend in use
     /// (levelset() is true for BOTH kernel backends -- they share the device
     /// arrays; dataflow() singles out the sync-free one; backend_name() names
-    /// it, in the env spelling: "cusparse" | "levelset" | "dataflow"), whether the env forced it
-    /// (else the AUTO decision), and the printed reason.
+    /// it, in the env spelling: "cusparse" | "levelset" | "dataflow"), whether
+    /// the env forced it (else the AUTO decision: dataflow on the fp32 build),
+    /// and the printed reason.
     bool levelset() const { return use_levelset_; }
     bool dataflow() const { return use_dataflow_; }
     const char* backend_name() const { return use_dataflow_ ? "dataflow" : use_levelset_ ? "levelset" : "cusparse"; }
@@ -718,7 +760,7 @@ private:
     // direction has a device row-order (rows by level) + host level boundaries
     // (read to size the per-level launches).
     bool          use_levelset_  = false;
-    bool          use_dataflow_  = false;   // implies use_levelset_ (shares its arrays)
+    bool          use_dataflow_  = false;   // implies use_levelset_ (shares its arrays); the fp32 build's AUTO
     bool          backend_forced_ = false;
     std::string   backend_reason_;
     std::size_t   reserve_bytes_  = 0;     // set_reserve_bytes(); NOT reset by destroy()

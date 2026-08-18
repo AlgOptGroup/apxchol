@@ -90,13 +90,19 @@ inline void print_sptrsv_banner_once() {
 #if defined(APXCHOL_USE_CUDA)
         // Runtime backend / storage modes of the GPU SpTRSV (env, resolved
         // per setup by cuda_sptrsv; the banner is one-shot, so it reports the
-        // value at first solve): APXCHOL_GPU_SPTRSV=levelset|dataflow|cusparse
-        // and the kernel backends' opt-in fp16 storage APXCHOL_GPU_SPTRSV_FP16=1.
+        // value at first solve): APXCHOL_GPU_SPTRSV=dataflow|cusparse|levelset
+        // (unset = AUTO: the dataflow backend on the fp32 build, cuSPARSE with
+        // the level-set fallback on fp64) and the kernel backends' opt-in fp16
+        // storage APXCHOL_GPU_SPTRSV_FP16=1.
         const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_from_env();
         const int  gpu_be   = apxchol::cuda_sptrsv::backend_from_env();
         const char* backend = gpu_be == 2 ? "GPU/dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
-                            : gpu_be > 0 ? "GPU/levelset" : gpu_be < 0 ? "GPU/cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)"
-                            : "GPU/auto: cuSPARSE, level-set if its SpSV analysis buffers do not fit";
+                            : gpu_be > 0 ? "GPU/levelset (APXCHOL_GPU_SPTRSV=levelset)"
+                            : gpu_be < 0 ? "GPU/cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)"
+                            : apxchol::cuda_sptrsv::auto_prefers_dataflow()
+                                ? "GPU/auto: dataflow (fp32 build default; APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)"
+                                : gpu_fp16 ? "GPU/auto: level-set (fp16 storage on the fp64 build)"
+                                           : "GPU/auto: cuSPARSE, level-set if its SpSV analysis buffers do not fit (fp64 build)";
         const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_GPU_SPTRSV_FP16=1)"
                                        : apxchol::cuda_sptrsv::value_name;
         const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;

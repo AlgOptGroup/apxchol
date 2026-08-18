@@ -306,10 +306,17 @@ TYPED_TEST(SolveTest, DeterministicWithSameSeed) {
     auto r2 = this->solve_with(L, b);
     EXPECT_EQ(r1.iterations, r2.iterations);
 #ifdef APXCHOL_USE_CUDA
-    // The GPU-resident PCG is not bit-deterministic run-to-run (cuSPARSE SpSV
-    // atomics + cuBLAS reduction order); observed wobble ~3e-5 relative. Gate
-    // at 1e-3 relative — still catches any real seed/algorithm change.
-    EXPECT_NEAR(r1.residual, r2.residual, 1e-3 * r1.residual);
+    // The GPU-resident PCG is bit-deterministic run to run on our dataflow /
+    // level-set SpTRSV backends (the fp32 build's AUTO is the dataflow one;
+    // cuSPARSE SpMV ALG_DEFAULT and the cuBLAS dot are deterministic too), but
+    // NOT on cuSPARSE SpSV (APXCHOL_GPU_SPTRSV=cusparse, or the fp64 build's
+    // AUTO): its atomics wobble the residual ~1e-2 relative and the iteration
+    // count by ±1. Exact where the SpTRSV is ours; a 1e-3 relative gate on
+    // cuSPARSE (still catches any real seed/algorithm change).
+    const int  be = apxchol::cuda_sptrsv::backend_from_env();
+    const bool maybe_cusparse = be < 0 || (be == 0 && !apxchol::cuda_sptrsv::auto_prefers_dataflow());
+    if (maybe_cusparse) EXPECT_NEAR(r1.residual, r2.residual, 1e-3 * r1.residual);
+    else                EXPECT_DOUBLE_EQ(r1.residual, r2.residual);
 #else
     EXPECT_DOUBLE_EQ(r1.residual, r2.residual);
 #endif

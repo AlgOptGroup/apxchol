@@ -401,7 +401,8 @@ if (NOT APXCHOL_SPTRSV_LOWPREC MATCHES "^(OFF|FP16_SCALED)$")
     message(FATAL_ERROR "APXCHOL_SPTRSV_LOWPREC must be OFF or FP16_SCALED (got '${APXCHOL_SPTRSV_LOWPREC}'; the BF16 / BF16_SCALED / FP24 variants were removed 2026-08-18).")
 endif()
 # CUDA builds have no COMPILE-TIME low-precision SpTRSV path (the GPU's fp16
-# storage is the runtime opt-in APXCHOL_GPU_SPTRSV_FP16=1, level-set backend):
+# storage is the runtime opt-in APXCHOL_GPU_SPTRSV_FP16=1 on our dataflow /
+# level-set kernels):
 # with APXCHOL_USE_CUDA=ON the
 # variant is TREATED AS OFF for this build (fp32 CPU storage, no macro, STATUS
 # line) instead of failing the configure -- same rule as the root

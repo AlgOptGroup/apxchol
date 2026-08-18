@@ -90,7 +90,7 @@ if (NOT APXCHOL_SPTRSV_LOWPREC MATCHES "^(OFF|FP16_SCALED)$")
 endif()
 # CUDA builds have no COMPILE-TIME low-precision SpTRSV path (the cuSPARSE
 # backend is fp32/fp64 only; the GPU's fp16 storage is the RUNTIME opt-in
-# APXCHOL_GPU_SPTRSV_FP16=1 on the level-set backend, see
+# APXCHOL_GPU_SPTRSV_FP16=1 on our dataflow / level-set kernels, see
 # include/apxchol/solver/sptrsv/cuda.h): with APXCHOL_USE_CUDA=ON any APXCHOL_SPTRSV_LOWPREC value is
 # TREATED AS OFF for this build -- CPU SpTRSV storage forced to fp32, no
 # APXCHOL_SPTRSV_LOWPREC_* macro defined -- with a STATUS line, instead of

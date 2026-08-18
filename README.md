@@ -3,13 +3,13 @@
 C++23 library implementing a parallel approximate-Cholesky preconditioner
 (Kyng–Sachdeva-style elimination with tree-based clique sampling) for graph
 Laplacian and SDDM linear systems, with an Eigen-compatible interface, an
-OpenMP or cuSPARSE triangular-solve backend, a CLI solver, Python and
+OpenMP or CUDA triangular-solve backend, a CLI solver, Python and
 Octave/MATLAB bindings, and a standalone benchmark suite comparing against
 Hypre BoomerAMG, AMGCL, RCHOL/pRCHOL, ParAC, CMG, and Laplacians.jl.
 
 The library is the header tree under `include/apxchol/` (namespace
 `apxchol::`) plus two compiled translation units in `src/` (CUDA builds add
-two device TUs); `python/` and
+three device TUs); `python/` and
 `octave/` are self-contained bindings, `examples/` demonstrates the public
 customization seams, and `benchmarks/` is a standalone comparison suite with
 its own [README](benchmarks/README.md) and committed
@@ -104,11 +104,14 @@ random draws are schedule-independent: the factor is bit-identical for a
 fixed seed at one thread; at T>1 merged edge weights can differ in their
 final ulps (accumulation order).
 
-With `-DAPXCHOL_USE_CUDA=ON` the triangular solves run on the GPU via
-cuSPARSE and the one-shot `apxchol::solve` uses a fully GPU-resident PCG
-(cuBLAS/cuSPARSE, nothing crosses the bus per iteration). The GPU-resident
-loop applies to the one-shot `apxchol::solve` only; `cpu_solver` on a CUDA
-build runs the host PCG with cuSPARSE triangular solves.
+With `-DAPXCHOL_USE_CUDA=ON` the triangular solves run on the GPU — by
+default through our sync-free dataflow kernel (one persistent launch per
+sweep, O(n) state, bit-deterministic; `APXCHOL_GPU_SPTRSV=cusparse` or
+`=levelset` select cuSPARSE SpSV or our level-set kernels instead) — and the
+one-shot `apxchol::solve` uses a fully GPU-resident PCG (cuBLAS/cuSPARSE
+SpMV, nothing crosses the bus per iteration). The GPU-resident loop applies
+to the one-shot `apxchol::solve` only; `cpu_solver` on a CUDA build runs the
+host PCG with GPU triangular solves.
 
 ### Customizing the solver
 

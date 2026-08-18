@@ -3,9 +3,9 @@
 // cuda_sptrsv::setup does to the factor BEFORE the upload -- the L11 extraction
 // into cuSPARSE's int32 arrays, the compacting factor drop (the shared
 // factor_drop.h implementation, the same one omp_sptrsv::setup runs), the
-// fp16 per-column-scaled narrowing of the level-set backend's opt-in fp16
-// storage (APXCHOL_GPU_SPTRSV_FP16=1), the CSR transpose and the level-set
-// schedules. Deliberately CUDA-FREE (no cuda_runtime.h, no __half: fp16
+// fp16 per-column-scaled narrowing of our kernel backends' opt-in fp16
+// storage (APXCHOL_GPU_SPTRSV_FP16=1), the CSR transpose, the level-set
+// schedules and the dataflow batch tables. Deliberately CUDA-FREE (no cuda_runtime.h, no __half: fp16
 // values are IEEE binary16 BIT PATTERNS, std::uint16_t, produced by
 // lowprec.h's fp16_t -- the same RNE the CPU FP16_SCALED build uses -- and
 // reinterpreted as __half on the device) so the CPU unit tests can state,
