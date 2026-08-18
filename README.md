@@ -208,6 +208,16 @@ weights; the PCG recurrence stays fp64; pass `=OFF` for an fp64 baseline);
 everything else defaults OFF except the `APXCHOL_BUILD_EXAMPLES` /
 `APXCHOL_BUILD_TESTS` toggles. Release builds add `-march=native`.
 
+One runtime knob (CPU/OpenMP backend): the SpTRSV setup drops factor
+off-diagonals below `1e-4 ×` their column's max |off-diagonal| before it
+builds its CSR/CSC, folding the dropped mass back into the kept entries of
+the column (a compacting, column-sum-preserving drop — fewer stored entries,
+same preconditioner within the measured 0-iteration tolerance; see
+`kFactorDropRelDefault` in
+[include/apxchol/solver/sptrsv/omp.h](include/apxchol/solver/sptrsv/omp.h)).
+`APXCHOL_FACTOR_DROP=0` disables it, `APXCHOL_FACTOR_DROP=<rel>` overrides
+the threshold.
+
 ## Benchmarks
 
 The benchmark suite is a separate CMake project under `benchmarks/`
