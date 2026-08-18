@@ -57,31 +57,62 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // branch measured; raising it needs the IPM ladder, not one matrix.
 inline constexpr double kFactorDropRelDefault = 1e-4;
 
-/// OpenMP parallel sparse triangular solver with two interchangeable schedulers:
+/// OpenMP parallel sparse triangular solver: ONE level-set kernel for both
+/// sweeps (Anderson & Saad 1989; Naumov 2011).
 ///
-///   1. **Level-set scheduler** (Anderson & Saad 1989; Naumov 2011):
-///      Pre-computes topological levels of the dependency DAG.  Each
-///      level is a parallel-for, with an implicit barrier between
-///      levels.  Best when the factor has few, fat levels, or when a
-///      few fat levels carry nearly all the work.
+/// setup() pre-computes the topological levels of the dependency DAG (or reads
+/// them off the elimination rounds, see round_bounds_); a solve is one
+/// persistent OpenMP team walking the levels in order with a barrier between
+/// levels. The forward solve (L y = x) walks the CSR of L11 -- row i, diagonal
+/// slot LAST, levels fwd_levels_ -- and the back solve (L^T z = y) walks the
+/// CSC -- column j, diagonal slot FIRST, levels bck_levels_ (already stored
+/// deepest-dependency-first, so both walks are index-ascending). Both are pure
+/// gathers of the same shape (per row / column: one dot product over the
+/// off-diagonal slots against y_out, one subtract, one divide by the diagonal),
+/// so they are ONE templated kernel, solve_levelset<Dir>, whose direction
+/// policy (fwd_dir / bck_dir, below the kernel) supplies the arrays, the level
+/// list, the off-diagonal slot range and diagonal slot of a row / column, and
+/// the input transform (identity, or the *_SCALED variants' folded x * r_j^2
+/// on the back solve). forward_solve / transpose_solve are thin wrappers.
 ///
-///   2. **Synchronization-free scheduler** (Liu, Smelyanskiy, Chow 2016;
-///      Park et al. 2014; Su, Yang, Zhao 2020 "SyncFree"):
-///      No barriers.  Each row carries an atomic counter of unresolved
-///      dependencies; threads pick rows dynamically and busy-wait on
-///      the counter, then notify dependents via atomic decrement.
-///      Could win only on genuinely deep factors of uniformly-thin
-///      levels with no fat work head.
+/// Levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
+/// `omp single` (4-way scalar kernel dot_thin); larger ("fat") levels are an
+/// `omp for schedule(static)` (plain scalar loop on fp32/fp64/FP24, SIMD
+/// dot_fat_simd on 16-bit storage). Two schedule experiments sit behind envs
+/// (both read at every setup, both DEFAULT OFF = the behaviour just described,
+/// both bit-identical to it -- the per-row arithmetic never changes, only
+/// which thread runs a row when and how many barriers there are):
+///   APXCHOL_SPTRSV_BALANCE=nnz    fat levels: instead of `omp for
+///     schedule(static)` (contiguous, equal ROW counts per thread) every thread
+///     takes a contiguous range of the level's rows holding an equal share of
+///     the level's NNZ (prefix over row lengths; a row is never split), then a
+///     barrier. The ranges are computed once per (level, team size) and cached
+///     (bal_off_ of each direction, bal_team_); a team of a different size
+///     recomputes them at the start of the solve. Deterministic per thread
+///     count. Motivation: `schedule(dynamic, 64)` gave -20% SpTRSV on IPM but
+///     +23% on grids -- nnz balancing should keep the IPM gain (rows of very
+///     unequal length within a level) without the grid loss.
+///   APXCHOL_SPTRSV_AGGLOMERATE=<K> thin levels: a run of consecutive thin
+///     levels is one SUPERSTEP -- one `omp single` runs the whole run, level
+///     after level, with NO barrier in between (a row of level k+1 depends only
+///     on levels <= k, all of which the same thread has already written in
+///     program order), one barrier at the end. K > 0 caps a superstep at K
+///     levels (bounds the time the other threads idle), K = 0 = the full run.
+///     Removes most of the barriers of the long thin tail: measured with
+///     APXCHOL_LEVEL_DUMP (bg+tree, T=16; the racy block_greedy makes the
+///     level count vary run to run), iter0040 has 100-185 levels per direction
+///     of which 60-94 (all but the ~36-41 fat ones) are thin and form ONE
+///     contiguous run (130 levels / 94 thin with a serial elimination),
+///     grid_2000 84-92 levels / 54-61 thin, one run (+ one isolated thin
+///     level); AGGLOMERATE=0 therefore leaves fat + 1 barriers per solve. Off =
+///     every thin level its own single + barrier (step_end_[l] == l + 1).
 ///
-/// Both schedulers reuse the same CSR (forward) / CSC (back) storage.
-/// The default `forward_solve` and `transpose_solve` entry points both use
-/// the level-set scheduler: paired A/B across the benchmark suite showed
-/// sync-free never beats level-set on any factor the current elimination
-/// produces (power-law factors have a tiny AVERAGE level size, but a few
-/// very fat early levels carry nearly all the work — see the
-/// APXCHOL_LEVEL_DUMP work-concentration stats).  The sync-free back solve
-/// remains as an opt-in escape hatch via APXCHOL_BCK_SCHED=syncfree for
-/// orderings that do produce deep-thin factors.
+/// The sync-free (Liu/Smelyanskiy/Chow 2016) back solve that used to sit
+/// behind APXCHOL_BCK_SCHED=syncfree was REMOVED: paired A/B across the suite
+/// never showed it winning on any factor the elimination produces (power-law
+/// factors have a tiny AVERAGE level size, but a few very fat early levels
+/// carry nearly all the work), and the point-to-point experiment showed the
+/// barrier COUNT is not what the wall time is made of.
 
 // sptrsv_value_t (bf16_t / fp16_t / fp24_t under the APXCHOL_SPTRSV_LOWPREC
 // variants, fp32 under -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in
@@ -106,7 +137,7 @@ inline constexpr double kFactorDropRelDefault = 1e-4;
 // variants that is narrow(L_jj / s_j), which may even overflow fp16 to inf --
 // and is read by the kernels ONLY under APXCHOL_FP16_DIAG, below; keeping it
 // leaves the CSR/CSC layout, the transpose, and every "diagonal is entry X"
-// invariant untouched). fwd_diag()/bck_diag() below are the single switch.
+// invariant untouched). diag<Dir>() below is the single switch.
 //
 // PER-COLUMN SCALE under the *_SCALED variants -- FOLDED INTO THE VECTORS:
 // scale_[j] = s_j = max |L_ij| over the off-diagonals of column j (1.0f if
@@ -114,8 +145,8 @@ inline constexpr double kFactorDropRelDefault = 1e-4;
 // What is stored is the COLUMN-SCALED factor L~ = L D^-1, D = diag(s_j):
 // off-diagonals narrow(L_ij / s_j) and diag_[j] = fp32(L_jj / s_j). The
 // kernels never multiply a scale back -- they run on L~ as stored, so every
-// kernel path (forward / back x thin / fat, sync-free) is ONE source for every
-// storage type, the only per-type difference being the widen() overload:
+// kernel path (forward / back x thin / fat) is ONE source for every storage
+// type, the only per-type difference being the widen() overload:
 //   forward:  L y = x  <=>  L~ (D y) = x.  forward_solve runs the plain forward
 //             kernel on L~ and returns y' = D y (y'_j = s_j y_j), NOT y.
 //   back:     L^T z = y  <=>  D L~^T z = y  <=>  L~^T z = D^-1 y = D^-2 y'.
@@ -159,9 +190,9 @@ inline constexpr double kFactorDropRelDefault = 1e-4;
 // at every setup, every build) selects; the default is the measured winner,
 // "scalar" (kFatGatherSimdDefault). A 4-wide step and a scalar tail
 // finish the row / column. Thin levels (the `omp single` paths) keep the 4-way
-// scalar kernel, the sync-free back solve its single accumulator; the fp32 /
-// fp64 / FP24 fat-level loop is the plain scalar loop it always was. Different
-// summation orders (2 lanes vs 4-way vs 1): same accuracy, not bit-identical.
+// scalar kernel; the fp32 / fp64 / FP24 fat-level loop is the plain scalar
+// loop it always was. Different summation orders (2 lanes vs 4-way vs 1):
+// same accuracy, not bit-identical.
 //
 // APXCHOL_FP16_DIAG=1 (env, read at every setup; FP16_SCALED only): the
 // kernels read the diagonal from its fp16 slot in csr_vals_/csc_vals_ --
@@ -226,9 +257,9 @@ inline constexpr double kFactorDropRelDefault = 1e-4;
 // work with no atomics -- per-column kept count -> serial prefix over m+1 ->
 // parallel compacted copy into uninitialized buffers -- and the compacted
 // arrays REPLACE L11_{outer,inner,vals} / nnz for everything downstream: the
-// CSR transpose, the CSC copy, the level sets (the topological scan reads the
-// compacted CSR/CSC; round-as-level bounds are per column and unaffected) and
-// the sync-free counters are all drop-agnostic. Result: nnz(L stored) -- the
+// CSR transpose, the CSC copy and the level sets (the topological scan reads
+// the compacted CSR/CSC; round-as-level bounds are per column and unaffected)
+// are all drop-agnostic. Result: nnz(L stored) -- the
 // CSR/CSC bytes and the per-sweep work -- shrink. The drop happens at the
 // FACTOR's precision (factor_value_t), before narrow_value(): dropped entries
 // never reach the storage format. Deterministic: the kept set is a per-entry
@@ -988,7 +1019,7 @@ private:
         // diag_ (L11_vals is already fp32 under the flag, so diag_ only ever held
         // the fp32 value widened to double) and matches the GPU backend, which has
         // always read the diagonal inline. The lowprec builds keep the exact-fp32
-        // diag_ filled above instead (see fwd_diag / bck_diag); their narrow
+        // diag_ filled above instead (see diag<Dir>); their narrow
         // diagonal slots in csr_vals_/csc_vals_ are written like every other
         // entry but never read.
         mark("csc_to_csr");
@@ -1260,19 +1291,55 @@ private:
         }
         mark("bck_levels");
         }
+
+        // ── Schedule experiments (see the class comment): read at every setup ──
+        // APXCHOL_SPTRSV_AGGLOMERATE=<K>: unset / empty -> off (every thin level
+        // its own superstep); "0" -> a superstep is a whole run of thin levels;
+        // K > 0 -> at most K levels per superstep. APXCHOL_SPTRSV_BALANCE=nnz
+        // -> fat levels split by nnz instead of `omp for schedule(static)`.
+        agglomerate_ = [] {
+            const char* e = std::getenv("APXCHOL_SPTRSV_AGGLOMERATE");
+            if (!e || !*e) return -1;
+            const int k = std::atoi(e);
+            return k < 0 ? -1 : k;
+        }();
+        balance_nnz_ = [] {
+            const char* e = std::getenv("APXCHOL_SPTRSV_BALANCE");
+            if (!e || !*e) return false;
+            const std::string_view v(e);
+            if (v == "nnz") return true;
+            if (v == "rows" || v == "0" || v == "off") return false;
+            std::fprintf(stderr, "[apxchol] APXCHOL_SPTRSV_BALANCE=%s ignored (expected nnz|rows); using rows\n", e);
+            return false;
+        }();
+        build_step_ends(fwd_levels_, fwd_step_end_);
+        build_step_ends(bck_levels_, bck_step_end_);
+        // nnz-balance tables for the team size a solve will most likely see;
+        // solve_levelset rebuilds them if its team differs (bal_team_).
+        bal_team_ = 0;
+        fwd_bal_off_.clear(); bck_bal_off_.clear();
+        if (balance_nnz_) {
+#ifdef _OPENMP
+            const int nt = omp_get_max_threads();
+#else
+            const int nt = 1;
+#endif
+            build_balance_tables(nt);
+        }
+        mark("schedule_tables");
+
         if (const char* e = std::getenv("APXCHOL_LEVEL_DUMP"); e && *e) {
             long long fwd_max = 0, bck_max = 0;
             for (auto& l : fwd_levels_) fwd_max = std::max<long long>(fwd_max, (long long)l.size());
             for (auto& l : bck_levels_) bck_max = std::max<long long>(bck_max, (long long)l.size());
             // Back-solve WORK concentration. avg/count of levels is a MISLEADING
-            // sync-free signal: power-law factors have a tiny average level size
-            // yet a few very fat early levels carry nearly all the work (so
-            // level-set wins). The predictive signals are per-level off-diagonal
-            // WORK (= SpTRSV flops): bck_work_top1_frac (share in the single
-            // fattest level — high => fat head => level-set) and bck_work_in_tiny
-            // (share in levels below the tiny-level threshold). A genuine
-            // sync-free candidate needs HIGH tiny-work AND LOW top1 (work truly
-            // spread across many small levels, no dominant head).
+            // signal: power-law factors have a tiny average level size yet a
+            // few very fat early levels carry nearly all the work (which is why
+            // level-set beat the removed sync-free schedule everywhere). The
+            // predictive signals are per-level off-diagonal WORK (= SpTRSV
+            // flops): bck_work_top1_frac (share in the single fattest level --
+            // high => fat head) and bck_work_in_tiny (share in levels below the
+            // tiny-level threshold).
             constexpr long long kTinyLevelSize = 512;   // diagnostic bucket only
             long long total_w = 0, max_lvl_w = 0, tiny_w = 0;
             for (auto& lvl : bck_levels_) {
@@ -1290,20 +1357,38 @@ private:
                 "bck_work_top1_frac=%.4f bck_work_in_tiny_frac=%.4f\n",
                 (long long)m_, fwd_levels_.size(), fwd_max, bck_levels_.size(), bck_max,
                 top1, tiny);
+            // Thin-level structure (what APXCHOL_SPTRSV_AGGLOMERATE acts on):
+            // per direction, the number of levels of size <= kSpTRSVOMPThreshold
+            // (each an `omp single` + barrier), and the length distribution of
+            // the RUNS of consecutive thin levels (a run = one superstep under
+            // AGGLOMERATE=0), as "len:count" pairs. Fat levels are the barriers
+            // that stay either way.
+            for (const auto* lv : {&fwd_levels_, &bck_levels_}) {
+                std::size_t thin_n = 0, fat_n = 0, runs = 0;
+                std::vector<std::pair<std::size_t, std::size_t>> hist;   // (run length, count), by length
+                std::size_t run = 0;
+                auto flush = [&] {
+                    if (!run) return;
+                    ++runs;
+                    auto it = std::find_if(hist.begin(), hist.end(), [&](const auto& h) { return h.first == run; });
+                    if (it == hist.end()) hist.emplace_back(run, 1); else ++it->second;
+                    run = 0;
+                };
+                for (const auto& l : *lv) {
+                    if (l.size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold)) { ++thin_n; ++run; }
+                    else { ++fat_n; flush(); }
+                }
+                flush();
+                std::sort(hist.begin(), hist.end());
+                std::fprintf(stderr, "[trsv-levels] %s: levels=%zu thin(<=%u)=%zu fat=%zu thin_runs=%zu barriers/solve=%zu"
+                             " (agglomerate=%d) run_lengths(len:count)=",
+                             lv == &fwd_levels_ ? "fwd" : "bck", lv->size(),
+                             static_cast<unsigned>(kSpTRSVOMPThreshold), thin_n, fat_n, runs,
+                             num_barriers(lv == &fwd_levels_), agglomerate_);
+                for (const auto& h : hist) std::fprintf(stderr, " %zu:%zu", h.first, h.second);
+                std::fprintf(stderr, "\n");
+            }
         }
-
-        // ── Sync-free initial dependency counts (backward only) ──
-        // Column j depends on (csc_col_ptr[j+1] - csc_col_ptr[j] - 1)
-        // off-diagonal rows k > j.  Pre-computed once and copied into the
-        // live counter buffer at the start of each sync-free back solve.
-        // (Forward always uses the level-set scheduler — see forward_solve —
-        // so no forward sync-free counters are built.)
-        bck_unsolved_init_.resize(m_);
-        #pragma omp parallel for schedule(static)
-        for (node_index j = 0; j < m_; ++j)
-            bck_unsolved_init_[j] =
-                static_cast<int>(csc_col_ptr_[j + 1] - csc_col_ptr_[j] - 1);
-        bck_unsolved_.resize(m_);
 
         ready_ = true;
     }
@@ -1315,209 +1400,209 @@ public:
     /// and writes y' = D y (y'_j = s_j * y_j) -- the value transpose_solve
     /// expects as its input; the pair (forward_solve, transpose_solve) applies
     /// (L L^T)^-1 on every build. See the file header, "FOLDED INTO THE
-    /// VECTORS". Always the level-set scheduler: empirically beats sync-free across
-    /// all level counts we tested (BG/luby/BK with thousands of levels and
-    /// rootset with ~65 levels), including the thin-level regime where the
-    /// back solve prefers sync-free — so the forward sync-free variant was
-    /// dropped.  (The back solve still chooses between the two: see
-    /// transpose_solve.)
+    /// VECTORS". Valid in place (x_in == y_out).
     void forward_solve(const double* x_in, double* y_out) const {
-        forward_solve_levelset(x_in, y_out);
+        solve_levelset<fwd_dir>(x_in, y_out);
     }
 
     /// Back solve: L^T * z = y.  Under the *_SCALED variants the input is the
     /// forward's y' = D y and the kernel solves L~^T z = D^-2 y' (input read
     /// scaled once per column by inv_scale_[j]^2), i.e. z = L^-T y as before;
-    /// D = I elsewhere. Default: level-set scheduler.  Paired A/B
-    /// across the benchmark suite shows the sync-free back-solve never beats
-    /// level-set on any factor the current elimination produces: power-law
-    /// factors have a tiny *average* level size that hides a few very fat
-    /// early levels carrying nearly all the work (which parallelize best
-    /// under level-set), while sync-free pays atomic-spin + load-imbalance
-    /// over the whole column set.  Sync-free stays available as an opt-in
-    /// escape hatch (APXCHOL_BCK_SCHED=syncfree) for orderings that produce
-    /// genuinely deep, uniformly-thin factors.
+    /// D = I elsewhere. Valid in place (x_in == y_out).
     void transpose_solve(const double* x_in, double* y_out) const {
-        static const bool syncfree = []{
-            const char* e = std::getenv("APXCHOL_BCK_SCHED");
-            return e && std::string_view(e) == "syncfree";
-        }();
-        if (syncfree) transpose_solve_syncfree(x_in, y_out);
-        else          transpose_solve_levelset(x_in, y_out);
+        solve_levelset<bck_dir>(x_in, y_out);
     }
 
-    // ── Level-set scheduler ──────────────────────────────────
+    // Whether the last setup() resolved APXCHOL_SPTRSV_BALANCE=nnz (fat levels
+    // split by nnz) and APXCHOL_SPTRSV_AGGLOMERATE (superstep cap; -1 = off,
+    // 0 = whole runs of thin levels, K > 0 = at most K levels per superstep).
+    bool balance_nnz() const { return balance_nnz_; }
+    int  agglomerate() const { return agglomerate_; }
 
-    void forward_solve_levelset(const double* x_in, double* y_out) const {
-        // No initializing copy of x_in into y_out: the input is folded
-        // straight into the recurrence (row i reads x_in[i] in its update
-        // below), removing a serial full-vector memory pass per solve.
-        // Bit-identical to the old copy-then-update form: y_out[i] was only
-        // ever read at row i's own update, where it still held x_in[i]
-        // (levels partition 0..m-1, each index written exactly once); the
-        // gathered terms read y_out entries written by earlier levels.
-        // In-place calls (x_in == y_out) stay valid for the same reason.
-
-        // ONE persistent OpenMP team across all levels.  Issuing a fresh
-        // `#pragma omp parallel for` per level costs ~10µs per fork-join
-        // at T=16, which dominates solve time when a factor has many
-        // levels (e.g. ~240 levels × 50 PCG iters × 2 solves = 24k
-        // fork-joins per solve on IPM iter40).  By spawning threads once
-        // and iterating levels inside the parallel region with `omp for`
-        // (implicit barrier between levels carries the level-dependency
-        // guarantee that level k+1 reads y_out written by level k), we
-        // collapse the fork-joins to one.  Tiny levels run on thread 0
-        // via `omp single` (also has an implicit barrier).
-        #pragma omp parallel
-        {
-            for (const auto& level : fwd_levels_) {
-                const node_index level_sz = static_cast<node_index>(level.size());
-                if (level_sz <= kSpTRSVOMPThreshold) {
-                    #pragma omp single
-                    {
-                        for (node_index k = 0; k < level_sz; ++k) {
-                            node_index i = level[k];
-                            // Two-stage prefetch: pull metadata 8 ahead
-                            // (cheap csr_row_ptr_[] load), pull actual nnz
-                            // payload 4 ahead where most cache-miss stalls
-                            // occur.
-                            if (k + 8 < level_sz)
-                                __builtin_prefetch(&csr_row_ptr_[level[k + 8]]);
-                            if (k + 4 < level_sz) {
-                                node_index ip = level[k + 4];
-                                __builtin_prefetch(&csr_col_idx_[csr_row_ptr_[ip]]);
-                                __builtin_prefetch(&csr_vals_[csr_row_ptr_[ip]]);
-                            }
-                            fwd_row</*Fat=*/false>(i, x_in, y_out);
-                        }
-                    } // implicit barrier
-                } else {
-                    #pragma omp for schedule(static)
-                    for (node_index k = 0; k < level_sz; ++k) {
-                        node_index i = level[k];
-                        if (k + 8 < level_sz)
-                            __builtin_prefetch(&csr_row_ptr_[level[k + 8]]);
-                        if (k + 4 < level_sz) {
-                            node_index ip = level[k + 4];
-                            __builtin_prefetch(&csr_col_idx_[csr_row_ptr_[ip]]);
-                            __builtin_prefetch(&csr_vals_[csr_row_ptr_[ip]]);
-                        }
-                        fwd_row</*Fat=*/true>(i, x_in, y_out);
-                    } // implicit barrier on omp for
-                }
-            }
-        }
-    }
-
-    void transpose_solve_levelset(const double* x_in, double* y_out) const {
-        // No initializing copy — x_in is folded into the recurrence exactly
-        // as in forward_solve_levelset (this solve is also a pure gather:
-        // column j reads x_in[j] once at its own update, and the sum gathers
-        // y_out entries of later columns written by earlier backward levels).
-        // Bit-identical to the old copy-then-update form; in-place calls
-        // (x_in == y_out) stay valid.
-
-        // ONE persistent OpenMP team across all backward levels.  See
-        // forward_solve_levelset for the rationale: collapses per-level
-        // fork-joins to one outer parallel region with implicit barriers
-        // between `omp for` constructs.  Tiny-level path runs on thread 0
-        // via `omp single` (also has an implicit barrier).
-        #pragma omp parallel
-        {
-            // Process backward levels from depth 0 (no dependencies) upward.
-            for (const auto& level : bck_levels_) {
-                const node_index level_sz = static_cast<node_index>(level.size());
-                if (level_sz <= kSpTRSVOMPThreshold) {
-                    #pragma omp single
-                    {
-                        for (node_index k = 0; k < level_sz; ++k) {
-                            node_index j = level[k];
-                            // Two-stage prefetch: csc_col_ptr_ 8 ahead,
-                            // csc_row_idx_/vals 4 ahead (where cache-miss
-                            // stalls hit).
-                            if (k + 8 < level_sz)
-                                __builtin_prefetch(&csc_col_ptr_[level[k + 8]]);
-                            if (k + 4 < level_sz) {
-                                node_index jp = level[k + 4];
-                                __builtin_prefetch(&csc_row_idx_[csc_col_ptr_[jp]]);
-                                __builtin_prefetch(&csc_vals_[csc_col_ptr_[jp]]);
-                            }
-                            bck_col</*Fat=*/false>(j, x_in, y_out);
-                        }
-                    } // implicit barrier
-                } else {
-                    #pragma omp for schedule(static)
-                    for (node_index k = 0; k < level_sz; ++k) {
-                        node_index j = level[k];
-                        if (k + 8 < level_sz)
-                            __builtin_prefetch(&csc_col_ptr_[level[k + 8]]);
-                        if (k + 4 < level_sz) {
-                            node_index jp = level[k + 4];
-                            __builtin_prefetch(&csc_row_idx_[csc_col_ptr_[jp]]);
-                            __builtin_prefetch(&csc_vals_[csc_col_ptr_[jp]]);
-                        }
-                        bck_col</*Fat=*/true>(j, x_in, y_out);
-                    } // implicit barrier on omp for
-                }
-            }
-        }
-    }
-
-    // ── Synchronization-free scheduler (back solve only) ─────
+private:
+    // ── THE level-set kernel (both directions) ─────────────────────────
     //
-    // Per-column dependency counters (bck_unsolved_) start at the
-    // off-diagonal nonzero count and decrement as producers finish.
-    // Threads pick columns dynamically; each column busy-waits on its
-    // counter to reach zero, computes, then publishes the result by
-    // atomically decrementing each dependent's counter.  Memory
-    // ordering: release on the publish, acquire on the spin-wait read,
-    // which establishes happens-before between the producer's write to
-    // y_out[j] and the consumer's load of y_out[j].
-    // (The forward solve always uses the level-set scheduler, which wins
-    // universally there, so it has no sync-free variant.)
-
-    void transpose_solve_syncfree(const double* x_in, double* y_out) const {
-        std::copy(x_in, x_in + m_, y_out);
-
-        #pragma omp parallel for schedule(static)
-        for (node_index j = 0; j < m_; ++j)
-            bck_unsolved_[j] = bck_unsolved_init_[j];
-
-        const node_index m = m_;
-        int* unsolved = bck_unsolved_.data();
-
-        // Process columns in reverse: column j depends on z[k] for k > j,
-        // so larger indices become ready first.  Reverse iteration in
-        // the dynamic-for keeps cache locality similar to the forward case
-        // and lets the index-(m-1) row (no dependencies) start immediately.
+    // No initializing copy of x_in into y_out: the input is folded straight
+    // into the recurrence (row v reads x_in[v] in its own update), which
+    // removes a serial full-vector memory pass per solve. Bit-identical to the
+    // copy-then-update form: y_out[v] was only ever read at row v's own
+    // update, where it still held x_in[v] (levels partition 0..m-1, each index
+    // written exactly once); the gathered terms read y_out entries written by
+    // earlier levels. In-place calls (x_in == y_out) stay valid for the same
+    // reason (the row's x_in[v] is read before its y_out[v] is written).
+    //
+    // ONE persistent OpenMP team across all levels. Issuing a fresh `#pragma
+    // omp parallel for` per level costs ~10us per fork-join at T=16, which
+    // dominates when a factor has many levels (~240 levels x 50 PCG iters x 2
+    // solves = 24k fork-joins per solve on IPM iter40). Spawning the team once
+    // and iterating levels inside it -- an `omp for` (fat) or `omp single`
+    // (thin) per level, whose implicit barrier carries the level-dependency
+    // guarantee that level k+1 reads y_out written by level k -- collapses
+    // that to one fork-join per solve.
+    //
+    // Schedules (see the class comment; both default OFF, both bit-identical):
+    //   fat level, default:      `omp for schedule(static)` over the level's rows;
+    //   fat level, balance_nnz_: thread t runs rows [off[t], off[t+1]) of the
+    //                            level's nnz-balanced split, then a barrier;
+    //   thin levels:             `omp single` over the SUPERSTEP [l, step_end[l])
+    //                            -- one level unless agglomerate_ >= 0.
+    template <class Dir>
+    void solve_levelset(const double* x_in, double* y_out) const {
+        const auto& levels   = Dir::levels(*this);
+        const auto& step_end = Dir::step_end(*this);
+        const std::size_t L  = levels.size();
+        assert(step_end.size() == L);
         #pragma omp parallel
         {
-            #pragma omp for schedule(dynamic, 64) nowait
-            for (node_index j_r = 0; j_r < m; ++j_r) {
-                node_index j = m - 1 - j_r;
-                while (__atomic_load_n(&unsolved[j], __ATOMIC_ACQUIRE) != 0) {
-                    #if defined(__x86_64__) || defined(__i386__)
-                    __builtin_ia32_pause();
-                    #endif
-                }
-
-                double sum = 0.0;
-                for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
-                    sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
-                y_out[j] = (bck_rhs(j, y_out) - sum) / bck_diag(j);   // x_in was copied into y_out above
-
-                // Notify dependents: columns i < j with L(j, i) ≠ 0.
-                // CSR row j lists exactly those, with diagonal last.
-                for (edge_index p = csr_row_ptr_[j]; p < csr_row_ptr_[j + 1] - 1; ++p) {
-                    node_index i = csr_col_idx_[p];
-                    __atomic_sub_fetch(&unsolved[i], 1, __ATOMIC_RELEASE);
+#ifdef _OPENMP
+            const int nt  = omp_get_num_threads();
+            const int tid = omp_get_thread_num();
+#else
+            const int nt = 1, tid = 0;
+#endif
+            if (balance_nnz_ && bal_team_ != nt) {
+                #pragma omp single
+                build_balance_tables(nt);      // mutable cache; implicit barrier publishes it
+            }
+            const node_index* bal = balance_nnz_ ? Dir::bal_off(*this).data() : nullptr;
+            for (std::size_t l = 0; l < L; ) {
+                const auto& level = levels[l];
+                const node_index level_sz = static_cast<node_index>(level.size());
+                if (level_sz <= kSpTRSVOMPThreshold) {
+                    // Superstep of thin levels [l, l_end): one thread, in
+                    // level order, no barrier in between (each level's rows
+                    // depend only on levels < it, all written by this thread
+                    // or before the previous barrier), one barrier at the end.
+                    const std::size_t l_end = step_end[l];
+                    #pragma omp single
+                    {
+                        for (std::size_t q = l; q < l_end; ++q) {
+                            const auto& lv = levels[q];
+                            const node_index sz = static_cast<node_index>(lv.size());
+                            solve_rows<Dir, /*Fat=*/false>(lv.data(), 0, sz, sz, x_in, y_out);
+                        }
+                    } // implicit barrier
+                    l = l_end;
+                } else if (bal) {
+                    const node_index* off = bal + l * static_cast<std::size_t>(nt + 1);
+                    solve_rows<Dir, /*Fat=*/true>(level.data(), off[tid], off[tid + 1], level_sz, x_in, y_out);
+                    #pragma omp barrier
+                    ++l;
+                } else {
+                    const node_index* lv = level.data();
+                    #pragma omp for schedule(static)
+                    for (node_index k = 0; k < level_sz; ++k) {
+                        prefetch_ahead<Dir>(lv, k, level_sz);
+                        solve_row<Dir, /*Fat=*/true>(lv[k], x_in, y_out);
+                    } // implicit barrier on omp for
+                    ++l;
                 }
             }
         }
     }
 
+    // Rows level[k0..k1) of a level of level_sz rows (the prefetch looks ahead
+    // in the whole level, past k1 -- harmless, and what `omp for` always did).
+    template <class Dir, bool Fat>
+    void solve_rows(const node_index* level, node_index k0, node_index k1, node_index level_sz,
+                    const double* x_in, double* y_out) const {
+        for (node_index k = k0; k < k1; ++k) {
+            prefetch_ahead<Dir>(level, k, level_sz);
+            solve_row<Dir, Fat>(level[k], x_in, y_out);
+        }
+    }
+    // Two-stage prefetch: pull the row-pointer of the row 8 ahead (cheap ptr[]
+    // load), the nnz payload (idx / vals) of the row 4 ahead, where most of
+    // the cache-miss stalls occur.
+    template <class Dir>
+    void prefetch_ahead(const node_index* level, node_index k, node_index level_sz) const {
+        const auto* ptr = Dir::ptr(*this).data();
+        if (k + 8 < level_sz)
+            __builtin_prefetch(&ptr[level[k + 8]]);
+        if (k + 4 < level_sz) {
+            const node_index vp = level[k + 4];
+            __builtin_prefetch(&Dir::idx(*this)[ptr[vp]]);
+            __builtin_prefetch(&Dir::vals(*this)[ptr[vp]]);
+        }
+    }
+
+    // Superstep table of one direction: step_end[l] = first level index NOT in
+    // the superstep that STARTS at thin level l (fat levels: l + 1, unused). A
+    // run of consecutive thin levels [a, r) is cut into supersteps of at most
+    // agglomerate_ levels (0 = the whole run); agglomerate_ < 0 (off) makes
+    // every superstep one level -- the pre-experiment schedule.
+    void build_step_ends(const std::vector<std::vector<node_index>>& levels,
+                         std::vector<std::size_t>& step_end) const {
+        const std::size_t L = levels.size();
+        step_end.resize(L);
+        auto thin = [&](std::size_t l) { return levels[l].size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold); };
+        for (std::size_t l = 0; l < L; ) {
+            if (!thin(l) || agglomerate_ < 0) { step_end[l] = l + 1; ++l; continue; }
+            std::size_t r = l;
+            while (r < L && thin(r)) ++r;                     // run of thin levels [l, r)
+            for (std::size_t q = l; q < r; ++q) {
+                std::size_t e = r;
+                if (agglomerate_ > 0)
+                    e = std::min<std::size_t>(r, q + static_cast<std::size_t>(agglomerate_));
+                step_end[q] = e;
+            }
+            l = r;
+        }
+    }
+    // nnz-balance tables of BOTH directions for a team of nt threads: for every
+    // level l, nt + 1 offsets into the level's row list such that thread t
+    // takes rows [off[t], off[t+1]) and the ranges hold (as nearly as whole
+    // rows allow) equal shares of the level's stored entries (row length ==
+    // ptr[v+1] - ptr[v]). Only fat levels are split (thin levels: all zeros,
+    // never read). Deterministic in (level, nt). O(m) per direction.
+    void build_balance_tables(int nt) const {
+        auto build = [&](const std::vector<std::vector<node_index>>& levels, const edge_index* ptr,
+                         std::vector<node_index>& off) {
+            const std::size_t L = levels.size();
+            const std::size_t W = static_cast<std::size_t>(nt) + 1;
+            off.assign(L * W, 0);
+            for (std::size_t l = 0; l < L; ++l) {
+                const auto& lv = levels[l];
+                const node_index sz = static_cast<node_index>(lv.size());
+                if (sz <= kSpTRSVOMPThreshold) continue;
+                node_index* o = off.data() + l * W;
+                std::uint64_t total = 0;
+                for (node_index k = 0; k < sz; ++k)
+                    total += static_cast<std::uint64_t>(ptr[lv[k] + 1] - ptr[lv[k]]);
+                // o[t] = first k whose prefix (entries of rows [0, k)) reaches
+                // total * t / nt; monotone in t, o[0] = 0, o[nt] = sz.
+                std::uint64_t run = 0;
+                node_index k = 0;
+                for (int t = 1; t < nt; ++t) {
+                    const std::uint64_t target = total * static_cast<std::uint64_t>(t) / static_cast<std::uint64_t>(nt);
+                    while (k < sz && run < target) {
+                        run += static_cast<std::uint64_t>(ptr[lv[k] + 1] - ptr[lv[k]]);
+                        ++k;
+                    }
+                    o[t] = k;
+                }
+                o[nt] = sz;
+            }
+        };
+        build(fwd_levels_, csr_row_ptr_.data(), fwd_bal_off_);
+        build(bck_levels_, csc_col_ptr_.data(), bck_bal_off_);
+        bal_team_ = nt;
+    }
+
+public:
     int num_fwd_levels() const { return static_cast<int>(fwd_levels_.size()); }
     int num_bck_levels() const { return static_cast<int>(bck_levels_.size()); }
+    // Barriers one solve in that direction executes under the schedule the last
+    // setup() resolved: one per fat level plus one per thin SUPERSTEP (== one per
+    // level when APXCHOL_SPTRSV_AGGLOMERATE is off).
+    std::size_t num_barriers(bool fwd) const {
+        const auto& levels   = fwd ? fwd_levels_ : bck_levels_;
+        const auto& step_end = fwd ? fwd_step_end_ : bck_step_end_;
+        std::size_t n = 0;
+        for (std::size_t l = 0; l < levels.size(); ++n)
+            l = (levels[l].size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold)) ? step_end[l] : l + 1;
+        return n;
+    }
 
     // Diagnostics: per-level row/col counts and per-level off-diagonal nnz.
     void level_stats(bool fwd, std::vector<int>& sizes, std::vector<long long>& work) const {
@@ -1553,11 +1638,12 @@ public:
 #endif
 
     /// Bytes held by this object's arrays (capacities, heap only): CSR + CSC +
-    /// level sets + round bounds + sync-free counters (+ the lowprec builds'
-    /// fp32 diag_ and the *_SCALED variants' scale_ / inv_scale_). After
-    /// setup() this is everything the SpTRSV keeps -- setup's transients (L11
-    /// copy, compacted copy, transpose bucket, scratch) are all released
-    /// before it returns (guarded by tests/test_sptrsv_memory.cpp).
+    /// level sets + round bounds + the schedule tables (superstep ends,
+    /// nnz-balance offsets) (+ the lowprec builds' fp32 diag_ and the *_SCALED
+    /// variants' scale_ / inv_scale_). After setup() this is everything the
+    /// SpTRSV keeps -- setup's transients (L11 copy, compacted copy, transpose
+    /// bucket, scratch) are all released before it returns (guarded by
+    /// tests/test_sptrsv_memory.cpp).
     std::size_t memory_bytes() const {
         std::size_t b = csr_row_ptr_.capacity() * sizeof(edge_index)
                       + csr_col_idx_.capacity() * sizeof(node_index)
@@ -1566,8 +1652,10 @@ public:
                       + csc_row_idx_.capacity() * sizeof(node_index)
                       + csc_vals_.capacity()    * sizeof(sptrsv_value_t)
                       + round_bounds_.capacity() * sizeof(node_index)
-                      + bck_unsolved_init_.capacity() * sizeof(int)
-                      + bck_unsolved_.capacity() * sizeof(int);
+                      + fwd_step_end_.capacity() * sizeof(std::size_t)
+                      + bck_step_end_.capacity() * sizeof(std::size_t)
+                      + fwd_bal_off_.capacity()  * sizeof(node_index)
+                      + bck_bal_off_.capacity()  * sizeof(node_index);
 #if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
         b += diag_.capacity() * sizeof(float);
 #endif
@@ -1627,45 +1715,70 @@ private:
 #endif
     lowprec_statistics stats_;
 
-    // ── The kernels: ONE source for every storage type ─────────────────
+    // ── The kernels: ONE source for every storage type AND both directions ──
     // Per stored entry the work is (value load, widen, index load, y gather,
     // fma); the storage type only changes the widen() overload. Per row /
-    // column: the diagonal division (fwd_diag / bck_diag) and, on the back
-    // solve of the *_SCALED variants, the input scale (bck_rhs).
+    // column: the diagonal division (diag<Dir>) and, on the back solve of the
+    // *_SCALED variants, the input scale (bck_dir::rhs). The DIRECTION is a
+    // policy: what differs between the sweeps is only which arrays (CSR vs
+    // CSC), which level list, where the diagonal slot sits (last vs first),
+    // and the input transform -- everything else is solve_levelset / solve_row.
+    struct fwd_dir {
+        // Forward: L~ y = x on the CSR (row i; diagonal slot LAST).
+        static const big_vec<edge_index>&     ptr (const omp_sptrsv& s) { return s.csr_row_ptr_; }
+        static const big_vec<node_index>&     idx (const omp_sptrsv& s) { return s.csr_col_idx_; }
+        static const big_vec<sptrsv_value_t>& vals(const omp_sptrsv& s) { return s.csr_vals_; }
+        static const std::vector<std::vector<node_index>>& levels(const omp_sptrsv& s) { return s.fwd_levels_; }
+        static const std::vector<std::size_t>& step_end(const omp_sptrsv& s) { return s.fwd_step_end_; }
+        static const std::vector<node_index>&  bal_off (const omp_sptrsv& s) { return s.fwd_bal_off_; }
+        // Off-diagonal slots of row i: [ptr[i], ptr[i+1] - 1); diagonal at ptr[i+1] - 1.
+        static edge_index first(const edge_index* ptr, node_index i) { return ptr[i]; }
+        static edge_index last (const edge_index* ptr, node_index i) { return ptr[i + 1] - 1; }
+        static edge_index diag_slot(const edge_index* ptr, node_index i) { return ptr[i + 1] - 1; }
+        // Input transform: identity.
+        static double rhs(const omp_sptrsv&, node_index i, const double* x_in) { return x_in[i]; }
+    };
+    struct bck_dir {
+        // Back: L~^T z = D^-2 y' on the CSC (column j; diagonal slot FIRST).
+        static const big_vec<edge_index>&     ptr (const omp_sptrsv& s) { return s.csc_col_ptr_; }
+        static const big_vec<node_index>&     idx (const omp_sptrsv& s) { return s.csc_row_idx_; }
+        static const big_vec<sptrsv_value_t>& vals(const omp_sptrsv& s) { return s.csc_vals_; }
+        static const std::vector<std::vector<node_index>>& levels(const omp_sptrsv& s) { return s.bck_levels_; }
+        static const std::vector<std::size_t>& step_end(const omp_sptrsv& s) { return s.bck_step_end_; }
+        static const std::vector<node_index>&  bal_off (const omp_sptrsv& s) { return s.bck_bal_off_; }
+        // Off-diagonal slots of column j: [ptr[j] + 1, ptr[j+1]); diagonal at ptr[j].
+        static edge_index first(const edge_index* ptr, node_index j) { return ptr[j] + 1; }
+        static edge_index last (const edge_index* ptr, node_index j) { return ptr[j + 1]; }
+        static edge_index diag_slot(const edge_index* ptr, node_index j) { return ptr[j]; }
+        // Input transform: x_in[j] * r_j^2 (r_j = fp32(1/s_j), r_j^2 exact in
+        // double) under the *_SCALED variants -- D^-2 folded into the input
+        // read, see the file header -- x_in[j] itself elsewhere.
+        static double rhs(const omp_sptrsv& s, node_index j, const double* x_in) {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+            const double r = static_cast<double>(s.inv_scale_[j]);
+            return x_in[j] * (r * r);
+#else
+            (void)s;
+            return x_in[j];
+#endif
+        }
+    };
 
-    // L(i,i) as the forward solve (CSR row i) / back solve (CSC column j)
-    // divides by it -- THE single place the diagonal's storage is chosen: the
-    // fp32/fp64 builds keep the inline read (last of CSR row / first of CSC
+    // L~(v,v) as the sweep divides by it -- THE single place the diagonal's
+    // storage is chosen: the fp32/fp64 builds keep the inline read (the
+    // direction's diagonal slot: last of the CSR row / first of the CSC
     // column, byte-identical to before), the lowprec builds read diag_[]
     // (scaled by 1/s_j under *_SCALED), and FP16_SCALED under
     // APXCHOL_FP16_DIAG (fp16_diag_) the fp16 diagonal slot itself.
-    double fwd_diag(node_index i) const {
+    template <class Dir>
+    double diag(node_index v) const {
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-        return fp16_diag_ ? widen(csr_vals_[csr_row_ptr_[i + 1] - 1]) : static_cast<double>(diag_[i]);
+        return fp16_diag_ ? widen(Dir::vals(*this)[Dir::diag_slot(Dir::ptr(*this).data(), v)])
+                          : static_cast<double>(diag_[v]);
 #elif defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-        return static_cast<double>(diag_[i]);
+        return static_cast<double>(diag_[v]);
 #else
-        return widen(csr_vals_[csr_row_ptr_[i + 1] - 1]);
-#endif
-    }
-    double bck_diag(node_index j) const {
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-        return fp16_diag_ ? widen(csc_vals_[csc_col_ptr_[j]]) : static_cast<double>(diag_[j]);
-#elif defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-        return static_cast<double>(diag_[j]);
-#else
-        return widen(csc_vals_[csc_col_ptr_[j]]);
-#endif
-    }
-    // The back solve's input for column j: x_in[j] * r_j^2 (r_j = fp32(1/s_j),
-    // r_j^2 exact in double) under the *_SCALED variants -- D^-2 folded into
-    // the input read, see the file header -- x_in[j] itself elsewhere.
-    double bck_rhs(node_index j, const double* x_in) const {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
-        const double r = static_cast<double>(inv_scale_[j]);
-        return x_in[j] * (r * r);
-#else
-        return x_in[j];
+        return widen(Dir::vals(*this)[Dir::diag_slot(Dir::ptr(*this).data(), v)]);
 #endif
     }
 
@@ -1814,48 +1927,33 @@ private:
     }
 #endif
 
-    // Forward row i (CSR row i, diagonal slot LAST): y_i = (x_i - sum_j L~_ij
-    // y_j) / L~_ii. Fat: the `omp for` levels -- the SIMD kernel on 16-bit
-    // storage, else the plain single-accumulator loop (instruction-identical
-    // to the pre-fold fp32 kernel); thin: dot_thin.
-    template <bool Fat>
-    void fwd_row(node_index i, const double* x_in, double* y_out) const {
-        const edge_index row_start = csr_row_ptr_[i];
-        const edge_index row_end   = csr_row_ptr_[i + 1] - 1;
+    // One row (forward: CSR row i) / column (back: CSC column j) of the sweep:
+    //   y_out[v] = (rhs(v) - sum over the off-diagonal slots of widen(vals) * y_out[idx]) / L~_vv
+    // The gather source is y_out itself (earlier levels' results); valid in
+    // place (x_in == y_out: rhs reads x_in[v] before y_out[v] is written).
+    // Fat: the `omp for` levels -- the SIMD kernel on 16-bit storage, else the
+    // plain single-accumulator loop (instruction-identical to the pre-fold fp32
+    // kernel); thin: dot_thin (4-way).
+    template <class Dir, bool Fat>
+    void solve_row(node_index v, const double* x_in, double* y_out) const {
+        const edge_index* ptr = Dir::ptr(*this).data();
+        const edge_index p0 = Dir::first(ptr, v);
+        const edge_index p1 = Dir::last(ptr, v);
         double sum;
         if constexpr (Fat && kSimdDot) {
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-            sum = dot_fat_simd(csr_vals_.data(), csr_col_idx_.data(), row_start, row_end, y_out);
+            sum = dot_fat_simd(Dir::vals(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
 #endif
         } else if constexpr (Fat) {
+            const sptrsv_value_t* vals = Dir::vals(*this).data();
+            const node_index*     idx  = Dir::idx(*this).data();
             sum = 0.0;
-            for (edge_index p = row_start; p < row_end; ++p)
-                sum += widen(csr_vals_[p]) * y_out[csr_col_idx_[p]];
+            for (edge_index p = p0; p < p1; ++p)
+                sum += widen(vals[p]) * y_out[idx[p]];
         } else {
-            sum = dot_thin(csr_vals_.data(), csr_col_idx_.data(), row_start, row_end, y_out);
+            sum = dot_thin(Dir::vals(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
         }
-        y_out[i] = (x_in[i] - sum) / fwd_diag(i);
-    }
-    // Back column j (CSC column j, diagonal slot FIRST): z_j = (x_j [* r_j^2]
-    // - sum_k L~_kj z_k) / L~_jj; the gather source is y_out (z) itself. Valid
-    // in place (x_in == y_out: x_in[j] is read before y_out[j] is written).
-    template <bool Fat>
-    void bck_col(node_index j, const double* x_in, double* y_out) const {
-        const edge_index col_start = csc_col_ptr_[j] + 1;
-        const edge_index col_end   = csc_col_ptr_[j + 1];
-        double sum;
-        if constexpr (Fat && kSimdDot) {
-#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-            sum = dot_fat_simd(csc_vals_.data(), csc_row_idx_.data(), col_start, col_end, y_out);
-#endif
-        } else if constexpr (Fat) {
-            sum = 0.0;
-            for (edge_index p = col_start; p < col_end; ++p)
-                sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
-        } else {
-            sum = dot_thin(csc_vals_.data(), csc_row_idx_.data(), col_start, col_end, y_out);
-        }
-        y_out[j] = (bck_rhs(j, x_in) - sum) / bck_diag(j);
+        y_out[v] = (Dir::rhs(*this, v, x_in) - sum) / diag<Dir>(v);
     }
 
     // Level sets.
@@ -1870,11 +1968,22 @@ public:
     void set_round_bounds(std::vector<node_index> b) { round_bounds_ = std::move(b); }
 private:
 
-    // Sync-free back-solve dependency counters.
-    // bck_unsolved_init_ holds the immutable initial counts (computed once in
-    // setup); bck_unsolved_ is the live counter buffer reset at each solve.
-    std::vector<int> bck_unsolved_init_;
-    mutable std::vector<int> bck_unsolved_;
+    // Schedule experiments (class comment; set at every setup()).
+    // Superstep table per direction: step_end[l] = first level index NOT in the
+    // superstep starting at level l (fat levels and agglomerate_ < 0: l + 1).
+    int  agglomerate_ = -1;                       // APXCHOL_SPTRSV_AGGLOMERATE: -1 off, 0 whole run, K cap
+    std::vector<std::size_t> fwd_step_end_;
+    std::vector<std::size_t> bck_step_end_;
+    // nnz-balanced per-thread row ranges per direction: (bal_team_ + 1) offsets
+    // per level, fat levels only (thin: zeros). Built by setup() for
+    // omp_get_max_threads() and rebuilt inside solve_levelset (under `omp
+    // single`, hence mutable) when its team has a different size. Two solves
+    // of different team sizes running CONCURRENTLY on one object would race on
+    // the rebuild -- not a supported pattern (never was: one team per object).
+    bool balance_nnz_ = false;                    // APXCHOL_SPTRSV_BALANCE=nnz
+    mutable int bal_team_ = 0;
+    mutable std::vector<node_index> fwd_bal_off_;
+    mutable std::vector<node_index> bck_bal_off_;
 };
 
 } // namespace apxchol
