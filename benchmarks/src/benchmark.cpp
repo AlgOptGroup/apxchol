@@ -421,23 +421,34 @@ static BenchResult run_apxchol_v1(
         const long long offdiag = Lnnz - n_fac;          // strict lower entries
         const long long adj_nnz = (long long)L.nonZeros() - L.rows();
         std::string stored;
-#if !defined(APXCHOL_USE_CUDA)
         // What the SpTRSV actually holds after its setup (L11 = the factor minus
         // the Laplacian's grounded last row/col, minus APXCHOL_FACTOR_DROP's
-        // compaction): the CSR and the CSC each store stored_nnz entries.
-        // (Formatted before the FILL line is printed: setup itself prints a
-        // line under APXCHOL_VERBOSE.)
+        // compaction): the CSR and the CSC each store stored_nnz entries. Same
+        // shared drop on both backends (factor_drop.h); the CUDA backend
+        // additionally reports the device bytes of its factor arrays and its
+        // runtime storage mode. (Formatted before the FILL line is printed:
+        // setup itself prints a line under APXCHOL_VERBOSE.)
         {
+#if defined(APXCHOL_USE_CUDA)
+            apxchol::cuda_sptrsv trsv;
+#else
             apxchol::omp_sptrsv trsv;
+#endif
             trsv.setup(Fmeas.L, static_cast<apxchol::node_index>(Fmeas.sddm ? n_fac : n_fac - 1));
             const auto& st = trsv.drop_stats();
             std::ostringstream os;
             os << " stored_nnz=" << st.nnz_stored
                << " (L11_nnz=" << st.nnz_factor << " dropped=" << st.dropped
                << " drop_rel=" << st.rel << " compensate=" << (st.compensate ? 1 : 0) << ")";
+#if defined(APXCHOL_USE_CUDA)
+            os << " gpu=" << (trsv.levelset() ? "levelset" : "cusparse")
+               << "/" << (trsv.fp16() ? "fp16" : apxchol::cuda_sptrsv::value_name)
+               << " factor_dev_MB=" << std::fixed << std::setprecision(1) << trsv.factor_device_bytes() / 1e6
+               << " dev_delta_MB=" << trsv.device_bytes_delta() / 1e6
+               << " cusparse_buf_MB=" << trsv.cusparse_buffer_bytes() / 1e6;
+#endif
             stored = os.str();
         }
-#endif
         std::cerr << "FILL " << combo_name
                   << "  Lnnz=" << Lnnz << " offdiag=" << offdiag
                   << " adj_nnz=" << adj_nnz

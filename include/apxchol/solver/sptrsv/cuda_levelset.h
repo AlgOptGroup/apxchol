@@ -37,6 +37,27 @@ void levelset_solve(cudaStream_t stream,
                     const int* row_order, const int* level_ptr, int num_levels,
                     const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);
 
+/// The same level-set solve on the FP16 PER-COLUMN-SCALED storage of the
+/// opt-in APXCHOL_GPU_SPTRSV_FP16=1 mode (cuda_host.h states the contract):
+/// `vals16` are IEEE binary16 bit patterns (uint16_t on the host side, read as
+/// __half here) of the column-scaled factor L~ = L D^-1 -- the row's diagonal
+/// SLOT is still present in the CSR but is skipped; the diagonal the row
+/// divides by is the fp32 `diag[i]` (fp32(L_ii / s_i), plus the column's
+/// rounding residual under the default diag_comp) -- and the row's rhs is
+/// scaled once by `in_scale[i]` if `in_scale` != nullptr (the back solve
+/// passes inv_scale^2 = fp32(1/s_i)^2, folding D^-2 into its input; the
+/// forward solve passes nullptr):
+///   out[i] = (rhs[i] * in_scale[i] - sum_{j != i} widen(vals16[p]) * out[j]) / diag[i].
+/// Every product is formed and accumulated in sptrsv_gpu_value_t (float on
+/// the default fp32 build) after the half -> float widen; the fixed warp-
+/// reduce order keeps it deterministic per factor. Same schedule / same
+/// per-level launch structure as levelset_solve.
+void levelset_solve_fp16(cudaStream_t stream,
+                         const int* rowptr, const int* colidx, const unsigned short* vals16,
+                         const float* diag, const float* in_scale,
+                         const int* row_order, const int* level_ptr, int num_levels,
+                         const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);
+
 /// y = A*x with A's CSR values stored in fp32 (memory saving; LOSSLESS when A is
 /// exactly fp32-representable, e.g. unweighted/pattern graphs) but each product
 /// promoted to fp64 and accumulated in fp64 -- so x stays fp64 and the result is

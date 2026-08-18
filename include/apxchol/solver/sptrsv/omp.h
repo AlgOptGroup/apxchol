@@ -2,6 +2,7 @@
 #include "apxchol/types.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/big_alloc.h"
+#include "apxchol/solver/sptrsv/factor_drop.h"   // the compacting drop (shared with the CUDA backend)
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -27,35 +28,12 @@ namespace apxchol {
 // computational benefit of parallelizing a single level's rows/cols.
 inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 
-// DEFAULT relative threshold of the COMPACTING FACTOR DROP (see the "COMPACTING
-// DROP" section of the omp_sptrsv header comment below): at setup, factor
-// off-diagonal (i, j) is stored in the SpTRSV's CSR/CSC iff
-//   |L_ij| >= kFactorDropRelDefault * s_j,   s_j = column j's max |off-diagonal|,
-// the dropped mass of each column is folded back into its kept off-diagonals
-// (column sums preserved), and the diagonal is always kept. Env
-// APXCHOL_FACTOR_DROP=<rel> overrides (read at every setup): 0 (or any value
-// <= 0) disables the drop, any other value replaces the threshold.
-//
-// ON by default at 1e-4 by measurement. Branch perf/factor-drop @ fbbfd72
-// (pre-center-k base, where the IPM matrix classified as SDDM; fp32 build,
-// T=1, tol 1e-8, bg+tree[vec_pool], Iters/RelRes drop-off vs drop-on):
-// grid_500 40/40, grid_2000 50/50, iter0040 44/44 -- 0 PCG iterations change;
-// grids drop 0 entries (exact no-op), iter0040 drops 51.8% of its
-// off-diagonals (stored nnz 9063231 -> 4639013), i.e. the SpTRSV's CSR/CSC
-// bytes and per-sweep work roughly halve there. Re-measured on main
-// (center-k grounding, iter0040 is a rank-(n-1) Laplacian factor there),
-// same protocol, this port with the column-sum compensation: grid_500 40/40
-// (RelRes 8.345e-09 both), grid_2000 47/47 (8.161e-09 both), iter0040 45/45
-// (7.196e-09 -> 7.224e-09), com-Amazon 38/38 (7.977e-09 both, 0 dropped);
-// iter0040 drops 51.6% (9032674 -> 4639053). WITHOUT the compensation
-// (APXCHOL_FACTOR_DROP_COMPENSATE=0, the branch's plain-removal semantics)
-// the same 1e-4 costs iter0040 45 -> 67 iterations on main's Laplacian path
-// (48 -> 48 with APXCHOL_GROUND=reg, i.e. on the SDDM path the branch
-// measured on, where it costs nothing either way); see the header comment
-// for why. With the compensation iter0040 stays at 45 up to rel=3e-3
-// (67% dropped), so 1e-4 is a conservative default, kept as the value the
-// branch measured; raising it needs the IPM ladder, not one matrix.
-inline constexpr double kFactorDropRelDefault = 1e-4;
+// kFactorDropRelDefault (the compacting drop's default threshold, 1e-4, and
+// the measurements behind it), factor_drop_rel_from_env() /
+// factor_drop_compensate_from_env(), factor_column_scale() and the drop itself
+// (compact_factor_columns) live in factor_drop.h -- ONE host implementation
+// shared with the CUDA backend; the "COMPACTING DROP" section below is the
+// authoritative description of what it does and why.
 
 /// OpenMP parallel sparse triangular solver with two interchangeable schedulers:
 ///
@@ -414,10 +392,7 @@ public:
     // double, stored fp32 (the factor is fp32 on every build that uses it, so
     // this is exact).
     static float column_scale(const factor_value_t* vals, edge_index first, edge_index last) {
-        double mx = 0.0;
-        for (edge_index p = first + 1; p < last; ++p)
-            mx = std::max(mx, std::fabs(static_cast<double>(vals[p])));
-        return mx > 0.0 ? static_cast<float>(mx) : 1.0f;
+        return factor_column_scale(vals, first, last);   // factor_drop.h (shared with the GPU backend)
     }
 
     // Diagonal contract (public for the tests): what the kernels DIVIDE by for
@@ -455,19 +430,11 @@ public:
     // empty) -> kFactorDropRelDefault; set -> its value, where anything <= 0
     // (including "0" and unparsable text, which atof reads as 0) turns the
     // drop OFF.
-    static double factor_drop_rel_from_env() {
-        const char* e = std::getenv("APXCHOL_FACTOR_DROP");
-        if (!e || !*e) return kFactorDropRelDefault;
-        const double r = std::atof(e);
-        return r > 0.0 ? r : 0.0;
-    }
+    static double factor_drop_rel_from_env() { return apxchol::factor_drop_rel_from_env(); }
     // APXCHOL_FACTOR_DROP_COMPENSATE: unset / anything but "0" -> the
     // column-sum compensation is applied (default); "0" -> plain removal (the
     // A/B switch; see the file header). Read at every setup().
-    static bool factor_drop_compensate_from_env() {
-        const char* e = std::getenv("APXCHOL_FACTOR_DROP_COMPENSATE");
-        return !(e && *e && std::atoi(e) == 0);
-    }
+    static bool factor_drop_compensate_from_env() { return apxchol::factor_drop_compensate_from_env(); }
 
     // Statistics of the last setup() (see the file header): what the
     // compacting drop did to L11 = L.topLeftCorner(m, m) (rel / compensate /
@@ -683,73 +650,21 @@ private:
         std::vector<edge_index>           drop_outer;
         std::unique_ptr<node_index[]>     drop_inner;
         std::unique_ptr<factor_value_t[]> drop_vals;
-        if (factor_drop_rel > 0.0) {
-            drop_outer.resize(static_cast<size_t>(m_) + 1);
-            std::uint64_t n_thr = 0, n_fmt = 0;
-            #pragma omp parallel for schedule(static) reduction(+ : n_thr, n_fmt)
-            for (node_index j = 0; j < m_; ++j) {
-                const float s = col_scale[j];
-                edge_index kept = 0;
-                for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p) {
-                    const factor_value_t v = L11_vals[p];
-                    if (L11_inner[p] == j) { ++kept; continue; }                // diagonal: always
-                    if (keep_offdiag(v, s, factor_drop_rel, fp16_flush_subnormal)) { ++kept; continue; }
-                    // Dropped: attribute to the threshold first (the format-only
-                    // reason is what the drop removes ON TOP of the threshold).
-                    if (std::fabs(static_cast<double>(v)) < factor_drop_rel * static_cast<double>(s)) ++n_thr;
-                    else ++n_fmt;
-                }
-                drop_outer[j + 1] = kept;
-            }
-            drop_outer[0] = 0;
-            for (node_index j = 0; j < m_; ++j)
-                drop_outer[j + 1] += drop_outer[j];
-            const edge_index nnz_kept = drop_outer[m_];
-            if (nnz_kept != nnz) {
-                drop_inner.reset(new node_index[nnz_kept]);
-                drop_vals.reset(new factor_value_t[nnz_kept]);
-                #pragma omp parallel for schedule(static)
-                for (node_index j = 0; j < m_; ++j) {
-                    const float s = col_scale[j];
-                    const edge_index first = drop_outer[j];
-                    edge_index out = first;
-                    double dropped_sum = 0.0, kept_abs = 0.0;   // over the off-diagonals
-                    for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p) {
-                        const factor_value_t v = L11_vals[p];
-                        if (L11_inner[p] != j) {
-                            if (!keep_offdiag(v, s, factor_drop_rel, fp16_flush_subnormal)) {
-                                dropped_sum += static_cast<double>(v);
-                                continue;
-                            }
-                            kept_abs += std::fabs(static_cast<double>(v));
-                        }
-                        drop_inner[out] = L11_inner[p];
-                        drop_vals[out]  = v;
-                        ++out;
-                    }
-                    assert(out == drop_outer[j + 1]);
-                    // Column-sum compensation (see the file header): spread the
-                    // dropped mass over the kept off-diagonals in proportion to
-                    // |v|, so the column sum -- hence L~ L~^T's row sums, the
-                    // Laplacian structure and the grounding mass -- is what it
-                    // was. Same fixed order in every thread: deterministic.
-                    if (drop_compensate && dropped_sum != 0.0 && kept_abs > 0.0) {
-                        const double per_abs = dropped_sum / kept_abs;
-                        for (edge_index q = first; q < out; ++q) {
-                            if (drop_inner[q] == j) continue;
-                            const double v = static_cast<double>(drop_vals[q]);
-                            drop_vals[q] = static_cast<factor_value_t>(v + per_abs * std::fabs(v));
-                        }
-                    }
-                }
-                stats_.dropped_threshold = n_thr;
-                stats_.dropped_flush     = n_fmt;
-                stats_.dropped           = n_thr + n_fmt;
-                assert(stats_.dropped == static_cast<std::uint64_t>(nnz - nnz_kept));
+        {
+            factor_drop_stats ds;
+            const bool compacted = compact_factor_columns<edge_index, node_index, factor_value_t>(
+                m_, L11_outer, L11_inner, L11_vals, col_scale, factor_drop_rel, drop_compensate,
+                [=](factor_value_t v, float s) { return keep_offdiag(v, s, factor_drop_rel, fp16_flush_subnormal); },
+                drop_outer, drop_inner, drop_vals, ds);
+            stats_.dropped_threshold = ds.dropped_threshold;
+            stats_.dropped_flush     = ds.dropped_flush;
+            stats_.dropped           = ds.dropped;
+            stats_.nnz_stored        = ds.nnz_stored;
+            if (compacted) {
                 L11_outer = drop_outer.data();
                 L11_inner = drop_inner.get();
                 L11_vals  = drop_vals.get();
-                nnz = nnz_kept;
+                nnz = static_cast<edge_index>(ds.nnz_stored);
                 // The Laplacian path's L11 copy is dead now: free it before the
                 // transpose allocates its bucket (peak memory, not speed).
                 // (`v = {}` would only clear -- it keeps the capacity; swapping
@@ -761,12 +676,10 @@ private:
                 // copy has just replaced -- the input is dead now.
                 if (consumed && m == L.rows())
                     consumed->release_values();
-            } else {
-                std::vector<edge_index>().swap(drop_outer);   // nothing dropped: keep aliasing the input
             }
-            mark("factor_drop");
+            if (factor_drop_rel > 0.0) mark("factor_drop");
         }
-        stats_.nnz_stored = static_cast<std::uint64_t>(nnz);
+        assert(stats_.nnz_stored == static_cast<std::uint64_t>(nnz));
 #if !defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
         // Last read of the drop-only scales on the non-scaled builds (store()
         // and the diagonal below do not use them): free, not at return.
