@@ -16,6 +16,9 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
+#include <immintrin.h>   // fat-level SIMD kernels (16-bit storage): _mm256_cvtph_ps / _mm256_i32gather_pd / _mm256_fmadd_pd
+#endif
 
 namespace apxchol {
 
@@ -56,30 +59,103 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // (fp32/fp64 only). It narrows csr_vals_/csc_vals_ -- the two largest factor
 // copies -- cutting memory and bandwidth on the bandwidth-bound (~94% of peak)
 // triangular solve. Every read of a stored value in the solve kernels below
-// goes through fwd_val()/bck_val() -> widen(): the arithmetic is ALWAYS done
-// in double, whatever the storage width; the outer PCG stays fp64.
+// goes through widen(): the arithmetic is ALWAYS done in double, whatever the
+// storage width; the outer PCG stays fp64.
 //
 // DIAGONAL under the LOWPREC variants: the fp32/fp64 builds read L(i,i) inline
 // from the factor (last entry of CSR row i / first entry of CSC column j) at
 // the same precision as the off-diagonals. The lowprec builds do NOT: an 8-bit
 // diagonal was measured to be the dominant iteration-count damage (iter0040
 // T=1: diag-only bf16 314 PCG iters, off-diag-only 185, both 348, fp32 65), so
-// every lowprec build keeps a separate exact-fp32 `diag_[m]`, filled at setup
-// from the factor (factor_value_t == float, i.e. BEFORE any narrowing), and
-// both solves divide by diag_[i]. The narrow diagonal slot stays in
-// csr_vals_/csc_vals_ (written like every other entry through narrow_value --
-// under the *_SCALED variants that is L_jj / s_j, which may even overflow fp16
-// to inf -- but NEVER read by the kernels; keeping it leaves the CSR/CSC
-// layout, the transpose, and every "diagonal is entry X" invariant untouched).
-// fwd_diag()/bck_diag() below are the single switch.
+// every lowprec build keeps a separate fp32 `diag_[m]`, filled at setup from
+// the factor (factor_value_t == float, i.e. BEFORE any narrowing) -- exactly
+// L_jj under BF16 / FP24, the SCALED diagonal L_jj / s_j (one fp32 division,
+// stored_diag()) under the *_SCALED variants, see below -- and both solves
+// divide by diag_[i]. The narrow diagonal slot stays in csr_vals_/csc_vals_
+// (written like every other entry through narrow_value -- under the *_SCALED
+// variants that is narrow(L_jj / s_j), which may even overflow fp16 to inf --
+// and is read by the kernels ONLY under APXCHOL_FP16_DIAG, below; keeping it
+// leaves the CSR/CSC layout, the transpose, and every "diagonal is entry X"
+// invariant untouched). fwd_diag()/bck_diag() below are the single switch.
 //
-// PER-COLUMN SCALE under the *_SCALED variants: scale_[j] = max |L_ij| over
-// the off-diagonals of column j (1.0f if there is none), fp32, computed at
-// setup from the factor. What is stored is narrow(L_ij / scale_[j]); the
-// kernels multiply back: the CSR forward sweep gathers scale_[csr_col_idx_[p]]
-// (the entry's COLUMN, alongside the y gather it already does), the CSC back
-// sweep hoists scale_[j] out of column j's loop. fwd_val()/bck_val() are the
-// single switch.
+// PER-COLUMN SCALE under the *_SCALED variants -- FOLDED INTO THE VECTORS:
+// scale_[j] = s_j = max |L_ij| over the off-diagonals of column j (1.0f if
+// there is none), fp32, computed at setup from the factor (column_scale()).
+// What is stored is the COLUMN-SCALED factor L~ = L D^-1, D = diag(s_j):
+// off-diagonals narrow(L_ij / s_j) and diag_[j] = fp32(L_jj / s_j). The
+// kernels never multiply a scale back -- they run on L~ as stored, so every
+// kernel path (forward / back x thin / fat, sync-free) is ONE source for every
+// storage type, the only per-type difference being the widen() overload:
+//   forward:  L y = x  <=>  L~ (D y) = x.  forward_solve runs the plain forward
+//             kernel on L~ and returns y' = D y (y'_j = s_j y_j), NOT y.
+//   back:     L^T z = y  <=>  D L~^T z = y  <=>  L~^T z = D^-1 y = D^-2 y'.
+//             transpose_solve takes y' (the forward's output, THE pair
+//             contract) and runs the plain back kernel on L~^T with the input
+//             read x_in[j] scaled once per column: z_j = (x_in[j] * r_j^2 -
+//             sum_k h_kj z_k) / diag_[j], r_j = fp32(1 / s_j) (inv_scale_[j],
+//             set at setup; r_j^2 is exact in double). One per-COLUMN load
+//             and multiply, nothing per entry, no pass between the sweeps.
+// The pair therefore applies z = L~^-T R L~^-1 x with R = diag(r_j^2) =
+// D^-2 (1 + O(2^-23)): symmetric positive definite, and with exact r_j
+// exactly (L_s L_s^T)^-1 for the STORED factor L_s = L~ D (effective diagonal
+// fp32(L_jj / s_j) * s_j, effective off-diagonals widen(h_ij) * s_j) -- the
+// unit tests state this pair contract (y' = D y, then z) against a serial
+// double reference on L_s. What changed vs the pre-fold kernels: the per-ENTRY
+// scale gather scale_[csr_col_idx_[p]] of the forward sweep and the per-entry
+// scale multiply of both sweeps are gone (the fma reads the stored value
+// directly), the diagonal is stored pre-scaled (2^-24 relative rounding of
+// L_jj / s_j, vs the exact fp32 L_jj before), and the forward output / back
+// input carry D. On the non-scaled builds
+// (fp32 / fp64 / BF16 / FP24) D = I: forward_solve returns y and
+// transpose_solve solves L^T z = x_in exactly as before -- the SCALED-only
+// pieces (inv_scale_, the x_in scaling) compile out and the fp32 kernels'
+// inner loops are instruction-identical to the pre-fold ones (objdump of the
+// outlined `omp` bodies: same FP instruction stream -- thin: vcvtss2sd +
+// vfmadd231sd x4, fat: vcvtss2sd / vmulsd / vaddsd, epilogue vsubsd /
+// vcvtss2sd / vdivsd -- only register allocation in the prologues moved).
+//
+// SIMD CONVERT (fat levels, the `omp for` paths; 16-bit storage only, i.e.
+// the BF16 / BF16_SCALED / FP16_SCALED builds; needs AVX2 + F16C + FMA, the
+// -march=native default on any x86 since Haswell / Zen): 8 stored values per
+// vector convert (widen8(): F16C _mm256_cvtph_ps for fp16, a 16-bit shift for
+// bf16 -- overloads for float / double exist so flipping the fp32 build over
+// is one constant, kSimdDot, but it is deliberately NOT flipped: the fp32
+// kernel stays as measured) -> two 4-double lanes -> _mm256_fmadd_pd into two
+// accumulators; the y gather is either _mm256_i32gather_pd (or i64gather
+// under 64-bit node indices) -- gather mode "simd" -- or the converted values
+// go through an 8-double stack buffer (which the compiler turns into register
+// lane extracts) and the gather is scalar loads feeding a 4-way scalar FMA
+// chain -- gather mode "scalar". Env APXCHOL_FP16_GATHER=simd|scalar (read
+// at every setup, every build) selects; the default is the measured winner,
+// "scalar" (kFatGatherSimdDefault). A 4-wide step and a scalar tail
+// finish the row / column. Thin levels (the `omp single` paths) keep the 4-way
+// scalar kernel, the sync-free back solve its single accumulator; the fp32 /
+// fp64 / FP24 fat-level loop is the plain scalar loop it always was. Different
+// summation orders (2 lanes vs 4-way vs 1): same accuracy, not bit-identical.
+//
+// APXCHOL_FP16_DIAG=1 (env, read at every setup; FP16_SCALED only): the
+// kernels read the diagonal from its fp16 slot in csr_vals_/csc_vals_ --
+// fp16(L_jj / s_j), what the slot has always held -- instead of the fp32
+// diag_[j] = fp32(L_jj / s_j): the same scaled quantity at 11 instead of 24
+// significant bits, nothing else differs. This is the SOUND fp16 diagonal:
+// for the factors apxchol produces L_jj >= s_j (each eliminated column is a
+// Laplacian / SDDM Schur-complement column: L_jj = sqrt(d_j), L_ij = -w_ij /
+// sqrt(d_j), so |L_ij| / L_jj = w_ij / d_j <= 1; setup counts violations,
+// lowprec_stats().diag_below_scale), so L_jj / s_j >= 1 is a NORMAL fp16
+// (2^-11 relative) unless it is >= 65520 and rounds to +inf (a hub whose
+// weighted degree exceeds 65520x its heaviest edge); storing L_jj unscaled
+// would have fp16's range problem on any weighted matrix. setup counts the
+// slots that are not normal finite fp16 (lowprec_stats().diag_fp16_bad); if
+// any exist the mode is REFUSED (stderr warning, diag_[] used for every
+// column) so a run under the env is either all-fp32 or all-fp16 diagonal,
+// never a mix. Purpose: a T=1 iteration-count test of an 11-bit diagonal
+// (bf16's 8 bits were the dominant damage) -- iteration-neutral would have
+// licensed dropping diag_ (4 B/row) in favour of the slot already in the
+// CSR/CSC streams. MEASURED (fp16s build, T=1, tol 1e-8, bg+tree[vec_pool],
+// with and without APXCHOL_FACTOR_DROP=1e-4): grid_500 40 -> 40, grid_2000
+// 47 -> 47, iter0040 44 -> 50 PCG iterations (+14%; 0 slots refused, 0
+// columns with L_jj < s_j on all three) -- NOT neutral on IPM, so diag_ stays
+// fp32 and the mode stays a diagnostic.
 //
 // ROUNDING mode: RNE for every variant. For the two bf16 variants,
 // APXCHOL_BF16_STOCHASTIC=1 (env, read at every setup) switches the
@@ -244,6 +320,37 @@ public:
         return mx > 0.0 ? static_cast<float>(mx) : 1.0f;
     }
 
+    // Diagonal contract (public for the tests): what the kernels DIVIDE by for
+    // a column whose factor diagonal is L_jj and whose scale is s (1.0f on the
+    // non-scaled builds). The *_SCALED variants store the scaled diagonal
+    // fp32(L_jj / s) -- one fp32 division -- in diag_[j] (see the file header,
+    // "FOLDED INTO THE VECTORS"); the other lowprec builds store L_jj itself
+    // in diag_[j]; the fp32/fp64 builds read the factor value inline (== L_jj at
+    // the factor's width). Under APXCHOL_FP16_DIAG (FP16_SCALED) the kernels
+    // divide by widen(fp16(L_jj / s)) instead, i.e. narrow_value(L_jj, ., s, .).
+    static double stored_diag(factor_value_t L_jj, float s) {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        return static_cast<double>(static_cast<float>(L_jj) / s);
+#elif defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+        (void)s;
+        return static_cast<double>(static_cast<float>(L_jj));       // fp32 diag_
+#else
+        (void)s;
+        return widen(L_jj);   // inline read: factor_value_t == sptrsv_value_t here
+#endif
+    }
+    // Back-input scale contract (public for the tests): transpose_solve reads
+    // x_in[j] * r_j^2 with r_j = inv_scale(s_j) (fp32 reciprocal; r_j^2 exact
+    // in double); 1.0 on the non-scaled builds.
+    static double inv_scale(float s) {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        return static_cast<double>(1.0f / s);
+#else
+        (void)s;
+        return 1.0;
+#endif
+    }
+
     // Statistics of the last setup() (see the file header). offdiag / flushed /
     // subnormal / factor_subnormal are over the STORED factor (after the drop);
     // the dropped_* counts are what the drop removed; nnz_factor is L11's nnz
@@ -258,10 +365,30 @@ public:
         std::uint64_t dropped_flush     = 0;   //   ... because the storage format stores them as zero anyway
         std::uint64_t nnz_factor        = 0;   // nnz of L11 as factorized (before the drop)
         std::uint64_t nnz_stored        = 0;   // nnz the CSR (and the CSC) hold (after the drop)
+        // FP16_SCALED only (0 elsewhere): diagonal slots fp16(L_jj / s_j) that
+        // are not a normal finite fp16 (inf / nan / zero / subnormal -- what
+        // refuses APXCHOL_FP16_DIAG), and columns WITH an off-diagonal whose
+        // L_jj < s_j (the diagonal-dominance sanity count the fp16 diagonal's
+        // soundness rests on; off-diagonal-free columns have s_j = 1.0f).
+        std::uint64_t diag_fp16_bad     = 0;
+        std::uint64_t diag_below_scale  = 0;
     };
     const lowprec_statistics& lowprec_stats() const { return stats_; }
     // nnz held by the SpTRSV's CSR / CSC (each) after the last setup().
     std::uint64_t stored_nnz() const { return stats_.nnz_stored; }
+    // FP16_SCALED: true iff the last setup() honoured APXCHOL_FP16_DIAG=1 (the
+    // kernels divide by the fp16 diagonal slot instead of the fp32 diag_[]);
+    // always false on every other build.
+    bool fp16_diag() const { return fp16_diag_; }
+    // Whether the fat-level 16-bit-storage kernels use the SIMD gather
+    // (APXCHOL_FP16_GATHER=simd) rather than the stack-buffer + scalar-gather
+    // flavour (=scalar) -- the value the last setup() resolved (default:
+    // kFatGatherSimdDefault). Read on every build; only acted on where
+    // simd_dot() is true.
+    bool fat_gather_simd() const { return gather_simd_; }
+    // Whether THIS build's fat-level kernels are the SIMD ones (16-bit storage
+    // on an AVX2 + F16C + FMA target).
+    static constexpr bool simd_dot() { return kSimdDot; }
 
     /// Analyze L11 = L.topLeftCorner(m, m): build CSR, CSC, and level sets.
     void setup(const sparse_csc& L, node_index m) {
@@ -377,6 +504,14 @@ public:
                 col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
             mark("col_scale");
         }
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        // r_j = fp32(1 / s_j): the back solve's per-column input scale (see the
+        // file header, "FOLDED INTO THE VECTORS"; inv_scale() is the contract).
+        inv_scale_.resize(m_);
+        #pragma omp parallel for schedule(static)
+        for (node_index j = 0; j < m_; ++j)
+            inv_scale_[j] = 1.0f / col_scale[j];
+#endif
 
         // ── Compacting drop (APXCHOL_FACTOR_DROP) ─────────────────────
         // O(nnz) parallel work: per-column kept count -> serial prefix over
@@ -450,14 +585,16 @@ public:
             return narrow_value(v, k, s, bf16_stochastic, fp16_flush_subnormal);
         };
 #if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-        // Exact fp32 diagonal, straight from the factor (factor_value_t ==
-        // float here; NOT via the narrowing path). L(j,j) is the FIRST entry
-        // of CSC column j -- the invariant the back solve has always relied on.
+        // fp32 diagonal, straight from the factor (factor_value_t == float
+        // here; NOT via the narrowing path): L_jj, or under the *_SCALED
+        // variants the scaled L_jj / s_j (stored_diag() is the contract). L(j,j)
+        // is the FIRST entry of CSC column j -- the invariant the back solve has
+        // always relied on.
         diag_.resize(m_);
         #pragma omp parallel for schedule(static)
         for (node_index j = 0; j < m_; ++j) {
             assert(L11_inner[L11_outer[j]] == j && "factor column must start with its diagonal");
-            diag_[j] = L11_vals[L11_outer[j]];
+            diag_[j] = static_cast<float>(stored_diag(L11_vals[L11_outer[j]], need_scale ? col_scale[j] : 1.0f));
         }
         mark("diag_fp32");
 #endif
@@ -669,8 +806,8 @@ public:
         for (node_index i = 0; i <= m_; ++i)
             csc_col_ptr_[i] = L11_outer[i];
         {
-            std::uint64_t n_off = 0, n_flush = 0, n_sub = 0, n_fsub = 0;
-            #pragma omp parallel for schedule(static) reduction(+ : n_off, n_flush, n_sub, n_fsub)
+            std::uint64_t n_off = 0, n_flush = 0, n_sub = 0, n_fsub = 0, n_dbad = 0, n_dlt = 0;
+            #pragma omp parallel for schedule(static) reduction(+ : n_off, n_flush, n_sub, n_fsub, n_dbad, n_dlt)
             for (node_index j = 0; j < m_; ++j) {
                 for (edge_index k = L11_outer[j]; k < L11_outer[j + 1]; ++k) {
                     const node_index    i  = L11_inner[k];
@@ -679,7 +816,18 @@ public:
                     csc_row_idx_[k] = i;
                     csc_vals_[k]    = w;
                     if (is_stored_subnormal(v)) ++n_fsub;          // census: the FACTOR value (fp32), diagonal incl.
-                    if (i == j) continue;                          // diagonal slot: unread under lowprec
+                    if (i == j) {                                  // diagonal slot: unread under lowprec ...
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+                        // ... except under APXCHOL_FP16_DIAG (see file header):
+                        // fp16(L_jj / s_j) must be a normal finite fp16.
+                        if (fp16_t::is_inf_or_nan(w.bits) || fp16_t::is_zero(w.bits) || fp16_t::is_subnormal(w.bits)) ++n_dbad;
+                        // L_jj < s_j among columns that HAVE an off-diagonal (s_j
+                        // is the placeholder 1.0f otherwise).
+                        if (L11_outer[j + 1] - L11_outer[j] > 1 &&
+                            static_cast<double>(v) < static_cast<double>(col_scale[j])) ++n_dlt;
+#endif
+                        continue;
+                    }
                     ++n_off;
                     if (v != 0 && widen(w) == 0.0) {
                         ++n_flush;                                 // zeroed by the storage format
@@ -690,6 +838,40 @@ public:
             }
             stats_.offdiag = n_off; stats_.flushed = n_flush;
             stats_.subnormal = n_sub; stats_.factor_subnormal = n_fsub;
+            stats_.diag_fp16_bad = n_dbad; stats_.diag_below_scale = n_dlt;
+            // Fat-level gather flavour of the 16-bit-storage SIMD kernels (see
+            // the file header, "SIMD CONVERT"): env read at every setup, on
+            // every build (acted on only where simd_dot()).
+            gather_simd_ = [] {
+                const char* e = std::getenv("APXCHOL_FP16_GATHER");
+                if (!e || !*e) return kFatGatherSimdDefault;
+                const std::string_view s(e);
+                if (s == "simd")   return true;
+                if (s == "scalar") return false;
+                std::fprintf(stderr, "[apxchol] APXCHOL_FP16_GATHER=%s ignored (expected simd|scalar); using the default\n", e);
+                return kFatGatherSimdDefault;
+            }();
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+            // APXCHOL_FP16_DIAG (see the file header): honoured only if every
+            // diagonal slot is a normal finite fp16.
+            const bool want_fp16_diag = [] {
+                const char* e = std::getenv("APXCHOL_FP16_DIAG");
+                return e && std::atoi(e) != 0;
+            }();
+            fp16_diag_ = want_fp16_diag && n_dbad == 0;
+            if (want_fp16_diag && !fp16_diag_)
+                std::fprintf(stderr,
+                    "[apxchol] APXCHOL_FP16_DIAG=1 REFUSED: %llu of %llu diagonal slots fp16(L_jj / s_j) are not a normal"
+                    " finite fp16 (L_jj / s_j >= 65520 rounds to inf); the fp32 diag_[] is used for every column\n",
+                    static_cast<unsigned long long>(n_dbad), static_cast<unsigned long long>(m_));
+            if (std::getenv("APXCHOL_VERBOSE"))
+                std::fprintf(stderr,
+                    "[apxchol] fp16 diag: %s (APXCHOL_FP16_DIAG=%d; slots not normal fp16=%llu, columns with L_jj < s_j=%llu);"
+                    " fat-level kernel=%s\n",
+                    fp16_diag_ ? "fp16 slot fp16(L_jj / s_j), 11-bit" : "fp32 diag_[] = fp32(L_jj / s_j)", want_fp16_diag ? 1 : 0,
+                    static_cast<unsigned long long>(n_dbad), static_cast<unsigned long long>(n_dlt),
+                    !kSimdDot ? "scalar (no AVX2/F16C/FMA at compile time)" : gather_simd_ ? "simd, gather=simd" : "simd, gather=scalar");
+#endif
             if (std::getenv("APXCHOL_VERBOSE")) {
                 const double den = n_off ? static_cast<double>(n_off) : 1.0;
                 std::fprintf(stderr,
@@ -888,7 +1070,11 @@ public:
     }
 
     /// Forward solve: L * y = x.  Reads x[0..m-1], writes y[0..m-1].
-    /// Always the level-set scheduler: empirically beats sync-free across
+    /// Under the *_SCALED variants the kernel runs on the stored L~ = L D^-1
+    /// and writes y' = D y (y'_j = s_j * y_j) -- the value transpose_solve
+    /// expects as its input; the pair (forward_solve, transpose_solve) applies
+    /// (L L^T)^-1 on every build. See the file header, "FOLDED INTO THE
+    /// VECTORS". Always the level-set scheduler: empirically beats sync-free across
     /// all level counts we tested (BG/luby/BK with thousands of levels and
     /// rootset with ~65 levels), including the thin-level regime where the
     /// back solve prefers sync-free — so the forward sync-free variant was
@@ -898,7 +1084,10 @@ public:
         forward_solve_levelset(x_in, y_out);
     }
 
-    /// Back solve: L^T * z = y.  Default: level-set scheduler.  Paired A/B
+    /// Back solve: L^T * z = y.  Under the *_SCALED variants the input is the
+    /// forward's y' = D y and the kernel solves L~^T z = D^-2 y' (input read
+    /// scaled once per column by inv_scale_[j]^2), i.e. z = L^-T y as before;
+    /// D = I elsewhere. Default: level-set scheduler.  Paired A/B
     /// across the benchmark suite shows the sync-free back-solve never beats
     /// level-set on any factor the current elimination produces: power-law
     /// factors have a tiny *average* level size that hides a few very fat
@@ -958,21 +1147,7 @@ public:
                                 __builtin_prefetch(&csr_col_idx_[csr_row_ptr_[ip]]);
                                 __builtin_prefetch(&csr_vals_[csr_row_ptr_[ip]]);
                             }
-                            // 4-way accumulator split (see solve.cpp:31 for rationale).
-                            double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
-                            const edge_index row_start = csr_row_ptr_[i];
-                            const edge_index row_end   = csr_row_ptr_[i + 1] - 1;
-                            edge_index p = row_start;
-                            for (; p + 4 <= row_end; p += 4) {
-                                s0 += fwd_val(p + 0) * y_out[csr_col_idx_[p + 0]];
-                                s1 += fwd_val(p + 1) * y_out[csr_col_idx_[p + 1]];
-                                s2 += fwd_val(p + 2) * y_out[csr_col_idx_[p + 2]];
-                                s3 += fwd_val(p + 3) * y_out[csr_col_idx_[p + 3]];
-                            }
-                            double sum = (s0 + s1) + (s2 + s3);
-                            for (; p < row_end; ++p)
-                                sum += fwd_val(p) * y_out[csr_col_idx_[p]];
-                            y_out[i] = (x_in[i] - sum) / fwd_diag(i);
+                            fwd_row</*Fat=*/false>(i, x_in, y_out);
                         }
                     } // implicit barrier
                 } else {
@@ -986,10 +1161,7 @@ public:
                             __builtin_prefetch(&csr_col_idx_[csr_row_ptr_[ip]]);
                             __builtin_prefetch(&csr_vals_[csr_row_ptr_[ip]]);
                         }
-                        double sum = 0.0;
-                        for (edge_index p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
-                            sum += fwd_val(p) * y_out[csr_col_idx_[p]];
-                        y_out[i] = (x_in[i] - sum) / fwd_diag(i);
+                        fwd_row</*Fat=*/true>(i, x_in, y_out);
                     } // implicit barrier on omp for
                 }
             }
@@ -1029,21 +1201,7 @@ public:
                                 __builtin_prefetch(&csc_row_idx_[csc_col_ptr_[jp]]);
                                 __builtin_prefetch(&csc_vals_[csc_col_ptr_[jp]]);
                             }
-                            double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
-                            const edge_index col_start = csc_col_ptr_[j] + 1;
-                            const edge_index col_end   = csc_col_ptr_[j + 1];
-                            const double sj = bck_scale(j);   // hoisted per-column scale (1.0 unless *_SCALED)
-                            edge_index p = col_start;
-                            for (; p + 4 <= col_end; p += 4) {
-                                s0 += bck_val(p + 0, sj) * y_out[csc_row_idx_[p + 0]];
-                                s1 += bck_val(p + 1, sj) * y_out[csc_row_idx_[p + 1]];
-                                s2 += bck_val(p + 2, sj) * y_out[csc_row_idx_[p + 2]];
-                                s3 += bck_val(p + 3, sj) * y_out[csc_row_idx_[p + 3]];
-                            }
-                            double sum = (s0 + s1) + (s2 + s3);
-                            for (; p < col_end; ++p)
-                                sum += bck_val(p, sj) * y_out[csc_row_idx_[p]];
-                            y_out[j] = (x_in[j] - sum) / bck_diag(j);
+                            bck_col</*Fat=*/false>(j, x_in, y_out);
                         }
                     } // implicit barrier
                 } else {
@@ -1057,11 +1215,7 @@ public:
                             __builtin_prefetch(&csc_row_idx_[csc_col_ptr_[jp]]);
                             __builtin_prefetch(&csc_vals_[csc_col_ptr_[jp]]);
                         }
-                        double sum = 0.0;
-                        const double sj = bck_scale(j);
-                        for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
-                            sum += bck_val(p, sj) * y_out[csc_row_idx_[p]];
-                        y_out[j] = (x_in[j] - sum) / bck_diag(j);
+                        bck_col</*Fat=*/true>(j, x_in, y_out);
                     } // implicit barrier on omp for
                 }
             }
@@ -1107,10 +1261,9 @@ public:
                 }
 
                 double sum = 0.0;
-                const double sj = bck_scale(j);
                 for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
-                    sum += bck_val(p, sj) * y_out[csc_row_idx_[p]];
-                y_out[j] = (y_out[j] - sum) / bck_diag(j);
+                    sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
+                y_out[j] = (bck_rhs(j, y_out) - sum) / bck_diag(j);   // x_in was copied into y_out above
 
                 // Notify dependents: columns i < j with L(j, i) ≠ 0.
                 // CSR row j lists exactly those, with diagonal last.
@@ -1186,68 +1339,252 @@ private:
     big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; bf16/fp16/fp24 under the LOWPREC variants
 
 #if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-    // Exact fp32 diagonal L(i,i), i < m_ (lowprec builds only; see the file
-    // header). fp32 rather than fp64: it is exactly what the fp32 build
-    // divides by (the factor is fp32 under both flags), so lowprec+diag32
-    // differs from fp32 ONLY in the off-diagonals -- one variable at a time.
+    // fp32 diagonal, i < m_ (lowprec builds only; see the file header): L(i,i)
+    // under BF16 / FP24 -- exactly what the fp32 build divides by, so those
+    // differ from fp32 ONLY in the off-diagonals -- and the scaled L(i,i) / s_i
+    // (one fp32 division, stored_diag()) under the *_SCALED variants.
     big_vec<float> diag_;
 #endif
 #if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
     // Per-column scale s_j = max |off-diagonal| of L11 column j (1.0f if
-    // none), fp32; the stored off-diagonals are narrow(L_ij / s_j) and the
-    // kernels multiply s_j back (see file header, column_scale()).
+    // none), fp32 (column_scale()); the stored factor is L~ = L D^-1, D =
+    // diag(s_j). Used at setup (narrowing, the drop threshold, diag_) and by
+    // col_scales(); the kernels never read it. inv_scale_[j] = fp32(1 / s_j)
+    // is what the back solve reads (once per column) to fold D^-2 into its
+    // input -- see the file header, "FOLDED INTO THE VECTORS".
     big_vec<float> scale_;
+    big_vec<float> inv_scale_;
 #endif
     lowprec_statistics stats_;
 
+    // ── The kernels: ONE source for every storage type ─────────────────
+    // Per stored entry the work is (value load, widen, index load, y gather,
+    // fma); the storage type only changes the widen() overload. Per row /
+    // column: the diagonal division (fwd_diag / bck_diag) and, on the back
+    // solve of the *_SCALED variants, the input scale (bck_rhs).
+
     // L(i,i) as the forward solve (CSR row i) / back solve (CSC column j)
-    // divides by it. THE single place the diagonal's storage is chosen: the
+    // divides by it -- THE single place the diagonal's storage is chosen: the
     // fp32/fp64 builds keep the inline read (last of CSR row / first of CSC
-    // column, byte-identical to before), the lowprec builds read diag_.
+    // column, byte-identical to before), the lowprec builds read diag_[]
+    // (scaled by 1/s_j under *_SCALED), and FP16_SCALED under
+    // APXCHOL_FP16_DIAG (fp16_diag_) the fp16 diagonal slot itself.
     double fwd_diag(node_index i) const {
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+        return fp16_diag_ ? widen(csr_vals_[csr_row_ptr_[i + 1] - 1]) : static_cast<double>(diag_[i]);
+#elif defined(APXCHOL_SPTRSV_LOWPREC_ANY)
         return static_cast<double>(diag_[i]);
 #else
         return widen(csr_vals_[csr_row_ptr_[i + 1] - 1]);
 #endif
     }
     double bck_diag(node_index j) const {
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+        return fp16_diag_ ? widen(csc_vals_[csc_col_ptr_[j]]) : static_cast<double>(diag_[j]);
+#elif defined(APXCHOL_SPTRSV_LOWPREC_ANY)
         return static_cast<double>(diag_[j]);
 #else
         return widen(csc_vals_[csc_col_ptr_[j]]);
 #endif
     }
+    // The back solve's input for column j: x_in[j] * r_j^2 (r_j = fp32(1/s_j),
+    // r_j^2 exact in double) under the *_SCALED variants -- D^-2 folded into
+    // the input read, see the file header -- x_in[j] itself elsewhere.
+    double bck_rhs(node_index j, const double* x_in) const {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        const double r = static_cast<double>(inv_scale_[j]);
+        return x_in[j] * (r * r);
+#else
+        return x_in[j];
+#endif
+    }
 
-    // Off-diagonal L(i,j) as the kernels read it, in double -- THE single
-    // place the storage format is undone. Forward (CSR position p, row i): the
-    // entry's column is csr_col_idx_[p], so the *_SCALED variants gather
-    // scale_[csr_col_idx_[p]] next to the y_out gather by the same index.
-    // Back (CSC position p inside column j): the caller hoists sj =
-    // bck_scale(j) out of the column loop. On every other build these are
-    // exactly widen(stored) (bit-identical to before).
-    double fwd_val(edge_index p) const {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
-        return widen(csr_vals_[p]) * static_cast<double>(scale_[csr_col_idx_[p]]);
+    // Fat-level SIMD kernel availability: AVX2 + F16C + FMA target AND 16-bit
+    // storage (bf16_t / fp16_t). widen8()/widen4() overloads exist for float
+    // and double too, so enabling the SIMD path for the fp32/fp64 builds is
+    // this one constant -- deliberately not done: those kernels stay the
+    // scalar loops they were measured as.
+    static constexpr bool kSimdIsa =
+#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
+        true;
 #else
-        return widen(csr_vals_[p]);
+        false;
 #endif
+    static constexpr bool kSimdDot = kSimdIsa && sizeof(sptrsv_value_t) == 2;
+    // Default fat-level gather flavour (APXCHOL_FP16_GATHER unset): "scalar"
+    // -- the winner of the unlocked A/B (fp16s, T=1: grid_2000 ~10-15% faster
+    // solve than the vector gather, iter0040 equal; T=8 within noise; see the
+    // commit message). vgatherdpd's latency sits on the critical path of the
+    // short grid rows; the compiler turns the "stack buffer" into register
+    // lane extracts feeding vfmadd231sd with a memory operand, so the scalar
+    // flavour has no store/reload either.
+    static constexpr bool kFatGatherSimdDefault = false;
+    // Kernel state set by setup() (see there).
+    bool fp16_diag_   = false;   // FP16_SCALED: APXCHOL_FP16_DIAG=1 honoured at the last setup()
+    bool gather_simd_ = false;   // fat-level SIMD kernels: vector gather (true) or stack buffer + scalar gather
+
+    // sum over q in [p, end) of widen(vals[q]) * y[idx[q]] -- the thin-level
+    // kernel: scalar, 4-way accumulators (see solve.cpp:31 for the rationale).
+    static double dot_thin(const sptrsv_value_t* __restrict vals, const node_index* __restrict idx,
+                           edge_index p, edge_index end, const double* __restrict y) {
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+        for (; p + 4 <= end; p += 4) {
+            s0 += widen(vals[p + 0]) * y[idx[p + 0]];
+            s1 += widen(vals[p + 1]) * y[idx[p + 1]];
+            s2 += widen(vals[p + 2]) * y[idx[p + 2]];
+            s3 += widen(vals[p + 3]) * y[idx[p + 3]];
+        }
+        double sum = (s0 + s1) + (s2 + s3);
+        for (; p < end; ++p)
+            sum += widen(vals[p]) * y[idx[p]];
+        return sum;
     }
-    double bck_scale(node_index j) const {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
-        return static_cast<double>(scale_[j]);
-#else
-        (void)j;
-        return 1.0;
-#endif
+
+#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
+    // Vector widen: 8 (or 4) consecutive stored values -> two (one) lanes of 4
+    // doubles. One overload per storage type; fp24_t has none (3-byte packed
+    // -> kSimdDot is false there anyway).
+    static inline void widen8(const fp16_t* v, __m256d& lo, __m256d& hi) {
+        const __m256 f = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v)));   // F16C
+        lo = _mm256_cvtps_pd(_mm256_castps256_ps128(f));
+        hi = _mm256_cvtps_pd(_mm256_extractf128_ps(f, 1));
     }
-    double bck_val(edge_index p, double sj) const {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
-        return widen(csc_vals_[p]) * sj;
-#else
-        (void)sj;
-        return widen(csc_vals_[p]);
+    static inline __m256d widen4(const fp16_t* v) {
+        return _mm256_cvtps_pd(_mm_cvtph_ps(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(v))));
+    }
+    static inline void widen8(const bf16_t* v, __m256d& lo, __m256d& hi) {
+        // bf16 -> fp32 is the bit pattern << 16 (exact, like to_float()).
+        const __m256i u = _mm256_cvtepu16_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v)));
+        const __m256  f = _mm256_castsi256_ps(_mm256_slli_epi32(u, 16));
+        lo = _mm256_cvtps_pd(_mm256_castps256_ps128(f));
+        hi = _mm256_cvtps_pd(_mm256_extractf128_ps(f, 1));
+    }
+    static inline __m256d widen4(const bf16_t* v) {
+        const __m128i u = _mm_cvtepu16_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(v)));
+        return _mm256_cvtps_pd(_mm_castsi128_ps(_mm_slli_epi32(u, 16)));
+    }
+    static inline void widen8(const float* v, __m256d& lo, __m256d& hi) {
+        lo = _mm256_cvtps_pd(_mm_loadu_ps(v));
+        hi = _mm256_cvtps_pd(_mm_loadu_ps(v + 4));
+    }
+    static inline __m256d widen4(const float* v) { return _mm256_cvtps_pd(_mm_loadu_ps(v)); }
+    static inline void widen8(const double* v, __m256d& lo, __m256d& hi) {
+        lo = _mm256_loadu_pd(v);
+        hi = _mm256_loadu_pd(v + 4);
+    }
+    static inline __m256d widen4(const double* v) { return _mm256_loadu_pd(v); }
+    // Four doubles y[idx[0..3]] (32- or 64-bit node indices).
+    static inline __m256d gather4(const double* y, const node_index* idx) {
+        if constexpr (sizeof(node_index) == 4)
+            return _mm256_i32gather_pd(y, _mm_loadu_si128(reinterpret_cast<const __m128i*>(idx)), 8);
+        else
+            return _mm256_i64gather_pd(y, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(idx)), 8);
+    }
+    static inline double hsum4(__m256d v) {
+        const __m128d lo = _mm_add_pd(_mm256_castpd256_pd128(v), _mm256_extractf128_pd(v, 1));
+        return _mm_cvtsd_f64(_mm_add_sd(lo, _mm_unpackhi_pd(lo, lo)));
+    }
+    // The same sum as dot_thin, fat-level SIMD flavour (16-bit storage): 8
+    // stored values per widen8; the y gather is a vector gather + vector FMA
+    // (2 accumulators) when gather_simd_, else the 8 widened doubles go through
+    // a stack buffer and scalar gathers feed a 4-way scalar FMA chain. Then a
+    // 4-wide step and a scalar tail. Different summation order from dot_thin
+    // (and between the two flavours): same accuracy, not bit-identical. A
+    // template on the value type so it is only instantiated where kSimdDot
+    // selects it (fp24_t has no widen8).
+    template <class V>
+    double dot_fat_simd(const V* __restrict vals, const node_index* __restrict idx,
+                        edge_index p, edge_index end, const double* __restrict y) const {
+        if (gather_simd_) {
+            __m256d acc0 = _mm256_setzero_pd(), acc1 = _mm256_setzero_pd();
+            for (; p + 8 <= end; p += 8) {
+                __m256d h0, h1;
+                widen8(vals + p, h0, h1);
+                acc0 = _mm256_fmadd_pd(h0, gather4(y, idx + p),     acc0);
+                acc1 = _mm256_fmadd_pd(h1, gather4(y, idx + p + 4), acc1);
+            }
+            if (p + 4 <= end) {
+                acc0 = _mm256_fmadd_pd(widen4(vals + p), gather4(y, idx + p), acc0);
+                p += 4;
+            }
+            double sum = hsum4(_mm256_add_pd(acc0, acc1));
+            for (; p < end; ++p)
+                sum += widen(vals[p]) * y[idx[p]];
+            return sum;
+        }
+        alignas(32) double hb[8];
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+        for (; p + 8 <= end; p += 8) {
+            __m256d h0, h1;
+            widen8(vals + p, h0, h1);
+            _mm256_store_pd(hb,     h0);
+            _mm256_store_pd(hb + 4, h1);
+            s0 += hb[0] * y[idx[p + 0]];
+            s1 += hb[1] * y[idx[p + 1]];
+            s2 += hb[2] * y[idx[p + 2]];
+            s3 += hb[3] * y[idx[p + 3]];
+            s0 += hb[4] * y[idx[p + 4]];
+            s1 += hb[5] * y[idx[p + 5]];
+            s2 += hb[6] * y[idx[p + 6]];
+            s3 += hb[7] * y[idx[p + 7]];
+        }
+        if (p + 4 <= end) {
+            _mm256_store_pd(hb, widen4(vals + p));
+            s0 += hb[0] * y[idx[p + 0]];
+            s1 += hb[1] * y[idx[p + 1]];
+            s2 += hb[2] * y[idx[p + 2]];
+            s3 += hb[3] * y[idx[p + 3]];
+            p += 4;
+        }
+        double sum = (s0 + s1) + (s2 + s3);
+        for (; p < end; ++p)
+            sum += widen(vals[p]) * y[idx[p]];
+        return sum;
+    }
 #endif
+
+    // Forward row i (CSR row i, diagonal slot LAST): y_i = (x_i - sum_j L~_ij
+    // y_j) / L~_ii. Fat: the `omp for` levels -- the SIMD kernel on 16-bit
+    // storage, else the plain single-accumulator loop (instruction-identical
+    // to the pre-fold fp32 kernel); thin: dot_thin.
+    template <bool Fat>
+    void fwd_row(node_index i, const double* x_in, double* y_out) const {
+        const edge_index row_start = csr_row_ptr_[i];
+        const edge_index row_end   = csr_row_ptr_[i + 1] - 1;
+        double sum;
+        if constexpr (Fat && kSimdDot) {
+#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
+            sum = dot_fat_simd(csr_vals_.data(), csr_col_idx_.data(), row_start, row_end, y_out);
+#endif
+        } else if constexpr (Fat) {
+            sum = 0.0;
+            for (edge_index p = row_start; p < row_end; ++p)
+                sum += widen(csr_vals_[p]) * y_out[csr_col_idx_[p]];
+        } else {
+            sum = dot_thin(csr_vals_.data(), csr_col_idx_.data(), row_start, row_end, y_out);
+        }
+        y_out[i] = (x_in[i] - sum) / fwd_diag(i);
+    }
+    // Back column j (CSC column j, diagonal slot FIRST): z_j = (x_j [* r_j^2]
+    // - sum_k L~_kj z_k) / L~_jj; the gather source is y_out (z) itself. Valid
+    // in place (x_in == y_out: x_in[j] is read before y_out[j] is written).
+    template <bool Fat>
+    void bck_col(node_index j, const double* x_in, double* y_out) const {
+        const edge_index col_start = csc_col_ptr_[j] + 1;
+        const edge_index col_end   = csc_col_ptr_[j + 1];
+        double sum;
+        if constexpr (Fat && kSimdDot) {
+#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
+            sum = dot_fat_simd(csc_vals_.data(), csc_row_idx_.data(), col_start, col_end, y_out);
+#endif
+        } else if constexpr (Fat) {
+            sum = 0.0;
+            for (edge_index p = col_start; p < col_end; ++p)
+                sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
+        } else {
+            sum = dot_thin(csc_vals_.data(), csc_row_idx_.data(), col_start, col_end, y_out);
+        }
+        y_out[j] = (bck_rhs(j, x_in) - sum) / bck_diag(j);
     }
 
     // Level sets.

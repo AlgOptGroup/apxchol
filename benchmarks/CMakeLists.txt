@@ -393,7 +393,7 @@ option(APXCHOL_SPTRSV_FP32 "fp32 SpTRSV factor values (diag + PCG stay fp64). DE
 if (APXCHOL_SPTRSV_FP32)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_SPTRSV_FP32)
 endif()
-set(APXCHOL_SPTRSV_LOWPREC "OFF" CACHE STRING "Low-precision SpTRSV factor-value STORAGE for the off-diagonals, diagonal exact fp32 (reads widen to fp64; compute unchanged): OFF | BF16 | BF16_SCALED | FP16_SCALED | FP24 -- see the root CMakeLists.txt / include/apxchol/lowprec.h. CPU/omp only; overrides APXCHOL_SPTRSV_FP32. DEFAULT OFF")
+set(APXCHOL_SPTRSV_LOWPREC "OFF" CACHE STRING "Low-precision SpTRSV factor-value STORAGE for the off-diagonals, diagonal fp32 (reads widen to fp64; compute unchanged; the *_SCALED variants fold the per-column scale into the vectors and their 16-bit fat-level kernels are SIMD, env APXCHOL_FP16_GATHER=simd|scalar; FP16_SCALED: env APXCHOL_FP16_DIAG=1 = fp16 diagonal): OFF | BF16 | BF16_SCALED | FP16_SCALED | FP24 -- see the root CMakeLists.txt / include/apxchol/lowprec.h. CPU/omp only; overrides APXCHOL_SPTRSV_FP32. DEFAULT OFF")
 set_property(CACHE APXCHOL_SPTRSV_LOWPREC PROPERTY STRINGS OFF BF16 BF16_SCALED FP16_SCALED FP24)
 option(APXCHOL_SPTRSV_BF16 "Deprecated alias for APXCHOL_SPTRSV_LOWPREC=BF16" OFF)
 string(TOUPPER "${APXCHOL_SPTRSV_LOWPREC}" APXCHOL_SPTRSV_LOWPREC)

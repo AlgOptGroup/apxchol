@@ -224,32 +224,44 @@ TEST(BF16, StochasticRoundingBoundedDeterministicUnbiased) {
 
 // ── SpTRSV kernels compute in double from the widened stored values ─────
 // Build a random unit-ish lower-triangular factor, run forward (L y = x) and
-// back (L^T z = y) solves through omp_sptrsv, and check the residual against
+// back (L^T z = y) solves through omp_sptrsv, and check the residuals against
 // the values the SpTRSV STORES row by row with a componentwise bound. Because
 // the kernels accumulate in double, the residual is at roundoff level even
 // when the storage is 16-bit -- if any read did bf16/fp16/fp32 arithmetic this
 // would blow up to ~2^-8..2^-11. Under the lowprec builds the stored values
 // are: off-diagonals narrowed by omp_sptrsv::narrow_value (RNE, or for the
 // bf16 variants stochastic-by-CSC-index under APXCHOL_BF16_STOCHASTIC=1; the
-// *_SCALED variants divide by the per-column scale that the kernels multiply
-// back) and the DIAGONAL exact fp32 -- so this test also pins (a) that the
-// kernels divide by the exact diagonal (a narrow diagonal would show as a
-// ~2^-8 residual), (b) that CSR (forward) and CSC (back) hold the SAME rounded
-// value for every entry in stochastic mode, and (c) that the scale the kernels
-// multiply back is the very s_j the narrowing divided by.
+// *_SCALED variants divide by the per-column scale s_j) and the DIAGONAL fp32
+// (omp_sptrsv::stored_diag: L_jj, or L_jj / s_j under *_SCALED) -- so this
+// test also pins (a) that the kernels divide by that diagonal (a narrow
+// diagonal would show as a ~2^-8 residual), (b) that CSR (forward) and CSC
+// (back) hold the SAME rounded value for every entry in stochastic mode, and
+// (c) the *_SCALED PAIR CONTRACT (omp.h, "FOLDED INTO THE VECTORS"): the
+// kernels run on the stored L~ = L D^-1 with no scale multiplication --
+// forward_solve returns y' = D y (y'_j = s_j y_j) and transpose_solve, given
+// y', solves L~^T z = R y' with R = diag(r_j^2), r_j = inv_scale(s_j) =
+// fp32(1/s_j) -- so the pair applies (L_s L_s^T)^-1 for the stored factor
+// L_s = L~ D up to the 2^-23 of r_j. Checked (i) at roundoff against L~ / R
+// (what the kernels compute) and (ii) y' == D y, z == L_s^-T y against a
+// serial double substitution on L_s (roundoff for y', 2^-23-class for z).
 namespace {
 
-// What omp_sptrsv::setup stores (widened, scale multiplied back) for the
-// factor entry at CSC position p with value v in a column with scale s: the
-// contract under test. Under the fp32/fp64 builds this is v itself.
-double stored_value(factor_value_t v, edge_index p, bool is_diag, bool stochastic, float s) {
-    if (is_diag) return static_cast<double>(v);              // exact fp32 diag_ (or the fp32/fp64 inline read)
-    const double w = apxchol::widen(apxchol::omp_sptrsv::narrow_value(v, p, s, stochastic,
-                                                                          /*fp16_flush_subnormal=*/true));
+// The KERNEL matrix L~ as omp_sptrsv::setup stores it (widened, NOT
+// rescaled) for the factor entry at CSC position p with value v in a column
+// with scale s: off-diagonals through narrow_value, the diagonal through
+// stored_diag. Under the fp32/fp64 builds this is v itself.
+double kernel_value(factor_value_t v, edge_index p, bool is_diag, bool stochastic, float s) {
+    if (is_diag) return apxchol::omp_sptrsv::stored_diag(v, s);
+    return apxchol::widen(apxchol::omp_sptrsv::narrow_value(v, p, s, stochastic,
+                                                             /*fp16_flush_subnormal=*/true));
+}
+// The per-column scale the kernels' input / output carry (1.0f off *_SCALED).
+float pair_scale(const sparse_csc& L, node_index j) {
 #if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
-    return w * static_cast<double>(s);
+    return apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]);
 #else
-    return w;
+    (void)L; (void)j;
+    return 1.0f;
 #endif
 }
 
@@ -289,19 +301,19 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
     return L;
 }
 
-// Componentwise residual check of L y = x (transpose == false) or L^T z = x
-// (transpose == true) against the values the SpTRSV stores.
-void check_triangular_residual(const sparse_csc& L, const std::vector<double>& x,
-                               const std::vector<double>& y, bool transpose,
-                               bool stochastic = false) {
+// Componentwise residual of L~ y = b (transpose == false) or L~^T z = b
+// (transpose == true) against the KERNEL matrix L~ (kernel_value): what the
+// kernels compute, at double roundoff.
+void check_kernel_residual(const sparse_csc& L, const std::vector<double>& b,
+                           const std::vector<double>& y, bool transpose, bool stochastic) {
     const node_index m = L.rows();
-    std::vector<double> r(x), scale(m, 0.0);
-    for (node_index i = 0; i < m; ++i) scale[i] = std::fabs(x[i]);
+    std::vector<double> r(b), scale(m, 0.0);
+    for (node_index i = 0; i < m; ++i) scale[i] = std::fabs(b[i]);
     for (node_index j = 0; j < m; ++j) {
         const float s_j = apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]);
         for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
             const node_index i = L.inner_[p];
-            const double v = stored_value(L.vals_[p], p, /*is_diag=*/i == j, stochastic, s_j);
+            const double v = kernel_value(L.vals_[p], p, /*is_diag=*/i == j, stochastic, s_j);
             if (!transpose) { r[i] -= v * y[j]; scale[i] += std::fabs(v * y[j]); }
             else            { r[j] -= v * y[i]; scale[j] += std::fabs(v * y[i]); }
         }
@@ -311,7 +323,36 @@ void check_triangular_residual(const sparse_csc& L, const std::vector<double>& x
         worst = std::max(worst, std::fabs(r[i]) / (scale[i] + 1e-300));
     // Double accumulation over <= ~70 terms: roundoff ~1e-14; 2^-8..2^-11
     // would be the signature of any narrow-precision arithmetic.
-    EXPECT_LT(worst, 1e-11) << (transpose ? "back" : "forward") << " solve residual";
+    EXPECT_LT(worst, 1e-11) << (transpose ? "back" : "forward") << " kernel residual";
+}
+
+// Serial double reference solves on the STORED factor L_s = L~ D (kernel
+// off-diagonal * s_j, kernel diagonal * s_j): L_s y = x, then L_s^T z = y.
+void reference_pair(const sparse_csc& L, const std::vector<double>& x, bool stochastic,
+                    std::vector<double>& y, std::vector<double>& z) {
+    const node_index m = L.rows();
+    // Column-oriented forward substitution.
+    y = x;
+    for (node_index j = 0; j < m; ++j) {
+        const float s_j = apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]);
+        const double sd = static_cast<double>(pair_scale(L, j));
+        const edge_index p0 = L.outer_[j];
+        y[j] /= kernel_value(L.vals_[p0], p0, true, stochastic, s_j) * sd;
+        for (edge_index p = p0 + 1; p < L.outer_[j + 1]; ++p)
+            y[L.inner_[p]] -= kernel_value(L.vals_[p], p, false, stochastic, s_j) * sd * y[j];
+    }
+    // Column-oriented back substitution (L_s^T z = y: column j of L_s is row j of L_s^T).
+    z.assign(m, 0.0);
+    for (node_index jj = m; jj-- > 0; ) {
+        const node_index j = jj;
+        const float s_j = apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]);
+        const double sd = static_cast<double>(pair_scale(L, j));
+        const edge_index p0 = L.outer_[j];
+        double acc = y[j];
+        for (edge_index p = p0 + 1; p < L.outer_[j + 1]; ++p)
+            acc -= kernel_value(L.vals_[p], p, false, stochastic, s_j) * sd * z[L.inner_[p]];
+        z[j] = acc / (kernel_value(L.vals_[p0], p0, true, stochastic, s_j) * sd);
+    }
 }
 
 void run_kernel_precision_check(bool stochastic) {
@@ -322,12 +363,37 @@ void run_kernel_precision_check(bool stochastic) {
         trsv.setup(L, m);
         std::mt19937 rng(7);
         std::uniform_real_distribution<double> ux(-1.0, 1.0);
-        std::vector<double> x(m), y(m), z(m);
+        std::vector<double> x(m), yp(m), z(m);
         for (auto& v : x) v = ux(rng);
-        trsv.forward_solve(x.data(), y.data());
-        check_triangular_residual(L, x, y, /*transpose=*/false, stochastic);
-        trsv.transpose_solve(y.data(), z.data());
-        check_triangular_residual(L, y, z, /*transpose=*/true, stochastic);
+        // (i) What the kernels compute, at roundoff: L~ y' = x, then
+        //     L~^T z = R y'.
+        trsv.forward_solve(x.data(), yp.data());
+        check_kernel_residual(L, x, yp, /*transpose=*/false, stochastic);
+        trsv.transpose_solve(yp.data(), z.data());
+        std::vector<double> ryp(m);
+        for (node_index j = 0; j < m; ++j) {
+            const double r = apxchol::omp_sptrsv::inv_scale(pair_scale(L, j));
+            ryp[j] = yp[j] * (r * r);
+        }
+        check_kernel_residual(L, ryp, z, /*transpose=*/true, stochastic);
+        // (ii) The pair contract against the serial reference on L_s = L~ D:
+        //      y' = D y at roundoff, z = L_s^-T y up to r_j = fp32(1/s_j)
+        //      (2^-23 relative on the input, i.e. on z; exact off *_SCALED).
+        std::vector<double> y_ref, z_ref;
+        reference_pair(L, x, stochastic, y_ref, z_ref);
+        double worst_y = 0.0, worst_z = 0.0, sc_y = 0.0, sc_z = 0.0;
+        for (node_index j = 0; j < m; ++j) {
+            worst_y = std::max(worst_y, std::fabs(yp[j] - static_cast<double>(pair_scale(L, j)) * y_ref[j]));
+            worst_z = std::max(worst_z, std::fabs(z[j] - z_ref[j]));
+            sc_y = std::max(sc_y, std::fabs(yp[j]));
+            sc_z = std::max(sc_z, std::fabs(z_ref[j]));
+        }
+        EXPECT_LT(worst_y, 1e-10 * sc_y) << "y' = D y";
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        EXPECT_LT(worst_z, 1e-5 * sc_z) << "z (r_j = fp32(1/s_j))";
+#else
+        EXPECT_LT(worst_z, 1e-10 * sc_z) << "z";
+#endif
     }
 }
 
@@ -359,4 +425,150 @@ TEST(BF16, SpTRSVStochasticModeIsConsistentAcrossCSRAndCSC) {
         differ += rne.csr_vals()[k] != sto.csr_vals()[k];
     EXPECT_GT(differ, rne.csr_vals().size() / 10);
 #endif
+}
+
+// ── Fat-level kernels (the `omp for` paths) ─────────────────────────────
+// A round-structured factor (R rounds of B > kSpTRSVOMPThreshold mutually
+// independent columns; every off-diagonal points to a LATER round) fed
+// through set_round_bounds so every level is fat and the `omp for` kernels
+// run -- on 16-bit storage the SIMD ones (simd_dot()): 8-wide vector widen,
+// 4-wide step, scalar tail, in both gather flavours (APXCHOL_FP16_GATHER=
+// simd | scalar, read at every setup). CSR row lengths are spread over
+// 0..48 so every path (8-blocks, the 4-step, tails of 0..3) is exercised.
+// Checked exactly like the thin-level kernels: the pair contract at roundoff
+// against L~ / R and against the serial reference on L_s, plus the two
+// gather flavours (and the sync-free back solve) agreeing to roundoff.
+namespace {
+
+sparse_csc make_round_structured_lower(node_index R, node_index B, unsigned seed,
+                                       std::vector<node_index>& round_bounds) {
+    const node_index m = R * B;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> uval(-0.5, 0.5);
+    std::uniform_real_distribution<double> udiag(1.0, 3.0);
+    std::uniform_int_distribution<int> ulen(0, 48);
+    // Row i (round r = i / B) picks len_i distinct columns from rounds < r.
+    std::vector<std::vector<node_index>> col_rows(m);
+    for (node_index j = 0; j < m; ++j) col_rows[j].push_back(j);   // diagonal
+    for (node_index i = 0; i < m; ++i) {
+        const node_index r = i / B;
+        if (r == 0) continue;
+        int len = ulen(rng);
+        if (i % 1009 == 0) len += 200;                        // a few very long rows
+        std::uniform_int_distribution<node_index> ucol(0, r * B - 1);
+        std::vector<node_index> cols;
+        for (int t = 0; t < len; ++t) cols.push_back(ucol(rng));
+        std::sort(cols.begin(), cols.end());
+        cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
+        for (node_index j : cols) col_rows[j].push_back(i);
+    }
+    sparse_csc L;
+    L.n_ = m;
+    L.outer_.assign(static_cast<size_t>(m) + 1, 0);
+    for (node_index j = 0; j < m; ++j) {
+        std::sort(col_rows[j].begin(), col_rows[j].end());
+        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(col_rows[j].size());
+    }
+    L.inner_.resize(static_cast<size_t>(L.outer_[m]));
+    L.vals_.resize(static_cast<size_t>(L.outer_[m]));
+    for (node_index j = 0; j < m; ++j) {
+        edge_index out = L.outer_[j];
+        for (node_index r : col_rows[j]) {
+            L.inner_[out] = r;
+            L.vals_[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : uval(rng));
+            ++out;
+        }
+    }
+    round_bounds.resize(static_cast<size_t>(R) + 1);
+    for (node_index r = 0; r <= R; ++r) round_bounds[r] = r * B;
+    return L;
+}
+
+} // namespace
+
+TEST(BF16, SpTRSVFatLevelKernelsBothGatherFlavours) {
+    const node_index R = 8, B = 2 * apxchol::kSpTRSVOMPThreshold;   // 8 fat levels of 2048
+    std::vector<node_index> bounds;
+    const sparse_csc L = make_round_structured_lower(R, B, 4321, bounds);
+    const node_index m = R * B;
+    // Row-length spectrum has teeth: rows of every tail length and 8-blocks.
+    {
+        std::vector<int> hist(4, 0); int ge8 = 0, ge4 = 0;
+        std::vector<int> rowlen(m, 0);
+        for (node_index j = 0; j < m; ++j)
+            for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) rowlen[L.inner_[p]]++;
+        for (node_index i = 0; i < m; ++i) { hist[rowlen[i] % 4]++; ge8 += rowlen[i] >= 8; ge4 += rowlen[i] >= 4; }
+        for (int t = 0; t < 4; ++t) ASSERT_GT(hist[t], 100) << "tail length " << t;
+        ASSERT_GT(ge8, static_cast<int>(m / 4));
+        ASSERT_GT(ge4, static_cast<int>(m / 2));
+    }
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<double> ux(-1.0, 1.0);
+    std::vector<double> x(m);
+    for (auto& v : x) v = ux(rng);
+    std::vector<double> y_ref, z_ref;
+    reference_pair(L, x, /*stochastic=*/false, y_ref, z_ref);
+
+    std::vector<std::vector<double>> yps, zs, zsf;
+    for (const char* mode : {"simd", "scalar"}) {
+        SCOPED_TRACE(std::string("APXCHOL_FP16_GATHER=") + mode);
+        setenv("APXCHOL_FP16_GATHER", mode, 1);
+        apxchol::omp_sptrsv trsv;
+        trsv.set_round_bounds(bounds);
+        trsv.setup(L, m);
+        unsetenv("APXCHOL_FP16_GATHER");
+        EXPECT_EQ(trsv.fat_gather_simd(), std::string(mode) == "simd");
+#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
+        EXPECT_EQ(apxchol::omp_sptrsv::simd_dot(), sizeof(sptrsv_value_t) == 2);
+#else
+        EXPECT_FALSE(apxchol::omp_sptrsv::simd_dot());
+#endif
+        // Every level is fat (round-as-level).
+        std::vector<int> sizes; std::vector<long long> work;
+        trsv.level_stats(/*fwd=*/true, sizes, work);
+        ASSERT_EQ(sizes.size(), static_cast<size_t>(R));
+        for (int s : sizes) ASSERT_EQ(s, static_cast<int>(B));
+        trsv.level_stats(/*fwd=*/false, sizes, work);
+        ASSERT_EQ(sizes.size(), static_cast<size_t>(R));
+        for (int s : sizes) ASSERT_EQ(s, static_cast<int>(B));
+
+        std::vector<double> yp(m), z(m), zf(m);
+        trsv.forward_solve(x.data(), yp.data());
+        check_kernel_residual(L, x, yp, /*transpose=*/false, /*stochastic=*/false);
+        trsv.transpose_solve(yp.data(), z.data());
+        trsv.transpose_solve_syncfree(yp.data(), zf.data());
+        std::vector<double> ryp(m);
+        for (node_index j = 0; j < m; ++j) {
+            const double r = apxchol::omp_sptrsv::inv_scale(pair_scale(L, j));
+            ryp[j] = yp[j] * (r * r);
+        }
+        check_kernel_residual(L, ryp, z,  /*transpose=*/true, /*stochastic=*/false);
+        check_kernel_residual(L, ryp, zf, /*transpose=*/true, /*stochastic=*/false);
+        double worst_y = 0.0, worst_z = 0.0, sc_y = 0.0, sc_z = 0.0;
+        for (node_index j = 0; j < m; ++j) {
+            worst_y = std::max(worst_y, std::fabs(yp[j] - static_cast<double>(pair_scale(L, j)) * y_ref[j]));
+            worst_z = std::max(worst_z, std::fabs(z[j] - z_ref[j]));
+            sc_y = std::max(sc_y, std::fabs(yp[j]));
+            sc_z = std::max(sc_z, std::fabs(z_ref[j]));
+        }
+        EXPECT_LT(worst_y, 1e-10 * sc_y) << "y' = D y";
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        EXPECT_LT(worst_z, 1e-5 * sc_z) << "z (r_j = fp32(1/s_j))";
+#else
+        EXPECT_LT(worst_z, 1e-10 * sc_z) << "z";
+#endif
+        yps.push_back(yp); zs.push_back(z); zsf.push_back(zf);
+    }
+    // The two gather flavours (different summation order) agree to roundoff.
+    double dy = 0.0, dz = 0.0, dzf = 0.0, sy = 0.0, sz = 0.0;
+    for (node_index j = 0; j < m; ++j) {
+        dy  = std::max(dy,  std::fabs(yps[0][j] - yps[1][j]));
+        dz  = std::max(dz,  std::fabs(zs[0][j]  - zs[1][j]));
+        dzf = std::max(dzf, std::fabs(zsf[0][j] - zsf[1][j]));
+        sy  = std::max(sy,  std::fabs(yps[0][j]));
+        sz  = std::max(sz,  std::fabs(zs[0][j]));
+    }
+    EXPECT_LT(dy,  1e-12 * sy);
+    EXPECT_LT(dz,  1e-12 * sz);
+    EXPECT_LT(dzf, 1e-12 * sz);
 }

@@ -9,16 +9,23 @@
 // alias of _BF16). All variants share the same shape:
 //
 //   * ONLY the off-diagonals of the SpTRSV's CSR/CSC value arrays are stored
-//     narrow; the DIAGONAL is kept exact fp32 in omp_sptrsv::diag_ (an 8-bit
+//     narrow; the DIAGONAL is kept fp32 in omp_sptrsv::diag_ (an 8-bit
 //     diagonal was the dominant iteration-count damage of the first all-bf16
-//     variant).
+//     variant): L_jj itself, or under the *_SCALED variants the scaled
+//     L_jj / s_j (omp_sptrsv::stored_diag). FP16_SCALED can be asked to read
+//     the fp16 diagonal slot instead (env APXCHOL_FP16_DIAG=1, refused unless
+//     every slot is a normal fp16 -- omp.h file header).
 //   * The factor itself (sparse_csc::vals_, factor_value_t) is fp32; the
 //     narrowing happens once, in omp_sptrsv::setup, through
 //     omp_sptrsv::narrow_value (a pure function of the entry, so the CSR
 //     transpose and the CSC copy agree bit-for-bit).
 //   * Every read in the solve kernels widens to fp64 in registers via widen();
-//     the arithmetic is unchanged. This is a preconditioner-QUALITY knob (PCG
-//     iteration count), never a residual-floor one.
+//     the arithmetic is unchanged and the kernels are one source for every
+//     storage type (the fat-level kernels of the 16-bit types are SIMD:
+//     _mm256_cvtph_ps / bf16 shift, vector gather + FMA -- env
+//     APXCHOL_FP16_GATHER=simd|scalar picks the gather flavour). This is a
+//     preconditioner-QUALITY knob (PCG iteration count), never a
+//     residual-floor one.
 //
 // The variants differ in what per-entry rounding they apply (all RNE unless
 // noted), which is what the T=1 iteration-count table in the commit history
@@ -30,9 +37,13 @@
 //   BF16_SCALED  bf16 of L_ij / s_j with a per-COLUMN scale s_j = max_i
 //                |L_ij| over column j's off-diagonals (stored fp32 in
 //                omp_sptrsv::scale_; 1.0f if the column has no nonzero
-//                off-diagonal). Widen: bf16 -> fp32 -> fp64, times s_j.
-//                Isolates the effect of the scaling alone (bf16 does not need
-//                it for range) versus the mantissa width, against FP16_SCALED.
+//                off-diagonal). Widen: bf16 -> fp32 -> fp64. The scale is
+//                NOT multiplied back by the kernels: it is folded into the
+//                vectors (forward_solve returns D y, transpose_solve takes it
+//                and scales its input by D^-2 -- omp.h "FOLDED INTO THE
+//                VECTORS"). Isolates the effect of the scaling alone (bf16
+//                does not need it for range) versus the mantissa width,
+//                against FP16_SCALED.
 //   FP16_SCALED  IEEE binary16 (11 significant bits, 2^-11 relative in the
 //                normal range) of L_ij / s_j, same s_j. The scaling maps every
 //                column's largest off-diagonal to +-1.0 exactly, so no entry
@@ -84,8 +95,9 @@
 #if defined(APXCHOL_SPTRSV_BF16) && !defined(APXCHOL_SPTRSV_LOWPREC_BF16)
 #  error "APXCHOL_SPTRSV_BF16 (alias of APXCHOL_SPTRSV_LOWPREC=BF16) conflicts with another APXCHOL_SPTRSV_LOWPREC_* variant."
 #endif
-// Derived: any low-precision variant (fp32 factor, separate exact-fp32
-// diagonal); any per-column-scaled variant (scale_ array, scale gather).
+// Derived: any low-precision variant (fp32 factor, separate fp32 diagonal
+// array); any per-column-scaled variant (scale_ / inv_scale_ arrays, scaled
+// diagonal, the D y / D^-2 pair contract).
 #if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED) || \
     defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED) || defined(APXCHOL_SPTRSV_LOWPREC_FP24)
 #  define APXCHOL_SPTRSV_LOWPREC_ANY 1
