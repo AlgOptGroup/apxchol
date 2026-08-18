@@ -3,8 +3,10 @@
 #include "apxchol/solver/factorization.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/sptrsv/cuda.h"
@@ -12,7 +14,99 @@
 #include "apxchol/solver/sptrsv/omp.h"
 #endif
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace apxchol {
+
+// ── Deterministic parallel-reduction scaffolding ─────────────────────────────
+// Shared by the fused vector passes of the preconditioner (below) and of the
+// PCG loop (src/solve.cpp). Every reduction those passes perform follows one
+// scheme so its fp summation order NEVER depends on scheduling:
+//   * the index range is cut into the contiguous per-thread chunks that
+//     `schedule(static)` (no chunk size) would produce -- a fixed partition
+//     for a given (n, thread count);
+//   * each thread accumulates its chunk into private registers (a 4-way
+//     accumulator split where the pass has no other work to hide the FMA
+//     dependency chain), then writes ONE partial into `part[tid * kStride]`;
+//   * the partials are summed serially in thread order 0..nt-1.
+// No `reduction(+:...)` clause anywhere: libgomp combines those in thread
+// COMPLETION order, which varies run to run. Results are therefore
+// bit-identical run-to-run for a fixed thread count (they do differ across
+// thread counts -- the chunk boundaries move -- exactly like every other
+// parallel pass in the solver).
+namespace detail {
+
+/// Minimum n before a fused vector pass engages OpenMP (same threshold the
+/// partitioners use for their per-vertex loops; below it fork-join dominates).
+inline constexpr Eigen::Index kFusedOmpMin = 2000;
+
+/// Per-thread stride (in doubles) of the partial-sum buffer: one cache line
+/// per thread, so the single end-of-chunk write never false-shares.
+inline constexpr int kPartStride = 8;
+
+/// Contiguous chunk of [0, n) owned by thread `tid` of `nt`: the first
+/// (n mod nt) threads get one extra element, exactly like schedule(static).
+inline std::pair<Eigen::Index, Eigen::Index>
+static_chunk(Eigen::Index n, int tid, int nt) noexcept {
+    const Eigen::Index base = n / nt, rem = n % nt;
+    const Eigen::Index lo = static_cast<Eigen::Index>(tid) * base
+                          + std::min<Eigen::Index>(tid, rem);
+    return {lo, lo + base + (tid < rem ? 1 : 0)};
+}
+
+/// Number of doubles the partial buffer must hold: omp_get_max_threads() is,
+/// per the OpenMP spec, an upper bound on the team size of any parallel
+/// region encountered next without a num_threads clause -- so `kPartStride`
+/// doubles per that many threads always suffices. Callers keep the buffer
+/// as reusable workspace so repeated solves stay allocation-free.
+inline std::size_t part_capacity() noexcept {
+    int nt = 1;
+#ifdef _OPENMP
+    nt = omp_get_max_threads();
+#endif
+    return static_cast<std::size_t>(nt) * kPartStride;
+}
+
+/// Thread id / team size inside a parallel region (0 / 1 when the `if`
+/// clause disabled the team, or without OpenMP).
+inline void omp_ids(int& tid, int& nt) noexcept {
+    tid = 0; nt = 1;
+#ifdef _OPENMP
+    tid = omp_get_thread_num(); nt = omp_get_num_threads();
+#endif
+}
+
+/// Serial thread-order sum of `nt` partials at slot `slot` (< kPartStride).
+inline double reduce_parts(const double* part, int nt, int slot = 0) noexcept {
+    double s = 0.0;
+    for (int t = 0; t < nt; ++t) s += part[static_cast<std::size_t>(t) * kPartStride + slot];
+    return s;
+}
+
+/// Deterministic parallel Σ v[i], i in [0, n). `part` must hold
+/// part_capacity() doubles. Fixed 4-way accumulator split per chunk.
+inline double det_sum(const double* v, Eigen::Index n, double* part) {
+    int nt_used = 1;
+    #pragma omp parallel if(n > kFusedOmpMin)
+    {
+        int tid, nt; omp_ids(tid, nt);
+        if (tid == 0) nt_used = nt;
+        const auto [lo, hi] = static_chunk(n, tid, nt);
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+        Eigen::Index i = lo;
+        for (; i + 4 <= hi; i += 4) {
+            s0 += v[i + 0]; s1 += v[i + 1]; s2 += v[i + 2]; s3 += v[i + 3];
+        }
+        double s = (s0 + s1) + (s2 + s3);
+        for (; i < hi; ++i) s += v[i];
+        part[static_cast<std::size_t>(tid) * kPartStride] = s;
+    }
+    return reduce_parts(part, nt_used);
+}
+
+} // namespace detail
 
 /// Eigen-compatible preconditioner using approximate Cholesky factorization.
 ///
@@ -171,101 +265,171 @@ public:
     const omp_sptrsv& trsv() const { return trsv_; }
 #endif
 
-    /// Apply M^{-1} to rhs via approximate Cholesky.
+    /// Apply M^{-1} to rhs via approximate Cholesky (Eigen entry point; also
+    /// what apply()/Eigen::ConjugateGradient hit).
     ///
     /// Laplacian path (rank n-1): center → P → L^{-1} → L^{-T} → P^{-1} → center.
     /// SDDM path     (rank n):   P → L^{-1} → L^{-T} → P^{-1}.
+    ///
+    /// `b` may be any dense column expression (a plain VectorXd binds without a
+    /// copy); `x` must be a contiguous dense vector (its .data() is handed to
+    /// the SpTRSV, as before).
     void _solve_impl(const auto& b, auto& x) const {
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
+        const Eigen::Ref<const Eigen::VectorXd> bv(b);
+        ensure_part_();
+        const double b_sum = F_.sddm ? 0.0 : detail::det_sum(bv.data(), n_, part_.data());
+        apply_core(bv.data(), b_sum, x.data(), nullptr);
+    }
 
+    /// PCG-loop application: z = M^{-1} r, with the reductions the outer loop
+    /// needs FUSED into the passes that already stream the vectors:
+    ///   * r·z is accumulated in the final unpermute gather (the pass that
+    ///     writes z) -- returned;
+    ///   * Laplacian path only: the input centering uses `r_sum` (= Σ r,
+    ///     which the PCG update pass produces for free) instead of a mean
+    ///     pass over r, and the output re-centering is one deterministic
+    ///     reduction over the permuted solve output followed by the same
+    ///     gather (subtract-mean + write z + r·z in one pass) -- so z is the
+    ///     centered vector exactly as _solve_impl produces it.
+    /// `r_sum` is ignored on the SDDM path. Reductions are deterministic for
+    /// a fixed thread count (see detail:: scaffolding at the top of the file).
+    double apply_fused(const double* r, double r_sum, double* z) const {
+        eigen_assert(m_factorizationIsOk && "factorize() should be called first");
+        ensure_part_();
+        double rz = 0.0;
+        apply_core(r, r_sum, z, &rz);
+        return rz;
+    }
+
+private:
+    void ensure_part_() const {
+        const std::size_t need = detail::part_capacity();
+        if (part_.size() < need) part_.resize(need);
+    }
+
+    /// Shared body of _solve_impl / apply_fused: z = M^{-1} b.
+    /// `b_sum` = Σ b (Laplacian centering only; ignored for SDDM). If `rz_out`
+    /// is non-null the final unpermute gather also accumulates b·z into it.
+    void apply_core(const double* b, double b_sum, double* z, double* rz_out) const {
         if (cp_) { cp_->descend("solve"); cp_->tick(); }
 
         // Permutation as explicit gather/scatter (replaces Eigen::PermutationMatrix
         // products). perm[v] = new position of original vertex v.
         //   to permuted   : dst[perm[v]] = src[v]   (scatter)
         //   from permuted : dst[v] = src[perm[v]]   (gather)
-        // Both are bijective writes -> trivially parallel (Eigen's perm product
-        // was serial; this is a free parallelism win on million-row systems).
+        // Both are bijective writes -> trivially parallel. The gather is the
+        // last pass that writes z, so the b·z reduction (and, on the
+        // Laplacian path, the output re-centering) ride on it: `shift` is
+        // subtracted from every gathered value, and the per-thread partial
+        // b·z products are summed in thread order (deterministic).
         const node_index* P = F_.perm.data();
         const Eigen::Index n = n_;
-        auto permute_to = [&](const auto& src, auto& dst) {
-            #pragma omp parallel for schedule(static)
-            for (Eigen::Index v = 0; v < n; ++v) dst(P[v]) = src(v);
+        double* part = part_.data();
+        auto gather_out = [&](const double* src, double shift) {
+            int nt_used = 1;
+            #pragma omp parallel if(n > detail::kFusedOmpMin)
+            {
+                int tid, nt; detail::omp_ids(tid, nt);
+                if (tid == 0) nt_used = nt;
+                const auto [lo, hi] = detail::static_chunk(n, tid, nt);
+                double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+                Eigen::Index v = lo;
+                for (; v + 4 <= hi; v += 4) {
+                    const double z0 = src[P[v + 0]] - shift;
+                    const double z1 = src[P[v + 1]] - shift;
+                    const double z2 = src[P[v + 2]] - shift;
+                    const double z3 = src[P[v + 3]] - shift;
+                    z[v + 0] = z0; z[v + 1] = z1; z[v + 2] = z2; z[v + 3] = z3;
+                    s0 += b[v + 0] * z0; s1 += b[v + 1] * z1;
+                    s2 += b[v + 2] * z2; s3 += b[v + 3] * z3;
+                }
+                double s = (s0 + s1) + (s2 + s3);
+                for (; v < hi; ++v) {
+                    const double zv = src[P[v]] - shift;
+                    z[v] = zv;
+                    s += b[v] * zv;
+                }
+                part[static_cast<std::size_t>(tid) * detail::kPartStride] = s;
+            }
+            if (rz_out) *rz_out = detail::reduce_parts(part, nt_used);
         };
-        auto permute_from = [&](const auto& src, auto& dst) {
-            #pragma omp parallel for schedule(static)
-            for (Eigen::Index v = 0; v < n; ++v) dst(v) = src(P[v]);
-        };
+        // Label of the final pass: says whether b·z was fused in, so a
+        // profile shows which application path ran.
+        const char* unpermute_label = rz_out ? "unpermute+rz" : "unpermute";
 
         if (F_.sddm) {
             // ── SDDM path: full-rank factor, no centering ──
-            permute_to(b, x);
+            #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+            for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
             if (cp_) (*cp_)("permute");
 
 #if defined(APXCHOL_USE_CUDA)
-            trsv_.solve_LLt(x.data(), scratch_.data());
-            x = scratch_;
+            // solve_LLt reads z[0..n) and writes scratch_[0..n); the gather
+            // below reads scratch_ straight (the old x = scratch_; scratch_ = x
+            // round trip was a no-op pair of serial copies).
+            trsv_.solve_LLt(z, scratch_.data());
             if (cp_) (*cp_)("back");
-
-            scratch_ = x;
-            permute_from(scratch_, x);
+            const double* out = scratch_.data();
 #else
-            trsv_.forward_solve(x.data(), scratch_.data());
+            trsv_.forward_solve(z, scratch_.data());
             if (cp_) (*cp_)("forward");
-            // The transpose solve writes scratch2_ (not x) so the unpermute
-            // below can gather straight from it — this removes the serial
-            // full-n `scratch_ = x` staging copy the old flow paid to keep
-            // the gather's src and dst distinct.
+            // The transpose solve writes scratch2_ (not z) so the unpermute
+            // below can gather straight from it — no serial staging copy.
             trsv_.transpose_solve(scratch_.data(), scratch2_.data());
             if (cp_) (*cp_)("back");
-
-            permute_from(scratch2_, x);
+            const double* out = scratch2_.data();
 #endif
-            if (cp_) (*cp_)("unpermute");
+            gather_out(out, 0.0);
+            if (cp_) (*cp_)(unpermute_label);
         } else {
             // ── Laplacian path: rank-(n-1) factor with centering ──
             const Eigen::Index m = n_ - 1;
 
-            scratch_.array() = b.array() - b.mean();
-            permute_to(scratch_, x);
+            // Input centering fused into the permute scatter: z[P[v]] = b[v] - mean(b).
+            const double b_mean = b_sum / static_cast<double>(n);
+            #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+            for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v] - b_mean;
             if (cp_) (*cp_)("permute");
 
 #if defined(APXCHOL_USE_CUDA)
-            trsv_.solve_LLt(x.data(), scratch_.data());
-            x.head(m) = Eigen::Map<const Eigen::VectorXd>(scratch_.data(), m);
+            // solve_LLt reads z[0..m) and writes scratch_[0..m); entry m (the
+            // grounded vertex) is 0.
+            trsv_.solve_LLt(z, scratch_.data());
             if (cp_) (*cp_)("back");
-
-            x(m) = 0.0;
-
-            scratch_ = x;
-            permute_from(scratch_, x);
+            scratch_(m) = 0.0;
+            const double* out = scratch_.data();
 #else
-            trsv_.forward_solve(x.data(), scratch_.data());
+            trsv_.forward_solve(z, scratch_.data());
             if (cp_) (*cp_)("forward");
-            // As in the SDDM path: transpose-solve into scratch2_ and gather
-            // from it, instead of solving into x and paying a serial
-            // `scratch_ = x` copy before the unpermute.
             trsv_.transpose_solve(scratch_.data(), scratch2_.data());
             if (cp_) (*cp_)("back");
-
             scratch2_(m) = 0.0;
-
-            permute_from(scratch2_, x);
+            const double* out = scratch2_.data();
 #endif
-            x.array() -= x.mean();
-            if (cp_) (*cp_)("unpermute");
+            // Output re-centering: the permutation preserves the multiset, so
+            // mean(z) == mean(out) -- one deterministic reduction over the
+            // permuted solve output, then the gather subtracts it while
+            // writing z (and accumulates b·z if asked). Replaces the
+            // gather + z.mean() + z -= mean triple pass.
+            const double z_mean = detail::det_sum(out, n, part) / static_cast<double>(n);
+            gather_out(out, z_mean);
+            if (cp_) (*cp_)(unpermute_label);
         }
 
         if (cp_) cp_->ascend();
     }
 
-private:
     struct factorization F_;
     factor_options opts_;
     graph_storage storage_ = graph_storage::vec_pool;
     checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
     mutable Eigen::VectorXd scratch_;
+    // Per-thread partial sums for the deterministic reductions in apply_core
+    // (sized to the max team on first use; reusable, so solves stay
+    // allocation-free after the first call).
+    mutable std::vector<double> part_;
 #if !defined(APXCHOL_USE_CUDA)
     // Transpose-solve output staging for the CPU _solve_impl (see
     // install_factor); unused (never resized) under CUDA.

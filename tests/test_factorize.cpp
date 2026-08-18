@@ -370,6 +370,52 @@ TYPED_TEST(FactorizeTest, LaplacianFlagNotSet) {
     EXPECT_FALSE(F.sddm);
 }
 
+// ── PCG-loop determinism (fused, OpenMP-parallel vector kernels) ──
+// The PCG outer loop and the preconditioner application stream their vectors
+// in fused passes with hand-rolled per-thread partial reductions (see the
+// detail:: scaffolding in preconditioner.h). Same factor + same b must give
+// bit-identical iterations / residual / x run to run at the thread count the
+// test process has. n = 10k is above the OpenMP engagement threshold, so
+// with OMP_NUM_THREADS > 1 this exercises the parallel path (a reduction()
+// clause or any completion-order sum would fail this at T > 1).
+static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<double>& A,
+                                                 const Eigen::VectorXd& b, bool laplacian) {
+    apxchol::solve_options opts;
+    opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;
+    apxchol::cpu_solver slv(A, opts);
+    auto r1 = slv.solve(b);
+    auto r2 = slv.solve(b);
+    ASSERT_LT(r1.residual, 1e-8);
+    EXPECT_EQ(r1.iterations, r2.iterations);
+    EXPECT_EQ(r1.residual, r2.residual);                    // exact, not ULP-tolerant
+    EXPECT_TRUE((r1.x.array() == r2.x.array()).all());
+    // Warm start (x0 path: r = b - A x0 in one fused pass) is deterministic too.
+    auto w1 = slv.solve(b, 1e-10, 500, &r1.x);
+    auto w2 = slv.solve(b, 1e-10, 500, &r1.x);
+    EXPECT_EQ(w1.iterations, w2.iterations);
+    EXPECT_EQ(w1.residual, w2.residual);
+    EXPECT_TRUE((w1.x.array() == w2.x.array()).all());
+    // The Eigen-facing application (apply -> _solve_impl): same guarantee, and
+    // on a Laplacian the output is re-centred (mean zero to rounding).
+    Eigen::VectorXd z1 = slv.apply(b), z2 = slv.apply(b);
+    EXPECT_TRUE((z1.array() == z2.array()).all());
+    if (laplacian) {
+        EXPECT_NEAR(z1.mean(), 0.0, 1e-13 * z1.cwiseAbs().maxCoeff());
+    }
+}
+
+TEST(PcgFusion, RepeatedSolvesBitIdenticalLaplacian) {
+    auto L = grid_laplacian(100, 100);
+    auto b = apxchol::generate_test_rhs(L.rows());
+    expect_repeated_solves_bit_identical(L, b, /*laplacian=*/true);
+}
+
+TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
+    auto M = sddm_grid(100, 100, 0.5);
+    Eigen::VectorXd b = Eigen::VectorXd::Random(M.rows());
+    expect_repeated_solves_bit_identical(M, b, /*laplacian=*/false);
+}
+
 TYPED_TEST(FactorizeTest, SDDMFullRankDiagonal) {
     auto M = sddm_grid(5, 5, 1.0);
     auto F = this->factorize_with(M);
