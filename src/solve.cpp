@@ -235,6 +235,15 @@ inline void init_residual(double* r, const double* b, const double* Ax0,
     rs = detail::reduce_parts(part, nt_used, 1);
 }
 
+// x -= mean(x): the once-per-solve min-norm centring of a Laplacian
+// solution (see cpu_solver::solve_impl). One deterministic reduction
+// (detail::det_sum) + one parallel subtract pass.
+inline void center_x(double* x, Eigen::Index n, double* part) {
+    const double mean = detail::det_sum(x, n, part) / static_cast<double>(n);
+    #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+    for (Eigen::Index i = 0; i < n; ++i) x[i] -= mean;
+}
+
 } // namespace
 
 // ── cpu_solver: factor + operator built once, PCG-solve many b ──────────────────
@@ -463,6 +472,17 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     Eigen::VectorXd& Ap = Ap_;
     double* part = part_.data();
 
+    // Laplacian (rank n-1) case: the returned x is the MIN-NORM solution --
+    // mean(x) = 0 -- for every exit below (SDDM: full rank, nothing to do).
+    // Under the center-k schedule (APXCHOL_GROUND=center-k, the default) most
+    // preconditioner applications skip their output re-centring, so x
+    // accumulates a component along the null space 1 (invisible to the
+    // residual, since A·1 = 0); one deterministic mean subtraction at the end
+    // (center_x) restores exactly what per-application centring (K = 1) and
+    // a zero start would have produced. A warm start x0 gets the same
+    // treatment, so the answer never depends on x0's constant.
+    const bool laplacian = !precond_.factor().sddm;
+
     // Every vector pass of the loop below is a fused, OpenMP-parallel kernel
     // (see the anonymous namespace at the top of this file) whose reductions
     // are deterministic for a fixed thread count. Scalars carried between
@@ -480,7 +500,10 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
         init_residual(r.data(), b.data(), Ap.data(), n, part, rr, rs);
         res.iterations = 0;
         res.residual = std::sqrt(rr) / bnorm;
-        if (res.residual < tol) return;
+        if (res.residual < tol) {
+            if (laplacian) center_x(x.data(), n, part);
+            return;
+        }
     } else {
         // r = b - L*0 = b, copied in the same pass that produces b·b (= bnorm²)
         // and Σ b.
@@ -505,6 +528,11 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
     if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
 
+    // New solve: restart the center-k application counter (APXCHOL_GROUND=
+    // center-k, see env_knobs.h) so the centring schedule -- every K-th
+    // preconditioner application centres -- is the same for every solve on
+    // this factor (repeated solves stay bit-identical).
+    precond_.reset_apply_count();
     // z = M^{-1} r with r·z fused into the pass that writes z (recorded as
     // pcg.solve.{permute,forward,back,unpermute+rz}); p = z is one copy pass.
     double rz = precond_.apply_fused(r.data(), rs, z.data());
@@ -565,6 +593,11 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
         if (pcg_trace) t_update_p += now_us() - t0a2;
         if (use_cp) res.timings("update_p");
         rz = rz_new;
+    }
+    // Min-norm solution for a Laplacian (see the note above the loop).
+    if (laplacian) {
+        center_x(x.data(), n, part);
+        if (use_cp) res.timings("center_x");
     }
     if (use_cp) res.timings.ascend();
 

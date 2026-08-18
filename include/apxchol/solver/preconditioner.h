@@ -1,9 +1,11 @@
 #pragma once
 #include "apxchol/checkpoint.h"
+#include "apxchol/env_knobs.h"
 #include "apxchol/solver/factorization.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <algorithm>
+#include <cstdint>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -252,6 +254,14 @@ public:
         return *this;
     }
 
+    /// Restart the per-solve application counter of the center-k centring
+    /// schedule (APXCHOL_GROUND=center-k, the default; see env_knobs.h). Call
+    /// at the start of each PCG solve so the schedule (every K-th application
+    /// centres) is identical for every solve on this factor -- repeated
+    /// solves then reproduce bit-identical results. Irrelevant for K = 1
+    /// (every application centres) and on the SDDM path.
+    void reset_apply_count() const noexcept { apply_count_ = 0; }
+
     Eigen::Index rows() const { return n_; }
     Eigen::Index cols() const { return n_; }
     Eigen::ComputationInfo info() const { return m_info; }
@@ -268,7 +278,10 @@ public:
     /// Apply M^{-1} to rhs via approximate Cholesky (Eigen entry point; also
     /// what apply()/Eigen::ConjugateGradient hit).
     ///
-    /// Laplacian path (rank n-1): center → P → L^{-1} → L^{-T} → P^{-1} → center.
+    /// Laplacian path (rank n-1): center → P → L^{-1} → L^{-T} → P^{-1} → center,
+    ///   where the two centring passes run on every K-th application only
+    ///   (APXCHOL_GROUND=center-k, K = APXCHOL_CENTER_K, default 10; see
+    ///   env_knobs.h and take_center_()). K = 1 centres every application.
     /// SDDM path     (rank n):   P → L^{-1} → L^{-T} → P^{-1}.
     ///
     /// `b` may be any dense column expression (a plain VectorXd binds without a
@@ -278,8 +291,11 @@ public:
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
         const Eigen::Ref<const Eigen::VectorXd> bv(b);
         ensure_part_();
-        const double b_sum = F_.sddm ? 0.0 : detail::det_sum(bv.data(), n_, part_.data());
-        apply_core(bv.data(), b_sum, x.data(), nullptr);
+        // Σb feeds the Laplacian input centring, so it is only computed on a
+        // centring application (center-k schedule).
+        const bool center = !F_.sddm && take_center_();
+        const double b_sum = center ? detail::det_sum(bv.data(), n_, part_.data()) : 0.0;
+        apply_core(bv.data(), b_sum, center, x.data(), nullptr);
     }
 
     /// PCG-loop application: z = M^{-1} r, with the reductions the outer loop
@@ -292,13 +308,17 @@ public:
     ///     reduction over the permuted solve output followed by the same
     ///     gather (subtract-mean + write z + r·z in one pass) -- so z is the
     ///     centered vector exactly as _solve_impl produces it.
-    /// `r_sum` is ignored on the SDDM path. Reductions are deterministic for
-    /// a fixed thread count (see detail:: scaffolding at the top of the file).
+    /// `r_sum` is ignored on the SDDM path and on the Laplacian path's
+    /// non-centring applications (center-k schedule: only every K-th
+    /// application of a solve centres, the others skip both mean passes; see
+    /// take_center_()). Reductions are deterministic for a fixed thread count
+    /// (see detail:: scaffolding at the top of the file).
     double apply_fused(const double* r, double r_sum, double* z) const {
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
         ensure_part_();
+        const bool center = !F_.sddm && take_center_();
         double rz = 0.0;
-        apply_core(r, r_sum, z, &rz);
+        apply_core(r, r_sum, center, z, &rz);
         return rz;
     }
 
@@ -308,10 +328,26 @@ private:
         if (part_.size() < need) part_.resize(need);
     }
 
+    /// Laplacian-path centring schedule (APXCHOL_GROUND=center-k, see
+    /// env_knobs.h): advances the per-solve application counter and returns
+    /// whether THIS application centres -- applications K, 2K, ... (1-based
+    /// since the last reset_apply_count()) do, the others skip both mean
+    /// passes; K = 1 centres every application. In any other grounding mode
+    /// (reg: make_graph grounds the matrix, so it classifies SDDM and never
+    /// reaches this path) a factor that is nevertheless Laplacian centres on
+    /// every application. Call exactly once per Laplacian-path application.
+    bool take_center_() const noexcept {
+        const auto& k = detail::env_knobs::get();
+        if (k.ground != detail::grounding_kind::center_k) return true;
+        return (++apply_count_ % static_cast<std::uint64_t>(k.center_k)) == 0;
+    }
+
     /// Shared body of _solve_impl / apply_fused: z = M^{-1} b.
-    /// `b_sum` = Σ b (Laplacian centering only; ignored for SDDM). If `rz_out`
-    /// is non-null the final unpermute gather also accumulates b·z into it.
-    void apply_core(const double* b, double b_sum, double* z, double* rz_out) const {
+    /// `b_sum` = Σ b and `center` = whether this application runs the two
+    /// Laplacian mean passes (both ignored for SDDM). If `rz_out` is non-null
+    /// the final unpermute gather also accumulates b·z into it.
+    void apply_core(const double* b, double b_sum, bool center,
+                    double* z, double* rz_out) const {
         if (cp_) { cp_->descend("solve"); cp_->tick(); }
 
         // Permutation as explicit gather/scatter (replaces Eigen::PermutationMatrix
@@ -386,10 +422,26 @@ private:
             // ── Laplacian path: rank-(n-1) factor with centering ──
             const Eigen::Index m = n_ - 1;
 
-            // Input centering fused into the permute scatter: z[P[v]] = b[v] - mean(b).
-            const double b_mean = b_sum / static_cast<double>(n);
-            #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
-            for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v] - b_mean;
+            // APXCHOL_GROUND=center-k (see env_knobs.h): the two mean-
+            // subtraction passes run only on centring applications (every
+            // K-th one -- `center` was decided by the caller via
+            // take_center_()); the others skip both. In exact arithmetic PCG
+            // keeps r in the centred subspace (A·1 = 0 => 1ᵀ(b − A x) = 1ᵀb
+            // = 0), so the pre-centring is a no-op there and the post-
+            // centring only removes an x-component along 1 (null space --
+            // invisible to the residual). Centring every K-th application
+            // bounds the fp drift of both; K = 1 centres every application.
+            if (center) {
+                // Input centering fused into the permute scatter:
+                // z[P[v]] = b[v] - mean(b), mean from the caller's Σb.
+                const double b_mean = b_sum / static_cast<double>(n);
+                #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+                for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v] - b_mean;
+            } else {
+                // Skipped application: plain scatter (b_sum unused).
+                #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+                for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
+            }
             if (cp_) (*cp_)("permute");
 
 #if defined(APXCHOL_USE_CUDA)
@@ -407,12 +459,14 @@ private:
             scratch2_(m) = 0.0;
             const double* out = scratch2_.data();
 #endif
-            // Output re-centering: the permutation preserves the multiset, so
-            // mean(z) == mean(out) -- one deterministic reduction over the
-            // permuted solve output, then the gather subtracts it while
-            // writing z (and accumulates b·z if asked). Replaces the
-            // gather + z.mean() + z -= mean triple pass.
-            const double z_mean = detail::det_sum(out, n, part) / static_cast<double>(n);
+            // Output re-centering (centring applications only): the
+            // permutation preserves the multiset, so mean(z) == mean(out) --
+            // one deterministic reduction over the permuted solve output,
+            // then the gather subtracts it while writing z (and accumulates
+            // b·z if asked). Replaces the gather + z.mean() + z -= mean
+            // triple pass. A skipped application gathers with shift 0.
+            const double z_mean = center
+                ? detail::det_sum(out, n, part) / static_cast<double>(n) : 0.0;
             gather_out(out, z_mean);
             if (cp_) (*cp_)(unpermute_label);
         }
@@ -425,6 +479,10 @@ private:
     graph_storage storage_ = graph_storage::vec_pool;
     checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
+    // Laplacian-path application counter of the center-k centring schedule
+    // (counts _solve_impl / apply_fused calls on the Laplacian branch since
+    // the last reset_apply_count(); see take_center_()).
+    mutable std::uint64_t apply_count_ = 0;
     mutable Eigen::VectorXd scratch_;
     // Per-thread partial sums for the deterministic reductions in apply_core
     // (sized to the max team on first use; reusable, so solves stay

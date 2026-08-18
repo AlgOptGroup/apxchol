@@ -73,6 +73,8 @@ public:
     /// PCG against the held factor. tol < 0 / max_iter < 0 = use opts values.
     /// `x0` (optional) is the initial guess; nullptr = start from zero; a
     /// wrong-length x0 throws std::invalid_argument.
+    /// For a pure Laplacian (rank n-1) the returned x is the min-norm
+    /// solution (mean(x) = 0), whatever x0's constant component was.
     solve_result solve(const Eigen::VectorXd& b,
                        double tol = -1.0, int max_iter = -1,
                        const Eigen::VectorXd* x0 = nullptr) const;

@@ -35,6 +35,13 @@ struct factorize_workspace {
     /// touched_buffers, reused across rounds.
     std::vector<node_index> touched_concat;
 
+    /// Per-vertex incoming-edge histogram for the vec_pool fused path
+    /// (sized G.n() once, lazily). Invariant: all-zero between rounds -- the
+    /// round that fills it resets exactly the touched entries afterwards, so
+    /// no O(n) allocate+zero is paid per round (that per-round memset was
+    /// 16 MB/round on grid_2000 and would dominate a small-IS tail round).
+    std::vector<node_index> incoming;
+
     /// Round counter, incremented by the factorize loop once per round.
     uint64_t round_index = 0;
 

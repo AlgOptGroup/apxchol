@@ -66,15 +66,19 @@ This dispatches storage from the `graph_storage` enum and the partitioner by nam
 
 ### PCG loop: fused, deterministic vector kernels
 
-`cpu_solver::solve_impl` (`src/solve.cpp`) is not a chain of Eigen expressions: each iteration is four fused, OpenMP-parallel passes — `spmv+pAp` (p·Ap folded into the SpMV row loop), `update_xr_norm` (x += αp, r −= αAp, r·r, Σr in one pass), the preconditioner application (`pcg.solve.{permute,forward,back,unpermute+rz}`: input centering fused into the permute scatter, output re-centering + r·z fused into the unpermute gather), and `update_p`. Those are also the checkpoint labels under `pcg.*`. Every reduction uses the scheme in `preconditioner.h` `detail::` (fixed `static_chunk` partition, per-thread partials summed in thread order — never a `reduction()` clause), so results are bit-identical run to run for a fixed thread count (they differ across thread counts at fp-rounding level, like every other parallel pass). `PcgFusion.*` in `tests/test_factorize.cpp` guards this; keep new vector passes on the same scheme.
+`cpu_solver::solve_impl` (`src/solve.cpp`) is not a chain of Eigen expressions: each iteration is four fused, OpenMP-parallel passes — `spmv+pAp` (p·Ap folded into the SpMV row loop), `update_xr_norm` (x += αp, r −= αAp, r·r, Σr in one pass), the preconditioner application (`pcg.solve.{permute,forward,back,unpermute+rz}`: input centering fused into the permute scatter, output re-centering + r·z fused into the unpermute gather — both centrings on centring applications only, see below), and `update_p`; after the loop, `center_x` (Laplacian only: x −= mean(x) once). Those are also the checkpoint labels under `pcg.*`. Every reduction uses the scheme in `preconditioner.h` `detail::` (fixed `static_chunk` partition, per-thread partials summed in thread order — never a `reduction()` clause), so results are bit-identical run to run for a fixed thread count (they differ across thread counts at fp-rounding level, like every other parallel pass). `PcgFusion.*` in `tests/test_factorize.cpp` guards this; keep new vector passes on the same scheme.
 
 ### Laplacian vs SDDM rank
 
 `factorization::sddm` distinguishes the two cases and changes the preconditioner application path:
-- Laplacian (positive semidefinite, rank `n−1`): factor dimension is `n−1`; `_solve_impl` subtracts the mean of `b` before solving and re-centers `x` afterwards.
+- Laplacian (positive semidefinite, rank `n−1`): factor dimension is `n−1`; the application (`apply_core`) subtracts the mean of `b` before solving and re-centers the output afterwards — but only on every K-th application (the center-k schedule, K = 10 by default; see the env knobs below and `take_center_()`); the other applications skip both mean passes. `cpu_solver::solve_impl` restarts the schedule per solve (`reset_apply_count`) and subtracts `mean(x)` once from the returned solution (`center_x`), so the solution is min-norm regardless of K or of a warm start's constant.
 - SDDM (positive definite, full rank): full `n×n` factor, no centering.
 
-When touching `_solve_impl` or anything that constructs a `factorization`, check both branches.
+When touching `apply_core` or anything that constructs a `factorization`, check both branches.
+
+### Experiment env knobs (`include/apxchol/env_knobs.h`)
+
+Process-wide, read once. `APXCHOL_GROUND=center-k|reg` (+ `APXCHOL_CENTER_K`, `APXCHOL_REG_EPS`) selects how a pure Laplacian is grounded: `center-k` (the default, K = `APXCHOL_CENTER_K` = 10) centres only every K-th preconditioner application of a solve; K = 1 centres every application (`APXCHOL_GROUND=center` is accepted as an alias for K = 1, canonical spelling `center-k` + `APXCHOL_CENTER_K=1`); `reg` adds an explicit `eps·diag` self-loop at `make_graph` time so the matrix classifies as SDDM (full-rank factor, no centring). `APXCHOL_OMP_THRESHOLD` overrides `factor_options::omp_threshold` (unset = unchanged); `APXCHOL_TAIL_THREADS` runs sub-threshold ("tail") elimination rounds on the fused parallel path with a small pinned team instead of the serial path (unset = serial tail). Unit tests assume the knobs are unset, i.e. the center-k default (`reg` deliberately flips the SDDM flag; a parallel tail/partitioner is only reproducible up to fp merge-order ulps and the racy block_greedy conflict resolution).
 
 ### factor_options tuning knobs
 

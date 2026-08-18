@@ -395,12 +395,28 @@ static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<doubl
     EXPECT_EQ(w1.iterations, w2.iterations);
     EXPECT_EQ(w1.residual, w2.residual);
     EXPECT_TRUE((w1.x.array() == w2.x.array()).all());
-    // The Eigen-facing application (apply -> _solve_impl): same guarantee, and
-    // on a Laplacian the output is re-centred (mean zero to rounding).
-    Eigen::VectorXd z1 = slv.apply(b), z2 = slv.apply(b);
+    // The Eigen-facing application (apply -> _solve_impl): same guarantee. On
+    // a Laplacian it follows the center-k schedule (APXCHOL_GROUND=center-k,
+    // see env_knobs.h): only every K-th application since the last
+    // reset_apply_count() runs the two mean passes, so compare applications
+    // at the same phase (restart the schedule before each call).
+    const auto& pc = slv.preconditioner();
+    pc.reset_apply_count();
+    Eigen::VectorXd z1 = slv.apply(b);
+    pc.reset_apply_count();
+    Eigen::VectorXd z2 = slv.apply(b);
     EXPECT_TRUE((z1.array() == z2.array()).all());
     if (laplacian) {
-        EXPECT_NEAR(z1.mean(), 0.0, 1e-13 * z1.cwiseAbs().maxCoeff());
+        // The K-th application after a restart centres: mean zero to rounding.
+        const int K = apxchol::detail::env_knobs::get().center_k;
+        pc.reset_apply_count();
+        Eigen::VectorXd zk;
+        for (int i = 0; i < K; ++i) zk = slv.apply(b);
+        EXPECT_NEAR(zk.mean(), 0.0, 1e-13 * zk.cwiseAbs().maxCoeff());
+        // The returned SOLUTION is min-norm regardless of the schedule
+        // (cpu_solver::solve centres x once at the end).
+        EXPECT_NEAR(r1.x.mean(), 0.0, 1e-14 * r1.x.cwiseAbs().maxCoeff());
+        EXPECT_NEAR(w1.x.mean(), 0.0, 1e-14 * w1.x.cwiseAbs().maxCoeff());
     }
 }
 
@@ -414,6 +430,86 @@ TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
     auto M = sddm_grid(100, 100, 0.5);
     Eigen::VectorXd b = Eigen::VectorXd::Random(M.rows());
     expect_repeated_solves_bit_identical(M, b, /*laplacian=*/false);
+}
+
+// ── Grounding: min-norm Laplacian solution ──
+// cpu_solver::solve returns the MIN-NORM solution of a Laplacian system.
+// Under the center-k schedule the preconditioner skips its output
+// re-centring on most applications, so the PCG iterate drifts along the null
+// space 1 (invisible to the residual); solve_impl subtracts mean(x) once at
+// the end -- also for a warm start, whose constant component must not leak
+// into the answer.
+TEST(Grounding, LaplacianSolutionIsMinNorm) {
+    auto L = grid_laplacian(60, 60);        // n = 3600 > kFusedOmpMin
+    auto b = apxchol::generate_test_rhs(L.rows());
+    apxchol::solve_options opts;
+    opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;
+    apxchol::cpu_solver slv(L, opts);
+    auto r = slv.solve(b);
+    ASSERT_LT(r.residual, 1e-8);
+    EXPECT_NEAR(r.x.mean(), 0.0, 1e-14 * r.x.cwiseAbs().maxCoeff());
+    EXPECT_LT((L * r.x - b).norm() / b.norm(), 1e-6);
+    // Warm start shifted by a constant, tightened tolerance -> PCG iterates
+    // from x0; the answer is still mean-zero and still solves the system.
+    Eigen::VectorXd x0 = r.x.array() + 5.0;
+    auto w = slv.solve(b, 1e-10, 500, &x0);
+    EXPECT_GT(w.iterations, 0);
+    EXPECT_NEAR(w.x.mean(), 0.0, 1e-14 * w.x.cwiseAbs().maxCoeff());
+    EXPECT_LT((L * w.x - b).norm() / b.norm(), 1e-8);
+    // Already-converged warm start (loose tolerance -> 0 iterations): the
+    // early exit centres too.
+    auto e = slv.solve(b, 1e-6, 500, &x0);
+    EXPECT_EQ(e.iterations, 0);
+    EXPECT_NEAR(e.x.mean(), 0.0, 1e-14 * e.x.cwiseAbs().maxCoeff());
+    EXPECT_LT((L * e.x - b).norm() / b.norm(), 1e-6);
+}
+
+// Build a weighted grid Laplacian DIRECTLY from fp64 triplets. Deliberately
+// bypasses weighted_grid_laplacian/graph<>: under APXCHOL_POOL_FP32 the graph
+// edge pool stores weights in fp32, so routing the weights through graph<>
+// would silently quantize them and mask the regression tested below.
+static Eigen::SparseMatrix<double> fp64_weighted_grid_laplacian(
+        int rows, int cols, double w_horiz, double w_vert) {
+    const int n = rows * cols;
+    auto id = [cols](int r, int c) { return r * cols + c; };
+    std::vector<Eigen::Triplet<double>> trips;
+    std::vector<double> deg(n, 0.0);
+    auto edge = [&](int u, int v, double w) {
+        trips.emplace_back(u, v, -w);
+        trips.emplace_back(v, u, -w);
+        deg[u] += w;
+        deg[v] += w;
+    };
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < cols; ++c) {
+            if (r + 1 < rows) edge(id(r, c), id(r + 1, c), w_vert);
+            if (c + 1 < cols) edge(id(r, c), id(r, c + 1), w_horiz);
+        }
+    for (int i = 0; i < n; ++i) trips.emplace_back(i, i, deg[i]);
+    Eigen::SparseMatrix<double> L(n, n);
+    L.setFromTriplets(trips.begin(), trips.end());
+    return L;
+}
+
+// Regression (fp32-quantized wdeg vs exact diag): make_graph used to compute
+// the excess test's weighted degree by re-walking the stored edge weights,
+// which are fp32-quantized under APXCHOL_POOL_FP32. Exact fp64 diag minus a
+// quantized wdeg left phantom excess ≈1e-8·diag — above the 1e-12 gate — so a
+// pure Laplacian whose weights are not fp32-representable (0.01, 2/101) was
+// misclassified as SDDM. The excess must come from the exact fp64 input.
+TYPED_TEST(FactorizeTest, NonFp32ExactWeightsLaplacianNotSDDM) {
+    auto L = fp64_weighted_grid_laplacian(10, 10, 0.01, 2.0 / 101.0);
+    auto F = this->factorize_with(L);
+    EXPECT_FALSE(F.sddm);
+}
+
+// Positive control for the regression above: with the same non-fp32-exact
+// weights, a genuinely SDDM matrix must still be detected.
+TYPED_TEST(FactorizeTest, NonFp32ExactWeightsSDDMFlagStillSet) {
+    auto L = fp64_weighted_grid_laplacian(10, 10, 0.01, 2.0 / 101.0);
+    L.coeffRef(0, 0) += 0.5;
+    auto F = this->factorize_with(L);
+    EXPECT_TRUE(F.sddm);
 }
 
 TYPED_TEST(FactorizeTest, SDDMFullRankDiagonal) {

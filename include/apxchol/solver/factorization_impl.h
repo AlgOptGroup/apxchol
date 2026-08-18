@@ -14,6 +14,7 @@
 #include "apxchol/solver/factorize_workspace.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
+#include "apxchol/env_knobs.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -156,14 +157,30 @@ void eliminate_partition_singleton(const Eliminator& elim,
     std::vector<factor_col> local_cols(n_verts);
 
     #ifdef _OPENMP
-    if (n_verts > opts.omp_threshold) {
+    // APXCHOL_TAIL_THREADS (experiment knob, see env_knobs.h): rounds whose IS
+    // is at or below omp_threshold normally take the fully serial path at the
+    // bottom of this function. When the knob is set (> 0), such "tail" rounds
+    // run the fused PARALLEL path below instead, on a small pinned team of
+    // min(APXCHOL_TAIL_THREADS, ws.threads.size()) threads. Unset (default) =
+    // serial tail, unchanged. The parallel path applies clique edges in
+    // thread-arrival order, so a tail-parallel factor may differ from the
+    // serial-tail factor by fp merge-order ulps (same class of difference as
+    // the main path at T > 1).
+    const int tail_threads = detail::env_knobs::get().tail_threads;
+    const bool tail_parallel = tail_threads > 0 && n_verts <= opts.omp_threshold;
+    if (n_verts > opts.omp_threshold || tail_parallel) {
+        // Team size for the fused paths: the full workspace team, or the pinned
+        // tail team on a tail round.
+        const int team_threads = tail_parallel
+            ? std::min<int>(tail_threads, static_cast<int>(ws.threads.size()))
+            : static_cast<int>(ws.threads.size());
         if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
             // Mega-fused parallel region: compute + deactivate + apply all under
             // one fork-join.  On BG/BK with ~1k+ rounds this saves ~2 extra
             // fork-joins/round vs the post-38ffdbc split.
             // process_vertex does inline dedup + dead-edge filter so we
             // skip the explicit merge_parallel_edges pass.
-            const int num_threads = static_cast<int>(ws.threads.size());
+            const int num_threads = team_threads;
             std::vector<size_t> e_offsets(num_threads + 1, 0);
             edge_index e_start = 0;
             edge_index a_start = 0;   // adj-pool base offset
@@ -242,9 +259,13 @@ void eliminate_partition_singleton(const Eliminator& elim,
             // edge-pool reservation, per-vertex incoming count, and
             // serial reserve_for grow (reserve_for is NOT thread-safe).
             // The actual atomic_push_reserved phase is parallel and lock-free.
-            const int num_threads = static_cast<int>(ws.threads.size());
+            const int num_threads = team_threads;
             std::vector<size_t> e_offsets(num_threads + 1, 0);
-            std::vector<node_index> incoming(static_cast<size_t>(G.n()), 0);
+            // Persistent all-zero histogram (see factorize_workspace::incoming);
+            // sized once, reset per round over the touched entries only.
+            if (ws.incoming.size() < static_cast<size_t>(G.n()))
+                ws.incoming.assign(static_cast<size_t>(G.n()), 0);
+            std::vector<node_index>& incoming = ws.incoming;
             edge_index e_start = 0;
 
             #pragma omp parallel num_threads(num_threads)
@@ -331,6 +352,15 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     ws.threads[tid].excess_buffer.clear();
                 }
 
+                // Restore the all-zero invariant of ws.incoming over exactly
+                // the touched vertices (every vertex with incoming > 0 was
+                // pushed once, on its 0->1 bump). Safe here: the only reader
+                // of incoming[] is bulk_reserve_parallel's single section,
+                // which ended at that call's trailing omp-for barrier.
+                #pragma omp for schedule(static) nowait
+                for (size_t i = 0; i < ws.touched_concat.size(); ++i)
+                    incoming[ws.touched_concat[i]] = 0;
+
                 // Deactivate partition vertices in parallel (disjoint).
                 #pragma omp for schedule(static) nowait
                 for (size_t k = 0; k < n_verts; ++k)
@@ -348,7 +378,11 @@ void eliminate_partition_singleton(const Eliminator& elim,
             // Skip the explicit merge_parallel_edges pass: process_vertex
             // does inline dedup + dead-edge filter, saving a full
             // adjacency traversal per IS vertex per round.
-            #pragma omp parallel
+            // Team: the OpenMP default (as before) unless this is a
+            // tail-parallel round, which pins the small tail team.
+            const int legacy_threads = tail_parallel ? team_threads
+                                                     : omp_get_max_threads();
+            #pragma omp parallel num_threads(legacy_threads)
             {
                 int tid = omp_get_thread_num();
 
@@ -530,11 +564,22 @@ template<typename Partitioner, typename Eliminator, incidence_storage Incidence>
 factorization factorize_impl(const Eliminator& elim,
                              Partitioner& partitioner,
                              graph<Incidence> G,
-                             const factor_options& opts,
+                             const factor_options& opts_in,
                              checkpoint* cp) {
     const node_index n = G.n();
     if (n == 0)
         return {};
+
+    // APXCHOL_OMP_THRESHOLD (experiment knob, see env_knobs.h) overrides
+    // factor_options::omp_threshold for this factorization -- it flows from
+    // here into the partitioner context, the degree prepass and the per-round
+    // serial/parallel elimination gate. Unset = opts_in unchanged.
+    const factor_options opts = [&] {
+        factor_options o = opts_in;
+        const long ov = detail::env_knobs::get().omp_threshold;
+        if (ov >= 0) o.omp_threshold = static_cast<size_t>(ov);
+        return o;
+    }();
 
     if (cp) cp->descend("setup");
 
