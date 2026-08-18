@@ -96,8 +96,10 @@ endif()
 if (NOT APXCHOL_SPTRSV_LOWPREC MATCHES "^(OFF|BF16|BF16_SCALED|FP16_SCALED|FP24)$")
     message(FATAL_ERROR "APXCHOL_SPTRSV_LOWPREC must be one of OFF, BF16, BF16_SCALED, FP16_SCALED, FP24 (got '${APXCHOL_SPTRSV_LOWPREC}').")
 endif()
-# CUDA builds have no low-precision SpTRSV path (the cuSPARSE backend is
-# fp32/fp64 only): with APXCHOL_USE_CUDA=ON any APXCHOL_SPTRSV_LOWPREC value is
+# CUDA builds have no COMPILE-TIME low-precision SpTRSV path (the cuSPARSE
+# backend is fp32/fp64 only; the GPU's fp16 storage is the RUNTIME opt-in
+# APXCHOL_GPU_SPTRSV_FP16=1 on the level-set backend, see
+# include/apxchol/solver/sptrsv/cuda.h): with APXCHOL_USE_CUDA=ON any APXCHOL_SPTRSV_LOWPREC value is
 # TREATED AS OFF for this build -- CPU SpTRSV storage forced to fp32, no
 # APXCHOL_SPTRSV_LOWPREC_* macro defined -- with a STATUS line, instead of
 # failing the configure. So a LOWPREC default other than OFF (or a shared

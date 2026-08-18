@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <stdexcept>
@@ -87,9 +88,17 @@ inline void print_sptrsv_banner_once() {
     static const bool printed = [] {
         if (!std::getenv("APXCHOL_VERBOSE")) return true;
 #if defined(APXCHOL_USE_CUDA)
-        const char* backend = "GPU/cuSPARSE";
-        const char* vname   = apxchol::cuda_sptrsv::value_name;
-        const std::size_t vbytes = apxchol::cuda_sptrsv::value_bytes;
+        // Runtime backend / storage modes of the GPU SpTRSV (env, resolved
+        // per setup by cuda_sptrsv; the banner is one-shot, so it reports the
+        // value at first solve): APXCHOL_GPU_SPTRSV=levelset and the level-set
+        // backend's opt-in fp16 storage APXCHOL_GPU_SPTRSV_FP16=1.
+        const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_from_env();
+        const int  gpu_be   = apxchol::cuda_sptrsv::backend_from_env();
+        const char* backend = gpu_be > 0 ? "GPU/levelset" : gpu_be < 0 ? "GPU/cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)"
+                            : "GPU/auto: cuSPARSE, level-set if its SpSV analysis buffers do not fit";
+        const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_GPU_SPTRSV_FP16=1)"
+                                       : apxchol::cuda_sptrsv::value_name;
+        const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;
 #else
         const char* backend = "CPU/omp";
         const char* vname   = apxchol::omp_sptrsv::value_name;
@@ -738,6 +747,26 @@ solve_result solve(const Eigen::SparseMatrix<double>& L,
         precond.set_storage(opts.storage);
         if (!std::getenv("APXCHOL_NO_CHECKPOINT"))
             precond.set_checkpoint(&res.timings);
+        // The GPU SpTRSV's AUTO backend decision (cuda.h: cuSPARSE unless its
+        // O(nnz) SpSV analysis buffers do not fit) must leave room for what
+        // cuda_pcg::setup allocates AFTER it: the full-symmetric operator
+        // (nnz_full = 2*(entries with row >= col) - n; int32 col idx + fp64
+        // values -- an upper bound, fp32-exact operators store fp32) + row
+        // pointers + the 6 fp64 PCG vectors.
+        {
+            const Eigen::Index n = L.rows();
+            const int* Lo = L.outerIndexPtr();
+            const int* Li = L.innerIndexPtr();
+            std::int64_t lower = 0;
+            #pragma omp parallel for schedule(static) reduction(+ : lower)
+            for (Eigen::Index k = 0; k < n; ++k)
+                for (int p = Lo[k]; p < Lo[k + 1]; ++p) lower += Li[p] >= k;
+            const std::int64_t nnz_full = 2 * lower - n;
+            precond.trsv().set_reserve_bytes(
+                static_cast<std::size_t>(nnz_full) * (sizeof(int) + sizeof(double)) +
+                static_cast<std::size_t>(n + 1) * sizeof(int) +
+                6 * static_cast<std::size_t>(n) * sizeof(double));
+        }
         precond.compute(L);
 
         const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");

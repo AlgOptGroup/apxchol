@@ -567,3 +567,237 @@ TEST(SpTRSVDrop, CompactedArraysAreByteIdenticalAcrossThreadCounts) {
     same(t);
 #endif
 }
+
+// ── GPU backend host preparation (cuda_host.h; CUDA-free, so stated here on
+// every build) ────────────────────────────────────────────────────────────────
+//
+// cuda_sptrsv::setup builds L11 as int32 CSC arrays, runs THE compacting drop
+// (factor_drop.h -- the same implementation omp_sptrsv::setup runs) on them
+// and uploads the result. What it uploads must be what the CPU backend
+// stores: same stored nnz, same column pointers / row indices, same values
+// (bit-for-bit through the fp32/fp64 storage; through narrow_value() on the
+// lowprec builds), for the Laplacian (m = n-1) and SDDM (m = n) paths, drop
+// on (explicit and default) and off.
+#include "apxchol/solver/sptrsv/cuda_host.h"
+
+TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
+    struct cfg { node_index n; bool laplacian; };
+    for (const char* rel_env : {"1e-4", static_cast<const char*>(nullptr), "0"})
+    for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60001, true}}) {
+        const node_index m = c.laplacian ? c.n - 1 : c.n;
+        SCOPED_TRACE("n=" + std::to_string(c.n) + (c.laplacian ? " (Laplacian m=n-1)" : " (SDDM m=n)") +
+                     " APXCHOL_FACTOR_DROP=" + (rel_env ? rel_env : "<unset>"));
+        scoped_drop_env env(rel_env);
+        const sparse_csc L = make_wide_magnitude_lower(c.n);
+        // CPU backend.
+        apxchol::omp_sptrsv trsv;
+        trsv.setup(L, m);
+        // GPU backend's host side, exactly as cuda_sptrsv::setup does it (fp32
+        // storage: keep predicate = |v| >= rel * s_j and v != 0).
+        const double rel = apxchol::factor_drop_rel_from_env();
+        const bool   comp = apxchol::factor_drop_compensate_from_env();
+        auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
+        const std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
+        const std::uint64_t L11_nnz = L11_nnz_of(L, m);
+        ASSERT_EQ(static_cast<std::uint64_t>(LT.nnz), L11_nnz);
+        const apxchol::factor_drop_stats st = apxchol::cuda_host::apply_factor_drop(
+            LT, scales, rel, comp, /*fp16_storage=*/false, /*fp16_flush_subnormal=*/true);
+        // Same statistics ...
+        const auto& cs = trsv.drop_stats();
+        EXPECT_EQ(st.rel, cs.rel);
+        EXPECT_EQ(st.compensate, cs.compensate);
+        EXPECT_EQ(st.nnz_factor, cs.nnz_factor);
+        EXPECT_EQ(st.nnz_stored, cs.nnz_stored);
+        EXPECT_EQ(st.dropped, cs.dropped);
+        EXPECT_EQ(st.dropped_threshold, cs.dropped_threshold);
+        EXPECT_EQ(st.dropped_flush, cs.dropped_flush);
+        EXPECT_EQ(static_cast<std::uint64_t>(LT.nnz), trsv.stored_nnz());
+        if (rel_env && std::string(rel_env) == "1e-4") { ASSERT_GT(st.dropped, L11_nnz / 4); }   // teeth
+        if (rel_env && std::string(rel_env) == "0")    { ASSERT_EQ(st.dropped, 0u); }
+        // ... same structure ...
+        ASSERT_EQ(trsv.csc_col_ptr().size(), static_cast<size_t>(m) + 1);
+        for (node_index j = 0; j <= m; ++j)
+            ASSERT_EQ(static_cast<edge_index>(LT.ptr[j]), trsv.csc_col_ptr()[j]) << "col_ptr " << j;
+        std::uint64_t idx_mismatch = 0, val_mismatch = 0;
+        for (std::int64_t k = 0; k < LT.nnz; ++k) {
+            idx_mismatch += static_cast<node_index>(LT.idx[k]) != trsv.csc_row_idx()[k];
+        }
+        EXPECT_EQ(idx_mismatch, 0u);
+        // ... same values: the GPU uploads the compacted fp32 factor value; the
+        // CPU stores narrow_value() of it (a plain cast on fp32/fp64, so
+        // bit-for-bit; through the storage format on the lowprec builds, at
+        // the pre-drop scale s_j -- which is what column_scales() computed).
+        for (node_index j = 0; j < m; ++j) {
+            const float s = scales[j];
+            for (int k = LT.ptr[j]; k < LT.ptr[j + 1]; ++k) {
+                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(
+                    LT.vals[k], static_cast<edge_index>(k), s, /*stochastic=*/false, /*fp16_flush_subnormal=*/true);
+                val_mismatch += !(trsv.csc_vals()[k] == expect);
+            }
+        }
+        EXPECT_EQ(val_mismatch, 0u);
+        // And the GPU-side transpose (CSR of L for the level-set forward
+        // solve) is the CPU's CSR: same row pointers, column indices, values.
+        const auto Lc = apxchol::cuda_host::transpose_csr(LT);
+        ASSERT_EQ(Lc.nnz, LT.nnz);
+        for (node_index i = 0; i <= m; ++i)
+            ASSERT_EQ(static_cast<edge_index>(Lc.ptr[i]), trsv.csr_row_ptr()[i]) << "row_ptr " << i;
+        std::uint64_t t_mismatch = 0;
+        for (std::int64_t k = 0; k < Lc.nnz; ++k)
+            t_mismatch += static_cast<node_index>(Lc.idx[k]) != trsv.csr_col_idx()[k];
+        EXPECT_EQ(t_mismatch, 0u);
+        for (node_index i = 0; i < m; ++i)
+            for (int k = Lc.ptr[i]; k < Lc.ptr[i + 1]; ++k) {
+                const node_index j = static_cast<node_index>(Lc.idx[k]);
+                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(
+                    Lc.vals[k], static_cast<edge_index>(k), scales[j], false, true);
+                // (position k differs between CSR and CSC only in the bf16
+                // stochastic hash, which is off here)
+                t_mismatch += !(trsv.csr_vals()[k] == expect);
+            }
+        EXPECT_EQ(t_mismatch, 0u);
+        // Level schedules: every row's off-diagonal dependencies sit in
+        // strictly earlier levels (forward on CSR of L ascending, back on CSR
+        // of L^T descending); the schedule is a permutation of the rows.
+        for (bool fwd : {true, false}) {
+            std::vector<int> order, lvl;
+            const auto& A = fwd ? Lc : LT;
+            apxchol::cuda_host::compute_levels(A.m, A.ptr.data(), A.idx.get(), fwd, order, lvl);
+            ASSERT_EQ(order.size(), static_cast<size_t>(m));
+            std::vector<int> level_of(m, -1);
+            for (size_t l = 0; l + 1 < lvl.size(); ++l)
+                for (int q = lvl[l]; q < lvl[l + 1]; ++q) level_of[order[q]] = static_cast<int>(l);
+            std::uint64_t bad = 0;
+            for (int i = 0; i < A.m; ++i) {
+                if (level_of[i] < 0) { ++bad; continue; }
+                for (int p = A.ptr[i]; p < A.ptr[i + 1]; ++p)
+                    if (A.idx[p] != i && !(level_of[A.idx[p]] < level_of[i])) ++bad;
+            }
+            EXPECT_EQ(bad, 0u) << (fwd ? "forward" : "back");
+        }
+    }
+}
+
+// The fp16 per-column-scaled storage the level-set backend uploads under
+// APXCHOL_GPU_SPTRSV_FP16=1 (cuda_host.h file header): each slot is
+// binary16(fp32(v) / s_j) RNE with fp16 subnormals flushed to signed zero
+// (restated here through lowprec.h's fp16_t on the bit level), diag[j] =
+// fp32(L_jj) / s_j, inv_scale[j] = fp32(1 / s_j); with diag_comp the column's
+// rounding residual is folded into diag[j] so the STORED column (diag +
+// widened off-diagonals) sums to the fp32 column / s_j; the drop's fp16 keep
+// predicate additionally removes what fp16 flushes. Under the CPU FP16_SCALED
+// build the bits equal omp_sptrsv's stored bits entry for entry.
+TEST(GpuHostPrep, Fp16ScaledStorageContract) {
+    for (bool laplacian : {false, true}) {
+        const node_index n = 4001;
+        const node_index m = laplacian ? n - 1 : n;
+        SCOPED_TRACE(laplacian ? "Laplacian m=n-1" : "SDDM m=n");
+        const sparse_csc L = make_wide_magnitude_lower(n);
+        const double rel = 1e-4;
+        auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
+        const std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
+        {
+            const std::vector<double> ref = reference_scales_L11(L, m);
+            for (node_index j = 0; j < m; ++j) ASSERT_EQ(scales[j], static_cast<float>(ref[j])) << j;
+        }
+        // The fp16 keep predicate: threshold AND not fp16-flushed at |v/s|
+        // (with the subnormal flush: < 2^-14 after rounding); at rel = 1e-4
+        // > 2^-14 the second clause adds nothing, at rel = 1e-30 it is what
+        // remains.
+        {
+            std::uint64_t only_fmt = 0, disagree = 0;
+            for (node_index j = 0; j < m; ++j)
+                for (int k = LT.ptr[j] + 1; k < LT.ptr[j + 1]; ++k) {
+                    const float v = static_cast<float>(LT.vals[k]);
+                    const bool thr = std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(scales[j]);
+                    const apxchol::fp16_t h(v / scales[j]);
+                    const bool fmt = !(apxchol::fp16_t::is_zero(h.bits) || apxchol::fp16_t::is_subnormal(h.bits));
+                    disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], rel, true, true) != (thr && fmt);
+                    disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], 1e-30, true, true) != (v != 0.0f && fmt);
+                    disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], 1e-30, false, true) != (v != 0.0f);
+                    only_fmt += (v != 0.0f) && !fmt;
+                }
+            EXPECT_EQ(disagree, 0u);
+            EXPECT_GT(only_fmt, 0u);   // teeth: the wide-magnitude factor has fp16-subnormal entries
+        }
+        const apxchol::factor_drop_stats st = apxchol::cuda_host::apply_factor_drop(
+            LT, scales, rel, true, /*fp16_storage=*/true, /*fp16_flush_subnormal=*/true);
+        ASSERT_GT(st.dropped, 0u);
+        for (bool diag_comp : {false, true}) {
+            SCOPED_TRACE(diag_comp ? "diag_comp" : "no diag_comp");
+            const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales, /*flush_subnormal=*/true, diag_comp);
+            ASSERT_EQ(h16.diag.size(), static_cast<size_t>(m));
+            ASSERT_EQ(h16.inv_scale.size(), static_cast<size_t>(m));
+            std::uint64_t bits_mismatch = 0, sub = 0;
+            double worst_cs = 0.0;
+            for (node_index j = 0; j < m; ++j) {
+                const float s = scales[j];
+                EXPECT_EQ(h16.inv_scale[j], 1.0f / s);
+                ASSERT_EQ(LT.idx[LT.ptr[j]], static_cast<int>(j));
+                const float d0 = static_cast<float>(LT.vals[LT.ptr[j]]) / s;   // fp32(L_jj) / s_j
+                double resid = 0.0, col_x = 0.0, col_stored = 0.0;
+                for (int k = LT.ptr[j]; k < LT.ptr[j + 1]; ++k) {
+                    const float v = static_cast<float>(LT.vals[k]);
+                    apxchol::fp16_t h(v / s);                                    // RNE
+                    if (apxchol::fp16_t::is_subnormal(h.bits))
+                        h = apxchol::fp16_t::from_bits(static_cast<std::uint16_t>(h.bits & 0x8000u));
+                    bits_mismatch += h16.vals[k] != h.bits;
+                    if (k == LT.ptr[j]) continue;                                // diagonal slot
+                    sub += apxchol::fp16_t::is_subnormal(h16.vals[k]);
+                    const double w = static_cast<double>(apxchol::fp16_t::from_bits(h16.vals[k]).to_float());
+                    resid      += static_cast<double>(LT.vals[k]) / static_cast<double>(s) - w;
+                    col_x      += static_cast<double>(LT.vals[k]) / static_cast<double>(s);
+                    col_stored += w;
+                }
+                const float d_expect = diag_comp ? static_cast<float>(static_cast<double>(d0) + resid) : d0;
+                EXPECT_EQ(h16.diag[j], d_expect) << "diag " << j;
+                // Stored column sum vs the fp32 column / s_j: exact (to fp32) with
+                // the compensation, off by the rounding residual without.
+                const double stored_sum = static_cast<double>(h16.diag[j]) + col_stored;
+                const double x_sum      = static_cast<double>(d0) + col_x;
+                const double abs_scale  = std::fabs(static_cast<double>(d0)) + std::fabs(col_x) + 1e-300;
+                worst_cs = std::max(worst_cs, std::fabs(stored_sum - x_sum) / abs_scale);
+            }
+            EXPECT_EQ(bits_mismatch, 0u);
+            EXPECT_EQ(sub, 0u);                      // subnormals flushed
+            EXPECT_EQ(h16.subnormal, 0u);
+            if (diag_comp) EXPECT_LT(worst_cs, 4e-7); // one fp32 rounding of the diagonal
+            else           EXPECT_GT(worst_cs, 1e-5); // teeth: fp16's 2^-11 residual is visible
+        }
+        // Subnormals kept (APXCHOL_FP16_KEEP_SUBNORMAL=1 semantics): the slot is
+        // the IEEE RNE result, subnormals included, and counted.
+        {
+            const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales, /*flush_subnormal=*/false, false);
+            std::uint64_t bits_mismatch = 0, sub = 0;
+            for (node_index j = 0; j < m; ++j)
+                for (int k = LT.ptr[j] + 1; k < LT.ptr[j + 1]; ++k) {
+                    const apxchol::fp16_t h(static_cast<float>(LT.vals[k]) / scales[j]);
+                    bits_mismatch += h16.vals[k] != h.bits;
+                    sub += apxchol::fp16_t::is_subnormal(h16.vals[k]);
+                }
+            EXPECT_EQ(bits_mismatch, 0u);
+            EXPECT_EQ(h16.subnormal, sub);
+        }
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+        // The CPU FP16_SCALED build stores the very same bits (same drop, same
+        // narrowing) and the same un-compensated diagonal.
+        {
+            scoped_drop_env env("1e-4");
+            scoped_env keep("APXCHOL_FP16_KEEP_SUBNORMAL", nullptr);
+            scoped_env comp("APXCHOL_LOWPREC_DIAG_COMP", nullptr);
+            apxchol::omp_sptrsv trsv;
+            trsv.setup(L, m);
+            ASSERT_EQ(trsv.stored_nnz(), static_cast<std::uint64_t>(LT.nnz));
+            const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales, true, false);
+            std::uint64_t mism = 0;
+            for (std::int64_t k = 0; k < LT.nnz; ++k) mism += trsv.csc_vals()[k].bits != h16.vals[k];
+            EXPECT_EQ(mism, 0u);
+            for (node_index j = 0; j < m; ++j) {
+                EXPECT_EQ(trsv.col_scales()[j], scales[j]) << j;
+                EXPECT_EQ(static_cast<double>(h16.diag[j]),
+                          apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], scales[j])) << j;
+            }
+        }
+#endif
+    }
+}

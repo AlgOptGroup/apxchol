@@ -408,7 +408,9 @@ endif()
 if (NOT APXCHOL_SPTRSV_LOWPREC MATCHES "^(OFF|BF16|BF16_SCALED|FP16_SCALED|FP24)$")
     message(FATAL_ERROR "APXCHOL_SPTRSV_LOWPREC must be one of OFF, BF16, BF16_SCALED, FP16_SCALED, FP24 (got '${APXCHOL_SPTRSV_LOWPREC}').")
 endif()
-# CUDA builds have no low-precision SpTRSV path: with APXCHOL_USE_CUDA=ON the
+# CUDA builds have no COMPILE-TIME low-precision SpTRSV path (the GPU's fp16
+# storage is the runtime opt-in APXCHOL_GPU_SPTRSV_FP16=1, level-set backend):
+# with APXCHOL_USE_CUDA=ON the
 # variant is TREATED AS OFF for this build (fp32 CPU storage, no macro, STATUS
 # line) instead of failing the configure -- same rule as the root
 # CMakeLists.txt; the cache value is left as requested.
