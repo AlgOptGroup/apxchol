@@ -141,8 +141,20 @@ namespace detail {
 
 struct factor_col {
     node_index vertex;
-    double diag = 0.0;   // L diagonal: sqrt(total_deg) including SDDM excess
-    std::vector<std::pair<node_index, double>> entries; // (neighbor, L_value)
+    // L diagonal: sqrt(total_deg) including SDDM excess. Stored at the factor's
+    // precision (sptrsv_value_t: fp32 under APXCHOL_SPTRSV_FP32, else fp64),
+    // like `entries` below: it is computed in fp64 and only ever copied into
+    // sparse_csc::vals_ of that same type, so narrowing here is bit-identical
+    // (and keeps this per-column header at 32 B instead of 40 B; there are n
+    // of them).
+    sptrsv_value_t diag = 0;
+    // (neighbor, L_value). The value is stored at the factor's precision -- it
+    // is computed in fp64 (w / sqrt_deg) and only ever copied (negated) into
+    // sparse_csc::vals_, which has that same type, so narrowing here instead of
+    // at assembly is bit-identical and halves the largest setup-transient array
+    // (16 -> 8 B per factor entry; every column of the factor is held here
+    // until assembly).
+    std::vector<std::pair<node_index, sptrsv_value_t>> entries;
 };
 
 // Build elimination-order permutation and assemble L in CSC format.

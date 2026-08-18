@@ -410,7 +410,11 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
       else                              op_fp32_ = operator_is_fp32_exact(L); }
     if (op_fp32_) {
         Lrm_f_ = Lrm_.cast<float>();
-        Lrm_ = Eigen::SparseMatrix<double, Eigen::RowMajor>();   // free the fp64 copy (steady-state fp32)
+        // Free the fp64 copy (steady-state fp32). Swap-with-empty: assigning an
+        // empty SparseMatrix only resets the sizes and KEEPS the value/index
+        // buffers allocated (Eigen's CompressedStorage never shrinks), i.e.
+        // `Lrm_ = SparseMatrix()` left the full fp64 operator resident.
+        Eigen::SparseMatrix<double, Eigen::RowMajor>().swap(Lrm_);
     }
 
     // Memory breakdown of the major live arrays just before PCG (env-gated).
