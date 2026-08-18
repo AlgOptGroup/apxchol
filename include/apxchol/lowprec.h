@@ -72,7 +72,10 @@
 // This header holds the variant-selection macros, the fp16_t / fp24_t
 // storage types (bf16_t lives in bf16.h) and their widen() overloads. The
 // omp SpTRSV backend is the only consumer; the CUDA backend is fp32/fp64
-// only (configure errors out on the combination).
+// only: with APXCHOL_USE_CUDA=ON the CMake variable is treated as OFF for
+// that build (fp32 CPU storage, no APXCHOL_SPTRSV_LOWPREC_* macro, a STATUS
+// line) so a non-OFF default can never break a CUDA build; the #error below
+// only fires if the macro is defined by hand next to APXCHOL_USE_CUDA.
 #include "apxchol/bf16.h"
 #include <bit>
 #include <cmath>
@@ -108,7 +111,7 @@
 #  define APXCHOL_SPTRSV_LOWPREC_SCALED 1
 #endif
 #if defined(APXCHOL_SPTRSV_LOWPREC_ANY) && defined(APXCHOL_USE_CUDA)
-#  error "The APXCHOL_SPTRSV_LOWPREC variants are implemented for the CPU/omp SpTRSV only; the CUDA backend has no low-precision path."
+#  error "The APXCHOL_SPTRSV_LOWPREC variants are implemented for the CPU/omp SpTRSV only; the CUDA backend has no low-precision path (CMake treats APXCHOL_SPTRSV_LOWPREC as OFF under APXCHOL_USE_CUDA -- this macro was defined by hand)."
 #endif
 
 namespace apxchol {
