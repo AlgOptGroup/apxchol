@@ -261,7 +261,11 @@ void eliminate_partition_singleton(const Eliminator& elim,
             // The actual atomic_push_reserved phase is parallel and lock-free.
             const int num_threads = team_threads;
             std::vector<size_t> e_offsets(num_threads + 1, 0);
-            std::vector<node_index> incoming(static_cast<size_t>(G.n()), 0);
+            // Persistent all-zero histogram (see factorize_workspace::incoming);
+            // sized once, reset per round over the touched entries only.
+            if (ws.incoming.size() < static_cast<size_t>(G.n()))
+                ws.incoming.assign(static_cast<size_t>(G.n()), 0);
+            std::vector<node_index>& incoming = ws.incoming;
             edge_index e_start = 0;
 
             #pragma omp parallel num_threads(num_threads)
@@ -347,6 +351,15 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         G.atomic_add_excess(u, delta);
                     ws.threads[tid].excess_buffer.clear();
                 }
+
+                // Restore the all-zero invariant of ws.incoming over exactly
+                // the touched vertices (every vertex with incoming > 0 was
+                // pushed once, on its 0->1 bump). Safe here: the only reader
+                // of incoming[] is bulk_reserve_parallel's single section,
+                // which ended at that call's trailing omp-for barrier.
+                #pragma omp for schedule(static) nowait
+                for (size_t i = 0; i < ws.touched_concat.size(); ++i)
+                    incoming[ws.touched_concat[i]] = 0;
 
                 // Deactivate partition vertices in parallel (disjoint).
                 #pragma omp for schedule(static) nowait
