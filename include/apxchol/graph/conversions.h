@@ -117,6 +117,9 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
 
         if (off_diag_nnz > 0) {
             g.adj_bulk_reserve_parallel(touched.begin(), touched.end(), incoming);
+            // incoming[] (n counts) is consumed by the reserve; the edge pass
+            // below reads only the matrix. Free it here, not at return.
+            std::vector<node_index>().swap(incoming);
             const edge_index e_start = g.reserve_edge_pool(off_diag_nnz);
 
             // Per-thread off-diag count (pre-pass for deterministic slot assignment).

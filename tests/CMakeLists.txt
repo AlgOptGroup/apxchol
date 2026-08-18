@@ -16,6 +16,9 @@ add_executable(unit_tests
         test_custom_hooks.cpp
         test_sptrsv_transpose.cpp
         test_sptrsv_drop.cpp
+        test_sptrsv_memory.cpp
+        test_bf16.cpp
+        test_lowprec.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE

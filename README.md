@@ -198,15 +198,25 @@ you need `pcg`'s interface.
 ## Build options
 
 Compile-time options (`APXCHOL_USE_CUDA`, `APXCHOL_SPTRSV_FP32`,
-`APXCHOL_POOL_FP32`, `APXCHOL_64BIT_EDGE_INDICES` /
+`APXCHOL_SPTRSV_LOWPREC`, `APXCHOL_POOL_FP32`, `APXCHOL_64BIT_EDGE_INDICES` /
 `APXCHOL_64BIT_NODE_INDICES`, `APXCHOL_BUILD_EXAMPLES` /
 `APXCHOL_BUILD_TESTS` / `APXCHOL_BUILD_TOOLS`) are declared and documented
 where they live, in [CMakeLists.txt](CMakeLists.txt) — `cmake -LH build`
 lists them with their help strings. `APXCHOL_SPTRSV_FP32` and
 `APXCHOL_POOL_FP32` default ON (fp32 factor values / fp32 residual-pool
 weights; the PCG recurrence stays fp64; pass `=OFF` for an fp64 baseline);
-everything else defaults OFF except the `APXCHOL_BUILD_EXAMPLES` /
-`APXCHOL_BUILD_TESTS` toggles. Release builds add `-march=native`.
+`APXCHOL_SPTRSV_LOWPREC=BF16|BF16_SCALED|FP16_SCALED|FP24` (default `OFF`,
+CPU backend only) narrows the SpTRSV off-diagonal factor STORAGE further to
+bfloat16 / per-column-scaled bfloat16 / per-column-scaled IEEE fp16 / the
+top 24 bits of fp32 (the diagonal stays exact fp32) — reads widen to fp64 in
+registers, so it only changes the preconditioner quality (iteration count),
+not the attainable residual; see
+[include/apxchol/lowprec.h](include/apxchol/lowprec.h) (for the bf16
+variants `APXCHOL_BF16_STOCHASTIC=1` in the environment switches the
+rounding from round-to-nearest-even to unbiased stochastic rounding);
+everything else defaults OFF except the
+`APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS` toggles. Release builds
+add `-march=native`.
 
 One runtime knob (CPU/OpenMP backend): the SpTRSV setup drops factor
 off-diagonals below `1e-4 ×` their column's max |off-diagonal| before it

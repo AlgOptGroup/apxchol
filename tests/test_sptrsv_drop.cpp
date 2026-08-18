@@ -14,6 +14,14 @@
 //   * the CSR/CSC the drop produces are byte-identical across thread counts;
 //   * the env contract: unset = default ON at 1e-4, "0" / negative / junk =
 //     off, any positive value overrides (rel > 1 keeps only the diagonal).
+// Under the APXCHOL_SPTRSV_LOWPREC variants (sptrsv_value_t narrower than the
+// factor's factor_value_t; the *_SCALED ones store L_ij / s_j with s_j the
+// PRE-drop column max) the drop and the compensation run on the fp32 factor
+// before the narrowing, so the value contract becomes "stored ==
+// narrow_value(compensated reference value, s_j)" bit-for-bit, and the
+// column-sum / solve comparisons hold to the storage format's rounding; the
+// storage-format-specific drop clause (format_flushes) has its own tests in
+// test_lowprec.cpp.
 #include <gtest/gtest.h>
 #include <cmath>
 #include <cstdint>
@@ -32,6 +40,7 @@
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
+using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
@@ -92,7 +101,7 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed,
         edge_index out = L.outer_[j];
         for (node_index r : col_rows[j]) {
             L.inner_[out] = r;
-            L.vals_[out]  = static_cast<sptrsv_value_t>(r == j ? udiag(rng) : -uval(rng));
+            L.vals_[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : -uval(rng));
             ++out;
         }
     }
@@ -149,7 +158,7 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel, b
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
                 if (L.inner_[p] >= m || L.inner_[p] == j || d.Lz.vals_[p] == 0) continue;
                 const double v = static_cast<double>(d.Lz.vals_[p]);
-                d.Lz.vals_[p] = static_cast<sptrsv_value_t>(v + per_abs * std::fabs(v));
+                d.Lz.vals_[p] = static_cast<factor_value_t>(v + per_abs * std::fabs(v));
             }
         }
     }
@@ -164,6 +173,33 @@ std::vector<double> column_sums_L11(const sparse_csc& L, node_index m) {
             if (L.inner_[p] < m) cs[j] += static_cast<double>(L.vals_[p]);
     return cs;
 }
+
+// Relative rounding of ONE stored off-diagonal in this build's storage
+// format (what the column-sum / solve comparisons below are held to): 0 on
+// the fp32 / fp64 builds (the factor IS the stored value), 2^-8 bf16, 2^-11
+// fp16, 2^-16 fp24.
+constexpr double kStorageEps =
+#if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
+    1.0 / 256.0;
+#elif defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+    1.0 / 2048.0;
+#elif defined(APXCHOL_SPTRSV_LOWPREC_FP24)
+    1.0 / 65536.0;
+#else
+    0.0;
+#endif
+// The pre-drop per-column scale the *_SCALED variants divide by (1.0 off them).
+double pair_scale(double s_pre) {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+    return s_pre;
+#else
+    (void)s_pre;
+    return 1.0;
+#endif
+}
+// The EFFECTIVE factor value a stored off-diagonal stands for: widened, times
+// the column scale under *_SCALED (the kernels run on L~ = L D^-1).
+double effective(sptrsv_value_t w, double s_pre) { return apxchol::widen(w) * pair_scale(s_pre); }
 
 std::uint64_t L11_nnz_of(const sparse_csc& L, node_index m) {
     std::uint64_t n = 0;
@@ -180,7 +216,7 @@ sparse_csc make_wide_magnitude_lower(node_index n) {
     std::uniform_real_distribution<double> uexp(-7.0, 2.0);
     for (node_index j = 0; j < n; ++j)
         for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
-            L.vals_[p] = static_cast<sptrsv_value_t>(-std::pow(10.0, uexp(rng)));
+            L.vals_[p] = static_cast<factor_value_t>(-std::pow(10.0, uexp(rng)));
             if ((p % 101) == 5) L.vals_[p] = 0;   // explicit zeros: always dropped
         }
     return L;
@@ -245,12 +281,16 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             double worst_cs = 0.0;
             for (node_index j = 0; j < m; ++j) {
                 ASSERT_EQ(trsv.csc_row_idx()[trsv.csc_col_ptr()[j]], j) << "diagonal first, col " << j;
-                double sum = static_cast<double>(trsv.csc_vals()[trsv.csc_col_ptr()[j]]);
+                // The diagonal the kernels divide by (fp32 L_jj / s_j under
+                // *_SCALED, the fp32 diag_ elsewhere on lowprec, the stored
+                // value itself on fp32/fp64), back in the factor's units.
+                double sum = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], static_cast<float>(pair_scale(s[j])))
+                           * pair_scale(s[j]);
                 double abs = std::fabs(sum), dropped_mass = 0.0;
                 for (edge_index p = trsv.csc_col_ptr()[j] + 1; p < trsv.csc_col_ptr()[j + 1]; ++p) {
-                    const double v = static_cast<double>(trsv.csc_vals()[p]);
+                    const double v = effective(trsv.csc_vals()[p], s[j]);
                     zeros += v == 0.0;
-                    below += std::fabs(v) < rel * s[j];
+                    below += std::fabs(v) < rel * s[j] * (1.0 - 2.0 * kStorageEps);
                     sum += v; abs += std::fabs(v);
                 }
                 if (!compensate)
@@ -263,7 +303,32 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
                 ASSERT_EQ(trsv.csr_col_idx()[trsv.csr_row_ptr()[i + 1] - 1], i) << "diagonal last, row " << i;
             EXPECT_EQ(zeros, 0u);
             EXPECT_EQ(below, 0u);
-            EXPECT_LT(worst_cs, sizeof(sptrsv_value_t) == 4 ? 1e-5 : 1e-13);
+            // fp32 rounding of the rescaled entries (fp64: none), plus each
+            // stored entry's own storage rounding on the lowprec builds.
+            EXPECT_LT(worst_cs, (sizeof(factor_value_t) == 4 ? 1e-5 : 1e-13) + 2.0 * kStorageEps);
+        }
+        // Value contract: every stored off-diagonal is narrow_value() of the
+        // reference's (compensated) value at the PRE-drop scale s_j -- bit for
+        // bit (the same pure function setup uses; a plain cast on fp32/fp64).
+        {
+            const std::vector<double> s = reference_scales_L11(L, m);
+            std::uint64_t mismatches = 0;
+            for (node_index j = 0; j < m; ++j) {
+                edge_index q = trsv.csc_col_ptr()[j] + 1;
+                for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
+                    if (L.inner_[p] >= m) continue;
+                    if (std::fabs(static_cast<double>(L.vals_[p])) < rel * s[j]) continue;   // dropped
+                    ASSERT_LT(q, trsv.csc_col_ptr()[j + 1]);
+                    ASSERT_EQ(trsv.csc_row_idx()[q], L.inner_[p]);
+                    const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(
+                        ref.Lz.vals_[p], q, static_cast<float>(pair_scale(s[j])), /*stochastic=*/false,
+                        /*fp16_flush_subnormal=*/true);
+                    mismatches += !(trsv.csc_vals()[q] == expect);
+                    ++q;
+                }
+                ASSERT_EQ(q, trsv.csc_col_ptr()[j + 1]);
+            }
+            EXPECT_EQ(mismatches, 0u);
         }
         // The reference kept everything (drop OFF): its stored nnz is the full L11.
         EXPECT_EQ(rf.drop_stats().rel, 0.0);
@@ -271,7 +336,12 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         EXPECT_EQ(rf.drop_stats().dropped, 0u);
 
         // Solves agree to ~1e-12 (same arithmetic up to the 4-way accumulator
-        // grouping; the zeroed terms contribute exact zeros).
+        // grouping; the zeroed terms contribute exact zeros). Not stated for
+        // the *_SCALED variants WITH the compensation: the reference factor's
+        // column max is the compensated one, so its per-column scale -- hence
+        // its rounding, its forward output D y and its back input -- differ
+        // from the compacted factor's pre-drop s_j (the value contract above
+        // and the residual below cover that case).
         std::mt19937 rng(9 + c.n);
         std::uniform_real_distribution<double> ux(-1.0, 1.0);
         std::vector<double> x(m), y1(m), y2(m), z1(m), z2(m);
@@ -287,20 +357,36 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             scale_f = std::max(scale_f, std::fabs(y2[i]));
             scale_b = std::max(scale_b, std::fabs(z2[i]));
         }
-        EXPECT_LT(worst_f, 1e-12 * std::max(1.0, scale_f)) << "forward";
-        EXPECT_LT(worst_b, 1e-12 * std::max(1.0, scale_b)) << "back";
-        // And the compacted forward solve is an exact solve of the STORED L
-        // (double accumulation): componentwise residual at roundoff.
-        double worst = 0.0;
-        for (node_index i = 0; i < m; ++i) {
-            double r = x[i], sc = std::fabs(x[i]);
-            for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q) {
-                const double t = static_cast<double>(trsv.csr_vals()[q]) * y1[trsv.csr_col_idx()[q]];
-                r -= t; sc += std::fabs(t);
-            }
-            worst = std::max(worst, std::fabs(r) / (sc + 1e-300));
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        const bool same_scales = !compensate;
+#else
+        const bool same_scales = true;
+#endif
+        if (same_scales) {
+            EXPECT_LT(worst_f, 1e-12 * std::max(1.0, scale_f)) << "forward";
+            EXPECT_LT(worst_b, 1e-12 * std::max(1.0, scale_b)) << "back";
         }
-        EXPECT_LT(worst, 1e-11);
+        // And the compacted forward solve is an exact solve of the STORED L
+        // (double accumulation): componentwise residual at roundoff. (On the
+        // lowprec builds the kernels divide by stored_diag(), not the narrow
+        // diagonal slot; under *_SCALED y1 is y' = D y on L~ = L D^-1.)
+        {
+            const std::vector<double> s = reference_scales_L11(L, m);
+            double worst = 0.0;
+            for (node_index i = 0; i < m; ++i) {
+                double r = x[i], sc = std::fabs(x[i]);
+                for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q) {
+                    const node_index j = trsv.csr_col_idx()[q];
+                    const double v = (j == i)
+                        ? apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[i]], static_cast<float>(pair_scale(s[i])))
+                        : apxchol::widen(trsv.csr_vals()[q]);
+                    const double t = v * y1[j];
+                    r -= t; sc += std::fabs(t);
+                }
+                worst = std::max(worst, std::fabs(r) / (sc + 1e-300));
+            }
+            EXPECT_LT(worst, 1e-11);
+        }
 
         // The env is read at every setup: unset = the default, which IS 1e-4
         // (same result as the explicit "1e-4" above); "0" = nothing dropped.
@@ -347,11 +433,25 @@ TEST(SpTRSVDrop, EdgeCases) {
     const node_index m = 2000;
     sparse_csc L = make_random_lower(m, 4.0, 31, 0.0, 1.0);
     for (edge_index p = 0; p < L.nonZeros(); ++p)
-        if ((p % 5) == 2) L.vals_[p] = static_cast<sptrsv_value_t>(L.vals_[p] * 1e-9);   // far below 1e-4 * s_j
+        if ((p % 5) == 2) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-9);   // far below 1e-4 * s_j
     std::uint64_t offdiag = 0;
     for (node_index j = 0; j < m; ++j) offdiag += L.outer_[j + 1] - L.outer_[j] - 1;
     const std::uint64_t nnz = static_cast<std::uint64_t>(L.nonZeros());
     ASSERT_GT(reference_dense_drop(L, m, 1e-4).zeroed, 100u);   // the default would remove plenty here
+    // What the storage format alone would store as zero (the drop's second
+    // clause, omp_sptrsv::format_flushes): nothing on the fp32 / fp64 / bf16 /
+    // fp24 builds (every entry here is a nonzero fp32); on FP16_SCALED the
+    // 1e-9-scaled entries (fp16 flushes them, subnormals included by default).
+    const std::vector<double> s_pre = reference_scales_L11(L, m);
+    std::uint64_t fmt_zero = 0;
+    for (node_index j = 0; j < m; ++j)
+        for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p)
+            fmt_zero += apxchol::omp_sptrsv::format_flushes(L.vals_[p], static_cast<float>(s_pre[j]), true);
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+    ASSERT_GT(fmt_zero, 100u);
+#else
+    ASSERT_EQ(fmt_zero, 0u);
+#endif
     for (const char* rel : {"0", "-1", "abc"}) {
         SCOPED_TRACE(std::string("APXCHOL_FACTOR_DROP=") + rel);
         scoped_drop_env env(rel);
@@ -362,14 +462,25 @@ TEST(SpTRSVDrop, EdgeCases) {
         EXPECT_EQ(t.csc_vals().size(), nnz);
     }
     {
-        scoped_drop_env env("1e-30");   // below everything: nothing goes
+        scoped_drop_env env("1e-30");   // below everything: nothing goes (but the format zeros)
         apxchol::omp_sptrsv t; t.setup(L, m);
         EXPECT_EQ(t.drop_stats().rel, 1e-30);
-        EXPECT_EQ(t.drop_stats().dropped, 0u);
-        EXPECT_EQ(t.stored_nnz(), nnz);
-        EXPECT_EQ(t.csc_col_ptr().back(), static_cast<edge_index>(nnz));
-        EXPECT_EQ(0, std::memcmp(t.csc_vals().data(), L.vals_.data(), nnz * sizeof(sptrsv_value_t)));
-        EXPECT_EQ(0, std::memcmp(t.csc_row_idx().data(), L.inner_.data(), nnz * sizeof(node_index)));
+        EXPECT_EQ(t.drop_stats().dropped, fmt_zero);
+        EXPECT_EQ(t.drop_stats().dropped_threshold, 0u);
+        EXPECT_EQ(t.drop_stats().dropped_flush, fmt_zero);
+        EXPECT_EQ(t.stored_nnz(), nnz - fmt_zero);
+        EXPECT_EQ(t.csc_col_ptr().back(), static_cast<edge_index>(nnz - fmt_zero));
+        if (fmt_zero == 0) {
+            // Nothing dropped, so nothing compensated: the CSC IS the factor
+            // (through the storage contract: a plain cast on fp32/fp64).
+            EXPECT_EQ(0, std::memcmp(t.csc_row_idx().data(), L.inner_.data(), nnz * sizeof(node_index)));
+            std::uint64_t mismatches = 0;
+            for (node_index j = 0; j < m; ++j)
+                for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
+                    mismatches += !(t.csc_vals()[p] == apxchol::omp_sptrsv::narrow_value(
+                        L.vals_[p], p, static_cast<float>(pair_scale(s_pre[j])), false, true));
+            EXPECT_EQ(mismatches, 0u);
+        }
     }
     {
         scoped_drop_env env("2");        // > 1: every off-diagonal goes, diagonal stays
@@ -382,13 +493,24 @@ TEST(SpTRSVDrop, EdgeCases) {
             ASSERT_EQ(t.csr_row_ptr()[j], static_cast<edge_index>(j));
             ASSERT_EQ(t.csr_col_idx()[j], j);
         }
-        // Solving with a diagonal factor: y = x / diag, both sweeps.
+        // Solving with a diagonal factor: the forward sweep divides by the
+        // stored diagonal (L_jj; L_jj / s_j under *_SCALED, where it returns
+        // y' = D y and the PRE-drop s_j is still the scale) and the pair
+        // (forward, then back on the forward's output) applies (L L^T)^-1 =
+        // 1 / L_jj^2 -- exactly on fp32/fp64, to fp32(1/s_j)'s 2^-23 under
+        // *_SCALED.
         std::vector<double> x(m, 1.0), y(m), z(m);
         t.forward_solve(x.data(), y.data());
-        t.transpose_solve(x.data(), z.data());
+        t.transpose_solve(y.data(), z.data());
         for (node_index j = 0; j < m; ++j) {
-            ASSERT_NEAR(y[j], 1.0 / static_cast<double>(L.vals_[L.outer_[j]]), 1e-15) << j;
-            ASSERT_NEAR(z[j], 1.0 / static_cast<double>(L.vals_[L.outer_[j]]), 1e-15) << j;
+            const double L_jj = static_cast<double>(L.vals_[L.outer_[j]]);
+            const double d    = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], static_cast<float>(pair_scale(s_pre[j])));
+            ASSERT_NEAR(y[j], 1.0 / d, 1e-15 / d) << j;
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+            ASSERT_NEAR(z[j], 1.0 / (L_jj * L_jj), 1e-6 / (L_jj * L_jj)) << j;
+#else
+            ASSERT_NEAR(z[j], 1.0 / (L_jj * L_jj), 4e-15 / (L_jj * L_jj)) << j;
+#endif
         }
     }
 }

@@ -12,10 +12,63 @@
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/pcg_cuda.h"
 #endif
+#if defined(__x86_64__) || defined(__i386__)
+#include <pmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE (DAZ)
+#include <xmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE    (FTZ)
+#endif
 
 namespace apxchol {
 
 namespace {
+
+// APXCHOL_FTZ=1 (env, read at every PCG entry): set the x86 MXCSR FTZ bit
+// (results that would be subnormal become zero) and DAZ bit (subnormal INPUTS
+// are treated as zero) on the calling thread and on every thread of the
+// OpenMP team. MXCSR is per-thread state, so it is set inside a parallel region
+// -- libgomp keeps its pooled worker threads across regions, so the SpMV /
+// SpTRSV / axpy regions of the PCG loop then run on threads that have it set
+// -- and once more on the master (Eigen's dots / norms run there). Opt-in;
+// the default leaves MXCSR alone. Sticky for the threads' lifetime (not
+// restored on return; every subsequent parallel region in the process
+// inherits it). x86 only: a no-op elsewhere. Numerics: subnormals in the
+// factor / operator / PCG vectors are treated as zero -- the factor census
+// (omp_sptrsv::lowprec_stats().factor_subnormal, APXCHOL_VERBOSE) says whether
+// there are any to matter.
+inline void maybe_enable_ftz_daz() {
+    const char* e = std::getenv("APXCHOL_FTZ");
+    if (!(e && std::atoi(e) != 0)) return;
+#if defined(__x86_64__) || defined(__i386__)
+    auto set_ftz_daz = [] {
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+    };
+    int nt = 1;
+    #pragma omp parallel
+    {
+        set_ftz_daz();
+        #pragma omp single
+        {
+#ifdef _OPENMP
+            nt = omp_get_num_threads();
+#endif
+        }
+    }
+    set_ftz_daz();   // the master (also a team member above; harmless twice)
+    static const bool printed = [nt] {
+        if (std::getenv("APXCHOL_VERBOSE"))
+            std::fprintf(stderr, "[apxchol] APXCHOL_FTZ=1: MXCSR FTZ+DAZ set on the master and on the"
+                                 " %d-thread OpenMP team at PCG entry (sticky)\n", nt);
+        return true;
+    }();
+    (void)printed;
+#else
+    static const bool warned = [] {
+        std::fprintf(stderr, "[apxchol] APXCHOL_FTZ=1 ignored: not an x86 build\n");
+        return true;
+    }();
+    (void)warned;
+#endif
+}
 // Eigen's parallel SpMV requires Eigen::initParallel() to be called
 // once per process before any threaded operation.  Calling it from a
 // function-local static keeps it lazy and thread-safe.
@@ -25,8 +78,9 @@ inline void ensure_eigen_parallel() {
 }
 
 // One-time build-flag report straight from the LIBRARY TU: the width is
-// sizeof() of the type solve.cpp actually compiled, so 4 == this .so/.a was
-// built with -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Reports whichever SpTRSV
+// sizeof() of the type solve.cpp actually compiled, so 2 == this .so/.a was
+// built with APXCHOL_SPTRSV_LOWPREC = BF16 / BF16_SCALED / FP16_SCALED, 3 ==
+// FP24, 4 == -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Reports whichever SpTRSV
 // backend (CPU omp / GPU cuda) this build compiled. Opt-in via
 // APXCHOL_VERBOSE — a library should be silent on stderr by default.
 inline void print_sptrsv_banner_once() {
@@ -42,12 +96,28 @@ inline void print_sptrsv_banner_once() {
         const std::size_t vbytes = apxchol::omp_sptrsv::value_bytes;
 #endif
         std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem"
-#ifdef APXCHOL_SPTRSV_FP32
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+                             " (APXCHOL_SPTRSV_LOWPREC=%s; off-diagonals only, diagonal fp32;"
+                             " rounding=%s)\n",
+#elif defined(APXCHOL_SPTRSV_FP32)
                              " (APXCHOL_SPTRSV_FP32 defined)\n",
 #else
                              " (APXCHOL_SPTRSV_FP32 NOT defined)\n",
 #endif
-                     backend, vname, vbytes);
+                     backend, vname, vbytes
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+                     , apxchol::omp_sptrsv::lowprec_variant
+#if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
+                     // Same env read omp_sptrsv::setup does (per setup call); the
+                     // banner is one-shot, so it reports the value at first solve.
+                     , (std::getenv("APXCHOL_BF16_STOCHASTIC") &&
+                        std::atoi(std::getenv("APXCHOL_BF16_STOCHASTIC")) != 0)
+                           ? "stochastic (APXCHOL_BF16_STOCHASTIC=1)" : "RNE"
+#else
+                     , "RNE"
+#endif
+#endif
+                     );
         return true;
     }();
     (void)printed;
@@ -410,7 +480,11 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
       else                              op_fp32_ = operator_is_fp32_exact(L); }
     if (op_fp32_) {
         Lrm_f_ = Lrm_.cast<float>();
-        Lrm_ = Eigen::SparseMatrix<double, Eigen::RowMajor>();   // free the fp64 copy (steady-state fp32)
+        // Free the fp64 copy (steady-state fp32). Swap-with-empty: assigning an
+        // empty SparseMatrix only resets the sizes and KEEPS the value/index
+        // buffers allocated (Eigen's CompressedStorage never shrinks), i.e.
+        // `Lrm_ = SparseMatrix()` left the full fp64 operator resident.
+        Eigen::SparseMatrix<double, Eigen::RowMajor>().swap(Lrm_);
     }
 
     // Memory breakdown of the major live arrays just before PCG (env-gated).
@@ -452,6 +526,7 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
                             const Eigen::VectorXd* x0) const {
     if (tol < 0.0)    tol = opts_.tol;
     if (max_iter < 0) max_iter = opts_.max_iter;
+    maybe_enable_ftz_daz();   // opt-in APXCHOL_FTZ=1, per-thread MXCSR (see above)
 
     // Preconditioned CG with stagnation detection.
     const Eigen::Index n = n_;

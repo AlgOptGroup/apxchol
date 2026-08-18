@@ -112,7 +112,9 @@ void process_vertex(const Eliminator& elim,
 
     if (nbrs.empty()) {
         double d = G.excess(v);
-        col = {v, d > 0.0 ? std::sqrt(d) : 1.0, {}};
+        col.vertex = v;
+        col.diag   = static_cast<factor_value_t>(d > 0.0 ? std::sqrt(d) : 1.0);
+        col.entries.clear();
         return;
     }
 
@@ -120,10 +122,10 @@ void process_vertex(const Eliminator& elim,
     if (total_deg <= 0.0) total_deg = 1.0;
     double sqrt_deg = std::sqrt(total_deg);
     col.vertex = v;
-    col.diag = sqrt_deg;
+    col.diag = static_cast<factor_value_t>(sqrt_deg);
     col.entries.reserve(nbrs.size());
     for (const auto& [u, w] : nbrs)
-        col.entries.emplace_back(u, w / sqrt_deg);
+        col.entries.emplace_back(u, static_cast<factor_value_t>(w / sqrt_deg));
 
     // Propagate excess to neighbors (deferred for thread safety). Runs BEFORE
     // sample_clique so the eliminator receives the neighbor span as dead
@@ -802,22 +804,15 @@ factorization factorize_impl(const Eliminator& elim,
     }
     if (cp) (*cp)("elim_remaining");
 
-    detail::build_csc(result, factor_cols, n, cp);
-
-    // Optional debugging hook: print final nnz(L) when env var is set.
-    // Useful for comparing factor fill across option settings without touching
-    // the caller.
-    if (const char* e = std::getenv("APXCHOL_DUMP_NNZ"); e && *e) {
-        std::fprintf(stderr, "[apxchol] nnz(L) = %zu\n",
-                     static_cast<size_t>(result.L.nonZeros()));
-    }
-
     // Quantify incidence-pool over-allocation: peak working-graph bytes vs the
     // factor's "useful" size, and the live fraction (1 - abandoned-slab share).
     // live_frac well below 1 => abandoned slabs dominate -> compaction would help.
+    // Read off the working graph HERE, before it is freed below (nnz(L) is the
+    // off-diagonal count + one diagonal per column -- what assemble_csc builds).
     if (const char* e = std::getenv("APXCHOL_MEM_DUMP"); e && *e) {
         const double MB = 1.0 / (1024.0 * 1024.0);
-        const size_t nnz = static_cast<size_t>(result.L.nonZeros());
+        size_t nnz = factor_cols.size();
+        for (const auto& c : factor_cols) nnz += c.entries.size();
         double live_frac = -1.0;
         if constexpr (std::is_same_v<Incidence, vec_pool_incidence> ||
                       std::is_same_v<Incidence, forward_star_incidence>)
@@ -836,6 +831,37 @@ factorization factorize_impl(const Eliminator& elim,
                 work.adj_min_live_fraction(), tot_edges,
                 tot_edges * sizeof(typename std::remove_cvref_t<decltype(work)>::edge) * MB);
         }
+    }
+
+    // ── Elimination is over: drop the elimination state BEFORE assembly ──
+    // Assembly reads only factor_cols (+ n). The residual graph (now at its
+    // largest: every clique edge ever added), the per-thread workspace (T
+    // vertex-indexed dedup buckets + edge buffers) and the round scratch are all
+    // dead here, yet they used to stay alive while assemble_csc allocated the
+    // factor's CSC on top of them -- and that overlap was the process peak
+    // (grid_2000: ~960 MB of dead state under a 200 MB assembly; iter0040:
+    // ~300 MB under 70 MB). Freeing them first moves the peak back to the
+    // elimination phase itself. Pure lifetime change: bit-identical output.
+    work = graph<Incidence>();
+    ws   = factorize_workspace();
+    sel  = selection();
+    std::vector<node_index>().swap(active);
+    std::vector<node_index>().swap(live_degrees);
+    std::vector<node_index>().swap(pre_degrees);
+    std::vector<node_index>().swap(pre_scratch);
+    std::vector<node_index>().swap(pre_eligible);
+
+    detail::build_csc(result, factor_cols, n, cp);
+    // The per-column lists are consumed: free them here (n small vectors + the
+    // header array), not at return.
+    std::vector<detail::factor_col>().swap(factor_cols);
+
+    // Optional debugging hook: print final nnz(L) when env var is set.
+    // Useful for comparing factor fill across option settings without touching
+    // the caller.
+    if (const char* e = std::getenv("APXCHOL_DUMP_NNZ"); e && *e) {
+        std::fprintf(stderr, "[apxchol] nnz(L) = %zu\n",
+                     static_cast<size_t>(result.L.nonZeros()));
     }
 
     if (cp) cp->ascend();

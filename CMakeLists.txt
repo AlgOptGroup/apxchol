@@ -72,6 +72,9 @@ option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge in
 option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
 option(APXCHOL_SPTRSV_FP32 "fp32 SpTRSV factor values, diagonal included (the PCG recurrence stays fp64; still converges to 1e-8); OFF gives an fp64 baseline" ON)
 option(APXCHOL_POOL_FP32 "fp32 residual-pool edge weights (reads promote to fp64; convergence unchanged); OFF gives an fp64 baseline" ON)
+set(APXCHOL_SPTRSV_LOWPREC "OFF" CACHE STRING "Low-precision SpTRSV factor-value STORAGE variant for the OFF-diagonals (diagonal kept exact fp32 in a separate array; reads widen to fp64 in registers, compute unchanged -- a preconditioner-quality knob: PCG still converges, maybe in more iters): OFF | BF16 (bfloat16, RNE; env APXCHOL_BF16_STOCHASTIC=1 selects unbiased stochastic rounding) | BF16_SCALED (bf16 of L_ij / s_j, per-column scale s_j = max |off-diagonal|) | FP16_SCALED (IEEE binary16 of L_ij / s_j; entries < 2^-25 of their column max flush to zero -- counted, printed under APXCHOL_VERBOSE) | FP24 (top 24 bits of fp32, 3 B/entry, no scaling). See include/apxchol/lowprec.h. CPU/omp backend only -- with APXCHOL_USE_CUDA=ON the value is treated as OFF for that build (fp32 CPU storage, STATUS message), never an error; takes precedence over APXCHOL_SPTRSV_FP32. Under FP16_SCALED stored fp16 subnormals are flushed to zero by default (env APXCHOL_FP16_KEEP_SUBNORMAL=1 keeps them). Every build honours the runtime env APXCHOL_FACTOR_DROP=<rel> (compacting drop: off-diagonals below rel * column max are REMOVED from the SpTRSV CSR/CSC at setup), APXCHOL_FTZ=1 (MXCSR FTZ+DAZ on every thread at PCG entry) and APXCHOL_FP16_GATHER=simd|scalar (fat-level kernel flavour of the 16-bit variants); FP16_SCALED also APXCHOL_FP16_DIAG=1 (divide by the fp16 diagonal slot; refused unless every slot is a normal fp16). The *_SCALED variants fold the scale into the vectors (forward_solve returns D y, transpose_solve takes it); see include/apxchol/solver/sptrsv/omp.h")
+set_property(CACHE APXCHOL_SPTRSV_LOWPREC PROPERTY STRINGS OFF BF16 BF16_SCALED FP16_SCALED FP24)
+option(APXCHOL_SPTRSV_BF16 "Deprecated alias for APXCHOL_SPTRSV_LOWPREC=BF16" OFF)
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 option(APXCHOL_BUILD_TOOLS "Build the developer analysis tools (bench_setup, analyze_factor)" OFF)
@@ -79,6 +82,31 @@ option(APXCHOL_BUILD_TOOLS "Build the developer analysis tools (bench_setup, ana
 if (APXCHOL_64BIT_INDICES)
     message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
     set(APXCHOL_64BIT_EDGE_INDICES ON)
+endif()
+
+# Normalise the low-precision variant: legacy alias, case, validity.
+string(TOUPPER "${APXCHOL_SPTRSV_LOWPREC}" APXCHOL_SPTRSV_LOWPREC)
+if (APXCHOL_SPTRSV_BF16)
+    if (APXCHOL_SPTRSV_LOWPREC STREQUAL "OFF")
+        set(APXCHOL_SPTRSV_LOWPREC "BF16")
+    elseif (NOT APXCHOL_SPTRSV_LOWPREC STREQUAL "BF16")
+        message(FATAL_ERROR "APXCHOL_SPTRSV_BF16=ON is an alias for APXCHOL_SPTRSV_LOWPREC=BF16 and conflicts with APXCHOL_SPTRSV_LOWPREC=${APXCHOL_SPTRSV_LOWPREC}.")
+    endif()
+endif()
+if (NOT APXCHOL_SPTRSV_LOWPREC MATCHES "^(OFF|BF16|BF16_SCALED|FP16_SCALED|FP24)$")
+    message(FATAL_ERROR "APXCHOL_SPTRSV_LOWPREC must be one of OFF, BF16, BF16_SCALED, FP16_SCALED, FP24 (got '${APXCHOL_SPTRSV_LOWPREC}').")
+endif()
+# CUDA builds have no low-precision SpTRSV path (the cuSPARSE backend is
+# fp32/fp64 only): with APXCHOL_USE_CUDA=ON any APXCHOL_SPTRSV_LOWPREC value is
+# TREATED AS OFF for this build -- CPU SpTRSV storage forced to fp32, no
+# APXCHOL_SPTRSV_LOWPREC_* macro defined -- with a STATUS line, instead of
+# failing the configure. So a LOWPREC default other than OFF (or a shared
+# cache / preset) can never break a CUDA build; the requested value stays in
+# the cache untouched (it is what the CPU builds of the same tree get). Same
+# rule in benchmarks/CMakeLists.txt.
+if (NOT APXCHOL_SPTRSV_LOWPREC STREQUAL "OFF" AND APXCHOL_USE_CUDA)
+    message(STATUS "APXCHOL_SPTRSV_LOWPREC=${APXCHOL_SPTRSV_LOWPREC} requested together with APXCHOL_USE_CUDA=ON: the CUDA backend has no low-precision SpTRSV path -- CPU SpTRSV storage forced to fp32 (APXCHOL_SPTRSV_LOWPREC treated as OFF) for this build")
+    set(APXCHOL_SPTRSV_LOWPREC "OFF")
 endif()
 
 if (APXCHOL_USE_CUDA)
@@ -151,6 +179,9 @@ if (APXCHOL_64BIT_NODE_INDICES)
 endif()
 if (APXCHOL_SPTRSV_FP32)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_SPTRSV_FP32)
+endif()
+if (NOT APXCHOL_SPTRSV_LOWPREC STREQUAL "OFF")
+    target_compile_definitions(apxchol_core PUBLIC APXCHOL_SPTRSV_LOWPREC_${APXCHOL_SPTRSV_LOWPREC})
 endif()
 if (APXCHOL_POOL_FP32)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_POOL_FP32)
