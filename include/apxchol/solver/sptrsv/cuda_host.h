@@ -4,7 +4,8 @@
 // into cuSPARSE's int32 arrays, the compacting factor drop (the shared
 // factor_drop.h implementation, the same one omp_sptrsv::setup runs), the
 // fp16 per-column-scaled narrowing of our kernel backends' opt-in fp16
-// storage (APXCHOL_GPU_SPTRSV_FP16=1), the CSR transpose, the level-set
+// storage (APXCHOL_GPU_SPTRSV_FP16=1), the CSR transpose (the shared
+// transpose.h implementation, the one omp_sptrsv::setup runs), the level-set
 // schedules and the dataflow batch tables. Deliberately CUDA-FREE (no cuda_runtime.h, no __half: fp16
 // values are IEEE binary16 BIT PATTERNS, std::uint16_t, produced by
 // lowprec.h's fp16_t -- the same RNE the CPU FP16_SCALED build uses -- and
@@ -32,6 +33,7 @@
 // sums to what the fp32 column sums to.
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
+#include "apxchol/solver/sptrsv/transpose.h"
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -234,24 +236,26 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
 }
 
 /// Transpose a square m x m CSR (values of any trivially copyable V). The
-/// level-set forward solve needs CSR of L (row access) while setup builds CSR
-/// of L^T (== the factor's CSC); this produces the one from the other. O(nnz);
-/// within each output row the input-row order is preserved (deterministic).
+/// dataflow / level-set forward solves need CSR of L (row access) while setup
+/// builds CSR of L^T (== the factor's CSC); this produces the one from the
+/// other. THE shared transpose (transpose.h -- the very code omp_sptrsv::setup
+/// runs for its CSC -> CSR): the blocked counting-sort parallel path, O(nnz)
+/// total work, for m > kParTransposeMinRows (APXCHOL_PAR_TRANSPOSE=0 disables
+/// it), the serial column-order scatter below; within each output row the
+/// input-row order is preserved on both paths, and the three arrays are
+/// byte-identical to the serial result at ANY thread count
+/// (SpTRSVTranspose.GpuHostTransposeIsByteIdenticalToSerialReference).
 template <class V>
 inline csr_int<V> transpose_csr(const csr_int<V>& in) {
     csr_int<V> out;
     out.m = in.m; out.nnz = in.nnz;
-    out.ptr.assign(static_cast<std::size_t>(in.m) + 1, 0);
-    for (std::int64_t p = 0; p < in.nnz; ++p) out.ptr[in.idx[p] + 1]++;
-    for (int i = 0; i < in.m; ++i) out.ptr[i + 1] += out.ptr[i];
+    out.ptr.resize(static_cast<std::size_t>(in.m) + 1);
     out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(in.nnz));
     out.vals = std::make_unique_for_overwrite<V[]>(static_cast<std::size_t>(in.nnz));
-    std::vector<int> pos(out.ptr.begin(), out.ptr.end());
-    for (int i = 0; i < in.m; ++i)
-        for (int p = in.ptr[i]; p < in.ptr[i + 1]; ++p) {
-            const int d = pos[in.idx[p]]++;
-            out.idx[d] = i; out.vals[d] = in.vals[p];
-        }
+    transpose_csc_to_csr<int, int, V, V>(
+        in.m, in.ptr.data(), in.idx.get(), in.vals.get(),
+        out.ptr.data(), out.idx.get(), out.vals.get(),
+        [](V v, int) { return v; }, use_parallel_transpose(in.m));
     return out;
 }
 

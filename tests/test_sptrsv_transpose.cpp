@@ -1,12 +1,15 @@
-// Byte-identity tests for the parallel CSC→CSR transpose in omp_sptrsv::setup.
+// Byte-identity tests for the shared CSC→CSR transpose (transpose.h) through
+// BOTH its callers: omp_sptrsv::setup (the CPU SpTRSV's CSR of L11) and
+// cuda_host::transpose_csr (the GPU backend's host prep: CSR of L from CSR of
+// L^T, int32 arrays, plain value copy).
 //
 // The blocked counting-sort transpose (APXCHOL_PAR_TRANSPOSE, engaged for
-// m > 50000) must produce a CSR that is byte-identical to the classic serial
-// count/prefix/scatter transpose — same csr_row_ptr_, same csr_col_idx_
-// (ascending column order within every row), same csr_vals_ bit patterns —
-// for ANY thread count. These tests build a random sparse lower-triangular
-// factor big enough to engage the parallel path and compare against an
-// independent serial reference at several thread counts.
+// m > kParTransposeMinRows = 50000) must produce a CSR that is byte-identical
+// to the classic serial count/prefix/scatter transpose — same row pointers,
+// same column indices (ascending column order within every row), same value
+// bit patterns — for ANY thread count. These tests build a random sparse
+// lower-triangular factor big enough to engage the parallel path and compare
+// against an independent serial reference at several thread counts.
 
 #include <gtest/gtest.h>
 #include <cstring>
@@ -17,6 +20,7 @@
 #endif
 
 #include "apxchol/sparse_csc.h"
+#include "apxchol/solver/sptrsv/cuda_host.h"
 #include "apxchol/solver/sptrsv/omp.h"
 
 using apxchol::edge_index;
@@ -170,6 +174,106 @@ TEST(SpTRSVTranspose, RowsAreAscendingWithDiagonalLast) {
             ASSERT_LT(col_idx[p - 1], col_idx[p]) << "row " << i;
         EXPECT_EQ(col_idx[row_ptr[i + 1] - 1], i) << "diagonal not last in row " << i;
     }
+}
+
+// ── The GPU backend's host transpose (cuda_host::transpose_csr) ─────────
+// The same shared implementation on int32 arrays with a plain value copy:
+// byte-identical to an independent serial reference on the parallel path
+// (m > 50000) at every thread count, and on the serial path.
+namespace {
+
+template <class V>
+struct ref_csr_int {
+    std::vector<int> ptr, idx;
+    std::vector<V>   vals;
+};
+
+template <class V>
+ref_csr_int<V> reference_transpose_int(const apxchol::cuda_host::csr_int<V>& A) {
+    ref_csr_int<V> R;
+    R.ptr.assign(static_cast<size_t>(A.m) + 1, 0);
+    for (std::int64_t p = 0; p < A.nnz; ++p) R.ptr[A.idx[p] + 1]++;
+    for (int i = 0; i < A.m; ++i) R.ptr[i + 1] += R.ptr[i];
+    R.idx.resize(static_cast<size_t>(A.nnz));
+    R.vals.resize(static_cast<size_t>(A.nnz));
+    std::vector<int> pos(R.ptr.begin(), R.ptr.end());
+    for (int i = 0; i < A.m; ++i)
+        for (int p = A.ptr[i]; p < A.ptr[i + 1]; ++p) {
+            const int d = pos[A.idx[p]]++;
+            R.idx[d] = i; R.vals[d] = A.vals[p];
+        }
+    return R;
+}
+
+template <class V>
+void expect_gpu_transpose_identical(const apxchol::cuda_host::csr_int<V>& LT, const ref_csr_int<V>& R,
+                                    int threads) {
+    SCOPED_TRACE("threads=" + std::to_string(threads));
+    const auto Lc = apxchol::cuda_host::transpose_csr(LT);
+    ASSERT_EQ(Lc.m, LT.m);
+    ASSERT_EQ(Lc.nnz, LT.nnz);
+    ASSERT_EQ(Lc.ptr.size(), R.ptr.size());
+    EXPECT_EQ(0, std::memcmp(Lc.ptr.data(), R.ptr.data(), R.ptr.size() * sizeof(int)));
+    EXPECT_EQ(0, std::memcmp(Lc.idx.get(), R.idx.data(), R.idx.size() * sizeof(int)));
+    EXPECT_EQ(0, std::memcmp(Lc.vals.get(), R.vals.data(), R.vals.size() * sizeof(V)));
+}
+
+} // namespace
+
+TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThreadCounts) {
+    const node_index m = 70000;   // > 50000: parallel path
+    sparse_csc L = make_random_lower(m, 4.0, /*seed=*/12345);
+    // The GPU backend's int32 CSC of L11 (== CSR of L^T), fp32 values, and its
+    // fp16 bit-pattern twin (the fp16 storage transposes uint16_t values).
+    const auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
+    apxchol::cuda_host::csr_int<std::uint16_t> LT16;
+    LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
+    LT16.idx  = std::make_unique<int[]>(static_cast<size_t>(LT.nnz));
+    LT16.vals = std::make_unique<std::uint16_t[]>(static_cast<size_t>(LT.nnz));
+    for (std::int64_t p = 0; p < LT.nnz; ++p) {
+        LT16.idx[p]  = LT.idx[p];
+        LT16.vals[p] = static_cast<std::uint16_t>((static_cast<std::uint64_t>(p) * 2654435761ull) >> 16);   // arbitrary bit patterns
+    }
+    const auto R   = reference_transpose_int(LT);
+    const auto R16 = reference_transpose_int(LT16);
+    ASSERT_GT(LT.nnz, static_cast<std::int64_t>(4) * m);
+
+#ifdef _OPENMP
+    const int max_threads = omp_get_max_threads();
+    for (int threads : {1, 2, 3, 4, max_threads}) {
+        omp_set_num_threads(threads);
+        expect_gpu_transpose_identical(LT, R, threads);
+        expect_gpu_transpose_identical(LT16, R16, threads);
+    }
+    omp_set_num_threads(max_threads);
+#else
+    expect_gpu_transpose_identical(LT, R, 1);
+    expect_gpu_transpose_identical(LT16, R16, 1);
+#endif
+    // And it IS the CPU backend's CSR of L11 (same shared code, same input):
+    // row pointers, column indices, values (fp32 storage: a plain cast).
+    apxchol::omp_sptrsv trsv;
+    trsv.setup(L, m);
+    ASSERT_EQ(trsv.csr_row_ptr().size(), R.ptr.size());
+    for (node_index i = 0; i <= m; ++i)
+        ASSERT_EQ(static_cast<edge_index>(R.ptr[i]), trsv.csr_row_ptr()[i]) << "row_ptr " << i;
+    std::uint64_t mism = 0;
+    for (std::int64_t k = 0; k < LT.nnz; ++k)
+        mism += static_cast<node_index>(R.idx[k]) != trsv.csr_col_idx()[k];
+    EXPECT_EQ(mism, 0u);
+#if !defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+    for (std::int64_t k = 0; k < LT.nnz; ++k)
+        mism += !(static_cast<sptrsv_value_t>(R.vals[k]) == trsv.csr_vals()[k]);
+    EXPECT_EQ(mism, 0u);
+#endif
+}
+
+TEST(SpTRSVTranspose, GpuHostTransposeSerialPathMatchesReference) {
+    const node_index m = 20000;   // <= 50000: serial path
+    sparse_csc L = make_random_lower(m, 5.0, /*seed=*/4242);
+    const auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
+    const auto R  = reference_transpose_int(LT);
+    expect_gpu_transpose_identical(LT, R, 0);
 }
 
 // The serial fallback (m <= 50000) must agree with the reference too.
