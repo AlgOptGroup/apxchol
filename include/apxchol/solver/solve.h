@@ -3,6 +3,7 @@
 #include "apxchol/solver/preconditioner.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <vector>
 
 namespace apxchol {
 
@@ -111,6 +112,9 @@ private:
     // Reused PCG workspace (lazily sized). Makes repeated solves allocation-
     // free; shared state — concurrent solves on one cpu_solver are a race.
     mutable Eigen::VectorXd r_, z_, p_, Ap_;
+    // Per-thread partial sums of the fused PCG kernels' deterministic
+    // reductions (one cache line per thread; sized to the max team on use).
+    mutable std::vector<double> part_;
     // Row-major FULL symmetric operator for the parallel SpMV; exactly one of
     // the two is populated (fp32 when every value round-trips float losslessly).
     Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm_;

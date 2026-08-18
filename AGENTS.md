@@ -62,7 +62,11 @@ This dispatches storage from the `graph_storage` enum and the partitioner by nam
 
 ### Eigen integration
 
-`apx_cholesky` (`include/apxchol/solver/preconditioner.h`) inherits `Eigen::SparseSolverBase` and is meant to be plugged into `Eigen::ConjugateGradient<SpMat, UpLo, apxchol::apx_cholesky>`. `analyzePattern` is a no-op; `factorize` calls into `apxchol::factorize` and then sets up the SpTRSV backend.
+`apx_cholesky` (`include/apxchol/solver/preconditioner.h`) inherits `Eigen::SparseSolverBase` and is meant to be plugged into `Eigen::ConjugateGradient<SpMat, UpLo, apxchol::apx_cholesky>`. `analyzePattern` is a no-op; `factorize` calls into `apxchol::factorize` and then sets up the SpTRSV backend. Both `_solve_impl` (the Eigen entry) and `apply_fused` (the PCG-loop entry used by `cpu_solver`: takes Σr, returns r·z) share one body, `apply_core`.
+
+### PCG loop: fused, deterministic vector kernels
+
+`cpu_solver::solve_impl` (`src/solve.cpp`) is not a chain of Eigen expressions: each iteration is four fused, OpenMP-parallel passes — `spmv+pAp` (p·Ap folded into the SpMV row loop), `update_xr_norm` (x += αp, r −= αAp, r·r, Σr in one pass), the preconditioner application (`pcg.solve.{permute,forward,back,unpermute+rz}`: input centering fused into the permute scatter, output re-centering + r·z fused into the unpermute gather), and `update_p`. Those are also the checkpoint labels under `pcg.*`. Every reduction uses the scheme in `preconditioner.h` `detail::` (fixed `static_chunk` partition, per-thread partials summed in thread order — never a `reduction()` clause), so results are bit-identical run to run for a fixed thread count (they differ across thread counts at fp-rounding level, like every other parallel pass). `PcgFusion.*` in `tests/test_factorize.cpp` guards this; keep new vector passes on the same scheme.
 
 ### Laplacian vs SDDM rank
 
