@@ -5,13 +5,9 @@
 //     transpose_solve return the SAME BYTES at every thread count (in place
 //     and out of place) -- the thin `omp single` path, the fat `omp for` path
 //     and the fat SIMD path (16-bit storage) included;
-//   * the two schedule experiments -- APXCHOL_SPTRSV_BALANCE=nnz (fat levels
-//     split by nnz, tables cached per team size and rebuilt inside a solve
-//     when the team changes) and APXCHOL_SPTRSV_AGGLOMERATE=<K> (runs of thin
-//     levels as one barrier-free superstep) -- change only the schedule, so
-//     they return the SAME BYTES as the default at every thread count, and the
-//     env is read at setup (reported by balance_nnz() / agglomerate());
-//   * anchored to a correct solve: the default-schedule T=1 result satisfies
+//   * one barrier per level (num_barriers() == the level count, both
+//     directions);
+//   * anchored to a correct solve: the T=1 result satisfies
 //     the stored factor's triangular system to double roundoff (so the chain
 //     of identities above is a chain of correct solves), stated through the
 //     public storage contract (narrow_value / stored_diag / inv_scale) exactly
@@ -227,12 +223,10 @@ void set_threads(int t) {
 
 } // namespace
 
-// Default schedule: the same bytes at every thread count, both shapes, both
-// directions, in and out of place; anchored to a correct solve at T=1.
+// The same bytes at every thread count, both shapes, both directions, in and
+// out of place; anchored to a correct solve at T=1.
 TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");   // state the storage contract on the un-dropped factor
-    scoped_env no_bal("APXCHOL_SPTRSV_BALANCE", nullptr);
-    scoped_env no_agg("APXCHOL_SPTRSV_AGGLOMERATE", nullptr);
     const std::vector<int> T = thread_counts();
     const int t_max = T.back();
 
@@ -242,13 +236,12 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
         const node_index m = L.rows();
         apxchol::omp_sptrsv trsv;
         trsv.setup(L, m);
-        EXPECT_FALSE(trsv.balance_nnz());
-        EXPECT_EQ(trsv.agglomerate(), -1);
         for (bool fwd : {true, false}) {
             const level_shape s = shape(trsv, fwd);
             ASSERT_GT(s.fat, 3u) << "fwd=" << fwd;                 // both kernel paths run
             ASSERT_GT(s.thin, 100u) << "fwd=" << fwd;
-            ASSERT_GT(s.longest_thin_run, 50u) << "fwd=" << fwd;   // real supersteps for the agglomerate test
+            ASSERT_GT(s.longest_thin_run, 50u) << "fwd=" << fwd;   // a long single-thread tail of `omp single` levels
+            EXPECT_EQ(trsv.num_barriers(fwd), s.levels);           // one barrier per level
         }
         const auto x = random_x(m, 1);
         set_threads(1);
@@ -270,6 +263,7 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
         for (bool fwd : {true, false}) {
             const level_shape s = shape(trsv, fwd);
             ASSERT_EQ(s.levels, 8u); ASSERT_EQ(s.thin, 0u);
+            EXPECT_EQ(trsv.num_barriers(fwd), 8u);
         }
         const auto x = random_x(m, 2);
         set_threads(1);
@@ -281,98 +275,4 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
         }
     }
     set_threads(t_max);
-}
-
-// The schedule experiments return the default's bytes at every thread count.
-// BALANCE=nnz builds its tables at setup for omp_get_max_threads() and rebuilds
-// them inside the solve for any other team (T = 1..4 here); AGGLOMERATE=0
-// (whole thin runs) and =3 (capped supersteps) both cover the barrier-free
-// multi-level `omp single`; the pair with both on covers their interaction.
-TEST(SpTRSVLevelset, ScheduleExperimentsAreBitIdenticalToDefault) {
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
-    const std::vector<int> T = thread_counts();
-    const int t_max = T.back();
-    set_threads(t_max);
-
-    const sparse_csc L = make_mixed(60000, 60, 400, 12345);
-    const node_index m = L.rows();
-    const auto x = random_x(m, 1);
-    apxchol::omp_sptrsv dflt;
-    {
-        scoped_env no_bal("APXCHOL_SPTRSV_BALANCE", nullptr);
-        scoped_env no_agg("APXCHOL_SPTRSV_AGGLOMERATE", nullptr);
-        dflt.setup(L, m);
-    }
-    std::vector<pair_out> ref;
-    for (int t : T) { set_threads(t); ref.push_back(solve_pair(dflt, x)); }
-    set_threads(t_max);
-
-    struct mode { const char* bal; const char* agg; bool want_bal; int want_agg; };
-    for (const mode& md : {mode{"nnz", nullptr, true, -1}, mode{nullptr, "0", false, 0},
-                           mode{nullptr, "3", false, 3},   mode{"nnz", "0", true, 0}}) {
-        const std::string tag = std::string("BALANCE=") + (md.bal ? md.bal : "<unset>") +
-                                " AGGLOMERATE=" + (md.agg ? md.agg : "<unset>");
-        SCOPED_TRACE(tag);
-        apxchol::omp_sptrsv trsv;
-        {
-            scoped_env bal("APXCHOL_SPTRSV_BALANCE", md.bal);
-            scoped_env agg("APXCHOL_SPTRSV_AGGLOMERATE", md.agg);
-            trsv.setup(L, m);
-        }
-        EXPECT_EQ(trsv.balance_nnz(), md.want_bal);
-        EXPECT_EQ(trsv.agglomerate(), md.want_agg);
-        // Same level structure (the schedule does not touch the level sets);
-        // the barrier count is what AGGLOMERATE changes: off = one per level,
-        // 0 = one per fat level + one per run of thin levels, K = runs cut at K.
-        for (bool fwd : {true, false}) {
-            std::vector<int> a, b; std::vector<long long> wa, wb;
-            dflt.level_stats(fwd, a, wa); trsv.level_stats(fwd, b, wb);
-            ASSERT_EQ(a, b);
-            const level_shape s = shape(dflt, fwd);
-            ASSERT_EQ(dflt.num_barriers(fwd), s.levels);
-            if (md.want_agg < 0)       EXPECT_EQ(trsv.num_barriers(fwd), s.levels);
-            else if (md.want_agg == 0) { EXPECT_LT(trsv.num_barriers(fwd), s.fat + s.thin / 50); EXPECT_GE(trsv.num_barriers(fwd), s.fat + 1); }
-            else                       { EXPECT_LT(trsv.num_barriers(fwd), s.levels); EXPECT_GE(trsv.num_barriers(fwd), s.fat + (s.thin + md.want_agg - 1) / md.want_agg); }
-        }
-        for (std::size_t i = 0; i < T.size(); ++i) {
-            set_threads(T[i]);
-            expect_same_bytes(ref[i], solve_pair(trsv, x), (tag + " T=" + std::to_string(T[i])).c_str());
-        }
-        // Back at the setup team size after the rebuilds (cache is per team size).
-        set_threads(t_max);
-        expect_same_bytes(ref.back(), solve_pair(trsv, x), (tag + " T=max after rebuilds").c_str());
-    }
-    set_threads(t_max);
-}
-
-// A malformed BALANCE value is ignored (default schedule), a negative
-// AGGLOMERATE is off; a fresh setup re-reads both.
-TEST(SpTRSVLevelset, EnvContract) {
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
-    std::vector<node_index> bounds;
-    const sparse_csc L = make_round(3, 2 * apxchol::kSpTRSVOMPThreshold, 99, bounds);
-    const node_index m = L.rows();
-    apxchol::omp_sptrsv trsv;
-    trsv.set_round_bounds(bounds);
-    {
-        scoped_env bal("APXCHOL_SPTRSV_BALANCE", "bogus");
-        scoped_env agg("APXCHOL_SPTRSV_AGGLOMERATE", "-5");
-        trsv.setup(L, m);
-        EXPECT_FALSE(trsv.balance_nnz());
-        EXPECT_EQ(trsv.agglomerate(), -1);
-    }
-    {
-        scoped_env bal("APXCHOL_SPTRSV_BALANCE", "nnz");
-        scoped_env agg("APXCHOL_SPTRSV_AGGLOMERATE", "8");
-        trsv.setup(L, m);
-        EXPECT_TRUE(trsv.balance_nnz());
-        EXPECT_EQ(trsv.agglomerate(), 8);
-    }
-    {
-        scoped_env bal("APXCHOL_SPTRSV_BALANCE", "rows");
-        scoped_env agg("APXCHOL_SPTRSV_AGGLOMERATE", "");
-        trsv.setup(L, m);
-        EXPECT_FALSE(trsv.balance_nnz());
-        EXPECT_EQ(trsv.agglomerate(), -1);
-    }
 }

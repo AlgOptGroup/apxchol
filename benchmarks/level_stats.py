@@ -12,8 +12,8 @@ omp_sptrsv -- level-set won everywhere; power-law graphs have a tiny average
 level size but a fat work head). The "syncfree_candidate" column keeps that
 screen's verdict for continuity: work genuinely SPREAD across many tiny levels
 with NO dominant head, i.e. bck_work_in_tiny_frac HIGH AND bck_work_top1_frac
-LOW. The dump also prints per-direction thin-level counts and thin-run length
-histograms (what APXCHOL_SPTRSV_AGGLOMERATE acts on) on extra "[trsv-levels]
+LOW. The dump also prints per-direction thin-level counts, thin-run length
+histograms and barriers/solve (one per level) on extra "[trsv-levels]
 fwd:/bck:" lines. Writes results/level_stats.csv. Run from repo root:
   python3 benchmarks/level_stats.py
 """

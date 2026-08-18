@@ -56,41 +56,30 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// Levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
 /// `omp single` (4-way scalar kernel dot_thin); larger ("fat") levels are an
 /// `omp for schedule(static)` (plain scalar loop on fp32/fp64, SIMD
-/// dot_fat_simd on fp16 storage). Two schedule experiments sit behind envs
-/// (both read at every setup, both DEFAULT OFF = the behaviour just described,
-/// both bit-identical to it -- the per-row arithmetic never changes, only
-/// which thread runs a row when and how many barriers there are):
-///   APXCHOL_SPTRSV_BALANCE=nnz    fat levels: instead of `omp for
-///     schedule(static)` (contiguous, equal ROW counts per thread) every thread
-///     takes a contiguous range of the level's rows holding an equal share of
-///     the level's NNZ (prefix over row lengths; a row is never split), then a
-///     barrier. The ranges are computed once per (level, team size) and cached
-///     (bal_off_ of each direction, bal_team_); a team of a different size
-///     recomputes them at the start of the solve. Deterministic per thread
-///     count. Motivation: `schedule(dynamic, 64)` gave -20% SpTRSV on IPM but
-///     +23% on grids -- nnz balancing should keep the IPM gain (rows of very
-///     unequal length within a level) without the grid loss.
-///   APXCHOL_SPTRSV_AGGLOMERATE=<K> thin levels: a run of consecutive thin
-///     levels is one SUPERSTEP -- one `omp single` runs the whole run, level
-///     after level, with NO barrier in between (a row of level k+1 depends only
-///     on levels <= k, all of which the same thread has already written in
-///     program order), one barrier at the end. K > 0 caps a superstep at K
-///     levels (bounds the time the other threads idle), K = 0 = the full run.
-///     Removes most of the barriers of the long thin tail: measured with
-///     APXCHOL_LEVEL_DUMP (bg+tree, T=16; the racy block_greedy makes the
-///     level count vary run to run), iter0040 has 100-185 levels per direction
-///     of which 60-94 (all but the ~36-41 fat ones) are thin and form ONE
-///     contiguous run (130 levels / 94 thin with a serial elimination),
-///     grid_2000 84-92 levels / 54-61 thin, one run (+ one isolated thin
-///     level); AGGLOMERATE=0 therefore leaves fat + 1 barriers per solve. Off =
-///     every thin level its own single + barrier (step_end_[l] == l + 1).
+/// dot_fat_simd on fp16 storage); one barrier per level either way
+/// (num_barriers()). A solve is a pure gather -- each row's arithmetic is
+/// independent of which thread runs it and when -- so both sweeps return the
+/// SAME BYTES at every thread count (tests/test_sptrsv_levelset.cpp).
 ///
-/// The sync-free (Liu/Smelyanskiy/Chow 2016) back solve that used to sit
-/// behind APXCHOL_BCK_SCHED=syncfree was REMOVED: paired A/B across the suite
-/// never showed it winning on any factor the elimination produces (power-law
-/// factors have a tiny AVERAGE level size, but a few very fat early levels
-/// carry nearly all the work), and the point-to-point experiment showed the
-/// barrier COUNT is not what the wall time is made of.
+/// Two schedule experiments were tried against this and REMOVED 2026-08-18
+/// as negative results (neither beat the schedule above; both were
+/// bit-identical to it): APXCHOL_SPTRSV_BALANCE=nnz (fat levels split into
+/// per-thread contiguous row ranges of equal stored-entry counts, cached per
+/// team size, instead of `omp for schedule(static)` by row count -- the
+/// motivation was `schedule(dynamic, 64)`'s -20% SpTRSV on IPM at +23% on
+/// grids) and APXCHOL_SPTRSV_AGGLOMERATE=<K> (runs of consecutive thin levels
+/// as one barrier-free `omp single` superstep -- iter0040 has 60-94 thin
+/// levels per direction in ONE contiguous run, grid_2000 54-61, so this
+/// removed most of a solve's barriers: iter0040 ~37-42 instead of ~100-130).
+/// Same verdict as the sync-free (Liu/Smelyanskiy/Chow 2016) back solve that
+/// used to sit behind APXCHOL_BCK_SCHED=syncfree, removed before them: paired
+/// A/B across the suite never showed it winning on any factor the
+/// elimination produces (power-law factors have a tiny AVERAGE level size,
+/// but a few very fat early levels carry nearly all the work), and the
+/// point-to-point experiment showed the barrier COUNT is not what the wall
+/// time is made of. APXCHOL_LEVEL_DUMP=1 still prints the thin-level counts
+/// and thin-run length histogram per direction (the structure those
+/// experiments targeted) next to the work-concentration signals.
 
 // sptrsv_value_t (fp16_t under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED, fp32
 // under -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in sparse_csc.h (the
@@ -1162,42 +1151,6 @@ private:
         mark("bck_levels");
         }
 
-        // ── Schedule experiments (see the class comment): read at every setup ──
-        // APXCHOL_SPTRSV_AGGLOMERATE=<K>: unset / empty -> off (every thin level
-        // its own superstep); "0" -> a superstep is a whole run of thin levels;
-        // K > 0 -> at most K levels per superstep. APXCHOL_SPTRSV_BALANCE=nnz
-        // -> fat levels split by nnz instead of `omp for schedule(static)`.
-        agglomerate_ = [] {
-            const char* e = std::getenv("APXCHOL_SPTRSV_AGGLOMERATE");
-            if (!e || !*e) return -1;
-            const int k = std::atoi(e);
-            return k < 0 ? -1 : k;
-        }();
-        balance_nnz_ = [] {
-            const char* e = std::getenv("APXCHOL_SPTRSV_BALANCE");
-            if (!e || !*e) return false;
-            const std::string_view v(e);
-            if (v == "nnz") return true;
-            if (v == "rows" || v == "0" || v == "off") return false;
-            std::fprintf(stderr, "[apxchol] APXCHOL_SPTRSV_BALANCE=%s ignored (expected nnz|rows); using rows\n", e);
-            return false;
-        }();
-        build_step_ends(fwd_levels_, fwd_step_end_);
-        build_step_ends(bck_levels_, bck_step_end_);
-        // nnz-balance tables for the team size a solve will most likely see;
-        // solve_levelset rebuilds them if its team differs (bal_team_).
-        bal_team_ = 0;
-        fwd_bal_off_.clear(); bck_bal_off_.clear();
-        if (balance_nnz_) {
-#ifdef _OPENMP
-            const int nt = omp_get_max_threads();
-#else
-            const int nt = 1;
-#endif
-            build_balance_tables(nt);
-        }
-        mark("schedule_tables");
-
         if (const char* e = std::getenv("APXCHOL_LEVEL_DUMP"); e && *e) {
             long long fwd_max = 0, bck_max = 0;
             for (auto& l : fwd_levels_) fwd_max = std::max<long long>(fwd_max, (long long)l.size());
@@ -1227,12 +1180,10 @@ private:
                 "bck_work_top1_frac=%.4f bck_work_in_tiny_frac=%.4f\n",
                 (long long)m_, fwd_levels_.size(), fwd_max, bck_levels_.size(), bck_max,
                 top1, tiny);
-            // Thin-level structure (what APXCHOL_SPTRSV_AGGLOMERATE acts on):
-            // per direction, the number of levels of size <= kSpTRSVOMPThreshold
-            // (each an `omp single` + barrier), and the length distribution of
-            // the RUNS of consecutive thin levels (a run = one superstep under
-            // AGGLOMERATE=0), as "len:count" pairs. Fat levels are the barriers
-            // that stay either way.
+            // Thin-level structure: per direction, the number of levels of size
+            // <= kSpTRSVOMPThreshold (each an `omp single` + barrier), and the
+            // length distribution of the RUNS of consecutive thin levels (the
+            // single-thread tail of a solve), as "len:count" pairs.
             for (const auto* lv : {&fwd_levels_, &bck_levels_}) {
                 std::size_t thin_n = 0, fat_n = 0, runs = 0;
                 std::vector<std::pair<std::size_t, std::size_t>> hist;   // (run length, count), by length
@@ -1251,10 +1202,10 @@ private:
                 flush();
                 std::sort(hist.begin(), hist.end());
                 std::fprintf(stderr, "[trsv-levels] %s: levels=%zu thin(<=%u)=%zu fat=%zu thin_runs=%zu barriers/solve=%zu"
-                             " (agglomerate=%d) run_lengths(len:count)=",
+                             " run_lengths(len:count)=",
                              lv == &fwd_levels_ ? "fwd" : "bck", lv->size(),
                              static_cast<unsigned>(kSpTRSVOMPThreshold), thin_n, fat_n, runs,
-                             num_barriers(lv == &fwd_levels_), agglomerate_);
+                             num_barriers(lv == &fwd_levels_));
                 for (const auto& h : hist) std::fprintf(stderr, " %zu:%zu", h.first, h.second);
                 std::fprintf(stderr, "\n");
             }
@@ -1283,12 +1234,6 @@ public:
         solve_levelset<bck_dir>(x_in, y_out);
     }
 
-    // Whether the last setup() resolved APXCHOL_SPTRSV_BALANCE=nnz (fat levels
-    // split by nnz) and APXCHOL_SPTRSV_AGGLOMERATE (superstep cap; -1 = off,
-    // 0 = whole runs of thin levels, K > 0 = at most K levels per superstep).
-    bool balance_nnz() const { return balance_nnz_; }
-    int  agglomerate() const { return agglomerate_; }
-
 private:
     // ── THE level-set kernel (both directions) ─────────────────────────
     //
@@ -1310,77 +1255,36 @@ private:
     // guarantee that level k+1 reads y_out written by level k -- collapses
     // that to one fork-join per solve.
     //
-    // Schedules (see the class comment; both default OFF, both bit-identical):
-    //   fat level, default:      `omp for schedule(static)` over the level's rows;
-    //   fat level, balance_nnz_: thread t runs rows [off[t], off[t+1]) of the
-    //                            level's nnz-balanced split, then a barrier;
-    //   thin levels:             `omp single` over the SUPERSTEP [l, step_end[l])
-    //                            -- one level unless agglomerate_ >= 0.
+    // Schedule: thin level -> `omp single` over its rows (one thread, level
+    // order); fat level -> `omp for schedule(static)` over its rows; the
+    // implicit barrier of each carries the level dependency.
     template <class Dir>
     void solve_levelset(const double* x_in, double* y_out) const {
-        const auto& levels   = Dir::levels(*this);
-        const auto& step_end = Dir::step_end(*this);
-        const std::size_t L  = levels.size();
-        assert(step_end.size() == L);
+        const auto& levels  = Dir::levels(*this);
+        const std::size_t L = levels.size();
         #pragma omp parallel
         {
-#ifdef _OPENMP
-            const int nt  = omp_get_num_threads();
-            const int tid = omp_get_thread_num();
-#else
-            const int nt = 1, tid = 0;
-#endif
-            if (balance_nnz_ && bal_team_ != nt) {
-                #pragma omp single
-                build_balance_tables(nt);      // mutable cache; implicit barrier publishes it
-            }
-            const node_index* bal = balance_nnz_ ? Dir::bal_off(*this).data() : nullptr;
-            for (std::size_t l = 0; l < L; ) {
+            for (std::size_t l = 0; l < L; ++l) {
                 const auto& level = levels[l];
                 const node_index level_sz = static_cast<node_index>(level.size());
+                const node_index* lv = level.data();
                 if (level_sz <= kSpTRSVOMPThreshold) {
-                    // Superstep of thin levels [l, l_end): one thread, in
-                    // level order, no barrier in between (each level's rows
-                    // depend only on levels < it, all written by this thread
-                    // or before the previous barrier), one barrier at the end.
-                    const std::size_t l_end = step_end[l];
                     #pragma omp single
-                    {
-                        for (std::size_t q = l; q < l_end; ++q) {
-                            const auto& lv = levels[q];
-                            const node_index sz = static_cast<node_index>(lv.size());
-                            solve_rows<Dir, /*Fat=*/false>(lv.data(), 0, sz, sz, x_in, y_out);
-                        }
-                    } // implicit barrier
-                    l = l_end;
-                } else if (bal) {
-                    const node_index* off = bal + l * static_cast<std::size_t>(nt + 1);
-                    solve_rows<Dir, /*Fat=*/true>(level.data(), off[tid], off[tid + 1], level_sz, x_in, y_out);
-                    #pragma omp barrier
-                    ++l;
+                    for (node_index k = 0; k < level_sz; ++k) {
+                        prefetch_ahead<Dir>(lv, k, level_sz);
+                        solve_row<Dir, /*Fat=*/false>(lv[k], x_in, y_out);
+                    } // implicit barrier on omp single
                 } else {
-                    const node_index* lv = level.data();
                     #pragma omp for schedule(static)
                     for (node_index k = 0; k < level_sz; ++k) {
                         prefetch_ahead<Dir>(lv, k, level_sz);
                         solve_row<Dir, /*Fat=*/true>(lv[k], x_in, y_out);
                     } // implicit barrier on omp for
-                    ++l;
                 }
             }
         }
     }
 
-    // Rows level[k0..k1) of a level of level_sz rows (the prefetch looks ahead
-    // in the whole level, past k1 -- harmless, and what `omp for` always did).
-    template <class Dir, bool Fat>
-    void solve_rows(const node_index* level, node_index k0, node_index k1, node_index level_sz,
-                    const double* x_in, double* y_out) const {
-        for (node_index k = k0; k < k1; ++k) {
-            prefetch_ahead<Dir>(level, k, level_sz);
-            solve_row<Dir, Fat>(level[k], x_in, y_out);
-        }
-    }
     // Two-stage prefetch: pull the row-pointer of the row 8 ahead (cheap ptr[]
     // load), the nnz payload (idx / vals) of the row 4 ahead, where most of
     // the cache-miss stalls occur.
@@ -1396,82 +1300,13 @@ private:
         }
     }
 
-    // Superstep table of one direction: step_end[l] = first level index NOT in
-    // the superstep that STARTS at thin level l (fat levels: l + 1, unused). A
-    // run of consecutive thin levels [a, r) is cut into supersteps of at most
-    // agglomerate_ levels (0 = the whole run); agglomerate_ < 0 (off) makes
-    // every superstep one level -- the pre-experiment schedule.
-    void build_step_ends(const std::vector<std::vector<node_index>>& levels,
-                         std::vector<std::size_t>& step_end) const {
-        const std::size_t L = levels.size();
-        step_end.resize(L);
-        auto thin = [&](std::size_t l) { return levels[l].size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold); };
-        for (std::size_t l = 0; l < L; ) {
-            if (!thin(l) || agglomerate_ < 0) { step_end[l] = l + 1; ++l; continue; }
-            std::size_t r = l;
-            while (r < L && thin(r)) ++r;                     // run of thin levels [l, r)
-            for (std::size_t q = l; q < r; ++q) {
-                std::size_t e = r;
-                if (agglomerate_ > 0)
-                    e = std::min<std::size_t>(r, q + static_cast<std::size_t>(agglomerate_));
-                step_end[q] = e;
-            }
-            l = r;
-        }
-    }
-    // nnz-balance tables of BOTH directions for a team of nt threads: for every
-    // level l, nt + 1 offsets into the level's row list such that thread t
-    // takes rows [off[t], off[t+1]) and the ranges hold (as nearly as whole
-    // rows allow) equal shares of the level's stored entries (row length ==
-    // ptr[v+1] - ptr[v]). Only fat levels are split (thin levels: all zeros,
-    // never read). Deterministic in (level, nt). O(m) per direction.
-    void build_balance_tables(int nt) const {
-        auto build = [&](const std::vector<std::vector<node_index>>& levels, const edge_index* ptr,
-                         std::vector<node_index>& off) {
-            const std::size_t L = levels.size();
-            const std::size_t W = static_cast<std::size_t>(nt) + 1;
-            off.assign(L * W, 0);
-            for (std::size_t l = 0; l < L; ++l) {
-                const auto& lv = levels[l];
-                const node_index sz = static_cast<node_index>(lv.size());
-                if (sz <= kSpTRSVOMPThreshold) continue;
-                node_index* o = off.data() + l * W;
-                std::uint64_t total = 0;
-                for (node_index k = 0; k < sz; ++k)
-                    total += static_cast<std::uint64_t>(ptr[lv[k] + 1] - ptr[lv[k]]);
-                // o[t] = first k whose prefix (entries of rows [0, k)) reaches
-                // total * t / nt; monotone in t, o[0] = 0, o[nt] = sz.
-                std::uint64_t run = 0;
-                node_index k = 0;
-                for (int t = 1; t < nt; ++t) {
-                    const std::uint64_t target = total * static_cast<std::uint64_t>(t) / static_cast<std::uint64_t>(nt);
-                    while (k < sz && run < target) {
-                        run += static_cast<std::uint64_t>(ptr[lv[k] + 1] - ptr[lv[k]]);
-                        ++k;
-                    }
-                    o[t] = k;
-                }
-                o[nt] = sz;
-            }
-        };
-        build(fwd_levels_, csr_row_ptr_.data(), fwd_bal_off_);
-        build(bck_levels_, csc_col_ptr_.data(), bck_bal_off_);
-        bal_team_ = nt;
-    }
-
 public:
     int num_fwd_levels() const { return static_cast<int>(fwd_levels_.size()); }
     int num_bck_levels() const { return static_cast<int>(bck_levels_.size()); }
-    // Barriers one solve in that direction executes under the schedule the last
-    // setup() resolved: one per fat level plus one per thin SUPERSTEP (== one per
-    // level when APXCHOL_SPTRSV_AGGLOMERATE is off).
+    // Barriers one solve in that direction executes: one per level (thin or
+    // fat) under the level-set schedule -- the critical-path length of a solve.
     std::size_t num_barriers(bool fwd) const {
-        const auto& levels   = fwd ? fwd_levels_ : bck_levels_;
-        const auto& step_end = fwd ? fwd_step_end_ : bck_step_end_;
-        std::size_t n = 0;
-        for (std::size_t l = 0; l < levels.size(); ++n)
-            l = (levels[l].size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold)) ? step_end[l] : l + 1;
-        return n;
+        return (fwd ? fwd_levels_ : bck_levels_).size();
     }
 
     // Diagnostics: per-level row/col counts and per-level off-diagonal nnz.
@@ -1508,9 +1343,8 @@ public:
 #endif
 
     /// Bytes held by this object's arrays (capacities, heap only): CSR + CSC +
-    /// level sets + round bounds + the schedule tables (superstep ends,
-    /// nnz-balance offsets) (+ the lowprec builds' fp32 diag_ and the *_SCALED
-    /// variants' scale_ / inv_scale_). After setup() this is everything the
+    /// level sets + round bounds (+ FP16_SCALED's fp32 diag_ / scale_ /
+    /// inv_scale_). After setup() this is everything the
     /// SpTRSV keeps -- setup's transients (L11 copy, compacted copy, transpose
     /// bucket, scratch) are all released before it returns (guarded by
     /// tests/test_sptrsv_memory.cpp).
@@ -1521,11 +1355,7 @@ public:
                       + csc_col_ptr_.capacity() * sizeof(edge_index)
                       + csc_row_idx_.capacity() * sizeof(node_index)
                       + csc_vals_.capacity()    * sizeof(sptrsv_value_t)
-                      + round_bounds_.capacity() * sizeof(node_index)
-                      + fwd_step_end_.capacity() * sizeof(std::size_t)
-                      + bck_step_end_.capacity() * sizeof(std::size_t)
-                      + fwd_bal_off_.capacity()  * sizeof(node_index)
-                      + bck_bal_off_.capacity()  * sizeof(node_index);
+                      + round_bounds_.capacity() * sizeof(node_index);
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         b += diag_.capacity() * sizeof(float)
            + scale_.capacity() * sizeof(float) + inv_scale_.capacity() * sizeof(float);
@@ -1593,8 +1423,6 @@ private:
         static const big_vec<node_index>&     idx (const omp_sptrsv& s) { return s.csr_col_idx_; }
         static const big_vec<sptrsv_value_t>& vals(const omp_sptrsv& s) { return s.csr_vals_; }
         static const std::vector<std::vector<node_index>>& levels(const omp_sptrsv& s) { return s.fwd_levels_; }
-        static const std::vector<std::size_t>& step_end(const omp_sptrsv& s) { return s.fwd_step_end_; }
-        static const std::vector<node_index>&  bal_off (const omp_sptrsv& s) { return s.fwd_bal_off_; }
         // Off-diagonal slots of row i: [ptr[i], ptr[i+1] - 1); diagonal at ptr[i+1] - 1.
         static edge_index first(const edge_index* ptr, node_index i) { return ptr[i]; }
         static edge_index last (const edge_index* ptr, node_index i) { return ptr[i + 1] - 1; }
@@ -1608,8 +1436,6 @@ private:
         static const big_vec<node_index>&     idx (const omp_sptrsv& s) { return s.csc_row_idx_; }
         static const big_vec<sptrsv_value_t>& vals(const omp_sptrsv& s) { return s.csc_vals_; }
         static const std::vector<std::vector<node_index>>& levels(const omp_sptrsv& s) { return s.bck_levels_; }
-        static const std::vector<std::size_t>& step_end(const omp_sptrsv& s) { return s.bck_step_end_; }
-        static const std::vector<node_index>&  bal_off (const omp_sptrsv& s) { return s.bck_bal_off_; }
         // Off-diagonal slots of column j: [ptr[j] + 1, ptr[j+1]); diagonal at ptr[j].
         static edge_index first(const edge_index* ptr, node_index j) { return ptr[j] + 1; }
         static edge_index last (const edge_index* ptr, node_index j) { return ptr[j + 1]; }
@@ -1816,24 +1642,6 @@ private:
     std::vector<node_index> round_bounds_;
 public:
     void set_round_bounds(std::vector<node_index> b) { round_bounds_ = std::move(b); }
-private:
-
-    // Schedule experiments (class comment; set at every setup()).
-    // Superstep table per direction: step_end[l] = first level index NOT in the
-    // superstep starting at level l (fat levels and agglomerate_ < 0: l + 1).
-    int  agglomerate_ = -1;                       // APXCHOL_SPTRSV_AGGLOMERATE: -1 off, 0 whole run, K cap
-    std::vector<std::size_t> fwd_step_end_;
-    std::vector<std::size_t> bck_step_end_;
-    // nnz-balanced per-thread row ranges per direction: (bal_team_ + 1) offsets
-    // per level, fat levels only (thin: zeros). Built by setup() for
-    // omp_get_max_threads() and rebuilt inside solve_levelset (under `omp
-    // single`, hence mutable) when its team has a different size. Two solves
-    // of different team sizes running CONCURRENTLY on one object would race on
-    // the rebuild -- not a supported pattern (never was: one team per object).
-    bool balance_nnz_ = false;                    // APXCHOL_SPTRSV_BALANCE=nnz
-    mutable int bal_team_ = 0;
-    mutable std::vector<node_index> fwd_bal_off_;
-    mutable std::vector<node_index> bck_bal_off_;
 };
 
 } // namespace apxchol
