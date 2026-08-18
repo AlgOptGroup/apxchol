@@ -7,8 +7,11 @@
 //     ties + carry, NaN;
 //   * the storage CONTRACT of omp_sptrsv::setup for whatever variant this
 //     build compiled: every stored CSR/CSC value == narrow_value(v, p, s_j),
-//     the per-column scales, the off-diagonal flush/subnormal statistics, and
-//     the APXCHOL_LOWPREC_DROP diagnostic (fp32/fp64 builds).
+//     the per-column scales, the off-diagonal flush/subnormal statistics, the
+//     fp16 subnormal flush (FP16_SCALED default; APXCHOL_FP16_KEEP_SUBNORMAL=1
+//     restores IEEE), and the compacting drop APXCHOL_FACTOR_DROP=<rel>
+//     (every build): stored nnz == kept entries, and the compacted SpTRSV
+//     solves like the zeroed-but-not-removed reference.
 #include <gtest/gtest.h>
 #include <cmath>
 #include <cstdint>
@@ -311,7 +314,7 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
         std::uint64_t offdiag = 0;
         for (node_index j = 0; j < m; ++j)
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(L.vals_[p], p, s[j], false);
+                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(L.vals_[p], p, s[j], false, true);
                 ASSERT_TRUE(trsv.csc_vals()[p] == expect) << "csc p=" << p;
                 if (L.inner_[p] != j) ++offdiag;
                 // CSR twin: locate (row = inner[p], col = j).
@@ -344,7 +347,10 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
 }
 
 // A hand-built column with one flushed and one subnormal ratio: the counts
-// are exact under FP16_SCALED and zero everywhere else.
+// are exact under FP16_SCALED (default: the subnormal is flushed too, so
+// flushed=2 / subnormal=0; APXCHOL_FP16_KEEP_SUBNORMAL=1: flushed=1 /
+// subnormal=1) and zero everywhere else. The forward solve is exact w.r.t.
+// the STORED values either way.
 TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
     // 4x4 lower factor: column 0 = diag 2, off-diagonals 1.0 (max), 1e-6 (fp16
     // subnormal after scaling), 1e-9 (flushed). Columns 1..3: diagonal only /
@@ -354,93 +360,304 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
     L.outer_ = {0, 4, 6, 7, 8};
     L.inner_ = {0, 1, 2, 3,  1, 2,  2,  3};
     L.vals_  = {2.0f, 1.0f, 1e-6f, 1e-9f,  1.5f, -0.25f,  1.0f,  1.0f};
-    apxchol::omp_sptrsv trsv;
-    trsv.setup(L, 4);
-    EXPECT_EQ(trsv.lowprec_stats().offdiag, 4u);
-    EXPECT_EQ(trsv.lowprec_stats().dropped, 0u);
+    for (int keep_sub = 0; keep_sub < 2; ++keep_sub) {
+        SCOPED_TRACE(keep_sub ? "APXCHOL_FP16_KEEP_SUBNORMAL=1" : "default (fp16 subnormals flushed)");
+        if (keep_sub) setenv("APXCHOL_FP16_KEEP_SUBNORMAL", "1", 1);
+        apxchol::omp_sptrsv trsv;
+        trsv.setup(L, 4);
+        unsetenv("APXCHOL_FP16_KEEP_SUBNORMAL");
+        EXPECT_EQ(trsv.lowprec_stats().offdiag, 4u);
+        EXPECT_EQ(trsv.lowprec_stats().dropped, 0u);
+        EXPECT_EQ(trsv.lowprec_stats().nnz_factor, 8u);
+        EXPECT_EQ(trsv.lowprec_stats().nnz_stored, 8u);
+        EXPECT_EQ(trsv.stored_nnz(), 8u);
+        EXPECT_EQ(trsv.lowprec_stats().factor_subnormal, 0u);   // every fp32 value here is normal
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-    EXPECT_EQ(trsv.lowprec_stats().flushed, 1u);
-    EXPECT_EQ(trsv.lowprec_stats().subnormal, 1u);
-    EXPECT_EQ(trsv.col_scales()[0], 1.0f);
-    EXPECT_EQ(trsv.col_scales()[1], 0.25f);
-    EXPECT_EQ(trsv.col_scales()[2], 1.0f);   // no off-diagonal -> 1
-    // What the kernels see: 1e-9 is gone, 1e-6 is a subnormal approximation.
-    EXPECT_EQ(apxchol::widen(trsv.csc_vals()[3]), 0.0);
-    EXPECT_NEAR(apxchol::widen(trsv.csc_vals()[2]), 1e-6, std::ldexp(1.0, -25));
+        EXPECT_EQ(trsv.lowprec_stats().flushed,   keep_sub ? 1u : 2u);
+        EXPECT_EQ(trsv.lowprec_stats().subnormal, keep_sub ? 1u : 0u);
+        EXPECT_EQ(trsv.col_scales()[0], 1.0f);
+        EXPECT_EQ(trsv.col_scales()[1], 0.25f);
+        EXPECT_EQ(trsv.col_scales()[2], 1.0f);   // no off-diagonal -> 1
+        // What the kernels see: 1e-9 is gone; 1e-6 is a subnormal approximation
+        // when kept, gone (signed zero, +) when flushed.
+        EXPECT_EQ(apxchol::widen(trsv.csc_vals()[3]), 0.0);
+        if (keep_sub) EXPECT_NEAR(apxchol::widen(trsv.csc_vals()[2]), 1e-6, std::ldexp(1.0, -25));
+        else          EXPECT_EQ(apxchol::widen(trsv.csc_vals()[2]), 0.0);
+        // The contract functions agree with what was stored.
+        EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1e-6f, 1.0f, /*flush=*/true),  true);
+        EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1e-6f, 1.0f, /*flush=*/false), false);
+        EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1e-9f, 1.0f, /*flush=*/false), true);
+        EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1.0f,  1.0f, /*flush=*/true),  false);
+        EXPECT_TRUE(apxchol::omp_sptrsv::narrow_value(-1e-6f, 0, 1.0f, false, true) ==
+                    fp16_t::from_bits(0x8000u));   // sign survives the flush
 #else
-    EXPECT_EQ(trsv.lowprec_stats().flushed, 0u);
-    EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
+        EXPECT_EQ(trsv.lowprec_stats().flushed, 0u);
+        EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
+        EXPECT_FALSE(apxchol::omp_sptrsv::format_flushes(1e-9f, 1.0f, true));   // fp32's range: only 0 stores as 0
+        EXPECT_TRUE(apxchol::omp_sptrsv::format_flushes(0.0f, 1.0f, true));
 #endif
-    // The forward/back solves still run and are exact w.r.t. the STORED
-    // values (a tiny system: check L y = x against them).
-    std::vector<double> x = {1.0, -2.0, 0.5, 3.0}, y(4);
-    trsv.forward_solve(x.data(), y.data());
-    for (node_index i = 0; i < 4; ++i) {
-        double r = x[i];
-        for (node_index j = 0; j <= i; ++j)
-            for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
-                if (L.inner_[p] == i) {
-                    double v = (i == j) ? static_cast<double>(L.vals_[p])
-                                        : apxchol::widen(trsv.csc_vals()[p]);
+        // The forward/back solves still run and are exact w.r.t. the STORED
+        // values (a tiny system: check L y = x against them).
+        std::vector<double> x = {1.0, -2.0, 0.5, 3.0}, y(4);
+        trsv.forward_solve(x.data(), y.data());
+        for (node_index i = 0; i < 4; ++i) {
+            double r = x[i];
+            for (node_index j = 0; j <= i; ++j)
+                for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
+                    if (L.inner_[p] == i) {
+                        double v = (i == j) ? static_cast<double>(L.vals_[p])
+                                            : apxchol::widen(trsv.csc_vals()[p]);
 #if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
-                    if (i != j) v *= trsv.col_scales()[j];
+                        if (i != j) v *= trsv.col_scales()[j];
 #endif
-                    r -= v * y[j];
-                }
-        EXPECT_NEAR(r, 0.0, 1e-12) << "row " << i;
+                        r -= v * y[j];
+                    }
+            EXPECT_NEAR(r, 0.0, 1e-12) << "row " << i;
+        }
     }
 }
 
-// APXCHOL_LOWPREC_DROP=<rel> (fp32/fp64 builds): off-diagonals with |v| <
-// rel * s_j are stored as zero, counted in dropped, present as zeros in both
-// CSR and CSC, and the kernels use the zeros. Ignored on the lowprec builds.
-TEST(LowPrec, DropDiagnosticZeroesSmallOffDiagonalsRelativeToColumnMax) {
-    sparse_csc L = make_random_lower(3000, 4.0, 55, -1.0, 1.0);
-    const std::vector<float> s = reference_scales(L);
-    setenv("APXCHOL_LOWPREC_DROP", "0.3", 1);
-    apxchol::omp_sptrsv trsv;
-    trsv.setup(L, 3000);
-    unsetenv("APXCHOL_LOWPREC_DROP");
-    std::uint64_t expect_dropped = 0, csc_zero = 0, csr_zero = 0;
-    for (node_index j = 0; j < 3000; ++j)
-        for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-            if (L.inner_[p] == j) continue;
-            const bool drop = std::fabs(static_cast<double>(L.vals_[p])) < 0.3 * s[j];
-            expect_dropped += drop;
-            csc_zero += apxchol::widen(trsv.csc_vals()[p]) == 0.0;
-        }
-    for (std::size_t q = 0; q < trsv.csr_vals().size(); ++q)
-        csr_zero += apxchol::widen(trsv.csr_vals()[q]) == 0.0;
-    ASSERT_GT(expect_dropped, 100u);   // the test has teeth
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-    // Ignored: nothing dropped, no unexpected zeros beyond the format's own
-    // (values here are >= 1e-9 relative -- but fp16 might flush a few; only
-    // the dropped counter is asserted).
-    EXPECT_EQ(trsv.lowprec_stats().dropped, 0u);
-#else
-    EXPECT_EQ(trsv.lowprec_stats().dropped, expect_dropped);
-    EXPECT_EQ(csc_zero, expect_dropped);
-    EXPECT_EQ(csr_zero, expect_dropped);
-    // The kernels solve with the DROPPED matrix: L_drop y = x exactly (double
-    // accumulation), where L_drop is what the CSC now holds.
-    std::mt19937 rng(9);
-    std::uniform_real_distribution<double> ux(-1.0, 1.0);
-    std::vector<double> x(3000), y(3000);
-    for (auto& v : x) v = ux(rng);
-    trsv.forward_solve(x.data(), y.data());
-    double worst = 0.0;
-    for (node_index i = 0; i < 3000; ++i) {
-        double r = x[i], sc = std::fabs(x[i]);
-        for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q) {
-            const double t = apxchol::widen(trsv.csr_vals()[q]) * y[trsv.csr_col_idx()[q]];
-            r -= t; sc += std::fabs(t);
-        }
-        worst = std::max(worst, std::fabs(r) / (sc + 1e-300));
+// ── Compacting drop: APXCHOL_FACTOR_DROP=<rel> ──────────────────────────
+namespace {
+
+// The reference "dense drop": the same factor with the entries the drop
+// removes set to ZERO in place (nothing removed). Kept iff |v| >= rel * s_j
+// and the storage format of this build does not store it as zero anyway
+// (fp32 / fp64 / bf16 / fp24: only an exact zero; FP16_SCALED: everything
+// fp16 flushes -- subnormals included by default). Written out here without
+// omp_sptrsv::keep_offdiag so the predicate is stated twice independently.
+struct dense_drop {
+    sparse_csc    Lz;        // zeroed copy
+    std::uint64_t kept  = 0; // entries with a nonzero-or-diagonal slot (== stored nnz after the drop)
+    std::uint64_t zeroed = 0;
+};
+// Per-column scale of L11 = L.topLeftCorner(m, m) (rows >= m excluded -- the
+// Laplacian path's grounded last row is not part of what the SpTRSV sees).
+std::vector<float> reference_scales_L11(const sparse_csc& L, node_index m) {
+    std::vector<float> s(m, 1.0f);
+    for (node_index j = 0; j < m; ++j) {
+        double mx = 0.0;
+        for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p)
+            if (L.inner_[p] < m) mx = std::max(mx, std::fabs(static_cast<double>(L.vals_[p])));
+        s[j] = mx > 0.0 ? static_cast<float>(mx) : 1.0f;
     }
-    EXPECT_LT(worst, 1e-11);
+    return s;
+}
+
+dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel, bool fp16_flush_subnormal) {
+    dense_drop d;
+    d.Lz = L;
+    const std::vector<float> s = reference_scales_L11(L, m);
+    for (node_index j = 0; j < m; ++j)
+        for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
+            if (L.inner_[p] >= m) continue;                    // outside L11 (Laplacian last row)
+            if (L.inner_[p] == j) { ++d.kept; continue; }
+            const factor_value_t v = L.vals_[p];
+            bool keep = std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s[j]);
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+            const fp16_t h(static_cast<float>(v) / s[j]);
+            if (fp16_t::is_zero(h.bits) || (fp16_flush_subnormal && fp16_t::is_subnormal(h.bits))) keep = false;
+#else
+            (void)fp16_flush_subnormal;
+            if (v == 0) keep = false;
 #endif
-    // Without the env var nothing is dropped (read at every setup).
-    apxchol::omp_sptrsv plain;
-    plain.setup(L, 3000);
-    EXPECT_EQ(plain.lowprec_stats().dropped, 0u);
+            if (keep) ++d.kept; else { ++d.zeroed; d.Lz.vals_[p] = 0; }
+        }
+    return d;
+}
+
+} // namespace
+
+// APXCHOL_FACTOR_DROP=<rel> (every build): off-diagonals with |v| < rel * s_j
+// (and those the storage format would store as zero) are REMOVED before the
+// CSR/CSC are built: stored nnz == the number of kept entries, the diagonal
+// is always kept (first in every CSC column, last in every CSR row), the
+// statistics say what was dropped, and the forward AND back solves through
+// the compacted arrays agree with the reference dense-drop (entries zeroed in
+// place, no env) to ~1e-12. Both the SDDM alias path (m == n) and the
+// Laplacian copy path (m == n-1), serial and parallel transpose (m > 50000),
+// with a spread of magnitudes so ~half of the off-diagonals fall under 1e-4.
+TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
+    struct cfg { node_index n; bool laplacian; };
+    for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
+        const node_index m = c.laplacian ? c.n - 1 : c.n;
+        SCOPED_TRACE("n=" + std::to_string(c.n) + (c.laplacian ? " (Laplacian m=n-1)" : " (SDDM m=n)"));
+        // Magnitudes spread over ~9 decades: |v| = 10^u, u uniform in [-7, 2),
+        // so about half of every column sits below 1e-4 * s_j.
+        sparse_csc L = make_random_lower(c.n, 6.0, 4242 + c.n, -1.0, 1.0);
+        {
+            std::mt19937 rng(77 + c.n);
+            std::uniform_real_distribution<double> uexp(-7.0, 2.0);
+            for (node_index j = 0; j < c.n; ++j)
+                for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
+                    const double sign = L.vals_[p] < 0 ? -1.0 : 1.0;
+                    L.vals_[p] = static_cast<factor_value_t>(sign * std::pow(10.0, uexp(rng)));
+                    if ((p % 101) == 5) L.vals_[p] = 0;   // a few explicit zeros: always dropped
+                }
+        }
+        const double rel = 1e-4;
+        const dense_drop ref = reference_dense_drop(L, m, rel, /*fp16_flush_subnormal=*/true);
+        ASSERT_GT(ref.zeroed, ref.kept / 4);   // the test has teeth: a big chunk goes
+
+        // Compacted (env set for this setup only).
+        setenv("APXCHOL_FACTOR_DROP", "1e-4", 1);
+        apxchol::omp_sptrsv trsv;
+        trsv.setup(L, m);
+        unsetenv("APXCHOL_FACTOR_DROP");
+        // Reference: dense drop, no env.
+        apxchol::omp_sptrsv rf;
+        rf.setup(ref.Lz, m);
+
+        // Counts.
+        std::uint64_t L11_nnz = 0;
+        for (node_index j = 0; j < m; ++j)
+            for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) L11_nnz += L.inner_[p] < m;
+        const auto& st = trsv.lowprec_stats();
+        EXPECT_EQ(st.nnz_factor, L11_nnz);
+        EXPECT_EQ(st.nnz_stored, ref.kept);
+        EXPECT_EQ(trsv.stored_nnz(), ref.kept);
+        EXPECT_EQ(st.dropped, ref.zeroed);
+        EXPECT_EQ(st.dropped, st.dropped_threshold + st.dropped_flush);
+        EXPECT_EQ(st.offdiag + static_cast<std::uint64_t>(m), ref.kept);
+        EXPECT_EQ(trsv.csc_vals().size(), ref.kept);
+        EXPECT_EQ(trsv.csr_vals().size(), ref.kept);
+        EXPECT_EQ(trsv.csc_row_idx().size(), ref.kept);
+        EXPECT_EQ(trsv.csr_col_idx().size(), ref.kept);
+        EXPECT_EQ(trsv.csc_col_ptr().back(), static_cast<edge_index>(ref.kept));
+        EXPECT_EQ(trsv.csr_row_ptr().back(), static_cast<edge_index>(ref.kept));
+        // No stored zeros survive the drop; every kept off-diagonal is above the threshold.
+        {
+            const std::vector<float> s = reference_scales_L11(L, m);
+            std::uint64_t zeros = 0, below = 0;
+            for (node_index j = 0; j < m; ++j) {
+                ASSERT_EQ(trsv.csc_row_idx()[trsv.csc_col_ptr()[j]], j) << "diagonal first, col " << j;
+                for (edge_index p = trsv.csc_col_ptr()[j] + 1; p < trsv.csc_col_ptr()[j + 1]; ++p) {
+                    zeros += apxchol::widen(trsv.csc_vals()[p]) == 0.0;
+                    // Recover |v| >= rel * s_j from the stored value: under the
+                    // *_SCALED variants the stored ratio is >= rel up to rounding.
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+                    below += std::fabs(apxchol::widen(trsv.csc_vals()[p])) < rel * 0.99;
+#else
+                    below += std::fabs(apxchol::widen(trsv.csc_vals()[p])) < rel * static_cast<double>(s[j]) * 0.99;
+#endif
+                }
+            }
+            for (node_index i = 0; i < m; ++i)
+                ASSERT_EQ(trsv.csr_col_idx()[trsv.csr_row_ptr()[i + 1] - 1], i) << "diagonal last, row " << i;
+            EXPECT_EQ(zeros, 0u);
+            EXPECT_EQ(below, 0u);
+        }
+        // Reference has the same kept structure count-wise (its stored nnz is the full L11).
+        EXPECT_EQ(rf.lowprec_stats().nnz_stored, L11_nnz);
+        EXPECT_EQ(rf.lowprec_stats().dropped, 0u);
+
+        // Solves agree to ~1e-12 (same arithmetic up to the 4-way accumulator
+        // grouping; the zeroed terms contribute exact zeros).
+        std::mt19937 rng(9 + c.n);
+        std::uniform_real_distribution<double> ux(-1.0, 1.0);
+        std::vector<double> x(m), y1(m), y2(m), z1(m), z2(m);
+        for (auto& v : x) v = ux(rng);
+        trsv.forward_solve(x.data(), y1.data());
+        rf.forward_solve(x.data(), y2.data());
+        trsv.transpose_solve(x.data(), z1.data());
+        rf.transpose_solve(x.data(), z2.data());
+        double worst_f = 0.0, worst_b = 0.0, scale_f = 0.0, scale_b = 0.0;
+        for (node_index i = 0; i < m; ++i) {
+            worst_f = std::max(worst_f, std::fabs(y1[i] - y2[i]));
+            worst_b = std::max(worst_b, std::fabs(z1[i] - z2[i]));
+            scale_f = std::max(scale_f, std::fabs(y2[i]));
+            scale_b = std::max(scale_b, std::fabs(z2[i]));
+        }
+        EXPECT_LT(worst_f, 1e-12 * std::max(1.0, scale_f)) << "forward";
+        EXPECT_LT(worst_b, 1e-12 * std::max(1.0, scale_b)) << "back";
+        // And the compacted forward solve is an exact solve of the STORED L
+        // (double accumulation): componentwise residual at roundoff.
+        double worst = 0.0;
+        for (node_index i = 0; i < m; ++i) {
+            double r = x[i], sc = std::fabs(x[i]);
+            for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q) {
+                double v = apxchol::widen(trsv.csr_vals()[q]);
+                const node_index j = trsv.csr_col_idx()[q];
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+                if (j == i) v = static_cast<double>(L.vals_[L.outer_[i]]);   // exact fp32 diag_
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+                else        v *= trsv.col_scales()[j];
+#endif
+#endif
+                const double t = v * y1[j];
+                r -= t; sc += std::fabs(t);
+            }
+            worst = std::max(worst, std::fabs(r) / (sc + 1e-300));
+        }
+        EXPECT_LT(worst, 1e-11);
+
+        // Without the env var nothing is dropped (read at every setup).
+        apxchol::omp_sptrsv plain;
+        plain.setup(L, m);
+        EXPECT_EQ(plain.lowprec_stats().dropped, 0u);
+        EXPECT_EQ(plain.lowprec_stats().nnz_stored, L11_nnz);
+        EXPECT_EQ(plain.stored_nnz(), L11_nnz);
+    }
+}
+
+// rel = 0 / unset / negative = off; the diagonal survives ANY rel (even > 1,
+// which drops every off-diagonal), the scales are unchanged by the drop, and
+// on FP16_SCALED a tiny rel still removes what fp16 flushes (a stored zero is
+// a stored entry) -- the drop's second criterion.
+TEST(LowPrec, FactorDropEdgeCases) {
+    sparse_csc L = make_random_lower(2000, 4.0, 31, -1.0, 1.0);
+    for (edge_index p = 0; p < L.nonZeros(); ++p)
+        if ((p % 5) == 2) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-9);   // fp16-flush range
+    const std::vector<float> s = reference_scales(L);
+    std::uint64_t offdiag = 0, fp16_zero = 0;
+    for (node_index j = 0; j < 2000; ++j)
+        for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
+            ++offdiag;
+            const fp16_t h(static_cast<float>(L.vals_[p]) / s[j]);
+            fp16_zero += fp16_t::is_zero(h.bits) || fp16_t::is_subnormal(h.bits);
+        }
+    ASSERT_GT(fp16_zero, 100u);
+    for (const char* rel : {"0", "-1", "abc"}) {
+        SCOPED_TRACE(std::string("APXCHOL_FACTOR_DROP=") + rel);
+        setenv("APXCHOL_FACTOR_DROP", rel, 1);
+        apxchol::omp_sptrsv t; t.setup(L, 2000);
+        unsetenv("APXCHOL_FACTOR_DROP");
+        EXPECT_EQ(t.lowprec_stats().dropped, 0u);
+        EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()));
+    }
+    {
+        setenv("APXCHOL_FACTOR_DROP", "1e-30", 1);   // below everything: only format zeros go
+        apxchol::omp_sptrsv t; t.setup(L, 2000);
+        unsetenv("APXCHOL_FACTOR_DROP");
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+        EXPECT_EQ(t.lowprec_stats().dropped, fp16_zero);
+        EXPECT_EQ(t.lowprec_stats().dropped_flush, fp16_zero);
+        EXPECT_EQ(t.lowprec_stats().dropped_threshold, 0u);
+        EXPECT_EQ(t.lowprec_stats().flushed, 0u);      // nothing stored as zero remains
+        EXPECT_EQ(t.lowprec_stats().subnormal, 0u);
+#else
+        EXPECT_EQ(t.lowprec_stats().dropped, 0u);
+#endif
+        EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()) - t.lowprec_stats().dropped);
+    }
+    {
+        setenv("APXCHOL_FACTOR_DROP", "2", 1);        // > 1: every off-diagonal goes, diagonal stays
+        apxchol::omp_sptrsv t; t.setup(L, 2000);
+        unsetenv("APXCHOL_FACTOR_DROP");
+        EXPECT_EQ(t.lowprec_stats().dropped, offdiag);
+        EXPECT_EQ(t.stored_nnz(), 2000u);
+        EXPECT_EQ(t.lowprec_stats().offdiag, 0u);
+        for (node_index j = 0; j < 2000; ++j) {
+            ASSERT_EQ(t.csc_col_ptr()[j], static_cast<edge_index>(j));
+            ASSERT_EQ(t.csc_row_idx()[j], j);
+        }
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        for (node_index j = 0; j < 2000; ++j) ASSERT_EQ(t.col_scales()[j], s[j]);   // scale from BEFORE the drop
+#endif
+        // Solving with a diagonal factor: y = x / diag.
+        std::vector<double> x(2000, 1.0), y(2000);
+        t.forward_solve(x.data(), y.data());
+        for (node_index j = 0; j < 2000; ++j)
+            ASSERT_NEAR(y[j], 1.0 / static_cast<double>(L.vals_[L.outer_[j]]), 1e-15) << j;
+    }
 }

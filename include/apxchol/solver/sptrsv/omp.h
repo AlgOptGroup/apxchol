@@ -93,16 +93,48 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // unbiased rounding's errors average out. Ignored (no effect) on the other
 // builds.
 //
-// DROP diagnostic (fp32/fp64 builds only): APXCHOL_LOWPREC_DROP=<rel> (env,
-// read at every setup) stores ZERO for every off-diagonal with |L_ij| < rel *
-// (column j's max |off-diagonal|) -- threshold dropping in isolation, no
-// precision change, to test whether the fp16 flush-to-zero of the same entries
-// is what costs iterations. Ignored on the lowprec builds.
+// FP16 SUBNORMALS (FP16_SCALED only): a stored fp16 subnormal (|L_ij / s_j| in
+// [2^-25, 2^-14)) carries between 1 and 10 significant bits and, per the drop
+// measurement below, that magnitude range is dead weight for the
+// preconditioner. narrow_value therefore flushes fp16 subnormals to (signed)
+// zero at storage time BY DEFAULT; env APXCHOL_FP16_KEEP_SUBNORMAL=1 (read at
+// every setup) restores IEEE behaviour (subnormals stored as such). Ignored on
+// every other build. The flushed count below includes them.
 //
-// STATISTICS: setup() counts, over the off-diagonals, how many stored values
-// flushed to zero (v != 0, stored == 0), how many are subnormal in the storage
-// format, and how many the DROP diagnostic zeroed; lowprec_stats() returns
-// them and APXCHOL_VERBOSE prints them (one line per setup).
+// COMPACTING DROP (every build): APXCHOL_FACTOR_DROP=<rel> (env, read at every
+// setup; unset / <= 0 = off) removes -- not zeroes -- factor off-diagonals
+// BEFORE the CSR/CSC are built: entry (i, j), i != j, is KEPT iff
+//   |L_ij| >= rel * s_j   (s_j = column j's max |off-diagonal|, column_scale())
+//   AND the storage format does not map it to zero anyway (format_flushes():
+//   an exact zero on the fp32/fp64/bf16/fp24 builds; on FP16_SCALED also
+//   everything fp16 flushes -- |L_ij / s_j| < 2^-25, or < 2^-14 with the
+//   subnormal flush above -- since a stored zero is still a stored entry).
+// The diagonal is always kept, so every column keeps its first entry (the
+// diagonal-first CSC / diagonal-last CSR invariants hold) and s_j is unchanged
+// by the drop (the column max itself is never below rel * s_j for rel <= 1).
+// keep_offdiag() is the pure predicate; it is applied in O(nnz) parallel work
+// (per-column count -> prefix -> compacted copy) and the transpose, the CSC
+// copy, the level sets and everything after see only the compacted factor, so
+// nnz(L stored) -- and the CSR/CSC bytes -- shrink. Round-as-level bounds are
+// per column and unaffected. Measured on the fp32 build (T=1, tol 1e-8):
+// dropping below 1e-4 * s_j costs 0 PCG iterations on grid_500 / grid_2000 /
+// iter0040 while removing 52% of iter0040's off-diagonals (0% on grids). This
+// supersedes the earlier APXCHOL_LOWPREC_DROP diagnostic (same threshold, same
+// numerics -- a stored zero and an absent entry solve identically -- but that
+// one saved flops, not bytes); the diagnostic was removed.
+//
+// STATISTICS (lowprec_stats(), printed under APXCHOL_VERBOSE: one "sptrsv
+// storage" line per setup, plus a "factor drop" line when the drop is on):
+// the factor's nnz before / after the drop (nnz_factor, nnz_stored
+// -- the latter is what the CSR and CSC each hold), how many off-diagonals the
+// drop removed and why (dropped = dropped_threshold + dropped_flush), and over
+// the STORED off-diagonals: how many stored values flushed to zero (v != 0,
+// stored == 0), how many are subnormal in the storage format, plus the
+// SUBNORMAL CENSUS factor_subnormal = number of factor entries (diagonal
+// included, factor_value_t = fp32 on the default builds) that are fp32
+// subnormals -- on the fp32 build these ARE the stored values, so this is
+// exactly "how many stored fp32 factor values are subnormal" (the DAZ/FTZ
+// question; see APXCHOL_FTZ in solve.cpp).
 
 class omp_sptrsv {
 public:
@@ -134,13 +166,17 @@ public:
     // column whose per-column scale is s (the *_SCALED variants: s_j = max
     // |off-diagonal| of column j, 1.0f if none; every other variant ignores s
     // -- pass 1.0f). `stochastic` selects bf16 stochastic rounding (bf16
-    // variants only; ignored elsewhere). A PURE function of its arguments: the
-    // CSR transpose and the CSC copy both call it, so the two stored copies of
-    // every entry agree bit-for-bit whatever the rounding mode (needed for the
-    // stochastic mode; a no-op cast on the fp32/fp64 builds, exactly the
-    // static_cast they always did). The DROP diagnostic is applied by the
-    // caller BEFORE this (it zeroes v).
-    static sptrsv_value_t narrow_value(factor_value_t v, edge_index k, float s, bool stochastic) {
+    // variants only; ignored elsewhere); `fp16_flush_subnormal` flushes fp16
+    // subnormals to signed zero (FP16_SCALED only, the default there -- see
+    // the file header; ignored elsewhere). A PURE function of its arguments:
+    // the CSR transpose and the CSC copy both call it, so the two stored
+    // copies of every entry agree bit-for-bit whatever the rounding mode
+    // (needed for the stochastic mode; a no-op cast on the fp32/fp64 builds,
+    // exactly the static_cast they always did). The compacting drop
+    // (APXCHOL_FACTOR_DROP) happens BEFORE this: dropped entries never reach
+    // it.
+    static sptrsv_value_t narrow_value(factor_value_t v, edge_index k, float s, bool stochastic,
+                                       bool fp16_flush_subnormal) {
 #if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
         const float x = static_cast<float>(v) / s;      // |x| <= 1 for the off-diagonals (s is their max)
 #else
@@ -148,26 +184,59 @@ public:
         const factor_value_t x = v;
 #endif
 #if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
+        (void)fp16_flush_subnormal;
         return stochastic ? from_float_stochastic(x, static_cast<std::uint64_t>(k))
                           : bf16_t(x);                   // RNE
 #elif defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         (void)k; (void)stochastic;
-        return fp16_t(x);                                // RNE, subnormals / flush per IEEE
+        const fp16_t h(x);                               // RNE, subnormals / flush per IEEE
+        if (fp16_flush_subnormal && fp16_t::is_subnormal(h.bits))
+            return fp16_t::from_bits(static_cast<std::uint16_t>(h.bits & 0x8000u));   // signed zero
+        return h;
 #elif defined(APXCHOL_SPTRSV_LOWPREC_FP24)
-        (void)k; (void)stochastic;
+        (void)k; (void)stochastic; (void)fp16_flush_subnormal;
         return fp24_t(x);                                // RNE on the dropped 8 bits
 #else
-        (void)k; (void)stochastic;
+        (void)k; (void)stochastic; (void)fp16_flush_subnormal;
         return static_cast<sptrsv_value_t>(x);
 #endif
+    }
+
+    // True iff THIS build's storage format maps the off-diagonal v (in a
+    // column with scale s) to zero regardless of rounding mode: an exact zero
+    // on the fp32 / fp64 / bf16 / fp24 builds (they keep fp32's exponent range,
+    // so a nonzero fp32 factor entry never rounds to zero -- bf16 stochastic
+    // rounding included, whose two candidates bracket a nonzero x); on
+    // FP16_SCALED everything fp16 flushes (|v / s| < 2^-25 under RNE) plus,
+    // with `fp16_flush_subnormal`, the fp16 subnormal range (< 2^-14 after
+    // rounding). Pure; independent of the entry's position k.
+    static bool format_flushes(factor_value_t v, float s, bool fp16_flush_subnormal) {
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+        const fp16_t h(static_cast<float>(v) / s);
+        return fp16_t::is_zero(h.bits) || (fp16_flush_subnormal && fp16_t::is_subnormal(h.bits));
+#else
+        (void)s; (void)fp16_flush_subnormal;
+        return v == 0;
+#endif
+    }
+
+    // THE compacting-drop predicate (public so the tests can state it): the
+    // off-diagonal v of a column with scale s survives APXCHOL_FACTOR_DROP=rel
+    // iff |v| >= rel * s and the storage format does not map it to zero. The
+    // diagonal is never passed through this (always kept).
+    static bool keep_offdiag(factor_value_t v, float s, double rel, bool fp16_flush_subnormal) {
+        return std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s) &&
+               !format_flushes(v, s, fp16_flush_subnormal);
     }
 
     // Per-column scale contract (public for the tests): the *_SCALED variants'
     // s_j, computed by setup() from the factor column [first, last) whose FIRST
     // entry is the diagonal: max |off-diagonal|, or 1.0f if the column has no
     // nonzero off-diagonal (so v / s_j is always defined). Also the reference
-    // of the DROP diagnostic's threshold. Computed in double, stored fp32 (the
-    // factor is fp32 on every build that uses it, so this is exact).
+    // of the compacting drop's threshold (computed BEFORE the drop; the drop
+    // never removes the column max, so it is the same after). Computed in
+    // double, stored fp32 (the factor is fp32 on every build that uses it, so
+    // this is exact).
     static float column_scale(const factor_value_t* vals, edge_index first, edge_index last) {
         double mx = 0.0;
         for (edge_index p = first + 1; p < last; ++p)
@@ -175,14 +244,24 @@ public:
         return mx > 0.0 ? static_cast<float>(mx) : 1.0f;
     }
 
-    // Off-diagonal statistics of the last setup() (see the file header).
+    // Statistics of the last setup() (see the file header). offdiag / flushed /
+    // subnormal / factor_subnormal are over the STORED factor (after the drop);
+    // the dropped_* counts are what the drop removed; nnz_factor is L11's nnz
+    // before the drop and nnz_stored after (== nnz_factor when the drop is off).
     struct lowprec_statistics {
-        std::uint64_t offdiag   = 0;   // number of off-diagonal entries of L11
-        std::uint64_t flushed   = 0;   // stored as zero although the factor value was nonzero
-        std::uint64_t subnormal = 0;   // stored as a subnormal of the storage format
-        std::uint64_t dropped   = 0;   // zeroed by the APXCHOL_LOWPREC_DROP diagnostic
+        std::uint64_t offdiag           = 0;   // number of stored off-diagonal entries of L11
+        std::uint64_t flushed           = 0;   // stored as zero although the factor value was nonzero
+        std::uint64_t subnormal         = 0;   // stored as a subnormal of the storage format
+        std::uint64_t factor_subnormal  = 0;   // factor entries (fp32, diagonal incl.) that are fp32 subnormals
+        std::uint64_t dropped           = 0;   // off-diagonals removed by APXCHOL_FACTOR_DROP (= the two below)
+        std::uint64_t dropped_threshold = 0;   //   ... because |L_ij| < rel * s_j
+        std::uint64_t dropped_flush     = 0;   //   ... because the storage format stores them as zero anyway
+        std::uint64_t nnz_factor        = 0;   // nnz of L11 as factorized (before the drop)
+        std::uint64_t nnz_stored        = 0;   // nnz the CSR (and the CSC) hold (after the drop)
     };
     const lowprec_statistics& lowprec_stats() const { return stats_; }
+    // nnz held by the SpTRSV's CSR / CSC (each) after the last setup().
+    std::uint64_t stored_nnz() const { return stats_.nnz_stored; }
 
     /// Analyze L11 = L.topLeftCorner(m, m): build CSR, CSC, and level sets.
     void setup(const sparse_csc& L, node_index m) {
@@ -260,39 +339,37 @@ public:
         }
         mark("L11_alias_or_copy");
 
-        // store(v, k, i, j): the factor entry L(i,j) at CSC position k -> the
-        // SpTRSV's storage width, via narrow_value() (see its contract above);
-        // the DROP diagnostic zeroes v first. Both stored copies of an entry
-        // (CSR transpose below, CSC copy) go through this same pure function.
-        // The bf16 rounding-mode env is read at every setup (any build; it
-        // only has an effect on the bf16 variants).
+        // Storage-mode envs, read at every setup (any build; each only has an
+        // effect on its own variant): bf16 rounding mode, fp16 subnormal flush
+        // (default ON, see file header).
         const bool bf16_stochastic = [] {
             const char* e = std::getenv("APXCHOL_BF16_STOCHASTIC");
             return e && std::atoi(e) != 0;
         }();
-        // APXCHOL_LOWPREC_DROP=<rel> (fp32/fp64 builds only; see file header).
-        const double drop_rel = [] {
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-            return 0.0;
-#else
-            const char* e = std::getenv("APXCHOL_LOWPREC_DROP");
+        const bool fp16_flush_subnormal = [] {
+            const char* e = std::getenv("APXCHOL_FP16_KEEP_SUBNORMAL");
+            return !(e && std::atoi(e) != 0);
+        }();
+        // APXCHOL_FACTOR_DROP=<rel> (every build; see file header). <= 0 = off.
+        const double factor_drop_rel = [] {
+            const char* e = std::getenv("APXCHOL_FACTOR_DROP");
             const double r = e ? std::atof(e) : 0.0;
             return r > 0.0 ? r : 0.0;
-#endif
         }();
         stats_ = lowprec_statistics{};
-        // Per-column scale s_j (the *_SCALED variants' scale_, the DROP
-        // diagnostic's threshold reference; not needed otherwise). See
-        // column_scale() for the contract.
+        stats_.nnz_factor = static_cast<std::uint64_t>(nnz);
+        // Per-column scale s_j (the *_SCALED variants' scale_, the compacting
+        // drop's threshold reference; not needed otherwise). See column_scale()
+        // for the contract. Computed from the factor BEFORE the drop.
 #if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
         scale_.resize(m_);
         float* const col_scale = scale_.data();
         const bool need_scale = true;
 #else
         std::vector<float> col_scale_local;
-        if (drop_rel > 0.0) col_scale_local.resize(m_);
+        if (factor_drop_rel > 0.0) col_scale_local.resize(m_);
         float* const col_scale = col_scale_local.data();
-        const bool need_scale = drop_rel > 0.0;
+        const bool need_scale = factor_drop_rel > 0.0;
 #endif
         if (need_scale) {
             #pragma omp parallel for schedule(static)
@@ -300,12 +377,77 @@ public:
                 col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
             mark("col_scale");
         }
-        const auto store = [=](factor_value_t v, edge_index k, node_index i, node_index j) -> sptrsv_value_t {
+
+        // ── Compacting drop (APXCHOL_FACTOR_DROP) ─────────────────────
+        // O(nnz) parallel work: per-column kept count -> serial prefix over
+        // m_+1 -> parallel compacted copy. The compacted arrays REPLACE
+        // L11_{outer,inner,vals} / nnz for everything below (transpose, CSC
+        // copy, level sets), so the rest of setup is drop-agnostic. Order
+        // within a column is preserved (diagonal stays first). The buffers are
+        // allocated uninitialized (every slot is written exactly once).
+        std::vector<edge_index>           drop_outer;
+        std::unique_ptr<node_index[]>     drop_inner;
+        std::unique_ptr<factor_value_t[]> drop_vals;
+        if (factor_drop_rel > 0.0) {
+            drop_outer.resize(static_cast<size_t>(m_) + 1);
+            std::uint64_t n_thr = 0, n_fmt = 0;
+            #pragma omp parallel for schedule(static) reduction(+ : n_thr, n_fmt)
+            for (node_index j = 0; j < m_; ++j) {
+                const float s = col_scale[j];
+                edge_index kept = 0;
+                for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p) {
+                    const factor_value_t v = L11_vals[p];
+                    if (L11_inner[p] == j) { ++kept; continue; }                // diagonal: always
+                    if (keep_offdiag(v, s, factor_drop_rel, fp16_flush_subnormal)) { ++kept; continue; }
+                    // Dropped: attribute to the threshold first (the format-only
+                    // reason is what the drop removes ON TOP of the threshold).
+                    if (std::fabs(static_cast<double>(v)) < factor_drop_rel * static_cast<double>(s)) ++n_thr;
+                    else ++n_fmt;
+                }
+                drop_outer[j + 1] = kept;
+            }
+            drop_outer[0] = 0;
+            for (node_index j = 0; j < m_; ++j)
+                drop_outer[j + 1] += drop_outer[j];
+            const edge_index nnz_kept = drop_outer[m_];
+            drop_inner.reset(new node_index[nnz_kept]);
+            drop_vals.reset(new factor_value_t[nnz_kept]);
+            #pragma omp parallel for schedule(static)
+            for (node_index j = 0; j < m_; ++j) {
+                const float s = col_scale[j];
+                edge_index out = drop_outer[j];
+                for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p) {
+                    const factor_value_t v = L11_vals[p];
+                    if (L11_inner[p] != j && !keep_offdiag(v, s, factor_drop_rel, fp16_flush_subnormal))
+                        continue;
+                    drop_inner[out] = L11_inner[p];
+                    drop_vals[out]  = v;
+                    ++out;
+                }
+                assert(out == drop_outer[j + 1]);
+            }
+            stats_.dropped_threshold = n_thr;
+            stats_.dropped_flush     = n_fmt;
+            stats_.dropped           = n_thr + n_fmt;
+            L11_outer = drop_outer.data();
+            L11_inner = drop_inner.get();
+            L11_vals  = drop_vals.get();
+            nnz = nnz_kept;
+            // The Laplacian path's L11 copy is dead now: free it before the
+            // transpose allocates its bucket (peak-memory, not speed).
+            L11_inner_local = {}; L11_vals_local = {}; L11_outer_local = {};
+            mark("factor_drop");
+        }
+        stats_.nnz_stored = static_cast<std::uint64_t>(nnz);
+
+        // store(v, k, i, j): the factor entry L(i,j) at CSC position k of the
+        // (possibly compacted) L11 -> the SpTRSV's storage width, via
+        // narrow_value() (see its contract above). Both stored copies of an
+        // entry (CSR transpose below, CSC copy) go through this same pure
+        // function.
+        const auto store = [=](factor_value_t v, edge_index k, node_index /*i*/, node_index j) -> sptrsv_value_t {
             const float s = need_scale ? col_scale[j] : 1.0f;
-            if (drop_rel > 0.0 && i != j &&
-                std::fabs(static_cast<double>(v)) < drop_rel * static_cast<double>(s))
-                v = 0;
-            return narrow_value(v, k, s, bf16_stochastic);
+            return narrow_value(v, k, s, bf16_stochastic, fp16_flush_subnormal);
         };
 #if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
         // Exact fp32 diagonal, straight from the factor (factor_value_t ==
@@ -527,8 +669,8 @@ public:
         for (node_index i = 0; i <= m_; ++i)
             csc_col_ptr_[i] = L11_outer[i];
         {
-            std::uint64_t n_off = 0, n_flush = 0, n_sub = 0, n_drop = 0;
-            #pragma omp parallel for schedule(static) reduction(+ : n_off, n_flush, n_sub, n_drop)
+            std::uint64_t n_off = 0, n_flush = 0, n_sub = 0, n_fsub = 0;
+            #pragma omp parallel for schedule(static) reduction(+ : n_off, n_flush, n_sub, n_fsub)
             for (node_index j = 0; j < m_; ++j) {
                 for (edge_index k = L11_outer[j]; k < L11_outer[j + 1]; ++k) {
                     const node_index    i  = L11_inner[k];
@@ -536,12 +678,10 @@ public:
                     const sptrsv_value_t w = store(v, k, i, j);
                     csc_row_idx_[k] = i;
                     csc_vals_[k]    = w;
+                    if (is_stored_subnormal(v)) ++n_fsub;          // census: the FACTOR value (fp32), diagonal incl.
                     if (i == j) continue;                          // diagonal slot: unread under lowprec
                     ++n_off;
-                    if (drop_rel > 0.0 &&
-                        std::fabs(static_cast<double>(v)) < drop_rel * static_cast<double>(col_scale[j])) {
-                        ++n_drop;                                  // zeroed by the diagnostic
-                    } else if (v != 0 && widen(w) == 0.0) {
+                    if (v != 0 && widen(w) == 0.0) {
                         ++n_flush;                                 // zeroed by the storage format
                     } else if (is_stored_subnormal(w)) {
                         ++n_sub;
@@ -549,20 +689,40 @@ public:
                 }
             }
             stats_.offdiag = n_off; stats_.flushed = n_flush;
-            stats_.subnormal = n_sub; stats_.dropped = n_drop;
+            stats_.subnormal = n_sub; stats_.factor_subnormal = n_fsub;
             if (std::getenv("APXCHOL_VERBOSE")) {
                 const double den = n_off ? static_cast<double>(n_off) : 1.0;
                 std::fprintf(stderr,
-                    "[apxchol] sptrsv storage %s (lowprec=%s): offdiag=%llu flushed_to_zero=%llu (%.6f%%)"
-                    " subnormal=%llu (%.6f%%)%s",
+                    "[apxchol] sptrsv storage %s (lowprec=%s): stored_nnz=%llu offdiag=%llu"
+                    " flushed_to_zero=%llu (%.6f%%) subnormal=%llu (%.6f%%)"
+                    " factor_subnormal(fp32 census, diag incl.)=%llu\n",
                     value_name, lowprec_variant,
+                    static_cast<unsigned long long>(stats_.nnz_stored),
                     static_cast<unsigned long long>(n_off),
                     static_cast<unsigned long long>(n_flush), 100.0 * n_flush / den,
                     static_cast<unsigned long long>(n_sub),   100.0 * n_sub / den,
-                    drop_rel > 0.0 ? "" : "\n");
-                if (drop_rel > 0.0)
-                    std::fprintf(stderr, " dropped(APXCHOL_LOWPREC_DROP=%g)=%llu (%.6f%%)\n",
-                                 drop_rel, static_cast<unsigned long long>(n_drop), 100.0 * n_drop / den);
+                    static_cast<unsigned long long>(n_fsub));
+                if (factor_drop_rel > 0.0) {
+                    // Fractions are of the factor's ORIGINAL off-diagonals.
+                    const std::uint64_t off0 = n_off + stats_.dropped;
+                    const double den0 = off0 ? static_cast<double>(off0) : 1.0;
+                    std::fprintf(stderr,
+                        "[apxchol] factor drop (APXCHOL_FACTOR_DROP=%g%s): dropped=%llu (%.4f%% of %llu off-diagonals;"
+                        " threshold=%llu, format_zero=%llu) stored_nnz %llu -> %llu (%.4f%% of factor)\n",
+                        factor_drop_rel,
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+                        fp16_flush_subnormal ? ", fp16 subnormals flushed" : ", fp16 subnormals kept",
+#else
+                        "",
+#endif
+                        static_cast<unsigned long long>(stats_.dropped), 100.0 * stats_.dropped / den0,
+                        static_cast<unsigned long long>(off0),
+                        static_cast<unsigned long long>(stats_.dropped_threshold),
+                        static_cast<unsigned long long>(stats_.dropped_flush),
+                        static_cast<unsigned long long>(stats_.nnz_factor),
+                        static_cast<unsigned long long>(stats_.nnz_stored),
+                        100.0 * stats_.nnz_stored / (stats_.nnz_factor ? stats_.nnz_factor : 1));
+                }
             }
         }
         mark("csc_copy");

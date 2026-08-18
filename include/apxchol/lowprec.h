@@ -49,11 +49,12 @@
 //                fp32 range), RNE on the dropped 8 bits, packed in 3 bytes.
 //                No scaling. 3 B/entry instead of 4.
 //
-// Plus one DIAGNOSTIC that changes no storage format, for the fp32/fp64
-// (non-lowprec) builds only: env APXCHOL_LOWPREC_DROP=<rel> makes setup()
-// store ZERO for every off-diagonal with |L_ij| < rel * s_j (the same
-// per-column max), i.e. threshold dropping in isolation, no precision change.
-// Ignored on the lowprec builds (where the fp16 flush already is that).
+// FP16_SCALED additionally flushes stored fp16 SUBNORMALS to (signed) zero at
+// storage time by default (env APXCHOL_FP16_KEEP_SUBNORMAL=1 keeps them);
+// and every build honours the runtime env APXCHOL_FACTOR_DROP=<rel>, a
+// COMPACTING drop (off-diagonals with |L_ij| < rel * s_j, plus whatever the
+// storage format would store as zero, are REMOVED from the CSR/CSC at
+// setup). Both live in omp_sptrsv (solver/sptrsv/omp.h, file header).
 //
 // This header holds the variant-selection macros, the fp16_t / fp24_t
 // storage types (bf16_t lives in bf16.h) and their widen() overloads. The

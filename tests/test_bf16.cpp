@@ -244,7 +244,8 @@ namespace {
 // contract under test. Under the fp32/fp64 builds this is v itself.
 double stored_value(factor_value_t v, edge_index p, bool is_diag, bool stochastic, float s) {
     if (is_diag) return static_cast<double>(v);              // exact fp32 diag_ (or the fp32/fp64 inline read)
-    const double w = apxchol::widen(apxchol::omp_sptrsv::narrow_value(v, p, s, stochastic));
+    const double w = apxchol::widen(apxchol::omp_sptrsv::narrow_value(v, p, s, stochastic,
+                                                                          /*fp16_flush_subnormal=*/true));
 #if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
     return w * static_cast<double>(s);
 #else

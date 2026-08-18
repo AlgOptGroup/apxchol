@@ -61,7 +61,8 @@ ref_csr reference_transpose(const sparse_csc& L) {
         for (edge_index p = outer[j]; p < outer[j + 1]; ++p) {
             const edge_index out = pos[inner[p]]++;
             R.col_idx[out] = j;
-            R.vals[out]    = apxchol::omp_sptrsv::narrow_value(vals[p], p, s_j, /*stochastic=*/false);
+            R.vals[out]    = apxchol::omp_sptrsv::narrow_value(vals[p], p, s_j, /*stochastic=*/false,
+                                                               /*fp16_flush_subnormal=*/true);
         }
     }
     return R;

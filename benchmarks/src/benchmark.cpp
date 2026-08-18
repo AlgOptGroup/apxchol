@@ -423,8 +423,20 @@ static BenchResult run_apxchol_v1(
         std::cerr << "FILL " << combo_name
                   << "  Lnnz=" << Lnnz << " offdiag=" << offdiag
                   << " adj_nnz=" << adj_nnz
-                  << " ratio(2*offdiag/adj)=" << (2.0 * offdiag / adj_nnz)
-                  << "\n" << std::flush;
+                  << " ratio(2*offdiag/adj)=" << (2.0 * offdiag / adj_nnz);
+#if !defined(APXCHOL_USE_CUDA)
+        // What the SpTRSV actually holds after its setup (L11 = the factor minus
+        // the Laplacian's grounded last row/col, minus APXCHOL_FACTOR_DROP's
+        // compaction): the CSR and the CSC each store stored_nnz entries.
+        {
+            apxchol::omp_sptrsv trsv;
+            trsv.setup(Fmeas.L, static_cast<apxchol::node_index>(Fmeas.sddm ? n_fac : n_fac - 1));
+            const auto& st = trsv.lowprec_stats();
+            std::cerr << " stored_nnz=" << st.nnz_stored
+                      << " (L11_nnz=" << st.nnz_factor << " dropped=" << st.dropped << ")";
+        }
+#endif
+        std::cerr << "\n" << std::flush;
     }
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     if (dump_profile) {
