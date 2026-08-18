@@ -72,6 +72,10 @@ This dispatches storage from the `graph_storage` enum and the partitioner by nam
 
 When touching `_solve_impl` or anything that constructs a `factorization`, check both branches.
 
+### Experiment env knobs (`include/apxchol/env_knobs.h`)
+
+Process-wide, read once, all default to "unset" = prior behaviour. `APXCHOL_GROUND=center|center-k|reg` (+ `APXCHOL_CENTER_K`, `APXCHOL_REG_EPS`) selects how a pure Laplacian is grounded (per-application centring / centring only every K-th application / an explicit `eps·diag` self-loop at `make_graph` time that makes the matrix classify as SDDM); `APXCHOL_OMP_THRESHOLD` overrides `factor_options::omp_threshold`; `APXCHOL_TAIL_THREADS` runs sub-threshold ("tail") elimination rounds on the fused parallel path with a small pinned team instead of the serial path. Unit tests assume the knobs are unset (`reg` deliberately flips the SDDM flag; a parallel tail/partitioner is only reproducible up to fp merge-order ulps and the racy block_greedy conflict resolution).
+
 ### factor_options tuning knobs
 
 `include/apxchol/solver/factor_options.h` is the authoritative source for tuning parameters. Several knobs have non-obvious empirical defaults documented in long comments there:
