@@ -456,7 +456,7 @@ TEST(BF16, SpTRSVStochasticModeIsConsistentAcrossCSRAndCSC) {
 // 0..48 so every path (8-blocks, the 4-step, tails of 0..3) is exercised.
 // Checked exactly like the thin-level kernels: the pair contract at roundoff
 // against L~ / R and against the serial reference on L_s, plus the two
-// gather flavours (and the sync-free back solve) agreeing to roundoff.
+// gather flavours agreeing to roundoff.
 namespace {
 
 sparse_csc make_round_structured_lower(node_index R, node_index B, unsigned seed,
@@ -529,7 +529,7 @@ TEST(BF16, SpTRSVFatLevelKernelsBothGatherFlavours) {
     std::vector<double> y_ref, z_ref;
     reference_pair(L, x, /*stochastic=*/false, y_ref, z_ref);
 
-    std::vector<std::vector<double>> yps, zs, zsf;
+    std::vector<std::vector<double>> yps, zs;
     for (const char* mode : {"simd", "scalar"}) {
         SCOPED_TRACE(std::string("APXCHOL_FP16_GATHER=") + mode);
         setenv("APXCHOL_FP16_GATHER", mode, 1);
@@ -552,18 +552,16 @@ TEST(BF16, SpTRSVFatLevelKernelsBothGatherFlavours) {
         ASSERT_EQ(sizes.size(), static_cast<size_t>(R));
         for (int s : sizes) ASSERT_EQ(s, static_cast<int>(B));
 
-        std::vector<double> yp(m), z(m), zf(m);
+        std::vector<double> yp(m), z(m);
         trsv.forward_solve(x.data(), yp.data());
         check_kernel_residual(L, x, yp, /*transpose=*/false, /*stochastic=*/false);
         trsv.transpose_solve(yp.data(), z.data());
-        trsv.transpose_solve_syncfree(yp.data(), zf.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
             const double r = apxchol::omp_sptrsv::inv_scale(pair_scale(L, j));
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z,  /*transpose=*/true, /*stochastic=*/false);
-        check_kernel_residual(L, ryp, zf, /*transpose=*/true, /*stochastic=*/false);
         double worst_y = 0.0, worst_z = 0.0, sc_y = 0.0, sc_z = 0.0;
         for (node_index j = 0; j < m; ++j) {
             worst_y = std::max(worst_y, std::fabs(yp[j] - static_cast<double>(pair_scale(L, j)) * y_ref[j]));
@@ -577,18 +575,16 @@ TEST(BF16, SpTRSVFatLevelKernelsBothGatherFlavours) {
 #else
         EXPECT_LT(worst_z, 1e-10 * sc_z) << "z";
 #endif
-        yps.push_back(yp); zs.push_back(z); zsf.push_back(zf);
+        yps.push_back(yp); zs.push_back(z);
     }
     // The two gather flavours (different summation order) agree to roundoff.
-    double dy = 0.0, dz = 0.0, dzf = 0.0, sy = 0.0, sz = 0.0;
+    double dy = 0.0, dz = 0.0, sy = 0.0, sz = 0.0;
     for (node_index j = 0; j < m; ++j) {
         dy  = std::max(dy,  std::fabs(yps[0][j] - yps[1][j]));
         dz  = std::max(dz,  std::fabs(zs[0][j]  - zs[1][j]));
-        dzf = std::max(dzf, std::fabs(zsf[0][j] - zsf[1][j]));
         sy  = std::max(sy,  std::fabs(yps[0][j]));
         sz  = std::max(sz,  std::fabs(zs[0][j]));
     }
     EXPECT_LT(dy,  1e-12 * sy);
     EXPECT_LT(dz,  1e-12 * sz);
-    EXPECT_LT(dzf, 1e-12 * sz);
 }

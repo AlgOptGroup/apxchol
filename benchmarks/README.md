@@ -194,7 +194,7 @@ python3 benchmarks/fill_pass.py
 python3 benchmarks/fill_chart.py --out benchmarks/latest/figures
 # Per-(selector, matrix) SpTRSV back-solve level counts + the selector_levels figure:
 python3 benchmarks/selector_levels.py
-# SpTRSV level structure per matrix (sync-free candidacy re-check):
+# SpTRSV level structure per matrix (level counts / work concentration):
 python3 benchmarks/level_stats.py
 ```
 

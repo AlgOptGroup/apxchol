@@ -383,18 +383,17 @@ int main(int argc, char* argv[]) {
                             fwd ? "fwd" : "bck", sizes.size(), total_w, max_sz, max_w,
                             big, total_w ? (double)big_w / total_w : 0.0);
             }
-            std::printf("\n%-7s %14s %14s %14s\n",
-                        "thr", "fwd_levelset",
-                        "bck_levelset", "bck_syncfree");
-            std::printf("%s\n", std::string(55, '-').c_str());
+            std::printf("\n%-7s %14s %14s\n",
+                        "thr", "fwd_levelset", "bck_levelset");
+            std::printf("%s\n", std::string(40, '-').c_str());
 
             for (int t : {1, 2, 4, 8, 16, 32}) {
 #ifdef _OPENMP
                 omp_set_num_threads(t);
 #endif
                 // Warm up.
-                trsv.forward_solve_levelset(rhs.data(), tmp.data());
-                trsv.transpose_solve_levelset(tmp.data(), out.data());
+                trsv.forward_solve(rhs.data(), tmp.data());
+                trsv.transpose_solve(tmp.data(), out.data());
 
                 auto bench = [&](auto solve) {
                     auto t0 = Clock::now();
@@ -404,16 +403,12 @@ int main(int argc, char* argv[]) {
                     return std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
                 };
                 double fl = bench([&](const double* a, double* b) {
-                    trsv.forward_solve_levelset(a, b);
+                    trsv.forward_solve(a, b);
                 });
                 double bl = bench([&](const double* a, double* b) {
-                    trsv.transpose_solve_levelset(a, b);
+                    trsv.transpose_solve(a, b);
                 });
-                double bs = bench([&](const double* a, double* b) {
-                    trsv.transpose_solve_syncfree(a, b);
-                });
-                std::printf("%-7d %14.3f %14.3f %14.3f\n",
-                            t, fl, bl, bs);
+                std::printf("%-7d %14.3f %14.3f\n", t, fl, bl);
             }
             return 0;
         }

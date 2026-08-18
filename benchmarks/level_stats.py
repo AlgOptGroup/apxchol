@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Collect SpTRSV level statistics per matrix so we can re-check, after any
-re-sweep, whether any matrix is a genuine candidate for the sync-free back-solve.
+"""Collect SpTRSV level statistics per matrix (level counts + work concentration).
 
 Runs the benchmark with APXCHOL_LEVEL_DUMP=1 (apxchol bg+tree factor) on each
 matrix and parses the "[trsv-levels]" stderr line, which reports the back-solve
-level count, max level size, and — crucially — the WORK-concentration signals:
+level count, max level size, and the WORK-concentration signals:
   bck_work_top1_frac    share of off-diagonal SpTRSV work in the single fattest level
   bck_work_in_tiny_frac share of work in levels below the legacy size threshold
 
-The auto-selector now defaults to level-set everywhere (sync-free never won on the
-current factors); a matrix is only a plausible sync-free candidate when its work is
-genuinely SPREAD across many tiny levels with NO dominant head, i.e.
-  bck_work_in_tiny_frac HIGH  AND  bck_work_top1_frac LOW.
-Power-law graphs fail this (tiny avg but a fat work head). Writes
-results/level_stats.csv. Run from repo root:
+Historical purpose: screening for the sync-free back solve (since REMOVED from
+omp_sptrsv -- level-set won everywhere; power-law graphs have a tiny average
+level size but a fat work head). The "syncfree_candidate" column keeps that
+screen's verdict for continuity: work genuinely SPREAD across many tiny levels
+with NO dominant head, i.e. bck_work_in_tiny_frac HIGH AND bck_work_top1_frac
+LOW. The dump also prints per-direction thin-level counts and thin-run length
+histograms (what APXCHOL_SPTRSV_AGGLOMERATE acts on) on extra "[trsv-levels]
+fwd:/bck:" lines. Writes results/level_stats.csv. Run from repo root:
   python3 benchmarks/level_stats.py
 """
 import csv, os, re
@@ -47,9 +48,9 @@ PAT = re.compile(
 
 
 def candidate(top1, tiny):
-    # Sync-free only has a chance when work is spread across tiny levels with no
-    # fat head. These cutoffs are deliberately permissive (a screen, not a gate);
-    # any hit should be A/B'd with APXCHOL_BCK_SCHED before trusting it.
+    # The (removed) sync-free schedule only had a chance when work is spread
+    # across tiny levels with no fat head. Kept as a descriptive screen; these
+    # cutoffs are deliberately permissive.
     return "MAYBE" if (tiny > 0.5 and top1 < 0.1) else "no"
 
 
