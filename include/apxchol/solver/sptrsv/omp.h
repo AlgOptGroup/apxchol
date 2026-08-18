@@ -274,6 +274,28 @@ inline constexpr double kFactorDropRelDefault = 1e-4;
 // the un-scaled fp32 factor column and only THEN is the column narrowed
 // (L_ij / s_j); s_j is the pre-drop column max, which the drop never removes.
 //
+// COLUMN-SUM COMPENSATION OF THE ROUNDING (lowprec builds; env
+// APXCHOL_LOWPREC_DIAG_COMP=1, read at every setup, DEFAULT OFF -- a
+// diagnostic, measured on the integration branch): the per-entry storage
+// rounding delta_ij of a narrow off-diagonal is exactly the kind of
+// perturbation the paragraph above is about -- it breaks the zero column
+// sums of a Laplacian factor, i.e. it grounds every vertex a little (~2^-11
+// relative under fp16) at both endpoints of every edge -- and on the
+// Laplacian (m = n-1, center-k) path PCG pays for it exactly as it pays for
+// plain removal: MEASURED iter0040 (T=1, tol 1e-8, bg+tree[vec_pool], drop
+// on) fp32 45 -> FP16_SCALED 64 (67 with the drop off; 64 with fp16
+// subnormals kept), while on the SDDM path (APXCHOL_GROUND=reg) both take 48.
+// The lowprec builds keep the diagonal in a separate fp32 diag_[], so the
+// residual can be absorbed there: with the knob, diag_[j] = fp32(x_jj +
+// sum_i (x_ij - widen(h_ij))) with x = the value store() narrows (L_ij / s_j
+// under *_SCALED), computed in the CSC pass -- the stored column then sums
+// to what the fp32 column sums to (up to fp32), the diagonal moves by at
+// most 2^-11 relative (|sum_i L_ij| = L_jj for our factors), and the
+// stored_diag() contract / the unit tests describe the knob-OFF diagonal.
+// Ignored under APXCHOL_FP16_DIAG (the slot is fp16). Whether this
+// recovers the Laplacian-path iterations is what the knob is for; adopting
+// it as the default means restating stored_diag() and its tests.
+//
 // STATISTICS (lowprec_stats() == drop_stats(), printed under APXCHOL_VERBOSE:
 // one "sptrsv storage" line per setup, plus a "factor drop" line when the drop
 // is on): the threshold in effect (rel; 0 = off) and whether the compensation
@@ -484,6 +506,10 @@ public:
     // kernels divide by the fp16 diagonal slot instead of the fp32 diag_[]);
     // always false on every other build.
     bool fp16_diag() const { return fp16_diag_; }
+    // Lowprec builds: true iff the last setup() applied APXCHOL_LOWPREC_DIAG_COMP=1
+    // (diag_[j] carries the column's storage-rounding residual, see the file
+    // header); always false on the fp32/fp64 builds.
+    bool lowprec_diag_comp() const { return diag_comp_; }
     // Whether the fat-level 16-bit-storage kernels use the SIMD gather
     // (APXCHOL_FP16_GATHER=simd) rather than the stack-buffer + scalar-gather
     // flavour (=scalar) -- the value the last setup() resolved (default:
@@ -978,9 +1004,24 @@ private:
         for (node_index i = 0; i <= m_; ++i)
             csc_col_ptr_[i] = L11_outer[i];
         {
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+            // APXCHOL_LOWPREC_DIAG_COMP=1 (env, read at every setup; lowprec
+            // builds only; default OFF -- a DIAGNOSTIC, see the file header,
+            // "COLUMN-SUM COMPENSATION OF THE ROUNDING"): fold each column's
+            // storage-rounding residual sum_i (x_ij - widen(h_ij)) (x = the
+            // value store() narrows, i.e. L_ij / s_j under *_SCALED) into the
+            // fp32 diag_[j], so the STORED column sums to what the fp32
+            // (compensated-drop) column sums to.
+            const bool diag_comp = [] {
+                const char* e = std::getenv("APXCHOL_LOWPREC_DIAG_COMP");
+                return e && std::atoi(e) != 0;
+            }();
+            diag_comp_ = diag_comp;
+#endif
             std::uint64_t n_off = 0, n_flush = 0, n_sub = 0, n_fsub = 0, n_dbad = 0, n_dlt = 0;
             #pragma omp parallel for schedule(static) reduction(+ : n_off, n_flush, n_sub, n_fsub, n_dbad, n_dlt)
             for (node_index j = 0; j < m_; ++j) {
+                double resid = 0.0;                                // sum over the off-diagonals of (x - widen(stored))
                 for (edge_index k = L11_outer[j]; k < L11_outer[j + 1]; ++k) {
                     const node_index    i  = L11_inner[k];
                     const factor_value_t v = L11_vals[k];
@@ -988,6 +1029,12 @@ private:
                     csc_row_idx_[k] = i;
                     csc_vals_[k]    = w;
                     if (is_stored_subnormal(v)) ++n_fsub;          // census: the FACTOR value (fp32), diagonal incl.
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+                    if (diag_comp && i != j) {
+                        const double x = static_cast<double>(v) / (kStoreScaled ? static_cast<double>(col_scale[j]) : 1.0);
+                        resid += x - widen(w);
+                    }
+#endif
                     if (i == j) {                                  // diagonal slot: unread under lowprec ...
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
                         // ... except under APXCHOL_FP16_DIAG (see file header):
@@ -1007,6 +1054,12 @@ private:
                         ++n_sub;
                     }
                 }
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+                if (diag_comp)
+                    diag_[j] = static_cast<float>(static_cast<double>(diag_[j]) + resid);
+#else
+                (void)resid;
+#endif
             }
             stats_.offdiag = n_off; stats_.flushed = n_flush;
             stats_.subnormal = n_sub; stats_.factor_subnormal = n_fsub;
@@ -1047,10 +1100,10 @@ private:
             if (std::getenv("APXCHOL_VERBOSE")) {
                 const double den = n_off ? static_cast<double>(n_off) : 1.0;
                 std::fprintf(stderr,
-                    "[apxchol] sptrsv storage %s (lowprec=%s): stored_nnz=%llu offdiag=%llu"
+                    "[apxchol] sptrsv storage %s (lowprec=%s%s): stored_nnz=%llu offdiag=%llu"
                     " flushed_to_zero=%llu (%.6f%%) subnormal=%llu (%.6f%%)"
                     " factor_subnormal(fp32 census, diag incl.)=%llu\n",
-                    value_name, lowprec_variant,
+                    value_name, lowprec_variant, diag_comp_ ? ", diag_comp" : "",
                     static_cast<unsigned long long>(stats_.nnz_stored),
                     static_cast<unsigned long long>(n_off),
                     static_cast<unsigned long long>(n_flush), 100.0 * n_flush / den,
@@ -1637,6 +1690,7 @@ private:
     // flavour has no store/reload either.
     static constexpr bool kFatGatherSimdDefault = false;
     // Kernel state set by setup() (see there).
+    bool diag_comp_   = false;   // lowprec builds: APXCHOL_LOWPREC_DIAG_COMP=1 applied at the last setup()
     bool fp16_diag_   = false;   // FP16_SCALED: APXCHOL_FP16_DIAG=1 honoured at the last setup()
     bool gather_simd_ = false;   // fat-level SIMD kernels: vector gather (true) or stack buffer + scalar gather
 
