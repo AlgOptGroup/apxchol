@@ -413,7 +413,14 @@ public:
     // ── Level-set scheduler ──────────────────────────────────
 
     void forward_solve_levelset(const double* x_in, double* y_out) const {
-        std::copy(x_in, x_in + m_, y_out);
+        // No initializing copy of x_in into y_out: the input is folded
+        // straight into the recurrence (row i reads x_in[i] in its update
+        // below), removing a serial full-vector memory pass per solve.
+        // Bit-identical to the old copy-then-update form: y_out[i] was only
+        // ever read at row i's own update, where it still held x_in[i]
+        // (levels partition 0..m-1, each index written exactly once); the
+        // gathered terms read y_out entries written by earlier levels.
+        // In-place calls (x_in == y_out) stay valid for the same reason.
 
         // ONE persistent OpenMP team across all levels.  Issuing a fresh
         // `#pragma omp parallel for` per level costs ~10µs per fork-join
@@ -459,7 +466,7 @@ public:
                             double sum = (s0 + s1) + (s2 + s3);
                             for (; p < row_end; ++p)
                                 sum += csr_vals_[p] * y_out[csr_col_idx_[p]];
-                            y_out[i] = (y_out[i] - sum) / csr_vals_[csr_row_ptr_[i + 1] - 1];
+                            y_out[i] = (x_in[i] - sum) / csr_vals_[csr_row_ptr_[i + 1] - 1];
                         }
                     } // implicit barrier
                 } else {
@@ -476,7 +483,7 @@ public:
                         double sum = 0.0;
                         for (edge_index p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
                             sum += csr_vals_[p] * y_out[csr_col_idx_[p]];
-                        y_out[i] = (y_out[i] - sum) / csr_vals_[csr_row_ptr_[i + 1] - 1];
+                        y_out[i] = (x_in[i] - sum) / csr_vals_[csr_row_ptr_[i + 1] - 1];
                     } // implicit barrier on omp for
                 }
             }
@@ -484,7 +491,12 @@ public:
     }
 
     void transpose_solve_levelset(const double* x_in, double* y_out) const {
-        std::copy(x_in, x_in + m_, y_out);
+        // No initializing copy — x_in is folded into the recurrence exactly
+        // as in forward_solve_levelset (this solve is also a pure gather:
+        // column j reads x_in[j] once at its own update, and the sum gathers
+        // y_out entries of later columns written by earlier backward levels).
+        // Bit-identical to the old copy-then-update form; in-place calls
+        // (x_in == y_out) stay valid.
 
         // ONE persistent OpenMP team across all backward levels.  See
         // forward_solve_levelset for the rationale: collapses per-level
@@ -524,7 +536,7 @@ public:
                             double sum = (s0 + s1) + (s2 + s3);
                             for (; p < col_end; ++p)
                                 sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
-                            y_out[j] = (y_out[j] - sum) / csc_vals_[csc_col_ptr_[j]];
+                            y_out[j] = (x_in[j] - sum) / csc_vals_[csc_col_ptr_[j]];
                         }
                     } // implicit barrier
                 } else {
@@ -541,7 +553,7 @@ public:
                         double sum = 0.0;
                         for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
                             sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
-                        y_out[j] = (y_out[j] - sum) / csc_vals_[csc_col_ptr_[j]];
+                        y_out[j] = (x_in[j] - sum) / csc_vals_[csc_col_ptr_[j]];
                     } // implicit barrier on omp for
                 }
             }
