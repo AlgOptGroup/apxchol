@@ -3,7 +3,9 @@
 #include "apxchol/sparse_csc.h"
 #include "apxchol/big_alloc.h"
 #include <algorithm>
+#include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +23,36 @@ namespace apxchol {
 // Below this threshold, the thread-dispatch overhead exceeds the
 // computational benefit of parallelizing a single level's rows/cols.
 inline constexpr node_index kSpTRSVOMPThreshold = 1024;
+
+// DEFAULT relative threshold of the COMPACTING FACTOR DROP (see the "COMPACTING
+// DROP" section of the omp_sptrsv header comment below): at setup, factor
+// off-diagonal (i, j) is stored in the SpTRSV's CSR/CSC iff
+//   |L_ij| >= kFactorDropRelDefault * s_j,   s_j = column j's max |off-diagonal|,
+// the dropped mass of each column is folded back into its kept off-diagonals
+// (column sums preserved), and the diagonal is always kept. Env
+// APXCHOL_FACTOR_DROP=<rel> overrides (read at every setup): 0 (or any value
+// <= 0) disables the drop, any other value replaces the threshold.
+//
+// ON by default at 1e-4 by measurement. Branch perf/factor-drop @ fbbfd72
+// (pre-center-k base, where the IPM matrix classified as SDDM; fp32 build,
+// T=1, tol 1e-8, bg+tree[vec_pool], Iters/RelRes drop-off vs drop-on):
+// grid_500 40/40, grid_2000 50/50, iter0040 44/44 -- 0 PCG iterations change;
+// grids drop 0 entries (exact no-op), iter0040 drops 51.8% of its
+// off-diagonals (stored nnz 9063231 -> 4639013), i.e. the SpTRSV's CSR/CSC
+// bytes and per-sweep work roughly halve there. Re-measured on main
+// (center-k grounding, iter0040 is a rank-(n-1) Laplacian factor there),
+// same protocol, this port with the column-sum compensation: grid_500 40/40
+// (RelRes 8.345e-09 both), grid_2000 47/47 (8.161e-09 both), iter0040 45/45
+// (7.196e-09 -> 7.224e-09), com-Amazon 38/38 (7.977e-09 both, 0 dropped);
+// iter0040 drops 51.6% (9032674 -> 4639053). WITHOUT the compensation
+// (APXCHOL_FACTOR_DROP_COMPENSATE=0, the branch's plain-removal semantics)
+// the same 1e-4 costs iter0040 45 -> 67 iterations on main's Laplacian path
+// (48 -> 48 with APXCHOL_GROUND=reg, i.e. on the SDDM path the branch
+// measured on, where it costs nothing either way); see the header comment
+// for why. With the compensation iter0040 stays at 45 up to rel=3e-3
+// (67% dropped), so 1e-4 is a conservative default, kept as the value the
+// branch measured; raising it needs the IPM ladder, not one matrix.
+inline constexpr double kFactorDropRelDefault = 1e-4;
 
 /// OpenMP parallel sparse triangular solver with two interchangeable schedulers:
 ///
@@ -52,6 +84,63 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // sparse_csc.h and shared with the CUDA backend. It halves csr_vals_/csc_vals_
 // -- the two largest factor copies -- cutting memory and bandwidth on the
 // bandwidth-bound (~94% of peak) triangular solve; diag + outer PCG stay fp64.
+//
+// COMPACTING DROP (APXCHOL_FACTOR_DROP=<rel>, default kFactorDropRelDefault =
+// 1e-4, read at every setup; <= 0 = off): setup() REMOVES -- not zeroes --
+// factor off-diagonals BEFORE the CSR/CSC are built: entry (i, j), i != j, is
+// KEPT iff
+//   |L_ij| >= rel * s_j   (s_j = column j's max |off-diagonal|, column_scale(),
+//                          computed from the factor BEFORE the drop).
+// keep_offdiag() is the pure predicate. The diagonal is always kept, so every
+// column keeps its first entry (the diagonal-first CSC / diagonal-last CSR
+// invariants the solves rely on hold) and s_j is unchanged by the drop (the
+// column max itself is never below rel * s_j for rel <= 1). Exact zeros
+// always go (|0| < rel * s_j for any rel > 0). The drop is O(nnz) parallel
+// work with no atomics -- per-column kept count -> serial prefix over m+1 ->
+// parallel compacted copy into uninitialized buffers -- and the compacted
+// arrays REPLACE L11_{outer,inner,vals} / nnz for everything downstream: the
+// CSR transpose, the CSC copy, the level sets (the topological scan reads the
+// compacted CSR/CSC; round-as-level bounds are per column and unaffected) and
+// the sync-free counters are all drop-agnostic. Result: nnz(L stored) -- the
+// CSR/CSC bytes and the per-sweep work -- shrink. Deterministic: the kept set
+// is a per-entry predicate on the factor, the output order is the input
+// order, and the compensation below sums each column in a fixed order (the
+// factor itself is deterministic at T=1; at T>1 only fp merge-order ulps
+// differ, as before). When nothing is below the threshold (grids) the arrays
+// are left untouched -- no copy is made.
+//
+// COLUMN-SUM COMPENSATION (default ON; APXCHOL_FACTOR_DROP_COMPENSATE=0, read
+// at every setup, gives plain removal for A/B): every column of the factor of
+// a Laplacian sums to zero -- L(j,j) = sqrt(deg_j), L(i,j) = -w_ij/sqrt(deg_j)
+// -- which is exactly why L L^T again has zero row sums (a Laplacian in the
+// generalized sense: A + a zero-row-sum sampling error) and why grounding the
+// last vertex costs nothing: (L L^T)_11 = L11 L11^T is the reduced form of
+// that approximation, with the same total grounding mass as the true A_11. Plain removal of an entry L(i,j) breaks the column sum: to
+// first order it deletes the tiny edge (i,j) from the approximate Laplacian
+// AND leaves its weight behind as a self-loop at both endpoints -- in the
+// grounded (Laplacian, m = n-1) view, an extra edge to ground. Modes that are
+// only weakly grounded in A_11 (regions far from the hub in conductance) then
+// see a preconditioner that grounds them much more strongly, and PCG pays:
+// measured on main's iter0040 (Laplacian path) plain removal at rel=1e-4
+// costs 45 -> 67 iterations, while on the SDDM path (APXCHOL_GROUND=reg,
+// where residuals stay orthogonal to the one near-null direction) it costs
+// nothing (48 -> 48; the branch that introduced the drop measured 44 -> 44
+// on that path). The compensation folds each column's dropped mass back into
+// its kept off-diagonals in proportion to |v| (for the M-matrix factors we
+// produce -- all off-diagonals <= 0 -- that is a uniform rescale of the kept
+// off-diagonals by 1 + |dropped| / |kept|; the |v| weighting only keeps it
+// bounded on a mixed-sign column). Column sums -- hence the zero row sums of
+// L~ L~^T and the total grounding mass of L~11 L~11^T (= sum of squared column
+// sums of L~11 = the hub row's) -- are preserved exactly (up to fp32
+// rounding); the perturbation is a bounded relative change of the kept edges
+// instead of an unbounded relative change of the grounding. Measured on iter0040 (main): 45 -> 45 iterations at rel = 1e-4,
+// 1e-3 and 3e-3 (52 / 65 / 67% of the off-diagonals dropped). This is the
+// same idea as MILU's row-sum preservation. Measurement behind the default:
+// see kFactorDropRelDefault.
+//
+// STATISTICS: drop_stats() / stored_nnz() report the factor's nnz before and
+// after the drop and how many off-diagonals went; APXCHOL_VERBOSE prints one
+// "[apxchol] sptrsv storage" line per setup.
 
 class omp_sptrsv {
 public:
@@ -64,6 +153,58 @@ public:
     static constexpr std::size_t value_bytes = sizeof(sptrsv_value_t);
     static constexpr const char* value_name =
         sizeof(sptrsv_value_t) == 4 ? "float (fp32)" : "double (fp64)";
+
+    // THE compacting-drop predicate (public so the tests can state it): the
+    // off-diagonal v of a column whose max |off-diagonal| is s survives
+    // APXCHOL_FACTOR_DROP=rel iff |v| >= rel * s. The diagonal is never
+    // passed through this (always kept). Pure.
+    static bool keep_offdiag(sptrsv_value_t v, double s, double rel) {
+        return std::fabs(static_cast<double>(v)) >= rel * s;
+    }
+
+    // Per-column scale contract (public for the tests): s_j of the factor
+    // column [first, last) whose FIRST entry is the diagonal (the assembler's
+    // CSC invariant, which the back solve relies on too): max |off-diagonal|,
+    // or 1.0 if the column has no nonzero off-diagonal. The drop's threshold
+    // reference; computed BEFORE the drop (the drop never removes the column
+    // max, so it is the same after).
+    static double column_scale(const sptrsv_value_t* vals, edge_index first, edge_index last) {
+        double mx = 0.0;
+        for (edge_index p = first + 1; p < last; ++p)
+            mx = std::max(mx, std::fabs(static_cast<double>(vals[p])));
+        return mx > 0.0 ? mx : 1.0;
+    }
+
+    // APXCHOL_FACTOR_DROP=<rel> resolution, read at every setup(): unset (or
+    // empty) -> kFactorDropRelDefault; set -> its value, where anything <= 0
+    // (including "0" and unparsable text, which atof reads as 0) turns the
+    // drop OFF.
+    static double factor_drop_rel_from_env() {
+        const char* e = std::getenv("APXCHOL_FACTOR_DROP");
+        if (!e || !*e) return kFactorDropRelDefault;
+        const double r = std::atof(e);
+        return r > 0.0 ? r : 0.0;
+    }
+    // APXCHOL_FACTOR_DROP_COMPENSATE: unset / anything but "0" -> the
+    // column-sum compensation is applied (default); "0" -> plain removal (the
+    // A/B switch; see the file header). Read at every setup().
+    static bool factor_drop_compensate_from_env() {
+        const char* e = std::getenv("APXCHOL_FACTOR_DROP_COMPENSATE");
+        return !(e && *e && std::atoi(e) == 0);
+    }
+
+    // Statistics of the last setup() (see the file header): what the
+    // compacting drop did to L11 = L.topLeftCorner(m, m).
+    struct drop_statistics {
+        double        rel        = 0.0;  // threshold in effect (0 = drop off)
+        bool          compensate = true; // column-sum compensation applied to the dropped columns
+        std::uint64_t nnz_factor = 0;    // nnz of L11 as factorized (before the drop)
+        std::uint64_t nnz_stored = 0;    // nnz the CSR (and the CSC) each hold (after the drop)
+        std::uint64_t dropped    = 0;    // off-diagonals removed (== nnz_factor - nnz_stored)
+    };
+    const drop_statistics& drop_stats() const { return stats_; }
+    // nnz held by the SpTRSV's CSR / CSC (each) after the last setup().
+    std::uint64_t stored_nnz() const { return stats_.nnz_stored; }
 
     /// Analyze L11 = L.topLeftCorner(m, m): build CSR, CSC, and level sets.
     void setup(const sparse_csc& L, node_index m) {
@@ -140,6 +281,111 @@ public:
             L11_vals  = L11_vals_local.data();
         }
         mark("L11_alias_or_copy");
+
+        // ── Compacting drop (APXCHOL_FACTOR_DROP; see the file header) ──
+        // O(nnz) parallel work, no atomics: per-column kept count -> serial
+        // prefix over m_+1 -> parallel compacted copy. The compacted arrays
+        // REPLACE L11_{outer,inner,vals} / nnz for everything below (transpose,
+        // CSC copy, level sets), so the rest of setup is drop-agnostic. Order
+        // within a column is preserved (diagonal stays first). The buffers are
+        // allocated uninitialized (every slot is written exactly once). If no
+        // entry is below the threshold the original arrays stay in place (no
+        // second copy of the factor for the exact-no-op case, e.g. grids).
+        const double factor_drop_rel = factor_drop_rel_from_env();
+        const bool   drop_compensate = factor_drop_compensate_from_env();
+        stats_ = drop_statistics{};
+        stats_.rel        = factor_drop_rel;
+        stats_.compensate = drop_compensate;
+        stats_.nnz_factor = static_cast<std::uint64_t>(nnz);
+        std::vector<edge_index>           drop_outer;
+        std::unique_ptr<node_index[]>     drop_inner;
+        std::unique_ptr<sptrsv_value_t[]> drop_vals;
+        if (factor_drop_rel > 0.0) {
+            // Per-column threshold reference s_j, from the factor BEFORE the
+            // drop (column_scale() contract).
+            std::vector<double> col_scale(m_);
+            #pragma omp parallel for schedule(static)
+            for (node_index j = 0; j < m_; ++j)
+                col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
+            drop_outer.resize(static_cast<size_t>(m_) + 1);
+            #pragma omp parallel for schedule(static)
+            for (node_index j = 0; j < m_; ++j) {
+                const double s = col_scale[j];
+                edge_index kept = 0;
+                for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p)
+                    if (L11_inner[p] == j || keep_offdiag(L11_vals[p], s, factor_drop_rel)) ++kept;
+                drop_outer[j + 1] = kept;
+            }
+            drop_outer[0] = 0;
+            for (node_index j = 0; j < m_; ++j)
+                drop_outer[j + 1] += drop_outer[j];
+            const edge_index nnz_kept = drop_outer[m_];
+            if (nnz_kept != nnz) {
+                drop_inner.reset(new node_index[nnz_kept]);
+                drop_vals.reset(new sptrsv_value_t[nnz_kept]);
+                #pragma omp parallel for schedule(static)
+                for (node_index j = 0; j < m_; ++j) {
+                    const double s = col_scale[j];
+                    const edge_index first = drop_outer[j];
+                    edge_index out = first;
+                    double dropped_sum = 0.0, kept_abs = 0.0;   // over the off-diagonals
+                    for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p) {
+                        const sptrsv_value_t v = L11_vals[p];
+                        if (L11_inner[p] != j) {
+                            if (!keep_offdiag(v, s, factor_drop_rel)) {
+                                dropped_sum += static_cast<double>(v);
+                                continue;
+                            }
+                            kept_abs += std::fabs(static_cast<double>(v));
+                        }
+                        drop_inner[out] = L11_inner[p];
+                        drop_vals[out]  = v;
+                        ++out;
+                    }
+                    assert(out == drop_outer[j + 1]);
+                    // Column-sum compensation (see the file header): spread the
+                    // dropped mass over the kept off-diagonals in proportion to
+                    // |v|, so the column sum -- hence L~ L~^T's row sums, the
+                    // Laplacian structure and the grounding mass -- is what it
+                    // was. Same fixed order in every thread: deterministic.
+                    if (drop_compensate && dropped_sum != 0.0 && kept_abs > 0.0) {
+                        const double per_abs = dropped_sum / kept_abs;
+                        for (edge_index q = first; q < out; ++q) {
+                            if (drop_inner[q] == j) continue;
+                            const double v = static_cast<double>(drop_vals[q]);
+                            drop_vals[q] = static_cast<sptrsv_value_t>(v + per_abs * std::fabs(v));
+                        }
+                    }
+                }
+                stats_.dropped = static_cast<std::uint64_t>(nnz - nnz_kept);
+                L11_outer = drop_outer.data();
+                L11_inner = drop_inner.get();
+                L11_vals  = drop_vals.get();
+                nnz = nnz_kept;
+                // The Laplacian path's L11 copy is dead now: free it before the
+                // transpose allocates its bucket (peak memory, not speed).
+                L11_inner_local = {}; L11_vals_local = {}; L11_outer_local = {};
+            } else {
+                drop_outer = {};   // nothing dropped: keep aliasing the input
+            }
+            mark("factor_drop");
+        }
+        stats_.nnz_stored = static_cast<std::uint64_t>(nnz);
+        if (std::getenv("APXCHOL_VERBOSE")) {
+            const std::uint64_t off0 = stats_.nnz_factor - static_cast<std::uint64_t>(m_);
+            std::fprintf(stderr,
+                "[apxchol] sptrsv storage %s: stored_nnz=%llu (L11_nnz=%llu);"
+                " factor drop (APXCHOL_FACTOR_DROP=%g%s%s): dropped=%llu (%.4f%% of %llu off-diagonals)\n",
+                value_name,
+                static_cast<unsigned long long>(stats_.nnz_stored),
+                static_cast<unsigned long long>(stats_.nnz_factor),
+                factor_drop_rel, factor_drop_rel > 0.0 ? "" : ", off",
+                factor_drop_rel > 0.0 ? (drop_compensate ? ", column sums preserved"
+                                                         : ", plain removal (COMPENSATE=0)") : "",
+                static_cast<unsigned long long>(stats_.dropped),
+                100.0 * static_cast<double>(stats_.dropped) / (off0 ? static_cast<double>(off0) : 1.0),
+                static_cast<unsigned long long>(off0));
+        }
 
         // ── CSC → CSR of L11 (for forward solve) ─────
         // Blocked counting-sort parallel transpose (APXCHOL_PAR_TRANSPOSE,
@@ -761,16 +1007,22 @@ public:
     }
     bool ready() const { return ready_; }
 
-    // Read-only views of the CSR built by setup's CSC→CSR transpose. Used by
-    // the SpTRSVTranspose unit tests to byte-compare the parallel transpose
-    // against a serial reference (and available for diagnostics).
+    // Read-only views of the CSR built by setup's CSC→CSR transpose and of the
+    // CSC copy. Used by the SpTRSVTranspose unit tests to byte-compare the
+    // parallel transpose against a serial reference and by the SpTRSVDrop
+    // tests to check what the compacting drop stored (and available for
+    // diagnostics).
     const auto& csr_row_ptr() const { return csr_row_ptr_; }
     const auto& csr_col_idx() const { return csr_col_idx_; }
     const auto& csr_vals()    const { return csr_vals_; }
+    const auto& csc_col_ptr() const { return csc_col_ptr_; }
+    const auto& csc_row_idx() const { return csc_row_idx_; }
+    const auto& csc_vals()    const { return csc_vals_; }
 
 private:
     node_index m_ = 0;
     bool ready_ = false;
+    drop_statistics stats_;   // what the last setup()'s compacting drop did
 
     // SpTRSV's CSR/CSC arrays are read by the inner forward/back loops at
     // ~50 GB/s effective on T=16. With default 4 KB pages and ~32 MB per
