@@ -162,8 +162,8 @@ void expect_same_bytes(const pair_out& a, const pair_out& b, const char* what) {
 }
 
 // The stored factor L_s the kernels see (public storage contract): the
-// off-diagonal (i, j) is widen(narrow_value(L_ij, k, s_j, ., .)), the diagonal
-// stored_diag(L_jj, s_j) -- both in the column-scaled frame under *_SCALED.
+// off-diagonal (i, j) is widen(narrow_value(L_ij, s_j, .)), the diagonal
+// stored_diag(L_jj, s_j) -- both in the column-scaled frame under FP16_SCALED.
 // The pair contract: forward returns y' with L_s y' = x; back, given y',
 // returns z with L_s^T z = R y', R = diag(inv_scale(s_j)^2). Residuals in
 // double on the same stored values: only summation order differs.
@@ -177,7 +177,7 @@ void expect_correct_pair(const sparse_csc& L, const std::vector<double>& x, cons
         ry[j] += apxchol::omp_sptrsv::stored_diag(vals[outer[j]], s[j]) * o.y[j];
         rz[j] += apxchol::omp_sptrsv::stored_diag(vals[outer[j]], s[j]) * o.z[j];
         for (edge_index p = outer[j] + 1; p < outer[j + 1]; ++p) {
-            const double v = apxchol::widen(apxchol::omp_sptrsv::narrow_value(vals[p], p, s[j], false, true));
+            const double v = apxchol::widen(apxchol::omp_sptrsv::narrow_value(vals[p], s[j], true));
             ry[inner[p]] += v * o.y[j];      // (L_s y')_i
             rz[j]        += v * o.z[inner[p]];   // (L_s^T z)_j
         }

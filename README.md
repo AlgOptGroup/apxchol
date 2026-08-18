@@ -205,16 +205,15 @@ where they live, in [CMakeLists.txt](CMakeLists.txt) — `cmake -LH build`
 lists them with their help strings. `APXCHOL_SPTRSV_FP32` and
 `APXCHOL_POOL_FP32` default ON (fp32 factor values / fp32 residual-pool
 weights; the PCG recurrence stays fp64; pass `=OFF` for an fp64 baseline);
-`APXCHOL_SPTRSV_LOWPREC=BF16|BF16_SCALED|FP16_SCALED|FP24` (default `OFF`,
-CPU backend only) narrows the SpTRSV off-diagonal factor STORAGE further to
-bfloat16 / per-column-scaled bfloat16 / per-column-scaled IEEE fp16 / the
-top 24 bits of fp32 (the diagonal stays exact fp32) — reads widen to fp64 in
+`APXCHOL_SPTRSV_LOWPREC=FP16_SCALED` (default `OFF`, CPU backend only)
+narrows the SpTRSV off-diagonal factor STORAGE further to per-column-scaled
+IEEE fp16 (the diagonal stays exact fp32) — reads widen to fp64 in
 registers, so it only changes the preconditioner quality (iteration count),
 not the attainable residual; see
-[include/apxchol/lowprec.h](include/apxchol/lowprec.h) (for the bf16
-variants `APXCHOL_BF16_STOCHASTIC=1` in the environment switches the
-rounding from round-to-nearest-even to unbiased stochastic rounding);
-everything else defaults OFF except the
+[include/apxchol/lowprec.h](include/apxchol/lowprec.h) (with
+`APXCHOL_LOWPREC_DIAG_COMP=1` in the environment the per-column rounding
+residual is folded into the fp32 diagonal, which is what keeps the iteration
+count at the fp32 build's on Laplacians); everything else defaults OFF except the
 `APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS` toggles. Release builds
 add `-march=native`.
 

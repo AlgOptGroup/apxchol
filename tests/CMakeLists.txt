@@ -18,7 +18,7 @@ add_executable(unit_tests
         test_sptrsv_drop.cpp
         test_sptrsv_memory.cpp
         test_sptrsv_levelset.cpp
-        test_bf16.cpp
+        test_sptrsv_kernels.cpp
         test_lowprec.cpp
 )
 

@@ -80,8 +80,8 @@ inline void ensure_eigen_parallel() {
 
 // One-time build-flag report straight from the LIBRARY TU: the width is
 // sizeof() of the type solve.cpp actually compiled, so 2 == this .so/.a was
-// built with APXCHOL_SPTRSV_LOWPREC = BF16 / BF16_SCALED / FP16_SCALED, 3 ==
-// FP24, 4 == -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Reports whichever SpTRSV
+// built with APXCHOL_SPTRSV_LOWPREC = FP16_SCALED, 4 == -DAPXCHOL_SPTRSV_FP32,
+// 8 == fp64. Reports whichever SpTRSV
 // backend (CPU omp / GPU cuda) this build compiled. Opt-in via
 // APXCHOL_VERBOSE — a library should be silent on stderr by default.
 inline void print_sptrsv_banner_once() {
@@ -105,26 +105,16 @@ inline void print_sptrsv_banner_once() {
         const std::size_t vbytes = apxchol::omp_sptrsv::value_bytes;
 #endif
         std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem"
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-                             " (APXCHOL_SPTRSV_LOWPREC=%s; off-diagonals only, diagonal fp32;"
-                             " rounding=%s)\n",
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+                             " (APXCHOL_SPTRSV_LOWPREC=%s; off-diagonals only, diagonal fp32; rounding=RNE)\n",
 #elif defined(APXCHOL_SPTRSV_FP32)
                              " (APXCHOL_SPTRSV_FP32 defined)\n",
 #else
                              " (APXCHOL_SPTRSV_FP32 NOT defined)\n",
 #endif
                      backend, vname, vbytes
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
                      , apxchol::omp_sptrsv::lowprec_variant
-#if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
-                     // Same env read omp_sptrsv::setup does (per setup call); the
-                     // banner is one-shot, so it reports the value at first solve.
-                     , (std::getenv("APXCHOL_BF16_STOCHASTIC") &&
-                        std::atoi(std::getenv("APXCHOL_BF16_STOCHASTIC")) != 0)
-                           ? "stochastic (APXCHOL_BF16_STOCHASTIC=1)" : "RNE"
-#else
-                     , "RNE"
-#endif
 #endif
                      );
         return true;

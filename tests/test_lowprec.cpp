@@ -1,12 +1,10 @@
-// Low-precision SpTRSV storage variants (include/apxchol/lowprec.h):
+// Low-precision SpTRSV storage (include/apxchol/lowprec.h):
 //   * fp16_t: IEEE binary16 round-trip bound (2^-11 relative, normal range),
 //     the documented subnormal / flush-to-zero / overflow behaviour, RNE ties,
 //     and an exhaustive cross-check of the bit-level converters against the
 //     compiler's _Float16 where available;
-//   * fp24_t: 24-bit round-trip bound (2^-16 relative), exact values, RNE
-//     ties + carry, NaN;
-//   * the storage CONTRACT of omp_sptrsv::setup for whatever variant this
-//     build compiled: every stored CSR/CSC value == narrow_value(v, p, s_j),
+//   * the storage CONTRACT of omp_sptrsv::setup for whatever storage this
+//     build compiled: every stored CSR/CSC value == narrow_value(v, s_j),
 //     the per-column scales, the off-diagonal flush/subnormal statistics, the
 //     fp16 subnormal flush (FP16_SCALED default; APXCHOL_FP16_KEEP_SUBNORMAL=1
 //     restores IEEE), and the compacting drop APXCHOL_FACTOR_DROP=<rel>
@@ -29,7 +27,6 @@
 using apxchol::edge_index;
 using apxchol::factor_value_t;
 using apxchol::fp16_t;
-using apxchol::fp24_t;
 using apxchol::node_index;
 using apxchol::sparse_csc;
 using apxchol::sptrsv_value_t;
@@ -186,77 +183,7 @@ TEST(FP16, DocumentedSubnormalFlushOverflowAndTies) {
     EXPECT_EQ(sizeof(fp16_t), 2u);
 }
 
-// ── fp24_t ──────────────────────────────────────────────────────────────
-
-// Full fp32 normal range: |fp24(x) - x| <= 2^-16 |x| (16 significant bits,
-// RNE); the round trip through the 3-byte packing is what is tested.
-TEST(FP24, RoundTripWithin2PowMinus16Relative) {
-    std::mt19937_64 rng(2401);
-    std::uniform_real_distribution<double> uexp(-120.0, 120.0);
-    std::uniform_real_distribution<double> umant(1.0, 2.0);
-    std::bernoulli_distribution sign(0.5);
-    const double bound = std::ldexp(1.0, -16);
-    double worst = 0.0;
-    for (int t = 0; t < 2'000'000; ++t) {
-        const float x = static_cast<float>(
-            (sign(rng) ? -1.0 : 1.0) * std::ldexp(umant(rng), static_cast<int>(std::floor(uexp(rng)))));
-        const fp24_t q = x;
-        const float  y = q.to_float();
-        const double rel = rel_err(y, x);
-        worst = std::max(worst, rel);
-        ASSERT_LE(rel, bound) << "x=" << x << " y=" << y;
-        ASSERT_EQ(apxchol::widen(q), static_cast<double>(y));
-        ASSERT_EQ(std::signbit(y), std::signbit(x));
-        // The stored pattern is the top 24 bits of the widened float, and the
-        // widened float has its low 8 bits clear.
-        ASSERT_EQ(q.bits(), f2u(y) >> 8);
-        ASSERT_EQ(f2u(y) & 0xffu, 0u);
-        ASSERT_FALSE(apxchol::is_stored_subnormal(q));
-    }
-    EXPECT_GT(worst, bound * 0.9);
-}
-
-// Values with <= 16 significant bits are exact; RNE ties, carry, NaN, and the
-// fp32 subnormals (which fp24 keeps, at 15 bits).
-TEST(FP24, ExactValuesTiesCarryNaNSubnormal) {
-    for (float x : {0.0f, -0.0f, 1.0f, -1.0f, 0.5f, 1.5f, 65535.0f, -32767.5f,
-                    1.0f + std::ldexp(1.0f, -15) /* 1 + 2^-15 */, std::ldexp(1.0f, -100), std::ldexp(1.0f, 100)}) {
-        const fp24_t q = x;
-        EXPECT_EQ(f2u(q.to_float()), f2u(x)) << x;
-        EXPECT_EQ(q.bits(), f2u(x) >> 8);
-    }
-    // 1 + 2^-16 is halfway between 1 (even) and 1 + 2^-15 (odd) -> 1.
-    EXPECT_EQ(fp24_t(1.0f + std::ldexp(1.0f, -16)).to_float(), 1.0f);
-    // 1 + 3*2^-16 is halfway between 1 + 2^-15 (odd) and 1 + 2^-14 (even) -> 1 + 2^-14.
-    EXPECT_EQ(fp24_t(1.0f + 3.0f * std::ldexp(1.0f, -16)).to_float(), 1.0f + std::ldexp(1.0f, -14));
-    // Just above / below the tie go to the nearest.
-    EXPECT_EQ(fp24_t(u2f(0x3f800081u)).to_float(), 1.0f + std::ldexp(1.0f, -15));
-    EXPECT_EQ(fp24_t(u2f(0x3f80007fu)).to_float(), 1.0f);
-    // Carry: 1 - 2^-24 (0x3f7fffff) rounds UP to 1.0 (0x3f8000), 0x3fffffff -> 2.0.
-    EXPECT_EQ(fp24_t(u2f(0x3f7fffffu)).bits(), 0x3f8000u);
-    EXPECT_EQ(fp24_t(u2f(0x3fffffffu)).bits(), 0x400000u);
-    EXPECT_EQ(fp24_t(u2f(0xbf7fffffu)).bits(), 0xbf8000u);
-    // FLT_MAX overflows to inf (within half an fp24 ulp of the top).
-    EXPECT_TRUE(std::isinf(fp24_t(std::numeric_limits<float>::max()).to_float()));
-    EXPECT_TRUE(std::isnan(fp24_t(std::numeric_limits<float>::quiet_NaN()).to_float()));
-    EXPECT_TRUE(std::isinf(fp24_t(std::numeric_limits<float>::infinity()).to_float()));
-    // fp32 subnormals stay (sub)normal-with-15-bits.
-    const float sub = std::ldexp(1.0f, -140);
-    EXPECT_TRUE(apxchol::is_stored_subnormal(fp24_t(sub)));
-    EXPECT_NEAR(fp24_t(sub).to_float(), sub, sub * std::ldexp(1.0, -14));
-    // Byte layout: b[0] is the low byte of the 24-bit pattern.
-    const fp24_t one = 1.0f;   // 0x3f8000
-    EXPECT_EQ(one.b[0], 0x00u); EXPECT_EQ(one.b[1], 0x80u); EXPECT_EQ(one.b[2], 0x3fu);
-    EXPECT_EQ(sizeof(fp24_t), 3u);
-    EXPECT_EQ(fp24_t(0.75).bits(), fp24_t(0.75f).bits());
-    EXPECT_EQ(fp24_t(7).to_float(), 7.0f);
-    // A dense array of them really is 3 B/entry.
-    fp24_t arr[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    EXPECT_EQ(reinterpret_cast<const char*>(&arr[1]) - reinterpret_cast<const char*>(&arr[0]), 3);
-    EXPECT_EQ(arr[3].to_float(), 4.0f);
-}
-
-// ── omp_sptrsv storage contract for THIS build's variant ────────────────
+// ── omp_sptrsv storage contract for THIS build's storage ────────────────
 namespace {
 
 sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed,
@@ -311,14 +238,14 @@ std::vector<float> reference_scales(const sparse_csc& L) {
 
 } // namespace
 
-// Every stored CSC value equals narrow_value(v, p, s_j) bit-for-bit, and so
+// Every stored CSC value equals narrow_value(v, s_j) bit-for-bit, and so
 // does its CSR twin; the scales (if any) match; offdiag count is right.
 TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
     scoped_drop_off drop_off;   // storage contract on the un-dropped factor
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose */}) {
         SCOPED_TRACE("m=" + std::to_string(m));
-        // Wide value range so the *_SCALED variants see ratios spanning many
-        // binades (fp16 subnormals / flushes included) and fp24 sees the range.
+        // Wide value range so FP16_SCALED sees ratios spanning many binades
+        // (fp16 subnormals / flushes included).
         sparse_csc L = make_random_lower(m, 4.0, 77, -2.0, 2.0);
         for (edge_index p = 0; p < L.nonZeros(); ++p)
             if ((p % 7) == 3) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-7);
@@ -332,7 +259,7 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
         std::uint64_t offdiag = 0;
         for (node_index j = 0; j < m; ++j)
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(L.vals_[p], p, s[j], false, true);
+                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(L.vals_[p], s[j], true);
                 ASSERT_TRUE(trsv.csc_vals()[p] == expect) << "csc p=" << p;
                 if (L.inner_[p] != j) ++offdiag;
                 // CSR twin: locate (row = inner[p], col = j).
@@ -348,16 +275,14 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
             }
         EXPECT_EQ(trsv.lowprec_stats().offdiag, offdiag);
         EXPECT_EQ(trsv.lowprec_stats().dropped, 0u);
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         ASSERT_EQ(trsv.col_scales().size(), static_cast<size_t>(m));
         for (node_index j = 0; j < m; ++j) ASSERT_EQ(trsv.col_scales()[j], s[j]) << "j=" << j;
-#endif
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         // The 1e-7-scaled entries sit ~2^-23 below their column max: fp16 must
         // have flushed or subnormalised a good fraction of the off-diagonals.
         EXPECT_GT(trsv.lowprec_stats().flushed + trsv.lowprec_stats().subnormal, offdiag / 20);
 #else
-        // bf16 / fp24 / fp32 / fp64 have fp32's range: nothing flushes here.
+        // fp32 / fp64 have fp32's range: nothing flushes here.
         EXPECT_EQ(trsv.lowprec_stats().flushed, 0u);
         EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
 #endif
@@ -407,7 +332,7 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
         EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1e-6f, 1.0f, /*flush=*/false), false);
         EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1e-9f, 1.0f, /*flush=*/false), true);
         EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1.0f,  1.0f, /*flush=*/true),  false);
-        EXPECT_TRUE(apxchol::omp_sptrsv::narrow_value(-1e-6f, 0, 1.0f, false, true) ==
+        EXPECT_TRUE(apxchol::omp_sptrsv::narrow_value(-1e-6f, 1.0f, true) ==
                     fp16_t::from_bits(0x8000u));   // sign survives the flush
 #else
         EXPECT_EQ(trsv.lowprec_stats().flushed, 0u);
@@ -418,7 +343,7 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
         // The forward/back solves still run and are exact w.r.t. the STORED
         // values (a tiny system: check L~ y' = x against them -- the kernel
         // matrix L~: widened off-diagonals, stored_diag() diagonal; under
-        // *_SCALED forward_solve returns y' = D y, see omp.h).
+        // FP16_SCALED forward_solve returns y' = D y, see omp.h).
         std::vector<double> x = {1.0, -2.0, 0.5, 3.0}, y(4);
         trsv.forward_solve(x.data(), y.data());
         for (node_index i = 0; i < 4; ++i) {
@@ -427,7 +352,7 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
                 for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
                     if (L.inner_[p] == i) {
                         const float sj =
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
                             trsv.col_scales()[j];
 #else
                             1.0f;
@@ -447,7 +372,7 @@ namespace {
 // The reference "dense drop": the same factor with the entries the drop
 // removes set to ZERO in place (nothing removed). Kept iff |v| >= rel * s_j
 // and the storage format of this build does not store it as zero anyway
-// (fp32 / fp64 / bf16 / fp24: only an exact zero; FP16_SCALED: everything
+// (fp32 / fp64: only an exact zero; FP16_SCALED: everything
 // fp16 flushes -- subnormals included by default). Written out here without
 // omp_sptrsv::keep_offdiag so the predicate is stated twice independently.
 struct dense_drop {
@@ -561,9 +486,9 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
                 ASSERT_EQ(trsv.csc_row_idx()[trsv.csc_col_ptr()[j]], j) << "diagonal first, col " << j;
                 for (edge_index p = trsv.csc_col_ptr()[j] + 1; p < trsv.csc_col_ptr()[j + 1]; ++p) {
                     zeros += apxchol::widen(trsv.csc_vals()[p]) == 0.0;
-                    // Recover |v| >= rel * s_j from the stored value: under the
-                    // *_SCALED variants the stored ratio is >= rel up to rounding.
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+                    // Recover |v| >= rel * s_j from the stored value: under
+                    // FP16_SCALED the stored ratio is >= rel up to rounding.
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
                     below += std::fabs(apxchol::widen(trsv.csc_vals()[p])) < rel * 0.99;
 #else
                     below += std::fabs(apxchol::widen(trsv.csc_vals()[p])) < rel * static_cast<double>(s[j]) * 0.99;
@@ -609,8 +534,8 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q) {
                 double v = apxchol::widen(trsv.csr_vals()[q]);
                 const node_index j = trsv.csr_col_idx()[q];
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-                if (j == i) v = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[i]], s[i]);   // fp32 diag_ (s ignored off *_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+                if (j == i) v = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[i]], s[i]);   // fp32 diag_
 #endif
                 const double t = v * y1[j];
                 r -= t; sc += std::fabs(t);
@@ -687,15 +612,15 @@ TEST(LowPrec, FactorDropEdgeCases) {
             ASSERT_EQ(t.csc_col_ptr()[j], static_cast<edge_index>(j));
             ASSERT_EQ(t.csc_row_idx()[j], j);
         }
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         for (node_index j = 0; j < 2000; ++j) ASSERT_EQ(t.col_scales()[j], s[j]);   // scale from BEFORE the drop
 #endif
         // Solving with a diagonal factor: y' = x / stored diagonal (L_jj, or
-        // L_jj / s_j under *_SCALED where forward_solve returns y' = D y).
+        // L_jj / s_j under FP16_SCALED where forward_solve returns y' = D y).
         std::vector<double> x(2000, 1.0), y(2000);
         t.forward_solve(x.data(), y.data());
         for (node_index j = 0; j < 2000; ++j) {
-            const double d = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], s[j]);   // s ignored off *_SCALED
+            const double d = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], s[j]);   // s ignored off FP16_SCALED
             ASSERT_NEAR(y[j], 1.0 / d, 1e-15 * std::fabs(1.0 / d)) << j;
         }
     }

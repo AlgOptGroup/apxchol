@@ -14,9 +14,9 @@
 //   * the CSR/CSC the drop produces are byte-identical across thread counts;
 //   * the env contract: unset = default ON at 1e-4, "0" / negative / junk =
 //     off, any positive value overrides (rel > 1 keeps only the diagonal).
-// Under the APXCHOL_SPTRSV_LOWPREC variants (sptrsv_value_t narrower than the
-// factor's factor_value_t; the *_SCALED ones store L_ij / s_j with s_j the
-// PRE-drop column max) the drop and the compensation run on the fp32 factor
+// Under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED (sptrsv_value_t narrower than the
+// factor's factor_value_t; it stores L_ij / s_j with s_j the PRE-drop column
+// max) the drop and the compensation run on the fp32 factor
 // before the narrowing, so the value contract becomes "stored ==
 // narrow_value(compensated reference value, s_j)" bit-for-bit, and the
 // column-sum / solve comparisons hold to the storage format's rounding; the
@@ -176,21 +176,16 @@ std::vector<double> column_sums_L11(const sparse_csc& L, node_index m) {
 
 // Relative rounding of ONE stored off-diagonal in this build's storage
 // format (what the column-sum / solve comparisons below are held to): 0 on
-// the fp32 / fp64 builds (the factor IS the stored value), 2^-8 bf16, 2^-11
-// fp16, 2^-16 fp24.
+// the fp32 / fp64 builds (the factor IS the stored value), 2^-11 fp16.
 constexpr double kStorageEps =
-#if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
-    1.0 / 256.0;
-#elif defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
     1.0 / 2048.0;
-#elif defined(APXCHOL_SPTRSV_LOWPREC_FP24)
-    1.0 / 65536.0;
 #else
     0.0;
 #endif
-// The pre-drop per-column scale the *_SCALED variants divide by (1.0 off them).
+// The pre-drop per-column scale FP16_SCALED divides by (1.0 off it).
 double pair_scale(double s_pre) {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
     return s_pre;
 #else
     (void)s_pre;
@@ -321,8 +316,7 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
                     ASSERT_LT(q, trsv.csc_col_ptr()[j + 1]);
                     ASSERT_EQ(trsv.csc_row_idx()[q], L.inner_[p]);
                     const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(
-                        ref.Lz.vals_[p], q, static_cast<float>(pair_scale(s[j])), /*stochastic=*/false,
-                        /*fp16_flush_subnormal=*/true);
+                        ref.Lz.vals_[p], static_cast<float>(pair_scale(s[j])), /*fp16_flush_subnormal=*/true);
                     mismatches += !(trsv.csc_vals()[q] == expect);
                     ++q;
                 }
@@ -357,7 +351,7 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             scale_f = std::max(scale_f, std::fabs(y2[i]));
             scale_b = std::max(scale_b, std::fabs(z2[i]));
         }
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         const bool same_scales = !compensate;
 #else
         const bool same_scales = true;
@@ -368,8 +362,8 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         }
         // And the compacted forward solve is an exact solve of the STORED L
         // (double accumulation): componentwise residual at roundoff. (On the
-        // lowprec builds the kernels divide by stored_diag(), not the narrow
-        // diagonal slot; under *_SCALED y1 is y' = D y on L~ = L D^-1.)
+        // lowprec build the kernels divide by stored_diag(), not the narrow
+        // diagonal slot; under FP16_SCALED y1 is y' = D y on L~ = L D^-1.)
         {
             const std::vector<double> s = reference_scales_L11(L, m);
             double worst = 0.0;
@@ -439,8 +433,8 @@ TEST(SpTRSVDrop, EdgeCases) {
     const std::uint64_t nnz = static_cast<std::uint64_t>(L.nonZeros());
     ASSERT_GT(reference_dense_drop(L, m, 1e-4).zeroed, 100u);   // the default would remove plenty here
     // What the storage format alone would store as zero (the drop's second
-    // clause, omp_sptrsv::format_flushes): nothing on the fp32 / fp64 / bf16 /
-    // fp24 builds (every entry here is a nonzero fp32); on FP16_SCALED the
+    // clause, omp_sptrsv::format_flushes): nothing on the fp32 / fp64 builds
+    // (every entry here is a nonzero fp32); on FP16_SCALED the
     // 1e-9-scaled entries (fp16 flushes them, subnormals included by default).
     const std::vector<double> s_pre = reference_scales_L11(L, m);
     std::uint64_t fmt_zero = 0;
@@ -478,7 +472,7 @@ TEST(SpTRSVDrop, EdgeCases) {
             for (node_index j = 0; j < m; ++j)
                 for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
                     mismatches += !(t.csc_vals()[p] == apxchol::omp_sptrsv::narrow_value(
-                        L.vals_[p], p, static_cast<float>(pair_scale(s_pre[j])), false, true));
+                        L.vals_[p], static_cast<float>(pair_scale(s_pre[j])), true));
             EXPECT_EQ(mismatches, 0u);
         }
     }
@@ -506,7 +500,7 @@ TEST(SpTRSVDrop, EdgeCases) {
             const double L_jj = static_cast<double>(L.vals_[L.outer_[j]]);
             const double d    = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], static_cast<float>(pair_scale(s_pre[j])));
             ASSERT_NEAR(y[j], 1.0 / d, 1e-15 / d) << j;
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
             ASSERT_NEAR(z[j], 1.0 / (L_jj * L_jj), 1e-6 / (L_jj * L_jj)) << j;
 #else
             ASSERT_NEAR(z[j], 1.0 / (L_jj * L_jj), 4e-15 / (L_jj * L_jj)) << j;
@@ -631,7 +625,7 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
             const float s = scales[j];
             for (int k = LT.ptr[j]; k < LT.ptr[j + 1]; ++k) {
                 const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(
-                    LT.vals[k], static_cast<edge_index>(k), s, /*stochastic=*/false, /*fp16_flush_subnormal=*/true);
+                    LT.vals[k], s, /*fp16_flush_subnormal=*/true);
                 val_mismatch += !(trsv.csc_vals()[k] == expect);
             }
         }
@@ -649,10 +643,7 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
         for (node_index i = 0; i < m; ++i)
             for (int k = Lc.ptr[i]; k < Lc.ptr[i + 1]; ++k) {
                 const node_index j = static_cast<node_index>(Lc.idx[k]);
-                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(
-                    Lc.vals[k], static_cast<edge_index>(k), scales[j], false, true);
-                // (position k differs between CSR and CSC only in the bf16
-                // stochastic hash, which is off here)
+                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(Lc.vals[k], scales[j], true);
                 t_mismatch += !(trsv.csr_vals()[k] == expect);
             }
         EXPECT_EQ(t_mismatch, 0u);

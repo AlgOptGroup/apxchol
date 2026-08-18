@@ -50,13 +50,13 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// so they are ONE templated kernel, solve_levelset<Dir>, whose direction
 /// policy (fwd_dir / bck_dir, below the kernel) supplies the arrays, the level
 /// list, the off-diagonal slot range and diagonal slot of a row / column, and
-/// the input transform (identity, or the *_SCALED variants' folded x * r_j^2
+/// the input transform (identity, or FP16_SCALED's folded x * r_j^2
 /// on the back solve). forward_solve / transpose_solve are thin wrappers.
 ///
 /// Levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
 /// `omp single` (4-way scalar kernel dot_thin); larger ("fat") levels are an
-/// `omp for schedule(static)` (plain scalar loop on fp32/fp64/FP24, SIMD
-/// dot_fat_simd on 16-bit storage). Two schedule experiments sit behind envs
+/// `omp for schedule(static)` (plain scalar loop on fp32/fp64, SIMD
+/// dot_fat_simd on fp16 storage). Two schedule experiments sit behind envs
 /// (both read at every setup, both DEFAULT OFF = the behaviour just described,
 /// both bit-identical to it -- the per-row arithmetic never changes, only
 /// which thread runs a row when and how many barriers there are):
@@ -92,32 +92,32 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// carry nearly all the work), and the point-to-point experiment showed the
 /// barrier COUNT is not what the wall time is made of.
 
-// sptrsv_value_t (bf16_t / fp16_t / fp24_t under the APXCHOL_SPTRSV_LOWPREC
-// variants, fp32 under -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in
-// sparse_csc.h (variants: lowprec.h) and shared with the CUDA backend
-// (fp32/fp64 only). It narrows csr_vals_/csc_vals_ -- the two largest factor
+// sptrsv_value_t (fp16_t under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED, fp32
+// under -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in sparse_csc.h (the
+// variant: lowprec.h) and shared with the CUDA backend (fp32/fp64 at compile
+// time). It narrows csr_vals_/csc_vals_ -- the two largest factor
 // copies -- cutting memory and bandwidth on the bandwidth-bound (~94% of peak)
 // triangular solve. Every read of a stored value in the solve kernels below
 // goes through widen(): the arithmetic is ALWAYS done in double, whatever the
 // storage width; the outer PCG stays fp64.
 //
-// DIAGONAL under the LOWPREC variants: the fp32/fp64 builds read L(i,i) inline
-// from the factor (last entry of CSR row i / first entry of CSC column j) at
-// the same precision as the off-diagonals. The lowprec builds do NOT: an 8-bit
+// DIAGONAL under FP16_SCALED: the fp32/fp64 builds read L(i,i) inline from
+// the factor (last entry of CSR row i / first entry of CSC column j) at the
+// same precision as the off-diagonals. The lowprec build does NOT: a narrow
 // diagonal was measured to be the dominant iteration-count damage (iter0040
-// T=1: diag-only bf16 314 PCG iters, off-diag-only 185, both 348, fp32 65), so
-// every lowprec build keeps a separate fp32 `diag_[m]`, filled at setup from
-// the factor (factor_value_t == float, i.e. BEFORE any narrowing) -- exactly
-// L_jj under BF16 / FP24, the SCALED diagonal L_jj / s_j (one fp32 division,
-// stored_diag()) under the *_SCALED variants, see below -- and both solves
-// divide by diag_[i]. The narrow diagonal slot stays in csr_vals_/csc_vals_
-// (written like every other entry through narrow_value -- under the *_SCALED
-// variants that is narrow(L_jj / s_j), which may even overflow fp16 to inf --
-// and is read by the kernels ONLY under APXCHOL_FP16_DIAG, below; keeping it
-// leaves the CSR/CSC layout, the transpose, and every "diagonal is entry X"
-// invariant untouched). diag<Dir>() below is the single switch.
+// T=1, the removed all-bf16 variant: diag-only bf16 314 PCG iters,
+// off-diag-only 185, both 348, fp32 65), so the lowprec build keeps a
+// separate fp32 `diag_[m]`, filled at setup from the factor (factor_value_t ==
+// float, i.e. BEFORE any narrowing) -- the SCALED diagonal L_jj / s_j (one
+// fp32 division, stored_diag()), see below -- and both solves divide by
+// diag_[i]. The narrow diagonal slot stays in csr_vals_/csc_vals_ (written
+// like every other entry through narrow_value, i.e. fp16(L_jj / s_j), which
+// may even overflow fp16 to inf -- and is read by the kernels ONLY under
+// APXCHOL_FP16_DIAG, below; keeping it leaves the CSR/CSC layout, the
+// transpose, and every "diagonal is entry X" invariant untouched). diag<Dir>()
+// below is the single switch.
 //
-// PER-COLUMN SCALE under the *_SCALED variants -- FOLDED INTO THE VECTORS:
+// PER-COLUMN SCALE under FP16_SCALED -- FOLDED INTO THE VECTORS:
 // scale_[j] = s_j = max |L_ij| over the off-diagonals of column j (1.0f if
 // there is none), fp32, computed at setup from the factor (column_scale()).
 // What is stored is the COLUMN-SCALED factor L~ = L D^-1, D = diag(s_j):
@@ -145,7 +145,7 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // directly), the diagonal is stored pre-scaled (2^-24 relative rounding of
 // L_jj / s_j, vs the exact fp32 L_jj before), and the forward output / back
 // input carry D. On the non-scaled builds
-// (fp32 / fp64 / BF16 / FP24) D = I: forward_solve returns y and
+// (fp32 / fp64) D = I: forward_solve returns y and
 // transpose_solve solves L^T z = x_in exactly as before -- the SCALED-only
 // pieces (inv_scale_, the x_in scaling) compile out and the fp32 kernels'
 // inner loops are instruction-identical to the pre-fold ones (objdump of the
@@ -154,12 +154,12 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // vcvtss2sd / vdivsd -- only register allocation in the prologues moved).
 //
 // SIMD CONVERT (fat levels, the `omp for` paths; 16-bit storage only, i.e.
-// the BF16 / BF16_SCALED / FP16_SCALED builds; needs AVX2 + F16C + FMA, the
-// -march=native default on any x86 since Haswell / Zen): 8 stored values per
-// vector convert (widen8(): F16C _mm256_cvtph_ps for fp16, a 16-bit shift for
-// bf16 -- overloads for float / double exist so flipping the fp32 build over
-// is one constant, kSimdDot, but it is deliberately NOT flipped: the fp32
-// kernel stays as measured) -> two 4-double lanes -> _mm256_fmadd_pd into two
+// the FP16_SCALED build; needs AVX2 + F16C + FMA, the -march=native default
+// on any x86 since Haswell / Zen): 8 stored values per vector convert
+// (widen8(): F16C _mm256_cvtph_ps -- overloads for float / double exist so
+// flipping the fp32 build over is one constant, kSimdDot, but it is
+// deliberately NOT flipped: the fp32 kernel stays as measured) -> two 4-double
+// lanes -> _mm256_fmadd_pd into two
 // accumulators; the y gather is either _mm256_i32gather_pd (or i64gather
 // under 64-bit node indices) -- gather mode "simd" -- or the converted values
 // go through an 8-double stack buffer (which the compiler turns into register
@@ -168,8 +168,8 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // at every setup, every build) selects; the default is the measured winner,
 // "scalar" (kFatGatherSimdDefault). A 4-wide step and a scalar tail
 // finish the row / column. Thin levels (the `omp single` paths) keep the 4-way
-// scalar kernel; the fp32 / fp64 / FP24 fat-level loop is the plain scalar
-// loop it always was. Different summation orders (2 lanes vs 4-way vs 1):
+// scalar kernel; the fp32 / fp64 fat-level loop is the plain scalar loop it
+// always was. Different summation orders (2 lanes vs 4-way vs 1):
 // same accuracy, not bit-identical.
 //
 // APXCHOL_FP16_DIAG=1 (env, read at every setup; FP16_SCALED only): the
@@ -196,17 +196,9 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // columns with L_jj < s_j on all three) -- NOT neutral on IPM, so diag_ stays
 // fp32 and the mode stays a diagnostic.
 //
-// ROUNDING mode: RNE for every variant. For the two bf16 variants,
-// APXCHOL_BF16_STOCHASTIC=1 (env, read at every setup) switches the
-// off-diagonal narrowing to unbiased stochastic rounding with a deterministic
-// per-entry threshold (a hash of the entry's CSC index -- see bf16.h), so it
-// is run-to-run and thread-count deterministic given the factor, and CSR/CSC
-// agree entry-for-entry (a disagreement would make the preconditioner L1 L2^T
-// non-symmetric). Motivation: RNE's per-entry error is a deterministic
-// function of the value; on a Laplacian-structured factor those errors can be
-// systematically signed and accumulate through the triangular solve, whereas
-// unbiased rounding's errors average out. Ignored (no effect) on the other
-// builds.
+// ROUNDING: RNE (the bf16 variants' opt-in stochastic rounding went with
+// them; a Laplacian factor's systematically signed RNE errors are what the
+// APXCHOL_LOWPREC_DIAG_COMP compensation below absorbs instead).
 //
 // FP16 SUBNORMALS (FP16_SCALED only): a stored fp16 subnormal (|L_ij / s_j| in
 // [2^-25, 2^-14)) carries between 1 and 10 significant bits and, per the drop
@@ -223,7 +215,7 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 //   |L_ij| >= rel * s_j   (s_j = column j's max |off-diagonal|, column_scale(),
 //                          computed from the factor BEFORE the drop)
 //   AND the storage format does not map it to zero anyway (format_flushes():
-//   an exact zero on the fp32/fp64/bf16/fp24 builds; on FP16_SCALED also
+//   an exact zero on the fp32/fp64 builds; on FP16_SCALED also
 //   everything fp16 flushes -- |L_ij / s_j| < 2^-25, or < 2^-14 with the
 //   subnormal flush above -- since a stored zero is still a stored entry; at
 //   the default rel = 1e-4 > 2^-14 this second clause adds nothing).
@@ -279,7 +271,7 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // iter0040 (main): 45 -> 45 iterations at rel = 1e-4, 1e-3 and 3e-3 (52 / 65
 // / 67% of the off-diagonals dropped). This is the same idea as MILU's
 // row-sum preservation. Measurement behind the default: see
-// kFactorDropRelDefault. Under the *_SCALED variants the compensation runs on
+// kFactorDropRelDefault. Under FP16_SCALED the compensation runs on
 // the un-scaled fp32 factor column and only THEN is the column narrowed
 // (L_ij / s_j); s_j is the pre-drop column max, which the drop never removes.
 //
@@ -325,19 +317,13 @@ public:
 
     // Compiled width of the off-diagonal factor values, read straight off the
     // type the compiler actually built. 2 == this TU was compiled with
-    // APXCHOL_SPTRSV_LOWPREC = BF16 / BF16_SCALED / FP16_SCALED, 3 == FP24,
-    // 4 == -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Printed at startup so the build
-    // flag is observable at runtime (no inferring from residuals).
+    // APXCHOL_SPTRSV_LOWPREC = FP16_SCALED, 4 == -DAPXCHOL_SPTRSV_FP32, 8 ==
+    // fp64. Printed at startup so the build flag is observable at runtime (no
+    // inferring from residuals).
     static constexpr std::size_t value_bytes = sizeof(sptrsv_value_t);
     static constexpr const char* value_name =
-#if defined(APXCHOL_SPTRSV_LOWPREC_BF16)
-        "bf16";
-#elif defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
-        "bf16 (per-column scaled)";
-#elif defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         "fp16 (per-column scaled)";
-#elif defined(APXCHOL_SPTRSV_LOWPREC_FP24)
-        "fp24";
 #else
         sizeof(sptrsv_value_t) == 4 ? "float (fp32)" : "double (fp64)";
 #endif
@@ -345,56 +331,37 @@ public:
     static constexpr const char* lowprec_variant = sptrsv_lowprec_variant;
 
     // THE storage contract (public so the unit tests can state it): what
-    // setup() stores for the factor entry at CSC position k with value v, in a
-    // column whose per-column scale is s (the *_SCALED variants: s_j = max
-    // |off-diagonal| of column j, 1.0f if none; every other variant ignores s
-    // -- pass 1.0f). `stochastic` selects bf16 stochastic rounding (bf16
-    // variants only; ignored elsewhere); `fp16_flush_subnormal` flushes fp16
-    // subnormals to signed zero (FP16_SCALED only, the default there -- see
-    // the file header; ignored elsewhere). A PURE function of its arguments:
-    // the CSR transpose and the CSC copy both call it, so the two stored
-    // copies of every entry agree bit-for-bit whatever the rounding mode
-    // (needed for the stochastic mode; a no-op cast on the fp32/fp64 builds,
-    // exactly the static_cast they always did). The compacting drop
-    // (APXCHOL_FACTOR_DROP) happens BEFORE this: dropped entries never reach
-    // it.
-    static sptrsv_value_t narrow_value(factor_value_t v, edge_index k, float s, bool stochastic,
-                                       bool fp16_flush_subnormal) {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+    // setup() stores for the factor entry with value v, in a column whose
+    // per-column scale is s (FP16_SCALED: s_j = max |off-diagonal| of column
+    // j, 1.0f if none; the fp32/fp64 builds ignore s -- pass 1.0f).
+    // `fp16_flush_subnormal` flushes fp16 subnormals to signed zero
+    // (FP16_SCALED only, the default there -- see the file header; ignored
+    // elsewhere). A PURE function of its arguments: the CSR transpose and the
+    // CSC copy both call it, so the two stored copies of every entry agree
+    // bit-for-bit (a no-op cast on the fp32/fp64 builds, exactly the
+    // static_cast they always did). The compacting drop (APXCHOL_FACTOR_DROP)
+    // happens BEFORE this: dropped entries never reach it.
+    static sptrsv_value_t narrow_value(factor_value_t v, float s, bool fp16_flush_subnormal) {
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         const float x = static_cast<float>(v) / s;      // |x| <= 1 for the off-diagonals as factorized (s is
                                                         // their max; the drop's compensation may lift kept
                                                         // entries a little above -- fp16 has range to spare)
-#else
-        (void)s;
-        const factor_value_t x = v;
-#endif
-#if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
-        (void)fp16_flush_subnormal;
-        return stochastic ? from_float_stochastic(x, static_cast<std::uint64_t>(k))
-                          : bf16_t(x);                   // RNE
-#elif defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-        (void)k; (void)stochastic;
         const fp16_t h(x);                               // RNE, subnormals / flush per IEEE
         if (fp16_flush_subnormal && fp16_t::is_subnormal(h.bits))
             return fp16_t::from_bits(static_cast<std::uint16_t>(h.bits & 0x8000u));   // signed zero
         return h;
-#elif defined(APXCHOL_SPTRSV_LOWPREC_FP24)
-        (void)k; (void)stochastic; (void)fp16_flush_subnormal;
-        return fp24_t(x);                                // RNE on the dropped 8 bits
 #else
-        (void)k; (void)stochastic; (void)fp16_flush_subnormal;
-        return static_cast<sptrsv_value_t>(x);
+        (void)s; (void)fp16_flush_subnormal;
+        return static_cast<sptrsv_value_t>(v);
 #endif
     }
 
     // True iff THIS build's storage format maps the off-diagonal v (in a
-    // column with scale s) to zero regardless of rounding mode: an exact zero
-    // on the fp32 / fp64 / bf16 / fp24 builds (they keep fp32's exponent range,
-    // so a nonzero fp32 factor entry never rounds to zero -- bf16 stochastic
-    // rounding included, whose two candidates bracket a nonzero x); on
-    // FP16_SCALED everything fp16 flushes (|v / s| < 2^-25 under RNE) plus,
-    // with `fp16_flush_subnormal`, the fp16 subnormal range (< 2^-14 after
-    // rounding). Pure; independent of the entry's position k.
+    // column with scale s) to zero: an exact zero on the fp32 / fp64 builds
+    // (a nonzero factor entry never rounds to zero there); on FP16_SCALED
+    // everything fp16 flushes (|v / s| < 2^-25 under RNE) plus, with
+    // `fp16_flush_subnormal`, the fp16 subnormal range (< 2^-14 after
+    // rounding). Pure.
     static bool format_flushes(factor_value_t v, float s, bool fp16_flush_subnormal) {
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         const fp16_t h(static_cast<float>(v) / s);
@@ -414,8 +381,8 @@ public:
                !format_flushes(v, s, fp16_flush_subnormal);
     }
 
-    // Per-column scale contract (public for the tests): the *_SCALED variants'
-    // s_j, computed by setup() from the factor column [first, last) whose FIRST
+    // Per-column scale contract (public for the tests): FP16_SCALED's s_j,
+    // computed by setup() from the factor column [first, last) whose FIRST
     // entry is the diagonal: max |off-diagonal|, or 1.0f if the column has no
     // nonzero off-diagonal (so v / s_j is always defined). Also the reference
     // of the compacting drop's threshold (computed BEFORE the drop; the drop
@@ -428,18 +395,14 @@ public:
 
     // Diagonal contract (public for the tests): what the kernels DIVIDE by for
     // a column whose factor diagonal is L_jj and whose scale is s (1.0f on the
-    // non-scaled builds). The *_SCALED variants store the scaled diagonal
-    // fp32(L_jj / s) -- one fp32 division -- in diag_[j] (see the file header,
-    // "FOLDED INTO THE VECTORS"); the other lowprec builds store L_jj itself
-    // in diag_[j]; the fp32/fp64 builds read the factor value inline (== L_jj at
-    // the factor's width). Under APXCHOL_FP16_DIAG (FP16_SCALED) the kernels
-    // divide by widen(fp16(L_jj / s)) instead, i.e. narrow_value(L_jj, ., s, .).
+    // fp32/fp64 builds). FP16_SCALED stores the scaled diagonal fp32(L_jj / s)
+    // -- one fp32 division -- in diag_[j] (see the file header, "FOLDED INTO
+    // THE VECTORS"); the fp32/fp64 builds read the factor value inline (== L_jj
+    // at the factor's width). Under APXCHOL_FP16_DIAG the kernels divide by
+    // widen(fp16(L_jj / s)) instead, i.e. narrow_value(L_jj, s, .).
     static double stored_diag(factor_value_t L_jj, float s) {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         return static_cast<double>(static_cast<float>(L_jj) / s);
-#elif defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-        (void)s;
-        return static_cast<double>(static_cast<float>(L_jj));       // fp32 diag_
 #else
         (void)s;
         return widen(L_jj);   // inline read: factor_value_t == sptrsv_value_t here
@@ -447,9 +410,9 @@ public:
     }
     // Back-input scale contract (public for the tests): transpose_solve reads
     // x_in[j] * r_j^2 with r_j = inv_scale(s_j) (fp32 reciprocal; r_j^2 exact
-    // in double); 1.0 on the non-scaled builds.
+    // in double); 1.0 on the fp32/fp64 builds.
     static double inv_scale(float s) {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         return static_cast<double>(1.0f / s);
 #else
         (void)s;
@@ -563,7 +526,7 @@ private:
         std::vector<factor_value_t> L11_vals_local;
         const edge_index*     L11_outer;
         const node_index*     L11_inner;
-        const factor_value_t* L11_vals;     // the FACTOR's width: fp32 under FP32/BF16, else fp64
+        const factor_value_t* L11_vals;     // the FACTOR's width: fp32 under FP32 / FP16_SCALED, else fp64
         edge_index nnz;
         if (m == L.rows()) {
             // SDDM full matrix: alias L (assume already compressed by
@@ -614,13 +577,8 @@ private:
         }
         mark("L11_alias_or_copy");
 
-        // Storage-mode envs, read at every setup (any build; each only has an
-        // effect on its own variant): bf16 rounding mode, fp16 subnormal flush
-        // (default ON, see file header).
-        const bool bf16_stochastic = [] {
-            const char* e = std::getenv("APXCHOL_BF16_STOCHASTIC");
-            return e && std::atoi(e) != 0;
-        }();
+        // Storage-mode env, read at every setup (any build; only FP16_SCALED
+        // acts on it): the fp16 subnormal flush (default ON, see file header).
         const bool fp16_flush_subnormal = [] {
             const char* e = std::getenv("APXCHOL_FP16_KEEP_SUBNORMAL");
             return !(e && std::atoi(e) != 0);
@@ -633,13 +591,13 @@ private:
         stats_.rel        = factor_drop_rel;
         stats_.compensate = drop_compensate;
         stats_.nnz_factor = static_cast<std::uint64_t>(nnz);
-        // Per-column scale s_j (the *_SCALED variants' scale_ -- a member, the
-        // storage divides by it -- and the compacting drop's threshold
+        // Per-column scale s_j (FP16_SCALED's scale_ -- a member, the storage
+        // divides by it -- and the compacting drop's threshold
         // reference; not needed otherwise). See column_scale() for the
         // contract. Computed from the factor BEFORE the drop. On the non-scaled
         // builds it is a drop-only transient (m floats), freed right after the
         // drop block: the storage there ignores the scale.
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         constexpr bool kStoreScaled = true;    // narrow_value / stored_diag read s_j
         scale_.resize(m_);
         float* const col_scale = scale_.data();
@@ -657,7 +615,7 @@ private:
                 col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
             mark("col_scale");
         }
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         // r_j = fp32(1 / s_j): the back solve's per-column input scale (see the
         // file header, "FOLDED INTO THE VECTORS"; inv_scale() is the contract).
         inv_scale_.resize(m_);
@@ -711,27 +669,26 @@ private:
             if (factor_drop_rel > 0.0) mark("factor_drop");
         }
         assert(stats_.nnz_stored == static_cast<std::uint64_t>(nnz));
-#if !defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if !defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         // Last read of the drop-only scales on the non-scaled builds (store()
         // and the diagonal below do not use them): free, not at return.
         std::vector<float>().swap(col_scale_local);
 #endif
 
-        // store(v, k, i, j): the factor entry L(i,j) at CSC position k of the
+        // store(v, j): the factor entry with value v in column j of the
         // (possibly compacted) L11 -> the SpTRSV's storage width, via
         // narrow_value() (see its contract above). Both stored copies of an
         // entry (CSR transpose below, CSC copy) go through this same pure
         // function.
-        const auto store = [=](factor_value_t v, edge_index k, node_index /*i*/, node_index j) -> sptrsv_value_t {
+        const auto store = [=](factor_value_t v, node_index j) -> sptrsv_value_t {
             const float s = kStoreScaled ? col_scale[j] : 1.0f;
-            return narrow_value(v, k, s, bf16_stochastic, fp16_flush_subnormal);
+            return narrow_value(v, s, fp16_flush_subnormal);
         };
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         // fp32 diagonal, straight from the factor (factor_value_t == float
-        // here; NOT via the narrowing path): L_jj, or under the *_SCALED
-        // variants the scaled L_jj / s_j (stored_diag() is the contract). L(j,j)
-        // is the FIRST entry of CSC column j -- the invariant the back solve has
-        // always relied on.
+        // here; NOT via the narrowing path): the scaled L_jj / s_j
+        // (stored_diag() is the contract). L(j,j) is the FIRST entry of CSC
+        // column j -- the invariant the back solve has always relied on.
         diag_.resize(m_);
         #pragma omp parallel for schedule(static)
         for (node_index j = 0; j < m_; ++j) {
@@ -876,7 +833,7 @@ private:
                         const edge_index out = cur[row >> shift]++;
                         bkt_row[out] = row;
                         bkt_col[out] = j;
-                        bkt_val[out] = store(L11_vals[p], p, row, j);
+                        bkt_val[out] = store(L11_vals[p], j);
                     }
                 #pragma omp barrier
                 // Phase 3: per-block stable counting sort into the final CSR
@@ -919,7 +876,7 @@ private:
                     const node_index row = L11_inner[p];
                     const edge_index out = pos[row]++;
                     csr_col_idx_[out] = j;
-                    csr_vals_[out]    = store(L11_vals[p], p, row, j);
+                    csr_vals_[out]    = store(L11_vals[p], j);
                 }
             }
         }
@@ -948,12 +905,12 @@ private:
         for (node_index i = 0; i <= m_; ++i)
             csc_col_ptr_[i] = L11_outer[i];
         {
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-            // APXCHOL_LOWPREC_DIAG_COMP=1 (env, read at every setup; lowprec
-            // builds only; default OFF -- a DIAGNOSTIC, see the file header,
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+            // APXCHOL_LOWPREC_DIAG_COMP=1 (env, read at every setup; the lowprec
+            // build only; default OFF -- a DIAGNOSTIC, see the file header,
             // "COLUMN-SUM COMPENSATION OF THE ROUNDING"): fold each column's
             // storage-rounding residual sum_i (x_ij - widen(h_ij)) (x = the
-            // value store() narrows, i.e. L_ij / s_j under *_SCALED) into the
+            // value store() narrows, i.e. L_ij / s_j) into the
             // fp32 diag_[j], so the STORED column sums to what the fp32
             // (compensated-drop) column sums to.
             const bool diag_comp = [] {
@@ -969,11 +926,11 @@ private:
                 for (edge_index k = L11_outer[j]; k < L11_outer[j + 1]; ++k) {
                     const node_index    i  = L11_inner[k];
                     const factor_value_t v = L11_vals[k];
-                    const sptrsv_value_t w = store(v, k, i, j);
+                    const sptrsv_value_t w = store(v, j);
                     csc_row_idx_[k] = i;
                     csc_vals_[k]    = w;
                     if (is_stored_subnormal(v)) ++n_fsub;          // census: the FACTOR value (fp32), diagonal incl.
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
                     if (diag_comp && i != j) {
                         const double x = static_cast<double>(v) / (kStoreScaled ? static_cast<double>(col_scale[j]) : 1.0);
                         resid += x - widen(w);
@@ -998,7 +955,7 @@ private:
                         ++n_sub;
                     }
                 }
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
                 if (diag_comp)
                     diag_[j] = static_cast<float>(static_cast<double>(diag_[j]) + resid);
 #else
@@ -1309,7 +1266,7 @@ private:
 public:
 
     /// Forward solve: L * y = x.  Reads x[0..m-1], writes y[0..m-1].
-    /// Under the *_SCALED variants the kernel runs on the stored L~ = L D^-1
+    /// Under FP16_SCALED the kernel runs on the stored L~ = L D^-1
     /// and writes y' = D y (y'_j = s_j * y_j) -- the value transpose_solve
     /// expects as its input; the pair (forward_solve, transpose_solve) applies
     /// (L L^T)^-1 on every build. See the file header, "FOLDED INTO THE
@@ -1318,7 +1275,7 @@ public:
         solve_levelset<fwd_dir>(x_in, y_out);
     }
 
-    /// Back solve: L^T * z = y.  Under the *_SCALED variants the input is the
+    /// Back solve: L^T * z = y.  Under FP16_SCALED the input is the
     /// forward's y' = D y and the kernel solves L~^T z = D^-2 y' (input read
     /// scaled once per column by inv_scale_[j]^2), i.e. z = L^-T y as before;
     /// D = I elsewhere. Valid in place (x_in == y_out).
@@ -1545,7 +1502,7 @@ public:
     const auto& csc_col_ptr() const { return csc_col_ptr_; }
     const auto& csc_row_idx() const { return csc_row_idx_; }
     const auto& csc_vals()    const { return csc_vals_; }
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
     // Per-column scales s_j of the last setup() (see column_scale()).
     const auto& col_scales()  const { return scale_; }
 #endif
@@ -1569,11 +1526,9 @@ public:
                       + bck_step_end_.capacity() * sizeof(std::size_t)
                       + fwd_bal_off_.capacity()  * sizeof(node_index)
                       + bck_bal_off_.capacity()  * sizeof(node_index);
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-        b += diag_.capacity() * sizeof(float);
-#endif
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
-        b += scale_.capacity() * sizeof(float) + inv_scale_.capacity() * sizeof(float);
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+        b += diag_.capacity() * sizeof(float)
+           + scale_.capacity() * sizeof(float) + inv_scale_.capacity() * sizeof(float);
 #endif
         for (const auto* lv : {&fwd_levels_, &bck_levels_}) {
             b += lv->capacity() * sizeof(std::vector<node_index>);
@@ -1601,22 +1556,18 @@ private:
     // col_idx holds column ids (node_index).
     big_vec<edge_index>     csr_row_ptr_;
     big_vec<node_index>     csr_col_idx_;
-    big_vec<sptrsv_value_t> csr_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; bf16/fp16/fp24 under the LOWPREC variants
+    big_vec<sptrsv_value_t> csr_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; fp16 under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED
 
     // CSC of L11 (back solve). col_ptr is an offset array (edge_index);
     // row_idx holds row ids (node_index).
     big_vec<edge_index>     csc_col_ptr_;
     big_vec<node_index>     csc_row_idx_;
-    big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; bf16/fp16/fp24 under the LOWPREC variants
+    big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; fp16 under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED
 
-#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-    // fp32 diagonal, i < m_ (lowprec builds only; see the file header): L(i,i)
-    // under BF16 / FP24 -- exactly what the fp32 build divides by, so those
-    // differ from fp32 ONLY in the off-diagonals -- and the scaled L(i,i) / s_i
-    // (one fp32 division, stored_diag()) under the *_SCALED variants.
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+    // fp32 diagonal, i < m_ (the lowprec build only; see the file header): the
+    // scaled L(i,i) / s_i (one fp32 division, stored_diag()).
     big_vec<float> diag_;
-#endif
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
     // Per-column scale s_j = max |off-diagonal| of L11 column j (1.0f if
     // none), fp32 (column_scale()); the stored factor is L~ = L D^-1, D =
     // diag(s_j). Used at setup (narrowing, the drop threshold, diag_) and by
@@ -1631,8 +1582,8 @@ private:
     // ── The kernels: ONE source for every storage type AND both directions ──
     // Per stored entry the work is (value load, widen, index load, y gather,
     // fma); the storage type only changes the widen() overload. Per row /
-    // column: the diagonal division (diag<Dir>) and, on the back solve of the
-    // *_SCALED variants, the input scale (bck_dir::rhs). The DIRECTION is a
+    // column: the diagonal division (diag<Dir>) and, on the back solve of
+    // FP16_SCALED, the input scale (bck_dir::rhs). The DIRECTION is a
     // policy: what differs between the sweeps is only which arrays (CSR vs
     // CSC), which level list, where the diagonal slot sits (last vs first),
     // and the input transform -- everything else is solve_levelset / solve_row.
@@ -1664,10 +1615,10 @@ private:
         static edge_index last (const edge_index* ptr, node_index j) { return ptr[j + 1]; }
         static edge_index diag_slot(const edge_index* ptr, node_index j) { return ptr[j]; }
         // Input transform: x_in[j] * r_j^2 (r_j = fp32(1/s_j), r_j^2 exact in
-        // double) under the *_SCALED variants -- D^-2 folded into the input
-        // read, see the file header -- x_in[j] itself elsewhere.
+        // double) under FP16_SCALED -- D^-2 folded into the input read, see the
+        // file header -- x_in[j] itself elsewhere.
         static double rhs(const omp_sptrsv& s, node_index j, const double* x_in) {
-#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
             const double r = static_cast<double>(s.inv_scale_[j]);
             return x_in[j] * (r * r);
 #else
@@ -1680,23 +1631,21 @@ private:
     // L~(v,v) as the sweep divides by it -- THE single place the diagonal's
     // storage is chosen: the fp32/fp64 builds keep the inline read (the
     // direction's diagonal slot: last of the CSR row / first of the CSC
-    // column, byte-identical to before), the lowprec builds read diag_[]
-    // (scaled by 1/s_j under *_SCALED), and FP16_SCALED under
-    // APXCHOL_FP16_DIAG (fp16_diag_) the fp16 diagonal slot itself.
+    // column, byte-identical to before), FP16_SCALED reads diag_[] (scaled by
+    // 1/s_j), and under APXCHOL_FP16_DIAG (fp16_diag_) the fp16 diagonal slot
+    // itself.
     template <class Dir>
     double diag(node_index v) const {
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         return fp16_diag_ ? widen(Dir::vals(*this)[Dir::diag_slot(Dir::ptr(*this).data(), v)])
                           : static_cast<double>(diag_[v]);
-#elif defined(APXCHOL_SPTRSV_LOWPREC_ANY)
-        return static_cast<double>(diag_[v]);
 #else
         return widen(Dir::vals(*this)[Dir::diag_slot(Dir::ptr(*this).data(), v)]);
 #endif
     }
 
     // Fat-level SIMD kernel availability: AVX2 + F16C + FMA target AND 16-bit
-    // storage (bf16_t / fp16_t). widen8()/widen4() overloads exist for float
+    // storage (fp16_t). widen8()/widen4() overloads exist for float
     // and double too, so enabling the SIMD path for the fp32/fp64 builds is
     // this one constant -- deliberately not done: those kernels stay the
     // scalar loops they were measured as.
@@ -1716,7 +1665,7 @@ private:
     // flavour has no store/reload either.
     static constexpr bool kFatGatherSimdDefault = false;
     // Kernel state set by setup() (see there).
-    bool diag_comp_   = false;   // lowprec builds: APXCHOL_LOWPREC_DIAG_COMP=1 applied at the last setup()
+    bool diag_comp_   = false;   // FP16_SCALED: APXCHOL_LOWPREC_DIAG_COMP=1 applied at the last setup()
     bool fp16_diag_   = false;   // FP16_SCALED: APXCHOL_FP16_DIAG=1 honoured at the last setup()
     bool gather_simd_ = false;   // fat-level SIMD kernels: vector gather (true) or stack buffer + scalar gather
 
@@ -1739,8 +1688,7 @@ private:
 
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
     // Vector widen: 8 (or 4) consecutive stored values -> two (one) lanes of 4
-    // doubles. One overload per storage type; fp24_t has none (3-byte packed
-    // -> kSimdDot is false there anyway).
+    // doubles. One overload per storage type.
     static inline void widen8(const fp16_t* v, __m256d& lo, __m256d& hi) {
         const __m256 f = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v)));   // F16C
         lo = _mm256_cvtps_pd(_mm256_castps256_ps128(f));
@@ -1748,17 +1696,6 @@ private:
     }
     static inline __m256d widen4(const fp16_t* v) {
         return _mm256_cvtps_pd(_mm_cvtph_ps(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(v))));
-    }
-    static inline void widen8(const bf16_t* v, __m256d& lo, __m256d& hi) {
-        // bf16 -> fp32 is the bit pattern << 16 (exact, like to_float()).
-        const __m256i u = _mm256_cvtepu16_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v)));
-        const __m256  f = _mm256_castsi256_ps(_mm256_slli_epi32(u, 16));
-        lo = _mm256_cvtps_pd(_mm256_castps256_ps128(f));
-        hi = _mm256_cvtps_pd(_mm256_extractf128_ps(f, 1));
-    }
-    static inline __m256d widen4(const bf16_t* v) {
-        const __m128i u = _mm_cvtepu16_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(v)));
-        return _mm256_cvtps_pd(_mm_castsi128_ps(_mm_slli_epi32(u, 16)));
     }
     static inline void widen8(const float* v, __m256d& lo, __m256d& hi) {
         lo = _mm256_cvtps_pd(_mm_loadu_ps(v));
@@ -1788,7 +1725,7 @@ private:
     // 4-wide step and a scalar tail. Different summation order from dot_thin
     // (and between the two flavours): same accuracy, not bit-identical. A
     // template on the value type so it is only instantiated where kSimdDot
-    // selects it (fp24_t has no widen8).
+    // selects it.
     template <class V>
     double dot_fat_simd(const V* __restrict vals, const node_index* __restrict idx,
                         edge_index p, edge_index end, const double* __restrict y) const {
