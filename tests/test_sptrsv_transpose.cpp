@@ -22,6 +22,7 @@
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
+using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
@@ -56,7 +57,7 @@ ref_csr reference_transpose(const sparse_csc& L) {
         for (edge_index p = outer[j]; p < outer[j + 1]; ++p) {
             const edge_index out = pos[inner[p]]++;
             R.col_idx[out] = j;
-            R.vals[out]    = vals[p];
+            R.vals[out]    = vals[p];   // factor_value_t -> sptrsv_value_t: RNE under bf16
         }
     return R;
 }
@@ -95,7 +96,7 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
         edge_index out = L.outer_[j];
         for (node_index r : col_rows[j]) {
             L.inner_[out] = r;
-            L.vals_[out]  = static_cast<sptrsv_value_t>(uval(rng));
+            L.vals_[out]  = static_cast<factor_value_t>(uval(rng));
             ++out;
         }
     }

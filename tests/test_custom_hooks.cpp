@@ -12,10 +12,12 @@ namespace {
 
 // "Exact factor => O(1) PCG iterations" bound. An exact Cholesky factor stored
 // at fp32/fp64 preconditions PCG to <= 3 iterations; under bf16 STORAGE
-// (-DAPXCHOL_SPTRSV_BF16) every factor entry carries a 2^-8 relative rounding,
-// so the "exact" factor is only an approximate one and PCG needs a few more
-// (measured 5-6 on the grids below) -- iteration count, not the residual
-// floor, is what precision buys, so only this bound relaxes.
+// (-DAPXCHOL_SPTRSV_BF16) every off-diagonal factor entry carries a 2^-8
+// relative rounding (the diagonal stays exact fp32), so the "exact" factor is
+// only an approximate one and PCG needs a few more (5-6 were measured on the
+// grids below by the original all-bf16 variant, diagonal included) --
+// iteration count, not the residual floor, is what precision buys, so only
+// this bound relaxes.
 #if defined(APXCHOL_SPTRSV_BF16)
 constexpr int kExactFactorMaxIters = 8;
 #else

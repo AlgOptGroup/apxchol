@@ -206,9 +206,12 @@ lists them with their help strings. `APXCHOL_SPTRSV_FP32` and
 `APXCHOL_POOL_FP32` default ON (fp32 factor values / fp32 residual-pool
 weights; the PCG recurrence stays fp64; pass `=OFF` for an fp64 baseline);
 `APXCHOL_SPTRSV_BF16` (default OFF, CPU backend only) narrows the SpTRSV
-factor storage further to bfloat16 — reads widen to fp64 in registers, so
-it only changes the preconditioner quality (iteration count), not the
-attainable residual; everything else defaults OFF except the
+off-diagonal factor storage further to bfloat16 (the diagonal stays exact
+fp32) — reads widen to fp64 in registers, so it only changes the
+preconditioner quality (iteration count), not the attainable residual;
+`APXCHOL_BF16_STOCHASTIC=1` in the environment switches its rounding from
+round-to-nearest-even to unbiased stochastic rounding; everything else
+defaults OFF except the
 `APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS` toggles. Release builds
 add `-march=native`.
 

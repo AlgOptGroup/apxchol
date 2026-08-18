@@ -393,7 +393,7 @@ option(APXCHOL_SPTRSV_FP32 "fp32 SpTRSV factor values (diag + PCG stay fp64). DE
 if (APXCHOL_SPTRSV_FP32)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_SPTRSV_FP32)
 endif()
-option(APXCHOL_SPTRSV_BF16 "bf16 (16-bit) SpTRSV factor-value STORAGE (reads widen to fp64; compute unchanged; CPU/omp only; overrides APXCHOL_SPTRSV_FP32). DEFAULT OFF" OFF)
+option(APXCHOL_SPTRSV_BF16 "bf16 (16-bit) SpTRSV factor-value STORAGE for the off-diagonals, diagonal exact fp32 (reads widen to fp64; compute unchanged; RNE or env APXCHOL_BF16_STOCHASTIC=1; CPU/omp only; overrides APXCHOL_SPTRSV_FP32). DEFAULT OFF" OFF)
 if (APXCHOL_SPTRSV_BF16)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_SPTRSV_BF16)
 endif()

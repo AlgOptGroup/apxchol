@@ -3,6 +3,7 @@
 #include "apxchol/sparse_csc.h"
 #include "apxchol/big_alloc.h"
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -54,7 +55,30 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // largest factor copies -- cutting memory and bandwidth on the bandwidth-bound
 // (~94% of peak) triangular solve. Every read of a stored value in the solve
 // kernels below goes through widen() (bf16.h): the arithmetic is ALWAYS done in
-// double, whatever the storage width; diag + outer PCG stay fp64.
+// double, whatever the storage width; the outer PCG stays fp64.
+//
+// DIAGONAL under bf16 (-DAPXCHOL_SPTRSV_BF16): the fp32/fp64 builds read
+// L(i,i) inline from the factor (last entry of CSR row i / first entry of CSC
+// column j) at the same precision as the off-diagonals. bf16 does NOT: an
+// 8-bit diagonal was measured to be the dominant iteration-count damage
+// (iter0040 T=1: diag-only bf16 314 PCG iters, off-diag-only 185, both 348,
+// fp32 65), so the bf16 build keeps a separate exact-fp32 `diag_[m]`, filled
+// at setup from the factor (factor_value_t == float, i.e. BEFORE any bf16
+// rounding), and both solves divide by diag_[i]. The bf16 diagonal slot stays
+// in csr_vals_/csc_vals_ (harmless: never read by the kernels; keeping it
+// leaves the CSR/CSC layout, the transpose, and every "diagonal is entry X"
+// invariant untouched). fwd_diag()/bck_diag() below are the single switch.
+//
+// ROUNDING mode under bf16: RNE by default. APXCHOL_BF16_STOCHASTIC=1 (env,
+// read at every setup) switches the off-diagonal narrowing to unbiased
+// stochastic rounding with a deterministic per-entry threshold (a hash of the
+// entry's CSC index -- see bf16.h), so it is run-to-run and thread-count
+// deterministic given the factor, and CSR/CSC agree entry-for-entry (a
+// disagreement would make the preconditioner L1 L2^T non-symmetric).
+// Motivation: RNE's per-entry error is a deterministic function of the value;
+// on a Laplacian-structured factor those errors can be systematically signed
+// and accumulate through the triangular solve, whereas unbiased rounding's
+// errors average out. Ignored (no effect) on the fp32/fp64 builds.
 
 class omp_sptrsv {
 public:
@@ -94,10 +118,10 @@ public:
         // ~60 ms on IPM iter40 — manual parallel version drops it under 10 ms.
         std::vector<edge_index>     L11_outer_local;
         std::vector<node_index>     L11_inner_local;
-        std::vector<sptrsv_value_t> L11_vals_local;
+        std::vector<factor_value_t> L11_vals_local;
         const edge_index*     L11_outer;
         const node_index*     L11_inner;
-        const sptrsv_value_t* L11_vals;     // fp32 under the flag (diag read separately)
+        const factor_value_t* L11_vals;     // the FACTOR's width: fp32 under FP32/BF16, else fp64
         edge_index nnz;
         if (m == L.rows()) {
             // SDDM full matrix: alias L (assume already compressed by
@@ -110,7 +134,7 @@ public:
             // Parallel build of L11 = L.topLeftCorner(m, m).
             const edge_index* L_outer = L.outerIndexPtr();
             const node_index* L_inner = L.innerIndexPtr();
-            const sptrsv_value_t* L_vals = L.valuePtr();
+            const factor_value_t* L_vals = L.valuePtr();
             const node_index drop_row = L.rows() - 1;
             // PASS 1 (parallel): per-column count of entries with row < m.
             std::vector<node_index> col_kept(m_, 0);
@@ -145,6 +169,37 @@ public:
             L11_vals  = L11_vals_local.data();
         }
         mark("L11_alias_or_copy");
+
+        // narrow(v, k): a factor value -> the SpTRSV's storage width. A PURE
+        // function of (value, CSC index k): the CSR transpose below and the
+        // CSC copy both call it, so the two stored copies of every entry
+        // agree bit-for-bit whatever the rounding mode (needed for the
+        // stochastic mode; a no-op cast on the fp32/fp64 builds, exactly the
+        // static_cast they always did).
+#if defined(APXCHOL_SPTRSV_BF16)
+        const bool bf16_stochastic = [] {
+            const char* e = std::getenv("APXCHOL_BF16_STOCHASTIC");
+            return e && std::atoi(e) != 0;
+        }();
+        const auto narrow = [bf16_stochastic](factor_value_t v, edge_index k) -> sptrsv_value_t {
+            return bf16_stochastic ? from_float_stochastic(v, static_cast<std::uint64_t>(k))
+                                   : bf16_t(v);                       // RNE
+        };
+        // Exact fp32 diagonal, straight from the factor (factor_value_t ==
+        // float here; NOT via the bf16 path). L(j,j) is the FIRST entry of
+        // CSC column j -- the invariant the back solve has always relied on.
+        diag_.resize(m_);
+        #pragma omp parallel for schedule(static)
+        for (node_index j = 0; j < m_; ++j) {
+            assert(L11_inner[L11_outer[j]] == j && "factor column must start with its diagonal");
+            diag_[j] = L11_vals[L11_outer[j]];
+        }
+        mark("diag_fp32");
+#else
+        const auto narrow = [](factor_value_t v, edge_index) -> sptrsv_value_t {
+            return static_cast<sptrsv_value_t>(v);
+        };
+#endif
 
         // ── CSC → CSR of L11 (for forward solve) ─────
         // Blocked counting-sort parallel transpose (APXCHOL_PAR_TRANSPOSE,
@@ -280,7 +335,7 @@ public:
                         const edge_index out = cur[row >> shift]++;
                         bkt_row[out] = row;
                         bkt_col[out] = j;
-                        bkt_val[out] = static_cast<sptrsv_value_t>(L11_vals[p]);
+                        bkt_val[out] = narrow(L11_vals[p], p);
                     }
                 #pragma omp barrier
                 // Phase 3: per-block stable counting sort into the final CSR
@@ -323,19 +378,22 @@ public:
                     const node_index row = L11_inner[p];
                     const edge_index out = pos[row]++;
                     csr_col_idx_[out] = j;
-                    csr_vals_[out]    = static_cast<sptrsv_value_t>(L11_vals[p]);
+                    csr_vals_[out]    = narrow(L11_vals[p], p);
                 }
             }
         }
 
-        // No separate diagonal array: the solve reads L(i,i) inline from the factor
-        // -- the LAST entry of CSR row i (forward: sum loop stops one short) and the
-        // FIRST entry of CSC column j (back: sum loop starts one in) -- at the same
-        // precision as the off-diagonals (fp32 / bf16 under the flags; the read
-        // widens like every other one). This is bit-identical
-        // to the old fp64 diag_ (L11_vals is already fp32 under the flag, so diag_ only
-        // ever held the fp32 value widened to double) and matches the GPU backend,
-        // which has always read the diagonal inline.
+        // fp32/fp64 builds: no separate diagonal array -- the solve reads L(i,i)
+        // inline from the factor, the LAST entry of CSR row i (forward: sum loop
+        // stops one short) and the FIRST entry of CSC column j (back: sum loop
+        // starts one in), at the same precision as the off-diagonals (the read
+        // widens like every other one). This is bit-identical to the old fp64
+        // diag_ (L11_vals is already fp32 under the flag, so diag_ only ever held
+        // the fp32 value widened to double) and matches the GPU backend, which has
+        // always read the diagonal inline. The bf16 build keeps the exact-fp32
+        // diag_ filled above instead (see fwd_diag / bck_diag); its bf16 diagonal
+        // slots in csr_vals_/csc_vals_ are written like every other entry but
+        // never read.
         mark("csc_to_csr");
 
         // ── CSC of L11 (for back solve) ─────────────────────────
@@ -349,7 +407,7 @@ public:
         #pragma omp parallel for schedule(static)
         for (edge_index k = 0; k < nnz; ++k) {
             csc_row_idx_[k] = L11_inner[k];
-            csc_vals_[k]    = static_cast<sptrsv_value_t>(L11_vals[k]);
+            csc_vals_[k]    = narrow(L11_vals[k], k);
         }
         mark("csc_copy");
 
@@ -598,7 +656,7 @@ public:
                             double sum = (s0 + s1) + (s2 + s3);
                             for (; p < row_end; ++p)
                                 sum += widen(csr_vals_[p]) * y_out[csr_col_idx_[p]];
-                            y_out[i] = (x_in[i] - sum) / widen(csr_vals_[csr_row_ptr_[i + 1] - 1]);
+                            y_out[i] = (x_in[i] - sum) / fwd_diag(i);
                         }
                     } // implicit barrier
                 } else {
@@ -615,7 +673,7 @@ public:
                         double sum = 0.0;
                         for (edge_index p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
                             sum += widen(csr_vals_[p]) * y_out[csr_col_idx_[p]];
-                        y_out[i] = (x_in[i] - sum) / widen(csr_vals_[csr_row_ptr_[i + 1] - 1]);
+                        y_out[i] = (x_in[i] - sum) / fwd_diag(i);
                     } // implicit barrier on omp for
                 }
             }
@@ -668,7 +726,7 @@ public:
                             double sum = (s0 + s1) + (s2 + s3);
                             for (; p < col_end; ++p)
                                 sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
-                            y_out[j] = (x_in[j] - sum) / widen(csc_vals_[csc_col_ptr_[j]]);
+                            y_out[j] = (x_in[j] - sum) / bck_diag(j);
                         }
                     } // implicit barrier
                 } else {
@@ -685,7 +743,7 @@ public:
                         double sum = 0.0;
                         for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
                             sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
-                        y_out[j] = (x_in[j] - sum) / widen(csc_vals_[csc_col_ptr_[j]]);
+                        y_out[j] = (x_in[j] - sum) / bck_diag(j);
                     } // implicit barrier on omp for
                 }
             }
@@ -733,7 +791,7 @@ public:
                 double sum = 0.0;
                 for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
                     sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
-                y_out[j] = (y_out[j] - sum) / widen(csc_vals_[csc_col_ptr_[j]]);
+                y_out[j] = (y_out[j] - sum) / bck_diag(j);
 
                 // Notify dependents: columns i < j with L(j, i) ≠ 0.
                 // CSR row j lists exactly those, with diagonal last.
@@ -800,6 +858,33 @@ private:
     big_vec<edge_index>     csc_col_ptr_;
     big_vec<node_index>     csc_row_idx_;
     big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32, bf16 under _BF16
+
+#if defined(APXCHOL_SPTRSV_BF16)
+    // Exact fp32 diagonal L(i,i), i < m_ (bf16 build only; see the file
+    // header). fp32 rather than fp64: it is exactly what the fp32 build
+    // divides by (the factor is fp32 under both flags), so bf16+diag32
+    // differs from fp32 ONLY in the off-diagonals -- one variable at a time.
+    big_vec<float> diag_;
+#endif
+
+    // L(i,i) as the forward solve (CSR row i) / back solve (CSC column j)
+    // divides by it. THE single place the diagonal's storage is chosen: the
+    // fp32/fp64 builds keep the inline read (last of CSR row / first of CSC
+    // column, byte-identical to before), the bf16 build reads diag_.
+    double fwd_diag(node_index i) const {
+#if defined(APXCHOL_SPTRSV_BF16)
+        return static_cast<double>(diag_[i]);
+#else
+        return widen(csr_vals_[csr_row_ptr_[i + 1] - 1]);
+#endif
+    }
+    double bck_diag(node_index j) const {
+#if defined(APXCHOL_SPTRSV_BF16)
+        return static_cast<double>(diag_[j]);
+#else
+        return widen(csc_vals_[csc_col_ptr_[j]]);
+#endif
+    }
 
     // Level sets.
     std::vector<std::vector<node_index>> fwd_levels_;

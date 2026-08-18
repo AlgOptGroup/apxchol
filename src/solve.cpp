@@ -43,13 +43,22 @@ inline void print_sptrsv_banner_once() {
 #endif
         std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem"
 #if defined(APXCHOL_SPTRSV_BF16)
-                             " (APXCHOL_SPTRSV_BF16 defined)\n",
+                             " (APXCHOL_SPTRSV_BF16 defined; off-diagonals only, diagonal fp32;"
+                             " rounding=%s)\n",
 #elif defined(APXCHOL_SPTRSV_FP32)
                              " (APXCHOL_SPTRSV_FP32 defined)\n",
 #else
                              " (APXCHOL_SPTRSV_FP32 NOT defined)\n",
 #endif
-                     backend, vname, vbytes);
+                     backend, vname, vbytes
+#if defined(APXCHOL_SPTRSV_BF16)
+                     // Same env read omp_sptrsv::setup does (per setup call); the
+                     // banner is one-shot, so it reports the value at first solve.
+                     , (std::getenv("APXCHOL_BF16_STOCHASTIC") &&
+                        std::atoi(std::getenv("APXCHOL_BF16_STOCHASTIC")) != 0)
+                           ? "stochastic (APXCHOL_BF16_STOCHASTIC=1)" : "RNE"
+#endif
+                     );
         return true;
     }();
     (void)printed;

@@ -18,19 +18,36 @@ namespace apxchol {
 // costs a few extra PCG iters ("changes iters, not the residual floor").
 //
 // BF16 (-DAPXCHOL_SPTRSV_BF16, OFF by default; CPU/omp backend only) goes one
-// step further: 16-bit storage (bf16_t, see bf16.h) for the same arrays --
-// 2 B/nnz of value stream instead of 4, i.e. the 8 B/nnz (idx + val) factor
-// stream drops to 6 B/nnz. Compute is unchanged: every read widens
-// bf16 -> fp32 -> double in registers via widen(); the rounding happens
-// once, at the factor-assembly write (RNE on the fp32 pattern). Precision
-// is 2^-8 relative per entry, so this is a preconditioner-quality knob:
-// PCG still converges to tol, possibly in more iterations. It takes
-// precedence over APXCHOL_SPTRSV_FP32 when both are defined.
+// step further: 16-bit storage (bf16_t, see bf16.h) for the SpTRSV's own
+// CSR/CSC value arrays -- 2 B/nnz of value stream instead of 4, i.e. the
+// 8 B/nnz (idx + val) factor stream drops to 6 B/nnz. Compute is unchanged:
+// every read widens bf16 -> fp32 -> double in registers via widen(); the
+// rounding happens once, when omp_sptrsv::setup copies the factor into its
+// CSR/CSC (RNE on the fp32 pattern by default; APXCHOL_BF16_STOCHASTIC=1
+// selects unbiased stochastic rounding). ONLY the off-diagonals are bf16: the
+// diagonal is kept exact-fp32 in a separate omp_sptrsv::diag_ array (rounding
+// the diagonal to 8 bits was measured to be the dominant iteration-count
+// damage). Precision is 2^-8 relative per off-diagonal entry, so this is a
+// preconditioner-quality knob: PCG still converges to tol, possibly in more
+// iterations. It takes precedence over APXCHOL_SPTRSV_FP32 when both are
+// defined.
+//
+// Two value types, deliberately:
+//   - factor_value_t : what the FACTOR (sparse_csc::vals_, the assembler's
+//     output) stores. fp32 under FP32 *and* BF16 (the bf16 build needs the
+//     exact fp32 diagonal at SpTRSV setup, and its factor is released right
+//     after setup anyway), fp64 otherwise.
+//   - sptrsv_value_t : what the SpTRSV kernels' CSR/CSC value arrays store
+//     (and the GPU backend's d_vals). bf16 under BF16, else == factor_value_t.
+// They coincide on the fp32/fp64 builds, so those are unchanged byte-for-byte.
 #if defined(APXCHOL_SPTRSV_BF16)
+using factor_value_t = float;
 using sptrsv_value_t = bf16_t;
 #elif defined(APXCHOL_SPTRSV_FP32)
+using factor_value_t = float;
 using sptrsv_value_t = float;
 #else
+using factor_value_t = double;
 using sptrsv_value_t = double;
 #endif
 
@@ -58,13 +75,15 @@ struct sparse_csc {
     std::vector<edge_index>     outer_; // n_+1 column pointers (cumulative nnz)
     std::vector<node_index>     inner_; // row indices
     // Off-diagonal AND diagonal factor values, fp32 under -DAPXCHOL_SPTRSV_FP32
-    // (saves ~nnz*4 B at the assembly peak), bf16 under -DAPXCHOL_SPTRSV_BF16
-    // (writes narrow via bf16_t's converting ctor; reads must widen()). The diagonal can ride along in fp32:
-    // it's L(i,i) = sqrt(weighted degree), a benign well-scaled positive scalar,
-    // and fp32 diag converges to 1e-8 just like fp64 (verified on IPM/social/grid;
-    // the GPU backend has always stored the diagonal in fp32 too). The fp64 build
-    // leaves vals_ as double -> byte-identical.
-    std::vector<sptrsv_value_t> vals_;
+    // and -DAPXCHOL_SPTRSV_BF16 (saves ~nnz*4 B at the assembly peak; the bf16
+    // narrowing of the off-diagonals happens later, in omp_sptrsv::setup, so
+    // the diagonal reaches the SpTRSV at full fp32). Reads should widen(). The
+    // diagonal can ride along in fp32: it's L(i,i) = sqrt(weighted degree), a
+    // benign well-scaled positive scalar, and fp32 diag converges to 1e-8 just
+    // like fp64 (verified on IPM/social/grid; the GPU backend has always stored
+    // the diagonal in fp32 too). The fp64 build leaves vals_ as double ->
+    // byte-identical.
+    std::vector<factor_value_t> vals_;
 
     sparse_csc() = default;
 
@@ -78,8 +97,8 @@ struct sparse_csc {
     const edge_index* outerIndexPtr() const { return outer_.data(); }
     node_index*       innerIndexPtr()       { return inner_.data(); }
     const node_index* innerIndexPtr() const { return inner_.data(); }
-    sptrsv_value_t*       valuePtr()            { return vals_.data(); }
-    const sptrsv_value_t* valuePtr()      const { return vals_.data(); }
+    factor_value_t*       valuePtr()            { return vals_.data(); }
+    const factor_value_t* valuePtr()      const { return vals_.data(); }
 
     // Build surface (mirrors the resize/reserve/resizeNonZeros/makeCompressed
     // sequence assemble_csc used on the Eigen matrix) ----------------------
@@ -101,7 +120,7 @@ struct sparse_csc {
     /// factor (~nnz*12 B) for the entire solve. swap-with-empty actually frees.
     void release_values() {
         std::vector<node_index>().swap(inner_);
-        std::vector<sptrsv_value_t>().swap(vals_);
+        std::vector<factor_value_t>().swap(vals_);
     }
 
     /// Assert the just-built cumulative column pointers never overflowed

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <random>
@@ -22,6 +23,7 @@ using apxchol::bf16_t;
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
+using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
@@ -101,8 +103,8 @@ TEST(BF16, RoundToNearestEvenAndCarry) {
     EXPECT_TRUE(std::isinf(apxchol::to_float(apxchol::from_float(std::numeric_limits<float>::infinity()))));
 }
 
-// Assignment from double / int narrows through the same RNE path (this is
-// what the factor assembler does with `values[pos] = col.diag`).
+// Assignment from double / float / int narrows through the same RNE path
+// (this is what omp_sptrsv::setup's CSC copy does with the fp32 factor value).
 TEST(BF16, ConvertingConstructorFromDoubleAndInt) {
     const bf16_t from_d = 3.14159265358979;
     const bf16_t from_f = 3.14159265f;
@@ -134,14 +136,93 @@ TEST(BF16, SpTRSVValueTypeMatchesBuildFlag) {
     EXPECT_EQ(apxchol::omp_sptrsv::value_bytes, sizeof(sptrsv_value_t));
 }
 
+// ── Stochastic rounding (bf16.h: from_float_stochastic) ────────────────
+// Per entry: the result is one of the two bf16 neighbours of x (truncation or
+// truncation + 1 ulp), so |y - x| < 2^-7 |x|; exact values stay exact; the
+// threshold is a pure function of the index (deterministic); and over many
+// independent indices the mean rounding error is ~0 (unbiased), which is the
+// whole point versus RNE.
+TEST(BF16, StochasticRoundingBoundedDeterministicUnbiased) {
+    std::mt19937_64 rng(4242);
+    std::uniform_real_distribution<double> uexp(-60.0, 60.0);
+    std::uniform_real_distribution<double> umant(1.0, 2.0);
+    std::bernoulli_distribution sign(0.5);
+    const double ulp_rel_bound = std::ldexp(1.0, -7);
+    for (int t = 0; t < 200'000; ++t) {
+        const float x = static_cast<float>(
+            (sign(rng) ? -1.0 : 1.0) * std::ldexp(umant(rng), static_cast<int>(uexp(rng))));
+        const std::uint64_t idx = rng();
+        const bf16_t h  = apxchol::from_float_stochastic(x, idx);
+        const bf16_t h2 = apxchol::from_float_stochastic(x, idx);
+        ASSERT_EQ(h.bits, h2.bits) << "not deterministic in idx";
+        const float y = apxchol::to_float(h);
+        const double rel = std::fabs(static_cast<double>(y) - static_cast<double>(x)) /
+                           std::fabs(static_cast<double>(x));
+        ASSERT_LT(rel, ulp_rel_bound) << "x=" << x << " y=" << y;
+        // One of the two neighbours: truncation, or truncation + 1 ulp (with carry).
+        const std::uint16_t trunc = static_cast<std::uint16_t>(f2u(x) >> 16);
+        ASSERT_TRUE(h.bits == trunc || h.bits == static_cast<std::uint16_t>(trunc + 1))
+            << "x=" << x;
+        ASSERT_EQ(std::signbit(y), std::signbit(x));
+    }
+    // Exact bf16 values never move, whatever the index.
+    for (float x : {0.0f, 1.0f, -1.5f, 255.0f, std::ldexp(1.0f, -40)})
+        for (std::uint64_t idx = 0; idx < 64; ++idx)
+            EXPECT_EQ(f2u(apxchol::to_float(apxchol::from_float_stochastic(x, idx))), f2u(x));
+    // Carry into the exponent: 1 - 2^-24 rounds UP to 1.0f for a threshold
+    // >= 1 (r = 0xffff), and stays truncated (0x3f7f) only for t == 0.
+    {
+        const float below1 = u2f(0x3f7fffffu);
+        int ups = 0;
+        for (std::uint64_t idx = 0; idx < 4096; ++idx)
+            ups += apxchol::from_float_stochastic(below1, idx).bits == 0x3f80u;
+        EXPECT_GE(ups, 4090);   // P(t == 0) = 2^-16 per index
+    }
+    // Unbiased: for a fixed x whose discarded fraction is r/2^16, the mean of
+    // (y - x) over many indices must be ~0 (RNE would give a fixed nonzero
+    // error for every one of them). Sample the fraction at 1/4, 1/2, 3/4.
+    for (std::uint32_t frac : {0x4000u, 0x8000u, 0xc000u}) {
+        const float x = u2f(0x3f800000u | frac);      // 1 + frac * 2^-23
+        const double ulp = std::ldexp(1.0, -7);
+        double sum_err = 0.0;
+        const int N = 1 << 16;
+        for (std::uint64_t idx = 0; idx < static_cast<std::uint64_t>(N); ++idx)
+            sum_err += static_cast<double>(apxchol::to_float(apxchol::from_float_stochastic(x, idx)))
+                     - static_cast<double>(x);
+        // Std error of the mean is ~ ulp * sqrt(p(1-p)/N) <= ulp * 2e-3;
+        // allow 5 sigma. RNE's error here would be frac/2^16 * ulp or its
+        // complement, i.e. >= 0.25 ulp -- two orders of magnitude off.
+        EXPECT_LT(std::fabs(sum_err / N), 0.01 * ulp) << "frac=" << frac;
+    }
+}
+
 // ── SpTRSV kernels compute in double from the widened stored values ─────
 // Build a random unit-ish lower-triangular factor, run forward (L y = x) and
 // back (L^T z = y) solves through omp_sptrsv, and check the residual against
-// the STORED (widened) values row by row with a componentwise bound. Because
+// the values the SpTRSV STORES row by row with a componentwise bound. Because
 // the kernels accumulate in double, the residual is at roundoff level even
-// when the storage is bf16 -- if any read did bf16/fp32 arithmetic, or the
-// diagonal read did not widen, this would blow up to ~2^-8.
+// when the storage is bf16 -- if any read did bf16/fp32 arithmetic this would
+// blow up to ~2^-8. Under the bf16 build the stored values are: off-diagonals
+// narrowed to bf16 (RNE, or stochastic-by-CSC-index under
+// APXCHOL_BF16_STOCHASTIC=1) and the DIAGONAL exact fp32 -- so this test also
+// pins (a) that the kernels divide by the exact diagonal (a bf16 diagonal
+// would show as a ~2^-8 residual) and (b) that CSR (forward) and CSC (back)
+// hold the SAME rounded value for every entry in stochastic mode.
 namespace {
+
+// What omp_sptrsv::setup stores for the factor entry at CSC position p with
+// value v: the contract under test.
+double stored_value(factor_value_t v, edge_index p, bool is_diag, bool stochastic) {
+#if defined(APXCHOL_SPTRSV_BF16)
+    if (is_diag) return static_cast<double>(v);              // exact fp32 diag_
+    return stochastic
+        ? apxchol::widen(apxchol::from_float_stochastic(v, static_cast<std::uint64_t>(p)))
+        : apxchol::widen(static_cast<sptrsv_value_t>(v));    // RNE
+#else
+    (void)p; (void)is_diag; (void)stochastic;
+    return apxchol::widen(v);
+#endif
+}
 
 sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
     std::mt19937 rng(seed);
@@ -172,7 +253,7 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
         edge_index out = L.outer_[j];
         for (node_index r : col_rows[j]) {
             L.inner_[out] = r;
-            L.vals_[out]  = static_cast<sptrsv_value_t>(r == j ? udiag(rng) : uval(rng));
+            L.vals_[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : uval(rng));
             ++out;
         }
     }
@@ -180,16 +261,17 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
 }
 
 // Componentwise residual check of L y = x (transpose == false) or L^T z = x
-// (transpose == true) against the widened stored values.
+// (transpose == true) against the values the SpTRSV stores.
 void check_triangular_residual(const sparse_csc& L, const std::vector<double>& x,
-                               const std::vector<double>& y, bool transpose) {
+                               const std::vector<double>& y, bool transpose,
+                               bool stochastic = false) {
     const node_index m = L.rows();
     std::vector<double> r(x), scale(m, 0.0);
     for (node_index i = 0; i < m; ++i) scale[i] = std::fabs(x[i]);
     for (node_index j = 0; j < m; ++j)
         for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
             const node_index i = L.inner_[p];
-            const double v = apxchol::widen(L.vals_[p]);
+            const double v = stored_value(L.vals_[p], p, /*is_diag=*/i == j, stochastic);
             if (!transpose) { r[i] -= v * y[j]; scale[i] += std::fabs(v * y[j]); }
             else            { r[j] -= v * y[i]; scale[j] += std::fabs(v * y[i]); }
         }
@@ -201,11 +283,9 @@ void check_triangular_residual(const sparse_csc& L, const std::vector<double>& x
     EXPECT_LT(worst, 1e-11) << (transpose ? "back" : "forward") << " solve residual";
 }
 
-} // namespace
-
-TEST(BF16, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
+void run_kernel_precision_check(bool stochastic) {
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose path */}) {
-        SCOPED_TRACE("m=" + std::to_string(m));
+        SCOPED_TRACE("m=" + std::to_string(m) + (stochastic ? " stochastic" : " RNE"));
         sparse_csc L = make_random_lower(m, 4.0, 99);
         apxchol::omp_sptrsv trsv;
         trsv.setup(L, m);
@@ -214,8 +294,38 @@ TEST(BF16, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
         std::vector<double> x(m), y(m), z(m);
         for (auto& v : x) v = ux(rng);
         trsv.forward_solve(x.data(), y.data());
-        check_triangular_residual(L, x, y, /*transpose=*/false);
+        check_triangular_residual(L, x, y, /*transpose=*/false, stochastic);
         trsv.transpose_solve(y.data(), z.data());
-        check_triangular_residual(L, y, z, /*transpose=*/true);
+        check_triangular_residual(L, y, z, /*transpose=*/true, stochastic);
     }
+}
+
+} // namespace
+
+TEST(BF16, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
+    run_kernel_precision_check(/*stochastic=*/false);
+}
+
+// APXCHOL_BF16_STOCHASTIC=1 is read at every setup(): CSR and CSC must carry
+// the same stochastically rounded off-diagonals and the exact diagonal. On the
+// fp32/fp64 builds the env var is ignored and this is the RNE test again.
+TEST(BF16, SpTRSVStochasticModeIsConsistentAcrossCSRAndCSC) {
+    setenv("APXCHOL_BF16_STOCHASTIC", "1", 1);
+    run_kernel_precision_check(/*stochastic=*/true);
+    unsetenv("APXCHOL_BF16_STOCHASTIC");
+#if defined(APXCHOL_SPTRSV_BF16)
+    // And it really is a different rounding: the two modes must disagree on
+    // some entries of a real factor (else the knob is dead).
+    sparse_csc L = make_random_lower(3000, 4.0, 99);
+    apxchol::omp_sptrsv rne, sto;
+    rne.setup(L, 3000);
+    setenv("APXCHOL_BF16_STOCHASTIC", "1", 1);
+    sto.setup(L, 3000);
+    unsetenv("APXCHOL_BF16_STOCHASTIC");
+    ASSERT_EQ(rne.csr_vals().size(), sto.csr_vals().size());
+    std::size_t differ = 0;
+    for (std::size_t k = 0; k < rne.csr_vals().size(); ++k)
+        differ += rne.csr_vals()[k] != sto.csr_vals()[k];
+    EXPECT_GT(differ, rne.csr_vals().size() / 10);
+#endif
 }
