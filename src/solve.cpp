@@ -361,6 +361,9 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
     if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
 
+    // New solve: restart the APXCHOL_GROUND=center-k application counter so
+    // the centring schedule is the same for every solve on this factor.
+    precond_.reset_apply_count();
     z = precond_.solve(r);                 // recorded as pcg.solve.{forward,back,…}
     p = z;
     double rz = r.dot(z);

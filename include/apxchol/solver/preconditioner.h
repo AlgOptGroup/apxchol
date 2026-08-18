@@ -1,8 +1,10 @@
 #pragma once
 #include "apxchol/checkpoint.h"
+#include "apxchol/env_knobs.h"
 #include "apxchol/solver/factorization.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <cstdint>
 #include <stdexcept>
 #include <utility>
 
@@ -158,6 +160,13 @@ public:
         return *this;
     }
 
+    /// Restart the per-solve application counter used by APXCHOL_GROUND=
+    /// center-k (see env_knobs.h). Call at the start of each PCG solve so the
+    /// centring schedule (every K-th application) is identical for every
+    /// solve on this factor -- repeated solves then reproduce bit-identical
+    /// results. A no-op in the default (center) mode.
+    void reset_apply_count() const noexcept { apply_count_ = 0; }
+
     Eigen::Index rows() const { return n_; }
     Eigen::Index cols() const { return n_; }
     Eigen::ComputationInfo info() const { return m_info; }
@@ -226,8 +235,27 @@ public:
             // ── Laplacian path: rank-(n-1) factor with centering ──
             const Eigen::Index m = n_ - 1;
 
-            scratch_.array() = b.array() - b.mean();
-            permute_to(scratch_, x);
+            // APXCHOL_GROUND=center-k (experiment knob, see env_knobs.h): run
+            // the two mean-subtraction passes only on every K-th application
+            // (applications K, 2K, ...; 1-based count) and skip both on the
+            // others. In exact arithmetic PCG keeps r in the centred subspace
+            // (A·1 = 0 => 1ᵀ(b − A x) = 1ᵀb = 0), so the pre-centring is a
+            // no-op there and the post-centring only removes an x-component
+            // along 1 (null space -- invisible to the residual). Centring
+            // every K-th application bounds the fp drift of both. K = 1 (or
+            // mode center, the default) centres every application as before.
+            const bool center = [&] {
+                const auto& k = detail::env_knobs::get();
+                if (k.ground != detail::grounding_kind::center_k) return true;
+                return (++apply_count_ % static_cast<std::uint64_t>(k.center_k)) == 0;
+            }();
+
+            if (center) {
+                scratch_.array() = b.array() - b.mean();
+                permute_to(scratch_, x);
+            } else {
+                permute_to(b, x);
+            }
             if (cp_) (*cp_)("permute");
 
 #if defined(APXCHOL_USE_CUDA)
@@ -252,7 +280,7 @@ public:
 
             permute_from(scratch2_, x);
 #endif
-            x.array() -= x.mean();
+            if (center) x.array() -= x.mean();
             if (cp_) (*cp_)("unpermute");
         }
 
@@ -265,6 +293,9 @@ private:
     graph_storage storage_ = graph_storage::vec_pool;
     checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
+    // Laplacian-path application counter for APXCHOL_GROUND=center-k (counts
+    // _solve_impl calls on the Laplacian branch; unused in the other modes).
+    mutable std::uint64_t apply_count_ = 0;
     mutable Eigen::VectorXd scratch_;
 #if !defined(APXCHOL_USE_CUDA)
     // Transpose-solve output staging for the CPU _solve_impl (see
