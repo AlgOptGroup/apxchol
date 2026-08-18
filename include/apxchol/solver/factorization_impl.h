@@ -113,7 +113,7 @@ void process_vertex(const Eliminator& elim,
     if (nbrs.empty()) {
         double d = G.excess(v);
         col.vertex = v;
-        col.diag   = static_cast<sptrsv_value_t>(d > 0.0 ? std::sqrt(d) : 1.0);
+        col.diag   = static_cast<factor_value_t>(d > 0.0 ? std::sqrt(d) : 1.0);
         col.entries.clear();
         return;
     }
@@ -122,10 +122,10 @@ void process_vertex(const Eliminator& elim,
     if (total_deg <= 0.0) total_deg = 1.0;
     double sqrt_deg = std::sqrt(total_deg);
     col.vertex = v;
-    col.diag = static_cast<sptrsv_value_t>(sqrt_deg);
+    col.diag = static_cast<factor_value_t>(sqrt_deg);
     col.entries.reserve(nbrs.size());
     for (const auto& [u, w] : nbrs)
-        col.entries.emplace_back(u, static_cast<sptrsv_value_t>(w / sqrt_deg));
+        col.entries.emplace_back(u, static_cast<factor_value_t>(w / sqrt_deg));
 
     // Propagate excess to neighbors (deferred for thread safety). Runs BEFORE
     // sample_clique so the eliminator receives the neighbor span as dead

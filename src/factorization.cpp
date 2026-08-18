@@ -62,7 +62,7 @@ static void assemble_csc(sparse_csc& L,
     const std::ptrdiff_t nc = static_cast<std::ptrdiff_t>(factor_cols.size());
     #pragma omp parallel
     {
-        std::vector<std::pair<node_index, sptrsv_value_t>> col_entries;
+        std::vector<std::pair<node_index, factor_value_t>> col_entries;
         #pragma omp for schedule(dynamic, 256)
         for (std::ptrdiff_t i = 0; i < nc; ++i) {
             const auto& col = factor_cols[i];
@@ -71,7 +71,7 @@ static void assemble_csc(sparse_csc& L,
             col_entries.clear();
             col_entries.reserve(col.entries.size());
             for (const auto& [nbr, val] : col.entries)
-                col_entries.emplace_back(perm[nbr], static_cast<sptrsv_value_t>(-val));
+                col_entries.emplace_back(perm[nbr], static_cast<factor_value_t>(-val));
             std::sort(col_entries.begin(), col_entries.end());
 
             edge_index pos = outerPtr[perm_col];

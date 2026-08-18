@@ -37,6 +37,7 @@
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
+using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
@@ -121,8 +122,22 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
     ASSERT_GT(st.dropped, nnz / 5) << "the test needs the drop-copy path";
     ASSERT_GT(nnz, 1000000u);
 
-    constexpr std::size_t VB = sizeof(sptrsv_value_t), NB = sizeof(node_index), EB = sizeof(edge_index);
+    // FB: the factor's value width (the L11 copy and the compacted copy are at
+    // factor precision); VB: the SpTRSV's storage width (CSR / bucket) -- equal
+    // on the fp32 / fp64 builds, 4 vs 2 (3) under the LOWPREC variants.
+    constexpr std::size_t FB = sizeof(factor_value_t), VB = sizeof(sptrsv_value_t);
+    constexpr std::size_t NB = sizeof(node_index), EB = sizeof(edge_index);
     const std::size_t slack = 6 * MB;   // page rounding + per-thread RSS batching + level-vector heap
+    // Per-column member arrays the LOWPREC builds keep alive through setup
+    // (fp32 diag_; the *_SCALED variants' scale_ / inv_scale_ -- allocated
+    // before the drop): part of memory_bytes(), and of every peak moment.
+    std::size_t per_col_members = 0;
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+    per_col_members += m * sizeof(float);
+#endif
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+    per_col_members += 2 * m * sizeof(float);
+#endif
 
     // (a) Steady state: nothing survives setup but the SpTRSV's own arrays.
     const std::size_t live = trsv.memory_bytes();
@@ -135,13 +150,13 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
     //   drop moment      L11 copy (nnz) + col_scale (m x 8) + drop copy (kept)
     //   transpose moment drop copy (kept) + CSR (kept) + bucket (kept x 12 B)
     // A leaked L11 copy would sit under the transpose moment and add nnz*8 B.
-    const std::size_t drop_moment = nnz * (NB + VB) + (m + 1) * EB      // L11 copy
-                                  + m * sizeof(double)                  // col_scale
-                                  + kept * (NB + VB) + (m + 1) * EB;    // drop copy
-    const std::size_t transpose_moment = kept * (NB + VB) + (m + 1) * EB   // drop copy
+    const std::size_t drop_moment = nnz * (NB + FB) + (m + 1) * EB      // L11 copy
+                                  + m * sizeof(double)                  // col_scale (fp32 or fp64)
+                                  + kept * (NB + FB) + (m + 1) * EB;    // drop copy
+    const std::size_t transpose_moment = kept * (NB + FB) + (m + 1) * EB   // drop copy
                                        + kept * (NB + VB) + (m + 1) * EB   // CSR
                                        + kept * (2 * NB + VB);             // bucket
-    const std::size_t peak_bound = std::max(drop_moment, transpose_moment) + slack;
+    const std::size_t peak_bound = std::max(drop_moment, transpose_moment) + per_col_members + slack;
     const std::size_t peak = static_cast<std::size_t>(hwm_kb - rss0_kb) * 1024;
     EXPECT_LE(peak, peak_bound)
         << "setup peak " << peak / double(MB) << " MB exceeds the intended transient overlap "

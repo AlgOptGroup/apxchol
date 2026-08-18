@@ -26,7 +26,8 @@ static Eigen::SparseMatrix<double> factor_to_eigen(const apxchol::sparse_csc& L)
     trips.reserve(static_cast<size_t>(L.nonZeros()));
     for (apxchol::node_index c = 0; c < L.cols(); ++c)
         for (apxchol::edge_index p = outer[c]; p < outer[c + 1]; ++p)
-            trips.emplace_back(static_cast<int>(inner[p]), static_cast<int>(c), vals[p]);
+            trips.emplace_back(static_cast<int>(inner[p]), static_cast<int>(c),
+                               apxchol::widen(vals[p]));
     Eigen::SparseMatrix<double> M(static_cast<int>(L.rows()), static_cast<int>(L.cols()));
     M.setFromTriplets(trips.begin(), trips.end());
     return M;
@@ -48,7 +49,7 @@ static double factor_diag(const apxchol::sparse_csc& L, int i) {
     const auto* inner = L.innerIndexPtr();
     const auto* vals  = L.valuePtr();
     for (apxchol::edge_index p = outer[i]; p < outer[i + 1]; ++p)
-        if (static_cast<int>(inner[p]) == i) return vals[p];
+        if (static_cast<int>(inner[p]) == i) return apxchol::widen(vals[p]);
     return 0.0;
 }
 

@@ -22,6 +22,7 @@
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
+using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
@@ -52,12 +53,18 @@ ref_csr reference_transpose(const sparse_csc& L) {
     R.col_idx.resize(nnz);
     R.vals.resize(nnz);
     std::vector<edge_index> pos(R.row_ptr.begin(), R.row_ptr.begin() + m);
-    for (node_index j = 0; j < m; ++j)
+    for (node_index j = 0; j < m; ++j) {
+        // factor_value_t -> sptrsv_value_t through the documented storage
+        // contract (RNE narrowing under the lowprec variants, divided by the
+        // per-column scale under the *_SCALED ones; a plain cast otherwise).
+        const float s_j = apxchol::omp_sptrsv::column_scale(vals, outer[j], outer[j + 1]);
         for (edge_index p = outer[j]; p < outer[j + 1]; ++p) {
             const edge_index out = pos[inner[p]]++;
             R.col_idx[out] = j;
-            R.vals[out]    = vals[p];
+            R.vals[out]    = apxchol::omp_sptrsv::narrow_value(vals[p], p, s_j, /*stochastic=*/false,
+                                                               /*fp16_flush_subnormal=*/true);
         }
+    }
     return R;
 }
 
@@ -95,7 +102,7 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
         edge_index out = L.outer_[j];
         for (node_index r : col_rows[j]) {
             L.inner_[out] = r;
-            L.vals_[out]  = static_cast<sptrsv_value_t>(uval(rng));
+            L.vals_[out]  = static_cast<factor_value_t>(uval(rng));
             ++out;
         }
     }
