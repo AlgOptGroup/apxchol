@@ -488,3 +488,19 @@ column sums preserved) — 46→46 iters at 1e-4 AND 1e-3 (ladder neutral to 3e-
 grid_2000 / com-Amazon / coAuthorsDBLP: 0 entries below threshold → exact no-op. 1e-3 is a
 candidate default pending the full-suite ladder. Composed main after all merges vs the
 Aug-18 pre-merge base (iter0040 / grid_2000 totals): ≈ −14% / −7%.
+
+## Benchmark-suite re-run, smoke tier (2026-08-18, boost-on, main 9f8246f + drop)
+
+9 matrices × 4 apxchol configs + RCHOL/pRCHOL/BoomerAMG(+cut)/AMGCL/ParAC, `sweep_fair.py
+--headline-only`, vs the stored pre-change cells (`results/cells_pre_2026_08_18`).
+**Solve phase: −19…−45% on grids/PDE/IPM with identical iteration counts** (bg+tree: iter0040
+0.62→0.41 s, ecology1 0.56→0.38, parabolic_fem 0.35→0.22, grid_500 0.09→0.05); social ~flat
+(nothing to drop, small vectors). **Setup: not interpretable vs old cells** — competitors' setup
+moved +20…60% with identical iterations (BoomerAMG, AMGCL, ParAC), i.e. environment (hot
+afternoon after 3 h of campaigns; boost-on variance ±25% between consecutive reps measured on
+ecology1 root+tree: 0.66/0.67/0.84 s vs a 2.07 s outlier). Two traps found and fixed:
+(1) amd-pstate default governor=powersave after the kernel update ran the whole suite ~2× slow
+(fixed: performance/performance); (2) the sweep is resume-safe — old cells must be moved aside.
+The locked paired campaigns remain the evidence for what changed; the suite's role is a fresh
+self-consistent baseline → run cold: `~/.cache/apxchol_prof/harness2/full_suite_rerun.sh`
+(archives cells, CPU all families then GPU; CUDA build being refreshed).
