@@ -1,7 +1,8 @@
 // bf16_t (include/apxchol/bf16.h): round-trip / rounding / widening tests, plus a
 // storage-width-agnostic check that the OpenMP SpTRSV kernels compute in double
 // from the WIDENED stored factor values (whatever sptrsv_value_t this build
-// compiled: bf16 / fp32 / fp64).
+// compiled: bf16 / bf16-scaled / fp16-scaled / fp24 / fp32 / fp64 -- see
+// lowprec.h; fp16_t / fp24_t have their own tests in test_lowprec.cpp).
 
 #include <gtest/gtest.h>
 #include <cmath>
@@ -120,18 +121,43 @@ TEST(BF16, ConvertingConstructorFromDoubleAndInt) {
 }
 
 // The compiled storage width must match the build flag, and value_name /
-// value_bytes (what the APXCHOL_VERBOSE banner prints) must agree with it.
+// value_bytes / lowprec_variant (what the APXCHOL_VERBOSE banner prints) must
+// agree with it.
 TEST(BF16, SpTRSVValueTypeMatchesBuildFlag) {
-#if defined(APXCHOL_SPTRSV_BF16)
+#if defined(APXCHOL_SPTRSV_LOWPREC_BF16)
     EXPECT_EQ(sizeof(sptrsv_value_t), 2u);
     EXPECT_STREQ(apxchol::omp_sptrsv::value_name, "bf16");
+    EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "BF16");
     EXPECT_TRUE((std::is_same_v<sptrsv_value_t, bf16_t>));
+    EXPECT_TRUE((std::is_same_v<factor_value_t, float>));
+#elif defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
+    EXPECT_EQ(sizeof(sptrsv_value_t), 2u);
+    EXPECT_STREQ(apxchol::omp_sptrsv::value_name, "bf16 (per-column scaled)");
+    EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "BF16_SCALED");
+    EXPECT_TRUE((std::is_same_v<sptrsv_value_t, bf16_t>));
+    EXPECT_TRUE((std::is_same_v<factor_value_t, float>));
+#elif defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+    EXPECT_EQ(sizeof(sptrsv_value_t), 2u);
+    EXPECT_STREQ(apxchol::omp_sptrsv::value_name, "fp16 (per-column scaled)");
+    EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "FP16_SCALED");
+    EXPECT_TRUE((std::is_same_v<sptrsv_value_t, apxchol::fp16_t>));
+    EXPECT_TRUE((std::is_same_v<factor_value_t, float>));
+#elif defined(APXCHOL_SPTRSV_LOWPREC_FP24)
+    EXPECT_EQ(sizeof(sptrsv_value_t), 3u);
+    EXPECT_STREQ(apxchol::omp_sptrsv::value_name, "fp24");
+    EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "FP24");
+    EXPECT_TRUE((std::is_same_v<sptrsv_value_t, apxchol::fp24_t>));
+    EXPECT_TRUE((std::is_same_v<factor_value_t, float>));
 #elif defined(APXCHOL_SPTRSV_FP32)
     EXPECT_EQ(sizeof(sptrsv_value_t), 4u);
     EXPECT_STREQ(apxchol::omp_sptrsv::value_name, "float (fp32)");
+    EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "OFF");
+    EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
 #else
     EXPECT_EQ(sizeof(sptrsv_value_t), 8u);
     EXPECT_STREQ(apxchol::omp_sptrsv::value_name, "double (fp64)");
+    EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "OFF");
+    EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
 #endif
     EXPECT_EQ(apxchol::omp_sptrsv::value_bytes, sizeof(sptrsv_value_t));
 }
@@ -201,26 +227,28 @@ TEST(BF16, StochasticRoundingBoundedDeterministicUnbiased) {
 // back (L^T z = y) solves through omp_sptrsv, and check the residual against
 // the values the SpTRSV STORES row by row with a componentwise bound. Because
 // the kernels accumulate in double, the residual is at roundoff level even
-// when the storage is bf16 -- if any read did bf16/fp32 arithmetic this would
-// blow up to ~2^-8. Under the bf16 build the stored values are: off-diagonals
-// narrowed to bf16 (RNE, or stochastic-by-CSC-index under
-// APXCHOL_BF16_STOCHASTIC=1) and the DIAGONAL exact fp32 -- so this test also
-// pins (a) that the kernels divide by the exact diagonal (a bf16 diagonal
-// would show as a ~2^-8 residual) and (b) that CSR (forward) and CSC (back)
-// hold the SAME rounded value for every entry in stochastic mode.
+// when the storage is 16-bit -- if any read did bf16/fp16/fp32 arithmetic this
+// would blow up to ~2^-8..2^-11. Under the lowprec builds the stored values
+// are: off-diagonals narrowed by omp_sptrsv::narrow_value (RNE, or for the
+// bf16 variants stochastic-by-CSC-index under APXCHOL_BF16_STOCHASTIC=1; the
+// *_SCALED variants divide by the per-column scale that the kernels multiply
+// back) and the DIAGONAL exact fp32 -- so this test also pins (a) that the
+// kernels divide by the exact diagonal (a narrow diagonal would show as a
+// ~2^-8 residual), (b) that CSR (forward) and CSC (back) hold the SAME rounded
+// value for every entry in stochastic mode, and (c) that the scale the kernels
+// multiply back is the very s_j the narrowing divided by.
 namespace {
 
-// What omp_sptrsv::setup stores for the factor entry at CSC position p with
-// value v: the contract under test.
-double stored_value(factor_value_t v, edge_index p, bool is_diag, bool stochastic) {
-#if defined(APXCHOL_SPTRSV_BF16)
-    if (is_diag) return static_cast<double>(v);              // exact fp32 diag_
-    return stochastic
-        ? apxchol::widen(apxchol::from_float_stochastic(v, static_cast<std::uint64_t>(p)))
-        : apxchol::widen(static_cast<sptrsv_value_t>(v));    // RNE
+// What omp_sptrsv::setup stores (widened, scale multiplied back) for the
+// factor entry at CSC position p with value v in a column with scale s: the
+// contract under test. Under the fp32/fp64 builds this is v itself.
+double stored_value(factor_value_t v, edge_index p, bool is_diag, bool stochastic, float s) {
+    if (is_diag) return static_cast<double>(v);              // exact fp32 diag_ (or the fp32/fp64 inline read)
+    const double w = apxchol::widen(apxchol::omp_sptrsv::narrow_value(v, p, s, stochastic));
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+    return w * static_cast<double>(s);
 #else
-    (void)p; (void)is_diag; (void)stochastic;
-    return apxchol::widen(v);
+    return w;
 #endif
 }
 
@@ -268,17 +296,19 @@ void check_triangular_residual(const sparse_csc& L, const std::vector<double>& x
     const node_index m = L.rows();
     std::vector<double> r(x), scale(m, 0.0);
     for (node_index i = 0; i < m; ++i) scale[i] = std::fabs(x[i]);
-    for (node_index j = 0; j < m; ++j)
+    for (node_index j = 0; j < m; ++j) {
+        const float s_j = apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]);
         for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
             const node_index i = L.inner_[p];
-            const double v = stored_value(L.vals_[p], p, /*is_diag=*/i == j, stochastic);
+            const double v = stored_value(L.vals_[p], p, /*is_diag=*/i == j, stochastic, s_j);
             if (!transpose) { r[i] -= v * y[j]; scale[i] += std::fabs(v * y[j]); }
             else            { r[j] -= v * y[i]; scale[j] += std::fabs(v * y[i]); }
         }
+    }
     double worst = 0.0;
     for (node_index i = 0; i < m; ++i)
         worst = std::max(worst, std::fabs(r[i]) / (scale[i] + 1e-300));
-    // Double accumulation over <= ~70 terms: roundoff ~1e-14; 2^-8 = 4e-3
+    // Double accumulation over <= ~70 terms: roundoff ~1e-14; 2^-8..2^-11
     // would be the signature of any narrow-precision arithmetic.
     EXPECT_LT(worst, 1e-11) << (transpose ? "back" : "forward") << " solve residual";
 }
@@ -308,12 +338,12 @@ TEST(BF16, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
 
 // APXCHOL_BF16_STOCHASTIC=1 is read at every setup(): CSR and CSC must carry
 // the same stochastically rounded off-diagonals and the exact diagonal. On the
-// fp32/fp64 builds the env var is ignored and this is the RNE test again.
+// non-bf16 builds the env var is ignored and this is the RNE test again.
 TEST(BF16, SpTRSVStochasticModeIsConsistentAcrossCSRAndCSC) {
     setenv("APXCHOL_BF16_STOCHASTIC", "1", 1);
     run_kernel_precision_check(/*stochastic=*/true);
     unsetenv("APXCHOL_BF16_STOCHASTIC");
-#if defined(APXCHOL_SPTRSV_BF16)
+#if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
     // And it really is a different rounding: the two modes must disagree on
     // some entries of a real factor (else the knob is dead).
     sparse_csc L = make_random_lower(3000, 4.0, 99);

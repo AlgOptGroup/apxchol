@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -49,36 +50,59 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// remains as an opt-in escape hatch via APXCHOL_BCK_SCHED=syncfree for
 /// orderings that do produce deep-thin factors.
 
-// sptrsv_value_t (bf16 under -DAPXCHOL_SPTRSV_BF16, fp32 under
-// -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in sparse_csc.h and shared with
-// the CUDA backend (fp32/fp64 only). It narrows csr_vals_/csc_vals_ -- the two
-// largest factor copies -- cutting memory and bandwidth on the bandwidth-bound
-// (~94% of peak) triangular solve. Every read of a stored value in the solve
-// kernels below goes through widen() (bf16.h): the arithmetic is ALWAYS done in
-// double, whatever the storage width; the outer PCG stays fp64.
+// sptrsv_value_t (bf16_t / fp16_t / fp24_t under the APXCHOL_SPTRSV_LOWPREC
+// variants, fp32 under -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in
+// sparse_csc.h (variants: lowprec.h) and shared with the CUDA backend
+// (fp32/fp64 only). It narrows csr_vals_/csc_vals_ -- the two largest factor
+// copies -- cutting memory and bandwidth on the bandwidth-bound (~94% of peak)
+// triangular solve. Every read of a stored value in the solve kernels below
+// goes through fwd_val()/bck_val() -> widen(): the arithmetic is ALWAYS done
+// in double, whatever the storage width; the outer PCG stays fp64.
 //
-// DIAGONAL under bf16 (-DAPXCHOL_SPTRSV_BF16): the fp32/fp64 builds read
-// L(i,i) inline from the factor (last entry of CSR row i / first entry of CSC
-// column j) at the same precision as the off-diagonals. bf16 does NOT: an
-// 8-bit diagonal was measured to be the dominant iteration-count damage
-// (iter0040 T=1: diag-only bf16 314 PCG iters, off-diag-only 185, both 348,
-// fp32 65), so the bf16 build keeps a separate exact-fp32 `diag_[m]`, filled
-// at setup from the factor (factor_value_t == float, i.e. BEFORE any bf16
-// rounding), and both solves divide by diag_[i]. The bf16 diagonal slot stays
-// in csr_vals_/csc_vals_ (harmless: never read by the kernels; keeping it
-// leaves the CSR/CSC layout, the transpose, and every "diagonal is entry X"
-// invariant untouched). fwd_diag()/bck_diag() below are the single switch.
+// DIAGONAL under the LOWPREC variants: the fp32/fp64 builds read L(i,i) inline
+// from the factor (last entry of CSR row i / first entry of CSC column j) at
+// the same precision as the off-diagonals. The lowprec builds do NOT: an 8-bit
+// diagonal was measured to be the dominant iteration-count damage (iter0040
+// T=1: diag-only bf16 314 PCG iters, off-diag-only 185, both 348, fp32 65), so
+// every lowprec build keeps a separate exact-fp32 `diag_[m]`, filled at setup
+// from the factor (factor_value_t == float, i.e. BEFORE any narrowing), and
+// both solves divide by diag_[i]. The narrow diagonal slot stays in
+// csr_vals_/csc_vals_ (written like every other entry through narrow_value --
+// under the *_SCALED variants that is L_jj / s_j, which may even overflow fp16
+// to inf -- but NEVER read by the kernels; keeping it leaves the CSR/CSC
+// layout, the transpose, and every "diagonal is entry X" invariant untouched).
+// fwd_diag()/bck_diag() below are the single switch.
 //
-// ROUNDING mode under bf16: RNE by default. APXCHOL_BF16_STOCHASTIC=1 (env,
-// read at every setup) switches the off-diagonal narrowing to unbiased
-// stochastic rounding with a deterministic per-entry threshold (a hash of the
-// entry's CSC index -- see bf16.h), so it is run-to-run and thread-count
-// deterministic given the factor, and CSR/CSC agree entry-for-entry (a
-// disagreement would make the preconditioner L1 L2^T non-symmetric).
-// Motivation: RNE's per-entry error is a deterministic function of the value;
-// on a Laplacian-structured factor those errors can be systematically signed
-// and accumulate through the triangular solve, whereas unbiased rounding's
-// errors average out. Ignored (no effect) on the fp32/fp64 builds.
+// PER-COLUMN SCALE under the *_SCALED variants: scale_[j] = max |L_ij| over
+// the off-diagonals of column j (1.0f if there is none), fp32, computed at
+// setup from the factor. What is stored is narrow(L_ij / scale_[j]); the
+// kernels multiply back: the CSR forward sweep gathers scale_[csr_col_idx_[p]]
+// (the entry's COLUMN, alongside the y gather it already does), the CSC back
+// sweep hoists scale_[j] out of column j's loop. fwd_val()/bck_val() are the
+// single switch.
+//
+// ROUNDING mode: RNE for every variant. For the two bf16 variants,
+// APXCHOL_BF16_STOCHASTIC=1 (env, read at every setup) switches the
+// off-diagonal narrowing to unbiased stochastic rounding with a deterministic
+// per-entry threshold (a hash of the entry's CSC index -- see bf16.h), so it
+// is run-to-run and thread-count deterministic given the factor, and CSR/CSC
+// agree entry-for-entry (a disagreement would make the preconditioner L1 L2^T
+// non-symmetric). Motivation: RNE's per-entry error is a deterministic
+// function of the value; on a Laplacian-structured factor those errors can be
+// systematically signed and accumulate through the triangular solve, whereas
+// unbiased rounding's errors average out. Ignored (no effect) on the other
+// builds.
+//
+// DROP diagnostic (fp32/fp64 builds only): APXCHOL_LOWPREC_DROP=<rel> (env,
+// read at every setup) stores ZERO for every off-diagonal with |L_ij| < rel *
+// (column j's max |off-diagonal|) -- threshold dropping in isolation, no
+// precision change, to test whether the fp16 flush-to-zero of the same entries
+// is what costs iterations. Ignored on the lowprec builds.
+//
+// STATISTICS: setup() counts, over the off-diagonals, how many stored values
+// flushed to zero (v != 0, stored == 0), how many are subnormal in the storage
+// format, and how many the DROP diagnostic zeroed; lowprec_stats() returns
+// them and APXCHOL_VERBOSE prints them (one line per setup).
 
 class omp_sptrsv {
 public:
@@ -86,13 +110,79 @@ public:
 
     // Compiled width of the off-diagonal factor values, read straight off the
     // type the compiler actually built. 2 == this TU was compiled with
-    // -DAPXCHOL_SPTRSV_BF16, 4 == -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Printed at
-    // startup so the build flag is observable at runtime (no inferring from
-    // residuals).
+    // APXCHOL_SPTRSV_LOWPREC = BF16 / BF16_SCALED / FP16_SCALED, 3 == FP24,
+    // 4 == -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Printed at startup so the build
+    // flag is observable at runtime (no inferring from residuals).
     static constexpr std::size_t value_bytes = sizeof(sptrsv_value_t);
     static constexpr const char* value_name =
-        sizeof(sptrsv_value_t) == 2 ? "bf16" :
+#if defined(APXCHOL_SPTRSV_LOWPREC_BF16)
+        "bf16";
+#elif defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
+        "bf16 (per-column scaled)";
+#elif defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+        "fp16 (per-column scaled)";
+#elif defined(APXCHOL_SPTRSV_LOWPREC_FP24)
+        "fp24";
+#else
         sizeof(sptrsv_value_t) == 4 ? "float (fp32)" : "double (fp64)";
+#endif
+    // The APXCHOL_SPTRSV_LOWPREC variant this TU compiled ("OFF" for fp32/fp64).
+    static constexpr const char* lowprec_variant = sptrsv_lowprec_variant;
+
+    // THE storage contract (public so the unit tests can state it): what
+    // setup() stores for the factor entry at CSC position k with value v, in a
+    // column whose per-column scale is s (the *_SCALED variants: s_j = max
+    // |off-diagonal| of column j, 1.0f if none; every other variant ignores s
+    // -- pass 1.0f). `stochastic` selects bf16 stochastic rounding (bf16
+    // variants only; ignored elsewhere). A PURE function of its arguments: the
+    // CSR transpose and the CSC copy both call it, so the two stored copies of
+    // every entry agree bit-for-bit whatever the rounding mode (needed for the
+    // stochastic mode; a no-op cast on the fp32/fp64 builds, exactly the
+    // static_cast they always did). The DROP diagnostic is applied by the
+    // caller BEFORE this (it zeroes v).
+    static sptrsv_value_t narrow_value(factor_value_t v, edge_index k, float s, bool stochastic) {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        const float x = static_cast<float>(v) / s;      // |x| <= 1 for the off-diagonals (s is their max)
+#else
+        (void)s;
+        const factor_value_t x = v;
+#endif
+#if defined(APXCHOL_SPTRSV_LOWPREC_BF16) || defined(APXCHOL_SPTRSV_LOWPREC_BF16_SCALED)
+        return stochastic ? from_float_stochastic(x, static_cast<std::uint64_t>(k))
+                          : bf16_t(x);                   // RNE
+#elif defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
+        (void)k; (void)stochastic;
+        return fp16_t(x);                                // RNE, subnormals / flush per IEEE
+#elif defined(APXCHOL_SPTRSV_LOWPREC_FP24)
+        (void)k; (void)stochastic;
+        return fp24_t(x);                                // RNE on the dropped 8 bits
+#else
+        (void)k; (void)stochastic;
+        return static_cast<sptrsv_value_t>(x);
+#endif
+    }
+
+    // Per-column scale contract (public for the tests): the *_SCALED variants'
+    // s_j, computed by setup() from the factor column [first, last) whose FIRST
+    // entry is the diagonal: max |off-diagonal|, or 1.0f if the column has no
+    // nonzero off-diagonal (so v / s_j is always defined). Also the reference
+    // of the DROP diagnostic's threshold. Computed in double, stored fp32 (the
+    // factor is fp32 on every build that uses it, so this is exact).
+    static float column_scale(const factor_value_t* vals, edge_index first, edge_index last) {
+        double mx = 0.0;
+        for (edge_index p = first + 1; p < last; ++p)
+            mx = std::max(mx, std::fabs(static_cast<double>(vals[p])));
+        return mx > 0.0 ? static_cast<float>(mx) : 1.0f;
+    }
+
+    // Off-diagonal statistics of the last setup() (see the file header).
+    struct lowprec_statistics {
+        std::uint64_t offdiag   = 0;   // number of off-diagonal entries of L11
+        std::uint64_t flushed   = 0;   // stored as zero although the factor value was nonzero
+        std::uint64_t subnormal = 0;   // stored as a subnormal of the storage format
+        std::uint64_t dropped   = 0;   // zeroed by the APXCHOL_LOWPREC_DROP diagnostic
+    };
+    const lowprec_statistics& lowprec_stats() const { return stats_; }
 
     /// Analyze L11 = L.topLeftCorner(m, m): build CSR, CSC, and level sets.
     void setup(const sparse_csc& L, node_index m) {
@@ -170,24 +260,57 @@ public:
         }
         mark("L11_alias_or_copy");
 
-        // narrow(v, k): a factor value -> the SpTRSV's storage width. A PURE
-        // function of (value, CSC index k): the CSR transpose below and the
-        // CSC copy both call it, so the two stored copies of every entry
-        // agree bit-for-bit whatever the rounding mode (needed for the
-        // stochastic mode; a no-op cast on the fp32/fp64 builds, exactly the
-        // static_cast they always did).
-#if defined(APXCHOL_SPTRSV_BF16)
+        // store(v, k, i, j): the factor entry L(i,j) at CSC position k -> the
+        // SpTRSV's storage width, via narrow_value() (see its contract above);
+        // the DROP diagnostic zeroes v first. Both stored copies of an entry
+        // (CSR transpose below, CSC copy) go through this same pure function.
+        // The bf16 rounding-mode env is read at every setup (any build; it
+        // only has an effect on the bf16 variants).
         const bool bf16_stochastic = [] {
             const char* e = std::getenv("APXCHOL_BF16_STOCHASTIC");
             return e && std::atoi(e) != 0;
         }();
-        const auto narrow = [bf16_stochastic](factor_value_t v, edge_index k) -> sptrsv_value_t {
-            return bf16_stochastic ? from_float_stochastic(v, static_cast<std::uint64_t>(k))
-                                   : bf16_t(v);                       // RNE
+        // APXCHOL_LOWPREC_DROP=<rel> (fp32/fp64 builds only; see file header).
+        const double drop_rel = [] {
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+            return 0.0;
+#else
+            const char* e = std::getenv("APXCHOL_LOWPREC_DROP");
+            const double r = e ? std::atof(e) : 0.0;
+            return r > 0.0 ? r : 0.0;
+#endif
+        }();
+        stats_ = lowprec_statistics{};
+        // Per-column scale s_j (the *_SCALED variants' scale_, the DROP
+        // diagnostic's threshold reference; not needed otherwise). See
+        // column_scale() for the contract.
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        scale_.resize(m_);
+        float* const col_scale = scale_.data();
+        const bool need_scale = true;
+#else
+        std::vector<float> col_scale_local;
+        if (drop_rel > 0.0) col_scale_local.resize(m_);
+        float* const col_scale = col_scale_local.data();
+        const bool need_scale = drop_rel > 0.0;
+#endif
+        if (need_scale) {
+            #pragma omp parallel for schedule(static)
+            for (node_index j = 0; j < m_; ++j)
+                col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
+            mark("col_scale");
+        }
+        const auto store = [=](factor_value_t v, edge_index k, node_index i, node_index j) -> sptrsv_value_t {
+            const float s = need_scale ? col_scale[j] : 1.0f;
+            if (drop_rel > 0.0 && i != j &&
+                std::fabs(static_cast<double>(v)) < drop_rel * static_cast<double>(s))
+                v = 0;
+            return narrow_value(v, k, s, bf16_stochastic);
         };
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
         // Exact fp32 diagonal, straight from the factor (factor_value_t ==
-        // float here; NOT via the bf16 path). L(j,j) is the FIRST entry of
-        // CSC column j -- the invariant the back solve has always relied on.
+        // float here; NOT via the narrowing path). L(j,j) is the FIRST entry
+        // of CSC column j -- the invariant the back solve has always relied on.
         diag_.resize(m_);
         #pragma omp parallel for schedule(static)
         for (node_index j = 0; j < m_; ++j) {
@@ -195,10 +318,6 @@ public:
             diag_[j] = L11_vals[L11_outer[j]];
         }
         mark("diag_fp32");
-#else
-        const auto narrow = [](factor_value_t v, edge_index) -> sptrsv_value_t {
-            return static_cast<sptrsv_value_t>(v);
-        };
 #endif
 
         // ── CSC → CSR of L11 (for forward solve) ─────
@@ -236,7 +355,8 @@ public:
         //
         // Memory: one transient bucket of nnz·(2·sizeof(node_index) +
         // sizeof(sptrsv_value_t)) bytes (12 B/nnz on the default
-        // 32-bit-index fp32 build, 10 B/nnz under bf16), allocated uninitialized (every slot is
+        // 32-bit-index fp32 build, 10-11 B/nnz under the lowprec variants),
+        // allocated uninitialized (every slot is
         // written exactly once in phase 2) and freed before the level-set
         // build, plus the nt×NB count matrix (≤ 32·129·8 B ≈ 33 KB).
         //
@@ -335,7 +455,7 @@ public:
                         const edge_index out = cur[row >> shift]++;
                         bkt_row[out] = row;
                         bkt_col[out] = j;
-                        bkt_val[out] = narrow(L11_vals[p], p);
+                        bkt_val[out] = store(L11_vals[p], p, row, j);
                     }
                 #pragma omp barrier
                 // Phase 3: per-block stable counting sort into the final CSR
@@ -378,7 +498,7 @@ public:
                     const node_index row = L11_inner[p];
                     const edge_index out = pos[row]++;
                     csr_col_idx_[out] = j;
-                    csr_vals_[out]    = narrow(L11_vals[p], p);
+                    csr_vals_[out]    = store(L11_vals[p], p, row, j);
                 }
             }
         }
@@ -390,24 +510,60 @@ public:
         // widens like every other one). This is bit-identical to the old fp64
         // diag_ (L11_vals is already fp32 under the flag, so diag_ only ever held
         // the fp32 value widened to double) and matches the GPU backend, which has
-        // always read the diagonal inline. The bf16 build keeps the exact-fp32
-        // diag_ filled above instead (see fwd_diag / bck_diag); its bf16 diagonal
-        // slots in csr_vals_/csc_vals_ are written like every other entry but
-        // never read.
+        // always read the diagonal inline. The lowprec builds keep the exact-fp32
+        // diag_ filled above instead (see fwd_diag / bck_diag); their narrow
+        // diagonal slots in csr_vals_/csc_vals_ are written like every other
+        // entry but never read.
         mark("csc_to_csr");
 
         // ── CSC of L11 (for back solve) ─────────────────────────
-        // Parallel memcpy of the three arrays.
+        // Parallel copy of the three arrays (values through store()), column
+        // by column so store() knows the entry's column; this pass also
+        // gathers the off-diagonal storage statistics (each entry once).
         csc_col_ptr_.resize(static_cast<size_t>(m_) + 1);
         csc_row_idx_.resize(nnz);
         csc_vals_.resize(nnz);
         #pragma omp parallel for schedule(static)
         for (node_index i = 0; i <= m_; ++i)
             csc_col_ptr_[i] = L11_outer[i];
-        #pragma omp parallel for schedule(static)
-        for (edge_index k = 0; k < nnz; ++k) {
-            csc_row_idx_[k] = L11_inner[k];
-            csc_vals_[k]    = narrow(L11_vals[k], k);
+        {
+            std::uint64_t n_off = 0, n_flush = 0, n_sub = 0, n_drop = 0;
+            #pragma omp parallel for schedule(static) reduction(+ : n_off, n_flush, n_sub, n_drop)
+            for (node_index j = 0; j < m_; ++j) {
+                for (edge_index k = L11_outer[j]; k < L11_outer[j + 1]; ++k) {
+                    const node_index    i  = L11_inner[k];
+                    const factor_value_t v = L11_vals[k];
+                    const sptrsv_value_t w = store(v, k, i, j);
+                    csc_row_idx_[k] = i;
+                    csc_vals_[k]    = w;
+                    if (i == j) continue;                          // diagonal slot: unread under lowprec
+                    ++n_off;
+                    if (drop_rel > 0.0 &&
+                        std::fabs(static_cast<double>(v)) < drop_rel * static_cast<double>(col_scale[j])) {
+                        ++n_drop;                                  // zeroed by the diagnostic
+                    } else if (v != 0 && widen(w) == 0.0) {
+                        ++n_flush;                                 // zeroed by the storage format
+                    } else if (is_stored_subnormal(w)) {
+                        ++n_sub;
+                    }
+                }
+            }
+            stats_.offdiag = n_off; stats_.flushed = n_flush;
+            stats_.subnormal = n_sub; stats_.dropped = n_drop;
+            if (std::getenv("APXCHOL_VERBOSE")) {
+                const double den = n_off ? static_cast<double>(n_off) : 1.0;
+                std::fprintf(stderr,
+                    "[apxchol] sptrsv storage %s (lowprec=%s): offdiag=%llu flushed_to_zero=%llu (%.6f%%)"
+                    " subnormal=%llu (%.6f%%)%s",
+                    value_name, lowprec_variant,
+                    static_cast<unsigned long long>(n_off),
+                    static_cast<unsigned long long>(n_flush), 100.0 * n_flush / den,
+                    static_cast<unsigned long long>(n_sub),   100.0 * n_sub / den,
+                    drop_rel > 0.0 ? "" : "\n");
+                if (drop_rel > 0.0)
+                    std::fprintf(stderr, " dropped(APXCHOL_LOWPREC_DROP=%g)=%llu (%.6f%%)\n",
+                                 drop_rel, static_cast<unsigned long long>(n_drop), 100.0 * n_drop / den);
+            }
         }
         mark("csc_copy");
 
@@ -648,14 +804,14 @@ public:
                             const edge_index row_end   = csr_row_ptr_[i + 1] - 1;
                             edge_index p = row_start;
                             for (; p + 4 <= row_end; p += 4) {
-                                s0 += widen(csr_vals_[p + 0]) * y_out[csr_col_idx_[p + 0]];
-                                s1 += widen(csr_vals_[p + 1]) * y_out[csr_col_idx_[p + 1]];
-                                s2 += widen(csr_vals_[p + 2]) * y_out[csr_col_idx_[p + 2]];
-                                s3 += widen(csr_vals_[p + 3]) * y_out[csr_col_idx_[p + 3]];
+                                s0 += fwd_val(p + 0) * y_out[csr_col_idx_[p + 0]];
+                                s1 += fwd_val(p + 1) * y_out[csr_col_idx_[p + 1]];
+                                s2 += fwd_val(p + 2) * y_out[csr_col_idx_[p + 2]];
+                                s3 += fwd_val(p + 3) * y_out[csr_col_idx_[p + 3]];
                             }
                             double sum = (s0 + s1) + (s2 + s3);
                             for (; p < row_end; ++p)
-                                sum += widen(csr_vals_[p]) * y_out[csr_col_idx_[p]];
+                                sum += fwd_val(p) * y_out[csr_col_idx_[p]];
                             y_out[i] = (x_in[i] - sum) / fwd_diag(i);
                         }
                     } // implicit barrier
@@ -672,7 +828,7 @@ public:
                         }
                         double sum = 0.0;
                         for (edge_index p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
-                            sum += widen(csr_vals_[p]) * y_out[csr_col_idx_[p]];
+                            sum += fwd_val(p) * y_out[csr_col_idx_[p]];
                         y_out[i] = (x_in[i] - sum) / fwd_diag(i);
                     } // implicit barrier on omp for
                 }
@@ -716,16 +872,17 @@ public:
                             double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
                             const edge_index col_start = csc_col_ptr_[j] + 1;
                             const edge_index col_end   = csc_col_ptr_[j + 1];
+                            const double sj = bck_scale(j);   // hoisted per-column scale (1.0 unless *_SCALED)
                             edge_index p = col_start;
                             for (; p + 4 <= col_end; p += 4) {
-                                s0 += widen(csc_vals_[p + 0]) * y_out[csc_row_idx_[p + 0]];
-                                s1 += widen(csc_vals_[p + 1]) * y_out[csc_row_idx_[p + 1]];
-                                s2 += widen(csc_vals_[p + 2]) * y_out[csc_row_idx_[p + 2]];
-                                s3 += widen(csc_vals_[p + 3]) * y_out[csc_row_idx_[p + 3]];
+                                s0 += bck_val(p + 0, sj) * y_out[csc_row_idx_[p + 0]];
+                                s1 += bck_val(p + 1, sj) * y_out[csc_row_idx_[p + 1]];
+                                s2 += bck_val(p + 2, sj) * y_out[csc_row_idx_[p + 2]];
+                                s3 += bck_val(p + 3, sj) * y_out[csc_row_idx_[p + 3]];
                             }
                             double sum = (s0 + s1) + (s2 + s3);
                             for (; p < col_end; ++p)
-                                sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
+                                sum += bck_val(p, sj) * y_out[csc_row_idx_[p]];
                             y_out[j] = (x_in[j] - sum) / bck_diag(j);
                         }
                     } // implicit barrier
@@ -741,8 +898,9 @@ public:
                             __builtin_prefetch(&csc_vals_[csc_col_ptr_[jp]]);
                         }
                         double sum = 0.0;
+                        const double sj = bck_scale(j);
                         for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
-                            sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
+                            sum += bck_val(p, sj) * y_out[csc_row_idx_[p]];
                         y_out[j] = (x_in[j] - sum) / bck_diag(j);
                     } // implicit barrier on omp for
                 }
@@ -789,8 +947,9 @@ public:
                 }
 
                 double sum = 0.0;
+                const double sj = bck_scale(j);
                 for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
-                    sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
+                    sum += bck_val(p, sj) * y_out[csc_row_idx_[p]];
                 y_out[j] = (y_out[j] - sum) / bck_diag(j);
 
                 // Notify dependents: columns i < j with L(j, i) ≠ 0.
@@ -831,6 +990,13 @@ public:
     const auto& csr_row_ptr() const { return csr_row_ptr_; }
     const auto& csr_col_idx() const { return csr_col_idx_; }
     const auto& csr_vals()    const { return csr_vals_; }
+    const auto& csc_col_ptr() const { return csc_col_ptr_; }
+    const auto& csc_row_idx() const { return csc_row_idx_; }
+    const auto& csc_vals()    const { return csc_vals_; }
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+    // Per-column scales s_j of the last setup() (see column_scale()).
+    const auto& col_scales()  const { return scale_; }
+#endif
 
 private:
     node_index m_ = 0;
@@ -851,38 +1017,76 @@ private:
     // col_idx holds column ids (node_index).
     big_vec<edge_index>     csr_row_ptr_;
     big_vec<node_index>     csr_col_idx_;
-    big_vec<sptrsv_value_t> csr_vals_;   // fp32 under APXCHOL_SPTRSV_FP32, bf16 under _BF16
+    big_vec<sptrsv_value_t> csr_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; bf16/fp16/fp24 under the LOWPREC variants
 
     // CSC of L11 (back solve). col_ptr is an offset array (edge_index);
     // row_idx holds row ids (node_index).
     big_vec<edge_index>     csc_col_ptr_;
     big_vec<node_index>     csc_row_idx_;
-    big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32, bf16 under _BF16
+    big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; bf16/fp16/fp24 under the LOWPREC variants
 
-#if defined(APXCHOL_SPTRSV_BF16)
-    // Exact fp32 diagonal L(i,i), i < m_ (bf16 build only; see the file
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
+    // Exact fp32 diagonal L(i,i), i < m_ (lowprec builds only; see the file
     // header). fp32 rather than fp64: it is exactly what the fp32 build
-    // divides by (the factor is fp32 under both flags), so bf16+diag32
+    // divides by (the factor is fp32 under both flags), so lowprec+diag32
     // differs from fp32 ONLY in the off-diagonals -- one variable at a time.
     big_vec<float> diag_;
 #endif
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+    // Per-column scale s_j = max |off-diagonal| of L11 column j (1.0f if
+    // none), fp32; the stored off-diagonals are narrow(L_ij / s_j) and the
+    // kernels multiply s_j back (see file header, column_scale()).
+    big_vec<float> scale_;
+#endif
+    lowprec_statistics stats_;
 
     // L(i,i) as the forward solve (CSR row i) / back solve (CSC column j)
     // divides by it. THE single place the diagonal's storage is chosen: the
     // fp32/fp64 builds keep the inline read (last of CSR row / first of CSC
-    // column, byte-identical to before), the bf16 build reads diag_.
+    // column, byte-identical to before), the lowprec builds read diag_.
     double fwd_diag(node_index i) const {
-#if defined(APXCHOL_SPTRSV_BF16)
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
         return static_cast<double>(diag_[i]);
 #else
         return widen(csr_vals_[csr_row_ptr_[i + 1] - 1]);
 #endif
     }
     double bck_diag(node_index j) const {
-#if defined(APXCHOL_SPTRSV_BF16)
+#if defined(APXCHOL_SPTRSV_LOWPREC_ANY)
         return static_cast<double>(diag_[j]);
 #else
         return widen(csc_vals_[csc_col_ptr_[j]]);
+#endif
+    }
+
+    // Off-diagonal L(i,j) as the kernels read it, in double -- THE single
+    // place the storage format is undone. Forward (CSR position p, row i): the
+    // entry's column is csr_col_idx_[p], so the *_SCALED variants gather
+    // scale_[csr_col_idx_[p]] next to the y_out gather by the same index.
+    // Back (CSC position p inside column j): the caller hoists sj =
+    // bck_scale(j) out of the column loop. On every other build these are
+    // exactly widen(stored) (bit-identical to before).
+    double fwd_val(edge_index p) const {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        return widen(csr_vals_[p]) * static_cast<double>(scale_[csr_col_idx_[p]]);
+#else
+        return widen(csr_vals_[p]);
+#endif
+    }
+    double bck_scale(node_index j) const {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        return static_cast<double>(scale_[j]);
+#else
+        (void)j;
+        return 1.0;
+#endif
+    }
+    double bck_val(edge_index p, double sj) const {
+#if defined(APXCHOL_SPTRSV_LOWPREC_SCALED)
+        return widen(csc_vals_[p]) * sj;
+#else
+        (void)sj;
+        return widen(csc_vals_[p]);
 #endif
     }
 

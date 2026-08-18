@@ -53,12 +53,17 @@ ref_csr reference_transpose(const sparse_csc& L) {
     R.col_idx.resize(nnz);
     R.vals.resize(nnz);
     std::vector<edge_index> pos(R.row_ptr.begin(), R.row_ptr.begin() + m);
-    for (node_index j = 0; j < m; ++j)
+    for (node_index j = 0; j < m; ++j) {
+        // factor_value_t -> sptrsv_value_t through the documented storage
+        // contract (RNE narrowing under the lowprec variants, divided by the
+        // per-column scale under the *_SCALED ones; a plain cast otherwise).
+        const float s_j = apxchol::omp_sptrsv::column_scale(vals, outer[j], outer[j + 1]);
         for (edge_index p = outer[j]; p < outer[j + 1]; ++p) {
             const edge_index out = pos[inner[p]]++;
             R.col_idx[out] = j;
-            R.vals[out]    = vals[p];   // factor_value_t -> sptrsv_value_t: RNE under bf16
+            R.vals[out]    = apxchol::omp_sptrsv::narrow_value(vals[p], p, s_j, /*stochastic=*/false);
         }
+    }
     return R;
 }
 

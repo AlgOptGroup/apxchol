@@ -1,5 +1,7 @@
 #pragma once
-// bfloat16 storage type for the SpTRSV factor values (-DAPXCHOL_SPTRSV_BF16).
+// bfloat16 storage type for the SpTRSV factor values (APXCHOL_SPTRSV_LOWPREC =
+// BF16 or BF16_SCALED; the legacy -DAPXCHOL_SPTRSV_BF16 is an alias of BF16 --
+// see lowprec.h, which also holds the fp16_t / fp24_t siblings).
 //
 // bf16 is the top 16 bits of an IEEE-754 binary32: 1 sign, 8 exponent, 7
 // explicit mantissa bits (8 with the hidden bit -> relative precision 2^-8
@@ -18,9 +20,10 @@
 // threshold) that the SpTRSV setup uses under APXCHOL_BF16_STOCHASTIC=1.
 //
 // Where the narrowing happens: NOT in the factor assembler. The factor
-// (sparse_csc::vals_, factor_value_t) stays fp32 under the bf16 build so the
-// exact fp32 DIAGONAL is still available when omp_sptrsv::setup narrows the
-// off-diagonals into its own bf16 CSR/CSC copies (see omp.h: diag_).
+// (sparse_csc::vals_, factor_value_t) stays fp32 under the bf16 builds so the
+// exact fp32 DIAGONAL (and, for BF16_SCALED, the per-column scale) is still
+// available when omp_sptrsv::setup narrows the off-diagonals into its own bf16
+// CSR/CSC copies (see omp.h: narrow_value, diag_, scale_).
 //
 // No intrinsics: the shift/memcpy form vectorizes fine and is portable
 // (AVX512_BF16 would only matter for the store, which is setup-only).
