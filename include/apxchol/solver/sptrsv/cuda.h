@@ -6,7 +6,10 @@
 #include "apxchol/solver/sptrsv/cuda_levelset.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include <cuda_runtime.h>
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
 #include <cusparse.h>
+#endif
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -17,12 +20,15 @@
 namespace apxchol {
 
 // GPU SpTRSV value type = the shared sptrsv_value_t (fp32 under
-// -DAPXCHOL_SPTRSV_FP32). cuSPARSE SpSV requires matrix/vector/compute types to
-// match, so the factor (d_vals_) AND the internal solve vectors (d_x_/d_y_) all
-// use this; the PCG-facing interface stays fp64 and casts at the boundary.
+// -DAPXCHOL_SPTRSV_FP32): the factor (d_vals_) AND the internal solve vectors
+// (d_x_/d_y_) all use this (cuSPARSE SpSV, where compiled in, requires
+// matrix/vector/compute types to match); the PCG-facing interface stays fp64
+// and casts at the boundary.
 using cuda_value_t = sptrsv_value_t;
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
 inline constexpr cudaDataType_t cuda_value_dtype =
     sizeof(cuda_value_t) == 4 ? CUDA_R_32F : CUDA_R_64F;
+#endif
 
 namespace detail {
 
@@ -31,18 +37,27 @@ inline void check_cuda(cudaError_t err, const char* msg) {
         throw std::runtime_error(std::string(msg) + ": " + cudaGetErrorString(err));
 }
 
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
 inline void check_cusparse(cusparseStatus_t err, const char* msg) {
     if (err != CUSPARSE_STATUS_SUCCESS)
         throw std::runtime_error(std::string(msg) + ": cusparse error " + std::to_string(err));
 }
+#endif
 
 } // namespace detail
 
 #define APXCHOL_CUDA_CHECK(call)    apxchol::detail::check_cuda(call, #call)
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
 #define APXCHOL_CUSPARSE_CHECK(call) apxchol::detail::check_cusparse(call, #call)
+#endif
 
 /// RAII wrapper for the GPU sparse triangular solve of the factor: three
-/// backends behind one interface.
+/// backends behind one interface -- two of ours (always compiled) and cuSPARSE
+/// SpSV, which is an OPT-IN of the build (CMake APXCHOL_CUDA_WITH_CUSPARSE,
+/// default OFF: then this header, and the whole CUDA library, link cudart
+/// only; cusparse_available() tells; env APXCHOL_GPU_SPTRSV=cusparse without it
+/// is a stderr note and the AUTO choice; the fp64 build's AUTO is then the
+/// level-set backend, there being nothing else that supports fp64).
 ///   * Our sync-free DATAFLOW kernel (the DEFAULT on the fp32 build -- the
 ///     AUTO choice; env APXCHOL_GPU_SPTRSV=dataflow names it explicitly;
 ///     cuda_dataflow.h): CSR of L (forward) + CSR of L^T (back) on device
@@ -56,9 +71,11 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 ///     grid sizes. Same fp16 storage option as the level-set backend; fp32
 ///     build only (dataflow_supported()).
 ///   * cuSPARSE SpSV (env APXCHOL_GPU_SPTRSV=cusparse; the AUTO choice on the
-///     fp64 build, where the dataflow kernel does not exist): copies L11 to
-///     device once, runs the analysis once (O(nnz) scratch), then
-///     GPU-parallel forward/back solves. Not deterministic run to run.
+///     fp64 build, where the dataflow kernel does not exist; ONLY when the
+///     build opted in with APXCHOL_CUDA_WITH_CUSPARSE -- default OFF, kept as
+///     a comparison baseline): copies L11 to device once, runs the analysis
+///     once (O(nnz) scratch), then GPU-parallel forward/back solves. Not
+///     deterministic run to run.
 ///   * Our O(n)-schedule level-set kernels (env APXCHOL_GPU_SPTRSV=levelset,
 ///     cuda_levelset.h): the same two CSRs, one launch per level --
 ///     memory-frugal (no O(nnz) analysis buffer), deterministic, with the
@@ -173,15 +190,25 @@ public:
         const char* e = std::getenv("APXCHOL_GPU_SPTRSV_FP16");
         return e && std::atoi(e) != 0;
     }
+    /// Whether the cuSPARSE SpSV backend is compiled into this build (CMake
+    /// APXCHOL_CUDA_WITH_CUSPARSE, default OFF).
+    static constexpr bool cusparse_available() {
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
+        return true;
+#else
+        return false;
+#endif
+    }
     // The env's explicit choice: +2 = dataflow forced, +1 = levelset forced,
-    // -1 = cusparse forced (fp16 off), 0 = unset / anything else = AUTO (see
-    // the class comment; auto_prefers_dataflow() says which AUTO).
+    // -1 = cusparse forced (fp16 off, cuSPARSE compiled in), 0 = unset /
+    // anything else = AUTO (see the class comment; auto_prefers_dataflow()
+    // says which AUTO).
     static int backend_from_env() {
         const char* be = std::getenv("APXCHOL_GPU_SPTRSV");
         const std::string s(be ? be : "");
         if (s == "dataflow") return +2;
         if (s == "levelset") return +1;
-        if (s == "cusparse") return fp16_from_env() ? 0 : -1;   // no fp16 SpSV in cuSPARSE: AUTO
+        if (s == "cusparse") return (fp16_from_env() || !cusparse_available()) ? 0 : -1;   // no fp16 SpSV in cuSPARSE / not compiled in: AUTO
         return 0;
     }
     static bool levelset_from_env() { return backend_from_env() == 1; }
@@ -213,10 +240,24 @@ public:
     }
 
     /// Setup: build L11 on the host, run the compacting drop, (fp16: narrow),
-    /// copy to device, create cuSPARSE descriptors / level schedules.
+    /// copy to device, build the kernel backends' tables (or, opted in, the
+    /// cuSPARSE descriptors + analyses). Env APXCHOL_SPTRSV_SETUP_TRACE=1 (the
+    /// CPU backend's knob, same name) prints the per-stage wall times of one
+    /// setup to stderr (diagnostic; the first setup of a process also pays the
+    /// CUDA context creation, ~100 ms on this machine, inside "build_L11").
     void setup(const sparse_csc& L, node_index m) {
         destroy();
         m_ = static_cast<int64_t>(m);
+        const bool trace = std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
+        auto t_prev = std::chrono::steady_clock::now();
+        auto mark = [&](const char* what) {
+            if (!trace) return;
+            cudaDeviceSynchronize();
+            const auto now = std::chrono::steady_clock::now();
+            std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms\n", what,
+                         std::chrono::duration<double, std::milli>(now - t_prev).count());
+            t_prev = std::chrono::steady_clock::now();
+        };
 
         // Runtime modes (env, per setup). AUTO (be_env == 0) is the dataflow
         // backend on the fp32 build (nothing to fit, nothing to decide); on
@@ -228,13 +269,21 @@ public:
         const int be_env = backend_from_env();
         backend_forced_ = be_env != 0;
         use_dataflow_   = be_env == 2 || (be_env == 0 && auto_prefers_dataflow());
-        use_levelset_   = be_env > 0 || use_dataflow_ || (be_env == 0 && fp16_);
+        // Without cuSPARSE compiled in, AUTO on the fp64 build is the level-set
+        // backend (the only fp64-capable one left).
+        use_levelset_   = be_env > 0 || use_dataflow_ || (be_env == 0 && (fp16_ || !cusparse_available()));
         {
             const char* be = std::getenv("APXCHOL_GPU_SPTRSV");
-            if (fp16_ && be && std::string(be) == "cusparse")
-                std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPTRSV_FP16=1: cuSPARSE SpSV has no fp16 value type"
-                                     " (CUSPARSE_STATUS_NOT_SUPPORTED); using the AUTO backend (%s)\n",
-                                     use_dataflow_ ? "dataflow" : "level-set");
+            if (be && std::string(be) == "cusparse") {
+                if (!cusparse_available())
+                    std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPTRSV=cusparse: the cuSPARSE SpSV backend is not compiled"
+                                         " into this build (CMake APXCHOL_CUDA_WITH_CUSPARSE=OFF); using the AUTO backend (%s)\n",
+                                         use_dataflow_ ? "dataflow" : "level-set");
+                else if (fp16_)
+                    std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPTRSV_FP16=1: cuSPARSE SpSV has no fp16 value type"
+                                         " (CUSPARSE_STATUS_NOT_SUPPORTED); using the AUTO backend (%s)\n",
+                                         use_dataflow_ ? "dataflow" : "level-set");
+            }
         }
         backend_reason_.clear();
         const bool   fp16_flush_subnormal = fp16_flush_subnormal_from_env();
@@ -247,6 +296,7 @@ public:
         // int32; a factor exceeding it cannot use cuSPARSE's 32-bit index API.
         // The same three arrays are CSR of L^T (the back solve's operand).
         cuda_host::csr_int<cuda_value_t> LT = cuda_host::build_L11_csc_int<cuda_value_t>(L, m_);
+        mark("build_L11");
 
         // Per-column scales (the drop's threshold reference; the fp16 storage's
         // scale), from the factor BEFORE the drop.
@@ -257,6 +307,7 @@ public:
         stats_ = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, drop_compensate,
                                               fp16_, fp16_flush_subnormal);
         nnz_ = LT.nnz;
+        mark("col_scale+drop");
 
         size_t free_before = 0, total = 0;
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
@@ -276,6 +327,7 @@ public:
         APXCHOL_CUDA_CHECK(cudaMalloc(&d_x_, m_ * sizeof(cuda_value_t)));
         APXCHOL_CUDA_CHECK(cudaMalloc(&d_y_, m_ * sizeof(cuda_value_t)));
         h_stage_.resize(static_cast<size_t>(m_));
+        mark("upload_LT_struct+vecs");
 
         if (fp16_) {
             backend_reason_ = use_dataflow_
@@ -310,16 +362,21 @@ public:
             LT16.idx  = std::move(LT.idx);
             LT16.vals = std::move(h16.vals);
             cuda_host::csr_int<std::uint16_t> L16 = cuda_host::transpose_csr(LT16);
+            mark("fp16_narrow+transpose");
             dev_alloc(reinterpret_cast<void**>(&d_L_rowptr_), (m_ + 1) * sizeof(int));
             dev_alloc(reinterpret_cast<void**>(&d_L_colidx_), nnz_ * sizeof(int));
             dev_alloc(reinterpret_cast<void**>(&d_L_vals16_), nnz_ * sizeof(std::uint16_t));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_rowptr_, L16.ptr.data(), (m_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, L16.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals16_, L16.vals.get(), nnz_ * sizeof(std::uint16_t), cudaMemcpyHostToDevice));
+            mark("upload_L");
             setup_kernel_backend(LT16.ptr, LT16.idx.get(), L16.ptr, L16.idx.get());
+            mark("kernel_backend_tables");
         } else {
             dev_alloc(reinterpret_cast<void**>(&d_vals_), nnz_ * sizeof(cuda_value_t));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_vals_, LT.vals.get(), nnz_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
+            mark("upload_LT_vals");
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
             if (!use_levelset_) {
                 // cuSPARSE descriptors + the two SpSV buffer-size queries (no
                 // allocation yet). AUTO (fp64 build only -- the fp32 build's
@@ -355,12 +412,19 @@ public:
                 } else {
                     backend_reason_ = "cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)";
                 }
-            } else {
+            } else
+#endif
+            {
                 backend_reason_ = use_dataflow_
                     ? (backend_forced_ ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
-                                       : "dataflow (auto: the fp32 build's default -- no analysis buffer, O(n) state;"
-                                         " APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)")
-                    : "level-set (APXCHOL_GPU_SPTRSV=levelset)";
+                                       : (cusparse_available()
+                                            ? "dataflow (auto: the fp32 build's default -- no analysis buffer, O(n) state;"
+                                              " APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)"
+                                            : "dataflow (auto: the fp32 build's default -- no analysis buffer, O(n) state;"
+                                              " APXCHOL_GPU_SPTRSV=levelset overrides; cuSPARSE not compiled in)"))
+                    : (backend_forced_ ? "level-set (APXCHOL_GPU_SPTRSV=levelset)"
+                                       : "level-set (auto: the fp64 build without cuSPARSE compiled in --"
+                                         " APXCHOL_CUDA_WITH_CUSPARSE=OFF; the dataflow kernel needs the fp32 build)");
             }
             if (std::getenv("APXCHOL_VERBOSE"))
                 std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s\n", backend_reason_.c_str());
@@ -369,16 +433,23 @@ public:
                 // Transpose the stored CSR of L^T (2x factor storage -- still far
                 // under cuSPARSE's factor + O(nnz) SpSV scratch).
                 cuda_host::csr_int<cuda_value_t> Lc = cuda_host::transpose_csr(LT);
+                mark("transpose");
                 dev_alloc(reinterpret_cast<void**>(&d_L_rowptr_), (m_ + 1) * sizeof(int));
                 dev_alloc(reinterpret_cast<void**>(&d_L_colidx_), nnz_ * sizeof(int));
                 dev_alloc(reinterpret_cast<void**>(&d_L_vals_),   nnz_ * sizeof(cuda_value_t));
                 APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_rowptr_, Lc.ptr.data(), (m_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
                 APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, Lc.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
                 APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals_,   Lc.vals.get(), nnz_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
+                mark("upload_L");
                 setup_kernel_backend(LT.ptr, LT.idx.get(), Lc.ptr, Lc.idx.get());
-            } else {
-                cusparse_analyze();
+                mark("kernel_backend_tables");
             }
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
+            else {
+                cusparse_analyze();
+                mark("cusparse_analyze");
+            }
+#endif
         }
         size_t free_after = 0;
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_after, &total));
@@ -490,7 +561,8 @@ public:
     /// setup (which includes those, at allocation granularity).
     std::size_t factor_device_bytes() const { return factor_bytes_; }
     std::size_t device_bytes_delta() const { return device_delta_bytes_; }
-    /// cuSPARSE SpSV analysis buffers (0 on the level-set backend).
+    /// cuSPARSE SpSV analysis buffers (0 on our kernel backends, and always 0
+    /// when cuSPARSE is not compiled in).
     std::size_t cusparse_buffer_bytes() const { return cusparse_buf_bytes_; }
 
 private:
@@ -552,6 +624,7 @@ private:
                     fwd_level_ptr_.size()-1, bck_level_ptr_.size()-1, mf/1e9, mt/1e9); }
     }
 
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
     // cuSPARSE backend, phase 1: handle, matrix / vector descriptors, the two
     // SpSV descriptors and their buffer SIZES (cusparseSpSV_bufferSize; no
     // device allocation) -- what the AUTO decision needs. Requires d_rowPtr_ /
@@ -630,6 +703,7 @@ private:
         bufSizeFwd_ = bufSizeBck_ = 0;
         cusparse_buf_bytes_ = 0;
     }
+#endif // APXCHOL_CUDA_WITH_CUSPARSE
 
     void solve_LLt_dev_impl() const {
         if (use_dataflow_) {
@@ -682,6 +756,9 @@ private:
                            static_cast<int>(bck_level_ptr_.size()) - 1, d_y_, d_x_);
             return;
         }
+#if !defined(APXCHOL_CUDA_WITH_CUSPARSE)
+        throw std::runtime_error("apxchol cuda_sptrsv: no backend selected (cuSPARSE not compiled in)");
+#else
         const cuda_value_t alpha = cuda_value_t(1);
         // Forward:  L * d_y = d_x  ↔  TRANSPOSE on L^T.
         APXCHOL_CUSPARSE_CHECK(cusparseSpSV_solve(
@@ -693,6 +770,7 @@ private:
             cusparse_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
             matLT_, vecY_, vecX_, cuda_value_dtype,
             CUSPARSE_SPSV_ALG_DEFAULT, descrBck_));
+#endif
     }
 
     void destroy() {
@@ -711,9 +789,12 @@ private:
             d_vals16_ = nullptr; d_diag_ = d_inv_scale2_ = nullptr;
             df_grid_ = 0;
             fwd_level_ptr_.clear(); bck_level_ptr_.clear();
-        } else {
+        }
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
+        else {
             cusparse_teardown();
         }
+#endif
         cudaFree(d_rowPtr_);
         cudaFree(d_colIdx_);
         cudaFree(d_vals_);
@@ -793,7 +874,8 @@ private:
     float*        d_diag_         = nullptr;
     float*        d_inv_scale2_   = nullptr;
 
-    // cuSPARSE state.
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
+    // cuSPARSE state (the opt-in backend).
     cusparseHandle_t      cusparse_ = nullptr;
     cusparseSpMatDescr_t  matLT_    = nullptr;
     cusparseDnVecDescr_t  vecX_     = nullptr;
@@ -804,9 +886,12 @@ private:
     void*                 bufBck_   = nullptr;
     size_t                bufSizeFwd_ = 0;
     size_t                bufSizeBck_ = 0;
+#endif
 };
 
 #undef APXCHOL_CUDA_CHECK
+#if defined(APXCHOL_CUDA_WITH_CUSPARSE)
 #undef APXCHOL_CUSPARSE_CHECK
+#endif
 
 } // namespace apxchol

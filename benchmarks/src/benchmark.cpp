@@ -1790,11 +1790,17 @@ static HYPRE_IJMatrix eigen_to_hypre_ij(const Eigen::SparseMatrix<double>& L) {
     return A;
 }
 
-#ifdef APXCHOL_USE_CUDA
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_CUDA_WITH_CUSPARSE)
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cusparse.h>
 
-// GPU-resident PCG using cuSPARSE SpMV + cuBLAS axpy/dot/nrm2.
+// LEGACY `apxchol_gpu` solver (not used by any sweep; the library's own
+// GPU-resident PCG, apxchol::solve on the CUDA build, is what `apxchol_v1`
+// runs): GPU-resident PCG using cuSPARSE SpMV + cuBLAS axpy/dot/nrm2 --
+// the last cuBLAS / cuSPARSE consumer in the driver, so it is compiled only
+// with the cuSPARSE opt-in (CMake APXCHOL_CUDA_WITH_CUSPARSE), which is
+// also what links cublas/cusparse to the benchmark.
 // Preconditioner (apx_cholesky) stays as-is; we bounce r,z through
 // host per iter because the precond's solve_LLt API is host-pointer-based.
 // Net solve cost per iter still ~5x lower than CPU-PCG with cuSPARSE
@@ -1948,7 +1954,7 @@ static BenchResult run_apxchol_gpu_pcg(
     cublasDestroy(cublas); cusparseDestroy(cusparse);
     return r;
 }
-#endif // APXCHOL_USE_CUDA
+#endif // APXCHOL_USE_CUDA && APXCHOL_CUDA_WITH_CUSPARSE
 
 static BenchResult run_hypre_boomeramg(
     const Eigen::SparseMatrix<double>& L,
@@ -2507,9 +2513,9 @@ int main(int argc, char** argv) {
             }, R));
         }
 
-#ifdef APXCHOL_USE_CUDA
-        // apxchol with GPU-resident PCG (cuBLAS axpy/dot/nrm2 + cuSPARSE SpMV).
-        // Preconditioner stays as-is (cuSPARSE sptrsv with H2D/D2H bounce).
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_CUDA_WITH_CUSPARSE)
+        // LEGACY apxchol with a cuBLAS/cuSPARSE GPU PCG around the host-pointer
+        // preconditioner API (see run_apxchol_gpu_pcg); cuSPARSE opt-in only.
         if (args.solvers.count("apxchol_gpu")) {
             for (const auto& combo : v1_combos) {
                 if (!args.v1_configs.empty()) {

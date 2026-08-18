@@ -91,18 +91,22 @@ inline void print_sptrsv_banner_once() {
         // Runtime backend / storage modes of the GPU SpTRSV (env, resolved
         // per setup by cuda_sptrsv; the banner is one-shot, so it reports the
         // value at first solve): APXCHOL_GPU_SPTRSV=dataflow|cusparse|levelset
-        // (unset = AUTO: the dataflow backend on the fp32 build, cuSPARSE with
-        // the level-set fallback on fp64) and the kernel backends' opt-in fp16
-        // storage APXCHOL_GPU_SPTRSV_FP16=1.
+        // (unset = AUTO: the dataflow backend on the fp32 build; on fp64
+        // cuSPARSE with the level-set fallback where cuSPARSE is compiled in
+        // -- CMake APXCHOL_CUDA_WITH_CUSPARSE -- else the level-set) and the
+        // kernel backends' opt-in fp16 storage APXCHOL_GPU_SPTRSV_FP16=1.
         const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_from_env();
         const int  gpu_be   = apxchol::cuda_sptrsv::backend_from_env();
+        const bool gpu_cus  = apxchol::cuda_sptrsv::cusparse_available();
         const char* backend = gpu_be == 2 ? "GPU/dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
                             : gpu_be > 0 ? "GPU/levelset (APXCHOL_GPU_SPTRSV=levelset)"
                             : gpu_be < 0 ? "GPU/cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)"
                             : apxchol::cuda_sptrsv::auto_prefers_dataflow()
-                                ? "GPU/auto: dataflow (fp32 build default; APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)"
+                                ? (gpu_cus ? "GPU/auto: dataflow (fp32 build default; APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)"
+                                           : "GPU/auto: dataflow (fp32 build default; APXCHOL_GPU_SPTRSV=levelset overrides; cuSPARSE not compiled in)")
                                 : gpu_fp16 ? "GPU/auto: level-set (fp16 storage on the fp64 build)"
-                                           : "GPU/auto: cuSPARSE, level-set if its SpSV analysis buffers do not fit (fp64 build)";
+                                : gpu_cus  ? "GPU/auto: cuSPARSE, level-set if its SpSV analysis buffers do not fit (fp64 build)"
+                                           : "GPU/auto: level-set (fp64 build, cuSPARSE not compiled in)";
         const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_GPU_SPTRSV_FP16=1)"
                                        : apxchol::cuda_sptrsv::value_name;
         const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;
@@ -733,10 +737,12 @@ solve_result solve(const Eigen::SparseMatrix<double>& L,
     print_sptrsv_banner_once();
 
 #if defined(APXCHOL_USE_CUDA)
-    // GPU-resident ("native") PCG: keep A + all 5 PCG vectors on device, use
-    // cuBLAS axpy/dot/nrm2 + cuSPARSE SpMV, so nothing crosses the bus per
-    // iteration. (A host-PCG-with-GPU-SpTRSV path is transfer-bound and
-    // pointless; construct a cpu_solver directly if you really want it.)
+    // GPU-resident ("native") PCG: keep A + all 5 PCG vectors on device and
+    // run our own SpMV / fused vector kernels with deterministic reductions
+    // (pcg_cuda.h; no cuSPARSE / cuBLAS), so nothing but three 8-byte scalars
+    // per iteration crosses the bus. (A host-PCG-with-GPU-SpTRSV path is
+    // transfer-bound and pointless; construct a cpu_solver directly if you
+    // really want it.)
     {
         apx_cholesky precond;
         solve_result res;

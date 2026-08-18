@@ -66,7 +66,8 @@ FetchContent_MakeAvailable(fast_matrix_market)
 find_package(OpenMP)
 
 # ── Build options ───────────────────────────────────
-option(APXCHOL_USE_CUDA "Use cuSPARSE (GPU) for sparse triangular solve" OFF)
+option(APXCHOL_USE_CUDA "GPU build: our CUDA SpTRSV kernels (dataflow / level-set) + the GPU-resident PCG with our own SpMV / vector kernels; links cudart only unless APXCHOL_CUDA_WITH_CUSPARSE" OFF)
+option(APXCHOL_CUDA_WITH_CUSPARSE "CUDA build only: also compile + link the cuSPARSE SpSV backend of the GPU SpTRSV (opt-in comparison baseline, env APXCHOL_GPU_SPTRSV=cusparse; the fp64 build's OOM-aware AUTO). OFF = the CUDA library links cudart alone (no cuSPARSE, no cuBLAS)" OFF)
 option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors with more than 2^31 nonzeros" OFF)
 option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
 option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
@@ -145,6 +146,9 @@ add_library(apxchol_core
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_levelset.cu>
     # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow), same reason.
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_dataflow.cu>
+    # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
+    # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
+    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>
 )
 # Eigen is the only dependency of the core TUs/headers.  fast_matrix_market
 # is file I/O used solely by the CLI and analyze_factor — linked on those
@@ -160,7 +164,15 @@ target_include_directories(apxchol_core PUBLIC
 
 if (APXCHOL_USE_CUDA)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_CUDA)
-    target_link_libraries(apxchol_core PUBLIC CUDA::cudart CUDA::cusparse CUDA::cublas)
+    # cudart only: the SpTRSV kernels, the GPU-resident PCG's SpMV / vector
+    # kernels and its reductions are all ours. cuSPARSE (the opt-in SpSV
+    # backend) is compiled and linked only under APXCHOL_CUDA_WITH_CUSPARSE;
+    # cuBLAS is not used anywhere.
+    target_link_libraries(apxchol_core PUBLIC CUDA::cudart)
+    if (APXCHOL_CUDA_WITH_CUSPARSE)
+        target_compile_definitions(apxchol_core PUBLIC APXCHOL_CUDA_WITH_CUSPARSE)
+        target_link_libraries(apxchol_core PUBLIC CUDA::cusparse)
+    endif()
     # nvcc (13.x) + recent CMake reject a "CUDA23" dialect, so the .cu device TUs
     # compile as C++20 while the host .cpp TUs stay C++23 — same fix as
     # benchmarks/apxchol_v1. Without this the CUDA configure fails outright.

@@ -58,13 +58,4 @@ void levelset_solve_fp16(cudaStream_t stream,
                          const int* row_order, const int* level_ptr, int num_levels,
                          const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);
 
-/// y = A*x with A's CSR values stored in fp32 (memory saving; LOSSLESS when A is
-/// exactly fp32-representable, e.g. unweighted/pattern graphs) but each product
-/// promoted to fp64 and accumulated in fp64 -- so x stays fp64 and the result is
-/// fp64-accurate. Unlike a pure-fp32 cuSPARSE SpMV (fp32 vectors + fp32 accumulate),
-/// this does NOT floor the PCG recurrence: an exact-fp32 operator gives the same Ap
-/// as fp64 storage. One warp per row.
-void spmv_f32A_f64(cudaStream_t stream, const int* rowptr, const int* colidx,
-                   const float* valsf32, const double* x, double* y, int n);
-
 } // namespace apxchol

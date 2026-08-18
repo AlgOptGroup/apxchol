@@ -121,37 +121,4 @@ void levelset_solve_fp16(cudaStream_t stream,
     }
 }
 
-namespace {
-
-// y = A*x; A values are fp32 (promoted to fp64 per product), x/y fp64, accumulate
-// fp64. One warp per row strides the row's nonzeros + warp-reduces. No dependencies
-// (SpMV is embarrassingly parallel), so this is a single launch.
-__global__ void spmv_f32A_f64_kernel(const int* __restrict__ rowptr,
-                                     const int* __restrict__ colidx,
-                                     const float* __restrict__ valsf32,
-                                     const double* __restrict__ x,
-                                     double* __restrict__ y, int n) {
-    const int gtid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int row = gtid >> 5;
-    const int lane = gtid & 31;
-    if (row >= n) return;
-    const int beg = rowptr[row], end = rowptr[row + 1];
-    double sum = 0.0;
-    for (int p = beg + lane; p < end; p += 32)
-        sum += static_cast<double>(valsf32[p]) * x[colidx[p]];   // promote A, fp64 MAC
-    #pragma unroll
-    for (int o = 16; o > 0; o >>= 1)
-        sum += __shfl_down_sync(0xffffffffu, sum, o);
-    if (lane == 0) y[row] = sum;
-}
-
-} // namespace
-
-void spmv_f32A_f64(cudaStream_t stream, const int* rowptr, const int* colidx,
-                   const float* valsf32, const double* x, double* y, int n) {
-    constexpr int block = 256;
-    const int grid = (n + (block / 32) - 1) / (block / 32);
-    spmv_f32A_f64_kernel<<<grid, block, 0, stream>>>(rowptr, colidx, valsf32, x, y, n);
-}
-
 } // namespace apxchol

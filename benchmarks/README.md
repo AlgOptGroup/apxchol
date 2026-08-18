@@ -297,7 +297,7 @@ buy", not a single ranking. Every solver attacks the original singular `L`
 (de-singularized per the [Protocol](#protocol); every solver — the in-house ones *and*
 ParAC, which now uses a per-component-consistent pin-zeroed RHS — scores `‖b−Lx‖` against
 the original L, only CMG uses the `εI`-regularized variant) to true 1e-8. On apxchol, the GPU bar is the **GPU-resident PCG** (
-all PCG vectors stay on device, cuBLAS + cuSPARSE), which is 2-4.5× faster per iter
+all PCG vectors stay on device; since 2026-08-18 our own SpMV / vector kernels, no cuBLAS / cuSPARSE), which is 2-4.5× faster per iter
 than the host-PCG hybrid (measured on an RTX 4090 Laptop at locked clocks).
 
 GitHub markdown has no tabs, so each metric uses collapsible `<details>` blocks —
@@ -662,7 +662,7 @@ bars *are* comparable — its physics driver is the per-component split on the p
   triangular solve dominates; AMD reordering (author-recommended) is required for
   competitive performance and is counted in its setup time.
 - **The GPU-resident PCG is apxchol's fastest solve.** Keeping all PCG vectors on
-  device (cuBLAS + cuSPARSE) is **2-4.5× faster per iteration**
+  device (measured then with cuBLAS + cuSPARSE; the loop is our own kernels since 2026-08-18) is **2-4.5× faster per iteration**
   than the host-PCG hybrid — ~13 ms/it vs ~59 ms/it on `grid_2000`, ~6.5 vs ~23 on
   `G3_circuit` (RTX 4090 Laptop, locked clocks). The host path does its SpMV on the
   contended CPU cores, so it is both slower and far noisier; GPU-PCG is now the only

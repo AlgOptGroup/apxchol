@@ -1,9 +1,10 @@
 #pragma once
-/// GPU-resident PCG loop using cuBLAS + cuSPARSE.
+/// GPU-resident PCG loop -- our own kernels only (pcg_cuda_kernels.h): no
+/// cuSPARSE, no cuBLAS. The CUDA library build links cudart alone.
 ///
 /// Why this exists: the existing CPU PCG path in src/solve.cpp issues
 /// `precond.solve(r)` per iter, which on the CUDA build copies r → device,
-/// runs cuSPARSE SpSV, copies result → host. ~10 ms/iter is spent on
+/// runs the GPU SpTRSV, copies result → host. ~10 ms/iter is spent on
 /// CPU↔GPU transfers alone. The SpMV `y = A*x` runs on the CPU even in
 /// the CUDA build, paying further bandwidth cost and missing GPU SpMV
 /// throughput (~10× the CPU rate on this hardware).
@@ -11,47 +12,45 @@
 /// `cuda_pcg` keeps the input matrix A as a full-symmetric CSR on the
 /// device once, allocates all 5 PCG vectors (x, r, p, z, Ap) on device,
 /// and runs every iteration entirely on the GPU:
-///   - SpMV via cusparseSpMV(matA, p, Ap)
-///   - dot / nrm2 / axpy via cuBLAS
+///   - SpMV + p.Ap: our CSR kernel (pcg_cuda::spmv_pAp; LANES threads per
+///     row picked from the average nnz/row, fp64 or fp32-exact operator
+///     values promoted per product, fp64 accumulate)
+///   - the fused vector passes mirroring the CPU loop (src/solve.cpp):
+///     update_xr (x += alpha p, r -= alpha Ap, r.r in one pass), r.z,
+///     update_p (p = z + beta p)
 ///   - precond.solve via the existing cuda_sptrsv::solve_LLt_dev
-/// Only the initial b is H2D'd, only the final x is D2H'd. Per-iter
-/// transfer cost drops from ~10 ms/iter to ~0.
+/// Every reduction is DETERMINISTIC (fixed grid, per-block partials, fixed-
+/// order final reduce -- no floating-point atomics; see pcg_cuda_kernels.h),
+/// so on our SpTRSV kernels (dataflow / level-set) the whole solve is bit-
+/// identical run to run. Only the initial b is H2D'd, three 8-byte scalars
+/// per iteration (p.Ap, r.r, r.z) come back to the host, only the final x
+/// is D2H'd.
 ///
-/// Caveats: cuBLAS routines block the calling stream; we let the default
-/// stream serialize everything. Multi-stream pipelining could overlap
-/// SpMV with vector ops but is out of scope here.
+/// Env: APXCHOL_GPU_SPMV_LANES=1|2|4|8|16|32 overrides the SpMV's threads-
+/// per-row choice (A/B only; read at setup; spmv_lanes() reports it).
+/// APXCHOL_GPU_FP32_OPERATOR=0|1 overrides the operator storage precision
+/// (default AUTO: fp32 iff every value round-trips fp32).
 
 #include <Eigen/Sparse>
 #include <Eigen/Core>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <cuda_runtime.h>
-#include <cusparse.h>
-#include <cublas_v2.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-// check_cuda + check_cusparse live in apxchol/solver/sptrsv/cuda.h (already
-// included transitively via preconditioner.h). Only the cublas variant is new.
+// check_cuda lives in apxchol/solver/sptrsv/cuda.h (already included
+// transitively via preconditioner.h).
+#include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol {
 
-namespace detail {
-
-inline void check_cublas(cublasStatus_t err, const char* msg) {
-    if (err != CUBLAS_STATUS_SUCCESS)
-        throw std::runtime_error(std::string(msg) + ": cublas error "
-                                 + std::to_string(err));
-}
-
-}  // namespace detail
-
 #define APXCHOL_PCG_CUDA_CHECK(c)      apxchol::detail::check_cuda((c), #c)
-#define APXCHOL_PCG_CUSPARSE_CHECK(c)  apxchol::detail::check_cusparse((c), #c)
-#define APXCHOL_PCG_CUBLAS_CHECK(c)    apxchol::detail::check_cublas((c), #c)
 
 /// All-on-device PCG. Construct once per matrix; reusable across solves.
 class cuda_pcg {
@@ -103,6 +102,7 @@ public:
         // each value to fp64; Krylov vectors stay fp64, so the 1e-8 floor is preserved).
         // Default = AUTO: fp32 iff exact. APXCHOL_GPU_FP32_OPERATOR overrides -- "0"
         // forces fp64; any other value forces fp32 (testing; floors if A is inexact).
+        // Same rule as the CPU's op_fp32_ (src/solve.cpp).
         { const char* e = std::getenv("APXCHOL_GPU_FP32_OPERATOR");
           if (e && std::string(e) == "0")   fp32_op_ = false;
           else if (e && *e != '\0')         fp32_op_ = true;
@@ -126,32 +126,25 @@ public:
             fprintf(stderr, "[fp32op] operator stored %s (fp32-exact=%d)\n",
                     fp32_op_ ? "fp32" : "fp64", static_cast<int>(op_fp32_exact));
 
-        // PCG iterate vectors.
+        // SpMV row mapping: threads per row from the average nnz/row
+        // (pcg_cuda::spmv_lanes_for), env APXCHOL_GPU_SPMV_LANES overrides.
+        spmv_lanes_ = pcg_cuda::spmv_lanes_for(n_ > 0 ? static_cast<double>(nnz_) / static_cast<double>(n_) : 1.0);
+        if (const char* e = std::getenv("APXCHOL_GPU_SPMV_LANES")) {
+            const int v = std::atoi(e);
+            if (v == 1 || v == 2 || v == 4 || v == 8 || v == 16 || v == 32) spmv_lanes_ = v;
+            else if (*e) std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPMV_LANES=%s ignored (expected 1|2|4|8|16|32); using %d\n", e, spmv_lanes_);
+        }
+        spmv_blocks_ = pcg_cuda::pcg_blocks(n_ * spmv_lanes_);
+        vec_blocks_  = pcg_cuda::pcg_blocks(n_);
+
+        // PCG iterate vectors, the reduction partials (one double per block of
+        // the fixed grid) and the device / pinned-host scalar the fixed-order
+        // final reduce lands in.
         for (double** p : {&d_b_, &d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_})
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(p, n_ * sizeof(double)));
-
-        // cuSPARSE / cuBLAS handles and SpMV descriptor.
-        APXCHOL_PCG_CUSPARSE_CHECK(cusparseCreate(&cusparse_));
-        APXCHOL_PCG_CUBLAS_CHECK(cublasCreate(&cublas_));
-        if (fp32_op_) {
-            // SpMV is the custom fp32-load / fp64-compute kernel (spmv_f32A_f64) reading
-            // d_vals_f32_ directly -- no cuSPARSE matrix/vectors/buffer needed, and no
-            // fp32 vectors (it consumes the fp64 d_p_ and writes the fp64 d_Ap_). This
-            // is what keeps the operator fp32 in MEMORY but fp64 in COMPUTE, so an
-            // exact-fp32 operator still drives the residual to 1e-8.
-        } else {
-            APXCHOL_PCG_CUSPARSE_CHECK(cusparseCreateCsr(
-                &matA_, n_, n_, nnz_, d_row_ptr_, d_col_idx_, d_vals_,
-                CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F));
-            APXCHOL_PCG_CUSPARSE_CHECK(cusparseCreateDnVec(&vec_p_,  n_, d_p_,  CUDA_R_64F));
-            APXCHOL_PCG_CUSPARSE_CHECK(cusparseCreateDnVec(&vec_Ap_, n_, d_Ap_, CUDA_R_64F));
-            double alpha = 1.0, beta = 0.0; size_t buf_sz = 0;
-            APXCHOL_PCG_CUSPARSE_CHECK(cusparseSpMV_bufferSize(
-                cusparse_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-                matA_, vec_p_, &beta, vec_Ap_, CUDA_R_64F,
-                CUSPARSE_SPMV_ALG_DEFAULT, &buf_sz));
-            if (buf_sz > 0) APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&spmv_buf_, buf_sz));
-        }
+        APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_part_, pcg_cuda::kMaxBlocks * sizeof(double)));
+        APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_scalar_, sizeof(double)));
+        APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&h_scalar_), sizeof(double), cudaHostAllocDefault));
 
         ready_ = true;
     }
@@ -207,61 +200,46 @@ public:
             APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_p_, d_z_, n_ * sizeof(double),
                                                 cudaMemcpyDeviceToDevice, 0));
-        double rz = 0.0;
-        APXCHOL_PCG_CUBLAS_CHECK(cublasDdot(cublas_, n_, d_r_, 1, d_z_, 1, &rz));
+        pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
+        double rz = reduce(vec_blocks_);
 
         double rnorm = bnorm;
         int it;
         for (it = 0; it < max_iter; ++it) {
-            // Ap = A * p.  fp32-operator: custom fp32-load/fp64-compute SpMV (Ap stays
-            // fp64-accurate). fp64-operator: cuSPARSE SpMV. Either way the recurrence
-            // (dots/axpy below) is fp64.
-            if (fp32_op_) {
-                spmv_f32A_f64(0, d_row_ptr_, d_col_idx_, d_vals_f32_,
-                              d_p_, d_Ap_, static_cast<int>(n_));
-            } else {
-                double alpha_one = 1.0, beta_zero = 0.0;
-                APXCHOL_PCG_CUSPARSE_CHECK(cusparseSpMV(
-                    cusparse_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha_one,
-                    matA_, vec_p_, &beta_zero, vec_Ap_, CUDA_R_64F,
-                    CUSPARSE_SPMV_ALG_DEFAULT, spmv_buf_));
-            }
-
-            // pAp = p · Ap. !(pAp > 0) catches NaN and ≤ 0.
-            double pAp = 0.0;
-            APXCHOL_PCG_CUBLAS_CHECK(cublasDdot(cublas_, n_, d_p_, 1, d_Ap_, 1, &pAp));
+            // Ap = A * p with pAp = p·Ap folded into the row loop (fp32-operator:
+            // fp32 loads promoted per product, fp64 accumulate -- Ap stays
+            // fp64-accurate either way). !(pAp > 0) catches NaN and <= 0.
+            if (fp32_op_) pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_f32_, d_p_, d_Ap_, d_part_, spmv_lanes_);
+            else          pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_,     d_p_, d_Ap_, d_part_, spmv_lanes_);
+            const double pAp = reduce(spmv_blocks_);
             if (!(pAp > 0.0)) break;
 
             const double alpha = rz / pAp;
-            const double neg_alpha = -alpha;
 
-            // x += alpha * p ; r -= alpha * Ap
-            APXCHOL_PCG_CUBLAS_CHECK(cublasDaxpy(cublas_, n_, &alpha,     d_p_,  1, d_x_, 1));
-            APXCHOL_PCG_CUBLAS_CHECK(cublasDaxpy(cublas_, n_, &neg_alpha, d_Ap_, 1, d_r_, 1));
+            // x += alpha * p ; r -= alpha * Ap ; rr = r·r  -- one pass.
+            pcg_cuda::update_xr(0, n_, d_x_, d_p_, d_r_, d_Ap_, alpha, d_part_);
+            const double rr = reduce(vec_blocks_);
 
-            // rnorm = ||r|| / bnorm. NaN propagates through cuBLAS reductions;
+            // rnorm = ||r|| / bnorm. NaN propagates through the reductions;
             // !(rnorm < tol) would re-enter the loop forever on NaN, so guard
             // with an isfinite check. ++it before break to count the just-
             // completed iter (matches apxchol_v1's `res.iterations = i + 1`).
-            APXCHOL_PCG_CUBLAS_CHECK(cublasDnrm2(cublas_, n_, d_r_, 1, &rnorm));
-            rnorm /= bnorm;
+            rnorm = std::sqrt(rr) / bnorm;
             if (!std::isfinite(rnorm)) { ++it; break; }
             if (rnorm < tol) { ++it; break; }
 
-            // z = M^{-1} r
+            // z = M^{-1} r ; rz_new = r·z
             precond.trsv().solve_LLt_dev(d_r_, d_z_);
             if (laplacian)
                 APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
-            double rz_new = 0.0;
-            APXCHOL_PCG_CUBLAS_CHECK(cublasDdot(cublas_, n_, d_r_, 1, d_z_, 1, &rz_new));
+            pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
+            const double rz_new = reduce(vec_blocks_);
             if (!std::isfinite(rz_new) || rz_new == 0.0) { ++it; break; }
             const double beta = rz_new / rz;
             rz = rz_new;
 
-            // p = z + beta * p  (= beta * p + z; we use scal+axpy)
-            APXCHOL_PCG_CUBLAS_CHECK(cublasDscal(cublas_, n_, &beta, d_p_, 1));
-            const double one = 1.0;
-            APXCHOL_PCG_CUBLAS_CHECK(cublasDaxpy(cublas_, n_, &one, d_z_, 1, d_p_, 1));
+            // p = z + beta * p
+            pcg_cuda::update_p(0, n_, d_p_, d_z_, beta);
         }
 
         // D2H x_perm, then un-permute and (for Laplacian) re-center.
@@ -283,8 +261,22 @@ public:
     bool ready() const { return ready_; }
     int64_t n() const { return n_; }
     int64_t nnz() const { return nnz_; }
+    /// Operator storage precision resolved at setup (fp32 iff exact, or the env).
+    bool fp32_operator() const { return fp32_op_; }
+    /// Threads per row of the SpMV resolved at setup (spmv_lanes_for / env).
+    int spmv_lanes() const { return spmv_lanes_; }
 
 private:
+    // Fixed-order final reduce of the first `blocks` per-block partials in
+    // d_part_ (written by the kernel that just ran on stream 0) into the device
+    // scalar, then 8 bytes back into pinned host memory. Synchronises stream 0.
+    double reduce(int blocks) const {
+        pcg_cuda::reduce_partials(0, d_part_, blocks, d_scalar_);
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(h_scalar_, d_scalar_, sizeof(double), cudaMemcpyDeviceToHost, 0));
+        APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(0));
+        return *h_scalar_;
+    }
+
     // Build full-symmetric CSR of A_perm = P L P^T from a (lower-half-stored)
     // symmetric matrix L and its permutation P. The factor F_.L was built on
     // A_perm, so running PCG in permuted space matches what trsv_.solve_LLt_dev
@@ -369,8 +361,8 @@ private:
         }
         fp32_exact = exact;
 
-        // Sort each row's (col, val) ascending. Eigen/cuSPARSE both want
-        // sorted CSR for fastest SpMV. Per-thread kv buffer reused across
+        // Sort each row's (col, val) ascending: sorted CSR gives the SpMV its
+        // best locality on the x gathers. Per-thread kv buffer reused across
         // rows (avoids n tiny mallocs).
         #pragma omp parallel
         {
@@ -395,21 +387,16 @@ private:
 
     void destroy() {
         if (!ready_) return;
-        if (vec_p_)  cusparseDestroyDnVec(vec_p_);      // null in fp32-operator mode
-        if (vec_Ap_) cusparseDestroyDnVec(vec_Ap_);     // (custom SpMV, no cuSPARSE descr)
-        if (matA_)   cusparseDestroySpMat(matA_);
-        vec_p_ = nullptr; vec_Ap_ = nullptr; matA_ = nullptr;
-        cusparseDestroy(cusparse_);
-        cublasDestroy(cublas_);
-        for (double** p : {&d_b_, &d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_}) {
+        for (double** p : {&d_b_, &d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_, &d_part_, &d_scalar_}) {
             if (*p) { cudaFree(*p); *p = nullptr; }
         }
-        if (spmv_buf_) { cudaFree(spmv_buf_); spmv_buf_ = nullptr; }
+        if (h_scalar_) { cudaFreeHost(h_scalar_); h_scalar_ = nullptr; }
         if (d_row_ptr_) { cudaFree(d_row_ptr_); d_row_ptr_ = nullptr; }
         if (d_col_idx_) { cudaFree(d_col_idx_); d_col_idx_ = nullptr; }
         if (d_vals_)     { cudaFree(d_vals_);     d_vals_     = nullptr; }
         if (d_vals_f32_) { cudaFree(d_vals_f32_); d_vals_f32_ = nullptr; }
         fp32_op_ = false;
+        spmv_lanes_ = 1; spmv_blocks_ = vec_blocks_ = 0;
         ready_ = false;
     }
 
@@ -422,33 +409,30 @@ private:
     int*    d_col_idx_ = nullptr;
     double* d_vals_    = nullptr;
     // fp32-operator path (APXCHOL_GPU_FP32_OPERATOR): operator values stored fp32,
-    // SpMV done by the custom fp32-load/fp64-compute kernel (Krylov vectors stay fp64).
+    // SpMV promotes per product (Krylov vectors stay fp64).
     bool    fp32_op_    = false;
     float*  d_vals_f32_ = nullptr;
+    // SpMV row mapping (threads per row) and the two fixed grids.
+    int     spmv_lanes_  = 1;
+    int     spmv_blocks_ = 0;
+    int     vec_blocks_  = 0;
 
     // Host-side permutation map (perm.indices()) for one-time use in solve()
     // to permute b -> b_perm and x_perm -> x.
     std::vector<node_index> h_perm_;
 
-    // Device PCG vectors.
+    // Device PCG vectors + reduction scratch.
     double* d_b_  = nullptr;
     double* d_x_  = nullptr;
     double* d_r_  = nullptr;
     double* d_p_  = nullptr;
     double* d_z_  = nullptr;
     double* d_Ap_ = nullptr;
-
-    // cuSPARSE / cuBLAS state.
-    cusparseHandle_t      cusparse_ = nullptr;
-    cublasHandle_t        cublas_   = nullptr;
-    cusparseSpMatDescr_t  matA_     = nullptr;
-    cusparseDnVecDescr_t  vec_p_    = nullptr;
-    cusparseDnVecDescr_t  vec_Ap_   = nullptr;
-    void*                 spmv_buf_ = nullptr;
+    double* d_part_   = nullptr;   // kMaxBlocks per-block partials
+    double* d_scalar_ = nullptr;   // the final reduce's result
+    double* h_scalar_ = nullptr;   // pinned host mirror of d_scalar_
 };
 
 #undef APXCHOL_PCG_CUDA_CHECK
-#undef APXCHOL_PCG_CUSPARSE_CHECK
-#undef APXCHOL_PCG_CUBLAS_CHECK
 
 }  // namespace apxchol

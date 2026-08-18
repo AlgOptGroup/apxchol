@@ -106,12 +106,16 @@ final ulps (accumulation order).
 
 With `-DAPXCHOL_USE_CUDA=ON` the triangular solves run on the GPU — by
 default through our sync-free dataflow kernel (one persistent launch per
-sweep, O(n) state, bit-deterministic; `APXCHOL_GPU_SPTRSV=cusparse` or
-`=levelset` select cuSPARSE SpSV or our level-set kernels instead) — and the
-one-shot `apxchol::solve` uses a fully GPU-resident PCG (cuBLAS/cuSPARSE
-SpMV, nothing crosses the bus per iteration). The GPU-resident loop applies
-to the one-shot `apxchol::solve` only; `cpu_solver` on a CUDA build runs the
-host PCG with GPU triangular solves.
+sweep, O(n) state, bit-deterministic; `APXCHOL_GPU_SPTRSV=levelset` selects
+our level-set kernels instead) — and the one-shot `apxchol::solve` uses a
+fully GPU-resident PCG (our own CSR SpMV and fused vector kernels with
+deterministic reductions; nothing but three scalars per iteration crosses
+the bus). The CUDA build links `cudart` only — no cuSPARSE, no cuBLAS;
+`-DAPXCHOL_CUDA_WITH_CUSPARSE=ON` opts back into the cuSPARSE SpSV
+triangular-solve backend (`APXCHOL_GPU_SPTRSV=cusparse`) as a comparison
+baseline. The GPU-resident loop applies to the one-shot `apxchol::solve`
+only; `cpu_solver` on a CUDA build runs the host PCG with GPU triangular
+solves.
 
 ### Customizing the solver
 
