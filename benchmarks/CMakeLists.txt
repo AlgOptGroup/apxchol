@@ -427,6 +427,9 @@ if (APXCHOL_USE_CUDA)
     # Custom level-set SpTRSV kernels (APXCHOL_GPU_SPTRSV=levelset): O(n) schedule
     # instead of cuSPARSE's O(nnz) analysis buffer.
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_levelset.cu)
+    # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow): one
+    # persistent launch per sweep, 8 B/row of epoch-tagged state.
+    target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_dataflow.cu)
     target_link_libraries(apxchol_v1 PUBLIC CUDA::cudart CUDA::cusparse CUDA::cublas)
     # Pin the CUDA dialect to 20: the target's host features are cxx_std_23, but nvcc
     # (13.x) + recent CMake reject a "CUDA23" dialect, so the cuda_cast.cu sources must

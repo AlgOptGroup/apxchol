@@ -284,4 +284,45 @@ inline void compute_levels(int m, const int* rowptr, const int* colidx, bool asc
     for (int i = 0; i < m; ++i) row_order[pos[level[i]]++] = i;
 }
 
+/// The dataflow backend's lane-group size of a row of `entries` CSR entries
+/// (diagonal slot included): the smallest power of two G <= 32 with G * pre
+/// >= entries (`pre` = the kernel's per-lane prefetch depth,
+/// dataflow_prefetch_depth()). Restated on the device; both sides must agree.
+inline int dataflow_lane_group(int entries, int pre) {
+    int G = 1;
+    while (G < 32 && G * pre < entries) G <<= 1;
+    return G;
+}
+
+/// The dataflow backend's BATCH table for one sweep direction: consecutive
+/// rows in sweep order (q = 0..m-1; the row is q, or m-1-q when the sweep is
+/// reversed) packed greedily into warps of 32 lanes -- row q takes G(q)
+/// lanes (dataflow_lane_group of its CSR row length `len[row]`), aligned to
+/// a multiple of G(q); when a row does not fit the batch is closed and the
+/// row starts the next one. Returns batch_start (n_batches + 1 sweep
+/// positions; batch b = positions [batch_start[b], batch_start[b+1])). O(m)
+/// memory, one pass.
+inline std::vector<int> dataflow_batches(int m, bool reverse, const int* len, int pre) {
+    std::vector<int> bs;
+    bs.reserve(static_cast<std::size_t>(m) / 32 + 2);
+    bs.push_back(0);
+    int pos = 0;
+    for (int q = 0; q < m; ++q) {
+        const int row = reverse ? m - 1 - q : q;
+        const int G = dataflow_lane_group(len[row], pre);
+        const int aligned = (pos + G - 1) & ~(G - 1);
+        if (aligned + G > 32) { bs.push_back(q); pos = 0; }
+        pos = ((pos + G - 1) & ~(G - 1)) + G;
+    }
+    bs.push_back(m);
+    return bs;
+}
+
+/// CSR row lengths (diagonal included), rowptr[i+1] - rowptr[i].
+inline std::vector<int> csr_row_lengths(int m, const int* rowptr) {
+    std::vector<int> len(static_cast<std::size_t>(m));
+    for (int i = 0; i < m; ++i) len[i] = rowptr[i + 1] - rowptr[i];
+    return len;
+}
+
 } // namespace apxchol::cuda_host

@@ -38,8 +38,8 @@ grows.)
 - `snake_case` for types, functions, and variables; trailing `_` on private
   members. Namespace is `apxchol::`.
 - The core is header-only under `include/apxchol/` plus two compiled TUs
-  (`src/factorization.cpp`, `src/solve.cpp`; CUDA builds add `src/cuda_cast.cu`
-  and `src/cuda_levelset.cu`). Templates and inline logic belong
+  (`src/factorization.cpp`, `src/solve.cpp`; CUDA builds add `src/cuda_cast.cu`,
+  `src/cuda_levelset.cu` and `src/cuda_dataflow.cu`). Templates and inline logic belong
   in the headers; the TUs exist to instantiate the runtime-dispatch entry points.
 - Keep the two-axis dispatch consistent: a new independent-set partitioner must
   be appended to `partitioner_list` in `partitioner_list.h`, and a new storage

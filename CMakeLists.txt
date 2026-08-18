@@ -143,6 +143,8 @@ add_library(apxchol_core
     # Level-set SpTRSV kernels: sptrsv/cuda.h calls levelset_solve
     # unconditionally, so the CUDA build needs this TU to link.
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_levelset.cu>
+    # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow), same reason.
+    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_dataflow.cu>
 )
 # Eigen is the only dependency of the core TUs/headers.  fast_matrix_market
 # is file I/O used solely by the CLI and analyze_factor — linked on those

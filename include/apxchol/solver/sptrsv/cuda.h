@@ -1,6 +1,7 @@
 #pragma once
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/cuda_cast.h"
+#include "apxchol/solver/sptrsv/cuda_dataflow.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "apxchol/solver/sptrsv/cuda_levelset.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
@@ -40,15 +41,23 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 #define APXCHOL_CUDA_CHECK(call)    apxchol::detail::check_cuda(call, #call)
 #define APXCHOL_CUSPARSE_CHECK(call) apxchol::detail::check_cusparse(call, #call)
 
-/// RAII wrapper for the GPU sparse triangular solve of the factor: two
+/// RAII wrapper for the GPU sparse triangular solve of the factor: three
 /// backends behind one interface.
 ///   * cuSPARSE SpSV (default): copies L11 to device once, runs the analysis
 ///     once, then fast GPU-parallel forward/back solves.
 ///   * Our O(n)-schedule level-set kernels (env APXCHOL_GPU_SPTRSV=levelset,
 ///     cuda_levelset.h): CSR of L (forward) + CSR of L^T (back) on device, one
-///     launch per level -- memory-frugal (no O(nnz) analysis buffer) and the
-///     only backend with the opt-in FP16 factor storage
-///     (APXCHOL_GPU_SPTRSV_FP16=1, below).
+///     launch per level -- memory-frugal (no O(nnz) analysis buffer), with the
+///     opt-in FP16 factor storage (APXCHOL_GPU_SPTRSV_FP16=1, below).
+///   * Our sync-free DATAFLOW kernel (env APXCHOL_GPU_SPTRSV=dataflow,
+///     cuda_dataflow.h): the same two CSRs as the level-set backend (no
+///     level schedules) plus 8 B/row of epoch-tagged {value, epoch} words,
+///     two O(n) warp-batch tables and four control ints -- ONE persistent
+///     launch per sweep instead of one per level, rows claimed in natural
+///     (forward) / reverse (back) order, consumers poll their neighbours'
+///     tagged words. Same fp16 storage option; fp32 build only. Faster than
+///     cuSPARSE on grid_2000 / iter0040 (measured), bit-deterministic run to
+///     run and across grid sizes.
 ///
 /// cuSPARSE SpSV requires CSR (not CSC).  Eigen stores column-major (CSC).
 /// We exploit the identity  CSC(L) == CSR(L^T):  the same three arrays
@@ -57,9 +66,10 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 ///   - Forward  solve  L  * y = x  ↔  TRANSPOSE    on L^T
 ///   - Back     solve  L^T* z = y  ↔  NON_TRANSPOSE on L^T
 ///
-/// BACKEND SELECTION (per setup): env APXCHOL_GPU_SPTRSV=cusparse|levelset is
-/// an explicit override; APXCHOL_GPU_SPTRSV_FP16=1 forces levelset (below).
-/// Otherwise AUTO: cuSPARSE is preferred, but its two SpSV analyses need
+/// BACKEND SELECTION (per setup): env APXCHOL_GPU_SPTRSV=cusparse|levelset|
+/// dataflow is an explicit override; APXCHOL_GPU_SPTRSV_FP16=1 without one
+/// (or with =cusparse) selects levelset (below), with =dataflow the fp16
+/// dataflow kernel. Otherwise AUTO (never dataflow -- opt-in): cuSPARSE is preferred, but its two SpSV analyses need
 /// O(nnz) device scratch (~23 B/nnz each on this toolkit -- 128 MB on
 /// iter0040, 766 MB on grid_2000, several GB on the giant social factors),
 /// which is exactly what OOMs com-Orkut on a 16 GB card. So setup, once the
@@ -91,9 +101,9 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 /// stored_nnz= on this backend too); the CPU unit tests state that the
 /// arrays this backend uploads are the arrays omp_sptrsv stores.
 ///
-/// FP16 STORAGE (env APXCHOL_GPU_SPTRSV_FP16=1, default off; level-set
-/// backend only -- it forces APXCHOL_GPU_SPTRSV=levelset, with a stderr note
-/// if cuSPARSE was asked for explicitly): cuSPARSE 12.8's SpSV REJECTS
+/// FP16 STORAGE (env APXCHOL_GPU_SPTRSV_FP16=1, default off; our two kernel
+/// backends only -- without APXCHOL_GPU_SPTRSV=dataflow it forces levelset,
+/// with a stderr note if cuSPARSE was asked for explicitly): cuSPARSE 12.8's SpSV REJECTS
 /// CUDA_R_16F matrix values (cusparseSpSV_bufferSize returns
 /// CUSPARSE_STATUS_NOT_SUPPORTED, "value type of matA (CUDA_R_16F) is not
 /// supported", for every A/vector/compute combination -- probed on this
@@ -135,24 +145,27 @@ public:
     ~cuda_sptrsv() { destroy(); }
 
     // Env resolution of the runtime modes (read at every setup()):
-    //   APXCHOL_GPU_SPTRSV=levelset|cusparse (default cusparse),
-    //   APXCHOL_GPU_SPTRSV_FP16=1 (default off; implies levelset).
+    //   APXCHOL_GPU_SPTRSV=levelset|cusparse|dataflow (unset = AUTO),
+    //   APXCHOL_GPU_SPTRSV_FP16=1 (default off; implies levelset unless
+    //   dataflow was asked for).
     static bool fp16_from_env() {
         const char* e = std::getenv("APXCHOL_GPU_SPTRSV_FP16");
         return e && std::atoi(e) != 0;
     }
-    // The env's explicit choice: +1 = levelset forced (or fp16), -1 = cusparse
-    // forced, 0 = unset / anything else = AUTO (see the class comment).
+    // The env's explicit choice: +2 = dataflow forced, +1 = levelset forced
+    // (or fp16 without dataflow), -1 = cusparse forced, 0 = unset / anything
+    // else = AUTO (see the class comment).
     static int backend_from_env() {
-        if (fp16_from_env()) return +1;
         const char* be = std::getenv("APXCHOL_GPU_SPTRSV");
-        if (!be) return 0;
-        const std::string s(be);
+        const std::string s(be ? be : "");
+        if (s == "dataflow") return +2;
+        if (fp16_from_env()) return +1;
         if (s == "levelset") return +1;
         if (s == "cusparse") return -1;
         return 0;
     }
-    static bool levelset_from_env() { return backend_from_env() > 0; }
+    static bool levelset_from_env() { return backend_from_env() == 1; }
+    static bool dataflow_from_env() { return backend_from_env() == 2; }
     // Safety margin of the AUTO decision: cuSPARSE is chosen only if its
     // analysis buffers fit into free - kAutoMarginFraction * total - reserve.
     static constexpr double kAutoMarginFraction = 0.10;
@@ -184,7 +197,8 @@ public:
         fp16_ = fp16_from_env();
         const int be_env = backend_from_env();
         backend_forced_ = be_env != 0;
-        use_levelset_   = be_env > 0;          // AUTO (0) starts on cuSPARSE, decided below
+        use_dataflow_   = be_env == 2;
+        use_levelset_   = be_env > 0;          // AUTO (0) starts on cuSPARSE, decided below; dataflow is a level-set variant here
         {
             const char* be = std::getenv("APXCHOL_GPU_SPTRSV");
             if (fp16_ && be && std::string(be) == "cusparse")
@@ -233,7 +247,8 @@ public:
         h_stage_.resize(static_cast<size_t>(m_));
 
         if (fp16_) {
-            backend_reason_ = "level-set (APXCHOL_GPU_SPTRSV_FP16=1)";
+            backend_reason_ = use_dataflow_ ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow, APXCHOL_GPU_SPTRSV_FP16=1)"
+                                            : "level-set (APXCHOL_GPU_SPTRSV_FP16=1)";
             if (std::getenv("APXCHOL_VERBOSE"))
                 std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s\n", backend_reason_.c_str());
             // FP16 per-column-scaled storage (cuda_host.h contract): values of
@@ -266,7 +281,7 @@ public:
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_rowptr_, L16.ptr.data(), (m_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, L16.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals16_, L16.vals.get(), nnz_ * sizeof(std::uint16_t), cudaMemcpyHostToDevice));
-            setup_levels(LT16.ptr, LT16.idx.get(), L16.ptr, L16.idx.get());
+            setup_kernel_backend(LT16.ptr, LT16.idx.get(), L16.ptr, L16.idx.get());
         } else {
             dev_alloc(reinterpret_cast<void**>(&d_vals_), nnz_ * sizeof(cuda_value_t));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_vals_, LT.vals.get(), nnz_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
@@ -304,7 +319,7 @@ public:
                     backend_reason_ = "cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)";
                 }
             } else {
-                backend_reason_ = fp16_ ? "level-set (APXCHOL_GPU_SPTRSV_FP16=1)" : "level-set (APXCHOL_GPU_SPTRSV=levelset)";
+                backend_reason_ = use_dataflow_ ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow)" : "level-set (APXCHOL_GPU_SPTRSV=levelset)";
             }
             if (std::getenv("APXCHOL_VERBOSE"))
                 std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s\n", backend_reason_.c_str());
@@ -319,7 +334,7 @@ public:
                 APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_rowptr_, Lc.ptr.data(), (m_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
                 APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, Lc.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
                 APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals_,   Lc.vals.get(), nnz_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
-                setup_levels(LT.ptr, LT.idx.get(), Lc.ptr, Lc.idx.get());
+                setup_kernel_backend(LT.ptr, LT.idx.get(), Lc.ptr, Lc.idx.get());
             } else {
                 cusparse_analyze();
             }
@@ -334,7 +349,7 @@ public:
             std::fprintf(stderr,
                 "[apxchol] sptrsv storage GPU/%s %s: stored_nnz=%llu offdiag=%llu%s"
                 " | factor device bytes=%.1f MB (cudaMemGetInfo delta %.1f MB; free %.2f -> %.2f of %.2f GB)\n",
-                use_levelset_ ? "levelset" : "cuSPARSE",
+                backend_name(),
                 fp16_ ? (diag_comp_ ? "fp16 (per-column scaled, diag fp32 + rounding residual)"
                                     : "fp16 (per-column scaled, diag fp32)") : value_name,
                 static_cast<unsigned long long>(stats_.nnz_stored), static_cast<unsigned long long>(off),
@@ -409,9 +424,16 @@ public:
     const factor_drop_stats& drop_stats() const { return stats_; }
     /// nnz the device CSR(s) hold after the last setup() (after the drop).
     std::uint64_t stored_nnz() const { return stats_.nnz_stored; }
-    /// Runtime modes resolved at the last setup(): the backend in use, whether
-    /// the env forced it (else the AUTO decision), and the printed reason.
+    /// Runtime modes resolved at the last setup(): the backend in use
+    /// (levelset() is true for BOTH kernel backends -- they share the device
+    /// arrays; dataflow() singles out the sync-free one; backend_name() names
+    /// it, in the env spelling: "cusparse" | "levelset" | "dataflow"), whether the env forced it
+    /// (else the AUTO decision), and the printed reason.
     bool levelset() const { return use_levelset_; }
+    bool dataflow() const { return use_dataflow_; }
+    const char* backend_name() const { return use_dataflow_ ? "dataflow" : use_levelset_ ? "levelset" : "cusparse"; }
+    /// Dataflow backend: blocks of the persistent grid (0 on the others).
+    int dataflow_grid() const { return df_grid_; }
     bool backend_forced() const { return backend_forced_; }
     const std::string& backend_reason() const { return backend_reason_; }
     bool fp16() const { return fp16_; }
@@ -432,22 +454,60 @@ public:
 private:
     // Level schedules for the level-set backend: forward from CSR of L
     // (ascending), back from CSR of L^T (descending). Serial O(nnz).
-    void setup_levels(const std::vector<int>& LT_ptr, const int* LT_idx,
-                      const std::vector<int>& L_ptr,  const int* L_idx) {
-        std::vector<int> fwd_order, bck_order;
-        cuda_host::compute_levels(static_cast<int>(m_), L_ptr.data(),  L_idx,  true,  fwd_order, fwd_level_ptr_);
-        cuda_host::compute_levels(static_cast<int>(m_), LT_ptr.data(), LT_idx, false, bck_order, bck_level_ptr_);
-        APXCHOL_CUDA_CHECK(cudaMalloc(&d_fwd_order_, m_ * sizeof(int)));
-        APXCHOL_CUDA_CHECK(cudaMalloc(&d_bck_order_, m_ * sizeof(int)));
-        factor_bytes_ += 2 * m_ * sizeof(int);
-        APXCHOL_CUDA_CHECK(cudaMemcpy(d_fwd_order_, fwd_order.data(), m_ * sizeof(int), cudaMemcpyHostToDevice));
-        APXCHOL_CUDA_CHECK(cudaMemcpy(d_bck_order_, bck_order.data(), m_ * sizeof(int), cudaMemcpyHostToDevice));
+    // The two kernel backends' schedules. Level-set: the level orders of both
+    // directions (forward from CSR of L ascending, back from CSR of L^T
+    // descending; serial O(nnz) host work) + host level boundaries. Dataflow
+    // (cuda_dataflow.h): no levels at all -- the warp batch tables of both
+    // directions (from the CSR row lengths), the m tagged words, the control
+    // ints, the resident grid.
+    void setup_kernel_backend(const std::vector<int>& LT_ptr, const int* LT_idx,
+                              const std::vector<int>& L_ptr,  const int* L_idx) {
+        const int mi = static_cast<int>(m_);
+        if (!use_dataflow_) {
+            std::vector<int> fwd_order, bck_order;
+            cuda_host::compute_levels(mi, L_ptr.data(),  L_idx,  true,  fwd_order, fwd_level_ptr_);
+            cuda_host::compute_levels(mi, LT_ptr.data(), LT_idx, false, bck_order, bck_level_ptr_);
+            APXCHOL_CUDA_CHECK(cudaMalloc(&d_fwd_order_, m_ * sizeof(int)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&d_bck_order_, m_ * sizeof(int)));
+            factor_bytes_ += 2 * m_ * sizeof(int);
+            APXCHOL_CUDA_CHECK(cudaMemcpy(d_fwd_order_, fwd_order.data(), m_ * sizeof(int), cudaMemcpyHostToDevice));
+            APXCHOL_CUDA_CHECK(cudaMemcpy(d_bck_order_, bck_order.data(), m_ * sizeof(int), cudaMemcpyHostToDevice));
+        } else {
+            if (!dataflow_supported())
+                throw std::runtime_error("apxchol: APXCHOL_GPU_SPTRSV=dataflow needs the fp32 SpTRSV build (APXCHOL_SPTRSV_FP32=ON)");
+            const std::vector<int> len_L  = cuda_host::csr_row_lengths(mi, L_ptr.data());
+            const std::vector<int> len_LT = cuda_host::csr_row_lengths(mi, LT_ptr.data());
+            const int pre = dataflow_prefetch_depth();
+            const std::vector<int> fwd_b = cuda_host::dataflow_batches(mi, false, len_L.data(),  pre);
+            const std::vector<int> bck_b = cuda_host::dataflow_batches(mi, true,  len_LT.data(), pre);
+            fwd_batches_ = static_cast<int>(fwd_b.size()) - 1;
+            bck_batches_ = static_cast<int>(bck_b.size()) - 1;
+            auto up = [&](int** d, const std::vector<int>& h) {
+                APXCHOL_CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(d), h.size() * sizeof(int)));
+                factor_bytes_ += h.size() * sizeof(int);
+                APXCHOL_CUDA_CHECK(cudaMemcpy(*d, h.data(), h.size() * sizeof(int), cudaMemcpyHostToDevice));
+            };
+            up(&d_fwd_batches_, fwd_b); up(&d_bck_batches_, bck_b);
+            APXCHOL_CUDA_CHECK(cudaMalloc(&d_df_tag_, m_ * sizeof(unsigned long long)));
+            APXCHOL_CUDA_CHECK(cudaMemset(d_df_tag_, 0, m_ * sizeof(unsigned long long)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&d_df_ctrl_, 4 * sizeof(int)));
+            APXCHOL_CUDA_CHECK(cudaMemset(d_df_ctrl_, 0, 4 * sizeof(int)));
+            factor_bytes_ += m_ * sizeof(unsigned long long) + 4 * sizeof(int);
+            df_epoch_ = 0;
+            df_grid_ = dataflow_grid_size(fp16_);
+        }
 
         if (std::getenv("APXCHOL_GPU_MEM_DEBUG")) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
-          fprintf(stderr,"[mem] SpTRSV level-set: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
-                  "fwd_levels=%zu bck_levels=%zu | GPU free=%.2f/%.2f GB\n",
-                  2.0*nnz_*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
-                  fwd_level_ptr_.size()-1, bck_level_ptr_.size()-1, mf/1e9, mt/1e9); }
+          if (use_dataflow_)
+            fprintf(stderr,"[mem] SpTRSV dataflow: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
+                    "fwd_batches=%d bck_batches=%d grid=%dx%d tag=%.1fMB | GPU free=%.2f/%.2f GB\n",
+                    2.0*nnz_*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
+                    fwd_batches_, bck_batches_, df_grid_, kDataflowBlock, m_ * 8.0 / 1e6, mf/1e9, mt/1e9);
+          else
+            fprintf(stderr,"[mem] SpTRSV level-set: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
+                    "fwd_levels=%zu bck_levels=%zu | GPU free=%.2f/%.2f GB\n",
+                    2.0*nnz_*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
+                    fwd_level_ptr_.size()-1, bck_level_ptr_.size()-1, mf/1e9, mt/1e9); }
     }
 
     // cuSPARSE backend, phase 1: handle, matrix / vector descriptors, the two
@@ -530,6 +590,34 @@ private:
     }
 
     void solve_LLt_dev_impl() const {
+        if (use_dataflow_) {
+            // One persistent launch per sweep (cuda_dataflow.h). Forward on
+            // CSR of L with CSR of L^T as the dependent lists, back the
+            // reverse; the level orders are the topological claim orders.
+            const int m = static_cast<int>(m_);
+            // Epochs: the forward sweep tags its words with e, the back sweep
+            // with e+1 (one shared tag array; a consumer only accepts the
+            // current sweep's epoch). Long before the 32-bit epoch could wrap
+            // onto a stale word the array is cleared and the count restarted.
+            if (df_epoch_ >= 0xFFFFFF00u) {
+                APXCHOL_CUDA_CHECK(cudaMemsetAsync(d_df_tag_, 0, m_ * sizeof(unsigned long long), 0));
+                df_epoch_ = 0;
+            }
+            const unsigned e_fwd = ++df_epoch_;
+            const unsigned e_bck = ++df_epoch_;
+            if (fp16_) {
+                dataflow_solve_fp16(0, m, false, d_L_rowptr_, d_L_colidx_, d_L_vals16_, d_diag_, nullptr,
+                                    d_fwd_batches_, fwd_batches_, d_df_tag_, e_fwd, d_df_ctrl_, df_grid_, d_x_, d_y_);
+                dataflow_solve_fp16(0, m, true, d_rowPtr_, d_colIdx_, d_vals16_, d_diag_, d_inv_scale2_,
+                                    d_bck_batches_, bck_batches_, d_df_tag_, e_bck, d_df_ctrl_ + 2, df_grid_, d_y_, d_x_);
+            } else {
+                dataflow_solve(0, m, false, d_L_rowptr_, d_L_colidx_, d_L_vals_,
+                               d_fwd_batches_, fwd_batches_, d_df_tag_, e_fwd, d_df_ctrl_, df_grid_, d_x_, d_y_);
+                dataflow_solve(0, m, true, d_rowPtr_, d_colIdx_, d_vals_,
+                               d_bck_batches_, bck_batches_, d_df_tag_, e_bck, d_df_ctrl_ + 2, df_grid_, d_y_, d_x_);
+            }
+            return;
+        }
         if (fp16_) {
             // Forward  L~ y' = x  (CSR of L~, forward schedule; no input scale):  d_x_ -> d_y_.
             levelset_solve_fp16(0, d_L_rowptr_, d_L_colidx_, d_L_vals16_, d_diag_, nullptr,
@@ -571,9 +659,15 @@ private:
             cudaFree(d_L_rowptr_); cudaFree(d_L_colidx_); cudaFree(d_L_vals_); cudaFree(d_L_vals16_);
             cudaFree(d_fwd_order_); cudaFree(d_bck_order_);
             cudaFree(d_vals16_); cudaFree(d_diag_); cudaFree(d_inv_scale2_);
+            cudaFree(d_df_tag_); cudaFree(d_df_ctrl_);
+            cudaFree(d_fwd_batches_); cudaFree(d_bck_batches_);
+            d_df_tag_ = nullptr; d_df_ctrl_ = nullptr;
+            d_fwd_batches_ = d_bck_batches_ = nullptr; fwd_batches_ = bck_batches_ = 0;
+            df_epoch_ = 0;
             d_L_rowptr_ = d_L_colidx_ = d_fwd_order_ = d_bck_order_ = nullptr;
             d_L_vals_ = nullptr; d_L_vals16_ = nullptr;
             d_vals16_ = nullptr; d_diag_ = d_inv_scale2_ = nullptr;
+            df_grid_ = 0;
             fwd_level_ptr_.clear(); bck_level_ptr_.clear();
         } else {
             cusparse_teardown();
@@ -589,6 +683,7 @@ private:
         d_y_    = nullptr;
         ready_ = false;
         use_levelset_ = false;
+        use_dataflow_ = false;
         backend_forced_ = false;
         backend_reason_.clear();
         fp16_ = false;
@@ -623,6 +718,7 @@ private:
     // direction has a device row-order (rows by level) + host level boundaries
     // (read to size the per-level launches).
     bool          use_levelset_  = false;
+    bool          use_dataflow_  = false;   // implies use_levelset_ (shares its arrays)
     bool          backend_forced_ = false;
     std::string   backend_reason_;
     std::size_t   reserve_bytes_  = 0;     // set_reserve_bytes(); NOT reset by destroy()
@@ -633,6 +729,17 @@ private:
     int*          d_bck_order_    = nullptr;
     std::vector<int> fwd_level_ptr_;
     std::vector<int> bck_level_ptr_;
+    // Dataflow backend (APXCHOL_GPU_SPTRSV=dataflow; cuda_dataflow.h): the
+    // warp batch tables of both directions, the m tagged words {value, epoch}
+    // both sweeps publish into (mutable state, 8 B/row), the sweep epoch, 2+2
+    // control ints and the persistent grid.
+    int*          d_fwd_batches_   = nullptr;   // cuda_host::dataflow_batches
+    int*          d_bck_batches_   = nullptr;
+    int           fwd_batches_ = 0, bck_batches_ = 0;
+    unsigned long long* d_df_tag_  = nullptr;
+    mutable unsigned    df_epoch_  = 0;         // last epoch handed out (0 = none)
+    int*          d_df_ctrl_       = nullptr;   // {fwd ticket, fwd finished, bck ticket, bck finished}
+    int           df_grid_         = 0;
     // fp16 storage (APXCHOL_GPU_SPTRSV_FP16=1; level-set only): binary16 values
     // of CSR(L~^T) (d_vals16_, replaces d_vals_) and CSR(L~) (d_L_vals16_,
     // replaces d_L_vals_), the fp32 scaled diagonal and the back solve's

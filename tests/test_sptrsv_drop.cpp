@@ -23,12 +23,16 @@
 // storage-format-specific drop clause (format_flushes) has its own tests in
 // test_lowprec.cpp.
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 #ifdef _OPENMP
 #include <omp.h>
@@ -792,3 +796,291 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
 #endif
     }
 }
+
+// ── The dataflow backend's host side (cuda_host.h; CUDA-free) ────────────────
+//
+// dataflow_batches packs the rows of one sweep direction into warps: rows in
+// sweep order, each taking a lane group G = dataflow_lane_group(row length,
+// pre) -- the smallest power of two <= 32 with G * pre >= length -- aligned to
+// a multiple of G, a batch closed exactly when the next row does not fit
+// (greedy, so no batch could have taken one more row). The device restates
+// the same rule lane by lane, so this table IS the contract between the two.
+TEST(GpuHostPrep, DataflowBatchesPackRowsIntoAlignedLaneGroups) {
+    for (int pre : {4, 8}) {
+        SCOPED_TRACE("pre=" + std::to_string(pre));
+        // The rule itself.
+        EXPECT_EQ(apxchol::cuda_host::dataflow_lane_group(1, pre), 1);
+        EXPECT_EQ(apxchol::cuda_host::dataflow_lane_group(pre, pre), 1);
+        EXPECT_EQ(apxchol::cuda_host::dataflow_lane_group(pre + 1, pre), 2);
+        EXPECT_EQ(apxchol::cuda_host::dataflow_lane_group(4 * pre, pre), 4);
+        EXPECT_EQ(apxchol::cuda_host::dataflow_lane_group(32 * pre, pre), 32);
+        EXPECT_EQ(apxchol::cuda_host::dataflow_lane_group(1000 * pre, pre), 32);   // capped: the kernel chunks the rest
+        for (int len = 1; len <= 40 * pre; ++len) {
+            const int G = apxchol::cuda_host::dataflow_lane_group(len, pre);
+            ASSERT_TRUE(G >= 1 && G <= 32 && (G & (G - 1)) == 0) << len;
+            if (G < 32) ASSERT_GE(G * pre, len) << len;
+            if (G > 1)  ASSERT_LT((G / 2) * pre, len) << len;                     // minimal
+        }
+        // On a real-shaped factor, both directions.
+        const node_index n = 60001, m = n - 1;
+        const sparse_csc L = make_wide_magnitude_lower(n);
+        scoped_drop_env env("1e-4");
+        auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
+        { const std::vector<float> sc = apxchol::cuda_host::column_scales(LT);
+          apxchol::cuda_host::apply_factor_drop(LT, sc, 1e-4, true, false, true); }
+        const auto Lc = apxchol::cuda_host::transpose_csr(LT);
+        for (bool reverse : {false, true}) {
+            SCOPED_TRACE(reverse ? "back (reverse order, CSR of L^T)" : "forward (natural order, CSR of L)");
+            const auto& A = reverse ? LT : Lc;
+            const std::vector<int> len = apxchol::cuda_host::csr_row_lengths(A.m, A.ptr.data());
+            ASSERT_EQ(len.size(), static_cast<size_t>(m));
+            for (int i = 0; i < A.m; ++i) ASSERT_EQ(len[i], A.ptr[i + 1] - A.ptr[i]);
+            const std::vector<int> bs = apxchol::cuda_host::dataflow_batches(A.m, reverse, len.data(), pre);
+            ASSERT_GE(bs.size(), 2u);
+            EXPECT_EQ(bs.front(), 0);
+            EXPECT_EQ(bs.back(), A.m);
+            auto lanes_needed = [&](int q, int pos) {   // aligned start + G of sweep position q placed at lane pos
+                const int row = reverse ? A.m - 1 - q : q;
+                const int G = apxchol::cuda_host::dataflow_lane_group(len[row], pre);
+                const int start = (pos + G - 1) & ~(G - 1);
+                return std::pair<int, int>{start, G};
+            };
+            std::uint64_t rows_seen = 0, full_batches = 0;
+            for (size_t b = 0; b + 1 < bs.size(); ++b) {
+                ASSERT_LT(bs[b], bs[b + 1]) << "batch " << b;                     // non-empty, increasing
+                ASSERT_LE(bs[b + 1] - bs[b], 32) << "batch " << b;
+                int pos = 0;
+                for (int q = bs[b]; q < bs[b + 1]; ++q) {
+                    const auto [start, G] = lanes_needed(q, pos);
+                    ASSERT_LE(start + G, 32) << "batch " << b << " row " << q;   // fits
+                    ASSERT_EQ(start % G, 0);                                    // aligned
+                    pos = start + G;
+                    ++rows_seen;
+                }
+                if (b + 2 < bs.size()) {                                          // greedy: the next row would not fit
+                    const auto [start, G] = lanes_needed(bs[b + 1], pos);
+                    EXPECT_GT(start + G, 32) << "batch " << b << " closed early";
+                }
+                full_batches += (bs[b + 1] - bs[b]) >= 8;
+            }
+            EXPECT_EQ(rows_seen, static_cast<std::uint64_t>(m));
+            EXPECT_GT(full_batches, 0u);                                           // teeth: short rows pack many per warp
+            EXPECT_LT(bs.size() - 1, static_cast<size_t>(m));                      // ... and long ones do not
+        }
+    }
+}
+
+#ifdef APXCHOL_USE_CUDA
+// ── The GPU backends against each other (CUDA build only) ───────────────────
+//
+// The dataflow kernel (cuda_dataflow.h) and the level-set kernel
+// (cuda_levelset.h) solve the same triangular systems from the same device
+// arrays: on a random 60k-row factor (Laplacian path, m = n-1, dense tail
+// rows, the default drop) their forward and back sweeps agree to fp32
+// rounding-order (a different summation order per row), the dataflow result
+// is bit-identical across launches AND grid sizes (1 block, 7 blocks, the
+// resident grid), for the fp32 and the fp16 storage; and through cuda_sptrsv
+// (env APXCHOL_GPU_SPTRSV=dataflow|levelset) the L L^T pair agrees the same
+// way, dataflow again bit-identical run to run.
+#include "apxchol/solver/sptrsv/cuda.h"
+#include "apxchol/solver/sptrsv/cuda_dataflow.h"
+#include "apxchol/solver/sptrsv/cuda_levelset.h"
+#include <cuda_runtime.h>
+
+namespace {
+template <class T> T* dev_upload(const T* h, std::size_t count) {
+    T* d = nullptr;
+    EXPECT_EQ(cudaMalloc(&d, count * sizeof(T)), cudaSuccess);
+    EXPECT_EQ(cudaMemcpy(d, h, count * sizeof(T), cudaMemcpyHostToDevice), cudaSuccess);
+    return d;
+}
+template <class T> std::vector<T> dev_download(const T* d, std::size_t count) {
+    std::vector<T> h(count);
+    EXPECT_EQ(cudaMemcpy(h.data(), d, count * sizeof(T), cudaMemcpyDeviceToHost), cudaSuccess);
+    return h;
+}
+// max |a-b| / max |a| and the count of differing entries; every entry finite.
+std::pair<double, std::size_t> rel_diff(const std::vector<float>& a, const std::vector<float>& b) {
+    double maxabs = 0, maxdiff = 0; std::size_t nd = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(a[i]) && std::isfinite(b[i])) << "entry " << i;
+        maxabs = std::max(maxabs, std::fabs(static_cast<double>(a[i])));
+        maxdiff = std::max(maxdiff, std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i])));
+        nd += a[i] != b[i];
+    }
+    return {maxdiff / (maxabs > 0 ? maxabs : 1.0), nd};
+}
+} // namespace
+
+// A random factor whose forward AND back solves stay bounded in fp32 (every
+// row of L and of L^T strictly diagonally dominant: diagonal in [1, 3],
+// off-diagonals in [0, 0.01], hub columns of ~66 entries sum to < 0.7) --
+// make_wide_magnitude_lower's 10^2 entries overflow a 60k-row back solve to
+// inf, which would make the comparison vacuous. The hub columns are the
+// long rows of the back sweep (lane groups of 16); the drop keeps nearly all.
+static sparse_csc make_dominant_lower(node_index n) { return make_random_lower(n, 6.0, 515 + n, 0.0, 0.01); }
+
+TEST(GpuDataflow, MatchesTheLevelSetKernelBothDirectionsAndIsDeterministic) {
+    ASSERT_TRUE(apxchol::dataflow_supported());   // fp32 SpTRSV build (the default)
+    const node_index n = 60001, m = n - 1;
+    const sparse_csc L = make_dominant_lower(n);
+    scoped_drop_env env("1e-4");
+    auto LT = apxchol::cuda_host::build_L11_csc_int<apxchol::cuda_value_t>(L, m);
+    const std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
+    apxchol::cuda_host::apply_factor_drop(LT, scales, 1e-4, true, false, true);
+    const auto Lc = apxchol::cuda_host::transpose_csr(LT);
+    const int mi = static_cast<int>(m);
+    // fp16 storage of the same factor (cuda_host.h contract).
+    const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales, true, true);
+    apxchol::cuda_host::csr_int<std::uint16_t> LT16;
+    LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
+    LT16.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(LT.nnz));
+    std::copy_n(LT.idx.get(), LT.nnz, LT16.idx.get());
+    LT16.vals = std::make_unique_for_overwrite<std::uint16_t[]>(static_cast<std::size_t>(LT.nnz));
+    std::copy_n(h16.vals.get(), LT.nnz, LT16.vals.get());
+    const auto L16 = apxchol::cuda_host::transpose_csr(LT16);
+    std::vector<float> inv_scale2(m);
+    for (node_index j = 0; j < m; ++j) inv_scale2[j] = static_cast<float>(static_cast<double>(h16.inv_scale[j]) * h16.inv_scale[j]);
+
+    // Device arrays: CSR of L (forward), CSR of L^T (back), both storages.
+    int* d_Lp = dev_upload(Lc.ptr.data(), m + 1);   int* d_Li = dev_upload(Lc.idx.get(), Lc.nnz);
+    float* d_Lv = dev_upload(Lc.vals.get(), Lc.nnz);
+    int* d_Tp = dev_upload(LT.ptr.data(), m + 1);   int* d_Ti = dev_upload(LT.idx.get(), LT.nnz);
+    float* d_Tv = dev_upload(LT.vals.get(), LT.nnz);
+    std::uint16_t* d_Lv16 = dev_upload(L16.vals.get(), L16.nnz);
+    std::uint16_t* d_Tv16 = dev_upload(LT16.vals.get(), LT16.nnz);
+    float* d_diag = dev_upload(h16.diag.data(), m);
+    float* d_is2  = dev_upload(inv_scale2.data(), m);
+    // Level-set schedules and dataflow batches.
+    std::vector<int> fo, fl, bo, bl;
+    apxchol::cuda_host::compute_levels(mi, Lc.ptr.data(), Lc.idx.get(), true,  fo, fl);
+    apxchol::cuda_host::compute_levels(mi, LT.ptr.data(), LT.idx.get(), false, bo, bl);
+    int* d_fo = dev_upload(fo.data(), m); int* d_bo = dev_upload(bo.data(), m);
+    const int pre = apxchol::dataflow_prefetch_depth();
+    const std::vector<int> lenL = apxchol::cuda_host::csr_row_lengths(mi, Lc.ptr.data());
+    const std::vector<int> lenT = apxchol::cuda_host::csr_row_lengths(mi, LT.ptr.data());
+    const std::vector<int> fb = apxchol::cuda_host::dataflow_batches(mi, false, lenL.data(), pre);
+    const std::vector<int> bb = apxchol::cuda_host::dataflow_batches(mi, true,  lenT.data(), pre);
+    int* d_fb = dev_upload(fb.data(), fb.size()); int* d_bb = dev_upload(bb.data(), bb.size());
+    unsigned long long* d_tag = nullptr; int* d_ctrl = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_tag, m * sizeof(unsigned long long)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_tag, 0, m * sizeof(unsigned long long)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_ctrl, 2 * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_ctrl, 0, 2 * sizeof(int)), cudaSuccess);
+    // rhs, outputs.
+    std::vector<float> x(m);
+    { std::mt19937 rng(9); std::uniform_real_distribution<float> u(-1.f, 1.f); for (auto& v : x) v = u(rng); }
+    float* d_x = dev_upload(x.data(), m);
+    float *d_y1 = nullptr, *d_y2 = nullptr, *d_z1 = nullptr, *d_z2 = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_y1, m * 4), cudaSuccess); ASSERT_EQ(cudaMalloc(&d_y2, m * 4), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_z1, m * 4), cudaSuccess); ASSERT_EQ(cudaMalloc(&d_z2, m * 4), cudaSuccess);
+    unsigned epoch = 0;
+    const int resident = apxchol::dataflow_grid_size(false);
+    ASSERT_GE(resident, 1);
+
+    for (bool fp16 : {false, true}) {
+        SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
+        // Forward: L y = x on the level-set kernel and on the dataflow kernel.
+        if (fp16) apxchol::levelset_solve_fp16(0, d_Lp, d_Li, d_Lv16, d_diag, nullptr, d_fo, fl.data(), (int)fl.size() - 1, d_x, d_y1);
+        else      apxchol::levelset_solve(0, d_Lp, d_Li, d_Lv, d_fo, fl.data(), (int)fl.size() - 1, d_x, d_y1);
+        auto df_fwd = [&](float* out, int grid) {
+            ++epoch;
+            if (fp16) apxchol::dataflow_solve_fp16(0, mi, false, d_Lp, d_Li, d_Lv16, d_diag, nullptr, d_fb, (int)fb.size() - 1, d_tag, epoch, d_ctrl, grid, d_x, out);
+            else      apxchol::dataflow_solve(0, mi, false, d_Lp, d_Li, d_Lv, d_fb, (int)fb.size() - 1, d_tag, epoch, d_ctrl, grid, d_x, out);
+        };
+        df_fwd(d_y2, resident);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const std::vector<float> y_ls = dev_download(d_y1, m), y_df = dev_download(d_y2, m);
+        {
+            const auto [rd, nd] = rel_diff(y_ls, y_df);
+            EXPECT_LT(rd, 1e-6) << "forward: dataflow vs level-set";   // fp32 rounding order only (observed 6e-8)
+            EXPECT_GT(nd, 0u);                     // teeth: different summation order, so not identical ...
+            SCOPED_TRACE("forward rel diff " + std::to_string(rd));
+            std::fprintf(stderr, "[GpuDataflow] %s forward: max rel diff vs level-set %.3e (%zu of %d entries differ)\n",
+                         fp16 ? "fp16" : "fp32", rd, nd, mi);
+        }
+        // ... but bit-identical to itself, across launches and grid sizes.
+        for (int grid : {resident, 1, 7}) {
+            df_fwd(d_z1, grid);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const std::vector<float> again = dev_download(d_z1, m);
+            const auto [rd, nd] = rel_diff(y_df, again);
+            EXPECT_EQ(nd, 0u) << "forward dataflow not deterministic at grid " << grid << " (rel diff " << rd << ")";
+        }
+        // Back: L^T z = y (both from the level-set y so the inputs match).
+        if (fp16) apxchol::levelset_solve_fp16(0, d_Tp, d_Ti, d_Tv16, d_diag, d_is2, d_bo, bl.data(), (int)bl.size() - 1, d_y1, d_z1);
+        else      apxchol::levelset_solve(0, d_Tp, d_Ti, d_Tv, d_bo, bl.data(), (int)bl.size() - 1, d_y1, d_z1);
+        auto df_bck = [&](float* out, int grid) {
+            ++epoch;
+            if (fp16) apxchol::dataflow_solve_fp16(0, mi, true, d_Tp, d_Ti, d_Tv16, d_diag, d_is2, d_bb, (int)bb.size() - 1, d_tag, epoch, d_ctrl, grid, d_y1, out);
+            else      apxchol::dataflow_solve(0, mi, true, d_Tp, d_Ti, d_Tv, d_bb, (int)bb.size() - 1, d_tag, epoch, d_ctrl, grid, d_y1, out);
+        };
+        df_bck(d_z2, resident);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const std::vector<float> z_ls = dev_download(d_z1, m), z_df = dev_download(d_z2, m);
+        {
+            const auto [rd, nd] = rel_diff(z_ls, z_df);
+            EXPECT_LT(rd, 1e-6) << "back: dataflow vs level-set";
+            EXPECT_GT(nd, 0u);
+            std::fprintf(stderr, "[GpuDataflow] %s back: max rel diff vs level-set %.3e (%zu of %d entries differ)\n",
+                         fp16 ? "fp16" : "fp32", rd, nd, mi);
+        }
+        for (int grid : {resident, 1, 7}) {
+            df_bck(d_y2, grid);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const std::vector<float> again = dev_download(d_y2, m);
+            const auto [rd, nd] = rel_diff(z_df, again);
+            EXPECT_EQ(nd, 0u) << "back dataflow not deterministic at grid " << grid << " (rel diff " << rd << ")";
+        }
+        // The control words are back at zero after every sweep (self-reset).
+        const std::vector<int> ctrl = dev_download(d_ctrl, 2);
+        EXPECT_EQ(ctrl[0], 0); EXPECT_EQ(ctrl[1], 0);
+    }
+    for (void* p : {(void*)d_Lp, (void*)d_Li, (void*)d_Lv, (void*)d_Tp, (void*)d_Ti, (void*)d_Tv, (void*)d_Lv16, (void*)d_Tv16,
+                    (void*)d_diag, (void*)d_is2, (void*)d_fo, (void*)d_bo, (void*)d_fb, (void*)d_bb, (void*)d_tag, (void*)d_ctrl,
+                    (void*)d_x, (void*)d_y1, (void*)d_y2, (void*)d_z1, (void*)d_z2})
+        cudaFree(p);
+}
+
+TEST(GpuDataflow, PairThroughCudaSptrsvMatchesLevelSetAndIsDeterministic) {
+    const node_index n = 60001, m = n - 1;
+    const sparse_csc L = make_dominant_lower(n);
+    scoped_drop_env env("1e-4");
+    std::vector<double> x(m), y_ls(m), y_df(m), y_df2(m);
+    { std::mt19937 rng(11); std::uniform_real_distribution<double> u(-1.0, 1.0); for (auto& v : x) v = u(rng); }
+    for (bool fp16 : {false, true}) {
+        SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
+        scoped_env f16("APXCHOL_GPU_SPTRSV_FP16", fp16 ? "1" : nullptr);
+        {
+            scoped_env be("APXCHOL_GPU_SPTRSV", "levelset");
+            apxchol::cuda_sptrsv t; t.setup(L, m);
+            ASSERT_TRUE(t.levelset()); ASSERT_FALSE(t.dataflow());
+            EXPECT_STREQ(t.backend_name(), "levelset");
+            t.solve_LLt(x.data(), y_ls.data());
+        }
+        {
+            scoped_env be("APXCHOL_GPU_SPTRSV", "dataflow");
+            apxchol::cuda_sptrsv t; t.setup(L, m);
+            ASSERT_TRUE(t.dataflow()); ASSERT_TRUE(t.levelset());   // dataflow shares the level-set arrays
+            EXPECT_STREQ(t.backend_name(), "dataflow");
+            EXPECT_EQ(t.fp16(), fp16);
+            EXPECT_GE(t.dataflow_grid(), 1);
+            t.solve_LLt(x.data(), y_df.data());
+            t.solve_LLt(x.data(), y_df2.data());
+        }
+        double maxabs = 0, maxdiff = 0; std::size_t nd = 0, nd2 = 0;
+        for (node_index i = 0; i < m; ++i) {
+            ASSERT_TRUE(std::isfinite(y_ls[i]) && std::isfinite(y_df[i])) << i;
+            maxabs = std::max(maxabs, std::fabs(y_ls[i]));
+            maxdiff = std::max(maxdiff, std::fabs(y_ls[i] - y_df[i]));
+            nd  += y_ls[i] != y_df[i];
+            nd2 += y_df[i] != y_df2[i];
+        }
+        EXPECT_LT(maxdiff / maxabs, 1e-6) << "L L^T pair: dataflow vs level-set";
+        EXPECT_GT(nd, 0u);
+        EXPECT_EQ(nd2, 0u) << "dataflow pair not bit-identical run to run";
+        std::fprintf(stderr, "[GpuDataflow] %s pair through cuda_sptrsv: max rel diff vs level-set %.3e\n",
+                     fp16 ? "fp16" : "fp32", maxdiff / maxabs);
+    }
+}
+#endif // APXCHOL_USE_CUDA

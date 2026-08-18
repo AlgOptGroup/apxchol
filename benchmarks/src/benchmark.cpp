@@ -441,7 +441,7 @@ static BenchResult run_apxchol_v1(
                << " (L11_nnz=" << st.nnz_factor << " dropped=" << st.dropped
                << " drop_rel=" << st.rel << " compensate=" << (st.compensate ? 1 : 0) << ")";
 #if defined(APXCHOL_USE_CUDA)
-            os << " gpu=" << (trsv.levelset() ? "levelset" : "cusparse")
+            os << " gpu=" << trsv.backend_name()
                << "/" << (trsv.fp16() ? "fp16" : apxchol::cuda_sptrsv::value_name)
                << " factor_dev_MB=" << std::fixed << std::setprecision(1) << trsv.factor_device_bytes() / 1e6
                << " dev_delta_MB=" << trsv.device_bytes_delta() / 1e6
