@@ -229,14 +229,25 @@ private:
             trsv_.set_round_bounds(std::move(bounds));
         }
 #endif
+#if !defined(APXCHOL_USE_CUDA)
+        // Hand the factor over unless the caller wants to read it afterwards:
+        // the CPU SpTRSV then releases F_.L's row/value arrays at the first
+        // point it no longer reads them (Laplacian path: right after its L11
+        // copy), so its setup transient does not sit on a dead copy of the
+        // factor. The release below then finds nothing left to free.
+        if (keep_factor_) trsv_.setup(F_.L, factor_dim);
+        else              trsv_.setup_consuming(F_.L, factor_dim);
+#else
         trsv_.setup(F_.L, factor_dim);
+#endif
         if (cp_) { (*cp_)("sptrsv_setup"); cp_->ascend(); }
 
         // The SpTRSV (and the CUDA path) have copied the factor into their own
         // CSR/CSC; the PCG loop only uses trsv_, never F_.L. Free the factor's
         // big row/value arrays -> one fewer full copy of the factor held during
         // the solve (~nnz*12 B; e.g. ~1.4 GB on com-LiveJournal). nonZeros() (the
-        // fill stat) still works via the retained column pointers.
+        // fill stat) still works via the retained column pointers. (On the CPU
+        // path setup_consuming has normally done this already; idempotent.)
         // set_keep_factor(true) skips the free for callers that export L.
         if (!keep_factor_)
             F_.L.release_values();

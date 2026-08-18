@@ -207,7 +207,25 @@ public:
     std::uint64_t stored_nnz() const { return stats_.nnz_stored; }
 
     /// Analyze L11 = L.topLeftCorner(m, m): build CSR, CSC, and level sets.
-    void setup(const sparse_csc& L, node_index m) {
+    /// L is read only; the caller keeps it.
+    void setup(const sparse_csc& L, node_index m) { setup_impl(L, m, nullptr); }
+
+    /// Same analysis, but the SpTRSV CONSUMES L: its row/value arrays are
+    /// released (sparse_csc::release_values) at the first point setup no longer
+    /// reads them, instead of surviving until the caller frees them after setup.
+    /// On the Laplacian path (m == n-1) that is right after the L11 copy, so
+    /// the setup transient -- L11 + the transpose bucket + CSR (+ CSC) -- no
+    /// longer sits on top of a dead full copy of the factor (nnz*(4+sizeof
+    /// value) B: ~70 MB on iter0040, ~180 MB on grid_2000). On the SDDM path
+    /// L11 aliases L, so the release happens after the compacting drop copied it
+    /// (if it did) or else after the CSC copy. Column pointers stay (nonZeros()
+    /// still works). For callers that keep the factor, use setup().
+    void setup_consuming(sparse_csc& L, node_index m) { setup_impl(L, m, &L); }
+
+private:
+    // `consumed` != nullptr: `L` may be released as soon as it is dead (see
+    // setup_consuming); it then always aliases &L.
+    void setup_impl(const sparse_csc& L, node_index m, sparse_csc* consumed) {
         m_ = m;
         const bool trace = std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
         auto now = []() {
@@ -279,6 +297,8 @@ public:
             L11_outer = L11_outer_local.data();
             L11_inner = L11_inner_local.data();
             L11_vals  = L11_vals_local.data();
+            // L11 is a full copy: the input factor is dead from here on.
+            if (consumed) consumed->release_values();
         }
         mark("L11_alias_or_copy");
 
@@ -364,9 +384,17 @@ public:
                 nnz = nnz_kept;
                 // The Laplacian path's L11 copy is dead now: free it before the
                 // transpose allocates its bucket (peak memory, not speed).
-                L11_inner_local = {}; L11_vals_local = {}; L11_outer_local = {};
+                // (`v = {}` would only clear -- it keeps the capacity; swapping
+                // with an empty vector actually returns the memory.)
+                std::vector<node_index>().swap(L11_inner_local);
+                std::vector<sptrsv_value_t>().swap(L11_vals_local);
+                std::vector<edge_index>().swap(L11_outer_local);
+                // SDDM path: L11 aliased the input factor, which the compacted
+                // copy has just replaced -- the input is dead now.
+                if (consumed && m == L.rows())
+                    consumed->release_values();
             } else {
-                drop_outer = {};   // nothing dropped: keep aliasing the input
+                std::vector<edge_index>().swap(drop_outer);   // nothing dropped: keep aliasing the input
             }
             mark("factor_drop");
         }
@@ -592,6 +620,9 @@ public:
             csc_vals_[k]    = static_cast<sptrsv_value_t>(L11_vals[k]);
         }
         mark("csc_copy");
+        // Last read of L11 (hence of an aliased input factor): the level sets and
+        // counters below only use the SpTRSV's own arrays.
+        if (consumed) consumed->release_values();
 
         // ── Level sets ──────────────────────────────────────────
         // Round-as-level (DEFAULT when round boundaries are available;
@@ -752,6 +783,8 @@ public:
 
         ready_ = true;
     }
+
+public:
 
     /// Forward solve: L * y = x.  Reads x[0..m-1], writes y[0..m-1].
     /// Always the level-set scheduler: empirically beats sync-free across
