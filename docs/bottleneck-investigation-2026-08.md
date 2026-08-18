@@ -391,3 +391,100 @@ factor so co-scheduled rows are contiguous and agglomerates levels into fatter s
 rounds could pipeline next-round `prune` into idle time (substantial restructuring; the tail
 knob is the cheap partial answer). Cheapest discriminator first: if nnz-balancing moves
 nothing, the wait is memory, not imbalance, and (2) is not worth the effort either.
+
+## Addendum 3 — low-precision factor storage (2026-08-18)
+
+| variant (T=1 iterations) | grid_500 | grid_2000 | iter0040 |
+|---|---|---|---|
+| fp32 (default) | 40 | 50 | 44 |
+| bf16 all | 52 | 68 | 260 |
+| bf16 + fp32 diagonal | 49 | 62 | 132 |
+| bf16 + per-column scale | 49 | 60 | 71 |
+| **fp16 + per-column scale** (2 B/entry) | **42** | **51** | **44** |
+| fp24 (3 B/entry) | 40 | 49 | 44 |
+| fp32, drop off-diagonals < 1e-3·colmax | 40 | 50 | 63 (65% dropped) |
+| **fp32, drop < 1e-4·colmax** | 40 | 50 | **44 (52% dropped)** |
+
+Reading: the failure mode of bf16 was mantissa width (7 bits ≈ 4e-3 relative), not 16 bits per
+se; fp16's 10 bits (5e-4) with a per-column scale (s_j = column max |off-diag|, fp32 diag and
+scale arrays) matches fp32 quality — while flushing 19% of iter0040's off-diagonals to zero and
+28% to subnormal. The isolation experiment explains why: entries below ~1e-4 of their column
+max carry no preconditioning value (52% of the IPM factor!). Two levers follow: (a) fp16-scaled
+storage (−22% factor bytes, F16C intrinsic mandatory: the naive `_Float16→double` compiles to
+a libgcc call and is 3× slower); (b) a *compacting* threshold drop at setup (−50% factor nnz on
+IPM-class matrices: bytes AND flops; ~0 on grids). Scaling granularity: per-column is natural
+(a column = one vertex's clique sample; entries share scale; the CSC sweep hoists it, the CSR
+sweep gathers it alongside y[col]); per-row mixes unrelated eliminations; global cannot span
+IPM's ~10 decades. Format floor: the useful in-column range is ~3.5 decades (≈4 exponent bits
+after scaling) and the mantissa needs ≥~9 bits — fp16 is near the practical optimum; fp8/8-bit
+quantization cannot reach bf16's (already insufficient) precision. Timing A/B pending
+(campaigns 5–6); bf16-scaled's unexplained 132→71 (range is not the issue for bf16) to be probed
+with a power-of-two scale.
+
+### Factor compressibility census (tools/factor_census.cpp, branch diag/factor-census)
+
+Entropy of the stored factor at the precision we need (fp16 after per-column scaling):
+grids 5.1 bits/entry (synthetic 3-weight artifact: 57% of entries equal their column max),
+**iter0040 11.0 bits/entry after dropping the dead half — fp16 is within 5 bits of optimal;
+no 8-bit scalar or structural format exists for IPM values.** Indices: deltas are large because
+only 9% (grids) / 25% (IPM) of a column's neighbours were eliminated in the same round —
+round-based elimination scatters neighbours across the ordering (structural, not an ordering
+choice); entropy floor 1.3–2.4 B/entry, varint 1.9–2.8 B. Practical fixed-width target:
+**24-bit absolute index + fp16 value = 5 B/entry (−37.5%)** for n < 16M; with the drop on IPM
+≈2.4 B per original entry (−70%). Campaign 5 caveat: iter0040's SpTRSV is dependency-bound,
+so byte cuts pay there via fewer *entries* (drop), not fewer bytes per entry; grids are where
+per-entry compression pays.
+
+### Low-precision TIMING (campaign 5, locked, paired, same-branch fp32 base)
+
+| variant | iter0040 SpTRSV/iter | iter0040 total | grid SpTRSV/iter | grid total |
+|---|---|---|---|---|
+| fp16 per-column-scaled | **+7.2%** | −6.9%* | −0.5% | −0.7% |
+| fp24 | +0.1% | −3.1%* | **−4.2%** | −3.7% |
+| drop <1e-4 (zeroed, flops-only) | −10.2% | −2.3%* | (nothing to drop) | — |
+| scheduling dynamic,256 vs static | −20% | | **+23%** | |
+
+\* iter0040 totals are dominated by iteration-count luck (44–46); read the per-iteration columns.
+Verdict: fp16 storage is iteration-neutral but NOT faster — the per-entry F16C convert +
+scale gather costs about what the bytes save (IPM's SpTRSV is dependency-bound anyway; grid's
+short rows make the per-entry decode a large fraction). fp24 (no scaling, cheap widen) is the
+only low-precision variant with a measured win: −4% grid SpTRSV. The compacting drop is the
+IPM lever (fewer entries = fewer dependent flops AND bytes) — campaign 6. Load balancing is
+real but workload-dependent: dynamic chunking wins on IPM's narrow levels (−20% SpTRSV) and
+loses badly on grid's wide ones (+23%) → the right fix is static-by-nnz partitioning.
+
+### Compacting factor drop — TIMING (campaign 6, locked, paired, iter0040)
+
+| variant | SpTRSV/iter | solve/iter | total | iters | stored entries |
+|---|---|---|---|---|---|
+| fp32 (base) | 9.63 ms | 16.24 ms | 1.876 s | 45 | 9.06 M |
+| **drop < 1e-4·colmax (compacting)** | **4.83 (−49.8%)** | **11.63 (−28.4%)** | **1.624 (−13.4%)** | 44 | 4.64 M |
+| drop < 3e-4 | 4.77 (−50.5%) | 11.49 | 1.630 | 47 | 3.98 M |
+| fp16-scaled | 11.78 (+22%) | 18.58 | 1.954 | 45 | 9.06 M |
+| fp16-scaled + drop 1e-4 | 6.08 | 12.94 | 1.748 | 45 | 4.64 M |
+
+The single largest lever found: removing the 52% of IPM factor entries below 1e-4 of their
+column max halves the triangular solves one-for-one (they are dependency-bound: cost tracks
+dependent flops on the critical path, not bytes), at zero iteration cost. Setup-time filter,
+deterministic, ~20 lines, env `APXCHOL_FACTOR_DROP` (branch perf/factor-drop @ fbbfd72).
+Grids: 0 entries below threshold → exact no-op. Recommend default 1e-4 after the social-suite
+sanity in the benchmark re-run. fp16-scaled is a confirmed loser on IPM (+22% SpTRSV: F16C
+convert on the critical path); fp32 subnormals in the factor = 0 → FTZ irrelevant.
+
+### Compensated drop on main (campaign 7, locked, paired) — MERGED as default 1e-4
+
+Plain removal on the CORRECT Laplacian path costs iterations (45→67 at 1e-4): a Laplacian
+factor's columns sum to zero, and deleting an entry leaves its weight as extra grounding at both
+endpoints. Fix: fold each column's dropped mass into its kept off-diagonals (MILU-style,
+column sums preserved) — 46→46 iters at 1e-4 AND 1e-3 (ladder neutral to 3e-3).
+
+| iter0040 | SpTRSV/iter | solve/iter | total | iters |
+|---|---|---|---|---|
+| main (composed) | 9.71 ms | 15.10 | 1.777 s | 46 |
+| **drop 1e-4 compensated (default)** | **4.88 (−50%)** | **10.08 (−33%)** | **1.574 (−11.4%)** | 46 |
+| drop 1e-3 compensated | 4.30 (−56%) | 9.37 (−38%) | 1.478 (−16.8%) | 46 |
+| drop 1e-4 plain | 5.13 | 10.17 | 1.741 | 66 |
+
+grid_2000 / com-Amazon / coAuthorsDBLP: 0 entries below threshold → exact no-op. 1e-3 is a
+candidate default pending the full-suite ladder. Composed main after all merges vs the
+Aug-18 pre-merge base (iter0040 / grid_2000 totals): ≈ −14% / −7%.
