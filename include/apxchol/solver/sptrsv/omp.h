@@ -4,8 +4,10 @@
 #include "apxchol/big_alloc.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -140,77 +142,175 @@ public:
         mark("L11_alias_or_copy");
 
         // ── CSC → CSR of L11 (for forward solve) ─────
-        // Row-range parallel transpose (APXCHOL_PAR_TRANSPOSE, default on for
-        // large m): thread t owns output row-range [r_lo,r_hi) and scans ALL
-        // columns, emitting only entries whose row is in its range. No shared
-        // writes (each thread writes a disjoint CSR region) and per-thread pos[]
-        // is only m/nt. Trades random scatter-writes for sequential redundant
-        // reads of L11_inner; values are read only for accepted entries. Output
-        // is identical to the serial scatter (columns walked in increasing order
-        // -> per-row ascending column order preserved). The row-count histogram
-        // is parallelized the same way: thread t writes only csr_row_ptr_[row+1]
-        // for row in [r_lo,r_hi) -> indices [r_lo+1, r_hi], disjoint across
-        // threads.
+        // Blocked counting-sort parallel transpose (APXCHOL_PAR_TRANSPOSE,
+        // default on for large m): O(nnz) TOTAL work. Replaces the row-range
+        // rescan scheme, where every thread scanned ALL nnz twice filtering to
+        // its own row range — O(threads·nnz) total work, so the stage's wall
+        // time was flat in thread count (71-76% of sptrsv_setup at T=16).
         //
-        // Below the size threshold the SERIAL scatter wins (thread dispatch +
-        // redundant column scans cost more than they save). Two other parallel
-        // schemes were tried and rejected:
-        //   (a) per-thread histograms (nt × m × 4 B per call) — wins on
-        //       small-n high-fanout factors but the allocation explodes on
-        //       multi-million-row grids;
+        //   Phase 1 (parallel): threads own contiguous, nnz-balanced COLUMN
+        //     ranges. Rows are split into NB ≤ 4·nt blocks of power-of-two
+        //     width (block-of-row is a shift). Thread t histograms its column
+        //     range's entries per row block into cnt[t][b].
+        //   Phase 2 (parallel): a serial exclusive prefix over cnt in
+        //     (b major, t minor) order gives every (thread, block) pair an
+        //     exact segment in an nnz-sized bucket. Thread t re-scans its
+        //     column range in ascending-column order, appending each entry
+        //     (row, col, value) to its segment of the entry's row block.
+        //   Phase 3 (parallel over blocks): block b's bucket region
+        //     [blk_off[b], blk_off[b+1]) holds exactly its rows' entries in
+        //     ascending-column order (segments are concatenated in thread
+        //     order == ascending column ranges, each internally ascending).
+        //     A per-block counting sort — count rows, exclusive prefix based
+        //     at blk_off[b] (which IS the final CSR offset of the block's
+        //     first row, since blocks partition rows contiguously), then a
+        //     stable scatter — lands every entry in its final CSR slot and
+        //     fills the block's csr_row_ptr_ range.
+        //
+        // Determinism / byte-identity: within each row, the stable per-block
+        // scatter preserves the bucket's ascending-column order — exactly the
+        // order the serial scatter (columns walked 0..m-1) produces — and
+        // csr_row_ptr_ is uniquely determined by the row counts. All three
+        // CSR arrays are therefore byte-identical to the serial result for
+        // ANY thread count (verified by SpTRSVTranspose.* unit tests).
+        //
+        // Memory: one transient bucket of nnz·(2·sizeof(node_index) +
+        // sizeof(sptrsv_value_t)) bytes (12 B/nnz on the default
+        // 32-bit-index fp32 build), allocated uninitialized (every slot is
+        // written exactly once in phase 2) and freed before the level-set
+        // build, plus the nt×NB count matrix (≤ 32·129·8 B ≈ 33 KB).
+        //
+        // Rejected alternatives:
+        //   (a) per-thread full row histograms — nt × m × 4 B per call wins
+        //       on small-n high-fanout factors but the allocation explodes on
+        //       multi-million-row grids (256 MB at m=4M, nt=16);
         //   (b) atomic-claim on shared O(m) counters — avoids the n × nt
         //       memory but cache-line ping-pong on the m-sized counters under
-        //       high thread counts makes it slower than serial on both shapes.
+        //       high thread counts makes it slower than serial on both shapes;
+        //   (c) row-range rescan (the previous scheme) — no extra memory, but
+        //       O(threads·nnz) total work: flat wall time in thread count.
+        //
+        // Below the size threshold the SERIAL scatter wins (thread dispatch
+        // overhead exceeds the work).
         static const bool kParTranspose = [] {
             const char* e = std::getenv("APXCHOL_PAR_TRANSPOSE");
             return e ? std::atoi(e) != 0 : true;
         }();
         const bool par_tr = kParTranspose && m_ > 50000;
         csr_row_ptr_.assign(static_cast<size_t>(m_) + 1, 0);
+        csr_col_idx_.resize(nnz);
+        csr_vals_.resize(nnz);
         if (par_tr) {
+            // Transient bucket, deliberately UNINITIALIZED (a std::vector
+            // would serially memset up to nnz·12 B): phase 2 writes every
+            // slot exactly once before phase 3 reads it.
+            std::unique_ptr<node_index[]>     bkt_row(new node_index[nnz]);
+            std::unique_ptr<node_index[]>     bkt_col(new node_index[nnz]);
+            std::unique_ptr<sptrsv_value_t[]> bkt_val(new sptrsv_value_t[nnz]);
+            std::vector<edge_index> cnt;      // cnt[t*NB + b]: per-(thread, block) counts
+            std::vector<edge_index> seg_off;  // segment starts, same layout as cnt
+            std::vector<edge_index> blk_off;  // NB+1 block starts (== final CSR offsets)
+            int        shift = 0;             // log2(rows per block)
+            node_index NB    = 1;             // number of row blocks
             #pragma omp parallel
             {
                 const int tid = omp_get_thread_num();
                 const int nt  = omp_get_num_threads();
-                const node_index r_lo = static_cast<node_index>((int64_t(m_) * tid) / nt);
-                const node_index r_hi = static_cast<node_index>((int64_t(m_) * (tid + 1)) / nt);
-                for (node_index j = 0; j < m_; ++j)
+                #pragma omp single
+                {
+                    // Row-block width: smallest power of two >= ceil(m/(4·nt)),
+                    // so NB <= 4·nt (~4 blocks/thread for phase-3 balance) and
+                    // block-of-row is a shift.
+                    const node_index target =
+                        (m_ + 4 * static_cast<node_index>(nt) - 1) / (4 * static_cast<node_index>(nt));
+                    node_index rpb = 1;
+                    shift = 0;
+                    while (rpb < target) { rpb <<= 1; ++shift; }
+                    NB = ((m_ - 1) >> shift) + 1;   // == ceil(m/rpb); m_ > 50000 here
+                    cnt.assign(static_cast<size_t>(nt) * NB, 0);
+                }   // implicit barrier: cnt/NB/shift visible to all threads
+                // Contiguous nnz-balanced column range for this thread (a
+                // single column is never split, so one pathologically dense
+                // column bounds the imbalance). Boundaries are monotone in
+                // tid, so ranges are disjoint and cover every entry.
+                auto col_at = [&](int t) {
+                    const edge_index tgt = static_cast<edge_index>(
+                        static_cast<std::uint64_t>(nnz) * t / nt);
+                    return static_cast<node_index>(
+                        std::lower_bound(L11_outer, L11_outer + m_ + 1, tgt) - L11_outer);
+                };
+                const node_index c_lo = col_at(tid);
+                const node_index c_hi = col_at(tid + 1);
+                // Phase 1: per-(thread, block) histogram.
+                edge_index* my_cnt = cnt.data() + static_cast<size_t>(tid) * NB;
+                for (node_index j = c_lo; j < c_hi; ++j)
+                    for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p)
+                        my_cnt[L11_inner[p] >> shift]++;
+                #pragma omp barrier
+                #pragma omp single
+                {
+                    // Exclusive prefix in (b major, t minor) order: segment
+                    // concatenation inside each block follows ascending
+                    // column ranges. O(nt·NB) — trivially serial.
+                    seg_off.resize(cnt.size());
+                    blk_off.resize(static_cast<size_t>(NB) + 1);
+                    edge_index run = 0;
+                    for (node_index b = 0; b < NB; ++b) {
+                        blk_off[b] = run;
+                        for (int t = 0; t < nt; ++t) {
+                            seg_off[static_cast<size_t>(t) * NB + b] = run;
+                            run += cnt[static_cast<size_t>(t) * NB + b];
+                        }
+                    }
+                    blk_off[NB] = run;   // == nnz
+                }   // implicit barrier
+                // Phase 2: scatter into the bucket (private cursors; each
+                // (thread, block) segment is written by one thread only).
+                std::vector<edge_index> cur(
+                    seg_off.begin() + static_cast<size_t>(tid) * NB,
+                    seg_off.begin() + static_cast<size_t>(tid + 1) * NB);
+                for (node_index j = c_lo; j < c_hi; ++j)
                     for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p) {
                         const node_index row = L11_inner[p];
-                        if (row >= r_lo && row < r_hi) csr_row_ptr_[row + 1]++;
+                        const edge_index out = cur[row >> shift]++;
+                        bkt_row[out] = row;
+                        bkt_col[out] = j;
+                        bkt_val[out] = static_cast<sptrsv_value_t>(L11_vals[p]);
                     }
+                #pragma omp barrier
+                // Phase 3: per-block stable counting sort into the final CSR
+                // (each block owns disjoint row + output ranges — race-free
+                // and schedule-independent).
+                #pragma omp for schedule(dynamic, 1)
+                for (node_index b = 0; b < NB; ++b) {
+                    const node_index r_lo = static_cast<node_index>(
+                        static_cast<std::uint64_t>(b) << shift);
+                    const node_index r_hi = static_cast<node_index>(std::min<std::uint64_t>(
+                        m_, static_cast<std::uint64_t>(b + 1) << shift));
+                    std::vector<edge_index> pos(r_hi - r_lo, 0);
+                    for (edge_index k = blk_off[b]; k < blk_off[b + 1]; ++k)
+                        pos[bkt_row[k] - r_lo]++;
+                    edge_index run = blk_off[b];   // final CSR offset of row r_lo
+                    for (node_index r = r_lo; r < r_hi; ++r) {
+                        const edge_index c = pos[r - r_lo];
+                        csr_row_ptr_[r] = run;
+                        pos[r - r_lo]   = run;
+                        run += c;
+                    }
+                    for (edge_index k = blk_off[b]; k < blk_off[b + 1]; ++k) {
+                        const edge_index out = pos[bkt_row[k] - r_lo]++;
+                        csr_col_idx_[out] = bkt_col[k];
+                        csr_vals_[out]    = bkt_val[k];
+                    }
+                }   // implicit barrier
             }
+            csr_row_ptr_[m_] = nnz;
         } else {
             for (node_index j = 0; j < m_; ++j)
                 for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p)
                     csr_row_ptr_[L11_inner[p] + 1]++;
-        }
-        for (node_index i = 0; i < m_; ++i)
-            csr_row_ptr_[i + 1] += csr_row_ptr_[i];
-        csr_col_idx_.resize(nnz);
-        csr_vals_.resize(nnz);
-        if (par_tr) {
-            #pragma omp parallel
-            {
-                const int tid = omp_get_thread_num();
-                const int nt  = omp_get_num_threads();
-                const node_index r_lo = static_cast<node_index>((int64_t(m_) * tid) / nt);
-                const node_index r_hi = static_cast<node_index>((int64_t(m_) * (tid + 1)) / nt);
-                if (r_hi > r_lo) {
-                    std::vector<edge_index> pos(csr_row_ptr_.begin() + r_lo,
-                                                csr_row_ptr_.begin() + r_hi);
-                    for (node_index j = 0; j < m_; ++j) {
-                        for (edge_index p = L11_outer[j]; p < L11_outer[j + 1]; ++p) {
-                            const node_index row = L11_inner[p];
-                            if (row < r_lo || row >= r_hi) continue;
-                            const edge_index out = pos[row - r_lo]++;
-                            csr_col_idx_[out] = j;
-                            csr_vals_[out]    = static_cast<sptrsv_value_t>(L11_vals[p]);
-                        }
-                    }
-                }
-            }
-        } else {
+            for (node_index i = 0; i < m_; ++i)
+                csr_row_ptr_[i + 1] += csr_row_ptr_[i];
             std::vector<edge_index> pos(csr_row_ptr_.begin(),
                                         csr_row_ptr_.begin() + m_);
             for (node_index j = 0; j < m_; ++j) {
@@ -218,7 +318,7 @@ public:
                     const node_index row = L11_inner[p];
                     const edge_index out = pos[row]++;
                     csr_col_idx_[out] = j;
-                    csr_vals_[out]    = L11_vals[p];
+                    csr_vals_[out]    = static_cast<sptrsv_value_t>(L11_vals[p]);
                 }
             }
         }
@@ -285,8 +385,20 @@ public:
             }
             int maxd = 0;
             for (node_index c = 0; c < m_; ++c) maxd = std::max(maxd, rof[c]);
+            // Pre-size every level exactly (one O(m) histogram pass) so the
+            // fill below never reallocates; contents and order are unchanged.
+            // The fill itself stays serial: it is a stable multi-bucket
+            // append whose parallelization would need per-(thread, level)
+            // exact offsets — another full two-pass — for an O(m) loop that
+            // is small next to the transpose above.
+            std::vector<node_index> lvl_cnt(static_cast<size_t>(maxd) + 1, 0);
+            for (node_index c = 0; c < m_; ++c) lvl_cnt[rof[c]]++;
             fwd_levels_.assign(maxd + 1, {});
             bck_levels_.assign(maxd + 1, {});
+            for (int d = 0; d <= maxd; ++d) {
+                fwd_levels_[d].reserve(lvl_cnt[d]);
+                bck_levels_[maxd - d].reserve(lvl_cnt[d]);
+            }
             for (node_index c = 0; c < m_; ++c) {
                 fwd_levels_[rof[c]].push_back(c);          // L solve: round order
                 bck_levels_[maxd - rof[c]].push_back(c);   // L^T solve: reversed
@@ -295,6 +407,10 @@ public:
         } else {
         // ── Forward level sets (for L solve) ────────────────────
         // Row i depends on columns j < i where L(i,j) ≠ 0.
+        // The depth recurrence is inherently sequential (depth[i] reads the
+        // depths of earlier rows along the DAG's longest path), so it stays
+        // serial; the fill is pre-sized from a depth histogram so its
+        // push_backs never reallocate (contents and order unchanged).
         {
             std::vector<int> depth(m_, 0);
             int max_depth = 0;
@@ -305,7 +421,11 @@ public:
                 depth[i] = d;
                 max_depth = std::max(max_depth, d);
             }
+            std::vector<node_index> lvl_cnt(static_cast<size_t>(max_depth) + 1, 0);
+            for (node_index i = 0; i < m_; ++i) lvl_cnt[depth[i]]++;
             fwd_levels_.resize(max_depth + 1);
+            for (int d = 0; d <= max_depth; ++d)
+                fwd_levels_[d].reserve(lvl_cnt[d]);
             for (node_index i = 0; i < m_; ++i)
                 fwd_levels_[depth[i]].push_back(i);
         }
@@ -314,6 +434,8 @@ public:
         // ── Backward level sets (for L^T solve) ─────────────────
         // Column j: z[j] = (y[j] - Σ L(k,j)*z[k]) / L(j,j)  for k > j.
         // So column j depends on z[k] for k > j where L(k,j) ≠ 0.
+        // Same structure as the forward scan: sequential depth recurrence
+        // (reverse direction), histogram-pre-sized fill.
         {
             std::vector<int> depth(m_, 0);
             int max_depth = 0;
@@ -327,7 +449,11 @@ public:
                 depth[j] = d;
                 max_depth = std::max(max_depth, d);
             }
+            std::vector<node_index> lvl_cnt(static_cast<size_t>(max_depth) + 1, 0);
+            for (node_index j = 0; j < m_; ++j) lvl_cnt[depth[j]]++;
             bck_levels_.resize(max_depth + 1);
+            for (int d = 0; d <= max_depth; ++d)
+                bck_levels_[d].reserve(lvl_cnt[d]);
             for (node_index j = 0; j < m_; ++j)
                 bck_levels_[depth[j]].push_back(j);
         }
@@ -634,6 +760,13 @@ public:
         }
     }
     bool ready() const { return ready_; }
+
+    // Read-only views of the CSR built by setup's CSC→CSR transpose. Used by
+    // the SpTRSVTranspose unit tests to byte-compare the parallel transpose
+    // against a serial reference (and available for diagnostics).
+    const auto& csr_row_ptr() const { return csr_row_ptr_; }
+    const auto& csr_col_idx() const { return csr_col_idx_; }
+    const auto& csr_vals()    const { return csr_vals_; }
 
 private:
     node_index m_ = 0;

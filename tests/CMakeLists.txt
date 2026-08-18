@@ -14,6 +14,7 @@ add_executable(unit_tests
         test_factorize.cpp
         test_elimination.cpp
         test_custom_hooks.cpp
+        test_sptrsv_transpose.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE
