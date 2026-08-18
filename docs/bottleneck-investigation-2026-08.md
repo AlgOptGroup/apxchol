@@ -354,3 +354,40 @@ extracted before loss and cross-verified by 8 independent re-derivations from th
 raw perf.data (`~/.cache/apxchol_prof/*.data`) and in-conversation records. Verifier and
 synthesis reports: `~/.cache/apxchol_prof/reports/`. Workflow journal:
 `~/.claude/projects/.../workflows/wf_dfc44256-718/journal.jsonl`.
+
+## Addendum 2 — campaign 3 (2026-08-18): lever experiments, paired locked A/B
+
+Base = main 3fac63f (includes copy-removal + O(nnz) transpose). Locked 2.5 GHz, T=16,
+5 interleaved reps per variant, medians; per-iteration solve compared. Full table:
+`~/.cache/apxchol_prof/results3/`, `harness2/c3_analyze.py`.
+
+| lever | iter0040 solve/iter | iter0040 total | grid solve/iter | grid total | verdict |
+|---|---|---|---|---|---|
+| **PCG fusion** (30→22 vector streams, all parallel, deterministic) | **−12.3%** | **−10.3%** | **−8.4%** | **−3.9%** | ship |
+| SDDM fix + `center` (correct Laplacian path, per-apply centering) | +10.6% | −3% | **+33.7%** | +21.5% | the cost of naive centering |
+| SDDM fix + `center-k` (re-center every 10th application) | −0.9% | −7%* | −0.1% | ±0 | **adopt** (correctness at zero cost) |
+| SDDM fix + `reg` (explicit deterministic eps=1e-8 grounding, SDDM path) | +2.3% | −5%* | −1.0% | +1.9% | viable alternative; full-rank factor |
+| tail rounds `TAIL_THREADS=4` / `OMP_THRESHOLD=256` (vs same-branch center) | 0 | setup −3…−4% | 0 | setup −5…−7% | small; merge only as trivial env knob |
+| SpTRSV P2P flags / counter sync (bit-identical) | +7% / +2% | 0 / −4% | +1% / −2% | +4% / 0 | **negative** — barrier count is not wall time |
+| CCD auto-placement (8T on one CCD, in-library) | −3.5% | −3.0% | +9.8% | +8.3% | opt-in only; needs a workload heuristic |
+| bf16 factor values (all) | 5.8× iters | — | +33% iters | — | **negative** (see memory note; diag32 variant pending) |
+
+\* the grounding/tail branch also carries a bit-identical persistent-`incoming[]` change that
+makes its setup ~5–8% faster than base on iter0040; compare within that family for the
+grounding effect. Verified 3-mode convergence (independent true-residual tool): all reach
+~8–9e-9 against the original singular operator; center-k leaves a null-space constant in x
+(one final centring restores min-norm).
+
+### Barrier spin — what the P2P negative does and does not mean
+
+The P2P/counter experiment swapped the synchronization *primitive* while keeping the *work
+assignment*; it measured 0…+7%. Interpretation: threads at a barrier wait for the slowest
+thread of that level, which is slow because of memory or because it drew more work; the
+primitive is irrelevant. This does NOT close the sync topic — it redirects it to **balance**:
+(1) SpTRSV levels are split by row-index range, not by nnz → an nnz-balanced split is a
+few-line test; (2) the CPU state of the art (Park ISC'14; GrowLocal 2025) reorders the
+factor so co-scheduled rows are contiguous and agglomerates levels into fatter supersteps —
+1.4× over the MKL-style baseline on unstructured factors; untested here; (3) elimination
+rounds could pipeline next-round `prune` into idle time (substantial restructuring; the tail
+knob is the cheap partial answer). Cheapest discriminator first: if nnz-balancing moves
+nothing, the wait is memory, not imbalance, and (2) is not worth the effort either.
