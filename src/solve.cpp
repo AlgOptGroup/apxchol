@@ -25,8 +25,8 @@ inline void ensure_eigen_parallel() {
 }
 
 // One-time build-flag report straight from the LIBRARY TU: the width is
-// sizeof() of the type solve.cpp actually compiled, so 4 == this .so/.a was
-// built with -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Reports whichever SpTRSV
+// sizeof() of the type solve.cpp actually compiled, so 2 == this .so/.a was
+// built with -DAPXCHOL_SPTRSV_BF16, 4 == -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Reports whichever SpTRSV
 // backend (CPU omp / GPU cuda) this build compiled. Opt-in via
 // APXCHOL_VERBOSE — a library should be silent on stderr by default.
 inline void print_sptrsv_banner_once() {
@@ -42,7 +42,9 @@ inline void print_sptrsv_banner_once() {
         const std::size_t vbytes = apxchol::omp_sptrsv::value_bytes;
 #endif
         std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem"
-#ifdef APXCHOL_SPTRSV_FP32
+#if defined(APXCHOL_SPTRSV_BF16)
+                             " (APXCHOL_SPTRSV_BF16 defined)\n",
+#elif defined(APXCHOL_SPTRSV_FP32)
                              " (APXCHOL_SPTRSV_FP32 defined)\n",
 #else
                              " (APXCHOL_SPTRSV_FP32 NOT defined)\n",

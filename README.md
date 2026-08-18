@@ -198,15 +198,19 @@ you need `pcg`'s interface.
 ## Build options
 
 Compile-time options (`APXCHOL_USE_CUDA`, `APXCHOL_SPTRSV_FP32`,
-`APXCHOL_POOL_FP32`, `APXCHOL_64BIT_EDGE_INDICES` /
+`APXCHOL_SPTRSV_BF16`, `APXCHOL_POOL_FP32`, `APXCHOL_64BIT_EDGE_INDICES` /
 `APXCHOL_64BIT_NODE_INDICES`, `APXCHOL_BUILD_EXAMPLES` /
 `APXCHOL_BUILD_TESTS` / `APXCHOL_BUILD_TOOLS`) are declared and documented
 where they live, in [CMakeLists.txt](CMakeLists.txt) — `cmake -LH build`
 lists them with their help strings. `APXCHOL_SPTRSV_FP32` and
 `APXCHOL_POOL_FP32` default ON (fp32 factor values / fp32 residual-pool
 weights; the PCG recurrence stays fp64; pass `=OFF` for an fp64 baseline);
-everything else defaults OFF except the `APXCHOL_BUILD_EXAMPLES` /
-`APXCHOL_BUILD_TESTS` toggles. Release builds add `-march=native`.
+`APXCHOL_SPTRSV_BF16` (default OFF, CPU backend only) narrows the SpTRSV
+factor storage further to bfloat16 — reads widen to fp64 in registers, so
+it only changes the preconditioner quality (iteration count), not the
+attainable residual; everything else defaults OFF except the
+`APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS` toggles. Release builds
+add `-march=native`.
 
 ## Benchmarks
 

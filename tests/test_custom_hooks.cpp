@@ -10,6 +10,18 @@
 
 namespace {
 
+// "Exact factor => O(1) PCG iterations" bound. An exact Cholesky factor stored
+// at fp32/fp64 preconditions PCG to <= 3 iterations; under bf16 STORAGE
+// (-DAPXCHOL_SPTRSV_BF16) every factor entry carries a 2^-8 relative rounding,
+// so the "exact" factor is only an approximate one and PCG needs a few more
+// (measured 5-6 on the grids below) -- iteration count, not the residual
+// floor, is what precision buys, so only this bound relaxes.
+#if defined(APXCHOL_SPTRSV_BF16)
+constexpr int kExactFactorMaxIters = 8;
+#else
+constexpr int kExactFactorMaxIters = 3;
+#endif
+
 Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
     const int n = rows * cols;
     std::vector<Eigen::Triplet<double>> t;
@@ -108,7 +120,7 @@ TEST(CustomEliminator, LambdaViaAsEliminator) {
 
     apxchol::cpu_solver slv(L, std::move(F));
     auto res = slv.solve(b, 1e-8, 500);
-    EXPECT_LE(res.iterations, 3);            // exact factor
+    EXPECT_LE(res.iterations, kExactFactorMaxIters);   // exact factor
     EXPECT_LT(res.residual, 1e-8);
 }
 
@@ -122,7 +134,7 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     apxchol::cpu_solver slv(A, std::move(F));
     auto res = slv.solve(apxchol::generate_test_rhs(A.rows()), 1e-12, 50);
     // An exact factor preconditions PCG to convergence in O(1) iterations.
-    EXPECT_LE(res.iterations, 3);
+    EXPECT_LE(res.iterations, kExactFactorMaxIters);
     EXPECT_LT(res.residual, 1e-12);
 }
 

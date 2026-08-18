@@ -164,7 +164,7 @@ static Eigen::SparseMatrix<double> eigen_topleft(const apxchol::sparse_csc& L,
         for (apxchol::edge_index p = outer[c]; p < outer[c + 1]; ++p)
             if (static_cast<long long>(inner[p]) < m)
                 trips.emplace_back(static_cast<int>(inner[p]),
-                                   static_cast<int>(c), vals[p]);
+                                   static_cast<int>(c), apxchol::widen(vals[p]));
     Eigen::SparseMatrix<double> M(static_cast<int>(m), static_cast<int>(m));
     M.setFromTriplets(trips.begin(), trips.end());
     M.makeCompressed();

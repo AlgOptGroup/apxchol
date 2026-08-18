@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/types.h"
+#include "apxchol/bf16.h"
 #include <vector>
 #include <cstddef>
 #include <cassert>
@@ -15,7 +16,19 @@ namespace apxchol {
 // triangular solve. The outer PCG (vectors, dots, SpMV/residual) stays fp64,
 // so it still converges to 1e-8: the preconditioner is approximate, fp32 only
 // costs a few extra PCG iters ("changes iters, not the residual floor").
-#ifdef APXCHOL_SPTRSV_FP32
+//
+// BF16 (-DAPXCHOL_SPTRSV_BF16, OFF by default; CPU/omp backend only) goes one
+// step further: 16-bit storage (bf16_t, see bf16.h) for the same arrays --
+// 2 B/nnz of value stream instead of 4, i.e. the 8 B/nnz (idx + val) factor
+// stream drops to 6 B/nnz. Compute is unchanged: every read widens
+// bf16 -> fp32 -> double in registers via widen(); the rounding happens
+// once, at the factor-assembly write (RNE on the fp32 pattern). Precision
+// is 2^-8 relative per entry, so this is a preconditioner-quality knob:
+// PCG still converges to tol, possibly in more iterations. It takes
+// precedence over APXCHOL_SPTRSV_FP32 when both are defined.
+#if defined(APXCHOL_SPTRSV_BF16)
+using sptrsv_value_t = bf16_t;
+#elif defined(APXCHOL_SPTRSV_FP32)
 using sptrsv_value_t = float;
 #else
 using sptrsv_value_t = double;
@@ -45,7 +58,8 @@ struct sparse_csc {
     std::vector<edge_index>     outer_; // n_+1 column pointers (cumulative nnz)
     std::vector<node_index>     inner_; // row indices
     // Off-diagonal AND diagonal factor values, fp32 under -DAPXCHOL_SPTRSV_FP32
-    // (saves ~nnz*4 B at the assembly peak). The diagonal can ride along in fp32:
+    // (saves ~nnz*4 B at the assembly peak), bf16 under -DAPXCHOL_SPTRSV_BF16
+    // (writes narrow via bf16_t's converting ctor; reads must widen()). The diagonal can ride along in fp32:
     // it's L(i,i) = sqrt(weighted degree), a benign well-scaled positive scalar,
     // and fp32 diag converges to 1e-8 just like fp64 (verified on IPM/social/grid;
     // the GPU backend has always stored the diagonal in fp32 too). The fp64 build

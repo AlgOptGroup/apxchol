@@ -48,21 +48,26 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// remains as an opt-in escape hatch via APXCHOL_BCK_SCHED=syncfree for
 /// orderings that do produce deep-thin factors.
 
-// sptrsv_value_t (fp32 under -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in
-// sparse_csc.h and shared with the CUDA backend. It halves csr_vals_/csc_vals_
-// -- the two largest factor copies -- cutting memory and bandwidth on the
-// bandwidth-bound (~94% of peak) triangular solve; diag + outer PCG stay fp64.
+// sptrsv_value_t (bf16 under -DAPXCHOL_SPTRSV_BF16, fp32 under
+// -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in sparse_csc.h and shared with
+// the CUDA backend (fp32/fp64 only). It narrows csr_vals_/csc_vals_ -- the two
+// largest factor copies -- cutting memory and bandwidth on the bandwidth-bound
+// (~94% of peak) triangular solve. Every read of a stored value in the solve
+// kernels below goes through widen() (bf16.h): the arithmetic is ALWAYS done in
+// double, whatever the storage width; diag + outer PCG stay fp64.
 
 class omp_sptrsv {
 public:
     omp_sptrsv() = default;
 
     // Compiled width of the off-diagonal factor values, read straight off the
-    // type the compiler actually built. 4 == this TU was compiled with
-    // -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Printed at startup so the build flag is
-    // observable at runtime (no inferring from residuals).
+    // type the compiler actually built. 2 == this TU was compiled with
+    // -DAPXCHOL_SPTRSV_BF16, 4 == -DAPXCHOL_SPTRSV_FP32, 8 == fp64. Printed at
+    // startup so the build flag is observable at runtime (no inferring from
+    // residuals).
     static constexpr std::size_t value_bytes = sizeof(sptrsv_value_t);
     static constexpr const char* value_name =
+        sizeof(sptrsv_value_t) == 2 ? "bf16" :
         sizeof(sptrsv_value_t) == 4 ? "float (fp32)" : "double (fp64)";
 
     /// Analyze L11 = L.topLeftCorner(m, m): build CSR, CSC, and level sets.
@@ -176,7 +181,7 @@ public:
         //
         // Memory: one transient bucket of nnz·(2·sizeof(node_index) +
         // sizeof(sptrsv_value_t)) bytes (12 B/nnz on the default
-        // 32-bit-index fp32 build), allocated uninitialized (every slot is
+        // 32-bit-index fp32 build, 10 B/nnz under bf16), allocated uninitialized (every slot is
         // written exactly once in phase 2) and freed before the level-set
         // build, plus the nt×NB count matrix (≤ 32·129·8 B ≈ 33 KB).
         //
@@ -326,7 +331,8 @@ public:
         // No separate diagonal array: the solve reads L(i,i) inline from the factor
         // -- the LAST entry of CSR row i (forward: sum loop stops one short) and the
         // FIRST entry of CSC column j (back: sum loop starts one in) -- at the same
-        // precision as the off-diagonals (fp32 under the flag). This is bit-identical
+        // precision as the off-diagonals (fp32 / bf16 under the flags; the read
+        // widens like every other one). This is bit-identical
         // to the old fp64 diag_ (L11_vals is already fp32 under the flag, so diag_ only
         // ever held the fp32 value widened to double) and matches the GPU backend,
         // which has always read the diagonal inline.
@@ -584,15 +590,15 @@ public:
                             const edge_index row_end   = csr_row_ptr_[i + 1] - 1;
                             edge_index p = row_start;
                             for (; p + 4 <= row_end; p += 4) {
-                                s0 += csr_vals_[p + 0] * y_out[csr_col_idx_[p + 0]];
-                                s1 += csr_vals_[p + 1] * y_out[csr_col_idx_[p + 1]];
-                                s2 += csr_vals_[p + 2] * y_out[csr_col_idx_[p + 2]];
-                                s3 += csr_vals_[p + 3] * y_out[csr_col_idx_[p + 3]];
+                                s0 += widen(csr_vals_[p + 0]) * y_out[csr_col_idx_[p + 0]];
+                                s1 += widen(csr_vals_[p + 1]) * y_out[csr_col_idx_[p + 1]];
+                                s2 += widen(csr_vals_[p + 2]) * y_out[csr_col_idx_[p + 2]];
+                                s3 += widen(csr_vals_[p + 3]) * y_out[csr_col_idx_[p + 3]];
                             }
                             double sum = (s0 + s1) + (s2 + s3);
                             for (; p < row_end; ++p)
-                                sum += csr_vals_[p] * y_out[csr_col_idx_[p]];
-                            y_out[i] = (x_in[i] - sum) / csr_vals_[csr_row_ptr_[i + 1] - 1];
+                                sum += widen(csr_vals_[p]) * y_out[csr_col_idx_[p]];
+                            y_out[i] = (x_in[i] - sum) / widen(csr_vals_[csr_row_ptr_[i + 1] - 1]);
                         }
                     } // implicit barrier
                 } else {
@@ -608,8 +614,8 @@ public:
                         }
                         double sum = 0.0;
                         for (edge_index p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
-                            sum += csr_vals_[p] * y_out[csr_col_idx_[p]];
-                        y_out[i] = (x_in[i] - sum) / csr_vals_[csr_row_ptr_[i + 1] - 1];
+                            sum += widen(csr_vals_[p]) * y_out[csr_col_idx_[p]];
+                        y_out[i] = (x_in[i] - sum) / widen(csr_vals_[csr_row_ptr_[i + 1] - 1]);
                     } // implicit barrier on omp for
                 }
             }
@@ -654,15 +660,15 @@ public:
                             const edge_index col_end   = csc_col_ptr_[j + 1];
                             edge_index p = col_start;
                             for (; p + 4 <= col_end; p += 4) {
-                                s0 += csc_vals_[p + 0] * y_out[csc_row_idx_[p + 0]];
-                                s1 += csc_vals_[p + 1] * y_out[csc_row_idx_[p + 1]];
-                                s2 += csc_vals_[p + 2] * y_out[csc_row_idx_[p + 2]];
-                                s3 += csc_vals_[p + 3] * y_out[csc_row_idx_[p + 3]];
+                                s0 += widen(csc_vals_[p + 0]) * y_out[csc_row_idx_[p + 0]];
+                                s1 += widen(csc_vals_[p + 1]) * y_out[csc_row_idx_[p + 1]];
+                                s2 += widen(csc_vals_[p + 2]) * y_out[csc_row_idx_[p + 2]];
+                                s3 += widen(csc_vals_[p + 3]) * y_out[csc_row_idx_[p + 3]];
                             }
                             double sum = (s0 + s1) + (s2 + s3);
                             for (; p < col_end; ++p)
-                                sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
-                            y_out[j] = (x_in[j] - sum) / csc_vals_[csc_col_ptr_[j]];
+                                sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
+                            y_out[j] = (x_in[j] - sum) / widen(csc_vals_[csc_col_ptr_[j]]);
                         }
                     } // implicit barrier
                 } else {
@@ -678,8 +684,8 @@ public:
                         }
                         double sum = 0.0;
                         for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
-                            sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
-                        y_out[j] = (x_in[j] - sum) / csc_vals_[csc_col_ptr_[j]];
+                            sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
+                        y_out[j] = (x_in[j] - sum) / widen(csc_vals_[csc_col_ptr_[j]]);
                     } // implicit barrier on omp for
                 }
             }
@@ -726,8 +732,8 @@ public:
 
                 double sum = 0.0;
                 for (edge_index p = csc_col_ptr_[j] + 1; p < csc_col_ptr_[j + 1]; ++p)
-                    sum += csc_vals_[p] * y_out[csc_row_idx_[p]];
-                y_out[j] = (y_out[j] - sum) / csc_vals_[csc_col_ptr_[j]];
+                    sum += widen(csc_vals_[p]) * y_out[csc_row_idx_[p]];
+                y_out[j] = (y_out[j] - sum) / widen(csc_vals_[csc_col_ptr_[j]]);
 
                 // Notify dependents: columns i < j with L(j, i) ≠ 0.
                 // CSR row j lists exactly those, with diagonal last.
@@ -787,13 +793,13 @@ private:
     // col_idx holds column ids (node_index).
     big_vec<edge_index>     csr_row_ptr_;
     big_vec<node_index>     csr_col_idx_;
-    big_vec<sptrsv_value_t> csr_vals_;   // fp32 under APXCHOL_SPTRSV_FP32
+    big_vec<sptrsv_value_t> csr_vals_;   // fp32 under APXCHOL_SPTRSV_FP32, bf16 under _BF16
 
     // CSC of L11 (back solve). col_ptr is an offset array (edge_index);
     // row_idx holds row ids (node_index).
     big_vec<edge_index>     csc_col_ptr_;
     big_vec<node_index>     csc_row_idx_;
-    big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32
+    big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32, bf16 under _BF16
 
     // Level sets.
     std::vector<std::vector<node_index>> fwd_levels_;
