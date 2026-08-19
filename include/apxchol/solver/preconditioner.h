@@ -40,9 +40,20 @@ namespace apxchol {
 // parallel pass in the solver).
 namespace detail {
 
-/// Minimum n before a fused vector pass engages OpenMP (same threshold the
-/// partitioners use for their per-vertex loops; below it fork-join dominates).
-inline constexpr Eigen::Index kFusedOmpMin = 2000;
+/// Minimum n before a fused vector pass engages OpenMP. At or below it the
+/// SAME loop runs on the encountering thread (the `if` clause disables the
+/// team, omp_ids reports tid 0 / nt 1), so the sub-threshold path is
+/// bit-identical to a T=1 run -- one code path, no second kernel. Default
+/// 2000 via env_knobs (APXCHOL_FUSED_PARALLEL_MIN overrides; read once).
+/// Do NOT raise it to make mid-size problems "cache-friendly serial": at
+/// n = 299k-335k every gated pass measured FASTER parallel at T=16, and a
+/// serial stretch also starves the level-set SpTRSV around it (sleeping
+/// team) -- see the knob's doc in env_knobs.h for the 2026-08-19 numbers.
+inline Eigen::Index fused_omp_min() noexcept {
+    static const Eigen::Index v =
+        static_cast<Eigen::Index>(env_knobs::get().fused_parallel_min);
+    return v;
+}
 
 /// Per-thread stride (in doubles) of the partial-sum buffer: one cache line
 /// per thread, so the single end-of-chunk write never false-shares.
@@ -91,7 +102,7 @@ inline double reduce_parts(const double* part, int nt, int slot = 0) noexcept {
 /// part_capacity() doubles. Fixed 4-way accumulator split per chunk.
 inline double det_sum(const double* v, Eigen::Index n, double* part) {
     int nt_used = 1;
-    #pragma omp parallel if(n > kFusedOmpMin)
+    #pragma omp parallel if(n > fused_omp_min())
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -375,7 +386,7 @@ private:
         double* part = part_.data();
         auto gather_out = [&](const double* src, double shift) {
             int nt_used = 1;
-            #pragma omp parallel if(n > detail::kFusedOmpMin)
+            #pragma omp parallel if(n > detail::fused_omp_min())
             {
                 int tid, nt; detail::omp_ids(tid, nt);
                 if (tid == 0) nt_used = nt;
@@ -407,7 +418,7 @@ private:
 
         if (F_.sddm) {
             // ── SDDM path: full-rank factor, no centering ──
-            #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+            #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
             for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
             if (cp_) (*cp_)("permute");
 
@@ -446,11 +457,11 @@ private:
                 // Input centering fused into the permute scatter:
                 // z[P[v]] = b[v] - mean(b), mean from the caller's Σb.
                 const double b_mean = b_sum / static_cast<double>(n);
-                #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+                #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
                 for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v] - b_mean;
             } else {
                 // Skipped application: plain scatter (b_sum unused).
-                #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+                #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
                 for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
             }
             if (cp_) (*cp_)("permute");

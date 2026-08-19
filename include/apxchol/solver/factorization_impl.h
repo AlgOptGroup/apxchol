@@ -167,7 +167,9 @@ void eliminate_partition_singleton(const Eliminator& elim,
     // serial tail, unchanged. The parallel path applies clique edges in
     // thread-arrival order, so a tail-parallel factor may differ from the
     // serial-tail factor by fp merge-order ulps (same class of difference as
-    // the main path at T > 1).
+    // the main path at T > 1); rounds whose IS fits in one schedule(dynamic,64)
+    // chunk are processed by a single thread and stay bit-deterministic.
+    // Promoting tail 4 to the default measured neutral-to-worse (2026-08-19).
     const int tail_threads = detail::env_knobs::get().tail_threads;
     const bool tail_parallel = tail_threads > 0 && n_verts <= opts.omp_threshold;
     if (n_verts > opts.omp_threshold || tail_parallel) {

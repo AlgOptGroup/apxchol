@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -13,6 +14,18 @@
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/solver/solve.h"
+
+// The fused PCG / preconditioner vector passes engage their OpenMP team only
+// above APXCHOL_FUSED_PARALLEL_MIN (default 2000). Pin the default here so
+// the PcgFusion determinism tests below keep exercising the PARALLEL
+// reduction scheme even if the ambient environment raises the knob (the
+// serial path, one thread over the whole range, is trivially deterministic).
+// setenv at static-init time runs before the first env_knobs::get()
+// (read-once).
+static const bool pin_fused_parallel_min = [] {
+    setenv("APXCHOL_FUSED_PARALLEL_MIN", "2000", /*overwrite=*/1);
+    return true;
+}();
 
 // ── Helpers ──────────────────────────────────────────
 
@@ -388,9 +401,10 @@ TYPED_TEST(FactorizeTest, LaplacianFlagNotSet) {
 // in fused passes with hand-rolled per-thread partial reductions (see the
 // detail:: scaffolding in preconditioner.h). Same factor + same b must give
 // bit-identical iterations / residual / x run to run at the thread count the
-// test process has. n = 10k is above the OpenMP engagement threshold, so
-// with OMP_NUM_THREADS > 1 this exercises the parallel path (a reduction()
-// clause or any completion-order sum would fail this at T > 1).
+// test process has. n = 10k is above the OpenMP engagement threshold
+// (APXCHOL_FUSED_PARALLEL_MIN, pinned to its 2000 default at the top of this
+// file), so with OMP_NUM_THREADS > 1 this exercises the parallel path (a
+// reduction() clause or any completion-order sum would fail this at T > 1).
 static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<double>& A,
                                                  const Eigen::VectorXd& b, bool laplacian) {
     apxchol::solve_options opts;
@@ -453,7 +467,7 @@ TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
 // the end -- also for a warm start, whose constant component must not leak
 // into the answer.
 TEST(Grounding, LaplacianSolutionIsMinNorm) {
-    auto L = grid_laplacian(60, 60);        // n = 3600 > kFusedOmpMin
+    auto L = grid_laplacian(60, 60);        // n = 3600 > APXCHOL_FUSED_PARALLEL_MIN (2000)
     auto b = apxchol::generate_test_rhs(L.rows());
     apxchol::solve_options opts;
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;

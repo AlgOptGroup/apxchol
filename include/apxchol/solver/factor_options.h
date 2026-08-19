@@ -56,7 +56,11 @@ struct factor_options {
     unsigned seed = 42;
     partition_options partition;     // selection knobs (see above)
     double min_is_fraction = 0.05;   // fall back to sequential when IS < 5% of active
-    size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP
+    size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP.
+                                     // Also gates the partitioners' parallel paths;
+                                     // lowering it below typical round sizes makes the
+                                     // factor structure nondeterministic run to run
+                                     // (racy block_greedy conflicts -- see env_knobs.h)
     std::string is_select = "block_greedy";  // Partitioner name (runtime dispatch via dispatch_partitioner)
 
     // When the main IS-finding loop bails out (IS < min_is_fraction · active),

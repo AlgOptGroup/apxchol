@@ -183,7 +183,7 @@ inline double parallel_spmv_csr(const Eigen::SparseMatrix<S, Eigen::RowMajor>& L
     const auto* inner = Lrm.innerIndexPtr();
     const S*    val   = Lrm.valuePtr();
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::kFusedOmpMin)
+    #pragma omp parallel if(n > detail::fused_omp_min())
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -226,7 +226,7 @@ inline void update_xr(double* x, const double* p, double* r, const double* Ap,
                       double alpha, Eigen::Index n, double* part,
                       double& rr, double& rs) {
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::kFusedOmpMin)
+    #pragma omp parallel if(n > detail::fused_omp_min())
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -265,7 +265,7 @@ inline void update_xr(double* x, const double* p, double* r, const double* Ap,
 
 // p = z + beta*p in one parallel pass (no reduction).
 inline void update_p(double* p, const double* z, double beta, Eigen::Index n) {
-    #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+    #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
     for (Eigen::Index i = 0; i < n; ++i) p[i] = z[i] + beta * p[i];
 }
 
@@ -274,7 +274,7 @@ inline void update_p(double* p, const double* z, double beta, Eigen::Index n) {
 inline void init_residual(double* r, const double* b, const double* Ax0,
                           Eigen::Index n, double* part, double& rr, double& rs) {
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::kFusedOmpMin)
+    #pragma omp parallel if(n > detail::fused_omp_min())
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -320,7 +320,7 @@ inline void init_residual(double* r, const double* b, const double* Ax0,
 // (detail::det_sum) + one parallel subtract pass.
 inline void center_x(double* x, Eigen::Index n, double* part) {
     const double mean = detail::det_sum(x, n, part) / static_cast<double>(n);
-    #pragma omp parallel for schedule(static) if(n > detail::kFusedOmpMin)
+    #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
     for (Eigen::Index i = 0; i < n; ++i) x[i] -= mean;
 }
 
