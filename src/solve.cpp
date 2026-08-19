@@ -94,8 +94,9 @@ inline void print_sptrsv_banner_once() {
         // (unset = AUTO: the dataflow backend on the fp32 build; on fp64
         // cuSPARSE with the level-set fallback where cuSPARSE is compiled in
         // -- CMake APXCHOL_CUDA_WITH_CUSPARSE -- else the level-set) and the
-        // kernel backends' opt-in fp16 storage APXCHOL_GPU_SPTRSV_FP16=1.
-        const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_from_env();
+        // kernel backends' fp16 storage APXCHOL_GPU_SPTRSV_FP16=0|1 (unset =
+        // ON where a kernel backend resolves on the fp32 build).
+        const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_resolved();
         const int  gpu_be   = apxchol::cuda_sptrsv::backend_from_env();
         const bool gpu_cus  = apxchol::cuda_sptrsv::cusparse_available();
         const char* backend = gpu_be == 2 ? "GPU/dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
@@ -107,7 +108,7 @@ inline void print_sptrsv_banner_once() {
                                 : gpu_fp16 ? "GPU/auto: level-set (fp16 storage on the fp64 build)"
                                 : gpu_cus  ? "GPU/auto: cuSPARSE, level-set if its SpSV analysis buffers do not fit (fp64 build)"
                                            : "GPU/auto: level-set (fp64 build, cuSPARSE not compiled in)";
-        const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_GPU_SPTRSV_FP16=1)"
+        const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_GPU_SPTRSV_FP16=0 opts out)"
                                        : apxchol::cuda_sptrsv::value_name;
         const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;
 #else

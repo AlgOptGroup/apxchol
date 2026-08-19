@@ -10,6 +10,7 @@
 #include <cusparse.h>
 #endif
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -152,9 +153,21 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 /// default (the CPU's APXCHOL_LOWPREC_DIAG_COMP=1 semantics, ON here:
 /// =0 turns it off for A/B; without it the Laplacian path pays iter0040 45 ->
 /// 64 iterations) -- and inv_scale[j] = fp32(1 / s_j); the forward solve on
-/// L~ returns y' = D y and the back solve reads its input times inv_scale^2,
+/// L~ returns y' = D y and the back solve reads its input times inv_scale^2
+/// (r_j^2 kept in DOUBLE on the device and multiplied in double, exactly the
+/// CPU FP16_SCALED contract: pre-squaring into fp32 overflows to Inf for
+/// s_j < ~5.4e-20 -- a column whose off-diagonal max is that small does occur
+/// on real factors -- and the Inf turned the whole solve into silent NaN),
 /// so the pair applies (L_s L_s^T)^-1 for the stored L_s = L~ D. Products
-/// and sums are formed in cuda_value_t (float) after the half -> float widen.
+/// and sums are otherwise formed in cuda_value_t (float) after the half ->
+/// float widen. Columns whose scale s_j cannot be represented at all (fp32
+/// 1/s_j overflows, s_j < ~3e-39, or fp32(L_jj)/s_j overflows, off-diagonals
+/// >= ~1e38x below the diagonal) fall back to s_j = 1: their off-diagonals
+/// are dropped/flushed -- below anything an fp32 sweep could see next to
+/// that diagonal anyway. setup() then verifies
+/// every device diag / inv_scale^2 is finite (diag also nonzero) and THROWS
+/// otherwise: a factor the fp16 storage cannot represent must fail loudly,
+/// never dissolve into NaN.
 /// Device factor bytes per stored entry: 4 (colidx) + 2 (value), times two
 /// CSRs, plus 8 B/row -- vs 4 + 4 fp32 (times two on the level-set backend).
 /// fp16 subnormals are flushed to zero at storage (APXCHOL_FP16_KEEP_SUBNORMAL=1
@@ -184,11 +197,24 @@ public:
     // Env resolution of the runtime modes (read at every setup()):
     //   APXCHOL_GPU_SPTRSV=dataflow|cusparse|levelset (unset = AUTO: dataflow
     //   on the fp32 build, the OOM-aware cuSPARSE/level-set rule on fp64),
-    //   APXCHOL_GPU_SPTRSV_FP16=1 (default off; kernel backends only -- with
-    //   =cusparse it is a stderr note + AUTO).
-    static bool fp16_from_env() {
+    //   APXCHOL_GPU_SPTRSV_FP16=0|1 (kernel backends only). Unset = DEFAULT
+    //   ON where a kernel backend is the resolved choice on the fp32 build
+    //   (measured: -12% gpu_pcg_loop on iter0040, -4..8% grids, within +-7%
+    //   elsewhere, -15..20% device factor bytes, iteration-neutral on all 9
+    //   suite matrices) -- and OFF on the fp64 build (keeps its cuSPARSE-if-
+    //   fits AUTO) and under a forced =cusparse (cuSPARSE has no fp16 SpSV).
+    //   Explicit =1 with =cusparse stays a stderr note + AUTO.
+    // Tri-state read: -1 unset, else 0/1.
+    static int fp16_env_tristate() {
         const char* e = std::getenv("APXCHOL_GPU_SPTRSV_FP16");
-        return e && std::atoi(e) != 0;
+        return e ? (std::atoi(e) != 0 ? 1 : 0) : -1;
+    }
+    static bool fp16_from_env() { return fp16_env_tristate() == 1; }
+    /// The resolved fp16-storage choice (explicit env, else the default rule
+    /// above). setup() and the solve.cpp banner both read this one.
+    static bool fp16_resolved() {
+        const int f = fp16_env_tristate();
+        return f >= 0 ? f != 0 : (dataflow_supported() && backend_from_env() >= 0);
     }
     /// Whether the cuSPARSE SpSV backend is compiled into this build (CMake
     /// APXCHOL_CUDA_WITH_CUSPARSE, default OFF).
@@ -208,7 +234,7 @@ public:
         const std::string s(be ? be : "");
         if (s == "dataflow") return +2;
         if (s == "levelset") return +1;
-        if (s == "cusparse") return (fp16_from_env() || !cusparse_available()) ? 0 : -1;   // no fp16 SpSV in cuSPARSE / not compiled in: AUTO
+        if (s == "cusparse") return (fp16_env_tristate() == 1 || !cusparse_available()) ? 0 : -1;   // no fp16 SpSV in cuSPARSE / not compiled in: AUTO (unset fp16 defaults OFF under forced cusparse)
         return 0;
     }
     static bool levelset_from_env() { return backend_from_env() == 1; }
@@ -265,8 +291,11 @@ public:
         // straight to the level-set, the only fp16-capable backend there).
         // use_dataflow_ implies use_levelset_ (the dataflow backend shares
         // the level-set's device arrays).
-        fp16_ = fp16_from_env();
         const int be_env = backend_from_env();
+        // fp16 storage: explicit env wins; unset defaults ON exactly where
+        // the resolution lands on a kernel backend on the fp32 build -- see
+        // fp16_resolved() / fp16_env_tristate() above.
+        fp16_ = fp16_resolved();
         backend_forced_ = be_env != 0;
         use_dataflow_   = be_env == 2 || (be_env == 0 && auto_prefers_dataflow());
         // Without cuSPARSE compiled in, AUTO on the fp64 build is the level-set
@@ -302,6 +331,21 @@ public:
         // scale), from the factor BEFORE the drop.
         std::vector<float> col_scale;
         if (factor_drop_rel > 0.0 || fp16_) col_scale = cuda_host::column_scales(LT);
+        // fp16 storage only: a column whose scale cannot be represented --
+        // fp32 1/s_j (s_j < ~3e-39) or the scaled diagonal fp32(L_jj)/s_j
+        // (off-diagonals >= ~1e38x below the diagonal) would overflow --
+        // falls back to s_j = 1 (the "no off-diagonals" convention): its
+        // off-diagonals are below anything an fp32 sweep could see next to
+        // that diagonal, and the drop/flush below removes them. Applied
+        // BEFORE the drop so the threshold and the storage agree on the
+        // scale.
+        if (fp16_)
+            for (int64_t j = 0; j < m_; ++j) {
+                const float s = col_scale[static_cast<std::size_t>(j)];
+                const float d = static_cast<float>(LT.vals[LT.ptr[static_cast<std::size_t>(j)]]);
+                if (!std::isfinite(1.0f / s) || !std::isfinite(d / s))
+                    col_scale[static_cast<std::size_t>(j)] = 1.0f;
+            }
 
         // ── Compacting drop (factor_drop.h; see the class comment) ──
         stats_ = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, drop_compensate,
@@ -344,17 +388,30 @@ public:
             cuda_host::fp16_scaled_arrays h16 =
                 cuda_host::narrow_fp16_scaled(LT, col_scale, fp16_flush_subnormal, diag_comp_);
             fp16_flushed_ = h16.flushed; fp16_subnormal_ = h16.subnormal;
-            std::vector<float> inv_scale2(static_cast<std::size_t>(m_));
+            // r_j^2 in DOUBLE (exact; the kernels multiply rhs * r_j^2 in
+            // double and narrow once -- pre-squaring into fp32 overflows for
+            // s_j < ~5.4e-20 and the Inf became silent NaN downstream).
+            std::vector<double> inv_scale2(static_cast<std::size_t>(m_));
             for (int64_t j = 0; j < m_; ++j) {
                 const double r = static_cast<double>(h16.inv_scale[j]);
-                inv_scale2[j] = static_cast<float>(r * r);   // r_j^2 (exact in double, one fp32 rounding)
+                inv_scale2[j] = r * r;
             }
+            // Fail LOUDLY on a factor the fp16 storage cannot represent
+            // (unreachable after the scale fallback above -- a guard, not a
+            // policy): a non-finite diag/inv_scale would dissolve the solve
+            // into NaN with no error anywhere.
+            for (int64_t j = 0; j < m_; ++j)
+                if (!(std::isfinite(h16.diag[j]) && h16.diag[j] != 0.0f && std::isfinite(inv_scale2[j])))
+                    throw std::runtime_error(
+                        "apxchol cuda_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
+                        " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(inv_scale2[j]) +
+                        "); set APXCHOL_GPU_SPTRSV_FP16=0");
             dev_alloc(reinterpret_cast<void**>(&d_vals16_),     nnz_ * sizeof(std::uint16_t));
             dev_alloc(reinterpret_cast<void**>(&d_diag_),       m_ * sizeof(float));
-            dev_alloc(reinterpret_cast<void**>(&d_inv_scale2_), m_ * sizeof(float));
+            dev_alloc(reinterpret_cast<void**>(&d_inv_scale2_), m_ * sizeof(double));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_vals16_, h16.vals.get(), nnz_ * sizeof(std::uint16_t), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_diag_, h16.diag.data(), m_ * sizeof(float), cudaMemcpyHostToDevice));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_inv_scale2_, inv_scale2.data(), m_ * sizeof(float), cudaMemcpyHostToDevice));
+            APXCHOL_CUDA_CHECK(cudaMemcpy(d_inv_scale2_, inv_scale2.data(), m_ * sizeof(double), cudaMemcpyHostToDevice));
             // CSR of L for the forward solve: transpose of (structure of LT,
             // fp16 values).
             cuda_host::csr_int<std::uint16_t> LT16;
@@ -786,7 +843,7 @@ private:
             df_epoch_ = 0;
             d_L_rowptr_ = d_L_colidx_ = d_fwd_order_ = d_bck_order_ = nullptr;
             d_L_vals_ = nullptr; d_L_vals16_ = nullptr;
-            d_vals16_ = nullptr; d_diag_ = d_inv_scale2_ = nullptr;
+            d_vals16_ = nullptr; d_diag_ = nullptr; d_inv_scale2_ = nullptr;
             df_grid_ = 0;
             fwd_level_ptr_.clear(); bck_level_ptr_.clear();
         }
@@ -863,16 +920,17 @@ private:
     mutable unsigned    df_epoch_  = 0;         // last epoch handed out (0 = none)
     int*          d_df_ctrl_       = nullptr;   // {fwd ticket, fwd finished, bck ticket, bck finished}
     int           df_grid_         = 0;
-    // fp16 storage (APXCHOL_GPU_SPTRSV_FP16=1; level-set only): binary16 values
-    // of CSR(L~^T) (d_vals16_, replaces d_vals_) and CSR(L~) (d_L_vals16_,
-    // replaces d_L_vals_), the fp32 scaled diagonal and the back solve's
-    // per-row input scale inv_scale^2.
+    // fp16 storage (APXCHOL_GPU_SPTRSV_FP16; kernel backends only): binary16
+    // values of CSR(L~^T) (d_vals16_, replaces d_vals_) and CSR(L~)
+    // (d_L_vals16_, replaces d_L_vals_), the fp32 scaled diagonal and the
+    // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
+    // exact; fp32 overflows for tiny scales, see the class comment).
     bool          fp16_           = false;
     bool          diag_comp_      = false;
     std::uint16_t* d_vals16_      = nullptr;
     std::uint16_t* d_L_vals16_    = nullptr;
     float*        d_diag_         = nullptr;
-    float*        d_inv_scale2_   = nullptr;
+    double*       d_inv_scale2_   = nullptr;
 
 #if defined(APXCHOL_CUDA_WITH_CUSPARSE)
     // cuSPARSE state (the opt-in backend).

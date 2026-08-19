@@ -165,7 +165,7 @@ __global__ void __launch_bounds__(kDataflowBlock)
 dataflow_kernel(int m, bool reverse,
                 const int* __restrict__ rowptr, const int* __restrict__ colidx,
                 const void* __restrict__ vals_raw,
-                const float* __restrict__ diag, const float* __restrict__ in_scale,
+                const float* __restrict__ diag, const double* __restrict__ in_scale,
                 const int* __restrict__ batch_start, int n_batches,
                 unsigned long long* tag, unsigned epoch,
                 int* ctrl, int total_warps,
@@ -216,7 +216,11 @@ dataflow_kernel(int m, bool reverse,
         c.load<FP16>(have, i, beg + sub, myG, end, colidx, vals_raw);
         VAL bval = VAL(0), dval = VAL(0);
         if (leader) {
-            if constexpr (FP16) { bval = in_scale ? rhs[i] * static_cast<VAL>(in_scale[i]) : rhs[i]; dval = static_cast<VAL>(diag[i]); }
+            // in_scale (the back solve's r_i^2) is DOUBLE and the product is
+            // formed in double before the one narrowing cast: the pre-squared
+            // value overflows fp32 for column scales s_i < ~5.4e-20 even
+            // though rhs[i] * r_i^2 itself is small (levelset does the same).
+            if constexpr (FP16) { bval = in_scale ? static_cast<VAL>(static_cast<double>(rhs[i]) * in_scale[i]) : rhs[i]; dval = static_cast<VAL>(diag[i]); }
             else                { bval = rhs[i]; }
         }
 #ifdef APXCHOL_DF_TRACE
@@ -359,7 +363,7 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse,
 
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
                          const int* rowptr, const int* colidx, const unsigned short* vals16,
-                         const float* diag, const float* in_scale,
+                         const float* diag, const double* in_scale,
                          const int* batch_start, int n_batches,
                          unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                          const VAL* rhs, VAL* out) {

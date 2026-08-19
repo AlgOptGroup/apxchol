@@ -131,10 +131,11 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse,
 /// The same sweep on the fp16 per-column-scaled storage (cuda_host.h
 /// contract; identical semantics to levelset_solve_fp16: `vals16` binary16
 /// bit patterns, the diagonal slot skipped, divide by the fp32 `diag[i]`,
-/// rhs[i] scaled once by `in_scale[i]` when non-null).
+/// rhs[i] scaled once by the DOUBLE `in_scale[i]` when non-null -- r_i^2
+/// exact, product in double, one narrowing cast; see cuda_levelset.h).
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
                          const int* rowptr, const int* colidx, const unsigned short* vals16,
-                         const float* diag, const float* in_scale,
+                         const float* diag, const double* in_scale,
                          const int* batch_start, int n_batches,
                          unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                          const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);

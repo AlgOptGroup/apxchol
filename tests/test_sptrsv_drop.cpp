@@ -939,8 +939,10 @@ TEST(GpuDataflow, MatchesTheLevelSetKernelBothDirectionsAndIsDeterministic) {
     LT16.vals = std::make_unique_for_overwrite<std::uint16_t[]>(static_cast<std::size_t>(LT.nnz));
     std::copy_n(h16.vals.get(), LT.nnz, LT16.vals.get());
     const auto L16 = apxchol::cuda_host::transpose_csr(LT16);
-    std::vector<float> inv_scale2(m);
-    for (node_index j = 0; j < m; ++j) inv_scale2[j] = static_cast<float>(static_cast<double>(h16.inv_scale[j]) * h16.inv_scale[j]);
+    // r_j^2 in DOUBLE (the kernels' in_scale contract: exact square, the
+    // rhs * r_j^2 product formed in double -- see cuda_levelset.h).
+    std::vector<double> inv_scale2(m);
+    for (node_index j = 0; j < m; ++j) inv_scale2[j] = static_cast<double>(h16.inv_scale[j]) * h16.inv_scale[j];
 
     // Device arrays: CSR of L (forward), CSR of L^T (back), both storages.
     int* d_Lp = dev_upload(Lc.ptr.data(), m + 1);   int* d_Li = dev_upload(Lc.idx.get(), Lc.nnz);
@@ -949,8 +951,8 @@ TEST(GpuDataflow, MatchesTheLevelSetKernelBothDirectionsAndIsDeterministic) {
     float* d_Tv = dev_upload(LT.vals.get(), LT.nnz);
     std::uint16_t* d_Lv16 = dev_upload(L16.vals.get(), L16.nnz);
     std::uint16_t* d_Tv16 = dev_upload(LT16.vals.get(), LT16.nnz);
-    float* d_diag = dev_upload(h16.diag.data(), m);
-    float* d_is2  = dev_upload(inv_scale2.data(), m);
+    float*  d_diag = dev_upload(h16.diag.data(), m);
+    double* d_is2  = dev_upload(inv_scale2.data(), m);
     // Level-set schedules and dataflow batches.
     std::vector<int> fo, fl, bo, bl;
     apxchol::cuda_host::compute_levels(mi, Lc.ptr.data(), Lc.idx.get(), true,  fo, fl);
@@ -1050,7 +1052,11 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesLevelSetAndIsDeterministic) {
     { std::mt19937 rng(11); std::uniform_real_distribution<double> u(-1.0, 1.0); for (auto& v : x) v = u(rng); }
     for (bool fp16 : {false, true}) {
         SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
-        scoped_env f16("APXCHOL_GPU_SPTRSV_FP16", fp16 ? "1" : nullptr);
+        // Pin BOTH ways: fp16 is default-ON where a kernel backend resolves
+        // on the fp32 build, so the fp32 sub-case must say =0 explicitly (an
+        // unset variable would resolve fp16 and compare fp16 output against
+        // the fp32 expectations).
+        scoped_env f16("APXCHOL_GPU_SPTRSV_FP16", fp16 ? "1" : "0");
         {
             scoped_env be("APXCHOL_GPU_SPTRSV", "levelset");
             apxchol::cuda_sptrsv t; t.setup(L, m);

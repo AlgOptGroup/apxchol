@@ -5,6 +5,7 @@
 #include "apxchol/solver/partitioner_helpers.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <cstdlib>
 #include <span>
 #include <vector>
 
@@ -131,14 +132,34 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     // With the exact clique rule the factorization is exact Cholesky:
     // P^T L L^T P == A up to roundoff (no sampling at all).
     auto A = grid_laplacian(8, 8);
-    auto G = apxchol::make_graph<vp_graph>(A);
-    auto F = apxchol::factorize(std::move(G), exact_clique_eliminator{});
-
-    apxchol::cpu_solver slv(A, std::move(F));
-    auto res = slv.solve(apxchol::generate_test_rhs(A.rows()), 1e-12, 50);
+    auto b = apxchol::generate_test_rhs(A.rows());
+    auto solve_once = [&] {
+        auto G = apxchol::make_graph<vp_graph>(A);
+        auto F = apxchol::factorize(std::move(G), exact_clique_eliminator{});
+        apxchol::cpu_solver slv(A, std::move(F));
+        return slv.solve(b, 1e-12, 50);
+    };
+#if defined(APXCHOL_USE_CUDA)
+    // The GPU SpTRSV's fp16 factor storage is a RUNTIME mode, default ON
+    // where a kernel backend resolves on the fp32 build -- so pin it per
+    // sub-case: "exact factor => O(1) iterations" requires LOSSLESS factor
+    // storage (under fp16 every stored off-diagonal carries a 2^-11 relative
+    // rounding and the factor is only approximately exact: one extra
+    // iteration on this grid). The residual floor is unaffected either way.
+    for (bool fp16 : {false, true}) {
+        SCOPED_TRACE(fp16 ? "fp16 storage" : "lossless storage");
+        setenv("APXCHOL_GPU_SPTRSV_FP16", fp16 ? "1" : "0", /*overwrite=*/1);
+        auto res = solve_once();
+        EXPECT_LE(res.iterations, kExactFactorMaxIters + (fp16 ? 1 : 0));
+        EXPECT_LT(res.residual, 1e-12);
+    }
+    unsetenv("APXCHOL_GPU_SPTRSV_FP16");
+#else
+    auto res = solve_once();
     // An exact factor preconditions PCG to convergence in O(1) iterations.
     EXPECT_LE(res.iterations, kExactFactorMaxIters);
     EXPECT_LT(res.residual, 1e-12);
+#endif
 }
 
 TEST(CustomPartitioner, StatefulInstanceConverges) {

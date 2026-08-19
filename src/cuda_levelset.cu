@@ -58,7 +58,7 @@ __global__ void levelset_warp_kernel_fp16(const int* __restrict__ rowptr,
                                           const int* __restrict__ colidx,
                                           const __half* __restrict__ vals,
                                           const float* __restrict__ diag,
-                                          const float* __restrict__ in_scale,
+                                          const double* __restrict__ in_scale,
                                           const int* __restrict__ row_order,
                                           int lvl_begin, int lvl_end,
                                           const VAL* __restrict__ rhs,
@@ -80,7 +80,11 @@ __global__ void levelset_warp_kernel_fp16(const int* __restrict__ rowptr,
     for (int o = 16; o > 0; o >>= 1)
         mysum += __shfl_down_sync(0xffffffffu, mysum, o);
     if (lane == 0) {
-        const VAL b = in_scale ? rhs[i] * static_cast<VAL>(in_scale[i]) : rhs[i];
+        // The back solve's input scale r_i^2 is read as DOUBLE and the product
+        // formed in double before the one narrowing cast: the pre-squared
+        // value overflows fp32 for column scales s_i < ~5.4e-20 (Inf -> NaN
+        // through the solve) even though rhs[i] * r_i^2 itself is small.
+        const VAL b = in_scale ? static_cast<VAL>(static_cast<double>(rhs[i]) * in_scale[i]) : rhs[i];
         out[i] = (b - mysum) / static_cast<VAL>(diag[i]);
     }
 }
@@ -105,7 +109,7 @@ void levelset_solve(cudaStream_t stream,
 
 void levelset_solve_fp16(cudaStream_t stream,
                          const int* rowptr, const int* colidx, const unsigned short* vals16,
-                         const float* diag, const float* in_scale,
+                         const float* diag, const double* in_scale,
                          const int* row_order, const int* level_ptr, int num_levels,
                          const VAL* rhs, VAL* out) {
     constexpr int block = 256;
