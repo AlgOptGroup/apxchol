@@ -86,12 +86,6 @@ __device__ __forceinline__ void backoff(unsigned& sleep_ns) {
 #endif
 }
 
-template <bool FP16>
-__device__ __forceinline__ VAL load_val(const void* __restrict__ vals_raw, int p) {
-    if constexpr (FP16) return static_cast<VAL>(__half2float(static_cast<const __half*>(vals_raw)[p]));
-    else                return static_cast<const VAL*>(vals_raw)[p];
-}
-
 // Group-wide AND of a lane predicate (G aligned power of two: the xor
 // butterfly stays inside the group). Every lane must participate.
 __device__ __forceinline__ bool group_all(bool pred, int G) {
@@ -108,8 +102,20 @@ __device__ __forceinline__ bool group_all(bool pred, int G) {
 // them (or fewer at the end). Loaded once (structure + value), then the tags
 // of the off-diagonal neighbours are polled until every one carries the
 // current epoch. `pending` = the entries still missing; y[t] the values.
+//
+// fp16 values are kept as RAW BITS until accumulate(): widening at load time
+// put an HADD2 (half -> float) right after every 2-byte load, and under the
+// fp16 kernel's register pressure ptxas recycled one address/destination
+// register pair for the whole 8-entry load loop -- each load had to retire
+// before the next could issue, so a chunk cost ~8 sequential memory round
+// trips instead of 1. On the latency-bound back sweep of a hub-heavy factor
+// (a long row is chewed chunk by chunk on the critical path) that was a
+// 1.8x per-sweep regression vs fp32 storage. Deferring the widen keeps the
+// load loop pure (distinct registers, all loads in flight together);
+// half2float is exact, so accumulate() computes bit-identical values.
 struct chunk {
-    int jj[kPre]; VAL vv[kPre]; VAL y[kPre];
+    int jj[kPre]; VAL y[kPre];
+    union { VAL f32[kPre]; unsigned short f16[kPre]; } vv;   // fp32 value, or raw binary16 bits
     unsigned pending;
     template <bool FP16>
     __device__ __forceinline__ void load(bool have, int i, int p0, int G, int end,
@@ -120,7 +126,15 @@ struct chunk {
             const int p = p0 + t * G;
             const bool ok = have && p < end;
             jj[t] = ok ? colidx[p] : -1;
-            vv[t] = ok ? load_val<FP16>(vals_raw, p) : VAL(0);
+            if constexpr (FP16) {
+                // Raw bits; the DIAGONAL slot's bits are dropped here (its value
+                // comes from diag[]; the slot can be fp16 Inf when L_jj/s_j >
+                // 65504 -- narrow_fp16_scaled's diag_bad -- and accumulate() is
+                // branchless, so an Inf would turn its zero product into NaN).
+                const unsigned short bits = ok ? static_cast<const unsigned short*>(vals_raw)[p] : static_cast<unsigned short>(0);
+                vv.f16[t] = jj[t] != i ? bits : static_cast<unsigned short>(0);
+            }
+            else vv.f32[t] = ok ? static_cast<const VAL*>(vals_raw)[p] : VAL(0);
             y[t]  = VAL(0);
             if (ok && jj[t] != i) pending |= 1u << t;
         }
@@ -139,11 +153,32 @@ struct chunk {
     // slot is captured, the fp16 one skipped (its diagonal comes from diag[]).
     template <bool FP16>
     __device__ __forceinline__ void accumulate(int i, VAL& sum, VAL& d) const {
+        if constexpr (FP16) {
+            // Branchless, two ILP chains: y[t] is 0 for empty slots, the diagonal
+            // slot (never polled: its pending bit is never set) and not-yet-ready
+            // entries, so every dead product contributes +-0 -- no jj[] tests.
+            // The serial 8-FFMA sum sat on the publish path of every critical-
+            // chain row; splitting it (fixed association -> still deterministic)
+            // measurably shortens hub-heavy back sweeps.
+            static_assert(kPre % 2 == 0, "pairs");
+            VAL s0 = VAL(0), s1 = VAL(0);
+            #pragma unroll
+            for (int t = 0; t < kPre; t += 2) {
+                // One packed half2 -> float2 widen per PAIR (the bits sit
+                // adjacent in the union, 4-byte aligned at even t).
+                const float2 f = __half22float2(*reinterpret_cast<const __half2*>(&vv.f16[t]));
+                s0 += f.x * y[t];
+                s1 += f.y * y[t + 1];
+            }
+            sum += s0 + s1;
+            (void)i; (void)d;
+            return;
+        }
         #pragma unroll
         for (int t = 0; t < kPre; ++t) {
             if (jj[t] < 0) continue;
-            if (jj[t] == i) { if constexpr (!FP16) d = vv[t]; }
-            else sum += vv[t] * y[t];
+            if (jj[t] == i) { d = vv.f32[t]; }
+            else            sum += vv.f32[t] * y[t];
         }
     }
 };
@@ -160,6 +195,28 @@ struct chunk {
 // elimination factor (dozens of off-diagonals) are why: with a lane-per-row-
 // plus-serial-fallback scheme they cost several round trips each, serialised
 // inside the warp, and the tail is the critical path.
+// REGISTER-BUDGET WARNING (hard-won, 2026-08-19): this kernel sits on a
+// scheduling cliff. When the fp16 instantiation's live state grows past
+// ~112 registers (2 blocks/SM allows up to 128, so occupancy does not flag
+// it), ptxas recycles the chunk loop's load registers and the 8-deep load
+// pipeline degrades toward SERIAL -- on a hub-heavy back sweep (a
+// sequential publish chain of multi-chunk rows) that is a ~2x per-sweep
+// regression; forcing __maxnreg__ does NOT recover it, the live state has
+// to shrink. The lean fp16 instantiation compiles to 104 registers and
+// schedules well. Check cuobjdump --dump-resource-usage after touching
+// per-entry code. Measured dead ends (kron_g500-logn16 back sweep, warm,
+// interleaved; see the 2026-08-19 fp16 rework):
+//   * fp16 COMPUTE (packed HFMA2 accumulate, fp16 accumulator): -4 ms on
+//     the kron back sweep, but the half-precision accumulation destroys
+//     convergence (relres 1e-3..4e-1, iteration cap on every workload).
+//   * MIXED-WIDTH storage (fp32 side arrays for rows > 128 entries): the
+//     extra addressing state lands the kernel at 116 registers -- past the
+//     cliff, back sweep ~2x SLOWER than lean fp16 -- and on hub factors the
+//     wide rows hold 70-91% of the nnz, so it also costs MORE device
+//     memory than plain fp32 storage. Negative on both axes.
+//   * PAIR 32-bit value loads + __maxnreg__(98): only ever won against the
+//     old branchy cvt-at-load accumulate; against the lean one they are a
+//     pure per-entry ALU tax (iter0040 sweeps +13-17%).
 template <bool FP16>
 __global__ void __launch_bounds__(kDataflowBlock)
 dataflow_kernel(int m, bool reverse,
@@ -220,6 +277,8 @@ dataflow_kernel(int m, bool reverse,
             // formed in double before the one narrowing cast: the pre-squared
             // value overflows fp32 for column scales s_i < ~5.4e-20 even
             // though rhs[i] * r_i^2 itself is small (levelset does the same).
+            // It sits at PREFETCH, before the wait loop, so its latency is
+            // hidden even on chain-bound sweeps (measured neutral on kron).
             if constexpr (FP16) { bval = in_scale ? static_cast<VAL>(static_cast<double>(rhs[i]) * in_scale[i]) : rhs[i]; dval = static_cast<VAL>(diag[i]); }
             else                { bval = rhs[i]; }
         }

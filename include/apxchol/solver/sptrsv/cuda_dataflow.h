@@ -87,6 +87,25 @@
 // the fp64 SpTRSV build); the fp16 storage of cuda_host.h is the same kernel
 // with the half -> float widen, the fp32 diag[] and the optional per-row
 // input scale (dataflow_solve_fp16), mirroring levelset_solve_fp16.
+//
+// fp16 PATH DESIGN (2026-08-19 rework; measurements RTX 4090 Laptop,
+// interleaved warm per-sweep medians): the values are loaded as raw 2-byte
+// bits (the diagonal slot zeroed -- it can be fp16 Inf, see cuda_host.h
+// diag_bad), widened only in the accumulate as ONE packed half2 -> float2
+// per entry pair, and accumulated branchlessly in two ILP chains (dead
+// slots contribute +-0 because their y is 0). Rationale: a hub-heavy BACK
+// sweep is a sequential publish chain of multi-chunk rows, so anything on
+// the load->poll->accumulate->publish path is paid once per chain link --
+// the original widen-at-load put a cvt behind every 2-byte load and, past
+// the register cliff (see the kernel comment in the .cu), serialized the
+// 8-deep load pipeline: kron_g500 back sweep 24 -> 13 ms after the rework,
+// com-LiveJournal solve 9.6 -> 5.4 s, at unchanged iteration counts.
+// Result vs fp32 storage: faster or equal on every forward sweep and on
+// IPM / grid factors (iter0040 pair 0.92x, grid_2000 0.97x), a small
+// residual on hub-graph back sweeps only (kron 1.06x, LJ 1.03-1.08x; the
+// per-link widen+select tax) -- sub-noise at total-solve level. Measured
+// dead ends (fp16 compute, mixed-width fp32-for-hub-rows, pair loads +
+// register cap) are recorded at the kernel in the .cu.
 namespace apxchol {
 
 /// Threads per block of the persistent kernel.
