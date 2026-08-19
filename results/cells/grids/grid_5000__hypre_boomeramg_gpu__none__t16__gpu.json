@@ -8,15 +8,21 @@
     "threads": 16
   },
   "matrix_meta": {},
-  "metrics": {},
+  "metrics": {
+    "returncode": 134,
+    "stdout_tail": "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb\nCUDA ERROR (code = 2, out of memory) at /home/adamant/laplacian_solver/benchmarks/build-cuda/_deps/hypre-src/src/utilities/memory.c:304\n",
+    "stderr_tail": "Graph: grid_5000, n=25000000, nnz=124980000\nterminate called after throwing an instance of 'thrust::_V_300402_SM_890::system::system_error'\n  what():  radix_sort: failed on 1st step: cudaErrorInvalidDevice: invalid device ordinal\nCommand terminated by signal 6\nAPXRSS 10671960\n",
+    "max_rss_mb": 10421.8,
+    "max_vram_mb": 5518.0
+  },
   "provenance": {
     "boost": "on",
     "boost_expected": "on",
-    "git_sha": "35d9a31ed5a81097c4888d2c2d237f5df081c92e",
-    "note": "FAIR gpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "git_sha": "69f9656f410549ad8f222f5a8830f848c64f1eac",
+    "note": "FAIR gpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
     "repeat": 3,
     "tier": "broad",
-    "timestamp": "2026-06-11T12:48:57"
+    "timestamp": "2026-08-19T22:22:55"
   },
   "schema": 1,
   "status": "oom"

@@ -8,16 +8,19 @@
     "threads": 16
   },
   "matrix_meta": {},
-  "metrics": {},
+  "metrics": {
+    "returncode": null,
+    "stderr_tail": "Graph: grid_4000, n=16000000, nnz=79984000\n"
+  },
   "provenance": {
     "boost": "on",
     "boost_expected": "on",
-    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
-    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "git_sha": "72a9191f99def661a25c3a5499ca457a9f8c4ae7",
+    "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
     "repeat": 3,
     "tier": "broad",
-    "timestamp": "2026-06-11T17:43:44"
+    "timestamp": "2026-08-19T12:18:52"
   },
   "schema": 1,
-  "status": "failed"
+  "status": "timeout"
 }

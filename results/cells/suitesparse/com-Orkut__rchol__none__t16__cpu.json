@@ -10,17 +10,17 @@
   "matrix_meta": {},
   "metrics": {
     "returncode": 139,
-    "stderr_tail": "Graph: com-Orkut.mtx, n=3072441, nnz=237442607\nCommand terminated by signal 11\nAPXRSS 21365320\n",
-    "max_rss_mb": 20864.6
+    "stderr_tail": "Graph: com-Orkut.mtx, n=3072441, nnz=237442607\nCommand terminated by signal 11\nAPXRSS 21375868\n",
+    "max_rss_mb": 20874.9
   },
   "provenance": {
     "boost": "on",
     "boost_expected": "on",
-    "git_sha": "ddcab69231b033024e7b09e0cb0a6fec84c2f0dc",
+    "git_sha": "72a9191f99def661a25c3a5499ca457a9f8c4ae7",
     "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
     "repeat": 3,
     "tier": "broad",
-    "timestamp": "2026-06-16T22:26:42"
+    "timestamp": "2026-08-19T12:18:52"
   },
   "schema": 1,
   "status": "failed"

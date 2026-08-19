@@ -11,24 +11,24 @@
   "metrics": {
     "n": 525825,
     "nnz": 3674625,
-    "setup_s": 0.2734654,
-    "solve_s": 0.3469081,
-    "total_s": 0.6203736,
-    "iters": 43,
-    "rel_res": 7.044934e-09,
+    "setup_s": 0.2696588,
+    "solve_s": 0.2074034,
+    "total_s": 0.4770621,
+    "iters": 45,
+    "rel_res": 6.677085e-09,
     "fillin": 0.0,
-    "us_per_nnz": 0.1688,
-    "solve_rss_mb": 433.0,
-    "max_rss_mb": 533.2
+    "us_per_nnz": 0.1298,
+    "solve_rss_mb": 372.8,
+    "max_rss_mb": 473.2
   },
   "provenance": {
     "boost": "on",
     "boost_expected": "on",
-    "git_sha": "84e8f241b5340dd1ebcfff0cfce71e5f13286f41",
-    "note": "FAIR cpu run, SDDM reg_rel=1e-6 (unified, no pinning)",
+    "git_sha": "72a9191f99def661a25c3a5499ca457a9f8c4ae7",
+    "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
     "repeat": 3,
     "tier": "broad",
-    "timestamp": "2026-06-11T17:43:44"
+    "timestamp": "2026-08-19T12:18:52"
   },
   "schema": 1,
   "status": "complete"

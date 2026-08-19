@@ -11,16 +11,16 @@
   "metrics": {
     "n": 250000,
     "nnz": 1248000,
-    "setup_s": 0.11362826159570313,
-    "solve_s": 0.065526428,
-    "total_s": 0.17915468959570313,
+    "setup_s": 0.11875792289965821,
+    "solve_s": 0.058593536,
+    "total_s": 0.1773514588996582,
     "iters": 55,
-    "rel_res": 8.4124323e-09,
-    "max_vram_mb": 376.0
+    "rel_res": 8.8206523e-09,
+    "max_vram_mb": 498.0
   },
   "provenance": {
     "source": "parac_runner.py",
-    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e"
+    "git_sha": "69f9656f410549ad8f222f5a8830f848c64f1eac"
   },
   "schema": 1,
   "status": "complete"

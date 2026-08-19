@@ -15,11 +15,11 @@
   "provenance": {
     "boost": "on",
     "boost_expected": "on",
-    "git_sha": "ddcab69231b033024e7b09e0cb0a6fec84c2f0dc",
+    "git_sha": "72a9191f99def661a25c3a5499ca457a9f8c4ae7",
     "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
     "repeat": 3,
     "tier": "broad",
-    "timestamp": "2026-06-16T22:26:42"
+    "timestamp": "2026-08-19T12:18:52"
   },
   "schema": 1,
   "status": "timeout"

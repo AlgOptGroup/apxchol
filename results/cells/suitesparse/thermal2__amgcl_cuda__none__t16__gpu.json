@@ -11,25 +11,25 @@
   "metrics": {
     "n": 1228045,
     "nnz": 8580313,
-    "setup_s": 0.2612276,
-    "solve_s": 0.03573895,
-    "total_s": 0.2969666,
+    "setup_s": 0.3949506,
+    "solve_s": 0.04049039,
+    "total_s": 0.435441,
     "iters": 20,
     "rel_res": 5.710403e-09,
     "fillin": 0.0,
-    "us_per_nnz": 0.0346,
+    "us_per_nnz": 0.0507,
     "solve_rss_mb": 0.0,
-    "max_rss_mb": 1713.5,
+    "max_rss_mb": 1771.2,
     "max_vram_mb": 570.0
   },
   "provenance": {
     "boost": "on",
     "boost_expected": "on",
-    "git_sha": "595df64fa7618066e3bcd6db7df830c12b8172b6",
+    "git_sha": "69f9656f410549ad8f222f5a8830f848c64f1eac",
     "note": "FAIR gpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
     "repeat": 3,
     "tier": "broad",
-    "timestamp": "2026-06-12T21:19:50"
+    "timestamp": "2026-08-19T22:22:55"
   },
   "schema": 1,
   "status": "complete"

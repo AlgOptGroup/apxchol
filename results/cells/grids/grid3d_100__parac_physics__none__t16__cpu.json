@@ -11,28 +11,28 @@
   "metrics": {
     "n": 1000000,
     "nnz": 6940000,
-    "setup_s": 1.439161,
-    "solve_s": 1.509,
-    "total_s": 2.948161,
+    "setup_s": 1.446813,
+    "solve_s": 1.516,
+    "total_s": 2.962813,
     "iters": 34,
-    "rel_res": 7.34822e-09,
+    "rel_res": 8.19518e-09,
     "fillin": 0.0,
-    "us_per_nnz": 0.4248,
+    "us_per_nnz": 0.4269,
     "amd_reorder_s": 0.991527,
-    "factor_s": 0.371428,
-    "prep_s": 0.076206,
+    "factor_s": 0.383555,
+    "prep_s": 0.071731,
     "n_components_solved": 1,
     "n_components_total": 1,
-    "max_rss_mb": 2270.3
+    "max_rss_mb": 2275.2
   },
   "provenance": {
     "boost": "on",
     "boost_expected": "on",
-    "git_sha": "9fe8a78c420f393dfbe65dc940dc2d865eeeb18e",
+    "git_sha": "72a9191f99def661a25c3a5499ca457a9f8c4ae7",
     "note": "ParAC FAIR vs ORIGINAL L (no reg-rel): GRAPH reads the per-component Dirichlet-pinned P; PHYSICS reads the giant component's pure L (single-node trim grounding, Hypre-style split on disconnected). Both use a per-component-consistent pin-zeroed RHS in the patched driver, so the residual is scored vs the original singular L (verified ~1e-12). AMD-reordered, true 1e-8, MKL serial, 16 cores",
     "repeat": 3,
     "tier": "broad",
-    "timestamp": "2026-06-13T22:09:25"
+    "timestamp": "2026-08-19T12:18:52"
   },
   "schema": 1,
   "status": "complete"
