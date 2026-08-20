@@ -28,6 +28,7 @@ from matplotlib.patches import Patch
 from matplotlib.legend_handler import HandlerTuple
 import numpy as np
 
+from runner_common import mat_labels   # registry-backed matrix axis labels
 import fair_charts as cpu
 import gpu_charts as gpu
 
@@ -232,7 +233,7 @@ def _bars(recs, grows, fam, out, *, ylabel, title, logy=False, val=None, stacked
         ax.set_ylabel(ylabel)
 
     bottom_ax.set_xticks(x + 0.43 - w / 2)
-    bottom_ax.set_xticklabels(mats, rotation=30, ha="right")
+    bottom_ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right")
     fig.suptitle(title, fontsize=11)
     # ONE legend entry per solver: the CPU swatch (plain) and GPU swatch (black-outlined)
     # sit side-by-side under "Solver (CPU / GPU)"; a device that only ever timed out gets a
@@ -405,7 +406,7 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     norm = mcolors.LogNorm(vmin=1.0, vmax=max(vmax, 1.6))
     fig, ax = plt.subplots(figsize=(max(8, 1.25 * len(mats) + 3.5), 0.55 * len(names) + 2))
     im = ax.imshow(np.ma.masked_invalid(ratio), cmap=cmap, aspect="auto", norm=norm)
-    ax.set_xticks(range(len(mats))); ax.set_xticklabels(mats, rotation=30, ha="right", fontsize=8)
+    ax.set_xticks(range(len(mats))); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right", fontsize=8)
     ax.set_yticks(range(len(names))); ax.set_yticklabels(names, fontsize=8.5)
     for i in range(len(names)):
         for j in range(len(mats)):

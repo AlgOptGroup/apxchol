@@ -41,6 +41,58 @@ line) are the two multigrids kept.
 
 ## Protocol
 
+- **Matrix interpretation (what system each file defines).** A `.mtx` file can hold
+  either of two different things, and they define two different linear systems. Every
+  entry in the registry (`benchmarks/runner_common.py`) **declares** which, and the
+  benchmark binary **requires** the declaration on the command line (`--kind`). It is
+  never auto-detected: a value-carrying file can perfectly well be a graph
+  (`kron_g500-logn16` stores integer *edge weights*), so any heuristic would be a
+  silent decision about which problem the suite reports on. An undeclared matrix is a
+  hard error, not a default.
+
+  | kind | what the file holds | the system we solve |
+  |---|---|---|
+  | `graph` | adjacency / `pattern` matrix (no operator diagonal) | `L = D − A`, assembled from `|value|` (unit weights for a `pattern` file; a self-loop on the file's diagonal is dropped). That **is** the system a graph file defines, so it is not a deviation. |
+  | `operator` | already-assembled Laplacian / SDDM operator | the published matrix itself — **solved as it stands**, diagonal included, signs untouched. |
+
+  | matrix | kind | | matrix | kind |
+  |---|---|---|---|---|
+  | `grid_*`, `grid3d_*` (generated) | `graph` | | `com-Amazon` | `graph` |
+  | `parabolic_fem` | `operator` | | `coAuthorsDBLP` | `graph` |
+  | `apache2` | `operator` | | `kron_g500-logn16` | `graph` |
+  | `ecology1` | `operator` | | `com-Youtube` | `graph` |
+  | `G3_circuit` | `operator` | | `coPapersDBLP` | `graph` |
+  | `thermal2` | `operator` | | `as-Skitter` | `graph` |
+  | `iter0010…0040` (IPM) | `operator` | | `com-LiveJournal` | `graph` |
+  | | | | `com-Orkut` | `graph` |
+
+  The five SuiteSparse `operator` files carry a stored positive diagonal on every row;
+  the `graph` files carry no usable diagonal at all (`kron_g500` has one on 327 of
+  65536 rows — self-loops, not an operator). ParAC's own benchmark splits its matrices
+  the same way ("physics matrices: used as-is" vs "graph matrices: build Laplacian from
+  adjacency"), and four of our five operator files are on its physics list.
+
+  Every solver in a cell receives the **same** matrix: the in-process ones directly,
+  the external ones (ParAC, AC/AC2, CMG) through `--dump-mtx`, which writes exactly the
+  operator the binary assembled. Each run prints one `[matrix] …` line saying how the
+  file was read, and each stored cell repeats it under `matrix_meta`. Solvers that
+  cannot take a given matrix produce an **`n/a`** cell (`iters = rel_res = −1`), never a
+  silent failure or a missing row — for example ParAC's *graph* mode on an `operator`
+  matrix (graph mode grounds a Laplacian; the matrix goes through ParAC's *physics*
+  path instead), or AC/AC2 on an operator carrying positive off-diagonals (Laplacians.jl
+  needs non-negative edge weights, and it solves the matrix it factorizes, so lumping
+  them would make it converge on a different matrix than it is scored against). `n/a` is
+  reserved for *cannot take this matrix*: a solver that runs and misses the tolerance is
+  `not_converged` — AC/AC2 do reach `apache2` and `G3_circuit` through
+  `approxchol_sddm`, but floor at 6.5e-6 / 1.4e-7 because the ground-vertex
+  augmentation gives those two negative-weight edges where their row sums go negative.
+
+  Whether the assembled operator is **singular** is a separate, downstream fact, read off
+  the matrix rather than declared: a graph always yields a singular Laplacian, and an
+  `operator` file may be one (`ecology1` is published as an exact Laplacian) or full-rank
+  SDDM (`apache2`, `G3_circuit`, `thermal2`, IPM). Only a singular operator is grounded
+  and only its solution and residual are mean-centred.
+
 - **De-singularization (the fairness model).** Grid / SuiteSparse Laplacians are
   **singular** (a constant null vector per connected component). Under the **current**
   protocol they are benchmarked on the **original singular `L`** — each solver removes

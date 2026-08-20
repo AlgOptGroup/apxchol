@@ -18,6 +18,9 @@ import matplotlib.colors as mcolors
 from matplotlib.ticker import FuncFormatter
 import numpy as np
 import gpu_charts as gpu   # reuse the GPU CSV loader + colours/order for overlays
+# Matrix axis labels come from the registry, so a matrix we ASSEMBLED an operator
+# for (a graph file -> L = D - A) never appears under its bare file name.
+from runner_common import mat_labels   # noqa: F401  (used by the tick-label calls)
 
 TOL = 1e-8
 
@@ -220,7 +223,7 @@ def bar_chart(recs, fam, out):
         for b, h in zip(bars, hatched):
             if h: b.set_hatch("xxx"); b.set_alpha(0.55)
     ax.set_yscale("log")
-    ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(mats, rotation=30, ha="right")
+    ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right")
     ax.set_ylabel("total solve time (s), log scale — t16")
     ax.set_title(f"{fam}: solver comparison (per-solver grounding, tol 1e-8)  "
                  f"[hatched = ran but did not reach 1e-8]")
@@ -305,7 +308,7 @@ def stacked_chart(recs, fam, out, mats=None):
             ax.bar(xx, setup, w, color=col, label=(lab if lab not in legended else None))
             legended.add(lab)
             ax.bar(xx, solv, w, bottom=setup, color=col, alpha=0.45, hatch="///")
-    ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(mats, rotation=30, ha="right")
+    ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right")
     ax.set_ylabel("time (s) — t16   [solid = setup (incl. AMD for ParAC), /// = solve]")
     ax.set_title(f"{fam}: setup + solve breakdown (per-solver grounding, tol 1e-8, linear scale)")
     ax.legend(ncol=3, fontsize=8); ax.grid(True, axis="y", alpha=0.3)
@@ -360,7 +363,7 @@ def convergence_chart(recs, fam, out, mats=None):
                    label=(lab if lab not in legended else None)); legended.add(lab)
     ax.axhline(1e-8, color="k", ls="--", alpha=0.6, label="tol 1e-8")
     ax.set_yscale("log"); ax.set_ylim(1e-10, 1)
-    ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(mats, rotation=30, ha="right")
+    ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right")
     ax.set_ylabel("final ‖b−Ax‖/‖b‖ (lower = better)")
     ax.set_title(f"{fam}: solution accuracy (bars above the 1e-8 line did not converge)")
     ax.legend(ncol=3, fontsize=8); ax.grid(True, axis="y", alpha=0.3)
@@ -573,7 +576,7 @@ def selector_family_panel(recs, gpu_cfg, fam, out, device="cpu"):
         vmax = np.nanmax(norm) if np.isfinite(norm).any() else 1.5
         ax.imshow(np.ma.masked_invalid(norm), cmap=cmap, aspect="auto",
                   vmin=1.0, vmax=max(min(float(vmax), 2.0), 1.05))
-        ax.set_xticks(range(len(mats))); ax.set_xticklabels(mats, rotation=40, ha="right", fontsize=7)
+        ax.set_xticks(range(len(mats))); ax.set_xticklabels(mat_labels(mats), rotation=40, ha="right", fontsize=7)
         ax.set_yticks(range(len(sels))); ax.set_yticklabels([f"{s}+tree" for s in sels], fontsize=8.5)
         ax.set_title(f"{name}" + (f" ({unit})" if unit else " (count)"), fontsize=10)
         for i in range(len(sels)):

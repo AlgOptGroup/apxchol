@@ -84,22 +84,28 @@ AC_FILL_JL = f"{ROOT}/benchmarks/julia/ac_fill.jl"
 DUMP = "/tmp/parac_fair_dump"
 
 def ac_mtx(mid, family, args, reg):
-    # AC reads a .mtx. grids: pure Laplacian dump; suitesparse: the data .mtx;
-    # IPM: the SDDM .mtx (ac_fill.jl augments it to a Laplacian, mirroring
-    # approxchol_sddm, so the fill is comparable to apxchol's SDDM factor).
-    if "--graph" in args:
-        p = f"{DUMP}/{mid}-pure.mtx"
-        if not os.path.exists(p):
-            sh(f"{BIN} {args} --dump-mtx {p} --solver none")
-        return p if os.path.exists(p) else None
-    m = re.search(r"--mtx (\S+)", args)
-    return m.group(1) if m else None
+    # AC measures its fill on the SAME operator the benchmark assembles, dumped
+    # with --dump-mtx: L = D - A for a kind=graph matrix, the published matrix
+    # for a kind=operator one. (It used to read the registry file directly for
+    # anything not generated, which made "AC saw the same matrix" an assumption
+    # rather than something the pass demonstrates.)
+    tag = "op" if rc.kind_of(mid) == "operator" else "pure"
+    p = f"{DUMP}/{mid}-{tag}.mtx"
+    if not os.path.exists(p):
+        sh(f"{BIN} {args} --dump-mtx {p} --solver none")
+    return p if os.path.exists(p) else None
 
 def ac_fill(mid, family, args, reg):
     src = ac_mtx(mid, family, args, reg)
     if not src or not os.path.exists(AC_FILL_JL):
         return
-    sddm = "sddm" if family == "ipm" else ""   # IPM matrices are SDDM (augment to Laplacian)
+    # An assembled OPERATOR (IPM normal equations + the SuiteSparse physics
+    # matrices) is SDDM: ac_fill.jl must read it signed and augment it to a
+    # Laplacian, mirroring approxchol_sddm, so the fill is comparable to
+    # apxchol's SDDM factor. A graph-derived Laplacian goes through the plain
+    # adjacency path. Keyed on the DECLARED kind — this used to test
+    # family == "ipm", which read the five SuiteSparse operators as adjacency.
+    sddm = "sddm" if rc.kind_of(mid) == "operator" else ""
     for solver, variant in (("ac", "ac"), ("ac2", "ac2")):
         if done(mid, solver):
             continue

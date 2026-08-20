@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.ticker import FuncFormatter
 import numpy as np
+# Matrix axis labels come from the registry, so a matrix we ASSEMBLED an operator
+# for (a graph file -> L = D - A) never appears under its bare file name.
+from runner_common import mat_labels   # noqa: F401
 
 # apxchol (GPU) = the GPU-RESIDENT PCG (cuda_pcg: all PCG vectors stay on device,
 # cuBLAS axpy/dot/nrm2 + cuSPARSE SpMV, precond via cuda_sptrsv::solve_LLt_dev). It
@@ -153,7 +156,7 @@ def value_heatmap(mats, row_labels, M, out, *, title, is_iters=False, cell_fmt=N
     norm = mcolors.LogNorm(vmin=1.0, vmax=max(vmax, 1.6))
     fig, ax = plt.subplots(figsize=(max(8, 1.25*len(mats)+3.5), 0.55*len(row_labels)+2))
     im = ax.imshow(np.ma.masked_invalid(ratio), cmap=cmap, aspect="auto", norm=norm)
-    ax.set_xticks(range(len(mats))); ax.set_xticklabels(mats, rotation=30, ha="right", fontsize=8)
+    ax.set_xticks(range(len(mats))); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right", fontsize=8)
     ax.set_yticks(range(len(row_labels))); ax.set_yticklabels(row_labels, fontsize=8.5)
     for i in range(M.shape[0]):
         for j in range(M.shape[1]):
@@ -193,7 +196,7 @@ def breakdown(rows, fam, out):
                        alpha=0.45, hatch="///")
             if not conv:
                 for bb in b: bb.set_hatch("xxx")
-    ax.set_xticks(x + 0.4 - w/2); ax.set_xticklabels(mats, rotation=30, ha="right")
+    ax.set_xticks(x + 0.4 - w/2); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right")
     ax.set_ylabel("time (s) — t16 GPU   [solid = setup, /// = solve]")
     ax.set_title(f"{fam} (GPU): setup + solve breakdown (per-solver grounding, tol 1e-8)")
     ax.legend(ncol=3, fontsize=8); ax.grid(True, axis="y", alpha=0.3)
@@ -232,7 +235,7 @@ def accuracy(rows, fam, out):
                    label=(lab if lab not in legended else None)); legended.add(lab)
     ax.axhline(TOL, color="k", ls="--", alpha=0.6, label="tol 1e-8")
     ax.set_yscale("log"); ax.set_ylim(1e-10, 1)
-    ax.set_xticks(x + 0.4 - w/2); ax.set_xticklabels(mats, rotation=30, ha="right")
+    ax.set_xticks(x + 0.4 - w/2); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right")
     ax.set_ylabel("final ‖b−Ax‖/‖b‖ (lower = better)")
     ax.set_title(f"{fam} (GPU): solution accuracy (all should sit on/under the 1e-8 line)")
     ax.legend(ncol=3, fontsize=8); ax.grid(True, axis="y", alpha=0.3)

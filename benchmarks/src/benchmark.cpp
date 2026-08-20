@@ -10,6 +10,11 @@
 //   --tile <int>       checkerboard tile size               (default: 4)
 //   --er-p <double>    Erdős-Rényi edge probability         (default: 0.01)
 //   --mtx <path>       Matrix Market file path
+//   --kind <k>         graph | operator — REQUIRED with --mtx. How the file is
+//                      to be interpreted; declared by the caller, never guessed.
+//                        graph    -> solve L = D - A built from |values|
+//                                    (unit weights for a `pattern` file)
+//                        operator -> solve the published matrix as it stands
 //   --solver <list>    comma-separated: apxchol,cg,ldlt,rchol,cholmod,all
 //   --tol <double>     PCG tolerance                        (default: 1e-8)
 //   --maxiter <int>    PCG max iterations                   (default: 500)
@@ -46,6 +51,11 @@
 #include "solver.h"
 #include "simple_solver.h"
 #include "mmio.h"
+
+// The operator class apxchol is defined on: scan_operator / require_operator /
+// the M-matrix lumping ceiling. The benchmark asserts a matrix declared
+// `--kind operator` against it rather than re-deriving its own classification.
+#include "apxchol/operator_class.h"
 
 #ifdef HAVE_APXCHOL_V1
 #include "apxchol/solver/solve.h"
@@ -113,6 +123,52 @@ laplacian_from_adj(const std::vector<std::vector<Edge>>& adj)
     Eigen::SparseMatrix<double> L(n, n);
     L.setFromTriplets(trips.begin(), trips.end());
     return L;
+}
+
+// ──────────────────── declared matrix kind ────────────────────
+// How the caller says the input is to be READ. Declared on the command line
+// (--kind, mandatory for --mtx), never inferred from the contents: a benchmark
+// must not have a heuristic silently deciding which problem it is solving, and
+// a value-carrying file can perfectly well be a graph (kron_g500-logn16 stores
+// integer EDGE WEIGHTS, not an assembled operator).
+enum class matrix_kind {
+    graph,     ///< adjacency/pattern file -> the system it defines is L = D - A
+    op,        ///< assembled Laplacian / SDDM operator -> solve it as published
+};
+
+// Whether the operator being benchmarked is a SINGULAR Laplacian (row sums zero
+// to within rounding), which is a property of the assembled matrix and NOT of
+// the declared kind: a graph always yields one, and a file declared `operator`
+// may or may not be one (ecology1 is published as an exact Laplacian; apache2,
+// G3_circuit, thermal2 and the IPM normal equations carry a diagonal excess and
+// are full-rank SDDM).
+//
+// It decides two things, both of which are wrong for a full-rank operator:
+//   * grounding — a singular Laplacian needs a pin / mean-centering, a full-rank
+//     operator must be handed to the solver untouched;
+//   * scoring — a Laplacian's solution and residual are only defined modulo the
+//     constant vector, so both get mean-centred. Doing that to a full-rank
+//     operator's UNIQUE solution corrupts it and inflates the reported residual.
+//
+// Set once in main() from the assembled L, then read by every solver runner.
+static bool g_laplacian_mode = true;
+
+// Is `L` a singular Laplacian? Row sums vanish relative to the largest diagonal.
+// (Column sums stand in for row sums; L is symmetric on every path here.)
+static bool is_laplacian_operator(const Eigen::SparseMatrix<double>& L) {
+    if (L.rows() == 0) return true;
+    const Eigen::VectorXd row_sum = L * Eigen::VectorXd::Ones(L.rows());
+    return row_sum.cwiseAbs().maxCoeff()
+         / std::max(1e-30, L.diagonal().cwiseAbs().maxCoeff()) < 1e-10;
+}
+
+// Mean-centre `v` iff we are solving a singular Laplacian. Replaces the
+// unconditional `v.array() -= v.mean()` that every solver runner used to apply
+// to its solution and residual back when every benchmarked matrix was a
+// Laplacian by construction.
+static Eigen::VectorXd& center_if_laplacian(Eigen::VectorXd& v) {
+    if (g_laplacian_mode) v.array() -= v.mean();
+    return v;
 }
 
 // ──────────────────── apxchol preconditioner adaptor ────────────────────
@@ -270,7 +326,11 @@ static Eigen::VectorXd make_rhs(const Eigen::SparseMatrix<double>& L, unsigned s
     for (int i = 0; i < n; ++i) g[i] = N(rng);
 
     Eigen::VectorXd b = L * g;
-    b.array() -= b.mean();
+    // A singular Laplacian is only solvable for b in range(L) = 1^perp, so the
+    // RHS is projected there. A full-rank operator has no such constraint and
+    // gets L*g as it comes — projecting it would be an arbitrary distortion of
+    // the system the file defines.
+    center_if_laplacian(b);
     double nrm = b.norm();
     if (nrm > 0.0) b /= nrm;
     return b;
@@ -328,9 +388,9 @@ static BenchResult run_apxchol(
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
     r.iterations = static_cast<int>(cg.iterations()) + 1;  // unify w/ apxchol convention
 
-    x.array() -= x.mean();
+    center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
-    res.array() -= res.mean();
+    center_if_laplacian(res);
     double bnorm = b.norm();
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
     r.fillin = solver.num_nonzeros() * 2.0 / r.nnz;
@@ -500,9 +560,9 @@ static BenchResult run_cg_no_precond(
     // Hypre all report "iters completed" (1 for that case). Add 1 to unify.
     r.iterations = static_cast<int>(cg.iterations()) + 1;
 
-    x.array() -= x.mean();
+    center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
-    res.array() -= res.mean();
+    center_if_laplacian(res);
     double bnorm = b.norm();
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
     r.fillin = 0;
@@ -549,9 +609,9 @@ static BenchResult run_cg_icc(
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
     r.iterations = static_cast<int>(cg.iterations()) + 1;  // unify w/ apxchol convention
 
-    x.array() -= x.mean();
+    center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
-    res.array() -= res.mean();
+    center_if_laplacian(res);
     double bnorm = b.norm();
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
     r.fillin = 0;
@@ -600,10 +660,10 @@ static BenchResult run_ldlt(
     // Iterative refinement on the original L
     for (int refine = 0; refine < 3; ++refine) {
         Eigen::VectorXd res = b - L * x;
-        res.array() -= res.mean();
+        center_if_laplacian(res);
         x += ldlt.solve(res);
     }
-    x.array() -= x.mean();
+    center_if_laplacian(x);
     r.solve_time = t.elapsed();
 
     r.total_time = r.setup_time + r.solve_time;
@@ -611,7 +671,7 @@ static BenchResult run_ldlt(
     r.iterations = 1;
 
     Eigen::VectorXd res = b - L * x;
-    res.array() -= res.mean();
+    center_if_laplacian(res);
     double bnorm = b.norm();
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
     r.fillin = 0;
@@ -628,6 +688,11 @@ struct Args {
     int tile = 4;
     double er_p = 0.01;
     std::string mtx_path;
+    // --kind graph|operator: how a .mtx file is to be READ. MANDATORY with --mtx
+    // and empty by default, so an undeclared file is a hard error rather than a
+    // guess. Generated graphs (grid/grid3d/checkerboard/erdos) are graphs by
+    // construction and may leave it empty.
+    std::string kind;
     std::string dump_mtx;          // if set: write the built Laplacian to this path and exit
     bool pin_dump = false;         // with --dump-mtx: write the per-component Dirichlet-PINNED
                                    // matrix (dirichlet_pin) instead of the raw L -- the FAIR
@@ -678,6 +743,14 @@ static Args parse_args(int argc, char** argv) {
         else if (arg == "--tile")  a.tile = std::stoi(next());
         else if (arg == "--er-p")  a.er_p = std::stod(next());
         else if (arg == "--mtx")   { a.mtx_path = next(); a.graph = "mtx"; }
+        else if (arg == "--kind") {
+            a.kind = next();
+            static const std::set<std::string> ok{"graph","operator"};
+            if (!ok.count(a.kind)) {
+                std::cerr << "Unknown --kind: " << a.kind
+                          << " (expected graph|operator)\n"; std::exit(1);
+            }
+        }
         else if (arg == "--dump-mtx") a.dump_mtx = next();
         else if (arg == "--pin-dump") a.pin_dump = true;
         else if (arg == "--giant-dump") a.giant_dump = true;
@@ -879,9 +952,9 @@ static BenchResult run_rchol(
 
     // unpermute the solution back to the original ordering: x = Pᵀ·y
     Eigen::VectorXd x_orig = rchol_amd ? Eigen::VectorXd(perm.transpose() * x) : x;
-    x_orig.array() -= x_orig.mean();
+    center_if_laplacian(x_orig);
     Eigen::VectorXd res = b - L * x_orig;
-    res.array() -= res.mean();
+    center_if_laplacian(res);
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     return r;
@@ -1038,9 +1111,9 @@ static BenchResult run_rchol_mkl(
     mkl_set_num_threads(old_threads);
 
     Eigen::VectorXd xe = Eigen::Map<Eigen::VectorXd>(x.data(), N);
-    xe.array() -= xe.mean();
+    center_if_laplacian(xe);
     Eigen::VectorXd res = b - L * xe;
-    res.array() -= res.mean();
+    center_if_laplacian(res);
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     return r;
@@ -1179,9 +1252,9 @@ static BenchResult run_rchol_parallel(
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
 
-    x.array() -= x.mean();
+    center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
-    res.array() -= res.mean();
+    center_if_laplacian(res);
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     return r;
@@ -1265,7 +1338,7 @@ static BenchResult run_cholmod(
     // Iterative refinement on original L
     for (int refine = 0; refine < 3; ++refine) {
         Eigen::VectorXd res = b - L * x;
-        res.array() -= res.mean();
+        center_if_laplacian(res);
 
         cholmod_dense r_chol;
         r_chol.nrow = n; r_chol.ncol = 1; r_chol.nzmax = n; r_chol.d = n;
@@ -1277,14 +1350,14 @@ static BenchResult run_cholmod(
             static_cast<double*>(dx_chol->x), n);
         cholmod_free_dense(&dx_chol, &c);
     }
-    x.array() -= x.mean();
+    center_if_laplacian(x);
     r.solve_time = t.elapsed();
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
     r.iterations = 1;
 
     Eigen::VectorXd res = b - L * x;
-    res.array() -= res.mean();
+    center_if_laplacian(res);
     double bnorm = b.norm();
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
     r.fillin = 0;
@@ -1536,9 +1609,7 @@ static BenchResult run_amgcl(
     // is_laplacian classification -- NOT timed (benchmark-only: deployment knows a
     // priori whether L is a singular Laplacian or already SDDM). If L is strictly
     // SDDM (--reg-rel / IPM) we solve the full operator unchanged regardless of method.
-    Eigen::VectorXd row_sum = L * Eigen::VectorXd::Ones(n);
-    const bool is_laplacian = row_sum.cwiseAbs().maxCoeff()
-        / std::max(1e-30, L.diagonal().cwiseAbs().maxCoeff()) < 1e-10;
+    const bool is_laplacian = is_laplacian_operator(L);
     using Backend = amgcl::backend::builtin<double>;
     using Solver = amgcl::make_solver<
         amgcl::amg<Backend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
@@ -1617,10 +1688,7 @@ static BenchResult run_amgcl_cuda(
     // the coarsest grid (relax_coarse=1, set in amgcl_cuda.cu). split is applied
     // upstream by run_split, so L here is whole or a single component. The residual is
     // always scored against the ORIGINAL L (full_*), mean-centered when is_laplacian.
-    Eigen::VectorXd amgcl_row_sum = L * Eigen::VectorXd::Ones(n);
-    const double amgcl_row_sum_rel = amgcl_row_sum.cwiseAbs().maxCoeff()
-                                   / std::max(1e-30, L.diagonal().cwiseAbs().maxCoeff());
-    const bool is_laplacian = amgcl_row_sum_rel < 1e-10;
+    const bool is_laplacian = is_laplacian_operator(L);
 
     // Solve operator (pinned for ground=pin, else original L) + relax-coarse flag.
     Eigen::VectorXd rhs_v = b;
@@ -1828,10 +1896,7 @@ static BenchResult run_apxchol_gpu_pcg(
     // that on IPM iter10 blew up iter count 53 -> 83. For Laplacian,
     // pin one vertex to make L full-rank (avoids CG breakdown).
     int n = r.n;
-    Eigen::VectorXd row_sum = L * Eigen::VectorXd::Ones(n);
-    const double row_sum_rel = row_sum.cwiseAbs().maxCoeff()
-                             / std::max(1e-30, L.diagonal().cwiseAbs().maxCoeff());
-    const bool is_laplacian = row_sum_rel < 1e-10;
+    const bool is_laplacian = is_laplacian_operator(L);
     // Symmetric Dirichlet pin (full n x n, SPD) for a singular Laplacian -- see
     // dirichlet_pin / run_amgcl. Reaches 1e-8 vs the original L.
     const int m = n;
@@ -1973,10 +2038,7 @@ static BenchResult run_hypre_boomeramg(
     // is measured against the same matrix every other solver sees. Only pin
     // when L is a singular Laplacian (row sums ~ 0) AND not regularized.
     int n = r.n;
-    Eigen::VectorXd row_sum = L * Eigen::VectorXd::Ones(n);
-    const double row_sum_rel = row_sum.cwiseAbs().maxCoeff()
-                             / std::max(1e-30, L.diagonal().cwiseAbs().maxCoeff());
-    const bool is_laplacian = row_sum_rel < 1e-10;
+    const bool is_laplacian = is_laplacian_operator(L);
     // Setup timer STARTS here: the de-sing grounding WORK (dirichlet_pin) + Hypre
     // format conversion + AMG/PCG build all count toward setup, apples-to-apples with
     // apxchol's graph-build-inclusive setup. The is_laplacian SpMV above is a
@@ -2100,10 +2162,7 @@ static BenchResult run_hypre_boomeramg_gpu(
     // system than the residual is checked against (b - L*x), which floors the
     // true residual at ~1e-6 on ill-conditioned problems and never reaches tol.
     int n = r.n;
-    Eigen::VectorXd row_sum = L * Eigen::VectorXd::Ones(n);
-    const double row_sum_rel = row_sum.cwiseAbs().maxCoeff()
-                             / std::max(1e-30, L.diagonal().cwiseAbs().maxCoeff());
-    const bool is_laplacian = row_sum_rel < 1e-10;
+    const bool is_laplacian = is_laplacian_operator(L);
     // Setup timer STARTS here: de-sing grounding (dirichlet_pin) + GPU-mode switch +
     // Hypre conversion + AMG/PCG build all count (apples-to-apples with apxchol). The
     // is_laplacian SpMV above is a benchmark-only classification, left out of setup.
@@ -2270,9 +2329,41 @@ int main(int argc, char** argv) {
     }
 #endif
 
+    // ── how this matrix is to be interpreted ───────────────────────────────────
+    // DECLARED by the caller, never sniffed. A generated graph is a graph by
+    // construction; a .mtx file must say which of the two things it is, because
+    // the file alone cannot tell us -- kron_g500-logn16 carries integer values
+    // that are EDGE WEIGHTS, while apache2 carries values that are an assembled
+    // operator, and no heuristic separates those two intents reliably. Getting
+    // it wrong silently changes which linear system the whole suite reports on.
+    const bool generated = (args.graph != "mtx");
+    if (generated && args.kind == "operator") {
+        std::cerr << "--kind operator is meaningless for the generated graph '"
+                  << args.graph << "': it has no published operator, only a "
+                     "topology. Drop --kind (or pass --kind graph).\n";
+        return 1;
+    }
+    if (!generated && args.kind.empty()) {
+        std::cerr
+            << "--mtx " << args.mtx_path << " needs an explicit --kind.\n"
+               "  --kind graph     the file is an adjacency / pattern matrix; the system it\n"
+               "                   defines is L = D - A, assembled from |value| (unit weights\n"
+               "                   for a `pattern` file).\n"
+               "  --kind operator  the file is an already-assembled Laplacian / SDDM operator;\n"
+               "                   solve it exactly as published, diagonal included.\n"
+               "There is deliberately no default: a benchmark must not have a heuristic\n"
+               "silently deciding which linear system it is solving.\n";
+        return 1;
+    }
+    const matrix_kind kind =
+        (args.kind == "operator") ? matrix_kind::op : matrix_kind::graph;
+
     // Build graph
     std::vector<std::vector<Edge>> adj;
     std::string graph_name;
+    // Set for kind=operator: the published matrix, loaded as it stands.
+    Eigen::SparseMatrix<double> published;
+    std::string interpretation;   // the one line we report + store in the cell
 
     if (args.graph == "grid") {
         int gc = (args.ny > 0) ? args.ny : args.n;
@@ -2292,20 +2383,57 @@ int main(int argc, char** argv) {
         std::snprintf(pbuf, sizeof(pbuf), "%.4g", args.er_p);
         graph_name = "erdos_" + std::to_string(args.n) + "_p" + pbuf;
     } else if (args.graph == "mtx") {
-        auto res = load_mtx_as_adjacency(args.mtx_path);
-        adj = std::move(res.adj);
         auto pos = args.mtx_path.rfind('/');
         graph_name = (pos != std::string::npos) ? args.mtx_path.substr(pos + 1) : args.mtx_path;
+        try {
+            if (kind == matrix_kind::op) {
+                // Declared an assembled operator: read it as published —
+                // diagonal included, signs untouched — and solve THAT. No
+                // adjacency exists for this path (see the `adj.empty()` gate on
+                // the v0 solver).
+                auto res = load_mtx_as_operator(args.mtx_path);
+                published = std::move(res.A);
+            } else {
+                auto res = load_mtx_as_adjacency(args.mtx_path);
+                adj = std::move(res.adj);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "cannot read " << args.mtx_path << " as --kind "
+                      << args.kind << ":\n  " << e.what() << "\n";
+            return 1;
+        }
     } else {
         std::cerr << "Unknown graph type: " << args.graph << "\n";
         return 1;
     }
 
 
-    int n = static_cast<int>(adj.size());
+    // ── assemble the operator the whole suite will solve ──────────────────────
+    Eigen::SparseMatrix<double> L;
+    apxchol::operator_scan op_scan{};
+    if (kind == matrix_kind::op) {
+        L = std::move(published);
+        // Assert the class rather than trusting the declaration: require_operator
+        // names WHICH condition fails (asymmetry, a non-positive diagonal, the
+        // adjacency signature) with counts, so a file mis-declared `operator`
+        // dies here with a diagnosis instead of quietly producing nonsense.
+        try {
+            op_scan = apxchol::require_operator(L);
+        } catch (const std::exception& e) {
+            std::cerr << "--kind operator rejected " << args.mtx_path << ":\n  "
+                      << e.what() << "\n";
+            return 1;
+        }
+        interpretation = "solved as published (assembled operator, diagonal as stored)";
+    } else {
+        L = laplacian_from_adj(adj);
+        interpretation = generated
+            ? "L = D - A assembled from the generator's edge weights"
+            : "L = D - A assembled from |values| (unit weights for a pattern file; "
+              "the file's own diagonal, i.e. any self-loop, is dropped)";
+    }
+    const int n = static_cast<int>(L.rows());
     std::cerr << "Graph: " << graph_name << ", n=" << n;
-
-    Eigen::SparseMatrix<double> L = laplacian_from_adj(adj);
 
     // --reg-rel: unify singular grid Laplacians to strictly-SDDM by adding
     // eps*I (eps = reg_rel * mean|diag|), the SAME shift for EVERY solver. This
@@ -2324,6 +2452,64 @@ int main(int argc, char** argv) {
     int nnz = static_cast<int>(L.nonZeros());
     std::cerr << ", nnz=" << nnz << "\n";
 
+    // ── how this matrix was interpreted: report it, once, before anything runs ──
+    // The grounding/scoring mode is a property of the ASSEMBLED operator, not of
+    // the declared kind: a graph always yields a singular Laplacian, and a file
+    // declared `operator` may be one (ecology1 is published as an exact
+    // Laplacian) or may be full-rank SDDM (apache2, G3_circuit, thermal2, the
+    // IPM normal equations).
+    g_laplacian_mode = is_laplacian_operator(L);
+    {
+        const char* kname = (kind == matrix_kind::op) ? "operator" : "graph";
+        std::cerr << "[matrix] " << graph_name << ": kind=" << kname
+                  << " -> " << interpretation << "\n";
+        std::cerr << "[matrix] operator is "
+                  << (g_laplacian_mode ? "a SINGULAR LAPLACIAN (row sums vanish): grounded, "
+                                         "solution and residual mean-centred"
+                                       : "FULL-RANK (nonzero row sums): solved and scored "
+                                         "untouched, no pin, no mean-centring")
+                  << "\n";
+        if (kind == matrix_kind::op) {
+            // The class facts come from scan_operator; only the wording is ours.
+            // (describe_operator is the LIBRARY's line, and its positive-off-
+            // diagonal clause reports what apxchol's own operator_view did about
+            // them — a per-solver preconditioner decision that has not been taken
+            // at this point, and never is at benchmark level: every solver here
+            // is handed the published operator and repairs it, or doesn't, on its
+            // own terms.)
+            std::cerr << "[matrix] operator class: "
+                      << (op_scan.excess_rows > 0 ? "SDDM" : "pure Laplacian")
+                      << ", " << op_scan.excess_rows << " of " << op_scan.rows
+                      << " rows carry a positive diagonal excess";
+            if (op_scan.deficient_rows > 0)
+                std::cerr << "; " << op_scan.deficient_rows
+                          << " rows break diagonal dominance (worst row sum "
+                          << op_scan.worst_row_sum << ") — reported, not enforced";
+            if (op_scan.offdiag_pos > 0)
+                std::cerr << "; " << op_scan.offdiag_pos
+                          << " positive off-diagonal entries carrying "
+                          << 100.0 * op_scan.positive_mass_fraction()
+                          << "% of the off-diagonal mass (apxchol's lumping ceiling is "
+                          << 100.0 * apxchol::kDefaultLumpMassCeiling
+                          << "%; each solver handles them on its own terms — the "
+                             "operator handed to all of them is the published one)";
+            std::cerr << "\n";
+        }
+        // One machine-readable line for the runners to lift into the cell's
+        // matrix_meta, so every stored result carries its own interpretation.
+        std::cerr << "MATRIX_META kind=" << kname
+                  << " n=" << n << " nnz=" << nnz
+                  << " laplacian=" << (g_laplacian_mode ? 1 : 0)
+                  << " grounding=" << (g_laplacian_mode ? "pin_or_native" : "none");
+        if (kind == matrix_kind::op)
+            std::cerr << " pos_offdiag=" << op_scan.offdiag_pos
+                      << " pos_offdiag_mass=" << op_scan.positive_mass_fraction();
+        // `input` (not `source`): the registry already uses `source` for WHERE a
+        // matrix comes from (grid / mtx), and the two must not collide in the cell.
+        std::cerr << " input=" << (args.graph == "mtx" ? args.mtx_path : graph_name)
+                  << " interpretation=\"" << interpretation << "\"\n";
+    }
+
     // --dump-mtx: write the built Laplacian (lower triangle, symmetric) to a
     // Matrix Market file and exit. Lets external solvers (e.g. ParAC, which
     // requires an AMD-reordered .mtx) consume the EXACT same matrix we benchmark.
@@ -2335,6 +2521,17 @@ int main(int argc, char** argv) {
         // grounded operator) rather than the raw singular L, so external solvers
         // solve the SAME system the in-process solvers do (no eps*I shift).
         Eigen::SparseMatrix<double> Lc;
+        if (args.pin_dump && !g_laplacian_mode) {
+            // Pinning grounds a SINGULAR Laplacian. Applied to a full-rank
+            // operator it deletes a real degree of freedom, so the external
+            // solver reading this dump would solve a different system than the
+            // in-process ones. Refuse rather than hand out a doctored operator.
+            std::cerr << "--pin-dump refused: " << graph_name
+                      << " is a full-rank operator (nonzero row sums); there is no "
+                         "null space to ground, and pinning would change the system. "
+                         "Dump it without --pin-dump.\n";
+            return 1;
+        }
         if (args.pin_dump) {
             std::vector<int> pinned;
             Lc = dirichlet_pin(L, pinned);
@@ -2433,14 +2630,25 @@ int main(int argc, char** argv) {
     };
 
     if (args.solvers.count("apxchol")) {
-        print(median_run([&]() {
-            std::streambuf* old = std::cout.rdbuf();
-            std::ostringstream devnull;
-            std::cout.rdbuf(devnull.rdbuf());
-            auto r = run_apxchol(adj, L, b, graph_name, args.tol, args.maxiter);
-            std::cout.rdbuf(old);
-            return r;
-        }, R));
+        // The v0 reference builds its preconditioner from an ADJACENCY LIST, so
+        // it can only ever solve L = D - A. On a published operator there is no
+        // adjacency to hand it (its diagonal excess has nowhere to go), and
+        // feeding it the off-diagonals would mean scoring it on a different
+        // system than every other solver in the same cell. Honest n/a instead.
+        if (adj.empty() && n > 0) {
+            std::cerr << "[n/a] apxchol (v0 reference) takes a graph adjacency; "
+                         "the matrix was declared kind=operator\n";
+            print(make_na("ApxChol+PCG [Kyng16]"));
+        } else {
+            print(median_run([&]() {
+                std::streambuf* old = std::cout.rdbuf();
+                std::ostringstream devnull;
+                std::cout.rdbuf(devnull.rdbuf());
+                auto r = run_apxchol(adj, L, b, graph_name, args.tol, args.maxiter);
+                std::cout.rdbuf(old);
+                return r;
+            }, R));
+        }
     }
 
 #ifdef HAVE_APXCHOL_V1

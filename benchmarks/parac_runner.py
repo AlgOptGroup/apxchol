@@ -4,8 +4,15 @@
 Consolidates the former standalone parac_fair.py (CPU) / parac_gpu.py (GPU)
 on top of runner_common. Same cells, same measurement semantics:
 
+kind=operator matrices (the published SuiteSparse operators + the IPM normal
+equations) take ParAC's OWN published-operator route: the matrix is dumped
+untouched and run through physics mode, exactly as ParAC's own
+experiment/physics_test_amd.sh benchmarks apache2 / G3_circuit / parabolic_fem.
+Their graph-mode cell is n/a — graph mode grounds a Laplacian. Everything below
+describes the kind=graph route.
+
 CPU (`parac` / `parac_physics`, device=cpu):
-  dump (grids+IPM pure Laplacian / native SDDM; SuiteSparse Dirichlet-pinned —
+  dump (grids pure Laplacian; SuiteSparse graphs Dirichlet-pinned —
   one symmetric pin per connected component, a full-rank SDDM whose residual
   against the pinned matrix equals the residual against the original singular L,
   so it's a FAIR replacement for the old eps*I reg-rel that ParAC needed to not
@@ -82,10 +89,29 @@ _g = lambda pat, o: (re.search(pat, o).group(1) if re.search(pat, o) else None)
 
 # ── shared: regularized/pure dump ───────────────────────────────────────────────
 def _dump_tag(mid):
-    """The dump variant for this matrix: SuiteSparse -> Dirichlet-pinned ('pin'),
-    everything else (grids + native-SDDM IPM) -> 'pure'. Pure family fact, so it's
-    knowable without dumping (lets the GPU path tag its cache before the dump)."""
+    """The dump variant for this matrix.
+
+    kind=operator -> 'op': the PUBLISHED operator, dumped untouched. This is
+    ParAC's own physics input — its benchmark scripts feed exactly these files
+    (parabolic_fem, ecology2, apache2, G3_circuit) to `driver <mtx> <threads> ""
+    1`, i.e. physics mode, and its data README says physics matrices are "used
+    as-is". Handing it our derived Laplacian instead bypassed that entry point.
+
+    kind=graph -> the Laplacian we build from the file, either Dirichlet-pinned
+    ('pin', SuiteSparse graphs) or pure ('pure', grids).
+
+    Knowable without dumping (family + registry kind), which lets the GPU path
+    tag its cache before the dump.
+    """
+    if rc.kind_of(mid) == "operator":
+        return "op"
     return "pin" if rc.MATRICES[mid]["family"] == "suitesparse" else "pure"
+
+
+def _dump_flag(tag):
+    """The --dump-mtx modifier for a dump tag. 'op' and 'pure' dump L as built;
+    only 'pin' asks for the Dirichlet-pinned variant."""
+    return "--pin-dump" if tag == "pin" else ""
 
 
 def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
@@ -100,7 +126,7 @@ def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
     os.makedirs(dump_dir, exist_ok=True)
     p = f"{dump_dir}/{mid}-{tag}.mtx"
     if not os.path.exists(p):
-        pinflag = "--pin-dump" if tag == "pin" else ""
+        pinflag = _dump_flag(tag)
         sh(f"{bin_path} {rc.margs_for(mid)} {pinflag} --dump-mtx {p} --solver none",
            timeout=timeout, mem_cap_gb=mem_cap_gb)
     return (p if os.path.exists(p) else None), tag
@@ -163,18 +189,20 @@ def _run_once_cpu(amd, physics):
                 rss_mb=rss_mb)
 
 
-def _measure_cpu(family, mid, amd, amds, physics, solver):
+def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
     """REPS runs of one driver mode (graph or physics), one cell."""
     if rc.cell_done(family, mid, solver, "", THREADS, "cpu", terminal=TERMINAL_CPU):
         return "skip(done)"
     try:
         runs = [_run_once_cpu(amd, physics) for _ in range(REPS)]
     except subprocess.TimeoutExpired:
-        rc.emit_cell(family, mid, solver, "", "timeout", {}, THREADS, "cpu", PROV_CPU)
+        rc.emit_cell(family, mid, solver, "", "timeout", {}, THREADS, "cpu", PROV_CPU,
+                     matrix_meta=extra_meta)
         return "TIMEOUT"
     ok = [r for r in runs if r["factor"] and r["solve"] and r["iters"]]
     if not ok:
-        rc.emit_cell(family, mid, solver, "", "failed", {}, THREADS, "cpu", PROV_CPU)
+        rc.emit_cell(family, mid, solver, "", "failed", {}, THREADS, "cpu", PROV_CPU,
+                     matrix_meta=extra_meta)
         return "FAILED"
     med = lambda key: statistics.median(float(r[key] or 0) for r in ok)
     factor = med("factor"); etree = med("etree"); ftree = med("ftree"); summ = med("summary")
@@ -192,7 +220,8 @@ def _measure_cpu(family, mid, amd, amds, physics, solver):
                "factor_s": round(factor, 6), "prep_s": round(prep, 6)}
     rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
     if rss: metrics["max_rss_mb"] = round(max(rss), 1)   # peak host RSS over reps
-    rc.emit_cell(family, mid, solver, "", status, metrics, THREADS, "cpu", PROV_CPU)
+    rc.emit_cell(family, mid, solver, "", status, metrics, THREADS, "cpu", PROV_CPU,
+                 matrix_meta=extra_meta)
     return f"{status} it={iters} solve={solve:.3f}"
 
 
@@ -302,11 +331,54 @@ def _measure_cpu_physics_split(family, mid):
     return f"{status} it={iters} solve={solve:.3f} comps={n_solved}/{n_comps_total}"
 
 
+def _run_cpu_operator(mid, family):
+    """ParAC CPU pass for a kind=operator matrix: its OWN published-operator path.
+
+    ParAC benchmarks published operators through `driver <mtx> <threads> "" 1` —
+    physics mode — on the matrix as downloaded (its experiment/physics_test_amd.sh
+    runs exactly parabolic_fem / ecology2 / apache2 / G3_circuit that way, and its
+    data README says physics matrices are "used as-is"). Its reader auto-detects
+    that the file already carries a diagonal and keeps it, rather than rebuilding
+    one from the off-diagonals. So: dump the published operator untouched,
+    AMD-reorder it, run physics.
+
+    The GRAPH-mode cell is n/a here. Graph mode grounds by pinning isolated nodes
+    and building a per-component mean-zero RHS — a Laplacian construction, which
+    a published full-rank operator has no need of and is not defined by.
+
+    Physics mode grounds by trimming the LAST row and column; that is ParAC's own
+    protocol for these matrices and is recorded in the cell so the reading is not
+    lost.
+    """
+    rc.emit_cell(family, mid, "parac", "", "n/a", {}, THREADS, "cpu", PROV_CPU,
+                 matrix_meta={"parac_mode": "n/a",
+                              "parac_na_reason":
+                                  "ParAC graph mode grounds a Laplacian (isolated-node pins "
+                                  "+ per-component mean-zero RHS); this matrix is a published "
+                                  "operator, which goes through ParAC's physics path instead"})
+    try:
+        amd, amds = _prep_amd(mid, "op", "")     # the published operator, untouched
+    except subprocess.TimeoutExpired:
+        if not rc.cell_done(family, mid, "parac_physics", "", THREADS, "cpu", terminal=TERMINAL_CPU):
+            rc.emit_cell(family, mid, "parac_physics", "", "timeout", {}, THREADS, "cpu", PROV_CPU)
+        return "graph[n/a] physics[TIMEOUT(dump/reorder)]"
+    if not amd:
+        return "graph[n/a] physics[SKIP(dump/reorder)]"
+    p = _measure_cpu(family, mid, amd, amds, True, "parac_physics",
+                     extra_meta={"parac_mode": "physics",
+                                 "parac_input": "the published operator, AMD-reordered",
+                                 "parac_grounding": "physics mode trims the last row/column"})
+    return f"graph[n/a] physics[{p}]"
+
+
 def run_cpu(mid):
     """ParAC CPU pass for one matrix: graph + physics cells. Returns a status string.
 
+    kind=operator goes through _run_cpu_operator (ParAC's own physics entry point on
+    the published matrix). For kind=graph:
+
     GRAPH reads the per-component-Dirichlet-pinned P (--pin-dump for SuiteSparse, pure
-    for grids/IPM) — fair on connected AND disconnected (one pin per component). PHYSICS
+    for grids) — fair on connected AND disconnected (one pin per component). PHYSICS
     is the LITERAL per-component split: each connected component >= COMP_THRESHOLD nodes
     is dumped as a PURE Laplacian, solved with the single-node trim grounding (which is
     valid only on a connected operator), and recombined (sum setup/solve, max iters) —
@@ -314,8 +386,10 @@ def run_cpu(mid):
     matrix; on disconnected matrices the small specks below the threshold are negligible.
     Both built on the consistent pin-zeroed RHS inside the patched driver."""
     family = rc.MATRICES[mid]["family"]
+    if rc.kind_of(mid) == "operator":
+        return _run_cpu_operator(mid, family)
     g_tag = _dump_tag(mid)
-    g_flag = "--pin-dump" if g_tag == "pin" else ""
+    g_flag = _dump_flag(g_tag)
     try:
         g_amd, g_amds = _prep_amd(mid, g_tag, g_flag)            # graph: per-component pin
         if not g_amd:
@@ -386,8 +460,18 @@ def run_gpu(mid, tol=TOL):
     except subprocess.TimeoutExpired:
         return "TIMEOUT(dump/sort)"   # no cell: GPU terminal set retries anyway
     results = []
+    is_operator = rc.kind_of(mid) == "operator"
     for solver_key, driver in (("parac_graph", rc.PARAC_GPU_DRIVER),
                                ("parac_physics", rc.PARAC_GPU_DRIVER_PHYS)):
+        if is_operator and solver_key == "parac_graph":
+            # Same reasoning as the CPU axis: graph mode grounds a Laplacian, and
+            # a published operator goes through ParAC's physics path instead.
+            rc.emit_cell(family, mid, solver_key, "", "n/a", {}, THREADS, "gpu", PROV_GPU,
+                         matrix_meta={"parac_mode": "n/a",
+                                      "parac_na_reason":
+                                          "ParAC graph mode grounds a Laplacian; this matrix "
+                                          "is a published operator and runs physics mode"})
+            results.append(f"{solver_key}[n/a]"); continue
         if rc.cell_done(family, mid, solver_key, "", THREADS, "gpu", terminal=TERMINAL_GPU):
             results.append(f"{solver_key}[skip(done)]"); continue
         if not os.path.exists(driver):

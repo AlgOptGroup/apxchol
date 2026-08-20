@@ -6,7 +6,15 @@ RESUME-SAFE: a cell that already has a terminal status is skipped, so re-running
 only fills empty cells. fair_charts.py / gpu_charts.py / combined_charts.py all
 read this one store.
 
-Singular-Laplacian families (grids, SuiteSparse) now run UNSHIFTED, on the
+Every matrix DECLARES how it is to be read (runner_common: kind=graph|operator),
+and the binary requires that declaration on the command line — nothing here
+guesses. kind=graph builds L = D - A from the file's |values| (the system a graph
+file defines); kind=operator solves the published matrix as it stands, diagonal
+included. Each matrix prints one interpretation line, and every cell records it
+under matrix_meta. External solvers (ParAC, AC/AC2) are handed that same operator
+through --dump-mtx rather than re-reading the registry file themselves.
+
+Singular-Laplacian families (grids, SuiteSparse graphs) now run UNSHIFTED, on the
 ORIGINAL singular L (no --reg-rel). The benchmark grounds singular Laplacians with
 a symmetric multi-component Dirichlet pin (one pin per connected component) and
 scores every solver's true residual against the original L, so multigrid reaches
@@ -32,7 +40,11 @@ import runner_common as rc
 import parac_runner
 from runner_common import ROOT, BIN, CELLS, GRIDS, SS, IPM, matrix_args, sh
 
-DUMP = "/tmp/fair_dump"
+# Dumped .mtx cache (grid Laplacians + the exact operator handed to the external
+# solvers). /tmp is a tmpfs on this box, i.e. RAM with a per-user quota, and the
+# giants dump multi-GB files — point this at a disk-backed directory when
+# sweeping them. See benchmarks/README.md.
+DUMP = os.environ.get("APXCHOL_BENCH_DUMP_DIR", "/tmp/fair_dump")
 TOL = "1e-8"
 REPS = 3
 THREADS = 16
@@ -60,10 +72,20 @@ PROV = {"boost":"on","boost_expected":"on","git_sha":rc.git_sha(),
 def classify(m):
     return rc.classify(m, TOL)
 
-def emit(family, mid, solver, config, status, metrics):
-    return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, PROV)
+# What the BINARY reported about the operator it assembled for each matrix
+# (`MATRIX_META ...` on stderr): kind, n/nnz, and whether the assembled operator
+# turned out to be a singular Laplacian (grounded) or full-rank (solved as-is).
+# Recorded once per matrix and merged into every cell for it, including the ones
+# produced by external solvers that never run the binary themselves — they are
+# handed the same operator via --dump-mtx, so the record applies to them too.
+OBSERVED = {}
 
-def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout=None, ground=None):
+def emit(family, mid, solver, config, status, metrics):
+    return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, PROV,
+                        matrix_meta=OBSERVED.get(mid))
+
+def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout=None, ground=None,
+            mid=None):
     cfg = f"--v1-configs '{config}'" if solver=="apxchol_v1" else ""
     # AMGCL de-singularization series: ground=coarse charts the relaxed-coarse cell
     # (--decompose stays auto, so whole+coarse on connected / split+coarse on
@@ -118,6 +140,10 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
                     except: pass
             pk = vram.peak_mb()                 # whole-run peak VRAM (GPU axis; sidecar)
             if pk: m["max_vram_mb"] = pk
+        # How the binary read this matrix, straight from its own report.
+        meta = rc.parse_matrix_meta(p.stderr)
+        if meta and mid:
+            OBSERVED[mid] = meta
         return st,m
     st,m = _run([])
     # (The "retry with APXCHOL_GPU_SPTRSV=levelset after an OOM" fallback that used
@@ -128,10 +154,18 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
     return st,m
 
 def run_julia(mtx, solver):
-    # AC/AC2 (Laplacians.jl) are Laplacian-native (handle the null-space internally),
-    # so they read the PURE Laplacian mtx (eps negligible vs the regularized others).
+    """AC/AC2 (Laplacians.jl) on the DUMPED operator.
+
+    They used to be handed the raw registry .mtx and re-derive a Laplacian from
+    it with their own copy of the adjacency reader, so their agreeing with the
+    in-process solvers was a property of two code paths happening to match — not
+    something the run demonstrated. `--operator` makes the Julia driver read the
+    matrix that `--dump-mtx` wrote, i.e. the exact operator every in-process
+    solver was given, and solve THAT: approxchol_lap on a singular Laplacian
+    (recovering A = -offdiag(L)), approxchol_sddm on a full-rank operator.
+    """
     cmd=(f"taskset -c 0-{THREADS-1} julia --project=benchmarks/julia "
-         f"benchmarks/julia/bench_laplacians.jl --mtx {mtx} --solver {solver} "
+         f"benchmarks/julia/bench_laplacians.jl --operator {mtx} --solver {solver} "
          f"--tol {TOL} --maxiter 500 --csv")
     try: out=sh(cmd, timeout=TIMEOUT).stdout
     except subprocess.TimeoutExpired: return "timeout", None
@@ -149,10 +183,24 @@ def run_parac(mid):
     except Exception as e:
         print(f"   {label:24} ERROR: {e}")
 
-def grid_mtx(mid, kind, spec):
-    os.makedirs(DUMP,exist_ok=True); p=f"{DUMP}/{mid}.mtx"
+def dump_mtx(mid):
+    """Write the EXACT operator the in-process solvers solve to a .mtx, cached.
+
+    This is the one seam every external solver goes through, so "every solver
+    received the same matrix" is demonstrated by construction rather than
+    assumed: the binary assembles the operator per the registry's declared kind
+    (L = D - A for a graph, the published matrix for an operator) and writes it
+    out. Grids dump their generated Laplacian; files dump whichever of the two
+    readings their kind selects.
+
+    NOTE the dumps are large (the giants run to several GB) and DUMP defaults to
+    a tmpfs — set APXCHOL_BENCH_DUMP_DIR to a disk-backed path before sweeping
+    them. Returns None when the dump failed.
+    """
+    os.makedirs(DUMP, exist_ok=True)
+    p = f"{DUMP}/{mid}.mtx"
     if not os.path.exists(p):
-        sh(f"{BIN[DEVICE]} {matrix_args(kind,spec)} --dump-mtx {p} --solver none", timeout=TIMEOUT)
+        sh(f"{BIN[DEVICE]} {rc.margs_for(mid)} --dump-mtx {p} --solver none", timeout=TIMEOUT)
     return p if os.path.exists(p) else None
 
 # --- CPU axis solver sets ---
@@ -254,11 +302,13 @@ def gpu_apx_total(family, mid):
             pass
     return best
 
-def do_matrix(mid, family, kind, spec, is2d, mtx_for_julia, n, reg):
-    print(f"[{mid}] (n={n}) device={DEVICE}", flush=True)
+def do_matrix(mid, family, source, spec, is2d, n, reg):
+    kind = rc.kind_of(mid)         # declared, never guessed; raises if missing
+    print(f"[{mid}] (n={n}) device={DEVICE} kind={kind} -> "
+          f"{rc.KIND_INTERPRETATION[kind]}", flush=True)
     if PARAC_ONLY:                 # --parac-only: ParAC and nothing else
         run_parac(mid); return
-    margs=matrix_args(kind,spec)
+    margs=rc.margs_for(mid)
     # The competitor wall-clock cap is TIMEOUT_MULT x GPU-apxchol's total time -- the
     # fastest apxchol config is the universal reference, so "10x of GPU apxchol" is the
     # same bar on both axes (the charts clamp+mark anything slower at that cap). A
@@ -274,7 +324,7 @@ def do_matrix(mid, family, kind, spec, is2d, mtx_for_julia, n, reg):
     if DEVICE == "gpu":
         t_apx = None
         for i,(solver,config) in enumerate(APX_GPU):
-            _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family), config)
+            _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
             if i==0 and m and m.get("total_s"): t_apx = m["total_s"]
         to = comp_timeout(t_apx)
         comp = list(COMP_GPU)
@@ -283,11 +333,11 @@ def do_matrix(mid, family, kind, spec, is2d, mtx_for_julia, n, reg):
                 # default (Hypre defaults) + CoarsenCutFactor 'cut' (hub->F-point),
                 # charted as two GPU series like the CPU axis -- cut is the fix on the
                 # mega-hub social giants, a no-op on grids/IPM.
-                step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to), solver)
+                step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver)
                 step(family,mid,solver,"cut",
-                     lambda s=solver: run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to), solver+"/cut")
+                     lambda s=solver: run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), solver+"/cut")
             else:
-                step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to), solver)
+                step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver)
         if RUN_PARAC:
             run_parac(mid)
         return  # no Julia on the GPU axis
@@ -299,7 +349,7 @@ def do_matrix(mid, family, kind, spec, is2d, mtx_for_julia, n, reg):
     apx_list = ([(s, c) for (s, c) in APX if "[vec_pool]" in c or "[vec]" in c]
                 if mid == "com-Orkut" else APX)
     for i,(solver,config) in enumerate(apx_list):
-        _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family), config)
+        _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
         if i==0 and m and m.get("total_s"): t_apx = m["total_s"]
     to = comp_timeout(t_apx)
     for solver in COMP:
@@ -308,14 +358,21 @@ def do_matrix(mid, family, kind, spec, is2d, mtx_for_julia, n, reg):
             # The cut variant is a no-op on uniform-degree grids/IPM and the fix on
             # mega-hub social graphs (com-Youtube/as-Skitter), so charting both shows
             # the methodology point instead of letting default blow up the timeout.
-            step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to), solver)
+            step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver)
             step(family,mid,solver,"cut",
-                 lambda s=solver: run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to), solver+"/cut")
+                 lambda s=solver: run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), solver+"/cut")
         else:
-            step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to), solver)
-    if mtx_for_julia:  # AC/AC2 read the .mtx directly (grids via dump, SS/IPM native)
-        for s in JULIA:
-            step(family,mid,s,"", lambda ss=s: run_julia(mtx_for_julia,ss), s)
+            step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver)
+    # AC/AC2 read the DUMPED operator — the same seam every other external solver
+    # goes through — so their cells demonstrably solve the same system as the
+    # in-process ones instead of re-deriving one from the registry file.
+    if JULIA and not all(cell_done(family, mid, s, "") for s in JULIA):
+        dumped = dump_mtx(mid)
+        if dumped:
+            for s in JULIA:
+                step(family,mid,s,"", lambda ss=s: run_julia(dumped,ss), s)
+        else:
+            print(f"   {'AC/AC2':24} SKIP (operator dump failed)")
     if RUN_PARAC:      # ParAC graph+physics (resume-safe; the runner skips done cells)
         run_parac(mid)
     # CMG is run separately by benchmarks/cmg_matlab_runner.py.
@@ -374,22 +431,21 @@ def main():
     print(f"=== fair sweep: device={DEVICE}, families={sorted(fams)}, "
           f"headline_only={a.headline_only}, store={CELLS} (resume-safe) ===", flush=True)
     # Resume-safe: cells with a terminal status are skipped (see cell_done).
+    # do_matrix reads the declared kind from the registry (rc.kind_of), so the
+    # loops here carry only WHERE the matrix comes from, never how to read it.
     if "grids" in fams:
-        for mid,family,kind,spec,is2d in GRIDS:
+        for mid,family,source,spec,is2d in GRIDS:
             if not want(mid): continue
-            n = spec*spec if kind=="grid" else spec*spec*spec
-            # grid_mtx dumps a (possibly multi-GB) .mtx only the Julia path needs;
-            # skip the dump when AC/AC2 are not being run.
-            gm = grid_mtx(mid,kind,spec) if JULIA else None
-            do_matrix(mid,family,kind,spec,is2d,gm,n,None)   # singular L, multi-component Dirichlet pin
+            n = spec*spec if source=="grid" else spec*spec*spec
+            do_matrix(mid,family,source,spec,is2d,n,None)   # singular L, multi-component Dirichlet pin
     if "suitesparse" in fams:
-        for mid,path,n in SS:
+        for mid,path,n,_kind in SS:
             if not want(mid): continue
-            do_matrix(mid,"suitesparse","mtx",f"{ROOT}/{path}",False,f"{ROOT}/{path}",n,None)  # singular L
+            do_matrix(mid,"suitesparse","mtx",f"{ROOT}/{path}",False,n,None)
     if "ipm" in fams:
-        for mid,path,n in IPM:  # native SDDM -> unshifted (reg=None)
+        for mid,path,n,_kind in IPM:
             if not want(mid): continue
-            do_matrix(mid,"ipm","mtx",f"{ROOT}/{path}",False,f"{ROOT}/{path}",n,None)
+            do_matrix(mid,"ipm","mtx",f"{ROOT}/{path}",False,n,None)
     print("FAIR sweep done")
 
 if __name__=="__main__":

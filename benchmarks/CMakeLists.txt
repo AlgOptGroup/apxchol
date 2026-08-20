@@ -385,6 +385,11 @@ find_package(OpenMP QUIET)
 
 add_library(apxchol_v1 STATIC
     ${PARENT_SRC}/factorization.cpp
+    # The operator class the factorization asserts its input against
+    # (include/apxchol/operator_class.h). factorization.cpp constructs an
+    # operator_view, and benchmark.cpp calls require_operator/describe_operator
+    # directly for --kind operator, so both need this translation unit.
+    ${PARENT_SRC}/operator_class.cpp
     ${PARENT_SRC}/solve.cpp
 )
 target_compile_features(apxchol_v1 PUBLIC cxx_std_23)
