@@ -10,12 +10,12 @@ cd "$(dirname "$0")"
 EIGEN_FLAGS=$(pkg-config --cflags eigen3 2>/dev/null || echo "-I/usr/include/eigen3")
 
 # CXXFLAGS overrides mkoctfile's defaults entirely -> restate optimization.
-# fp32 defines match the library defaults (root CMakeLists defaults).
+# fp32 pool defines match the library defaults (root CMakeLists defaults).
 CXXFLAGS="-O3 -march=native -std=gnu++23 -fopenmp -fPIC -Wall" \
 mkoctfile --mex \
     apxchol_mex.cpp ../src/factorization.cpp ../src/solve.cpp \
     -I../include ${EIGEN_FLAGS} \
-    -DAPXCHOL_SPTRSV_FP32 -DAPXCHOL_POOL_FP32 \
+    -DAPXCHOL_POOL_FP32 \
     -lgomp \
     -o apxchol_mex
 

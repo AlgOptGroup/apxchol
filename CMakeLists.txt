@@ -71,9 +71,8 @@ option(APXCHOL_CUDA_WITH_CUSPARSE "CUDA build only: also compile + link the cuSP
 option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors with more than 2^31 nonzeros" OFF)
 option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
 option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
-option(APXCHOL_SPTRSV_FP32 "fp32 SpTRSV factor values, diagonal included (the PCG recurrence stays fp64; still converges to 1e-8); OFF gives an fp64 baseline" ON)
 option(APXCHOL_POOL_FP32 "fp32 residual-pool edge weights (reads promote to fp64; convergence unchanged); OFF gives an fp64 baseline" ON)
-set(APXCHOL_SPTRSV_LOWPREC "OFF" CACHE STRING "Low-precision SpTRSV factor-value STORAGE variant for the OFF-diagonals (diagonal kept exact fp32 in a separate array; reads widen to fp64 in registers, compute unchanged -- a preconditioner-quality knob: PCG still converges, maybe in more iters): OFF | FP16_SCALED (IEEE binary16 of L_ij / s_j, per-column scale s_j = max |off-diagonal|; entries < 2^-25 of their column max flush to zero -- counted, printed under APXCHOL_VERBOSE). See include/apxchol/lowprec.h. CPU/omp backend only -- with APXCHOL_USE_CUDA=ON the value is treated as OFF for that build (fp32 CPU storage, STATUS message), never an error; takes precedence over APXCHOL_SPTRSV_FP32. Under FP16_SCALED stored fp16 subnormals are flushed to zero by default (env APXCHOL_FP16_KEEP_SUBNORMAL=1 keeps them) and the per-column storage-rounding residual can be folded into the fp32 diagonal (env APXCHOL_LOWPREC_DIAG_COMP=1). Every build honours the runtime env APXCHOL_FACTOR_DROP=<rel> (compacting drop: off-diagonals below rel * column max are REMOVED from the SpTRSV CSR/CSC at setup), APXCHOL_FTZ=1 (MXCSR FTZ+DAZ on every thread at PCG entry) and APXCHOL_FP16_GATHER=simd|scalar (fat-level kernel flavour of the fp16 storage); FP16_SCALED also APXCHOL_FP16_DIAG=1 (divide by the fp16 diagonal slot; refused unless every slot is a normal fp16). The scale is folded into the vectors (forward_solve returns D y, transpose_solve takes it); see include/apxchol/solver/sptrsv/omp.h")
+set(APXCHOL_SPTRSV_LOWPREC "OFF" CACHE STRING "Low-precision SpTRSV factor-value STORAGE variant for the OFF-diagonals (diagonal kept exact fp32 in a separate array; reads widen to fp64 in registers, compute unchanged -- a preconditioner-quality knob: PCG still converges, maybe in more iters): OFF | FP16_SCALED (IEEE binary16 of L_ij / s_j, per-column scale s_j = max |off-diagonal|; entries < 2^-25 of their column max flush to zero -- counted, printed under APXCHOL_VERBOSE). See include/apxchol/lowprec.h. CPU/omp backend only -- with APXCHOL_USE_CUDA=ON the value is treated as OFF for that build (fp32 CPU storage, STATUS message), never an error; Under FP16_SCALED stored fp16 subnormals are flushed to zero by default (env APXCHOL_FP16_KEEP_SUBNORMAL=1 keeps them) and the per-column storage-rounding residual can be folded into the fp32 diagonal (env APXCHOL_LOWPREC_DIAG_COMP=1). Every build honours the runtime env APXCHOL_FACTOR_DROP=<rel> (compacting drop: off-diagonals below rel * column max are REMOVED from the SpTRSV CSR/CSC at setup), APXCHOL_FTZ=1 (MXCSR FTZ+DAZ on every thread at PCG entry) and APXCHOL_FP16_GATHER=simd|scalar (fat-level kernel flavour of the fp16 storage); FP16_SCALED also APXCHOL_FP16_DIAG=1 (divide by the fp16 diagonal slot; refused unless every slot is a normal fp16). The scale is folded into the vectors (forward_solve returns D y, transpose_solve takes it); see include/apxchol/solver/sptrsv/omp.h")
 set_property(CACHE APXCHOL_SPTRSV_LOWPREC PROPERTY STRINGS OFF FP16_SCALED)
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
@@ -139,7 +138,7 @@ add_library(apxchol_core
     src/solve.cpp
     # Device precision-cast kernels for the mixed-precision GPU SpTRSV. Compiled
     # by nvcc only on the CUDA build (the .cpp TUs are host-compiled and can't
-    # host __global__). Harmless/unused when APXCHOL_SPTRSV_FP32 is off.
+    # host __global__).
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_cast.cu>
     # Level-set SpTRSV kernels: sptrsv/cuda.h calls levelset_solve
     # unconditionally, so the CUDA build needs this TU to link.
@@ -184,9 +183,6 @@ if (APXCHOL_64BIT_EDGE_INDICES)
 endif()
 if (APXCHOL_64BIT_NODE_INDICES)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_64BIT_NODE_INDICES)
-endif()
-if (APXCHOL_SPTRSV_FP32)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_SPTRSV_FP32)
 endif()
 if (NOT APXCHOL_SPTRSV_LOWPREC STREQUAL "OFF")
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_SPTRSV_LOWPREC_${APXCHOL_SPTRSV_LOWPREC})

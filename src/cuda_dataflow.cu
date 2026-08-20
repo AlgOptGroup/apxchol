@@ -2,7 +2,6 @@
 #include <cuda_fp16.h>
 #include <algorithm>
 #include <cstdlib>
-#include <stdexcept>
 
 // Sync-free (dataflow) GPU triangular solve with EPOCH-TAGGED values. See
 // cuda_dataflow.h for the scheme, the deadlock-freedom argument, the state
@@ -42,7 +41,6 @@ using VAL = sptrsv_gpu_value_t;
 constexpr int kPre = APXCHOL_DF_PRE;
 static_assert(kPre >= 1 && kPre <= 32, "the pending mask is 32 bits");
 
-#ifdef APXCHOL_SPTRSV_FP32
 static_assert(sizeof(VAL) == 4, "the tagged word packs a 4-byte value with a 4-byte epoch");
 constexpr unsigned kFull = 0xffffffffu;
 
@@ -374,32 +372,18 @@ int resident_blocks(const void* kernel) {
         per_sm = 1;
     return std::max(1, per_sm * sms);
 }
-#endif // APXCHOL_SPTRSV_FP32
 
 } // namespace
 
 int dataflow_prefetch_depth() { return kPre; }
-
-bool dataflow_supported() {
-#ifdef APXCHOL_SPTRSV_FP32
-    return true;
-#else
-    return false;
-#endif
-}
 
 int dataflow_grid_size(bool fp16) {
     if (const char* e = std::getenv("APXCHOL_GPU_DATAFLOW_BLOCKS")) {
         const int v = std::atoi(e);
         if (v > 0) return v;
     }
-#ifdef APXCHOL_SPTRSV_FP32
     return fp16 ? resident_blocks(reinterpret_cast<const void*>(&dataflow_kernel<true>))
                 : resident_blocks(reinterpret_cast<const void*>(&dataflow_kernel<false>));
-#else
-    (void)fp16;
-    return 1;
-#endif
 }
 
 void dataflow_solve(cudaStream_t stream, int m, bool reverse,
@@ -408,16 +392,10 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse,
                     unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                     const VAL* rhs, VAL* out) {
     if (m <= 0 || n_batches <= 0) return;
-#ifdef APXCHOL_SPTRSV_FP32
     const int total_warps = grid * (kDataflowBlock / 32);
     dataflow_kernel<false><<<grid, kDataflowBlock, 0, stream>>>(
         m, reverse, rowptr, colidx, vals, nullptr, nullptr,
         batch_start, n_batches, tag, epoch, ctrl, total_warps, rhs, out);
-#else
-    (void)stream; (void)reverse; (void)rowptr; (void)colidx; (void)vals; (void)batch_start;
-    (void)tag; (void)epoch; (void)ctrl; (void)grid; (void)rhs; (void)out;
-    throw std::runtime_error("apxchol: the dataflow GPU SpTRSV backend needs the fp32 SpTRSV build (APXCHOL_SPTRSV_FP32)");
-#endif
 }
 
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
@@ -427,16 +405,10 @@ void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
                          unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                          const VAL* rhs, VAL* out) {
     if (m <= 0 || n_batches <= 0) return;
-#ifdef APXCHOL_SPTRSV_FP32
     const int total_warps = grid * (kDataflowBlock / 32);
     dataflow_kernel<true><<<grid, kDataflowBlock, 0, stream>>>(
         m, reverse, rowptr, colidx, vals16, diag, in_scale,
         batch_start, n_batches, tag, epoch, ctrl, total_warps, rhs, out);
-#else
-    (void)stream; (void)reverse; (void)rowptr; (void)colidx; (void)vals16; (void)diag; (void)in_scale;
-    (void)batch_start; (void)tag; (void)epoch; (void)ctrl; (void)grid; (void)rhs; (void)out;
-    throw std::runtime_error("apxchol: the dataflow GPU SpTRSV backend needs the fp32 SpTRSV build (APXCHOL_SPTRSV_FP32)");
-#endif
 }
 
 } // namespace apxchol

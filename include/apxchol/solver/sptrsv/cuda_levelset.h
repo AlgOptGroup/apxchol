@@ -11,15 +11,11 @@
 //
 // Defined in src/cuda_levelset.cu (nvcc — the .cpp TUs are host-compiled and
 // can't host __global__), mirroring cuda_cast.cu. The value type matches the
-// factor width (fp32 under -DAPXCHOL_SPTRSV_FP32), declared here without pulling
+// factor width (fp32), declared here without pulling
 // in sparse_csc.h (host C++23, which the C++20-pinned .cu can't compile).
 namespace apxchol {
 
-#ifdef APXCHOL_SPTRSV_FP32
 using sptrsv_gpu_value_t = float;
-#else
-using sptrsv_gpu_value_t = double;
-#endif
 
 /// Solve a triangular system `T out = rhs` by level sets, where T is given in CSR
 /// (row i: entries at colidx[rowptr[i]..rowptr[i+1]), including the diagonal). The

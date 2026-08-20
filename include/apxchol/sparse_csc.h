@@ -8,49 +8,30 @@
 
 namespace apxchol {
 
-// Value type for the SpTRSV's off-diagonal factor entries, shared by BOTH the
-// OpenMP (omp.h) and CUDA (cuda.h) backends so the build flag means the same
-// thing on CPU and GPU. FP32 (-DAPXCHOL_SPTRSV_FP32, ON by default; pass =OFF
-// for an fp64 baseline) halves the two largest factor copies (csr/csc on CPU,
-// d_vals on GPU), cutting memory and the bandwidth on the bandwidth-bound
-// triangular solve. The outer PCG (vectors, dots, SpMV/residual) stays fp64,
-// so it still converges to 1e-8: the preconditioner is approximate, fp32 only
-// costs a few extra PCG iters ("changes iters, not the residual floor").
+// Value types of the factor and of the SpTRSV's own copies of it, shared by
+// BOTH the OpenMP (omp.h) and CUDA (cuda.h) backends so they mean the same
+// thing on CPU and GPU. Both are fp32, UNCONDITIONALLY: the fp64 baseline
+// (CMake APXCHOL_SPTRSV_FP32=OFF) was removed 2026-08-20 -- fp32 halves the
+// two largest factor copies (csr/csc on CPU, d_vals on GPU), cutting memory
+// and the bandwidth on the bandwidth-bound triangular solve, and it costs
+// only a few extra PCG iterations ("changes iters, not the residual floor"):
+// the outer PCG (vectors, dots, SpMV/residual) stays fp64 and still converges
+// to 1e-8. Nothing in the tree ever shipped or measured against the fp64
+// storage; the GPU's dataflow backend never supported it at all.
 //
-// The LOW-PRECISION variant (CMake APXCHOL_SPTRSV_LOWPREC = FP16_SCALED, OFF
-// by default; CPU/omp backend only; see lowprec.h for the full description)
-// goes one step further: 16-bit (fp16_t) storage for the SpTRSV's own CSR/CSC
-// value arrays -- 2 B/nnz of value stream instead of 4, i.e. the 8 B/nnz
-// (idx + val) factor stream drops to 6 B/nnz. Compute is unchanged: every
-// read widens to fp32 -> double in registers via widen(); the rounding
-// happens once, when omp_sptrsv::setup copies the factor into its CSR/CSC
-// (RNE of L_ij / s_j: a per-column scale, which is folded into the solve
-// vectors rather than multiplied back per entry -- omp.h "FOLDED INTO THE
-// VECTORS"). ONLY the off-diagonals are narrow: the diagonal is kept exact-fp32
-// in a separate omp_sptrsv::diag_ array (rounding the diagonal was measured
-// to be the dominant iteration-count damage). This is a preconditioner-quality
-// knob: PCG still converges to tol, possibly in more iterations. It takes
-// precedence over APXCHOL_SPTRSV_FP32 when both are defined.
-//
-// Two value types, deliberately:
 //   - factor_value_t : what the FACTOR (sparse_csc::vals_, the assembler's
-//     output) stores. fp32 under FP32 *and* the LOWPREC variant (the
-//     lowprec build needs the exact fp32 diagonal + per-column scales at
-//     SpTRSV setup, and its factor is released right after setup anyway),
-//     fp64 otherwise.
+//     output) stores. The SpTRSV's setup reads the exact fp32 diagonal and
+//     the per-column scales off it, and the factor is released right after
+//     setup on the consuming path.
 //   - sptrsv_value_t : what the SpTRSV kernels' CSR/CSC value arrays store
-//     (and the GPU backend's d_vals). fp16_t under FP16_SCALED, else ==
-//     factor_value_t.
-// They coincide on the fp32/fp64 builds, so those are unchanged byte-for-byte.
+//     (and the GPU backend's d_vals). fp16_t under the CPU-only
+//     APXCHOL_SPTRSV_LOWPREC=FP16_SCALED variant (lowprec.h), else fp32 like
+//     the factor.
+using factor_value_t = float;
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-using factor_value_t = float;
 using sptrsv_value_t = fp16_t;
-#elif defined(APXCHOL_SPTRSV_FP32)
-using factor_value_t = float;
-using sptrsv_value_t = float;
 #else
-using factor_value_t = double;
-using sptrsv_value_t = double;
+using sptrsv_value_t = float;
 #endif
 
 /// Owning Compressed-Sparse-Column matrix that replaces Eigen::SparseMatrix for
@@ -76,16 +57,14 @@ struct sparse_csc {
     node_index                  n_ = 0; // rows == cols (square factor)
     std::vector<edge_index>     outer_; // n_+1 column pointers (cumulative nnz)
     std::vector<node_index>     inner_; // row indices
-    // Off-diagonal AND diagonal factor values, fp32 under -DAPXCHOL_SPTRSV_FP32
-    // and APXCHOL_SPTRSV_LOWPREC=FP16_SCALED (saves ~nnz*4 B at the assembly
-    // peak; the low-precision narrowing of the off-diagonals happens later, in
-    // omp_sptrsv::setup, so the diagonal reaches the SpTRSV at full fp32).
-    // Reads should widen(). The
+    // Off-diagonal AND diagonal factor values, fp32 (saves ~nnz*4 B at the
+    // assembly peak vs fp64; any further narrowing of the off-diagonals
+    // happens later, in omp_sptrsv::setup, so the diagonal reaches the SpTRSV
+    // at full fp32). Reads should widen(). The
     // diagonal can ride along in fp32: it's L(i,i) = sqrt(weighted degree), a
     // benign well-scaled positive scalar, and fp32 diag converges to 1e-8 just
     // like fp64 (verified on IPM/social/grid; the GPU backend has always stored
-    // the diagonal in fp32 too). The fp64 build leaves vals_ as double ->
-    // byte-identical.
+    // the diagonal in fp32 too).
     std::vector<factor_value_t> vals_;
 
     sparse_csc() = default;

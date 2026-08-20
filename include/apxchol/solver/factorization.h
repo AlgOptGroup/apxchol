@@ -142,8 +142,7 @@ namespace detail {
 struct factor_col {
     node_index vertex;
     // L diagonal: sqrt(total_deg) including SDDM excess. Stored at the factor's
-    // precision (factor_value_t: fp32 under APXCHOL_SPTRSV_FP32 and every
-    // APXCHOL_SPTRSV_LOWPREC variant, else fp64),
+    // precision (factor_value_t: fp32),
     // like `entries` below: it is computed in fp64 and only ever copied into
     // sparse_csc::vals_ of that same type, so narrowing here is bit-identical
     // (and keeps this per-column header at 32 B instead of 40 B; there are n

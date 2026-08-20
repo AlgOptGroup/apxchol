@@ -80,8 +80,8 @@ inline void ensure_eigen_parallel() {
 
 // One-time build-flag report straight from the LIBRARY TU: the width is
 // sizeof() of the type solve.cpp actually compiled, so 2 == this .so/.a was
-// built with APXCHOL_SPTRSV_LOWPREC = FP16_SCALED, 4 == -DAPXCHOL_SPTRSV_FP32,
-// 8 == fp64. Reports whichever SpTRSV
+// built with APXCHOL_SPTRSV_LOWPREC = FP16_SCALED, 4 == fp32 (the default).
+// Reports whichever SpTRSV
 // backend (CPU omp / GPU cuda) this build compiled. Opt-in via
 // APXCHOL_VERBOSE — a library should be silent on stderr by default.
 inline void print_sptrsv_banner_once() {
@@ -91,23 +91,17 @@ inline void print_sptrsv_banner_once() {
         // Runtime backend / storage modes of the GPU SpTRSV (env, resolved
         // per setup by cuda_sptrsv; the banner is one-shot, so it reports the
         // value at first solve): APXCHOL_GPU_SPTRSV=dataflow|cusparse|levelset
-        // (unset = AUTO: the dataflow backend on the fp32 build; on fp64
-        // cuSPARSE with the level-set fallback where cuSPARSE is compiled in
-        // -- CMake APXCHOL_CUDA_WITH_CUSPARSE -- else the level-set) and the
-        // kernel backends' fp16 storage APXCHOL_GPU_SPTRSV_FP16=0|1 (unset =
-        // ON where a kernel backend resolves on the fp32 build).
+        // (unset = AUTO: the dataflow backend) and the kernel backends' fp16
+        // storage APXCHOL_GPU_SPTRSV_FP16=0|1 (unset = ON where a kernel
+        // backend resolves).
         const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_resolved();
         const int  gpu_be   = apxchol::cuda_sptrsv::backend_from_env();
         const bool gpu_cus  = apxchol::cuda_sptrsv::cusparse_available();
         const char* backend = gpu_be == 2 ? "GPU/dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
                             : gpu_be > 0 ? "GPU/levelset (APXCHOL_GPU_SPTRSV=levelset)"
                             : gpu_be < 0 ? "GPU/cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)"
-                            : apxchol::cuda_sptrsv::auto_prefers_dataflow()
-                                ? (gpu_cus ? "GPU/auto: dataflow (fp32 build default; APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)"
-                                           : "GPU/auto: dataflow (fp32 build default; APXCHOL_GPU_SPTRSV=levelset overrides; cuSPARSE not compiled in)")
-                                : gpu_fp16 ? "GPU/auto: level-set (fp16 storage on the fp64 build)"
-                                : gpu_cus  ? "GPU/auto: cuSPARSE, level-set if its SpSV analysis buffers do not fit (fp64 build)"
-                                           : "GPU/auto: level-set (fp64 build, cuSPARSE not compiled in)";
+                            : gpu_cus ? "GPU/auto: dataflow (the default; APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)"
+                                      : "GPU/auto: dataflow (the default; APXCHOL_GPU_SPTRSV=levelset overrides; cuSPARSE not compiled in)";
         const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_GPU_SPTRSV_FP16=0 opts out)"
                                        : apxchol::cuda_sptrsv::value_name;
         const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;
@@ -119,10 +113,8 @@ inline void print_sptrsv_banner_once() {
         std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem"
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
                              " (APXCHOL_SPTRSV_LOWPREC=%s; off-diagonals only, diagonal fp32; rounding=RNE)\n",
-#elif defined(APXCHOL_SPTRSV_FP32)
-                             " (APXCHOL_SPTRSV_FP32 defined)\n",
 #else
-                             " (APXCHOL_SPTRSV_FP32 NOT defined)\n",
+                             "\n",
 #endif
                      backend, vname, vbytes
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
@@ -752,25 +744,6 @@ solve_result solve(const Eigen::SparseMatrix<double>& L,
         if (!std::getenv("APXCHOL_NO_CHECKPOINT"))
             precond.set_checkpoint(&res.timings);
         // The GPU SpTRSV's AUTO backend decision (cuda.h: cuSPARSE unless its
-        // O(nnz) SpSV analysis buffers do not fit) must leave room for what
-        // cuda_pcg::setup allocates AFTER it: the full-symmetric operator
-        // (nnz_full = 2*(entries with row >= col) - n; int32 col idx + fp64
-        // values -- an upper bound, fp32-exact operators store fp32) + row
-        // pointers + the 6 fp64 PCG vectors.
-        {
-            const Eigen::Index n = L.rows();
-            const int* Lo = L.outerIndexPtr();
-            const int* Li = L.innerIndexPtr();
-            std::int64_t lower = 0;
-            #pragma omp parallel for schedule(static) reduction(+ : lower)
-            for (Eigen::Index k = 0; k < n; ++k)
-                for (int p = Lo[k]; p < Lo[k + 1]; ++p) lower += Li[p] >= k;
-            const std::int64_t nnz_full = 2 * lower - n;
-            precond.trsv().set_reserve_bytes(
-                static_cast<std::size_t>(nnz_full) * (sizeof(int) + sizeof(double)) +
-                static_cast<std::size_t>(n + 1) * sizeof(int) +
-                6 * static_cast<std::size_t>(n) * sizeof(double));
-        }
         precond.compute(L);
 
         const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");

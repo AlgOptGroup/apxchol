@@ -83,8 +83,8 @@
 // level-set backend is). Verified: tests/test_sptrsv_drop.cpp (CUDA build).
 //
 // Defined in src/cuda_dataflow.cu (nvcc TU). fp32 values (the tagged word
-// packs a 4-byte value with a 4-byte epoch: dataflow_supported() is false on
-// the fp64 SpTRSV build); the fp16 storage of cuda_host.h is the same kernel
+// packs a 4-byte value with a 4-byte epoch -- which is why the removed fp64
+// SpTRSV storage never had this backend); the fp16 storage of cuda_host.h is the same kernel
 // with the half -> float widen, the fp32 diag[] and the optional per-row
 // input scale (dataflow_solve_fp16), mirroring levelset_solve_fp16.
 //
@@ -115,12 +115,6 @@ inline constexpr int kDataflowBlock = 256;
 /// registers per lane; a compile-time constant of the .cu). The host's batch
 /// packing (cuda_host::dataflow_batches) needs it.
 int dataflow_prefetch_depth();
-
-/// False on the fp64 SpTRSV build (APXCHOL_SPTRSV_FP32 off): the tagged word
-/// packs a 4-byte value with the 4-byte epoch; there is no 16-byte
-/// single-copy-atomic store to pack a double the same way. The solve
-/// functions throw there.
-bool dataflow_supported();
 
 /// The persistent grid: cudaOccupancyMaxActiveBlocksPerMultiprocessor of the
 /// (fp32 or fp16) kernel x multiprocessor count on the current device -- the

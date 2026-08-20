@@ -322,17 +322,16 @@ TYPED_TEST(SolveTest, DeterministicWithSameSeed) {
     // The GPU-resident PCG is bit-deterministic run to run: its SpMV, vector
     // passes and reductions are our own kernels with fixed grids and fixed-
     // order partial sums (pcg_cuda_kernels.h -- no floating-point atomics),
-    // and so are our dataflow / level-set SpTRSV backends (the fp32 build's
-    // AUTO is the dataflow one). NOT on cuSPARSE SpSV (APXCHOL_GPU_SPTRSV=
-    // cusparse, or the fp64 build's AUTO -- only where the build opted in
+    // and so are our dataflow / level-set SpTRSV backends (AUTO is the
+    // dataflow one). NOT on cuSPARSE SpSV (APXCHOL_GPU_SPTRSV=cusparse --
+    // only where the build opted in
     // with APXCHOL_CUDA_WITH_CUSPARSE): its atomics wobble the residual ~1e-2
     // relative (measured 2e-3 .. 4e-3 on this 8x8 grid) and the iteration
     // count by ±1. Exact where the SpTRSV is ours; a 5e-2 relative gate on
     // cuSPARSE (still catches any real seed/algorithm change, which moves the
     // residual by orders of magnitude; the earlier 1e-3 gate flaked).
     const int  be = apxchol::cuda_sptrsv::backend_from_env();
-    const bool maybe_cusparse = apxchol::cuda_sptrsv::cusparse_available() &&
-        (be < 0 || (be == 0 && !apxchol::cuda_sptrsv::auto_prefers_dataflow() && !apxchol::cuda_sptrsv::fp16_from_env()));
+    const bool maybe_cusparse = apxchol::cuda_sptrsv::cusparse_available() && be < 0;
     if (maybe_cusparse) EXPECT_NEAR(r1.residual, r2.residual, 5e-2 * r1.residual);
     else                EXPECT_DOUBLE_EQ(r1.residual, r2.residual);
 #else

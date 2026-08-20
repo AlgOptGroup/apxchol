@@ -36,7 +36,7 @@ if (OpenMP_CXX_FOUND)
 endif()
 
 # Match the root library defaults (both ON by default there).
-target_compile_definitions(_apxchol PRIVATE APXCHOL_SPTRSV_FP32 APXCHOL_POOL_FP32)
+target_compile_definitions(_apxchol PRIVATE APXCHOL_POOL_FP32)
 if (NOT MSVC)
     # Distributable wheels (cibuildwheel sets APXCHOL_PORTABLE_BUILD=1) must not
     # use -march=native — it would SIGILL on older CPUs. Local source builds keep it.

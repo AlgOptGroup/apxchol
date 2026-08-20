@@ -59,16 +59,12 @@ TEST(SpTRSVKernels, SpTRSVValueTypeMatchesBuildFlag) {
     EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "FP16_SCALED");
     EXPECT_TRUE((std::is_same_v<sptrsv_value_t, apxchol::fp16_t>));
     EXPECT_TRUE((std::is_same_v<factor_value_t, float>));
-#elif defined(APXCHOL_SPTRSV_FP32)
+#else
     EXPECT_EQ(sizeof(sptrsv_value_t), 4u);
     EXPECT_STREQ(apxchol::omp_sptrsv::value_name, "float (fp32)");
     EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "OFF");
     EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
-#else
-    EXPECT_EQ(sizeof(sptrsv_value_t), 8u);
-    EXPECT_STREQ(apxchol::omp_sptrsv::value_name, "double (fp64)");
-    EXPECT_STREQ(apxchol::omp_sptrsv::lowprec_variant, "OFF");
-    EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
+    EXPECT_TRUE((std::is_same_v<factor_value_t, float>));
 #endif
     EXPECT_EQ(apxchol::omp_sptrsv::value_bytes, sizeof(sptrsv_value_t));
     // widen() of every storage type this build can see is the exact value.

@@ -82,10 +82,9 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// and thin-run length histogram per direction (the structure those
 /// experiments targeted) next to the work-concentration signals.
 
-// sptrsv_value_t (fp16_t under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED, fp32
-// under -DAPXCHOL_SPTRSV_FP32, else fp64) is defined in sparse_csc.h (the
-// variant: lowprec.h) and shared with the CUDA backend (fp32/fp64 at compile
-// time). It narrows csr_vals_/csc_vals_ -- the two largest factor
+// sptrsv_value_t (fp16_t under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED, else fp32)
+// is defined in sparse_csc.h (the variant: lowprec.h) and shared with the CUDA
+// backend (fp32 at compile time). It narrows csr_vals_/csc_vals_ -- the two largest factor
 // copies -- cutting memory and bandwidth on the bandwidth-bound (~94% of peak)
 // triangular solve. Every read of a stored value in the solve kernels below
 // goes through widen(): the arithmetic is ALWAYS done in double, whatever the
@@ -307,15 +306,15 @@ public:
 
     // Compiled width of the off-diagonal factor values, read straight off the
     // type the compiler actually built. 2 == this TU was compiled with
-    // APXCHOL_SPTRSV_LOWPREC = FP16_SCALED, 4 == -DAPXCHOL_SPTRSV_FP32, 8 ==
-    // fp64. Printed at startup so the build flag is observable at runtime (no
-    // inferring from residuals).
+    // APXCHOL_SPTRSV_LOWPREC = FP16_SCALED, 4 == the fp32 default. Printed at
+    // startup so the build flag is observable at runtime (no inferring from
+    // residuals).
     static constexpr std::size_t value_bytes = sizeof(sptrsv_value_t);
     static constexpr const char* value_name =
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
         "fp16 (per-column scaled)";
 #else
-        sizeof(sptrsv_value_t) == 4 ? "float (fp32)" : "double (fp64)";
+        "float (fp32)";
 #endif
     // The APXCHOL_SPTRSV_LOWPREC variant this TU compiled ("OFF" for fp32/fp64).
     static constexpr const char* lowprec_variant = sptrsv_lowprec_variant;
@@ -1221,13 +1220,13 @@ private:
     // col_idx holds column ids (node_index).
     big_vec<edge_index>     csr_row_ptr_;
     big_vec<node_index>     csr_col_idx_;
-    big_vec<sptrsv_value_t> csr_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; fp16 under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED
+    big_vec<sptrsv_value_t> csr_vals_;   // fp32; fp16 under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED
 
     // CSC of L11 (back solve). col_ptr is an offset array (edge_index);
     // row_idx holds row ids (node_index).
     big_vec<edge_index>     csc_col_ptr_;
     big_vec<node_index>     csc_row_idx_;
-    big_vec<sptrsv_value_t> csc_vals_;   // fp32 under APXCHOL_SPTRSV_FP32; fp16 under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED
+    big_vec<sptrsv_value_t> csc_vals_;   // fp32; fp16 under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED
 
 #if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
     // fp32 diagonal, i < m_ (the lowprec build only; see the file header): the

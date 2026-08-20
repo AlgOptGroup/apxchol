@@ -921,7 +921,6 @@ std::pair<double, std::size_t> rel_diff(const std::vector<float>& a, const std::
 static sparse_csc make_dominant_lower(node_index n) { return make_random_lower(n, 6.0, 515 + n, 0.0, 0.01); }
 
 TEST(GpuDataflow, MatchesTheLevelSetKernelBothDirectionsAndIsDeterministic) {
-    ASSERT_TRUE(apxchol::dataflow_supported());   // fp32 SpTRSV build (the default)
     const node_index n = 60001, m = n - 1;
     const sparse_csc L = make_dominant_lower(n);
     scoped_drop_env env("1e-4");
