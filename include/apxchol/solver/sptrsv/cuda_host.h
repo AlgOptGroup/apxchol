@@ -289,6 +289,21 @@ inline std::vector<int> dataflow_batches(int m, bool reverse, const int* len, in
 }
 
 /// CSR row lengths (diagonal included), rowptr[i+1] - rowptr[i].
+///
+/// SERIAL ON PURPOSE. The loop is embarrassingly parallel and this is the only
+/// part of `cuda_sptrsv::setup_kernel_backend` that is not `dataflow_batches`,
+/// so `#pragma omp parallel for schedule(static)` looks free -- it is a
+/// MEASURED REGRESSION (2026-08-20, RTX 4090 Laptop, T=16, `bg+tree[vec_pool]`,
+/// 28 samples/arm from `APXCHOL_SPTRSV_SETUP_TRACE`, both arms with a warm CUDA
+/// context): stage `kernel_backend_tables` grid_2000 **12.30 -> 20.25 ms**
+/// median (min 11.43 -> 13.31), iter0040 2.71 -> 2.89. The reason is the
+/// CONSUMER: `dataflow_batches` reads `len` back SERIALLY on one thread, and a
+/// parallel fill scatters those 4m bytes across every core's private caches
+/// first, so the greedy pack then pulls the whole array back cross-core. Do not
+/// re-add the pragma on its own -- it only pays off together with a parallel
+/// (chunk-and-fixup) `dataflow_batches`, which is where the stage's ~85% sits
+/// (host micro-benchmark at m = 4M, avg 5.5 nnz/row: 8.97 ms per direction vs
+/// 1.5 ms for this function).
 inline std::vector<int> csr_row_lengths(int m, const int* rowptr) {
     std::vector<int> len(static_cast<std::size_t>(m));
     for (int i = 0; i < m; ++i) len[i] = rowptr[i + 1] - rowptr[i];
