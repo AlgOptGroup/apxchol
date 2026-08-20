@@ -124,8 +124,7 @@ final ulps (accumulation order).
 
 With `-DAPXCHOL_USE_CUDA=ON` the triangular solves run on the GPU — by
 default through our sync-free dataflow kernel (one persistent launch per
-sweep, O(n) state, bit-deterministic; `APXCHOL_GPU_SPTRSV=levelset` selects
-our level-set kernels instead) — and the one-shot `apxchol::solve` uses a
+sweep, O(n) state, bit-deterministic) — and the one-shot `apxchol::solve` uses a
 fully GPU-resident PCG (our own CSR SpMV and fused vector kernels with
 deterministic reductions; nothing but three scalars per iteration crosses
 the bus). The CUDA build links `cudart` only — no cuSPARSE, no cuBLAS;
@@ -222,25 +221,23 @@ you need `pcg`'s interface.
 
 ## Build options
 
-Compile-time options (`APXCHOL_USE_CUDA`, `APXCHOL_SPTRSV_FP32`,
-`APXCHOL_SPTRSV_LOWPREC`, `APXCHOL_POOL_FP32`, `APXCHOL_64BIT_EDGE_INDICES` /
-`APXCHOL_64BIT_NODE_INDICES`, `APXCHOL_BUILD_EXAMPLES` /
-`APXCHOL_BUILD_TESTS` / `APXCHOL_BUILD_TOOLS`) are declared and documented
-where they live, in [CMakeLists.txt](CMakeLists.txt) — `cmake -LH build`
-lists them with their help strings. `APXCHOL_SPTRSV_FP32` and
-`APXCHOL_POOL_FP32` default ON (fp32 factor values / fp32 residual-pool
-weights; the PCG recurrence stays fp64; pass `=OFF` for an fp64 baseline);
-`APXCHOL_SPTRSV_LOWPREC=FP16_SCALED` (default `OFF`, CPU backend only)
-narrows the SpTRSV off-diagonal factor STORAGE further to per-column-scaled
-IEEE fp16 (the diagonal stays exact fp32) — reads widen to fp64 in
-registers, so it only changes the preconditioner quality (iteration count),
-not the attainable residual; see
-[include/apxchol/lowprec.h](include/apxchol/lowprec.h) (with
-`APXCHOL_LOWPREC_DIAG_COMP=1` in the environment the per-column rounding
-residual is folded into the fp32 diagonal, which is what keeps the iteration
-count at the fp32 build's on Laplacians); everything else defaults OFF except the
-`APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS` toggles. Release builds
-add `-march=native`.
+Compile-time options (`APXCHOL_USE_CUDA`, `APXCHOL_POOL_FP32`,
+`APXCHOL_64BIT_EDGE_INDICES` / `APXCHOL_64BIT_NODE_INDICES`,
+`APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS` / `APXCHOL_BUILD_TOOLS`)
+are declared and documented where they live, in
+[CMakeLists.txt](CMakeLists.txt) — `cmake -LH build` lists them with their
+help strings. Factor values are stored fp32 (`APXCHOL_POOL_FP32` defaults
+ON for the setup pool's weights; the PCG recurrence stays fp64). One
+runtime env, `APXCHOL_SPTRSV_FP16=0|1`, narrows the SpTRSV off-diagonal
+factor storage further to per-column-scaled IEEE fp16 — the diagonal stays
+exact fp32 and absorbs the per-column rounding residual, which is what
+keeps iteration counts at the fp32 level on Laplacians; reads widen in
+registers, so only preconditioner quality changes, not the attainable
+residual (see [include/apxchol/lowprec.h](include/apxchol/lowprec.h)).
+Unset, it resolves ON on the GPU backend and OFF on CPU; the CPU fp16 path
+requires F16C (x86) and falls back to fp32 with a note otherwise.
+Everything else defaults OFF except the `APXCHOL_BUILD_EXAMPLES` /
+`APXCHOL_BUILD_TESTS` toggles. Release builds add `-march=native`.
 
 One runtime knob (CPU/OpenMP backend): the SpTRSV setup drops factor
 off-diagonals below `1e-4 ×` their column's max |off-diagonal| before it
