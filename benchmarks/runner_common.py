@@ -21,7 +21,7 @@ level_stats.py:
 All runners (sweep_fair, thread_scaling, fill_pass, level_stats,
 selector_levels) import these helpers rather than carrying their own copies.
 """
-import json, os, re, signal, subprocess, threading, time
+import json, os, re, signal, subprocess, threading
 from pathlib import Path
 
 # Repo root, derived from this file's location (benchmarks/runner_common.py).
@@ -87,13 +87,6 @@ def boost_state():
         return "off" if open("/sys/devices/system/cpu/cpufreq/boost").read().strip() == "0" else "on"
     except Exception:
         return "unknown"
-
-def make_prov(note, **extra):
-    p = {"note": note, "git_sha": git_sha(), "boost": boost_state(),
-         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    p.update(extra)
-    return p
-
 
 # ── matrix registry ─────────────────────────────────────────────────────────────
 # Every entry DECLARES its kind. Two things can live in a .mtx file and they

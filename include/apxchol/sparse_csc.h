@@ -3,7 +3,6 @@
 #include "apxchol/lowprec.h"   // fp16_t, widen(), the APXCHOL_SPTRSV_FP16 reader
 #include <vector>
 #include <cstddef>
-#include <cassert>
 #include <limits>
 
 namespace apxchol {
@@ -100,17 +99,6 @@ struct sparse_csc {
     void release_values() {
         std::vector<node_index>().swap(inner_);
         std::vector<factor_value_t>().swap(vals_);
-    }
-
-    /// Assert the just-built cumulative column pointers never overflowed
-    /// edge_index. Call once after the prefix sum (assemble_csc).
-    void assert_no_offset_overflow() const {
-        // outer_ is monotone non-decreasing iff no wrap occurred; a wrapped
-        // (unsigned) offset would appear SMALLER than its predecessor.
-        for (std::size_t i = 1; i < outer_.size(); ++i)
-            assert(outer_[i] >= outer_[i - 1] &&
-                   "edge_index overflow: factor nnz exceeds the index type "
-                   "(rebuild with APXCHOL_64BIT_INDICES=ON)");
     }
 };
 

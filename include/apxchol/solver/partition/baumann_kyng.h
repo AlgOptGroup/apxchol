@@ -157,10 +157,6 @@ struct baumann_kyng_partitioner {
             // ── PASS 2: keep eligible sampled vertices that are priority-IS minima.
             #pragma omp parallel if(active.size() > ctx.omp_threshold)
             {
-                int tid = 0;
-                #ifdef _OPENMP
-                tid = omp_get_thread_num();
-                #endif
                 #pragma omp for schedule(static) nowait
                 for (size_t idx = 0; idx < sampled_all_.size(); ++idx) {
                     auto v = sampled_all_[idx];

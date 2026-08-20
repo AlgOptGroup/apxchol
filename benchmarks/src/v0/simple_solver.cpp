@@ -94,13 +94,6 @@ static std::vector<std::vector<std::tuple<int, int, double>>> get_existing_edges
   return existing_edges;
 }
 
-static std::unordered_map<int, double> get_weight_lookup_from_edges(std::vector<Edge>& edges) {
-  std::unordered_map<int, double> weight_lookup;
-  weight_lookup.reserve(edges.size());
-  for (std::size_t i = 0; i < edges.size(); ++i) weight_lookup[edges[i].to] = edges[i].w;
-  return weight_lookup;
-}
-
 static void eliminate_set(std::vector<std::vector<Edge>>& adj,
                           const std::vector<int>& is,
                           const std::vector<bool>& active,

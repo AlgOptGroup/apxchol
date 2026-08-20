@@ -167,20 +167,6 @@ public:
         }
     }
 
-    /// True if an inline adj push to v will NOT reallocate shared storage.
-    /// Only vec_pool uses a shared pool arena whose grow() reallocs it under
-    /// sibling threads (heap-use-after-free in the parallel multi-vertex
-    /// section); for it, report spare slab capacity so a full slab can defer
-    /// instead. Other backends never realloc shared state on an inline push:
-    /// forward_star draws from a pre-reserved atomic pool, and vec/bstr
-    /// use independent per-vertex containers (no cross-thread shared arena).
-    bool adj_has_inline_capacity(node_index v) const {
-        if constexpr (std::same_as<Incidence, vec_pool_incidence>)
-            return adj_.has_inline_capacity(v);
-        else
-            return true;
-    }
-
     /// Write edge data at a pre-allocated pool slot.  Lock-free; safe
     /// to call concurrently from different threads on different slots.
     void write_edge_at(edge_index slot, node_index u, node_index v, double w) {
@@ -357,9 +343,6 @@ public:
         return edges_[idx].traverse(from);
     }
     double edge_weight(edge_index idx) const { return edges_[idx].w; }
-    node_index other_endpoint(node_index v, edge_index idx) const {
-        return edges_[idx].traverse(v);
-    }
 
     /// Per-vertex excess diagonal (for SDDM matrices).
     /// For a pure Laplacian this is zero everywhere.
