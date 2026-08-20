@@ -789,6 +789,186 @@ TEST(GpuHostPrep, DataflowBatchesPackRowsIntoAlignedLaneGroups) {
     }
 }
 
+// ── ROW SEGMENTATION, host side (cuda_host.h) ───────────────────────────────
+//
+// dataflow_row_stats is the evidence the split threshold is picked from, so
+// its buckets are stated here independently: bucket k counts the rows an
+// unsplit walk would chew in more than 2^k chunks of C = 32 * pre entries.
+TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
+    const int pre = 8;                                     // C = 256
+    const std::vector<int> len = {1, 2, 255, 256, 257, 512, 1024, 100000};
+    const auto st = apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), len.data(), pre);
+    EXPECT_EQ(st.base, 256);
+    EXPECT_EQ(st.m, 8);
+    std::int64_t total = 0; for (int l : len) total += l;
+    EXPECT_EQ(st.nnz, total);
+    EXPECT_EQ(st.max_len, 100000);
+    EXPECT_DOUBLE_EQ(st.mean_len, static_cast<double>(total) / 8.0);
+    EXPECT_EQ(st.rows_ge[0], 5);                           // 256, 257, 512, 1024, 100000
+    EXPECT_EQ(st.nnz_ge[0], 256 + 257 + 512 + 1024 + 100000);
+    EXPECT_EQ(st.rows_ge[1], 3);                           // >= 512
+    EXPECT_EQ(st.rows_ge[2], 2);                           // >= 1024
+    EXPECT_EQ(st.rows_ge[3], 1);                           // >= 2048: only the 100000 row
+    EXPECT_EQ(st.rows_ge[8], 1);                           // >= 65536
+    EXPECT_EQ(st.rows_ge[9], 0);                           // >= 131072
+    EXPECT_EQ(st.nnz_ge[8], 100000);
+    // Empty input: no buckets, no division by zero.
+    const auto e = apxchol::cuda_host::dataflow_row_stats(0, nullptr, pre);
+    EXPECT_EQ(e.nnz, 0); EXPECT_EQ(e.max_len, 0); EXPECT_DOUBLE_EQ(e.mean_len, 0.0);
+}
+
+namespace {
+// A tiny CSR with a diagonal in every row, built from row lengths: row i gets
+// `len[i]` entries, the diagonal LAST (the CSR-of-L convention) or FIRST (the
+// CSR-of-L^T one), the rest distinct column indices != i.
+struct toy_csr {
+    std::vector<int> ptr, idx, len;
+};
+toy_csr make_toy_csr(const std::vector<int>& len, bool diag_first) {
+    toy_csr t; t.len = len;
+    t.ptr.assign(len.size() + 1, 0);
+    for (size_t i = 0; i < len.size(); ++i) t.ptr[i + 1] = t.ptr[i] + len[i];
+    t.idx.resize(static_cast<size_t>(t.ptr.back()));
+    for (size_t i = 0; i < len.size(); ++i) {
+        int col = 0;
+        for (int p = t.ptr[i]; p < t.ptr[i + 1]; ++p) {
+            const bool is_diag = diag_first ? (p == t.ptr[i]) : (p == t.ptr[i + 1] - 1);
+            if (is_diag) { t.idx[static_cast<size_t>(p)] = static_cast<int>(i); continue; }
+            if (col == static_cast<int>(i)) ++col;
+            t.idx[static_cast<size_t>(p)] = col++;
+        }
+    }
+    return t;
+}
+} // namespace
+
+// The plan with seg == 0 IS dataflow_batches() -- the rollback switch, and
+// what makes "segmentation off" bit-identical to the pre-segmentation kernel.
+TEST(GpuHostPrep, DataflowPlanWithoutSegmentationIsTheBatchTable) {
+    const node_index n = 60001, m = n - 1;
+    const sparse_csc L = make_wide_magnitude_lower(n);
+    scoped_drop_env env("1e-4");
+    auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
+    { const std::vector<float> sc = apxchol::cuda_host::column_scales(LT);
+      apxchol::cuda_host::apply_factor_drop(LT, sc, 1e-4, false); }
+    const auto Lc = apxchol::cuda_host::transpose_csr(LT);
+    for (int pre : {4, 8}) {
+        for (bool reverse : {false, true}) {
+            SCOPED_TRACE("pre=" + std::to_string(pre) + (reverse ? " back" : " forward"));
+            const auto& A = reverse ? LT : Lc;
+            const std::vector<int> len = apxchol::cuda_host::csr_row_lengths(A.m, A.ptr.data());
+            const std::vector<int> bs = apxchol::cuda_host::dataflow_batches(A.m, reverse, len.data(), pre);
+            const apxchol::cuda_host::dataflow_plan pl = apxchol::cuda_host::dataflow_build_plan(
+                A.m, reverse, A.ptr.data(), A.idx.get(), len.data(), pre,
+                apxchol::cuda_host::dataflow_seg_params{});          // seg = 0
+            EXPECT_EQ(pl.batch_start, bs);
+            EXPECT_EQ(pl.n_slots, 0);
+            EXPECT_EQ(pl.n_split, 0);
+            EXPECT_TRUE(pl.spec.empty());
+            ASSERT_EQ(pl.batch_spec.size() + 1, pl.batch_start.size());
+            for (int v : pl.batch_spec) EXPECT_EQ(v, -1);
+            EXPECT_EQ(apxchol::cuda_host::dataflow_plan_check(pl, A.m, reverse, len.data(), pre), "");
+        }
+    }
+}
+
+// With segmentation on: the segments of a split row cover its CSR range
+// exactly once, `dpos` IS the diagonal, the items are emitted in sweep order
+// with every segment before its finalizer, each special item is alone in its
+// batch, batch_start stays monotone and spans [0, m), and the extra state is
+// O(n) + O(nnz / seg).
+TEST(GpuHostPrep, DataflowPlanSegmentsCoverSplitRowsExactlyOnce) {
+    const int pre = 8, C = 32 * pre;
+    // Row lengths with a real hub tail; both diagonal conventions.
+    std::vector<int> len(4000);
+    for (size_t i = 0; i < len.size(); ++i) len[i] = 1 + static_cast<int>(i % 9);
+    len[10] = 5000; len[11] = 260; len[2000] = 40000; len[3999] = 1200; len[0] = 1;
+    for (bool diag_first : {false, true}) {
+        const toy_csr t = make_toy_csr(len, diag_first);
+        const int m = static_cast<int>(len.size());
+        for (bool reverse : {false, true}) {
+            for (const apxchol::cuda_host::dataflow_seg_params p :
+                 {apxchol::cuda_host::dataflow_seg_params{1024, 2048, 4096},
+                  apxchol::cuda_host::dataflow_seg_params{256, 0, 4096},      // torture: split everything
+                  apxchol::cuda_host::dataflow_seg_params{1 << 28, 128, 4096}}) {  // forced S = 1
+                SCOPED_TRACE("diag_first=" + std::to_string(diag_first) + " reverse=" + std::to_string(reverse) +
+                             " seg=" + std::to_string(p.seg) + " split_min=" + std::to_string(p.split_min));
+                const auto pl = apxchol::cuda_host::dataflow_build_plan(
+                    m, reverse, t.ptr.data(), t.idx.data(), len.data(), pre, p);
+                ASSERT_EQ(apxchol::cuda_host::dataflow_plan_check(pl, m, reverse, len.data(), pre), "");
+                // Walk the plan in order and re-derive everything.
+                std::vector<char> covered(t.idx.size(), 0);
+                int split_rows = 0, slots_seen = 0;
+                std::vector<int> pending_slots;                    // slots of the row being segmented
+                int pending_row = -1;
+                for (const auto& sp : pl.spec) {
+                    if (sp.row >= 0) {                             // SEGMENT
+                        if (pending_row != sp.row) { EXPECT_TRUE(pending_slots.empty()); pending_row = sp.row; }
+                        ASSERT_GT(sp.b, sp.a);
+                        ASSERT_GE(sp.a, t.ptr[static_cast<size_t>(sp.row)]);
+                        ASSERT_LE(sp.b, t.ptr[static_cast<size_t>(sp.row) + 1]);
+                        ASSERT_EQ(sp.c, slots_seen) << "slots are handed out in order";
+                        ++slots_seen;
+                        pending_slots.push_back(sp.c);
+                        // whole chunks, so every segment has the same depth
+                        if (sp.b != t.ptr[static_cast<size_t>(sp.row) + 1]) EXPECT_EQ((sp.b - sp.a) % C, 0);
+                        for (int q = sp.a; q < sp.b; ++q) {
+                            ASSERT_EQ(covered[static_cast<size_t>(q)], 0) << "entry " << q << " covered twice";
+                            covered[static_cast<size_t>(q)] = 1;
+                        }
+                        continue;
+                    }
+                    const int row = ~sp.row;                       // FINALIZER
+                    ASSERT_EQ(row, pending_row) << "finalizer of a row whose segments did not just precede it";
+                    ASSERT_EQ(sp.b, static_cast<int>(pending_slots.size()));
+                    ASSERT_EQ(sp.a, pending_slots.front());
+                    EXPECT_EQ(t.idx[static_cast<size_t>(sp.c)], row) << "dpos must be the diagonal";
+                    ASSERT_GE(sp.c, t.ptr[static_cast<size_t>(row)]);
+                    ASSERT_LT(sp.c, t.ptr[static_cast<size_t>(row) + 1]);
+                    if (p.seg == (1 << 28)) EXPECT_EQ(sp.b, 1) << "seg > any row must give S = 1";
+                    // the segments covered the row's whole CSR range
+                    for (int q = t.ptr[static_cast<size_t>(row)]; q < t.ptr[static_cast<size_t>(row) + 1]; ++q)
+                        ASSERT_EQ(covered[static_cast<size_t>(q)], 1) << "row " << row << " entry " << q;
+                    pending_slots.clear();
+                    pending_row = -1;
+                    ++split_rows;
+                }
+                EXPECT_TRUE(pending_slots.empty());
+                EXPECT_EQ(split_rows, pl.n_split);
+                EXPECT_EQ(slots_seen, pl.n_slots);
+                EXPECT_EQ(pl.spec.size(), static_cast<size_t>(pl.n_slots + pl.n_split));
+                // exactly the rows over the threshold were split
+                int expect_split = 0;
+                for (int l : len) expect_split += (l - 1 > p.split_min);
+                EXPECT_EQ(pl.n_split, expect_split);
+                // O(n) + O(nnz / seg) state
+                EXPECT_LE(pl.n_slots, static_cast<int>(t.idx.size()) / std::min(p.seg, C) + pl.n_split);
+                // the split rows do NOT also appear in a plain batch
+                for (const auto& sp : pl.spec) {
+                    if (sp.row >= 0) continue;
+                    EXPECT_GT(len[static_cast<size_t>(~sp.row)] - 1, p.split_min);
+                }
+            }
+        }
+    }
+}
+
+// max_seg caps S even for an absurdly long row, so one row can never occupy
+// an unbounded slice of the ticket window.
+TEST(GpuHostPrep, DataflowPlanCapsTheSegmentCountPerRow) {
+    const int pre = 8;
+    std::vector<int> len(4, 3);
+    len[2] = 1000000;
+    const toy_csr t = make_toy_csr(len, false);
+    apxchol::cuda_host::dataflow_seg_params p{256, 0, 8};
+    const auto pl = apxchol::cuda_host::dataflow_build_plan(
+        4, false, t.ptr.data(), t.idx.data(), len.data(), pre, p);
+    EXPECT_EQ(apxchol::cuda_host::dataflow_plan_check(pl, 4, false, len.data(), pre), "");
+    for (const auto& sp : pl.spec)
+        if (sp.row < 0 && ~sp.row == 2) EXPECT_LE(sp.b, p.max_seg);
+    EXPECT_LE(pl.n_slots, 8 + 3);
+}
+
 #ifdef APXCHOL_USE_CUDA
 // ── The GPU dataflow kernel against an independent CPU reference ────────────
 //

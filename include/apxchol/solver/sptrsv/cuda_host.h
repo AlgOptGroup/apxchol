@@ -35,6 +35,7 @@
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include "apxchol/solver/sptrsv/transpose.h"
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -293,6 +294,217 @@ inline std::vector<int> csr_row_lengths(int m, const int* rowptr) {
     std::vector<int> len(static_cast<std::size_t>(m));
     for (int i = 0; i < m; ++i) len[i] = rowptr[i + 1] - rowptr[i];
     return len;
+}
+
+/// ── row segmentation (see cuda_dataflow.h "ROW SEGMENTATION") ──────────────
+///
+/// A row of `len` CSR entries is walked by its lane group in chunks of
+/// G * pre entries, and G caps at 32, so an unsplit row costs
+/// ceil(len / C) chunk round trips ON THE CRITICAL PATH with C = 32 * pre.
+/// On a hub factor the elimination tail is a CHAIN of such rows, so the sweep
+/// pays (chain length) x (len / C) round trips. Segmentation cuts a long row
+/// into S pieces that run as independent warps plus a finalizer that sums
+/// their partials.
+
+/// Row-length statistics of one sweep direction -- the evidence behind the
+/// segmentation threshold (APXCHOL_GPU_SPTRSV_STATS=1 prints them at setup).
+/// Bucket k counts the rows with len >= (32 * pre) << k, i.e. the rows an
+/// unsplit walk chews in more than 2^k chunks, and the entries they hold.
+struct dataflow_len_stats {
+    static constexpr int kBuckets = 12;
+    int          m        = 0;
+    std::int64_t nnz      = 0;
+    int          max_len  = 0;
+    double       mean_len = 0.0;
+    int          base     = 0;            // C = 32 * pre, one unsplit chunk
+    std::int64_t rows_ge[kBuckets]{};     // rows with len >= base << k
+    std::int64_t nnz_ge[kBuckets]{};      // and the entries they hold
+};
+
+inline dataflow_len_stats dataflow_row_stats(int m, const int* len, int pre) {
+    dataflow_len_stats s;
+    s.m = m;
+    s.base = 32 * pre;
+    for (int i = 0; i < m; ++i) {
+        const int l = len[i];
+        s.nnz += l;
+        if (l > s.max_len) s.max_len = l;
+        for (int k = 0; k < dataflow_len_stats::kBuckets; ++k) {
+            if (l < (static_cast<std::int64_t>(s.base) << k)) break;
+            ++s.rows_ge[k];
+            s.nnz_ge[k] += l;
+        }
+    }
+    s.mean_len = m > 0 ? static_cast<double>(s.nnz) / static_cast<double>(m) : 0.0;
+    return s;
+}
+
+/// Parameters of the segmentation. A row with more than `split_min`
+/// off-diagonals is cut into segments of about `seg` entries -- rounded UP to
+/// a whole chunk C = 32 * pre so every segment has the same chunk depth and
+/// none is a straggler -- at most `max_seg` of them. `seg == 0` disables
+/// segmentation: the plan is then exactly dataflow_batches() (the rollback
+/// switch, APXCHOL_GPU_DF_SEG=0).
+///
+/// The rule is a pure function of (row lengths, params) and must NEVER read
+/// occupancy, grid size or device properties: that is what keeps the result
+/// bit-identical across grid sizes.
+struct dataflow_seg_params {
+    int seg       = 0;
+    int split_min = 0;
+    int max_seg   = 4096;
+};
+
+/// One special item of the plan; 16 bytes, uploaded as int4.
+///   SEGMENT   : row =  i, a = lo, b = hi, c = slot  -- CSR range [lo, hi)
+///   FINALIZER : row = ~i, a = s0, b = S,  c = dpos  -- slots [s0, s0 + S)
+struct dataflow_spec { int row = 0, a = 0, b = 0, c = 0; };
+
+/// The batch plan of one sweep direction. `batch_start` is the same monotone
+/// table dataflow_batches() returns; `batch_spec[b]` selects the path: -1 =
+/// plain (the kernel's untouched common path), >= 0 = index into `spec`.
+/// A special item is ALONE in its batch and uses all 32 lanes; a segment's
+/// batch is ZERO-WIDTH in sweep positions and the finalizer's batch owns the
+/// split row's position, so `batch_start` stays monotone and the plain
+/// batches stay contiguous position runs.
+struct dataflow_plan {
+    std::vector<int>           batch_start;   // nb + 1
+    std::vector<int>           batch_spec;    // nb, -1 = plain
+    std::vector<dataflow_spec> spec;          // n_slots + n_split entries
+    int n_slots = 0;                          // partial slots this direction needs
+    int n_split = 0;                          // rows that were split
+    int n_batches() const { return static_cast<int>(batch_spec.size()); }
+};
+
+/// Build the plan of one sweep direction. `rowptr` / `colidx` are that
+/// direction's CSR (CSR of L forward, CSR of L^T back), `len` its row
+/// lengths, `pre` = dataflow_prefetch_depth().
+///
+/// Segments cover the row's WHOLE CSR range, diagonal slot included: the
+/// kernel is passed the true row id and drops the `jj == i` slot exactly as
+/// the unsplit walk does (fp16 zeroes its bits at load, fp32 parks it in the
+/// unused `d`), while the finalizer owns the divide through `dpos`. Covering
+/// the whole range -- rather than trimming the diagonal off one end -- is
+/// what makes a forced S = 1 split BIT-IDENTICAL to the unsplit kernel in
+/// BOTH directions: lane `sub` gets exactly the entries it would have got
+/// there. `dpos` is found by scanning the row; the diagonal-first (CSR of
+/// L^T) / diagonal-last (CSR of L) convention is not relied on.
+inline dataflow_plan dataflow_build_plan(int m, bool reverse, const int* rowptr,
+                                         const int* colidx, const int* len, int pre,
+                                         const dataflow_seg_params& p) {
+    const int C = 32 * pre;
+    dataflow_plan pl;
+    pl.batch_start.reserve(static_cast<std::size_t>(m) / 32 + 2);
+    pl.batch_start.push_back(0);
+    int open = 0;   // sweep position the currently open batch starts at
+    int pos  = 0;   // lane cursor inside the open PLAIN batch
+    for (int q = 0; q < m; ++q) {
+        const int row = reverse ? m - 1 - q : q;
+        const int l   = len[row];
+        if (p.seg > 0 && l - 1 > p.split_min) {
+            const int beg = rowptr[row], end = rowptr[row + 1];
+            int dpos = -1;
+            for (int t = beg; t < end; ++t)
+                if (colidx[t] == row) { dpos = t; break; }
+            if (dpos < 0)
+                throw std::runtime_error("apxchol cuda_sptrsv: row " + std::to_string(row) +
+                                         " has no diagonal entry; the dataflow plan needs it");
+            const int lo  = beg, hi = end, span = hi - lo;
+            int S = (span + p.seg - 1) / p.seg;
+            if (S > p.max_seg) S = p.max_seg;
+            if (S < 1) S = 1;
+            int seg_len = (span + S - 1) / S;
+            seg_len = ((seg_len + C - 1) / C) * C;                  // whole chunks
+            const int S_act = (span + seg_len - 1) / seg_len;       // <= S
+            if (q > open) { pl.batch_start.push_back(q); pl.batch_spec.push_back(-1); }
+            const int s0 = pl.n_slots;
+            for (int s = 0; s < S_act; ++s) {
+                pl.spec.push_back(dataflow_spec{row, lo + s * seg_len,
+                                                std::min(hi, lo + (s + 1) * seg_len), s0 + s});
+                pl.batch_start.push_back(q);                        // zero-width
+                pl.batch_spec.push_back(static_cast<int>(pl.spec.size()) - 1);
+            }
+            pl.n_slots += S_act;
+            pl.spec.push_back(dataflow_spec{~row, s0, S_act, dpos});
+            pl.batch_start.push_back(q + 1);                        // owns the row's position
+            pl.batch_spec.push_back(static_cast<int>(pl.spec.size()) - 1);
+            ++pl.n_split;
+            open = q + 1;
+            pos  = 0;
+            continue;
+        }
+        const int G = dataflow_lane_group(l, pre);
+        int aligned = (pos + G - 1) & ~(G - 1);
+        if (aligned + G > 32) {
+            pl.batch_start.push_back(q); pl.batch_spec.push_back(-1);
+            open = q; pos = 0; aligned = 0;
+        }
+        pos = aligned + G;
+    }
+    if (open < m) { pl.batch_start.push_back(m); pl.batch_spec.push_back(-1); }
+    return pl;
+}
+
+/// The plan's SAFETY PROPERTY, checked on the host because the kernel relies
+/// on it implicitly: the chunk walk parks the lanes of rows that are not
+/// ready in an inner spin, so an item that needs MORE THAN ONE chunk must
+/// never share a warp with a possible producer. Without segmentation that
+/// holds by accident (multi-chunk implies G = 32 implies one row per batch);
+/// segments and finalizers keep it by being alone in their batch. Also
+/// re-states the table invariants (monotone starts, <= 32 lanes per plain
+/// batch, every sweep position covered exactly once, segments before their
+/// finalizer). Returns "" when the plan is sound, else what is wrong. O(m).
+inline std::string dataflow_plan_check(const dataflow_plan& pl, int m, bool reverse,
+                                       const int* len, int pre) {
+    const int nb = pl.n_batches();
+    if (static_cast<int>(pl.batch_start.size()) != nb + 1) return "batch_start size != n_batches + 1";
+    if (pl.batch_start.front() != 0 || pl.batch_start.back() != m) return "batch_start does not span [0, m)";
+    std::vector<char> seen(static_cast<std::size_t>(m), 0);
+    for (int b = 0; b < nb; ++b) {
+        const int q0 = pl.batch_start[b], q1 = pl.batch_start[b + 1];
+        if (q1 < q0) return "batch_start is not monotone at batch " + std::to_string(b);
+        const int sb = pl.batch_spec[b];
+        if (sb >= static_cast<int>(pl.spec.size())) return "batch_spec out of range at batch " + std::to_string(b);
+        if (sb >= 0) {
+            const dataflow_spec& sp = pl.spec[static_cast<std::size_t>(sb)];
+            if (sp.row >= 0) {                        // SEGMENT: zero-width
+                if (q1 != q0) return "segment batch " + std::to_string(b) + " is not zero-width";
+            } else {                                  // FINALIZER: owns its row's position
+                if (q1 != q0 + 1) return "finalizer batch " + std::to_string(b) + " does not own one position";
+                const int row = reverse ? m - 1 - q0 : q0;
+                if (~sp.row != row) return "finalizer batch " + std::to_string(b) + " is at the wrong position";
+                seen[static_cast<std::size_t>(q0)] = 1;
+            }
+            continue;
+        }
+        if (q1 == q0) return "empty plain batch " + std::to_string(b);
+        int pos = 0;
+        for (int q = q0; q < q1; ++q) {
+            const int row = reverse ? m - 1 - q : q;
+            const int G = dataflow_lane_group(len[row], pre);
+            pos = (pos + G - 1) & ~(G - 1);
+            if (pos + G > 32) return "plain batch " + std::to_string(b) + " overflows 32 lanes";
+            if (len[row] > G * pre && q1 - q0 != 1)   // the implicit warp-sharing property
+                return "multi-chunk row " + std::to_string(row) + " shares batch " + std::to_string(b);
+            pos += G;
+            seen[static_cast<std::size_t>(q)] = 1;
+        }
+    }
+    for (int q = 0; q < m; ++q)
+        if (!seen[static_cast<std::size_t>(q)]) return "sweep position " + std::to_string(q) + " is in no batch";
+    for (std::size_t k = 0; k < pl.spec.size(); ++k) {
+        const dataflow_spec& sp = pl.spec[k];
+        if (sp.row >= 0) continue;
+        const int s0 = sp.a, S = sp.b;
+        if (S < 1 || s0 < 0 || s0 + S > pl.n_slots) return "finalizer slot range out of bounds";
+        if (static_cast<int>(k) < S) return "finalizer precedes its segments";
+        for (int s = 0; s < S; ++s) {
+            const dataflow_spec& sg = pl.spec[k - static_cast<std::size_t>(S) + static_cast<std::size_t>(s)];
+            if (sg.row != ~sp.row || sg.c != s0 + s) return "segment/finalizer mismatch";
+            if (sg.b <= sg.a) return "empty segment";
+        }
+    }
+    return std::string();
 }
 
 } // namespace apxchol::cuda_host
