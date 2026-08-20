@@ -16,7 +16,7 @@ for methodology and [`latest/summary.md`](latest/summary.md) for the tables.
 |---|---|---|---|
 | **apxchol** | Approximate Cholesky + PCG; headline = best of 4 IS-selectors (bg/luby/root/bk) per matrix/device | 16 (C++) | this repo (`src/`, `include/apxchol/`) |
 | ↳ IS selectors | bg=block-greedy, luby, root=Blelloch rootset, bk=Baumann-Kyng; luby/root give shallow factors that the GPU SpTRSV prefers (per-selector spread in the ablation chart) | 16 (C++) | this repo |
-| **RCHOL** | Randomized Cholesky + PCG (serial factorization) | serial factor | [ut-padas/rchol](https://github.com/ut-padas/rchol) |
+| **RCHOL** | Randomized Cholesky + **their own** PCG (`util/pcg.cpp`, MKL ILP64; serial factorization; x86 only) | serial factor | [ut-padas/rchol](https://github.com/ut-padas/rchol) |
 | **BoomerAMG** | Classical *algebraic* multigrid + PCG | 16 (C, OpenMP) | [Hypre](https://github.com/hypre-space/hypre) |
 | **AMGCL** | Smoothed-aggregation *algebraic* multigrid + PCG; Dirichlet-pin de-singularization, default config | 16 (C++) | [ddemidov/amgcl](https://github.com/ddemidov/amgcl) |
 | **ParAC** | Parallel randomized Cholesky + PCG (AMD-reordered, MKL) | 16 (C++) | [Tianyu-Liang/Parallel-Randomized-Cholesky](https://github.com/Tianyu-Liang/Parallel-Randomized-Cholesky) |
@@ -38,6 +38,66 @@ line) are the two multigrids kept.
 - **CHOLMOD** (direct supernodal Cholesky) is out of scope — the suite compares
   preconditioned iterative methods. `CG/LDLT [Eigen]` and the apxchol IS/storage
   ablations (`bk/luby/root`, `vec`) exist in the binary but are not in the headline set.
+
+## Whose solve loop produced each number
+
+**The RHS, the de-singularization and the final residual are the harness's, identical for
+every solver in a cell. The iteration is the vendor's.** We do not re-implement a solver's
+Krylov loop and report the result as theirs. Per solver:
+
+| Solver | Setup we time | The iteration that produced `iters`/`solve_s` | Ours in the loop |
+|---|---|---|---|
+| **apxchol** | our factorization | our PCG | everything — it is our method |
+| **RCHOL / pRCHOL** | their `rchol(A,G)` / `rchol(A,G,perm,nt)` | **their `util/pcg.cpp`** (MKL `mkl_sparse_d_mv` / `d_trsv`), the loop their `ex_laplace.cpp` drives | nothing. AMD reorder (`rchol`) is ours, on their own README's recommendation; pRCHOL uses **their** `reorder()` with the ordering `rchol` returns, as in their `ex_laplace_parallel.cpp`. **x86 only** — see the note below |
+| **BoomerAMG** | `HYPRE_ParCSRPCGSetup` (which builds the AMG hierarchy — exactly once) | `HYPRE_ParCSRPCGSolve` with `HYPRE_BoomerAMGSolve` as preconditioner — hypre's iteration, hypre's count | the Dirichlet pin, the IJ marshalling, the residual re-grade |
+| **AMGCL** | their `make_solver<amg<SA,spai0>, solver::cg>` ctor | their `solve(rhs,sol)` | the pin and the Eigen→CRS marshalling. **We chose `cg` over their runtime default `bicgstab`** — the operator is SPD, their own docs recommend it there, and it keeps the Krylov method uniform across the table |
+| **ParAC** | their `experiment/driver` binary, their documented CLI | their driver's own loop, their printed timings/iterations | nothing in the iteration. Its input is built by **their** `write_graph.jl`, so in graph mode the ParAC row is same-operator / **different RHS** |
+| **CMG** | `cmg_sdd(A)` | MATLAB's built-in `pcg` — CMG's own documented usage (`matlab/cmg/README.txt`) | the RHS build and the re-grade. Its MATLAB wall-time is not cross-language comparable; **the iteration count is the signal** |
+| **AC / AC2** | `approxchol_lap` / `approxchol_sddm` closure | **their** `pcg`, including their `stag_test` | the `tol_eff` rescale for the sddm augmented basis. `AC2` = their `approxchol_lap` with `ApproxCholParams(:deg,5,2,2)`, **not** their separate `approxchol_lap2` |
+| `cg` / `icc` / `ldlt` / `cholmod` | — | Eigen's / SuiteSparse's own | nothing |
+
+**Documented calibrations and patches — these must stay visible wherever the table is
+published** (see [THE GRADING RULE](#grading-rule) for why a calibration, not a looser mark):
+
+| Solver | Their stop test | What we pass / change | Tolerance actually used |
+|---|---|---|---|
+| ParAC-CPU | **absolute**, `sqrt(dpar[4]) > sqrt(dpar[0])`, on the recurrence residual | `PARAC_REL_TOL` calibrated from one probe run (`_calibrate_rel_tol`); recorded per cell as `parac_rel_tol` | `rel_tol = (τ·r_recur,0/R_0)²`, per matrix, so their **printed true** residual lands under 1e-8 |
+| ParAC-GPU | **preconditioned**-residual ratio `√⟨r,M⁻¹r⟩/√⟨r₀,M⁻¹r₀⟩` — optimistic by ~10× | their `solver.hpp` **patched** to the true Euclidean ratio (`benchmarks/CMakeLists.txt`); the CG recurrence math is untouched, only the test | 1e-8, on the true relative residual |
+| AC (`sddm` path) | `‖r‖/‖b‖` against the **augmented** RHS `[b; −Σb]` — a different basis | `tol_eff = tol·‖b‖/‖b_aug‖` (`bench_laplacians.jl`) | `tol_eff`, so the residual in *our* basis is 1e-8 |
+| AC / AC2 | `‖r‖/nb < tol` **plus `stag_test = 5`** — a stagnation early exit can return a non-converged `x` | nothing: their exit is theirs to keep | 1e-8; a stagnation exit is caught by our re-grade and lands as `not_converged` |
+| BoomerAMG | 2-norm **recurrence** residual (`TwoNorm=1`, `StopCrit=0`), on the **Dirichlet-pinned** subsystem | nothing. Recurrence drift was tested and ruled out: `HYPRE_PCGSetRecomputeResidual(1)` leaves iterations and residual bit-identical on iter0040 / grid_2000 / com-Amazon, so the knob was not kept. **Its real gap is pin-vs-score, and is OPEN — see below** | 1e-8, on hypre's pinned system |
+| RCHOL / pRCHOL | `dnrm2(r) > dnrm2(b)·tol` (`pcg.cpp:82`), recurrence | nothing — **semantically identical to ours**, so adopting their loop imports no quirk | 1e-8 |
+
+**OPEN: BoomerAMG's pin-vs-score gap on singular Laplacians.** Every solver is scored on the
+**original singular `L`**, but BoomerAMG (and AMGCL) solve the **Dirichlet-pinned** SPD
+subsystem, and the two residuals are not the same number. Measured at HEAD on `iter0040`
+(`--kind operator`, which the binary correctly detects as a singular Laplacian): hypre's own
+final relative residual is **2.06e-9** — it converged, on its system — while the harness's
+re-grade against the original `L` is **1.71e-8**, a factor of **8.3**. Under
+[THE GRADING RULE](#grading-rule) that cell is `not_converged` at 1e-8, and it is the only
+family where this bites (grid_2000 2.98e-9, com-Amazon 5.28e-9 — both pass comfortably).
+This is **not** a stop-test problem — `HYPRE_PCGSetRecomputeResidual(1)` was tried and leaves
+iterations and residual bit-identical, so it was not kept — and no hypre tolerance knob
+closes it. The fix is rule option 1: **calibrate the tolerance handed to hypre for the
+pin-to-original transfer**, the same shape as ParAC's calibration. **NOT DONE.** Until it is,
+BoomerAMG's IPM cells must be reported at their true re-graded residual, `not_converged`
+where that exceeds 1e-8 — and not quietly passed by widening the grade, which is exactly what
+the old 10× band did.
+
+**RCHOL is x86-only.** Their `util/pcg.hpp` hard-includes `mkl_spblas.h`/`mkl.h` (having
+first forced `MKL_INT = size_t`, which is why the build links MKL's **ILP64** interface, as
+their own Makefile does). On a machine without MKL — aarch64: Grace / GH200 / Daint — their
+shipped solve cannot run, and substituting one of ours is exactly what we stopped doing. The
+`rchol`/`rchol_par` rows there are **factor-only**: `rchol()`'s time and fill-in are real,
+the solve columns are the `n/a` sentinel, and the solver name carries
+*"factor only; upstream solve needs MKL (x86)"*. The price of faithfulness on Grace is four
+full competitors (BoomerAMG, AMGCL, AC, AC2) instead of six.
+
+**`solve_rss_mb` is not reported for RCHOL/pRCHOL.** Their `create_sparse` (`pcg.cpp:33-53`)
+allocates a second full copy of `A` and of `G` on every construction and never frees it — the
+`delete[]` at `pcg.cpp:53` is commented out upstream — so the number would measure their leak
+rather than the memory a solve holds. The binary emits `-1` (unmeasured) and the runner drops
+the metric rather than storing a misleading value.
 
 ## Protocol
 
@@ -153,11 +213,34 @@ line) are the two multigrids kept.
   `--dump-mtx` and fed to the Julia / MATLAB / external solvers, so they consume the
   *exact* same matrix the C++ solvers build (no per-backend grid generators — e.g.
   3D grids work without a Julia `grid3d` generator).
-- **Tolerance**: true relative residual `‖b − A x‖ / ‖b‖ ≤ 1e-8`. The runner's
-  acceptance band is one order looser than that — a cell is recorded `complete` at
-  `rel_res ≤ 10·tol` (1e-7) and `not_converged` above it — but in the committed store
-  **every** `complete` cell is in fact at or below 1e-8 (largest is 9.996e-9), so the
-  headline "converged" set means true 1e-8.
+- <a name="grading-rule"></a>**THE GRADING RULE (tolerance).** A cell is `complete` **iff its
+  TRUE relative residual against the defining operator — `‖b − A x‖ / ‖b‖`, recomputed by
+  the harness from the returned `x`, never a solver's own recurrence estimate — is at or
+  below *exactly* the requested `tol` (1e-8).** One rule, every solver, ours included: no
+  grace factor, no per-solver pass mark. It is implemented in one place,
+  `runner_common.classify()`, and the chart filters use the same mark.
+
+  Until 2026-08-20 this band was **10·tol** for every solver routed through `classify()`
+  (apxchol, BoomerAMG, AMGCL, RCHOL, CMG, AC/AC2) while `parac_runner` held ParAC to `tol`
+  — one competitor graded ten times harder than everything else, including us. That
+  asymmetry is gone.
+
+  When a solver's **own** stopping test is optimistic (a preconditioned-residual ratio, an
+  absolute test, a recurrence estimate), the answer is **never** to relax this grade. It is,
+  in order of preference:
+  1. **Calibrate what we hand their loop** so their true residual lands at `tol` — ParAC-CPU
+     and ParAC-GPU (`PARAC_REL_TOL` from a one-run probe, `parac_runner._calibrate_rel_tol`),
+     AC-`sddm` (`tol_eff = tol·‖b‖/‖b_aug‖` for the augmented basis). **BoomerAMG needs one
+     and does not have one yet** — see the OPEN note in [Whose solve
+     loop](#whose-solve-loop-produced-each-number).
+  2. **Patch their convergence test** to the true residual when no parameter reaches it —
+     `gpu_rchol`'s CUDA PCG, patched in `benchmarks/CMakeLists.txt` and documented in
+     [`patches/`](patches/), with the reason.
+  3. Otherwise the cell is **`not_converged`, carrying its true residual**. That is an
+     honest result, not a harness failure.
+
+  Every calibration and patch is listed in [Whose solve loop produced each
+  number](#whose-solve-loop-produced-each-number) with the tolerance actually passed.
 - **Reps**: 3, median — except the **CMG** cells, which are single-shot (`repeat=1`,
   one MATLAB run per matrix). **Threads**: 16 physical cores, pinned, run without contention.
 - **Metrics**: setup_s, solve_s, total_s, PCG iterations, rel_res, µs/nnz.
@@ -222,7 +305,7 @@ is silently skipped when its dependency is missing (configure prints which):
 | `rchol_par` (pRCHOL) | system **METIS** (`libmetis` + `metis.h`) |
 | `cholmod` | system **CHOLMOD** (SuiteSparse) |
 | `amgcl`, `amgcl_cuda` | **Boost** headers (AMGCL only; the apxchol core is Boost-free) |
-| `rchol` PCG, ParAC CPU driver | **MKL** (`-DMKL_ROOT=…`, `MKLROOT`, or `paths_local.cmake`) |
+| `rchol` / `rchol_par` **solve** (their `util/pcg.cpp`), ParAC CPU driver | **MKL** (`-DMKL_ROOT=…`, `MKLROOT`, or `paths_local.cmake`); **ILP64** interface, x86 only. Without it those two rows are factor-only — see [Whose solve loop](#whose-solve-loop-produced-each-number) |
 | GPU axis | **CUDA** + `-DAPXCHOL_USE_CUDA=ON`; Hypre-GPU also needs `-DBENCH_HYPRE_USE_CUDA=ON`, ParAC needs `-DBUILD_GPU_RCHOL=ON` |
 | `cmg`, `parac`, `ac`/`ac2` | out-of-tree tools — see [Local configuration](#local-configuration-out-of-tree-tools) |
 
@@ -334,11 +417,16 @@ a message naming the variable to set. Everything else — the repo root, the ben
 binaries, the cell store — is derived from the source tree, so no configuration is
 needed for the in-tree solvers.
 
-**MKL** (optional; it backs the RCHOL PCG solve and the ParAC CPU driver) is found
+**MKL** (optional; it backs RCHOL's own PCG — their `util/pcg.cpp`, which every
+`rchol`/`rchol_par` solve number now comes from — and the ParAC CPU driver) is found
 via `-DMKL_ROOT=/path/to/oneapi/mkl/<version>`, the `MKLROOT` environment variable,
 or a gitignored `benchmarks/paths_local.cmake` containing
-`set(MKL_ROOT "..." CACHE PATH "")`. Without it, configure prints
-`MKL not found ...` and the MKL-dependent targets are skipped.
+`set(MKL_ROOT "..." CACHE PATH "")`. Two interface layers are used, deliberately:
+`rchol_lib` links **ILP64** (`mkl_intel_ilp64`) because their `pcg.hpp` forces
+`MKL_INT = size_t` before including `mkl_types.h` — their own Makefile does the same —
+while the out-of-tree ParAC/`gpu_rchol` CPU driver links **LP64**, MKL's default `int`.
+Without MKL, configure prints `MKL not found ...`, the ParAC CPU driver is skipped, and
+`rchol`/`rchol_par` degrade to factor-only rows (their solve is x86-only).
 
 ### Timing harness
 

@@ -263,7 +263,8 @@ def scaling_chart(recs, fam, out, gpu_rows=None, device="cpu"):
             nz = nnz_by_mat.get(mat)
             if not nz: continue
             for glab, gv in d.items():
-                if gv.get("total") and gv.get("rel_res", 1.0) <= TOL * 1.5:
+                # THE GRADING RULE (benchmarks/README.md): exactly TOL, no grace factor.
+                if gv.get("total") and gv.get("rel_res", 1.0) <= TOL:
                     gpu_series[glab].append((nz, gv["total"]))
         for glab in gpu.ORDER:
             if glab not in gpu_series: continue

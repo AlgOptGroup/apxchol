@@ -188,7 +188,8 @@ def breakdown(rows, fam, out):
         # bars within a matrix sorted fastest->slowest (converged only get a bar)
         present = sorted((l for l in labs if l in d), key=lambda l: d[l]["total"])
         for j, lab in enumerate(present):
-            conv = d[lab]["rel_res"] <= TOL*1.5
+            # THE GRADING RULE (benchmarks/README.md): exactly TOL, no grace factor.
+            conv = d[lab]["rel_res"] <= TOL
             col = COLORS[lab]; xx = x[i] + j*w
             ax.bar(xx, d[lab]["setup"], w, color=col,
                    label=(lab if lab not in legended else None)); legended.add(lab)

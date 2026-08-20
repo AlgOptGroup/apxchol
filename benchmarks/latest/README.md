@@ -8,9 +8,15 @@ in `summary.md`.
 
 - **Tolerance**: true relative residual `‖b − L x‖ / ‖b‖ ≤ 1e-8` against the
   **original** operator (no preconditioned-norm shortcuts, no scoring against a
-  perturbed system). The runner accepts a cell as `complete` at `rel_res ≤ 10·tol`
-  (1e-7), but every `complete` cell in the committed store is in fact ≤ 1e-8
-  (largest 9.996e-9).
+  perturbed system). A cell is `complete` **iff** it is at or below *exactly* that
+  `tol` — one rule, every solver including ours, no grace factor and no per-solver
+  pass mark. (The runner used to accept `rel_res ≤ 10·tol` for everything routed
+  through `classify()` while ParAC alone was held to `tol`; that asymmetry was
+  removed 2026-08-20. No cell in the committed store changes status: all 546
+  `complete` cells across 13 solvers are already ≤ 1e-8; the largest is 9.994e-9,
+  and it is one of ours — `apxchol_v1` on `iter0010`/gpu.) A solver whose own
+  stopping test is optimistic is fixed by calibrating or patching *its* test — see
+  [THE GRADING RULE](../README.md#grading-rule).
 - **Reps**: 3, median — except the **CMG** cells, which are single-shot (`repeat=1`).
 - **Threads**: 16 physical cores (the `t16` figures), pinned, run without contention.
 - **Machine**: AMD Ryzen 9 7945HX (16C/32T, Zen 4), 128 GB RAM, NVIDIA RTX 4090 Laptop
