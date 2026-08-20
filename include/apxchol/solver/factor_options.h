@@ -64,15 +64,35 @@ struct factor_options {
     std::string is_select = "block_greedy";  // Partitioner name (runtime dispatch via dispatch_partitioner)
 
     // When the main IS-finding loop bails out (IS < min_is_fraction · active),
-    // optionally parallelize the residual peel by switching to BK rounds until
-    // active shrinks below this threshold, then serial peel the tail.
+    // the residual is worked down by BK rounds until active falls below this
+    // threshold; the serial peel then takes the tail.
     //
-    // Default SIZE_MAX = disabled (always serial peel).  Empirically the
-    // serial peel wins on the dense, high-degree residuals BG produces:
-    // BK rounds on the residual eliminate only ~100 vertices each, so the
-    // 100s of fork-join overheads add up to more than the serial peel cost.
-    // Set to a small value (e.g. 256) to enable for graphs with low-degree
-    // or near-IS-shaped residuals.
+    // SIZE_MAX here does NOT mean "serial peel": it means "defer to the
+    // partitioner", and every shipped partitioner that can bail out
+    // (block_greedy, luby, rootset) declares residual_handoff_threshold = 500,
+    // so the BK residual loop IS on by default.  Set an explicit value to
+    // override the trait; the serial peel is only reached for the last
+    // `residual_handoff_threshold` vertices.
+    //
+    // Do NOT raise it to hand the peel more of the residual.  BK's per-round
+    // yield does collapse on a dense residual (as-Skitter, T=16: ~80
+    // vertices/round at the handoff, ~0.4/round by the time active reaches 600),
+    // but the rounds still win: they buy the elimination ORDER, and the peel's
+    // `natural` order is dearer per column than a BK round is per vertex.
+    // Measured on as-Skitter (T=16, vec_pool, bg+tree, deterministic counters)
+    // by forcing the handoff at a larger active and reading nnz(L) and
+    // `elim_remaining` off the checkpoint:
+    //     handoff at   500    1000    2000    3000    5325 (a first-whiff bail)
+    //     nnz(L) M   18.48   18.51   18.63   18.83   19.43   (+5.1% at 5325)
+    //     elim_rem ms   26      65     172     285     421
+    //     BK find_partition saved by stopping there: 0 / 31 / 92 / 136 ms
+    // i.e. every column moved to the peel costs both fill AND time.  The same
+    // shape on com-LiveJournal (handoff at 500 / 2000 / 5000 / 10000 / 20000:
+    // nnz 120.6 / 120.7 / 121.3 / 123.4 / 128.8 M, elim_rem 49 / 362 / 1326 /
+    // 4829 / 5302 ms), coAuthorsDBLP and com-Amazon (setup lowest at 500 on
+    // both, nnz +18% / +5% at a 15000 handoff).  A yield-triggered early stop
+    // was implemented and measured against the same frontier and is dominated —
+    // see the residual-loop comment in factorization_impl.h.
     size_t parallel_residual_threshold = std::numeric_limits<size_t>::max();
 
     // Pivot ordering strategy for the serial residual peel (eliminate_remaining).

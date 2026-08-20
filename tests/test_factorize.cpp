@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <numeric>
+#include <span>
 #include <string>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -15,6 +17,7 @@
 #include "apxchol/solver/preconditioner.h"
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
+#include "apxchol/solver/partition/baumann_kyng.h"
 #include "apxchol/solver/solve.h"
 
 // ── Helpers ──────────────────────────────────────────
@@ -839,4 +842,108 @@ TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     EXPECT_LE(exact.iterations, sampled.iterations)
         << "exact low-degree cliques should not need more PCG iterations: "
         << "exact=" << exact.iterations << ", sampled=" << sampled.iterations;
+}
+
+// ─── BK residual loop (parallel_residual_threshold) ─────────────────────────
+//
+// A complete graph is the cheapest way to reach this code from a unit test: its
+// independent set is one vertex, so block_greedy trips min_is_fraction on the
+// first round and hands the whole graph to the residual path. That is the same
+// loop the social graphs enter at 70k-830k active.
+namespace {
+Eigen::SparseMatrix<double> clique_laplacian(int n) {
+    Eigen::SparseMatrix<double> L(n, n);
+    std::vector<Eigen::Triplet<double>> t;
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j)
+            if (i != j) t.emplace_back(i, j, -1.0);
+        t.emplace_back(i, i, static_cast<double>(n - 1));
+    }
+    L.setFromTriplets(t.begin(), t.end());
+    return L;
+}
+}  // namespace
+
+TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
+    constexpr int n = 60;
+    constexpr size_t thresh = 5;
+    const auto L = clique_laplacian(n);
+    const auto b = apxchol::generate_test_rhs(L.rows());
+
+    apxchol::factor_options peel_only;              // 60 < the trait's 500, so
+    peel_only.seed = 7;                             // the loop is not entered:
+    const auto a = apxchol::factorize(              // the peel takes all 60.
+        L, apxchol::graph_storage::vec_pool, peel_only);
+    EXPECT_TRUE(a.rounds.empty())
+        << "block_greedy did not bail on a clique, so this test is not "
+           "exercising the residual path any more";
+
+    // Several seeds: the loop must reach the threshold under every one of them.
+    // On a clique BK's sample is empty with probability (1-p)^n ~ 3% per round
+    // over ~55 rounds, so at least one seed here whiffs — and a whiff must be
+    // retried, not treated as "the residual stopped shrinking". Bailing on the
+    // first empty round (the behaviour until 2026-08-20) dumps the rest on the
+    // serial peel and fails the peel-column bound below.
+    for (unsigned seed : {7u, 11u, 42u, 1234u, 20260820u}) {
+        apxchol::factor_options with_loop;          // BK rounds down to `thresh`,
+        with_loop.seed = seed;                      // then the peel takes the
+        with_loop.parallel_residual_threshold = thresh;   // rest.
+        const auto c = apxchol::factorize(
+            L, apxchol::graph_storage::vec_pool, with_loop);
+
+        size_t in_rounds = 0;
+        for (const auto& r : c.rounds) in_rounds += r.is_size;
+        EXPECT_GE(in_rounds, static_cast<size_t>(n) - thresh)
+            << "seed " << seed << ": the BK residual loop handed "
+            << (static_cast<size_t>(n) - in_rounds) << " columns to the serial "
+            << "peel, but parallel_residual_threshold = " << thresh
+            << " allows at most " << thresh;
+
+        // Same (input, seed, thread count) => same factor, bit for bit.
+        const auto c2 = apxchol::factorize(
+            L, apxchol::graph_storage::vec_pool, with_loop);
+        expect_same_factor(c, c2, "BK residual loop, seed " +
+                                  std::to_string(seed));
+        if (::testing::Test::HasFatalFailure()) return;
+
+        // And it is still a usable preconditioner.
+        const auto res = apxchol::solve(L, b,
+            {.tol = 1e-8, .max_iter = 200,
+             .storage = apxchol::graph_storage::vec_pool,
+             .factor_opts = with_loop});
+        EXPECT_LT(res.residual, 1e-8) << "seed " << seed;
+    }
+}
+
+// The residual loop constructs a fresh baumann_kyng_partitioner partway through
+// an elimination, where graph::m() is monotone and 2*m/|active| is inflated by
+// every edge the eliminated prefix consumed. BK must honour a caller-supplied
+// est_avg_degree on round 0 rather than recomputing one; this pins that seam,
+// whose only visible effect is which vertices round 0 samples.
+TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
+    const auto L = grid_laplacian(30, 30);          // 900 vertices, avg degree < 4
+    apxchol::partition_context ctx{apxchol::partition_options{}, 42, 2000, nullptr};
+    std::vector<apxchol::node_index> active(900);
+    std::iota(active.begin(), active.end(), apxchol::node_index{0});
+
+    auto is_size = [&](double seed) {
+        auto G = apxchol::make_graph<
+            apxchol::graph<apxchol::vec_pool_incidence>>(L);
+        apxchol::baumann_kyng_partitioner bk;
+        bk.est_avg_degree = seed;                   // 0 = "work it out yourself"
+        apxchol::selection sel;
+        sel.reset(G.n());
+        bk.find_partition(G, std::span<const apxchol::node_index>(active),
+                          ctx, sel);
+        return sel.finalize().num_regions();
+    };
+
+    // Seeding a huge average degree drives p = 1/(c·d) down, so round 0 samples
+    // almost nothing; the unseeded call measures the real ~4 and samples freely.
+    const auto unseeded = is_size(0.0);
+    const auto inflated = is_size(4000.0);
+    EXPECT_GT(unseeded, 0u);
+    EXPECT_LT(inflated, unseeded)
+        << "round 0 ignored the caller's est_avg_degree seed (unseeded="
+        << unseeded << ", seeded 4000 => " << inflated << ")";
 }
