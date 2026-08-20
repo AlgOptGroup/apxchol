@@ -1,12 +1,23 @@
-# AMD reorder for ParAC — OUR preprocessing step, not a modification of ParAC.
+# AMD reorder for ParAC — the FALLBACK preprocessing step.
+#
+# THE RUNNER DOES NOT NORMALLY CALL THIS. ParAC's inputs are prepared by ParAC's
+# OWN cpu_implementation/write_graph.jl (`graph_produce` / `physics_produce`),
+# invoked from their checkout through benchmarks/parac_produce_upstream.jl: the
+# runner charges that preprocessing to ParAC's setup time, so it has to be their
+# code. This script is what parac_runner falls back to when their producer refuses
+# an input — `physics_produce` asserts on a globally diagonally-deficient matrix —
+# and a cell prepared this way says so in matrix_meta.parac_prep.
+#
+# It is a faithful stand-in, not an approximation: its output is byte-identical to
+# theirs on every matrix compared (apache2, G3_circuit via physics_produce;
+# com-Amazon comp0, grid_1000 comp0 via graph_produce — see
+# benchmarks/patches/parac/README.md). It differs only in applying ONLY the
+# permutation, so it is also correct for an input `graph_produce` would rebuild
+# the diagonal of, and in offering --perm, which their producer does not write.
 #
 # ParAC requires a fill-reducing ordering: fed the raw input its elimination tree
 # is pathological (the CPU factor does not finish in reasonable time), and its own
-# benchmark scripts only ever run `*-amd.mtx` files. Its own producer for those
-# files is cpu_implementation/write_graph.jl, which we deliberately do NOT use:
-# `graph_produce` REBUILDS the diagonal as a pure Laplacian, which silently
-# destroys the diagonal of an SDDM operator. This script applies only the
-# permutation, preserving every value including the diagonal.
+# benchmark scripts only ever run `*-amd.mtx` files.
 #
 #   julia parac_reorder_amd.jl <in.mtx> <out.mtx> [--augment] [--perm <file>]
 #

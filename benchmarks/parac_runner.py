@@ -7,27 +7,49 @@ on top of runner_common.
 Each matrix goes through exactly ONE ParAC mode: the one ParAC documents for it.
 The other mode's cell is n/a, with the reason recorded.
 
+PREPROCESSING IS THEIRS. Every input ParAC reads is prepared by ParAC's OWN
+cpu_implementation/write_graph.jl, invoked out of their checkout through the thin
+dispatcher benchmarks/parac_produce_upstream.jl. We charge that preprocessing to
+ParAC's setup time (setup = factor + prep + amds), so it has to be their code
+doing their work — not our reimplementation of it. Outputs land in OUR cache
+directories under THEIR naming convention (`<prefix>.mtx` in, `<prefix>-amd.mtx`
+/ `<prefix>-nnz-sorted.mtx` out), so their checkout is never written to.
+benchmarks/parac_reorder_amd.jl and parac_nnz_sort.jl remain as the FALLBACK for
+an input their producer rejects; a cell prepared by the fallback records that,
+and the reason, in matrix_meta.parac_prep.
+
 kind=graph -> GRAPH mode (`driver <mtx> <threads> ""`).
   Dump the PURE L = D - A, one connected component at a time (--giant-dump
-  --comp-rank R; rank 0 IS the whole matrix when it is connected), AMD-reorder
-  it, and let ParAC generate its own zero-sum RHS. That RHS is consistent for a
-  connected singular Laplacian, so ParAC solves the very L the benchmark reports
-  on and its printed residual is against that L. We do NOT hand it a
-  Dirichlet-pinned matrix: its RHS generator knows nothing about our pin, and the
-  residual against the original L then floors around 1e-3 no matter the tolerance
-  (measured; see benchmarks/patches/parac/README.md). Its physics cell is n/a —
-  physics mode trims a row, which on a pure Laplacian deletes a real vertex.
+  --comp-rank R; rank 0 IS the whole matrix when it is connected), hand it to
+  their `graph_produce(prefix, "amd")`, and let ParAC generate its own zero-sum
+  RHS. That RHS is consistent for a connected singular Laplacian, so ParAC solves
+  the very L the benchmark reports on and its printed residual is against that L.
+  We do NOT hand it a Dirichlet-pinned matrix: its RHS generator knows nothing
+  about our pin, and the residual against the original L then floors around 1e-3
+  no matter the tolerance (measured; see benchmarks/patches/parac/README.md). Its
+  physics cell is n/a — physics mode trims a row, which on a pure Laplacian
+  deletes a real vertex.
+
+  graph_produce strips the diagonal, forces the off-diagonals negative and
+  REBUILDS the diagonal as -colsum, i.e. re-derives the pure Laplacian. On our
+  component dumps — which already ARE pure Laplacians of a connected component —
+  that rebuild is a no-op: verified byte-identical to a permutation-only reorder
+  on com-Amazon (unweighted) and grid_1000 (weighted).
 
 kind=operator -> PHYSICS mode (`driver <mtx> <threads> "" 1`).
-  Dump the operator as PUBLISHED, then AMD-reorder it WITH --augment, which
-  reproduces ParAC's own physics input construction (write_graph.jl
-  physics_produce): permute, then append the ground row/column, so the appended
-  node is last. Physics mode trims exactly that node, so what it solves is the
-  published operator itself. The augmentation is not optional — run physics mode
-  on an un-augmented operator and the trim deletes a real degree of freedom
-  (measured: apache2 scores 3.1e-3 against the published matrix while ParAC
-  prints 8.8e-9; G3_circuit does not converge at all). Its graph cell is n/a —
-  graph mode grounds a Laplacian, which a full-rank operator is not.
+  Dump the operator as PUBLISHED and hand it to their `physics_produce(prefix,
+  "amd")`: permute, then append the ground row/column, so the appended node is
+  last. Physics mode trims exactly that node, so what it solves is the published
+  operator itself. The augmentation is not optional — run physics mode on an
+  un-augmented operator and the trim deletes a real degree of freedom (measured:
+  apache2 scores 3.1e-3 against the published matrix while ParAC prints 8.8e-9;
+  G3_circuit does not converge at all). Its graph cell is n/a — graph mode
+  grounds a Laplacian, which a full-rank operator is not.
+
+  physics_produce refuses (`@assert false`, "not diagonally dominant") an input
+  whose TOTAL entry sum is below -1e-9. All nine kind=operator matrices clear it
+  with room: apache2 +2.20e4, ecology1 +2.05e-9, G3_circuit +6.91e8,
+  parabolic_fem +2.00, thermal2 +2.01e3, iter0010..0040 +5.24e-1.
 
 TOLERANCE. ParAC's stopping test compares the residual NORM against
 sqrt(rel_tol): an ABSOLUTE test, and on the recurrence residual, which runs
@@ -38,16 +60,17 @@ relative residual is ParAC's own `relative residual:` line and lands just under
 TOL; both it and the calibrated tolerance are recorded in the cell.
 
 CPU (`parac` / `parac_physics`, device=cpu):
-  dump -> julia AMD reorder (cached with a .time sidecar) -> calibrate -> REPS
-  runs of the driver. setup = AMD + host prep (etree/ftree/summary) + elimination
-  kernel; peak host RSS via /usr/bin/time.
+  dump -> their write_graph.jl producer, method "amd" (cached with .time/.prep
+  sidecars) -> calibrate -> REPS runs of the driver. setup = AMD + host prep
+  (etree/ftree/summary) + elimination kernel; peak host RSS via /usr/bin/time.
 
 GPU (`parac_graph` / `parac_physics`, device=gpu):
-  dump -> ParAC's own random-nnz-sort (julia wrapper; the random step is
-  ESSENTIAL — deterministic degree-sort makes the level-set SpTRSV ~1000x
-  slower, and --augment appends the ground node after it for an operator) ->
-  the two CUDA drivers (driver.cu / driver_physics.cu), REPS medians. Those take
-  the tolerance on argv already, so the same calibration applies with no patch.
+  dump -> their write_graph.jl producer, method "nnz-sort" (their random
+  permutation THEN degree sort; the random step is ESSENTIAL — a deterministic
+  degree-sort makes the level-set SpTRSV ~1000x slower, and physics_produce
+  appends the ground node after it for an operator) -> the two CUDA drivers
+  (driver.cu / driver_physics.cu), REPS medians. Those take the tolerance on argv
+  already, so the same calibration applies with no patch.
   setup = sort + etree/ftree/summary + kernel + CSR conversion + SpSV analysis
   (ALL pre-solve work, apples-to-apples with apxchol); peak VRAM via the
   nvidia-smi sidecar.
@@ -94,11 +117,20 @@ try:
 except ImportError:
     pass
 
-# OUR preprocessing, in OUR repo: the AMD reorder (+ the physics augmentation) and
-# the nnz-sort ParAC needs. These used to live untracked inside the ParAC checkout;
-# they are our harness's business, not a modification of ParAC, so they are set
-# AFTER paths_local — a machine-local file must not be able to point them back at
-# a copy in someone's ParAC tree. Drop any REORDER_JL line from paths_local.py.
+# THEIR preprocessing, run from THEIR checkout. parac_produce_upstream.jl is a
+# dispatcher in OUR repo that includes ParAC's cpu_implementation/write_graph.jl
+# and calls physics_produce / graph_produce on it; every line of preprocessing is
+# theirs. It runs under benchmarks/julia (the project that carries AMD, Metis and
+# Laplacians — instantiate with
+#   julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').
+PRODUCE_JL = f"{ROOT}/benchmarks/parac_produce_upstream.jl"
+JULIA_PROJECT = f"{ROOT}/benchmarks/julia"
+
+# OUR reimplementations, kept as the FALLBACK for an input their producer rejects.
+# These used to live untracked inside the ParAC checkout; they are our harness's
+# business, not a modification of ParAC, so they are set AFTER paths_local — a
+# machine-local file must not be able to point them back at a copy in someone's
+# ParAC tree. Drop any REORDER_JL line from paths_local.py.
 REORDER_JL = f"{ROOT}/benchmarks/parac_reorder_amd.jl"
 NNZ_SORT_JL = f"{ROOT}/benchmarks/parac_nnz_sort.jl"
 
@@ -110,8 +142,10 @@ PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
                     "gate + configurable tolerance; no numerics touched). kind=graph -> GRAPH "
                     "mode on the PURE L per connected component, ParAC's own zero-sum RHS; "
                     "kind=operator -> PHYSICS mode on the PUBLISHED operator augmented ParAC's "
-                    "own way (--augment: permute, then append the ground row/column the trim "
-                    "removes). Tolerance calibrated from a probe run so ParAC's own printed "
+                    "own way (permute, then append the ground row/column the trim removes). "
+                    "Input prepared by ParAC's OWN cpu_implementation/write_graph.jl "
+                    "(graph_produce / physics_produce, method 'amd'), not by a reimplementation. "
+                    "Tolerance calibrated from a probe run so ParAC's own printed "
                     "relative residual lands under 1e-8. AMD-reordered, MKL serial, 16 cores",
             "repeat": REPS, "tier": "broad",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
@@ -158,34 +192,130 @@ def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
     return (p if os.path.exists(p) else None), tag
 
 
+# ── ParAC's OWN preprocessing (their write_graph.jl) ────────────────────────────
+# "amd time:" / "sort time:" is what THEIR producer prints; both scripts print it
+# the same way, so the reorder seconds we charge are the ones their code measured.
+_PREP_TIME_RE = re.compile(r"(?:amd|sort|random|nd) time:\s*([0-9.eE+-]+)")
+_PREP_SUFFIX = {"amd": "-amd.mtx", "nnz-sort": "-nnz-sorted.mtx"}
+# A cache entry written before the .prep sidecar existed came from our
+# reimplementation. Say so rather than claiming provenance we cannot check —
+# delete the cached *-amd.mtx to have their producer rebuild (and stamp) it.
+_PREP_UNKNOWN = ("unrecorded: this cache entry predates the .prep sidecar, so it was "
+                 "written by benchmarks/parac_reorder_amd.jl / parac_nnz_sort.jl. Those "
+                 "were byte-identical to ParAC's own producer on every matrix compared "
+                 "(see benchmarks/patches/parac/README.md), but this particular file was "
+                 "not checked; delete it to have their producer rebuild it")
+
+
+def _write_graph_jl():
+    """ParAC's own cpu_implementation/write_graph.jl.
+
+    Configured explicitly (APXCHOL_PARAC_WRITE_GRAPH / paths_local.PARAC_WRITE_GRAPH)
+    or, by default, derived from the CPU driver's checkout — <checkout>/experiment/
+    driver sits next to <checkout>/cpu_implementation/write_graph.jl."""
+    if rc.PARAC_WRITE_GRAPH:
+        return rc.PARAC_WRITE_GRAPH
+    if rc.PARAC_CPU_DRIVER:
+        return os.path.join(os.path.dirname(os.path.dirname(rc.PARAC_CPU_DRIVER)),
+                            "cpu_implementation", "write_graph.jl")
+    return ""
+
+
+def _produce_upstream(prefix, src, mode, method, timeout, mem_cap_gb=None):
+    """Run ParAC's OWN producer (write_graph.jl `<mode>_produce`) on `src`.
+
+    Their producer takes a path PREFIX: it reads `<prefix>.mtx` and writes
+    `<prefix>-amd.mtx` / `<prefix>-nnz-sorted.mtx`. We honour that convention
+    inside OUR cache directory and point `<prefix>.mtx` at the dump with a
+    symlink, so nothing is ever written into their checkout and the cache file
+    names are unchanged.
+
+    Returns (out_path|None, seconds, error|None): error is a short string when
+    their producer could not take this input, which is the caller's cue to fall
+    back to our reimplementation AND to record why.
+    """
+    wg = _write_graph_jl()
+    if not wg or not os.path.exists(wg):
+        return None, 0.0, (f"ParAC write_graph.jl not found at {wg or '<unset>'} "
+                           f"(set $APXCHOL_PARAC_WRITE_GRAPH / paths_local.PARAC_WRITE_GRAPH)")
+    out = prefix + _PREP_SUFFIX[method]
+    link = prefix + ".mtx"
+    log = f"/tmp/parac_produce_{os.path.basename(prefix)}_{method}.log"
+    if os.path.exists(link) and not os.path.islink(link):
+        return None, 0.0, f"{link} exists and is not our symlink; refusing to overwrite it"
+    try:
+        if os.path.islink(link):
+            os.remove(link)
+        os.symlink(os.path.abspath(src), link)
+        cp = sh(f"julia --project={JULIA_PROJECT} {PRODUCE_JL} {wg} {prefix} {mode} {method} "
+                f"> {log} 2>&1", timeout=timeout, mem_cap_gb=mem_cap_gb)
+    finally:
+        if os.path.islink(link):
+            os.remove(link)
+    text = open(log).read() if os.path.exists(log) else ""
+    if cp.returncode != 0 or not os.path.exists(out):
+        tail = " | ".join(l.strip() for l in text.strip().splitlines()[-4:]) or "no output"
+        return None, 0.0, f"{mode}_produce(\"{method}\") rc={cp.returncode}: {tail}"
+    m = _PREP_TIME_RE.search(text)
+    return out, (float(m.group(1)) if m else 0.0), None
+
+
 # ── CPU axis ────────────────────────────────────────────────────────────────────
 def _reorder_amd(mid, src, tag, augment=False):
-    """julia AMD reorder (benchmarks/parac_reorder_amd.jl), cached; the .time
-    sidecar keeps the measured reorder seconds available for cached hits.
+    """AMD reorder via ParAC's OWN write_graph.jl producer, cached. Returns
+    (path|None, seconds, prep_provenance); the .time and .prep sidecars keep both
+    available on a warm cache hit.
 
-    augment=True additionally appends ParAC's ground row/column AFTER the
-    permutation, so the appended node is last and physics mode's trim removes
-    exactly it. The tag carries '-aug' so an augmented input can never be served
-    from a cache entry built without it."""
+    augment=True selects `physics_produce`, which permutes and then appends
+    ParAC's ground row/column, so the appended node is last and physics mode's
+    trim removes exactly it. Otherwise `graph_produce`, which re-derives the pure
+    Laplacian (a no-op on our component dumps, which already are one). The tag
+    carries '-aug' so an augmented input can never be served from a cache entry
+    built without it.
+
+    If their producer rejects the input — `physics_produce` asserts on a globally
+    diagonally-deficient matrix — we fall back to benchmarks/parac_reorder_amd.jl
+    and return the reason, which the caller records in the cell.
+    """
     rc.require_path(rc.PARAC_REORD, "APXCHOL_PARAC_REORDER_DIR", "PARAC_REORD",
                     "the ParAC AMD-reorder cache directory", must_exist=False)
     os.makedirs(rc.PARAC_REORD, exist_ok=True)
     if augment:
         tag = f"{tag}-aug"
-    amd = f"{rc.PARAC_REORD}/{mid}-{tag}-amd.mtx"
-    log = f"/tmp/parac_fair_reord_{mid}_{tag}.log"
-    tfile = f"{amd}.time"
+    prefix = f"{rc.PARAC_REORD}/{mid}-{tag}"
+    amd = prefix + "-amd.mtx"
+    tfile, pfile = amd + ".time", amd + ".prep"
     if not os.path.exists(amd):
-        flag = " --augment" if augment else ""
-        sh(f"julia {REORDER_JL} {src} {amd}{flag} > {log} 2>&1",
-           timeout=TIMEOUT_CPU, mem_cap_gb=MEM_CAP_GB)
-        secs = 0.0
-        if os.path.exists(log):
-            m = re.search(r"amd time:\s*([0-9.]+)", open(log).read())
-            secs = float(m.group(1)) if m else 0.0
+        mode = "physics" if augment else "graph"
+        out, secs, err = _produce_upstream(prefix, src, mode, "amd",
+                                           TIMEOUT_CPU, MEM_CAP_GB)
+        if out:
+            prep = f"ParAC write_graph.jl {mode}_produce(path, \"amd\"), upstream and unmodified"
+        else:
+            print(f"   [parac] upstream {mode}_produce refused {mid}: {err}\n"
+                  f"   [parac] falling back to benchmarks/parac_reorder_amd.jl", flush=True)
+            secs = _reorder_amd_ours(mid, src, amd, tag, augment)
+            prep = f"benchmarks/parac_reorder_amd.jl (FALLBACK — upstream refused: {err})"
         open(tfile, "w").write(str(secs))
+        open(pfile, "w").write(prep)
     secs = float(open(tfile).read()) if os.path.exists(tfile) else 0.0
-    return (amd if os.path.exists(amd) else None), secs
+    prep = open(pfile).read() if os.path.exists(pfile) else _PREP_UNKNOWN
+    return (amd if os.path.exists(amd) else None), secs, prep
+
+
+def _reorder_amd_ours(mid, src, amd, tag, augment):
+    """FALLBACK reorder with our own parac_reorder_amd.jl (see _reorder_amd).
+    Runs on julia's default environment, so it stays usable even when the
+    benchmarks/julia project their producer needs is not instantiated."""
+    log = f"/tmp/parac_fair_reord_{mid}_{tag}.log"
+    flag = " --augment" if augment else ""
+    sh(f"julia {REORDER_JL} {src} {amd}{flag} > {log} 2>&1",
+       timeout=TIMEOUT_CPU, mem_cap_gb=MEM_CAP_GB)
+    if os.path.exists(log):
+        m = _PREP_TIME_RE.search(open(log).read())
+        if m:
+            return float(m.group(1))
+    return 0.0
 
 
 def _run_once_cpu(amd, physics, rel_tol=None):
@@ -304,18 +434,20 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
 def _prep_amd(mid, tag, augment=False):
     """Dump one input variant + AMD-reorder it, cached by tag (the dump only feeds
     the reorder; a warm {mid}-{tag}[-aug]-amd.mtx + .time sidecar skips the
-    re-dump). Returns (amd_path|None, reorder_seconds)."""
+    re-dump). Returns (amd_path|None, reorder_seconds, prep_provenance)."""
     cache_tag = f"{tag}-aug" if augment else tag
     amd = f"{rc.PARAC_REORD}/{mid}-{cache_tag}-amd.mtx"
     if os.path.exists(amd) and os.path.exists(amd + ".time"):
-        return amd, float(open(amd + ".time").read())
+        prep = (open(amd + ".prep").read() if os.path.exists(amd + ".prep")
+                else _PREP_UNKNOWN)
+        return amd, float(open(amd + ".time").read()), prep
     os.makedirs(DUMP_CPU, exist_ok=True)
     src = f"{DUMP_CPU}/{mid}-{tag}.mtx"
     if not os.path.exists(src):
         sh(f"{rc.BIN['cpu']} {rc.margs_for(mid)} --dump-mtx {src} --solver none",
            timeout=TIMEOUT_CPU, mem_cap_gb=MEM_CAP_GB)
     if not os.path.exists(src):
-        return None, 0.0
+        return None, 0.0, ""
     return _reorder_amd(mid, src, tag, augment=augment)
 
 
@@ -359,7 +491,7 @@ def _measure_cpu_graph_split(family, mid):
         return "skip(done)"
     setup = solve = factor_tot = prep_tot = amds_tot = 0.0
     iters = 0; rr = 0.0; n_tot = nnz_tot = 0; rss_peak = 0.0
-    n_solved = 0; n_comps_total = None; rank = 0; tol_used = None
+    n_solved = 0; n_comps_total = None; rank = 0; tol_used = None; preps = []
     try:
         while True:
             src, n_nodes, n_comps = _dump_component(mid, rank)
@@ -369,10 +501,12 @@ def _measure_cpu_graph_split(family, mid):
                 break
             if n_nodes < COMP_THRESHOLD:     # sorted descending -> the rest are smaller too
                 break
-            amd, amds = _reorder_amd(mid, src, f"comp{rank}")
+            amd, amds, prep_prov = _reorder_amd(mid, src, f"comp{rank}")
             if not amd:
                 rank += 1
                 continue
+            if prep_prov not in preps:
+                preps.append(prep_prov)
             rel_tol = _calibrate_rel_tol(amd, False)
             if rel_tol is not None:
                 tol_used = rel_tol if tol_used is None else max(tol_used, rel_tol)
@@ -414,6 +548,7 @@ def _measure_cpu_graph_split(family, mid):
                  matrix_meta={"parac_mode": "graph",
                               "parac_input": "the PURE L = D - A, per connected "
                                              "component, AMD-reordered",
+                              "parac_prep": "; ".join(preps),
                               "parac_grounding": "graph mode: ParAC's own zero-sum RHS "
                                                  "on the singular Laplacian (no pin)"})
     return f"{status} it={iters} solve={solve:.3f} comps={n_solved}/{n_comps_total}"
@@ -436,7 +571,7 @@ def _run_cpu_operator(mid, family):
     `physics_produce`: permute, THEN append a ground row/column that turns the
     SDDM operator into a Laplacian. Physics mode's `remove_last_row_and_column`
     takes exactly that node back off, so what it solves is the published operator.
-    We reproduce the augmentation in parac_reorder_amd.jl --augment.
+    We run THEIR physics_produce, out of their checkout (see _produce_upstream).
 
     (The claim that its data README says physics matrices are "used as-is" does
     not apply here: that sentence is about the inputs generated for the Hypre and
@@ -450,7 +585,7 @@ def _run_cpu_operator(mid, family):
     rc.emit_cell(family, mid, "parac", "", "n/a", {}, THREADS, "cpu", PROV_CPU,
                  matrix_meta={"parac_mode": "n/a", "parac_na_reason": GRAPH_NA})
     try:
-        amd, amds = _prep_amd(mid, "op", augment=True)
+        amd, amds, prep_prov = _prep_amd(mid, "op", augment=True)
     except subprocess.TimeoutExpired:
         if not rc.cell_done(family, mid, "parac_physics", "", THREADS, "cpu", terminal=TERMINAL_CPU):
             rc.emit_cell(family, mid, "parac_physics", "", "timeout", {}, THREADS, "cpu", PROV_CPU)
@@ -461,6 +596,7 @@ def _run_cpu_operator(mid, family):
                      extra_meta={"parac_mode": "physics",
                                  "parac_input": "the PUBLISHED operator, AMD-reordered then "
                                                 "augmented with ParAC's ground row/column",
+                                 "parac_prep": prep_prov,
                                  "parac_grounding": "physics mode trims the appended ground "
                                                     "node, leaving the published operator"})
     return f"graph[n/a] physics[{p}]"
@@ -486,27 +622,43 @@ def run_cpu(mid):
 
 # ── GPU axis ────────────────────────────────────────────────────────────────────
 def _nnz_sort(mid, src, tag, augment=False):
-    """ParAC's OWN nnz-sort (random permutation then per-column-nnz sort, from
-    write_graph.jl) via parac_nnz_sort.jl; prints SORT COMPUTE time (excl. disk
-    I/O), same convention as parac_reorder_amd.jl. Returns (path|None, seconds).
+    """ParAC's OWN nnz-sort — write_graph.jl method "nnz-sort": a random
+    permutation, THEN a per-column-nnz sort — run out of their checkout, the same
+    `<mode>_produce` call the CPU axis makes with method "amd". Its printed "sort
+    time" (compute only, excluding the reindex + mmwrite I/O) is the reorder cost
+    we charge. Returns (path|None, seconds, prep_provenance).
 
-    augment=True appends ParAC's ground row/column after the permutation, which
-    driver_physics.cu's trim then removes — the GPU counterpart of the CPU
-    physics route. The tag carries '-aug' so the two can never alias."""
+    augment=True selects physics_produce, which appends ParAC's ground row/column
+    after the permutation; driver_physics.cu's trim then removes it — the GPU
+    counterpart of the CPU physics route. The tag carries '-aug' so the two can
+    never alias. On rejection we fall back to benchmarks/parac_nnz_sort.jl and
+    say so, exactly as _reorder_amd does."""
     os.makedirs(rc.PARAC_SORTED, exist_ok=True)
     if augment:
         tag = f"{tag}-aug"
-    out = f"{rc.PARAC_SORTED}/{mid}-{tag}-nnz-sorted.mtx"
-    tfile = f"{out}.time"
+    prefix = f"{rc.PARAC_SORTED}/{mid}-{tag}"
+    out = prefix + "-nnz-sorted.mtx"
+    tfile, pfile = out + ".time", out + ".prep"
     if os.path.exists(out) and os.path.exists(tfile):
-        return out, float(open(tfile).read())
-    flag = " --augment" if augment else ""
-    o = sh(f"julia {NNZ_SORT_JL} {src} {out}{flag}", timeout=TIMEOUT_GPU).stdout
-    m = re.search(r"sort time:\s*([0-9.eE+-]+)", o)
-    secs = float(m.group(1)) if m else 0.0
+        prep = (open(pfile).read() if os.path.exists(pfile)
+                else _PREP_UNKNOWN)
+        return out, float(open(tfile).read()), prep
+    mode = "physics" if augment else "graph"
+    produced, secs, err = _produce_upstream(prefix, src, mode, "nnz-sort", TIMEOUT_GPU)
+    if produced:
+        prep = f"ParAC write_graph.jl {mode}_produce(path, \"nnz-sort\"), upstream and unmodified"
+    else:
+        print(f"   [parac] upstream {mode}_produce refused {mid}: {err}\n"
+              f"   [parac] falling back to benchmarks/parac_nnz_sort.jl", flush=True)
+        flag = " --augment" if augment else ""
+        o = sh(f"julia {NNZ_SORT_JL} {src} {out}{flag}", timeout=TIMEOUT_GPU).stdout
+        m = _PREP_TIME_RE.search(o)
+        secs = float(m.group(1)) if m else 0.0
+        prep = f"benchmarks/parac_nnz_sort.jl (FALLBACK — upstream refused: {err})"
     if os.path.exists(out):
         open(tfile, "w").write(str(secs))
-    return (out if os.path.exists(out) else None), secs
+        open(pfile, "w").write(prep)
+    return (out if os.path.exists(out) else None), secs, prep
 
 
 def _run_once_gpu(driver, mtx, tol):
@@ -561,11 +713,15 @@ def run_gpu(mid, tol=TOL):
         cache_tag = f"{tag}-aug" if aug else tag
         sorted_cached = f"{rc.PARAC_SORTED}/{mid}-{cache_tag}-nnz-sorted.mtx"
         if os.path.exists(sorted_cached) and os.path.exists(sorted_cached + ".time"):
-            sorted_mtx, sort_s = sorted_cached, float(open(sorted_cached + ".time").read())
+            sorted_mtx = sorted_cached
+            sort_s = float(open(sorted_cached + ".time").read())
+            prep_prov = (open(sorted_cached + ".prep").read()
+                         if os.path.exists(sorted_cached + ".prep")
+                         else _PREP_UNKNOWN)
         else:
             src, _tag = _dump(mid, DUMP_GPU, rc.BIN["gpu"], TIMEOUT_GPU)
             if not src: return "SKIP(dump)"
-            sorted_mtx, sort_s = _nnz_sort(mid, src, tag, augment=aug)
+            sorted_mtx, sort_s, prep_prov = _nnz_sort(mid, src, tag, augment=aug)
             if not sorted_mtx: return "SKIP(nnz-sort)"
     except subprocess.TimeoutExpired:
         return "TIMEOUT(dump/sort)"   # no cell: GPU terminal set retries anyway
@@ -610,7 +766,8 @@ def run_gpu(mid, tol=TOL):
                    "iters": iters, "rel_res": rr, "parac_tol": cal}
         vram = [float(r["vram_mb"]) for r in ok if r.get("vram_mb")]
         if vram: metrics["max_vram_mb"] = round(max(vram), 1)   # peak VRAM over reps
-        rc.emit_cell(family, mid, solver_key, "", status, metrics, THREADS, "gpu", PROV_GPU)
+        rc.emit_cell(family, mid, solver_key, "", status, metrics, THREADS, "gpu", PROV_GPU,
+                     matrix_meta={"parac_prep": prep_prov})
         results.append(f"{solver_key}[{status} it={iters} solve={solve:.3f}]")
     return " ".join(results)
 

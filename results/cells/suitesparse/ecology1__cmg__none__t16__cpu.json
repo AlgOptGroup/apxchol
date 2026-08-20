@@ -1,0 +1,39 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "ecology1",
+    "solver": "cmg",
+    "threads": 16
+  },
+  "matrix_meta": {
+    "kind": "operator",
+    "family": "suitesparse",
+    "source": "mtx",
+    "interpretation": "solved as published (assembled operator, diagonal as stored)",
+    "path": "data/matrices/ecology1.mtx",
+    "cmg_input": "the DUMPED operator, read with its diagonal intact and solved unpinned and unshifted (the same system every other solver in this cell got)"
+  },
+  "metrics": {
+    "n": 1000000,
+    "nnz": 4996000,
+    "setup_s": 0.357605,
+    "solve_s": 0.884763,
+    "total_s": 1.242368,
+    "iters": 27,
+    "rel_res": 7.433216e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.2486725
+  },
+  "provenance": {
+    "boost": "on",
+    "git_sha": "3bda0c9be10d2881a75f654d3f6ac24cb5c1795f",
+    "note": "CMG (Koutis) canonical MATLAB R2026a in matlab-deps container, MEX-recompiled, tol 1e-8, published operator read as-is, solved unpinned and unshifted (reg_rel=0)",
+    "repeat": 1,
+    "tier": "broad",
+    "timestamp": "2026-08-20T22:17:21"
+  },
+  "schema": 1,
+  "status": "complete"
+}

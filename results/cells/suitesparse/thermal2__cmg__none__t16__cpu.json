@@ -1,0 +1,40 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "thermal2",
+    "solver": "cmg",
+    "threads": 16
+  },
+  "matrix_meta": {
+    "kind": "operator",
+    "family": "suitesparse",
+    "source": "mtx",
+    "interpretation": "solved as published (assembled operator, diagonal as stored)",
+    "path": "data/matrices/thermal2.mtx",
+    "cmg_input": "the DUMPED operator, read with its diagonal intact and solved unpinned and unshifted (the same system every other solver in this cell got)",
+    "cmg_na_reason": "cmg_precondition declined this matrix: CMG does not support positive off-diagonal entries, and it has 420 of them (upper triangle)"
+  },
+  "metrics": {
+    "n": 1228045,
+    "nnz": 8580313,
+    "setup_s": 0.380625,
+    "solve_s": 0.0,
+    "total_s": 0.380625,
+    "iters": -1,
+    "rel_res": -1.0,
+    "fillin": 0.0,
+    "us_per_nnz": 0.0
+  },
+  "provenance": {
+    "boost": "on",
+    "git_sha": "3bda0c9be10d2881a75f654d3f6ac24cb5c1795f",
+    "note": "CMG (Koutis) canonical MATLAB R2026a in matlab-deps container, MEX-recompiled, tol 1e-8, published operator read as-is, solved unpinned and unshifted (reg_rel=0)",
+    "repeat": 1,
+    "tier": "broad",
+    "timestamp": "2026-08-20T22:17:21"
+  },
+  "schema": 1,
+  "status": "n/a"
+}

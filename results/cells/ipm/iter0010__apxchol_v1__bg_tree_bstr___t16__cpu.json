@@ -1,0 +1,48 @@
+{
+  "cell": {
+    "config": "bg+tree[bstr]",
+    "device": "cpu",
+    "family": "ipm",
+    "matrix_id": "iter0010",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {
+    "kind": "operator",
+    "family": "ipm",
+    "source": "mtx",
+    "interpretation": "solved as published (assembled operator, diagonal as stored)",
+    "path": "data/ipm/iter0010/matrix.mtx",
+    "n": 524288,
+    "nnz": 7867398,
+    "laplacian": false,
+    "grounding": "none",
+    "pos_offdiag": 0,
+    "pos_offdiag_mass": 0.0,
+    "input": "/home/adamant/laplacian_solver/.claude/worktrees/agent-a3767f31974f1537a/data/ipm/iter0010/matrix.mtx"
+  },
+  "metrics": {
+    "n": 524288,
+    "nnz": 7867398,
+    "setup_s": 1.186128,
+    "solve_s": 0.3250168,
+    "total_s": 1.511145,
+    "iters": 30,
+    "rel_res": 8.183947e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.1921,
+    "solve_rss_mb": 538.2,
+    "max_rss_mb": 698.3
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "3bda0c9be10d2881a75f654d3f6ac24cb5c1795f",
+    "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-08-20T22:13:50"
+  },
+  "schema": 1,
+  "status": "complete"
+}

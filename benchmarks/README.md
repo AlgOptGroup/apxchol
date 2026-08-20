@@ -79,9 +79,13 @@ line) are the two multigrids kept.
   cannot take a given matrix produce an **`n/a`** cell (`iters = rel_res = −1`), never a
   silent failure or a missing row — for example ParAC's *graph* mode on an `operator`
   matrix (graph mode grounds a Laplacian; the matrix goes through ParAC's *physics*
-  path instead), or AC/AC2 on an operator carrying positive off-diagonals (Laplacians.jl
-  needs non-negative edge weights, and it solves the matrix it factorizes, so lumping
-  them would make it converge on a different matrix than it is scored against). `n/a` is
+  path instead), or AC/AC2 **and CMG** on an operator carrying positive off-diagonals —
+  `parabolic_fem` (524 288 of them) and `thermal2` (420). Laplacians.jl needs
+  non-negative edge weights, and it solves the matrix it factorizes, so lumping them
+  would make it converge on a different matrix than it is scored against; CMG says so
+  itself (`cmg_precondition` returns an empty preconditioner: *"The current version of
+  CMG does not support positive off-diagonals"*). Every such cell carries the reason
+  under `matrix_meta.na_reason` / `matrix_meta.cmg_na_reason`. `n/a` is
   reserved for *cannot take this matrix*: a solver that runs and misses the tolerance is
   `not_converged` — AC/AC2 do reach `apache2` and `G3_circuit` through
   `approxchol_sddm`, but floor at 6.5e-6 / 1.4e-7 because the ground-vertex
@@ -121,8 +125,14 @@ line) are the two multigrids kept.
   configuration, not a patched convergence test — until its own printed residual
   lands under 1e-8. The same competitor wall-clock cap applies to ParAC:
   on **com-Orkut** it exceeds the shared ~20 min competitor cap during setup and is
-  recorded as `timeout`, like rchol_par/rchol on the same matrix. **CMG** still keeps the `ε·I`
-  regularization (`A = L + ε·I`, `ε = 1e-6·mean|diag|`, via `--reg-rel`), scored on `L + εI`.
+  recorded as `timeout`, like rchol_par/rchol on the same matrix. **CMG** keeps the `ε·I`
+  regularization (`A = L + ε·I`, `ε = 1e-6·mean|diag|`), scored on `L + εI`, on the
+  **singular** families only; on a `kind=operator` matrix it now reads the dump *as an
+  operator* — diagonal included — and solves it unpinned and unshifted, so it is measured
+  on the same published matrix as everything else in the cell. (It used to rebuild the
+  diagonal as the degree there, i.e. solve a different system; `parabolic_fem` /
+  `thermal2` were "complete" only because of that rebuild — against the real operator
+  CMG declines them, see the n/a note below.)
 - **Which protocol each committed cell was measured under (mixed).** The store holds
   **1048** cells recorded over two protocols; every cell carries its own provenance note.
   The pin protocol above is the **current** one and covers **essentially the whole GPU
@@ -231,14 +241,18 @@ benchmarks/build/benchmark --graph grid --n 2000 \
 # Dump a matrix to .mtx (for external solvers / ParAC)
 benchmarks/build/benchmark --graph grid3d --n 100 --dump-mtx /tmp/g.mtx --solver none
 
-# The single fair CPU sweep — ONE runner for grids + SuiteSparse + IPM.
-# Original singular L; each solver self-grounds (--only <ids> refreshes a subset).
-# ParAC (graph+physics) runs IN-PROCESS as part of the sweep (parac_runner.py);
-# --no-parac skips it, --parac-only runs only it. Shared harness: runner_common.py.
+# The single fair CPU sweep — ONE runner for grids + SuiteSparse + IPM, and for
+# EVERY solver in the comparison: apxchol + the C++ competitors in-process, ParAC
+# (graph+physics, parac_runner.py), AC/AC2 (Julia) and CMG (MATLAB container,
+# cmg_matlab_runner.py). Original singular L; each solver self-grounds
+# (--only <ids> refreshes a subset). Opt out individually with --no-parac /
+# --no-julia / --no-cmg (--parac-only runs only ParAC). One-time setup for AC/AC2
+# and for ParAC's own input producer:
+#   julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
 python3 benchmarks/sweep_fair.py
-# ParAC alone (AMD-reorder + driver), standalone:
+# ParAC alone (their write_graph.jl producer + driver), standalone:
 python3 benchmarks/parac_runner.py --device cpu  # [--only id1,id2]
-# CMG (canonical MATLAB CMG in the matlab-deps container) — its own runner:
+# CMG alone (canonical MATLAB CMG in the matlab-deps container):
 python3 benchmarks/cmg_matlab_runner.py
 # CPU charts + tables, then the thread-scaling charts:
 PYTHONPATH=benchmarks python3 benchmarks/fair_charts.py --out benchmarks/latest
@@ -308,7 +322,7 @@ Some competitors live outside this repository, so their paths are **not** hardco
 | --- | --- | --- |
 | ParAC CPU driver (`experiment/driver`) | `APXCHOL_PARAC_DRIVER` | `PARAC_CPU_DRIVER` |
 | ParAC AMD-reorder cache directory | `APXCHOL_PARAC_REORDER_DIR` | `PARAC_REORD` |
-| ParAC `reorder_amd.jl` | `APXCHOL_PARAC_REORDER_JL` | `REORDER_JL` |
+| ParAC's own `cpu_implementation/write_graph.jl` (the input producer the runner calls; **derived from the driver's checkout** unless the two live apart) | `APXCHOL_PARAC_WRITE_GRAPH` | `PARAC_WRITE_GRAPH` |
 | Runtime libs the ParAC driver needs | `APXCHOL_PARAC_LDLIB` | `PARAC_LDLIB` |
 | MATLAB install tree (CMG) | `APXCHOL_MATLAB_ROOT` | `MATLAB` |
 | `cmg-solver` checkout (CMG) | `APXCHOL_CMG_SOLVER` | `CMG_SOLVER` |

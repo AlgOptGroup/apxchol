@@ -1,10 +1,17 @@
-# Minimal nnz-sort reorder for ParAC GPU — ParAC's own ordering from
-# cpu_implementation/write_graph.jl (graph_share "nnz-sort"): a RANDOM permutation
+# Minimal nnz-sort reorder for ParAC GPU — the FALLBACK.
+#
+# THE RUNNER DOES NOT NORMALLY CALL THIS: the GPU input is produced by ParAC's own
+# cpu_implementation/write_graph.jl with method "nnz-sort", run from their checkout
+# through benchmarks/parac_produce_upstream.jl (see parac_runner._nnz_sort). This
+# script is the stand-in for an input their producer refuses, and a cell prepared
+# with it records that in matrix_meta.parac_prep.
+#
+# It reproduces their ordering from graph_share "nnz-sort": a RANDOM permutation
 # first, THEN a sort by per-column nnz. Like parac_reorder_amd.jl it PRESERVES all
 # values (incl. the diagonal) so it is correct for SDDM too — it only applies
 # ParAC's depth-reducing permutation. It prints the SORT COMPUTE time (excluding
-# the reindex + mmwrite I/O), matching how parac_reorder_amd.jl reports amd time,
-# so GPU and CPU ParAC count reorder time the SAME way.
+# the reindex + mmwrite I/O), matching how their producer reports sort time, so
+# GPU and CPU ParAC count reorder time the SAME way.
 #
 #   julia parac_nnz_sort.jl <in.mtx> <out.mtx> [--augment]
 #

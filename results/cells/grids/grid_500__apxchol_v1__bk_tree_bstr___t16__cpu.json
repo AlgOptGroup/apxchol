@@ -1,0 +1,46 @@
+{
+  "cell": {
+    "config": "bk+tree[bstr]",
+    "device": "cpu",
+    "family": "grids",
+    "matrix_id": "grid_500",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {
+    "kind": "graph",
+    "family": "grids",
+    "source": "grid",
+    "interpretation": "L = D - A assembled from the generator's edge weights",
+    "generator": "grid(n=500)",
+    "n": 250000,
+    "nnz": 1248000,
+    "laplacian": true,
+    "grounding": "pin_or_native",
+    "input": "grid_500"
+  },
+  "metrics": {
+    "n": 250000,
+    "nnz": 1248000,
+    "setup_s": 0.09873024,
+    "solve_s": 0.09662575,
+    "total_s": 0.195356,
+    "iters": 43,
+    "rel_res": 9.140494e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.1565,
+    "solve_rss_mb": 164.0,
+    "max_rss_mb": 184.8
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "3bda0c9be10d2881a75f654d3f6ac24cb5c1795f",
+    "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-08-20T22:06:42"
+  },
+  "schema": 1,
+  "status": "complete"
+}

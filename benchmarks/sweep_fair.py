@@ -21,9 +21,18 @@ scores every solver's true residual against the original L, so multigrid reaches
 1e-8 without the eps*I perturbation that --reg-rel used to add. (reg-rel was
 masking real solver limitations -- e.g. AMGCL floors on the disconnected
 as-Skitter -- by solving a better-conditioned L+eps*I.) IPM normal-equation
-matrices are already strictly SDDM and likewise run unshifted. CMG is the lone
-reg-rel solver and runs from its own script (benchmarks/cmg_matlab_runner.py),
-not from here; everything in this sweep is reg-free.
+matrices are already strictly SDDM and likewise run unshifted. CMG remains the
+lone reg-rel solver on the singular families (it is scored on L+eps*I there, and
+on the published operator itself for kind=operator); everything else in this
+sweep is reg-free.
+
+EVERY solver in the comparison runs from here, so one sweep fills every cell:
+apxchol + the C++ competitors in-process, ParAC via parac_runner.py, AC/AC2 via
+benchmarks/julia/bench_laplacians.jl and CMG via cmg_matlab_runner.py (canonical
+MATLAB CMG in the matlab-deps container). --no-julia / --no-cmg / --no-parac opt
+out individually; --headline-only drops AC/AC2 (too slow on the social giants).
+A solver that cannot take a given matrix emits an explicit `n/a` cell carrying
+the reason, never a silent gap.
 
   # CPU axis (default):
   systemd-inhibit --what=sleep:idle --mode=block python3 benchmarks/sweep_fair.py
@@ -34,10 +43,11 @@ ParAC runs IN-PROCESS via parac_runner.py (graph+physics on both axes), emitting
 into the same store. Shared harness (hardened sh, matrix registry, cell store,
 CSV parse, VRAM sidecar) lives in runner_common.py.
 """
-import argparse, json, os, subprocess, sys, time
+import argparse, json, os, re, subprocess, sys, time
 
 import runner_common as rc
 import parac_runner
+import cmg_matlab_runner
 from runner_common import ROOT, BIN, CELLS, GRIDS, SS, IPM, matrix_args, sh
 
 # Dumped .mtx cache (grid Laplacians + the exact operator handed to the external
@@ -80,9 +90,15 @@ def classify(m):
 # handed the same operator via --dump-mtx, so the record applies to them too.
 OBSERVED = {}
 
-def emit(family, mid, solver, config, status, metrics):
+def emit(family, mid, solver, config, status, metrics, extra_meta=None):
+    """One cell. `extra_meta` is whatever the runner learned that the registry
+    cannot say — notably WHY a cell is n/a, so an unsupported combination reads as
+    unsupported instead of as a hole in the table."""
+    meta = dict(OBSERVED.get(mid) or {})
+    if extra_meta:
+        meta.update(extra_meta)
     return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, PROV,
-                        matrix_meta=OBSERVED.get(mid))
+                        matrix_meta=meta or None)
 
 def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout=None, ground=None,
             mid=None):
@@ -163,13 +179,32 @@ def run_julia(mtx, solver):
     matrix that `--dump-mtx` wrote, i.e. the exact operator every in-process
     solver was given, and solve THAT: approxchol_lap on a singular Laplacian
     (recovering A = -offdiag(L)), approxchol_sddm on a full-rank operator.
+
+    Laplacians.jl needs non-negative edge weights, so an operator with POSITIVE
+    off-diagonals is one it genuinely cannot take (parabolic_fem, thermal2). The
+    Julia driver says so on stderr and emits its n/a sentinel row (iters/rel_res
+    = -1); we lift that sentence into the cell, so the n/a carries its reason
+    instead of reading as a hole.
+
+    Needs the Julia project instantiated once:
+      julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
     """
     cmd=(f"taskset -c 0-{THREADS-1} julia --project=benchmarks/julia "
          f"benchmarks/julia/bench_laplacians.jl --operator {mtx} --solver {solver} "
          f"--tol {TOL} --maxiter 500 --csv")
-    try: out=sh(cmd, timeout=TIMEOUT).stdout
-    except subprocess.TimeoutExpired: return "timeout", None
-    return classify(rc.parse_csv(out))
+    try: cp = sh(cmd, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return "timeout", None, {"na_reason": f"exceeded the {TIMEOUT}s per-cell wall cap"}
+    st, m = classify(rc.parse_csv(cp.stdout))
+    meta = {}
+    if st == "n/a":
+        hit = re.search(r"^\[n/a\][^:]*:\s*(.+)$", cp.stderr or "", re.M)
+        meta["na_reason"] = (hit.group(1).strip() if hit else
+                             "Laplacians.jl reported this operator unsupported "
+                             "(no reason line captured)")
+    elif st == "failed" and (cp.stderr or "").strip():
+        meta["na_reason"] = cp.stderr.strip().splitlines()[-1][:500]
+    return st, m, meta
 
 def run_parac(mid):
     # In-process via parac_runner (graph+physics cells, resume-safe). Per-step
@@ -182,6 +217,28 @@ def run_parac(mid):
         print(f"   {label:24} {res}")
     except Exception as e:
         print(f"   {label:24} ERROR: {e}")
+
+_CMG_STATE = {"probed": False, "ok": False, "why": ""}
+
+def run_cmg(mid):
+    """CMG (canonical MATLAB CMG in the matlab-deps container), in-process via
+    cmg_matlab_runner — resume-safe, and it emits its own cell.
+
+    Availability (MATLAB tree + cmg-solver checkout + container image) is probed
+    ONCE per sweep. On a machine without them the sweep says so in one line
+    naming exactly what is missing, instead of failing 27 times."""
+    if not _CMG_STATE["probed"]:
+        _CMG_STATE["ok"], _CMG_STATE["why"] = cmg_matlab_runner.available()
+        _CMG_STATE["probed"] = True
+        if not _CMG_STATE["ok"]:
+            print(f"   {'cmg':24} UNAVAILABLE — no cmg cells this run: {_CMG_STATE['why']}",
+                  flush=True)
+    if not _CMG_STATE["ok"]:
+        return
+    try:
+        print(f"   {'cmg':24} {cmg_matlab_runner.run_one(mid)}", flush=True)
+    except Exception as e:                       # never abort the sweep for one solver
+        print(f"   {'cmg':24} ERROR: {e}", flush=True)
 
 def dump_mtx(mid):
     """Write the EXACT operator the in-process solvers solve to a .mtx, cached.
@@ -244,6 +301,11 @@ COMP = ["rchol","rchol_par","hypre_boomeramg","amgcl"]
 JULIA = ["ac","ac2"]
 RUN_PARAC = True     # ParAC runs as part of every sweep (skip via --no-parac)
 PARAC_ONLY = False   # --parac-only: run ONLY ParAC (skip apxchol/competitors/AC)
+# CMG (canonical MATLAB CMG in the matlab-deps container) likewise runs as part of
+# every CPU sweep -- it is a charted competitor, so leaving it to a separate
+# command is how its column went empty. --no-cmg skips it; a machine without
+# MATLAB/docker says so once and moves on. CPU only: it is serial MATLAB.
+RUN_CMG = True
 # --no-cap: drop the 10x-GPU-apxchol competitor wall cap and RE-RUN cells currently
 # stored as 'timeout' (clamped), so AMGCL/BoomerAMG get an HONEST uncapped wall time on
 # the matrices where they previously hit the cap. NOCAP_TIMEOUT is still a sane outer
@@ -276,10 +338,14 @@ def cell_metrics(family, mid, solver, config):
     except: return None, None
 
 def step(family, mid, solver, config, runner, label):
+    """Run one cell. `runner` returns (status, metrics) or, when it has something
+    to say about the cell, (status, metrics, extra_meta)."""
     if cell_done(family, mid, solver, config):
         print(f"   {label:24} (skip, done)")
         return cell_metrics(family, mid, solver, config)   # so resume can still read apxchol's time
-    st,m=runner(); emit(family,mid,solver,config,st,m)
+    res = runner()
+    st, m = res[0], res[1]
+    emit(family, mid, solver, config, st, m, res[2] if len(res) > 2 else None)
     print(f"   {label:24} {st} it={m.get('iters','-') if m else '-'} "
           f"total={m.get('total_s','-') if m else '-'}", flush=True)
     return st, m
@@ -375,7 +441,8 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
             print(f"   {'AC/AC2':24} SKIP (operator dump failed)")
     if RUN_PARAC:      # ParAC graph+physics (resume-safe; the runner skips done cells)
         run_parac(mid)
-    # CMG is run separately by benchmarks/cmg_matlab_runner.py.
+    if RUN_CMG:        # CMG in the MATLAB container (resume-safe; emits its own cell)
+        run_cmg(mid)
 
 def main():
     global DEVICE, APX, JULIA, COMP
@@ -401,6 +468,11 @@ def main():
                          "by the C++ de-singularization changes).")
     ap.add_argument("--no-parac", action="store_true",
                     help="skip ParAC (run in-process via parac_runner.py).")
+    ap.add_argument("--no-cmg", action="store_true",
+                    help="skip CMG (canonical MATLAB CMG in the matlab-deps container, run "
+                         "in-process via cmg_matlab_runner.py). It is skipped automatically "
+                         "on --device gpu (serial MATLAB) and on a machine where MATLAB, the "
+                         "cmg-solver checkout or the container image is missing.")
     ap.add_argument("--parac-only", action="store_true",
                     help="run ONLY ParAC (skip apxchol / competitors / AC); for filling the "
                          "ParAC giant-matrix cells without touching the rest.")
@@ -410,7 +482,7 @@ def main():
                          "an honest uncapped wall time. NOCAP_TIMEOUT_S (default 4h) is the "
                          "only outer ceiling. Pair with --only/--families to target matrices.")
     a = ap.parse_args()
-    global RUN_PARAC, PARAC_ONLY, NO_CAP
+    global RUN_PARAC, PARAC_ONLY, NO_CAP, RUN_CMG
     DEVICE = a.device
     fams = {f.strip() for f in a.families.split(",") if f.strip()}
     only = {x.strip() for x in a.only.split(",") if x.strip()}
@@ -419,6 +491,8 @@ def main():
     if a.no_parac: RUN_PARAC = False
     if a.parac_only: PARAC_ONLY = True
     if a.no_cap: NO_CAP = True
+    # CMG is serial MATLAB: it has no GPU axis, so its cells are device=cpu only.
+    if a.no_cmg or DEVICE == "gpu": RUN_CMG = False
     if a.headline_only:
         APX = [("apxchol_v1","bg+tree[vec_pool]"), ("apxchol_v1","luby+tree[vec_pool]"),
                ("apxchol_v1","root+tree[vec_pool]"), ("apxchol_v1","bk+tree[vec_pool]")]
@@ -430,6 +504,16 @@ def main():
     PROV["note"] = f"FAIR {DEVICE} run, singular L, multi-component Dirichlet pin (per-solver grounding)"
     print(f"=== fair sweep: device={DEVICE}, families={sorted(fams)}, "
           f"headline_only={a.headline_only}, store={CELLS} (resume-safe) ===", flush=True)
+    print(f"    external solvers: parac={'on' if RUN_PARAC else 'off'} "
+          f"ac/ac2={'on' if JULIA else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)
+    if not JULIA:
+        print("    NOTE: AC/AC2 are OFF -> their cells stay empty. Fill them with "
+              "`python3 benchmarks/sweep_fair.py` without --no-julia/--headline-only "
+              "(needs: julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').",
+              flush=True)
+    if not RUN_CMG and DEVICE == "cpu":
+        print("    NOTE: CMG is OFF -> its cells stay empty. Fill them with "
+              "`python3 benchmarks/cmg_matlab_runner.py`.", flush=True)
     # Resume-safe: cells with a terminal status are skipped (see cell_done).
     # do_matrix reads the declared kind from the registry (rc.kind_of), so the
     # loops here carry only WHERE the matrix comes from, never how to read it.
