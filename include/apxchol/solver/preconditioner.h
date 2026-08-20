@@ -1,11 +1,14 @@
 #pragma once
 #include "apxchol/checkpoint.h"
 #include "apxchol/env_knobs.h"
+#include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/factorization.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -177,6 +180,18 @@ public:
     /// Compute the approximate Cholesky factorization of A.
     apx_cholesky& factorize(const auto& A) {
         eigen_assert(m_analysisIsOk && "analyzePattern() should be called first");
+        // Kick CUDA device init onto a helper thread so it runs concurrently
+        // with the elimination below (cuda_context.h; a no-op without CUDA).
+        // HERE and not in a solver constructor: this is the earliest point that
+        // is common to every path which then does host work before touching the
+        // GPU -- cpu_solver's ctor, Eigen's cg.compute(), the Python/Octave
+        // bindings -- and the whole factorization (make_graph, find_partition,
+        // eliminate, assembly: ~0.5 s on the suite's big matrices) sits between
+        // it and install_factor()'s first CUDA call. Starting it earlier could
+        // only buy the few microseconds of set_options/analyzePattern; starting
+        // it in a constructor would also spin up a context for callers that
+        // construct a solver and never factor.
+        cuda_ctx::prewarm();
         n_ = A.rows();
         F_ = apxchol::factorize(A, storage_, opts_, cp_);
         install_factor();
@@ -251,6 +266,21 @@ private:
         if (keep_factor_) trsv_.setup(F_.L, factor_dim);
         else              trsv_.setup_consuming(F_.L, factor_dim);
 #else
+        // Device init, on its OWN checkpoint label. CUDA creates the primary
+        // context lazily inside the first CUDA call, which is trsv_.setup()
+        // below: until 2026-08-20 that fixed per-process cost (~100-135 ms on
+        // an RTX 4090 Laptop, ~715 ms on a GH200) was silently counted as
+        // sptrsv_setup, inflating every published GPU setup number -- worst at
+        // small n, where it was the majority of the reported time. Now
+        // factorize() prewarms it on a helper thread and we pay only the
+        // REMAINING wait here, under "cuda_init"; sptrsv_setup below reports
+        // its own work only. NOTE: this changes the meaning of published GPU
+        // setup numbers -- the benchmark cells need regenerating.
+        const double cuda_init_s = cuda_ctx::ensure_context();
+        if (cp_) (*cp_)("cuda_init");
+        if (std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below
+            std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
+                         "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
         trsv_.setup(F_.L, factor_dim);
 #endif
         if (cp_) { (*cp_)("sptrsv_setup"); cp_->ascend(); }
