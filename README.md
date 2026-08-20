@@ -1,19 +1,37 @@
 # apxchol — Scalable Approximate Cholesky for Laplacian/SDDM Systems
 
-C++23 library implementing a parallel approximate-Cholesky preconditioner
-(Kyng–Sachdeva-style elimination with tree-based clique sampling) for graph
-Laplacian and SDDM linear systems, with an Eigen-compatible interface, an
-OpenMP or CUDA triangular-solve backend, a CLI solver, Python and
-Octave/MATLAB bindings, and a standalone benchmark suite comparing against
-Hypre BoomerAMG, AMGCL, RCHOL/pRCHOL, ParAC, CMG, and Laplacians.jl.
+apxchol solves large sparse linear systems **Lx = b** where **L** is a graph
+Laplacian or SDDM matrix — the systems behind spectral graph algorithms,
+interior-point methods for network flow, and PDE/physics simulations on
+grids and networks.
 
-The library is the header tree under `include/apxchol/` (namespace
-`apxchol::`) plus two compiled translation units in `src/` (CUDA builds add
-three device TUs); `python/` and
-`octave/` are self-contained bindings, `examples/` demonstrates the public
-customization seams, and `benchmarks/` is a standalone comparison suite with
-its own [README](benchmarks/README.md) and committed
-[charts](benchmarks/latest/).
+It builds a randomized approximate Cholesky factorization
+(Kyng–Sachdeva-style parallel elimination) and uses it as a PCG
+preconditioner. Parallel on CPU (OpenMP) with an optional CUDA solve path,
+deterministic for a fixed seed, no dependencies beyond a C++23 compiler and
+Eigen.
+
+```cpp
+#include "apxchol.h"
+auto res = apxchol::solve(L, b, {.tol = 1e-8});   // Eigen in, Eigen out
+```
+
+Python (`pip install apxchol`) and Octave/MATLAB bindings included; a
+standalone benchmark suite compares against Hypre BoomerAMG, AMGCL,
+RCHOL/pRCHOL, ParAC, CMG, and Laplacians.jl
+([charts](benchmarks/latest/)).
+
+**Contact:** <apxchol@inf.ethz.ch> — questions, issues, and use cases
+welcome. Developed at ETH Zürich.
+
+---
+
+Everything below is the detailed reference. The library is the header tree
+under `include/apxchol/` (namespace `apxchol::`) plus two compiled
+translation units in `src/` (CUDA builds add three device TUs); `python/`
+and `octave/` are self-contained bindings, `examples/` demonstrates the
+public customization seams, and `benchmarks/` is a standalone comparison
+suite with its own [README](benchmarks/README.md).
 
 ## Quick start
 
