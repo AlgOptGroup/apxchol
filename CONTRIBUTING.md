@@ -39,7 +39,7 @@ grows.)
   members. Namespace is `apxchol::`.
 - The core is header-only under `include/apxchol/` plus two compiled TUs
   (`src/factorization.cpp`, `src/solve.cpp`; CUDA builds add `src/cuda_cast.cu`,
-  `src/cuda_levelset.cu` and `src/cuda_dataflow.cu`). Templates and inline logic belong
+  `src/cuda_dataflow.cu` and `src/cuda_pcg_kernels.cu`). Templates and inline logic belong
   in the headers; the TUs exist to instantiate the runtime-dispatch entry points.
 - Keep the two-axis dispatch consistent: a new independent-set partitioner must
   be appended to `partitioner_list` in `partitioner_list.h`, and a new storage
