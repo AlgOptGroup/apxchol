@@ -694,10 +694,6 @@ struct Args {
     // construction and may leave it empty.
     std::string kind;
     std::string dump_mtx;          // if set: write the built Laplacian to this path and exit
-    bool pin_dump = false;         // with --dump-mtx: write the per-component Dirichlet-PINNED
-                                   // matrix (dirichlet_pin) instead of the raw L -- the FAIR
-                                   // grounded operator for external solvers (ParAC/CMG), so
-                                   // they solve the same singular system everyone else does
     bool giant_dump = false;       // with --dump-mtx: write a connected component's PURE Laplacian
                                    // (relabeled 0..cn-1) -- the comp_rank-th LARGEST (0 = giant).
                                    // = the full pure L for a connected matrix. Lets ParAC physics
@@ -752,7 +748,6 @@ static Args parse_args(int argc, char** argv) {
             }
         }
         else if (arg == "--dump-mtx") a.dump_mtx = next();
-        else if (arg == "--pin-dump") a.pin_dump = true;
         else if (arg == "--giant-dump") a.giant_dump = true;
         else if (arg == "--comp-rank") a.comp_rank = std::stoi(next());
         else if (arg == "--reg-rel") a.reg_rel = std::stod(next());
@@ -2517,27 +2512,9 @@ int main(int argc, char** argv) {
         std::ofstream out(args.dump_mtx);
         if (!out) { std::cerr << "cannot open " << args.dump_mtx << "\n"; return 1; }
         out << "%%MatrixMarket matrix coordinate real symmetric\n";
-        // --pin-dump: emit the per-component Dirichlet-pinned matrix (the fair
-        // grounded operator) rather than the raw singular L, so external solvers
-        // solve the SAME system the in-process solvers do (no eps*I shift).
         Eigen::SparseMatrix<double> Lc;
-        if (args.pin_dump && !g_laplacian_mode) {
-            // Pinning grounds a SINGULAR Laplacian. Applied to a full-rank
-            // operator it deletes a real degree of freedom, so the external
-            // solver reading this dump would solve a different system than the
-            // in-process ones. Refuse rather than hand out a doctored operator.
-            std::cerr << "--pin-dump refused: " << graph_name
-                      << " is a full-rank operator (nonzero row sums); there is no "
-                         "null space to ground, and pinning would change the system. "
-                         "Dump it without --pin-dump.\n";
-            return 1;
-        }
-        if (args.pin_dump) {
-            std::vector<int> pinned;
-            Lc = dirichlet_pin(L, pinned);
-            std::cerr << "[pin-dump] grounded " << pinned.size()
-                      << " node(s) (one per connected component)\n";
-        } else if (args.giant_dump) {
+        if (args.giant_dump) {
+
             // The comp_rank-th LARGEST connected component's PURE Laplacian, relabeled
             // 0..cn-1. rank 0 = the giant (= the full pure L for a connected matrix). The
             // runner loops rank 0,1,2,... over components above a size threshold and runs
