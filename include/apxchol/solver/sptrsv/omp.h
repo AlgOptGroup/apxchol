@@ -1358,7 +1358,9 @@ private:
 
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
     // Vector widen: 8 (or 4) consecutive stored values -> two (one) lanes of 4
-    // doubles. One overload per storage type.
+    // doubles. One overload per storage type. (The `double` pair went with the
+    // fp64 storage on 2026-08-20; the `float` pair is unused by design -- see
+    // simd_dot_v below.)
     static inline void widen8(const fp16_t* v, __m256d& lo, __m256d& hi) {
         const __m256 f = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v)));   // F16C
         lo = _mm256_cvtps_pd(_mm256_castps256_ps128(f));
@@ -1372,11 +1374,6 @@ private:
         hi = _mm256_cvtps_pd(_mm_loadu_ps(v + 4));
     }
     static inline __m256d widen4(const float* v) { return _mm256_cvtps_pd(_mm_loadu_ps(v)); }
-    static inline void widen8(const double* v, __m256d& lo, __m256d& hi) {
-        lo = _mm256_loadu_pd(v);
-        hi = _mm256_loadu_pd(v + 4);
-    }
-    static inline __m256d widen4(const double* v) { return _mm256_loadu_pd(v); }
     // The same sum as dot_thin, fat-level SIMD flavour (16-bit storage): 8
     // stored values per widen8, through an 8-double stack buffer (which the
     // compiler turns into register lane extracts) feeding a 4-way scalar FMA
