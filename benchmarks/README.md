@@ -102,22 +102,24 @@ line) are the two multigrids kept.
   **apxchol** native rank-aware solve (mean-centring); **BoomerAMG** a
   provably-safe (DFS-tree-leaf) Dirichlet pin, one node per connected component → SPD;
   **AMGCL** the same Dirichlet pin, run with its default config.
-  **ParAC** needs a full-rank SDD operator on the heterogeneous SuiteSparse Laplacians
-  (it diverges on the pure singular ones). Its **graph** driver reads the **same
-  per-component Dirichlet pin** as the multigrids (one symmetric DFS-leaf node per
-  component → full-rank SDDM, **instead of `ε·I`** — removing the artificial spectral-shift
-  advantage of reg-rel that made the operator better-conditioned *and* was the thing scored).
-  Its **physics** driver runs the **literal per-component split**: each connected component
-  ≥ 1000 nodes is solved on its *pure* Laplacian (the driver's single-node trim grounds a
-  connected operator), recombined as setup/solve = SUM, iters/rel_res = MAX (sub-threshold
-  specks are negligible singletons/pairs). **Both drivers run inside the patched ParAC binary
-  on a shared, per-component-consistent, pin-zeroed RHS**, so — exactly like every in-house
-  solver — ParAC's reported residual is `‖b − L·x‖ / ‖b‖` against the **original singular
-  `L`** (verified ≤1e-8 on every converged matrix, ~1e-12 by direct solve), *not* the
-  grounded operator it reads. **This closes the earlier scoring gap**, where ParAC generated
-  its own RHS and scored it against the pinned/trimmed operator (≈7% vs the true `L` on the
-  pinned matrices). Grids and the native-SDDM IPM matrices are read pure (the consistent RHS
-  reduces to the global zero-sum there). The same competitor wall-clock cap applies to ParAC:
+  **ParAC grounds itself**, and is given the input its own scripts build (see
+  [`patches/parac/README.md`](patches/parac/README.md) for the measurements behind
+  this). A `kind=graph` matrix goes to its **graph** driver as the **pure singular
+  `L`**, one connected component at a time: graph mode generates its own zero-sum
+  RHS, which is consistent for a connected Laplacian, so it solves the very `L` we
+  report on and its printed `‖b − L·x‖ / ‖b‖` is against that `L`. We do **not**
+  hand it a Dirichlet-pinned matrix — its RHS generator knows nothing about the
+  pin, and the residual against the original `L` then floors at ~1e-3 (com-Amazon
+  1.4e-3, coAuthorsDBLP 2.0e-3) no matter how tight the tolerance. A
+  `kind=operator` matrix goes to its **physics** driver as the **published
+  operator**, AMD-reordered and then augmented with the ground row/column exactly
+  as ParAC's own `write_graph.jl physics_produce` does; physics mode's trim removes
+  that appended node, so what it solves is the published operator itself. Each
+  matrix runs **one** mode and the other cell is `n/a` with the reason recorded.
+  ParAC's stopping test is absolute (`‖r‖` vs `sqrt(rel_tol)`) and on the
+  recurrence residual, so the tolerance is **calibrated from one probe run** —
+  configuration, not a patched convergence test — until its own printed residual
+  lands under 1e-8. The same competitor wall-clock cap applies to ParAC:
   on **com-Orkut** it exceeds the shared ~20 min competitor cap during setup and is
   recorded as `timeout`, like rchol_par/rchol on the same matrix. **CMG** still keeps the `ε·I`
   regularization (`A = L + ε·I`, `ε = 1e-6·mean|diag|`, via `--reg-rel`), scored on `L + εI`.
@@ -272,10 +274,15 @@ PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out benchmarks/lat
 
 ParAC is charted as **two drivers on both devices** — graph (Laplacian) and
 physics (SDDM). The same self-contained binary runs both: on GPU via driver.cu /
-driver_physics.cu, on CPU via one extra argv (`is_graph=0`). On the pin-grounded
-SuiteSparse Laplacians and the native-SDDM IPM matrices the physics driver needs fewer
-iterations (e.g. iter0030 on CPU: 49 vs 93); on pure-Laplacian grids the two are within
-a couple of iterations of each other. Note: ParAC's GPU SpTRSV is extremely
+driver_physics.cu, on CPU via one extra argv (`is_graph=0`). **Each matrix runs
+exactly one of them**, the one ParAC documents for it: `kind=graph` → graph
+(pure `L`, its own zero-sum RHS), `kind=operator` → physics (published operator
+plus ParAC's ground-node augmentation, which the mode's trim removes). The other
+cell is `n/a` and carries the reason, so a chart shows a deliberate gap rather
+than a solver that silently vanished. Running the *other* mode is not a second
+data point but a wrong answer: physics on an un-augmented operator deletes a real
+degree of freedom (apache2 scores 3.1e-3 against the published matrix while ParAC
+prints 8.8e-9; G3_circuit does not converge at all). Note: ParAC's GPU SpTRSV is extremely
 sensitive to the elimination ordering — its required nnz-sort is a **random
 permutation then a sort by column-nnz** (`parac_nnz_sort.jl`, matching their
 `write_graph.jl`). A deterministic degree-sort instead builds a very deep

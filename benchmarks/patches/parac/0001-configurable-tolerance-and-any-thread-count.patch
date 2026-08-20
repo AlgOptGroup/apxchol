@@ -1,0 +1,68 @@
+From: apxchol benchmark harness <adamant.pwn@gmail.com>
+Subject: [PATCH 1/1] experiment/driver: run the solve at any thread count, and let
+ the PCG tolerance be configured
+
+Two hard-coded assumptions in the CPU experiment driver keep it from being
+benchmarked at a chosen tolerance on a machine that is not a 32-core Perlmutter
+node. Neither changes any numerics.
+
+1. `if(num_threads == 32)` gates the entire PCG solve. Run the driver with any
+   other thread count and it factorizes and then exits without solving, so there
+   is no iteration count and no residual to report.
+
+2. `example_pcg_solver` already takes `max_iter` and `rel_tol` as parameters, but
+   the call site never passes them, so they are pinned at 1000 / 1e-7. Its two
+   sibling entry points already expose them: `experiment/independent_cg.cpp`
+   reads both from argv (argv[4], argv[5]) and the CUDA drivers take the
+   tolerance as argv[4]. Reading them from the environment here keeps the
+   driver's positional-argument convention intact (argv[4] already selects
+   physics mode) while making the tolerance configurable. Defaults are unchanged.
+
+The stopping test itself is untouched. Note for anyone calibrating it: the test
+is `sqrt(dpar[4]) > sqrt(dpar[0])`, i.e. it compares the residual norm against
+sqrt(rel_tol) and is therefore an ABSOLUTE test -- at the default 1e-7 it stops
+at ||r|| <= 3.16e-4 regardless of ||b||.
+
+---
+--- a/experiment/driver_local.cpp
++++ b/experiment/driver_local.cpp
+@@ -1,10 +1,11 @@
+ 
+ 
+ //#include <mpi.h>
+ #include <chrono>
++#include <cstdlib>
+ #include "custom_cg.hpp"
+ #include <atomic>
+ 
+ 
+ typedef int custom_idx;
+ 
+@@ -1027,15 +1028,24 @@
+     printf("triangular solve max path: %d at index: %d\n", *max_path, std::distance(max_path_dp.begin(), max_path));
+   
+     
+ 
+     custom_space::sparse_matrix<type_int, type_data> precond_M(processor.mat.rows(), processor.mat.cols(), std::move(csr_val_host), std::move(csr_col_ind_host), std::move(csr_rowptr_host));
+ 
+-    if(num_threads == 32)
+-    {
+-       example_pcg_solver(processor.mat, precond_M, diagonal_entries.data(), is_graph);
++    if(num_threads >= 1)
++    {
++       // The PCG parameters are already parameters of example_pcg_solver; they were
++       // just never passed. Read them from the environment (as independent_cg.cpp
++       // takes them on argv and the CUDA drivers take the tolerance as argv[4]), so
++       // a benchmark can request a tolerance without editing the source. Defaults
++       // are unchanged.
++       const char *env_iter = getenv("PARAC_MAX_ITER");
++       const char *env_tol  = getenv("PARAC_REL_TOL");
++       example_pcg_solver(processor.mat, precond_M, diagonal_entries.data(), is_graph,
++                          env_iter ? atoi(env_iter) : 1000,
++                          env_tol  ? atof(env_tol)  : 1e-7);
+     }
+     
+     for(int li = 0; li < 10; li++)
+     {
+         printf("\n");
+     }

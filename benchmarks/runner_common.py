@@ -398,7 +398,10 @@ class VramSampler:
 # set the environment variables below, or define the same names in a gitignored
 # benchmarks/paths_local.py. Unset is fine unless a ParAC cell is actually run.
 PARAC_CPU_DRIVER = os.environ.get("APXCHOL_PARAC_DRIVER", "")   # 5th arg "1" => physics/SDDM mode
-PARAC_REORD = os.environ.get("APXCHOL_PARAC_REORDER_DIR", "")   # AMD-reorder cache
+# AMD-reorder cache. Point this OUTSIDE the ParAC checkout: it is our derived data
+# (tens of GB), and that checkout is meant to stay at upstream plus the one patch
+# in benchmarks/patches/parac/.
+PARAC_REORD = os.environ.get("APXCHOL_PARAC_REORDER_DIR", "")
 # Runtime library path the CPU driver needs (its MKL/compiler runtime), if any.
 PARAC_LDLIB = os.environ.get("APXCHOL_PARAC_LDLIB", os.environ.get("LD_LIBRARY_PATH", ""))
 PARAC_SORTED = "/tmp/parac_gpu_sorted"                       # GPU input: random-nnz-sort cache
