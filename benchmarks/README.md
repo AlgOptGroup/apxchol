@@ -287,6 +287,25 @@ CPU `_giants` panels mix protocols (see the provenance bullet above).
 
 ## Running
 
+**Re-running only what a change invalidated.** Each cell records the `git_sha` it
+was produced at, and the sweep is resume-safe (a cell with a terminal status is
+skipped). So a code change that alters what a solver measures does not cost a
+full sweep:
+
+```sh
+python3 benchmarks/stale_cells.py            # report: total, stale, reusable
+python3 benchmarks/stale_cells.py --delete   # drop the stale cells
+python3 benchmarks/sweep_fair.py ...         # refills exactly those gaps
+```
+
+`stale_cells.py` carries one rule per invalidating commit (which solvers or which
+matrix kinds it changed). **Add a rule whenever a change alters what is measured
+or which matrix is solved** — a stale cell is indistinguishable from a fresh one
+in the tables, and mixing the two is how a corrected defect quietly survives in
+a published number. The stale cells are committed, so `--delete` is recoverable
+with `git checkout -- results/cells`.
+
+
 **Input matrices.** Grid instances are generated in-process. The SuiteSparse
 matrices come from the [SuiteSparse Matrix Collection](https://sparse.tamu.edu);
 `./scripts/download_graphs.sh` (repo root) fetches every one used by the sweep
