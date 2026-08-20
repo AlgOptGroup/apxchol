@@ -30,7 +30,8 @@ EVERY solver in the comparison runs from here, so one sweep fills every cell:
 apxchol + the C++ competitors in-process, ParAC via parac_runner.py, AC/AC2 via
 benchmarks/julia/bench_laplacians.jl and CMG via cmg_matlab_runner.py (canonical
 MATLAB CMG in the matlab-deps container). --no-julia / --no-cmg / --no-parac opt
-out individually; --headline-only drops AC/AC2 (too slow on the social giants).
+out individually; --headline-only restricts the apxchol config list (AC/AC2 are
+dropped only by an explicit --no-julia).
 A solver that cannot take a given matrix emits an explicit `n/a` cell carrying
 the reason, never a silent gap.
 
@@ -496,7 +497,10 @@ def main():
     if a.headline_only:
         APX = [("apxchol_v1","bg+tree[vec_pool]"), ("apxchol_v1","luby+tree[vec_pool]"),
                ("apxchol_v1","root+tree[vec_pool]"), ("apxchol_v1","bk+tree[vec_pool]")]
-        JULIA = []   # AC/AC2 are too slow / fail on the large social graphs
+        # NOTE: --headline-only restricts the apxchol CONFIG list only. It no longer
+        # disables AC/AC2: leaving their cells empty silently understates coverage.
+        # Use --no-julia explicitly when you want the speed (they are slow, and hit
+        # the cap or OOM on the social giants -- recorded as timeout/failed cells).
     if a.no_rchol:
         COMP = [c for c in COMP if c not in ("rchol","rchol_par")]
     if DEVICE == "gpu" and not os.path.exists(BIN["gpu"]):
