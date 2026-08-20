@@ -68,7 +68,9 @@ def run_cpp(margs, solver, config, reg, t):
     try: m = parse_csv(sh(cmd, timeout=TIMEOUT).stdout)
     except subprocess.TimeoutExpired: return "timeout", None
     if m is None: return "failed", None
-    return ("complete" if m["rel_res"] <= float(TOL) * 10 else "not_converged"), m
+    # THE GRADING RULE (benchmarks/README.md): true relative residual <= exactly
+    # tol, same for every solver, no grace factor. Kept in sync with rc.classify.
+    return ("complete" if m["rel_res"] <= float(TOL) else "not_converged"), m
 
 def run_parac(mid, t):
     # reuse the cached AMD-reordered matrix (pure for grids/ipm, pin for SS;
@@ -93,7 +95,11 @@ def run_parac(mid, t):
                         g(r"relative residual:\s*([0-9.eE+-]+)"))
     if not (fac and sol and it): return "failed", None
     setup = float(fac) + amds; solve = float(sol) / 1000
-    return ("complete" if float(rr) <= 1e-7 else "not_converged"), dict(
+    # Same rule as run_cpp: ParAC's own printed relative residual, graded at exactly
+    # TOL. This axis runs ParAC at its driver default and does NOT apply the
+    # tolerance calibration parac_runner._calibrate_rel_tol does, so a cell that
+    # lands above TOL is recorded not_converged rather than passed at a looser mark.
+    return ("complete" if float(rr) <= float(TOL) else "not_converged"), dict(
         total_s=setup + solve, setup_s=setup, solve_s=solve, iters=int(it), rel_res=float(rr))
 
 def sweep():

@@ -291,7 +291,13 @@ def parse_csv(out):
                  total_s=float(f[6]), iters=int(f[7]), rel_res=float(f[8]),
                  fillin=float(f[9]), us_per_nnz=float(f[10]))
         if len(f) >= 12:                     # solve_rss_mb (host VmRSS held during solve)
-            try: d["solve_rss_mb"] = float(f[11])
+            # < 0 = the binary declined to measure it. RCHOL is the case: their
+            # util/pcg.cpp leaks a full extra copy of A and of G per construction
+            # (the delete[] at pcg.cpp:53 is commented out upstream), so the number
+            # would report their leak rather than solve-held memory. Absent, not zero.
+            try:
+                v = float(f[11])
+                if v >= 0: d["solve_rss_mb"] = v
             except ValueError: pass
         # NOTE: the binary also emits solve_vram_mb (col 12), but per-process solve-phase
         # VRAM can't be cleanly isolated (whole-device cudaMemGetInfo is desktop+context
@@ -302,12 +308,27 @@ def parse_csv(out):
         return None
 
 def classify(m, tol):
-    """(status, metrics). n/a = the C++ side's unsupported-combo sentinel
-    (iters/rel_res = -1), distinct from not_converged (ran, missed tol) and
-    failed (no CSV row / crash)."""
+    """(status, metrics) under THE GRADING RULE — see benchmarks/README.md.
+
+    THE RULE, for every solver including our own: a cell is `complete` iff its
+    TRUE relative residual against the defining operator, recomputed by the
+    harness, is <= exactly the requested tol. No grace factor, no per-solver
+    pass mark. (Until 2026-08-20 this function passed anything at 10*tol, which
+    was a 10x grace for every solver routed through it while parac_runner held
+    ParAC to tol — the asymmetry this rule removes.)
+
+    A solver whose OWN stopping test is optimistic (preconditioned-residual
+    ratio, absolute test, recurrence estimate) is not accommodated by relaxing
+    the grade. The fix is to calibrate the tolerance handed to its loop
+    (ParAC-CPU/GPU, AC-sddm), or to patch its convergence test to the true
+    residual (gpu_rchol, benchmarks/patches/), or — failing both — to record
+    the cell `not_converged` with its true residual. That is an honest result.
+
+    n/a = the C++ side's unsupported-combo sentinel (iters/rel_res = -1),
+    distinct from not_converged (ran, missed tol) and failed (no CSV row)."""
     if m is None: return "failed", None
     if m["rel_res"] < 0: return "n/a", m
-    return ("complete" if m["rel_res"] <= float(tol) * 10 else "not_converged"), m
+    return ("complete" if m["rel_res"] <= float(tol) else "not_converged"), m
 
 
 # ── per-cell result store (schema 1) ────────────────────────────────────────────

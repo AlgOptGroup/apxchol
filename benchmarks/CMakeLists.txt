@@ -61,22 +61,30 @@ else()
 endif()
 
 # ── Optional: MKL ────────────────────────────────────
-# MKL backs the RCHOL PCG solve and the ParAC CPU driver; both are skipped when it
-# is absent. Point at an install with -DMKL_ROOT=/path/to/oneapi/mkl/<version>, via
-# the MKLROOT environment variable (oneAPI's setvars.sh exports it), or from a
+# MKL backs RCHOL's own PCG (their util/pcg.cpp, compiled into rchol_lib below) and the
+# ParAC CPU driver. Without it the rchol/rchol_par cells become FACTOR-ONLY rows and the
+# ParAC CPU driver is skipped entirely. Point at an install with
+# -DMKL_ROOT=/path/to/oneapi/mkl/<version>, via the MKLROOT environment variable (oneAPI's setvars.sh exports it), or from a
 # gitignored benchmarks/paths_local.cmake holding `set(MKL_ROOT ... CACHE PATH ...)`.
 if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/paths_local.cmake")
     include("${CMAKE_CURRENT_LIST_DIR}/paths_local.cmake")
 endif()
 set(MKL_ROOT "$ENV{MKLROOT}" CACHE PATH "MKL root directory (empty = MKL-dependent solvers skipped)")
 find_path(MKL_INCLUDE mkl.h HINTS ${MKL_ROOT}/include)
+# ILP64, not LP64: RCHOL's util/pcg.hpp does `#define MKL_INT size_t` BEFORE including
+# mkl_types.h, whose `#ifndef MKL_INT` guards let that definition win, so every MKL call
+# in their shipped PCG passes 64-bit integers. Their own Makefile links -lmkl_intel_ilp64
+# for exactly this reason. The LP64 layer is still resolved for the out-of-tree
+# gpu_rchol / ParAC CPU driver, which uses MKL's default 32-bit MKL_INT.
+find_library(MKL_ILP64 mkl_intel_ilp64 HINTS ${MKL_ROOT}/lib)
 find_library(MKL_LP64 mkl_intel_lp64 HINTS ${MKL_ROOT}/lib)
 find_library(MKL_SEQ mkl_sequential HINTS ${MKL_ROOT}/lib)  # sequential layer: gnu_thread thrashed (per-iter MKL sparse oversubscription, ~8x slower); rchol PCG is bandwidth-bound so threaded MKL gives no win anyway. Parallel-rchol = rchol_par (METIS factor) instead.
 find_library(MKL_CORE mkl_core HINTS ${MKL_ROOT}/lib)
-if (MKL_INCLUDE AND MKL_LP64 AND MKL_SEQ AND MKL_CORE)
+if (MKL_INCLUDE AND MKL_ILP64 AND MKL_SEQ AND MKL_CORE)
     set(HAVE_MKL TRUE)
-    set(MKL_LIBRARIES ${MKL_LP64} ${MKL_SEQ} ${MKL_CORE} pthread m dl)
-    message(STATUS "Found MKL: ${MKL_ROOT}")
+    set(MKL_LIBRARIES ${MKL_ILP64} ${MKL_SEQ} ${MKL_CORE} pthread m dl)
+    set(MKL_LIBRARIES_LP64 ${MKL_LP64} ${MKL_SEQ} ${MKL_CORE} pthread m dl)
+    message(STATUS "Found MKL: ${MKL_ROOT} (ILP64 interface for RCHOL's util/pcg.cpp)")
 else()
     set(HAVE_MKL FALSE)
     message(STATUS "MKL not found (MKL_ROOT='${MKL_ROOT}') — MKL-accelerated "
@@ -124,6 +132,13 @@ set(RCHOL_SOURCES
     ${RCHOL_DIR}/rchol_lap/spcol.cpp
     ${RCHOL_DIR}/util/util.cpp
 )
+if (HAVE_MKL)
+    # Their SHIPPED PCG. Every rchol/rchol_par solve number now comes from this file
+    # (the same loop their ex_laplace.cpp drives), not from a re-implementation of it
+    # in benchmark.cpp. It hard-includes mkl_spblas.h/mkl.h, so it compiles only where
+    # MKL does (x86); without it the RCHOL rows are factor-only — see benchmark.cpp.
+    list(APPEND RCHOL_SOURCES ${RCHOL_DIR}/util/pcg.cpp)
+endif()
 if (HAVE_METIS)
     list(APPEND RCHOL_SOURCES
         ${RCHOL_DIR}/rchol/find_separator.cpp
@@ -244,8 +259,9 @@ if (BUILD_GPU_RCHOL)
 
     find_package(OpenMP QUIET)
 
-    # CPU driver (experiment/ — includes MKL PCG solve)
-    if (OpenMP_CXX_FOUND AND HAVE_MKL)
+    # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
+    # this driver uses MKL's default 32-bit MKL_INT, so it must NOT get the ILP64 layer.
+    if (OpenMP_CXX_FOUND AND HAVE_MKL AND MKL_LP64)
         add_executable(gpu_rchol_cpu_driver
             ${gpu_rchol_SOURCE_DIR}/experiment/driver_local.cpp
         )
@@ -257,12 +273,12 @@ if (BUILD_GPU_RCHOL)
             ${MKL_INCLUDE}
         )
         target_link_libraries(gpu_rchol_cpu_driver PRIVATE
-            OpenMP::OpenMP_CXX ${MKL_LIBRARIES}
+            OpenMP::OpenMP_CXX ${MKL_LIBRARIES_LP64}
         )
         target_compile_options(gpu_rchol_cpu_driver PRIVATE -O3 -w)
         message(STATUS "GPU RCHOL CPU driver enabled (experiment/driver_local.cpp)")
     else()
-        message(STATUS "GPU RCHOL CPU driver needs OpenMP + MKL — skipped")
+        message(STATUS "GPU RCHOL CPU driver needs OpenMP + MKL (LP64) — skipped")
     endif()
 
     # GPU driver (needs CUDA)

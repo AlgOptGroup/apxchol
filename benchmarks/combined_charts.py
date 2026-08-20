@@ -74,9 +74,10 @@ def _gpu(grows, fam, mat, glab):
     if glab is None:
         return None
     d = grows.get((fam, mat), {}).get(glab)
-    # TOL*10 = the store's "complete" threshold (gpu_charts.load already filtered to
-    # complete cells); ParAC's driver stops a few x above tol, keep it visible.
-    if not d or d.get("rel_res", 1.0) > TOL * 10:
+    # THE GRADING RULE (benchmarks/README.md): true relative residual <= exactly TOL,
+    # same for every solver. gpu_charts.load has already filtered to complete cells;
+    # this re-check must use the same mark, not a looser one.
+    if not d or d.get("rel_res", 1.0) > TOL:
         return None
     return dict(setup=d.get("setup", 0.0), solve=d.get("solve", 0.0),
                 total=d.get("total", 0.0), iters=d.get("iters"),

@@ -71,8 +71,10 @@
 #include "rchol.hpp"
 #include "util.hpp"
 #ifdef HAVE_MKL
-#include <mkl_spblas.h>
-#include <mkl.h>
+// RCHOL's OWN PCG (util/pcg.cpp, compiled into rchol_lib). This is the solve loop
+// their ex_laplace.cpp drives; we call it instead of re-implementing the iteration.
+// pcg.hpp pulls in mkl_spblas.h/mkl.h itself, having first forced MKL_INT = size_t.
+#include "pcg.hpp"
 #endif
 #ifdef HAVE_METIS
 #include "rchol_parallel.hpp"
@@ -798,10 +800,6 @@ static Args parse_args(int argc, char** argv) {
 #endif
 #ifdef HAVE_RCHOL
             , "rchol"
-#ifdef HAVE_MKL
-            , "rchol_mkl"
-            , "rchol_mkl1"
-#endif
 #ifdef HAVE_METIS
             , "rchol_par"
 #endif
@@ -830,29 +828,6 @@ static SparseCSR eigen_to_csr(const Eigen::SparseMatrix<double, Eigen::RowMajor>
     }
     return SparseCSR(rowPtr, colIdx, val);
 }
-
-struct RcholPreconditioner {
-    Eigen::SparseMatrix<double> G_eigen;
-    int n_ = 0;
-
-    void init(const SparseCSR& G) {
-        n_ = static_cast<int>(G.size());
-        using T = Eigen::Triplet<double>;
-        std::vector<T> trips;
-        for (int i = 0; i < n_; ++i)
-            for (size_t k = G.rowPtr[i]; k < G.rowPtr[i + 1]; ++k)
-                trips.emplace_back(i, static_cast<int>(G.colIdx[k]), G.val[k]);
-        G_eigen.resize(n_, n_);
-        G_eigen.setFromTriplets(trips.begin(), trips.end());
-    }
-
-    Eigen::VectorXd solve(const Eigen::VectorXd& b) const {
-        Eigen::VectorXd x = G_eigen.transpose().triangularView<Eigen::Lower>().solve(b);
-        return G_eigen.triangularView<Eigen::Upper>().solve(x);
-    }
-    int rows() const { return n_; }
-    int cols() const { return n_; }
-};
 
 static BenchResult run_rchol(
     const Eigen::SparseMatrix<double>& L,
@@ -912,254 +887,67 @@ static BenchResult run_rchol(
         rchol_amd ? Eigen::SparseMatrix<double, Eigen::RowMajor>(perm * L * perm.transpose())
                   : Eigen::SparseMatrix<double, Eigen::RowMajor>(L);
     Eigen::VectorXd bp = rchol_amd ? Eigen::VectorXd(perm * b) : b;
+    // Their pcg() takes the operator in their own SparseCSR; building it is pre-solve
+    // work, so it is charged to setup like every other marshalling cost.
+    SparseCSR Apcg = eigen_to_csr(Lp);
+    std::vector<double> bpv(bp.data(), bp.data() + N);
     r.setup_time = t.elapsed();
 
-    RcholPreconditioner P;
-    P.init(G);
     r.fillin = 2.0 * static_cast<double>(G.nnz()) / static_cast<double>(A.nnz());
     double bnorm = b.norm();   // norm is permutation-invariant
 
-    t.start();
     Eigen::VectorXd x = Eigen::VectorXd::Zero(N);
-    Eigen::VectorXd rv = bp;
-    Eigen::VectorXd z = P.solve(rv);
-    Eigen::VectorXd p = z;
-    double rz = rv.dot(z);
-    r.iterations = 0;
-
-    for (int it = 0; it < maxiter; ++it) {
-        Eigen::VectorXd Ap = Lp * p;
-        double pAp = p.dot(Ap);
-        if (std::abs(pAp) < 1e-30) break;
-        double alpha = rz / pAp;
-        x += alpha * p;
-        rv -= alpha * Ap;
-        r.iterations = it + 1;
-        if (rv.norm() / bnorm < tol) break;
-        z = P.solve(rv);
-        double rz_new = rv.dot(z);
-        p = z + (rz_new / rz) * p;
-        rz = rz_new;
-    }
+#ifdef HAVE_MKL
+    // THEIR solve loop, verbatim: rchol's util/pcg.cpp, the same call their
+    // ex_laplace.cpp makes. Their stop test (pcg.cpp:82) is
+    // dnrm2(r) > dnrm2(b)*tol on the recurrence residual — semantically identical
+    // to the one this function used to hand-roll, so adopting it imports no quirk;
+    // it just stops re-implementing an iteration they ship. Their kernels are MKL
+    // (mkl_sparse_d_mv / d_trsv). Note their create_sparse never calls
+    // mkl_sparse_optimize, so the triangular solve re-analyses on every iteration —
+    // yet it is still far faster than the Eigen transpose-triangular solve this
+    // replaced. Faster or slower, it is now THEIR solve cost, not our re-write's.
+    std::vector<double> xv;          // empty on purpose: iteration() only resize()s it
+    double relres = 0.0; int itr = 0;
+    t.start();
+    pcg(Apcg, bpv, tol, maxiter, G, xv, relres, itr);
     r.solve_time = t.elapsed();
+    r.iterations = itr;
+    x = Eigen::Map<Eigen::VectorXd>(xv.data(), N);
+#else
+    // No MKL (aarch64: Grace / GH200 / Daint). Their PCG hard-includes mkl_spblas.h,
+    // so their shipped solve cannot run here — and substituting one of ours is exactly
+    // what this change removed. The row is FACTOR-ONLY: rchol()'s time and fill-in are
+    // real, the solve columns are the n/a sentinel (iters = rel_res = -1).
+    (void)bpv; (void)Apcg; (void)tol; (void)maxiter; (void)Lp;
+    r.solver_name += " [factor only; upstream solve needs MKL (x86)]";
+    r.solve_time = 0.0;
+    r.iterations = -1;
+#endif
     r.total_time = r.setup_time + r.solve_time;
-    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
+    // solve_rss_mb is NOT recorded for RCHOL: their create_sparse (pcg.cpp:33-53)
+    // allocates a second full copy of A and of G and never frees it (the delete[] is
+    // commented out upstream), so the number would measure their leak, not the memory
+    // a solve holds. -1 = unmeasured, the same sentinel solve_vram_mb uses.
+    r.solve_rss_mb = -1.0;
 
+#ifdef HAVE_MKL
     // unpermute the solution back to the original ordering: x = Pᵀ·y
     Eigen::VectorXd x_orig = rchol_amd ? Eigen::VectorXd(perm.transpose() * x) : x;
     center_if_laplacian(x_orig);
     Eigen::VectorXd res = b - L * x_orig;
     center_if_laplacian(res);
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
-    r.us_per_nnz = r.total_time / r.nnz * 1e6;
-    return r;
-}
-
-// ──────────────────── RCHOL + MKL PCG solver ────────────────────
-#ifdef HAVE_MKL
-// MKL CSR wrapper for SparseCSR (converts size_t -> MKL_INT)
-struct MklSparse {
-    sparse_matrix_t handle = nullptr;
-    std::vector<MKL_INT> rowStart, rowEnd, cols;
-    std::vector<double> vals;
-
-    void init(const SparseCSR& S) {
-        MKL_INT n = static_cast<MKL_INT>(S.size());
-        rowStart.resize(n);
-        rowEnd.resize(n);
-        cols.resize(S.nnz());
-        vals.resize(S.nnz());
-        for (MKL_INT i = 0; i < n; ++i) {
-            rowStart[i] = static_cast<MKL_INT>(S.rowPtr[i]);
-            rowEnd[i]   = static_cast<MKL_INT>(S.rowPtr[i + 1]);
-        }
-        for (size_t k = 0; k < S.nnz(); ++k) {
-            cols[k] = static_cast<MKL_INT>(S.colIdx[k]);
-            vals[k] = S.val[k];
-        }
-        mkl_sparse_d_create_csr(&handle, SPARSE_INDEX_BASE_ZERO, n, n,
-                                 rowStart.data(), rowEnd.data(),
-                                 cols.data(), vals.data());
-    }
-    ~MklSparse() { if (handle) mkl_sparse_destroy(handle); }
-};
-
-static BenchResult run_rchol_mkl(
-    const Eigen::SparseMatrix<double>& L,
-    const Eigen::VectorXd& b,
-    const std::string& graph_name,
-    double tol, int maxiter, int mkl_threads = 0)
-{
-    BenchResult r;
-    r.solver_name = mkl_threads == 1 ? "RCHOL+MKL1 [Chen20]" : "RCHOL+MKL [Chen20]";
-    r.graph_name = graph_name;
-    r.n = static_cast<int>(L.rows());
-    r.nnz = static_cast<int>(L.nonZeros());
-    int N = r.n;
-
-    // Convert to row-major CSR
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm(L);
-
-    // Original (unshifted) matrix for SpMV in PCG
-    SparseCSR A_orig = eigen_to_csr(Lrm);
-
-    // Shift diagonal for RCHOL factorization (needs strictly SDD)
-    double eps = 1e-6;
-    for (int k = 0; k < Lrm.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Lrm, k); it; ++it)
-            if (it.row() == it.col()) it.valueRef() += eps;
-
-    SparseCSR A_shifted = eigen_to_csr(Lrm);
-    SparseCSR G;
-
-    Timer t;
-    t.start();
-    {
-        std::streambuf* old = std::cout.rdbuf();
-        std::ostringstream devnull;
-        std::cout.rdbuf(devnull.rdbuf());
-        rchol(A_shifted, G);
-        std::cout.rdbuf(old);
-    }
-    r.setup_time = t.elapsed();
-    r.fillin = 2.0 * static_cast<double>(G.nnz()) / static_cast<double>(A_shifted.nnz());
-
-    // Create MKL sparse handles
-    MklSparse mklL, mklG;
-    mklL.init(A_orig);   // ORIGINAL matrix for SpMV (not shifted!)
-    mklG.init(G);
-
-    matrix_descr desL;
-    desL.type = SPARSE_MATRIX_TYPE_GENERAL;
-
-    matrix_descr desG;
-    desG.type = SPARSE_MATRIX_TYPE_TRIANGULAR;
-    desG.mode = SPARSE_FILL_MODE_UPPER;
-    desG.diag = SPARSE_DIAG_NON_UNIT;
-
-    // Set MKL thread count for solve phase
-    int old_threads = mkl_get_max_threads();
-    if (mkl_threads > 0) mkl_set_num_threads(mkl_threads);
-
-    // MKL inspector-executor: precompute the triangular-solve / SpMV execution
-    // plan ONCE. Required by the MKL sparse API for efficient *repeated* calls —
-    // without it, mkl_sparse_d_trsv has no level-schedule and re-analyzes on every
-    // PCG iteration, which thrashes catastrophically under threading.
-    {
-        Timer topt; topt.start();
-        mkl_sparse_set_mv_hint(mklL.handle, SPARSE_OPERATION_NON_TRANSPOSE, desL,
-                               static_cast<MKL_INT>(maxiter));
-        mkl_sparse_set_sv_hint(mklG.handle, SPARSE_OPERATION_TRANSPOSE, desG,
-                               static_cast<MKL_INT>(maxiter));
-        mkl_sparse_set_sv_hint(mklG.handle, SPARSE_OPERATION_NON_TRANSPOSE, desG,
-                               static_cast<MKL_INT>(maxiter));
-        mkl_sparse_optimize(mklL.handle);
-        mkl_sparse_optimize(mklG.handle);
-        r.setup_time += topt.elapsed();
-    }
-
-    // MKL PCG
-    t.start();
-    std::vector<double> x(N, 0.0), rv(b.data(), b.data() + N);
-    std::vector<double> z(N), p(N), Ap(N), prev_r(N), prev_z(N);
-    double bnorm = cblas_dnrm2(N, rv.data(), 1);
-    r.iterations = 0;
-
-    for (int it = 0; it < maxiter; ++it) {
-        // Apply preconditioner: z = G^{-1} G^{-T} r
-        std::vector<double> tmp(N);
-        mkl_sparse_d_trsv(SPARSE_OPERATION_TRANSPOSE, 1.0, mklG.handle, desG,
-                           rv.data(), tmp.data());
-        mkl_sparse_d_trsv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, mklG.handle, desG,
-                           tmp.data(), z.data());
-
-        if (it == 0) {
-            cblas_dcopy(N, z.data(), 1, p.data(), 1);
-        } else {
-            double d1 = cblas_ddot(N, rv.data(), 1, z.data(), 1);
-            double d2 = cblas_ddot(N, prev_r.data(), 1, prev_z.data(), 1);
-            cblas_dscal(N, d1 / d2, p.data(), 1);
-            cblas_daxpy(N, 1.0, z.data(), 1, p.data(), 1);
-        }
-
-        // Ap = L * p  (using ORIGINAL matrix, not shifted)
-        mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, mklL.handle, desL,
-                         p.data(), 0.0, Ap.data());
-
-        double d1 = cblas_ddot(N, p.data(), 1, rv.data(), 1);
-        double d2 = cblas_ddot(N, p.data(), 1, Ap.data(), 1);
-        double alpha = d1 / d2;
-
-        cblas_daxpy(N, alpha, p.data(), 1, x.data(), 1);
-        cblas_dcopy(N, rv.data(), 1, prev_r.data(), 1);
-        cblas_dcopy(N, z.data(), 1, prev_z.data(), 1);
-        cblas_daxpy(N, -alpha, Ap.data(), 1, rv.data(), 1);
-        r.iterations = it + 1;
-
-        if (cblas_dnrm2(N, rv.data(), 1) / bnorm < tol) break;
-    }
-    r.solve_time = t.elapsed();
-    r.total_time = r.setup_time + r.solve_time;
-    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-
-    // Restore MKL thread count
-    mkl_set_num_threads(old_threads);
-
-    Eigen::VectorXd xe = Eigen::Map<Eigen::VectorXd>(x.data(), N);
-    center_if_laplacian(xe);
-    Eigen::VectorXd res = b - L * xe;
-    center_if_laplacian(res);
-    r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
-    r.us_per_nnz = r.total_time / r.nnz * 1e6;
-    return r;
-}
+#else
+    (void)x; (void)bnorm;
+    r.rel_residual = -1.0;   // n/a sentinel: no solve ran, only the factorization
 #endif
+    r.us_per_nnz = r.total_time / r.nnz * 1e6;
+    return r;
+}
 
 // ──────────────────── Parallel RCHOL + PCG solver ────────────────────
 #ifdef HAVE_METIS
-struct PermutedRcholPreconditioner {
-    Eigen::SparseMatrix<double> G_eigen;
-    Eigen::VectorXi fwd_perm;  // original -> permuted
-    Eigen::VectorXi inv_perm;  // permuted -> original
-    int n_ = 0;
-
-    void init(const SparseCSR& G, const std::vector<size_t>& perm) {
-        n_ = static_cast<int>(G.size());
-        using T = Eigen::Triplet<double>;
-        std::vector<T> trips;
-        for (int i = 0; i < n_; ++i)
-            for (size_t k = G.rowPtr[i]; k < G.rowPtr[i + 1]; ++k)
-                trips.emplace_back(i, static_cast<int>(G.colIdx[k]), G.val[k]);
-        G_eigen.resize(n_, n_);
-        G_eigen.setFromTriplets(trips.begin(), trips.end());
-
-        // perm[new_i] = old_i, so inv_perm[old_i] = new_i
-        fwd_perm.resize(n_);
-        inv_perm.resize(n_);
-        for (int i = 0; i < n_; ++i) {
-            fwd_perm[i] = static_cast<int>(perm[i]);
-            inv_perm[static_cast<int>(perm[i])] = i;
-        }
-    }
-
-    Eigen::VectorXd solve(const Eigen::VectorXd& b) const {
-        // Permute to reordered space: bp[new_i] = b[perm[new_i]]
-        Eigen::VectorXd bp(n_);
-        for (int i = 0; i < n_; ++i)
-            bp[i] = b[fwd_perm[i]];
-        // Triangular solves: G^{-T} then G^{-1}
-        Eigen::VectorXd x = G_eigen.transpose().triangularView<Eigen::Lower>().solve(bp);
-        x = G_eigen.triangularView<Eigen::Upper>().solve(x);
-        // Unpermute: result[perm[new_i]] = x[new_i]
-        Eigen::VectorXd result(n_);
-        for (int i = 0; i < n_; ++i)
-            result[fwd_perm[i]] = x[i];
-        return result;
-    }
-    int rows() const { return n_; }
-    int cols() const { return n_; }
-};
-
 static BenchResult run_rchol_parallel(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
@@ -1174,12 +962,13 @@ static BenchResult run_rchol_parallel(
     int N = r.n;
 
     Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm(L);
+    SparseCSR A_unshifted = eigen_to_csr(Lrm);   // the PCG operator (grounding contract)
     double eps = 1e-6;
     for (int k = 0; k < Lrm.outerSize(); ++k)
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Lrm, k); it; ++it)
             if (it.row() == it.col()) it.valueRef() += eps;
 
-    SparseCSR A = eigen_to_csr(Lrm);
+    SparseCSR A = eigen_to_csr(Lrm);             // + eps*I: rchol needs strictly SDD
     SparseCSR G;
     std::vector<size_t> perm;
 
@@ -1213,44 +1002,48 @@ static BenchResult run_rchol_parallel(
         rchol(A, G, perm, nthreads);
         std::cout.rdbuf(old);
     }
+    // rchol(A,G,perm,t) hands back its own nested-dissection ordering; upstream's
+    // ex_laplace_parallel.cpp:38-46 then reorders BOTH the operator and the RHS with
+    // their reorder() and runs the PCG in that space. We do exactly that (their
+    // reorder(), not a re-implementation), on the UNSHIFTED operator so the residual
+    // is still against the L we score on. Pre-solve work -> charged to setup.
+    SparseCSR Aperm;
+    reorder(A_unshifted, perm, Aperm);
+    std::vector<double> bv(b.data(), b.data() + N), bperm;
+    reorder(bv, perm, bperm);
     r.setup_time = t.elapsed();
 
-    PermutedRcholPreconditioner P;
-    P.init(G, perm);
     r.fillin = 2.0 * static_cast<double>(G.nnz()) / static_cast<double>(A.nnz());
+    double bnorm = b.norm();   // norm is permutation-invariant
 
-    // PCG solve
-    t.start();
     Eigen::VectorXd x = Eigen::VectorXd::Zero(N);
-    Eigen::VectorXd rv = b;
-    Eigen::VectorXd z = P.solve(rv);
-    Eigen::VectorXd p = z;
-    double rz = rv.dot(z);
-    double bnorm = b.norm();
-    r.iterations = 0;
-
-    for (int it = 0; it < maxiter; ++it) {
-        Eigen::VectorXd Ap = L * p;
-        double pAp = p.dot(Ap);
-        if (std::abs(pAp) < 1e-30) break;
-        double alpha = rz / pAp;
-        x += alpha * p;
-        rv -= alpha * Ap;
-        r.iterations = it + 1;
-        if (rv.norm() / bnorm < tol) break;
-        z = P.solve(rv);
-        double rz_new = rv.dot(z);
-        p = z + (rz_new / rz) * p;
-        rz = rz_new;
-    }
+#ifdef HAVE_MKL
+    std::vector<double> xv;          // empty on purpose: iteration() only resize()s it
+    double relres = 0.0; int itr = 0;
+    t.start();
+    pcg(Aperm, bperm, tol, maxiter, G, xv, relres, itr);   // THEIR solve loop
     r.solve_time = t.elapsed();
+    r.iterations = itr;
+    for (int i = 0; i < N; ++i) x[static_cast<int>(perm[i])] = xv[i];   // unpermute
+#else
+    // See run_rchol: their PCG needs MKL (x86), so this is a FACTOR-ONLY row here.
+    (void)Aperm; (void)bperm; (void)tol; (void)maxiter;
+    r.solver_name += " [factor only; upstream solve needs MKL (x86)]";
+    r.solve_time = 0.0;
+    r.iterations = -1;
+#endif
     r.total_time = r.setup_time + r.solve_time;
-    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
+    r.solve_rss_mb = -1.0;   // not meaningful for RCHOL — see run_rchol
 
+#ifdef HAVE_MKL
     center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
     center_if_laplacian(res);
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
+#else
+    (void)x; (void)bnorm;
+    r.rel_residual = -1.0;   // n/a sentinel: no solve ran, only the factorization
+#endif
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     return r;
 }
@@ -2080,7 +1873,14 @@ static BenchResult run_hypre_boomeramg(
     HYPRE_BoomerAMGSetTol(amg, 0.0);
     HYPRE_BoomerAMGSetMaxIter(amg, 1);
     configure_boomeramg(amg, /*gpu=*/false);  // scalable coarsening (see helper)
-    HYPRE_BoomerAMGSetup(amg, parA, parB, parX);
+    // NO explicit HYPRE_BoomerAMGSetup here. HYPRE_ParCSRPCGSetup below invokes the
+    // preconditioner setup we register with HYPRE_PCGSetPrecond unconditionally
+    // (hypre_PCGSetup -> precond_setup, krylov/pcg.c), and hypre_BoomerAMGSetup has
+    // no already-built early return: it rebuilds the whole hierarchy. Calling both
+    // put TWO full hierarchy builds inside the setup timer, i.e. every BoomerAMG
+    // setup/total we ever published was ~2x its real cost (verified with a gdb
+    // breakpoint count: hypre_BoomerAMGSetup hit 2x per cell). Hypre's own
+    // examples/ex5.c:412-437 and test/ij.c call PCGSetup alone; so do we now.
 
     HYPRE_Solver pcg;
     HYPRE_ParCSRPCGCreate(MPI_COMM_WORLD, &pcg);
@@ -2094,6 +1894,17 @@ static BenchResult run_hypre_boomeramg(
     // residual floors above tol. Relative stop converges every component to tol; on the
     // whole matrix (||b||=1) it's identical to the old absolute behavior.
     HYPRE_PCGSetStopCrit(pcg, 0);
+    // NOTE on grading (benchmarks/README.md, THE GRADING RULE). Hypre's test is on the
+    // RECURRENCE residual, so the obvious worry is drift — but measured, there is none:
+    // HYPRE_PCGSetRecomputeResidual(1) (their own knob, which re-tests on a recomputed
+    // r = b - Ax) leaves iterations and residual BIT-IDENTICAL on iter0040 / grid_2000 /
+    // com-Amazon, and hypre's own reported final residual matches its true one. What DOES
+    // differ is the SYSTEM: on a singular Laplacian hypre solves the Dirichlet-PINNED SPD
+    // subsystem, while we score every solver on the ORIGINAL singular L. On iter0040 that
+    // gap is 8.3x (hypre's own 2.06e-9 vs our re-grade 1.71e-8) — a GROUNDING gap, not a
+    // stop-test one, so no hypre tolerance knob closes it. Closing it needs a
+    // pin-to-original tolerance calibration of the same shape as ParAC's. NOT DONE; until
+    // then such a cell is honestly `not_converged` at tol=1e-8.
     HYPRE_PCGSetMaxIter(pcg, maxiter);
     HYPRE_PCGSetPrintLevel(pcg, 0);
     HYPRE_PCGSetPrecond(pcg,
@@ -2207,7 +2018,8 @@ static BenchResult run_hypre_boomeramg_gpu(
     HYPRE_BoomerAMGSetTol(amg, 0.0);
     HYPRE_BoomerAMGSetMaxIter(amg, 1);
     configure_boomeramg(amg, /*gpu=*/true);  // scalable coarsening (see helper)
-    HYPRE_BoomerAMGSetup(amg, parA, parB, parX);
+    // NO explicit HYPRE_BoomerAMGSetup here — see the CPU path for why (HYPRE_ParCSRPCGSetup
+    // runs the registered precond setup itself, and hypre_BoomerAMGSetup always rebuilds).
 
     HYPRE_Solver pcg;
     HYPRE_ParCSRPCGCreate(MPI_COMM_WORLD, &pcg);
@@ -2221,6 +2033,8 @@ static BenchResult run_hypre_boomeramg_gpu(
     // residual floors above tol. Relative stop converges every component to tol; on the
     // whole matrix (||b||=1) it's identical to the old absolute behavior.
     HYPRE_PCGSetStopCrit(pcg, 0);
+    // See the CPU path for the grading note: hypre's recurrence-vs-true residual is
+    // measured identical, and the real BoomerAMG gap on a singular L is pin-vs-score.
     HYPRE_PCGSetMaxIter(pcg, maxiter);
     HYPRE_PCGSetPrintLevel(pcg, 0);
     HYPRE_PCGSetPrecond(pcg,
@@ -2763,12 +2577,6 @@ int main(int argc, char** argv) {
 #ifdef HAVE_RCHOL
     if (args.solvers.count("rchol"))
         print(median_run([&]() { return run_rchol(L, b, graph_name, args.tol, args.maxiter); }, R));
-#ifdef HAVE_MKL
-    if (args.solvers.count("rchol_mkl"))
-        print(median_run([&]() { return run_rchol_mkl(L, b, graph_name, args.tol, args.maxiter); }, R));
-    if (args.solvers.count("rchol_mkl1"))
-        print(median_run([&]() { return run_rchol_mkl(L, b, graph_name, args.tol, args.maxiter, 1); }, R));
-#endif
 #ifdef HAVE_METIS
     if (args.solvers.count("rchol_par")) {
         try {

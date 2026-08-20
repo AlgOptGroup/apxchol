@@ -415,8 +415,10 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
     setup = factor + prep + amds   # setup = reorder + full pre-solve factorization
     total = setup + solve
     # rel_res is ParAC's own ||Ax-b||/||b|| against the operator it solved, which
-    # the input construction makes the operator we report on. Judge it at the
-    # tolerance we asked for, not at a looser one.
+    # the input construction makes the operator we report on. THE GRADING RULE
+    # (benchmarks/README.md): exactly TOL, the same mark every other solver gets.
+    # ParAC's optimistic absolute test is handled by CALIBRATING the tolerance we
+    # pass it (_calibrate_rel_tol), never by relaxing this comparison.
     status = "complete" if rr <= float(TOL) else "not_converged"
     metrics = {"n": n, "nnz": nnz, "setup_s": round(setup, 6), "solve_s": round(solve, 6),
                "total_s": round(total, 6), "iters": iters, "rel_res": rr, "fillin": 0.0,
