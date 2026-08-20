@@ -159,25 +159,16 @@ void eliminate_partition_singleton(const Eliminator& elim,
     std::vector<factor_col> local_cols(n_verts);
 
     #ifdef _OPENMP
-    // APXCHOL_TAIL_THREADS (experiment knob, see env_knobs.h): rounds whose IS
-    // is at or below omp_threshold normally take the fully serial path at the
-    // bottom of this function. When the knob is set (> 0), such "tail" rounds
-    // run the fused PARALLEL path below instead, on a small pinned team of
-    // min(APXCHOL_TAIL_THREADS, ws.threads.size()) threads. Unset (default) =
-    // serial tail, unchanged. The parallel path applies clique edges in
-    // thread-arrival order, so a tail-parallel factor may differ from the
-    // serial-tail factor by fp merge-order ulps (same class of difference as
-    // the main path at T > 1); rounds whose IS fits in one schedule(dynamic,64)
-    // chunk are processed by a single thread and stay bit-deterministic.
-    // Promoting tail 4 to the default measured neutral-to-worse (2026-08-19).
-    const int tail_threads = detail::env_knobs::get().tail_threads;
-    const bool tail_parallel = tail_threads > 0 && n_verts <= opts.omp_threshold;
-    if (n_verts > opts.omp_threshold || tail_parallel) {
-        // Team size for the fused paths: the full workspace team, or the pinned
-        // tail team on a tail round.
-        const int team_threads = tail_parallel
-            ? std::min<int>(tail_threads, static_cast<int>(ws.threads.size()))
-            : static_cast<int>(ws.threads.size());
+    // Rounds whose IS is at or below omp_threshold take the fully serial path
+    // at the bottom of this function. (Running them on a small pinned team
+    // instead was the APXCHOL_TAIL_THREADS experiment, removed 2026-08-20:
+    // tail 4 at threshold 2000 measured neutral-to-worse on iter0040 /
+    // grid_2000, and the parallel path applies clique edges in thread-arrival
+    // order, so it also costs the tail's bit-determinism. See "Retired knobs"
+    // in AGENTS.md.)
+    if (n_verts > opts.omp_threshold) {
+        // Team size for the fused paths: the full workspace team.
+        const int team_threads = static_cast<int>(ws.threads.size());
         if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
             // Mega-fused parallel region: compute + deactivate + apply all under
             // one fork-join.  On BG/BK with ~1k+ rounds this saves ~2 extra
@@ -382,11 +373,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
             // Skip the explicit merge_parallel_edges pass: process_vertex
             // does inline dedup + dead-edge filter, saving a full
             // adjacency traversal per IS vertex per round.
-            // Team: the OpenMP default (as before) unless this is a
-            // tail-parallel round, which pins the small tail team.
-            const int legacy_threads = tail_parallel ? team_threads
-                                                     : omp_get_max_threads();
-            #pragma omp parallel num_threads(legacy_threads)
+            // Team: the OpenMP default (as before).
+            #pragma omp parallel num_threads(omp_get_max_threads())
             {
                 int tid = omp_get_thread_num();
 

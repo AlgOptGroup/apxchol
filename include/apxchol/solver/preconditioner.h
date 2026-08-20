@@ -43,17 +43,19 @@ namespace detail {
 /// Minimum n before a fused vector pass engages OpenMP. At or below it the
 /// SAME loop runs on the encountering thread (the `if` clause disables the
 /// team, omp_ids reports tid 0 / nt 1), so the sub-threshold path is
-/// bit-identical to a T=1 run -- one code path, no second kernel. Default
-/// 2000 via env_knobs (APXCHOL_FUSED_PARALLEL_MIN overrides; read once).
-/// Do NOT raise it to make mid-size problems "cache-friendly serial": at
-/// n = 299k-335k every gated pass measured FASTER parallel at T=16, and a
-/// serial stretch also starves the level-set SpTRSV around it (sleeping
-/// team) -- see the knob's doc in env_knobs.h for the 2026-08-19 numbers.
-inline Eigen::Index fused_omp_min() noexcept {
-    static const Eigen::Index v =
-        static_cast<Eigen::Index>(env_knobs::get().fused_parallel_min);
-    return v;
-}
+/// bit-identical to a T=1 run -- one code path, no second kernel.
+///
+/// 2000, the value the passes shipped with, and a CONSTANT: the
+/// APXCHOL_FUSED_PARALLEL_MIN override was removed 2026-08-20 after raising
+/// it was REFUTED by measurement (2026-08-19, T=16, Zen 4). At n = 299k/335k
+/// (coAuthorsDBLP / com-Amazon -- the vectors are NOT cache-resident, 6 fp64
+/// n-vectors alone are ~16 MB) every gated pass is faster PARALLEL --
+/// update_xr 0.086 vs 0.396 ms/iter serialized, permute 0.089 vs 0.171,
+/// unpermute+rz 0.096 vs 0.236, spmv+pAp 0.62 vs 4.32 -- and serializing them
+/// also starves the level-set SpTRSV in between (sleeping team, forward
+/// 130 -> 226 ms). Do NOT raise it to make mid-size problems "cache-friendly
+/// serial".
+inline constexpr Eigen::Index fused_omp_min() noexcept { return 2000; }
 
 /// Per-thread stride (in doubles) of the partial-sum buffer: one cache line
 /// per thread, so the single end-of-chunk write never false-shares.

@@ -32,8 +32,8 @@ namespace apxchol {
 inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 
 // kFactorDropRelDefault (the compacting drop's default threshold, 1e-4, and
-// the measurements behind it), factor_drop_rel_from_env() /
-// factor_drop_compensate_from_env(), factor_column_scale() and the drop itself
+// the measurements behind it), factor_drop_rel_from_env(),
+// factor_column_scale() and the drop itself
 // (compact_factor_columns) live in factor_drop.h -- ONE host implementation
 // shared with the CUDA backend; the "COMPACTING DROP" section below is the
 // authoritative description of what it does and why.
@@ -233,8 +233,9 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // When nothing is below the threshold (grids) the arrays are left untouched
 // -- no copy is made.
 //
-// COLUMN-SUM COMPENSATION (default ON; APXCHOL_FACTOR_DROP_COMPENSATE=0, read
-// at every setup, gives plain removal for A/B): every column of the factor of
+// COLUMN-SUM COMPENSATION (UNCONDITIONAL; the APXCHOL_FACTOR_DROP_COMPENSATE=0
+// A/B switch was removed 2026-08-20 -- the numbers below are why): every
+// column of the factor of
 // a Laplacian sums to zero -- L(j,j) = sqrt(deg_j), L(i,j) = -w_ij/sqrt(deg_j)
 // -- which is exactly why L L^T again has zero row sums (a Laplacian in the
 // generalized sense: A + a zero-row-sum sampling error) and why grounding the
@@ -285,7 +286,7 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // STATISTICS (lowprec_stats() == drop_stats(), printed under APXCHOL_VERBOSE:
 // one "sptrsv storage" line per setup, plus a "factor drop" line when the drop
 // is on): the threshold in effect (rel; 0 = off) and whether the compensation
-// was applied (compensate), the factor's nnz before / after the drop
+// the factor's nnz before / after the drop
 // (nnz_factor, nnz_stored -- the latter is what the CSR and the CSC each
 // hold), how many off-diagonals the drop removed and why (dropped =
 // dropped_threshold + dropped_flush), and over the STORED off-diagonals: how
@@ -436,21 +437,16 @@ public:
     // (including "0" and unparsable text, which atof reads as 0) turns the
     // drop OFF.
     static double factor_drop_rel_from_env() { return apxchol::factor_drop_rel_from_env(); }
-    // APXCHOL_FACTOR_DROP_COMPENSATE: unset / anything but "0" -> the
-    // column-sum compensation is applied (default); "0" -> plain removal (the
-    // A/B switch; see the file header). Read at every setup().
-    static bool factor_drop_compensate_from_env() { return apxchol::factor_drop_compensate_from_env(); }
 
     // Statistics of the last setup() (see the file header): what the
-    // compacting drop did to L11 = L.topLeftCorner(m, m) (rel / compensate /
-    // nnz_factor / nnz_stored / dropped*) and what the storage format did to
+    // compacting drop did to L11 = L.topLeftCorner(m, m) (rel / nnz_factor /
+    // nnz_stored / dropped*) and what the storage format did to
     // what remained. offdiag / flushed / subnormal / factor_subnormal are over
     // the STORED factor (after the drop); the dropped_* counts are what the
     // drop removed; nnz_factor is L11's nnz before the drop and nnz_stored
     // after (== nnz_factor when the drop is off).
     struct lowprec_statistics {
         double        rel               = 0.0;  // drop threshold in effect (0 = drop off)
-        bool          compensate        = true; // column-sum compensation applied to the dropped columns
         std::uint64_t offdiag           = 0;   // number of stored off-diagonal entries of L11
         std::uint64_t flushed           = 0;   // stored as zero although the factor value was nonzero
         std::uint64_t subnormal         = 0;   // stored as a subnormal of the storage format
@@ -470,7 +466,7 @@ public:
     };
     const lowprec_statistics& lowprec_stats() const { return stats_; }
     // The same record under the name the drop-only callers use:
-    // rel / compensate / nnz_factor / nnz_stored / dropped are its drop half.
+    // rel / nnz_factor / nnz_stored / dropped are its drop half.
     const lowprec_statistics& drop_stats() const { return stats_; }
     // nnz held by the SpTRSV's CSR / CSC (each) after the last setup().
     std::uint64_t stored_nnz() const { return stats_.nnz_stored; }
@@ -585,12 +581,10 @@ private:
         mark("L11_alias_or_copy");
 
         // APXCHOL_FACTOR_DROP=<rel> (both storages; default kFactorDropRelDefault,
-        // <= 0 = off) and APXCHOL_FACTOR_DROP_COMPENSATE (see the file header).
+        // <= 0 = off). The column-sum compensation is unconditional.
         const double factor_drop_rel = factor_drop_rel_from_env();
-        const bool   drop_compensate = factor_drop_compensate_from_env();
         stats_ = lowprec_statistics{};
         stats_.rel        = factor_drop_rel;
-        stats_.compensate = drop_compensate;
         stats_.nnz_factor = static_cast<std::uint64_t>(nnz);
         // Per-column scale s_j (the fp16 storage's scale_ -- a member, the
         // storage divides by it -- and the compacting drop's threshold
@@ -656,7 +650,7 @@ private:
         {
             factor_drop_stats ds;
             const bool compacted = compact_factor_columns<edge_index, node_index, factor_value_t>(
-                m_, L11_outer, L11_inner, L11_vals, col_scale, factor_drop_rel, drop_compensate,
+                m_, L11_outer, L11_inner, L11_vals, col_scale, factor_drop_rel,
                 [=](factor_value_t v, float s) { return keep_offdiag<V>(v, s, factor_drop_rel); },
                 drop_outer, drop_inner, drop_vals, ds);
             stats_.dropped_threshold = ds.dropped_threshold;
@@ -831,10 +825,10 @@ private:
                     const std::uint64_t off0 = n_off + stats_.dropped;
                     const double den0 = off0 ? static_cast<double>(off0) : 1.0;
                     std::fprintf(stderr,
-                        "[apxchol] factor drop (APXCHOL_FACTOR_DROP=%g%s): dropped=%llu (%.4f%% of %llu off-diagonals;"
-                        " threshold=%llu, format_zero=%llu) stored_nnz %llu -> %llu (%.4f%% of factor)\n",
+                        "[apxchol] factor drop (APXCHOL_FACTOR_DROP=%g, column sums preserved): dropped=%llu"
+                        " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
+                        " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
                         factor_drop_rel,
-                        drop_compensate ? ", column sums preserved" : ", plain removal (COMPENSATE=0)",
                         static_cast<unsigned long long>(stats_.dropped), 100.0 * stats_.dropped / den0,
                         static_cast<unsigned long long>(off0),
                         static_cast<unsigned long long>(stats_.dropped_threshold),

@@ -156,14 +156,14 @@ inline std::vector<float> column_scales(const csr_int<Val>& A) {
 /// it). Returns what happened (drop_stats()).
 template <class Val>
 inline factor_drop_stats apply_factor_drop(csr_int<Val>& L11, const std::vector<float>& col_scale,
-                                           double rel, bool compensate,
+                                           double rel,
                                            bool fp16_storage) {
     factor_drop_stats st;
     std::vector<int>       out_ptr;
     std::unique_ptr<int[]> out_idx;
     std::unique_ptr<Val[]> out_vals;
     const bool compacted = compact_factor_columns<int, int, Val>(
-        L11.m, L11.ptr.data(), L11.idx.get(), L11.vals.get(), col_scale.data(), rel, compensate,
+        L11.m, L11.ptr.data(), L11.idx.get(), L11.vals.get(), col_scale.data(), rel,
         [=](Val v, float s) { return keep_offdiag(v, s, rel, fp16_storage); },
         out_ptr, out_idx, out_vals, st);
     if (compacted) {

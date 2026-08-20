@@ -113,8 +113,8 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 ///
 /// COMPACTING FACTOR DROP (both backends): setup runs THE compacting drop
 /// (factor_drop.h -- the very implementation omp_sptrsv::setup runs on the
-/// CPU; same env knobs, same default: APXCHOL_FACTOR_DROP=<rel>, default 1e-4,
-/// <= 0 = off; APXCHOL_FACTOR_DROP_COMPENSATE=0 = plain removal) on the HOST
+/// CPU; same env knob, same default: APXCHOL_FACTOR_DROP=<rel>, default 1e-4,
+/// <= 0 = off; the column-sum compensation is unconditional) on the HOST
 /// L11 arrays before anything is uploaded: off-diagonals below rel * (column
 /// max |off-diagonal|) are removed, the diagonal always kept, each column's
 /// dropped mass folded back into its kept off-diagonals so column sums are
@@ -268,7 +268,6 @@ public:
         }
         backend_reason_.clear();
         const double factor_drop_rel = factor_drop_rel_from_env();
-        const bool   drop_compensate = factor_drop_compensate_from_env();
 
         // Build L11 = top-left m×m block of the factor in CSC, as int arrays
         // (cuSPARSE CUSPARSE_INDEX_32I). The factor on GPU-tested matrices fits
@@ -298,7 +297,7 @@ public:
             }
 
         // ── Compacting drop (factor_drop.h; see the class comment) ──
-        stats_ = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, drop_compensate, fp16_);
+        stats_ = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, fp16_);
         nnz_ = LT.nnz;
         mark("col_scale+drop");
 
@@ -439,9 +438,10 @@ public:
                 factor_bytes_ / 1e6, device_delta_bytes_ / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
             if (stats_.rel > 0.0)
                 std::fprintf(stderr,
-                    "[apxchol] factor drop (APXCHOL_FACTOR_DROP=%g%s): dropped=%llu (%.4f%% of %llu off-diagonals;"
-                    " threshold=%llu, format_zero=%llu) stored_nnz %llu -> %llu (%.4f%% of factor)\n",
-                    stats_.rel, stats_.compensate ? ", column sums preserved" : ", plain removal (COMPENSATE=0)",
+                    "[apxchol] factor drop (APXCHOL_FACTOR_DROP=%g, column sums preserved): dropped=%llu"
+                    " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
+                    " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
+                    stats_.rel,
                     static_cast<unsigned long long>(stats_.dropped),
                     100.0 * static_cast<double>(stats_.dropped) / static_cast<double>(off0 ? off0 : 1),
                     static_cast<unsigned long long>(off0),
@@ -484,7 +484,7 @@ public:
 
     bool ready() const { return ready_; }
     /// What the compacting drop did at the last setup() (factor_drop.h): rel /
-    /// compensate / nnz_factor / nnz_stored / dropped*.
+    /// nnz_factor / nnz_stored / dropped*.
     const factor_drop_stats& drop_stats() const { return stats_; }
     /// nnz the device CSR(s) hold after the last setup() (after the drop).
     std::uint64_t stored_nnz() const { return stats_.nnz_stored; }

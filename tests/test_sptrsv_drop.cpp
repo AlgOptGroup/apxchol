@@ -9,7 +9,7 @@
 //     back solves through the compacted arrays agree with a drop-OFF
 //     omp_sptrsv on the reference factor with the dropped entries ZEROED in
 //     place and the same compensation applied (restated independently);
-//     with APXCHOL_FACTOR_DROP_COMPENSATE=0 the reference is the plain
+//     (the column-sum compensation is unconditional; the reference is the
 //     zeroed factor (a stored zero and an absent entry solve identically);
 //   * the CSR/CSC the drop produces are byte-identical across thread counts;
 //   * the env contract: unset = default ON at 1e-4, "0" / negative / junk =
@@ -65,9 +65,6 @@ struct scoped_env {
 };
 struct scoped_drop_env : scoped_env {
     explicit scoped_drop_env(const char* value) : scoped_env("APXCHOL_FACTOR_DROP", value) {}
-};
-struct scoped_compensate_env : scoped_env {
-    explicit scoped_compensate_env(const char* value) : scoped_env("APXCHOL_FACTOR_DROP_COMPENSATE", value) {}
 };
 
 // Random lower-triangular factor: every column gets a diagonal entry (first,
@@ -129,18 +126,18 @@ std::vector<double> reference_scales_L11(const sparse_csc& L, node_index m) {
 
 // The reference "dense drop": the same factor with the entries the drop
 // removes set to ZERO in place (nothing removed). Kept iff |v| >= rel * s_j.
-// With `compensate`, each column's dropped mass is folded back into its kept
-// off-diagonals in proportion to |v| (v += dropped_sum * |v| / sum|kept|),
-// which preserves the column sum. Written out here without
-// omp_sptrsv::keep_offdiag / setup so predicate and compensation are stated
-// twice independently.
+// Each column's dropped mass is folded back into its kept off-diagonals in
+// proportion to |v| (v += dropped_sum * |v| / sum|kept|), which preserves the
+// column sum -- unconditionally, as in the implementation. Written out here
+// without omp_sptrsv::keep_offdiag / setup so predicate and compensation are
+// stated twice independently.
 struct dense_drop {
     sparse_csc    Lz;         // zeroed (and compensated) copy
     std::uint64_t kept   = 0; // diagonal + kept off-diagonals of L11 (== stored nnz after the drop)
     std::uint64_t zeroed = 0;
 };
 
-dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel, bool compensate = true) {
+dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel) {
     dense_drop d;
     d.Lz = L;
     const std::vector<double> s = reference_scales_L11(L, m);
@@ -157,7 +154,7 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel, b
         // (Same double arithmetic order as setup -- per_abs first -- so the
         // compacted values are bit-identical to these, which the 1e-12 solve
         // comparison below relies on.)
-        if (compensate && dropped_sum != 0.0 && kept_abs > 0.0) {
+        if (dropped_sum != 0.0 && kept_abs > 0.0) {
             const double per_abs = dropped_sum / kept_abs;
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
                 if (L.inner_[p] >= m || L.inner_[p] == j || d.Lz.vals_[p] == 0) continue;
@@ -226,15 +223,13 @@ sparse_csc make_wide_magnitude_lower(node_index n) {
 // parallel transpose (m > 50000).
 TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
     struct cfg { node_index n; bool laplacian; };
-    for (bool compensate : {true, false})
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
         const node_index m = c.laplacian ? c.n - 1 : c.n;
         SCOPED_TRACE("n=" + std::to_string(c.n) + (c.laplacian ? " (Laplacian m=n-1)" : " (SDDM m=n)") +
-                     (compensate ? ", column sums preserved" : ", plain removal"));
-        scoped_compensate_env comp_env(compensate ? nullptr : "0");
+                     ", column sums preserved");
         const sparse_csc L = make_wide_magnitude_lower(c.n);
         const double rel = 1e-4;
-        const dense_drop ref = reference_dense_drop(L, m, rel, compensate);
+        const dense_drop ref = reference_dense_drop(L, m, rel);
         ASSERT_GT(ref.zeroed, ref.kept / 4);   // the test has teeth: a big chunk goes
         const std::uint64_t L11_nnz = L11_nnz_of(L, m);
 
@@ -248,7 +243,6 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         // Counts.
         const auto& st = trsv.drop_stats();
         EXPECT_EQ(st.rel, rel);
-        EXPECT_EQ(st.compensate, compensate);
         EXPECT_EQ(st.nnz_factor, L11_nnz);
         EXPECT_EQ(st.nnz_stored, ref.kept);
         EXPECT_EQ(trsv.stored_nnz(), ref.kept);
@@ -277,18 +271,14 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
                 // value itself on fp32/fp64), back in the factor's units.
                 double sum = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], static_cast<float>(pair_scale(s[j])))
                            * pair_scale(s[j]);
-                double abs = std::fabs(sum), dropped_mass = 0.0;
+                double abs = std::fabs(sum);
                 for (edge_index p = trsv.csc_col_ptr()[j] + 1; p < trsv.csc_col_ptr()[j + 1]; ++p) {
                     const double v = effective(trsv.csc_vals()[p], s[j]);
                     zeros += v == 0.0;
                     below += std::fabs(v) < rel * s[j] * (1.0 - 2.0 * kStorageEps);
                     sum += v; abs += std::fabs(v);
                 }
-                if (!compensate)
-                    for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p)
-                        if (L.inner_[p] < m && std::fabs(static_cast<double>(L.vals_[p])) < rel * s[j])
-                            dropped_mass += static_cast<double>(L.vals_[p]);
-                worst_cs = std::max(worst_cs, std::fabs(sum + dropped_mass - cs[j]) / abs);
+                worst_cs = std::max(worst_cs, std::fabs(sum - cs[j]) / abs);
             }
             for (node_index i = 0; i < m; ++i)
                 ASSERT_EQ(trsv.csr_col_idx()[trsv.csr_row_ptr()[i + 1] - 1], i) << "diagonal last, row " << i;
@@ -404,11 +394,6 @@ TEST(SpTRSVDrop, EnvContract) {
     { scoped_drop_env env("abc");   EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 0.0); }
     { scoped_drop_env env("3e-4");  EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 3e-4); }
     { scoped_drop_env env("2");     EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 2.0); }
-    // Compensation: on unless APXCHOL_FACTOR_DROP_COMPENSATE=0.
-    { scoped_compensate_env env(nullptr); EXPECT_TRUE(apxchol::omp_sptrsv::factor_drop_compensate_from_env()); }
-    { scoped_compensate_env env("");      EXPECT_TRUE(apxchol::omp_sptrsv::factor_drop_compensate_from_env()); }
-    { scoped_compensate_env env("1");     EXPECT_TRUE(apxchol::omp_sptrsv::factor_drop_compensate_from_env()); }
-    { scoped_compensate_env env("0");     EXPECT_FALSE(apxchol::omp_sptrsv::factor_drop_compensate_from_env()); }
 }
 
 // rel = 0 / negative / junk = off; a rel below every entry drops nothing (and
@@ -573,17 +558,15 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
         // GPU backend's host side, exactly as cuda_sptrsv::setup does it (fp32
         // storage: keep predicate = |v| >= rel * s_j and v != 0).
         const double rel = apxchol::factor_drop_rel_from_env();
-        const bool   comp = apxchol::factor_drop_compensate_from_env();
         auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
         const std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
         const std::uint64_t L11_nnz = L11_nnz_of(L, m);
         ASSERT_EQ(static_cast<std::uint64_t>(LT.nnz), L11_nnz);
         const apxchol::factor_drop_stats st = apxchol::cuda_host::apply_factor_drop(
-            LT, scales, rel, comp, /*fp16_storage=*/false);
+            LT, scales, rel, /*fp16_storage=*/false);
         // Same statistics ...
         const auto& cs = trsv.drop_stats();
         EXPECT_EQ(st.rel, cs.rel);
-        EXPECT_EQ(st.compensate, cs.compensate);
         EXPECT_EQ(st.nnz_factor, cs.nnz_factor);
         EXPECT_EQ(st.nnz_stored, cs.nnz_stored);
         EXPECT_EQ(st.dropped, cs.dropped);
@@ -677,7 +660,7 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
             EXPECT_GT(only_fmt, 0u);   // teeth: the wide-magnitude factor has fp16-subnormal entries
         }
         const apxchol::factor_drop_stats st = apxchol::cuda_host::apply_factor_drop(
-            LT, scales, rel, true, /*fp16_storage=*/true);
+            LT, scales, rel, /*fp16_storage=*/true);
         ASSERT_GT(st.dropped, 0u);
         {
             const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales);
@@ -751,7 +734,7 @@ TEST(GpuHostPrep, DataflowBatchesPackRowsIntoAlignedLaneGroups) {
         scoped_drop_env env("1e-4");
         auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
         { const std::vector<float> sc = apxchol::cuda_host::column_scales(LT);
-          apxchol::cuda_host::apply_factor_drop(LT, sc, 1e-4, true, false); }
+          apxchol::cuda_host::apply_factor_drop(LT, sc, 1e-4, false); }
         const auto Lc = apxchol::cuda_host::transpose_csr(LT);
         for (bool reverse : {false, true}) {
             SCOPED_TRACE(reverse ? "back (reverse order, CSR of L^T)" : "forward (natural order, CSR of L)");
@@ -897,7 +880,7 @@ TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministi
     scoped_drop_env env("1e-4");
     auto LT = apxchol::cuda_host::build_L11_csc_int<apxchol::cuda_value_t>(L, m);
     const std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
-    apxchol::cuda_host::apply_factor_drop(LT, scales, 1e-4, true, false);
+    apxchol::cuda_host::apply_factor_drop(LT, scales, 1e-4, false);
     const auto Lc = apxchol::cuda_host::transpose_csr(LT);
     const int mi = static_cast<int>(m);
     // fp16 storage of the same factor (cuda_host.h contract).

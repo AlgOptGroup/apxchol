@@ -338,13 +338,14 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
 namespace {
 
 // The reference "dense drop": the same factor with the entries the drop
-// removes set to ZERO in place (nothing removed). Kept iff |v| >= rel * s_j
-// and the storage format of this build does not store it as zero anyway
-// (fp32 / fp64: only an exact zero; FP16_SCALED: everything
-// fp16 flushes -- subnormals included by default). Written out here without
-// omp_sptrsv::keep_offdiag so the predicate is stated twice independently.
+// removes set to ZERO in place (nothing removed) and each column's dropped
+// mass folded back into its kept off-diagonals in proportion to |v| -- the
+// unconditional column-sum compensation. Kept iff |v| >= rel * s_j and the
+// storage format does not store it as zero anyway (fp32: only an exact zero).
+// Written out here without omp_sptrsv::keep_offdiag so the predicate and the
+// compensation are stated twice independently.
 struct dense_drop {
-    sparse_csc    Lz;        // zeroed copy
+    sparse_csc    Lz;        // zeroed + compensated copy
     std::uint64_t kept  = 0; // entries with a nonzero-or-diagonal slot (== stored nnz after the drop)
     std::uint64_t zeroed = 0;
 };
@@ -361,20 +362,31 @@ std::vector<float> reference_scales_L11(const sparse_csc& L, node_index m) {
     return s;
 }
 
-dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel, bool fp16_flush_subnormal) {
+dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel) {
     dense_drop d;
     d.Lz = L;
     const std::vector<float> s = reference_scales_L11(L, m);
-    for (node_index j = 0; j < m; ++j)
+    for (node_index j = 0; j < m; ++j) {
+        double dropped_sum = 0.0, kept_abs = 0.0;
         for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
             if (L.inner_[p] >= m) continue;                    // outside L11 (Laplacian last row)
             if (L.inner_[p] == j) { ++d.kept; continue; }
             const factor_value_t v = L.vals_[p];
             bool keep = std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s[j]);
-            (void)fp16_flush_subnormal;
             if (v == 0) keep = false;
-            if (keep) ++d.kept; else { ++d.zeroed; d.Lz.vals_[p] = 0; }
+            if (keep) { ++d.kept; kept_abs += std::fabs(static_cast<double>(v)); }
+            else      { ++d.zeroed; dropped_sum += static_cast<double>(v); d.Lz.vals_[p] = 0; }
         }
+        if (dropped_sum != 0.0 && kept_abs > 0.0) {
+            const double per_abs = dropped_sum / kept_abs;
+            for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
+                if (L.inner_[p] >= m) continue;
+                const double v = static_cast<double>(d.Lz.vals_[p]);
+                if (v == 0.0) continue;                        // dropped (or an exact zero)
+                d.Lz.vals_[p] = static_cast<factor_value_t>(v + per_abs * std::fabs(v));
+            }
+        }
+    }
     return d;
 }
 
@@ -385,16 +397,13 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel, b
 // CSR/CSC are built: stored nnz == the number of kept entries, the diagonal
 // is always kept (first in every CSC column, last in every CSR row), the
 // statistics say what was dropped, and the forward AND back solves through
-// the compacted arrays agree with the reference dense-drop (entries zeroed in
-// place, drop off) to ~1e-12. This is the COMPACTION test, so it runs the
-// drop as plain removal (APXCHOL_FACTOR_DROP_COMPENSATE=0): the column-sum
-// compensation -- the default -- rescales the kept entries and is stated
-// separately in test_sptrsv_drop.cpp. Both the SDDM alias path (m == n) and
+// the compacted arrays agree with the reference dense-drop (entries zeroed
+// and the column mass folded back in place, drop off on the reference) to
+// ~1e-12. Both the SDDM alias path (m == n) and
 // the Laplacian copy path (m == n-1), serial and parallel transpose (m >
 // 50000), with a spread of magnitudes so ~half of the off-diagonals fall
 // under 1e-4.
 TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
-    scoped_env plain_removal("APXCHOL_FACTOR_DROP_COMPENSATE", "0");
     struct cfg { node_index n; bool laplacian; };
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
         const node_index m = c.laplacian ? c.n - 1 : c.n;
@@ -413,7 +422,7 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
                 }
         }
         const double rel = 1e-4;
-        const dense_drop ref = reference_dense_drop(L, m, rel, /*fp16_flush_subnormal=*/true);
+        const dense_drop ref = reference_dense_drop(L, m, rel);
         ASSERT_GT(ref.zeroed, ref.kept / 4);   // the test has teeth: a big chunk goes
 
         // Compacted (env set for this setup only).
@@ -512,7 +521,6 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         apxchol::omp_sptrsv dflt;
         { scoped_env unset("APXCHOL_FACTOR_DROP", nullptr); dflt.setup(L, m); }
         EXPECT_EQ(dflt.lowprec_stats().rel, apxchol::kFactorDropRelDefault);
-        EXPECT_FALSE(dflt.lowprec_stats().compensate);
         EXPECT_EQ(dflt.stored_nnz(), ref.kept);
     }
 }

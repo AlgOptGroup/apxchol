@@ -4,8 +4,7 @@
 /// All values are read ONCE (first use) and cached for the process lifetime,
 /// so flipping an env var mid-run has no effect. Nothing here is public API:
 /// it exists so the bench harness can A/B the experiments below without a
-/// rebuild. The tail knobs default to "unset" = prior behaviour; the grounding
-/// and fused-parallel knobs have real defaults (center-k K = 10; 2000).
+/// rebuild. The grounding knob has a real default (center-k, K = 10).
 ///
 ///   APXCHOL_GROUND = center-k | reg              (default: center-k)
 ///     How a pure Laplacian (rank n-1) is grounded in the preconditioner.
@@ -45,31 +44,7 @@
 ///     the default was also perf-refuted: iter0040 10-rep paired medians show
 ///     setup 0.867 s (2000/serial tail) vs 0.869 s (256/tail 4) -- the
 ///     eliminate-stage win (~-22%) is offset elsewhere.
-///
-///   APXCHOL_TAIL_THREADS = <int>
-///     When set (> 0) and a round's IS is <= omp_threshold, run the PARALLEL
-///     fused elimination path with num_threads(APXCHOL_TAIL_THREADS) (clamped
-///     to the workspace team size) instead of the serial path. Unset/0 =
-///     serial tail as before. NOTE: the parallel path applies edges in
-///     thread-arrival order, so the factor may differ from the serial-tail
-///     factor by fp merge-order ulps (rounds whose IS fits in one
-///     schedule(dynamic,64) chunk are processed by a single thread and stay
-///     bit-deterministic). Tail 4 at threshold 2000 measured NEUTRAL-to-worse
-///     on iter0040/grid_2000 (2026-08-19), so the default stays serial.
-///
-///   APXCHOL_FUSED_PARALLEL_MIN = <int>
-///     Vector length above which the fused PCG / preconditioner vector passes
-///     (src/solve.cpp + apply_core; see detail::fused_omp_min() in
-///     preconditioner.h) engage their OpenMP team. At or below it the SAME
-///     loops run on the encountering thread (the `if` clause disables the
-///     team), bit-identical to a T=1 run. Default 2000, the value the passes
-///     shipped with. Raising it was REFUTED by measurement (2026-08-19,
-///     T=16, Zen 4): at n = 299k/335k (coAuthorsDBLP / com-Amazon -- vectors
-///     are NOT cache-resident, 6 fp64 n-vectors alone are ~16 MB) every
-///     gated pass is faster parallel (update_xr 0.086 vs 0.396 ms/iter,
-///     permute 0.089 vs 0.171, unpermute+rz 0.096 vs 0.236, spmv+pAp 0.62
-///     vs 4.32), and serializing them also starves the level-set SpTRSV
-///     in between (sleeping team, forward 130 -> 226 ms). Knob kept for A/B.
+
 
 #include <cstdio>
 #include <cstdlib>
@@ -84,8 +59,6 @@ struct env_knobs {
     int            center_k = 10;      // APXCHOL_CENTER_K (center-k mode only)
     double         reg_eps  = 1e-8;    // APXCHOL_REG_EPS  (reg mode only)
     long           omp_threshold = -1; // APXCHOL_OMP_THRESHOLD; < 0 = unset
-    int            tail_threads  = 0;  // APXCHOL_TAIL_THREADS;  <= 0 = serial tail
-    long           fused_parallel_min = 2000;   // APXCHOL_FUSED_PARALLEL_MIN
 
     static const env_knobs& get() {
         static const env_knobs k = parse();
@@ -117,14 +90,6 @@ private:
         if (const char* e = std::getenv("APXCHOL_OMP_THRESHOLD"); e && *e) {
             const long v = std::atol(e);
             if (v >= 0) k.omp_threshold = v;
-        }
-        if (const char* e = std::getenv("APXCHOL_TAIL_THREADS"); e && *e) {
-            const int v = std::atoi(e);
-            if (v >= 0) k.tail_threads = v;
-        }
-        if (const char* e = std::getenv("APXCHOL_FUSED_PARALLEL_MIN"); e && *e) {
-            const long v = std::atol(e);
-            if (v >= 0) k.fused_parallel_min = v;
         }
         return k;
     }

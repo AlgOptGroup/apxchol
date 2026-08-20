@@ -14,7 +14,7 @@
 //   dropped mass of each column is folded back into its kept off-diagonals in
 //   proportion to |v| (a uniform rescale for the all-negative M-matrix columns
 //   the elimination produces), so every column sums to what it summed to
-//   (`compensate`, default ON): a Laplacian factor's zero column sums are what
+//   (unconditional): a Laplacian factor's zero column sums are what
 //   keep L L^T a Laplacian and the grounded L11 L11^T a reduced Laplacian with
 //   the right grounding mass -- plain removal costs iter0040 45 -> 67 PCG
 //   iterations on the Laplacian path, the compensated drop 45 -> 45 while
@@ -58,7 +58,9 @@ namespace apxchol {
 // (RelRes 8.345e-09 both), grid_2000 47/47 (8.161e-09 both), iter0040 45/45
 // (7.196e-09 -> 7.224e-09), com-Amazon 38/38 (7.977e-09 both, 0 dropped);
 // iter0040 drops 51.6% (9032674 -> 4639053). WITHOUT the compensation
-// (APXCHOL_FACTOR_DROP_COMPENSATE=0, the branch's plain-removal semantics)
+// (plain removal -- the branch's semantics, and the A/B switch
+// APXCHOL_FACTOR_DROP_COMPENSATE=0 that was removed 2026-08-20 for exactly
+// this number)
 // the same 1e-4 costs iter0040 45 -> 67 iterations on main's Laplacian path
 // (48 -> 48 with APXCHOL_GROUND=reg, i.e. on the SDDM path the branch
 // measured on, where it costs nothing either way); see the omp.h header
@@ -77,14 +79,6 @@ inline double factor_drop_rel_from_env() {
     const double r = std::atof(e);
     return r > 0.0 ? r : 0.0;
 }
-// APXCHOL_FACTOR_DROP_COMPENSATE: unset / anything but "0" -> the
-// column-sum compensation is applied (default); "0" -> plain removal (the
-// A/B switch; see the omp.h file header). Read at every setup().
-inline bool factor_drop_compensate_from_env() {
-    const char* e = std::getenv("APXCHOL_FACTOR_DROP_COMPENSATE");
-    return !(e && *e && std::atoi(e) == 0);
-}
-
 // Per-column scale contract: s_j of the factor column [first, last) whose
 // FIRST entry is the diagonal: max |off-diagonal|, or 1.0f if the column has
 // no nonzero off-diagonal (so v / s_j is always defined). The reference of the
@@ -102,15 +96,14 @@ inline float factor_column_scale(const Val* vals, Off first, Off last) {
 }
 
 // What the compacting drop did to the m columns handed to it (the SpTRSV
-// backends expose it as drop_stats()): the threshold in effect (rel; 0 = off)
-// and whether the compensation was applied, nnz before / after (nnz_stored is
+// backends expose it as drop_stats()): the threshold in effect (rel; 0 = off),
+// nnz before / after (nnz_stored is
 // what the CSR and the CSC each hold), and how many off-diagonals went and
 // why (dropped = dropped_threshold + dropped_flush -- below the threshold, or
 // stored as zero by the storage format anyway; a dropped entry is attributed
 // to the threshold first).
 struct factor_drop_stats {
     double        rel               = 0.0;
-    bool          compensate        = true;
     std::uint64_t nnz_factor        = 0;   // nnz of the columns as factorized (before the drop)
     std::uint64_t nnz_stored        = 0;   // nnz after the drop (== nnz_factor when nothing dropped)
     std::uint64_t dropped           = 0;   // = dropped_threshold + dropped_flush
@@ -128,21 +121,20 @@ struct factor_drop_stats {
 /// the compacted arrays are returned in `out_outer` (m+1), `out_inner` /
 /// `out_vals` (nnz_stored, allocated UNINITIALIZED -- every slot is written
 /// exactly once), with the column-sum compensation applied to the kept
-/// off-diagonals of every column that lost mass (when `compensate`), and the
+/// off-diagonals of every column that lost mass, and the
 /// function returns true; otherwise the outputs are left untouched (no copy
 /// for the exact-no-op case, e.g. grids) and it returns false. `st` gets
-/// nnz_factor / nnz_stored / dropped* either way (rel / compensate too).
+/// rel / nnz_factor / nnz_stored / dropped* either way.
 /// O(nnz) parallel, no atomics: per-column kept count -> serial prefix over
 /// m+1 -> parallel compacted copy + per-column compensation, all at the
 /// factor's precision (Val), before any narrowing to a storage format.
 template <class Off, class Idx, class Val, class Keep>
 inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, const Val* vals,
-                                   const float* col_scale, double rel, bool compensate, Keep keep,
+                                   const float* col_scale, double rel, Keep keep,
                                    std::vector<Off>& out_outer, std::unique_ptr<Idx[]>& out_inner,
                                    std::unique_ptr<Val[]>& out_vals, factor_drop_stats& st) {
     const Off nnz = outer[m];
     st.rel        = rel;
-    st.compensate = compensate;
     st.nnz_factor = static_cast<std::uint64_t>(nnz);
     st.nnz_stored = static_cast<std::uint64_t>(nnz);
     st.dropped = st.dropped_threshold = st.dropped_flush = 0;
@@ -203,7 +195,7 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
         // the column sum -- hence L~ L~^T's row sums, the Laplacian structure
         // and the grounding mass -- is what it was. Same fixed order in every
         // thread: deterministic.
-        if (compensate && dropped_sum != 0.0 && kept_abs > 0.0) {
+        if (dropped_sum != 0.0 && kept_abs > 0.0) {
             const double per_abs = dropped_sum / kept_abs;
             for (Off q = first; q < out; ++q) {
                 if (drop_inner[q] == j) continue;

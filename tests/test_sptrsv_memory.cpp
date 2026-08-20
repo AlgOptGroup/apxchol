@@ -102,7 +102,6 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
     const auto F = apxchol::factorize(L, apxchol::graph_storage::vec_pool, fopts);
     const node_index m = F.L.rows() - 1;                       // Laplacian path
     scoped_env drop("APXCHOL_FACTOR_DROP", "0.5");             // force a real drop
-    scoped_env comp("APXCHOL_FACTOR_DROP_COMPENSATE", nullptr);
 
     { apxchol::omp_sptrsv warm; warm.setup(F.L, m); }          // OMP team + arenas exist
     if (!reset_peak_rss()) GTEST_SKIP() << "/proc/self/clear_refs not writable";
