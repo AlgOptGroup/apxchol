@@ -47,17 +47,23 @@ ctest --test-dir build --output-on-failure
 
 # Fetch the SuiteSparse test matrices into data/matrices/ (gitignored).
 # Downloads ~3.3 GB total (com-Orkut alone is 1.7 GB and additionally needs
-# -DAPXCHOL_64BIT_EDGE_INDICES=ON); only ecology1 is needed for the smoke
-# test below.
+# -DAPXCHOL_64BIT_EDGE_INDICES=ON); only ecology1 and com-Amazon are needed
+# for the smoke tests below.
 ./scripts/download_graphs.sh
 
-# Solve a Matrix Market Laplacian/SDDM system against a generated random RHS
+# Solve a Matrix Market system against a generated random RHS. The input may
+# be an assembled Laplacian/SDDM operator (ecology1) or a graph
+# adjacency/pattern matrix (com-Amazon and most SuiteSparse graphs), from
+# which L = D - A is built; which one it is, is auto-detected and reported on
+# the "input:" line — override with --input-kind laplacian|adjacency.
 ./build/apxchol data/matrices/ecology1.mtx --random-rhs --tol 1e-8
+./build/apxchol data/matrices/com-Amazon.mtx --random-rhs --tol 1e-8
 # ... or bring your own right-hand side:
 ./build/apxchol data/matrices/ecology1.mtx --rhs your_rhs.mtx  # MatrixMarket vector of length n
 ```
 
-Useful CLI knobs: `--tol`, `--maxiter`, `--is {block_greedy|luby|baumann_kyng|rootset}`,
+Useful CLI knobs: `--tol`, `--maxiter`, `--input-kind {auto|laplacian|adjacency}`,
+`--is {block_greedy|luby|baumann_kyng|rootset}`,
 `--graph-storage {vec|forward_star|bstr|vec_pool}`,
 `-o solution.mtx`, `--seed`. See `--help` for the full list.
 

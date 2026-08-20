@@ -20,6 +20,7 @@
 #include "apxchol/solver/sptrsv/omp.h"
 #include "apxchol/graph/incidence_list.h"
 #include "apxchol/graph/conversions.h"
+#include "mtx_input.h"
 
 namespace {
 
@@ -256,9 +257,25 @@ int main(int argc, char* argv[]) {
         const cli_options cli = parse_args(argc, argv);
 
         Eigen::SparseMatrix<double> A;
+        fast_matrix_market::matrix_market_header hdr;
         {
             std::ifstream f(cli.input_path);
-            fast_matrix_market::read_matrix_market_eigen(f, A);
+            fast_matrix_market::read_matrix_market_eigen(f, hdr, A);
+        }
+        // Same trap as the CLI: an adjacency/pattern .mtx handed straight to
+        // factorize() gives negative edge weights and a fill-free factor, so
+        // every number this tool prints would be about a graph that isn't
+        // there. See src/mtx_input.h.
+        {
+            const auto scan = apxchol::scan_input(A);
+            std::string reason;
+            const auto kind = apxchol::resolve_input_kind(
+                apxchol::input_kind::automatic, scan,
+                hdr.field == fast_matrix_market::pattern, reason);
+            std::printf("%s\n",
+                        apxchol::describe_input(kind, scan, reason).c_str());
+            if (kind == apxchol::input_kind::adjacency)
+                apxchol::adjacency_to_laplacian(A);
         }
 
         factor_options opts;

@@ -20,10 +20,12 @@ add_executable(unit_tests
         test_sptrsv_levelset.cpp
         test_sptrsv_kernels.cpp
         test_lowprec.cpp
+        test_mtx_input.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE
         apxchol_core
+        apxchol_mtx_input
         GTest::gtest_main
 )
 
@@ -42,6 +44,64 @@ include(GoogleTest)
 gtest_discover_tests(unit_tests PROPERTIES TIMEOUT 120
         ENVIRONMENT "OMP_NUM_THREADS=4")
 
+# ── CLI-level tests ─────────────────────────────────
+# The Laplacian-vs-adjacency bug was in the CLI, not the core, so it gets
+# tests that actually run the binary on files of each input kind. The fixtures
+# are tiny path graphs, one file per kind. They live in fixtures/, not data/:
+# the root .gitignore's `data/` rule is unanchored and would swallow them.
+set(APXCHOL_CLI_DATA "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+
+# These four must CONVERGE, so they are checked by exit code (0 = reached
+# --tol) plus a FAIL_REGULAR_EXPRESSION that trips if the file was read as the
+# wrong kind. Do not add PASS_REGULAR_EXPRESSION here: setting it makes CTest
+# ignore the exit code, which is the convergence signal.
+
+# An adjacency/pattern file is what SuiteSparse ships and what the README
+# tells users to download: it must be recognised and solved, not silently
+# turned into a garbage system (the regression: "iterations 0 / residual 1").
+add_test(NAME cli_pattern_adjacency_converges
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_pattern.mtx" --random-rhs --tol 1e-8)
+set_tests_properties(cli_pattern_adjacency_converges PROPERTIES
+        FAIL_REGULAR_EXPRESSION "LAPLACIAN/SDDM operator")
+
+# An assembled Laplacian keeps being solved as given.
+add_test(NAME cli_laplacian_converges
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_laplacian.mtx" --random-rhs --tol 1e-8)
+set_tests_properties(cli_laplacian_converges PROPERTIES
+        FAIL_REGULAR_EXPRESSION "ADJACENCY graph")
+
+# So does an SDDM system (positive diagonal excess), which must NOT be rebuilt
+# as a Laplacian -- that would discard the excess.
+add_test(NAME cli_sddm_converges
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_sddm.mtx" --random-rhs --tol 1e-8)
+set_tests_properties(cli_sddm_converges PROPERTIES
+        FAIL_REGULAR_EXPRESSION "ADJACENCY graph")
+
+# --input-kind adjacency on an already-assembled Laplacian is a no-op
+# (|-w| = w and the rebuilt diagonal is the degree), so it still converges.
+add_test(NAME cli_explicit_adjacency_on_laplacian
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_laplacian.mtx" --random-rhs
+                 --tol 1e-8 --input-kind adjacency)
+set_tests_properties(cli_explicit_adjacency_on_laplacian PROPERTIES
+        FAIL_REGULAR_EXPRESSION "LAPLACIAN/SDDM operator")
+
+# An input that is neither kind must fail loudly (exit 2), naming what was
+# detected -- never solve one of the two readings silently. PASS_REGULAR_
+# EXPRESSION decides the verdict from the output, so the deliberate non-zero
+# exit code does not mark the test failed.
+add_test(NAME cli_ambiguous_input_is_rejected
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/ambiguous.mtx" --random-rhs --tol 1e-8)
+set_tests_properties(cli_ambiguous_input_is_rejected PROPERTIES
+        PASS_REGULAR_EXPRESSION "cannot tell whether this matrix is")
+
+# Forcing the wrong kind must still be loud: the run reports the breakdown
+# rather than presenting "iterations 0 / residual 1" as a result.
+add_test(NAME cli_forced_wrong_kind_reports_breakdown
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_pattern.mtx" --random-rhs
+                 --tol 1e-8 --input-kind laplacian)
+set_tests_properties(cli_forced_wrong_kind_reports_breakdown PROPERTIES
+        PASS_REGULAR_EXPRESSION "PCG broke down before its first update")
+
 # Developer analysis tools (not tests, not registered with ctest).
 # APXCHOL_BUILD_TOOLS is declared in the root CMakeLists.txt.
 if (APXCHOL_BUILD_TOOLS)
@@ -49,6 +109,8 @@ if (APXCHOL_BUILD_TOOLS)
     target_link_libraries(bench_setup PRIVATE apxchol_core)
 
     add_executable(analyze_factor analyze_factor.cpp)
-    # fast_matrix_market: this tool reads .mtx files itself (the core doesn't).
-    target_link_libraries(analyze_factor PRIVATE apxchol_core fast_matrix_market::fast_matrix_market)
+    # fast_matrix_market: this tool reads .mtx files itself (the core doesn't),
+    # so it needs the CLI's Laplacian-vs-adjacency interpretation too.
+    target_link_libraries(analyze_factor PRIVATE apxchol_core apxchol_mtx_input
+                          fast_matrix_market::fast_matrix_market)
 endif()

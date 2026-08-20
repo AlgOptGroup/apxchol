@@ -8,6 +8,12 @@
 
 namespace apxchol {
 
+static const std::map<std::string, input_kind> input_kind_map = {
+    {"auto",      input_kind::automatic},
+    {"laplacian", input_kind::laplacian},
+    {"adjacency", input_kind::adjacency},
+};
+
 static const std::map<std::string, graph_storage> graph_storage_map = {
     {"vec",          graph_storage::vec},
     {"forward_star", graph_storage::forward_star},
@@ -34,8 +40,10 @@ run_config parse_args(int argc, char* argv[]) {
     bool verbose = false;
     std::string rhs_str, output_str;
 
-    CLI::App app{"Solve a Laplacian or SDDM system Ax = b via approximate Cholesky + PCG "
-                 "(Laplacian vs SDDM auto-detected)"};
+    CLI::App app{"Solve a Laplacian or SDDM system Ax = b via approximate Cholesky + PCG. "
+                 "The input .mtx may be an assembled Laplacian/SDDM operator or a graph "
+                 "adjacency/pattern matrix; which one is auto-detected and reported (see "
+                 "--input-kind), and Laplacian vs SDDM is auto-detected within the solver"};
 
     // ── version ──
     app.add_flag_callback("-V,--version", []() {
@@ -65,6 +73,17 @@ run_config parse_args(int argc, char* argv[]) {
     rhs_opt->excludes(rand_flag);
     rand_flag->excludes(rhs_opt);
     rhs_group->require_option(1);
+
+    // ── how to read the input matrix ──
+    std::string input_kind_str = "auto";
+    app.add_option("--input-kind", input_kind_str,
+                   "How to read the input file: 'laplacian' = an already-assembled "
+                   "Laplacian/SDDM operator, solved as given; 'adjacency' = a graph "
+                   "adjacency/pattern matrix, from which L = D - A is assembled "
+                   "(edge weight |value|, self-loops dropped); 'auto' = decide from "
+                   "the off-diagonal signs and the diagonal, and refuse if ambiguous")
+        ->capture_default_str()
+        ->check(CLI::IsMember({"auto", "laplacian", "adjacency"}));
 
     // ── output ──
     app.add_option("-o,--output", output_str,
@@ -126,6 +145,7 @@ run_config parse_args(int argc, char* argv[]) {
 
     if (!rhs_str.empty())    cfg.rhs_path     = rhs_str;
     if (!output_str.empty()) cfg.output_path  = output_str;
+    cfg.input = input_kind_map.at(input_kind_str);
     cfg.solve_opts.storage = graph_storage_map.at(graph_storage_str);
     setup_logging(quiet, verbose);
     return cfg;

@@ -1,5 +1,6 @@
 #include "apxchol.h"
 #include "config.h"
+#include "mtx_input.h"
 #include <fast_matrix_market/app/Eigen.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdlib>
@@ -15,14 +16,30 @@ int main(int argc, char* argv[]) try {
 
     spdlog::debug("loading matrix from {}", cfg.input_path);
     Eigen::SparseMatrix<double> L;
+    fast_matrix_market::matrix_market_header hdr;
     {
         std::ifstream f(cfg.input_path);
-        fast_matrix_market::read_matrix_market_eigen(f, L);
+        fast_matrix_market::read_matrix_market_eigen(f, hdr, L);
     }
     if (L.rows() != L.cols()) {
         spdlog::error("matrix must be square, got {}x{}", L.rows(), L.cols());
         return 2;
     }
+
+    // Decide what the file actually holds before handing it to the solver:
+    // an adjacency matrix fed in as an operator gives negative edge weights,
+    // zero fill and an immediate PCG breakdown, with nothing on screen to say
+    // why. See src/mtx_input.h.
+    // An unusable or ambiguous matrix throws here; the handler below logs it
+    // and exits 2, as it does for any other input error.
+    const auto scan = scan_input(L);
+    std::string reason;
+    const input_kind kind = resolve_input_kind(
+        cfg.input, scan, hdr.field == fast_matrix_market::pattern, reason);
+    spdlog::info("{}", describe_input(kind, scan, reason));
+    if (kind == input_kind::adjacency)
+        adjacency_to_laplacian(L);
+
     spdlog::info("n = {},  nnz(L) = {}", L.rows(), L.nonZeros());
 
     Eigen::VectorXd b;
@@ -57,10 +74,27 @@ int main(int argc, char* argv[]) try {
     }
 
     const bool converged = res.residual < cfg.solve_opts.tol;
-    if (!converged)
-        spdlog::error("did not reach tol {} (residual {}); on a disconnected "
-                      "Laplacian a globally generated RHS may be inconsistent "
-                      "per component", cfg.solve_opts.tol, res.residual);
+    if (!converged) {
+        // iterations == 0 without convergence means PCG stopped before its
+        // first update, i.e. p·Ap <= 0: the operator is not positive
+        // semidefinite and NOTHING was solved. That is the symptom a
+        // misinterpreted input produces, so name the interpretation.
+        const std::string why = diagnose_failure(kind, scan);
+        if (res.iterations == 0)
+            spdlog::error("PCG broke down before its first update (p·Ap <= 0): the "
+                          "operator is not positive semidefinite, so x = 0 was "
+                          "returned and the reported residual {} is meaningless.{} "
+                          "The input was read as {}.",
+                          res.residual, why,
+                          kind == input_kind::adjacency
+                              ? "an adjacency graph (L = D - A)"
+                              : "an assembled Laplacian/SDDM operator");
+        else
+            spdlog::error("did not reach tol {} in {} iterations (residual {}); on a "
+                          "disconnected Laplacian a globally generated RHS may be "
+                          "inconsistent per component.{}",
+                          cfg.solve_opts.tol, res.iterations, res.residual, why);
+    }
     return converged ? 0 : 1;
 } catch (const std::exception& e) {
     spdlog::error("{}", e.what());
