@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/graph/conversions.h"
+#include "apxchol/operator_class.h"
 #include "apxchol/solver/elimination/elimination.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/partitioner_list.h"
@@ -33,6 +34,14 @@ struct factorization {
     // Peak graph memory during factorization (bytes, heap only).
     std::size_t peak_graph_bytes = 0;
 
+    // Stored positive off-diagonal entries the M-matrix lumping moved onto the
+    // diagonal before this factor was built (0 = the input was already an
+    // M-matrix, the overwhelmingly common case). Two entries per pair; the
+    // rank of the perturbation is half this. See operator_class.h. The
+    // OPERATOR is untouched — only the matrix the preconditioner was built
+    // from carries the lumping.
+    Eigen::Index lumped_offdiag = 0;
+
     // Per-round statistics. active/is_size/avg_deg are always populated;
     // nnz_added/nnz_total only when a checkpoint is provided (they need an
     // extra factor_cols scan). is_size drives the SpTRSV round-as-level path.
@@ -57,13 +66,35 @@ factorization factorize(graph<Incidence> G,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
 
+namespace detail {
+
+/// The prologue EVERY matrix-level factorize() shares, so that no surface can
+/// drift from another: assert the operator contract (operator_class.h), apply
+/// M-matrix lumping if the matrix needs and permits it, build the graph from
+/// the result, and record what was lumped on the returned factorization.
+///
+/// `L` itself is never modified — a lumped input is factorized from a private
+/// copy — which is what keeps the operator PCG applies bit-identical to the
+/// one the caller passed.
+template<typename Graph, typename Build>
+factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
+                                 Build&& build) {
+    const operator_view op(L);
+    factorization F = build(make_graph<Graph>(op.matrix()));
+    F.lumped_offdiag = op.lumped();
+    return F;
+}
+
+} // namespace detail
+
 /// Factorize from a Laplacian matrix, building a Graph internally.
 template<typename Graph = graph<>>
 factorization factorize(const Eigen::SparseMatrix<double>& L,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    auto G = make_graph<Graph>(L);
-    return factorize(std::move(G), opts, cp);
+    return detail::factorize_operator<Graph>(L, [&](auto&& G) {
+        return factorize(std::move(G), opts, cp);
+    });
 }
 
 /// Custom-eliminator overload: substitute your own star-vertex elimination
@@ -99,14 +130,18 @@ template<typename Partitioner = block_greedy_partitioner, eliminator E,
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return factorize<Partitioner>(make_graph<Graph>(L), elim, opts, cp);
+    return detail::factorize_operator<Graph>(L, [&](auto&& G) {
+        return factorize<Partitioner>(std::move(G), elim, opts, cp);
+    });
 }
 
 template<partitioner P, typename Graph = graph<>>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return factorize(make_graph<Graph>(L), std::move(part), opts, cp);
+    return detail::factorize_operator<Graph>(L, [&](auto&& G) {
+        return factorize(std::move(G), std::move(part), opts, cp);
+    });
 }
 
 template<partitioner P, eliminator E, typename Graph = graph<>>
@@ -114,7 +149,9 @@ factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return factorize(make_graph<Graph>(L), std::move(part), elim, opts, cp);
+    return detail::factorize_operator<Graph>(L, [&](auto&& G) {
+        return factorize(std::move(G), std::move(part), elim, opts, cp);
+    });
 }
 
 /// Runtime-dispatch overload for graphs: picks partitioner by name from

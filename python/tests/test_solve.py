@@ -110,7 +110,7 @@ def test_b_length_mismatch_raises():
         solver.solve(np.ones(L.shape[0] + 1))
 
 
-# ── input contract: adjacency matrices are rejected, never converted ─────────
+# ── operator contract: the class is asserted, not sniffed at ─────────────────
 
 
 def grid2d_adjacency(m):
@@ -120,22 +120,24 @@ def grid2d_adjacency(m):
 
 
 def test_adjacency_input_raises_with_a_diagnosis():
-    """The failure this check exists to prevent: an adjacency matrix used to
+    """An adjacency matrix used to factor to zero fill and report
 
-    factor to zero fill and report `converged=False` with no explanation."""
+    `converged=False` with no explanation. It is now refused by the
+    positive-diagonal condition of the operator contract -- a hard PSD
+    violation -- with the explicit conversion named."""
     A = grid2d_adjacency(10)
     with pytest.raises(ValueError) as exc:
         apxchol.solver(A)
     msg = str(exc.value)
-    assert "adjacency matrix" in msg
-    # (a) what was detected, with counts
-    assert f"none of the {A.shape[0]} rows carries a positive diagonal" in msg
+    # (a) which condition failed, with counts
+    assert "Condition FAILED: positive diagonal" in msg
+    assert f"Not one of the {A.shape[0]} non-empty rows" in msg
     assert f"{A.nnz} off-diagonal entries are positive" in msg
-    # (b) what apxchol wants instead
-    assert "assembled Laplacian/SDDM operator" in msg
+    # (b) the class apxchol is defined on
+    assert "apxchol solves symmetric SDDM / Laplacian operators" in msg
     # (c) the one-line fix, naming the helper
+    assert "ADJACENCY matrix" in msg
     assert "apxchol.laplacian(A)" in msg
-    assert "scipy.sparse.diags" in msg
 
 
 def test_every_public_entry_rejects_an_adjacency_matrix():
@@ -145,29 +147,52 @@ def test_every_public_entry_rejects_an_adjacency_matrix():
                  lambda: apxchol.factorize(A),
                  lambda: apxchol.Solver(A),
                  lambda: apxchol.solve(A, b)):
-        with pytest.raises(ValueError, match="adjacency matrix"):
+        with pytest.raises(ValueError, match="Condition FAILED: positive diagonal"):
             call()
 
 
-def test_check_is_narrow_positive_diagonal_is_never_rejected():
-    """Only the UNAMBIGUOUS signature fires: no positive diagonal ANYWHERE.
+def test_a_row_without_a_positive_diagonal_is_refused_as_such():
+    """The diagonal condition is about PSD, not about spotting adjacency
 
-    A matrix that mixes positive off-diagonals with a positive diagonal is
-    ambiguous (mixed-sign FEM/structural operators look like that), so it must
-    keep going through untouched.
-    """
+    matrices: one bad row is enough, and the message must NOT then suggest a
+    conversion that would not help."""
+    A = grid2d_sddm(10).tolil()
+    A[3, 3] = -1.0
+    with pytest.raises(ValueError) as exc:
+        apxchol.factorize(A.tocsc())
+    msg = str(exc.value)
+    assert "Condition FAILED: positive diagonal" in msg
+    assert "first at row 3" in msg
+    assert "ADJACENCY" not in msg
+
+
+def test_positive_offdiagonals_on_a_positive_diagonal_are_lumped_not_rejected():
+    """A nearly-SDDM SPD operator (mixed-sign FEM/structural matrices look
+
+    like this) is repaired by M-matrix lumping, not refused -- and the
+    preconditioner-only transform leaves the caller's matrix alone."""
     A = grid2d_sddm(10).tolil()
     A[0, 3] = +0.25              # a positive off-diagonal on a positive diagonal
     A[3, 0] = +0.25
     A = A.tocsc()
+    before = A.copy()
     assert (A.diagonal() > 0).all()
-    apxchol.factorize(A)         # must not raise
 
-    # One single positive diagonal entry in an otherwise adjacency-looking
-    # matrix is enough ambiguity to disable the check.
-    B = grid2d_adjacency(10).tolil()
-    B[0, 0] = 1.0
-    apxchol.factorize(B.tocsc())  # must not raise
+    s = apxchol.factorize(A)
+    assert s.lumped == 2         # both triangles of the one pair
+    # the caller's matrix is untouched
+    assert (A != before).nnz == 0
+
+    b = np.ones(A.shape[0])
+    res = s.solve(b, tol=1e-8, maxiter=500)
+    assert res.converged
+    # ... and the residual is against the TRUE operator, not the lumped one
+    assert np.linalg.norm(b - A @ res.x) / np.linalg.norm(b) < 1e-7
+
+
+def test_a_pure_laplacian_reports_no_lumping():
+    s = apxchol.factorize(grid2d_laplacian(10))
+    assert s.lumped == 0
 
 
 def test_mixed_sign_operator_with_positive_diagonal_still_solves():

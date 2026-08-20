@@ -21,6 +21,7 @@ add_executable(unit_tests
         test_sptrsv_kernels.cpp
         test_lowprec.cpp
         test_mtx_input.cpp
+        test_operator_class.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE
@@ -77,6 +78,24 @@ add_test(NAME cli_sddm_converges
 set_tests_properties(cli_sddm_converges PROPERTIES
         FAIL_REGULAR_EXPRESSION "ADJACENCY graph")
 
+# A nearly-SDDM SPD operator (one off-diagonal positive) is repaired by
+# M-matrix lumping when the preconditioner is built and must converge. Without
+# it the positive entry becomes a negative edge weight, sample_clique's prefix
+# sampler breaks, and the run ends in the stagnation guard.
+add_test(NAME cli_nearly_sddm_converges
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_nearly_sddm.mtx" --random-rhs --tol 1e-8)
+set_tests_properties(cli_nearly_sddm_converges PROPERTIES
+        FAIL_REGULAR_EXPRESSION "ADJACENCY graph")
+
+# The A/B knob. It must RUN with lumping off -- both arms of an A/B have to
+# produce a number -- but say loudly that it is handing the factorization
+# negative edge weights, which has no other symptom than a bad residual.
+add_test(NAME cli_lumping_disabled_warns
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_nearly_sddm.mtx" --random-rhs --tol 1e-8)
+set_tests_properties(cli_lumping_disabled_warns PROPERTIES
+        ENVIRONMENT "APXCHOL_LUMP=0"
+        PASS_REGULAR_EXPRESSION "M-matrix lumping is disabled")
+
 # --input-kind adjacency on an already-assembled Laplacian is a no-op
 # (|-w| = w and the rebuilt diagonal is the degree), so it still converges.
 add_test(NAME cli_explicit_adjacency_on_laplacian
@@ -94,13 +113,16 @@ add_test(NAME cli_ambiguous_input_is_rejected
 set_tests_properties(cli_ambiguous_input_is_rejected PROPERTIES
         PASS_REGULAR_EXPRESSION "cannot tell whether this matrix is")
 
-# Forcing the wrong kind must still be loud: the run reports the breakdown
-# rather than presenting "iterations 0 / residual 1" as a result.
-add_test(NAME cli_forced_wrong_kind_reports_breakdown
+# Forcing the wrong kind must still be loud. The CLI honours --input-kind (it
+# is a human tool and says what it did), but the LIBRARY then asserts the
+# operator class and refuses: an adjacency matrix carries no positive diagonal,
+# which no positive semidefinite operator can do. It used to reach PCG and
+# report "iterations 0 / residual 1"; now it never gets that far.
+add_test(NAME cli_forced_wrong_kind_is_refused
          COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_pattern.mtx" --random-rhs
                  --tol 1e-8 --input-kind laplacian)
-set_tests_properties(cli_forced_wrong_kind_reports_breakdown PROPERTIES
-        PASS_REGULAR_EXPRESSION "PCG broke down before its first update")
+set_tests_properties(cli_forced_wrong_kind_is_refused PROPERTIES
+        PASS_REGULAR_EXPRESSION "Condition FAILED: positive diagonal")
 
 # Developer analysis tools (not tests, not registered with ctest).
 # APXCHOL_BUILD_TOOLS is declared in the root CMakeLists.txt.

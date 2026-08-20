@@ -28,6 +28,11 @@ struct solve_result {
     Eigen::VectorXd x;
     Eigen::Index iterations = 0;
     double residual      = 0.0;
+    // Positive off-diagonal entries the M-matrix lumping moved onto the
+    // diagonal while building the PRECONDITIONER (0 = the operator was already
+    // an M-matrix). The operator this residual is measured against is the one
+    // the caller passed, lumping or not. See operator_class.h.
+    Eigen::Index lumped_offdiag = 0;
     checkpoint timings;
     // Device VRAM (MB) held at solve end (operator + factor + PCG vectors still
     // resident), via cudaMemGetInfo. -1 = unmeasured (CPU build / host PCG).

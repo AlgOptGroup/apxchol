@@ -1,8 +1,12 @@
 // Tests for the CLI's Laplacian-vs-adjacency input interpretation
-// (src/mtx_input.h) and for the end-to-end symptom it exists to prevent:
-// an adjacency matrix fed to the solver as an operator factorizes to zero
-// fill and PCG breaks down before its first update ("iterations 0 /
-// residual 1").
+// (src/mtx_input.h): the human-facing layer that decides how to READ a .mtx
+// file and prints its decision, with --input-kind to override it.
+//
+// The LIBRARY-side counterpart -- asserting the operator class rather than
+// guessing at it -- lives in test_operator_class.cpp. Note the split: reading
+// an adjacency matrix as an operator no longer "breaks down at iteration 0",
+// it is REFUSED by the precondition assertion (see
+// AdjacencyInputRegression.RawAdjacencyIsRefusedByTheOperatorContract below).
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -16,10 +20,8 @@
 #include "apxchol/solver/solve.h"
 #include "mtx_input.h"
 
-using apxchol::adjacency_signature;
 using apxchol::adjacency_to_laplacian;
 using apxchol::describe_input;
-using apxchol::detect_adjacency_signature;
 using apxchol::input_kind;
 using apxchol::input_scan;
 using apxchol::resolve_input_kind;
@@ -68,74 +70,6 @@ Eigen::Index offdiag_factor_nnz(const apxchol::factorization& F) {
 }
 
 } // namespace
-
-// ── detect_adjacency_signature: the rule the BINDINGS reject on ─────────────
-// Narrower than resolve_input_kind's automatic decision, because a library
-// caller gets an error, not a conversion with a printed explanation.
-
-TEST(AdjacencySignature, FiresOnAnAdjacencyMatrix) {
-    const Sparse A = grid_adjacency(6, 6);
-    const adjacency_signature sig = detect_adjacency_signature(A);
-    EXPECT_TRUE(sig.detected());
-    EXPECT_EQ(sig.n, 36);
-    EXPECT_FALSE(sig.any_positive_diagonal);
-    EXPECT_EQ(sig.positive_offdiag, A.nonZeros());
-}
-
-TEST(AdjacencySignature, NeverFiresOnAnAssembledOperator) {
-    EXPECT_FALSE(detect_adjacency_signature(grid_laplacian(6, 6)).detected());
-
-    Sparse sddm = grid_laplacian(6, 6);            // Laplacian + diagonal excess
-    for (int i = 0; i < sddm.rows(); ++i) sddm.coeffRef(i, i) += 0.05;
-    sddm.makeCompressed();
-    EXPECT_FALSE(detect_adjacency_signature(sddm).detected());
-}
-
-TEST(AdjacencySignature, NeverFiresWhenAnyRowHasAPositiveDiagonal) {
-    // The mixed-sign FEM/structural case (parabolic_fem, thermal2, bcsstk*,
-    // G3_circuit, apache2): positive diagonal AND positive off-diagonals. It
-    // works today and must keep working.
-    Sparse M = grid_laplacian(6, 6);
-    M.coeffRef(0, 3) = +0.25;
-    M.coeffRef(3, 0) = +0.25;
-    M.makeCompressed();
-    EXPECT_GT(scan_input(M).offdiag_pos, 0);
-    EXPECT_FALSE(detect_adjacency_signature(M).detected());
-
-    // ... and a single positive diagonal entry is enough ambiguity to disarm
-    // the check even on an otherwise adjacency-shaped matrix.
-    Sparse A = grid_adjacency(6, 6);
-    A.coeffRef(0, 0) = 1.0;
-    A.makeCompressed();
-    EXPECT_FALSE(detect_adjacency_signature(A).detected());
-}
-
-TEST(AdjacencySignature, NeverFiresWithoutPositiveOffDiagonals) {
-    Sparse Z(8, 8);                                 // empty: nothing to judge
-    EXPECT_FALSE(detect_adjacency_signature(Z).detected());
-
-    // A negated adjacency matrix has no positive diagonal, but no positive
-    // off-diagonal either -- resolve_input_kind reads it as an operator, and
-    // so must the bindings.
-    Sparse N = grid_adjacency(6, 6);
-    for (int k = 0; k < N.outerSize(); ++k)
-        for (Sparse::InnerIterator it(N, k); it; ++it) it.valueRef() = -it.value();
-    EXPECT_FALSE(detect_adjacency_signature(N).detected());
-}
-
-TEST(AdjacencySignature, AgreesWithTheScanTheCliUses) {
-    // One rule, three surfaces: whatever the bindings reject, the CLI's own
-    // facts must call an adjacency matrix too.
-    const Sparse cases[] = {
-        grid_adjacency(5, 7), grid_laplacian(5, 7), path_adjacency(9),
-        grid_laplacian(1, 9), Sparse(4, 4),
-    };
-    for (const Sparse& M : cases) {
-        const input_scan s = scan_input(M);
-        const bool from_scan = s.n > 0 && s.diag_pos == 0 && s.offdiag_pos > 0;
-        EXPECT_EQ(detect_adjacency_signature(M).detected(), from_scan);
-    }
-}
 
 // ── scan_input ───────────────────────────────────────
 
@@ -357,28 +291,38 @@ TEST(AdjacencyToLaplacian, IsIdempotentOnAPureLaplacian) {
     EXPECT_NEAR((L - again).norm(), 0.0, 1e-12);
 }
 
-// ── end-to-end regression: zero fill / 0 iterations ──
+// ── end-to-end regression: the adjacency-as-operator mistake ─────────────────
 
-TEST(AdjacencyInputRegression, RawAdjacencyGeneratesNoFillAndBreaksDownAtIterationZero) {
-    // The bug this whole module exists to prevent. Handing the solver a raw
-    // adjacency matrix negates every off-diagonal into a negative edge weight;
-    // sample_clique early-returns on the resulting non-positive weighted
-    // degree, so NOT ONE sampled clique edge is ever emitted. Each original
-    // edge is still written to the factor when its first endpoint is
-    // eliminated, so a fill-free factor holds exactly `edges` off-diagonal
-    // entries -- and PCG then cannot take a single step.
+TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
+    // The bug this module exists to prevent, and how it now surfaces. Handing
+    // the solver a raw adjacency matrix used to negate every off-diagonal into
+    // a negative edge weight, produce a fill-free factor and a PCG that could
+    // not take a single step ("iterations 0 / residual 1"). The library now
+    // asserts the operator class instead: an adjacency matrix has no positive
+    // diagonal anywhere, which is a hard PSD violation, so it is REFUSED --
+    // with the explicit conversion named.
     constexpr Eigen::Index kEdges = 2 * 20 * 19;   // 20x20 4-neighbour grid
     const Sparse A = grid_adjacency(20, 20);
     ASSERT_EQ(A.nonZeros(), 2 * kEdges);           // both triangles stored
 
-    const auto F = apxchol::factorize(A);
-    EXPECT_EQ(offdiag_factor_nnz(F), kEdges)
-        << "expected a fill-free factor (one entry per input edge)";
-
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
-    const auto res = apxchol::solve(A, b, {.tol = 1e-8, .max_iter = 200});
-    EXPECT_EQ(res.iterations, 0);
-    EXPECT_DOUBLE_EQ(res.residual, 1.0);
+    for (auto call : {+[](const Sparse& M) {
+                          (void)apxchol::factorize(M);
+                      },
+                      +[](const Sparse& M) {
+                          (void)apxchol::solve(
+                              M, apxchol::generate_test_rhs(M.rows()),
+                              {.tol = 1e-8, .max_iter = 200});
+                      }}) {
+        try {
+            call(A);
+            FAIL() << "expected the operator contract to refuse an adjacency matrix";
+        } catch (const std::invalid_argument& e) {
+            const std::string msg = e.what();
+            EXPECT_NE(msg.find("positive diagonal"), std::string::npos) << msg;
+            EXPECT_NE(msg.find("ADJACENCY"), std::string::npos) << msg;
+            EXPECT_NE(msg.find("apxchol.laplacian(A)"), std::string::npos) << msg;
+        }
+    }
 }
 
 TEST(AdjacencyInputRegression, ConvertedAdjacencyHasPlausibleFillAndConverges) {

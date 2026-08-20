@@ -59,49 +59,95 @@ The public surface is the header tree under `include/apxchol/` plus two compiled
   - `partition/` — independent-set partitioners (`block_greedy` default, plus `luby`, `baumann_kyng`, `rootset`); the list lives in `partitioner_list.h` (`hybrid` and the separator partitioners no longer exist).
   - `sptrsv/` — triangular-solve backend (`omp.h` by default, `cuda.h` when `APXCHOL_USE_CUDA`; `factor_drop.h` = the compacting drop shared by both; `transpose.h` = the CSC→CSR transpose shared by both (blocked counting-sort parallel path + serial scatter, `use_parallel_transpose()` rule); `cuda_host.h` = the CUDA-free host prep of the GPU backend — L11 extraction, drop, fp16 narrowing, transpose (via `transpose.h`), level schedules, dataflow batch tables; `cuda_levelset.h` / `cuda_dataflow.h` / `cuda_cast.h` = the device kernels' declarations, defined in `src/*.cu`). The GPU-resident PCG's own kernels are `solver/pcg_cuda_kernels.h` / `src/cuda_pcg_kernels.cu`. See "SpTRSV level-set kernel" below.
 
+### Operator contract + M-matrix lumping (`include/apxchol/operator_class.h`, `src/operator_class.cpp`)
+
+The class the solver is DEFINED on, asserted rather than guessed, in ONE place
+every surface goes through — the CLI, the C++ API and both bindings:
+
+    A = A^T,   a_ii > 0,   a_ij <= 0 for i != j.
+
+`require_operator` throws `std::invalid_argument` naming WHICH condition failed
+and with what counts: square → finite → symmetry → positive diagonal →
+off-diagonal sign. Diagonal dominance is **reported, never enforced** —
+`G3_circuit` (42% of rows) and `apache2` (2 rows) are legitimately non-dominant
+and converge. A non-positive diagonal on a non-empty row is a hard PSD
+violation (`e_i^T A e_i = a_ii`), and the ADJACENCY case is exactly that
+condition failing everywhere while positive off-diagonals exist — so an
+adjacency matrix is refused by the diagonal condition, with `apxchol.laplacian(A)`
+/ `apxchol_laplacian(A)` / `--input-kind adjacency` named in the message. (This
+replaced `detect_adjacency_signature`, a heuristic about the caller's INTENT
+that could only recognise the one shape it had been taught.)
+
+**M-matrix lumping** repairs a nearly-SDDM SPD operator instead of rejecting
+it. For every positive off-diagonal pair, `a_ii += a_ij; a_jj += a_ij;
+a_ij = a_ji = 0` — equivalently `Â = A + Σ a_ij (e_i - e_j)(e_i - e_j)^T`, a sum
+of positive multiples of rank-1 PSD matrices, so `A ⪯ Â`: PSD in, PSD out; PD
+in, PD out; row sums preserved exactly; dominance strengthened by `2·P_i`; all
+edge weights `>= 0`, which is what `tree_elimination::sample_clique` needs (its
+`prefix` array must be non-decreasing for the `upper_bound` draw — one negative
+weight and the sampler draws from a broken distribution, and the bad fill
+spreads by additive merging). Default **ON**: it cannot produce a wrong answer,
+only a worse preconditioner.
+
+What it buys tracks the positive off-diagonal MASS, not the entry count, and
+the range is wide (measured 2026-08-20 against the same build with
+`APXCHOL_LUMP=0`): `thermal2`, at 0.0017% of the mass, **survives without it**
+— 46 iterations unrepaired vs 44 lumped — and `parabolic_fem` 44 vs 42; but
+`bcsstk13` at 39.7% runs 500 iterations to a residual of **NaN** unrepaired,
+and 50 to a stagnated 29.4 even lumped. Hence the ceiling.
+
+It is applied ONLY to the matrix the PRECONDITIONER is built from, on a private
+copy — PCG keeps applying the operator the caller passed, so the residual is
+for the system asked about. Same contract as rchol's non-SDD compensation
+(arXiv:2011.07769 §5.2.1). `operator_view` is the seam: it holds the lumped
+copy when one is needed and is a plain reference to the caller's matrix
+otherwise (a Laplacian/SDDM operator costs no copy). Every matrix-level
+`factorize` goes through `detail::factorize_operator`, which is what keeps the
+surfaces from diverging. The count lands on `factorization::lumped_offdiag`,
+`solve_result::lumped_offdiag` and `Solver.lumped` (Python), and
+`APXCHOL_VERBOSE` prints a one-line `describe_operator` summary.
+
+Refused past `APXCHOL_LUMP_MAX` (default **0.25**) of the off-diagonal |mass|;
+`APXCHOL_LUMP=0` disables lumping and lets the violation through with a stderr
+warning (both arms of an A/B must produce a number). The ceiling is on MASS,
+not entry count: `parabolic_fem` has 33% of its off-diagonals positive carrying
+3e-6 of the mass. Measured basis in `operator_class.h`.
+
+Measured as published (CLI, `--tol 1e-8`, T=8): `thermal2` 44 iters / 8.9e-09
+(840 entries lumped, 0.0017% of mass), `parabolic_fem` 42 / 9.1e-09 (1048576
+entries, 0.00016%), `apache2` 30 / 7.4e-09 and `G3_circuit` 45 / 8.6e-09 (both
+have NO positive off-diagonals — lumping is a no-op there, they exercise the
+non-dominant SDDM path), `bcsstk13` refused at 39.7% of the mass.
+
+Cost is one O(nnz) parallel scan per factorize (binary-searching the transpose
+partner inside `A` itself — no `A^T` materialized, no extra allocation).
+
 ### CLI input interpretation (`src/mtx_input.h`, target `apxchol_mtx_input`)
 
-The core takes an ASSEMBLED Laplacian/SDDM operator. A `.mtx` file may instead
-hold a graph ADJACENCY/pattern matrix (no diagonal, non-negative off-diagonals)
-— which is what most SuiteSparse graphs and `scripts/download_graphs.sh` give
-you — and the two are indistinguishable once inside `make_graph`: an adjacency
-matrix negates into NEGATIVE edge weights, `tree_elimination::sample_clique`
-early-returns on the resulting non-positive weighted degree, so the factor gets
-**zero fill** and PCG breaks down before its first update (`pAp <= 0`), which
-the CLI used to print as a bare "iterations 0 / residual 1". The benchmark
-suite never had the bug: `load_mtx_as_adjacency` always reads `.mtx` as
+The CLI's HUMAN-FACING layer, one level above the contract. Nothing else
+compiles it — the bindings deliberately do not, since a library caller does not
+reliably see what we print. It may guess, because it prints its guess on every
+run and takes `--input-kind` to override it.
+
+A `.mtx` file may hold an assembled operator or a graph ADJACENCY/pattern
+matrix (no diagonal, non-negative off-diagonals) — which is what most
+SuiteSparse graphs and `scripts/download_graphs.sh` give you. The benchmark
+suite never had the ambiguity: `load_mtx_as_adjacency` always reads `.mtx` as
 adjacency.
 
 `scan_input` → `resolve_input_kind` → `adjacency_to_laplacian` (Eigen-only, no
-file I/O; unit-tested in `tests/test_mtx_input.cpp` plus six `cli_*` ctest
-cases over `tests/data/*.mtx`). `--input-kind auto` (default) decides in this
-order: no off-diagonals → operator; all off-diagonals non-positive → operator;
-all positive → adjacency (a Laplacian/SDDM cannot have positive off-diagonals);
-mixed signs with a positive diagonal on EVERY row → operator (`parabolic_fem`,
-`thermal2`, `bcsstk*`); anything else → hard error naming the counts. Explicit
-`laplacian` / `adjacency` override and never fail. Off-diagonals confined to
-one triangle are a hard error (the file was not read symmetrically). The chosen
-reading is always logged on one `input:` line, and a non-convergent run appends
-what the scan found. Adjacency assembly is `L = D - A`, `A_ij = |M_ij|`,
-self-loops dropped — the same reading as `load_mtx_as_adjacency`, so it is a
-no-op on an already-assembled pure Laplacian. Diagonal dominance is reported,
-never enforced: `G3_circuit` (42% of rows) and `apache2` are legitimately
-non-dominant and converge.
-
-The **bindings** (`python/`, `octave/`) had the same bug by a different route —
-an in-memory `scipy.io.mmread(...)` / `sparse(...)` handed straight to
-`cpu_solver`, surfacing only as `converged=False`. They compile `mtx_input.cpp`
-too and reject on `detect_adjacency_signature`: a NARROW rule (not one row has
-a positive diagonal entry, yet positive off-diagonals exist) that never fires
-on anything that worked before, `parabolic_fem`/`thermal2`/`G3_circuit`/
-`apache2` included. It is an **error**, not the CLI's auto-conversion: the CLI
-prints how it read the file on every run, a library caller does not reliably
-see anything we print, so converting would risk returning a confident answer to
-a different system than the caller asked about. `apxchol.laplacian(A)` /
-`apxchol_laplacian(A)` do the conversion explicitly, with the CLI's `L = D - A`,
-`A_ij = |M_ij|`, self-loops-dropped semantics. Cost is nil on valid input: the
-scan stops at the first positive diagonal entry (0.000 ms vs a 50 ms ingestion
-at nnz 6.9M; only a matrix about to be rejected is walked whole).
+file I/O; unit-tested in `tests/test_mtx_input.cpp` plus eight `cli_*` ctest
+cases over `tests/fixtures/*.mtx`). `--input-kind auto` (default) decides in
+this order: no off-diagonals → operator; all off-diagonals non-positive →
+operator; all positive → adjacency (a Laplacian/SDDM cannot have positive
+off-diagonals); mixed signs with a positive diagonal on EVERY row → operator
+(`parabolic_fem`, `thermal2`, `bcsstk*`); anything else → hard error naming the
+counts. Explicit `laplacian` / `adjacency` override the READING and never fail
+— but the library's contract assertion still applies afterwards, so forcing
+`laplacian` on an adjacency file is refused there, not silently solved. Adjacency
+assembly is `L = D - A`, `A_ij = |M_ij|`, self-loops dropped — the same reading
+as `load_mtx_as_adjacency`, so it is a no-op on an already-assembled pure
+Laplacian.
 
 ### Dispatch and customization seams
 
@@ -157,7 +203,7 @@ When touching `apply_core` or anything that constructs a `factorization`, check 
 
 ### Experiment env knobs (`include/apxchol/env_knobs.h`)
 
-Process-wide, read once. `APXCHOL_GROUND=center-k|reg` (+ `APXCHOL_CENTER_K`, `APXCHOL_REG_EPS`) selects how a pure Laplacian is grounded: `center-k` (the default, K = `APXCHOL_CENTER_K` = 10) centres only every K-th preconditioner application of a solve; K = 1 centres every application (`APXCHOL_GROUND=center` is accepted as an alias for K = 1, canonical spelling `center-k` + `APXCHOL_CENTER_K=1`); `reg` adds an explicit `eps·diag` self-loop at `make_graph` time so the matrix classifies as SDDM (full-rank factor, no centring). `APXCHOL_OMP_THRESHOLD` overrides `factor_options::omp_threshold` (unset = unchanged; it also gates the partitioners, so lowering it puts more rounds on the parallel selection branch and changes the factor — deterministically, since 2026-08-20. The earlier note here, that below-2000 values "make the factor structure nondeterministic via the racy `block_greedy` conflict resolution (12/50 failures at 256)", had the threshold wrong, not the race: the race fired at the DEFAULT 2000 too — it just needs enough threads for cross-block chains (0/50 at T=4, 19/50 at T=8 on a 120×120 grid). Both are fixed; see "Determinism contract"). The `APXCHOL_TAIL_THREADS` (parallel tail rounds) and `APXCHOL_FUSED_PARALLEL_MIN` (OpenMP engagement threshold of the fused vector passes) knobs were removed 2026-08-20 — see "Retired knobs"; `detail::fused_omp_min()` is now the constant 2000.
+Process-wide, read once. `APXCHOL_GROUND=center-k|reg` (+ `APXCHOL_CENTER_K`, `APXCHOL_REG_EPS`) selects how a pure Laplacian is grounded: `center-k` (the default, K = `APXCHOL_CENTER_K` = 10) centres only every K-th preconditioner application of a solve; K = 1 centres every application (`APXCHOL_GROUND=center` is accepted as an alias for K = 1, canonical spelling `center-k` + `APXCHOL_CENTER_K=1`); `reg` adds an explicit `eps·diag` self-loop at `make_graph` time so the matrix classifies as SDDM (full-rank factor, no centring). `APXCHOL_OMP_THRESHOLD` overrides `factor_options::omp_threshold` (unset = unchanged; it also gates the partitioners, so lowering it puts more rounds on the parallel selection branch and changes the factor — deterministically, since 2026-08-20. The earlier note here, that below-2000 values "make the factor structure nondeterministic via the racy `block_greedy` conflict resolution (12/50 failures at 256)", had the threshold wrong, not the race: the race fired at the DEFAULT 2000 too — it just needs enough threads for cross-block chains (0/50 at T=4, 19/50 at T=8 on a 120×120 grid). Both are fixed; see "Determinism contract"). `APXCHOL_LUMP=0` disables M-matrix lumping (default ON) so a nearly-SDDM operator is refused instead of repaired — the A/B knob; `APXCHOL_LUMP_MAX` (default 0.25) is the off-diagonal-|mass| ceiling above which lumping is refused. See "Operator contract + M-matrix lumping". The `APXCHOL_TAIL_THREADS` (parallel tail rounds) and `APXCHOL_FUSED_PARALLEL_MIN` (OpenMP engagement threshold of the fused vector passes) knobs were removed 2026-08-20 — see "Retired knobs"; `detail::fused_omp_min()` is now the constant 2000.
 
 ### SpTRSV level-set kernel (`include/apxchol/solver/sptrsv/omp.h`, CPU/omp backend)
 

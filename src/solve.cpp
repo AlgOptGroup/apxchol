@@ -481,6 +481,11 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     if (tol < 0.0)    tol = opts_.tol;
     if (max_iter < 0) max_iter = opts_.max_iter;
 
+    // Report what the preconditioner build had to lump. The PCG below applies
+    // Lrm_/Lrm_f_, built from the caller's matrix, so the residual it reports
+    // is against the true operator whether anything was lumped or not.
+    res.lumped_offdiag = precond_.factor().lumped_offdiag;
+
     // Preconditioned CG with stagnation detection.
     const Eigen::Index n = n_;
 
@@ -695,6 +700,9 @@ solve_result solve(const Eigen::SparseMatrix<double>& L,
             precond.set_checkpoint(&res.timings);
         // The GPU SpTRSV's AUTO backend decision (cuda.h: cuSPARSE unless its
         precond.compute(L);
+        // Lumping (if any) happened inside compute(), on a private copy; the
+        // GPU operator below is built from L itself.
+        res.lumped_offdiag = precond.factor().lumped_offdiag;
 
         const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
         if (use_cp) { res.timings.descend("setup"); res.timings.tick(); }
