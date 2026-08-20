@@ -765,10 +765,26 @@ factorization factorize_impl(const Eliminator& elim,
         residual_thresh = residual_handoff_default;
     if (active.size() > residual_thresh) {
         baumann_kyng_partitioner bk;
+        // BK is sample-bounded here too, so an empty round means what it means
+        // in the main loop: THIS round's hash sample whiffed, not that the
+        // residual has stopped shrinking.  Retry on the next round's seed under
+        // the same budget.  Bailing on the first empty round (the behaviour
+        // until 2026-08-20) made the handoff point an artefact of where the
+        // first whiff happened to land — coAuthorsDBLP stopped at 507 active
+        // (harmless, the threshold is 500) but as-Skitter stopped at 5325 and
+        // handed all of it to the serial peel, while BK was still eliminating
+        // ~25 vertices per round.
+        size_t bk_consecutive_empty = 0;
         while (active.size() > residual_thresh) {
             ws.reset_for_round();
             const auto& bk_part = run_partitioner(bk, work, active);
-            if (bk_part.num_regions() == 0) break;
+            if (bk_part.num_regions() == 0) {
+                if (++bk_consecutive_empty >= kMaxEmptyRounds)
+                    break;                     // hand the residual to the peel
+                ++ws.round_index;              // keep retry rounds distinguishable
+                continue;                      // whiffed sample round: retry
+            }
+            bk_consecutive_empty = 0;
             result.rounds.push_back({active.size(), bk_part.num_regions(),
                                      last_avg_degree, 0, 0});
             const size_t cols_before_bk = cp ? factor_cols.size() : 0;

@@ -67,12 +67,19 @@ struct factor_options {
     // optionally parallelize the residual peel by switching to BK rounds until
     // active shrinks below this threshold, then serial peel the tail.
     //
-    // Default SIZE_MAX = disabled (always serial peel).  Empirically the
-    // serial peel wins on the dense, high-degree residuals BG produces:
-    // BK rounds on the residual eliminate only ~100 vertices each, so the
-    // 100s of fork-join overheads add up to more than the serial peel cost.
-    // Set to a small value (e.g. 256) to enable for graphs with low-degree
-    // or near-IS-shaped residuals.
+    // SIZE_MAX here does NOT mean "serial peel": it means "defer to the
+    // partitioner", and every shipped partitioner that can bail out
+    // (block_greedy, luby, rootset) declares residual_handoff_threshold = 500,
+    // so the BK residual loop IS on by default.  Set an explicit value to
+    // override the trait; the serial peel is only reached for the last
+    // `residual_handoff_threshold` vertices.
+    //
+    // The original rationale for defaulting it off still holds where the
+    // residual is dense: BK's per-round yield collapses there (as-Skitter,
+    // T=16: ~25 vertices/round at the handoff, ~1.6/round by the time active
+    // reaches 500), so the fork-join overheads of the extra rounds cost about
+    // what the serial peel they replace costs.  What the parallel rounds do
+    // buy is fill: nnz(L) 19.43M -> 18.48M (-4.9%) on as-Skitter.
     size_t parallel_residual_threshold = std::numeric_limits<size_t>::max();
 
     // Pivot ordering strategy for the serial residual peel (eliminate_remaining).
