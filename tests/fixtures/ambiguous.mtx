@@ -1,0 +1,9 @@
+%%MatrixMarket matrix coordinate real symmetric
+% Mixed-sign off-diagonals and no diagonal at all: neither an assembled
+% Laplacian/SDDM operator (those have non-positive off-diagonals) nor a
+% weighted adjacency matrix (those have non-negative ones). --input-kind auto
+% must refuse this rather than silently solve one of the two readings.
+4 4 3
+2 1 1
+3 2 -1
+4 3 1

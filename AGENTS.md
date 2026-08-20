@@ -20,7 +20,9 @@ ctest --test-dir build --output-on-failure
 # Single test or filter
 ./build/tests/unit_tests --gtest_filter='FactorizeTest/*.PermutationIsValid'
 
-# CLI solver (a RHS is mandatory: --rhs file.mtx or --random-rhs)
+# CLI solver (a RHS is mandatory: --rhs file.mtx or --random-rhs). The input
+# .mtx may be an assembled Laplacian/SDDM operator or a graph adjacency/pattern
+# matrix; the kind is auto-detected and reported (`--input-kind` overrides).
 ./build/apxchol path/to/matrix.mtx --random-rhs --tol 1e-8
 ```
 
@@ -52,6 +54,35 @@ The public surface is the header tree under `include/apxchol/` plus two compiled
   - `elimination/` — the tree-based clique-sampling kernel plus the public `eliminator` seam (`weighted_neighbor`, `deferred_edge`, `edge_emitter`, `random_stream`, `as_eliminator`; per-elimination seeds — no library-owned RNG stream); the `clique`/`iid` variants no longer exist.
   - `partition/` — independent-set partitioners (`block_greedy` default, plus `luby`, `baumann_kyng`, `rootset`); the list lives in `partitioner_list.h` (`hybrid` and the separator partitioners no longer exist).
   - `sptrsv/` — triangular-solve backend (`omp.h` by default, `cuda.h` when `APXCHOL_USE_CUDA`; `factor_drop.h` = the compacting drop shared by both; `transpose.h` = the CSC→CSR transpose shared by both (blocked counting-sort parallel path + serial scatter, `use_parallel_transpose()` rule); `cuda_host.h` = the CUDA-free host prep of the GPU backend — L11 extraction, drop, fp16 narrowing, transpose (via `transpose.h`), level schedules, dataflow batch tables; `cuda_levelset.h` / `cuda_dataflow.h` / `cuda_cast.h` = the device kernels' declarations, defined in `src/*.cu`). The GPU-resident PCG's own kernels are `solver/pcg_cuda_kernels.h` / `src/cuda_pcg_kernels.cu`. See "SpTRSV level-set kernel" below.
+
+### CLI input interpretation (`src/mtx_input.h`, target `apxchol_mtx_input`)
+
+The core takes an ASSEMBLED Laplacian/SDDM operator. A `.mtx` file may instead
+hold a graph ADJACENCY/pattern matrix (no diagonal, non-negative off-diagonals)
+— which is what most SuiteSparse graphs and `scripts/download_graphs.sh` give
+you — and the two are indistinguishable once inside `make_graph`: an adjacency
+matrix negates into NEGATIVE edge weights, `tree_elimination::sample_clique`
+early-returns on the resulting non-positive weighted degree, so the factor gets
+**zero fill** and PCG breaks down before its first update (`pAp <= 0`), which
+the CLI used to print as a bare "iterations 0 / residual 1". The benchmark
+suite never had the bug: `load_mtx_as_adjacency` always reads `.mtx` as
+adjacency.
+
+`scan_input` → `resolve_input_kind` → `adjacency_to_laplacian` (Eigen-only, no
+file I/O; unit-tested in `tests/test_mtx_input.cpp` plus six `cli_*` ctest
+cases over `tests/data/*.mtx`). `--input-kind auto` (default) decides in this
+order: no off-diagonals → operator; all off-diagonals non-positive → operator;
+all positive → adjacency (a Laplacian/SDDM cannot have positive off-diagonals);
+mixed signs with a positive diagonal on EVERY row → operator (`parabolic_fem`,
+`thermal2`, `bcsstk*`); anything else → hard error naming the counts. Explicit
+`laplacian` / `adjacency` override and never fail. Off-diagonals confined to
+one triangle are a hard error (the file was not read symmetrically). The chosen
+reading is always logged on one `input:` line, and a non-convergent run appends
+what the scan found. Adjacency assembly is `L = D - A`, `A_ij = |M_ij|`,
+self-loops dropped — the same reading as `load_mtx_as_adjacency`, so it is a
+no-op on an already-assembled pure Laplacian. Diagonal dominance is reported,
+never enforced: `G3_circuit` (42% of rows) and `apache2` are legitimately
+non-dominant and converge.
 
 ### Dispatch and customization seams
 

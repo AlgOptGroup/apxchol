@@ -163,10 +163,18 @@ if (APXCHOL_POOL_FP32)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_POOL_FP32)
 endif()
 
+# ── CLI input interpretation ─────────────────────────
+# Laplacian-vs-adjacency detection for the CLI's .mtx input. Its own target so
+# the unit tests can link it without pulling in CLI11/spdlog; Eigen-only, no
+# file I/O (the CLI reads the file and hands over the matrix).
+add_library(apxchol_mtx_input STATIC src/mtx_input.cpp)
+target_link_libraries(apxchol_mtx_input PUBLIC Eigen3::Eigen)
+target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 # ── CLI solver ───────────────────────────────────────
 add_executable(apxchol src/main.cpp src/config.cpp)
-target_link_libraries(apxchol PRIVATE apxchol_core CLI11::CLI11 spdlog::spdlog
-                      fast_matrix_market::fast_matrix_market)
+target_link_libraries(apxchol PRIVATE apxchol_core apxchol_mtx_input CLI11::CLI11
+                      spdlog::spdlog fast_matrix_market::fast_matrix_market)
 
 # ── Examples ─────────────────────────────────────────
 if (APXCHOL_BUILD_EXAMPLES)
