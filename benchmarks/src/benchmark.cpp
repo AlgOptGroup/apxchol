@@ -2245,6 +2245,31 @@ int main(int argc, char** argv) {
     }
 #endif
 
+#ifdef APXCHOL_USE_CUDA
+    // ── CUDA device init warmup: a FAIRNESS measure, not an optimization ──
+    // CUDA creates the per-process primary context LAZILY, inside whichever
+    // CUDA call comes first. Without this warmup that fixed cost lands inside
+    // the measured setup of whichever GPU solver happens to run first in the
+    // process — ours (apxchol_v1) and every GPU competitor alike (amgcl_cuda,
+    // hypre_boomeramg_gpu, the GPU RCHOL/ParAC drivers). That was uniform, so
+    // it was fair, but it inflated every published GPU setup number: ~80-135 ms
+    // on an RTX 4090 Laptop, ~715 ms on a GH200, worst in relative terms at
+    // small n. (Enabling GPU persistence mode is not a substitute: it moved the
+    // laptop cost only 80-97 -> 76-86 ms.) Paying it here, once, before any
+    // solver is timed, puts every GPU solver on the same post-initialization
+    // footing — and keeps them there now that apxchol's own library-side
+    // prewarm (apxchol/solver/cuda_context.h) hides its share of the cost.
+    // Printed rather than hidden. Nothing else about the timing logic changes.
+    {
+        const auto t_cuda_init = std::chrono::high_resolution_clock::now();
+        cudaFree(nullptr);
+        const double init_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t_cuda_init).count();
+        std::cerr << "[bench] cuda_init (once, before any timed solver): "
+                  << std::fixed << std::setprecision(1) << init_ms << " ms\n";
+    }
+#endif
+
     // Build graph
     std::vector<std::vector<Edge>> adj;
     std::string graph_name;
