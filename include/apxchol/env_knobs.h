@@ -44,6 +44,20 @@
 ///     the default was also perf-refuted: iter0040 10-rep paired medians show
 ///     setup 0.867 s (2000/serial tail) vs 0.869 s (256/tail 4) -- the
 ///     eliminate-stage win (~-22%) is offset elsewhere.
+///
+///   APXCHOL_LUMP = 0 | 1                          (default: 1, ON)
+///     M-matrix lumping of positive off-diagonals when the PRECONDITIONER is
+///     built (operator_class.h). Default ON because it cannot produce a wrong
+///     answer -- PCG keeps applying the operator the caller passed -- only a
+///     worse preconditioner. APXCHOL_LUMP=0 turns it off for an A/B: the run
+///     PROCEEDS (both arms of an A/B must produce a number) but prints a
+///     stderr warning, since the factorization is then handed negative edge
+///     weights and the only symptom is a bad residual at the end.
+///
+///   APXCHOL_LUMP_MAX = <fraction in (0, 1]>       (default: 0.25)
+///     Ceiling on the fraction of off-diagonal |mass| lumping may delete
+///     before the matrix is refused instead. See kDefaultLumpMassCeiling in
+///     operator_class.h for the measured basis.
 
 
 #include <cstdio>
@@ -59,6 +73,11 @@ struct env_knobs {
     int            center_k = 10;      // APXCHOL_CENTER_K (center-k mode only)
     double         reg_eps  = 1e-8;    // APXCHOL_REG_EPS  (reg mode only)
     long           omp_threshold = -1; // APXCHOL_OMP_THRESHOLD; < 0 = unset
+    bool           lump = true;        // APXCHOL_LUMP
+    // APXCHOL_LUMP_MAX; <= 0 = unset, resolved against
+    // apxchol::kDefaultLumpMassCeiling (defined in operator_class.h, which
+    // owns the documented default -- this header must not restate it).
+    double         lump_max_mass = -1.0;
 
     static const env_knobs& get() {
         static const env_knobs k = parse();
@@ -90,6 +109,16 @@ private:
         if (const char* e = std::getenv("APXCHOL_OMP_THRESHOLD"); e && *e) {
             const long v = std::atol(e);
             if (v >= 0) k.omp_threshold = v;
+        }
+        if (const char* e = std::getenv("APXCHOL_LUMP"); e && *e)
+            k.lump = std::strcmp(e, "0") != 0;
+        if (const char* e = std::getenv("APXCHOL_LUMP_MAX"); e && *e) {
+            const double v = std::atof(e);
+            if (v > 0.0 && v <= 1.0) k.lump_max_mass = v;
+            else
+                std::fprintf(stderr,
+                    "[apxchol] APXCHOL_LUMP_MAX='%s' is not a fraction in "
+                    "(0, 1]; using the default ceiling\n", e);
         }
         return k;
     }

@@ -75,27 +75,31 @@ function test_apxchol()
   ok = ok + 1; fprintf('ok %d  error paths raise\n', ok);
 
   % ── 7. an adjacency matrix is REJECTED, not silently mis-solved ──
-  % Without this check the solver negates every edge weight, factors to zero
-  % fill and reports 0 iterations / residual 1 with no diagnosis.
+  % Without the operator contract the solver negates every edge weight, factors
+  % to zero fill and reports 0 iterations / residual 1 with no diagnosis. An
+  % adjacency matrix carries no positive diagonal anywhere, which is a hard PSD
+  % violation, so the positive-diagonal condition catches it.
   n7 = 10;  L7 = grid2d_laplacian(n7);
   A7 = spdiags(diag(L7), 0, n7*n7, n7*n7) - L7;      % the adjacency matrix
   err = false;  msg = '';  id = '';
   try, apxchol_solver(A7); catch e, err = true; id = e.identifier; msg = e.message; end
   assert(err, 'adjacency input must error');
-  assert(strcmp(id, 'apxchol:adjacencyInput'), 'wrong identifier: %s', id);
-  assert(~isempty(strfind(msg, 'adjacency matrix')), 'message: no detection');
-  assert(~isempty(strfind(msg, sprintf('none of the %d rows', n7*n7))), ...
+  assert(strcmp(id, 'apxchol:badInput'), 'wrong identifier: %s', id);
+  assert(~isempty(strfind(msg, 'Condition FAILED: positive diagonal')), ...
+         'message: does not name the failed condition');
+  assert(~isempty(strfind(msg, sprintf('Not one of the %d non-empty rows', n7*n7))), ...
          'message: no row count');
   assert(~isempty(strfind(msg, sprintf('%d off-diagonal entries are positive', nnz(A7)))), ...
          'message: no off-diagonal count');
-  assert(~isempty(strfind(msg, 'assembled Laplacian/SDDM operator')), ...
+  assert(~isempty(strfind(msg, 'apxchol solves symmetric SDDM / Laplacian operators')), ...
          'message: does not say what is wanted');
+  assert(~isempty(strfind(msg, 'ADJACENCY matrix')), 'message: no detection');
   assert(~isempty(strfind(msg, 'apxchol_laplacian(A)')), 'message: no fix');
   ok = ok + 1; fprintf('ok %d  adjacency input rejected with a diagnosis\n', ok);
 
-  % ── 8. the check is NARROW: one positive diagonal disables it ──
-  % Mixed-sign operators (positive diagonal, some positive off-diagonals) are
-  % ambiguous and must keep working exactly as before.
+  % ── 8. positive off-diagonals on a positive diagonal are LUMPED, not refused ──
+  % A nearly-SDDM SPD operator (mixed-sign FEM/structural matrices look like
+  % this) is repaired when the preconditioner is built and must keep solving.
   n8 = 10;  m8 = n8 * n8;
   L8 = grid2d_laplacian(n8);
   L8 = L8 + 0.5 * speye(m8);          % SDDM
@@ -103,9 +107,15 @@ function test_apxchol()
   b8 = randn(m8, 1);
   r8 = apxchol_solve(L8, b8);
   assert(r8.converged, 'mixed-sign operator with a positive diagonal must solve');
-  A8 = A7;  A8(1, 1) = 1.0;           % one diagonal entry => ambiguous => allowed
-  s8 = apxchol_solver(A8);  clear s8;
-  ok = ok + 1; fprintf('ok %d  check is narrow (positive diagonal never rejected)\n', ok);
+  % the residual is against the TRUE operator, lumping or not
+  assert(norm(b8 - L8 * r8.x) / norm(b8) <= 1e-7, 'residual is not against A');
+  % ... while a SINGLE bad diagonal row is still a hard refusal
+  A8 = L8;  A8(2, 2) = -1.0;
+  err = false;  msg = '';
+  try, apxchol_solver(A8); catch e, err = true; msg = e.message; end
+  assert(err, 'a non-positive diagonal must error');
+  assert(~isempty(strfind(msg, 'first at row 1')), 'message: no witness row');
+  ok = ok + 1; fprintf('ok %d  positive off-diagonals lumped, bad diagonal refused\n', ok);
 
   % ── 9. apxchol_laplacian assembles L = D - A ──
   L9 = apxchol_laplacian(A7);

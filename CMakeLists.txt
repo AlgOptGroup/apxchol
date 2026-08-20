@@ -113,6 +113,7 @@ configure_file(
 # ── Core library: ApxChol preconditioner ─────────────
 add_library(apxchol_core
     src/factorization.cpp
+    src/operator_class.cpp
     src/solve.cpp
     # Device precision-cast kernels for the mixed-precision GPU SpTRSV. Compiled
     # by nvcc only on the CUDA build (the .cpp TUs are host-compiled and can't

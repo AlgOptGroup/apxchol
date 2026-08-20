@@ -24,12 +24,14 @@ find_package(pybind11 CONFIG REQUIRED)
 # The core TUs depend only on Eigen + OpenMP (no fast_matrix_market, no
 # generated version.h, no CLI11/spdlog), so we compile them straight into the
 # extension. The benchmark-critical apxchol::solve in solve.cpp is reused as-is;
-# mtx_input.cpp supplies the adjacency-input check the CLI shares with us.
+# operator_class.cpp supplies the operator-contract assertion and the M-matrix
+# lumping, shared verbatim with the CLI and the Octave binding. (src/mtx_input.cpp
+# is NOT compiled here: it is the CLI's own file-interpretation layer.)
 pybind11_add_module(_apxchol
     src/apxchol_ext.cpp
     ${APX_ROOT}/src/factorization.cpp
+    ${APX_ROOT}/src/operator_class.cpp
     ${APX_ROOT}/src/solve.cpp
-    ${APX_ROOT}/src/mtx_input.cpp
 )
 target_include_directories(_apxchol PRIVATE ${APX_ROOT}/include ${APX_ROOT}/src)
 target_link_libraries(_apxchol PRIVATE Eigen3::Eigen)

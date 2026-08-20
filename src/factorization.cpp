@@ -126,8 +126,16 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
                         graph_storage storage,
                         const factor_options& opts_in,
                         checkpoint* cp) {
-    if (L.rows() != L.cols())
-        throw std::invalid_argument("factorize: matrix must be square");
+    // Assert the operator contract and lump positive off-diagonals if the
+    // matrix needs it. Same `operator_view` the header's factorize() overloads
+    // use — one implementation, so the CLI, the C++ API and both bindings
+    // cannot diverge. Throws (naming the failed condition) on a violation;
+    // `op.matrix()` is L itself whenever nothing had to be lumped.
+    //
+    // Deliberately OUTSIDE the checkpoint bracket below: this is input
+    // validation, not factorization work, and folding it into "make_graph"
+    // would silently move the bench's setup_time.
+    const operator_view op(L);
 
     // make_graph runs BEFORE factorize_with_strategy's own descend("setup") —
     // without its own bracket, its cost (~700 ms on IPM iter40: full
@@ -140,24 +148,27 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
     // by-value graph parameter — no defensive deep-copy on the dispatch path.
     auto do_factorize = [&](auto&& G) {
         if (cp) { (*cp)("make_graph"); cp->ascend(); }
-        return factorize_with_strategy(std::move(G), opts, cp);
+        factorization F = factorize_with_strategy(std::move(G), opts, cp);
+        F.lumped_offdiag = op.lumped();
+        return F;
     };
 
+    const Eigen::SparseMatrix<double>& A = op.matrix();
     switch (storage) {
     case graph_storage::forward_star: {
-        auto G = make_graph<graph<forward_star_incidence>>(L);
+        auto G = make_graph<graph<forward_star_incidence>>(A);
         return do_factorize(std::move(G));
     }
     case graph_storage::bstr: {
-        auto G = make_graph<graph<bstr_incidence>>(L);
+        auto G = make_graph<graph<bstr_incidence>>(A);
         return do_factorize(std::move(G));
     }
     case graph_storage::vec_pool: {
-        auto G = make_graph<graph<vec_pool_incidence>>(L);
+        auto G = make_graph<graph<vec_pool_incidence>>(A);
         return do_factorize(std::move(G));
     }
     default: {
-        auto G = make_graph<graph<vec_incidence>>(L);
+        auto G = make_graph<graph<vec_incidence>>(A);
         return do_factorize(std::move(G));
     }
     }

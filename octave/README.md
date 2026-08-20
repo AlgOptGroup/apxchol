@@ -18,8 +18,11 @@ res = apxchol_solve(A, b);        % one-shot convenience
 ```
 
 `A` must be the **assembled operator** (Laplacian or SDDM), not the adjacency
-matrix of a graph — an adjacency matrix raises `apxchol:adjacencyInput`, never
-gets converted silently. `apxchol_laplacian` does the conversion explicitly:
+matrix of a graph. The operator contract — symmetric, positive diagonal,
+non-positive off-diagonals — is asserted, and a violation raises
+`apxchol:badInput` naming which condition failed. An adjacency matrix carries
+no positive diagonal anywhere, so it is caught there, never converted silently.
+`apxchol_laplacian` does the conversion explicitly:
 
 ```matlab
 A = mmread('com-Amazon.mtx');     % adjacency matrix
@@ -29,6 +32,12 @@ res = apxchol_solve(L, b);
 
 Laplacian vs SDDM is auto-detected (singular Laplacians get the rank-(n−1)
 factor with null-space centering). Defaults only — no tuning knobs exposed.
+
+A symmetric operator that is SPD but carries a few POSITIVE off-diagonals (so
+not an M-matrix) is repaired rather than refused: each positive pair is lumped
+onto the diagonal, `a_ii += a_ij; a_jj += a_ij; a_ij = 0`, when the
+preconditioner is built. Row sums are preserved and the PCG keeps applying `A`
+itself, so `res.residual` is for the system you passed.
 
 ## Build
 

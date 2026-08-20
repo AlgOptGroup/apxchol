@@ -24,7 +24,6 @@
 #include <vector>
 
 #include "apxchol.h"
-#include "mtx_input.h"
 
 namespace {
 
@@ -43,39 +42,6 @@ struct mex_error : std::runtime_error {
 
 [[noreturn]] void fail(const char* id, const std::string& msg) {
     throw mex_error(id, msg);
-}
-
-// Reject the one input class that is UNAMBIGUOUSLY not an operator: a graph
-// adjacency matrix. Handed to the core it would negate every edge weight,
-// `sample_clique` would early-return on the negative weighted degree, and the
-// caller would get a zero-fill factor and a PCG that breaks down before its
-// first update -- surfacing only as `converged == false`, with no diagnosis.
-//
-// This is an ERROR, not a silent conversion. The CLI can auto-convert because
-// it prints how it read the file on every run; a library caller does not
-// reliably see anything we print, so converting would risk handing back a
-// confident answer to a DIFFERENT system than the one they believe they asked
-// about. `apxchol_laplacian(A)` makes the conversion explicit instead.
-//
-// Narrow by construction (see `apxchol::adjacency_signature`, shared with the
-// CLI and the Python binding): it fires only when NOT ONE row carries a
-// positive diagonal entry while positive off-diagonals exist. Mixed-sign
-// FEM/structural operators keep working.
-void reject_adjacency_input(const Eigen::SparseMatrix<double>& A) {
-    const apxchol::adjacency_signature sig = apxchol::detect_adjacency_signature(A);
-    if (!sig.detected()) return;
-    fail("apxchol:adjacencyInput",
-         "A looks like a graph adjacency matrix, not an assembled operator: "
-         "none of the " + std::to_string(sig.n) +
-         " rows carries a positive diagonal entry, while " +
-         std::to_string(sig.positive_offdiag) +
-         " off-diagonal entries are positive. apxchol solves the assembled "
-         "Laplacian/SDDM operator, whose off-diagonals are non-positive by "
-         "definition; an adjacency matrix would be read with every edge weight "
-         "negated, giving a zero-fill factor and a PCG that cannot take a step. "
-         "Pass the assembled operator, or convert an adjacency matrix with "
-         "apxchol_laplacian(A) (equivalently "
-         "L = spdiags(sum(abs(A), 2), 0, n, n) - abs(A)).");
 }
 
 // ── reusable solver: thin shell over apxchol::cpu_solver (mirrors the Python
@@ -153,9 +119,13 @@ Eigen::SparseMatrix<double> mx_to_eigen(const mxArray* mA) {
     Eigen::SparseMatrix<double> A(nr, nc);
     A.setFromTriplets(trips.begin(), trips.end());
     A.makeCompressed();
-    // After assembly, so duplicate (i, j) entries have been summed and the
-    // signs tested are the ones the solver will actually see.
-    reject_adjacency_input(A);
+    // No input-class check here: the library asserts the operator contract
+    // itself, inside the factorization, from ONE implementation shared with
+    // the CLI and the Python binding (apxchol/operator_class.h). It throws
+    // std::invalid_argument, which the catch chain in mexFunction reports as
+    // `apxchol:badInput` naming the condition that failed; an adjacency matrix
+    // is caught by the positive-diagonal condition and the message names
+    // apxchol_laplacian(A).
     return A;
 }
 

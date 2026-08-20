@@ -55,28 +55,6 @@ input_scan scan_input(const Eigen::SparseMatrix<double>& M) {
     return s;
 }
 
-adjacency_signature detect_adjacency_signature(const Eigen::SparseMatrix<double>& M) {
-    adjacency_signature a;
-    a.n = M.rows();
-
-    for (Eigen::Index k = 0; k < M.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
-            if (it.row() == it.col()) {
-                // One positive diagonal entry is enough: an adjacency matrix
-                // has none, so nothing further can make the signature hold.
-                // Every assembled operator hits this in its first column,
-                // which is what keeps the check free on valid input.
-                if (it.value() > 0.0) {
-                    a.any_positive_diagonal = true;
-                    return a;
-                }
-            } else if (it.value() > 0.0) {
-                ++a.positive_offdiag;
-            }
-        }
-    return a;
-}
-
 input_kind resolve_input_kind(input_kind requested, const input_scan& s,
                               bool pattern_field, std::string& reason) {
     // ── Structural gate, whatever the requested kind ──

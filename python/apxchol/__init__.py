@@ -8,6 +8,7 @@ Public API:
     Solver.solve(b, tol=None, maxiter=500, *, rtol=None, x0=None, out=None)
                                      ->  SolveResult
     Solver.apply(r)                  ->  numpy.ndarray   (M^{-1} r)
+    Solver.lumped                    ->  int  (positive off-diagonals lumped)
     Solver.aslinearoperator()        ->  scipy LinearOperator
     Solver.aspreconditioner()        ->  alias of aslinearoperator()
     Solver.P / Solver.chol() / Solver.L / Solver.D   ->  factor export
@@ -135,6 +136,20 @@ class Solver:
     @property
     def sddm(self) -> bool:
         return self._impl.sddm()
+
+    @property
+    def lumped(self) -> int:
+        """Positive off-diagonal entries M-matrix lumping moved onto the diagonal.
+
+        Zero for a Laplacian or SDDM operator, which is the usual case. A
+        nonzero count means `A` was not an M-matrix and the PRECONDITIONER was
+        built from a repaired copy — `a_ii += a_ij; a_jj += a_ij; a_ij = 0` for
+        each positive off-diagonal pair, which preserves every row sum and can
+        only raise the matrix in the Loewner order. `A` itself is untouched and
+        is what the PCG applies, so `SolveResult.residual` is for the system
+        you passed. Two entries are counted per pair (both triangles).
+        """
+        return self._impl.lumped()
 
     def __repr__(self) -> str:
         try:
@@ -272,9 +287,15 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool",
     A : scipy.sparse matrix
         Square graph Laplacian (singular, rank n−1) or SDDM matrix; the two
         cases are auto-detected. This is the ASSEMBLED operator, not the
-        adjacency matrix of a graph — an adjacency matrix (no positive
-        diagonal, positive off-diagonals) is rejected with a `ValueError`
-        naming :func:`laplacian`, which converts one.
+        adjacency matrix of a graph. The operator contract — symmetric,
+        positive diagonal, non-positive off-diagonals — is ASSERTED: a
+        violation raises `ValueError` naming which condition failed, and an
+        adjacency matrix (no positive diagonal anywhere) is caught by the
+        diagonal condition with :func:`laplacian` named as the fix. Diagonal
+        dominance is reported but not required. Positive off-diagonals on an
+        otherwise valid operator are repaired by M-matrix lumping when the
+        PRECONDITIONER is built (see :attr:`Solver.lumped`); the PCG still
+        applies `A` itself, so the residual is for the system you passed.
     seed : int
         RNG seed for the randomized clique sampling (factorization is
         deterministic per seed at one thread only).

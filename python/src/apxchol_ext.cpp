@@ -10,43 +10,10 @@
 #include <vector>
 
 #include "apxchol.h"
-#include "mtx_input.h"
 
 namespace py = pybind11;
 
 namespace {
-
-// Reject the one input class that is UNAMBIGUOUSLY not an operator: a graph
-// adjacency matrix. Handed to the core it would negate every edge weight,
-// `sample_clique` would early-return on the negative weighted degree, and the
-// caller would get a zero-fill factor and a PCG that breaks down before its
-// first update -- surfacing only as `converged=False`, with no diagnosis.
-//
-// This is an ERROR, not a silent conversion. The CLI can auto-convert because
-// it prints how it read the file on every run; a library caller does not
-// reliably see anything we print, so converting would risk handing back a
-// confident answer to a DIFFERENT system than the one they believe they asked
-// about. `apxchol.laplacian(A)` makes the conversion explicit instead.
-//
-// Narrow by construction (see `apxchol::adjacency_signature`): it fires only
-// when NOT ONE row carries a positive diagonal entry while positive
-// off-diagonals exist. Mixed-sign FEM/structural operators keep working.
-void reject_adjacency_input(const Eigen::SparseMatrix<double>& A) {
-    const apxchol::adjacency_signature sig = apxchol::detect_adjacency_signature(A);
-    if (!sig.detected()) return;
-    throw std::invalid_argument(
-        "A looks like a graph adjacency matrix, not an assembled operator: "
-        "none of the " + std::to_string(sig.n) +
-        " rows carries a positive diagonal entry, while " +
-        std::to_string(sig.positive_offdiag) +
-        " off-diagonal entries are positive. apxchol solves the assembled "
-        "Laplacian/SDDM operator, whose off-diagonals are non-positive by "
-        "definition; an adjacency matrix would be read with every edge weight "
-        "negated, giving a zero-fill factor and a PCG that cannot take a step. "
-        "Pass the assembled operator, or convert an adjacency matrix with "
-        "apxchol.laplacian(A) (equivalently "
-        "L = scipy.sparse.diags(numpy.asarray(A.sum(axis=1)).ravel()) - A).");
-}
 
 // scipy CSC (indptr, indices, data) -> column-major Eigen::SparseMatrix<double>.
 // forcecast accepts int32/int64 index arrays and any float data dtype.
@@ -79,9 +46,12 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
     Eigen::SparseMatrix<double> A(n, n);
     A.setFromTriplets(trips.begin(), trips.end());
     A.makeCompressed();
-    // After assembly, so duplicate (i, j) entries have been summed and the
-    // signs tested are the ones the solver will actually see.
-    reject_adjacency_input(A);
+    // No input-class check here: the library asserts the operator contract
+    // itself, inside the factorization, from ONE implementation shared with
+    // the CLI and the Octave binding (apxchol/operator_class.h). A violation
+    // arrives as std::invalid_argument -> ValueError, naming which condition
+    // failed; an adjacency matrix is caught by the positive-diagonal condition
+    // and the message names apxchol.laplacian(A).
     return A;
 }
 
@@ -171,6 +141,11 @@ public:
 
     Eigen::Index rows() const { return slv_.rows(); }
     bool sddm() const { return factor().sddm; }
+    // Positive off-diagonal entries M-matrix lumping moved onto the diagonal
+    // while building the preconditioner; 0 for a Laplacian/SDDM operator.
+    std::int64_t lumped() const {
+        return static_cast<std::int64_t>(factor().lumped_offdiag);
+    }
 
     // M^{-1} r (one forward/back SpTRSV; reused tuned factor).
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const {
@@ -288,6 +263,7 @@ PYBIND11_MODULE(_apxchol, m) {
         .def("apply", &Solver::apply, py::arg("r"))
         .def("rows", &Solver::rows)
         .def("sddm", &Solver::sddm)
+        .def("lumped", &Solver::lumped)
         .def("factor_nnz", &Solver::factor_nnz)
         .def("factor_csc", &Solver::factor_csc)
         .def("perm", &Solver::perm);
