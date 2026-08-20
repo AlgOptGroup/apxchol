@@ -49,9 +49,10 @@
 ///                       for greedy rules that pick optimistically and drop
 ///                       conflicting picks in a later resolution pass — see
 ///                       block_greedy)
-///   out.contains(u)  — is u selected?    (plain read; during a parallel
-///                       selection this is deliberately racy, exactly like a
-///                       shared mask — fine for greedy/IS conflict checks)
+///   out.contains(u)  — is u selected?    (a plain, unsynchronized read of the
+///                       shared mask: it is YOUR job to call it only where no
+///                       other thread can be writing mask[u] concurrently —
+///                       see the determinism contract below)
 ///
 /// Threading contract: find_partition is called ONCE per round from the
 /// orchestrating thread and is expected to parallelize internally (gate on
@@ -61,6 +62,30 @@
 /// the shipped rules parallelize over different structures (contiguous
 /// candidate blocks, repeated whole-set passes, DAG levels, a hash sample),
 /// so there is no common parallel skeleton to factor out.
+///
+/// ── Determinism contract (REQUIRED of every partitioner) ──
+///
+/// A partitioner's output — the selected set AND the order it is added in —
+/// must be a pure function of (graph, candidates, ctx, team size). At a fixed
+/// seed and a fixed thread count, two runs must produce the same
+/// partition_result, byte for byte. It may (and does) differ ACROSS thread
+/// counts: the team size decides how the work is split, and that is an input.
+///
+/// This is not a nicety. The round's selection is the elimination order, the
+/// elimination order is the permutation, and the permutation is the factor's
+/// stored structure — so a schedule-dependent selection makes nnz(L) itself
+/// wobble run to run. Two shipped rules violated it until 2026-08-20:
+/// block_greedy resolved cross-block conflicts against a mask other threads
+/// were concurrently clearing, and rootset built its peel frontier by
+/// concatenating `schedule(dynamic)` per-thread buffers. Both are fixed at
+/// their sites; the guard is FactorizeDeterminism.* in tests/test_factorize.cpp.
+///
+/// The two patterns to avoid, concretely:
+///   * reading `out.contains(u)` (or any shared flag) in a pass that also
+///     writes it — decide against a snapshot, barrier, then apply;
+///   * letting a `schedule(dynamic)` / `nowait` loop decide WHERE a vertex
+///     lands in a per-thread buffer that is later concatenated — sort the
+///     result, or partition the work statically.
 ///
 /// `G` is non-const only so the pruning helpers can run. Queries
 /// (see graph/graph.h):

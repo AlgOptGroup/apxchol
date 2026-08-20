@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <string>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/IterativeLinearSolvers>
@@ -186,6 +188,110 @@ TYPED_TEST(FactorizeTest, Deterministic) {
     EXPECT_EQ(F1.perm, F2.perm);
     Eigen::SparseMatrix<double> diff = factor_to_eigen(F1.L) - factor_to_eigen(F2.L);
     EXPECT_LT(diff.norm(), 1e-14);
+}
+
+// ── Determinism of the PARALLEL selection path ───────
+//
+// FactorizeTest.Deterministic above factorizes a 5x5 grid: 25 candidates,
+// far below factor_options::omp_threshold, so every round takes the SERIAL
+// branch of the partitioner and the parallel one is never executed. This test
+// executes it, and is the regression guard for two schedule-dependent outputs
+// fixed 2026-08-20:
+//
+//   * block_greedy's cross-block conflict resolution read the shared chosen[]
+//     mask while other threads were clearing it, so whether a boundary pick
+//     dropped depended on who got there first. That changed the round's
+//     independent set, hence the elimination order, hence the factor's
+//     STRUCTURE and its nnz, run to run at one seed and one thread count.
+//     Measured at the parent commit on a 32-core box, standalone (i.e. not
+//     under ctest's OMP_NUM_THREADS=4 cap), SpTRSVSetupMemory.SetupConsuming-
+//     ReleasesTheFactorAndSolvesIdentically — which factorizes a 120x120 grid
+//     twice and compares — failed 19/50 at T=8, 16/50 at T=16, 19/50 at T=32,
+//     and 0/50 at T=1 and T=4.
+//   * rootset's peel passes are `schedule(dynamic, 64)` into per-thread
+//     buffers, so the frontier ORDER (not the set) followed chunk arrival:
+//     same independent set, different labels, different stored factor.
+//
+// Both are selection-side, so one storage suffices here; the storage x
+// partitioner matrix was checked separately.
+namespace {
+// Raise the OpenMP team size for one test and put it back (gtest runs the
+// whole binary in one process; ctest pins OMP_NUM_THREADS=4 for it).
+struct scoped_threads {
+    int saved = 1;
+    explicit scoped_threads([[maybe_unused]] int n) {
+#ifdef _OPENMP
+        saved = omp_get_max_threads();
+        omp_set_num_threads(n);
+#endif
+    }
+    ~scoped_threads() {
+#ifdef _OPENMP
+        omp_set_num_threads(saved);
+#endif
+    }
+};
+
+// Byte-for-byte equality of two factors: same column pointers, same row
+// indices, same values. Structure AND values, not a norm.
+void expect_same_factor(const apxchol::factorization& a,
+                        const apxchol::factorization& b,
+                        const std::string& what) {
+    ASSERT_EQ(a.perm, b.perm) << what << ": elimination order differs";
+    ASSERT_EQ(a.L.nonZeros(), b.L.nonZeros()) << what << ": factor nnz differs";
+    const std::size_t nc = static_cast<std::size_t>(a.L.cols()) + 1;
+    const std::size_t nz = static_cast<std::size_t>(a.L.nonZeros());
+    EXPECT_EQ(std::memcmp(a.L.outerIndexPtr(), b.L.outerIndexPtr(),
+                          nc * sizeof(apxchol::edge_index)), 0)
+        << what << ": column pointers differ";
+    EXPECT_EQ(std::memcmp(a.L.innerIndexPtr(), b.L.innerIndexPtr(),
+                          nz * sizeof(apxchol::node_index)), 0)
+        << what << ": row indices differ (factor STRUCTURE is not reproducible)";
+    EXPECT_EQ(std::memcmp(a.L.valuePtr(), b.L.valuePtr(),
+                          nz * sizeof(apxchol::factor_value_t)), 0)
+        << what << ": factor values differ";
+}
+} // namespace
+
+TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
+#ifndef _OPENMP
+    GTEST_SKIP() << "serial build: there is no parallel selection path";
+#else
+    if (const char* e = std::getenv("APXCHOL_OMP_THRESHOLD"); e && *e)
+        GTEST_SKIP() << "APXCHOL_OMP_THRESHOLD=" << e
+                     << " overrides the omp_threshold this test sets";
+    // 14400 candidates against a 256-vertex OpenMP gate: most of the ~45
+    // elimination rounds take the parallel branch. 16 threads whatever the box
+    // has -- oversubscription is welcome here, it widens the window the
+    // block_greedy race needed.
+    const scoped_threads team(16);
+    const auto L = grid_laplacian(120, 120);
+    for (const char* sel : {"block_greedy", "luby", "rootset", "baumann_kyng"}) {
+        apxchol::factor_options opts;
+        opts.seed = 3;
+        opts.omp_threshold = 256;
+        opts.is_select = sel;
+        const auto ref = apxchol::factorize(L, apxchol::graph_storage::vec_pool, opts);
+        ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
+        for (int rep = 1; rep <= 3; ++rep) {
+            const auto F = apxchol::factorize(L, apxchol::graph_storage::vec_pool, opts);
+            expect_same_factor(ref, F, std::string(sel) + " rep " + std::to_string(rep));
+            if (::testing::Test::HasFatalFailure()) return;
+        }
+    }
+#endif
+}
+
+// The T=1 half of the contract: one thread, byte-identical factor. Cheap and
+// unconditional -- it holds on the serial build too.
+TEST(FactorizeDeterminism, SingleThreadedFactorizationIsByteIdentical) {
+    const scoped_threads team(1);
+    const auto L = grid_laplacian(60, 60);
+    apxchol::factor_options opts;
+    opts.seed = 11;
+    const auto a = apxchol::factorize(L, apxchol::graph_storage::vec_pool, opts);
+    const auto b = apxchol::factorize(L, apxchol::graph_storage::vec_pool, opts);
+    expect_same_factor(a, b, "T=1");
 }
 
 TYPED_TEST(FactorizeTest, DifferentSeeds) {

@@ -110,25 +110,56 @@ private:
 
                 #pragma omp barrier  // all chosen[] writes visible
 
-                // Parallel "shared-flag" conflict resolution: each thread drops
-                // its own boundary candidates that have a still-chosen cross-block
-                // neighbor that beats them, reading the shared chosen[] directly.
-                // Racy (reads chosen[u] while u may be getting dropped) -> can
-                // over-drop chains (a<b<c can drop both b AND c), giving a
-                // slightly smaller IS. The over-drop is empirically negligible
-                // (PCG iters and solve-per-iter unchanged across IPM/grid/
-                // SuiteSparse workloads) while keeping the resolution fully
-                // parallel — an exact serial index-ordered resolution was ~6x
-                // slower on dense residuals with no quality gain.
-                for (auto v : my_boundary) {
-                    int mb = block_of[v];
+                // Parallel "shared-flag" conflict resolution, DECIDE-THEN-APPLY:
+                // each thread first works out which of its own boundary picks
+                // lose to a cross-block neighbor (reads only), then a barrier,
+                // then the removals land. Every read therefore sees the SAME
+                // post-greedy snapshot of chosen[] in every thread, whatever the
+                // scheduling — which is what makes the round's selection, hence
+                // the elimination order, hence the factor's STRUCTURE,
+                // reproducible run to run at a fixed thread count (see the
+                // determinism contract in the class comment below).
+                //
+                // Resolving against the snapshot always takes the over-drop of a
+                // chain (a beats b beats c across three blocks: b loses to a and
+                // c loses to b, so both go even though b itself is leaving).
+                // That is precisely the worst case the pre-2026-08-20 racy
+                // single-phase pass already produced whenever a thread happened
+                // to read chosen[b] before b's owner cleared it, so it cannot
+                // cost more IS than that pass already did on a bad interleaving:
+                // measured on a 120x120 grid at T=32, per-round IS sizes move by
+                // <= 0.5% (round 2: 1400-1405 racy across runs -> 1398) and the
+                // round count stays inside the racy spread (44, vs 44-47). PCG
+                // iteration counts do not get worse -- on grid 300x300 and
+                // 600x600 the deterministic factor lands at or below EVERY count
+                // the racy build produced over 3 runs (300 at T=32: 43 vs
+                // 43/45/46; 600 at T=32: 46 vs 48/48/50).
+                // An exact index-ordered resolution — v survives iff no neighbor
+                // that beats it SURVIVES — is a recursive definition along those
+                // chains; the serial form of it was ~6x slower on dense residuals
+                // with no quality gain.
+                //
+                // Correctness is unaffected by the over-drop: for any edge (u,v)
+                // with both endpoints picked and in different blocks the loser
+                // under (degree, index) sees the winner in the snapshot and
+                // drops, so no adjacent pair survives — the output is still an
+                // independent set (debug builds verify this after every round).
+                size_t ndrop = 0;
+                for (size_t bi = 0; bi < my_boundary.size(); ++bi) {
+                    const node_index v = my_boundary[bi];
+                    const int mb = block_of[v];
                     for (auto idx : G.adj(v)) {
                         auto u = G.edge_target(idx, v);
                         if (G.is_active(u) && out.contains(u) && u_beats_v(u, v) && block_of[u] != mb) {
-                            out.remove(v); break;
+                            my_boundary[ndrop++] = v;   // ndrop <= bi: never clobbers unread entries
+                            break;
                         }
                     }
                 }
+
+                #pragma omp barrier  // decisions are all taken against the snapshot
+
+                for (size_t i = 0; i < ndrop; ++i) out.remove(my_boundary[i]);
             }
         } else
         #endif

@@ -10,6 +10,9 @@
 
 #include "apxchol/solver/partitioner.h"
 #include "apxchol/solver/partitioner_helpers.h"
+#include <algorithm>
+#include <cstdint>
+#include <vector>
 
 namespace apxchol {
 
@@ -195,6 +198,23 @@ private:
                     }
                 }
             }
+
+            // The exposed root SET of this level is schedule-independent (each
+            // w is pushed exactly once, by whichever thread's atomic decrement
+            // takes pri[w] to 0), but its ORDER is not: both peel passes above
+            // are `schedule(dynamic, 64)` and concatenate per-thread buffers,
+            // so which thread collects which vertex — and hence where it lands
+            // in `removed`, and through `removed` in `next_frontier` even on
+            // the serial decrement branch — depends on chunk arrival. That
+            // order is the order this round adds vertices to the selection,
+            // i.e. the elimination order inside the round, i.e. the
+            // permutation and therefore the factor's stored structure. Sorting
+            // the frontier pins it, on BOTH branches (a big frontier with a
+            // small `removed` mixes the parallel and serial ones). It costs
+            // O(k log k) on a level that already walks every edge incident to
+            // `removed`, and it does NOT change the independent set — only the
+            // labels the round hands out.
+            std::sort(next_frontier.begin(), next_frontier.end());
 
             std::swap(frontier, next_frontier);
         }
