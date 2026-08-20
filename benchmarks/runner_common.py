@@ -96,7 +96,44 @@ def make_prov(note, **extra):
 
 
 # ── matrix registry ─────────────────────────────────────────────────────────────
-# (mid, family, kind, spec, is2d) for generated grids; (mid, path, n) for .mtx.
+# Every entry DECLARES its kind. Two things can live in a .mtx file and they
+# define two different linear systems:
+#
+#   kind="graph"     the file is an adjacency / pattern matrix. The system it
+#                    defines is the graph Laplacian L = D - A, assembled from
+#                    |value| (unit weights for a `pattern` file). That IS the
+#                    system a graph file defines, so building it is not a
+#                    deviation from the published data.
+#   kind="operator"  the file is an already-assembled Laplacian / SDDM operator.
+#                    The system it defines is the matrix itself, and we solve it
+#                    exactly as published, diagonal included.
+#
+# The declaration is EXPLICIT and never auto-detected. A heuristic cannot tell
+# the two apart: kron_g500-logn16 stores integer values that are edge weights,
+# apache2 stores values that are an assembled operator, and both are "a
+# symmetric valued .mtx". Letting the benchmark guess would let it silently
+# change which problem the whole suite reports on. Anything undeclared raises
+# (see kind_of) rather than falling back to a default.
+#
+# `source` is a separate axis: where the matrix comes from (a generated grid vs
+# a file), not how its values are to be read.
+#
+# Kinds below are grounded in the files themselves (census 2026-08-20, stored
+# diagonal vs sum |off-diagonal| per row):
+#   operator — a stored, strictly positive diagonal on every row:
+#     ecology1       max rel. deviation 0        (published as an exact Laplacian)
+#     parabolic_fem  6.4e-6                      (Laplacian to rounding)
+#     apache2        10.4% worst row             (SDDM)
+#     thermal2       143% worst row, mean 4.1e-4 (SDDM)
+#     G3_circuit     16876% worst row, mean 161% (SDDM, large diagonal excess)
+#     iter00x0       IPM normal equations, positive diagonal on every row
+#   graph — no usable diagonal at all (`pattern` files store none; kron_g500
+#     stores one on 327 of 65536 rows, i.e. self-loops, not an operator).
+# ParAC's own benchmark splits its matrices exactly this way ("physics matrices:
+# used as-is" vs "graph matrices: build Laplacian from adjacency"), and four of
+# our five operator files are on its physics list.
+#
+# (mid, family, source, spec, is2d) for generated grids; (mid, path, n, kind) for .mtx.
 GRIDS = [("grid_500", "grids", "grid", 500, True), ("grid_1000", "grids", "grid", 1000, True),
          ("grid_2000", "grids", "grid", 2000, True), ("grid_3000", "grids", "grid", 3000, True),
          ("grid3d_100", "grids", "grid3d", 100, False), ("grid3d_150", "grids", "grid3d", 150, False),
@@ -104,42 +141,143 @@ GRIDS = [("grid_500", "grids", "grid", 500, True), ("grid_1000", "grids", "grid"
          ("grid_4000", "grids", "grid", 4000, True),      # ~8.0e7 nnz
          ("grid3d_250", "grids", "grid3d", 250, False),   # ~1.1e8 nnz
          ("grid_5000", "grids", "grid", 5000, True)]      # ~1.25e8 nnz
-SS = [("parabolic_fem", "data/matrices/parabolic_fem.mtx", 525825),
-      ("apache2", "data/matrices/apache2.mtx", 715176),
-      ("ecology1", "data/matrices/ecology1.mtx", 1000000),
-      ("G3_circuit", "data/matrices/G3_circuit.mtx", 1585478),
-      ("thermal2", "data/matrices/thermal2.mtx", 1228045),
-      ("com-Amazon", "data/matrices/com-Amazon.mtx", 334863),
-      ("coAuthorsDBLP", "data/matrices/coAuthorsDBLP.mtx", 299067),
-      ("kron_g500-logn16", "data/matrices/kron_g500-logn16.mtx", 65536),
-      ("com-Youtube", "data/matrices/com-Youtube.mtx", 1134890),
-      ("coPapersDBLP", "data/matrices/coPapersDBLP.mtx", 540486),
-      ("as-Skitter", "data/matrices/as-Skitter.mtx", 1696415),
-      ("com-LiveJournal", "data/matrices/com-LiveJournal.mtx", 3997962),
-      ("com-Orkut", "data/matrices/com-Orkut.mtx", 3072441)]
-IPM = [("iter0010", "data/ipm/iter0010/matrix.mtx", 524288),
-       ("iter0020", "data/ipm/iter0020/matrix.mtx", 524288),
-       ("iter0030", "data/ipm/iter0030/matrix.mtx", 524288),
-       ("iter0040", "data/ipm/iter0040/matrix.mtx", 524288)]
+SS = [("parabolic_fem", "data/matrices/parabolic_fem.mtx", 525825, "operator"),
+      ("apache2", "data/matrices/apache2.mtx", 715176, "operator"),
+      ("ecology1", "data/matrices/ecology1.mtx", 1000000, "operator"),
+      ("G3_circuit", "data/matrices/G3_circuit.mtx", 1585478, "operator"),
+      ("thermal2", "data/matrices/thermal2.mtx", 1228045, "operator"),
+      ("com-Amazon", "data/matrices/com-Amazon.mtx", 334863, "graph"),
+      ("coAuthorsDBLP", "data/matrices/coAuthorsDBLP.mtx", 299067, "graph"),
+      ("kron_g500-logn16", "data/matrices/kron_g500-logn16.mtx", 65536, "graph"),
+      ("com-Youtube", "data/matrices/com-Youtube.mtx", 1134890, "graph"),
+      ("coPapersDBLP", "data/matrices/coPapersDBLP.mtx", 540486, "graph"),
+      ("as-Skitter", "data/matrices/as-Skitter.mtx", 1696415, "graph"),
+      ("com-LiveJournal", "data/matrices/com-LiveJournal.mtx", 3997962, "graph"),
+      ("com-Orkut", "data/matrices/com-Orkut.mtx", 3072441, "graph")]
+# IPM normal-equation matrices: assembled A D A^T operators with their own
+# diagonal, so they are solved as published like any other operator file.
+IPM = [("iter0010", "data/ipm/iter0010/matrix.mtx", 524288, "operator"),
+       ("iter0020", "data/ipm/iter0020/matrix.mtx", 524288, "operator"),
+       ("iter0030", "data/ipm/iter0030/matrix.mtx", 524288, "operator"),
+       ("iter0040", "data/ipm/iter0040/matrix.mtx", 524288, "operator")]
 
-def matrix_args(kind, spec):
-    """The benchmark binary's matrix-selection argv for a registry entry."""
-    if kind == "grid":   return f"--graph grid --n {spec}"
-    if kind == "grid3d": return f"--graph grid3d --n {spec}"
-    return f"--mtx {spec}"
+KINDS = ("graph", "operator")
 
-# id -> {family, kind, spec(absolute for mtx), is2d, n}
+def matrix_args(source, spec, kind="graph"):
+    """The benchmark binary's matrix-selection argv for a registry entry.
+
+    A generated grid is a graph by construction and takes no --kind; a file
+    always carries its declared --kind, which the binary REQUIRES.
+    """
+    if source == "grid":   return f"--graph grid --n {spec}"
+    if source == "grid3d": return f"--graph grid3d --n {spec}"
+    if kind not in KINDS:
+        raise ValueError(f"matrix_args: kind must be one of {KINDS}, got {kind!r}")
+    return f"--mtx {spec} --kind {kind}"
+
+# id -> {family, source, kind, spec(absolute for mtx), is2d, n}
 MATRICES = {}
-for mid, fam, kind, spec, is2d in GRIDS:
-    MATRICES[mid] = dict(family=fam, kind=kind, spec=spec, is2d=is2d, n=spec * spec if kind == "grid" else spec ** 3)
-for mid, path, n in SS:
-    MATRICES[mid] = dict(family="suitesparse", kind="mtx", spec=f"{ROOT}/{path}", is2d=False, n=n)
-for mid, path, n in IPM:
-    MATRICES[mid] = dict(family="ipm", kind="mtx", spec=f"{ROOT}/{path}", is2d=False, n=n)
+for mid, fam, source, spec, is2d in GRIDS:
+    MATRICES[mid] = dict(family=fam, source=source, kind="graph", spec=spec, is2d=is2d,
+                         n=spec * spec if source == "grid" else spec ** 3)
+for mid, path, n, kind in SS:
+    MATRICES[mid] = dict(family="suitesparse", source="mtx", kind=kind,
+                         spec=f"{ROOT}/{path}", is2d=False, n=n)
+for mid, path, n, kind in IPM:
+    MATRICES[mid] = dict(family="ipm", source="mtx", kind=kind,
+                         spec=f"{ROOT}/{path}", is2d=False, n=n)
+
+def kind_of(mid):
+    """The declared kind of `mid`. Raises rather than guessing — an undeclared
+    or mis-declared matrix must stop the run, not silently pick a reading."""
+    try:
+        m = MATRICES[mid]
+    except KeyError:
+        raise KeyError(
+            f"{mid!r} is not in the matrix registry (benchmarks/runner_common.py). "
+            f"Add it with an explicit kind: one of {KINDS}.") from None
+    kind = m.get("kind")
+    if kind not in KINDS:
+        raise ValueError(
+            f"{mid!r} has no declared kind (got {kind!r}). Every registry entry must "
+            f"declare kind={'|'.join(KINDS)}; there is deliberately no default.")
+    return kind
 
 def margs_for(mid):
     m = MATRICES[mid]
-    return matrix_args(m["kind"], m["spec"])
+    return matrix_args(m["source"], m["spec"], kind_of(mid))
+
+# The one-line human description of each reading, for the runners' output and
+# for the README table. Keep in step with benchmark.cpp's `interpretation`.
+KIND_INTERPRETATION = {
+    "graph":    "L = D - A assembled from |values| (unit weights for a pattern file)",
+    "operator": "solved as published (assembled operator, diagonal as stored)",
+}
+
+def matrix_meta_for(mid):
+    """The interpretation record stored in every cell's `matrix_meta`, so a
+    result can always be read back with the reading that produced it."""
+    m = MATRICES[mid]
+    kind = kind_of(mid)
+    meta = {"kind": kind, "family": m["family"], "source": m["source"],
+            "interpretation": KIND_INTERPRETATION[kind]}
+    if m["source"] == "mtx":
+        meta["path"] = os.path.relpath(m["spec"], ROOT)
+    else:
+        meta["generator"] = f"{m['source']}(n={m['spec']})"
+        # A generated graph has no file, so the file-reading half of the graph
+        # wording does not apply to it.
+        meta["interpretation"] = "L = D - A assembled from the generator's edge weights"
+    return meta
+
+# ── chart axis labels ───────────────────────────────────────────────────────────
+def mat_label(mid):
+    """The name a chart may show for `mid`.
+
+    A chart must never present a matrix we TRANSFORMED under its bare file name.
+    A kind=graph FILE is an adjacency matrix: what gets benchmarked is the
+    Laplacian assembled from it, not the matrix as it sits on disk, so the tick
+    says so. A kind=operator file IS solved as published and its bare name is
+    accurate; a generated grid has no published file to deviate from.
+    """
+    try:
+        m = MATRICES[mid]
+        if m["source"] == "mtx" and kind_of(mid) == "graph":
+            return f"{mid}\n(L=D−A)"
+    except (KeyError, ValueError):
+        pass
+    return mid
+
+
+def mat_labels(mats):
+    return [mat_label(m) for m in mats]
+
+
+_META_RE = re.compile(r'^MATRIX_META\s+(.*)$', re.M)
+
+def parse_matrix_meta(stderr):
+    """Lift the binary's `MATRIX_META ...` line out of stderr into a dict.
+
+    The binary reports how it actually read the matrix; the registry says how it
+    was asked to. Storing the binary's line means a cell records what was solved,
+    not what we intended to solve. Returns {} when the line is absent (external
+    solvers that never run the binary)."""
+    m = _META_RE.search(stderr or "")
+    if not m:
+        return {}
+    out = {}
+    for key, qval, val in re.findall(r'(\w+)=(?:"([^"]*)"|(\S+))', m.group(1)):
+        v = qval if qval else val
+        if key in ("n", "nnz", "laplacian", "pos_offdiag"):
+            try: v = int(v)
+            except ValueError: pass
+        elif key == "pos_offdiag_mass":
+            try: v = float(v)
+            except ValueError: pass
+        out[key] = v
+    if "laplacian" in out:
+        out["laplacian"] = bool(out["laplacian"])
+    return out
 
 
 # ── benchmark-binary CSV row -> metrics dict ────────────────────────────────────
@@ -179,11 +317,20 @@ def cell_path(family, mid, solver, config, threads, device):
     cfgtag = re.sub(r'[^A-Za-z0-9]+', '_', config) if config else "none"
     return f"{CELLS}/{family}/{mid}__{solver}__{cfgtag}__t{threads}__{device}.json"
 
-def emit_cell(family, mid, solver, config, status, metrics, threads, device, prov):
+def emit_cell(family, mid, solver, config, status, metrics, threads, device, prov,
+              matrix_meta=None):
+    """Write one cell. `matrix_meta` records HOW the matrix was interpreted —
+    the registry's declaration, plus whatever the binary reported about the
+    operator it actually assembled (parse_matrix_meta). It is filled from the
+    registry when the caller passes nothing, so no cell can be written without
+    saying which system it solved."""
     path = cell_path(family, mid, solver, config, threads, device)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    meta = dict(matrix_meta_for(mid)) if mid in MATRICES else {}
+    if matrix_meta:
+        meta.update(matrix_meta)
     cell = {"cell": {"config": config, "device": device, "family": family, "matrix_id": mid,
-                     "solver": solver, "threads": threads}, "matrix_meta": {},
+                     "solver": solver, "threads": threads}, "matrix_meta": meta,
             "metrics": metrics or {}, "provenance": prov, "schema": 1, "status": status}
     json.dump(cell, open(path, "w"), indent=2)
     return path
@@ -266,17 +413,20 @@ except ImportError:
 
 def parac_amd_mtx(mid, family=None):
     """The cached AMD-reordered .mtx parac_runner feeds the CPU driver. Tag =
-    'pin' for the Dirichlet-pinned SuiteSparse Laplacians ('reg' is the legacy
-    eps*I-regularized cache, kept as a fallback), 'pure' for grids / native-SDDM
-    IPM. With a family, only that family's tags are accepted (a fill/timing
+    'op' for a kind=operator matrix (the published operator, ParAC's own physics
+    input), 'pin' for the Dirichlet-pinned graph-derived SuiteSparse Laplacians
+    ('reg' is the legacy eps*I-regularized cache, kept as a fallback), 'pure' for
+    grids. With a family, only that family's tags are accepted (a fill/timing
     comparison must not silently switch operators); family=None tries all.
     """
     if not PARAC_REORD:               # ParAC not configured on this machine
         return None
-    if family is not None:
+    if mid in MATRICES and kind_of(mid) == "operator":
+        tags = ("op",)
+    elif family is not None:
         tags = ("pin", "reg") if family == "suitesparse" else ("pure",)
     else:
-        tags = ("pure", "pin", "reg")
+        tags = ("op", "pure", "pin", "reg")
     for tag in tags:
         for cand in (f"{mid}-{tag}-amd.mtx", f"{mid}-amd.mtx"):
             p = f"{PARAC_REORD}/{cand}"
