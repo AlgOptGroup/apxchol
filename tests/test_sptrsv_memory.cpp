@@ -93,6 +93,29 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
     // on free (disables glibc's dynamic mmap threshold for this process).
     ASSERT_EQ(mallopt(M_MMAP_THRESHOLD, 256 * 1024), 1);
 
+    // The kernel's per-mm RSS counters must actually track allocations for any
+    // of the accounting below to mean anything. On the SLES 6.4.0-*-64kb aarch64
+    // kernel of CSCS Alps (GH200, 64 KiB pages) they do not: over 10 identical
+    // runs of this binary VmRSS read 0 four times, tracked five times, and once
+    // DECREASED across setup (the delta underflowed to 1.8e19). Probe the
+    // counter once against a known touched allocation and skip when it does not
+    // follow -- a real leak on a platform that does report RSS still fails.
+    {
+        const long probe_before = proc_status_kb("VmRSS:");
+        constexpr std::size_t probe_bytes = 64 * MB;
+        std::vector<unsigned char> probe(probe_bytes, 1);
+        volatile unsigned char sink = 0;
+        for (std::size_t i = 0; i < probe_bytes; i += 4096) sink = probe[i];
+        (void) sink;
+        const long probe_after = proc_status_kb("VmRSS:");
+        const long probe_kb = static_cast<long>(probe_bytes / 1024);
+        if (probe_before <= 0 || probe_after <= 0 || probe_after - probe_before < probe_kb / 2)
+            GTEST_SKIP() << "kernel VmRSS does not track allocations here ("
+                         << probe_before << " -> " << probe_after << " kB across a touched "
+                         << probe_kb / 1024 << " MB allocation): the setup-peak accounting "
+                            "this test relies on is unavailable";
+    }
+
     // ~640k-column factor, ~3.5M nnz: the transients are tens of MB, far above
     // the accounting noise (page rounding, per-thread RSS batching, the
     // per-level vectors of the level sets), while a leaked L11 copy would add

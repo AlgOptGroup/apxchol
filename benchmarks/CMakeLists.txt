@@ -105,6 +105,17 @@ if (NOT rchol_POPULATED)
     FetchContent_Populate(rchol)
 endif()
 
+# rchol_lap.cpp carries a vestigial `#include<immintrin.h>` (no x86 intrinsic is
+# actually used anywhere in the file) that breaks every non-x86 build (aarch64,
+# e.g. Grace / GH200). Strip it from the fetched tree; upstream is unmaintained.
+if (NOT (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))
+    file(READ ${rchol_SOURCE_DIR}/c++/rchol_lap/rchol_lap.cpp _rchol_lap_src)
+    string(REPLACE "#include<immintrin.h>"
+                   "// immintrin.h: x86-only, unused -- stripped for ${CMAKE_SYSTEM_PROCESSOR}"
+                   _rchol_lap_src "${_rchol_lap_src}")
+    file(WRITE ${rchol_SOURCE_DIR}/c++/rchol_lap/rchol_lap.cpp "${_rchol_lap_src}")
+endif()
+
 set(RCHOL_DIR ${rchol_SOURCE_DIR}/c++)
 set(RCHOL_SOURCES
     ${RCHOL_DIR}/sparse.cpp
