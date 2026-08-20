@@ -181,6 +181,109 @@ struct chunk {
     }
 };
 
+// ── the special path: SEGMENT and FINALIZER items ───────────────────────────
+// ROW SEGMENTATION (cuda_host.h dataflow_build_plan; cuda_dataflow.h). A long
+// row's unsplit walk costs ceil(len / (32*kPre)) chunk round trips ON THE
+// CRITICAL PATH -- chunk k+1's loads cannot issue before chunk k has been
+// polled to completion -- and a hub factor's elimination tail is a CHAIN of
+// such rows, so the sweep pays (chain length) x (len / 256) round trips. The
+// host cuts such a row into S SEGMENTS, each a full 32-lane item that
+// accumulates one CSR slice and publishes its partial into an extra
+// epoch-tagged SLOT word (tag[m + slot]), plus one FINALIZER that polls the S
+// slots (no CSR at all), divides by the diagonal and publishes the row.
+//
+// __noinline__ ON PURPOSE: this path's live state must not merge with the
+// common path's, which sits on a ~112-register scheduling cliff (see the
+// REGISTER-BUDGET WARNING below). Every special item is ALONE in its batch,
+// so the whole warp is here and all 32 lanes take part in every shuffle --
+// which is also what keeps the chunk walk's inner spin safe (a multi-chunk
+// item must never share a warp with a possible producer).
+template <bool FP16>
+__device__ __noinline__ void dataflow_special(
+        int4 sp, int lane, int m,
+        const int* __restrict__ colidx, const void* __restrict__ vals_raw,
+        const float* __restrict__ diag, const double* __restrict__ in_scale,
+        unsigned long long* tag, unsigned epoch,
+        const VAL* __restrict__ rhs, VAL* __restrict__ out) {
+    unsigned sleep_ns = APXCHOL_DF_SPIN_NS;
+    VAL sum = VAL(0);
+    if (sp.x >= 0) {
+        // SEGMENT {i, lo, hi, slot}: the common path's chunk walk at G = 32
+        // over [lo, hi) instead of the whole row, so the per-lane entry order
+        // and the butterfly are the ones an unsplit G = 32 row would use. The
+        // TRUE row id is passed in, so a boundary that ever included the
+        // diagonal is handled exactly as there (fp16: the slot's bits are
+        // zeroed at load; fp32: the value is parked in the unused `d`).
+        const int i = sp.x, hi = sp.z;
+        VAL d = VAL(0);
+        int p0 = sp.y + lane;
+        bool more = p0 < hi;
+        while (__ballot_sync(kFull, more)) {
+            chunk c;
+            c.load<FP16>(more, i, p0, 32, hi, colidx, vals_raw);
+            for (;;) {
+                if (more) c.poll(tag, epoch);
+                if (group_all(!more || c.pending == 0u, 32)) break;
+                backoff(sleep_ns);
+            }
+            sleep_ns = APXCHOL_DF_SPIN_NS;
+            if (more) { c.accumulate<FP16>(i, sum, d); p0 += kPre * 32; more = p0 < hi; }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(kFull, sum, o);
+        if (lane == 0) st_tag(tag + m + sp.w, pack_tag(sum, epoch));
+        return;
+    }
+    // FINALIZER {~i, s0, S, dpos}: poll the S partial slots in FIXED INDEX
+    // ORDER (lane takes s0 + lane, s0 + lane + 32, ...; chunked when
+    // S > 32*kPre), coefficient 1 -- no colidx and no value loads -- then the
+    // same fixed butterfly and the divide. No value atomicAdd anywhere: the
+    // sum is a pure function of the factor and the plan, so the backend stays
+    // bit-deterministic run to run and across grid sizes.
+    const int i = ~sp.x, S = sp.z;
+    const unsigned long long* slots = tag + m + sp.y;
+    for (int base = 0; base < S; base += kPre * 32) {
+        VAL y[kPre];
+        unsigned pending = 0u;
+        #pragma unroll
+        for (int t = 0; t < kPre; ++t) {
+            y[t] = VAL(0);
+            if (base + lane + t * 32 < S) pending |= 1u << t;
+        }
+        for (;;) {
+            if (pending) {
+                unsigned long long w[kPre];
+                #pragma unroll
+                for (int t = 0; t < kPre; ++t)
+                    w[t] = (pending >> t) & 1u ? ld_tag(slots + base + lane + t * 32) : 0ull;
+                #pragma unroll
+                for (int t = 0; t < kPre; ++t)
+                    if (((pending >> t) & 1u) && tag_epoch(w[t]) == epoch) { y[t] = tag_value(w[t]); pending &= ~(1u << t); }
+            }
+            if (group_all(pending == 0u, 32)) break;
+            backoff(sleep_ns);
+        }
+        sleep_ns = APXCHOL_DF_SPIN_NS;
+        #pragma unroll
+        for (int t = 0; t < kPre; ++t) sum += y[t];
+    }
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(kFull, sum, o);
+    if (lane == 0) {
+        VAL d, bv;
+        if constexpr (FP16) {
+            d  = static_cast<VAL>(diag[i]);
+            bv = in_scale ? static_cast<VAL>(static_cast<double>(rhs[i]) * in_scale[i]) : rhs[i];
+        } else {
+            d  = static_cast<const VAL*>(vals_raw)[sp.w];   // the row's diagonal, found on the host
+            bv = rhs[i];
+        }
+        const VAL yi = (bv - sum) / d;
+        out[i] = yi;
+        st_tag(tag + i, pack_tag(yi, epoch));
+    }
+}
+
 // ── the persistent kernel ───────────────────────────────────────────────────
 // Every warp claims one BATCH per ticket: a run of consecutive rows (in sweep
 // order) packed by the host into 32 lanes -- a row of at most kPre entries
@@ -221,7 +324,8 @@ dataflow_kernel(int m, bool reverse,
                 const int* __restrict__ rowptr, const int* __restrict__ colidx,
                 const void* __restrict__ vals_raw,
                 const float* __restrict__ diag, const double* __restrict__ in_scale,
-                const int* __restrict__ batch_start, int n_batches,
+                const int* __restrict__ batch_start, const int* __restrict__ batch_spec,
+                const int4* __restrict__ spec, int n_batches,
                 unsigned long long* tag, unsigned epoch,
                 int* ctrl, int total_warps,
                 const VAL* __restrict__ rhs, VAL* __restrict__ out) {
@@ -233,6 +337,17 @@ dataflow_kernel(int m, bool reverse,
         if (lane == 0) b = atomicAdd(ticket, 1);
         b = __shfl_sync(kFull, b, 0);
         if (b >= n_batches) break;
+        // Special item? ONE extra int load per BATCH (not per row), broadcast
+        // to a UNIFORM branch -- the common path below is byte-for-byte what
+        // it was, and with segmentation off every batch_spec entry is -1.
+        int sb = 0;
+        if (lane == 0) sb = batch_spec[b];
+        sb = __shfl_sync(kFull, sb, 0);
+        if (sb >= 0) {
+            dataflow_special<FP16>(spec[sb], lane, m, colidx, vals_raw, diag, in_scale,
+                                   tag, epoch, rhs, out);
+            continue;
+        }
         const int q0 = batch_start[b], q1 = batch_start[b + 1];   // sweep positions [q0, q1)
         const int k  = q1 - q0;                                    // rows in the batch (<= 32)
         // Lane r < k describes row r of the batch: its id, its CSR range and
@@ -388,27 +503,27 @@ int dataflow_grid_size(bool fp16) {
 
 void dataflow_solve(cudaStream_t stream, int m, bool reverse,
                     const int* rowptr, const int* colidx, const VAL* vals,
-                    const int* batch_start, int n_batches,
+                    const int* batch_start, const int* batch_spec, const int4* spec, int n_batches,
                     unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                     const VAL* rhs, VAL* out) {
     if (m <= 0 || n_batches <= 0) return;
     const int total_warps = grid * (kDataflowBlock / 32);
     dataflow_kernel<false><<<grid, kDataflowBlock, 0, stream>>>(
         m, reverse, rowptr, colidx, vals, nullptr, nullptr,
-        batch_start, n_batches, tag, epoch, ctrl, total_warps, rhs, out);
+        batch_start, batch_spec, spec, n_batches, tag, epoch, ctrl, total_warps, rhs, out);
 }
 
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
                          const int* rowptr, const int* colidx, const unsigned short* vals16,
                          const float* diag, const double* in_scale,
-                         const int* batch_start, int n_batches,
+                         const int* batch_start, const int* batch_spec, const int4* spec, int n_batches,
                          unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                          const VAL* rhs, VAL* out) {
     if (m <= 0 || n_batches <= 0) return;
     const int total_warps = grid * (kDataflowBlock / 32);
     dataflow_kernel<true><<<grid, kDataflowBlock, 0, stream>>>(
         m, reverse, rowptr, colidx, vals16, diag, in_scale,
-        batch_start, n_batches, tag, epoch, ctrl, total_warps, rhs, out);
+        batch_start, batch_spec, spec, n_batches, tag, epoch, ctrl, total_warps, rhs, out);
 }
 
 } // namespace apxchol

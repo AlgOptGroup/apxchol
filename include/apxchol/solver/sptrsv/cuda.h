@@ -8,8 +8,10 @@
 #if defined(APXCHOL_CUDA_WITH_CUSPARSE)
 #include <cusparse.h>
 #endif
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -370,7 +372,7 @@ public:
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, L16.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals16_, L16.vals.get(), nnz_ * sizeof(std::uint16_t), cudaMemcpyHostToDevice));
             mark("upload_L");
-            setup_kernel_backend(LT16.ptr, L16.ptr);
+            setup_kernel_backend(LT16.ptr, L16.ptr, LT16.idx.get(), L16.idx.get());
             mark("kernel_backend_tables");
         } else {
             dev_alloc(reinterpret_cast<void**>(&d_vals_), nnz_ * sizeof(cuda_value_t));
@@ -410,7 +412,7 @@ public:
                 APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, Lc.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
                 APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals_,   Lc.vals.get(), nnz_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
                 mark("upload_L");
-                setup_kernel_backend(LT.ptr, Lc.ptr);
+                setup_kernel_backend(LT.ptr, Lc.ptr, LT.idx.get(), Lc.idx.get());
                 mark("kernel_backend_tables");
             }
 #if defined(APXCHOL_CUDA_WITH_CUSPARSE)
@@ -515,34 +517,137 @@ private:
     // The dataflow backend's host-side tables (cuda_dataflow.h): no levels at
     // all -- the warp batch tables of both directions (from the CSR row
     // lengths), the m tagged words, the control ints, the resident grid.
-    void setup_kernel_backend(const std::vector<int>& LT_ptr, const std::vector<int>& L_ptr) {
+    void setup_kernel_backend(const std::vector<int>& LT_ptr, const std::vector<int>& L_ptr,
+                              const int* LT_idx, const int* L_idx) {
         const int mi = static_cast<int>(m_);
         const std::vector<int> len_L  = cuda_host::csr_row_lengths(mi, L_ptr.data());
         const std::vector<int> len_LT = cuda_host::csr_row_lengths(mi, LT_ptr.data());
         const int pre = dataflow_prefetch_depth();
-        const std::vector<int> fwd_b = cuda_host::dataflow_batches(mi, false, len_L.data(),  pre);
-        const std::vector<int> bck_b = cuda_host::dataflow_batches(mi, true,  len_LT.data(), pre);
-        fwd_batches_ = static_cast<int>(fwd_b.size()) - 1;
-        bck_batches_ = static_cast<int>(bck_b.size()) - 1;
+        // Row segmentation: each direction gets its own threshold, from its
+        // own row-length histogram (the two differ a lot -- an elimination
+        // factor's hub rows land in CSR of L, its columns stay bounded).
+        const cuda_host::dataflow_len_stats st_L  = cuda_host::dataflow_row_stats(mi, len_L.data(), pre);
+        const cuda_host::dataflow_len_stats st_LT = cuda_host::dataflow_row_stats(mi, len_LT.data(), pre);
+        const cuda_host::dataflow_seg_params sp_f = dataflow_seg_params_for(pre, st_L);
+        const cuda_host::dataflow_seg_params sp_b = dataflow_seg_params_for(pre, st_LT);
+        const cuda_host::dataflow_plan fwd = cuda_host::dataflow_build_plan(
+            mi, false, L_ptr.data(), L_idx, len_L.data(), pre, sp_f);
+        const cuda_host::dataflow_plan bck = cuda_host::dataflow_build_plan(
+            mi, true, LT_ptr.data(), LT_idx, len_LT.data(), pre, sp_b);
+        // The kernel relies on the plan's warp-sharing property implicitly
+        // (see cuda_host.h dataflow_plan_check); O(m), so just check it.
+        for (int dir = 0; dir < 2; ++dir) {
+            const std::string why = cuda_host::dataflow_plan_check(
+                dir ? bck : fwd, mi, dir != 0, (dir ? len_LT : len_L).data(), pre);
+            if (!why.empty())
+                throw std::runtime_error("apxchol cuda_sptrsv: bad dataflow plan (" +
+                                         std::string(dir ? "back" : "forward") + "): " + why);
+        }
+        fwd_batches_ = fwd.n_batches();
+        bck_batches_ = bck.n_batches();
+        df_slots_ = std::max(fwd.n_slots, bck.n_slots);   // the two sweeps reuse the same words
+        df_split_rows_ = fwd.n_split + bck.n_split;
+        if (static_cast<std::int64_t>(m_) + df_slots_ > static_cast<std::int64_t>(std::numeric_limits<int>::max()))
+            throw std::runtime_error("apxchol cuda_sptrsv: m + dataflow partial slots exceeds the 32-bit index range");
         auto up = [&](int** d, const std::vector<int>& h) {
             APXCHOL_CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(d), h.size() * sizeof(int)));
             factor_bytes_ += h.size() * sizeof(int);
             APXCHOL_CUDA_CHECK(cudaMemcpy(*d, h.data(), h.size() * sizeof(int), cudaMemcpyHostToDevice));
         };
-        up(&d_fwd_batches_, fwd_b); up(&d_bck_batches_, bck_b);
-        APXCHOL_CUDA_CHECK(cudaMalloc(&d_df_tag_, m_ * sizeof(unsigned long long)));
-        APXCHOL_CUDA_CHECK(cudaMemset(d_df_tag_, 0, m_ * sizeof(unsigned long long)));
+        auto up_spec = [&](int4** d, const std::vector<cuda_host::dataflow_spec>& h) {
+            if (h.empty()) return;
+            static_assert(sizeof(cuda_host::dataflow_spec) == sizeof(int4), "spec items upload as int4");
+            APXCHOL_CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(d), h.size() * sizeof(int4)));
+            factor_bytes_ += h.size() * sizeof(int4);
+            APXCHOL_CUDA_CHECK(cudaMemcpy(*d, h.data(), h.size() * sizeof(int4), cudaMemcpyHostToDevice));
+        };
+        up(&d_fwd_batches_, fwd.batch_start); up(&d_bck_batches_, bck.batch_start);
+        up(&d_fwd_spec_sel_, fwd.batch_spec); up(&d_bck_spec_sel_, bck.batch_spec);
+        up_spec(&d_fwd_spec_, fwd.spec);      up_spec(&d_bck_spec_, bck.spec);
+        if (std::getenv("APXCHOL_GPU_SPTRSV_STATS"))
+            dataflow_print_stats(st_L, st_LT, sp_f, sp_b, fwd, bck);
+        const std::size_t tag_words = static_cast<std::size_t>(m_) + static_cast<std::size_t>(df_slots_);
+        APXCHOL_CUDA_CHECK(cudaMalloc(&d_df_tag_, tag_words * sizeof(unsigned long long)));
+        APXCHOL_CUDA_CHECK(cudaMemset(d_df_tag_, 0, tag_words * sizeof(unsigned long long)));
         APXCHOL_CUDA_CHECK(cudaMalloc(&d_df_ctrl_, 4 * sizeof(int)));
         APXCHOL_CUDA_CHECK(cudaMemset(d_df_ctrl_, 0, 4 * sizeof(int)));
-        factor_bytes_ += m_ * sizeof(unsigned long long) + 4 * sizeof(int);
+        factor_bytes_ += tag_words * sizeof(unsigned long long) + 4 * sizeof(int);
         df_epoch_ = 0;
         df_grid_ = dataflow_grid_size(fp16_);
 
         if (std::getenv("APXCHOL_GPU_MEM_DEBUG")) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
             fprintf(stderr,"[mem] SpTRSV dataflow: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
-                    "fwd_batches=%d bck_batches=%d grid=%dx%d tag=%.1fMB | GPU free=%.2f/%.2f GB\n",
+                    "fwd_batches=%d bck_batches=%d grid=%dx%d tag=%.1fMB slots=%d split_rows=%d | GPU free=%.2f/%.2f GB\n",
                     2.0*nnz_*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
-                    fwd_batches_, bck_batches_, df_grid_, kDataflowBlock, m_ * 8.0 / 1e6, mf/1e9, mt/1e9); }
+                    fwd_batches_, bck_batches_, df_grid_, kDataflowBlock, tag_words * 8.0 / 1e6,
+                    df_slots_, df_split_rows_, mf/1e9, mt/1e9); }
+    }
+
+    /// The segmentation parameters of ONE sweep direction. ON by default; the
+    /// threshold comes from that direction's own row-length histogram
+    /// (cuda_host::dataflow_split_threshold -- a pure function of row lengths,
+    /// so grid size cannot enter the result). ONE knob:
+    /// APXCHOL_GPU_DF_SPLIT=<off-diagonals> pins the threshold for both
+    /// directions, =0 turns segmentation off (the rollback switch: the plan,
+    /// and the output, become bit-identical to the unsplit kernel).
+    ///
+    /// The segment LENGTH is not a knob: it is ONE CHUNK, 32 * pre entries.
+    /// Measured on kron_g500-logn16 with the threshold pinned at 256
+    /// (gpu_pcg_loop ms/iteration, medians of 4, interleaved): 256 entries
+    /// 8.87, 512 10.34, 1024 11.62, unsplit 17.81; on com-LiveJournal 50.49 /
+    /// 60.60 / 112.97 against 156.59 -- the depth model's sqrt(len) optimum is
+    /// swamped by the extra round trip every additional chunk of a segment
+    /// costs on the critical path, so the shortest segment the chunk walk can
+    /// express wins. The planner keeps `seg` general; only this default is
+    /// fixed. max_seg only bounds the ticket window one giant row can occupy
+    /// and never binds in practice (the longest measured factor row,
+    /// com-Orkut's 134368, gives S = 525 against the 4096 cap).
+    static cuda_host::dataflow_seg_params dataflow_seg_params_for(
+            int pre, const cuda_host::dataflow_len_stats& st) {
+        cuda_host::dataflow_seg_params p;
+        const char* e = std::getenv("APXCHOL_GPU_DF_SPLIT");
+        const int   v = e ? std::atoi(e) : -1;
+        if (e && v <= 0) return p;                       // seg = 0: off
+        p.seg = 32 * pre;
+        p.split_min = e ? v : cuda_host::dataflow_split_threshold(st);
+        return p;
+    }
+
+    // APXCHOL_GPU_SPTRSV_STATS=1: the row-length histogram of both sweep
+    // directions -- the evidence behind the row-segmentation threshold
+    // (cuda_host.h dataflow_row_stats). Bucket k = the rows an unsplit walk
+    // chews in more than 2^k chunks of C = 32 * pre entries, and the share of
+    // the factor they hold: on a hub factor those few rows ARE the critical
+    // path, on a grid / IPM factor the histogram is empty past bucket 0.
+    void dataflow_print_stats(const cuda_host::dataflow_len_stats& st_L,
+                              const cuda_host::dataflow_len_stats& st_LT,
+                              const cuda_host::dataflow_seg_params& sp_f,
+                              const cuda_host::dataflow_seg_params& sp_b,
+                              const cuda_host::dataflow_plan& fwd,
+                              const cuda_host::dataflow_plan& bck) const {
+        for (int dir = 0; dir < 2; ++dir) {
+            const cuda_host::dataflow_len_stats& st = dir ? st_LT : st_L;
+            const cuda_host::dataflow_seg_params& sp = dir ? sp_b : sp_f;
+            std::fprintf(stderr, "[df-stats] %s: m=%d nnz=%lld mean_len=%.2f max_len=%d C=%d\n",
+                         dir ? "back (CSR L^T)" : "fwd (CSR L)", st.m,
+                         static_cast<long long>(st.nnz), st.mean_len, st.max_len, st.base);
+            for (int k = 0; k < cuda_host::dataflow_len_stats::kBuckets; ++k) {
+                if (!st.rows_ge[k]) break;
+                std::fprintf(stderr, "[df-stats]   len >= %8lld : rows %10lld (%6.3f%%)  entries %12lld (%6.2f%% of nnz)\n",
+                             static_cast<long long>(st.base) << k,
+                             static_cast<long long>(st.rows_ge[k]),
+                             100.0 * static_cast<double>(st.rows_ge[k]) / (st.m ? st.m : 1),
+                             static_cast<long long>(st.nnz_ge[k]),
+                             100.0 * static_cast<double>(st.nnz_ge[k]) / static_cast<double>(st.nnz ? st.nnz : 1));
+            }
+            const cuda_host::dataflow_plan& pl = dir ? bck : fwd;
+            std::fprintf(stderr, "[df-stats]   long-row nnz share %.3f -> seg=%d split_min=%d max_seg=%d"
+                                 " -> batches=%d split_rows=%d slots=%d spec=%zu (tables %.2f MB)\n",
+                         st.nnz ? static_cast<double>(st.nnz_ge[0]) / static_cast<double>(st.nnz) : 0.0,
+                         sp.seg, sp.split_min, sp.max_seg, pl.n_batches(), pl.n_split, pl.n_slots,
+                         pl.spec.size(),
+                         (pl.batch_start.size() * 4.0 + pl.batch_spec.size() * 4.0 + pl.spec.size() * 16.0) / 1e6);
+        }
     }
 
 #if defined(APXCHOL_CUDA_WITH_CUSPARSE)
@@ -636,21 +741,26 @@ private:
             // current sweep's epoch). Long before the 32-bit epoch could wrap
             // onto a stale word the array is cleared and the count restarted.
             if (df_epoch_ >= 0xFFFFFF00u) {
-                APXCHOL_CUDA_CHECK(cudaMemsetAsync(d_df_tag_, 0, m_ * sizeof(unsigned long long), 0));
+                APXCHOL_CUDA_CHECK(cudaMemsetAsync(d_df_tag_, 0,
+                    (static_cast<std::size_t>(m_) + static_cast<std::size_t>(df_slots_)) * sizeof(unsigned long long), 0));
                 df_epoch_ = 0;
             }
             const unsigned e_fwd = ++df_epoch_;
             const unsigned e_bck = ++df_epoch_;
             if (fp16_) {
                 dataflow_solve_fp16(0, m, false, d_L_rowptr_, d_L_colidx_, d_L_vals16_, d_diag_, nullptr,
-                                    d_fwd_batches_, fwd_batches_, d_df_tag_, e_fwd, d_df_ctrl_, df_grid_, d_x_, d_y_);
+                                    d_fwd_batches_, d_fwd_spec_sel_, d_fwd_spec_, fwd_batches_,
+                                    d_df_tag_, e_fwd, d_df_ctrl_, df_grid_, d_x_, d_y_);
                 dataflow_solve_fp16(0, m, true, d_rowPtr_, d_colIdx_, d_vals16_, d_diag_, d_inv_scale2_,
-                                    d_bck_batches_, bck_batches_, d_df_tag_, e_bck, d_df_ctrl_ + 2, df_grid_, d_y_, d_x_);
+                                    d_bck_batches_, d_bck_spec_sel_, d_bck_spec_, bck_batches_,
+                                    d_df_tag_, e_bck, d_df_ctrl_ + 2, df_grid_, d_y_, d_x_);
             } else {
                 dataflow_solve(0, m, false, d_L_rowptr_, d_L_colidx_, d_L_vals_,
-                               d_fwd_batches_, fwd_batches_, d_df_tag_, e_fwd, d_df_ctrl_, df_grid_, d_x_, d_y_);
+                               d_fwd_batches_, d_fwd_spec_sel_, d_fwd_spec_, fwd_batches_,
+                               d_df_tag_, e_fwd, d_df_ctrl_, df_grid_, d_x_, d_y_);
                 dataflow_solve(0, m, true, d_rowPtr_, d_colIdx_, d_vals_,
-                               d_bck_batches_, bck_batches_, d_df_tag_, e_bck, d_df_ctrl_ + 2, df_grid_, d_y_, d_x_);
+                               d_bck_batches_, d_bck_spec_sel_, d_bck_spec_, bck_batches_,
+                               d_df_tag_, e_bck, d_df_ctrl_ + 2, df_grid_, d_y_, d_x_);
             }
             return;
         }
@@ -678,8 +788,13 @@ private:
             cudaFree(d_vals16_); cudaFree(d_diag_); cudaFree(d_inv_scale2_);
             cudaFree(d_df_tag_); cudaFree(d_df_ctrl_);
             cudaFree(d_fwd_batches_); cudaFree(d_bck_batches_);
+            cudaFree(d_fwd_spec_sel_); cudaFree(d_bck_spec_sel_);
+            cudaFree(d_fwd_spec_); cudaFree(d_bck_spec_);
             d_df_tag_ = nullptr; d_df_ctrl_ = nullptr;
             d_fwd_batches_ = d_bck_batches_ = nullptr; fwd_batches_ = bck_batches_ = 0;
+            d_fwd_spec_sel_ = d_bck_spec_sel_ = nullptr;
+            d_fwd_spec_ = d_bck_spec_ = nullptr;
+            df_slots_ = df_split_rows_ = 0;
             df_epoch_ = 0;
             d_L_rowptr_ = d_L_colidx_ = nullptr;
             d_L_vals_ = nullptr; d_L_vals16_ = nullptr;
@@ -742,9 +857,15 @@ private:
     // warp batch tables of both directions, the m tagged words {value, epoch}
     // both sweeps publish into (mutable state, 8 B/row), the sweep epoch, 2+2
     // control ints and the persistent grid.
-    int*          d_fwd_batches_   = nullptr;   // cuda_host::dataflow_batches
+    int*          d_fwd_batches_   = nullptr;   // cuda_host::dataflow_build_plan
     int*          d_bck_batches_   = nullptr;
+    int*          d_fwd_spec_sel_  = nullptr;   // batch_spec: -1 = plain, else index into d_*_spec_
+    int*          d_bck_spec_sel_  = nullptr;
+    int4*         d_fwd_spec_      = nullptr;   // the row-segmentation items
+    int4*         d_bck_spec_      = nullptr;
     int           fwd_batches_ = 0, bck_batches_ = 0;
+    int           df_slots_ = 0;                // extra tagged words for the segment partials
+    int           df_split_rows_ = 0;           // rows the plan split (both directions summed)
     unsigned long long* d_df_tag_  = nullptr;
     mutable unsigned    df_epoch_  = 0;         // last epoch handed out (0 = none)
     int*          d_df_ctrl_       = nullptr;   // {fwd ticket, fwd finished, bck ticket, bck finished}
