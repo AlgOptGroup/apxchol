@@ -118,7 +118,11 @@ static bench_result run_one(const char* sname, const char* graph_name,
     double build_ms  = std::chrono::duration<double, std::milli>(t1 - t0).count();
     double factor_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
 
-    bench_result r{sname, graph_name, G.n(), G.m(),
+    // n()/m() are node_index/edge_index (unsigned); bench_result reports them as
+    // int. Narrowing in a braced init-list is a warning under gcc but an error
+    // under clang, so spell the conversion out.
+    bench_result r{sname, graph_name,
+                   static_cast<int>(G.n()), static_cast<int>(G.m()),
                    static_cast<long long>(F.L.nonZeros()),
                    build_ms, factor_ms, build_ms + factor_ms,
                    F.peak_graph_bytes / (1024.0 * 1024.0)};
