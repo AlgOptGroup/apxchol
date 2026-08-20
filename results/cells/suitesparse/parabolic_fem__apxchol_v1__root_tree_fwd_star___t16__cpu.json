@@ -1,0 +1,48 @@
+{
+  "cell": {
+    "config": "root+tree[fwd_star]",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "parabolic_fem",
+    "solver": "apxchol_v1",
+    "threads": 16
+  },
+  "matrix_meta": {
+    "kind": "operator",
+    "family": "suitesparse",
+    "source": "mtx",
+    "interpretation": "solved as published (assembled operator, diagonal as stored)",
+    "path": "data/matrices/parabolic_fem.mtx",
+    "n": 525825,
+    "nnz": 3674625,
+    "laplacian": false,
+    "grounding": "none",
+    "pos_offdiag": 1048576,
+    "pos_offdiag_mass": 1.58946e-06,
+    "input": "/home/adamant/laplacian_solver/.claude/worktrees/agent-a3767f31974f1537a/data/matrices/parabolic_fem.mtx"
+  },
+  "metrics": {
+    "n": 525825,
+    "nnz": 3674625,
+    "setup_s": 0.6374293,
+    "solve_s": 0.1730609,
+    "total_s": 0.8104902,
+    "iters": 38,
+    "rel_res": 8.401703e-09,
+    "fillin": 0.0,
+    "us_per_nnz": 0.2206,
+    "solve_rss_mb": 329.9,
+    "max_rss_mb": 446.1
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "3bda0c9be10d2881a75f654d3f6ac24cb5c1795f",
+    "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-08-20T22:06:42"
+  },
+  "schema": 1,
+  "status": "complete"
+}

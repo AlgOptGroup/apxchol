@@ -1,7 +1,9 @@
 [deps]
+AMD = "14f7f29c-3bd6-536c-9a0b-7339e30b5a3e"
 Laplacians = "6f8e5838-0efe-5de0-80a3-5fb4f8dbb1de"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MatrixMarket = "4d4711f2-db25-561a-b6b3-d35e7d4047d3"
+Metis = "2679e427-3c69-5b7f-982b-ece356f1e94b"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"

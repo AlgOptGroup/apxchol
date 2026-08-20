@@ -402,6 +402,13 @@ PARAC_CPU_DRIVER = os.environ.get("APXCHOL_PARAC_DRIVER", "")   # 5th arg "1" =>
 # (tens of GB), and that checkout is meant to stay at upstream plus the one patch
 # in benchmarks/patches/parac/.
 PARAC_REORD = os.environ.get("APXCHOL_PARAC_REORDER_DIR", "")
+# ParAC's OWN input producer, cpu_implementation/write_graph.jl, which the runner
+# calls (READ-ONLY, from their checkout) instead of reimplementing its
+# preprocessing — that preprocessing is charged to ParAC's setup time, so it has
+# to be their code. Empty => parac_runner derives it from PARAC_CPU_DRIVER's
+# checkout (<checkout>/experiment/driver -> <checkout>/cpu_implementation/
+# write_graph.jl); set this only when the two do not sit in the same tree.
+PARAC_WRITE_GRAPH = os.environ.get("APXCHOL_PARAC_WRITE_GRAPH", "")
 # Runtime library path the CPU driver needs (its MKL/compiler runtime), if any.
 PARAC_LDLIB = os.environ.get("APXCHOL_PARAC_LDLIB", os.environ.get("LD_LIBRARY_PATH", ""))
 PARAC_SORTED = "/tmp/parac_gpu_sorted"                       # GPU input: random-nnz-sort cache

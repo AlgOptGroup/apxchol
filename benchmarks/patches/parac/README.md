@@ -68,31 +68,136 @@ One probe suffices — the optimism factor is essentially constant in the
 tolerance for a given matrix. `benchmarks/parac_runner.py` implements this and
 records `parac_rel_tol` and the achieved residual in every cell.
 
-## Input construction — in this repo, not in theirs
+## Input construction — THEIR producer, run out of THEIR checkout
 
 ParAC requires a fill-reducing ordering (its own scripts only ever run
 `*-amd.mtx`) and, for a matrix that is not already a Laplacian, an augmentation.
-Its producer for both is `cpu_implementation/write_graph.jl`, which we do not
-call: `graph_produce` REBUILDS the diagonal as a pure Laplacian, silently
-destroying the diagonal of an SDDM operator. `benchmarks/parac_reorder_amd.jl` is
-our minimal stand-in — permutation only, all values preserved:
+Its producer for both is `cpu_implementation/write_graph.jl`, and **that is what
+the runner calls** — read-only, from the ParAC checkout, via the dispatcher
+`benchmarks/parac_produce_upstream.jl`. This matters because the runner charges
+the preprocessing to ParAC's setup time (`setup = factor + prep + amds`): it has
+to be their code doing their work.
 
-* **kind=graph** — dump the **pure** `L = D - A`, permute, feed to **graph mode**
+Their producer takes a path PREFIX — it reads `<prefix>.mtx` and writes
+`<prefix>-amd.mtx` — so the dispatcher puts `<prefix>` inside **our** cache
+directory (`PARAC_REORD` / `PARAC_SORTED`) and symlinks `<prefix>.mtx` at the
+dump. Nothing is written into their tree, and the cache file names are the ones
+the runner already used. The "amd time:" / "sort time:" line their code prints is
+what we charge.
+
+* **kind=graph** — dump the **pure** `L = D - A` (per connected component), call
+  **`graph_produce(prefix, "amd")`**, feed the result to **graph mode**
   (`driver <mtx> <threads> ""`). ParAC generates its own zero-sum RHS, which is
   consistent for a connected singular Laplacian, and its residual is against that
   L. Do **not** hand it a Dirichlet-pinned matrix (see "dropped" below).
-* **kind=operator** — dump the operator as published, then
-  `parac_reorder_amd.jl --augment`, which reproduces `write_graph.jl`'s
-  `physics_produce`: permute first, then append the ground row/column, so the
-  appended node is **last**. **Physics mode** (`driver <mtx> <threads> "" 1`)
-  trims exactly that node, and what it solves is the published operator itself
-  (verified: `trimmed laplacian nnz` equals the operator's nnz exactly, and an
-  independent score with `benchmarks/parac_verify_residual.py` matches ParAC's
-  own printed residual to all digits).
+* **kind=operator** — dump the operator as published, call
+  **`physics_produce(prefix, "amd")`**: permute first, then append the ground
+  row/column, so the appended node is **last**. **Physics mode**
+  (`driver <mtx> <threads> "" 1`) trims exactly that node, and what it solves is
+  the published operator itself.
 
 The augmentation is not optional. Physics mode's `remove_last_row_and_column` is
 how ParAC gets **back** to the published operator; run it on an un-augmented
 operator and it deletes a real degree of freedom.
+
+### `graph_produce` does not damage our graph dumps
+
+`graph_produce` strips the diagonal, forces the off-diagonals negative, permutes
+and then **rebuilds** the diagonal as `-colsum`. That rebuild would indeed destroy
+the diagonal of an SDDM operator — but graph mode never sees one. The only thing
+fed to it is a `--giant-dump` component, which already **is** the pure Laplacian
+of a connected component, so the rebuild reproduces it exactly. Measured
+(2026-08-20): its output is **byte-identical** to a permutation-only reorder of
+the same dump on `com-Amazon-comp0` (unweighted) and on `grid_1000-comp0`
+(weighted, where a differently-ordered summation could have moved the diagonal by
+an ulp and did not). `physics_produce`, the function the operator path uses, does
+not touch the diagonal at all.
+
+### Equivalence with the reimplementation it replaces
+
+`benchmarks/parac_reorder_amd.jl` used to prepare these inputs. Its output and
+their producer's are **byte-identical** on every matrix checked (`cmp`,
+2026-08-20):
+
+| matrix | path | their producer vs ours |
+|---|---|---|
+| apache2 | `physics_produce(·, "amd")` | byte-identical (80 762 604 B) |
+| G3_circuit | `physics_produce(·, "amd")` | byte-identical (130 569 986 B) |
+| com-Amazon comp0 | `graph_produce(·, "amd")` | byte-identical (22 888 494 B) |
+| grid_1000 comp0 | `graph_produce(·, "amd")` | byte-identical (56 840 557 B) |
+
+So the switch changes provenance, not numbers. End-to-end after the switch,
+apache2 through physics mode on **their** `physics_produce` output: 38 iterations,
+ParAC prints `relative residual: 6.217053e-09`, and
+`parac_verify_residual.py` scoring ParAC's own `x` against the **published**
+`data/matrices/apache2.mtx` gives `‖b − Ax‖/‖b‖ = 6.217053e-09` — the same number,
+independently computed, under 1e-8.
+
+#### Reproducing that independent score
+
+`parac_verify_residual.py` needs the raw `x` and `b`, which the driver does not
+write, and the permutation, which their producer does not write. Neither is
+obtained by touching the ParAC checkout:
+
+```bash
+# 1. a THROWAWAY instrumented copy of the driver, outside their tree
+cp -r "$PARAC_CHECKOUT"/{experiment,cpu_implementation} /tmp/parac_verify/
+#    add to /tmp/parac_verify/experiment/custom_cg.hpp, just before
+#    `double norm_rhs = cblas_dnrm2(...)` (b is overwritten right after it):
+#      if (const char *p = std::getenv("APXCHOL_XB_DUMP")) { FILE *f = fopen(p,"wb");
+#        long long nn = n; fwrite(&nn,8,1,f); fwrite(x.data(),8,n,f);
+#        fwrite(b.data(),8,n,f); fclose(f); }
+PARAC_CHECKOUT=/tmp/parac_verify bash benchmarks/parac_build.sh
+
+# 2. the permutation: our fallback script computes the SAME amd(G) — its whole
+#    output file is byte-identical to the one their producer wrote (cmp it)
+julia benchmarks/parac_reorder_amd.jl /tmp/parac_fair_dump/apache2-op.mtx \
+      /tmp/perm-check-amd.mtx --augment --perm /tmp/apache2.perm
+cmp /tmp/perm-check-amd.mtx "$PARAC_REORD"/apache2-op-aug-amd.mtx    # identical
+
+# 3. run and score
+APXCHOL_XB_DUMP=/tmp/apache2.xb PARAC_REL_TOL=<the cell's parac_rel_tol> \
+  MKL_NUM_THREADS=1 LD_LIBRARY_PATH=$MKLROOT/lib:$IOMPDIR \
+  taskset -c 0-15 /tmp/parac_verify/experiment/driver \
+    "$PARAC_REORD"/apache2-op-aug-amd.mtx 16 "" 1
+python3 benchmarks/parac_verify_residual.py --target data/matrices/apache2.mtx \
+    --xb /tmp/apache2.xb --perm /tmp/apache2.perm --mode perm
+```
+
+### `physics_produce`'s diagonal-dominance assert
+
+`physics_produce` refuses an input whose **total entry sum** is below `-1e-9`
+(`println("not diagonally dominant"); @assert false`). It is a global test, not a
+per-row one: a matrix may have any number of rows with negative excess and still
+pass. Every `kind=operator` matrix in the registry clears it, with the sum their
+check computes:
+
+| matrix | `sum(G)` | verdict |
+|---|---|---|
+| apache2 | +2.2000e4 | appends ground node |
+| ecology1 | +2.0518e-9 | appends (just over the 1e-9 gate) |
+| G3_circuit | +6.9107e8 | appends. Its many diagonally-**deficient** rows do not matter to this test: measured on the dump, 710 083 of its 1 585 478 rows have a strictly negative row sum (665 473 below −1e-12, worst −3.1e-3), and `col_append[col_append > 0] .= 0` simply gives each of them a zero-weight edge to the ground node |
+| parabolic_fem | +2.0000 | appends |
+| thermal2 | +2.0102e3 | appends |
+| iter0010 / 0020 / 0030 / 0040 | +5.2429e-1 each | appends |
+
+**Nothing currently falls back.** `benchmarks/parac_reorder_amd.jl` and
+`benchmarks/parac_nnz_sort.jl` stay in the tree as the fallback for an input their
+producer *would* reject: the runner then prints the refusal, uses ours, and stamps
+`matrix_meta.parac_prep` with `"... (FALLBACK — upstream refused: <exact error>)"`,
+so a fallback cell can never be mistaken for an upstream-prepared one. Every cell
+produced the normal way carries
+`parac_prep: "ParAC write_graph.jl <mode>_produce(path, \"<method>\"), upstream and unmodified"`.
+
+Their producer runs under `benchmarks/julia`, which carries the `AMD`, `Metis`
+and `Laplacians` packages `write_graph.jl` imports:
+
+```bash
+julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
+```
+
+The fallback deliberately runs on julia's *default* environment, so it stays
+usable when that project is not instantiated.
 
 ## What changes in the numbers
 

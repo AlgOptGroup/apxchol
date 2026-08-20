@@ -1,0 +1,47 @@
+{
+  "cell": {
+    "config": "",
+    "device": "cpu",
+    "family": "suitesparse",
+    "matrix_id": "parabolic_fem",
+    "solver": "ac2",
+    "threads": 16
+  },
+  "matrix_meta": {
+    "kind": "operator",
+    "family": "suitesparse",
+    "source": "mtx",
+    "interpretation": "solved as published (assembled operator, diagonal as stored)",
+    "path": "data/matrices/parabolic_fem.mtx",
+    "n": 525825,
+    "nnz": 3674625,
+    "laplacian": false,
+    "grounding": "none",
+    "pos_offdiag": 1048576,
+    "pos_offdiag_mass": 1.58946e-06,
+    "input": "/home/adamant/laplacian_solver/.claude/worktrees/agent-a3767f31974f1537a/data/matrices/parabolic_fem.mtx",
+    "na_reason": "1048576 positive off-diagonal entries carrying 0.000159% of the off-diagonal mass. Laplacians.jl needs non-negative edge weights and solves the matrix it factorizes, so it cannot take this operator (under apxchol's 0.25 lumping ceiling, but apxchol lumps for the PRECONDITIONER only and still applies the true operator in PCG)."
+  },
+  "metrics": {
+    "n": 525825,
+    "nnz": 3674625,
+    "setup_s": 0.0,
+    "solve_s": 0.0,
+    "total_s": 0.0,
+    "iters": -1,
+    "rel_res": -1.0,
+    "fillin": 0.0,
+    "us_per_nnz": 0.0
+  },
+  "provenance": {
+    "boost": "on",
+    "boost_expected": "on",
+    "git_sha": "3bda0c9be10d2881a75f654d3f6ac24cb5c1795f",
+    "note": "FAIR cpu run, singular L, multi-component Dirichlet pin (per-solver grounding)",
+    "repeat": 3,
+    "tier": "broad",
+    "timestamp": "2026-08-20T22:06:42"
+  },
+  "schema": 1,
+  "status": "n/a"
+}

@@ -5,14 +5,30 @@ Runs the canonical MATLAB CMG (Koutis original) inside the mathworks/matlab-deps
 container; the CMG MEX is recompiled for R2026a once via
 benchmarks/cmg/Dockerfile.matlab + makeCMG (mx_*.mexa64).
 
-Per matrix: dump the pure Laplacian, run bench_cmg.m (reg_rel=1e-6 — CMG is the lone
-reg-rel solver, scored on L+eps*I, per the Protocol) in the container, parse the CSV,
-emit a cell. CMG's hierarchy setup is O(n), so the giants are capped out. Resume-safe.
+Per matrix: dump the operator the sweep's own solvers were given (--dump-mtx, the
+one seam every external solver goes through), run bench_cmg.m in the container,
+parse the CSV, emit a cell. CMG's hierarchy setup is O(n), so the giants are
+capped out. Resume-safe.
+
+The matrix reaches CMG the way its declared kind says it should:
+
+  kind=graph     the dumped L, re-derived from |off-diagonal| (which for a graph
+                 dump reproduces exactly the L that was written), shifted by
+                 reg_rel=1e-6*mean|diag| — CMG is the lone reg-rel solver and is
+                 scored on L+eps*I, per the Protocol.
+  kind=operator  the dumped matrix read AS AN OPERATOR — diagonal included — and
+                 solved unpinned and unshifted, so CMG is measured on the same
+                 published operator as everything else in the cell. (The
+                 Laplacian reading rebuilds the diagonal as the degree, which for
+                 an SDDM operator silently discards its diagonal excess.)
+
+sweep_fair.py runs this in-process, so a normal sweep fills the cmg cells; it can
+also be driven on its own:
 
   python3 benchmarks/cmg_matlab_runner.py            # all chart matrices (grids/ipm/ss)
   python3 benchmarks/cmg_matlab_runner.py G3_circuit grid_2000   # a subset
 """
-import os, subprocess, sys, time
+import os, re, subprocess, sys, time
 
 import runner_common as rc
 from runner_common import ROOT, sh
@@ -23,7 +39,11 @@ CMG_MAX_N = int(os.environ.get("CMG_MAX_N", "30000000"))  # O(n) hierarchy, but 
 # is fast (grid_5000 @ 25M nodes runs fine) — covers every matrix in the registry. The
 # old 5M cap was an overly-conservative leftover from the interpreter-bound Octave era.
 TIMEOUT = int(os.environ.get("CMG_TIMEOUT_S", "1800"))
-DUMP_DIR = "/tmp/cmg_mtx"
+# Dumped .mtx cache, bind-mounted read-only into the container (so: absolute
+# path). /tmp is a tmpfs on this box — RAM, with a per-user quota — and the
+# giants dump multi-GB files, so point this at a disk-backed directory before
+# sweeping them, exactly as APXCHOL_BENCH_DUMP_DIR does for sweep_fair.
+DUMP_DIR = os.environ.get("APXCHOL_CMG_DUMP_DIR", "/tmp/cmg_mtx")
 IMAGE = "apxchol-matlab-cmg:r2026a"
 # Out-of-tree installs, mounted read-only into the container: set the environment
 # variables below, or define the same names in a gitignored benchmarks/paths_local.py.
@@ -37,10 +57,18 @@ except ImportError:
     pass
 
 PROV = {"boost": "on", "git_sha": rc.git_sha(),
-        "note": f"CMG (Koutis) canonical MATLAB R2026a in matlab-deps container, "
-                f"reg_rel={REG} (scored on L+eps*I), MEX-recompiled, tol 1e-8",
+        "note": "CMG (Koutis) canonical MATLAB R2026a in matlab-deps container, "
+                "MEX-recompiled, tol 1e-8",
         "repeat": 1, "tier": "broad",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+def _prov(as_operator):
+    """PROV with the grounding this matrix actually got — the two paths are scored
+    on DIFFERENT operators, so one note cannot describe both."""
+    tail = ("published operator read as-is, solved unpinned and unshifted (reg_rel=0)"
+            if as_operator else
+            f"singular L, reg_rel={REG} (scored on L+eps*I)")
+    return {**PROV, "note": f"{PROV['note']}, {tail}"}
 
 TERMINAL = frozenset({"complete", "not_converged", "failed", "timeout", "n/a"})
 
@@ -53,12 +81,43 @@ def _dump(mid):
     return p if os.path.exists(p) else None
 
 
-def _run_matlab_cmg(mtx_basename):
-    """Run bench_cmg.m on /cmg-mtx/<basename> inside the container; return stdout."""
+def available():
+    """(ok, reason) — is CMG runnable on this machine at all?
+
+    Probed ONCE by the sweep, so a machine without MATLAB says so in one loud
+    line instead of failing 27 times or, worse, leaving 27 silent gaps."""
+    for val, what in ((MATLAB, "the MATLAB R2026a install tree "
+                               "($APXCHOL_MATLAB_ROOT / paths_local.MATLAB)"),
+                      (CMG_SOLVER, "the cmg-solver checkout "
+                                   "($APXCHOL_CMG_SOLVER / paths_local.CMG_SOLVER)")):
+        if not val:
+            return False, f"{what} is not configured"
+        if not os.path.exists(val):
+            return False, f"{what} is not at {val}"
+    try:
+        cp = sh(f"docker image inspect {IMAGE}", timeout=120)
+    except Exception as e:                                  # docker missing / not usable
+        return False, f"docker is not usable here ({e})"
+    if cp.returncode != 0:
+        return False, (f"the container image {IMAGE} is missing — build it from "
+                       f"benchmarks/cmg/Dockerfile.matlab")
+    return True, ""
+
+
+def _run_matlab_cmg(mtx_basename, as_operator):
+    """Run bench_cmg.m on /cmg-mtx/<basename> inside the container; return
+    (stdout, stderr).
+
+    as_operator=1 for a kind=operator matrix: bench_cmg then reads the dump with
+    its diagonal intact and solves it unpinned and unshifted, i.e. the same
+    system every other solver in the cell got. as_operator=0 keeps the Laplacian
+    reading + reg_rel shift, which is the singular-L path."""
     rc.require_path(MATLAB, "APXCHOL_MATLAB_ROOT", "MATLAB", "the MATLAB R2026a install")
     rc.require_path(CMG_SOLVER, "APXCHOL_CMG_SOLVER", "CMG_SOLVER", "the cmg-solver checkout")
+    reg = "0" if as_operator else REG
     inner = (f"cd /bench && /opt/MATLAB/R2026a/bin/matlab -batch "
-             f"\\\"bench_cmg('/cmg-mtx/{mtx_basename}', {TOL}, {MAXITER}, {SEED}, {REG})\\\"")
+             f"\\\"bench_cmg('/cmg-mtx/{mtx_basename}', {TOL}, {MAXITER}, {SEED}, {reg}, "
+             f"{1 if as_operator else 0})\\\"")
     cmd = (f"docker run --rm --network=host "
            f"-v {MATLAB}:/opt/MATLAB/R2026a:ro "
            f"-v {CMG_SOLVER}:/cmg-solver:ro "
@@ -66,7 +125,8 @@ def _run_matlab_cmg(mtx_basename):
            f"-v {ROOT}/benchmarks/cmg:/bench:ro "
            f"-e HOME=/tmp -e CMG_ROOT=/cmg-solver "
            f"{IMAGE} bash -c \"{inner}\"")
-    return sh(cmd, timeout=TIMEOUT).stdout
+    cp = sh(cmd, timeout=TIMEOUT)
+    return cp.stdout, (cp.stderr or "")
 
 
 def run_one(mid):
@@ -76,19 +136,39 @@ def run_one(mid):
     n = rc.MATRICES[mid].get("n", 0)
     if n and n > CMG_MAX_N:
         rc.emit_cell(fam, mid, "cmg", "", "n/a", {"n": n}, THREADS, "cpu",
-                     {**PROV, "note": PROV["note"] + f" [skipped: n={n} > {CMG_MAX_N}]"})
+                     {**_prov(rc.kind_of(mid) == "operator"),
+                      "note": PROV["note"] + f" [skipped: n={n} > {CMG_MAX_N}]"},
+                     matrix_meta={"cmg_na_reason": f"n={n} exceeds CMG_MAX_N={CMG_MAX_N}, the "
+                                                   f"runner's cap on CMG's O(n) hierarchy setup"})
         return f"skip(n={n}>cap)"
+    as_operator = rc.kind_of(mid) == "operator"
+    meta = {"cmg_input": (
+        "the DUMPED operator, read with its diagonal intact and solved unpinned and "
+        "unshifted (the same system every other solver in this cell got)" if as_operator else
+        f"the DUMPED L, re-derived from |off-diagonal| (identical to the dump for a "
+        f"kind=graph matrix) and shifted by reg_rel={REG}*mean|diag| — CMG is the lone "
+        f"reg-rel solver and is scored on L+eps*I")}
     try:
         src = _dump(mid)
         if not src:
             return "SKIP(dump)"
-        out = _run_matlab_cmg(os.path.basename(src))
+        out, err = _run_matlab_cmg(os.path.basename(src), as_operator)
     except subprocess.TimeoutExpired:
-        rc.emit_cell(fam, mid, "cmg", "", "timeout", {}, THREADS, "cpu", PROV)
+        meta["cmg_na_reason"] = f"exceeded the {TIMEOUT}s per-cell wall cap"
+        rc.emit_cell(fam, mid, "cmg", "", "timeout", {}, THREADS, "cpu",
+                     _prov(as_operator), matrix_meta=meta)
         return "TIMEOUT"
     status, metrics = rc.classify(rc.parse_csv(out), TOL)
-    rc.emit_cell(fam, mid, "cmg", "", status, metrics, THREADS, "cpu", PROV)
-    return f"{status} it={metrics.get('iters') if metrics else '?'} rr={metrics.get('rel_res') if metrics else '?'}"
+    if status == "n/a":
+        # bench_cmg.m tags its refusals '[n/a] cmg on <name>: <reason>' on stderr.
+        hit = re.search(r"^\[n/a\] cmg[^:]*:\s*(.+)$", err, re.M)
+        meta["cmg_na_reason"] = (hit.group(1).strip() if hit else
+                                 "CMG declined this matrix (no reason line captured)")
+    rc.emit_cell(fam, mid, "cmg", "", status, metrics, THREADS, "cpu",
+                 _prov(as_operator), matrix_meta=meta)
+    note = f" [{meta['cmg_na_reason']}]" if status == "n/a" else ""
+    return (f"{status} it={metrics.get('iters') if metrics else '?'} "
+            f"rr={metrics.get('rel_res') if metrics else '?'}{note}")
 
 
 CHART_MATS = [m for m, meta in rc.MATRICES.items()
