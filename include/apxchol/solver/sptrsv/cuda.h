@@ -523,11 +523,17 @@ private:
         const std::vector<int> len_L  = cuda_host::csr_row_lengths(mi, L_ptr.data());
         const std::vector<int> len_LT = cuda_host::csr_row_lengths(mi, LT_ptr.data());
         const int pre = dataflow_prefetch_depth();
-        const cuda_host::dataflow_seg_params sp = dataflow_seg_params_from_env();
+        // Row segmentation: each direction gets its own threshold, from its
+        // own row-length histogram (the two differ a lot -- an elimination
+        // factor's hub rows land in CSR of L, its columns stay bounded).
+        const cuda_host::dataflow_len_stats st_L  = cuda_host::dataflow_row_stats(mi, len_L.data(), pre);
+        const cuda_host::dataflow_len_stats st_LT = cuda_host::dataflow_row_stats(mi, len_LT.data(), pre);
+        const cuda_host::dataflow_seg_params sp_f = dataflow_seg_params_for(pre, st_L);
+        const cuda_host::dataflow_seg_params sp_b = dataflow_seg_params_for(pre, st_LT);
         const cuda_host::dataflow_plan fwd = cuda_host::dataflow_build_plan(
-            mi, false, L_ptr.data(), L_idx, len_L.data(), pre, sp);
+            mi, false, L_ptr.data(), L_idx, len_L.data(), pre, sp_f);
         const cuda_host::dataflow_plan bck = cuda_host::dataflow_build_plan(
-            mi, true, LT_ptr.data(), LT_idx, len_LT.data(), pre, sp);
+            mi, true, LT_ptr.data(), LT_idx, len_LT.data(), pre, sp_b);
         // The kernel relies on the plan's warp-sharing property implicitly
         // (see cuda_host.h dataflow_plan_check); O(m), so just check it.
         for (int dir = 0; dir < 2; ++dir) {
@@ -558,7 +564,8 @@ private:
         up(&d_fwd_batches_, fwd.batch_start); up(&d_bck_batches_, bck.batch_start);
         up(&d_fwd_spec_sel_, fwd.batch_spec); up(&d_bck_spec_sel_, bck.batch_spec);
         up_spec(&d_fwd_spec_, fwd.spec);      up_spec(&d_bck_spec_, bck.spec);
-        if (std::getenv("APXCHOL_GPU_SPTRSV_STATS")) dataflow_print_stats(len_L, len_LT, pre, sp, fwd, bck);
+        if (std::getenv("APXCHOL_GPU_SPTRSV_STATS"))
+            dataflow_print_stats(st_L, st_LT, sp_f, sp_b, fwd, bck);
         const std::size_t tag_words = static_cast<std::size_t>(m_) + static_cast<std::size_t>(df_slots_);
         APXCHOL_CUDA_CHECK(cudaMalloc(&d_df_tag_, tag_words * sizeof(unsigned long long)));
         APXCHOL_CUDA_CHECK(cudaMemset(d_df_tag_, 0, tag_words * sizeof(unsigned long long)));
@@ -576,28 +583,33 @@ private:
                     df_slots_, df_split_rows_, mf/1e9, mt/1e9); }
     }
 
-    /// The segmentation parameters of this setup. ONE knob:
-    /// APXCHOL_GPU_DF_SPLIT=<off-diagonals> -- rows longer than that are cut;
-    /// 0 = segmentation off, the rollback switch (bit-identical to the
-    /// unsplit kernel). The segment LENGTH is not a knob: it is one chunk,
-    /// 32 * pre entries, measured. max_seg only bounds the ticket window one
-    /// giant row can occupy and never binds in practice (the longest measured
-    /// factor row, com-Orkut's 33202, gives S = 130).
-    static cuda_host::dataflow_seg_params dataflow_seg_params_from_env() {
+    /// The segmentation parameters of ONE sweep direction. ON by default; the
+    /// threshold comes from that direction's own row-length histogram
+    /// (cuda_host::dataflow_split_threshold -- a pure function of row lengths,
+    /// so grid size cannot enter the result). ONE knob:
+    /// APXCHOL_GPU_DF_SPLIT=<off-diagonals> pins the threshold for both
+    /// directions, =0 turns segmentation off (the rollback switch: the plan,
+    /// and the output, become bit-identical to the unsplit kernel).
+    ///
+    /// The segment LENGTH is not a knob: it is ONE CHUNK, 32 * pre entries.
+    /// Measured on kron_g500-logn16 with the threshold pinned at 256
+    /// (gpu_pcg_loop ms/iteration, medians of 4, interleaved): 256 entries
+    /// 8.87, 512 10.34, 1024 11.62, unsplit 17.81; on com-LiveJournal 50.49 /
+    /// 60.60 / 112.97 against 156.59 -- the depth model's sqrt(len) optimum is
+    /// swamped by the extra round trip every additional chunk of a segment
+    /// costs on the critical path, so the shortest segment the chunk walk can
+    /// express wins. The planner keeps `seg` general; only this default is
+    /// fixed. max_seg only bounds the ticket window one giant row can occupy
+    /// and never binds in practice (the longest measured factor row,
+    /// com-Orkut's 134368, gives S = 525 against the 4096 cap).
+    static cuda_host::dataflow_seg_params dataflow_seg_params_for(
+            int pre, const cuda_host::dataflow_len_stats& st) {
         cuda_host::dataflow_seg_params p;
-        p.split_min = kDataflowSplitDefault;
-        if (const char* e = std::getenv("APXCHOL_GPU_DF_SPLIT")) {
-            const int v = std::atoi(e);
-            p.split_min = v > 0 ? v : 0;
-        }
-        // ONE CHUNK per segment. Measured on kron_g500-logn16 with the
-        // threshold pinned at 256 (gpu_pcg_loop ms/iteration, medians of 4,
-        // interleaved): 256 entries 8.87, 512 10.34, 1024 11.62, unsplit
-        // 17.81 -- the depth model's sqrt(len) optimum is swamped by the
-        // extra round trip every additional chunk of a segment costs on the
-        // critical path, so the shortest segment the chunk walk can express
-        // wins. The planner keeps `seg` general; only this default is fixed.
-        p.seg = p.split_min > 0 ? 32 * dataflow_prefetch_depth() : 0;
+        const char* e = std::getenv("APXCHOL_GPU_DF_SPLIT");
+        const int   v = e ? std::atoi(e) : -1;
+        if (e && v <= 0) return p;                       // seg = 0: off
+        p.seg = 32 * pre;
+        p.split_min = e ? v : cuda_host::dataflow_split_threshold(st);
         return p;
     }
 
@@ -607,14 +619,15 @@ private:
     // chews in more than 2^k chunks of C = 32 * pre entries, and the share of
     // the factor they hold: on a hub factor those few rows ARE the critical
     // path, on a grid / IPM factor the histogram is empty past bucket 0.
-    void dataflow_print_stats(const std::vector<int>& len_L, const std::vector<int>& len_LT, int pre,
-                              const cuda_host::dataflow_seg_params& sp,
+    void dataflow_print_stats(const cuda_host::dataflow_len_stats& st_L,
+                              const cuda_host::dataflow_len_stats& st_LT,
+                              const cuda_host::dataflow_seg_params& sp_f,
+                              const cuda_host::dataflow_seg_params& sp_b,
                               const cuda_host::dataflow_plan& fwd,
                               const cuda_host::dataflow_plan& bck) const {
-        const int mi = static_cast<int>(m_);
         for (int dir = 0; dir < 2; ++dir) {
-            const std::vector<int>& len = dir ? len_LT : len_L;
-            const cuda_host::dataflow_len_stats st = cuda_host::dataflow_row_stats(mi, len.data(), pre);
+            const cuda_host::dataflow_len_stats& st = dir ? st_LT : st_L;
+            const cuda_host::dataflow_seg_params& sp = dir ? sp_b : sp_f;
             std::fprintf(stderr, "[df-stats] %s: m=%d nnz=%lld mean_len=%.2f max_len=%d C=%d\n",
                          dir ? "back (CSR L^T)" : "fwd (CSR L)", st.m,
                          static_cast<long long>(st.nnz), st.mean_len, st.max_len, st.base);
@@ -628,8 +641,9 @@ private:
                              100.0 * static_cast<double>(st.nnz_ge[k]) / static_cast<double>(st.nnz ? st.nnz : 1));
             }
             const cuda_host::dataflow_plan& pl = dir ? bck : fwd;
-            std::fprintf(stderr, "[df-stats]   plan: seg=%d split_min=%d max_seg=%d -> batches=%d split_rows=%d"
-                                 " slots=%d spec=%zu (tables %.2f MB)\n",
+            std::fprintf(stderr, "[df-stats]   long-row nnz share %.3f -> seg=%d split_min=%d max_seg=%d"
+                                 " -> batches=%d split_rows=%d slots=%d spec=%zu (tables %.2f MB)\n",
+                         st.nnz ? static_cast<double>(st.nnz_ge[0]) / static_cast<double>(st.nnz) : 0.0,
                          sp.seg, sp.split_min, sp.max_seg, pl.n_batches(), pl.n_split, pl.n_slots,
                          pl.spec.size(),
                          (pl.batch_start.size() * 4.0 + pl.batch_spec.size() * 4.0 + pl.spec.size() * 16.0) / 1e6);

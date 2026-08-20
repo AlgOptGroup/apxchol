@@ -81,10 +81,11 @@
 //     minimum-unfinished-ticket argument below carries over verbatim;
 //   * no value atomicAdd anywhere, so the result stays bit-deterministic.
 // Depth drops from ceil(len/256) to 1 + ceil(S/256) + 1 with S = ceil(len/256)
-// segments of one chunk each. APXCHOL_GPU_DF_SPLIT=<off-diagonals> is the
-// threshold (0 = off, the rollback switch); the segment length is fixed at
-// one chunk -- longer segments measured strictly worse (see cuda.h
-// dataflow_seg_params_from_env).
+// segments of one chunk each. ON by default with the threshold derived PER
+// DIRECTION from that direction's row-length histogram (cuda_host.h
+// dataflow_split_threshold); APXCHOL_GPU_DF_SPLIT=<off-diagonals> pins it and
+// =0 is the rollback switch. The segment length is fixed at one chunk --
+// longer segments measured strictly worse (see cuda.h dataflow_seg_params_for).
 //
 // DEADLOCK FREEDOM. A lane only ever waits on rows with SMALLER tickets
 // (a forward neighbour j < i is earlier in the natural order, a back
@@ -152,13 +153,6 @@ using sptrsv_gpu_value_t = float;
 /// Threads per block of the persistent kernel.
 inline constexpr int kDataflowBlock = 256;
 
-/// DEFAULT ROW-SPLITTING threshold: a row with more than this many
-/// off-diagonals is cut into segments of ONE chunk (32 * prefetch depth
-/// entries) plus a finalizer -- see "ROW SEGMENTATION" in the file header.
-/// 0 = segmentation off. Env APXCHOL_GPU_DF_SPLIT=<n> overrides at every
-/// setup; 0 is the rollback switch and makes the plan, and the output,
-/// bit-identical to the unsplit kernel.
-inline constexpr int kDataflowSplitDefault = 0;
 
 /// The kernel's per-lane prefetch depth (entries of the row held in
 /// registers per lane; a compile-time constant of the .cu). The host's batch

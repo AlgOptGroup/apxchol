@@ -953,6 +953,89 @@ TEST(GpuHostPrep, DataflowPlanSegmentsCoverSplitRowsExactlyOnce) {
     }
 }
 
+// The SHIPPED threshold is derived from the direction's own histogram: a
+// direction whose long rows hold most of the work is cut aggressively (one
+// chunk), one where they are a rounding error only past the depth break-even
+// (three chunks). Stated here on the measured shares.
+TEST(GpuHostPrep, DataflowSplitThresholdFollowsTheLongRowShare) {
+    const int pre = 8, C = 32 * pre;
+    auto threshold_for = [&](const std::vector<int>& len) {
+        return apxchol::cuda_host::dataflow_split_threshold(
+            apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), len.data(), pre));
+    };
+    // Hub-heavy: a handful of very long rows hold nearly all the entries.
+    std::vector<int> hub(10000, 4);
+    for (int i = 0; i < 20; ++i) hub[static_cast<size_t>(i)] = 20000;
+    EXPECT_EQ(threshold_for(hub), C);
+    // Shallow: the same few long rows, but the short ones dominate the nnz.
+    std::vector<int> flat(10000000, 6);
+    for (int i = 0; i < 20; ++i) flat[static_cast<size_t>(i)] = 2000;
+    EXPECT_EQ(threshold_for(flat), 3 * C);
+    // No long rows at all (grid / IPM factors): the conservative threshold,
+    // which no row can reach -- so no row is split.
+    EXPECT_EQ(threshold_for(std::vector<int>(1000, 20)), 3 * C);
+    // Empty: no division by zero.
+    EXPECT_EQ(threshold_for(std::vector<int>{}), 3 * C);
+    // The rule is EXACTLY the share test, both sides of it.
+    std::vector<int> len(1000, 1);
+    len[0] = C;                                   // share = C / (C + 999)
+    const double share = static_cast<double>(C) / static_cast<double>(C + 999);
+    EXPECT_EQ(threshold_for(len), share >= apxchol::cuda_host::kDataflowSplitShare ? C : 3 * C);
+}
+
+// dataflow_plan_check is the host assertion of a property the kernel relies
+// on IMPLICITLY, so it has to have teeth: every mutation below is a real
+// failure mode of the packing, and setup throws on all of them.
+TEST(GpuHostPrep, DataflowPlanCheckRejectsBrokenPlans) {
+    const int pre = 8;
+    std::vector<int> len(600);
+    for (size_t i = 0; i < len.size(); ++i) len[i] = 1 + static_cast<int>(i % 7);
+    len[100] = 9000;                                   // a multi-chunk row
+    const toy_csr t = make_toy_csr(len, false);
+    const int m = static_cast<int>(len.size());
+    const apxchol::cuda_host::dataflow_seg_params on{256, 256, 4096};
+    const apxchol::cuda_host::dataflow_seg_params off{};
+    auto check = [&](const apxchol::cuda_host::dataflow_plan& pl) {
+        return apxchol::cuda_host::dataflow_plan_check(pl, m, false, len.data(), pre);
+    };
+    const auto good = apxchol::cuda_host::dataflow_build_plan(m, false, t.ptr.data(), t.idx.data(),
+                                                              len.data(), pre, on);
+    ASSERT_EQ(check(good), "");
+    // A segment batch that is not zero-width.
+    { auto bad = good;
+      for (size_t b = 0; b < bad.batch_spec.size(); ++b)
+          if (bad.batch_spec[b] >= 0 && bad.spec[static_cast<size_t>(bad.batch_spec[b])].row >= 0) {
+              bad.batch_start[b + 1] += 1; break;
+          }
+      EXPECT_NE(check(bad), ""); }
+    // A finalizer emitted BEFORE its segments.
+    { auto bad = good;
+      for (size_t k = 0; k < bad.spec.size(); ++k)
+          if (bad.spec[k].row < 0) { std::swap(bad.spec[k], bad.spec[0]); break; }
+      EXPECT_NE(check(bad), ""); }
+    // batch_start no longer monotone.
+    { auto bad = good;
+      bad.batch_start[1] = -1;
+      EXPECT_NE(check(bad), ""); }
+    // THE implicit property: a multi-chunk row sharing its warp with another
+    // row. dataflow_batches / dataflow_build_plan never emit that (multi-chunk
+    // implies G = 32 implies one row per batch), so it has to be forged: drop
+    // the boundary that isolates the long row.
+    { auto bad = apxchol::cuda_host::dataflow_build_plan(m, false, t.ptr.data(), t.idx.data(),
+                                                         len.data(), pre, off);
+      ASSERT_EQ(check(bad), "");
+      for (size_t b = 0; b + 1 < bad.batch_spec.size(); ++b)
+          if (bad.batch_start[b + 1] - bad.batch_start[b] == 1 &&
+              len[static_cast<size_t>(bad.batch_start[b])] > 32 * pre) {
+              bad.batch_start.erase(bad.batch_start.begin() + static_cast<long>(b) + 1);
+              bad.batch_spec.erase(bad.batch_spec.begin() + static_cast<long>(b));
+              break;
+          }
+      const std::string why = check(bad);
+      EXPECT_NE(why, "");
+      EXPECT_NE(why.find("multi-chunk"), std::string::npos) << why; }
+}
+
 // max_seg caps S even for an absurdly long row, so one row can never occupy
 // an unbounded slice of the ticket window.
 TEST(GpuHostPrep, DataflowPlanCapsTheSegmentCountPerRow) {
@@ -1267,10 +1350,17 @@ TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministi
             else if (kind)      { EXPECT_GT(plf.n_split, 0) << "hub factor: forward sweep must split"; }
             dev_plan pf = upload_plan(plf);
             dev_plan pb = upload_plan(plb);
+            // ONE tag array for both directions and every sweep below (the
+            // fwd / bck / fwd sequence is the slot-aliasing test: the two
+            // directions have different slot maps and reuse the same words,
+            // separated only by the epoch), plus a GUARD BAND: nothing may
+            // write past m + n_slots.
             const size_t words = static_cast<size_t>(m) + static_cast<size_t>(std::max(pf.slots, pb.slots));
+            const size_t kGuard = 64;
             unsigned long long* d_tag = nullptr;
-            ASSERT_EQ(cudaMalloc(&d_tag, words * sizeof(unsigned long long)), cudaSuccess);
+            ASSERT_EQ(cudaMalloc(&d_tag, (words + kGuard) * sizeof(unsigned long long)), cudaSuccess);
             ASSERT_EQ(cudaMemset(d_tag, 0, words * sizeof(unsigned long long)), cudaSuccess);
+            ASSERT_EQ(cudaMemset(d_tag + words, 0xAB, kGuard * sizeof(unsigned long long)), cudaSuccess);
             unsigned epoch = 0;
             for (bool fp16 : {false, true}) {
                 SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
@@ -1314,6 +1404,9 @@ TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministi
                 }
                 const std::vector<int> ctrl = dev_download(d_ctrl, 2);
                 EXPECT_EQ(ctrl[0], 0); EXPECT_EQ(ctrl[1], 0);   // the last warp out resets them
+                const auto guard = dev_download(d_tag + words, kGuard);
+                for (size_t g = 0; g < kGuard; ++g)
+                    ASSERT_EQ(guard[g], 0xABABABABABABABABull) << "a sweep wrote past m + n_slots, word " << g;
             }
             cudaFree(d_tag);
             free_plan(pf); free_plan(pb);

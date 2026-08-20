@@ -265,6 +265,12 @@ inline int dataflow_lane_group(int entries, int pre) {
     return G;
 }
 
+/// THE PLAIN BATCH TABLE, kept as the planner's REFERENCE IMPLEMENTATION:
+/// dataflow_build_plan() below produces exactly this at seg == 0, and a test
+/// says so on a real-shaped factor in both directions. Setup itself goes
+/// through the planner; this is the independently written greedy packer the
+/// planner's common path is checked against.
+///
 /// The dataflow backend's BATCH table for one sweep direction: consecutive
 /// rows in sweep order (q = 0..m-1; the row is q, or m-1-q when the sweep is
 /// reversed) packed greedily into warps of 32 lanes -- row q takes G(q)
@@ -337,6 +343,35 @@ inline dataflow_len_stats dataflow_row_stats(int m, const int* len, int pre) {
     }
     s.mean_len = m > 0 ? static_cast<double>(s.nnz) / static_cast<double>(m) : 0.0;
     return s;
+}
+
+/// The nnz share (of rows at least one chunk long) above which a direction
+/// counts as HUB-HEAVY and gets the aggressive split threshold. Measured
+/// separation: com-Amazon fwd 11% / back 0.2%, iter0040 0.01%, grid_500 0%
+/// on one side; com-LiveJournal back 42% / fwd 63%, com-Orkut 69% / 84%,
+/// kron_g500-logn16 54% / 90% on the other.
+inline constexpr double kDataflowSplitShare = 0.25;
+
+/// The DEFAULT split threshold of ONE sweep direction, from that direction's
+/// own row-length statistics. A pure function of row lengths -- never of
+/// occupancy, grid size or device properties -- so the plan, and the output,
+/// stay bit-identical across grid sizes.
+///
+/// Splitting a row of `len` entries trades a walk of ceil(len / C) chunk
+/// round trips for one segment chunk + one finalizer chunk + the publish
+/// (depth ~3), at the price of S + 1 extra ticket claims and batches. Where
+/// the long rows hold most of the work that price is nothing and the
+/// aggressive threshold C wins; where they are a rounding error the extra
+/// batches are pure overhead and only rows past the depth break-even (3C) are
+/// worth cutting. Measured (RTX 4090 Laptop, gpu_pcg_loop ms/iteration,
+/// medians of 6, interleaved):
+///   kron_g500-logn16 (fwd share 90%): unsplit 17.00 | C 8.87 | 2C 9.07 | 3C 10.48
+///   com-Amazon       (fwd share 11%): unsplit  1.99 | C 2.62 | 2C 2.09 | 3C  1.95
+/// -- i.e. the same threshold that is 2x on the hub factor is +31% on the
+/// shallow one, which is why this is derived and not a constant.
+inline int dataflow_split_threshold(const dataflow_len_stats& st) {
+    const double share = st.nnz ? static_cast<double>(st.nnz_ge[0]) / static_cast<double>(st.nnz) : 0.0;
+    return share >= kDataflowSplitShare ? st.base : 3 * st.base;
 }
 
 /// Parameters of the segmentation. A row with more than `split_min`
