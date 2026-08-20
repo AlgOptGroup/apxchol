@@ -222,6 +222,10 @@ sparse_csc make_wide_magnitude_lower(node_index n) {
 // alias path (m == n) and the Laplacian copy path (m == n-1), serial and
 // parallel transpose (m > 50000).
 TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     struct cfg { node_index n; bool laplacian; };
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
         const node_index m = c.laplacian ? c.n - 1 : c.n;
@@ -401,6 +405,10 @@ TEST(SpTRSVDrop, EnvContract) {
 // (even > 1, which drops every off-diagonal); the compacted factor solves as
 // a diagonal one then (y = x / diag).
 TEST(SpTRSVDrop, EdgeCases) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     const node_index m = 2000;
     sparse_csc L = make_random_lower(m, 4.0, 31, 0.0, 1.0);
     for (edge_index p = 0; p < L.nonZeros(); ++p)
@@ -544,6 +552,10 @@ TEST(SpTRSVDrop, CompactedArraysAreByteIdenticalAcrossThreadCounts) {
 #include "apxchol/solver/sptrsv/cuda_host.h"
 
 TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     struct cfg { node_index n; bool laplacian; };
     for (const char* rel_env : {"1e-4", static_cast<const char*>(nullptr), "0"})
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60001, true}}) {
@@ -1009,8 +1021,11 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
     std::vector<double> x(m), y_cpu(m), y_df(m), y_df2(m);
     { std::mt19937 rng(11); std::uniform_real_distribution<double> u(-1.0, 1.0); for (auto& v : x) v = u(rng); }
     // The CPU reference pair (fp32 storage, fp64 accumulation) -- one setup,
-    // both GPU storages are compared against it.
+    // both GPU storages are compared against it. The storage is pinned: the
+    // suite is also run with APXCHOL_SPTRSV_FP16=1 in the environment, and
+    // the tolerances below are stated against the fp32 CPU pair.
     {
+        scoped_env cpu32("APXCHOL_SPTRSV_FP16", "0");
         apxchol::omp_sptrsv c; c.setup(L, m);
         std::vector<double> t(m);
         c.forward_solve(x.data(), t.data());
@@ -1018,9 +1033,9 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
     }
     for (bool fp16 : {false, true}) {
         SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
-        // Pin BOTH ways: fp16 is default-ON where the dataflow kernel
-        // resolves, so the fp32 sub-case must say =0 explicitly.
-        scoped_env f16("APXCHOL_GPU_SPTRSV_FP16", fp16 ? "1" : "0");
+        // Pin BOTH ways: fp16 is default-ON on the GPU where the dataflow
+        // kernel resolves, so the fp32 sub-case must say =0 explicitly.
+        scoped_env f16("APXCHOL_SPTRSV_FP16", fp16 ? "1" : "0");
         {
             scoped_env be("APXCHOL_GPU_SPTRSV", "dataflow");
             apxchol::cuda_sptrsv t; t.setup(L, m);

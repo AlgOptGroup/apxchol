@@ -10,6 +10,18 @@
 #include <vector>
 
 namespace {
+// RAII env override: these tests state the DEFAULT (fp32) SpTRSV storage
+// contract, and the suite is also run with APXCHOL_SPTRSV_FP16=1 in the
+// environment, so they pin it.
+struct scoped_env {
+    std::string name, saved; bool had = false;
+    scoped_env(const char* var, const char* value) : name(var) {
+        if (const char* e = std::getenv(var)) { had = true; saved = e; }
+        if (value) setenv(var, value, 1); else unsetenv(var);
+    }
+    ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
+};
+
 
 // "Exact factor => O(1) PCG iterations" bound. An exact Cholesky factor stored
 // at fp32 preconditions PCG to <= 3 iterations. (Under the fp16 STORAGE --
@@ -122,6 +134,10 @@ TEST(CustomEliminator, LambdaViaAsEliminator) {
 }
 
 TEST(CustomEliminator, ExactCliqueFactorIsExact) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     // With the exact clique rule the factorization is exact Cholesky:
     // P^T L L^T P == A up to roundoff (no sampling at all).
     auto A = grid_laplacian(8, 8);

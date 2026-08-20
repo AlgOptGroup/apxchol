@@ -241,6 +241,10 @@ std::vector<float> reference_scales(const sparse_csc& L) {
 // Every stored CSC value equals narrow_value(v, s_j) bit-for-bit, and so
 // does its CSR twin; the scales (if any) match; offdiag count is right.
 TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     scoped_drop_off drop_off;   // storage contract on the un-dropped factor
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose */}) {
         SCOPED_TRACE("m=" + std::to_string(m));
@@ -287,6 +291,10 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
 // subnormal=1) and zero everywhere else. The forward solve is exact w.r.t.
 // the STORED values either way.
 TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     scoped_drop_off drop_off;   // the 1e-6 / 1e-9 entries must reach the storage format
     // 4x4 lower factor: column 0 = diag 2, off-diagonals 1.0 (max), 1e-6 (fp16
     // subnormal after scaling), 1e-9 (flushed). Columns 1..3: diagonal only /
@@ -404,6 +412,10 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel) {
 // 50000), with a spread of magnitudes so ~half of the off-diagonals fall
 // under 1e-4.
 TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     struct cfg { node_index n; bool laplacian; };
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
         const node_index m = c.laplacian ? c.n - 1 : c.n;
@@ -530,6 +542,10 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
 // on FP16_SCALED a tiny rel still removes what fp16 flushes (a stored zero is
 // a stored entry) -- the drop's second criterion.
 TEST(LowPrec, FactorDropEdgeCases) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     sparse_csc L = make_random_lower(2000, 4.0, 31, -1.0, 1.0);
     for (edge_index p = 0; p < L.nonZeros(); ++p)
         if ((p % 5) == 2) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-9);   // fp16-flush range

@@ -226,6 +226,10 @@ void set_threads(int t) {
 // The same bytes at every thread count, both shapes, both directions, in and
 // out of place; anchored to a correct solve at T=1.
 TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");   // state the storage contract on the un-dropped factor
     const std::vector<int> T = thread_counts();
     const int t_max = T.back();

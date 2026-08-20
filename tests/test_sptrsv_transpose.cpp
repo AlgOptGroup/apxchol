@@ -30,6 +30,18 @@ using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
+// RAII env override: these tests state the DEFAULT (fp32) SpTRSV storage
+// contract, and the suite is also run with APXCHOL_SPTRSV_FP16=1 in the
+// environment, so they pin it.
+struct scoped_env {
+    std::string name, saved; bool had = false;
+    scoped_env(const char* var, const char* value) : name(var) {
+        if (const char* e = std::getenv(var)) { had = true; saved = e; }
+        if (value) setenv(var, value, 1); else unsetenv(var);
+    }
+    ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
+};
+
 
 // ── Serial reference transpose ───────────────────────
 // Classic count + prefix + column-order scatter. Independent of the
@@ -132,6 +144,10 @@ void expect_byte_identical(const apxchol::omp_sptrsv& trsv, const ref_csr& R,
 // on). The output must be byte-identical to the serial reference at every
 // thread count — including T=1, and thread counts that do not divide m.
 TEST(SpTRSVTranspose, ByteIdenticalToSerialReferenceAcrossThreadCounts) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     const node_index m = 70000;   // > 50000: parallel path
     sparse_csc L = make_random_lower(m, 4.0, /*seed=*/12345);
     const ref_csr R = reference_transpose(L);
@@ -221,6 +237,10 @@ void expect_gpu_transpose_identical(const apxchol::cuda_host::csr_int<V>& LT, co
 } // namespace
 
 TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThreadCounts) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     const node_index m = 70000;   // > 50000: parallel path
     sparse_csc L = make_random_lower(m, 4.0, /*seed=*/12345);
     // The GPU backend's int32 CSC of L11 (== CSR of L^T), fp32 values, and its
@@ -276,6 +296,10 @@ TEST(SpTRSVTranspose, GpuHostTransposeSerialPathMatchesReference) {
 
 // The serial fallback (m <= 50000) must agree with the reference too.
 TEST(SpTRSVTranspose, SerialFallbackMatchesReference) {
+    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
+    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+
     const node_index m = 20000;   // <= 50000: serial path
     sparse_csc L = make_random_lower(m, 5.0, /*seed=*/4242);
     const ref_csr R = reference_transpose(L);
