@@ -53,6 +53,39 @@
 //     it saw the epoch of). The only atomics are the ticket claims and the
 //     last-warp reset of the two control ints (which do carry fences).
 //
+// ROW SEGMENTATION (2026-08-20). The walk above is ceil(len / (G*kPre))
+// chunk round trips deep, and G caps at 32, so a row of len entries costs
+// ceil(len / 256) round trips ON THE CRITICAL PATH -- chunk k+1's loads
+// cannot issue before chunk k has been polled to completion. A hub factor's
+// elimination tail is a CHAIN of such rows (kron_g500-logn16: 2345 forward
+// rows of >= 256 entries holding 82% of the factor, the longest 17789), so
+// the sweep pays (chain length) x (len / 256) round trips -- the whole
+// cuSPARSE gap on hub factors. The host therefore CUTS a long row into S
+// SEGMENTS plus one FINALIZER (cuda_host.h: dataflow_seg_params /
+// dataflow_build_plan / dataflow_plan_check):
+//   * a segment is a full 32-lane item over one CSR slice of the row; it
+//     accumulates exactly as an unsplit G = 32 row would and publishes its
+//     partial into an extra epoch-tagged SLOT word, tag[m + slot] -- the
+//     partials live in the SAME array as the rows, so ld_tag / st_tag /
+//     pack_tag apply verbatim, a stale slot is rejected by its epoch, and no
+//     per-sweep memset of slots is needed;
+//   * the finalizer polls the S slots (no CSR, no values), sums them IN
+//     FIXED SLOT ORDER, divides by the diagonal and publishes the row;
+//   * the S + 1 items are ALONE in their batches (the segments' batches are
+//     zero-width in sweep positions, the finalizer's owns the row's), so
+//     batch_start stays monotone, the common path is untouched, and the
+//     implicit "a multi-chunk item never shares a warp with a possible
+//     producer" property survives (dataflow_plan_check asserts it);
+//   * ticket order is sweep order with a row's segments BEFORE its finalizer,
+//     so every wait is still on a strictly smaller ticket and the
+//     minimum-unfinished-ticket argument below carries over verbatim;
+//   * no value atomicAdd anywhere, so the result stays bit-deterministic.
+// Depth drops from ceil(len/256) to 1 + ceil(S/256) + 1 with S = ceil(len/256)
+// segments of one chunk each. APXCHOL_GPU_DF_SPLIT=<off-diagonals> is the
+// threshold (0 = off, the rollback switch); the segment length is fixed at
+// one chunk -- longer segments measured strictly worse (see cuda.h
+// dataflow_seg_params_from_env).
+//
 // DEADLOCK FREEDOM. A lane only ever waits on rows with SMALLER tickets
 // (a forward neighbour j < i is earlier in the natural order, a back
 // neighbour k > i earlier in the reversed one), and a ticket is only ever
@@ -67,7 +100,8 @@
 // over tickets until they run out, so queued non-resident blocks would only
 // add a launch tail.
 //
-// STATE (device, O(n)): tag[m] (8 B/row, mutable, shared by both directions
+// STATE (device, O(n)): tag[m + n_slots] (8 B/row plus one word per
+// segmentation partial, mutable, shared by both directions
 // -- the forward sweep uses epoch e, the back sweep e+1), the two batch
 // tables (<= m+1 ints each, read-only), ctrl[2] per direction = {ticket,
 // finished warps} (zero at entry and at exit: the last warp out resets
@@ -118,6 +152,14 @@ using sptrsv_gpu_value_t = float;
 /// Threads per block of the persistent kernel.
 inline constexpr int kDataflowBlock = 256;
 
+/// DEFAULT ROW-SPLITTING threshold: a row with more than this many
+/// off-diagonals is cut into segments of ONE chunk (32 * prefetch depth
+/// entries) plus a finalizer -- see "ROW SEGMENTATION" in the file header.
+/// 0 = segmentation off. Env APXCHOL_GPU_DF_SPLIT=<n> overrides at every
+/// setup; 0 is the rollback switch and makes the plan, and the output,
+/// bit-identical to the unsplit kernel.
+inline constexpr int kDataflowSplitDefault = 0;
+
 /// The kernel's per-lane prefetch depth (entries of the row held in
 /// registers per lane; a compile-time constant of the .cu). The host's batch
 /// packing (cuda_host::dataflow_batches) needs it.
@@ -135,16 +177,20 @@ int dataflow_grid_size(bool fp16);
 ///   m, reverse : rows; the sweep order is the natural row order (T lower
 ///                triangular, forward) or its reverse (T upper triangular, back)
 ///   rowptr/colidx/vals : CSR of T (diagonal inside each row)
-///   batch_start, n_batches : the warp batches (cuda_host::dataflow_batches
+///   batch_start, n_batches : the warp batches (cuda_host::dataflow_build_plan
 ///                for this direction; n_batches + 1 ints on the device)
-///   tag : m tagged words {value, epoch}; a row's word is (re)written by this
+///   batch_spec : n_batches ints, -1 = a plain batch, >= 0 = an index into
+///                `spec` (the row-segmentation items); never null
+///   spec : the plan's dataflow_spec items as int4 (may be null when the plan
+///                has none)
+///   tag : m + n_slots tagged words {value, epoch}; a row's word is (re)written by this
 ///         sweep with `epoch`, and consumers poll it -- pass an epoch no
 ///         word in the array carries (the caller counts sweeps; 0 = never)
 ///   ctrl : 2 ints {ticket, finished warps}, zero at entry and at exit
 ///   grid : blocks (dataflow_grid_size()); block = kDataflowBlock
 void dataflow_solve(cudaStream_t stream, int m, bool reverse,
                     const int* rowptr, const int* colidx, const sptrsv_gpu_value_t* vals,
-                    const int* batch_start, int n_batches,
+                    const int* batch_start, const int* batch_spec, const int4* spec, int n_batches,
                     unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                     const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);
 
@@ -163,7 +209,7 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse,
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
                          const int* rowptr, const int* colidx, const unsigned short* vals16,
                          const float* diag, const double* in_scale,
-                         const int* batch_start, int n_batches,
+                         const int* batch_start, const int* batch_spec, const int4* spec, int n_batches,
                          unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                          const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);
 

@@ -1054,6 +1054,62 @@ std::vector<float> host_reference_sweep(int m, bool reverse,
 // long rows of the back sweep (lane groups of 16); the drop keeps nearly all.
 static sparse_csc make_dominant_lower(node_index n) { return make_random_lower(n, 6.0, 515 + n, 0.0, 0.01); }
 
+// ... and one with a REAL HUB TAIL, which the factor above does NOT have (its
+// longest row is ~66 entries, i.e. ONE chunk: it exercises nothing of the row
+// segmentation). Here a handful of dense COLUMNS give CSR(L^T) -- the back
+// sweep -- rows of 5k-20k entries, and a dense ROW TAIL (the last vertices,
+// which an elimination puts into everybody's column) gives CSR(L) -- the
+// forward sweep -- the same. The hub magnitudes are ~1e-5, so even a 20k-
+// entry row sums to ~0.2 against a diagonal in [1, 3]: BOTH triangular solves
+// stay bounded in fp32, which the comparisons below need.
+static sparse_csc make_hub_tail_lower(node_index n) {
+    std::mt19937 rng(9001 + n);
+    std::uniform_real_distribution<double> ubase(0.0, 0.01), uhub(0.0, 1e-5), udiag(1.0, 3.0);
+    std::poisson_distribution<int> pcount(6);
+    const node_index hub_len = 20000 < n / 3 ? 20000 : n / 3;
+    std::vector<std::vector<node_index>> col_rows(n);
+    std::vector<char> hub_col(n, 0), hub_row(n, 0);
+    for (node_index j : {node_index(5), node_index(1000), node_index(2000), node_index(3000)})
+        if (j < n) hub_col[j] = 1;
+    for (int k = 1; k <= 8; ++k) if (n > static_cast<node_index>(k)) hub_row[n - k] = 1;
+    for (node_index j = 0; j < n; ++j) {
+        auto& rows = col_rows[j];
+        rows.push_back(j);
+        if (j + 1 < n) {
+            std::uniform_int_distribution<node_index> urow(j + 1, n - 1);
+            int k = pcount(rng);
+            if (hub_col[j]) k += static_cast<int>(hub_len);
+            for (int t = 0; t < k; ++t) rows.push_back(urow(rng));
+        }
+    }
+    for (node_index r = 0; r < n; ++r) {                     // the dense row tail
+        if (!hub_row[r]) continue;
+        std::uniform_int_distribution<node_index> ucol(0, r > 0 ? r - 1 : 0);
+        for (node_index t = 0; t < hub_len && r > 0; ++t) col_rows[ucol(rng)].push_back(r);
+    }
+    sparse_csc L;
+    L.n_ = n;
+    L.outer_.assign(static_cast<size_t>(n) + 1, 0);
+    for (node_index j = 0; j < n; ++j) {
+        auto& rows = col_rows[j];
+        std::sort(rows.begin(), rows.end());
+        rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(rows.size());
+    }
+    L.inner_.resize(static_cast<size_t>(L.outer_[n]));
+    L.vals_.resize(static_cast<size_t>(L.outer_[n]));
+    for (node_index j = 0; j < n; ++j) {
+        edge_index out = L.outer_[j];
+        for (node_index r : col_rows[j]) {
+            L.inner_[out] = r;
+            L.vals_[out] = static_cast<factor_value_t>(
+                r == j ? udiag(rng) : -((hub_col[j] || hub_row[r]) ? uhub(rng) : ubase(rng)));
+            ++out;
+        }
+    }
+    return L;
+}
+
 // Gates of the tolerance-level comparisons below (see the block header): the
 // per-sweep one against the serial fp64 reference on the same arrays, and the
 // two pair gates against the CPU backend (fp16 storage rounds every
@@ -1066,184 +1122,317 @@ static constexpr double kSweepTol    = 1e-6;
 static constexpr double kPairTolFp32 = 1e-6;
 static constexpr double kPairTolFp16 = 1e-3;
 
+namespace {
+// One sweep direction's plan on the device (cuda_host::dataflow_build_plan).
+struct dev_plan {
+    int*  bs    = nullptr;      // batch_start, nb + 1
+    int*  sel   = nullptr;      // batch_spec, nb
+    int4* spec  = nullptr;      // the segmentation items (null when there are none)
+    int   nb    = 0;
+    int   slots = 0;
+};
+dev_plan upload_plan(const apxchol::cuda_host::dataflow_plan& pl) {
+    dev_plan d;
+    d.bs  = dev_upload(pl.batch_start.data(), pl.batch_start.size());
+    d.sel = dev_upload(pl.batch_spec.data(), pl.batch_spec.size());
+    if (!pl.spec.empty()) {
+        static_assert(sizeof(apxchol::cuda_host::dataflow_spec) == sizeof(int4), "int4 upload");
+        int4* p = nullptr;
+        EXPECT_EQ(cudaMalloc(&p, pl.spec.size() * sizeof(int4)), cudaSuccess);
+        EXPECT_EQ(cudaMemcpy(p, pl.spec.data(), pl.spec.size() * sizeof(int4), cudaMemcpyHostToDevice), cudaSuccess);
+        d.spec = p;
+    }
+    d.nb = pl.n_batches(); d.slots = pl.n_slots;
+    return d;
+}
+void free_plan(dev_plan& d) { cudaFree(d.bs); cudaFree(d.sel); cudaFree(d.spec); d = dev_plan{}; }
+
+// Everything one factor needs on the device: the two CSRs, both storages, and
+// the host arrays the serial fp64 reference reads. Frees itself.
+struct df_factor {
+    int m = 0;
+    apxchol::cuda_host::csr_int<float>         LT, Lc;
+    apxchol::cuda_host::csr_int<std::uint16_t> LT16, L16;
+    apxchol::cuda_host::fp16_scaled_arrays     h16;
+    std::vector<double> inv_scale2;
+    std::vector<int>    lenL, lenT;
+    int *d_Lp = nullptr, *d_Li = nullptr, *d_Tp = nullptr, *d_Ti = nullptr;
+    float *d_Lv = nullptr, *d_Tv = nullptr, *d_diag = nullptr;
+    std::uint16_t *d_Lv16 = nullptr, *d_Tv16 = nullptr;
+    double* d_is2 = nullptr;
+
+    df_factor(const sparse_csc& L, node_index mm) {
+        m = static_cast<int>(mm);
+        LT = apxchol::cuda_host::build_L11_csc_int<apxchol::cuda_value_t>(L, mm);
+        const std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
+        apxchol::cuda_host::apply_factor_drop(LT, scales, 1e-4, false);
+        Lc  = apxchol::cuda_host::transpose_csr(LT);
+        h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales);
+        LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
+        LT16.idx = std::make_unique_for_overwrite<int[]>(static_cast<size_t>(LT.nnz));
+        std::copy_n(LT.idx.get(), LT.nnz, LT16.idx.get());
+        LT16.vals = std::make_unique_for_overwrite<std::uint16_t[]>(static_cast<size_t>(LT.nnz));
+        std::copy_n(h16.vals.get(), LT.nnz, LT16.vals.get());
+        L16 = apxchol::cuda_host::transpose_csr(LT16);
+        inv_scale2.resize(static_cast<size_t>(m));
+        for (int j = 0; j < m; ++j) inv_scale2[static_cast<size_t>(j)] =
+            static_cast<double>(h16.inv_scale[static_cast<size_t>(j)]) * h16.inv_scale[static_cast<size_t>(j)];
+        lenL = apxchol::cuda_host::csr_row_lengths(m, Lc.ptr.data());
+        lenT = apxchol::cuda_host::csr_row_lengths(m, LT.ptr.data());
+        d_Lp = dev_upload(Lc.ptr.data(), static_cast<size_t>(m) + 1);
+        d_Li = dev_upload(Lc.idx.get(), static_cast<size_t>(Lc.nnz));
+        d_Lv = dev_upload(Lc.vals.get(), static_cast<size_t>(Lc.nnz));
+        d_Tp = dev_upload(LT.ptr.data(), static_cast<size_t>(m) + 1);
+        d_Ti = dev_upload(LT.idx.get(), static_cast<size_t>(LT.nnz));
+        d_Tv = dev_upload(LT.vals.get(), static_cast<size_t>(LT.nnz));
+        d_Lv16 = dev_upload(L16.vals.get(), static_cast<size_t>(L16.nnz));
+        d_Tv16 = dev_upload(LT16.vals.get(), static_cast<size_t>(LT16.nnz));
+        d_diag = dev_upload(h16.diag.data(), static_cast<size_t>(m));
+        d_is2  = dev_upload(inv_scale2.data(), static_cast<size_t>(m));
+    }
+    ~df_factor() {
+        for (void* p : {(void*)d_Lp,(void*)d_Li,(void*)d_Lv,(void*)d_Tp,(void*)d_Ti,(void*)d_Tv,
+                        (void*)d_Lv16,(void*)d_Tv16,(void*)d_diag,(void*)d_is2}) cudaFree(p);
+    }
+    df_factor(const df_factor&) = delete;
+    df_factor& operator=(const df_factor&) = delete;
+
+    apxchol::cuda_host::dataflow_plan plan(bool reverse, const apxchol::cuda_host::dataflow_seg_params& p) const {
+        const auto& A = reverse ? LT : Lc;
+        const auto& len = reverse ? lenT : lenL;
+        auto pl = apxchol::cuda_host::dataflow_build_plan(m, reverse, A.ptr.data(), A.idx.get(),
+                                                          len.data(), apxchol::dataflow_prefetch_depth(), p);
+        EXPECT_EQ(apxchol::cuda_host::dataflow_plan_check(pl, m, reverse, len.data(),
+                                                          apxchol::dataflow_prefetch_depth()), "");
+        return pl;
+    }
+};
+
+// One sweep through the kernel with a given plan. `tag` must hold
+// m + plan.slots words and carry no word of `epoch`.
+void run_sweep(const df_factor& F, const dev_plan& dp, bool reverse, bool fp16,
+               unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
+               const float* d_rhs, float* d_out) {
+    if (fp16)
+        apxchol::dataflow_solve_fp16(0, F.m, reverse,
+            reverse ? F.d_Tp : F.d_Lp, reverse ? F.d_Ti : F.d_Li, reverse ? F.d_Tv16 : F.d_Lv16,
+            F.d_diag, reverse ? F.d_is2 : nullptr,
+            dp.bs, dp.sel, dp.spec, dp.nb, tag, epoch, ctrl, grid, d_rhs, d_out);
+    else
+        apxchol::dataflow_solve(0, F.m, reverse,
+            reverse ? F.d_Tp : F.d_Lp, reverse ? F.d_Ti : F.d_Li, reverse ? F.d_Tv : F.d_Lv,
+            dp.bs, dp.sel, dp.spec, dp.nb, tag, epoch, ctrl, grid, d_rhs, d_out);
+}
+} // namespace
+
+// Every sweep, on both factors, against the SERIAL DOUBLE reference over the
+// same arrays -- with segmentation off, at the shipped setting, and in the
+// TORTURE setting (every row split into 256-entry pieces) -- plus
+// bit-identity across launches and grid sizes (1 block = 8 warps against
+// thousands of segment items is also the deadlock torture).
 TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministic) {
     const node_index n = 60001, m = n - 1;
-    const sparse_csc L = make_dominant_lower(n);
     scoped_drop_env env("1e-4");
-    auto LT = apxchol::cuda_host::build_L11_csc_int<apxchol::cuda_value_t>(L, m);
-    const std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
-    apxchol::cuda_host::apply_factor_drop(LT, scales, 1e-4, false);
-    const auto Lc = apxchol::cuda_host::transpose_csr(LT);
-    const int mi = static_cast<int>(m);
-    // fp16 storage of the same factor (cuda_host.h contract).
-    const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales);
-    apxchol::cuda_host::csr_int<std::uint16_t> LT16;
-    LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
-    LT16.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(LT.nnz));
-    std::copy_n(LT.idx.get(), LT.nnz, LT16.idx.get());
-    LT16.vals = std::make_unique_for_overwrite<std::uint16_t[]>(static_cast<std::size_t>(LT.nnz));
-    std::copy_n(h16.vals.get(), LT.nnz, LT16.vals.get());
-    const auto L16 = apxchol::cuda_host::transpose_csr(LT16);
-    // r_j^2 in DOUBLE (the kernel's in_scale contract: exact square, the
-    // rhs * r_j^2 product formed in double -- see cuda_dataflow.h).
-    std::vector<double> inv_scale2(m);
-    for (node_index j = 0; j < m; ++j) inv_scale2[j] = static_cast<double>(h16.inv_scale[j]) * h16.inv_scale[j];
-
-    // Device arrays: CSR of L (forward), CSR of L^T (back), both storages.
-    int* d_Lp = dev_upload(Lc.ptr.data(), m + 1);   int* d_Li = dev_upload(Lc.idx.get(), Lc.nnz);
-    float* d_Lv = dev_upload(Lc.vals.get(), Lc.nnz);
-    int* d_Tp = dev_upload(LT.ptr.data(), m + 1);   int* d_Ti = dev_upload(LT.idx.get(), LT.nnz);
-    float* d_Tv = dev_upload(LT.vals.get(), LT.nnz);
-    std::uint16_t* d_Lv16 = dev_upload(L16.vals.get(), L16.nnz);
-    std::uint16_t* d_Tv16 = dev_upload(LT16.vals.get(), LT16.nnz);
-    float*  d_diag = dev_upload(h16.diag.data(), m);
-    double* d_is2  = dev_upload(inv_scale2.data(), m);
-    // Dataflow batches.
-    const int pre = apxchol::dataflow_prefetch_depth();
-    const std::vector<int> lenL = apxchol::cuda_host::csr_row_lengths(mi, Lc.ptr.data());
-    const std::vector<int> lenT = apxchol::cuda_host::csr_row_lengths(mi, LT.ptr.data());
-    const std::vector<int> fb = apxchol::cuda_host::dataflow_batches(mi, false, lenL.data(), pre);
-    const std::vector<int> bb = apxchol::cuda_host::dataflow_batches(mi, true,  lenT.data(), pre);
-    int* d_fb = dev_upload(fb.data(), fb.size()); int* d_bb = dev_upload(bb.data(), bb.size());
-    unsigned long long* d_tag = nullptr; int* d_ctrl = nullptr;
-    ASSERT_EQ(cudaMalloc(&d_tag, m * sizeof(unsigned long long)), cudaSuccess);
-    ASSERT_EQ(cudaMemset(d_tag, 0, m * sizeof(unsigned long long)), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_ctrl, 2 * sizeof(int)), cudaSuccess);
-    ASSERT_EQ(cudaMemset(d_ctrl, 0, 2 * sizeof(int)), cudaSuccess);
-    // rhs, outputs.
-    std::vector<float> x(m);
-    { std::mt19937 rng(9); std::uniform_real_distribution<float> u(-1.f, 1.f); for (auto& v : x) v = u(rng); }
-    float* d_x = dev_upload(x.data(), m);
-    float *d_y1 = nullptr, *d_y2 = nullptr, *d_z1 = nullptr, *d_z2 = nullptr;
-    ASSERT_EQ(cudaMalloc(&d_y1, m * 4), cudaSuccess); ASSERT_EQ(cudaMalloc(&d_y2, m * 4), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_z1, m * 4), cudaSuccess); ASSERT_EQ(cudaMalloc(&d_z2, m * 4), cudaSuccess);
-    unsigned epoch = 0;
     const int resident = apxchol::dataflow_grid_size(false);
     ASSERT_GE(resident, 1);
-
-    for (bool fp16 : {false, true}) {
-        SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
-        // Forward: L y = x, serial double reference vs the dataflow kernel.
-        const std::vector<float> y_ref = host_reference_sweep(
-            mi, false, Lc.ptr.data(), Lc.idx.get(), Lc.vals.get(),
-            fp16 ? L16.vals.get() : nullptr, h16.diag.data(), nullptr, x);
-        auto df_fwd = [&](float* out, int grid) {
-            ++epoch;
-            if (fp16) apxchol::dataflow_solve_fp16(0, mi, false, d_Lp, d_Li, d_Lv16, d_diag, nullptr, d_fb, (int)fb.size() - 1, d_tag, epoch, d_ctrl, grid, d_x, out);
-            else      apxchol::dataflow_solve(0, mi, false, d_Lp, d_Li, d_Lv, d_fb, (int)fb.size() - 1, d_tag, epoch, d_ctrl, grid, d_x, out);
-        };
-        df_fwd(d_y2, resident);
-        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-        const std::vector<float> y_df = dev_download(d_y2, m);
-        {
-            const auto [rd, nd] = rel_diff(y_ref, y_df);
-            // Tolerance, not bit-equality: the reference accumulates in fp64,
-            // the kernel in fp32 (observed ~1e-6 over a 60k-row sweep).
-            EXPECT_LT(rd, kSweepTol) << "forward: dataflow vs serial double reference";
-            EXPECT_GT(nd, 0u);                     // teeth: different precision, so not identical ...
-            SCOPED_TRACE("forward rel diff " + std::to_string(rd));
-            std::fprintf(stderr, "[GpuDataflow] %s forward: max rel diff vs serial fp64 reference %.3e (%zu of %d entries differ)\n",
-                         fp16 ? "fp16" : "fp32", rd, nd, mi);
+    struct seg_cfg { const char* name; apxchol::cuda_host::dataflow_seg_params p; };
+    const seg_cfg cfgs[] = {
+        {"seg=0 (off)",              {0, 0, 4096}},
+        {"seg=1024 split_min=2048",  {1024, 2048, 4096}},
+        {"seg=256 split_min=0 (torture)", {256, 0, 4096}},
+    };
+    for (int kind = 0; kind < 2; ++kind) {
+        SCOPED_TRACE(kind ? "hub-tail factor" : "no-hub factor");
+        const sparse_csc L = kind ? make_hub_tail_lower(n) : make_dominant_lower(n);
+        const df_factor F(L, m);
+        std::vector<float> x(static_cast<size_t>(m));
+        { std::mt19937 rng(9); std::uniform_real_distribution<float> u(-1.f, 1.f); for (auto& v : x) v = u(rng); }
+        float* d_x = dev_upload(x.data(), static_cast<size_t>(m));
+        float *d_a = nullptr, *d_b = nullptr, *d_y = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_a, static_cast<size_t>(m) * 4), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_b, static_cast<size_t>(m) * 4), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(m) * 4), cudaSuccess);
+        int* d_ctrl = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_ctrl, 2 * sizeof(int)), cudaSuccess);
+        ASSERT_EQ(cudaMemset(d_ctrl, 0, 2 * sizeof(int)), cudaSuccess);
+        for (const seg_cfg& cfg : cfgs) {
+            SCOPED_TRACE(cfg.name);
+            const auto plf = F.plan(false, cfg.p), plb = F.plan(true, cfg.p);
+            std::fprintf(stderr, "[GpuDataflow] %s %s: split rows fwd %d bck %d, slots %d/%d, batches %d/%d\n",
+                         kind ? "hub" : "plain", cfg.name, plf.n_split, plb.n_split,
+                         plf.n_slots, plb.n_slots, plf.n_batches(), plb.n_batches());
+            // Teeth: the settings must actually reach the segment path (and
+            // seg = 0 must not).
+            if (cfg.p.seg == 0) { EXPECT_EQ(plf.n_split + plb.n_split, 0); }
+            else if (kind)      { EXPECT_GT(plf.n_split, 0) << "hub factor: forward sweep must split"; }
+            dev_plan pf = upload_plan(plf);
+            dev_plan pb = upload_plan(plb);
+            const size_t words = static_cast<size_t>(m) + static_cast<size_t>(std::max(pf.slots, pb.slots));
+            unsigned long long* d_tag = nullptr;
+            ASSERT_EQ(cudaMalloc(&d_tag, words * sizeof(unsigned long long)), cudaSuccess);
+            ASSERT_EQ(cudaMemset(d_tag, 0, words * sizeof(unsigned long long)), cudaSuccess);
+            unsigned epoch = 0;
+            for (bool fp16 : {false, true}) {
+                SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
+                // ── forward ──
+                const std::vector<float> y_ref = host_reference_sweep(
+                    F.m, false, F.Lc.ptr.data(), F.Lc.idx.get(), F.Lc.vals.get(),
+                    fp16 ? F.L16.vals.get() : nullptr, F.h16.diag.data(), nullptr, x);
+                run_sweep(F, pf, false, fp16, d_tag, ++epoch, d_ctrl, resident, d_x, d_a);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                const std::vector<float> y_df = dev_download(d_a, static_cast<size_t>(m));
+                { const auto [rd, nd] = rel_diff(y_ref, y_df);
+                  EXPECT_LT(rd, kSweepTol) << "forward: dataflow vs serial double reference";
+                  EXPECT_GT(nd, 0u);
+                  std::fprintf(stderr, "[GpuDataflow] %s %s %s forward: rel diff %.3e\n",
+                               kind ? "hub" : "plain", cfg.name, fp16 ? "fp16" : "fp32", rd); }
+                for (int grid : {resident, 1, 7}) {
+                    run_sweep(F, pf, false, fp16, d_tag, ++epoch, d_ctrl, grid, d_x, d_b);
+                    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                    const auto [rd, nd] = rel_diff(y_df, dev_download(d_b, static_cast<size_t>(m)));
+                    EXPECT_EQ(nd, 0u) << "forward not deterministic at grid " << grid << " (rel diff " << rd << ")";
+                }
+                // ── back, from the kernel's own forward output ──
+                ASSERT_EQ(cudaMemcpy(d_y, y_df.data(), static_cast<size_t>(m) * 4, cudaMemcpyHostToDevice), cudaSuccess);
+                const std::vector<float> z_ref = host_reference_sweep(
+                    F.m, true, F.LT.ptr.data(), F.LT.idx.get(), F.LT.vals.get(),
+                    fp16 ? F.LT16.vals.get() : nullptr, F.h16.diag.data(),
+                    fp16 ? F.inv_scale2.data() : nullptr, y_df);
+                run_sweep(F, pb, true, fp16, d_tag, ++epoch, d_ctrl, resident, d_y, d_a);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                const std::vector<float> z_df = dev_download(d_a, static_cast<size_t>(m));
+                { const auto [rd, nd] = rel_diff(z_ref, z_df);
+                  EXPECT_LT(rd, kSweepTol) << "back: dataflow vs serial double reference";
+                  EXPECT_GT(nd, 0u);
+                  std::fprintf(stderr, "[GpuDataflow] %s %s %s back: rel diff %.3e\n",
+                               kind ? "hub" : "plain", cfg.name, fp16 ? "fp16" : "fp32", rd); }
+                for (int grid : {resident, 1, 7}) {
+                    run_sweep(F, pb, true, fp16, d_tag, ++epoch, d_ctrl, grid, d_y, d_b);
+                    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                    const auto [rd, nd] = rel_diff(z_df, dev_download(d_b, static_cast<size_t>(m)));
+                    EXPECT_EQ(nd, 0u) << "back not deterministic at grid " << grid << " (rel diff " << rd << ")";
+                }
+                const std::vector<int> ctrl = dev_download(d_ctrl, 2);
+                EXPECT_EQ(ctrl[0], 0); EXPECT_EQ(ctrl[1], 0);   // the last warp out resets them
+            }
+            cudaFree(d_tag);
+            free_plan(pf); free_plan(pb);
         }
-        // ... but bit-identical to itself, across launches and grid sizes.
-        for (int grid : {resident, 1, 7}) {
-            df_fwd(d_z1, grid);
-            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-            const std::vector<float> again = dev_download(d_z1, m);
-            const auto [rd, nd] = rel_diff(y_df, again);
-            EXPECT_EQ(nd, 0u) << "forward dataflow not deterministic at grid " << grid << " (rel diff " << rd << ")";
-        }
-        // Back: L^T z = y. BOTH sides start from the kernel's own forward
-        // output (uploaded to d_y1) so the inputs match exactly.
-        ASSERT_EQ(cudaMemcpy(d_y1, y_df.data(), m * sizeof(float), cudaMemcpyHostToDevice), cudaSuccess);
-        const std::vector<float> z_ref = host_reference_sweep(
-            mi, true, LT.ptr.data(), LT.idx.get(), LT.vals.get(),
-            fp16 ? LT16.vals.get() : nullptr, h16.diag.data(), fp16 ? inv_scale2.data() : nullptr, y_df);
-        auto df_bck = [&](float* out, int grid) {
-            ++epoch;
-            if (fp16) apxchol::dataflow_solve_fp16(0, mi, true, d_Tp, d_Ti, d_Tv16, d_diag, d_is2, d_bb, (int)bb.size() - 1, d_tag, epoch, d_ctrl, grid, d_y1, out);
-            else      apxchol::dataflow_solve(0, mi, true, d_Tp, d_Ti, d_Tv, d_bb, (int)bb.size() - 1, d_tag, epoch, d_ctrl, grid, d_y1, out);
-        };
-        df_bck(d_z2, resident);
-        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-        const std::vector<float> z_df = dev_download(d_z2, m);
-        {
-            const auto [rd, nd] = rel_diff(z_ref, z_df);
-            EXPECT_LT(rd, kSweepTol) << "back: dataflow vs serial double reference";
-            EXPECT_GT(nd, 0u);
-            std::fprintf(stderr, "[GpuDataflow] %s back: max rel diff vs serial fp64 reference %.3e (%zu of %d entries differ)\n",
-                         fp16 ? "fp16" : "fp32", rd, nd, mi);
-        }
-        for (int grid : {resident, 1, 7}) {
-            df_bck(d_y2, grid);
-            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-            const std::vector<float> again = dev_download(d_y2, m);
-            const auto [rd, nd] = rel_diff(z_df, again);
-            EXPECT_EQ(nd, 0u) << "back dataflow not deterministic at grid " << grid << " (rel diff " << rd << ")";
-        }
-        // The control words are back at zero after every sweep (self-reset).
-        const std::vector<int> ctrl = dev_download(d_ctrl, 2);
-        EXPECT_EQ(ctrl[0], 0); EXPECT_EQ(ctrl[1], 0);
+        for (void* p : {(void*)d_x, (void*)d_a, (void*)d_b, (void*)d_y, (void*)d_ctrl}) cudaFree(p);
     }
-    for (void* p : {(void*)d_Lp, (void*)d_Li, (void*)d_Lv, (void*)d_Tp, (void*)d_Ti, (void*)d_Tv, (void*)d_Lv16, (void*)d_Tv16,
-                    (void*)d_diag, (void*)d_is2, (void*)d_fb, (void*)d_bb, (void*)d_tag, (void*)d_ctrl,
-                    (void*)d_x, (void*)d_y1, (void*)d_y2, (void*)d_z1, (void*)d_z2})
-        cudaFree(p);
+}
+
+// PROTOCOL ISOLATION, the strongest single test of the segmentation: force
+// S = 1 on every row the unsplit kernel would already walk with all 32 lanes
+// (> 16*pre entries), and the split output must be BIT-IDENTICAL to the
+// unsplit one -- same lane assignment, same entry order, the diagonal merely
+// moved from the group butterfly into the finalizer's divide. Any difference
+// is a protocol bug, not a rounding-order change.
+TEST(GpuDataflow, ForcedSingleSegmentSplitIsBitIdenticalToTheUnsplitKernel) {
+    const node_index n = 60001, m = n - 1;
+    scoped_drop_env env("1e-4");
+    const int pre = apxchol::dataflow_prefetch_depth();
+    const sparse_csc L = make_hub_tail_lower(n);
+    const df_factor F(L, m);
+    const int resident = apxchol::dataflow_grid_size(false);
+    std::vector<float> x(static_cast<size_t>(m));
+    { std::mt19937 rng(23); std::uniform_real_distribution<float> u(-1.f, 1.f); for (auto& v : x) v = u(rng); }
+    float* d_x = dev_upload(x.data(), static_cast<size_t>(m));
+    float *d_a = nullptr, *d_b = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_a, static_cast<size_t>(m) * 4), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_b, static_cast<size_t>(m) * 4), cudaSuccess);
+    int* d_ctrl = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_ctrl, 2 * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_ctrl, 0, 2 * sizeof(int)), cudaSuccess);
+    // seg larger than any row => S = 1; split_min = 16*pre is exactly the
+    // G = 32 boundary, so only rows the unsplit kernel gives all 32 lanes are
+    // split (splitting a shorter row is correct but re-associates its sum).
+    const apxchol::cuda_host::dataflow_seg_params off{0, 0, 4096};
+    const apxchol::cuda_host::dataflow_seg_params one{1 << 28, 16 * pre, 4096};
+    for (bool reverse : {false, true}) {
+        for (bool fp16 : {false, true}) {
+            SCOPED_TRACE(std::string(reverse ? "back" : "forward") + (fp16 ? " fp16" : " fp32"));
+            const auto pl_one = F.plan(reverse, one);
+            int n_one = 0;
+            for (const auto& sp : pl_one.spec) if (sp.row < 0) { EXPECT_EQ(sp.b, 1); ++n_one; }
+            EXPECT_GT(n_one, 0) << "the hub factor must actually have rows over the threshold";
+            dev_plan p0 = upload_plan(F.plan(reverse, off));
+            dev_plan p1 = upload_plan(pl_one);
+            const size_t words = static_cast<size_t>(m) + static_cast<size_t>(std::max(p0.slots, p1.slots));
+            unsigned long long* d_tag = nullptr;
+            ASSERT_EQ(cudaMalloc(&d_tag, words * sizeof(unsigned long long)), cudaSuccess);
+            ASSERT_EQ(cudaMemset(d_tag, 0, words * sizeof(unsigned long long)), cudaSuccess);
+            unsigned epoch = 0;
+            run_sweep(F, p0, reverse, fp16, d_tag, ++epoch, d_ctrl, resident, d_x, d_a);
+            run_sweep(F, p1, reverse, fp16, d_tag, ++epoch, d_ctrl, resident, d_x, d_b);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const auto unsplit = dev_download(d_a, static_cast<size_t>(m));
+            const auto split   = dev_download(d_b, static_cast<size_t>(m));
+            const auto [rd, nd] = rel_diff(unsplit, split);
+            EXPECT_EQ(nd, 0u) << "S = 1 split is not bit-identical to the unsplit kernel (rel diff " << rd
+                              << ", " << n_one << " rows split)";
+            cudaFree(d_tag);
+            free_plan(p0); free_plan(p1);
+        }
+    }
+    for (void* p : {(void*)d_x, (void*)d_a, (void*)d_b, (void*)d_ctrl}) cudaFree(p);
 }
 
 // The L L^T pair through cuda_sptrsv against the CPU backend's pair on the
 // same factor: two independent implementations of the SAME contract (the CPU
-// accumulates in double, so this is tolerance-level).
+// accumulates in double, so this is tolerance-level). Run on the hub-tail
+// factor too, and with segmentation both off and on -- the two must agree
+// with the CPU to the same tolerance and each be bit-identical run to run.
 TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
     const node_index n = 60001, m = n - 1;
-    const sparse_csc L = make_dominant_lower(n);
     scoped_drop_env env("1e-4");
-    std::vector<double> x(m), y_cpu(m), y_df(m), y_df2(m);
-    { std::mt19937 rng(11); std::uniform_real_distribution<double> u(-1.0, 1.0); for (auto& v : x) v = u(rng); }
-    // The CPU reference pair (fp32 storage, fp64 accumulation) -- one setup,
-    // both GPU storages are compared against it. The storage is pinned: the
-    // suite is also run with APXCHOL_SPTRSV_FP16=1 in the environment, and
-    // the tolerances below are stated against the fp32 CPU pair.
-    {
-        scoped_env cpu32("APXCHOL_SPTRSV_FP16", "0");
-        apxchol::omp_sptrsv c; c.setup(L, m);
-        std::vector<double> t(m);
-        c.forward_solve(x.data(), t.data());
-        c.transpose_solve(t.data(), y_cpu.data());
-    }
-    for (bool fp16 : {false, true}) {
-        SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
-        // Pin BOTH ways: fp16 is default-ON on the GPU where the dataflow
-        // kernel resolves, so the fp32 sub-case must say =0 explicitly.
-        scoped_env f16("APXCHOL_SPTRSV_FP16", fp16 ? "1" : "0");
+    for (int kind = 0; kind < 2; ++kind) {
+        SCOPED_TRACE(kind ? "hub-tail factor" : "no-hub factor");
+        const sparse_csc L = kind ? make_hub_tail_lower(n) : make_dominant_lower(n);
+        std::vector<double> x(m), y_cpu(m), y_df(m), y_df2(m);
+        { std::mt19937 rng(11); std::uniform_real_distribution<double> u(-1.0, 1.0); for (auto& v : x) v = u(rng); }
+        // The CPU reference pair (fp32 storage, fp64 accumulation) -- one
+        // setup, every GPU variant is compared against it. The storage is
+        // pinned: the suite is also run with APXCHOL_SPTRSV_FP16=1 in the
+        // environment, and the tolerances are stated against the fp32 pair.
         {
-            scoped_env be("APXCHOL_GPU_SPTRSV", "dataflow");
-            apxchol::cuda_sptrsv t; t.setup(L, m);
-            ASSERT_TRUE(t.dataflow());
-            EXPECT_STREQ(t.backend_name(), "dataflow");
-            EXPECT_EQ(t.fp16(), fp16);
-            EXPECT_GE(t.dataflow_grid(), 1);
-            t.solve_LLt(x.data(), y_df.data());
-            t.solve_LLt(x.data(), y_df2.data());
+            scoped_env cpu32("APXCHOL_SPTRSV_FP16", "0");
+            apxchol::omp_sptrsv c; c.setup(L, m);
+            std::vector<double> t(m);
+            c.forward_solve(x.data(), t.data());
+            c.transpose_solve(t.data(), y_cpu.data());
         }
-        double maxabs = 0, maxdiff = 0; std::size_t nd = 0, nd2 = 0;
-        for (node_index i = 0; i < m; ++i) {
-            ASSERT_TRUE(std::isfinite(y_cpu[i]) && std::isfinite(y_df[i])) << i;
-            maxabs = std::max(maxabs, std::fabs(y_cpu[i]));
-            maxdiff = std::max(maxdiff, std::fabs(y_cpu[i] - y_df[i]));
-            nd  += y_cpu[i] != y_df[i];
-            nd2 += y_df[i] != y_df2[i];
+        for (const char* seg : {"0", "256"}) {
+            for (bool fp16 : {false, true}) {
+                SCOPED_TRACE(std::string("APXCHOL_GPU_DF_SPLIT=") + seg + (fp16 ? " fp16" : " fp32"));
+                scoped_env f16("APXCHOL_SPTRSV_FP16", fp16 ? "1" : "0");
+                scoped_env sg("APXCHOL_GPU_DF_SPLIT", seg);
+                {
+                    scoped_env be("APXCHOL_GPU_SPTRSV", "dataflow");
+                    apxchol::cuda_sptrsv t; t.setup(L, m);
+                    ASSERT_TRUE(t.dataflow());
+                    EXPECT_STREQ(t.backend_name(), "dataflow");
+                    EXPECT_EQ(t.fp16(), fp16);
+                    EXPECT_GE(t.dataflow_grid(), 1);
+                    t.solve_LLt(x.data(), y_df.data());
+                    t.solve_LLt(x.data(), y_df2.data());
+                }
+                double maxabs = 0, maxdiff = 0; std::size_t nd = 0, nd2 = 0;
+                for (node_index i = 0; i < m; ++i) {
+                    ASSERT_TRUE(std::isfinite(y_cpu[i]) && std::isfinite(y_df[i])) << i;
+                    maxabs = std::max(maxabs, std::fabs(y_cpu[i]));
+                    maxdiff = std::max(maxdiff, std::fabs(y_cpu[i] - y_df[i]));
+                    nd  += y_cpu[i] != y_df[i];
+                    nd2 += y_df[i] != y_df2[i];
+                }
+                EXPECT_LT(maxdiff / maxabs, fp16 ? kPairTolFp16 : kPairTolFp32)
+                    << "L L^T pair: GPU dataflow vs CPU omp_sptrsv";
+                EXPECT_GT(nd, 0u);
+                EXPECT_EQ(nd2, 0u) << "dataflow pair not bit-identical run to run";
+                std::fprintf(stderr, "[GpuDataflow] %s split=%s %s pair: max rel diff vs the CPU pair %.3e\n",
+                             kind ? "hub" : "plain", seg, fp16 ? "fp16" : "fp32", maxdiff / maxabs);
+            }
         }
-        // The fp32 GPU sweep differs from the fp64-accumulating CPU one by
-        // rounding; the fp16 STORAGE additionally rounds every off-diagonal
-        // to 11 significant bits, which is a different (larger) preconditioner
-        // -- hence the two tolerances.
-        EXPECT_LT(maxdiff / maxabs, fp16 ? kPairTolFp16 : kPairTolFp32)
-            << "L L^T pair: GPU dataflow vs CPU omp_sptrsv";
-        EXPECT_GT(nd, 0u);
-        EXPECT_EQ(nd2, 0u) << "dataflow pair not bit-identical run to run";
-        std::fprintf(stderr, "[GpuDataflow] %s pair through cuda_sptrsv: max rel diff vs the CPU pair %.3e\n",
-                     fp16 ? "fp16" : "fp32", maxdiff / maxabs);
     }
 }
 #endif // APXCHOL_USE_CUDA
