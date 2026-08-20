@@ -74,11 +74,13 @@ public:
         // Permute and build full-symmetric CSR in one go (host side, once).
         // A_perm[i,j] = L[iperm[i], iperm[j]] where iperm is perm.inverse().
         std::vector<int> h_row_ptr;
-        std::vector<int> h_col_idx;
-        std::vector<double> h_vals;
+        // col_idx / vals are allocated UNINITIALIZED by the builder (PASS 2
+        // writes every slot exactly once) -- see the note there.
+        std::unique_ptr<int[]>    h_col_idx;
+        std::unique_ptr<double[]> h_vals;
         bool op_fp32_exact = false;   // set by the builder: A is exactly fp32-representable
-        build_permuted_full_symmetric_csr(L, perm, h_row_ptr, h_col_idx, h_vals, op_fp32_exact);
-        nnz_ = static_cast<int64_t>(h_col_idx.size());
+        build_permuted_full_symmetric_csr(L, perm, h_row_ptr, h_col_idx, h_vals,
+                                          nnz_, op_fp32_exact);
 
         // Save the permutation indices (host-side) for use in solve():
         // input b -> b_perm, output x_perm -> x.
@@ -93,7 +95,7 @@ public:
         APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_col_idx_, nnz_ * sizeof(int)));
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_row_ptr_, h_row_ptr.data(),
                                           (n_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_col_idx_, h_col_idx.data(),
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_col_idx_, h_col_idx.get(),
                                           nnz_ * sizeof(int), cudaMemcpyHostToDevice));
         // Operator A_perm storage precision. fp32 is LOSSLESS only when every value
         // round-trips fp32 (op_fp32_exact, detected for free during the build above);
@@ -116,10 +118,10 @@ public:
             for (int64_t k = 0; k < nnz_; ++k) h_vals_f[k] = static_cast<float>(h_vals[k]);
             APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_vals_f32_, h_vals_f.get(),
                                               nnz_ * sizeof(float), cudaMemcpyHostToDevice));
-            std::vector<double>().swap(h_vals);
+            h_vals.reset();
         } else {
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_vals_, nnz_ * sizeof(double)));
-            APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_vals_, h_vals.data(),
+            APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_vals_, h_vals.get(),
                                               nnz_ * sizeof(double), cudaMemcpyHostToDevice));
         }
         if (std::getenv("APXCHOL_GPU_MEM_DEBUG"))
@@ -284,7 +286,9 @@ private:
     //
     // perm.indices()[orig_v] = new_idx ⇒  A_perm[i,j] = L[iperm(i), iperm(j)]
     // where iperm = P^{-1}. The permutation acts on BOTH row and col of L.
-    // Output: row_ptr/col_idx/vals = CSR of A_perm (full symmetric, sorted).
+    // Output: row_ptr/col_idx/vals = CSR of A_perm (full symmetric, sorted),
+    // nnz = row_ptr[n] (col_idx/vals hold exactly that many entries; they are
+    // plain arrays, not vectors — see the allocation note below).
     //
     // Parallel build: PASS 1 uses atomic-fetch-add on shared row_ptr counts;
     // PASS 2 uses atomic-fetch-add on shared row_pos to claim slots; per-row
@@ -301,8 +305,9 @@ private:
         const Eigen::SparseMatrix<double>& L,
         const std::vector<node_index>& perm,
         std::vector<int>& row_ptr,
-        std::vector<int>& col_idx,
-        std::vector<double>& vals,
+        std::unique_ptr<int[]>& col_idx,
+        std::unique_ptr<double[]>& vals,
+        int64_t& nnz,
         bool& fp32_exact)
     {
         const int n = static_cast<int>(L.rows());
@@ -330,8 +335,21 @@ private:
         for (int i = 0; i < n; ++i)
             row_ptr[i + 1] += row_ptr[i];
         const int total = row_ptr[n];
-        col_idx.assign(total, 0);
-        vals.assign(total, 0.0);
+        nnz = total;
+        // UNINITIALIZED, deliberately: PASS 2 below writes every one of the
+        // `total` slots exactly once (its scatter is the same walk PASS 1 just
+        // counted), so a zero fill is pure waste -- and a SERIAL one, 80 MB of
+        // int + 160 MB of double on grid_2000, memset on one thread and then
+        // immediately overwritten. Same idiom (and same reason) as the fp32
+        // operator cast in setup(). The prefix sum above stays serial: it is
+        // n+1 entries, sub-ms even at n = 4M.
+        // Worth less than it looks: the page faults just move from the memset
+        // into PASS 2's (parallel) first touch, so the measured `gpu_pcg_setup`
+        // win is only grid_2000 79.9 -> 77.7 ms, iter0040 64.3 -> 63.3 (medians
+        // of 48, RTX 4090 Laptop, T=16, warm context). Kept because it is
+        // strictly less work and strictly less peak-transient traffic.
+        col_idx = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(total));
+        vals    = std::make_unique_for_overwrite<double[]>(static_cast<std::size_t>(total));
 
         // PASS 2 (parallel): atomic-claim slot, scatter. Non-deterministic
         // per-row order across threads; restored by per-row sort below. The fp32

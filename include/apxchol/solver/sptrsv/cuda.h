@@ -225,8 +225,11 @@ public:
     /// copy to device, build the kernel backends' tables (or, opted in, the
     /// cuSPARSE descriptors + analyses). Env APXCHOL_SPTRSV_SETUP_TRACE=1 (the
     /// CPU backend's knob, same name) prints the per-stage wall times of one
-    /// setup to stderr (diagnostic; the first setup of a process also pays the
-    /// CUDA context creation, ~100 ms on this machine, inside "build_L11").
+    /// setup to stderr (diagnostic). Since 2026-08-20 the per-process CUDA
+    /// context creation is NOT part of any stage here: the caller establishes
+    /// it before this call and reports it as "cuda_init"
+    /// (solver/cuda_context.h, apx_cholesky::install_factor); it used to be
+    /// charged to "build_L11", ~100-135 ms on this machine, ~715 ms on GH200.
     void setup(const sparse_csc& L, node_index m) {
         destroy();
         m_ = static_cast<int64_t>(m);
