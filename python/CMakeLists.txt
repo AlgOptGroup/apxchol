@@ -35,7 +35,11 @@ if (OpenMP_CXX_FOUND)
     target_link_libraries(_apxchol PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
-# Match the root library defaults (both ON by default there).
+# Match the root library default (ON there). The SpTRSV's fp32 factor storage
+# needs no macro any more, and its fp16 variant is a runtime env knob
+# (APXCHOL_SPTRSV_FP16) that the portable wheel build below cannot offer:
+# without -march=native there is no __F16C__, so omp_sptrsv compiles the fp32
+# storage only and the env falls back with a note. See include/apxchol/lowprec.h.
 target_compile_definitions(_apxchol PRIVATE APXCHOL_POOL_FP32)
 if (NOT MSVC)
     # Distributable wheels (cibuildwheel sets APXCHOL_PORTABLE_BUILD=1) must not

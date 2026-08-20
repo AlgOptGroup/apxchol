@@ -186,8 +186,7 @@ struct fp16_scaled_arrays {
     std::vector<float>               diag;       // m
     std::vector<float>               inv_scale;  // m
     std::uint64_t flushed   = 0;   // stored off-diagonals with v != 0 stored as zero
-    std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0 with the default flush)
-    std::uint64_t diag_bad  = 0;   // diagonal slots fp16(L_jj / s_j) that are not a normal finite fp16 (informational)
+    std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0: they are always flushed)
 };
 
 /// The narrowing itself: what THIS entry stores. Pure (both stored copies --
@@ -206,8 +205,8 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     out.vals = std::make_unique_for_overwrite<std::uint16_t[]>(static_cast<std::size_t>(L11.nnz));
     out.diag.resize(static_cast<std::size_t>(L11.m));
     out.inv_scale.resize(static_cast<std::size_t>(L11.m));
-    std::uint64_t n_flush = 0, n_sub = 0, n_dbad = 0;
-    #pragma omp parallel for schedule(static) reduction(+ : n_flush, n_sub, n_dbad)
+    std::uint64_t n_flush = 0, n_sub = 0;
+    #pragma omp parallel for schedule(static) reduction(+ : n_flush, n_sub)
     for (int j = 0; j < L11.m; ++j) {
         const float s = col_scale[j];
         out.inv_scale[j] = 1.0f / s;
@@ -218,10 +217,7 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
             const float v = static_cast<float>(L11.vals[p]);
             const std::uint16_t h = narrow_fp16_scaled_value(v, s);
             out.vals[p] = h;
-            if (L11.idx[p] == j) {
-                if (fp16_t::is_inf_or_nan(h) || fp16_t::is_zero(h) || fp16_t::is_subnormal(h)) ++n_dbad;
-                continue;
-            }
+            if (L11.idx[p] == j) continue;   // the diagonal SLOT: written, never read (see the file header)
             const float w = widen_fp16(h);
             if (v != 0.0f && w == 0.0f) ++n_flush;
             else if (fp16_t::is_subnormal(h)) ++n_sub;
@@ -230,7 +226,7 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
         d = static_cast<float>(static_cast<double>(d) + resid);
         out.diag[j] = d;
     }
-    out.flushed = n_flush; out.subnormal = n_sub; out.diag_bad = n_dbad;
+    out.flushed = n_flush; out.subnormal = n_sub;
     return out;
 }
 
