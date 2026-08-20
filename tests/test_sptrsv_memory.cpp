@@ -124,17 +124,15 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
 
     // FB: the factor's value width (the L11 copy and the compacted copy are at
     // factor precision); VB: the SpTRSV's storage width (CSR / bucket) -- equal
-    // on the fp32 / fp64 builds, 4 vs 2 under FP16_SCALED.
+    // to it at the default fp32 storage, 2 under APXCHOL_SPTRSV_FP16=1.
     constexpr std::size_t FB = sizeof(factor_value_t), VB = sizeof(sptrsv_value_t);
     constexpr std::size_t NB = sizeof(node_index), EB = sizeof(edge_index);
     const std::size_t slack = 6 * MB;   // page rounding + per-thread RSS batching + level-vector heap
-    // Per-column member arrays the FP16_SCALED build keeps alive through
-    // setup (fp32 diag_, scale_ / inv_scale_ -- allocated before the drop):
-    // part of memory_bytes(), and of every peak moment.
-    std::size_t per_col_members = 0;
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-    per_col_members += 3 * m * sizeof(float);
-#endif
+    // Per-column member arrays the fp16 storage keeps alive through setup
+    // (fp32 diag_, scale_ / inv_scale_ -- allocated before the drop): part of
+    // memory_bytes(), and of every peak moment. Zero at the default fp32
+    // storage, which is what these tests run.
+    const std::size_t per_col_members = 0;
 
     // (a) Steady state: nothing survives setup but the SpTRSV's own arrays.
     const std::size_t live = trsv.memory_bytes();

@@ -1,93 +1,92 @@
 #pragma once
-// Low-precision STORAGE variant for the SpTRSV factor values, selected at
-// configure time by the single CMake cache variable
+// fp16 STORAGE for the SpTRSV factor values -- the type, the converters, and
+// THE runtime switch both SpTRSV backends read.
 //
-//     APXCHOL_SPTRSV_LOWPREC = OFF | FP16_SCALED
+// Selected at RUNTIME, per setup, by the single environment variable
 //
-// which defines APXCHOL_SPTRSV_LOWPREC_FP16_SCALED (or nothing). The shape:
+//     APXCHOL_SPTRSV_FP16 = 0 | 1
+//
+// (sptrsv_fp16_env_tristate() below is the one reader; unset resolves per
+// DEVICE -- OFF on the CPU, ON on the GPU -- because the two have different
+// measured verdicts, see the backend headers). Before 2026-08-20 the CPU side
+// was a CMake cache variable, APXCHOL_SPTRSV_LOWPREC=OFF|FP16_SCALED, and the
+// GPU side a separate env, APXCHOL_GPU_SPTRSV_FP16; both are gone. The old
+// GPU name is still READ, as a deprecated alias with a one-shot stderr note.
+//
+// The shape of the storage:
 //
 //   * ONLY the off-diagonals of the SpTRSV's CSR/CSC value arrays are stored
-//     narrow; the DIAGONAL is kept fp32 in omp_sptrsv::diag_ (a narrow
-//     diagonal was the dominant iteration-count damage of the first all-bf16
-//     variant): the scaled L_jj / s_j (omp_sptrsv::stored_diag). FP16_SCALED
-//     can be asked to read the fp16 diagonal slot instead (env
-//     APXCHOL_FP16_DIAG=1, refused unless every slot is a normal fp16 --
-//     omp.h file header).
+//     narrow; the DIAGONAL is kept fp32 in a separate array (omp_sptrsv::diag_
+//     on the CPU, d_diag_ on the GPU) -- a narrow diagonal was the dominant
+//     iteration-count damage of the first all-bf16 variant: the scaled
+//     L_jj / s_j (omp_sptrsv::stored_diag) plus the column's rounding residual.
 //   * The factor itself (sparse_csc::vals_, factor_value_t) is fp32; the
-//     narrowing happens once, in omp_sptrsv::setup, through
-//     omp_sptrsv::narrow_value (a pure function of the entry, so the CSR
-//     transpose and the CSC copy agree bit-for-bit).
-//   * Every read in the solve kernels widens to fp64 in registers via widen();
-//     the arithmetic is unchanged and the kernels are one source for every
-//     storage type (the fat-level kernels of the 16-bit storage are SIMD:
-//     _mm256_cvtph_ps, vector gather + FMA -- env APXCHOL_FP16_GATHER=
-//     simd|scalar picks the gather flavour). This is a preconditioner-QUALITY
-//     knob (PCG iteration count), never a residual-floor one.
+//     narrowing happens once, at SpTRSV setup, through
+//     omp_sptrsv::narrow_value<fp16_t> (a pure function of the entry, so the
+//     CSR transpose and the CSC copy agree bit-for-bit) / the GPU's
+//     cuda_host::narrow_fp16_scaled_value.
+//   * Every read in the solve kernels widens to fp64 (CPU) / fp32 (GPU) in
+//     registers via widen(); the arithmetic is unchanged and the kernels are
+//     one source for every storage type (the CPU's fat-level kernels of the
+//     16-bit storage are SIMD: _mm256_cvtph_ps + a 4-way FMA chain). This is a
+//     preconditioner-QUALITY knob (PCG iteration count), never a
+//     residual-floor one.
 //
-//   FP16_SCALED  IEEE binary16 (11 significant bits, 2^-11 relative in the
-//                normal range) of L_ij / s_j with a per-COLUMN scale s_j =
-//                max_i |L_ij| over column j's off-diagonals (stored fp32 in
-//                omp_sptrsv::scale_; 1.0f if the column has no nonzero
-//                off-diagonal). The scaling maps every column's largest
-//                off-diagonal to +-1.0 exactly, so no entry overflows; entries
-//                below 2^-14 of their column max fall into fp16's SUBNORMAL
-//                range (absolute precision 2^-24 in the scaled units, i.e.
-//                progressively fewer significant bits) and entries below
-//                2^-25 of it FLUSH TO ZERO under RNE (2^-25 itself ties to
-//                even -> 0). setup() counts both and reports them under
-//                APXCHOL_VERBOSE (omp_sptrsv::lowprec_stats()) -- the flushed
-//                fraction is the direct test of "is dropping tiny entries
-//                relative to their column harmless". The scale is NOT
-//                multiplied back by the kernels: it is folded into the vectors
-//                (forward_solve returns D y, transpose_solve takes it and
-//                scales its input by D^-2 -- omp.h "FOLDED INTO THE VECTORS").
+//   The format: IEEE binary16 (11 significant bits, 2^-11 relative in the
+//   normal range) of L_ij / s_j with a per-COLUMN scale s_j = max_i |L_ij|
+//   over column j's off-diagonals (stored fp32; 1.0f if the column has no
+//   nonzero off-diagonal). The scaling maps every column's largest
+//   off-diagonal to +-1.0 exactly, so no entry overflows; entries below
+//   2^-14 of their column max would fall into fp16's SUBNORMAL range and are
+//   FLUSHED to signed zero at storage time. setup() counts the flushed and
+//   the subnormal and reports them under APXCHOL_VERBOSE. The scale is NOT
+//   multiplied back by the kernels: it is folded into the vectors
+//   (forward_solve returns D y, transpose_solve takes it and scales its input
+//   by D^-2 -- omp.h "FOLDED INTO THE VECTORS").
 //
 // (The bf16 / bf16-scaled / fp24 siblings that were measured against it --
 // 8-bit mantissa 3-6x the PCG iterations on IPM, fp24 marginal -- were removed
 // 2026-08-18; only fp16 with per-column folded scaling + fp32 diagonal +
-// column-sum compensation stayed, default OFF.)
+// column-sum compensation stayed.)
 //
-// FP16_SCALED additionally flushes stored fp16 SUBNORMALS to (signed) zero at
-// storage time by default (env APXCHOL_FP16_KEEP_SUBNORMAL=1 keeps them);
-// and every build runs the COMPACTING drop (APXCHOL_FACTOR_DROP=<rel>, ON by
-// default at kFactorDropRelDefault = 1e-4 with column-sum compensation:
-// off-diagonals with |L_ij| < rel * s_j, plus whatever the storage format
-// would store as zero, are REMOVED from the CSR/CSC at setup and their mass
-// folded back into the kept entries of the column). Both live in omp_sptrsv
-// (solver/sptrsv/omp.h, file header).
-//
-// This header holds the variant-selection macro, the fp16_t storage type and
-// the widen() overloads (float / double / fp16_t). The omp SpTRSV backend is
-// the compile-time consumer; the CUDA backend is fp32/fp64 at compile time
-// (its fp16 storage is the runtime opt-in APXCHOL_GPU_SPTRSV_FP16=1, which
-// narrows on the host through this fp16_t): with APXCHOL_USE_CUDA=ON the
-// CMake variable is treated as OFF for that build (fp32 CPU storage, no
-// APXCHOL_SPTRSV_LOWPREC_* macro, a STATUS line) so a non-OFF default can
-// never break a CUDA build; the #error below only fires if the macro is
-// defined by hand next to APXCHOL_USE_CUDA.
+// This header holds fp16_t, the widen() overloads (float / double / fp16_t)
+// and the env reader. Both SpTRSV backends are its consumers.
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <type_traits>
 #if defined(__F16C__)
 #include <immintrin.h>   // _cvtsh_ss: the one-instruction fp16 -> fp32 widen (vcvtph2ps)
 #endif
 
-// ── Variant selection ───────────────────────────────────────────────────
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED) && defined(APXCHOL_USE_CUDA)
-#  error "APXCHOL_SPTRSV_LOWPREC=FP16_SCALED is implemented for the CPU/omp SpTRSV only; the CUDA backend has no compile-time low-precision path (CMake treats APXCHOL_SPTRSV_LOWPREC as OFF under APXCHOL_USE_CUDA -- this macro was defined by hand)."
-#endif
-
 namespace apxchol {
 
-// The selected variant as a string, for banners / tests ("OFF" on the
-// fp32/fp64 builds).
-inline constexpr const char* sptrsv_lowprec_variant =
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-    "FP16_SCALED";
-#else
-    "OFF";
-#endif
+/// THE fp16-storage switch, read by BOTH SpTRSV backends at every setup:
+/// APXCHOL_SPTRSV_FP16=0|1. Tri-state: -1 unset (each backend applies its own
+/// default -- OFF on the CPU, ON on the GPU), else 0/1.
+///
+/// APXCHOL_GPU_SPTRSV_FP16, the GPU-only name this replaced on 2026-08-20, is
+/// still read as a DEPRECATED alias when the new name is unset; setting it
+/// prints a one-shot stderr note. Note that, being an alias of the UNIFIED
+/// variable, it now governs the CPU backend too.
+inline int sptrsv_fp16_env_tristate() {
+    if (const char* e = std::getenv("APXCHOL_SPTRSV_FP16"); e && *e)
+        return std::atoi(e) != 0 ? 1 : 0;
+    if (const char* e = std::getenv("APXCHOL_GPU_SPTRSV_FP16"); e && *e) {
+        static const bool warned = [] {
+            std::fprintf(stderr,
+                "[apxchol] APXCHOL_GPU_SPTRSV_FP16 is DEPRECATED: the fp16 factor storage is one knob for both"
+                " devices now, APXCHOL_SPTRSV_FP16=0|1 (unset = on for the GPU, off for the CPU). Reading the"
+                " old name as an alias -- which means it governs the CPU SpTRSV as well.\n");
+            return true;
+        }();
+        (void)warned;
+        return std::atoi(e) != 0 ? 1 : 0;
+    }
+    return -1;
+}
 
 // ── fp16_t: IEEE-754 binary16 storage ───────────────────────────────────
 // 1 sign, 5 exponent (bias 15), 10 explicit mantissa bits (11 significant ->
@@ -195,8 +194,8 @@ static_assert(std::is_trivially_copyable_v<fp16_t>);
 
 /// widen(): read a stored factor value into a double for compute. Identity
 /// (modulo the promotion the arithmetic would do anyway) for the fp32/fp64
-/// builds, fp16 -> fp32 -> double for the FP16_SCALED build. The SpTRSV
-/// kernels route every factor read through this.
+/// storage, fp16 -> fp32 -> double for the fp16 one. The SpTRSV kernels route
+/// every factor read through this.
 inline constexpr double widen(double v) { return v; }
 inline constexpr double widen(float v)  { return static_cast<double>(v); }
 inline double           widen(fp16_t v) { return static_cast<double>(v.to_float()); }

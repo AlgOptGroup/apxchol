@@ -93,12 +93,12 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 ///
 /// BACKEND SELECTION (per setup): env APXCHOL_GPU_SPTRSV=dataflow|cusparse
 /// is an explicit override -- exactly that backend, no fallback
-/// (=cusparse together with APXCHOL_GPU_SPTRSV_FP16=1 is impossible, cuSPARSE
+/// (=cusparse together with APXCHOL_SPTRSV_FP16=1 is impossible, cuSPARSE
 /// has no fp16 SpSV: a stderr note, then the AUTO choice). Unset (or any
 /// other value) = AUTO = the DATAFLOW backend, unconditionally -- it has no
 /// analysis buffer (its device state is the two CSRs the level-set backend
 /// needs anyway plus 8 B/row + O(n) batch tables), so there is nothing to fit
-/// and nothing to decide; with APXCHOL_GPU_SPTRSV_FP16=1 the fp16 dataflow
+/// and nothing to decide; with APXCHOL_SPTRSV_FP16=1 the fp16 dataflow
 /// kernel. Faster than cuSPARSE on every measured workload and deterministic.
 /// The decision is printed under APXCHOL_VERBOSE ("[apxchol] GPU SpTRSV
 /// backend: ..."; backend_reason() / backend_forced() / backend_name()).
@@ -126,8 +126,9 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 /// stored_nnz= on this backend too); the CPU unit tests state that the
 /// arrays this backend uploads are the arrays omp_sptrsv stores.
 ///
-/// FP16 STORAGE (env APXCHOL_GPU_SPTRSV_FP16=1, default off; our dataflow
-/// kernel only, with a stderr note if cuSPARSE was asked for explicitly):
+/// FP16 STORAGE (env APXCHOL_SPTRSV_FP16, shared with the CPU backend --
+/// lowprec.h; default ON on this device; our dataflow kernel only, with a
+/// stderr note if cuSPARSE was asked for explicitly):
 /// cuSPARSE 12.8's SpSV REJECTS
 /// CUDA_R_16F matrix values (cusparseSpSV_bufferSize returns
 /// CUSPARSE_STATUS_NOT_SUPPORTED, "value type of matA (CUDA_R_16F) is not
@@ -136,10 +137,9 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 /// CPU's FP16_SCALED contract (cuda_host.h file header; omp.h "FOLDED INTO
 /// THE VECTORS"): the off-diagonals hold binary16 of the column-scaled L~ =
 /// L D^-1 (s_j = column max |off-diagonal|), the diagonal is a separate fp32
-/// diag[j] = fp32(L_jj) / s_j -- plus the column's rounding residual by
-/// default (the CPU's APXCHOL_LOWPREC_DIAG_COMP=1 semantics, ON here:
-/// =0 turns it off for A/B; without it the Laplacian path pays iter0040 45 ->
-/// 64 iterations) -- and inv_scale[j] = fp32(1 / s_j); the forward solve on
+/// diag[j] = fp32(L_jj) / s_j -- plus the column's rounding residual, always
+/// (the same contract the CPU SpTRSV applies; without it the Laplacian path
+/// pays iter0040 45 -> 64 iterations) -- and inv_scale[j] = fp32(1 / s_j); the forward solve on
 /// L~ returns y' = D y and the back solve reads its input times inv_scale^2
 /// (r_j^2 kept in DOUBLE on the device and multiplied in double, exactly the
 /// CPU FP16_SCALED contract: pre-squaring into fp32 overflows to Inf for
@@ -157,9 +157,8 @@ inline void check_cusparse(cusparseStatus_t err, const char* msg) {
 /// never dissolve into NaN.
 /// Device factor bytes per stored entry: 4 (colidx) + 2 (value), times two
 /// CSRs, plus 8 B/row -- vs 4 + 4 with the fp32 storage.
-/// fp16 subnormals are flushed to zero at storage (APXCHOL_FP16_KEEP_SUBNORMAL=1
-/// keeps them) and the drop's keep predicate also drops what fp16 flushes,
-/// exactly as on the CPU FP16_SCALED build.
+/// fp16 subnormals are always flushed to zero at storage and the drop's keep
+/// predicate also drops what fp16 flushes, exactly as on the CPU.
 class cuda_sptrsv {
 public:
     cuda_sptrsv() = default;
@@ -182,17 +181,17 @@ public:
     // Env resolution of the runtime modes (read at every setup()):
     //   APXCHOL_GPU_SPTRSV=dataflow|cusparse (unset = AUTO: the dataflow
     //   backend),
-    //   APXCHOL_GPU_SPTRSV_FP16=0|1 (kernel backends only). Unset = DEFAULT
-    //   ON where a kernel backend is the resolved choice (measured: -12%
-    //   gpu_pcg_loop on iter0040, -4..8% grids, within +-7% elsewhere,
+    //   APXCHOL_SPTRSV_FP16=0|1 -- THE fp16-storage switch, shared with the
+    //   CPU backend (lowprec.h; the old GPU-only name APXCHOL_SPTRSV_FP16
+    //   is read as a deprecated alias). Our dataflow kernel only. Unset =
+    //   DEFAULT ON on this device, where it is the resolved choice (measured:
+    //   -12% gpu_pcg_loop on iter0040, -4..8% grids, within +-7% elsewhere,
     //   -15..20% device factor bytes, iteration-neutral on all 9 suite
     //   matrices) -- and OFF under a forced =cusparse (cuSPARSE has no fp16
-    //   SpSV). Explicit =1 with =cusparse stays a stderr note + AUTO.
+    //   SpSV). Explicit =1 with =cusparse stays a stderr note + AUTO. (The
+    //   CPU's unset default is the opposite, OFF: see omp.h.)
     // Tri-state read: -1 unset, else 0/1.
-    static int fp16_env_tristate() {
-        const char* e = std::getenv("APXCHOL_GPU_SPTRSV_FP16");
-        return e ? (std::atoi(e) != 0 ? 1 : 0) : -1;
-    }
+    static int fp16_env_tristate() { return sptrsv_fp16_env_tristate(); }
     static bool fp16_from_env() { return fp16_env_tristate() == 1; }
     /// The resolved fp16-storage choice (explicit env, else the default rule
     /// above). setup() and the solve.cpp banner both read this one.
@@ -221,19 +220,6 @@ public:
         return 0;
     }
     static bool dataflow_from_env() { return backend_from_env() == 1; }
-    // APXCHOL_LOWPREC_DIAG_COMP for the fp16 storage: ON unless "=0" (the CPU
-    // build reads the same variable, default OFF there -- see the class
-    // comment for why the default differs).
-    static bool fp16_diag_comp_from_env() {
-        const char* e = std::getenv("APXCHOL_LOWPREC_DIAG_COMP");
-        return !(e && *e && std::atoi(e) == 0);
-    }
-    // APXCHOL_FP16_KEEP_SUBNORMAL=1 keeps fp16 subnormals (default: flush).
-    static bool fp16_flush_subnormal_from_env() {
-        const char* e = std::getenv("APXCHOL_FP16_KEEP_SUBNORMAL");
-        return !(e && std::atoi(e) != 0);
-    }
-
     /// Setup: build L11 on the host, run the compacting drop, (fp16: narrow),
     /// copy to device, build the kernel backends' tables (or, opted in, the
     /// cuSPARSE descriptors + analyses). Env APXCHOL_SPTRSV_SETUP_TRACE=1 (the
@@ -276,13 +262,11 @@ public:
                     std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPTRSV=cusparse: the cuSPARSE SpSV backend is not compiled"
                                          " into this build (CMake APXCHOL_CUDA_WITH_CUSPARSE=OFF); using the AUTO backend (dataflow)\n");
                 else if (fp16_)
-                    std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPTRSV_FP16=1: cuSPARSE SpSV has no fp16 value type"
+                    std::fprintf(stderr, "[apxchol] APXCHOL_SPTRSV_FP16=1: cuSPARSE SpSV has no fp16 value type"
                                          " (CUSPARSE_STATUS_NOT_SUPPORTED); using the AUTO backend (dataflow)\n");
             }
         }
         backend_reason_.clear();
-        const bool   fp16_flush_subnormal = fp16_flush_subnormal_from_env();
-        diag_comp_ = fp16_ && fp16_diag_comp_from_env();
         const double factor_drop_rel = factor_drop_rel_from_env();
         const bool   drop_compensate = factor_drop_compensate_from_env();
 
@@ -314,8 +298,7 @@ public:
             }
 
         // ── Compacting drop (factor_drop.h; see the class comment) ──
-        stats_ = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, drop_compensate,
-                                              fp16_, fp16_flush_subnormal);
+        stats_ = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, drop_compensate, fp16_);
         nnz_ = LT.nnz;
         mark("col_scale+drop");
 
@@ -341,15 +324,14 @@ public:
 
         if (fp16_) {
             backend_reason_ = backend_forced_
-                ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow, APXCHOL_GPU_SPTRSV_FP16=1)"
-                : "dataflow (auto: the default; APXCHOL_GPU_SPTRSV_FP16=1 storage)";
+                ? "dataflow (APXCHOL_GPU_SPTRSV=dataflow, APXCHOL_SPTRSV_FP16=1)"
+                : "dataflow (auto: the default; APXCHOL_SPTRSV_FP16=1 storage)";
             if (std::getenv("APXCHOL_VERBOSE"))
                 std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s\n", backend_reason_.c_str());
             // FP16 per-column-scaled storage (cuda_host.h contract): values of
             // CSR(L^T) narrowed on the host, fp32 diag / inv_scale^2 alongside,
             // then the transpose (carrying the same 16-bit patterns) for CSR(L).
-            cuda_host::fp16_scaled_arrays h16 =
-                cuda_host::narrow_fp16_scaled(LT, col_scale, fp16_flush_subnormal, diag_comp_);
+            cuda_host::fp16_scaled_arrays h16 = cuda_host::narrow_fp16_scaled(LT, col_scale);
             fp16_flushed_ = h16.flushed; fp16_subnormal_ = h16.subnormal;
             // r_j^2 in DOUBLE (exact; the kernels multiply rhs * r_j^2 in
             // double and narrow once -- pre-squaring into fp32 overflows for
@@ -368,7 +350,7 @@ public:
                     throw std::runtime_error(
                         "apxchol cuda_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                         " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(inv_scale2[j]) +
-                        "); set APXCHOL_GPU_SPTRSV_FP16=0");
+                        "); set APXCHOL_SPTRSV_FP16=0");
             dev_alloc(reinterpret_cast<void**>(&d_vals16_),     nnz_ * sizeof(std::uint16_t));
             dev_alloc(reinterpret_cast<void**>(&d_diag_),       m_ * sizeof(float));
             dev_alloc(reinterpret_cast<void**>(&d_inv_scale2_), m_ * sizeof(double));
@@ -451,8 +433,7 @@ public:
                 "[apxchol] sptrsv storage GPU/%s %s: stored_nnz=%llu offdiag=%llu%s"
                 " | factor device bytes=%.1f MB (cudaMemGetInfo delta %.1f MB; free %.2f -> %.2f of %.2f GB)\n",
                 backend_name(),
-                fp16_ ? (diag_comp_ ? "fp16 (per-column scaled, diag fp32 + rounding residual)"
-                                    : "fp16 (per-column scaled, diag fp32)") : value_name,
+                fp16_ ? "fp16 (per-column scaled, diag fp32 + rounding residual)" : value_name,
                 static_cast<unsigned long long>(stats_.nnz_stored), static_cast<unsigned long long>(off),
                 fp16_ ? (" flushed_to_zero=" + std::to_string(fp16_flushed_) + " subnormal=" + std::to_string(fp16_subnormal_)).c_str() : "",
                 factor_bytes_ / 1e6, device_delta_bytes_ / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
@@ -518,8 +499,6 @@ public:
     bool backend_forced() const { return backend_forced_; }
     const std::string& backend_reason() const { return backend_reason_; }
     bool fp16() const { return fp16_; }
-    /// fp16 storage: whether the column rounding residual was folded into diag[].
-    bool fp16_diag_comp() const { return diag_comp_; }
     /// Bytes per stored off-diagonal value on the device (2 under fp16).
     std::size_t value_bytes_effective() const { return fp16_ ? 2 : value_bytes; }
     /// Device bytes of the factor arrays cudaMalloc'd by the last setup()
@@ -727,7 +706,6 @@ private:
         backend_forced_ = false;
         backend_reason_.clear();
         fp16_ = false;
-        diag_comp_ = false;
         factor_bytes_ = device_delta_bytes_ = cusparse_buf_bytes_ = 0;
         fp16_flushed_ = fp16_subnormal_ = 0;
         stats_ = factor_drop_stats{};
@@ -772,13 +750,12 @@ private:
     mutable unsigned    df_epoch_  = 0;         // last epoch handed out (0 = none)
     int*          d_df_ctrl_       = nullptr;   // {fwd ticket, fwd finished, bck ticket, bck finished}
     int           df_grid_         = 0;
-    // fp16 storage (APXCHOL_GPU_SPTRSV_FP16; kernel backends only): binary16
+    // fp16 storage (APXCHOL_SPTRSV_FP16; kernel backends only): binary16
     // values of CSR(L~^T) (d_vals16_, replaces d_vals_) and CSR(L~)
     // (d_L_vals16_, replaces d_L_vals_), the fp32 scaled diagonal and the
     // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
     // exact; fp32 overflows for tiny scales, see the class comment).
     bool          fp16_           = false;
-    bool          diag_comp_      = false;
     std::uint16_t* d_vals16_      = nullptr;
     std::uint16_t* d_L_vals16_    = nullptr;
     float*        d_diag_         = nullptr;

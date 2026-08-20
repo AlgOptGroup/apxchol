@@ -78,12 +78,12 @@ inline void ensure_eigen_parallel() {
     (void)dummy;
 }
 
-// One-time build-flag report straight from the LIBRARY TU: the width is
-// sizeof() of the type solve.cpp actually compiled, so 2 == this .so/.a was
-// built with APXCHOL_SPTRSV_LOWPREC = FP16_SCALED, 4 == fp32 (the default).
-// Reports whichever SpTRSV
-// backend (CPU omp / GPU cuda) this build compiled. Opt-in via
-// APXCHOL_VERBOSE — a library should be silent on stderr by default.
+// One-time report of the SpTRSV backend this build compiled (CPU omp / GPU
+// cuda) and of the factor-value storage the env resolves to
+// (APXCHOL_SPTRSV_FP16, lowprec.h -- unset means OFF on the CPU, ON on the
+// GPU). The banner is one-shot, so it reports the resolution at the first
+// solve. Opt-in via APXCHOL_VERBOSE — a library should be silent on stderr by
+// default.
 inline void print_sptrsv_banner_once() {
     static const bool printed = [] {
         if (!std::getenv("APXCHOL_VERBOSE")) return true;
@@ -92,7 +92,7 @@ inline void print_sptrsv_banner_once() {
         // per setup by cuda_sptrsv; the banner is one-shot, so it reports the
         // value at first solve): APXCHOL_GPU_SPTRSV=dataflow|cusparse
         // (unset = AUTO: the dataflow backend) and its fp16 storage
-        // APXCHOL_GPU_SPTRSV_FP16=0|1 (unset = ON where the dataflow kernel
+        // APXCHOL_SPTRSV_FP16=0|1 (unset = ON where the dataflow kernel
         // resolves).
         const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_resolved();
         const int  gpu_be   = apxchol::cuda_sptrsv::backend_from_env();
@@ -101,25 +101,18 @@ inline void print_sptrsv_banner_once() {
                             : gpu_be < 0 ? "GPU/cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)"
                             : gpu_cus ? "GPU/auto: dataflow (the default; APXCHOL_GPU_SPTRSV=cusparse overrides)"
                                       : "GPU/auto: dataflow (the default; cuSPARSE not compiled in)";
-        const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_GPU_SPTRSV_FP16=0 opts out)"
+        const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_SPTRSV_FP16=0 opts out)"
                                        : apxchol::cuda_sptrsv::value_name;
         const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;
 #else
+        const bool cpu_fp16 = apxchol::omp_sptrsv::fp16_from_env();
         const char* backend = "CPU/omp";
-        const char* vname   = apxchol::omp_sptrsv::value_name;
-        const std::size_t vbytes = apxchol::omp_sptrsv::value_bytes;
+        const char* vname   = cpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_SPTRSV_FP16=0 opts out)"
+                                       : "float (fp32)";
+        const std::size_t vbytes = cpu_fp16 ? 2 : sizeof(apxchol::sptrsv_value_t);
 #endif
-        std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem"
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-                             " (APXCHOL_SPTRSV_LOWPREC=%s; off-diagonals only, diagonal fp32; rounding=RNE)\n",
-#else
-                             "\n",
-#endif
-                     backend, vname, vbytes
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-                     , apxchol::omp_sptrsv::lowprec_variant
-#endif
-                     );
+        std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem\n",
+                     backend, vname, vbytes);
         return true;
     }();
     (void)printed;

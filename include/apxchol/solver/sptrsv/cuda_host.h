@@ -4,7 +4,7 @@
 // into cuSPARSE's int32 arrays, the compacting factor drop (the shared
 // factor_drop.h implementation, the same one omp_sptrsv::setup runs), the
 // fp16 per-column-scaled narrowing of our kernel backends' opt-in fp16
-// storage (APXCHOL_GPU_SPTRSV_FP16=1), the CSR transpose (the shared
+// storage (APXCHOL_SPTRSV_FP16=1), the CSR transpose (the shared
 // transpose.h implementation, the one omp_sptrsv::setup runs), the dataflow
 // schedules and the dataflow batch tables. Deliberately CUDA-FREE (no cuda_runtime.h, no __half: fp16
 // values are IEEE binary16 BIT PATTERNS, std::uint16_t, produced by
@@ -18,7 +18,7 @@
 // diag(s_j), s_j = factor_column_scale (max |off-diagonal| of column j, 1.0f
 // if none; the PRE-drop max, which the drop never removes): off-diagonal
 // slots hold fp16(fp32(L_ij) / s_j) (RNE; fp16 subnormals flushed to signed
-// zero by default, env APXCHOL_FP16_KEEP_SUBNORMAL=1 keeps them), the
+// zero, always), the
 // diagonal is NOT read from its (still present, fp16) slot but from a
 // separate fp32 diag[j] = fp32(L_jj) / s_j, and inv_scale[j] = fp32(1 / s_j).
 // The kernels never multiply a scale back: the forward solve on L~ returns
@@ -26,7 +26,8 @@
 // solves L~^T z = D^-2 y', so the pair applies (L_s L_s^T)^-1 for the stored
 // factor L_s = L~ D. The rounding residual of every column,
 // sum_i (x_ij - widen(h_ij)) with x_ij = fp64(L_ij) / s_j, is folded into
-// diag[j] by default (`diag_comp`; the CPU's APXCHOL_LOWPREC_DIAG_COMP, OFF
+// diag[j], always (the CPU SpTRSV does the same; the env knob that used
+// to gate it, APXCHOL_LOWPREC_DIAG_COMP, was removed 2026-08-20 -- it was OFF
 // there as a diagnostic, ON here because the fp16 GPU mode is new and was
 // measured with it: without it the Laplacian path pays iter0040 45 -> 64
 // PCG iterations, with it fp16 matches fp32's counts) so the stored column
@@ -115,12 +116,12 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
     return out;
 }
 
-/// The fp16 storage's flush clause: true iff fp16(x) is zero, or a subnormal
-/// with `flush_subnormal` (the default) -- the entries the FP16_SCALED format
-/// stores as (signed) zero. Pure.
-inline bool fp16_flushes(float x, bool flush_subnormal) {
+/// The fp16 storage's flush clause: true iff fp16(x) is zero or a subnormal
+/// -- the entries the format stores as (signed) zero (subnormals are always
+/// flushed; see lowprec.h). Pure.
+inline bool fp16_flushes(float x) {
     const fp16_t h(x);
-    return fp16_t::is_zero(h.bits) || (flush_subnormal && fp16_t::is_subnormal(h.bits));
+    return fp16_t::is_zero(h.bits) || fp16_t::is_subnormal(h.bits);
 }
 
 /// THE GPU backend's compacting-drop predicate (omp_sptrsv::keep_offdiag
@@ -130,9 +131,9 @@ inline bool fp16_flushes(float x, bool flush_subnormal) {
 /// under the fp16 storage (`fp16_storage`) also everything fp16 flushes at
 /// |v / s| (fp16_flushes). The diagonal is never passed through this.
 template <class Val>
-inline bool keep_offdiag(Val v, float s, double rel, bool fp16_storage, bool fp16_flush_subnormal) {
+inline bool keep_offdiag(Val v, float s, double rel, bool fp16_storage) {
     if (!(std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s))) return false;
-    if (fp16_storage) return !fp16_flushes(static_cast<float>(v) / s, fp16_flush_subnormal);
+    if (fp16_storage) return !fp16_flushes(static_cast<float>(v) / s);
     return v != Val(0);
 }
 
@@ -156,14 +157,14 @@ inline std::vector<float> column_scales(const csr_int<Val>& A) {
 template <class Val>
 inline factor_drop_stats apply_factor_drop(csr_int<Val>& L11, const std::vector<float>& col_scale,
                                            double rel, bool compensate,
-                                           bool fp16_storage, bool fp16_flush_subnormal) {
+                                           bool fp16_storage) {
     factor_drop_stats st;
     std::vector<int>       out_ptr;
     std::unique_ptr<int[]> out_idx;
     std::unique_ptr<Val[]> out_vals;
     const bool compacted = compact_factor_columns<int, int, Val>(
         L11.m, L11.ptr.data(), L11.idx.get(), L11.vals.get(), col_scale.data(), rel, compensate,
-        [=](Val v, float s) { return keep_offdiag(v, s, rel, fp16_storage, fp16_flush_subnormal); },
+        [=](Val v, float s) { return keep_offdiag(v, s, rel, fp16_storage); },
         out_ptr, out_idx, out_vals, st);
     if (compacted) {
         L11.ptr.swap(out_ptr);
@@ -178,7 +179,7 @@ inline factor_drop_stats apply_factor_drop(csr_int<Val>& L11, const std::vector<
 /// The fp16 per-column-scaled storage of an int CSC (see the file header for
 /// the contract): vals = binary16 bit patterns of fp32(L_ij) / s_j (diagonal
 /// slot included, unread by the kernels), diag = fp32(L_jj) / s_j (+ the
-/// column's rounding residual under `diag_comp`), inv_scale = fp32(1 / s_j),
+/// column's rounding residual, always), inv_scale = fp32(1 / s_j),
 /// plus the storage statistics over the off-diagonals.
 struct fp16_scaled_arrays {
     std::unique_ptr<std::uint16_t[]> vals;       // nnz
@@ -191,17 +192,16 @@ struct fp16_scaled_arrays {
 
 /// The narrowing itself: what THIS entry stores. Pure (both stored copies --
 /// CSR of L and CSR of L^T -- carry the same bits for the same entry).
-inline std::uint16_t narrow_fp16_scaled_value(float v, float s, bool flush_subnormal) {
+inline std::uint16_t narrow_fp16_scaled_value(float v, float s) {
     const fp16_t h(v / s);                                    // RNE
-    if (flush_subnormal && fp16_t::is_subnormal(h.bits))
+    if (fp16_t::is_subnormal(h.bits))
         return static_cast<std::uint16_t>(h.bits & 0x8000u);  // signed zero
     return h.bits;
 }
 inline float widen_fp16(std::uint16_t bits) { return fp16_t::from_bits(bits).to_float(); }
 
 template <class Val>
-inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std::vector<float>& col_scale,
-                                             bool flush_subnormal, bool diag_comp) {
+inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std::vector<float>& col_scale) {
     fp16_scaled_arrays out;
     out.vals = std::make_unique_for_overwrite<std::uint16_t[]>(static_cast<std::size_t>(L11.nnz));
     out.diag.resize(static_cast<std::size_t>(L11.m));
@@ -216,7 +216,7 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
         double resid = 0.0;                                            // sum over the off-diagonals of (x - widen(stored))
         for (int p = L11.ptr[j]; p < L11.ptr[j + 1]; ++p) {
             const float v = static_cast<float>(L11.vals[p]);
-            const std::uint16_t h = narrow_fp16_scaled_value(v, s, flush_subnormal);
+            const std::uint16_t h = narrow_fp16_scaled_value(v, s);
             out.vals[p] = h;
             if (L11.idx[p] == j) {
                 if (fp16_t::is_inf_or_nan(h) || fp16_t::is_zero(h) || fp16_t::is_subnormal(h)) ++n_dbad;
@@ -225,10 +225,9 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
             const float w = widen_fp16(h);
             if (v != 0.0f && w == 0.0f) ++n_flush;
             else if (fp16_t::is_subnormal(h)) ++n_sub;
-            if (diag_comp)
-                resid += static_cast<double>(L11.vals[p]) / static_cast<double>(s) - static_cast<double>(w);
+            resid += static_cast<double>(L11.vals[p]) / static_cast<double>(s) - static_cast<double>(w);
         }
-        if (diag_comp) d = static_cast<float>(static_cast<double>(d) + resid);
+        d = static_cast<float>(static_cast<double>(d) + resid);
         out.diag[j] = d;
     }
     out.flushed = n_flush; out.subnormal = n_sub; out.diag_bad = n_dbad;

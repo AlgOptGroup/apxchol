@@ -12,19 +12,12 @@
 namespace {
 
 // "Exact factor => O(1) PCG iterations" bound. An exact Cholesky factor stored
-// at fp32/fp64 preconditions PCG to <= 3 iterations; under the low-precision
-// STORAGE variant (APXCHOL_SPTRSV_LOWPREC=FP16_SCALED, see lowprec.h) every
-// off-diagonal factor entry carries a per-entry relative rounding (2^-11
-// fp16; the diagonal stays exact fp32), so the "exact" factor is only an
-// approximate one and PCG needs a few more (5-6 were measured on the grids
-// below by the original, since removed, all-bf16 variant, diagonal included)
-// -- iteration count, not the residual floor, is what precision buys, so only
-// this bound relaxes.
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-constexpr int kExactFactorMaxIters = 6;
-#else
+// at fp32 preconditions PCG to <= 3 iterations. (Under the fp16 STORAGE --
+// APXCHOL_SPTRSV_FP16=1, see lowprec.h -- every off-diagonal carries a 2^-11
+// relative rounding, so the "exact" factor is only an approximate one and PCG
+// needs a few more; iteration count, not the residual floor, is what
+// precision buys. These tests run at the default fp32 storage.)
 constexpr int kExactFactorMaxIters = 3;
-#endif
 
 Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
     const int n = rows * cols;
@@ -148,12 +141,12 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     // iteration on this grid). The residual floor is unaffected either way.
     for (bool fp16 : {false, true}) {
         SCOPED_TRACE(fp16 ? "fp16 storage" : "lossless storage");
-        setenv("APXCHOL_GPU_SPTRSV_FP16", fp16 ? "1" : "0", /*overwrite=*/1);
+        setenv("APXCHOL_SPTRSV_FP16", fp16 ? "1" : "0", /*overwrite=*/1);
         auto res = solve_once();
         EXPECT_LE(res.iterations, kExactFactorMaxIters + (fp16 ? 1 : 0));
         EXPECT_LT(res.residual, 1e-12);
     }
-    unsetenv("APXCHOL_GPU_SPTRSV_FP16");
+    unsetenv("APXCHOL_SPTRSV_FP16");
 #else
     auto res = solve_once();
     // An exact factor preconditions PCG to convergence in O(1) iterations.

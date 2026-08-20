@@ -391,26 +391,6 @@ if (APXCHOL_64BIT_INDICES)
 endif()
 option(APXCHOL_USE_CUDA "GPU build of apxchol_v1: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG (own SpMV / vector kernels); links cudart only unless APXCHOL_CUDA_WITH_CUSPARSE" OFF)
 option(APXCHOL_CUDA_WITH_CUSPARSE "CUDA build only: also compile + link the cuSPARSE SpSV backend of the GPU SpTRSV (env APXCHOL_GPU_SPTRSV=cusparse) and the benchmark's legacy cuBLAS/cuSPARSE `apxchol_gpu` solver. OFF = apxchol_v1 links cudart alone (see the root CMakeLists.txt)" OFF)
-set(APXCHOL_SPTRSV_LOWPREC "OFF" CACHE STRING "Low-precision SpTRSV factor-value STORAGE for the off-diagonals, diagonal fp32 (reads widen to fp64; compute unchanged; the per-column scale is folded into the vectors and the fp16 fat-level kernels are SIMD, env APXCHOL_FP16_GATHER=simd|scalar; env APXCHOL_FP16_DIAG=1 = fp16 diagonal): OFF | FP16_SCALED -- see the root CMakeLists.txt / include/apxchol/lowprec.h. CPU/omp only -- treated as OFF (fp32, STATUS message) when APXCHOL_USE_CUDA=ON. DEFAULT OFF")
-set_property(CACHE APXCHOL_SPTRSV_LOWPREC PROPERTY STRINGS OFF FP16_SCALED)
-string(TOUPPER "${APXCHOL_SPTRSV_LOWPREC}" APXCHOL_SPTRSV_LOWPREC)
-if (NOT APXCHOL_SPTRSV_LOWPREC MATCHES "^(OFF|FP16_SCALED)$")
-    message(FATAL_ERROR "APXCHOL_SPTRSV_LOWPREC must be OFF or FP16_SCALED (got '${APXCHOL_SPTRSV_LOWPREC}'; the BF16 / BF16_SCALED / FP24 variants were removed 2026-08-18).")
-endif()
-# CUDA builds have no COMPILE-TIME low-precision SpTRSV path (the GPU's fp16
-# storage is the runtime opt-in APXCHOL_GPU_SPTRSV_FP16=1 on our dataflow
-# kernel):
-# with APXCHOL_USE_CUDA=ON the
-# variant is TREATED AS OFF for this build (fp32 CPU storage, no macro, STATUS
-# line) instead of failing the configure -- same rule as the root
-# CMakeLists.txt; the cache value is left as requested.
-if (APXCHOL_USE_CUDA AND NOT APXCHOL_SPTRSV_LOWPREC STREQUAL "OFF")
-    message(STATUS "APXCHOL_SPTRSV_LOWPREC=${APXCHOL_SPTRSV_LOWPREC} requested together with APXCHOL_USE_CUDA=ON: the CUDA backend has no low-precision SpTRSV path -- CPU SpTRSV storage forced to fp32 (APXCHOL_SPTRSV_LOWPREC treated as OFF) for this build")
-    set(APXCHOL_SPTRSV_LOWPREC "OFF")
-endif()
-if (NOT APXCHOL_SPTRSV_LOWPREC STREQUAL "OFF")
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_SPTRSV_LOWPREC_${APXCHOL_SPTRSV_LOWPREC})
-endif()
 option(APXCHOL_POOL_FP32 "Store residual-pool edge weights in fp32 (halves edges_; reads promote to fp64; multigraph terminal writes keep it safe). DEFAULT ON (measured -23% setup IPM / -6.5% social, neutral grids, convergence unchanged); -DAPXCHOL_POOL_FP32=OFF for fp64 baseline" ON)
 if (APXCHOL_POOL_FP32)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_POOL_FP32)

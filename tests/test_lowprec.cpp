@@ -259,7 +259,7 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
         std::uint64_t offdiag = 0;
         for (node_index j = 0; j < m; ++j)
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(L.vals_[p], s[j], true);
+                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(L.vals_[p], s[j]);
                 ASSERT_TRUE(trsv.csc_vals()[p] == expect) << "csc p=" << p;
                 if (L.inner_[p] != j) ++offdiag;
                 // CSR twin: locate (row = inner[p], col = j).
@@ -275,17 +275,9 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
             }
         EXPECT_EQ(trsv.lowprec_stats().offdiag, offdiag);
         EXPECT_EQ(trsv.lowprec_stats().dropped, 0u);
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-        ASSERT_EQ(trsv.col_scales().size(), static_cast<size_t>(m));
-        for (node_index j = 0; j < m; ++j) ASSERT_EQ(trsv.col_scales()[j], s[j]) << "j=" << j;
-        // The 1e-7-scaled entries sit ~2^-23 below their column max: fp16 must
-        // have flushed or subnormalised a good fraction of the off-diagonals.
-        EXPECT_GT(trsv.lowprec_stats().flushed + trsv.lowprec_stats().subnormal, offdiag / 20);
-#else
         // fp32 / fp64 have fp32's range: nothing flushes here.
         EXPECT_EQ(trsv.lowprec_stats().flushed, 0u);
         EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
-#endif
     }
 }
 
@@ -316,30 +308,10 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
         EXPECT_EQ(trsv.lowprec_stats().nnz_stored, 8u);
         EXPECT_EQ(trsv.stored_nnz(), 8u);
         EXPECT_EQ(trsv.lowprec_stats().factor_subnormal, 0u);   // every fp32 value here is normal
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-        EXPECT_EQ(trsv.lowprec_stats().flushed,   keep_sub ? 1u : 2u);
-        EXPECT_EQ(trsv.lowprec_stats().subnormal, keep_sub ? 1u : 0u);
-        EXPECT_EQ(trsv.col_scales()[0], 1.0f);
-        EXPECT_EQ(trsv.col_scales()[1], 0.25f);
-        EXPECT_EQ(trsv.col_scales()[2], 1.0f);   // no off-diagonal -> 1
-        // What the kernels see: 1e-9 is gone; 1e-6 is a subnormal approximation
-        // when kept, gone (signed zero, +) when flushed.
-        EXPECT_EQ(apxchol::widen(trsv.csc_vals()[3]), 0.0);
-        if (keep_sub) EXPECT_NEAR(apxchol::widen(trsv.csc_vals()[2]), 1e-6, std::ldexp(1.0, -25));
-        else          EXPECT_EQ(apxchol::widen(trsv.csc_vals()[2]), 0.0);
-        // The contract functions agree with what was stored.
-        EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1e-6f, 1.0f, /*flush=*/true),  true);
-        EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1e-6f, 1.0f, /*flush=*/false), false);
-        EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1e-9f, 1.0f, /*flush=*/false), true);
-        EXPECT_EQ(apxchol::omp_sptrsv::format_flushes(1.0f,  1.0f, /*flush=*/true),  false);
-        EXPECT_TRUE(apxchol::omp_sptrsv::narrow_value(-1e-6f, 1.0f, true) ==
-                    fp16_t::from_bits(0x8000u));   // sign survives the flush
-#else
         EXPECT_EQ(trsv.lowprec_stats().flushed, 0u);
         EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
-        EXPECT_FALSE(apxchol::omp_sptrsv::format_flushes(1e-9f, 1.0f, true));   // fp32's range: only 0 stores as 0
-        EXPECT_TRUE(apxchol::omp_sptrsv::format_flushes(0.0f, 1.0f, true));
-#endif
+        EXPECT_FALSE(apxchol::omp_sptrsv::format_flushes(1e-9f, 1.0f));   // fp32's range: only 0 stores as 0
+        EXPECT_TRUE(apxchol::omp_sptrsv::format_flushes(0.0f, 1.0f));
         // The forward/back solves still run and are exact w.r.t. the STORED
         // values (a tiny system: check L~ y' = x against them -- the kernel
         // matrix L~: widened off-diagonals, stored_diag() diagonal; under
@@ -352,11 +324,7 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
                 for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
                     if (L.inner_[p] == i) {
                         const float sj =
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-                            trsv.col_scales()[j];
-#else
                             1.0f;
-#endif
                         const double v = (i == j) ? apxchol::omp_sptrsv::stored_diag(L.vals_[p], sj)
                                                   : apxchol::widen(trsv.csc_vals()[p]);
                         r -= v * y[j];
@@ -403,13 +371,8 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel, b
             if (L.inner_[p] == j) { ++d.kept; continue; }
             const factor_value_t v = L.vals_[p];
             bool keep = std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s[j]);
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-            const fp16_t h(static_cast<float>(v) / s[j]);
-            if (fp16_t::is_zero(h.bits) || (fp16_flush_subnormal && fp16_t::is_subnormal(h.bits))) keep = false;
-#else
             (void)fp16_flush_subnormal;
             if (v == 0) keep = false;
-#endif
             if (keep) ++d.kept; else { ++d.zeroed; d.Lz.vals_[p] = 0; }
         }
     return d;
@@ -488,11 +451,7 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
                     zeros += apxchol::widen(trsv.csc_vals()[p]) == 0.0;
                     // Recover |v| >= rel * s_j from the stored value: under
                     // FP16_SCALED the stored ratio is >= rel up to rounding.
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-                    below += std::fabs(apxchol::widen(trsv.csc_vals()[p])) < rel * 0.99;
-#else
                     below += std::fabs(apxchol::widen(trsv.csc_vals()[p])) < rel * static_cast<double>(s[j]) * 0.99;
-#endif
                 }
             }
             for (node_index i = 0; i < m; ++i)
@@ -534,9 +493,6 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q) {
                 double v = apxchol::widen(trsv.csr_vals()[q]);
                 const node_index j = trsv.csr_col_idx()[q];
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-                if (j == i) v = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[i]], s[i]);   // fp32 diag_
-#endif
                 const double t = v * y1[j];
                 r -= t; sc += std::fabs(t);
             }
@@ -590,15 +546,7 @@ TEST(LowPrec, FactorDropEdgeCases) {
         setenv("APXCHOL_FACTOR_DROP", "1e-30", 1);   // below everything: only format zeros go
         apxchol::omp_sptrsv t; t.setup(L, 2000);
         unsetenv("APXCHOL_FACTOR_DROP");
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-        EXPECT_EQ(t.lowprec_stats().dropped, fp16_zero);
-        EXPECT_EQ(t.lowprec_stats().dropped_flush, fp16_zero);
-        EXPECT_EQ(t.lowprec_stats().dropped_threshold, 0u);
-        EXPECT_EQ(t.lowprec_stats().flushed, 0u);      // nothing stored as zero remains
-        EXPECT_EQ(t.lowprec_stats().subnormal, 0u);
-#else
         EXPECT_EQ(t.lowprec_stats().dropped, 0u);
-#endif
         EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()) - t.lowprec_stats().dropped);
     }
     {
@@ -612,9 +560,6 @@ TEST(LowPrec, FactorDropEdgeCases) {
             ASSERT_EQ(t.csc_col_ptr()[j], static_cast<edge_index>(j));
             ASSERT_EQ(t.csc_row_idx()[j], j);
         }
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-        for (node_index j = 0; j < 2000; ++j) ASSERT_EQ(t.col_scales()[j], s[j]);   // scale from BEFORE the drop
-#endif
         // Solving with a diagonal factor: y' = x / stored diagonal (L_jj, or
         // L_jj / s_j under FP16_SCALED where forward_solve returns y' = D y).
         std::vector<double> x(2000, 1.0), y(2000);
@@ -626,134 +571,137 @@ TEST(LowPrec, FactorDropEdgeCases) {
     }
 }
 
-// ── APXCHOL_FP16_DIAG=1 (FP16_SCALED only; ignored elsewhere) ───────────
-// The kernels divide by the fp16 diagonal slot fp16(L_jj / s_j) instead of
-// the fp32 diag_[] = fp32(L_jj / s_j): (a) the forward solve is then an exact
-// solve of L~ with THAT diagonal (residual at roundoff against it, and
-// visibly different -- ~2^-11 -- from the fp32-diagonal solve); (b) the mode
-// is REFUSED (fp16_diag() false, diag_fp16_bad counted, solve bit-identical
-// to the no-env one) as soon as one slot is not a normal finite fp16 -- here
-// a column with L_jj / s_j >= 65520 -> +inf; (c) unset env: off. On the other
-// builds the env is ignored (fp16_diag() stays false, the counts are 0) and
-// the solve is unchanged.
+// ── The fp16 STORAGE at runtime (APXCHOL_SPTRSV_FP16=1) ─────────────────
+// The storage is a per-setup choice now, not a build flag, so these state its
+// contract against the same binary that runs the fp32 tests above:
+//   * every stored slot is narrow_value<fp16_t>(v, s_j) bit-for-bit, in the
+//     CSC and in its CSR twin, with fp16 subnormals flushed to signed zero;
+//   * col_scales() are the documented per-column maxima;
+//   * the fp32 diagonal is stored_diag<fp16_t>() PLUS the column's
+//     storage-rounding residual (the compensation is unconditional), so the
+//     STORED column sums to what the fp32 column / s_j sums to;
+//   * a column whose scale cannot be represented falls back to s_j = 1 and
+//     the setup still produces finite, nonzero diagonals (it THROWS
+//     otherwise -- see omp.h "DEGENERATE SCALES");
+//   * the env is the only switch, and the retired GPU-only name is an alias.
 namespace {
+bool fp16_available() { return apxchol::omp_sptrsv::fp16_supported(); }
+}  // namespace
 
-double forward_residual_with_diag(const sparse_csc& L, const apxchol::omp_sptrsv& t,
-                                  const std::vector<double>& x, const std::vector<double>& yp,
-                                  bool fp16_diag) {
-    const node_index m = L.rows();
-    const std::vector<float> s = reference_scales(L);
-    double worst = 0.0;
-    for (node_index i = 0; i < m; ++i) {
-        double r = x[i], sc = std::fabs(x[i]);
-        for (edge_index q = t.csr_row_ptr()[i]; q < t.csr_row_ptr()[i + 1]; ++q) {
-            const node_index j = t.csr_col_idx()[q];
-            double v = apxchol::widen(t.csr_vals()[q]);   // off-diagonal, or the fp16 diagonal slot
-            if (j == i && !fp16_diag) v = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[i]], s[i]);
-            const double term = v * yp[j];
-            r -= term; sc += std::fabs(term);
+TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
+    if (!fp16_available()) GTEST_SKIP() << "build has no F16C: fp16 storage not compiled";
+    scoped_drop_off drop_off;                              // storage contract on the un-dropped factor
+    scoped_env fp16("APXCHOL_SPTRSV_FP16", "1");
+    for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose */}) {
+        SCOPED_TRACE("m=" + std::to_string(m));
+        sparse_csc L = make_random_lower(m, 4.0, 77, -2.0, 2.0);
+        for (edge_index p = 0; p < L.nonZeros(); ++p)
+            if ((p % 7) == 3) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-7);
+        const std::vector<float> s = reference_scales(L);
+
+        apxchol::omp_sptrsv trsv;
+        trsv.setup(L, m);
+        ASSERT_TRUE(trsv.fp16());
+        EXPECT_EQ(trsv.value_bytes(), 2u);
+        ASSERT_EQ(trsv.csc_vals16().size(), static_cast<size_t>(L.nonZeros()));
+        EXPECT_EQ(trsv.csc_vals().size(), 0u);             // the fp32 arrays stay empty
+        ASSERT_EQ(trsv.col_scales().size(), static_cast<size_t>(m));
+        for (node_index j = 0; j < m; ++j) ASSERT_EQ(trsv.col_scales()[j], s[j]) << "j=" << j;
+
+        std::uint64_t offdiag = 0;
+        double worst_colsum = 0.0;
+        for (node_index j = 0; j < m; ++j) {
+            double x_sum = 0.0, stored_sum = 0.0, resid = 0.0;
+            for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
+                const fp16_t expect = apxchol::omp_sptrsv::narrow_value<fp16_t>(L.vals_[p], s[j]);
+                ASSERT_TRUE(trsv.csc_vals16()[p] == expect) << "csc p=" << p;
+                EXPECT_FALSE(fp16_t::is_subnormal(trsv.csc_vals16()[p].bits));   // always flushed
+                const node_index i = L.inner_[p];
+                bool found = false;
+                for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q)
+                    if (trsv.csr_col_idx()[q] == j) {
+                        ASSERT_TRUE(trsv.csr_vals16()[q] == expect) << "csr q=" << q;
+                        found = true;
+                        break;
+                    }
+                ASSERT_TRUE(found);
+                if (i == j) continue;
+                ++offdiag;
+                const double xv = static_cast<double>(L.vals_[p]) / static_cast<double>(s[j]);
+                x_sum      += xv;
+                stored_sum += apxchol::widen(expect);
+                resid      += xv - apxchol::widen(expect);
+            }
+            // The compensated diagonal, and the column sum it restores.
+            const double d0 = apxchol::omp_sptrsv::stored_diag<fp16_t>(L.vals_[L.outer_[j]], s[j]);
+            ASSERT_EQ(trsv.fp16_diag()[j], static_cast<float>(d0 + resid)) << "diag " << j;
+            const double abs_scale = std::fabs(d0) + std::fabs(x_sum) + 1e-300;
+            worst_colsum = std::max(worst_colsum,
+                std::fabs((static_cast<double>(trsv.fp16_diag()[j]) + stored_sum) - (d0 + x_sum)) / abs_scale);
         }
-        worst = std::max(worst, std::fabs(r) / (sc + 1e-300));
+        EXPECT_EQ(trsv.lowprec_stats().offdiag, offdiag);
+        EXPECT_LT(worst_colsum, 4e-7);                     // one fp32 rounding of the diagonal
+        // The 1e-7-scaled entries sit ~2^-23 below their column max: fp16 must
+        // have flushed a good fraction of the off-diagonals.
+        EXPECT_GT(trsv.lowprec_stats().flushed, offdiag / 20);
+        EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
+        EXPECT_EQ(trsv.lowprec_stats().scale_fallback, 0u);
     }
-    return worst;
 }
 
-} // namespace
-
-TEST(LowPrec, Fp16DiagonalModeIsExactRefusedOnOverflowAndOffByDefault) {
-    const node_index m = 3000;
-    sparse_csc L = make_random_lower(m, 4.0, 2718);      // diag in [1, 3] > s_j <= 0.5: every slot normal
-    std::mt19937 rng(5);
-    std::uniform_real_distribution<double> ux(-1.0, 1.0);
-    std::vector<double> x(m), y0(m), y1(m), y2(m), y3(m);
-    for (auto& v : x) v = ux(rng);
-
-    apxchol::omp_sptrsv base; base.setup(L, m);          // no env
-    EXPECT_FALSE(base.fp16_diag());
-    base.forward_solve(x.data(), y0.data());
-    EXPECT_LT(forward_residual_with_diag(L, base, x, y0, /*fp16_diag=*/false), 1e-11);
-
-    setenv("APXCHOL_FP16_DIAG", "1", 1);
-    apxchol::omp_sptrsv on; on.setup(L, m);
-    unsetenv("APXCHOL_FP16_DIAG");
-    on.forward_solve(x.data(), y1.data());
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-    EXPECT_TRUE(on.fp16_diag());
-    EXPECT_EQ(on.lowprec_stats().diag_fp16_bad, 0u);
-    EXPECT_EQ(on.lowprec_stats().diag_below_scale, 0u);
-    // Exact w.r.t. the fp16 diagonal ...
-    EXPECT_LT(forward_residual_with_diag(L, on, x, y1, /*fp16_diag=*/true), 1e-11);
-    // ... and therefore NOT w.r.t. the fp32 one (the slot really is read):
-    // ~2^-11 relative, well above roundoff and well below 2^-8.
-    const double r32 = forward_residual_with_diag(L, on, x, y1, /*fp16_diag=*/false);
-    EXPECT_GT(r32, 1e-6);
-    EXPECT_LT(r32, 1e-2);
-    double dmax = 0.0, ymax = 0.0;
-    for (node_index i = 0; i < m; ++i) { dmax = std::max(dmax, std::fabs(y1[i] - y0[i])); ymax = std::max(ymax, std::fabs(y0[i])); }
-    EXPECT_GT(dmax, 1e-6 * ymax);
-    EXPECT_LT(dmax, 1e-1 * ymax);
-    // The back solve reads the same slot: the pair still applies an SPD
-    // operator (residual against the fp16-diagonal L~^T at roundoff).
-    {
-        std::vector<double> z(m), rz(m);
-        on.transpose_solve(y1.data(), z.data());
-        const std::vector<float> s = reference_scales(L);
-        for (node_index j = 0; j < m; ++j) {
-            const double r = apxchol::omp_sptrsv::inv_scale(s[j]);
-            rz[j] = y1[j] * (r * r);
-        }
-        double worst = 0.0;
-        for (node_index j = 0; j < m; ++j) {
-            double r = rz[j], sc = std::fabs(rz[j]);
-            for (edge_index p = on.csc_col_ptr()[j]; p < on.csc_col_ptr()[j + 1]; ++p) {
-                const double term = apxchol::widen(on.csc_vals()[p]) * z[on.csc_row_idx()[p]];   // diag slot incl.
-                r -= term; sc += std::fabs(term);
-            }
-            worst = std::max(worst, std::fabs(r) / (sc + 1e-300));
-        }
-        EXPECT_LT(worst, 1e-11);
+TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
+    if (!fp16_available()) GTEST_SKIP() << "build has no F16C: fp16 storage not compiled";
+    scoped_drop_off drop_off;
+    scoped_env fp16("APXCHOL_SPTRSV_FP16", "1");
+    // Column 1's only off-diagonal is ~1e-40: s_j is an fp32 subnormal and
+    // fp32(1 / s_j) overflows, so the setup must fall back to s_j = 1.
+    sparse_csc L;
+    L.n_ = 3;
+    L.outer_ = {0, 2, 4, 5};
+    L.inner_ = {0, 2,  1, 2,  2};
+    L.vals_  = {2.0f, -0.5f,  3.0f, 1e-40f,  4.0f};
+    apxchol::omp_sptrsv trsv;
+    ASSERT_NO_THROW(trsv.setup(L, 3));
+    ASSERT_TRUE(trsv.fp16());
+    EXPECT_EQ(trsv.lowprec_stats().scale_fallback, 1u);
+    EXPECT_EQ(trsv.col_scales()[1], 1.0f);                 // the fallback
+    EXPECT_EQ(trsv.col_scales()[0], 0.5f);                 // untouched
+    for (node_index j = 0; j < 3; ++j) {
+        EXPECT_TRUE(std::isfinite(trsv.fp16_diag()[j])) << j;
+        EXPECT_NE(trsv.fp16_diag()[j], 0.0f) << j;
     }
-#else
-    EXPECT_FALSE(on.fp16_diag());
-    EXPECT_EQ(on.lowprec_stats().diag_fp16_bad, 0u);
-    EXPECT_EQ(on.lowprec_stats().diag_below_scale, 0u);
-    for (node_index i = 0; i < m; ++i) ASSERT_EQ(y1[i], y0[i]) << i;   // env ignored: bit-identical
-#endif
+    // The 1e-40 entry is below anything fp16 can hold next to that diagonal:
+    // it stores as (signed) zero.
+    EXPECT_EQ(apxchol::widen(trsv.csc_vals16()[3]), 0.0);
+    // ... and the solve runs.
+    std::vector<double> x = {1.0, -2.0, 0.5}, y(3), z(3);
+    trsv.forward_solve(x.data(), y.data());
+    trsv.transpose_solve(y.data(), z.data());
+    for (node_index j = 0; j < 3; ++j) { EXPECT_TRUE(std::isfinite(y[j])); EXPECT_TRUE(std::isfinite(z[j])); }
+}
 
-    // Refusal: one column whose L_jj / s_j overflows fp16 (diag 1e5, s = 1
-    // -> the column keeps its single off-diagonal at +-1.0 so s_j == 1).
-    sparse_csc Lbig = L;
+TEST(LowPrecFp16, TheEnvIsTheOnlySwitchAndTheRetiredGpuNameIsAnAlias) {
+    sparse_csc L;
+    L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
+    auto storage_of = [&](const char* var, const char* value) {
+        scoped_env a("APXCHOL_SPTRSV_FP16", nullptr);
+        scoped_env b("APXCHOL_GPU_SPTRSV_FP16", nullptr);
+        scoped_env c(var, value);
+        apxchol::omp_sptrsv t; t.setup(L, 2);
+        return t.fp16();
+    };
+    // Unset = OFF on the CPU (the GPU's default is the opposite: cuda.h).
+    EXPECT_FALSE(storage_of("APXCHOL_SPTRSV_FP16", nullptr));
+    EXPECT_FALSE(storage_of("APXCHOL_SPTRSV_FP16", "0"));
+    EXPECT_EQ(storage_of("APXCHOL_SPTRSV_FP16", "1"), fp16_available());
+    // The retired GPU-only name is read as an alias of the unified one.
+    EXPECT_EQ(storage_of("APXCHOL_GPU_SPTRSV_FP16", "1"), fp16_available());
+    EXPECT_FALSE(storage_of("APXCHOL_GPU_SPTRSV_FP16", "0"));
+    // The new name wins over the alias.
     {
-        const node_index j = 17;
-        ASSERT_GT(Lbig.outer_[j + 1] - Lbig.outer_[j], 1u);
-        Lbig.vals_[Lbig.outer_[j]] = 1e5f;
-        for (edge_index p = Lbig.outer_[j] + 1; p < Lbig.outer_[j + 1]; ++p) Lbig.vals_[p] = 1.0f;
+        scoped_env a("APXCHOL_SPTRSV_FP16", "0");
+        scoped_env b("APXCHOL_GPU_SPTRSV_FP16", "1");
+        apxchol::omp_sptrsv t; t.setup(L, 2);
+        EXPECT_FALSE(t.fp16());
     }
-    apxchol::omp_sptrsv rbase; rbase.setup(Lbig, m);
-    setenv("APXCHOL_FP16_DIAG", "1", 1);
-    apxchol::omp_sptrsv refused; refused.setup(Lbig, m);
-    unsetenv("APXCHOL_FP16_DIAG");
-    EXPECT_FALSE(refused.fp16_diag());
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-    EXPECT_EQ(refused.lowprec_stats().diag_fp16_bad, 1u);
-    EXPECT_TRUE(fp16_t::is_inf_or_nan(refused.csc_vals()[refused.csc_col_ptr()[17]].bits));
-#endif
-    rbase.forward_solve(x.data(), y2.data());
-    refused.forward_solve(x.data(), y3.data());
-    for (node_index i = 0; i < m; ++i) ASSERT_EQ(y3[i], y2[i]) << i;   // refused == no env, bit for bit
-    // And a column with L_jj < s_j among those with an off-diagonal is counted.
-    sparse_csc Llt = L;
-    {
-        const node_index j = 23;
-        ASSERT_GT(Llt.outer_[j + 1] - Llt.outer_[j], 1u);
-        Llt.vals_[Llt.outer_[j]] = 0.25f;                     // below the column max (<= 0.5, > 0.25 likely)
-        Llt.vals_[Llt.outer_[j] + 1] = 0.5f;                  // make sure the max is 0.5
-    }
-    apxchol::omp_sptrsv lt; lt.setup(Llt, m);
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-    EXPECT_EQ(lt.lowprec_stats().diag_below_scale, 1u);
-    EXPECT_EQ(lt.lowprec_stats().diag_fp16_bad, 0u);        // 0.5: still a normal fp16
-#else
-    EXPECT_EQ(lt.lowprec_stats().diag_below_scale, 0u);
-#endif
 }

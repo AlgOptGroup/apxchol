@@ -65,7 +65,7 @@ ref_csr reference_transpose(const sparse_csc& L) {
         for (edge_index p = outer[j]; p < outer[j + 1]; ++p) {
             const edge_index out = pos[inner[p]]++;
             R.col_idx[out] = j;
-            R.vals[out]    = apxchol::omp_sptrsv::narrow_value(vals[p], s_j, /*fp16_flush_subnormal=*/true);
+            R.vals[out]    = apxchol::omp_sptrsv::narrow_value(vals[p], s_j);
         }
     }
     return R;
@@ -261,11 +261,9 @@ TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThre
     for (std::int64_t k = 0; k < LT.nnz; ++k)
         mism += static_cast<node_index>(R.idx[k]) != trsv.csr_col_idx()[k];
     EXPECT_EQ(mism, 0u);
-#if !defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
     for (std::int64_t k = 0; k < LT.nnz; ++k)
         mism += !(static_cast<sptrsv_value_t>(R.vals[k]) == trsv.csr_vals()[k]);
     EXPECT_EQ(mism, 0u);
-#endif
 }
 
 TEST(SpTRSVTranspose, GpuHostTransposeSerialPathMatchesReference) {

@@ -173,7 +173,7 @@ void expect_correct_pair(const sparse_csc& L, const std::vector<double>& x, cons
         ry[j] += apxchol::omp_sptrsv::stored_diag(vals[outer[j]], s[j]) * o.y[j];
         rz[j] += apxchol::omp_sptrsv::stored_diag(vals[outer[j]], s[j]) * o.z[j];
         for (edge_index p = outer[j] + 1; p < outer[j + 1]; ++p) {
-            const double v = apxchol::widen(apxchol::omp_sptrsv::narrow_value(vals[p], s[j], true));
+            const double v = apxchol::widen(apxchol::omp_sptrsv::narrow_value(vals[p], s[j]));
             ry[inner[p]] += v * o.y[j];      // (L_s y')_i
             rz[j]        += v * o.z[inner[p]];   // (L_s^T z)_j
         }

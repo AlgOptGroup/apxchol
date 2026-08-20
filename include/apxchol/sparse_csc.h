@@ -1,6 +1,6 @@
 #pragma once
 #include "apxchol/types.h"
-#include "apxchol/lowprec.h"   // fp16_t + the APXCHOL_SPTRSV_LOWPREC_FP16_SCALED macro
+#include "apxchol/lowprec.h"   // fp16_t, widen(), the APXCHOL_SPTRSV_FP16 reader
 #include <vector>
 #include <cstddef>
 #include <cassert>
@@ -23,16 +23,13 @@ namespace apxchol {
 //     output) stores. The SpTRSV's setup reads the exact fp32 diagonal and
 //     the per-column scales off it, and the factor is released right after
 //     setup on the consuming path.
-//   - sptrsv_value_t : what the SpTRSV kernels' CSR/CSC value arrays store
-//     (and the GPU backend's d_vals). fp16_t under the CPU-only
-//     APXCHOL_SPTRSV_LOWPREC=FP16_SCALED variant (lowprec.h), else fp32 like
-//     the factor.
+//   - sptrsv_value_t : the DEFAULT width of the SpTRSV kernels' CSR/CSC value
+//     arrays (and of the GPU backend's d_vals): fp32. Both backends can narrow
+//     those arrays to fp16 at RUNTIME instead (APXCHOL_SPTRSV_FP16=1,
+//     lowprec.h) -- that is a per-setup choice of storage type, never a
+//     compile-time typedef.
 using factor_value_t = float;
-#if defined(APXCHOL_SPTRSV_LOWPREC_FP16_SCALED)
-using sptrsv_value_t = fp16_t;
-#else
 using sptrsv_value_t = float;
-#endif
 
 /// Owning Compressed-Sparse-Column matrix that replaces Eigen::SparseMatrix for
 /// the factor L. We own the storage so the index width is OURS, not forced
