@@ -21,7 +21,7 @@
 ///   - precond.solve via the existing cuda_sptrsv::solve_LLt_dev
 /// Every reduction is DETERMINISTIC (fixed grid, per-block partials, fixed-
 /// order final reduce -- no floating-point atomics; see pcg_cuda_kernels.h),
-/// so on our SpTRSV kernels (dataflow / level-set) the whole solve is bit-
+/// so on our dataflow SpTRSV kernel the whole solve is bit-
 /// identical run to run. Only the initial b is H2D'd, three 8-byte scalars
 /// per iteration (p.Ap, r.r, r.z) come back to the host, only the final x
 /// is D2H'd.

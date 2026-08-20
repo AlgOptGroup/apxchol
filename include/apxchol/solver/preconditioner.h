@@ -130,7 +130,7 @@ inline double det_sum(const double* v, Eigen::Index n, double* part) {
 ///   x = cg.solve(b);
 ///
 /// Triangular solve backend selected at compile time:
-///   - Default: OpenMP level-set parallel SpTRSV
+///   - Default: OpenMP level-set parallel SpTRSV (CPU)
 ///   - APXCHOL_USE_CUDA: cuSPARSE GPU-accelerated SpSV
 class apx_cholesky : public Eigen::SparseSolverBase<apx_cholesky> {
     using Base = Eigen::SparseSolverBase<apx_cholesky>;

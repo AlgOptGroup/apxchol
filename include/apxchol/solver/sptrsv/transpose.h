@@ -4,7 +4,7 @@
 // forward solve's operand) from the factor's CSC through it, and the GPU
 // backend's host prep (cuda_host::transpose_csr) builds CSR of L from CSR of
 // L^T -- the very same arrays, int32 -- for our two kernel backends (dataflow /
-// level-set) through it. Header-only, CUDA-free, OpenMP-parallel, templated on
+// dataflow) through it. Header-only, CUDA-free, OpenMP-parallel, templated on
 // the offset / index / value types (edge_index / node_index / sptrsv_value_t
 // on the CPU, int / int / cuda_value_t or uint16_t on the GPU) and on a
 // `store(v, j)` functor that maps the input value of an entry in column j to

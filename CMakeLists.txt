@@ -66,7 +66,7 @@ FetchContent_MakeAvailable(fast_matrix_market)
 find_package(OpenMP)
 
 # ── Build options ───────────────────────────────────
-option(APXCHOL_USE_CUDA "GPU build: our CUDA SpTRSV kernels (dataflow / level-set) + the GPU-resident PCG with our own SpMV / vector kernels; links cudart only unless APXCHOL_CUDA_WITH_CUSPARSE" OFF)
+option(APXCHOL_USE_CUDA "GPU build: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG with our own SpMV / vector kernels; links cudart only unless APXCHOL_CUDA_WITH_CUSPARSE" OFF)
 option(APXCHOL_CUDA_WITH_CUSPARSE "CUDA build only: also compile + link the cuSPARSE SpSV backend of the GPU SpTRSV (opt-in comparison baseline, env APXCHOL_GPU_SPTRSV=cusparse; the fp64 build's OOM-aware AUTO). OFF = the CUDA library links cudart alone (no cuSPARSE, no cuBLAS)" OFF)
 option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors with more than 2^31 nonzeros" OFF)
 option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
@@ -90,7 +90,7 @@ if (NOT APXCHOL_SPTRSV_LOWPREC MATCHES "^(OFF|FP16_SCALED)$")
 endif()
 # CUDA builds have no COMPILE-TIME low-precision SpTRSV path (the cuSPARSE
 # backend is fp32/fp64 only; the GPU's fp16 storage is the RUNTIME opt-in
-# APXCHOL_GPU_SPTRSV_FP16=1 on our dataflow / level-set kernels, see
+# APXCHOL_GPU_SPTRSV_FP16=1 on our dataflow kernel, see
 # include/apxchol/solver/sptrsv/cuda.h): with APXCHOL_USE_CUDA=ON any APXCHOL_SPTRSV_LOWPREC value is
 # TREATED AS OFF for this build -- CPU SpTRSV storage forced to fp32, no
 # APXCHOL_SPTRSV_LOWPREC_* macro defined -- with a STATUS line, instead of
@@ -140,9 +140,6 @@ add_library(apxchol_core
     # by nvcc only on the CUDA build (the .cpp TUs are host-compiled and can't
     # host __global__).
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_cast.cu>
-    # Level-set SpTRSV kernels: sptrsv/cuda.h calls levelset_solve
-    # unconditionally, so the CUDA build needs this TU to link.
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_levelset.cu>
     # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow), same reason.
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_dataflow.cu>
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels with

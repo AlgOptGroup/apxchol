@@ -322,8 +322,8 @@ TYPED_TEST(SolveTest, DeterministicWithSameSeed) {
     // The GPU-resident PCG is bit-deterministic run to run: its SpMV, vector
     // passes and reductions are our own kernels with fixed grids and fixed-
     // order partial sums (pcg_cuda_kernels.h -- no floating-point atomics),
-    // and so are our dataflow / level-set SpTRSV backends (AUTO is the
-    // dataflow one). NOT on cuSPARSE SpSV (APXCHOL_GPU_SPTRSV=cusparse --
+    // and so is our dataflow SpTRSV backend (the AUTO choice). NOT on
+    // cuSPARSE SpSV (APXCHOL_GPU_SPTRSV=cusparse --
     // only where the build opted in
     // with APXCHOL_CUDA_WITH_CUSPARSE): its atomics wobble the residual ~1e-2
     // relative (measured 2e-3 .. 4e-3 on this 8x8 grid) and the iteration

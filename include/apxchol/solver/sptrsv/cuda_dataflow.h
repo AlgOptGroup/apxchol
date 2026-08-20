@@ -1,19 +1,20 @@
 #pragma once
-#include "apxchol/solver/sptrsv/cuda_levelset.h"   // sptrsv_gpu_value_t
 #include <cuda_runtime.h>
 
 // Sync-free ("dataflow") GPU sparse triangular solve with O(n) STATE -- the
 // third SpTRSV backend of cuda.h (env APXCHOL_GPU_SPTRSV=dataflow).
 //
-// WHY. cuSPARSE SpSV is ~1.5-2x faster per sweep than our level-set kernel on
-// this GPU (both far below bandwidth; the level-set pays one launch + one
-// stream sync per level, 70-100 levels per sweep) but keeps an O(nnz)
-// analysis buffer (~23 B/nnz per direction: a level-permuted copy of the
-// matrix -- its find_colors / create_perm / number_of_deps kernels -- plus
-// per-row dependency counts), which is what OOMs the giant social factors.
-// This kernel is ONE persistent launch per sweep, works on the very CSR the
-// level-set backend already holds, and its per-solve state is 8 bytes per
-// ROW.
+// WHY. This replaced BOTH of the alternatives it was measured against. Our
+// (now removed) level-set kernel paid one launch plus one stream sync per
+// level, 70-100 levels per sweep; cuSPARSE SpSV was ~1.5-2x faster per sweep
+// than that but keeps an O(nnz) analysis buffer (~23 B/nnz per direction: a
+// level-permuted copy of the matrix -- its find_colors / create_perm /
+// number_of_deps kernels -- plus per-row dependency counts), which is what
+// OOMs the giant social factors. This kernel is ONE persistent launch per
+// sweep, its per-solve state is 8 bytes per ROW, and it beat both everywhere
+// measured (iter0040 0.98 vs level-set 1.54 / cuSPARSE 1.08 ms/iter,
+// grid_2000 3.20 vs 6.26 / 3.54; com-Orkut 0.77 vs 0.87 s/iter,
+// com-LiveJournal 0.21 vs 0.25).
 //
 // SCHEME (T out = rhs, T triangular in CSR with the diagonal inside every
 // row). Every row i owns a TAGGED WORD tag[i] = {value, epoch} (one 64-bit
@@ -71,22 +72,23 @@
 // tables (<= m+1 ints each, read-only), ctrl[2] per direction = {ticket,
 // finished warps} (zero at entry and at exit: the last warp out resets
 // them). No per-nonzero scratch, no in-degree array, no transposed
-// dependency structure -- each sweep touches only its own CSR (CSR of L
-// forward, CSR of L^T back), which the level-set backend holds anyway.
+// dependency structure, no level schedule -- each sweep touches only its own
+// CSR (CSR of L forward, CSR of L^T back).
 // The epoch is a 32-bit sweep count; the owner clears tag[] and restarts it
 // long before it could wrap onto a stale word.
 //
 // DETERMINISM. Which warp computes a row and when does not enter the value:
 // a lane's partial sum runs in entry order, the group's butterfly is fixed,
 // and the lane group of a row is a function of its length alone -- so out is
-// bit-identical run to run AND across grid sizes (cuSPARSE SpSV is not; the
-// level-set backend is). Verified: tests/test_sptrsv_drop.cpp (CUDA build).
+// bit-identical run to run AND across grid sizes (cuSPARSE SpSV is not).
+// Verified against an independent serial double-precision CPU reference of
+// the same device arrays: tests/test_sptrsv_drop.cpp (CUDA build).
 //
 // Defined in src/cuda_dataflow.cu (nvcc TU). fp32 values (the tagged word
 // packs a 4-byte value with a 4-byte epoch -- which is why the removed fp64
 // SpTRSV storage never had this backend); the fp16 storage of cuda_host.h is the same kernel
 // with the half -> float widen, the fp32 diag[] and the optional per-row
-// input scale (dataflow_solve_fp16), mirroring levelset_solve_fp16.
+// input scale (dataflow_solve_fp16).
 //
 // fp16 PATH DESIGN (2026-08-19 rework; measurements RTX 4090 Laptop,
 // interleaved warm per-sweep medians): the values are loaded as raw 2-byte
@@ -107,6 +109,11 @@
 // dead ends (fp16 compute, mixed-width fp32-for-hub-rows, pair loads +
 // register cap) are recorded at the kernel in the .cu.
 namespace apxchol {
+
+/// The device-side value type of the GPU SpTRSV: the factor width (fp32),
+/// declared here without pulling in sparse_csc.h (host C++23, which the
+/// C++20-pinned .cu cannot compile).
+using sptrsv_gpu_value_t = float;
 
 /// Threads per block of the persistent kernel.
 inline constexpr int kDataflowBlock = 256;
@@ -142,10 +149,17 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse,
                     const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);
 
 /// The same sweep on the fp16 per-column-scaled storage (cuda_host.h
-/// contract; identical semantics to levelset_solve_fp16: `vals16` binary16
-/// bit patterns, the diagonal slot skipped, divide by the fp32 `diag[i]`,
-/// rhs[i] scaled once by the DOUBLE `in_scale[i]` when non-null -- r_i^2
-/// exact, product in double, one narrowing cast; see cuda_levelset.h).
+/// contract): `vals16` are binary16 bit patterns of the column-scaled factor
+/// L~ = L D^-1, the row's diagonal SLOT is present in the CSR but skipped,
+/// the row divides by the fp32 `diag[i]` = fp32(L_ii / s_i) (plus the
+/// column's rounding residual under the default diag_comp), and rhs[i] is
+/// scaled once by the DOUBLE `in_scale[i]` when non-null (the back sweep
+/// passes inv_scale^2 = fp32(1/s_i)^2 held in double -- r_i^2 exact; the
+/// product rhs * r_i^2 is formed in double and narrowed once, because the
+/// pre-squared value overflows fp32 for s_i < ~5.4e-20 while the product
+/// itself is small -- the CPU FP16_SCALED contract, omp.h bck_dir::rhs,
+/// computes the very same double product; the forward sweep passes nullptr):
+///   out[i] = (rhs[i] * in_scale[i] - sum_{j != i} widen(vals16[p]) * out[j]) / diag[i].
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
                          const int* rowptr, const int* colidx, const unsigned short* vals16,
                          const float* diag, const double* in_scale,

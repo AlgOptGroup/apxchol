@@ -8,7 +8,7 @@
 // CUDA library build links cudart only (the cuSPARSE SpSV backend of the
 // SpTRSV is a separate opt-in, CMake APXCHOL_CUDA_WITH_CUSPARSE). Defined in
 // src/cuda_pcg_kernels.cu (nvcc; the .cpp TUs are host-compiled and cannot
-// host __global__), mirroring cuda_cast.cu / cuda_levelset.cu.
+// host __global__), mirroring cuda_cast.cu / cuda_dataflow.cu.
 //
 // The kernels mirror the CPU loop's fusion (src/solve.cpp): spmv+pAp (p.Ap
 // folded into the SpMV row loop), update_xr (x += alpha p, r -= alpha Ap, r.r

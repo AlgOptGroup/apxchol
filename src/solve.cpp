@@ -90,18 +90,17 @@ inline void print_sptrsv_banner_once() {
 #if defined(APXCHOL_USE_CUDA)
         // Runtime backend / storage modes of the GPU SpTRSV (env, resolved
         // per setup by cuda_sptrsv; the banner is one-shot, so it reports the
-        // value at first solve): APXCHOL_GPU_SPTRSV=dataflow|cusparse|levelset
-        // (unset = AUTO: the dataflow backend) and the kernel backends' fp16
-        // storage APXCHOL_GPU_SPTRSV_FP16=0|1 (unset = ON where a kernel
-        // backend resolves).
+        // value at first solve): APXCHOL_GPU_SPTRSV=dataflow|cusparse
+        // (unset = AUTO: the dataflow backend) and its fp16 storage
+        // APXCHOL_GPU_SPTRSV_FP16=0|1 (unset = ON where the dataflow kernel
+        // resolves).
         const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_resolved();
         const int  gpu_be   = apxchol::cuda_sptrsv::backend_from_env();
         const bool gpu_cus  = apxchol::cuda_sptrsv::cusparse_available();
-        const char* backend = gpu_be == 2 ? "GPU/dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
-                            : gpu_be > 0 ? "GPU/levelset (APXCHOL_GPU_SPTRSV=levelset)"
+        const char* backend = gpu_be > 0 ? "GPU/dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
                             : gpu_be < 0 ? "GPU/cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)"
-                            : gpu_cus ? "GPU/auto: dataflow (the default; APXCHOL_GPU_SPTRSV=cusparse|levelset overrides)"
-                                      : "GPU/auto: dataflow (the default; APXCHOL_GPU_SPTRSV=levelset overrides; cuSPARSE not compiled in)";
+                            : gpu_cus ? "GPU/auto: dataflow (the default; APXCHOL_GPU_SPTRSV=cusparse overrides)"
+                                      : "GPU/auto: dataflow (the default; cuSPARSE not compiled in)";
         const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_GPU_SPTRSV_FP16=0 opts out)"
                                        : apxchol::cuda_sptrsv::value_name;
         const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;

@@ -120,17 +120,11 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             if pk: m["max_vram_mb"] = pk
         return st,m
     st,m = _run([])
-    # apxchol-GPU: cuSPARSE's O(nnz) SpSV buffer OOMs the giants (com-Orkut). Retry with
-    # our O(n) level-set backend, which fits 16GB -- so Orkut-GPU gets a real number
-    # instead of OOM. (Tagged via APXCHOL_GPU_SPTRSV; the cell's config string is the
-    # apxchol config either way, so the chart just sees a populated apxchol-GPU cell.)
-    if st=="oom" and DEVICE=="gpu" and solver=="apxchol_v1":
-        st,m = _run(["APXCHOL_GPU_SPTRSV=levelset"])
-        # Provenance: this cell is the O(n) level-set fallback (cuSPARSE SpSV OOM'd),
-        # NOT the default cuSPARSE backend -- recorded so the charts/notes can mark it.
-        # The recorded setup/solve/total are the level-set run ALONE (a fresh invocation);
-        # the failed cuSPARSE attempt's time is not included.
-        if m is not None: m["gpu_sptrsv"]="levelset (cuSPARSE OOM fallback)"
+    # (The "retry with APXCHOL_GPU_SPTRSV=levelset after an OOM" fallback that used
+    # to sit here went with the level-set backend on 2026-08-20. It existed because
+    # AUTO used to be cuSPARSE, whose O(nnz) SpSV analysis buffer OOMs the giants;
+    # AUTO has been our O(n)-state dataflow kernel since 2026-08-18, so there is
+    # nothing to fall back FROM.)
     return st,m
 
 def run_julia(mtx, solver):

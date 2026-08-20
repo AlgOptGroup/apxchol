@@ -5,7 +5,7 @@
 // factor_drop.h implementation, the same one omp_sptrsv::setup runs), the
 // fp16 per-column-scaled narrowing of our kernel backends' opt-in fp16
 // storage (APXCHOL_GPU_SPTRSV_FP16=1), the CSR transpose (the shared
-// transpose.h implementation, the one omp_sptrsv::setup runs), the level-set
+// transpose.h implementation, the one omp_sptrsv::setup runs), the dataflow
 // schedules and the dataflow batch tables. Deliberately CUDA-FREE (no cuda_runtime.h, no __half: fp16
 // values are IEEE binary16 BIT PATTERNS, std::uint16_t, produced by
 // lowprec.h's fp16_t -- the same RNE the CPU FP16_SCALED build uses -- and
@@ -236,7 +236,7 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
 }
 
 /// Transpose a square m x m CSR (values of any trivially copyable V). The
-/// dataflow / level-set forward solves need CSR of L (row access) while setup
+/// The dataflow forward solve needs CSR of L (row access) while setup
 /// builds CSR of L^T (== the factor's CSC); this produces the one from the
 /// other. THE shared transpose (transpose.h -- the very code omp_sptrsv::setup
 /// runs for its CSC -> CSR): the blocked counting-sort parallel path, O(nnz)
@@ -257,35 +257,6 @@ inline csr_int<V> transpose_csr(const csr_int<V>& in) {
         out.ptr.data(), out.idx.get(), out.vals.get(),
         [](V v, int) { return v; }, use_parallel_transpose(in.m));
     return out;
-}
-
-/// Topological level partition of a triangular CSR. `ascending` = lower-tri
-/// (forward: off-diagonal deps have smaller index, sweep 0..m-1); !ascending =
-/// upper-tri (back: deps larger, sweep m-1..0). The diagonal is skipped.
-/// Returns row_order (rows bucketed by level) + level_ptr (boundaries, size
-/// num_levels+1).
-inline void compute_levels(int m, const int* rowptr, const int* colidx, bool ascending,
-                           std::vector<int>& row_order, std::vector<int>& level_ptr) {
-    std::vector<int> level(static_cast<std::size_t>(m), 0);
-    int maxlev = 0;
-    auto proc = [&](int i) {
-        int lv = 0;
-        for (int p = rowptr[i]; p < rowptr[i + 1]; ++p) {
-            const int j = colidx[p];
-            if (j == i) continue;
-            if (level[j] + 1 > lv) lv = level[j] + 1;
-        }
-        level[i] = lv; if (lv > maxlev) maxlev = lv;
-    };
-    if (ascending) for (int i = 0; i < m; ++i) proc(i);
-    else           for (int i = m - 1; i >= 0; --i) proc(i);
-    const int nlev = maxlev + 1;
-    level_ptr.assign(static_cast<std::size_t>(nlev) + 1, 0);
-    for (int i = 0; i < m; ++i) level_ptr[level[i] + 1]++;
-    for (int l = 0; l < nlev; ++l) level_ptr[l + 1] += level_ptr[l];
-    row_order.resize(static_cast<std::size_t>(m));
-    std::vector<int> pos(level_ptr.begin(), level_ptr.end());
-    for (int i = 0; i < m; ++i) row_order[pos[level[i]]++] = i;
 }
 
 /// The dataflow backend's lane-group size of a row of `entries` CSR entries
