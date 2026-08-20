@@ -379,7 +379,7 @@ inline int dataflow_split_threshold(const dataflow_len_stats& st) {
 /// a whole chunk C = 32 * pre so every segment has the same chunk depth and
 /// none is a straggler -- at most `max_seg` of them. `seg == 0` disables
 /// segmentation: the plan is then exactly dataflow_batches() (the rollback
-/// switch, APXCHOL_GPU_DF_SEG=0).
+/// switch, APXCHOL_GPU_DF_SPLIT=0).
 ///
 /// The rule is a pure function of (row lengths, params) and must NEVER read
 /// occupancy, grid size or device properties: that is what keeps the result
