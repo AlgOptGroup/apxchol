@@ -17,6 +17,16 @@ x = pcg(A, b, 1e-8, 500, @(r) s.apply(r));   % drop into Octave's pcg as M
 res = apxchol_solve(A, b);        % one-shot convenience
 ```
 
+`A` must be the **assembled operator** (Laplacian or SDDM), not the adjacency
+matrix of a graph — an adjacency matrix raises `apxchol:adjacencyInput`, never
+gets converted silently. `apxchol_laplacian` does the conversion explicitly:
+
+```matlab
+A = mmread('com-Amazon.mtx');     % adjacency matrix
+L = apxchol_laplacian(A);         % L = D - A, self-loops dropped
+res = apxchol_solve(L, b);
+```
+
 Laplacian vs SDDM is auto-detected (singular Laplacians get the rank-(n−1)
 factor with null-space centering). Defaults only — no tuning knobs exposed.
 
@@ -49,7 +59,8 @@ newer than MATLAB's officially "supported" GCC 12, which it accepts with a warni
 
 ```matlab
 mex -R2018a apxchol_mex.cpp ../src/factorization.cpp ../src/solve.cpp ...
-    -I../include -I/usr/include/eigen3 ...
+    ../src/mtx_input.cpp ...
+    -I../include -I../src -I/usr/include/eigen3 ...
     -DAPXCHOL_POOL_FP32 ...
     CXXFLAGS='$CXXFLAGS -std=c++23 -fopenmp -O3 -fPIC' ...
     LDFLAGS='$LDFLAGS -fopenmp' -lgomp

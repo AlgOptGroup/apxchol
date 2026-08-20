@@ -21,15 +21,17 @@ endif()
 
 find_package(OpenMP)
 find_package(pybind11 CONFIG REQUIRED)
-# The two core TUs depend only on Eigen + OpenMP (no fast_matrix_market, no
+# The core TUs depend only on Eigen + OpenMP (no fast_matrix_market, no
 # generated version.h, no CLI11/spdlog), so we compile them straight into the
-# extension. The benchmark-critical apxchol::solve in solve.cpp is reused as-is.
+# extension. The benchmark-critical apxchol::solve in solve.cpp is reused as-is;
+# mtx_input.cpp supplies the adjacency-input check the CLI shares with us.
 pybind11_add_module(_apxchol
     src/apxchol_ext.cpp
     ${APX_ROOT}/src/factorization.cpp
     ${APX_ROOT}/src/solve.cpp
+    ${APX_ROOT}/src/mtx_input.cpp
 )
-target_include_directories(_apxchol PRIVATE ${APX_ROOT}/include)
+target_include_directories(_apxchol PRIVATE ${APX_ROOT}/include ${APX_ROOT}/src)
 target_link_libraries(_apxchol PRIVATE Eigen3::Eigen)
 if (OpenMP_CXX_FOUND)
     target_link_libraries(_apxchol PRIVATE OpenMP::OpenMP_CXX)

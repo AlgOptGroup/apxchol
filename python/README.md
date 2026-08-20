@@ -24,6 +24,16 @@ M = solver.aspreconditioner()           # use as M= in scipy.sparse.linalg.cg
 res = apxchol.solve(A, b)               # one-shot convenience
 ```
 
+`A` must be the **assembled operator** (Laplacian or SDDM), not the adjacency
+matrix of a graph — an adjacency matrix is rejected with a `ValueError`, never
+converted silently. `apxchol.laplacian` does the conversion explicitly:
+
+```python
+A = scipy.io.mmread("com-Amazon.mtx").tocsc()   # adjacency matrix
+L = apxchol.laplacian(A)                        # L = D - A, self-loops dropped
+res = apxchol.solve(L, b)
+```
+
 Laplacian vs SDDM is auto-detected: singular Laplacians get a rank-(n−1)
 factor with native null-space handling; SDDM systems get the full-rank factor.
 The factor is built once per `factorize(A)` (alias: `apxchol.solver(A)`) and

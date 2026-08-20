@@ -88,6 +88,21 @@ no-op on an already-assembled pure Laplacian. Diagonal dominance is reported,
 never enforced: `G3_circuit` (42% of rows) and `apache2` are legitimately
 non-dominant and converge.
 
+The **bindings** (`python/`, `octave/`) had the same bug by a different route —
+an in-memory `scipy.io.mmread(...)` / `sparse(...)` handed straight to
+`cpu_solver`, surfacing only as `converged=False`. They compile `mtx_input.cpp`
+too and reject on `detect_adjacency_signature`: a NARROW rule (not one row has
+a positive diagonal entry, yet positive off-diagonals exist) that never fires
+on anything that worked before, `parabolic_fem`/`thermal2`/`G3_circuit`/
+`apache2` included. It is an **error**, not the CLI's auto-conversion: the CLI
+prints how it read the file on every run, a library caller does not reliably
+see anything we print, so converting would risk returning a confident answer to
+a different system than the caller asked about. `apxchol.laplacian(A)` /
+`apxchol_laplacian(A)` do the conversion explicitly, with the CLI's `L = D - A`,
+`A_ij = |M_ij|`, self-loops-dropped semantics. Cost is nil on valid input: the
+scan stops at the first positive diagonal entry (0.000 ms vs a 50 ms ingestion
+at nnz 6.9M; only a matrix about to be rejected is walked whole).
+
 ### Dispatch and customization seams
 
 `apxchol::factorize` is templated on the IS selector (partitioner), the incidence storage, and — via overloads taking an instance — the eliminator. Custom eliminators/partitioners are passed as instances (matrix- or graph-level overloads; see `docs/extending.md` and `examples/`); partitioners implement one uniform `find_partition(G, span<const node_index> candidates, ctx, selection&)` shape — the `degree_prepass` trait decides whether the orchestrator runs the prune/degree/cap pre-pass (candidates = eligible list, vertex-indexed `ctx.degrees` filled) or passes the raw active list (`ctx.degrees` empty); selection knobs are grouped as `factor_options::partition`. `graph<>` and the matrix overloads default to `vec_pool`. The call most users hit is the runtime-dispatch overload:
