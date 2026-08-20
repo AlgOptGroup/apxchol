@@ -295,8 +295,9 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // factor_subnormal = number of factor entries (diagonal included,
 // factor_value_t = fp32) that are fp32 subnormals -- on the fp32 storage
 // these ARE the stored values, so this is exactly "how many stored fp32
-// factor values are subnormal" (the DAZ/FTZ question; see APXCHOL_FTZ in
-// solve.cpp).
+// factor values are subnormal". Measured 0 of 4.6M (iter0040) and 0 of 21.9M
+// (grid_2000) -- which is why the MXCSR FTZ+DAZ knob that used to ask the
+// same question at PCG entry is gone (see "Retired knobs" in AGENTS.md).
 
 class omp_sptrsv {
 public:

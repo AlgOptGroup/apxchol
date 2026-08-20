@@ -439,7 +439,7 @@ static BenchResult run_apxchol_v1(
             std::ostringstream os;
             os << " stored_nnz=" << st.nnz_stored
                << " (L11_nnz=" << st.nnz_factor << " dropped=" << st.dropped
-               << " drop_rel=" << st.rel << " compensate=" << (st.compensate ? 1 : 0) << ")";
+               << " drop_rel=" << st.rel << ")";
 #if defined(APXCHOL_USE_CUDA)
             os << " gpu=" << trsv.backend_name()
                << "/" << (trsv.fp16() ? "fp16" : apxchol::cuda_sptrsv::value_name)

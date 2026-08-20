@@ -13,63 +13,22 @@
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/pcg_cuda.h"
 #endif
-#if defined(__x86_64__) || defined(__i386__)
-#include <pmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE (DAZ)
-#include <xmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE    (FTZ)
-#endif
 
 namespace apxchol {
 
 namespace {
 
-// APXCHOL_FTZ=1 (env, read at every PCG entry): set the x86 MXCSR FTZ bit
-// (results that would be subnormal become zero) and DAZ bit (subnormal INPUTS
-// are treated as zero) on the calling thread and on every thread of the
-// OpenMP team. MXCSR is per-thread state, so it is set inside a parallel region
-// -- libgomp keeps its pooled worker threads across regions, so the SpMV /
-// SpTRSV / axpy regions of the PCG loop then run on threads that have it set
-// -- and once more on the master (Eigen's dots / norms run there). Opt-in;
-// the default leaves MXCSR alone. Sticky for the threads' lifetime (not
-// restored on return; every subsequent parallel region in the process
-// inherits it). x86 only: a no-op elsewhere. Numerics: subnormals in the
-// factor / operator / PCG vectors are treated as zero -- the factor census
-// (omp_sptrsv::lowprec_stats().factor_subnormal, APXCHOL_VERBOSE) says whether
-// there are any to matter.
-inline void maybe_enable_ftz_daz() {
-    const char* e = std::getenv("APXCHOL_FTZ");
-    if (!(e && std::atoi(e) != 0)) return;
-#if defined(__x86_64__) || defined(__i386__)
-    auto set_ftz_daz = [] {
-        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-    };
-    int nt = 1;
-    #pragma omp parallel
-    {
-        set_ftz_daz();
-        #pragma omp single
-        {
-#ifdef _OPENMP
-            nt = omp_get_num_threads();
-#endif
-        }
-    }
-    set_ftz_daz();   // the master (also a team member above; harmless twice)
-    static const bool printed = [nt] {
-        if (std::getenv("APXCHOL_VERBOSE"))
-            std::fprintf(stderr, "[apxchol] APXCHOL_FTZ=1: MXCSR FTZ+DAZ set on the master and on the"
-                                 " %d-thread OpenMP team at PCG entry (sticky)\n", nt);
-        return true;
-    }();
-    (void)printed;
-#else
-    static const bool warned = [] {
-        std::fprintf(stderr, "[apxchol] APXCHOL_FTZ=1 ignored: not an x86 build\n");
-        return true;
-    }();
-    (void)warned;
-#endif
-}
+// (APXCHOL_FTZ=1 -- setting the x86 MXCSR FTZ + DAZ bits on the master and on
+// every OpenMP team thread at PCG entry -- lived here until 2026-08-20. It
+// was REFUTED end to end: no subnormal ever enters this computation, so the
+// bits are a no-op that costs one extra fork-join per solve. Evidence, T=1
+// so the whole pipeline is deterministic: FTZ on vs off gives a BYTE-IDENTICAL
+// solution vector on iter0040 (same md5, residual 8.074599861229295e-09 to
+// all 16 digits, 57 iterations) and identical iterations/residual on
+// grid_2000 (49, 7.813e-09) -- a flushed or treated-as-zero subnormal would
+// have to change a bit. The factor census agrees: factor_subnormal = 0 of
+// 4.6M / 21.9M stored fp32 values on the two. See "Retired knobs" in
+// AGENTS.md for the timing A/B.)
 // Eigen's parallel SpMV requires Eigen::initParallel() to be called
 // once per process before any threaded operation.  Calling it from a
 // function-local static keeps it lazy and thread-safe.
@@ -521,7 +480,6 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
                             const Eigen::VectorXd* x0) const {
     if (tol < 0.0)    tol = opts_.tol;
     if (max_iter < 0) max_iter = opts_.max_iter;
-    maybe_enable_ftz_daz();   // opt-in APXCHOL_FTZ=1, per-thread MXCSR (see above)
 
     // Preconditioned CG with stagnation detection.
     const Eigen::Index n = n_;

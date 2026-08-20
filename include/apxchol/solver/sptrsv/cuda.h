@@ -219,7 +219,6 @@ public:
         if (s == "cusparse") return (fp16_env_tristate() == 1 || !cusparse_available()) ? 0 : -1;   // no fp16 SpSV in cuSPARSE / not compiled in: AUTO (unset fp16 defaults OFF under forced cusparse)
         return 0;
     }
-    static bool dataflow_from_env() { return backend_from_env() == 1; }
     /// Setup: build L11 on the host, run the compacting drop, (fp16: narrow),
     /// copy to device, build the kernel backends' tables (or, opted in, the
     /// cuSPARSE descriptors + analyses). Env APXCHOL_SPTRSV_SETUP_TRACE=1 (the
