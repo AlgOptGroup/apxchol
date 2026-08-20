@@ -17,6 +17,11 @@
 /// `p·Ap <= 0` (reported as "iterations 0 / residual 1"). This header exists
 /// so that never happens without the user being told.
 ///
+/// The same confusion reaches the in-memory bindings (python/, octave/) by a
+/// different route -- a caller hands `scipy.io.mmread('com-Amazon.mtx')`
+/// straight to the solver -- so `detect_adjacency_signature` below is shared
+/// with them; they compile this TU too.
+///
 /// Everything here depends on Eigen only, so the unit tests can link it.
 
 #include <Eigen/Sparse>
@@ -56,6 +61,39 @@ struct input_scan {
 
 /// One pass over `M`, gathering everything `resolve_input_kind` needs.
 input_scan scan_input(const Eigen::SparseMatrix<double>& M);
+
+/// Counts behind the ADJACENCY SIGNATURE check, gathered in one early-exiting
+/// pass. See `detect_adjacency_signature`.
+struct adjacency_signature {
+    Eigen::Index n                    = 0;      ///< rows in the matrix
+    /// Some row carries a strictly positive diagonal entry. The scan stops at
+    /// the first one, so this is a flag, not a count -- when it is false, ALL
+    /// `n` rows lack a positive diagonal, which is what the message reports.
+    bool         any_positive_diagonal = false;
+    Eigen::Index positive_offdiag     = 0;      ///< strictly positive off-diagonals
+
+    /// The UNAMBIGUOUS adjacency signature: not one row carries a positive
+    /// diagonal entry -- which a Laplacian/SDDM always does -- yet positive
+    /// off-diagonal entries exist, which an M-matrix never has.
+    ///
+    /// Deliberately NARROWER than `resolve_input_kind`'s automatic decision:
+    /// it is the rule the in-memory bindings REJECT on, so it must never fire
+    /// on input that works today. Mixed-sign FEM/structural operators
+    /// (parabolic_fem, thermal2, bcsstk*, G3_circuit, apache2) all carry
+    /// positive diagonals and are therefore untouched. Equivalent, on a full
+    /// scan, to `scan_input(M).diag_pos == 0 && scan_input(M).offdiag_pos > 0`.
+    bool detected() const {
+        return n > 0 && !any_positive_diagonal && positive_offdiag > 0;
+    }
+};
+
+/// Test `M` for the adjacency signature, counting what an error message needs.
+///
+/// Cost is O(nnz) and, in practice, free for every assembled operator: the
+/// walk stops at the FIRST positive diagonal entry, which a Laplacian/SDDM
+/// carries in its very first column. Only a matrix that really has no positive
+/// diagonal anywhere is walked whole -- and that one is about to be rejected.
+adjacency_signature detect_adjacency_signature(const Eigen::SparseMatrix<double>& M);
 
 /// Resolve `requested` (possibly `automatic`) against the scan.
 ///

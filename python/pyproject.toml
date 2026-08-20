@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "apxchol"
-version = "0.2.2"
+version = "0.3.0"
 description = "CPU approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
 readme = "README.md"
 license = {file = "LICENSE"}

@@ -4,6 +4,7 @@ Public API:
     apxchol.factorize(A, **opts)  ->  Solver       (alias: apxchol.solver)
     apxchol.solve(A, b, tol=None, maxiter=500, *, rtol=None, **opts)
                                      ->  SolveResult
+    apxchol.laplacian(A)             ->  scipy.sparse.csc_matrix  (L = D - A)
     Solver.solve(b, tol=None, maxiter=500, *, rtol=None, x0=None, out=None)
                                      ->  SolveResult
     Solver.apply(r)                  ->  numpy.ndarray   (M^{-1} r)
@@ -22,7 +23,8 @@ from scipy.sparse.linalg import LinearOperator
 from . import _apxchol
 
 __all__ = [
-    "factorize", "solver", "solve", "Solver", "SolveResult", "__version__",
+    "factorize", "solver", "solve", "laplacian",
+    "Solver", "SolveResult", "__version__",
 ]
 
 DEFAULT_TOL = 1e-8
@@ -33,7 +35,7 @@ try:
 
     __version__ = _pkg_version("apxchol")
 except Exception:                      # not installed as a distribution
-    __version__ = "0.2.2+local"
+    __version__ = "0.3.0+local"
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,52 @@ class SolveResult:
     iters: int
     residual: float
     converged: bool
+
+
+def laplacian(A):
+    """Assemble the graph Laplacian ``L = D - A`` of a weighted ADJACENCY matrix.
+
+    The solver takes the assembled operator, never the adjacency matrix of the
+    graph (see :func:`factorize`); this is the explicit one-call conversion,
+    named after :func:`scipy.sparse.csgraph.laplacian` and following the same
+    convention — self-loops contribute nothing, `D` is the weighted-degree
+    diagonal, and isolated vertices get an all-zero row. It differs on one
+    point: edge weights are taken as ``|A_ij|``, matching the CLI's
+    ``--input-kind adjacency`` and the benchmark suite's reading of a `.mtx`
+    file, so a graph stored with negative weights is read as an undirected
+    graph rather than silently made indefinite.
+
+    Parameters
+    ----------
+    A : scipy.sparse matrix
+        Square, real, symmetric weighted adjacency matrix, in any sparse
+        format. Explicit zeros and self-loops are dropped; duplicate entries
+        are summed. `A` is not modified.
+
+    Returns
+    -------
+    scipy.sparse.csc_matrix
+        The float64 Laplacian, ready to hand to :func:`factorize`. Every
+        vertex keeps an explicit diagonal entry (zero for isolated ones).
+
+    Examples
+    --------
+    >>> A = scipy.io.mmread("com-Amazon.mtx").tocsc()   # adjacency
+    >>> res = apxchol.solve(apxchol.laplacian(A), b)
+    """
+    if not sp.issparse(A):
+        raise ValueError("A must be a scipy.sparse matrix")
+    if A.shape[0] != A.shape[1]:
+        raise ValueError(f"A must be square, got shape {A.shape}")
+    W = sp.csc_matrix(A, copy=True)      # copy: the caller's matrix stays intact
+    if np.iscomplexobj(W.data):
+        raise ValueError("A must be real; apxchol solves real symmetric systems")
+    W.sum_duplicates()                   # merge unmerged (i, j) before summing degrees
+    W.data = np.abs(W.data).astype(np.float64, copy=False)
+    W = W - sp.diags(W.diagonal(), format="csc")   # self-loops cancel in D - A
+    W.eliminate_zeros()                  # ... as do explicit zeros
+    deg = np.asarray(W.sum(axis=1)).ravel()
+    return (sp.diags(deg, format="csc") - W).tocsc()
 
 
 def _to_csc(A):
@@ -223,7 +271,10 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool",
     ----------
     A : scipy.sparse matrix
         Square graph Laplacian (singular, rank n−1) or SDDM matrix; the two
-        cases are auto-detected.
+        cases are auto-detected. This is the ASSEMBLED operator, not the
+        adjacency matrix of a graph — an adjacency matrix (no positive
+        diagonal, positive off-diagonals) is rejected with a `ValueError`
+        naming :func:`laplacian`, which converts one.
     seed : int
         RNG seed for the randomized clique sampling (factorization is
         deterministic per seed at one thread only).

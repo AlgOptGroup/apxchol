@@ -202,6 +202,10 @@ p = np.argsort(P)                        # A[p][:, p] ≈ L @ scipy.sparse.diags
 # (slower than solver.solve — scipy's Python-level CG loop — but composes
 # with scipy's callbacks and other methods like MINRES):
 M = solver.aspreconditioner()
+
+# A is the ASSEMBLED operator, never a graph adjacency matrix (which is
+# rejected with a ValueError, not converted silently). Convert one explicitly:
+L = apxchol.laplacian(sp.csc_matrix(mmread("com-Amazon.mtx")))   # L = D - A
 ```
 
 See [python/README.md](python/README.md) for the full API.
@@ -217,6 +221,10 @@ addpath('octave');
 s = apxchol_solver(A);            % sparse A; factor built once
 res = s.solve(b);                 % res.x, res.iters, res.residual, res.converged
 x = pcg(A, b, 1e-8, 500, @(r) s.apply(r));   % or as pcg's preconditioner
+
+% A is the ASSEMBLED operator, never a graph adjacency matrix (which raises
+% apxchol:adjacencyInput, not converted silently). Convert one explicitly:
+L = apxchol_laplacian(Adj);       % L = D - A
 ```
 
 The same source builds under MATLAB with `mex` (recipe in

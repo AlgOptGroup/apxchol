@@ -16,8 +16,10 @@
 #include "apxchol/solver/solve.h"
 #include "mtx_input.h"
 
+using apxchol::adjacency_signature;
 using apxchol::adjacency_to_laplacian;
 using apxchol::describe_input;
+using apxchol::detect_adjacency_signature;
 using apxchol::input_kind;
 using apxchol::input_scan;
 using apxchol::resolve_input_kind;
@@ -66,6 +68,74 @@ Eigen::Index offdiag_factor_nnz(const apxchol::factorization& F) {
 }
 
 } // namespace
+
+// ── detect_adjacency_signature: the rule the BINDINGS reject on ─────────────
+// Narrower than resolve_input_kind's automatic decision, because a library
+// caller gets an error, not a conversion with a printed explanation.
+
+TEST(AdjacencySignature, FiresOnAnAdjacencyMatrix) {
+    const Sparse A = grid_adjacency(6, 6);
+    const adjacency_signature sig = detect_adjacency_signature(A);
+    EXPECT_TRUE(sig.detected());
+    EXPECT_EQ(sig.n, 36);
+    EXPECT_FALSE(sig.any_positive_diagonal);
+    EXPECT_EQ(sig.positive_offdiag, A.nonZeros());
+}
+
+TEST(AdjacencySignature, NeverFiresOnAnAssembledOperator) {
+    EXPECT_FALSE(detect_adjacency_signature(grid_laplacian(6, 6)).detected());
+
+    Sparse sddm = grid_laplacian(6, 6);            // Laplacian + diagonal excess
+    for (int i = 0; i < sddm.rows(); ++i) sddm.coeffRef(i, i) += 0.05;
+    sddm.makeCompressed();
+    EXPECT_FALSE(detect_adjacency_signature(sddm).detected());
+}
+
+TEST(AdjacencySignature, NeverFiresWhenAnyRowHasAPositiveDiagonal) {
+    // The mixed-sign FEM/structural case (parabolic_fem, thermal2, bcsstk*,
+    // G3_circuit, apache2): positive diagonal AND positive off-diagonals. It
+    // works today and must keep working.
+    Sparse M = grid_laplacian(6, 6);
+    M.coeffRef(0, 3) = +0.25;
+    M.coeffRef(3, 0) = +0.25;
+    M.makeCompressed();
+    EXPECT_GT(scan_input(M).offdiag_pos, 0);
+    EXPECT_FALSE(detect_adjacency_signature(M).detected());
+
+    // ... and a single positive diagonal entry is enough ambiguity to disarm
+    // the check even on an otherwise adjacency-shaped matrix.
+    Sparse A = grid_adjacency(6, 6);
+    A.coeffRef(0, 0) = 1.0;
+    A.makeCompressed();
+    EXPECT_FALSE(detect_adjacency_signature(A).detected());
+}
+
+TEST(AdjacencySignature, NeverFiresWithoutPositiveOffDiagonals) {
+    Sparse Z(8, 8);                                 // empty: nothing to judge
+    EXPECT_FALSE(detect_adjacency_signature(Z).detected());
+
+    // A negated adjacency matrix has no positive diagonal, but no positive
+    // off-diagonal either -- resolve_input_kind reads it as an operator, and
+    // so must the bindings.
+    Sparse N = grid_adjacency(6, 6);
+    for (int k = 0; k < N.outerSize(); ++k)
+        for (Sparse::InnerIterator it(N, k); it; ++it) it.valueRef() = -it.value();
+    EXPECT_FALSE(detect_adjacency_signature(N).detected());
+}
+
+TEST(AdjacencySignature, AgreesWithTheScanTheCliUses) {
+    // One rule, three surfaces: whatever the bindings reject, the CLI's own
+    // facts must call an adjacency matrix too.
+    const Sparse cases[] = {
+        grid_adjacency(5, 7), grid_laplacian(5, 7), path_adjacency(9),
+        grid_laplacian(1, 9), Sparse(4, 4),
+    };
+    for (const Sparse& M : cases) {
+        const input_scan s = scan_input(M);
+        const bool from_scan = s.n > 0 && s.diag_pos == 0 && s.offdiag_pos > 0;
+        EXPECT_EQ(detect_adjacency_signature(M).detected(), from_scan);
+    }
+}
 
 // ── scan_input ───────────────────────────────────────
 
