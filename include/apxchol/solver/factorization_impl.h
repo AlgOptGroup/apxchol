@@ -450,9 +450,15 @@ void eliminate_partition(const Eliminator& elim,
 // Used when IS fraction drops below threshold — avoids the O(|active|)
 // IS-finding scan when only a few vertices can be chosen anyway.
 //
-// (An earlier version tried parallel BK rounds on the residual, but the
-// per-round fork-join cost outweighed the gain on the large, high-degree
-// residuals BG hands us; serial peel was strictly faster.)
+// It does NOT see the whole residual. The caller runs BK rounds first, down to
+// the partitioner's `residual_handoff_threshold` (500 for every shipped rule
+// that can bail), so this peels a bounded tail — 500 columns on the social
+// graphs, 76 on iter0040, 1 on grid_2000. An older note here claimed the
+// opposite ("an earlier version tried parallel BK rounds ... serial peel was
+// strictly faster"); the BK residual loop has in fact been on by default all
+// along, and stopping it early to feed this function more columns is a measured
+// loss on both fill and setup — see the residual-loop comment in
+// factorize_impl.
 template<typename Eliminator, typename Incidence>
 void eliminate_remaining(const Eliminator& elim,
                          graph<Incidence>& G,
@@ -747,19 +753,35 @@ factorization factorize_impl(const Eliminator& elim,
     // Eliminate any remaining vertices (0 or 1 after the while loop,
     // or all remaining when the IS-fraction fallback triggered above).
     //
-    // Parallel residual peel: when the main loop bailed with a large
-    // residual, switch to BK rounds.  BK is sample-bounded so it does
-    // not hit the same fallback, and each round eliminates a large
-    // batch in parallel via the same eliminate_partition machinery — far
-    // cheaper than the serial process_vertex peel for the high-degree
-    // residuals of LP-IPM Schur complements.
+    // BK residual loop: when the main loop bailed with a large residual, run BK
+    // rounds down to `residual_thresh` and let the serial peel have only the
+    // tail.  BK is sample-bounded, so it does not hit the main loop's
+    // min_is_fraction fallback the way the bailed-out partitioner just did.
     //
-    // Smart default: if user left parallel_residual_threshold at
-    // SIZE_MAX (disabled), use the partitioner's `residual_handoff_threshold`
-    // trait (defaults to SIZE_MAX = disabled).  Empirically measured
-    // on iter0010 (524k LP factor, 16t): reduces setup 8% (bg+fs,
-    // luby+fs), 2-6% (vec variants), also drops nnz(L) by ~5% via
-    // the cheaper IS-ordered peel.
+    // What it buys is the elimination ORDER, not parallelism: BK's
+    // degree-quantile cap picks low-degree pivots where the peel's `natural`
+    // order takes whatever comes next, and the resulting cliques are much
+    // smaller.  The rounds themselves are mostly NOT parallel — their IS is far
+    // below `omp_threshold`, so eliminate_partition takes its serial branch,
+    // which is the peel's per-vertex code (as-Skitter / coAuthorsDBLP /
+    // com-Amazon: max IS 231 / 160 / 171 over every residual round, i.e. never;
+    // com-LiveJournal: 112 rounds of 13336 above the gate).  Each round is
+    // therefore one O(|active|) BK scan on top of elimination work the peel
+    // would have done anyway, and it still wins because the pivot that scan
+    // buys makes the work cheaper.  Over the 4825 as-Skitter vertices between
+    // the two handoff points (8 paired reps, medians): the rounds cost 202 ms of
+    // `find_partition` + 145 ms of `eliminate` = ~72 us/vertex, against 397 ms
+    // of `eliminate_remaining` = ~82 us/column for the same vertices in the
+    // peel — and they leave 4.9% less fill behind.
+    //
+    // Default: `parallel_residual_threshold` = SIZE_MAX means "defer to the
+    // partitioner", NOT "off" — block_greedy / luby / rootset all declare
+    // `residual_handoff_threshold` = 500, so this loop runs by default and the
+    // peel sees at most 500 columns.  Only a partitioner that declares no
+    // threshold leaves it at SIZE_MAX and skips the loop entirely.  It fires
+    // only where the main loop bails with a large residual, i.e. on social
+    // graphs (as-Skitter enters at 69598 active, com-LiveJournal at 832288;
+    // iter0040 exits the main loop at 76 and grid_2000 at 1, so neither enters).
     size_t residual_thresh = opts.parallel_residual_threshold;
     if (residual_thresh == std::numeric_limits<size_t>::max())
         residual_thresh = residual_handoff_default;
@@ -774,7 +796,61 @@ factorization factorize_impl(const Eliminator& elim,
         // (harmless, the threshold is 500) but as-Skitter stopped at 5325 and
         // handed all of it to the serial peel, while BK was still eliminating
         // ~25 vertices per round.
+        //
+        // NO YIELD-BASED EARLY STOP. BK's per-round yield does decay to well
+        // under one vertex by the time `active` reaches the handoff threshold
+        // (as-Skitter ~80 vertices/round on entry, ~0.4/round at active = 600 —
+        // a smooth power-law decay, no cliff to aim a rule at), and a
+        // window-average "stop when the last 32 rounds averaged < y" rule was
+        // built and measured against exactly that. REJECTED: it buys no
+        // measurable setup and gives up fill.
+        //
+        // Same-binary A/B, arms by env, interleaved, 8 paired reps, T=16,
+        // vec_pool, bg+tree, seed 42. Every counter is deterministic (identical
+        // in all 8 reps of each arm); the timings are medians:
+        //
+        //   as-Skitter        stop at   nnz(L)       setup    find_part  elim_rem
+        //   no rule (ship)        500   18 479 113   0.981x    1171 ms     26 ms
+        //   yield < 1.0          2069   18 648 027   0.973x    1084 ms    168 ms
+        //   (baseline: bail on the first whiff, 5325)  19 430 230  1.000x
+        //                                                       969 ms    423 ms
+        //
+        // The setup column is a wash — the honest noise floor here is iter0040,
+        // which is BIT-IDENTICAL across all arms (it never enters this loop) and
+        // still swings 0.82-1.24x per rep. What is not a wash is `nnz(L)`: the
+        // rule gives back 0.91% of the 4.90% fill win for nothing. Pushing the
+        // handoff further out only makes that worse and monotonically so —
+        // as-Skitter nnz(L) at a 500/1000/2000/3000/5325 handoff is
+        // 18.48/18.51/18.63/18.83/19.43 M against `elim_remaining`
+        // 26/65/172/285/423 ms and only 0/31/92/136 ms of `find_partition`
+        // saved; com-LiveJournal at 500/2000/5000/10000/20000 is
+        // 120.6/120.7/121.3/123.4/128.8 M against `elim_remaining`
+        // 49/362/1326/4829/5302 ms; on coAuthorsDBLP and com-Amazon setup is
+        // *lowest* at the 500 handoff and nnz(L) is +18% / +5% at 15000.
+        //
+        // Two things make the tail cheap enough not to be worth cutting.
+        // (1) Whiffed rounds — the thing the rule was aimed at — are nearly
+        // free: a whiff means the hash sample caught nothing, so there is no
+        // edge-visit work behind it. as-Skitter's 864 whiffs cost 2.5 ms TOTAL
+        // (2.9 us each) against a ~2.9 s setup; com-LiveJournal's 1583 cost
+        // 8.3 ms. (2) A round is not a fork-join tax on top of the peel — it IS
+        // the peel's per-vertex code plus one scan, and the pivot that scan buys
+        // makes the elimination cheaper (~72 vs ~82 us per tail vertex; see the
+        // block above the loop).
+        //
+        // Do not re-add the rule without a workload where `eliminate_remaining`
+        // is cheaper per column than a BK round is per vertex.
         size_t bk_consecutive_empty = 0;
+        // BK's own round-0 seed is 2*m/|active|, and graph::m() is monotone —
+        // it still counts every edge the main loop's eliminations consumed — so
+        // starting BK here reads a badly inflated average degree, samples at
+        // 1/(c*d) against it and under-fills its first round. Hand it the main
+        // loop's last measured average instead (every partitioner that declares
+        // residual_handoff_threshold also declares degree_prepass, so this is
+        // populated whenever the loop can be reached; the 2*m fallback stays for
+        // a hand-set parallel_residual_threshold under a prepass-less rule).
+        if (last_avg_degree > 0.0)
+            bk.est_avg_degree = last_avg_degree;
         while (active.size() > residual_thresh) {
             ws.reset_for_round();
             const auto& bk_part = run_partitioner(bk, work, active);

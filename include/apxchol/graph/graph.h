@@ -52,7 +52,12 @@ public:
     }
 
     node_index n() const { return n_; }   // vertex count
-    edge_index m() const { return m_; }   // edge count (can exceed 2^31)
+    /// Edges EVER added (can exceed 2^31). MONOTONE: elimination prunes edges
+    /// but never decrements this, so mid-elimination `m()` is not the live edge
+    /// count and `2*m()/active` is not the live average degree — it is inflated
+    /// by every edge the eliminated prefix consumed. Anything needing a live
+    /// degree must measure one (prune_and_degrees) or be handed one.
+    edge_index m() const { return m_; }
 
     // Yields {to, w} with w PROMOTED to double, so all consumers (elimination,
     // weighted-degree, conversions) compute in fp64 regardless of pool storage.
