@@ -42,6 +42,17 @@
 #include <set>
 #include <thread>
 
+// dlsym(RTLD_DEFAULT, ...) — asks the running process WHICH OpenMP runtime it
+// actually loaded (see emit_build_meta below). Probed with __has_include so a
+// platform without <dlfcn.h> reports the runtime as unknown instead of failing
+// to compile.
+#if defined(__has_include)
+#  if __has_include(<dlfcn.h>)
+#    include <dlfcn.h>
+#    define APXCHOL_BENCH_HAVE_DLFCN 1
+#  endif
+#endif
+
 #ifdef APXCHOL_USE_CUDA
 #include <cuda_runtime.h>   // cudaMemGetInfo for read_vram_mb() (declared early; the
                             // cuBLAS/cuSPARSE GPU solvers include their headers locally)
@@ -99,6 +110,83 @@
 #include <amgcl/relaxation/spai0.hpp>
 #include <amgcl/adapter/eigen.hpp>
 #endif
+
+// ──────────────────── BUILD_META: the toolchain that built this binary ────────
+// Companion to the MATRIX_META line emitted later: that one says WHAT was
+// solved, this one says WHAT SOLVED IT, so a stored cell names the compiler its
+// numbers came from. Both are single machine-readable stderr lines; the runners
+// lift them with runner_common.parse_matrix_meta / parse_build_meta.
+//
+// The BINARY reports this, never the runner. A runner that inferred the compiler
+// from its build-directory name would keep saying "clang" about a stale gcc
+// binary sitting in build-clang/ — the precise failure mode this project has
+// been bitten by. Every field below is either a predefined macro of the compiler
+// compiling THIS file, a runtime probe of the OpenMP runtime this process
+// actually loaded, or a string the build system passed down at compile time.
+// Nothing is guessed: what cannot be established reads `unknown`.
+
+static const char* build_compiler() {
+#if defined(__clang__)          // must precede __GNUC__: clang defines both
+    return "clang";
+#elif defined(__GNUC__)
+    return "gcc";
+#else
+    return "unknown";
+#endif
+}
+
+static std::string build_compiler_version() {
+#if defined(__clang__)
+    return std::to_string(__clang_major__) + "." + std::to_string(__clang_minor__)
+         + "." + std::to_string(__clang_patchlevel__);
+#elif defined(__GNUC__)
+    return std::to_string(__GNUC__) + "." + std::to_string(__GNUC_MINOR__)
+         + "." + std::to_string(__GNUC_PATCHLEVEL__);
+#else
+    return "unknown";
+#endif
+}
+
+static const char* build_openmp_runtime() {
+#ifndef _OPENMP
+    return "none";
+#elif defined(APXCHOL_BENCH_HAVE_DLFCN)
+    // Which runtime is loaded, asked of the process itself rather than deduced
+    // from the compiler: -fopenmp=libomp under gcc, or an LD_PRELOAD, would make
+    // any compiler-based deduction wrong. LLVM's libomp also exports the GOMP_*
+    // compatibility entry points, so the llvm-only __kmpc_* symbol MUST be
+    // tested first or every clang build would report libgomp.
+    if (dlsym(RTLD_DEFAULT, "__kmpc_fork_call")) return "llvm-libomp";
+    if (dlsym(RTLD_DEFAULT, "GOMP_parallel"))    return "gnu-libgomp";
+    return "unknown";
+#else
+    return "unknown";
+#endif
+}
+
+static void emit_build_meta() {
+#ifdef APXCHOL_BUILD_ARCH_FLAGS
+    // Passed down by benchmarks/CMakeLists.txt from the flag it actually put on
+    // the command line (empty = built untuned, e.g. a Debug build).
+    const char* arch = APXCHOL_BUILD_ARCH_FLAGS[0] ? APXCHOL_BUILD_ARCH_FLAGS : "none";
+#else
+    const char* arch = "unknown";   // built outside the CMake project that passes it
+#endif
+    std::cerr << "BUILD_META compiler=" << build_compiler()
+              << " compiler_version=" << build_compiler_version()
+              << " openmp_runtime=" << build_openmp_runtime();
+#ifdef APXCHOL_USE_CUDA
+#  ifdef APXCHOL_BUILD_CUDA_HOST_COMPILER
+    const char* cuda_host = APXCHOL_BUILD_CUDA_HOST_COMPILER[0]
+                          ? APXCHOL_BUILD_CUDA_HOST_COMPILER
+                          : "unset(nvcc-default)";
+#  else
+    const char* cuda_host = "unknown";
+#  endif
+    std::cerr << " cuda_host_compiler=\"" << cuda_host << "\"";
+#endif
+    std::cerr << " arch_flags=\"" << arch << "\"\n";
+}
 
 // ──────────────────── timer helper ────────────────────
 struct Timer {
@@ -2156,6 +2244,10 @@ static BenchResult run_hypre_boomeramg_gpu(
 
 // ──────────────────── main ────────────────────
 int main(int argc, char** argv) {
+    // First, before anything can fail or hang: a cell recorded as `timeout` or
+    // `failed` still carries the toolchain that produced it, because the runner
+    // lifts this line out of whatever stderr it managed to capture.
+    emit_build_meta();
 #ifdef HAVE_HYPRE
     HYPRE_Init();  // sequential build uses Hypre's MPI shim; no MPI_Init needed
 #endif

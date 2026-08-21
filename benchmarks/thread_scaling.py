@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from runner_common import (margs_for, ROOT, sh, git_sha, boost_state, parse_csv,
+                           parse_build_meta, binary_toolchain,
                            PARAC_CPU_DRIVER as DRIVER, PARAC_REORD as REORD,
                            PARAC_LDLIB as LDLIB)
 
@@ -48,11 +49,17 @@ BOOST = boost_state()
 PROV = {"note": "thread-scaling sweep", "git_sha": git_sha(), "boost": BOOST}
 LOCKED = " — freq-locked 2.5 GHz (boost off)" if BOOST == "off" else ""
 
-def emit(mid, family, lab, t, m, status):
+# Toolchain per cell, and this sweep runs TWO binaries: ours (which reports its
+# own BUILD_META) and ParAC's driver (read off its ELF). A thread-scaling curve
+# compares a solver against itself across thread counts, so which compiler drew
+# it is exactly the thing that must not be left to memory.
+BUILD = {}
+
+def emit(mid, family, lab, t, m, status, prov=None):
     os.makedirs(CELLS, exist_ok=True)
     tag = re.sub(r'[^A-Za-z0-9]+', '_', lab)
     json.dump({"cell": {"matrix_id": mid, "family": family, "label": lab, "threads": t},
-               "metrics": m or {}, "status": status, "provenance": PROV},
+               "metrics": m or {}, "status": status, "provenance": {**PROV, **(prov or {})}},
               open(f"{CELLS}/{mid}__{tag}__t{t}.json", "w"))
 
 def done(mid, lab, t):
@@ -65,8 +72,12 @@ def run_cpp(margs, solver, config, reg, t):
     regf = "--reg-rel 1e-6" if reg else ""
     cmd = (f"taskset -c 0-{t-1} {BIN} {margs} --solver {solver} {cfg} {regf} "
            f"--threads {t} --tol {TOL} --maxiter 500 --repeat {REPS} --csv")
-    try: m = parse_csv(sh(cmd, timeout=TIMEOUT).stdout)
-    except subprocess.TimeoutExpired: return "timeout", None
+    try: p = sh(cmd, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired as e:
+        BUILD.update(parse_build_meta(e.stderr))   # even a timeout names its toolchain
+        return "timeout", None
+    BUILD.update(parse_build_meta(p.stderr))       # what built the binary that just ran
+    m = parse_csv(p.stdout)
     if m is None: return "failed", None
     # THE GRADING RULE (benchmarks/README.md): true relative residual <= exactly
     # tol, same for every solver, no grace factor. Kept in sync with rc.classify.
@@ -112,9 +123,11 @@ def sweep():
                     continue
                 if lab == "ParAC":
                     st, m = run_parac(mid, t)
+                    prov = binary_toolchain(DRIVER)   # off ParAC's own driver ELF
                 else:
                     st, m = run_cpp(margs, solver, config, reg, t)
-                emit(mid, fam, lab, t, m, st)
+                    prov = BUILD                      # the binary's own BUILD_META
+                emit(mid, fam, lab, t, m, st, prov)
                 print(f"   {lab:16} t{t:<2} {st} total={m['total_s'] if m else '-'}", flush=True)
 
 def charts(out=f"{ROOT}/benchmarks/latest"):

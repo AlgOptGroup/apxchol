@@ -62,13 +62,27 @@ PROV = {"boost": "on", "git_sha": rc.git_sha(),
         "repeat": 1, "tier": "broad",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
+# CMG's compiled part is the MEX that MATLAB's `mex` built inside the container
+# (benchmarks/cmg/Dockerfile.matlab), so the toolchain is read off that .mexa64
+# rather than off this host's compiler — the container's gcc is not this
+# machine's, and the file is the only thing that knows which one built it. The
+# rest of CMG is MATLAB m-code run by the R2026a interpreter (see the note).
+_MEX = "matlab/cmg/mex/mx_preconditioner_.mexa64"
+_TOOLCHAIN = {}
+
+def _toolchain():
+    if not _TOOLCHAIN:
+        _TOOLCHAIN.update(rc.binary_toolchain(os.path.join(CMG_SOLVER, _MEX)
+                                              if CMG_SOLVER else ""))
+    return _TOOLCHAIN
+
 def _prov(as_operator):
     """PROV with the grounding this matrix actually got — the two paths are scored
     on DIFFERENT operators, so one note cannot describe both."""
     tail = ("published operator read as-is, solved unpinned and unshifted (reg_rel=0)"
             if as_operator else
             f"singular L, reg_rel={REG} (scored on L+eps*I)")
-    return {**PROV, "note": f"{PROV['note']}, {tail}"}
+    return {**PROV, **_toolchain(), "note": f"{PROV['note']}, {tail}"}
 
 TERMINAL = frozenset({"complete", "not_converged", "failed", "timeout", "n/a"})
 

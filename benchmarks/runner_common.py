@@ -370,6 +370,108 @@ def parse_matrix_meta(stderr):
     return out
 
 
+# ── which toolchain produced a cell ─────────────────────────────────────────────
+# Two sources, and neither is a guess from a path:
+#   parse_build_meta()  — our binary's own `BUILD_META ...` line (solvers run
+#                         in-process: apxchol, RCHOL/pRCHOL, BoomerAMG, AMGCL).
+#   binary_toolchain()  — the ELF of an external solver's binary (ParAC's
+#                         drivers, the CMG MEX), read off the very file that runs.
+# Both land in the cell's PROVENANCE (not its matrix_meta): they say what solved
+# it, where matrix_meta says what was solved.
+
+_BUILD_RE = re.compile(r'^BUILD_META\s+(.*)$', re.M)
+
+def parse_build_meta(stderr):
+    """Lift the binary's `BUILD_META ...` line out of stderr into a dict.
+
+    Twin of parse_matrix_meta, and merged into the cell's `provenance`. The
+    binary reports its own compiler, compiler version, OpenMP runtime, arch
+    flags (and CUDA host compiler on a CUDA build); the runner never infers them
+    from which build directory it invoked, because a stale binary in
+    build-clang/ is still a gcc binary and the directory name would lie about it.
+
+    Emitted as the first line of main(), so a run that later times out or crashes
+    still identifies its toolchain. Returns {} when the line is absent — an
+    external solver that never runs our binary, or a binary predating BUILD_META.
+    """
+    m = _BUILD_RE.search(stderr or "")
+    if not m:
+        return {}
+    out = {}
+    for key, qval, val in re.findall(r'(\w+)=(?:"([^"]*)"|(\S+))', m.group(1)):
+        out[key] = qval if qval else val
+    return out
+
+
+def _readelf(path, *args):
+    """readelf output for `path`, or "" if it cannot be read."""
+    try:
+        p = subprocess.run(["readelf", *args, path], capture_output=True, text=True,
+                           timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return p.stdout if p.returncode == 0 else ""
+
+
+_ELF_COMMENT_RE = re.compile(r'^\s*\[\s*[0-9a-f]+\]\s+(.*\S)\s*$', re.M)
+_VER_RE = re.compile(r'\b(\d+\.\d+(?:\.\d+)?)\b')
+
+def binary_toolchain(path):
+    """{compiler, compiler_version, openmp_runtime, arch_flags} for a binary we
+    did not build — read OFF THE FILE THAT WILL RUN, not off the script that is
+    supposed to have produced it.
+
+    A build script pinned to `g++` says nothing about which g++ ran, or whether
+    the binary in place today came from that script at all: the ELF `.comment`
+    section carries every producing compiler's own version string, and DT_NEEDED
+    names the OpenMP runtime the binary actually links. More than one `.comment`
+    entry means objects from several compilers were linked in (static libraries,
+    the CUDA runtime); all of them are reported rather than a chosen one.
+
+    `arch_flags` is not recoverable from an ELF, so it is reported `unknown`
+    rather than copied from a build script — a wrong provenance is worse than an
+    absent one. Everything is `unknown` when the file is missing or unreadable
+    (no readelf, not an ELF), never silently omitted.
+    """
+    unknown = {"compiler": "unknown", "compiler_version": "unknown",
+               "openmp_runtime": "unknown", "arch_flags": "unknown"}
+    if not path or not os.path.exists(path):
+        return dict(unknown)
+
+    producers = []
+    for entry in _ELF_COMMENT_RE.findall(_readelf(path, "-p", ".comment")):
+        if entry not in producers:
+            producers.append(entry)
+    families, versions = [], []
+    for entry in producers:
+        low = entry.lower()
+        fam = ("clang" if "clang" in low else
+               "gcc"   if low.startswith("gcc") or "gnu c" in low else
+               "icc"   if "intel" in low else "other")
+        hit = re.search(r'clang version (\S+)', entry) if fam == "clang" else None
+        ver = hit.group(1) if hit else (_VER_RE.findall(entry) or ["unknown"])[-1]
+        if fam not in families: families.append(fam)
+        if ver not in versions: versions.append(ver)
+
+    # DT_NEEDED, not ldd: what the binary itself asks for, without running the
+    # dynamic loader over this machine's search path. A binary can pull in TWO
+    # runtimes at once — ParAC's driver links libgomp (its own -fopenmp) and
+    # libiomp5 (MKL's threading layer) — and that is reported, not collapsed.
+    needed = re.findall(r'Shared library: \[([^\]]+)\]', _readelf(path, "-d"))
+    omp = [name for lib, name in (("libomp.so", "llvm-libomp"),
+                                  ("libgomp.so", "gnu-libgomp"),
+                                  ("libiomp5.so", "intel-libiomp5"))
+           if any(n.startswith(lib) for n in needed)]
+
+    out = dict(unknown)
+    if families:
+        out["compiler"] = "+".join(families)
+        out["compiler_version"] = "+".join(versions)
+    if needed:                       # readelf could read the dynamic section
+        out["openmp_runtime"] = "+".join(omp) if omp else "none"
+    return out
+
+
 # ── benchmark-binary CSV row -> metrics dict ────────────────────────────────────
 def parse_csv(out):
     rows = [l for l in out.splitlines() if l and not l.startswith("solver,") and "," in l]
