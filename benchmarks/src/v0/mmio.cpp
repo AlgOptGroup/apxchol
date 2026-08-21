@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <fstream>
+#include <iterator>
 #if defined(__unix__) || defined(__APPLE__)
 #define MMIO_HAVE_MMAP 1
 #include <fcntl.h>
@@ -103,13 +104,23 @@ private:
         std::ifstream in(path, std::ios::binary);
         if (!in.is_open())
             throw std::runtime_error("Cannot open " + path);
+        // Size-then-read is the fast path, but tellg() returns -1 on a stream
+        // that cannot seek -- a pipe, or a process substitution such as
+        // `--mtx <(zcat com-Orkut.mtx.gz)`. Treating that as a zero-length file
+        // would report "Empty file" for input the reader this replaced consumed
+        // fine, so fall back to streaming it. seekg/tellg leave failbit set on
+        // such a stream; clear() before reading or the fallback reads nothing.
         in.seekg(0, std::ios::end);
         const std::streamoff len = in.tellg();
-        in.seekg(0, std::ios::beg);
         if (len > 0) {
+            in.seekg(0, std::ios::beg);
             buf_.resize(static_cast<size_t>(len));
             in.read(&buf_[0], len);
             buf_.resize(static_cast<size_t>(in.gcount()));
+        } else {
+            in.clear();
+            buf_.assign(std::istreambuf_iterator<char>(in),
+                        std::istreambuf_iterator<char>());
         }
         if (buf_.empty())
             throw std::runtime_error("Empty file: " + path);
