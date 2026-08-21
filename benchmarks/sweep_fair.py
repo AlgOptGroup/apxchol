@@ -98,6 +98,32 @@ OBSERVED = {}
 # cells: those never run this binary (see julia_toolchain).
 BUILD = {}
 
+# If the binary never reported a BUILD_META line, the cell must say so OUT LOUD rather
+# than be written with no toolchain keys at all. A silent omission is indistinguishable
+# from a cell predating this mechanism, and the case where it happens is exactly the one
+# this exists to catch: a stale binary sitting in the build directory that nobody
+# rebuilt. That happened in this repo on 2026-08-20.
+UNKNOWN_TOOLCHAIN = {
+    "compiler": "unknown",
+    "toolchain_note": "binary emitted no BUILD_META line - stale or pre-BUILD_META build",
+}
+_warned_no_build_meta = False
+
+
+def build_toolchain():
+    """The binary's self-reported toolchain, or an explicit `unknown` record.
+
+    Never returns {}: an empty merge would leave the cell silently unstamped."""
+    global _warned_no_build_meta
+    if BUILD:
+        return BUILD
+    if not _warned_no_build_meta:
+        _warned_no_build_meta = True
+        print("WARNING: the benchmark binary emitted no BUILD_META line; cells will be "
+              "stamped compiler=unknown. Rebuild it before trusting this sweep.",
+              file=sys.stderr, flush=True)
+    return UNKNOWN_TOOLCHAIN
+
 # AC/AC2 (Laplacians.jl) run under julia, not under any binary we build.
 JULIA_SOLVERS = ("ac", "ac2")
 _JULIA_TOOLCHAIN = {}
@@ -137,7 +163,7 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None):
     meta = dict(OBSERVED.get(mid) or {})
     if extra_meta:
         meta.update(extra_meta)
-    prov = {**PROV, **(julia_toolchain() if solver in JULIA_SOLVERS else BUILD)}
+    prov = {**PROV, **(julia_toolchain() if solver in JULIA_SOLVERS else build_toolchain())}
     return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, prov,
                         matrix_meta=meta or None)
 

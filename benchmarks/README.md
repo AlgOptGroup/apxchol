@@ -319,10 +319,13 @@ CUDA build), and each of those comes from the artefact that actually ran:
   runs them. `arch_flags` is not recoverable from an ELF, so it reads `unknown` for the
   external binaries rather than being guessed.
 
-Cells written **before** that date carry none of these fields (all 616 of them: the
-provenance keys in the store were exactly `git_sha, boost, boost_expected, note,
-repeat, tier, timestamp, source`). For those, the toolchain is genuinely unrecorded —
-GCC on this machine, with no version pinned down.
+Cells written **before** that date carry none of these fields — **all 826 of them**:
+616 in `results/cells` plus 210 in `results/scaling_cells`, whose provenance keys were
+exactly `git_sha, boost, boost_expected, note, repeat, tier, timestamp, source`. For
+those, the toolchain is genuinely unrecorded — GCC on this machine, with no version
+pinned down. (An earlier draft of this paragraph said "all 616", counting only the main
+store; the thread-scaling cells are just as unstamped and are just as much part of the
+published figures.)
 Runs are **boost-on** (no frequency lock), which on this laptop gives a **±20–30%
 session-to-session spread** on the same commit and config — so treat only ratios well
 above that band as signal, not individual cells or small deltas. The locked-frequency

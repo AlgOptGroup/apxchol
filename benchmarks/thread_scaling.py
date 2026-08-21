@@ -9,6 +9,7 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from sweep_fair import UNKNOWN_TOOLCHAIN
 from runner_common import (margs_for, ROOT, sh, git_sha, boost_state, parse_csv,
                            parse_build_meta, binary_toolchain,
                            PARAC_CPU_DRIVER as DRIVER, PARAC_REORD as REORD,
@@ -59,7 +60,7 @@ def emit(mid, family, lab, t, m, status, prov=None):
     os.makedirs(CELLS, exist_ok=True)
     tag = re.sub(r'[^A-Za-z0-9]+', '_', lab)
     json.dump({"cell": {"matrix_id": mid, "family": family, "label": lab, "threads": t},
-               "metrics": m or {}, "status": status, "provenance": {**PROV, **(prov or {})}},
+               "metrics": m or {}, "status": status, "provenance": {**PROV, **(prov or UNKNOWN_TOOLCHAIN)}},
               open(f"{CELLS}/{mid}__{tag}__t{t}.json", "w"))
 
 def done(mid, lab, t):
