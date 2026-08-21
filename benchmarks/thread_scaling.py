@@ -9,7 +9,7 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from runner_common import (ROOT, sh, git_sha, boost_state, parse_csv,
+from runner_common import (margs_for, ROOT, sh, git_sha, boost_state, parse_csv,
                            PARAC_CPU_DRIVER as DRIVER, PARAC_REORD as REORD,
                            PARAC_LDLIB as LDLIB)
 
@@ -24,8 +24,8 @@ TOL = "1e-8"; THREADS = [1, 2, 4, 8, 16]; TIMEOUT = 900; REPS = 2
 MATS = [
     ("grid_2000", "grids", "--graph grid --n 2000", False, True),
     ("grid3d_100", "grids", "--graph grid3d --n 100", False, False),
-    ("iter0040", "ipm", f"--mtx {ROOT}/data/ipm/iter0040/matrix.mtx", False, False),
-    ("ecology1", "suitesparse", f"--mtx {ROOT}/data/matrices/ecology1.mtx", False, False),
+    ("iter0040", "ipm", margs_for("iter0040"), False, False),
+    ("ecology1", "suitesparse", margs_for("ecology1"), False, False),
 ]
 # cpp solvers: label -> (solver, config)
 CPP = [("apxchol bg+tree", "apxchol_v1", "bg+tree[vec_pool]"),

@@ -18,7 +18,7 @@ this is safe to run alongside other (timing) work. Run from repo root:
 """
 import json, os, re, glob
 
-from runner_common import (ROOT, CELLS, sh as _sh, parac_amd_mtx,
+from runner_common import (margs_for, ROOT, CELLS, sh as _sh, parac_amd_mtx,
                            PARAC_GPU_DRIVER as GPU_DRIVER,
                            PARAC_GPU_DRIVER_PHYS as GPU_DRIVER_PHYS,
                            PARAC_CPU_DRIVER as CPU_DRIVER,
@@ -44,18 +44,18 @@ MATS = [
     ("grid_3000", "grids", "--graph grid --n 3000", False),
     ("grid3d_100", "grids", "--graph grid3d --n 100", False),
     ("grid3d_150", "grids", "--graph grid3d --n 150", False),
-    ("parabolic_fem", "suitesparse", f"--mtx {ROOT}/data/matrices/parabolic_fem.mtx", True),
-    ("apache2", "suitesparse", f"--mtx {ROOT}/data/matrices/apache2.mtx", True),
-    ("ecology1", "suitesparse", f"--mtx {ROOT}/data/matrices/ecology1.mtx", True),
-    ("G3_circuit", "suitesparse", f"--mtx {ROOT}/data/matrices/G3_circuit.mtx", True),
-    ("thermal2", "suitesparse", f"--mtx {ROOT}/data/matrices/thermal2.mtx", True),
-    ("com-Amazon", "suitesparse", f"--mtx {ROOT}/data/matrices/com-Amazon.mtx", True),
-    ("coAuthorsDBLP", "suitesparse", f"--mtx {ROOT}/data/matrices/coAuthorsDBLP.mtx", True),
-    ("kron_g500-logn16", "suitesparse", f"--mtx {ROOT}/data/matrices/kron_g500-logn16.mtx", True),
-    ("iter0010", "ipm", f"--mtx {ROOT}/data/ipm/iter0010/matrix.mtx", False),
-    ("iter0020", "ipm", f"--mtx {ROOT}/data/ipm/iter0020/matrix.mtx", False),
-    ("iter0030", "ipm", f"--mtx {ROOT}/data/ipm/iter0030/matrix.mtx", False),
-    ("iter0040", "ipm", f"--mtx {ROOT}/data/ipm/iter0040/matrix.mtx", False),
+    ("parabolic_fem", "suitesparse", margs_for("parabolic_fem"), True),
+    ("apache2", "suitesparse", margs_for("apache2"), True),
+    ("ecology1", "suitesparse", margs_for("ecology1"), True),
+    ("G3_circuit", "suitesparse", margs_for("G3_circuit"), True),
+    ("thermal2", "suitesparse", margs_for("thermal2"), True),
+    ("com-Amazon", "suitesparse", margs_for("com-Amazon"), True),
+    ("coAuthorsDBLP", "suitesparse", margs_for("coAuthorsDBLP"), True),
+    ("kron_g500-logn16", "suitesparse", margs_for("kron_g500-logn16"), True),
+    ("iter0010", "ipm", margs_for("iter0010"), False),
+    ("iter0020", "ipm", margs_for("iter0020"), False),
+    ("iter0030", "ipm", margs_for("iter0030"), False),
+    ("iter0040", "ipm", margs_for("iter0040"), False),
 ]
 
 

@@ -136,12 +136,12 @@ def run_one(mid):
     n = rc.MATRICES[mid].get("n", 0)
     if n and n > CMG_MAX_N:
         rc.emit_cell(fam, mid, "cmg", "", "n/a", {"n": n}, THREADS, "cpu",
-                     {**_prov(rc.kind_of(mid) == "operator"),
+                     {**_prov(rc.class_of(mid) == "sddm"),
                       "note": PROV["note"] + f" [skipped: n={n} > {CMG_MAX_N}]"},
                      matrix_meta={"cmg_na_reason": f"n={n} exceeds CMG_MAX_N={CMG_MAX_N}, the "
                                                    f"runner's cap on CMG's O(n) hierarchy setup"})
         return f"skip(n={n}>cap)"
-    as_operator = rc.kind_of(mid) == "operator"
+    as_operator = rc.class_of(mid) == "sddm"
     meta = {"cmg_input": (
         "the DUMPED operator, read with its diagonal intact and solved unpinned and "
         "unshifted (the same system every other solver in this cell got)" if as_operator else

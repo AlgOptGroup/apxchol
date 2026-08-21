@@ -42,6 +42,10 @@ function parse_args(args)
         "er_p"    => 0.01,
         "mtx"     => "",
         "operator" => "",
+        # --class laplacian|sddm: what the operator IS. REQUIRED with --operator,
+        # empty by default so an undeclared one is a hard error rather than a
+        # guess (see main_operator). Checked against operator_facts' scan.
+        "class"   => "",
         "solver"  => "all",  # ac, ac2, chol, cg, all
         "tol"     => 1e-8,
         "maxiter" => 500,
@@ -67,6 +71,10 @@ function parse_args(args)
             i += 1; opts["mtx"] = args[i]; opts["graph"] = "mtx"
         elseif a == "--operator" && i < length(args)
             i += 1; opts["operator"] = args[i]; opts["graph"] = "operator"
+        elseif a == "--class" && i < length(args)
+            i += 1; opts["class"] = args[i]
+            opts["class"] in ("laplacian", "sddm") ||
+                error("Unknown --class: $(opts["class"]) (expected laplacian|sddm)")
         elseif a == "--solver" && i < length(args)
             i += 1; opts["solver"] = args[i]
         elseif a == "--tol" && i < length(args)
@@ -217,13 +225,25 @@ function load_mtx_operator(path)
 end
 
 # Structural facts about an operator, matching include/apxchol/operator_class.h:
-# whether it is a singular Laplacian, and how much of its off-diagonal mass is
-# positive (the quantity apxchol's lumping ceiling is expressed in).
+# whether it SCANS as a singular Laplacian, and how much of its off-diagonal mass
+# is positive (the quantity apxchol's lumping ceiling is expressed in).
+#
+# `scan_is_lap` is a CHECK on the caller's --class, never the decider. It used to
+# be the decider, and it used the global ratio
+#     maximum(abs.(rs)) / maximum(abs.(d)) < 1e-10
+# which is the same test the C++ benchmark carried (`is_laplacian_operator`,
+# deleted 2026-08-21) and it fails the same way: a family with a uniform diagonal
+# shift never has vanishing row sums, so only the DENOMINATOR moves and the ratio
+# slides across any threshold mid-family. Three of the four IPM matrices were
+# called singular by it. The per-row form below tests each row against ITS OWN
+# diagonal (scan_operator's rule, src/operator_class.cpp:169), so a uniform shift
+# shows up as an excess on every row instead of as a small global ratio.
 function operator_facts(A)
     n = size(A, 1)
     d = diag(A)
     rs = A * ones(n)
-    is_lap = maximum(abs.(rs)) / max(maximum(abs.(d)), 1e-30) < 1e-10
+    slack = 1e-10 .* max.(abs.(d), 1.0)
+    scan_is_lap = !any(rs .> slack) && !any(rs .< -slack)
     rowsA = rowvals(A); valsA = nonzeros(A)
     pos_cnt = 0; pos_mass = 0.0; abs_mass = 0.0
     for j in 1:n, k in nzrange(A, j)
@@ -235,7 +255,7 @@ function operator_facts(A)
             pos_cnt += 1; pos_mass += v
         end
     end
-    return is_lap, pos_cnt, (abs_mass > 0 ? pos_mass / abs_mass : 0.0)
+    return scan_is_lap, pos_cnt, (abs_mass > 0 ? pos_mass / abs_mass : 0.0)
 end
 
 # apxchol's default ceiling on the positive off-diagonal MASS fraction
@@ -252,7 +272,7 @@ function na_result(sname, graph_name, n, nnz_A, reason)
                        0.0, 0.0, 0.0, -1, -1.0, 0.0, 0.0)
 end
 
-function run_approxchol_operator(A, b, graph_name, tol, maxiter; variant=:ac)
+function run_approxchol_operator(A, b, graph_name, tol, maxiter, is_lap; variant=:ac)
     # Solve A x = b with the AC preconditioner, on the operator EXACTLY as it
     # was handed to us, and score the residual against that same A.
     n = size(A, 1)
@@ -260,7 +280,9 @@ function run_approxchol_operator(A, b, graph_name, tol, maxiter; variant=:ac)
     sname = variant == :ac2 ? "AC2 [Kyng16;Jl]" : "AC [Kyng16;Jl]"
     params = variant == :ac2 ? ApproxCholParams(:deg, 5, 2, 2) : ApproxCholParams(:deg)
 
-    is_lap, pos_cnt, pos_mass = operator_facts(A)
+    # `is_lap` is the caller's DECLARED --class (asserted against the scan in
+    # main_operator); only the positive-off-diagonal facts come from the scan.
+    _, pos_cnt, pos_mass = operator_facts(A)
 
     # Laplacians.jl reaches the operator through its adjacency: approxchol_lap
     # takes A_adj directly, and approxchol_sddm = sddmWrapLap(approxchol_lap)
@@ -489,8 +511,26 @@ function main_operator(opts)
     A = load_mtx_operator(path)
     graph_name = basename(path)
     n = size(A, 1)
-    is_lap, pos_cnt, pos_mass = operator_facts(A)
-    @printf(stderr, "Operator: %s, n=%d, nnz=%d, %s, positive_offdiag=%d (%.3g%% of mass)\n",
+
+    # The grounding class is DECLARED (--class), never sniffed, exactly as it is
+    # for the C++ benchmark: this reference has to solve and score the same system
+    # the rest of the cell did, and it is handed the same dumped operator.
+    isempty(opts["class"]) && error(
+        "--operator $path needs an explicit --class.\n" *
+        "  --class laplacian  singular: grounded, solution and residual mean-centred\n" *
+        "  --class sddm       full-rank: solved and scored untouched\n" *
+        "There is deliberately no default and no detection — see operator_facts.")
+    declared_is_lap = opts["class"] == "laplacian"
+
+    # BELT AND BRACES: the scan checks the declaration, it does not make it.
+    scan_is_lap, pos_cnt, pos_mass = operator_facts(A)
+    scan_is_lap == declared_is_lap || error(
+        "--class $(opts["class"]) CONTRADICTS the structure of $path: the per-row scan " *
+        "says $(scan_is_lap ? "laplacian (singular)" : "sddm (full-rank)"). Fix the " *
+        "declaration in the matrix registry (benchmarks/runner_common.py), or the file " *
+        "is not what it is declared to be. Refusing to guess which of the two you meant.")
+    is_lap = declared_is_lap
+    @printf(stderr, "Operator: %s, n=%d, nnz=%d, %s (declared --class, checked against the scan), positive_offdiag=%d (%.3g%% of mass)\n",
             graph_name, n, nnz(A),
             is_lap ? "singular Laplacian" : "full-rank (SDDM)", pos_cnt, 100 * pos_mass)
 
@@ -521,7 +561,7 @@ function main_operator(opts)
     for s in solvers_to_run
         try
             (s == "ac" || s == "ac2") &&
-                run_approxchol_operator(warmup_L, warmup_b, "warmup", 1e-6, 100;
+                run_approxchol_operator(warmup_L, warmup_b, "warmup", 1e-6, 100, true;
                                         variant = (s == "ac2" ? :ac2 : :ac))
         catch; end
     end
@@ -529,7 +569,7 @@ function main_operator(opts)
     for s in solvers_to_run
         try
             r = if s == "ac" || s == "ac2"
-                run_approxchol_operator(A, b, graph_name, opts["tol"], opts["maxiter"];
+                run_approxchol_operator(A, b, graph_name, opts["tol"], opts["maxiter"], is_lap;
                                         variant = (s == "ac2" ? :ac2 : :ac))
             else
                 # The plain-CG / dense-Cholesky references ground the system by

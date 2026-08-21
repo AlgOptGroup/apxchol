@@ -29,6 +29,32 @@ RCHOL = {"rchol", "rchol_par"}
 # nothing else in this file would notice.
 DUMP_CONSUMERS = {"parac", "parac_graph", "parac_physics", "cmg", "ac", "ac2"}
 
+# Matrices the deleted `is_laplacian_operator` ratio heuristic MISCLASSIFIED.
+# All four IPM normal equations carry a uniform +1e-6 diagonal shift, so their row
+# sums never vanish and only max|diag| moves; the ratio max|rowsum|/max|diag| slid
+# under the 1e-10 threshold for three of the four (measured 2026-08-21):
+#     iter0010  4.396623e-10  SDDM, correct -- but only 4.4x from flipping
+#     iter0020  9.988164e-12  called LAPLACIAN, WRONG
+#     iter0030  8.242149e-12  called LAPLACIAN, WRONG
+#     iter0040  1.116573e-11  called LAPLACIAN, WRONG
+# Every other registry matrix was classified correctly, so only these three flip.
+MISSNIFFED = {"iter0020", "iter0030", "iter0040"}
+
+# Solvers that build their OWN right-hand side, outside the benchmark binary, from
+# the dumped matrix -- so the flag never reached them and their cells on the
+# missniffed matrices stand. The dump itself is unaffected: --dump-mtx writes L
+# and exits (benchmark.cpp) before make_rhs is ever called.
+#   cmg   bench_cmg.m:44 `is_singular = ~as_operator` -- for a kind=operator matrix
+#         it already skipped the mean-centring and the pin, i.e. it was already on
+#         the post-fix system.
+#   parac ParAC generates its own zero-sum RHS in graph mode and uses its own
+#         physics entry point on an operator; neither consults our flag.
+# ac/ac2 are NOT here: bench_laplacians.jl carried its own copy of the same ratio
+# test, so they would have been missniffed too. (No ac/ac2 cell exists on these
+# three matrices today, so the exclusion is moot in this store -- but the rule has
+# to stay correct if one is ever produced from a pre-fix checkout.)
+OWN_RHS = {"cmg", "parac", "parac_graph", "parac_physics"}
+
 # (commit, one-line reason, predicate over (solver, matrix_id, kind))
 RULES = [
     ("6a677bd", "BoomerAMG's hierarchy was built twice inside the setup timer",
@@ -41,19 +67,27 @@ RULES = [
                 "external solvers ground natively). 3bda0c9 also contains 9889d01, so "
                 "requiring it covers the operator-interpretation change to the dump too",
      lambda s, m, k: s in DUMP_CONSUMERS),
+    # This is a RE-RUN rule, not a re-grade: the same flag drives center_if_laplacian
+    # inside make_rhs, so mean-centring came off the RIGHT-HAND SIDE as well as off
+    # the scoring. The system solved was different (measured on iter0040: sum(b)
+    # 1.694e-14 -> 1.815e-10), which is why it hits EVERY solver on these matrices
+    # and not just the ones that were being pinned. Re-scoring stored cells cannot
+    # recover it; they have to be produced again.
+    ("2c95f53", "Laplacian-vs-SDDM was sniffed from a row-sum ratio; iter0020/0030/0040 "
+                "were pinned and their RHS mean-centred as if singular",
+     lambda s, m, k: m in MISSNIFFED and s not in OWN_RHS),
 ]
 
 
 def kind_of_matrix():
-    """matrix_id -> declared kind, from the registry (grids are graphs by construction)."""
-    kind = {g[0]: "graph" for g in rc.GRIDS}
-    for name in dir(rc):
-        v = getattr(rc, name)
-        if isinstance(v, list) and v and isinstance(v[0], tuple) \
-           and len(v[0]) == 4 and v[0][3] in rc.KINDS:
-            for e in v:
-                kind.setdefault(e[0], e[3])
-    return kind
+    """matrix_id -> declared kind, straight from the registry.
+
+    kind_of() raises on an undeclared or unknown matrix, which is the point: a
+    cell whose matrix is no longer in the registry must not be silently graded as
+    'not an operator'. Cells for retired matrices fall through to `unknown` below
+    via their own stored matrix_meta.
+    """
+    return {mid: rc.kind_of(mid) for mid in rc.MATRICES}
 
 
 def main():

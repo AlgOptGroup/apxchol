@@ -170,8 +170,8 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
     # nothing to fall back FROM.)
     return st,m
 
-def run_julia(mtx, solver):
-    """AC/AC2 (Laplacians.jl) on the DUMPED operator.
+def run_julia(mtx, solver, cls):
+    """AC/AC2 (Laplacians.jl) on the DUMPED operator, with its declared class.
 
     They used to be handed the raw registry .mtx and re-derive a Laplacian from
     it with their own copy of the adjacency reader, so their agreeing with the
@@ -187,12 +187,19 @@ def run_julia(mtx, solver):
     = -1); we lift that sentence into the cell, so the n/a carries its reason
     instead of reading as a hole.
 
+    `cls` is the registry's declared grounding class (rc.class_of), passed as
+    --class: the Julia driver used to sniff singular-vs-SDDM off the dump with the
+    same global row-sum ratio the C++ benchmark carried, which on the IPM family
+    is unattainable (see benchmarks/julia/bench_laplacians.jl's operator_facts).
+    It is the class of the DUMP, which is what the registry declares because the
+    dump is unregularized (dump_mtx passes no --reg-rel).
+
     Needs the Julia project instantiated once:
       julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
     """
     cmd=(f"taskset -c 0-{THREADS-1} julia --project=benchmarks/julia "
-         f"benchmarks/julia/bench_laplacians.jl --operator {mtx} --solver {solver} "
-         f"--tol {TOL} --maxiter 500 --csv")
+         f"benchmarks/julia/bench_laplacians.jl --operator {mtx} --class {cls} "
+         f"--solver {solver} --tol {TOL} --maxiter 500 --csv")
     try: cp = sh(cmd, timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return "timeout", None, {"na_reason": f"exceeded the {TIMEOUT}s per-cell wall cap"}
@@ -437,7 +444,8 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
         dumped = dump_mtx(mid)
         if dumped:
             for s in JULIA:
-                step(family,mid,s,"", lambda ss=s: run_julia(dumped,ss), s)
+                step(family,mid,s,"",
+                     lambda ss=s: run_julia(dumped,ss,rc.class_of(mid)), s)
         else:
             print(f"   {'AC/AC2':24} SKIP (operator dump failed)")
     if RUN_PARAC:      # ParAC graph+physics (resume-safe; the runner skips done cells)

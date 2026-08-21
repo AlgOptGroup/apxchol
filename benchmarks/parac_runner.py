@@ -165,17 +165,20 @@ def _dump_tag(mid):
     it does not know about is what used to floor its residual against the
     original L at ~1e-3.
 
-    Knowable without dumping (registry kind), which lets the GPU path tag its
+    Knowable without dumping (registry class), which lets the GPU path tag its
     cache before the dump.
     """
-    return "op" if rc.kind_of(mid) == "operator" else "pure"
+    return "op" if rc.class_of(mid) == "sddm" else "pure"
 
 
 def _augments(mid):
     """True when the reorder step must append ParAC's ground row/column. Only a
-    kind=operator matrix needs it: it is not a Laplacian, and physics mode's trim
-    is what takes the appended node back off."""
-    return rc.kind_of(mid) == "operator"
+    FULL-RANK operator needs it, and physics mode's trim is what takes the appended
+    node back off. Keyed on the declared CLASS, not on kind: ecology1 is
+    kind=operator and class=laplacian — already singular, so appending a ground row
+    would be wrong. kind says how to READ the file, class says whether the system it
+    defines is singular; only the second one answers this question."""
+    return rc.class_of(mid) == "sddm"
 
 
 def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
@@ -614,7 +617,7 @@ def run_cpu(mid):
     has no appended ground node for the trim to remove.
     """
     family = rc.MATRICES[mid]["family"]
-    if rc.kind_of(mid) == "operator":
+    if rc.class_of(mid) == "sddm":
         return _run_cpu_operator(mid, family)
     rc.emit_cell(family, mid, "parac_physics", "", "n/a", {}, THREADS, "cpu", PROV_CPU,
                  matrix_meta={"parac_mode": "n/a", "parac_na_reason": PHYSICS_NA})
@@ -708,7 +711,7 @@ def run_gpu(mid, tol=TOL):
     driver_physics.cu on the augmented published operator."""
     family = rc.MATRICES[mid]["family"]
     tag = _dump_tag(mid)
-    is_operator = rc.kind_of(mid) == "operator"
+    is_operator = rc.class_of(mid) == "sddm"
     aug = _augments(mid)
     try:
         # Warm nnz-sort cache (+.time) -> the dump is unneeded; skip it.

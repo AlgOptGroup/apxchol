@@ -567,3 +567,29 @@ if (HAVE_MKL)
     target_link_libraries(benchmark PRIVATE ${MKL_LIBRARIES})
 endif()
 
+
+# ── Guard-rail tests ────────────────────────────────────────────────────────────
+# The matrix contract is DECLARED, never sniffed: --kind says how to read the file,
+# --class says whether the system it defines is singular. Both are required with
+# --mtx, and --class is cross-checked against the structural scan so a WRONG
+# declaration is a hard error rather than a quietly different benchmark.
+#
+# Those three guards are the whole defence, and they had no automated coverage --
+# every negative case was only ever run by hand. A benchmark that silently solves
+# the wrong system is exactly the failure this project has paid for repeatedly, so
+# the guards get tests even though nothing else here does.
+enable_testing()
+
+add_test(NAME contract_requires_class
+         COMMAND benchmark --mtx ${CMAKE_CURRENT_SOURCE_DIR}/../data/matrices/ecology1.mtx
+                           --kind operator --solver apxchol_v1 --maxiter 1)
+set_tests_properties(contract_requires_class PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME contract_rejects_wrong_class
+         COMMAND benchmark --mtx ${CMAKE_CURRENT_SOURCE_DIR}/../data/matrices/ecology1.mtx
+                           --kind operator --class sddm --solver apxchol_v1 --maxiter 1)
+set_tests_properties(contract_rejects_wrong_class PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME contract_rejects_class_on_graph
+         COMMAND benchmark --graph grid --n 32 --class sddm --solver apxchol_v1 --maxiter 1)
+set_tests_properties(contract_rejects_class_on_graph PROPERTIES WILL_FAIL TRUE)
