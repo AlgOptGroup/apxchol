@@ -153,6 +153,21 @@ Laplacian.
 
 `apxchol::factorize` is templated on the IS selector (partitioner), the incidence storage, and — via overloads taking an instance — the eliminator. Custom eliminators/partitioners are passed as instances (matrix- or graph-level overloads; see `docs/extending.md` and `examples/`); partitioners implement one uniform `find_partition(G, span<const node_index> candidates, ctx, selection&)` shape — the `degree_prepass` trait decides whether the orchestrator runs the prune/degree/cap pre-pass (candidates = eligible list, vertex-indexed `ctx.degrees` filled) or passes the raw active list (`ctx.degrees` empty); selection knobs are grouped as `factor_options::partition`. `graph<>` and the matrix overloads default to `vec_pool`. The call most users hit is the runtime-dispatch overload:
 
+The standard degree-prepass path keeps its exact ordering while parallelizing
+the formerly serial setup scaffolding whenever `active.size() > omp_threshold`:
+an exact byte-radix degree quantile (identical to `nth_element`), stable ordered
+eligible filtering, and stable active-list compaction. `vec_pool` likewise builds
+per-vertex grow metadata in parallel before one pool resize, and elimination
+writes directly into the already-reserved final factor-column array instead of
+moving a temporary vector-of-vectors after each round. These are unconditional
+implementation details, not tuning knobs. They were factor-byte-identical on
+4/4 representative matrices. The final always-on implementation, measured
+against its pre-change commit at T=16 over 7 candidate runs each bracketed by
+the unchanged binary, reduced setup by 14.8% on grid_2000, 8.1% on iter0040,
+13.0% on com-Amazon and 11.1% on parabolic_fem; all 84/84 runs had identical
+factor nnz and the unchanged A/B null medians were within 3.2%. The preceding
+same-binary probe bounded peak-RSS change at −1.7% to +2.2%.
+
 ```cpp
 factorization factorize(const Eigen::SparseMatrix<double>& L,
                         graph_storage storage,

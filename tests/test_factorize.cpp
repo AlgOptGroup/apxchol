@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -102,6 +104,64 @@ static Eigen::SparseMatrix<double> weighted_grid_laplacian(int rows, int cols,
             if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), w_horiz);
         }
     return apxchol::laplacian(G);
+}
+
+TEST(PartitionerHelpers, ParallelDegreeQuantileMatchesNthElementExactly) {
+    std::vector<std::array<size_t, 256>> histograms;
+    for (size_t n : {size_t{1}, size_t{2}, size_t{257}, size_t{100000}}) {
+        std::vector<apxchol::node_index> degrees(n);
+        std::uint64_t state = 0x123456789abcdef0ULL;
+        for (size_t i = 0; i < n; ++i) {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            degrees[i] = (i % 3 == 0)
+                ? static_cast<apxchol::node_index>((state >> 32) % 97)
+                : static_cast<apxchol::node_index>(state >> 32);
+        }
+        for (double q : {0.01, 0.2, 0.5, 0.999}) {
+            auto reference = degrees;
+            size_t k = static_cast<size_t>(q * n);
+            if (k >= n) k = n - 1;
+            std::nth_element(reference.begin(), reference.begin() + k,
+                             reference.end());
+            EXPECT_EQ(apxchol::parallel_degree_quantile(
+                          degrees, n, q, histograms),
+                      reference[k])
+                << "n=" << n << " q=" << q;
+        }
+    }
+}
+
+TEST(PartitionerHelpers, ParallelDegreeFilterPreservesCandidateOrder) {
+    constexpr size_t n = 100000;
+    std::vector<apxchol::node_index> active(n), degrees(n);
+    for (size_t i = 0; i < n; ++i) {
+        active[i] = static_cast<apxchol::node_index>(n - i - 1);
+        degrees[i] = static_cast<apxchol::node_index>((i * 37 + i / 11) % 103);
+    }
+    std::vector<apxchol::node_index> expected, live(n), eligible;
+    for (size_t i = 0; i < n; ++i)
+        if (degrees[i] <= 23) expected.push_back(active[i]);
+    std::vector<size_t> offsets;
+    const size_t count = apxchol::parallel_ordered_degree_filter(
+        active, degrees, 23, live, eligible, offsets);
+    ASSERT_EQ(count, expected.size());
+    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), eligible.begin()));
+    for (size_t i = 0; i < n; ++i)
+        EXPECT_EQ(live[active[i]], degrees[i]);
+}
+
+TEST(PartitionerHelpers, ParallelActiveFilterIsStable) {
+    constexpr size_t n = 100000;
+    std::vector<apxchol::node_index> active(n), expected;
+    std::iota(active.begin(), active.end(), apxchol::node_index{0});
+    for (auto v : active)
+        if ((v * 17 + v / 13) % 11 < 4) expected.push_back(v);
+    std::vector<apxchol::node_index> scratch;
+    std::vector<size_t> offsets;
+    apxchol::parallel_stable_active_filter(
+        active, scratch, offsets,
+        [](apxchol::node_index v) { return (v * 17 + v / 13) % 11 < 4; });
+    EXPECT_EQ(active, expected);
 }
 
 // ── Typed test infrastructure ────────────────────────

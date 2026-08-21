@@ -14,7 +14,9 @@
 #include "apxchol/solver/factorize_workspace.h"
 #include "apxchol/solver/partition.h"
 #include <algorithm>
+#include <array>
 #include <span>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -43,6 +45,176 @@ inline double is_degree_threshold(std::span<const node_index> degrees,
         return static_cast<double>(scratch[k]);
     }
     return popts.degree_multiplier * avg_deg;
+}
+
+/// Exact kth-order statistic for unsigned degree values, using one radix
+/// selection pass per byte. Unlike a histogram approximation this returns the
+/// same threshold value as nth_element, including duplicate degrees. Scratch
+/// is caller-owned so repeated factorization rounds do not allocate it again.
+inline node_index parallel_degree_quantile(
+        std::span<const node_index> degrees, size_t n_active, double q,
+        std::vector<std::array<size_t, 256>>& histograms) {
+    static_assert(std::is_unsigned_v<node_index>);
+    size_t rank = static_cast<size_t>(q * n_active);
+    if (rank >= n_active) rank = n_active - 1;
+
+#ifndef _OPENMP
+    std::vector<node_index> scratch(degrees.begin(), degrees.begin() + n_active);
+    std::nth_element(scratch.begin(), scratch.begin() + rank, scratch.end());
+    return scratch[rank];
+#else
+    histograms.resize(static_cast<size_t>(omp_get_max_threads()));
+    std::array<size_t, 256> totals{};
+    node_index prefix = 0;
+    node_index mask = 0;
+
+    #pragma omp parallel shared(rank, prefix, mask, totals, histograms)
+    {
+        const int tid = omp_get_thread_num();
+        auto& local = histograms[static_cast<size_t>(tid)];
+        for (int shift = int(sizeof(node_index) * 8) - 8;
+             shift >= 0; shift -= 8) {
+            local.fill(0);
+            #pragma omp for schedule(static)
+            for (size_t i = 0; i < n_active; ++i) {
+                const node_index x = degrees[i];
+                if ((x & mask) == prefix)
+                    ++local[static_cast<unsigned>(
+                        (x >> shift) & node_index{255})];
+            }
+
+            #pragma omp single
+            {
+                totals.fill(0);
+                const int team = omp_get_num_threads();
+                for (int t = 0; t < team; ++t)
+                    for (size_t b = 0; b < totals.size(); ++b)
+                        totals[b] += histograms[static_cast<size_t>(t)][b];
+
+                size_t below = 0;
+                size_t bucket = 0;
+                while (bucket + 1 < totals.size()
+                       && rank >= below + totals[bucket]) {
+                    below += totals[bucket];
+                    ++bucket;
+                }
+                rank -= below;
+                prefix |= static_cast<node_index>(bucket) << shift;
+                mask |= node_index{255} << shift;
+            }
+            // The implicit barrier after single publishes the chosen prefix
+            // and residual rank before the next byte pass.
+        }
+    }
+    return prefix;
+#endif
+}
+
+/// Fill vertex-indexed degrees and compact eligible vertices in the original
+/// candidate order. The output vector stays at its high-water size; callers
+/// use the returned prefix length. This preserves every partitioner's exact
+/// candidate sequence.
+inline size_t parallel_ordered_degree_filter(
+        std::span<const node_index> active,
+        std::span<const node_index> degrees,
+        double threshold,
+        std::vector<node_index>& live_degrees,
+        std::vector<node_index>& eligible_storage,
+        std::vector<size_t>& offsets) {
+#ifndef _OPENMP
+    if (eligible_storage.size() < active.size())
+        eligible_storage.resize(active.size());
+    size_t out = 0;
+    for (size_t i = 0; i < active.size(); ++i) {
+        live_degrees[active[i]] = degrees[i];
+        if (degrees[i] <= threshold) eligible_storage[out++] = active[i];
+    }
+    return out;
+#else
+    const int max_threads = omp_get_max_threads();
+    offsets.resize(static_cast<size_t>(max_threads) + 1);
+    if (eligible_storage.size() < active.size())
+        eligible_storage.resize(active.size());
+    int used_threads = 1;
+
+    #pragma omp parallel shared(offsets, eligible_storage, live_degrees, used_threads)
+    {
+        const int tid = omp_get_thread_num();
+        const int team = omp_get_num_threads();
+        const size_t begin = active.size() * static_cast<size_t>(tid)
+                           / static_cast<size_t>(team);
+        const size_t end = active.size() * static_cast<size_t>(tid + 1)
+                         / static_cast<size_t>(team);
+        size_t count = 0;
+        for (size_t i = begin; i < end; ++i) {
+            live_degrees[active[i]] = degrees[i];
+            count += degrees[i] <= threshold;
+        }
+        offsets[static_cast<size_t>(tid) + 1] = count;
+
+        #pragma omp barrier
+        #pragma omp single
+        {
+            used_threads = team;
+            offsets[0] = 0;
+            for (int t = 0; t < team; ++t)
+                offsets[static_cast<size_t>(t) + 1] +=
+                    offsets[static_cast<size_t>(t)];
+        }
+
+        size_t out = offsets[static_cast<size_t>(tid)];
+        for (size_t i = begin; i < end; ++i)
+            if (degrees[i] <= threshold) eligible_storage[out++] = active[i];
+    }
+    return offsets[static_cast<size_t>(used_threads)];
+#endif
+}
+
+/// Stable parallel replacement for erase_if(active, !is_live). Scratch and
+/// active alternate storage, avoiding another O(|active|) allocation after the
+/// first high-water mark.
+template<typename IsLive>
+void parallel_stable_active_filter(std::vector<node_index>& active,
+                                   std::vector<node_index>& scratch,
+                                   std::vector<size_t>& offsets,
+                                   IsLive&& is_live) {
+#ifndef _OPENMP
+    std::erase_if(active, [&](node_index v) { return !is_live(v); });
+#else
+    const int max_threads = omp_get_max_threads();
+    offsets.resize(static_cast<size_t>(max_threads) + 1);
+    if (scratch.size() < active.size()) scratch.resize(active.size());
+    int used_threads = 1;
+
+    #pragma omp parallel shared(active, scratch, offsets, used_threads)
+    {
+        const int tid = omp_get_thread_num();
+        const int team = omp_get_num_threads();
+        const size_t begin = active.size() * static_cast<size_t>(tid)
+                           / static_cast<size_t>(team);
+        const size_t end = active.size() * static_cast<size_t>(tid + 1)
+                         / static_cast<size_t>(team);
+        size_t count = 0;
+        for (size_t i = begin; i < end; ++i) count += is_live(active[i]);
+        offsets[static_cast<size_t>(tid) + 1] = count;
+
+        #pragma omp barrier
+        #pragma omp single
+        {
+            used_threads = team;
+            offsets[0] = 0;
+            for (int t = 0; t < team; ++t)
+                offsets[static_cast<size_t>(t) + 1] +=
+                    offsets[static_cast<size_t>(t)];
+        }
+
+        size_t out = offsets[static_cast<size_t>(tid)];
+        for (size_t i = begin; i < end; ++i)
+            if (is_live(active[i])) scratch[out++] = active[i];
+    }
+    scratch.resize(offsets[static_cast<size_t>(used_threads)]);
+    active.swap(scratch);
+#endif
 }
 
 /// Standard pre-pass: prune edges to eliminated vertices and fill
@@ -81,6 +253,14 @@ double prune_and_degrees(graph<Incidence>& G,
 
 namespace detail {
 
+inline int factorize_thread_num() {
+#ifdef _OPENMP
+    return omp_get_thread_num();
+#else
+    return 0;
+#endif
+}
+
 /// Bulk-apply deferred edges from ws.threads[*].edge_buffer to G.
 ///
 /// For forward_star: parallel prefix-sum across threads + single reservation
@@ -111,7 +291,7 @@ void apply_deferred_edges(graph<Incidence>& G,
 
         #pragma omp parallel
         {
-            const int tid = omp_get_thread_num();
+            const int tid = factorize_thread_num();
             if (tid < num_threads) {
                 const size_t base = e_offsets[tid];
                 const auto& ebuf = ws.threads[tid].edge_buffer;
@@ -160,7 +340,7 @@ void apply_deferred_edges(graph<Incidence>& G,
 
         #pragma omp parallel
         {
-            const int tid = omp_get_thread_num();
+            const int tid = factorize_thread_num();
             if (tid < num_threads) {
                 const size_t base = e_offsets[tid];
                 const auto& ebuf = ws.threads[tid].edge_buffer;
@@ -198,7 +378,7 @@ void apply_deferred_excess(graph<Incidence>& G,
     if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
         #pragma omp parallel
         {
-            const int tid = omp_get_thread_num();
+            const int tid = factorize_thread_num();
             if (tid < static_cast<int>(ws.threads.size())) {
                 for (auto [u, delta] : ws.threads[tid].excess_buffer)
                     G.atomic_add_excess(u, delta);

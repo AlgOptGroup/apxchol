@@ -381,30 +381,18 @@ struct vec_pool_incidence {
         ++compact_count_;
     }
 
-    /// Bulk parallel reserve_for. Caller is inside an OpenMP parallel
-    /// region; this internally splits into:
-    ///   1. omp single — compute grows list, prefix-sum new_bases, one
-    ///      pool_.resize, update base_/cap_ eagerly.
-    ///   2. omp for    — each thread copies a chunk of old slabs to new
-    ///      locations (parallel). Implicit barrier ensures copies complete
-    ///      before the caller's apply phase touches the new slabs.
-    /// grows_ is a member (NOT thread_local) so the parallel copy phase
-    /// sees what single populated.
+    /// Bulk parallel reserve_for. Caller is inside an OpenMP parallel region.
+    /// Each thread computes the grow metadata for a stable slice of touched
+    /// vertices; one thread prefix-sums those sizes and grows the pool once;
+    /// then every thread copies its own old slabs. The trailing barrier makes
+    /// the new bases and contents visible before the caller's apply phase.
     template<typename TouchedIter>
     void bulk_reserve_parallel(TouchedIter touched_begin, TouchedIter touched_end,
                                const std::vector<node_index>& incoming) {
+        static_assert(std::random_access_iterator<TouchedIter>);
+#ifdef _OPENMP
         #pragma omp single
         {
-            const auto& cfg = vec_pool_config::get();
-            auto geo_cap = [&](node_index v, node_index need) -> node_index {
-                node_index new_cap = need;
-                if (cap_[v] > 0) {
-                    const node_index geo = static_cast<node_index>(
-                        int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
-                    if (geo > new_cap) new_cap = geo;
-                }
-                return new_cap;
-            };
             // Downsize-defrag: when >25% of the pool is dead slabs, rebuild it
             // keeping each live slab sized to max(this-round-need, 2*count). This
             // reclaims BOTH the abandoned slabs left by past doublings AND the
@@ -417,41 +405,113 @@ struct vec_pool_incidence {
             // a dedicated sweep could tune them if pool overhead shows up.)
             if (abandoned_ > pool_.size() / 4)
                 compact(&incoming);
-            grows_.clear();
-            size_t cursor = pool_.size();
-            for (auto it = touched_begin; it != touched_end; ++it) {
-                const node_index v = *it;
-                if (incoming[v] == 0) continue;
-                const node_index need = count_[v] + incoming[v];
-                if (cap_[v] >= need) continue;
-                node_index new_cap = geo_cap(v, need);
-                if (static_cast<std::size_t>(new_cap) >
-                    static_cast<std::size_t>(kPoolMax) - cursor)
-                    edge_index_overflow("vec_pool bulk reserve");
-                grows_.push_back({v, base_[v], cap_[v],
-                                  static_cast<edge_index>(cursor), new_cap});
-                cursor += new_cap;
-                abandoned_ += cap_[v];
-            }
-            if (cursor != pool_.size()) {
-                pool_.resize(cursor);
-                for (const auto& g : grows_) {
-                    base_[g.v] = g.new_base;
-                    cap_[g.v]  = g.new_cap;
-                }
-            }
-            grow_count_ += grows_.size();
+            bulk_touched_n_ = static_cast<size_t>(touched_end - touched_begin);
+            bulk_team_ = omp_get_num_threads();
+            bulk_old_pool_size_ = pool_.size();
+            bulk_cap_offsets_.resize(static_cast<size_t>(bulk_team_) + 1);
+            bulk_abandoned_by_thread_.resize(static_cast<size_t>(bulk_team_));
+            bulk_thread_grows_.resize(static_cast<size_t>(bulk_team_));
         }
-        // implicit barrier — new base_/cap_ visible.
-        #pragma omp for schedule(static)
-        for (size_t i = 0; i < grows_.size(); ++i) {
-            const auto& g = grows_[i];
-            if (g.old_cap > 0 && count_[g.v] > 0) {
+
+        const int tid = omp_get_thread_num();
+        const size_t begin = bulk_touched_n_ * static_cast<size_t>(tid)
+                           / static_cast<size_t>(bulk_team_);
+        const size_t end = bulk_touched_n_ * static_cast<size_t>(tid + 1)
+                         / static_cast<size_t>(bulk_team_);
+        const auto& cfg = vec_pool_config::get();
+        auto& my_grows = bulk_thread_grows_[static_cast<size_t>(tid)];
+        my_grows.clear();
+        size_t new_slots = 0;
+        size_t abandoned = 0;
+        for (size_t i = begin; i < end; ++i) {
+            const node_index v = touched_begin[static_cast<std::ptrdiff_t>(i)];
+            const node_index need = count_[v] + incoming[v];
+            if (incoming[v] == 0 || cap_[v] >= need) continue;
+            node_index new_cap = need;
+            if (cap_[v] > 0) {
+                const node_index geo = static_cast<node_index>(
+                    int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
+                if (geo > new_cap) new_cap = geo;
+            }
+            my_grows.push_back({v, base_[v], cap_[v], 0, new_cap});
+            new_slots += new_cap;
+            abandoned += cap_[v];
+        }
+        bulk_cap_offsets_[static_cast<size_t>(tid) + 1] = new_slots;
+        bulk_abandoned_by_thread_[static_cast<size_t>(tid)] = abandoned;
+
+        #pragma omp barrier
+        #pragma omp single
+        {
+            bulk_cap_offsets_[0] = bulk_old_pool_size_;
+            size_t total_abandoned = 0;
+            size_t total_grows = 0;
+            for (int t = 0; t < bulk_team_; ++t) {
+                const size_t add =
+                    bulk_cap_offsets_[static_cast<size_t>(t) + 1];
+                if (add > static_cast<size_t>(kPoolMax)
+                              - bulk_cap_offsets_[static_cast<size_t>(t)])
+                    edge_index_overflow("vec_pool parallel bulk reserve");
+                bulk_cap_offsets_[static_cast<size_t>(t) + 1] =
+                    bulk_cap_offsets_[static_cast<size_t>(t)] + add;
+                total_abandoned +=
+                    bulk_abandoned_by_thread_[static_cast<size_t>(t)];
+                total_grows +=
+                    bulk_thread_grows_[static_cast<size_t>(t)].size();
+            }
+            const size_t cursor =
+                bulk_cap_offsets_[static_cast<size_t>(bulk_team_)];
+            if (cursor != pool_.size()) pool_.resize(cursor);
+            abandoned_ += total_abandoned;
+            grow_count_ += total_grows;
+        }
+
+        size_t cursor = bulk_cap_offsets_[static_cast<size_t>(tid)];
+        for (auto& g : my_grows) {
+            g.new_base = static_cast<edge_index>(cursor);
+            base_[g.v] = g.new_base;
+            cap_[g.v] = g.new_cap;
+            if (g.old_cap > 0 && count_[g.v] > 0)
                 std::copy_n(pool_.begin() + g.old_base,
                             static_cast<size_t>(count_[g.v]),
                             pool_.begin() + g.new_base);
-            }
+            cursor += g.new_cap;
         }
+        #pragma omp barrier
+#else
+        if (abandoned_ > pool_.size() / 4) compact(&incoming);
+        const auto& cfg = vec_pool_config::get();
+        std::vector<Grow> grows;
+        size_t cursor = pool_.size();
+        for (auto it = touched_begin; it != touched_end; ++it) {
+            const node_index v = *it;
+            const node_index need = count_[v] + incoming[v];
+            if (incoming[v] == 0 || cap_[v] >= need) continue;
+            node_index new_cap = need;
+            if (cap_[v] > 0) {
+                const node_index geo = static_cast<node_index>(
+                    int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
+                if (geo > new_cap) new_cap = geo;
+            }
+            if (static_cast<size_t>(new_cap) >
+                static_cast<size_t>(kPoolMax) - cursor)
+                edge_index_overflow("vec_pool bulk reserve");
+            grows.push_back({v, base_[v], cap_[v],
+                             static_cast<edge_index>(cursor), new_cap});
+            cursor += new_cap;
+            abandoned_ += cap_[v];
+        }
+        if (cursor != pool_.size()) pool_.resize(cursor);
+        for (const auto& g : grows) {
+            base_[g.v] = g.new_base;
+            cap_[g.v] = g.new_cap;
+            if (g.old_cap > 0 && count_[g.v] > 0)
+                std::copy_n(pool_.begin() + g.old_base,
+                            static_cast<size_t>(count_[g.v]),
+                            pool_.begin() + g.new_base);
+        }
+        grow_count_ += grows.size();
+#endif
     }
 
 private:
@@ -511,10 +571,13 @@ private:
     // Pool offsets are bounded by this; exceeding it would silently wrap base_.
     static constexpr edge_index kPoolMax = std::numeric_limits<edge_index>::max();
 
-    // Scratch for bulk_reserve_parallel — kept here (NOT thread_local) so
-    // the parallel slab-copy phase sees what the single thread populated.
     struct Grow { node_index v; edge_index old_base; node_index old_cap; edge_index new_base; node_index new_cap; };
-    std::vector<Grow> grows_;
+    size_t bulk_touched_n_ = 0;
+    size_t bulk_old_pool_size_ = 0;
+    int bulk_team_ = 1;
+    std::vector<size_t> bulk_cap_offsets_;
+    std::vector<size_t> bulk_abandoned_by_thread_;
+    std::vector<std::vector<Grow>> bulk_thread_grows_;
 };
 
 } // namespace apxchol

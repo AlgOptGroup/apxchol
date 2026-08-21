@@ -16,6 +16,7 @@
 #include "apxchol/checkpoint.h"
 #include "apxchol/env_knobs.h"
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -177,7 +178,15 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                    checkpoint* cp = nullptr) {
     const size_t n_verts = part.num_vertices();
     // n_verts > 0 guaranteed by the dispatcher; early-exit not needed here.
-    std::vector<factor_col> local_cols(n_verts);
+    // The final column array is reserved to n before any round. Grow it once
+    // here, then let each iteration write its own column directly. This avoids
+    // constructing a temporary vector-of-vectors and serially moving every
+    // column after the parallel region.
+    const size_t factor_base = factor_cols.size();
+    factor_cols.resize(factor_base + n_verts);
+    auto output_col = [&](size_t k) -> factor_col& {
+        return factor_cols[factor_base + k];
+    };
 
     #ifdef _OPENMP
     // Rounds whose IS is at or below omp_threshold take the fully serial path
@@ -211,7 +220,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
 
                 #pragma omp for schedule(dynamic, 64)
                 for (size_t k = 0; k < n_verts; ++k)
-                    process_vertex(elim, G, part.data[k], opts.seed, local_cols[k],
+                    process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
                                    /*dedup_inline=*/true);
                 // implicit barrier — edge_buffers populated before prefix-sum
@@ -258,9 +267,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
             }
             G.bulk_decrement_active(static_cast<node_index>(n_verts));
 
-            for (auto& col : local_cols)
-                factor_cols.push_back(std::move(col));
-
             // NOTE: the mega-fused parallel region runs compute + apply + apply_excess
             // back-to-back inside one fork-join, so we cannot attribute these
             // sub-phases separately without breaking the fusion. Emit one honest
@@ -293,7 +299,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
 
                 #pragma omp for schedule(dynamic, 64)
                 for (size_t k = 0; k < n_verts; ++k)
-                    process_vertex(elim, G, part.data[k], opts.seed, local_cols[k],
+                    process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
                                    /*dedup_inline=*/true);
                 // implicit barrier — edge_buffers populated before pre-pass
@@ -384,9 +390,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
             }
             G.bulk_decrement_active(static_cast<node_index>(n_verts));
 
-            for (auto& col : local_cols)
-                factor_cols.push_back(std::move(col));
-
             if (cp) (*cp)("compute+apply_fused");
         } else {
             // Legacy backends (vec/bstr): separate parallel compute +
@@ -405,14 +408,11 @@ void eliminate_partition_singleton(const Eliminator& elim,
 
                 #pragma omp for schedule(dynamic, 64) nowait
                 for (size_t k = 0; k < n_verts; ++k)
-                    process_vertex(elim, G, part.data[k], opts.seed, local_cols[k],
+                    process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
                                    /*dedup_inline=*/true);
             }
             if (cp) { (*cp)("merge_is"); (*cp)("compute"); }
-
-            for (auto& col : local_cols)
-                factor_cols.push_back(std::move(col));
 
             // Apply phase via helpers (replaces previous inline serial apply).
             detail::apply_deferred_edges(G, ws, cp);
@@ -430,9 +430,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
         for (size_t k = 0; k < n_verts; ++k) {
             wt.edge_buffer.clear();
             wt.excess_buffer.clear();
-            process_vertex(elim, G, part.data[k], opts.seed, local_cols[k], wt,
+            process_vertex(elim, G, part.data[k], opts.seed, output_col(k), wt,
                            /*dedup_inline=*/true);
-            factor_cols.push_back(std::move(local_cols[k]));
             for (auto [u, v, w] : wt.edge_buffer)
                 G.add_edge(u, v, w);
             for (auto [v, delta] : wt.excess_buffer)
@@ -641,11 +640,14 @@ factorization factorize_impl(const Eliminator& elim,
     // Active vertex list (natural index order) — filtered in-place each round.
     std::vector<node_index> active(n);
     std::ranges::iota(active, node_index{0});
+    std::vector<node_index> active_scratch;
 
     // The partitioner's view of the run-constant services, the shared
     // selection structure, and the degree-prepass scratch (all owned here).
     selection sel;
     std::vector<node_index> pre_degrees, pre_scratch, pre_eligible;
+    std::vector<std::array<size_t, 256>> pre_histograms;
+    std::vector<size_t> pre_filter_offsets;
     std::vector<node_index> live_degrees;   // vertex-indexed, for ctx.degrees
 
     // Shared round front-end: prepass (when the partitioner's trait asks for
@@ -672,20 +674,34 @@ factorization factorize_impl(const Eliminator& elim,
         if constexpr (partitioner_degree_prepass_v<P>) {
             const double avg_deg =
                 prune_and_degrees(g, act, pre_degrees, opts.omp_threshold);
-            const double thr = is_degree_threshold(
-                pre_degrees, act.size(), avg_deg, opts.partition, pre_scratch);
+            const double q = opts.partition.degree_quantile;
+            const double thr = q > 0.0 && q < 1.0
+                                   && act.size() > opts.omp_threshold
+                ? static_cast<double>(parallel_degree_quantile(
+                      pre_degrees, act.size(), q, pre_histograms))
+                : is_degree_threshold(pre_degrees, act.size(), avg_deg,
+                                      opts.partition, pre_scratch);
             if (live_degrees.size() < static_cast<size_t>(g.n()))
                 live_degrees.resize(g.n());
-            pre_eligible.clear();
-            for (size_t i = 0; i < act.size(); ++i) {
-                live_degrees[act[i]] = pre_degrees[i];
-                if (pre_degrees[i] <= thr) pre_eligible.push_back(act[i]);
+            size_t eligible_count;
+            if (act.size() > opts.omp_threshold) {
+                eligible_count = parallel_ordered_degree_filter(
+                    act, pre_degrees, thr, live_degrees, pre_eligible,
+                    pre_filter_offsets);
+            } else {
+                pre_eligible.clear();
+                for (size_t i = 0; i < act.size(); ++i) {
+                    live_degrees[act[i]] = pre_degrees[i];
+                    if (pre_degrees[i] <= thr) pre_eligible.push_back(act[i]);
+                }
+                eligible_count = pre_eligible.size();
             }
-            last_candidate_count = pre_eligible.size();
+            last_candidate_count = eligible_count;
             last_avg_degree = avg_deg;
             pctx.degrees = live_degrees;
             if (cp) (*cp)("prune");
-            p.find_partition(g, std::span<const node_index>(pre_eligible),
+            p.find_partition(g, std::span<const node_index>(
+                                 pre_eligible.data(), eligible_count),
                              pctx, sel);
         } else {
             p.find_partition(g, act, pctx, sel);
@@ -755,7 +771,14 @@ factorization factorize_impl(const Eliminator& elim,
         result.peak_graph_bytes = std::max(result.peak_graph_bytes,
                                            work.memory_bytes());
 
-        std::erase_if(active, [&](node_index v) { return !work.is_active(v); });
+        if (active.size() > opts.omp_threshold) {
+            parallel_stable_active_filter(
+                active, active_scratch, pre_filter_offsets,
+                [&](node_index v) { return work.is_active(v); });
+        } else {
+            std::erase_if(active,
+                          [&](node_index v) { return !work.is_active(v); });
+        }
 
         ++ws.round_index;
 
@@ -909,7 +932,14 @@ factorization factorize_impl(const Eliminator& elim,
             }
             result.peak_graph_bytes = std::max(result.peak_graph_bytes,
                                                work.memory_bytes());
-            std::erase_if(active, [&](node_index v) { return !work.is_active(v); });
+            if (active.size() > opts.omp_threshold) {
+                parallel_stable_active_filter(
+                    active, active_scratch, pre_filter_offsets,
+                    [&](node_index v) { return work.is_active(v); });
+            } else {
+                std::erase_if(active,
+                              [&](node_index v) { return !work.is_active(v); });
+            }
             ++ws.round_index;
         }
     }
@@ -960,10 +990,13 @@ factorization factorize_impl(const Eliminator& elim,
     ws   = factorize_workspace();
     sel  = selection();
     std::vector<node_index>().swap(active);
+    std::vector<node_index>().swap(active_scratch);
     std::vector<node_index>().swap(live_degrees);
     std::vector<node_index>().swap(pre_degrees);
     std::vector<node_index>().swap(pre_scratch);
     std::vector<node_index>().swap(pre_eligible);
+    std::vector<std::array<size_t, 256>>().swap(pre_histograms);
+    std::vector<size_t>().swap(pre_filter_offsets);
 
     detail::build_csc(result, factor_cols, n, cp);
     // The per-column lists are consumed: free them here (n small vectors + the
