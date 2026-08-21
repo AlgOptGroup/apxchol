@@ -661,7 +661,13 @@ factorization factorize_impl(const Eliminator& elim,
         sel.reset(g.n());
         last_avg_degree = 0.0;
         last_candidate_count = act.size();
-        partition_context pctx{opts.partition, opts.seed, opts.omp_threshold, cp};
+        partition_context pctx{
+            .options = opts.partition,
+            .seed = opts.seed,
+            .omp_threshold = opts.omp_threshold,
+            .cp = cp,
+            .degrees = {},
+        };
         if (cp) { cp->descend("find_partition"); cp->tick(); }
         if constexpr (partitioner_degree_prepass_v<P>) {
             const double avg_deg =

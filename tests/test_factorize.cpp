@@ -936,7 +936,13 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
 // whose only visible effect is which vertices round 0 samples.
 TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
     const auto L = grid_laplacian(30, 30);          // 900 vertices, avg degree < 4
-    apxchol::partition_context ctx{apxchol::partition_options{}, 42, 2000, nullptr};
+    apxchol::partition_context ctx{
+        .options = {},
+        .seed = 42,
+        .omp_threshold = 2000,
+        .cp = nullptr,
+        .degrees = {},
+    };
     std::vector<apxchol::node_index> active(900);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
 
