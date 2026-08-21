@@ -8,7 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if (NOT MSVC)
     add_compile_options(-Wall -Wextra -Wpedantic)
     if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-        add_compile_options(-march=native)
+        # This is a SEPARATE cmake project (not an add_subdirectory of the root),
+        # so the shared native-tuning module is included by relative path.
+        include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_native_arch.cmake)
+        if (APXCHOL_NATIVE_ARCH_FLAG)
+            add_compile_options(${APXCHOL_NATIVE_ARCH_FLAG})
+        endif()
     endif()
 endif()
 
@@ -122,6 +127,28 @@ if (NOT (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))
                    "// immintrin.h: x86-only, unused -- stripped for ${CMAKE_SYSTEM_PROCESSOR}"
                    _rchol_lap_src "${_rchol_lap_src}")
     file(WRITE ${rchol_SOURCE_DIR}/c++/rchol_lap/rchol_lap.cpp "${_rchol_lap_src}")
+endif()
+
+# spcol.cpp declares the two scratch arrays of gsl_spmatrix_add() as VLAs with an
+# initialiser — a GCC extension that clang rejects outright, so the fetched tree
+# does not build under clang on any ISA. Swap them for heap vectors of the same
+# length, zero-initialised the same way; they live to the end of the function, so
+# they still outlive every use of c->i / c->data (including the sp_copy at the
+# bottom). Only under clang: a heap allocation per call is not a stack VLA, and
+# gcc must keep timing the pristine upstream code path. Upstream is unmaintained.
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    file(READ ${rchol_SOURCE_DIR}/c++/rchol_lap/spcol.cpp _rchol_spcol_src)
+    string(REPLACE "#include <stdexcept>\n\n#include \"spcol.hpp\""
+                   "#include <stdexcept>\n#include <vector>  // for the VLA replacement below\n\n#include \"spcol.hpp\""
+                   _rchol_spcol_src "${_rchol_spcol_src}")
+    string(REPLACE "    size_t i_array[ a->nz + 4 + b->nz] = {0};\n    double data_array[ a->nz + 4 + b->nz] = {0};"
+                   "    std::vector<size_t> i_array(a->nz + 4 + b->nz, 0);       // was a VLA (GCC ext)\n    std::vector<double> data_array(a->nz + 4 + b->nz, 0.0);  // was a VLA (GCC ext)"
+                   _rchol_spcol_src "${_rchol_spcol_src}")
+    string(REPLACE "c->i = i_array;" "c->i = i_array.data();"
+                   _rchol_spcol_src "${_rchol_spcol_src}")
+    string(REPLACE "c->data = data_array;" "c->data = data_array.data();"
+                   _rchol_spcol_src "${_rchol_spcol_src}")
+    file(WRITE ${rchol_SOURCE_DIR}/c++/rchol_lap/spcol.cpp "${_rchol_spcol_src}")
 endif()
 
 set(RCHOL_DIR ${rchol_SOURCE_DIR}/c++)
@@ -258,6 +285,23 @@ if (BUILD_GPU_RCHOL)
     endif()
 
     find_package(OpenMP QUIET)
+
+    # experiment/auxilliary.hpp uses INT_MAX (line ~121) without including
+    # <climits>; it only compiles where libstdc++ happens to leak the macro in.
+    # It is the copy the CPU driver actually sees (experiment/custom_cg.hpp
+    # includes it by quoted name from the same directory), and clang does not
+    # leak it, so add the include the source is missing.
+    set(_exp_aux_hpp "${gpu_rchol_SOURCE_DIR}/experiment/auxilliary.hpp")
+    file(READ "${_exp_aux_hpp}" _exp_aux_content)
+    string(FIND "${_exp_aux_content}" "#include <climits>" _exp_aux_pos)
+    if (_exp_aux_pos EQUAL -1)
+        string(REPLACE
+            "#include \"pre_process.hpp\""
+            "#include \"pre_process.hpp\"\n#include <climits>  // INT_MAX"
+            _exp_aux_content "${_exp_aux_content}")
+        file(WRITE "${_exp_aux_hpp}" "${_exp_aux_content}")
+        message(STATUS "Patched gpu_rchol experiment/auxilliary.hpp with the missing <climits>")
+    endif()
 
     # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
     # this driver uses MKL's default 32-bit MKL_INT, so it must NOT get the ILP64 layer.

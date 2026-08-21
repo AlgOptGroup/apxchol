@@ -10,15 +10,20 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# -march=native is the default for local builds; turn OFF for portable
+# Native tuning is the default for local builds; turn OFF for portable
 # binaries (distributed wheels/packages would SIGILL on older CPUs).
-option(APXCHOL_NATIVE_ARCH "Compile with -march=native (Release/RelWithDebInfo)" ON)
+# The flag itself is ISA-dependent (-march=native on x86, -mcpu=native on ARM)
+# and is probed in cmake/apxchol_native_arch.cmake.
+option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
 
 if (NOT MSVC)
     add_compile_options(-Wall -Wextra -Wpedantic)
     if (APXCHOL_NATIVE_ARCH AND
         (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
-        add_compile_options(-march=native)
+        include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/apxchol_native_arch.cmake)
+        if (APXCHOL_NATIVE_ARCH_FLAG)
+            add_compile_options(${APXCHOL_NATIVE_ARCH_FLAG})
+        endif()
     endif()
 endif()
 
