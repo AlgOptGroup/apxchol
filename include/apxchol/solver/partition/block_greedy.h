@@ -244,10 +244,23 @@ private:
                 // on ecology1, against 33% and 28% for the same repair done by
                 // rescanning all candidates.  On a graph whose numbering
                 // carries no locality (com-Youtube, as-Skitter) the frontier
-                // IS most of the boundary and the two cost the same — but that
-                // is exactly where the repair pays: bail |active| 27211 ->
-                // 9257 and 69598 -> 22584, forward levels 3430 -> 3047 and
-                // 5772 -> 5162.
+                // is much larger, but that is exactly where the repair pays by
+                // avoiding thousands of weak BG rounds.  With the current
+                // candidate-relative yield rule, same-binary T=16 A/B at seed
+                // 42 (three interleaved repair runs, each bracketed by plain
+                // null arms) gives:
+                //
+                //   com-Youtube  setup median 5.40 -> 4.68 s, total 13.00 ->
+                //                11.26 s, despite iterations 22 -> 23.
+                //   as-Skitter   component-consistent RHS, factor nnz
+                //                18.439M -> 18.393M, iterations 27 -> 26;
+                //                paired process CPU time -36%, -33%, -33%.
+                //
+                // Repair-only-at-bail and active-size floor/ceiling gates were
+                // also built.  They lose the early ordering effect, retain the
+                // extra rounds, or perturb quality without the setup saving;
+                // none survived.  Keep the full frontier repair rather than
+                // adding one of those governors.
                 //
                 // Admission, repeated to fixpoint: a frontier vertex is
                 // PENDING when no chosen active neighbor blocks it, and is
