@@ -134,22 +134,26 @@ endif()
 # does not build under clang on any ISA. Swap them for heap vectors of the same
 # length, zero-initialised the same way; they live to the end of the function, so
 # they still outlive every use of c->i / c->data (including the sp_copy at the
-# bottom). Only under clang: a heap allocation per call is not a stack VLA, and
-# gcc must keep timing the pristine upstream code path. Upstream is unmaintained.
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    file(READ ${rchol_SOURCE_DIR}/c++/rchol_lap/spcol.cpp _rchol_spcol_src)
-    string(REPLACE "#include <stdexcept>\n\n#include \"spcol.hpp\""
-                   "#include <stdexcept>\n#include <vector>  // for the VLA replacement below\n\n#include \"spcol.hpp\""
-                   _rchol_spcol_src "${_rchol_spcol_src}")
-    string(REPLACE "    size_t i_array[ a->nz + 4 + b->nz] = {0};\n    double data_array[ a->nz + 4 + b->nz] = {0};"
-                   "    std::vector<size_t> i_array(a->nz + 4 + b->nz, 0);       // was a VLA (GCC ext)\n    std::vector<double> data_array(a->nz + 4 + b->nz, 0.0);  // was a VLA (GCC ext)"
-                   _rchol_spcol_src "${_rchol_spcol_src}")
-    string(REPLACE "c->i = i_array;" "c->i = i_array.data();"
-                   _rchol_spcol_src "${_rchol_spcol_src}")
-    string(REPLACE "c->data = data_array;" "c->data = data_array.data();"
-                   _rchol_spcol_src "${_rchol_spcol_src}")
-    file(WRITE ${rchol_SOURCE_DIR}/c++/rchol_lap/spcol.cpp "${_rchol_spcol_src}")
-endif()
+# bottom). Upstream is unmaintained.
+#
+# Applied unconditionally, NOT only under clang. gsl_spmatrix_add has no callers
+# in the fetched tree (grep: one declaration in spcol.hpp, one definition here,
+# zero calls), so the heap allocation can never execute and no rchol timing can
+# move. Patching it under only one compiler would leave a competitor's sources
+# differing between our gcc and clang builds — which would quietly bias the
+# clang-vs-gcc comparison against RCHOL.
+file(READ ${rchol_SOURCE_DIR}/c++/rchol_lap/spcol.cpp _rchol_spcol_src)
+string(REPLACE "#include <stdexcept>\n\n#include \"spcol.hpp\""
+               "#include <stdexcept>\n#include <vector>  // for the VLA replacement below\n\n#include \"spcol.hpp\""
+               _rchol_spcol_src "${_rchol_spcol_src}")
+string(REPLACE "    size_t i_array[ a->nz + 4 + b->nz] = {0};\n    double data_array[ a->nz + 4 + b->nz] = {0};"
+               "    std::vector<size_t> i_array(a->nz + 4 + b->nz, 0);       // was a VLA (GCC ext)\n    std::vector<double> data_array(a->nz + 4 + b->nz, 0.0);  // was a VLA (GCC ext)"
+               _rchol_spcol_src "${_rchol_spcol_src}")
+string(REPLACE "c->i = i_array;" "c->i = i_array.data();"
+               _rchol_spcol_src "${_rchol_spcol_src}")
+string(REPLACE "c->data = data_array;" "c->data = data_array.data();"
+               _rchol_spcol_src "${_rchol_spcol_src}")
+file(WRITE ${rchol_SOURCE_DIR}/c++/rchol_lap/spcol.cpp "${_rchol_spcol_src}")
 
 set(RCHOL_DIR ${rchol_SOURCE_DIR}/c++)
 set(RCHOL_SOURCES
