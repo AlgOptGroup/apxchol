@@ -23,6 +23,11 @@ import runner_common as rc
 
 HYPRE = {"hypre_boomeramg", "hypre_boomeramg_gpu"}
 RCHOL = {"rchol", "rchol_par"}
+# Solvers that do not read the matrix from us at all: they consume the .mtx we DUMP.
+# A change to what we dump invalidates their cells even when their own code and the
+# solver-side harness are untouched, which is why they need a rule of their own --
+# nothing else in this file would notice.
+DUMP_CONSUMERS = {"parac", "parac_graph", "parac_physics", "cmg", "ac", "ac2"}
 
 # (commit, one-line reason, predicate over (solver, matrix_id, kind))
 RULES = [
@@ -32,6 +37,10 @@ RULES = [
      lambda s, m, k: s in RCHOL),
     ("9889d01", "operator files were read through the graph reader (diagonal discarded)",
      lambda s, m, k: k == "operator"),
+    ("3bda0c9", "the dumped .mtx these solvers consume changed (--pin-dump dropped; "
+                "external solvers ground natively). 3bda0c9 also contains 9889d01, so "
+                "requiring it covers the operator-interpretation change to the dump too",
+     lambda s, m, k: s in DUMP_CONSUMERS),
 ]
 
 
