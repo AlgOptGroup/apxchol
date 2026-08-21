@@ -148,7 +148,17 @@ PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
                     "Tolerance calibrated from a probe run so ParAC's own printed "
                     "relative residual lands under 1e-8. AMD-reordered, MKL serial, 16 cores",
             "repeat": REPS, "tier": "broad",
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            # The toolchain behind these numbers, read off the ParAC CPU driver
+            # ITSELF (ELF .comment + DT_NEEDED) rather than copied from
+            # benchmarks/parac_build.sh. That script hardcodes `g++`, which names
+            # no version and cannot tell us whether the driver in place today even
+            # came from it — the same reason our own binary self-reports BUILD_META.
+            # These describe the timed driver; the AMD-reorder prep charged to its
+            # setup is julia, as the note above says.
+            **rc.binary_toolchain(rc.PARAC_CPU_DRIVER)}
+# The GPU cells' toolchain is added per driver in run_gpu (two drivers, and both
+# are OURS to build — build-cuda/gpu_rchol_gpu_driver{,_physics}).
 PROV_GPU = {"source": "parac_runner.py", "git_sha": PROV_CPU["git_sha"]}
 
 _g = lambda pat, o: (re.search(pat, o).group(1) if re.search(pat, o) else None)
@@ -733,11 +743,16 @@ def run_gpu(mid, tol=TOL):
     results = []
     for solver_key, driver in (("parac_graph", rc.PARAC_GPU_DRIVER),
                                ("parac_physics", rc.PARAC_GPU_DRIVER_PHYS)):
+        # The toolchain of THE DRIVER ABOUT TO RUN, read off that file (ELF
+        # .comment + DT_NEEDED). build-cuda/ is a directory name and nothing more:
+        # a stale binary sitting in it would make any name-based claim a lie, so
+        # nothing here is inferred from the path.
+        prov = {**PROV_GPU, **rc.binary_toolchain(driver)}
         skip_reason = (GRAPH_NA if (is_operator and solver_key == "parac_graph")
                        else PHYSICS_NA if (not is_operator and solver_key == "parac_physics")
                        else None)
         if skip_reason:
-            rc.emit_cell(family, mid, solver_key, "", "n/a", {}, THREADS, "gpu", PROV_GPU,
+            rc.emit_cell(family, mid, solver_key, "", "n/a", {}, THREADS, "gpu", prov,
                          matrix_meta={"parac_mode": "n/a", "parac_na_reason": skip_reason})
             results.append(f"{solver_key}[n/a]"); continue
         if rc.cell_done(family, mid, solver_key, "", THREADS, "gpu", terminal=TERMINAL_GPU):
@@ -751,7 +766,7 @@ def run_gpu(mid, tol=TOL):
             results.append(f"{solver_key}[TIMEOUT]"); continue   # retried next run
         ok = [r for r in runs if r["factor"] and r["solve"] and r["iters"]]
         if not ok:
-            rc.emit_cell(family, mid, solver_key, "", "failed", None, THREADS, "gpu", PROV_GPU)
+            rc.emit_cell(family, mid, solver_key, "", "failed", None, THREADS, "gpu", prov)
             results.append(f"{solver_key}[FAILED]"); continue
         med = lambda key, scale=1.0: statistics.median(float(r[key] or 0) * scale for r in ok)
         etree = med("etree"); ftree = med("ftree"); summ = med("summary")
@@ -771,7 +786,7 @@ def run_gpu(mid, tol=TOL):
                    "iters": iters, "rel_res": rr, "parac_tol": cal}
         vram = [float(r["vram_mb"]) for r in ok if r.get("vram_mb")]
         if vram: metrics["max_vram_mb"] = round(max(vram), 1)   # peak VRAM over reps
-        rc.emit_cell(family, mid, solver_key, "", status, metrics, THREADS, "gpu", PROV_GPU,
+        rc.emit_cell(family, mid, solver_key, "", status, metrics, THREADS, "gpu", prov,
                      matrix_meta={"parac_prep": prep_prov})
         results.append(f"{solver_key}[{status} it={iters} solve={solve:.3f}]")
     return " ".join(results)

@@ -91,14 +91,54 @@ def classify(m):
 # handed the same operator via --dump-mtx, so the record applies to them too.
 OBSERVED = {}
 
+# What the BINARY reported about ITSELF (`BUILD_META ...` on stderr): compiler,
+# version, OpenMP runtime, arch flags. Filled from every run of it — including a
+# run that timed out — and merged into the provenance of the cells it produced,
+# so a cell names the toolchain its numbers came from. NOT applied to the AC/AC2
+# cells: those never run this binary (see julia_toolchain).
+BUILD = {}
+
+# AC/AC2 (Laplacians.jl) run under julia, not under any binary we build.
+JULIA_SOLVERS = ("ac", "ac2")
+_JULIA_TOOLCHAIN = {}
+
+def julia_toolchain():
+    """The toolchain behind an AC/AC2 cell, asked of the julia that runs them.
+
+    There is no ahead-of-time compiler to record: Laplacians.jl is JIT-compiled
+    per process, so what identifies the code generator is julia's version and its
+    libLLVM, and the CPU that JIT targets — julia's default `--cpu-target native`
+    tunes for the build machine exactly as our own -march=native builds do.
+    approxChol.jl is pure julia (no ccall, no threading), so no OpenMP runtime is
+    in its solve path. Probed once; unknown if julia cannot be run."""
+    if not _JULIA_TOOLCHAIN:
+        probe = ('println(string(VERSION)); println(Base.libllvm_version); '
+                 'println(Base.JLOptions().cpu_target == C_NULL ? "native" : '
+                 'unsafe_string(Base.JLOptions().cpu_target)); println(Sys.CPU_NAME)')
+        ver = llvm = target = cpu = "unknown"
+        try:
+            out = sh(f"julia -e '{probe}'", timeout=300).stdout.split()
+            if len(out) >= 4: ver, llvm, target, cpu = out[:4]
+        except Exception:
+            pass
+        _JULIA_TOOLCHAIN.update({
+            "compiler": "julia", "compiler_version": f"{ver} (libLLVM {llvm})",
+            "openmp_runtime": "none (pure-julia solver path)",
+            "arch_flags": f"cpu_target={target} ({cpu})"})
+    return _JULIA_TOOLCHAIN
+
 def emit(family, mid, solver, config, status, metrics, extra_meta=None):
     """One cell. `extra_meta` is whatever the runner learned that the registry
     cannot say — notably WHY a cell is n/a, so an unsupported combination reads as
-    unsupported instead of as a hole in the table."""
+    unsupported instead of as a hole in the table.
+
+    The toolchain fields go into PROVENANCE, and which ones depends on what ran:
+    the binary's own BUILD_META for the in-process solvers, julia's for AC/AC2."""
     meta = dict(OBSERVED.get(mid) or {})
     if extra_meta:
         meta.update(extra_meta)
-    return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, PROV,
+    prov = {**PROV, **(julia_toolchain() if solver in JULIA_SOLVERS else BUILD)}
+    return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, prov,
                         matrix_meta=meta or None)
 
 def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout=None, ground=None,
@@ -137,7 +177,12 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
         with rc.VramSampler("benchmark", enabled=(DEVICE == "gpu")) as vram:
             try: p=sh(cmd, timeout=timeout or TIMEOUT, mem_cap_gb=cap)
             except subprocess.TimeoutExpired as e:
+                # BUILD_META is the binary's FIRST stderr line, so even a run
+                # killed at the wall cap identifies the toolchain behind the
+                # 'timeout' cell it is about to write.
+                BUILD.update(rc.parse_build_meta(e.stderr))
                 return "timeout", _diag(None, e.output, e.stderr)
+        BUILD.update(rc.parse_build_meta(p.stderr))   # what built the binary that just ran
         st,m = classify(rc.parse_csv(p.stdout))
         if m is None:
             # No CSV row = crash. Distinguish OUT-OF-MEMORY (the giants: cuSPARSE SpSV

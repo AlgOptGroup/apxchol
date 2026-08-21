@@ -297,7 +297,32 @@ the metric rather than storing a misleading value.
 ### Machine
 
 Every committed number was measured on one machine: **AMD Ryzen 9 7945HX** (16 cores /
-32 threads, Zen 4), **128 GB** RAM, **NVIDIA RTX 4090 Laptop GPU (16 GB)**, Linux, GCC.
+32 threads, Zen 4), **128 GB** RAM, **NVIDIA RTX 4090 Laptop GPU (16 GB)**, Linux.
+
+**Which toolchain produced a cell is recorded in the cell**, not in this paragraph.
+Every cell written from 2026-08-21 on carries `compiler`, `compiler_version`,
+`openmp_runtime` and `arch_flags` under `provenance` (plus `cuda_host_compiler` on a
+CUDA build), and each of those comes from the artefact that actually ran:
+
+- **Solvers running in our binary** (apxchol, RCHOL/pRCHOL, BoomerAMG, AMGCL) — the
+  binary prints one `BUILD_META …` line as the first thing `main()` does
+  (`emit_build_meta`, `benchmarks/src/benchmark.cpp`) and the runner lifts it
+  (`runner_common.parse_build_meta`). The compiler names itself through its own
+  predefined macros, the OpenMP runtime is probed with `dlsym` in the running
+  process, and the tuning flags are compiled in by `benchmarks/CMakeLists.txt`.
+  Nothing is inferred from which build directory was invoked: a stale binary in
+  `build-clang/` is still a gcc binary, and this is the one way to say so.
+- **External solvers** (ParAC's CPU/GPU drivers, the CMG MEX) — read off the ELF of
+  the file that ran (`.comment` producers + `DT_NEEDED`, `runner_common.binary_toolchain`),
+  not copied from the build script that is supposed to have produced it.
+- **AC/AC2** — julia JIT: version + libLLVM + `--cpu-target`, asked of the julia that
+  runs them. `arch_flags` is not recoverable from an ELF, so it reads `unknown` for the
+  external binaries rather than being guessed.
+
+Cells written **before** that date carry none of these fields (all 616 of them: the
+provenance keys in the store were exactly `git_sha, boost, boost_expected, note,
+repeat, tier, timestamp, source`). For those, the toolchain is genuinely unrecorded —
+GCC on this machine, with no version pinned down.
 Runs are **boost-on** (no frequency lock), which on this laptop gives a **±20–30%
 session-to-session spread** on the same commit and config — so treat only ratios well
 above that band as signal, not individual cells or small deltas. The locked-frequency

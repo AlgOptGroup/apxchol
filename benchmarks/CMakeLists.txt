@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# The machine-tuning flags actually put on the command line below. Recorded into
+# the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
+# cell says whether its numbers came from a tuned build. Empty = untuned.
+set(APXCHOL_BENCH_ARCH_FLAGS "")
+
 if (NOT MSVC)
     add_compile_options(-Wall -Wextra -Wpedantic)
     if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
@@ -13,6 +18,7 @@ if (NOT MSVC)
         include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_native_arch.cmake)
         if (APXCHOL_NATIVE_ARCH_FLAG)
             add_compile_options(${APXCHOL_NATIVE_ARCH_FLAG})
+            set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_NATIVE_ARCH_FLAG}")
         endif()
     endif()
 endif()
@@ -511,6 +517,26 @@ target_link_libraries(benchmark PRIVATE laplacian_core rchol_lib apxchol_v1)
 target_include_directories(benchmark PRIVATE ${AMGCL_INCLUDE})
 target_compile_definitions(benchmark PRIVATE HAVE_RCHOL HAVE_APXCHOL_V1)
 target_compile_features(benchmark PRIVATE cxx_std_23)
+
+# ── BUILD_META inputs (emit_build_meta in src/benchmark.cpp) ───────────────────
+# The compiler names itself through its own predefined macros and probes its
+# OpenMP runtime at run time; these two facts it cannot know about itself. They
+# are COMPILED IN rather than handed to the runner, so they travel with the
+# binary: a runner reading them off a build-directory name would keep describing
+# a stale binary by the directory it happens to sit in.
+target_compile_definitions(benchmark PRIVATE
+    APXCHOL_BUILD_ARCH_FLAGS="${APXCHOL_BENCH_ARCH_FLAGS}")
+# dlsym for the OpenMP-runtime probe. Empty on glibc >= 2.34 (libdl merged into
+# libc); CMAKE_DL_LIBS keeps it linking on the systems where it is not.
+target_link_libraries(benchmark PRIVATE ${CMAKE_DL_LIBS})
+if (APXCHOL_USE_CUDA)
+    # BUILD_META's cuda_host_compiler: the host compiler nvcc was pointed at with
+    # -ccbin. Empty means CMake passed no -ccbin and nvcc used its own default,
+    # which the binary reports as `unset(nvcc-default)` rather than as a name we
+    # would be guessing.
+    target_compile_definitions(benchmark PRIVATE
+        APXCHOL_BUILD_CUDA_HOST_COMPILER="${CMAKE_CUDA_HOST_COMPILER}")
+endif()
 
 # AMGCL CUDA backend adapter (uses thrust + cuSPARSE, compiled with nvcc).
 # CUDA standard pinned to 20 (nvcc may not fully support C++23 with our toolchain).
