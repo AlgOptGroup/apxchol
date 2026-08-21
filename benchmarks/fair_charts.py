@@ -192,44 +192,6 @@ def family_groups(recs, fam, mats, split=False):
     if xl:  groups.append(("_giants_xl", xl))
     return groups
 
-def bar_chart(recs, fam, out):
-    mats = matrix_order(recs, fam)
-    # table[label][matrix] = (total_s, converged) — chosen via _pick (prefer t16,
-    # fall back to t1 for serial solvers, prefer converged).
-    table = defaultdict(dict)
-    for lab in ORDER:
-        if lab in CHART_EXCLUDE: continue
-        for mat in mats:
-            best = _pick(recs, fam, mat, lab)
-            if best is None: continue
-            table[lab][mat] = (best.get("metrics", {}).get("total_s"),
-                               best["status"] == "complete")
-    labs = [l for l in ORDER if l in table and l not in CHART_EXCLUDE]
-    if not labs or not mats: return
-    fig, ax = plt.subplots(figsize=(max(8, 1.6 * len(mats)), 5))
-    w = 0.8 / max(1, len(labs))
-    x = np.arange(len(mats))
-    for i, lab in enumerate(labs):
-        ys, hatched = [], []
-        for m in mats:
-            v = table[lab].get(m)
-            if v and v[0] and v[1]:
-                ys.append(v[0]); hatched.append(False)
-            elif v and v[0]:
-                ys.append(v[0]); hatched.append(True)   # ran but didn't converge
-            else:
-                ys.append(np.nan); hatched.append(False)
-        bars = ax.bar(x + i * w, ys, w, label=lab, color=COLORS.get(lab, "#888"))
-        for b, h in zip(bars, hatched):
-            if h: b.set_hatch("xxx"); b.set_alpha(0.55)
-    ax.set_yscale("log")
-    ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right")
-    ax.set_ylabel("total solve time (s), log scale — t16")
-    ax.set_title(f"{fam}: solver comparison (per-solver grounding, tol 1e-8)  "
-                 f"[hatched = ran but did not reach 1e-8]")
-    ax.legend(ncol=3, fontsize=8); ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
-
 def scaling_chart(recs, fam, out, gpu_rows=None, device="cpu"):
     # total-time-vs-nnz LINE only makes sense for a genuine size ladder (grids).
     # Split by device (like the bar charts): device="cpu" plots the CPU solvers,
@@ -278,67 +240,6 @@ def scaling_chart(recs, fam, out, gpu_rows=None, device="cpu"):
     ax.set_title(f"{fam} ({device.upper()}): scaling vs nnz (per-solver grounding, tol 1e-8)")
     ax.legend(fontsize=8); ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
-
-def stacked_chart(recs, fam, out, mats=None):
-    """Per-matrix grouped bars (LINEAR scale), each split into
-    setup (solid) + solve (///). ParAC's AMD reorder is included in its setup."""
-    if mats is None: mats = headline_mats(recs, fam)
-    data = defaultdict(dict)  # data[lab][mat] = (setup, solve)
-    for lab in ORDER:
-        if lab in CHART_EXCLUDE: continue
-        for mat in mats:
-            best = _pick(recs, fam, mat, lab)
-            if best is None or best["status"] != "complete": continue
-            m = best["metrics"]
-            if m.get("setup_s") is None or m.get("solve_s") is None: continue
-            data[lab][mat] = (m["setup_s"], m["solve_s"])  # setup_s already includes AMD
-    labs = [l for l in ORDER if l in data]
-    if not labs or not mats: return
-    # bars within each matrix group are sorted fastest -> slowest by total time
-    # (colors stay per-solver via the legend).
-    maxb = max((sum(1 for l in labs if m in data[l]) for m in mats), default=1)
-    fig, ax = plt.subplots(figsize=(max(8, 1.7 * len(mats)), 5.5))
-    w = 0.8 / max(1, maxb); x = np.arange(len(mats))
-    legended = set()
-    for i, mat in enumerate(mats):
-        present = sorted((l for l in labs if mat in data[l]),
-                         key=lambda l: sum(data[l][mat]))
-        for j, lab in enumerate(present):
-            setup, solv = data[lab][mat]
-            col = COLORS.get(lab, "#888"); xx = x[i] + j * w
-            ax.bar(xx, setup, w, color=col, label=(lab if lab not in legended else None))
-            legended.add(lab)
-            ax.bar(xx, solv, w, bottom=setup, color=col, alpha=0.45, hatch="///")
-    ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right")
-    ax.set_ylabel("time (s) — t16   [solid = setup (incl. AMD for ParAC), /// = solve]")
-    ax.set_title(f"{fam}: setup + solve breakdown (per-solver grounding, tol 1e-8, linear scale)")
-    ax.legend(ncol=3, fontsize=8); ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
-
-def iters_chart(recs, fam, out, mats=None):
-    """PCG iterations as a matrix × solver heatmap (CPU) — preconditioner quality,
-    threads-independent. Was grouped bars; a heatmap stays legible across the full
-    matrix ladder. CMG/AC iter counts are INCLUDED (iters is the metric on which CMG
-    is fairly comparable, unlike its interpreter-bound wall time)."""
-    if mats is None: mats = headline_mats(recs, fam)
-    rowlabs, rows, stats = [], [], []
-    for lab in ORDER:                          # include CMG/AC: iters IS meaningful
-        vals, srow, any_v, any_s = [], [], False, False
-        for mat in mats:
-            best = _pick(recs, fam, mat, lab)
-            st = best["status"] if best else None
-            it = (best.get("metrics", {}).get("iters")
-                  if best and st == "complete" else None)  # no non-converged
-            vals.append(it if it else np.nan); srow.append(st)
-            any_v = any_v or bool(it); any_s = any_s or (st in ("timeout", "oom", "failed"))
-        if any_v or any_s:                      # keep rows that ran-but-failed too
-            rowlabs.append(lab); rows.append(vals); stats.append(srow)
-    if not rowlabs or not mats: return
-    gpu.value_heatmap(mats, rowlabs, np.array(rows, dtype=float), out, is_iters=True,
-                      status=stats, device="cpu",
-                      title=f"{fam} (CPU): PCG iterations — matrix × solver, t16 "
-                            f"(green = fewest per matrix; cell = iters / ×best; "
-                            f"Timeout / OOM / FAIL = ran but no result; blank = not run)")
 
 def convergence_chart(recs, fam, out, mats=None):
     """Final relative residual reached per solver per matrix (log y, 1e-8 line).

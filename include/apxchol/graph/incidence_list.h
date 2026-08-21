@@ -228,12 +228,6 @@ struct vec_pool_incidence {
         pool_[base_[v] + count_[v]++] = idx;
     }
 
-    /// True iff push(v, ...) will NOT call grow() (hence won't realloc the
-    /// shared pool_). The parallel multi-vertex section uses this to stay
-    /// grow-free: a full slab defers the edge instead of growing under
-    /// sibling threads (which would be a data race on pool_).
-    bool has_inline_capacity(node_index v) const { return count_[v] < cap_[v]; }
-
     /// Ensure cap_[v] >= need. Caller must hold a serial pre-pass before
     /// invoking atomic_push_reserved in parallel — grow() reallocates the
     /// vertex's slab and is NOT thread-safe.

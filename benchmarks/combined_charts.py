@@ -304,15 +304,6 @@ def _cpu_time_cell(recs, fam, mat, cpu_lab, metric):
         v = m["setup_s"] + m["solve_s"]
     return (v if v is not None else np.nan), False
 
-def _cpu_oom(recs, fam, mat, lab):
-    """True if this CPU cell exists with status 'oom' (didn't fit host memory) -- so the
-    heatmap can label it 'OOM' instead of leaving it an indistinguishable grey 'not run'."""
-    if lab is None:
-        return False
-    b = cpu._pick(recs, fam, mat, lab)
-    return bool(b and b.get("status") == "oom")
-
-
 def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mats=None,
                      gstatus=None):
     """solver x matrix 'who wins where' heatmap for ONE metric (total / setup / solve /

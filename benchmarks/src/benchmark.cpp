@@ -273,7 +273,10 @@ static double read_vmrss_mb() {
 // so it overcounts the minimal working set the same way VmRSS overcounts host -- read at
 // solve end to record the SOLVE-held VRAM (operator + factor + SpSV bufs + PCG vectors).
 // Returns -1 when CUDA isn't compiled in or the query fails (CPU solvers stay unmeasured).
-static double read_vram_mb() {
+// [[maybe_unused]]: BOTH call sites sit inside `#ifdef APXCHOL_USE_CUDA` blocks, so a
+// CPU build defines this and never calls it. Conditionally used, not dead -- deleting it
+// breaks the CUDA build.
+[[maybe_unused]] static double read_vram_mb() {
 #ifdef APXCHOL_USE_CUDA
     size_t mf = 0, mt = 0;
     if (cudaMemGetInfo(&mf, &mt) == cudaSuccess && mt >= mf)
@@ -733,7 +736,6 @@ struct Args {
     // Match accepts either the bare combo name ("bg+tree") to run all
     // storage variants, or fully-qualified "bg+tree[vec]" / "bg+tree[fwd_star]".
     std::set<std::string> v1_configs;
-    bool v1_profile = false;
     // De-singularization is two orthogonal axes (see resolve_desing). decompose:
     // auto|whole|split (auto = split iff disconnected). ground: auto|pin|coarse|native
     // (auto = pin for AMG solvers / native for apxchol). The grounding WORK is timed
@@ -788,7 +790,6 @@ static Args parse_args(int argc, char** argv) {
             std::string tok;
             while (std::getline(ss, tok, ',')) a.v1_configs.insert(tok);
         }
-        else if (arg == "--v1-profile") a.v1_profile = true;
         else if (arg == "--decompose") {
             a.decompose = next();
             static const std::set<std::string> ok{"auto","whole","split"};
