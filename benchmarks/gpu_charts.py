@@ -10,7 +10,7 @@ parac_runner.py), the same runner/store as the CPU axis.
 
   python3 benchmarks/gpu_charts.py --root results/cells --out benchmarks/latest/figures
 """
-import argparse, csv, json, glob, os
+import argparse, json, glob, os
 from collections import defaultdict
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -19,7 +19,8 @@ from matplotlib.ticker import FuncFormatter
 import numpy as np
 # Matrix axis labels come from the registry, so a matrix we ASSEMBLED an operator
 # for (a graph file -> L = D - A) never appears under its bare file name.
-from runner_common import mat_labels   # noqa: F401
+from runner_common import (APXCHOL_DEFAULT_CONFIG, mat_labels,
+                           require_injective_labels, timeout_cap)
 
 # apxchol (GPU) = the GPU-RESIDENT PCG (cuda_pcg: all PCG vectors stay on device,
 # cuBLAS axpy/dot/nrm2 + cuSPARSE SpMV, precond via cuda_sptrsv::solve_LLt_dev). It
@@ -27,26 +28,42 @@ from runner_common import mat_labels   # noqa: F401
 # clocks), so the hybrid is dropped. apxchol stays blue; competitors match the CPU
 # chart colours (BoomerAMG green, AMGCL brown, ParAC orange). Geometric MG is excluded
 # (geometric MG is structured-grid-only, not a general-matrix solver).
-ORDER  = ["apxchol (GPU)", "ParAC Graph (GPU)", "ParAC Physics (GPU)",
+
+# ── THE SERIES RULE (same as fair_charts) ────────────────────────────────────────
+# Every series is EXACTLY ONE (solver, configuration); no series is a per-cell
+# minimum over configurations. Previously all four apxchol IS-selectors mapped to a
+# single "apxchol (GPU)" label and load() kept the fastest of the four per matrix,
+# while BoomerAMG's two configurations stayed two separate series -- best-of-4 for
+# us, best-of-1 for them. On the 27 GPU matrices in the store that minimum was worth
+# a geomean 9.7% (max 2.33x on parabolic_fem) against apxchol's own declared
+# default, and it also shrank the 10x-apxchol cap that every timed-out competitor
+# bar is clamped to. The selector spread lives in the dedicated selector/ablation
+# figures, which read the per-config cells directly.
+APX_SERIES  = ["apxchol/bg (GPU)", "apxchol/luby (GPU)",
+               "apxchol/root (GPU)", "apxchol/bk (GPU)"]
+ORDER  = APX_SERIES + ["ParAC Graph (GPU)", "ParAC Physics (GPU)",
           "BoomerAMG (GPU)", "BoomerAMG/cut (GPU)", "AMGCL (GPU)"]
-COLORS = {"apxchol (GPU)": "#0b5394",
+COLORS = {"apxchol/bg (GPU)": "#0b5394",     # declared default = darkest blue
+          "apxchol/luby (GPU)": "#3d7ebf",   # the other selectors get their own
+          "apxchol/root (GPU)": "#6fa8dc",   # shades, exactly as BoomerAMG's two
+          "apxchol/bk (GPU)": "#a4c2f4",     # configurations get two greens
           "ParAC Graph (GPU)": "#ff8c00", "ParAC Physics (GPU)": "#e6550d",
           "BoomerAMG (GPU)": "#2ca02c", "BoomerAMG/cut (GPU)": "#74c476",
           "AMGCL (GPU)": "#8c564b"}
-# (solver, config) -> chart label for GPU cells.
+# (solver, config) -> chart label for GPU cells. MUST stay injective (asserted below).
 LABELS = {
-    # all four IS-selectors -> one "apxchol (GPU)" series; load() keeps the fastest
-    # (min total) per matrix -- the best eliminator (luby/root usually win on GPU).
-    ("apxchol_v1", "bg+tree[vec_pool]"): "apxchol (GPU)",
-    ("apxchol_v1", "luby+tree[vec_pool]"): "apxchol (GPU)",
-    ("apxchol_v1", "root+tree[vec_pool]"): "apxchol (GPU)",
-    ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol (GPU)",
+    ("apxchol_v1", "bg+tree[vec_pool]"): "apxchol/bg (GPU)",
+    ("apxchol_v1", "luby+tree[vec_pool]"): "apxchol/luby (GPU)",
+    ("apxchol_v1", "root+tree[vec_pool]"): "apxchol/root (GPU)",
+    ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk (GPU)",
     ("hypre_boomeramg_gpu", ""): "BoomerAMG (GPU)",
     ("hypre_boomeramg_gpu", "cut"): "BoomerAMG/cut (GPU)",
     ("amgcl_cuda", ""): "AMGCL (GPU)",
     ("parac_graph", ""): "ParAC Graph (GPU)",
     ("parac_physics", ""): "ParAC Physics (GPU)",
 }
+require_injective_labels(LABELS, "GPU chart")
+APX_DEFAULT = LABELS[("apxchol_v1", APXCHOL_DEFAULT_CONFIG)]
 FAMS = ["grids", "ipm", "suitesparse"]
 # Social-giant set (match fair_charts.GIANT_MATS): grouped as _giants regardless of nnz.
 GIANT_MATS = {"as-Skitter", "coPapersDBLP", "com-LiveJournal", "com-Orkut", "com-Youtube"}
@@ -55,34 +72,43 @@ TOL = 1e-8
 def load(root):
     """Load GPU cells (device=gpu) from the per-cell JSON store into
     rows[(family,matrix)][label] = dict(setup,solve,total,iters,rel_res).
-    A flat gpu_chart CSV path is also accepted for backward compatibility."""
+
+    Legacy flat CSVs are intentionally rejected: they omit solver configuration,
+    status, and timeout-cap provenance, so they cannot satisfy the series rule."""
     rows = defaultdict(dict)
-    if os.path.isfile(root):  # legacy flat CSV
-        with open(root) as f:
-            for r in csv.DictReader(f):
-                try:
-                    rows[(r["family"], r["matrix"])][r["label"]] = dict(
-                        setup=float(r["setup_s"]), solve=float(r["solve_s"]),
-                        total=float(r["total_s"]), iters=int(r["iters"]),
-                        rel_res=float(r["rel_res"]))
-                except (ValueError, KeyError):
-                    pass
-        return rows
+    if os.path.isfile(root):
+        raise ValueError("legacy GPU CSVs lack configuration/status provenance; "
+                         "pass the unified per-cell store instead")
+    seen = set()
     for p in glob.glob(f"{root}/**/*__gpu.json", recursive=True):
         try:
             c = json.load(open(p))
         except Exception:
             continue
         cell = c["cell"]
-        if cell.get("device") != "gpu" or c.get("status") != "complete":
+        if cell.get("device") != "gpu":
             continue
         lab = LABELS.get((cell["solver"], cell.get("config", "")))
+        if not lab:
+            continue
+        key = (cell["family"], cell["matrix_id"], lab, cell.get("threads"))
+        if key in seen:
+            raise RuntimeError(f"duplicate GPU chart series {key}")
+        seen.add(key)
+        if c.get("status") != "complete":
+            continue
         m = c.get("metrics", {})
-        if not lab or m.get("total_s") is None:
+        if m.get("total_s") is None:
             continue
         prev = rows[(cell["family"], cell["matrix_id"])].get(lab)
-        if prev is not None and prev["total"] <= m["total_s"]:
-            continue   # keep the faster eliminator when several map to one label
+        if prev is not None:
+            # LABELS is injective, so two cells can only collide here if the store
+            # holds a duplicate for one (solver, config). Taking the faster one
+            # would be a min-over-draws; refuse instead of silently picking a winner.
+            raise RuntimeError(
+                f"duplicate GPU cell for {cell['family']}/{cell['matrix_id']} "
+                f"[{lab}] (config {cell.get('config','')!r}) -- refusing to choose "
+                f"between {prev['total']}s and {m['total_s']}s")
         rows[(cell["family"], cell["matrix_id"])][lab] = dict(
             setup=m.get("setup_s", 0.0), solve=m.get("solve_s", 0.0),
             total=m["total_s"], iters=m.get("iters", 0),
@@ -91,13 +117,11 @@ def load(root):
             vram_peak=m.get("max_vram_mb"))
     return rows
 
-def load_status(root):
-    """{(family, matrix, gpu_label): status} for ALL gpu cells incl. non-complete
-    (oom / timeout / failed), so the combined heatmap can tell a GPU-OOM cell apart
-    from one that was simply never run (white)."""
+def load_outcomes(root):
+    """Outcome metadata for every charted GPU cell, including exact timeout caps."""
     out = {}
     if os.path.isfile(root):
-        return out
+        raise ValueError("legacy GPU CSVs lack status and timeout-cap provenance")
     for p in glob.glob(f"{root}/**/*__gpu.json", recursive=True):
         try:
             c = json.load(open(p))
@@ -108,8 +132,16 @@ def load_status(root):
             continue
         lab = LABELS.get((cell["solver"], cell.get("config", "")))
         if lab:
-            out[(cell["family"], cell["matrix_id"], lab)] = c.get("status")
+            key = (cell["family"], cell["matrix_id"], lab)
+            if key in out:
+                raise RuntimeError(f"duplicate GPU outcome for {key}")
+            out[key] = {"status": c.get("status"),
+                        "timeout_cap_s": timeout_cap(c)}
     return out
+
+def load_status(root):
+    """Compatibility view used by GPU-only marker charts."""
+    return {key: value["status"] for key, value in load_outcomes(root).items()}
 
 
 def mats_of(rows, fam, reduce_grids=True):
@@ -245,7 +277,7 @@ def accuracy(rows, fam, out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="results/cells",
-                    help="per-cell JSON store (device=gpu cells); or a legacy flat CSV path")
+                    help="unified per-cell JSON store containing device=gpu cells")
     ap.add_argument("--out", default="benchmarks/latest/figures")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)

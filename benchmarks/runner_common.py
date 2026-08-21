@@ -21,7 +21,7 @@ level_stats.py:
 All runners (sweep_fair, thread_scaling, fill_pass, level_stats,
 selector_levels) import these helpers rather than carrying their own copies.
 """
-import json, os, re, signal, subprocess, threading
+import json, math, os, re, signal, subprocess, threading
 from pathlib import Path
 
 # Repo root, derived from this file's location (benchmarks/runner_common.py).
@@ -29,6 +29,7 @@ ROOT = str(Path(__file__).resolve().parents[1])
 BIN = {"cpu": f"{ROOT}/benchmarks/build/benchmark",
        "gpu": f"{ROOT}/benchmarks/build-cuda/benchmark"}
 CELLS = f"{ROOT}/results/cells"
+APXCHOL_DEFAULT_CONFIG = "bg+tree[vec_pool]"
 
 
 def require_path(value, env_var, const, what, must_exist=True):
@@ -523,20 +524,47 @@ def classify(m, tol):
     return ("complete" if m["rel_res"] <= float(tol) else "not_converged"), m
 
 
-# ── per-cell result store (schema 1) ────────────────────────────────────────────
+# ── per-cell result store (schema 2) ────────────────────────────────────────────
+# Schema 2 adds top-level `timeout_cap_s` to timeout outcomes. A timeout is only a
+# numerical lower bound when the exact wall-clock cap used for that invocation is
+# persisted with the cell; reconstructing it later can silently change the bound.
 DEFAULT_TERMINAL = frozenset({"complete", "not_converged", "failed", "timeout", "oom"})
+
+def timeout_cap(cell):
+    """Return a persisted positive finite timeout cap, otherwise None."""
+    cap = cell.get("timeout_cap_s")
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)):
+        return None
+    cap = float(cap)
+    return cap if math.isfinite(cap) and cap > 0 else None
+
+def require_injective_labels(mapping, name):
+    """Fail loudly when two configurations map to one chart series."""
+    reverse = {}
+    for config, label in mapping.items():
+        reverse.setdefault(label, []).append(config)
+    duplicates = {label: configs for label, configs in reverse.items()
+                  if len(configs) > 1}
+    if duplicates:
+        raise RuntimeError(f"{name} labels are not injective: {duplicates}")
 
 def cell_path(family, mid, solver, config, threads, device):
     cfgtag = re.sub(r'[^A-Za-z0-9]+', '_', config) if config else "none"
     return f"{CELLS}/{family}/{mid}__{solver}__{cfgtag}__t{threads}__{device}.json"
 
 def emit_cell(family, mid, solver, config, status, metrics, threads, device, prov,
-              matrix_meta=None):
+              matrix_meta=None, timeout_cap_s=None):
     """Write one cell. `matrix_meta` records HOW the matrix was interpreted —
     the registry's declaration, plus whatever the binary reported about the
     operator it actually assembled (parse_matrix_meta). It is filled from the
     registry when the caller passes nothing, so no cell can be written without
     saying which system it solved."""
+    if status == "timeout":
+        if timeout_cap({"timeout_cap_s": timeout_cap_s}) is None:
+            raise ValueError("timeout cells require a positive timeout_cap_s")
+    elif timeout_cap_s is not None:
+        raise ValueError("timeout_cap_s is only valid for status='timeout'")
+
     path = cell_path(family, mid, solver, config, threads, device)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     meta = dict(matrix_meta_for(mid)) if mid in MATRICES else {}
@@ -544,8 +572,11 @@ def emit_cell(family, mid, solver, config, status, metrics, threads, device, pro
         meta.update(matrix_meta)
     cell = {"cell": {"config": config, "device": device, "family": family, "matrix_id": mid,
                      "solver": solver, "threads": threads}, "matrix_meta": meta,
-            "metrics": metrics or {}, "provenance": prov, "schema": 1, "status": status}
-    json.dump(cell, open(path, "w"), indent=2)
+            "metrics": metrics or {}, "provenance": prov, "schema": 2, "status": status}
+    if status == "timeout":
+        cell["timeout_cap_s"] = timeout_cap({"timeout_cap_s": timeout_cap_s})
+    with open(path, "w") as handle:
+        json.dump(cell, handle, indent=2)
     return path
 
 def cell_status(family, mid, solver, config, threads, device):

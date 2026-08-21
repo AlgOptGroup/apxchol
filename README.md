@@ -119,8 +119,9 @@ Laplacian vs SDDM is auto-detected: singular Laplacians get a rank-(n−1)
 factor with null-space centering; SDDM systems get the full-rank factor.
 Both `apxchol::solve` and `apx_cholesky` default to the `vec_pool` storage
 backend and the `block_greedy` independent-set partitioner — the best
-default across the benchmark suite (the headline series picks the best of
-four selectors per matrix; `luby`/`rootset` win some GPU cells); reconfigure
+default across the benchmark suite. Benchmark charts show each selector as a
+separate series, and method-vs-method headlines use this declared default rather
+than choosing the fastest selector per matrix; reconfigure
 via `solve_options` / `set_storage` / `set_options`.
 
 The factorization is randomized (`--seed` / `factor_options::seed`). The

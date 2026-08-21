@@ -36,12 +36,19 @@ FAMS = ["grids", "ipm", "suitesparse"]
 TOL = 1e-8
 ENC = ("colour = solver  ·  GPU = black-outlined bar, CPU = plain"
        "  ·  solid = setup, /// = solve  ·  bars sorted fastest→slowest"
-       "  ·  red frame + ≥ (last) = timed out at the total cap")
+       "  ·  red frame + ≥ (last) = timed out at its persisted cap")
 
 # (name, colour, cpu_label, gpu_label). cpu_label/gpu_label = None when the solver
 # has no bar on that device (RCHOL/pRCHOL/AC/AC2 are CPU-only).
+#
+# THE SERIES RULE (fair_charts.LABELS): one row per (solver, configuration). apxchol's
+# four IS-selectors are four bars, exactly as BoomerAMG's two configurations are two
+# bars -- neither is collapsed into a per-matrix minimum over the other.
 SOLVERS = [
-    ("apxchol",       "#0b5394", "apxchol",       "apxchol (GPU)"),
+    ("apxchol/bg",    "#0b5394", "apxchol/bg",    "apxchol/bg (GPU)"),
+    ("apxchol/luby",  "#3d7ebf", "apxchol/luby",  "apxchol/luby (GPU)"),
+    ("apxchol/root",  "#6fa8dc", "apxchol/root",  "apxchol/root (GPU)"),
+    ("apxchol/bk",    "#a4c2f4", "apxchol/bk",    "apxchol/bk (GPU)"),
     ("BoomerAMG",     "#2ca02c", "BoomerAMG",     "BoomerAMG (GPU)"),
     ("BoomerAMG/cut", "#74c476", "BoomerAMG/cut", "BoomerAMG/cut (GPU)"),
     ("AMGCL",         "#8c564b", "AMGCL",         "AMGCL (GPU)"),
@@ -89,32 +96,40 @@ def _cpu_status(recs, fam, mat, lab):
     b = cpu._pick(recs, fam, mat, lab) if lab else None
     return b.get("status") if b else None
 
+def _cpu_outcome(recs, fam, mat, lab):
+    return cpu._pick(recs, fam, mat, lab) if lab else None
 
-def _collect(recs, grows, fam, gstatus=None, device="both"):
+def _collect(recs, grows, fam, goutcomes=None, device="both"):
     """-> mats (present), data[mat] = list of (name, colour, device, vals). Completed
-    solvers sort by total; TIMED-OUT solvers (no breakdown) get a sentinel bar at the
-    column cap (10x GPU-apxchol) flagged vals['timeout']=True, placed LAST.
+    solvers sort by total; timed-out solvers get a sentinel bar only when the cell
+    records the exact cap used. Such bars always sort last.
     device: 'both' | 'cpu' | 'gpu' -> filter which device's bars to include."""
-    gstatus = gstatus or {}
+    goutcomes = goutcomes or {}
     mats = cpu.headline_mats(recs, fam)
     present, data = [], {}
     for mat in mats:
-        cap = _gpu_apx_total(grows, fam, mat)
-        cap = CAP_MULT * cap if cap else None
         bars = []
         for name, col, cl, gl in SOLVERS:
             if device != "gpu":
                 c = _cpu(recs, fam, mat, cl)
                 if c:
                     bars.append((name, col, "CPU", c))
-                elif cap and _cpu_status(recs, fam, mat, cl) == "timeout":
-                    bars.append((name, col, "CPU", {"total": cap, "setup": cap, "solve": 0.0, "timeout": True}))
+                else:
+                    outcome = _cpu_outcome(recs, fam, mat, cl)
+                    cap = cpu.timeout_cap(outcome or {})
+                    if outcome and outcome.get("status") == "timeout" and cap:
+                        bars.append((name, col, "CPU", {"total": cap, "setup": cap,
+                                    "solve": 0.0, "timeout": True}))
             if device != "cpu":
                 g = _gpu(grows, fam, mat, gl)
                 if g:
                     bars.append((name, col, "GPU", g))
-                elif gl and cap and gstatus.get((fam, mat, gl)) == "timeout":
-                    bars.append((name, col, "GPU", {"total": cap, "setup": cap, "solve": 0.0, "timeout": True}))
+                elif gl:
+                    outcome = goutcomes.get((fam, mat, gl), {})
+                    cap = outcome.get("timeout_cap_s")
+                    if outcome.get("status") == "timeout" and cap:
+                        bars.append((name, col, "GPU", {"total": cap, "setup": cap,
+                                    "solve": 0.0, "timeout": True}))
         if bars:
             present.append(mat); data[mat] = bars
     return present, data
@@ -148,14 +163,14 @@ def _find_break(heights):
 
 
 def _bars(recs, grows, fam, out, *, ylabel, title, logy=False, val=None, stacked=False,
-          gstatus=None, device="both", ycompress=False):
+          goutcomes=None, device="both", ycompress=False):
     """Every (solver,device) bar individually, sorted by total per matrix; TIMED-OUT
     solvers (no breakdown) sort LAST as a red-framed '≥cap' bar. device filters CPU/GPU.
     val(vals) -> scalar; for the stacked breakdown val(vals) -> (setup, solve).
     ycompress: use a BROKEN linear y-axis (not log) when the heights are bimodal, so one
     towering bar (e.g. BoomerAMG 212s) stops flattening the <45s field while the bulk
     keeps true linear proportion; plain linear when the spread is continuous."""
-    mats, data = _collect(recs, grows, fam, gstatus, device)
+    mats, data = _collect(recs, grows, fam, goutcomes, device)
     if not mats:
         return
     maxslots = max(len(data[m]) for m in mats)
@@ -273,39 +288,28 @@ _METRIC_TITLE = {"total": "total time", "setup": "setup time",
                  "rss_solve": "solve-held host RSS, CPU solvers",
                  "vram_peak": "peak device VRAM (whole run, per-process), GPU solvers"}
 
-# Competitor times are clamped at CAP_MULT x the GPU-apxchol total for that matrix --
-# "render anything slower as that" (matches sweep_fair's competitor wall-clock cap, so
-# a solver killed at the cap and one that merely ran slow both land on the same ceiling
-# and a single off-the-chart giant solve can't blow up the colour scale).
-CAP_MULT = 10
-
-def _gpu_apx_total(grows, fam, mat):
-    d = grows.get((fam, mat), {}).get("apxchol (GPU)")
-    return d["total"] if (d and d.get("total")) else None
-
 # overview metric name -> raw per-cell metrics key (the store uses the _s suffix).
 _RAW_KEY = {"total": "total_s", "setup": "setup_s", "solve": "solve_s", "iters": "iters",
             "rss_peak": "max_rss_mb", "rss_solve": "solve_rss_mb",
             "vram_peak": "max_vram_mb"}
 
 def _cpu_time_cell(recs, fam, mat, cpu_lab, metric):
-    """(value_or_nan, is_timeout) for a CPU cell -- distinguishes a TIMED-OUT solver
-    (status 'timeout': rendered AT the cap) from one simply not run (nan -> grey)."""
+    """(value_or_nan, is_timeout, exact_cap_or_none) for one CPU series."""
     b = cpu._pick(recs, fam, mat, cpu_lab)
     if b is None:
-        return np.nan, False
+        return np.nan, False, None
     if b["status"] == "timeout":
-        return np.nan, True
+        return np.nan, True, cpu.timeout_cap(b)
     if b["status"] != "complete":
-        return np.nan, False
+        return np.nan, False, None
     m = b.get("metrics", {})
     v = m.get(_RAW_KEY.get(metric, metric))
     if v is None and metric == "total" and m.get("setup_s") is not None and m.get("solve_s") is not None:
         v = m["setup_s"] + m["solve_s"]
-    return (v if v is not None else np.nan), False
+    return (v if v is not None else np.nan), False, None
 
 def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mats=None,
-                     gstatus=None):
+                     goutcomes=None):
     """solver x matrix 'who wins where' heatmap for ONE metric (total / setup / solve /
     iters). rows = (solver, device), cols = matrix; colour = ratio to the best (lowest)
     in that matrix column (green = winner, log scale); each cell annotated with the
@@ -325,23 +329,21 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     is_rss = metric in ("rss_peak", "rss_solve")
     is_vram = metric == "vram_peak"
     is_mem = is_rss or is_vram                       # GB-formatted, blank-on-zero
-    # The competitor cap is a TOTAL wall-clock cap, so it's only honest to clamp/≥ the
+    # A timeout cap is a TOTAL wall-clock cap, so it is only meaningful on the
     # TOTAL heatmap. A timed-out solver produced NO setup/solve/iters breakdown, so on
     # those metrics it's marked 'T/O' (timed out) rather than a fabricated ≥cap value.
     clamp = metric == "total"
-    caps = [(_gpu_apx_total(grows, fam, m) or np.nan) for m in mats]
-    caps = [CAP_MULT * c if np.isfinite(c) else np.nan for c in caps]
-    gstatus = gstatus or {}
-    rows_data = []   # (rowlabel, vals, [is_timeout], [is_oom], device)
+    goutcomes = goutcomes or {}
+    rows_data = []   # (rowlabel, vals, timeouts, timeout_caps, oom, failed, device)
     for name, col, cl, gl in SOLVERS:
         if mode in ("cpu", "combined") and cl:
-            vals, tmo, oomf, failf = [], [], [], []
+            vals, tmo, tcaps, oomf, failf = [], [], [], [], []
             for m in mats:
-                v, t = _cpu_time_cell(recs, fam, m, cl, metric)   # (val|nan, is_timeout) any metric
+                v, t, cap = _cpu_time_cell(recs, fam, m, cl, metric)
                 if is_mem and not v:        # 0 / None memory = not recorded -> blank, not "0.0GB / inf×"
                     v = np.nan
                 st = _cpu_status(recs, fam, m, cl)
-                vals.append(v); tmo.append(t)
+                vals.append(v); tmo.append(t); tcaps.append(cap or np.nan)
                 oomf.append(st == "oom"); failf.append(st == "failed")
             # Memory heatmaps: a Timeout marker is informative NEXT TO real measurements
             # ("this config timed out, no memory recorded") but a row with ZERO memory
@@ -351,27 +353,32 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
             keep = (any(np.isfinite(x) for x in vals) or any(oomf)) if is_mem else \
                    (any(np.isfinite(x) for x in vals) or any(tmo) or any(oomf) or any(failf))
             if keep:
-                rows_data.append((f"{name} (CPU)" if mode == "combined" else name, vals, tmo, oomf, failf, "cpu"))
+                rows_data.append((f"{name} (CPU)" if mode == "combined" else name,
+                                  vals, tmo, tcaps, oomf, failf, "cpu"))
         if mode in ("gpu", "combined") and gl:
-            vals, tmo, oomf, failf = [], [], [], []
+            vals, tmo, tcaps, oomf, failf = [], [], [], [], []
             for m in mats:
                 vals.append((_gpu(grows, fam, m, gl) or {}).get(metric) or np.nan)
-                st = gstatus.get((fam, m, gl))
+                outcome = goutcomes.get((fam, m, gl), {})
+                st = outcome.get("status")
                 tmo.append(st == "timeout")
+                tcaps.append(outcome.get("timeout_cap_s") or np.nan)
                 oomf.append(st == "oom"); failf.append(st == "failed")
             # same row gate as the CPU branch: memory rows need real memory info.
             keep = (any(np.isfinite(x) for x in vals) or any(oomf)) if is_mem else \
                    (any(np.isfinite(x) for x in vals) or any(tmo) or any(oomf) or any(failf))
             if keep:
-                rows_data.append((f"{name} (GPU)" if mode == "combined" else name, vals, tmo, oomf, failf, "gpu"))
+                rows_data.append((f"{name} (GPU)" if mode == "combined" else name,
+                                  vals, tmo, tcaps, oomf, failf, "gpu"))
     if not rows_data or not mats:
         return
     names = [r[0] for r in rows_data]
     M = np.array([r[1] for r in rows_data], dtype=float)
     TMO = np.array([r[2] for r in rows_data], dtype=bool)
-    OOM = np.array([r[3] for r in rows_data], dtype=bool)
-    FAIL = np.array([r[4] for r in rows_data], dtype=bool)
-    DEV = [r[5] for r in rows_data]
+    TCAP = np.array([r[3] for r in rows_data], dtype=float)
+    OOM = np.array([r[4] for r in rows_data], dtype=bool)
+    FAIL = np.array([r[5] for r in rows_data], dtype=bool)
+    DEV = [r[6] for r in rows_data]
     # Clamp ONLY cells whose runtime we genuinely DON'T KNOW: a timed-out solver (no
     # real measurement -- e.g. RCHOL/pRCHOL hitting the cap) is rendered AT the cap with
     # '≥' + a black border. A solver that actually COMPLETED is rendered at its real
@@ -379,14 +386,14 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     # show it honestly rather than flattening it to the cap.
     capped = np.zeros_like(M, dtype=bool)
     if clamp:
-        for j in range(M.shape[1]):
-            c = caps[j]
-            if not np.isfinite(c):
-                continue
-            M[TMO[:, j], j] = c; capped[TMO[:, j], j] = True
+        known = TMO & np.isfinite(TCAP)
+        M[known] = TCAP[known]
+        capped[known] = True
     ratio = np.full_like(M, np.nan)
     for j in range(M.shape[1]):
-        colv = M[:, j]; pos = colv[np.isfinite(colv) & (colv > 0)]   # >0 only: no /0 -> inf/nan
+        colv = M[:, j]
+        # Lower bounds never compete for "best" against completed measurements.
+        pos = colv[np.isfinite(colv) & (colv > 0) & ~capped[:, j]]
         if pos.size:
             ratio[:, j] = colv / pos.min()
     cmap = plt.cm.RdYlGn_r.copy(); cmap.set_bad("white")   # never-run cells -> white
@@ -409,7 +416,7 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
                        else f"{M[i, j]:.2f}s")
                 ax.text(j, i, f"{pre}{val}\n{pre}{ratio[i, j]:.1f}×", ha="center",
                         va="center", fontsize=6.3)
-                if capped[i, j]:   # black border marks a clamped (>=10x GPU-apxchol) cell
+                if capped[i, j]:   # black border marks an exact persisted lower bound
                     ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
                                                edgecolor="black", lw=1.4))
             elif TMO[i, j]:        # timed out (TOTAL cap) -> red flag, no setup/solve/iters breakdown
@@ -432,7 +439,7 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     cb.set_label("× best solver in column (log scale)")
     dev = {"cpu": "CPU", "gpu": "GPU", "combined": "CPU + GPU"}[mode]
     unit = "fewest iters" if is_iters else "least memory" if is_mem else "fastest"
-    capnote = f"; ≥/border = timed out at {CAP_MULT}× GPU-apx (real time unknown)" if clamp else ""
+    capnote = "; ≥/border = exact persisted timeout cap (real time unknown)" if clamp else ""
     # Two-line title (was one over-long line that clipped off the figure edges); the
     # 2nd line carries the legend incl. the OOM (RAM/GPU) and white-'not run' keys.
     # Explicit 3 lines (title + two legend lines) so the marker key never wraps
@@ -452,12 +459,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cells", default="results/cells")
     ap.add_argument("--gpu-root", default="results/cells",
-                    help="per-cell store (device=gpu cells) or a legacy flat GPU CSV")
+                    help="unified per-cell store containing device=gpu cells")
     ap.add_argument("--out", default="benchmarks/latest/figures")
     a = ap.parse_args()
     recs = cpu.load(a.cells)          # device=cpu only (fair_charts filters)
     grows = gpu.load(a.gpu_root)
-    gstatus = gpu.load_status(a.gpu_root)   # GPU cell statuses incl. oom (for heatmap marks)
+    goutcomes = gpu.load_outcomes(a.gpu_root)
     os.makedirs(a.out, exist_ok=True)
     n = 0
     sd = lambda d: (d["setup"], d["solve"])
@@ -485,7 +492,7 @@ def main():
             rs = rsub_of(gmats)
             for dev, tag, lab in DEV:
                 _bars(rs, grows, fam, f"{base}_breakdown{tag}_{fam}{suffix}.png",
-                      stacked=True, val=sd, gstatus=gstatus, device=dev,
+                      stacked=True, val=sd, goutcomes=goutcomes, device=dev,
                       # broken axis on the giants (all devices) + every GPU breakdown:
                       # the GPU has the extreme outliers (e.g. ParAC on kron_g500 ~7s vs
                       # <1s for the rest). _find_break auto-gates, so non-bimodal GPU
@@ -510,7 +517,8 @@ def main():
                     modes = [("combined", ""), ("cpu", "_cpu"), ("gpu", "_gpu")]
                 for mode, tag in modes:
                     overview_heatmap(rsub, grows, fam, f"{base}_{stem}{tag}_{fam}{suffix}.png",
-                                     mode=mode, metric=metric, mats=hmats, gstatus=gstatus)
+                                     mode=mode, metric=metric, mats=hmats,
+                                     goutcomes=goutcomes)
                     n += 1
     print(f"combined_charts: {len(recs)} cpu + {len(grows)} gpu cells -> {n} figures in {a.out}")
 

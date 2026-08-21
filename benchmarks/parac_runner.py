@@ -411,7 +411,7 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
         runs = [_run_once_cpu(amd, physics, rel_tol=rel_tol) for _ in range(REPS)]
     except subprocess.TimeoutExpired:
         rc.emit_cell(family, mid, solver, "", "timeout", {}, THREADS, "cpu", PROV_CPU,
-                     matrix_meta=extra_meta)
+                     matrix_meta=extra_meta, timeout_cap_s=TIMEOUT_CPU)
         return "TIMEOUT"
     ok = [r for r in runs if r["factor"] and r["solve"] and r["iters"]]
     if not ok:
@@ -544,7 +544,8 @@ def _measure_cpu_graph_split(family, mid):
             if rss: rss_peak = max(rss_peak, max(rss))
             n_solved += 1; rank += 1
     except subprocess.TimeoutExpired:
-        rc.emit_cell(family, mid, "parac", "", "timeout", {}, THREADS, "cpu", PROV_CPU)
+        rc.emit_cell(family, mid, "parac", "", "timeout", {}, THREADS, "cpu", PROV_CPU,
+                     timeout_cap_s=TIMEOUT_CPU)
         return "TIMEOUT"
     if n_solved == 0 or nnz_tot == 0:
         rc.emit_cell(family, mid, "parac", "", "failed", {}, THREADS, "cpu", PROV_CPU)
@@ -603,7 +604,8 @@ def _run_cpu_operator(mid, family):
         amd, amds, prep_prov = _prep_amd(mid, "op", augment=True)
     except subprocess.TimeoutExpired:
         if not rc.cell_done(family, mid, "parac_physics", "", THREADS, "cpu", terminal=TERMINAL_CPU):
-            rc.emit_cell(family, mid, "parac_physics", "", "timeout", {}, THREADS, "cpu", PROV_CPU)
+            rc.emit_cell(family, mid, "parac_physics", "", "timeout", {}, THREADS, "cpu", PROV_CPU,
+                         timeout_cap_s=TIMEOUT_CPU)
         return "graph[n/a] physics[TIMEOUT(dump/reorder)]"
     if not amd:
         return "graph[n/a] physics[SKIP(dump/reorder)]"
@@ -763,7 +765,10 @@ def run_gpu(mid, tol=TOL):
             cal = _calibrate_tol_gpu(driver, sorted_mtx) or float(tol)
             runs = [_run_once_gpu(driver, sorted_mtx, cal) for _ in range(REPS)]
         except subprocess.TimeoutExpired:
-            results.append(f"{solver_key}[TIMEOUT]"); continue   # retried next run
+            rc.emit_cell(family, mid, solver_key, "", "timeout", {}, THREADS, "gpu", prov,
+                         matrix_meta={"parac_prep": prep_prov},
+                         timeout_cap_s=TIMEOUT_GPU)
+            results.append(f"{solver_key}[TIMEOUT]"); continue
         ok = [r for r in runs if r["factor"] and r["solve"] and r["iters"]]
         if not ok:
             rc.emit_cell(family, mid, solver_key, "", "failed", None, THREADS, "gpu", prov)

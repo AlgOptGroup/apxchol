@@ -20,21 +20,34 @@ import numpy as np
 import gpu_charts as gpu   # reuse the GPU CSV loader + colours/order for overlays
 # Matrix axis labels come from the registry, so a matrix we ASSEMBLED an operator
 # for (a graph file -> L = D - A) never appears under its bare file name.
-from runner_common import mat_labels   # noqa: F401  (used by the tick-label calls)
+from runner_common import (APXCHOL_DEFAULT_CONFIG, mat_labels,
+                           require_injective_labels, timeout_cap)
 
 TOL = 1e-8
 
 # canonical solver label + display order + colour
-# The four IS-selector configs (bg/luby/root/bk) all map to the single headline
-# "apxchol" series; _pick() then selects the FASTEST (min total_s) per matrix/device
-# -- "apxchol at its best eliminator". The per-config spread is shown in the
-# ablation chart. (Best is matrix/device-dependent: bg on grids, luby/root on GPU
-# IPM, etc., so a per-cell pick is the honest "best".)
+#
+# ── THE SERIES RULE (uniform across every solver, CPU and GPU) ───────────────────
+#   Every charted series is EXACTLY ONE (solver, configuration). No series is a
+#   per-cell minimum over several configurations. Where a figure structurally needs
+#   one row per method (the cross-method poster heatmap), it names a configuration
+#   DECLARED a priori (APX_DEFAULT below), never the per-cell fastest.
+#
+# This replaces the old rule, which mapped all four apxchol IS-selectors
+# (bg/luby/root/bk) onto one "apxchol" label and let _pick() take the FASTEST of the
+# four per matrix -- while BoomerAMG's two configurations (default / cut) stayed two
+# separate series that each got no such minimum. That was best-of-4 for us against
+# best-of-1 for them: measured over the 27 CPU matrices in the store it handed
+# apxchol a geomean 5.6% (max 23.4%) discount versus its own declared default, and
+# 9.7% (max 2.33x) on the GPU axis -- and, because the timed-out-competitor cap is
+# 10x apxchol's total, it also shrank the bound every capped competitor is drawn at.
+# The four selectors keep their own dedicated per-matrix figures (ablation_*,
+# selector_*, poster_selectors_*), so nothing is hidden by declaring a default.
 LABELS = {
-    ("apxchol_v1", "bg+tree[vec_pool]"): "apxchol",
-    ("apxchol_v1", "luby+tree[vec_pool]"): "apxchol",
-    ("apxchol_v1", "root+tree[vec_pool]"): "apxchol",
-    ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol",
+    ("apxchol_v1", "bg+tree[vec_pool]"): "apxchol/bg",
+    ("apxchol_v1", "luby+tree[vec_pool]"): "apxchol/luby",
+    ("apxchol_v1", "root+tree[vec_pool]"): "apxchol/root",
+    ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk",
     ("rchol", ""): "RCHOL",
     ("rchol_par", ""): "pRCHOL",
     ("hypre_boomeramg", ""): "BoomerAMG",
@@ -46,19 +59,28 @@ LABELS = {
     ("ac", ""): "AC (Jl ref)†",
     ("ac2", ""): "AC2 (Jl ref)†",
 }
+# This is a real runtime check, not an `assert` that disappears under `python -O`.
+require_injective_labels(LABELS, "CPU chart")
+
+# apxchol's DECLARED default configuration (sweep_fair.py: "The single headline
+# apxchol config is bg+tree"). Used wherever a figure needs exactly one apxchol row.
+# It is fixed a priori; it is never re-chosen from the timings.
+APX_DEFAULT = LABELS[("apxchol_v1", APXCHOL_DEFAULT_CONFIG)]
+APX_SERIES = ["apxchol/bg", "apxchol/luby", "apxchol/root", "apxchol/bk"]
+
 # Geometric MG excluded (structured-grid only, not a general-matrix solver).
 # AMGCL re-added: a distinct algebraic-MG competitor
 # (smoothed-aggregation + spai0), not redundant with BoomerAMG's classical AMG.
-# The headline "apxchol" series picks the BEST IS-selector
-# (bg/luby/root/bk) per matrix/device by min total time (see LABELS + _pick) --
-# luby/root produce shallow, deterministic factors that the GPU SpTRSV handles far
-# better than bg's variable-depth ones (bg ~2x slower + bimodal on GPU IPM). The
-# per-selector spread stays in the ablation chart.
-ORDER = ["apxchol",
+# Every apxchol IS-selector is its own series, exactly as BoomerAMG's two
+# configurations are -- the reader sees the spread instead of only its minimum.
+ORDER = APX_SERIES + [
          "RCHOL", "pRCHOL",
          "BoomerAMG", "BoomerAMG/cut", "AMGCL", "CMG (MATLAB)†", "ParAC Graph", "ParAC Physics",
          "AC (Jl ref)†", "AC2 (Jl ref)†"]
-COLORS = {"apxchol": "#0b5394",
+COLORS = {"apxchol/bg": "#0b5394",     # declared default = the darkest blue
+          "apxchol/luby": "#3d7ebf",   # the other three selectors: lighter blues,
+          "apxchol/root": "#6fa8dc",   # same family, same treatment as
+          "apxchol/bk": "#a4c2f4",     # BoomerAMG / BoomerAMG-cut's two greens
           "RCHOL": "#d62728", "pRCHOL": "#ff9896",
           "BoomerAMG": "#2ca02c", "BoomerAMG/cut": "#74c476",  # cut = lighter green
           "AMGCL": "#8c564b",   # brown (matches thread_scaling)
@@ -119,7 +141,11 @@ def matrix_order(recs, fam):
             if r["cell"]["matrix_id"] == m and r.get("metrics", {}).get("nnz"):
                 return r["metrics"]["nnz"]
         return 0
-    return sorted(mats, key=key)
+    # Tie-break on the id. Sorting a SET by nnz alone left tied matrices in set-iteration
+    # order, which varies with PYTHONHASHSEED -- the four IPM iters all have nnz=7867398,
+    # so every ipm chart's column order (and summary.md's row order) was reshuffled on
+    # each run. Deterministic now.
+    return sorted(mats, key=lambda m: (key(m), m))
 
 def headline_mats(recs, fam):
     """Per-matrix column charts: ordered by nnz ascending (the SAME order GPU +
@@ -204,13 +230,23 @@ def scaling_chart(recs, fam, out, gpu_rows=None, device="cpu"):
             nnz_by_mat[r["cell"]["matrix_id"]] = r["metrics"]["nnz"]
     fig, ax = plt.subplots(figsize=(8, 5.5))
     drawn = False
+    capped_any = False
     if device == "cpu":
         for lab in ORDER:
             if lab in CHART_EXCLUDE: continue
-            pts = []
+            pts, capped = [], []
             for mat in matrix_order(recs, fam):
                 best = _pick(recs, fam, mat, lab)
-                if best is None or best["status"] != "complete": continue
+                if best is None: continue
+                nz = nnz_by_mat.get(mat)
+                if best["status"] != "complete":
+                    # A dropped point used to end the line with no marker, so a
+                    # solver that HIT THE WALL-CLOCK CAP looked simply "not
+                    # measured". Draw it at its known lower bound instead.
+                    lo = timeout_cap(best)
+                    if best["status"] == "timeout" and nz and lo:
+                        capped.append((nz, lo))
+                    continue
                 m = best["metrics"]
                 if m.get("nnz") and m.get("total_s"):
                     pts.append((m["nnz"], m["total_s"]))
@@ -218,6 +254,12 @@ def scaling_chart(recs, fam, out, gpu_rows=None, device="cpu"):
                 pts.sort()
                 ax.plot([p[0] for p in pts], [p[1] for p in pts], marker="o",
                         label=lab, color=COLORS.get(lab, "#888")); drawn = True
+            if capped:
+                capped.sort(); capped_any = True
+                ax.scatter([p[0] for p in capped], [p[1] for p in capped], marker="x",
+                           s=55, linewidths=1.6, color=COLORS.get(lab, "#888"),
+                           zorder=5, label=None if pts else lab)
+                drawn = True
     else:  # gpu
         gpu_series = defaultdict(list)
         for (gf, mat), d in (gpu_rows or {}).items():
@@ -237,7 +279,13 @@ def scaling_chart(recs, fam, out, gpu_rows=None, device="cpu"):
         plt.close(fig); return
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("nnz"); ax.set_ylabel(f"total solve time (s) — t16 ({device.upper()})")
-    ax.set_title(f"{fam} ({device.upper()}): scaling vs nnz (per-solver grounding, tol 1e-8)")
+    cap_note = ("\n× = timed out; plotted at the exact persisted wall-clock cap "
+                "true time unknown" if capped_any else "")
+    ax.set_title(f"{fam} ({device.upper()}): scaling vs nnz (per-solver grounding, tol 1e-8)"
+                 + cap_note, fontsize=10.5)
+    if capped_any:   # one neutral legend key for the marker, not one per solver
+        ax.scatter([], [], marker="x", s=55, linewidths=1.6, color="0.25",
+                   label="× = timed out (exact persisted lower bound)")
     ax.legend(fontsize=8); ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
 
@@ -497,7 +545,8 @@ def selector_family_panel(recs, gpu_cfg, fam, out, device="cpu"):
 # ── Poster headline pair ─────────────────────────────────────────────────────────
 # TWO CPU-only heatmaps that share the SAME columns so they read side-by-side on the
 # poster: (1) the IS-selector question (which eliminator wins per graph) and (2) the
-# cross-method question (apxchol's best vs the multigrid/Cholesky competitors). One
+# cross-method question (apxchol at its DECLARED default selector vs the multigrid/
+# Cholesky competitors -- figure (1) is where the selector spread is read). One
 # curated, representative column set spanning the structured→irregular axis with BOTH
 # matrices apxchol loses (structured grids / FEM / IPM) and wins (the social giants).
 # IPM is one aggregated column (geomean over the iter ladder). Total time, t16, CPU.
@@ -519,30 +568,23 @@ POSTER_COLS = [                       # (col_id, family, display);  "__ipm__" = 
     ("as-Skitter",       "suitesparse", "as-Skitter"),
     ("com-LiveJournal",  "suitesparse", "com-LiveJournal"),
 ]
-POSTER_SOLVERS = ["apxchol", "BoomerAMG", "BoomerAMG/cut", "AMGCL", "CMG (MATLAB)†",
+# The headline carries exactly one declared apxchol configuration; competitor
+# configurations remain separate series rather than being collapsed into minima.
+POSTER_SOLVERS = [APX_DEFAULT, "BoomerAMG", "BoomerAMG/cut", "AMGCL", "CMG (MATLAB)†",
                   "ParAC Physics", "RCHOL"]
-POSTER_CAP_MULT = 10   # timed-out cells shown at >= CAP_MULT x apxchol(column), as the overview heatmap does
-
 def _poster_cell(recs, row, fam, mid):
     """(total_s | None, status) for one method on one real matrix, CPU t16. row is
     ('sel', selector) for an apxchol IS-selector at vec_pool, or ('lab', label) for a
-    competitor (resolved via _pick, which already prefers t16+converged)."""
+    competitor. Both resolve through the same declared-thread `_pick` rule."""
     kind, key = row
     if kind == "sel":
-        for r in recs:
-            c = r["cell"]
-            if (c["solver"] == "apxchol_v1" and c["family"] == fam and c["matrix_id"] == mid
-                    and c.get("threads") == 16 and r["status"] == "complete"):
-                m = _ABL_RX.match(c.get("config", ""))
-                if m and m.group(1) == key and m.group(2) == "vec_pool":
-                    return r["metrics"].get("total_s"), "complete"
-        return None, "missing"
+        key = f"apxchol/{key}"
     b = _pick(recs, fam, mid, key)
     if b is None:
-        return None, "missing"
+        return None, "missing", None
     if b["status"] != "complete":
-        return None, b["status"]
-    return b.get("metrics", {}).get("total_s"), "complete"
+        return None, b["status"], timeout_cap(b)
+    return b.get("metrics", {}).get("total_s"), "complete", None
 
 def _poster_value(recs, row, fam, col_id):
     """As _poster_cell, but col_id '__ipm__' returns the geomean of total_s over the IPM
@@ -550,15 +592,19 @@ def _poster_value(recs, row, fam, col_id):
     what converged (flagged), so a method that times out on one iter isn't dropped."""
     if col_id != "__ipm__":
         return _poster_cell(recs, row, fam, col_id)
-    vals = []
+    vals, caps = [], []
     for it in IPM_ITERS:
-        v, st = _poster_cell(recs, row, "ipm", it)
+        v, st, cap = _poster_cell(recs, row, "ipm", it)
         if st == "complete" and v is not None:
             vals.append(v)
+        if st == "timeout" and cap is not None:
+            caps.append(cap)
     if not vals:
-        return None, "missing"
+        if len(caps) == len(IPM_ITERS):
+            return None, "timeout", float(np.exp(np.mean(np.log(caps))))
+        return None, "missing", None
     g = float(np.exp(np.mean(np.log(vals))))
-    return g, ("complete" if len(vals) == len(IPM_ITERS) else "partial")
+    return g, ("complete" if len(vals) == len(IPM_ITERS) else "partial"), None
 
 def _poster_heatmap(recs, rows, out, title):
     """Shared renderer for the poster pair. rows = [(display_label, (kind, key))].
@@ -566,28 +612,27 @@ def _poster_heatmap(recs, rows, out, title):
     annotated with absolute seconds; bold = per-column winner; T = ran-but-timed-out."""
     n, ncol = len(rows), len(POSTER_COLS)
     M = np.full((n, ncol), np.nan)
+    CAPS = np.full((n, ncol), np.nan)
     ST = [["missing"] * ncol for _ in range(n)]
     for i, (_lab, spec) in enumerate(rows):
         for j, (cid, fam, _disp) in enumerate(POSTER_COLS):
-            v, st = _poster_value(recs, spec, fam, cid)
+            v, st, cap = _poster_value(recs, spec, fam, cid)
             ST[i][j] = st
             if v is not None and st in ("complete", "partial"):
                 M[i, j] = v
-    # Timed-out cells: their true time is unknown (only a lower bound) -> clamp to
-    # CAP_MULT x apxchol(column) and render '≥…' deep-red + black border, like the
-    # overview heatmap. apxchol is row 0 and always completes; n/a / missing stay
-    # grey-blank (set_bad).
+            if cap is not None:
+                CAPS[i, j] = cap
+    # A timeout is numerical only when its exact cap was persisted in that cell.
     capped = np.zeros((n, ncol), dtype=bool)
-    for j in range(ncol):
-        if np.isfinite(M[0, j]):
-            for i in range(n):
-                if ST[i][j] == "timeout":
-                    M[i, j] = POSTER_CAP_MULT * M[0, j]; capped[i, j] = True
+    known = np.isfinite(CAPS)
+    M[known] = CAPS[known]
+    capped[known] = True
     ratio = np.full_like(M, np.nan)
     for j in range(ncol):
-        col = M[:, j]; fin = col[np.isfinite(col)]
-        if fin.size:
-            ratio[:, j] = col / fin.min()
+        col = M[:, j]
+        completed = col[np.isfinite(col) & ~capped[:, j]]
+        if completed.size:
+            ratio[:, j] = col / completed.min()
     cmap = plt.cm.RdYlGn_r.copy(); cmap.set_bad("0.9")
     # LOG colour scale on the ratio (same as combined_charts.overview_heatmap), NOT a
     # capped linear one: on the social-giant columns the competitors are 100x+ best, so
@@ -605,6 +650,9 @@ def _poster_heatmap(recs, rows, out, title):
         for j in range(ncol):
             v = M[i, j]
             if not np.isfinite(v):
+                if ST[i][j] == "timeout":
+                    ax.text(j, i, "Timeout\ncap unknown", ha="center", va="center",
+                            fontsize=7.0, color="#8b0000", fontweight="bold")
                 continue
             pre = "≥" if capped[i, j] else ""
             is_best = (not capped[i, j]) and ratio[i, j] == 1.0
@@ -627,8 +675,9 @@ def poster_charts(recs, outdir):
         "colour = × fastest selector per column (green = best);  bold = best per graph")
     cmp_rows = [(s, ("lab", s)) for s in POSTER_SOLVERS]
     _poster_heatmap(recs, cmp_rows, f"{outdir}/poster_comparison_cpu.png",
-        "apxchol (best selector) vs multigrid / Cholesky  —  CPU total time (t16, tol 1e-8)\n"
-        "colour = × fastest solver per column (green = best);  bold = best per graph;  T = timeout")
+        f"apxchol ({APX_DEFAULT.split('/')[1]}+tree, the declared default — NOT the per-column best selector)"
+        "  vs multigrid / Cholesky\nCPU total time (t16, tol 1e-8);  one configuration per row for every solver.  "
+        "colour = × fastest per column;  bold = best;  ≥ = timed out at the cap")
 
 
 def export_csv(recs, path):
@@ -638,6 +687,7 @@ def export_csv(recs, path):
         rows.append({"family": c["family"], "matrix": c["matrix_id"],
                      "solver": c["solver"], "config": c.get("config", ""),
                      "threads": c.get("threads"), "status": r["status"],
+                     "timeout_cap_s": timeout_cap(r),
                      "setup_s": m.get("setup_s"), "solve_s": m.get("solve_s"),
                      "total_s": m.get("total_s"), "iters": m.get("iters"),
                      "rel_res": m.get("rel_res"), "nnz": m.get("nnz")})
@@ -646,27 +696,40 @@ def export_csv(recs, path):
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
 
 def _pick(recs, fam, mat, lab):
-    # Prefer t16, fall back to t1 (serial solvers like RCHOL/CMG only have t1),
-    # and prefer a converged cell over a non-converged one.
+    """The one cell that represents `lab` on this matrix.
+
+    Thread count is selected a priori: t16, with t1 as the historical fallback.
+    There is then exactly one cell. Duplicate cells are an error; no timing or
+    status is ever used to choose among them."""
     cands = [r for r in recs if r["cell"]["family"] == fam
              and r["cell"]["matrix_id"] == mat and label(r["cell"]) == lab]
     if not cands:
         return None
-    # Prefer t16 + converged, then the FASTEST total (selects the best IS-selector
-    # for the "apxchol" series, which maps all four eliminators to one label).
-    cands.sort(key=lambda r: (r["cell"].get("threads") != 16, r["status"] != "complete",
-                              r.get("metrics", {}).get("total_s") or float("inf")))
-    return cands[0]
+    t16 = [r for r in cands if r["cell"].get("threads") == 16]
+    t1 = [r for r in cands if r["cell"].get("threads") == 1]
+    chosen = t16 or t1
+    if not chosen and len(cands) == 1:
+        chosen = cands
+    if len(chosen) != 1:
+        details = [(r["cell"].get("threads"), r.get("status")) for r in cands]
+        raise RuntimeError(f"ambiguous chart series {fam}/{mat} [{lab}]: {details}")
+    return chosen[0]
 
 def summary_md(recs, path):
     fams = sorted({r["cell"]["family"] for r in recs})
     lines = ["# Latest benchmark summary — t16, tol 1e-8, original singular L (per-solver grounding; ParAC per-component-consistent RHS scored vs original L, CMG reg-rel)\n",
              "`† CMG (MATLAB)` = canonical Koutis CMG (MEX, matlab-deps container). MATLAB-pcg wall-time isn't cross-language-comparable, so its **iteration count** is the comparable signal — see below.",
-             # The multiplier here must match sweep_fair.TIMEOUT_MULT (the competitor
-             # wall-clock cap applied when the cells were run).
              "Blank = not run; `X` = ran but did not reach 1e-8; `T` = timed out "
-             "(> 10× apxchol's wall time on that matrix); `—` = solver doesn't support "
+             "without a recoverable cap; `T≥seconds` = timed out at the exact cap "
+             "persisted by the runner; `—` = solver doesn't support "
              "that de-singularization cell.\n",
+             "**Series rule (uniform).** Every column is exactly ONE (solver, configuration); "
+             "no column is a per-cell minimum over configurations. apxchol's four IS-selectors "
+             f"are four columns (`{'`, `'.join(APX_SERIES)}`), exactly as BoomerAMG's two "
+             "configurations are two columns; its declared default is "
+             f"`{APX_DEFAULT}`. The chart thread count is selected a priori (t16, with "
+             "a t1 fallback); duplicate cells are rejected, so neither status nor time "
+             "can select the representative.\n",
              "## Total solve time (s)\n"]
     for fam in fams:
         mats = matrix_order(recs, fam)
@@ -679,7 +742,9 @@ def summary_md(recs, path):
                 best = _pick(recs, fam, mat, lab)
                 if best is None: cells.append("")
                 elif best["status"] == "complete": cells.append(f"{best['metrics']['total_s']:.2f}")
-                elif best["status"] == "timeout": cells.append("T")   # distinct from X (ran, no converge) / blank (not run)
+                elif best["status"] == "timeout":
+                    cap = timeout_cap(best)
+                    cells.append(f"T≥{cap:g}" if cap is not None else "T")
                 elif best["status"] == "n/a": cells.append("—")       # solver doesn't support this de-sing cell
                 else: cells.append("X")
             lines.append(f"| {mat} | " + " | ".join(cells) + " |")
@@ -703,17 +768,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="results/cells")
     ap.add_argument("--out", default="benchmarks/latest")
-    ap.add_argument("--gpu-csv", default="",
-                    help="Legacy gpu_chart_sweep.sh CSV override. Empty (default) = read "
-                         "the device=gpu cells from --root (the unified per-cell store), "
-                         "so the GPU scaling overlay stays in sync with the GPU-only charts.")
     a = ap.parse_args()
     recs = load(a.root)
     # GPU overlay for the grid scaling chart. Default: the SAME per-cell store the
     # gpu_charts / combined_charts read (gpu.load filters device=gpu), so ParAC and
     # every other GPU solver appear. The old default pointed at a stale flat CSV,
     # which silently froze this chart (missing ParAC, pre-patch numbers).
-    gpu_rows = gpu.load(a.gpu_csv) if (a.gpu_csv and os.path.exists(a.gpu_csv)) else gpu.load(a.root)
+    gpu_rows = gpu.load(a.root)
     gpu_cfg = load_gpu_cfg(a.root)   # per-config GPU cells for the ablation CPU/GPU split
     os.makedirs(f"{a.out}/figures", exist_ok=True)
     for fam in sorted({r["cell"]["family"] for r in recs}):

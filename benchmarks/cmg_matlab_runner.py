@@ -170,7 +170,7 @@ def run_one(mid):
     except subprocess.TimeoutExpired:
         meta["cmg_na_reason"] = f"exceeded the {TIMEOUT}s per-cell wall cap"
         rc.emit_cell(fam, mid, "cmg", "", "timeout", {}, THREADS, "cpu",
-                     _prov(as_operator), matrix_meta=meta)
+                     _prov(as_operator), matrix_meta=meta, timeout_cap_s=TIMEOUT)
         return "TIMEOUT"
     status, metrics = rc.classify(rc.parse_csv(out), TOL)
     if status == "n/a":

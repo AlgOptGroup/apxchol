@@ -11,8 +11,10 @@ together are the whole mechanism for a limited re-run:
 
 A cell is stale when a rule below applies to it AND the commit that rule names is
 NOT an ancestor of the cell's git_sha -- i.e. the cell was produced before the fix.
-Add a rule whenever a change alters what a solver measures or which matrix it solves;
-that is cheaper than re-running the suite and safer than remembering by hand.
+Independently, schema-1 timeout cells are stale because they do not persist the cap
+needed to interpret the outcome numerically. Add a rule whenever a change alters what
+a solver measures or which matrix it solves; that is cheaper than re-running the suite
+and safer than remembering by hand.
 
 The report always states the denominator first: total cells, then the filter.
 """
@@ -78,6 +80,13 @@ RULES = [
      lambda s, m, k: m in MISSNIFFED and s not in OWN_RHS),
 ]
 
+TIMEOUT_CAP_REASON = ("timeout outcome predates schema 2 and does not record the "
+                      "actual wall-clock cap used")
+
+def timeout_cap_is_stale(cell):
+    """Schema-1 timeout outcomes cannot support a numerical lower bound."""
+    return cell.get("status") == "timeout" and rc.timeout_cap(cell) is None
+
 
 def kind_of_matrix():
     """matrix_id -> declared kind, straight from the registry.
@@ -120,6 +129,9 @@ def main():
         d = json.loads(p.read_text())
         c = d["cell"]
         s, m = c["solver"], c["matrix_id"]
+        if timeout_cap_is_stale(d):
+            stale.setdefault(p, []).append(TIMEOUT_CAP_REASON)
+            why[f"schema-2  {TIMEOUT_CAP_REASON}"] += 1
         k = (d.get("matrix_meta") or {}).get("kind") or kind.get(m)
         if k is None:
             unknown[m] += 1

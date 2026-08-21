@@ -14,8 +14,8 @@ for methodology and [`latest/summary.md`](latest/summary.md) for the tables.
 
 | Solver | Type | Threads | Source |
 |---|---|---|---|
-| **apxchol** | Approximate Cholesky + PCG; headline = best of 4 IS-selectors (bg/luby/root/bk) per matrix/device | 16 (C++) | this repo (`src/`, `include/apxchol/`) |
-| ↳ IS selectors | bg=block-greedy, luby, root=Blelloch rootset, bk=Baumann-Kyng; luby/root give shallow factors that the GPU SpTRSV prefers (per-selector spread in the ablation chart) | 16 (C++) | this repo |
+| **apxchol** | Approximate Cholesky + PCG. **One series per IS-selector**; `apxchol/bg` is the declared default (see *Series rule* below) | 16 (C++) | this repo (`src/`, `include/apxchol/`) |
+| ↳ IS selectors | bg=block-greedy, luby, root=Blelloch rootset, bk=Baumann-Kyng; luby/root give shallow factors that the GPU SpTRSV prefers. Each is charted separately — the headline is never a min over the four | 16 (C++) | this repo |
 | **RCHOL** | Randomized Cholesky + **their own** PCG (`util/pcg.cpp`, MKL ILP64; serial factorization; x86 only) | serial factor | [ut-padas/rchol](https://github.com/ut-padas/rchol) |
 | **BoomerAMG** | Classical *algebraic* multigrid + PCG | 16 (C, OpenMP) | [Hypre](https://github.com/hypre-space/hypre) |
 | **AMGCL** | Smoothed-aggregation *algebraic* multigrid + PCG; Dirichlet-pin de-singularization, default config | 16 (C++) | [ddemidov/amgcl](https://github.com/ddemidov/amgcl) |
@@ -135,6 +135,43 @@ rather than the memory a solve holds. The binary emits `-1` (unmeasured) and the
 the metric rather than storing a misleading value.
 
 ## Protocol
+
+- **Series rule — one series per (solver, configuration); no series is a minimum over
+  configurations.** A chart series or a table column is exactly one solver at exactly
+  one configuration. Where a solver has several configurations, each gets its own
+  series: apxchol's four IS-selectors are `apxchol/bg` `/luby` `/root` `/bk`, exactly
+  as Hypre's two coarsenings are `BoomerAMG` and `BoomerAMG/cut`. The cross-method
+  poster uses one apxchol baseline **declared a priori** — `apxchol/bg`,
+  `fair_charts.APX_DEFAULT` — while keeping competitor configurations separate.
+  It never substitutes the per-column fastest selector.
+
+  This is enforced mechanically: `fair_charts.LABELS` and `gpu_charts.LABELS` pass
+  a runtime injectivity check even under `python -O`, so a re-collapse fails loudly
+  instead of silently reinstating a minimum.
+
+  *Why it matters.* Until 2026-08-21 all four apxchol selectors mapped to one
+  `apxchol` label and `_pick`/`gpu_charts.load` kept the fastest of the four per
+  matrix, while every competitor was charted at its single configuration — best-of-4
+  for us against best-of-1 for them. Measured over the 27 CPU matrices in the store,
+  that minimum was worth a **geomean 5.6 % (max 23.4 %)** against apxchol's own
+  declared default, and **9.7 % (max 2.33×)** on the GPU axis; it also shrank the
+  `10× apxchol` cap that every timed-out competitor bar is clamped to. Collapsing the
+  competitors instead was rejected for the same reason dual-toolchain "report best"
+  was: RCHOL/pRCHOL/ParAC-CPU redraw their RNG every process, so a min over their
+  configurations is a min over random draws.
+
+- **Status rule — status never selects a representative.** The chart thread count is
+  fixed a priori (t16, with a t1 fallback for historical serial cells). There must then
+  be exactly one cell for that `(solver, configuration)` series; duplicates are an
+  error. A `complete` cell is therefore never ranked against a `timeout` /
+  `not_converged` / `failed` cell.
+
+  Schema 2 timeout cells persist the exact wall-clock cap as top-level
+  `timeout_cap_s`. Charts draw a numerical `≥cap` only from that field. They never
+  reconstruct a bound from current apxchol timings: old schema-1 timeout cells render
+  as unbounded `Timeout` and `stale_cells.py` schedules them for rerun.
+
+  Check both invariants with `PYTHONPATH=benchmarks python3 benchmarks/dev/audit_series_rule.py`.
 
 - **Matrix interpretation (what system each file defines).** A `.mtx` file can hold
   either of two different things, and they define two different linear systems. Every
@@ -866,12 +903,13 @@ both where apxchol **loses** (`G3_circuit`, `thermal2`, the `kron_g500` scale-fr
 graph, `coPapersDBLP`) and where it **wins** (`coAuthorsDBLP` + the social giants).
 CPU, t16, **total time**, tol 1e-8. Colour normalises *per column* on a **log scale**
 (green = fastest for that graph; `1×…16×` colorbar), each cell shows the absolute
-seconds over its `×-best` ratio, **bold** = per-column winner. Timed-out cells (real
-time unknown) are clamped to **`≥` 10× apxchol** and drawn deep-red with a black border
-(as in the house overview heatmap).
+seconds over its `×-best` ratio, **bold** = per-column winner. A timed-out cell with
+schema-2 provenance is drawn at its exact persisted **`≥cap`** lower bound with a
+black border; an old timeout without that field is labelled `Timeout, cap unknown`.
 
-The first answers *which IS selector* to use; the second answers *apxchol's best
-selector vs the multigrid / Cholesky field*. Same columns, so they read together.
+The first answers *which IS selector* to use; the second compares the declared
+`apxchol/bg` default with the multigrid / Cholesky field. Same columns, so they read
+together.
 
 ![apxchol IS-selector × graph, CPU total time](latest/figures/poster_selectors_cpu.png)
 ![apxchol vs multigrid/Cholesky, CPU total time](latest/figures/poster_comparison_cpu.png)
@@ -895,7 +933,8 @@ bars *are* comparable — its physics driver is the per-component split on the p
 - **On grids, multigrid wins.** Fastest on **total time** is **AMGCL with the Dirichlet
   pin** (e.g. grid_3000 ≈4.3 s vs BoomerAMG ≈9.3 s, apxchol ≈10.8 s); **BoomerAMG** has
   the **fewest iterations** (7–11, near-constant in size) but a heavier setup. The
-  Cholesky-type solvers cluster behind — **apxchol (best IS-selector) strongest of them**.
+  Cholesky-type solvers cluster behind — **apxchol strongest of them** (at `apxchol/bg`,
+  its declared default; the other selectors are their own rows).
   PCG iters on grids: BoomerAMG 7–11 ≪ AMGCL 12–15 / CMG 25–28 ≪ RCHOL 22–40 (only the
   three smallest grids completed) ≈ apxchol 28–51 < ParAC 34–74.
 - **On IPM (SDDM), BoomerAMG leads** (10 iterations on every rung, to true 1e-8);
