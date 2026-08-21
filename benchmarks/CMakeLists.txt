@@ -247,7 +247,20 @@ endif()
 # don't fail with "CUDA_ARCHITECTURES is empty".
 if (APXCHOL_USE_CUDA OR BENCH_HYPRE_USE_CUDA)
     include(CheckLanguage)
+    # Remember the requested CUDA host compiler BEFORE check_language runs. check_language()
+    # executes a sub-CMake and writes `set(CMAKE_CUDA_HOST_COMPILER "<what the sub-build
+    # resolved>")` into its result file (CheckLanguage.cmake:111), which SHADOWS the cache
+    # entry in this scope. So -DCMAKE_CUDA_HOST_COMPILER was silently discarded and nvcc fell
+    # back to its own default -- every benchmarks/build*-cuda configured this way was hosted
+    # by whatever nvcc picked (g++-15 here) no matter what was requested, with no diagnostic.
+    set(_apxchol_requested_cuda_host "${CMAKE_CUDA_HOST_COMPILER}")
     check_language(CUDA)
+    if (_apxchol_requested_cuda_host AND
+        NOT "${CMAKE_CUDA_HOST_COMPILER}" STREQUAL "${_apxchol_requested_cuda_host}")
+        message(STATUS "Restoring requested CUDA host compiler: ${_apxchol_requested_cuda_host}")
+        set(CMAKE_CUDA_HOST_COMPILER "${_apxchol_requested_cuda_host}"
+            CACHE FILEPATH "Host compiler nvcc drives" FORCE)
+    endif()
     if (CMAKE_CUDA_COMPILER)
         if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
             # Auto-detect via nvidia-smi, fallback to native (CMake 3.18+ keyword)
@@ -379,7 +392,20 @@ if (BUILD_GPU_RCHOL)
     endif()
 
     include(CheckLanguage)
+    # Remember the requested CUDA host compiler BEFORE check_language runs. check_language()
+    # executes a sub-CMake and writes `set(CMAKE_CUDA_HOST_COMPILER "<what the sub-build
+    # resolved>")` into its result file (CheckLanguage.cmake:111), which SHADOWS the cache
+    # entry in this scope. So -DCMAKE_CUDA_HOST_COMPILER was silently discarded and nvcc fell
+    # back to its own default -- every benchmarks/build*-cuda configured this way was hosted
+    # by whatever nvcc picked (g++-15 here) no matter what was requested, with no diagnostic.
+    set(_apxchol_requested_cuda_host "${CMAKE_CUDA_HOST_COMPILER}")
     check_language(CUDA)
+    if (_apxchol_requested_cuda_host AND
+        NOT "${CMAKE_CUDA_HOST_COMPILER}" STREQUAL "${_apxchol_requested_cuda_host}")
+        message(STATUS "Restoring requested CUDA host compiler: ${_apxchol_requested_cuda_host}")
+        set(CMAKE_CUDA_HOST_COMPILER "${_apxchol_requested_cuda_host}"
+            CACHE FILEPATH "Host compiler nvcc drives" FORCE)
+    endif()
     if (CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
 
