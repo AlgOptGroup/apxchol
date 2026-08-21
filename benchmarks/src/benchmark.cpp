@@ -542,8 +542,9 @@ static BenchResult run_apxchol_v1(
     if (degree_multiplier_override > 0.0)
         fopts.partition.degree_multiplier = degree_multiplier_override;
     // Experiment knobs to mimic AC's adaptive min-degree elimination: set
-    // min_is_fraction=1 so the IS bails immediately and the whole factor is
-    // peeled sequentially in residual_peel order (min_degree == AC's :deg).
+    // min_is_fraction=1 so a large residual's IS bails immediately and the
+    // whole factor is peeled sequentially in residual_peel order
+    // (min_degree == AC's :deg).
     if (const char* e = std::getenv("APXCHOL_MIN_IS_FRACTION"))
         fopts.min_is_fraction = std::atof(e);
     if (const char* e = std::getenv("APXCHOL_RESIDUAL_PEEL")) {

@@ -55,7 +55,15 @@ struct partition_options {
 struct factor_options {
     unsigned seed = 42;
     partition_options partition;     // selection knobs (see above)
-    double min_is_fraction = 0.05;   // fall back to sequential when IS < 5% of active
+    /// Minimum selector yield before handing a large residual to the BK path:
+    /// selected regions / vertices ELIGIBLE under the degree cap. Relative to
+    /// the candidate pool, not to all active vertices. A non-empty selection is
+    /// always accepted once active <= parallel_residual_threshold (or the
+    /// partitioner's default threshold), because bailing there would skip BK
+    /// and turn the whole tail into singleton peel levels. Zero progress always
+    /// bails. This is an algorithmic yield knob; omp_threshold is the separate
+    /// absolute work-size knob.
+    double min_is_fraction = 0.05;
     size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP.
                                      // Also gates the partitioners' parallel paths;
                                      // lowering it below typical round sizes makes the
@@ -63,7 +71,8 @@ struct factor_options {
                                      // (racy block_greedy conflicts -- see env_knobs.h)
     std::string is_select = "block_greedy";  // Partitioner name (runtime dispatch via dispatch_partitioner)
 
-    // When the main IS-finding loop bails out (IS < min_is_fraction · active),
+    // When the main IS-finding loop bails out
+    // (IS < min_is_fraction · degree-eligible candidates),
     // the residual is worked down by BK rounds until active falls below this
     // threshold; the serial peel then takes the tail.
     //

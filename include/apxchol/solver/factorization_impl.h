@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <span>
@@ -34,6 +35,26 @@
 namespace apxchol {
 
 namespace detail {
+
+// The IS-yield bailout measures the selector against the vertices it was
+// actually allowed to choose, not against all active vertices.  With the
+// default degree_quantile=0.2, using |active| as the denominator silently made
+// min_is_fraction=0.05 mean "select at least 25% of the candidate pool".
+//
+// Once the residual is at or below the partitioner's handoff threshold there
+// is no profitable fallback left: the BK residual loop is skipped and a bail
+// sends every remaining vertex to the singleton peel.  Keep selecting there as
+// long as the rule makes any progress.  selected==0 remains the unconditional
+// escape from a stuck custom selector.
+inline bool is_yield_too_small(size_t selected, size_t candidates,
+                               size_t active, double min_fraction,
+                               size_t residual_handoff_threshold) {
+    if (selected == 0) return true;
+    if (residual_handoff_threshold != std::numeric_limits<size_t>::max() &&
+        active <= residual_handoff_threshold)
+        return false;
+    return selected < candidates * min_fraction;
+}
 
 // Eliminate vertices in the partition: record L-columns, add clique edges.
 // Partition vertices across regions are pairwise non-adjacent (for singleton
@@ -613,6 +634,9 @@ factorization factorize_impl(const Eliminator& elim,
     constexpr bool sample_bounded = partitioner_sample_bounded_v<Partitioner>;
     constexpr size_t residual_handoff_default =
         partitioner_residual_handoff_v<Partitioner>;
+    size_t residual_thresh = opts.parallel_residual_threshold;
+    if (residual_thresh == std::numeric_limits<size_t>::max())
+        residual_thresh = residual_handoff_default;
 
     // Active vertex list (natural index order) — filtered in-place each round.
     std::vector<node_index> active(n);
@@ -629,12 +653,14 @@ factorization factorize_impl(const Eliminator& elim,
     // last_avg_degree feeds the per-round stats; it is the prepass's exact
     // average (0 = not measured, for partitioners without the prepass).
     double last_avg_degree = 0.0;
+    size_t last_candidate_count = 0;
     auto run_partitioner = [&](auto& p, graph<Incidence>& g,
                                std::span<const node_index> act)
         -> const partition_result& {
         using P = std::remove_reference_t<decltype(p)>;
         sel.reset(g.n());
         last_avg_degree = 0.0;
+        last_candidate_count = act.size();
         partition_context pctx{opts.partition, opts.seed, opts.omp_threshold, cp};
         if (cp) { cp->descend("find_partition"); cp->tick(); }
         if constexpr (partitioner_degree_prepass_v<P>) {
@@ -649,6 +675,7 @@ factorization factorize_impl(const Eliminator& elim,
                 live_degrees[act[i]] = pre_degrees[i];
                 if (pre_degrees[i] <= thr) pre_eligible.push_back(act[i]);
             }
+            last_candidate_count = pre_eligible.size();
             last_avg_degree = avg_deg;
             pctx.degrees = live_degrees;
             if (cp) (*cp)("prune");
@@ -690,7 +717,9 @@ factorization factorize_impl(const Eliminator& elim,
         // desyncs the boundaries and mislabels the sequential peel tail as one
         // independent level -> incorrect triangular solve.
         if constexpr (!sample_bounded) {
-            if (part.num_regions() < active.size() * opts.min_is_fraction)
+            if (detail::is_yield_too_small(
+                    part.num_regions(), last_candidate_count, active.size(),
+                    opts.min_is_fraction, residual_thresh))
                 break;
         } else {
             if (part.num_regions() == 0) {
@@ -751,7 +780,7 @@ factorization factorize_impl(const Eliminator& elim,
     }
 
     // Eliminate any remaining vertices (0 or 1 after the while loop,
-    // or all remaining when the IS-fraction fallback triggered above).
+    // or all remaining when the candidate-yield fallback triggered above).
     //
     // BK residual loop: when the main loop bailed with a large residual, run BK
     // rounds down to `residual_thresh` and let the serial peel have only the
@@ -782,9 +811,6 @@ factorization factorize_impl(const Eliminator& elim,
     // only where the main loop bails with a large residual, i.e. on social
     // graphs (as-Skitter enters at 69598 active, com-LiveJournal at 832288;
     // iter0040 exits the main loop at 76 and grid_2000 at 1, so neither enters).
-    size_t residual_thresh = opts.parallel_residual_threshold;
-    if (residual_thresh == std::numeric_limits<size_t>::max())
-        residual_thresh = residual_handoff_default;
     if (active.size() > residual_thresh) {
         baumann_kyng_partitioner bk;
         // BK is sample-bounded here too, so an empty round means what it means

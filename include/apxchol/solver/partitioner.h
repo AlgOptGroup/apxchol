@@ -111,7 +111,8 @@
 /// Optional traits (queried via `if constexpr (requires { T::X; })`):
 ///   T::degree_prepass             — see above (default false).
 ///   T::sample_bounded             — if true, the main loop skips the
-///                                   min_is_fraction bailout and retries
+///                                   candidate-relative min_is_fraction bailout
+///                                   and retries
 ///                                   empty rounds (bounded), for rules whose
 ///                                   IS size does not scale with |active|.
 ///   T::residual_handoff_threshold — when the main loop bails with MORE than

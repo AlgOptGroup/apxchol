@@ -864,19 +864,30 @@ Eigen::SparseMatrix<double> clique_laplacian(int n) {
 }
 }  // namespace
 
+TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
+    using apxchol::detail::is_yield_too_small;
+    constexpr size_t none = std::numeric_limits<size_t>::max();
+
+    // 9/200 is a 4.5% yield and therefore too small even though it is only
+    // 0.9% of the 1000 active vertices. The candidate pool is the denominator.
+    EXPECT_TRUE(is_yield_too_small(9, 200, 1000, 0.05, 500));
+    EXPECT_FALSE(is_yield_too_small(10, 200, 1000, 0.05, 500));
+
+    // Below the handoff threshold, one selected vertex is useful progress:
+    // bailing would skip BK and turn all 23 columns into singleton peel levels.
+    EXPECT_FALSE(is_yield_too_small(1, 5, 23, 0.05, 500));
+    EXPECT_TRUE(is_yield_too_small(0, 5, 23, 0.05, 500));
+
+    // A custom partitioner with no residual handoff trait keeps the ordinary
+    // relative-yield rule at every active size.
+    EXPECT_TRUE(is_yield_too_small(1, 100, 23, 0.05, none));
+}
+
 TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
     constexpr int n = 60;
     constexpr size_t thresh = 5;
     const auto L = clique_laplacian(n);
     const auto b = apxchol::generate_test_rhs(L.rows());
-
-    apxchol::factor_options peel_only;              // 60 < the trait's 500, so
-    peel_only.seed = 7;                             // the loop is not entered:
-    const auto a = apxchol::factorize(              // the peel takes all 60.
-        L, apxchol::graph_storage::vec_pool, peel_only);
-    EXPECT_TRUE(a.rounds.empty())
-        << "block_greedy did not bail on a clique, so this test is not "
-           "exercising the residual path any more";
 
     // Several seeds: the loop must reach the threshold under every one of them.
     // On a clique BK's sample is empty with probability (1-p)^n ~ 3% per round
@@ -890,6 +901,9 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         with_loop.parallel_residual_threshold = thresh;   // rest.
         const auto c = apxchol::factorize(
             L, apxchol::graph_storage::vec_pool, with_loop);
+        ASSERT_FALSE(c.rounds.empty());
+        EXPECT_EQ(c.rounds.front().active, static_cast<size_t>(n))
+            << "the clique should hand the full residual to BK";
 
         size_t in_rounds = 0;
         for (const auto& r : c.rounds) in_rounds += r.is_size;
