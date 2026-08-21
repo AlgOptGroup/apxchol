@@ -2054,13 +2054,12 @@ static BenchResult run_hypre_boomeramg(
     // RECURRENCE residual, so the obvious worry is drift — but measured, there is none:
     // HYPRE_PCGSetRecomputeResidual(1) (their own knob, which re-tests on a recomputed
     // r = b - Ax) leaves iterations and residual BIT-IDENTICAL on iter0040 / grid_2000 /
-    // com-Amazon, and hypre's own reported final residual matches its true one. What DOES
-    // differ is the SYSTEM: on a singular Laplacian hypre solves the Dirichlet-PINNED SPD
-    // subsystem, while we score every solver on the ORIGINAL singular L. On iter0040 that
-    // gap is 8.3x (hypre's own 2.06e-9 vs our re-grade 1.71e-8) — a GROUNDING gap, not a
-    // stop-test one, so no hypre tolerance knob closes it. Closing it needs a
-    // pin-to-original tolerance calibration of the same shape as ParAC's. NOT DONE; until
-    // then such a cell is honestly `not_converged` at tol=1e-8.
+    // com-Amazon, and hypre's own reported final residual matches its true one. The former
+    // 8.3x iter0040 gap was not a stopping or grounding effect: iter0040 is full-rank SDDM,
+    // but the old row-sum-ratio sniff misclassified and pinned it as a Laplacian. Matrix
+    // class is now declared by the registry, so no BoomerAMG-specific tolerance calibration
+    // is needed; the harness still re-grades its returned solution against the defining
+    // operator like every other solver.
     HYPRE_PCGSetMaxIter(pcg, maxiter);
     HYPRE_PCGSetPrintLevel(pcg, 0);
     HYPRE_PCGSetPrecond(pcg,
@@ -2190,7 +2189,7 @@ static BenchResult run_hypre_boomeramg_gpu(
     // whole matrix (||b||=1) it's identical to the old absolute behavior.
     HYPRE_PCGSetStopCrit(pcg, 0);
     // See the CPU path for the grading note: hypre's recurrence-vs-true residual is
-    // measured identical, and the real BoomerAMG gap on a singular L is pin-vs-score.
+    // measured identical, and the former gap was the now-fixed matrix-classification bug.
     HYPRE_PCGSetMaxIter(pcg, maxiter);
     HYPRE_PCGSetPrintLevel(pcg, 0);
     HYPRE_PCGSetPrecond(pcg,

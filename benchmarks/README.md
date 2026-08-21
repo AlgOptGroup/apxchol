@@ -302,9 +302,9 @@ the metric rather than storing a misleading value.
   in order of preference:
   1. **Calibrate what we hand their loop** so their true residual lands at `tol` — ParAC-CPU
      and ParAC-GPU (`PARAC_REL_TOL` from a one-run probe, `parac_runner._calibrate_rel_tol`),
-     AC-`sddm` (`tol_eff = tol·‖b‖/‖b_aug‖` for the augmented basis). **BoomerAMG needs one
-     and does not have one yet** — see the OPEN note in [Whose solve
-     loop](#whose-solve-loop-produced-each-number).
+     AC-`sddm` (`tol_eff = tol·‖b‖/‖b_aug‖` for the augmented basis). BoomerAMG needs no
+     calibration: recurrence drift was ruled out, and its former apparent gap was the
+     now-fixed matrix-classification bug documented below.
   2. **Patch their convergence test** to the true residual when no parameter reaches it —
      `gpu_rchol`'s CUDA PCG, patched in `benchmarks/CMakeLists.txt` and documented in
      [`patches/`](patches/), with the reason.
