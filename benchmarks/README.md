@@ -320,6 +320,26 @@ outstanding for them is the **CPU** side: 117 of their 139 CPU cells carry the e
 unified-`reg_rel` provenance and have not been re-run under the pin protocol, so the
 CPU `_giants` panels mix protocols (see the provenance bullet above).
 
+### Residual mean-centring is not a thumb on the scale (measured, 2026-08-21)
+
+`center_if_laplacian` mean-centres the scored residual and not only the solution,
+and `‖r − mean(r)‖ ≤ ‖r‖` always — so in principle the harness could report a
+residual *better* than the truth but never worse, a one-directional channel that
+would bite hardest exactly where margins are thinnest.
+
+It was measured rather than argued about: **ratio 1.000000000000 on 16/16 real
+cells, largest effect anywhere 9.4e-7 relative.** The reason is structural, not
+lucky — `‖L·1‖` is exactly 0 on every graph matrix, so there is nothing to centre
+away. Removing the centring would invalidate zero cells and could not change any
+published verdict.
+
+The probe used to establish this was deliberately **not** kept: it was env-gated
+instrumentation for an effect proven to be exactly zero, and half of it measured
+the Laplacian-vs-SDDM sniff that no longer exists. If it needs re-checking, the
+one-line test is whether `L * VectorXd::Ones(n)` is nonzero for the matrix in
+question — for a declared `class=sddm` operator it is, and for those the residual
+is not centred at all.
+
 ## Running
 
 **Re-running only what a change invalidated.** Each cell records the `git_sha` it
