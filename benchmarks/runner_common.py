@@ -122,7 +122,9 @@ def make_prov(note, **extra):
 # diagonal vs sum |off-diagonal| per row):
 #   operator — a stored, strictly positive diagonal on every row:
 #     ecology1       max rel. deviation 0        (published as an exact Laplacian)
-#     parabolic_fem  6.4e-6                      (Laplacian to rounding)
+#     parabolic_fem  6.4e-6                      (SDDM: small but real excess on
+#                                                 EVERY row, so it is full-rank —
+#                                                 "Laplacian to rounding" it is not)
 #     apache2        10.4% worst row             (SDDM)
 #     thermal2       143% worst row, mean 4.1e-4 (SDDM)
 #     G3_circuit     16876% worst row, mean 161% (SDDM, large diagonal excess)
@@ -133,7 +135,57 @@ def make_prov(note, **extra):
 # used as-is" vs "graph matrices: build Laplacian from adjacency"), and four of
 # our five operator files are on its physics list.
 #
-# (mid, family, source, spec, is2d) for generated grids; (mid, path, n, kind) for .mtx.
+# ── the second axis: the grounding CLASS ───────────────────────────────────────
+# `kind` says how to READ the file. `cls` says what the assembled operator IS,
+# and it decides two things the whole comparison rests on:
+#
+#   cls="laplacian"  singular: the constant vector is in the nullspace. Needs a
+#                    grounding (a Dirichlet pin, or apxchol's mean-centring), and
+#                    its solution and residual are only defined modulo constants,
+#                    so both get mean-centred before scoring.
+#   cls="sddm"       full-rank: a unique solution. Handed to every solver
+#                    untouched — no pin, no mean-centring. Pinning one would
+#                    change the system; mean-centring its UNIQUE solution
+#                    corrupts it and puts a floor under the reported residual.
+#
+# The two axes are NOT independent, which is why only kind="operator" declares a
+# class: a kind="graph" matrix is assembled as L = D - A and is a singular
+# Laplacian BY CONSTRUCTION (measured 2026-08-21 on all 18 graph entries:
+# max|rowsum| is exactly 0.0). An assembled operator file can be either, and
+# nothing in the file says which, so it must be declared. class_of() raises on an
+# undeclared operator exactly as kind_of() raises on an undeclared kind.
+#
+# This replaces a RATIO HEURISTIC (`is_laplacian_operator`, benchmark.cpp, deleted
+# 2026-08-21) that called a matrix Laplacian when max|rowsum| / max|diag| < 1e-10.
+# That test cannot work on a family carrying a uniform diagonal shift: the IPM
+# normal equations all carry +1e-6 I, so their row sums NEVER vanish and only
+# max|diag| moves as the barrier tightens — which slid the ratio across the
+# threshold mid-family (measured, this registry's own files):
+#     iter0010  4.396623e-10  -> SDDM       (correct, but 4.4x from flipping)
+#     iter0020  9.988164e-12  -> LAPLACIAN  WRONG: pinned, RHS mean-centred
+#     iter0030  8.242149e-12  -> LAPLACIAN  WRONG
+#     iter0040  1.116573e-11  -> LAPLACIAN  WRONG
+#     ecology1  8.881784e-17  -> LAPLACIAN  (correct, 6 orders of margin)
+# The declared class below is asserted against the binary's own structural scan
+# (apxchol::scan_operator, per-row and per-row-scaled rather than global), and a
+# mismatch is a hard error — see the `--class` handling in benchmark.cpp.
+#
+# Declared classes, and the structural scan that must agree with them
+# (audit 2026-08-21; `excess` = rows with a positive diagonal excess, `deficient`
+# = rows with a negative row sum; laplacian requires both to be 0):
+#     ecology1       excess 0         deficient 0        -> laplacian
+#     parabolic_fem  excess 525825    deficient 0        -> sddm
+#     apache2        excess 178795    deficient 2        -> sddm
+#     G3_circuit     excess 397769    deficient 665473   -> sddm
+#     thermal2       excess 1942      deficient 0        -> sddm
+#     iter0010       excess 524288    deficient 0        -> sddm
+#     iter0020       excess 524286    deficient 0        -> sddm
+#     iter0030       excess 524284    deficient 0        -> sddm
+#     iter0040       excess 524286    deficient 0        -> sddm
+#
+# (mid, family, source, spec, is2d) for generated grids; (mid, path, n, kind, cls)
+# for .mtx, where `cls` is the declared grounding class and is None for kind=graph
+# (a graph's L = D - A is a singular Laplacian by construction — nothing to declare).
 GRIDS = [("grid_500", "grids", "grid", 500, True), ("grid_1000", "grids", "grid", 1000, True),
          ("grid_2000", "grids", "grid", 2000, True), ("grid_3000", "grids", "grid", 3000, True),
          ("grid3d_100", "grids", "grid3d", 100, False), ("grid3d_150", "grids", "grid3d", 150, False),
@@ -141,50 +193,61 @@ GRIDS = [("grid_500", "grids", "grid", 500, True), ("grid_1000", "grids", "grid"
          ("grid_4000", "grids", "grid", 4000, True),      # ~8.0e7 nnz
          ("grid3d_250", "grids", "grid3d", 250, False),   # ~1.1e8 nnz
          ("grid_5000", "grids", "grid", 5000, True)]      # ~1.25e8 nnz
-SS = [("parabolic_fem", "data/matrices/parabolic_fem.mtx", 525825, "operator"),
-      ("apache2", "data/matrices/apache2.mtx", 715176, "operator"),
-      ("ecology1", "data/matrices/ecology1.mtx", 1000000, "operator"),
-      ("G3_circuit", "data/matrices/G3_circuit.mtx", 1585478, "operator"),
-      ("thermal2", "data/matrices/thermal2.mtx", 1228045, "operator"),
-      ("com-Amazon", "data/matrices/com-Amazon.mtx", 334863, "graph"),
-      ("coAuthorsDBLP", "data/matrices/coAuthorsDBLP.mtx", 299067, "graph"),
-      ("kron_g500-logn16", "data/matrices/kron_g500-logn16.mtx", 65536, "graph"),
-      ("com-Youtube", "data/matrices/com-Youtube.mtx", 1134890, "graph"),
-      ("coPapersDBLP", "data/matrices/coPapersDBLP.mtx", 540486, "graph"),
-      ("as-Skitter", "data/matrices/as-Skitter.mtx", 1696415, "graph"),
-      ("com-LiveJournal", "data/matrices/com-LiveJournal.mtx", 3997962, "graph"),
-      ("com-Orkut", "data/matrices/com-Orkut.mtx", 3072441, "graph")]
+SS = [("parabolic_fem", "data/matrices/parabolic_fem.mtx", 525825, "operator", "sddm"),
+      ("apache2", "data/matrices/apache2.mtx", 715176, "operator", "sddm"),
+      ("ecology1", "data/matrices/ecology1.mtx", 1000000, "operator", "laplacian"),
+      ("G3_circuit", "data/matrices/G3_circuit.mtx", 1585478, "operator", "sddm"),
+      ("thermal2", "data/matrices/thermal2.mtx", 1228045, "operator", "sddm"),
+      ("com-Amazon", "data/matrices/com-Amazon.mtx", 334863, "graph", None),
+      ("coAuthorsDBLP", "data/matrices/coAuthorsDBLP.mtx", 299067, "graph", None),
+      ("kron_g500-logn16", "data/matrices/kron_g500-logn16.mtx", 65536, "graph", None),
+      ("com-Youtube", "data/matrices/com-Youtube.mtx", 1134890, "graph", None),
+      ("coPapersDBLP", "data/matrices/coPapersDBLP.mtx", 540486, "graph", None),
+      ("as-Skitter", "data/matrices/as-Skitter.mtx", 1696415, "graph", None),
+      ("com-LiveJournal", "data/matrices/com-LiveJournal.mtx", 3997962, "graph", None),
+      ("com-Orkut", "data/matrices/com-Orkut.mtx", 3072441, "graph", None)]
 # IPM normal-equation matrices: assembled A D A^T operators with their own
 # diagonal, so they are solved as published like any other operator file.
-IPM = [("iter0010", "data/ipm/iter0010/matrix.mtx", 524288, "operator"),
-       ("iter0020", "data/ipm/iter0020/matrix.mtx", 524288, "operator"),
-       ("iter0030", "data/ipm/iter0030/matrix.mtx", 524288, "operator"),
-       ("iter0040", "data/ipm/iter0040/matrix.mtx", 524288, "operator")]
+# All four carry a uniform +1e-6 diagonal regularization, so all four are
+# full-rank SDDM — see the ratio table above for what that shift did to the
+# heuristic this declaration replaces.
+IPM = [("iter0010", "data/ipm/iter0010/matrix.mtx", 524288, "operator", "sddm"),
+       ("iter0020", "data/ipm/iter0020/matrix.mtx", 524288, "operator", "sddm"),
+       ("iter0030", "data/ipm/iter0030/matrix.mtx", 524288, "operator", "sddm"),
+       ("iter0040", "data/ipm/iter0040/matrix.mtx", 524288, "operator", "sddm")]
 
 KINDS = ("graph", "operator")
+CLASSES = ("laplacian", "sddm")
 
-def matrix_args(source, spec, kind="graph"):
+def matrix_args(source, spec, kind="graph", cls=None):
     """The benchmark binary's matrix-selection argv for a registry entry.
 
     A generated grid is a graph by construction and takes no --kind; a file
-    always carries its declared --kind, which the binary REQUIRES.
+    always carries its declared --kind, which the binary REQUIRES. A file
+    declared kind=operator also carries its --class, which the binary REQUIRES
+    and then asserts against its own structural scan.
     """
     if source == "grid":   return f"--graph grid --n {spec}"
     if source == "grid3d": return f"--graph grid3d --n {spec}"
     if kind not in KINDS:
         raise ValueError(f"matrix_args: kind must be one of {KINDS}, got {kind!r}")
-    return f"--mtx {spec} --kind {kind}"
+    if kind != "operator":
+        # L = D - A is singular by construction; the binary rejects --class here.
+        return f"--mtx {spec} --kind {kind}"
+    if cls not in CLASSES:
+        raise ValueError(f"matrix_args: kind=operator needs cls in {CLASSES}, got {cls!r}")
+    return f"--mtx {spec} --kind {kind} --class {cls}"
 
-# id -> {family, source, kind, spec(absolute for mtx), is2d, n}
+# id -> {family, source, kind, cls, spec(absolute for mtx), is2d, n}
 MATRICES = {}
 for mid, fam, source, spec, is2d in GRIDS:
-    MATRICES[mid] = dict(family=fam, source=source, kind="graph", spec=spec, is2d=is2d,
-                         n=spec * spec if source == "grid" else spec ** 3)
-for mid, path, n, kind in SS:
-    MATRICES[mid] = dict(family="suitesparse", source="mtx", kind=kind,
+    MATRICES[mid] = dict(family=fam, source=source, kind="graph", cls=None, spec=spec,
+                         is2d=is2d, n=spec * spec if source == "grid" else spec ** 3)
+for mid, path, n, kind, cls in SS:
+    MATRICES[mid] = dict(family="suitesparse", source="mtx", kind=kind, cls=cls,
                          spec=f"{ROOT}/{path}", is2d=False, n=n)
-for mid, path, n, kind in IPM:
-    MATRICES[mid] = dict(family="ipm", source="mtx", kind=kind,
+for mid, path, n, kind, cls in IPM:
+    MATRICES[mid] = dict(family="ipm", source="mtx", kind=kind, cls=cls,
                          spec=f"{ROOT}/{path}", is2d=False, n=n)
 
 def kind_of(mid):
@@ -203,9 +266,32 @@ def kind_of(mid):
             f"declare kind={'|'.join(KINDS)}; there is deliberately no default.")
     return kind
 
+def class_of(mid):
+    """The grounding class of `mid`: 'laplacian' (singular, needs grounding, scored
+    mean-centred) or 'sddm' (full-rank, solved and scored untouched).
+
+    kind=graph is 'laplacian' BY CONSTRUCTION — L = D - A has the constant vector
+    in its nullspace whatever the file held, so there is nothing to declare and
+    nothing to guess. kind=operator MUST declare it, and an undeclared one raises
+    rather than defaulting: this axis decides whether a solver gets pinned and
+    whether its residual is mean-centred, and the ratio heuristic that used to
+    decide it got three of the four IPM matrices wrong (see the registry header).
+    """
+    kind = kind_of(mid)                       # raises for an unknown/undeclared mid
+    if kind != "operator":
+        return "laplacian"
+    cls = MATRICES[mid].get("cls")
+    if cls not in CLASSES:
+        raise ValueError(
+            f"{mid!r} is kind=operator but has no declared class (got {cls!r}). Every "
+            f"operator entry must declare cls={'|'.join(CLASSES)}; there is deliberately "
+            f"no default, and no heuristic — a uniform diagonal shift makes a row-sum "
+            f"ratio test slide across any threshold you pick.")
+    return cls
+
 def margs_for(mid):
     m = MATRICES[mid]
-    return matrix_args(m["source"], m["spec"], kind_of(mid))
+    return matrix_args(m["source"], m["spec"], kind_of(mid), m.get("cls"))
 
 # The one-line human description of each reading, for the runners' output and
 # for the README table. Keep in step with benchmark.cpp's `interpretation`.
@@ -214,13 +300,23 @@ KIND_INTERPRETATION = {
     "operator": "solved as published (assembled operator, diagonal as stored)",
 }
 
+# What the grounding class means for how a cell was produced and scored.
+CLASS_INTERPRETATION = {
+    "laplacian": "singular: grounded (pin / mean-centring), solution and residual mean-centred",
+    "sddm":      "full-rank: no pin, no mean-centring, solved and scored as handed over",
+}
+
 def matrix_meta_for(mid):
     """The interpretation record stored in every cell's `matrix_meta`, so a
     result can always be read back with the reading that produced it."""
     m = MATRICES[mid]
     kind = kind_of(mid)
-    meta = {"kind": kind, "family": m["family"], "source": m["source"],
-            "interpretation": KIND_INTERPRETATION[kind]}
+    cls = class_of(mid)
+    meta = {"kind": kind, "class": cls, "family": m["family"], "source": m["source"],
+            "interpretation": KIND_INTERPRETATION[kind],
+            "class_interpretation": CLASS_INTERPRETATION[cls],
+            # False for kind=graph: the class was not declared, it is structural.
+            "class_declared": kind == "operator"}
     if m["source"] == "mtx":
         meta["path"] = os.path.relpath(m["spec"], ROOT)
     else:
@@ -268,15 +364,16 @@ def parse_matrix_meta(stderr):
     out = {}
     for key, qval, val in re.findall(r'(\w+)=(?:"([^"]*)"|(\S+))', m.group(1)):
         v = qval if qval else val
-        if key in ("n", "nnz", "laplacian", "pos_offdiag"):
+        if key in ("n", "nnz", "laplacian", "pos_offdiag", "class_declared"):
             try: v = int(v)
             except ValueError: pass
         elif key == "pos_offdiag_mass":
             try: v = float(v)
             except ValueError: pass
         out[key] = v
-    if "laplacian" in out:
-        out["laplacian"] = bool(out["laplacian"])
+    for flag in ("laplacian", "class_declared"):
+        if flag in out:
+            out[flag] = bool(out[flag])
     return out
 
 

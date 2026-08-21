@@ -15,6 +15,12 @@
 //                        graph    -> solve L = D - A built from |values|
 //                                    (unit weights for a `pattern` file)
 //                        operator -> solve the published matrix as it stands
+//   --class <c>        laplacian | sddm — REQUIRED with --kind operator, and
+//                      REJECTED otherwise (a graph's L = D - A is singular by
+//                      construction). What the assembled operator IS; declared by
+//                      the caller and then asserted against the structural scan.
+//                        laplacian -> singular: grounded, scored mean-centred
+//                        sddm      -> full-rank: no pin, no mean-centring
 //   --solver <list>    comma-separated: apxchol,cg,ldlt,rchol,cholmod,all
 //   --tol <double>     PCG tolerance                        (default: 1e-8)
 //   --maxiter <int>    PCG max iterations                   (default: 500)
@@ -138,31 +144,50 @@ enum class matrix_kind {
     op,        ///< assembled Laplacian / SDDM operator -> solve it as published
 };
 
-// Whether the operator being benchmarked is a SINGULAR Laplacian (row sums zero
-// to within rounding), which is a property of the assembled matrix and NOT of
-// the declared kind: a graph always yields one, and a file declared `operator`
-// may or may not be one (ecology1 is published as an exact Laplacian; apache2,
-// G3_circuit, thermal2 and the IPM normal equations carry a diagonal excess and
-// are full-rank SDDM).
+// ──────────────────── declared grounding class ────────────────────
+// The SECOND declared axis: what the assembled operator IS. Like --kind it is
+// stated by the caller (--class, mandatory with --kind operator) and then
+// ASSERTED against the structural scan, never inferred.
 //
-// It decides two things, both of which are wrong for a full-rank operator:
+// It decides two things, both of which are wrong if it is wrong:
 //   * grounding — a singular Laplacian needs a pin / mean-centering, a full-rank
 //     operator must be handed to the solver untouched;
 //   * scoring — a Laplacian's solution and residual are only defined modulo the
 //     constant vector, so both get mean-centred. Doing that to a full-rank
-//     operator's UNIQUE solution corrupts it and inflates the reported residual.
+//     operator's UNIQUE solution corrupts it and puts a FLOOR under the reported
+//     residual, because the whole error concentrates in the pinned row.
 //
-// Set once in main() from the assembled L, then read by every solver runner.
+// ── what used to be here, and why it is gone (deleted 2026-08-21) ────────────
+// `is_laplacian_operator(L)` SNIFFED the class off the assembled matrix:
+//
+//     max_i |rowsum_i| / max_i |L_ii|  <  1e-10   ->  "singular Laplacian"
+//
+// and main() assigned its result to g_laplacian_mode. A ratio test cannot work
+// on a family carrying a uniform diagonal shift. The IPM normal equations all
+// carry +1e-6 I, so their row sums NEVER vanish — every row sum is ~1e-6 — and
+// only the DENOMINATOR moves as the barrier tightens. That slides the ratio
+// across any fixed threshold mid-family (measured on the shipped files):
+//
+//     iter0010  4.396623e-10   SDDM      correct, but only 4.4x from flipping
+//     iter0020  9.988164e-12   LAPLACIAN WRONG -> pinned, RHS mean-centred
+//     iter0030  8.242149e-12   LAPLACIAN WRONG
+//     iter0040  1.116573e-11   LAPLACIAN WRONG
+//     ecology1  8.881784e-17   LAPLACIAN correct, 6 orders of margin
+//
+// No threshold separates 4.4e-10 from 8.9e-17 AND from 1.1e-11 at the same time;
+// the two populations overlap, so the test is not miscalibrated, it is
+// unattainable. Lowering the threshold to catch iter0020 pushes iter0010 (a 4.4x
+// margin) into the same trap the moment the barrier moves. What the ratio
+// actually measures is the SIZE of the largest diagonal, not the rank of L.
+//
+// The structural scan the class is now checked against does not have that
+// defect: apxchol::scan_operator tests each row against ITS OWN diagonal
+// (slack_i = 1e-10 * max(|L_ii|, 1)) instead of against the global maximum, so a
+// uniform shift shows up as an excess on every row rather than as a small global
+// ratio. It is a CHECK, not the decider — see the --class assertion in main().
+//
+// Set once in main() from the DECLARATION, then read by every solver runner.
 static bool g_laplacian_mode = true;
-
-// Is `L` a singular Laplacian? Row sums vanish relative to the largest diagonal.
-// (Column sums stand in for row sums; L is symmetric on every path here.)
-static bool is_laplacian_operator(const Eigen::SparseMatrix<double>& L) {
-    if (L.rows() == 0) return true;
-    const Eigen::VectorXd row_sum = L * Eigen::VectorXd::Ones(L.rows());
-    return row_sum.cwiseAbs().maxCoeff()
-         / std::max(1e-30, L.diagonal().cwiseAbs().maxCoeff()) < 1e-10;
-}
 
 // Mean-centre `v` iff we are solving a singular Laplacian. Replaces the
 // unconditional `v.array() -= v.mean()` that every solver runner used to apply
@@ -712,6 +737,11 @@ struct Args {
     // guess. Generated graphs (grid/grid3d/checkerboard/erdos) are graphs by
     // construction and may leave it empty.
     std::string kind;
+    // --class laplacian|sddm: what the assembled operator IS. MANDATORY with
+    // --kind operator and rejected otherwise, empty by default so an undeclared
+    // operator file is a hard error rather than a guess. Checked against
+    // apxchol::scan_operator before anything runs.
+    std::string cls;
     std::string dump_mtx;          // if set: write the built Laplacian to this path and exit
     bool giant_dump = false;       // with --dump-mtx: write a connected component's PURE Laplacian
                                    // (relabeled 0..cn-1) -- the comp_rank-th LARGEST (0 = giant).
@@ -764,6 +794,14 @@ static Args parse_args(int argc, char** argv) {
             if (!ok.count(a.kind)) {
                 std::cerr << "Unknown --kind: " << a.kind
                           << " (expected graph|operator)\n"; std::exit(1);
+            }
+        }
+        else if (arg == "--class") {
+            a.cls = next();
+            static const std::set<std::string> ok{"laplacian","sddm"};
+            if (!ok.count(a.cls)) {
+                std::cerr << "Unknown --class: " << a.cls
+                          << " (expected laplacian|sddm)\n"; std::exit(1);
             }
         }
         else if (arg == "--dump-mtx") a.dump_mtx = next();
@@ -1411,10 +1449,13 @@ static BenchResult run_amgcl(
     r.n = static_cast<int>(L.rows());
     r.nnz = static_cast<int>(L.nonZeros());
     int n = r.n;
-    // is_laplacian classification -- NOT timed (benchmark-only: deployment knows a
-    // priori whether L is a singular Laplacian or already SDDM). If L is strictly
-    // SDDM (--reg-rel / IPM) we solve the full operator unchanged regardless of method.
-    const bool is_laplacian = is_laplacian_operator(L);
+    // The DECLARED class (--class, checked against the structural scan in main),
+    // not a local re-derivation: this runner used to sniff it off L again, which
+    // is how three of the four IPM matrices ended up pinned. If L is strictly SDDM
+    // (--reg-rel / IPM) we solve the full operator unchanged regardless of method.
+    // Correct per component too, since run_split hands us a diagonal block: a block
+    // of a singular Laplacian is one, and a block of an SDDM operator is one.
+    const bool is_laplacian = g_laplacian_mode;
     using Backend = amgcl::backend::builtin<double>;
     using Solver = amgcl::make_solver<
         amgcl::amg<Backend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
@@ -1493,7 +1534,9 @@ static BenchResult run_amgcl_cuda(
     // the coarsest grid (relax_coarse=1, set in amgcl_cuda.cu). split is applied
     // upstream by run_split, so L here is whole or a single component. The residual is
     // always scored against the ORIGINAL L (full_*), mean-centered when is_laplacian.
-    const bool is_laplacian = is_laplacian_operator(L);
+    // DECLARED class (--class), checked against the structural scan in main; never
+    // re-derived here.
+    const bool is_laplacian = g_laplacian_mode;
 
     // Solve operator (pinned for ground=pin, else original L) + relax-coarse flag.
     Eigen::VectorXd rhs_v = b;
@@ -1696,12 +1739,13 @@ static BenchResult run_apxchol_gpu_pcg(
     r.n = static_cast<int>(L.rows());
     r.nnz = static_cast<int>(L.nonZeros());
 
-    // Detect Laplacian (zero row sums) vs SDDM (positive row sums).
-    // For SDDM (full-rank), no pinning needed — pinning is a perturbation
-    // that on IPM iter10 blew up iter count 53 -> 83. For Laplacian,
-    // pin one vertex to make L full-rank (avoids CG breakdown).
+    // Laplacian (singular) vs SDDM (full-rank) comes from the DECLARED class
+    // (--class), checked against the structural scan in main -- not detected here.
+    // For SDDM, no pinning: pinning is a perturbation that on IPM iter10 blew up
+    // the iteration count 53 -> 83. For Laplacian, pin one vertex to make L
+    // full-rank (avoids CG breakdown).
     int n = r.n;
-    const bool is_laplacian = is_laplacian_operator(L);
+    const bool is_laplacian = g_laplacian_mode;
     // Symmetric Dirichlet pin (full n x n, SPD) for a singular Laplacian -- see
     // dirichlet_pin / run_amgcl. Reaches 1e-8 vs the original L.
     const int m = n;
@@ -1843,11 +1887,16 @@ static BenchResult run_hypre_boomeramg(
     // is measured against the same matrix every other solver sees. Only pin
     // when L is a singular Laplacian (row sums ~ 0) AND not regularized.
     int n = r.n;
-    const bool is_laplacian = is_laplacian_operator(L);
+    // The DECLARED class (--class, checked against the structural scan in main),
+    // not a local re-derivation. This runner used to call is_laplacian_operator(L)
+    // here; on iter0020/0030/0040 that ratio test said "singular", hypre got pinned,
+    // and its residual against the ORIGINAL L then floored above 1e-8 no matter how
+    // many iterations it ran -- see the deleted function's comment for why the test
+    // cannot be fixed by moving the threshold.
+    const bool is_laplacian = g_laplacian_mode;
     // Setup timer STARTS here: the de-sing grounding WORK (dirichlet_pin) + Hypre
     // format conversion + AMG/PCG build all count toward setup, apples-to-apples with
-    // apxchol's graph-build-inclusive setup. The is_laplacian SpMV above is a
-    // benchmark-only classification and is deliberately left out of the timed region.
+    // apxchol's graph-build-inclusive setup.
     Timer t;
     t.start();
     // Symmetric Dirichlet pin (one node per connected component) for a singular
@@ -1985,10 +2034,10 @@ static BenchResult run_hypre_boomeramg_gpu(
     // system than the residual is checked against (b - L*x), which floors the
     // true residual at ~1e-6 on ill-conditioned problems and never reaches tol.
     int n = r.n;
-    const bool is_laplacian = is_laplacian_operator(L);
+    // DECLARED class (--class), checked against the structural scan in main.
+    const bool is_laplacian = g_laplacian_mode;
     // Setup timer STARTS here: de-sing grounding (dirichlet_pin) + GPU-mode switch +
-    // Hypre conversion + AMG/PCG build all count (apples-to-apples with apxchol). The
-    // is_laplacian SpMV above is a benchmark-only classification, left out of setup.
+    // Hypre conversion + AMG/PCG build all count (apples-to-apples with apxchol).
     Timer t;
     t.start();
     // Symmetric Dirichlet pin (one node per connected component) for a singular
@@ -2184,6 +2233,43 @@ int main(int argc, char** argv) {
     const matrix_kind kind =
         (args.kind == "operator") ? matrix_kind::op : matrix_kind::graph;
 
+    // ── which grounding class this operator belongs to ─────────────────────────
+    // Also DECLARED, for the same reason and with the same no-default rule. Only
+    // --kind operator declares it: everything else is assembled here as
+    // L = D - A, which is a SINGULAR LAPLACIAN BY CONSTRUCTION whatever the input
+    // held, so there is nothing for the caller to choose and a --class would be a
+    // second, contradictable source of truth.
+    if (kind != matrix_kind::op && !args.cls.empty()) {
+        std::cerr << "--class is only meaningful with --kind operator. "
+                  << (generated ? "The generated graph '" + args.graph + "'"
+                                : "--kind graph")
+                  << " is assembled as L = D - A, which is a singular Laplacian by "
+                     "construction — there is nothing to declare. Drop --class.\n";
+        return 1;
+    }
+    if (kind == matrix_kind::op && args.cls.empty()) {
+        std::cerr
+            << "--mtx " << args.mtx_path << " --kind operator needs an explicit --class.\n"
+               "  --class laplacian  the operator is SINGULAR (the constant vector is in its\n"
+               "                     nullspace): it is grounded, and its solution and residual\n"
+               "                     are scored mean-centred, being defined only modulo\n"
+               "                     constants.\n"
+               "  --class sddm       the operator is FULL-RANK: it has a unique solution, is\n"
+               "                     handed to every solver untouched, and is scored untouched\n"
+               "                     — no pin, no mean-centring.\n"
+               "There is deliberately no default and no detection. The ratio test this\n"
+               "replaced (max|rowsum| / max|diag| < 1e-10) called three of the four IPM\n"
+               "matrices singular because their uniform +1e-6 diagonal shift moves the\n"
+               "DENOMINATOR, not the row sums; pinning them put a floor under every\n"
+               "competitor's residual. The declaration is checked against the structural\n"
+               "scan below, so a WRONG --class is a hard error too, not a silent one.\n";
+        return 1;
+    }
+    // What the caller declared. For a graph the class is not declared at all: it
+    // is the construction, so nothing here can be wrong about it.
+    const bool declared_laplacian =
+        (kind == matrix_kind::op) ? (args.cls == "laplacian") : true;
+
     // Build graph
     std::vector<std::vector<Edge>> adj;
     std::string graph_name;
@@ -2258,6 +2344,42 @@ int main(int argc, char** argv) {
             : "L = D - A assembled from |values| (unit weights for a pattern file; "
               "the file's own diagonal, i.e. any self-loop, is dropped)";
     }
+    // ── BELT AND BRACES: assert the declared class against the structure ───────
+    // The declaration decides; the scan CHECKS it. scan_operator already counted,
+    // per row and against THAT ROW's own diagonal, how many rows carry a positive
+    // diagonal excess and how many break dominance. A singular Laplacian has
+    // neither: every row sum is zero to within its own scale. So the two verdicts
+    // are directly comparable, and a disagreement means one of them is a lie
+    // about which linear system we are about to benchmark. That is a hard error.
+    //
+    // Seven competitor-fairness defects in this harness were silent
+    // misclassifications, every one of them flattering us. A mis-declaration is
+    // cheap to make and expensive to find later; crashing here costs one run.
+    if (kind == matrix_kind::op) {
+        const bool scan_laplacian =
+            (op_scan.excess_rows == 0 && op_scan.deficient_rows == 0);
+        if (scan_laplacian != declared_laplacian) {
+            std::cerr
+                << "--class " << args.cls << " CONTRADICTS the structure of "
+                << args.mtx_path << ".\n"
+                   "  declared: " << (declared_laplacian ? "laplacian (singular)"
+                                                         : "sddm (full-rank)") << "\n"
+                   "  scanned:  " << (scan_laplacian ? "laplacian (singular)"
+                                                     : "sddm (full-rank)") << "\n"
+                   "  apxchol::scan_operator over " << op_scan.rows << " rows: "
+                << op_scan.excess_rows << " with a positive diagonal excess, "
+                << op_scan.deficient_rows << " with a negative row sum";
+            if (op_scan.deficient_rows > 0)
+                std::cerr << " (worst " << op_scan.worst_row_sum
+                          << " at row " << op_scan.worst_row << ")";
+            std::cerr
+                << ".\nA singular Laplacian has neither. Fix the declaration in the matrix\n"
+                   "registry (benchmarks/runner_common.py), or the file is not what it is\n"
+                   "declared to be. Refusing to guess which of the two you meant.\n";
+            return 1;
+        }
+    }
+
     const int n = static_cast<int>(L.rows());
     std::cerr << "Graph: " << graph_name << ", n=" << n;
 
@@ -2279,22 +2401,29 @@ int main(int argc, char** argv) {
     std::cerr << ", nnz=" << nnz << "\n";
 
     // ── how this matrix was interpreted: report it, once, before anything runs ──
-    // The grounding/scoring mode is a property of the ASSEMBLED operator, not of
-    // the declared kind: a graph always yields a singular Laplacian, and a file
-    // declared `operator` may be one (ecology1 is published as an exact
-    // Laplacian) or may be full-rank SDDM (apache2, G3_circuit, thermal2, the
-    // IPM normal equations).
-    g_laplacian_mode = is_laplacian_operator(L);
+    // The grounding/scoring mode comes from the DECLARATION (already checked
+    // against the structural scan above), with one transformation on top:
+    // --reg-rel adds eps*I after assembly, which removes the nullspace, so a
+    // regularized Laplacian is full-rank from here on no matter what was declared
+    // about the file. That is a property of the shift we applied, not a guess
+    // about the input.
+    g_laplacian_mode = declared_laplacian && !(args.reg_rel > 0.0);
     {
         const char* kname = (kind == matrix_kind::op) ? "operator" : "graph";
         std::cerr << "[matrix] " << graph_name << ": kind=" << kname
                   << " -> " << interpretation << "\n";
+        // Say where the verdict came from, so a reader of the log can tell a
+        // declaration from a construction from a transformation.
+        const char* provenance =
+            (args.reg_rel > 0.0)       ? "after --reg-rel"
+            : (kind == matrix_kind::op) ? "declared --class, checked against the scan"
+                                        : "by construction (L = D - A)";
         std::cerr << "[matrix] operator is "
-                  << (g_laplacian_mode ? "a SINGULAR LAPLACIAN (row sums vanish): grounded, "
-                                         "solution and residual mean-centred"
-                                       : "FULL-RANK (nonzero row sums): solved and scored "
-                                         "untouched, no pin, no mean-centring")
-                  << "\n";
+                  << (g_laplacian_mode ? "a SINGULAR LAPLACIAN: grounded, solution and "
+                                         "residual mean-centred"
+                                       : "FULL-RANK SDDM: solved and scored untouched, "
+                                         "no pin, no mean-centring")
+                  << " (" << provenance << ")\n";
         if (kind == matrix_kind::op) {
             // The class facts come from scan_operator; only the wording is ours.
             // (describe_operator is the LIBRARY's line, and its positive-off-
@@ -2324,6 +2453,8 @@ int main(int argc, char** argv) {
         // One machine-readable line for the runners to lift into the cell's
         // matrix_meta, so every stored result carries its own interpretation.
         std::cerr << "MATRIX_META kind=" << kname
+                  << " class=" << (g_laplacian_mode ? "laplacian" : "sddm")
+                  << " class_declared=" << (kind == matrix_kind::op ? 1 : 0)
                   << " n=" << n << " nnz=" << nnz
                   << " laplacian=" << (g_laplacian_mode ? 1 : 0)
                   << " grounding=" << (g_laplacian_mode ? "pin_or_native" : "none");

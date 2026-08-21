@@ -65,24 +65,59 @@ published** (see [THE GRADING RULE](#grading-rule) for why a calibration, not a 
 | ParAC-GPU | **preconditioned**-residual ratio `√⟨r,M⁻¹r⟩/√⟨r₀,M⁻¹r₀⟩` — optimistic by ~10× | their `solver.hpp` **patched** to the true Euclidean ratio (`benchmarks/CMakeLists.txt`); the CG recurrence math is untouched, only the test | 1e-8, on the true relative residual |
 | AC (`sddm` path) | `‖r‖/‖b‖` against the **augmented** RHS `[b; −Σb]` — a different basis | `tol_eff = tol·‖b‖/‖b_aug‖` (`bench_laplacians.jl`) | `tol_eff`, so the residual in *our* basis is 1e-8 |
 | AC / AC2 | `‖r‖/nb < tol` **plus `stag_test = 5`** — a stagnation early exit can return a non-converged `x` | nothing: their exit is theirs to keep | 1e-8; a stagnation exit is caught by our re-grade and lands as `not_converged` |
-| BoomerAMG | 2-norm **recurrence** residual (`TwoNorm=1`, `StopCrit=0`), on the **Dirichlet-pinned** subsystem | nothing. Recurrence drift was tested and ruled out: `HYPRE_PCGSetRecomputeResidual(1)` leaves iterations and residual bit-identical on iter0040 / grid_2000 / com-Amazon, so the knob was not kept. **Its real gap is pin-vs-score, and is OPEN — see below** | 1e-8, on hypre's pinned system |
+| BoomerAMG | 2-norm **recurrence** residual (`TwoNorm=1`, `StopCrit=0`), on the **Dirichlet-pinned** subsystem — and it is pinned only when the matrix is *declared* singular | nothing. Recurrence drift was tested and ruled out: `HYPRE_PCGSetRecomputeResidual(1)` leaves iterations and residual bit-identical on iter0040 / grid_2000 / com-Amazon, so the knob was not kept. The "pin-vs-score gap" that used to be listed here was **our misclassification of the IPM matrices, now CLOSED — see below** | 1e-8, on hypre's system (pinned only where `--class laplacian`) |
 | RCHOL / pRCHOL | `dnrm2(r) > dnrm2(b)·tol` (`pcg.cpp:82`), recurrence | nothing — **semantically identical to ours**, so adopting their loop imports no quirk | 1e-8 |
 
-**OPEN: BoomerAMG's pin-vs-score gap on singular Laplacians.** Every solver is scored on the
-**original singular `L`**, but BoomerAMG (and AMGCL) solve the **Dirichlet-pinned** SPD
-subsystem, and the two residuals are not the same number. Measured at HEAD on `iter0040`
-(`--kind operator`, which the binary correctly detects as a singular Laplacian): hypre's own
-final relative residual is **2.06e-9** — it converged, on its system — while the harness's
-re-grade against the original `L` is **1.71e-8**, a factor of **8.3**. Under
-[THE GRADING RULE](#grading-rule) that cell is `not_converged` at 1e-8, and it is the only
-family where this bites (grid_2000 2.98e-9, com-Amazon 5.28e-9 — both pass comfortably).
-This is **not** a stop-test problem — `HYPRE_PCGSetRecomputeResidual(1)` was tried and leaves
-iterations and residual bit-identical, so it was not kept — and no hypre tolerance knob
-closes it. The fix is rule option 1: **calibrate the tolerance handed to hypre for the
-pin-to-original transfer**, the same shape as ParAC's calibration. **NOT DONE.** Until it is,
-BoomerAMG's IPM cells must be reported at their true re-graded residual, `not_converged`
-where that exceeds 1e-8 — and not quietly passed by widening the grade, which is exactly what
-the old 10× band did.
+**CLOSED (2026-08-21): the BoomerAMG "pin-vs-score gap" on the IPM matrices was OUR
+misclassification, and no tolerance could ever have fixed it.** This paragraph used to say the
+fix was to *calibrate the tolerance handed to hypre for the pin-to-original transfer*, the same
+shape as ParAC's calibration. That was **unattainable**, and the reason matters.
+
+`iter0020`, `iter0030` and `iter0040` are **full-rank SDDM**, not singular Laplacians. They
+carry a uniform `+1e-6` diagonal regularization, so their row sums never vanish. The benchmark
+classified them by the ratio `max|rowsum| / max|diag| < 1e-10` (`is_laplacian_operator`, now
+deleted), and that ratio's numerator is pinned at ~1e-6 by the shift while only its
+**denominator** moves as the barrier tightens — so it slid under the threshold mid-family:
+
+| matrix | `max‖rowsum‖ / max‖diag‖` | old verdict | truth |
+|---|---|---|---|
+| `iter0010` | 4.396623e-10 | SDDM | SDDM — correct, but only **4.4×** from flipping |
+| `iter0020` | 9.988164e-12 | LAPLACIAN | **wrong** |
+| `iter0030` | 8.242149e-12 | LAPLACIAN | **wrong** |
+| `iter0040` | 1.116573e-11 | LAPLACIAN | **wrong** |
+| `ecology1` | 8.881784e-17 | LAPLACIAN | correct, 6 orders of margin |
+
+So BoomerAMG and AMGCL were **Dirichlet-pinned on a matrix with no nullspace**, and then scored
+against the unpinned original. The 1.71e-8 was not a gap to be closed by asking hypre for a
+tighter tolerance — it was a **floor**. All of the residual sits in the single pinned row, and
+its size is set by the shift, not by the solver: `1e-6 × 524288 × mean(x) = 1.70e-8`, which no
+number of iterations and no `--tol` can move. A calibration can only rescale a tolerance; it
+cannot lift a floor.
+
+**Measured before/after on `iter0040`** (CPU, 16T, `--tol 1e-8`, `--repeat 3`, true relative
+residual re-graded against the original `L`):
+
+| solver | before: iters / rel_res | after: iters / rel_res |
+|---|---|---|
+| `apxchol_v1 bg+tree[vec_pool]` | 44 / 9.873e-09 ✅ | 45 / 8.399e-09 ✅ |
+| `hypre_boomeramg` | 10 / **1.714e-08** ❌ `not_converged` | 10 / **2.059e-09** ✅ |
+| `amgcl` | 19 / **1.840e-08** ❌ `not_converged` | 19 / **7.003e-09** ✅ |
+
+Same iteration counts; only the system changed. BoomerAMG converges in the iterations it always
+took, and on total wall clock it now **beats** apxchol on this cell. That is the correct
+outcome: the cell was ours to lose and we were only holding it because a heuristic of ours had
+crippled two competitors.
+
+The matrix class is now **declared**, not detected — `--class laplacian|sddm`, required with
+`--kind operator`, carried in the registry beside `kind` (`runner_common.py`), and **asserted**
+against `apxchol::scan_operator`'s per-row census so a mis-declaration is a hard error rather
+than a silent one. The scan tests each row against *its own* diagonal, which is why a uniform
+shift is visible to it (an excess on every row) and invisible to a global ratio.
+
+This also **invalidates every stored cell on `iter0020`/`iter0030`/`iter0040`**, and as a
+**re-run**, not a re-grade: the same flag drove `center_if_laplacian` inside `make_rhs`, so the
+right-hand side itself changed (on `iter0040`, `sum(b)` 1.694e-14 → 1.815e-10). See the rule in
+`stale_cells.py`.
 
 **RCHOL is x86-only.** Their `util/pcg.hpp` hard-includes `mkl_spblas.h`/`mkl.h` (having
 first forced `MKL_INT = size_t`, which is why the build links MKL's **ILP64** interface, as
