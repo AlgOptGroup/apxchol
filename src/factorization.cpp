@@ -28,7 +28,7 @@ static void assemble_csc(sparse_csc& L,
                          node_index n) {
     edge_index total_offdiag = 0;
     for (const auto& col : factor_cols) {
-        const edge_index add = static_cast<edge_index>(col.entries.size());
+        const edge_index add = static_cast<edge_index>(col.entry_count);
         if (total_offdiag > sparse_csc::kEdgeMax - add)
             edge_index_overflow("assemble_csc(off-diagonal)");
         total_offdiag += add;
@@ -44,7 +44,7 @@ static void assemble_csc(sparse_csc& L,
     // fit node_index (<= degree < n); the cumulative outer pointers are edge_index.
     std::vector<node_index> col_counts(n, 1);
     for (const auto& col : factor_cols)
-        col_counts[perm[col.vertex]] += static_cast<node_index>(col.entries.size());
+        col_counts[perm[col.vertex]] += col.entry_count;
 
     // Build outer pointer array (cumulative sum). Bounded by nnz (checked above).
     auto* outerPtr = L.outerIndexPtr();
@@ -69,9 +69,11 @@ static void assemble_csc(sparse_csc& L,
             node_index perm_col = perm[col.vertex];
 
             col_entries.clear();
-            col_entries.reserve(col.entries.size());
-            for (const auto& [nbr, val] : col.entries)
+            col_entries.reserve(col.entry_count);
+            for (node_index j = 0; j < col.entry_count; ++j) {
+                const auto& [nbr, val] = col.entries[j];
                 col_entries.emplace_back(perm[nbr], static_cast<factor_value_t>(-val));
+            }
             std::sort(col_entries.begin(), col_entries.end());
 
             edge_index pos = outerPtr[perm_col];

@@ -9,6 +9,8 @@
 #include "apxchol/types.h"
 #include "apxchol/solver/elimination/elimination.h"
 #include <limits>
+#include <memory>
+#include <memory_resource>
 #include <utility>
 #include <vector>
 
@@ -38,6 +40,11 @@ struct factorize_workspace {
         // First-bump (0→1) pushes the vertex here, so the serial reserve_for
         // loop iterates only the touched vertices instead of all G.n().
         std::vector<node_index>     touched_buffer;
+
+        // Exact-size factor-column allocations share one monotonic resource.
+        // The owning pointer is moved out before the rest of the workspace is
+        // released, keeping the allocations alive through CSC assembly.
+        std::unique_ptr<std::pmr::monotonic_buffer_resource> factor_entries;
     };
     std::vector<per_thread> threads;
 

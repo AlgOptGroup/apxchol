@@ -170,6 +170,8 @@ void process_vertex(const Eliminator& elim,
                     bool dedup_inline = false) {
     auto& nbrs       = ws.neighbors;
     auto& excess_out = ws.excess_buffer;
+    col.entries = nullptr;
+    col.entry_count = 0;
     nbrs.clear();
     double edge_deg = 0.0;
     if (dedup_inline) {
@@ -201,7 +203,6 @@ void process_vertex(const Eliminator& elim,
         double d = G.excess(v);
         col.vertex = v;
         col.diag   = static_cast<factor_value_t>(d > 0.0 ? std::sqrt(d) : 1.0);
-        col.entries.clear();
         return;
     }
 
@@ -210,9 +211,13 @@ void process_vertex(const Eliminator& elim,
     double sqrt_deg = std::sqrt(total_deg);
     col.vertex = v;
     col.diag = static_cast<factor_value_t>(sqrt_deg);
-    col.entries.reserve(nbrs.size());
-    for (const auto& [u, w] : nbrs)
-        col.entries.emplace_back(u, static_cast<factor_value_t>(w / sqrt_deg));
+    col.entries = static_cast<factor_entry*>(ws.factor_entries->allocate(
+        nbrs.size() * sizeof(factor_entry), alignof(factor_entry)));
+    for (const auto& [u, w] : nbrs) {
+        std::construct_at(col.entries + col.entry_count,
+            factor_entry{u, static_cast<factor_value_t>(w / sqrt_deg)});
+        ++col.entry_count;
+    }
 
     // Propagate excess to neighbors (deferred for thread safety). Runs BEFORE
     // sample_clique so the eliminator receives the neighbor span as dead
@@ -578,7 +583,6 @@ void eliminate_remaining(const Eliminator& elim,
     auto peel_one = [&](node_index v) {
         wt.edge_buffer.clear();
         wt.excess_buffer.clear();
-        col.entries.clear();
         process_vertex(elim, G, v, opts.seed, col, wt,
                        /*dedup_inline=*/true);
         factor_cols.push_back(std::move(col));
@@ -712,6 +716,9 @@ factorization factorize_impl(const Eliminator& elim,
         num_threads_factorize = omp_get_max_threads();
 #endif
         ws.threads.resize(num_threads_factorize);
+        for (auto& t : ws.threads)
+            t.factor_entries =
+                std::make_unique<std::pmr::monotonic_buffer_resource>();
     }
     std::vector<detail::factor_col> factor_cols;
     factor_cols.reserve(n);
@@ -1036,7 +1043,7 @@ factorization factorize_impl(const Eliminator& elim,
         if (cp) {
             size_t round_nnz = 0;
             for (size_t ci = cols_before; ci < factor_cols.size(); ++ci)
-                round_nnz += factor_cols[ci].entries.size() + 1;
+                round_nnz += factor_cols[ci].entry_count + 1;
             result.rounds.back().nnz_added = round_nnz;
             result.rounds.back().nnz_total =
                 (result.rounds.size() >= 2
@@ -1241,7 +1248,7 @@ factorization factorize_impl(const Eliminator& elim,
             if (cp) {
                 size_t bk_round_nnz = 0;
                 for (size_t ci = cols_before_bk; ci < factor_cols.size(); ++ci)
-                    bk_round_nnz += factor_cols[ci].entries.size() + 1;
+                    bk_round_nnz += factor_cols[ci].entry_count + 1;
                 result.rounds.back().nnz_added = bk_round_nnz;
                 result.rounds.back().nnz_total =
                     (result.rounds.size() >= 2
@@ -1274,7 +1281,7 @@ factorization factorize_impl(const Eliminator& elim,
     if (const char* e = std::getenv("APXCHOL_MEM_DUMP"); e && *e) {
         const double MB = 1.0 / (1024.0 * 1024.0);
         size_t nnz = factor_cols.size();
-        for (const auto& c : factor_cols) nnz += c.entries.size();
+        for (const auto& c : factor_cols) nnz += c.entry_count;
         double live_frac = -1.0;
         if constexpr (std::is_same_v<Incidence, vec_pool_incidence> ||
                       std::is_same_v<Incidence, forward_star_incidence>)
@@ -1307,6 +1314,11 @@ factorization factorize_impl(const Eliminator& elim,
 #if defined(APXCHOL_USE_CUDA)
     gpu_frontend.reset();
 #endif
+    std::vector<std::unique_ptr<std::pmr::monotonic_buffer_resource>>
+        factor_entry_resources;
+    factor_entry_resources.reserve(ws.threads.size());
+    for (auto& t : ws.threads)
+        factor_entry_resources.push_back(std::move(t.factor_entries));
     work = graph<Incidence>();
     ws   = factorize_workspace();
     sel  = selection();
@@ -1320,9 +1332,11 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<size_t>().swap(pre_filter_offsets);
 
     detail::build_csc(result, factor_cols, n, cp);
-    // The per-column lists are consumed: free them here (n small vectors + the
-    // header array), not at return.
+    // The per-column ranges and their monotonic resources are consumed: free
+    // both here, not at return.
     std::vector<detail::factor_col>().swap(factor_cols);
+    std::vector<std::unique_ptr<std::pmr::monotonic_buffer_resource>>().swap(
+        factor_entry_resources);
 
     // Optional debugging hook: print final nnz(L) when env var is set.
     // Useful for comparing factor fill across option settings without touching

@@ -7,6 +7,7 @@
 #include "apxchol/sparse_csc.h"
 #include <Eigen/Sparse>
 #include <cstddef>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -176,22 +177,25 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
 
 namespace detail {
 
+struct factor_entry {
+    node_index neighbor;
+    factor_value_t value;
+};
+static_assert(std::is_trivially_destructible_v<factor_entry>);
+
 struct factor_col {
     node_index vertex;
     // L diagonal: sqrt(total_deg) including SDDM excess. Stored at the factor's
     // precision (factor_value_t: fp32),
-    // like `entries` below: it is computed in fp64 and only ever copied into
+    // Like the arena entries below, it is computed in fp64 and only copied into
     // sparse_csc::vals_ of that same type, so narrowing here is bit-identical
-    // (and keeps this per-column header at 32 B instead of 40 B; there are n
-    // of them).
+    // (and keeps the per-column header compact; there are n of them).
     factor_value_t diag = 0;
-    // (neighbor, L_value). The value is stored at the factor's precision -- it
-    // is computed in fp64 (w / sqrt_deg) and only ever copied (negated) into
-    // sparse_csc::vals_, which has that same type, so narrowing here instead of
-    // at assembly is bit-identical and halves the largest setup-transient array
-    // (16 -> 8 B per factor entry; every column of the factor is held here
-    // until assembly).
-    std::vector<std::pair<node_index, factor_value_t>> entries;
+    // Exact-size off-diagonal ranges come from one monotonic resource per
+    // elimination thread. They remain valid until assembly and avoid both one
+    // heap allocation per vertex and geometric append-buffer growth.
+    factor_entry* entries = nullptr;
+    node_index entry_count = 0;
 };
 
 // Build elimination-order permutation and assemble L in CSC format.
