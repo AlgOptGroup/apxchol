@@ -63,7 +63,11 @@ struct factor_options {
     /// little BK runway and turns almost the whole tail into singleton peel
     /// levels. Zero progress always bails. This is an algorithmic yield knob;
     /// omp_threshold is also the absolute safeguard: a selection already that
-    /// large is retained regardless of relative yield.
+    /// large is retained regardless of relative yield. On a residual with more
+    /// than four handoff-sized chunks and average degree at least the handoff
+    /// threshold, the effective yield is max(base, min(0.15, 3*base)); sparse,
+    /// small and no-handoff partitioners use the base exactly. Set zero to
+    /// disable yield-based handoff, including the dense-residual adaptation.
     double min_is_fraction = 0.05;
     size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP;
                                      // elimination also engages when selected-degree
