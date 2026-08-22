@@ -135,5 +135,24 @@ class FairSweepSelectionTest(unittest.TestCase):
         self.assertEqual(dispatched["iter0010"][0], "ipm")
 
 
+class JuliaPreflightTest(unittest.TestCase):
+    def test_missing_ignored_manifest_fails_before_cells_run(self):
+        with mock.patch.object(sweep_fair.os.path, "isfile", return_value=False):
+            ready, reason = sweep_fair.julia_preflight()
+        self.assertFalse(ready)
+        self.assertIn("Manifest.toml", reason)
+        self.assertIn("Pkg.instantiate", reason)
+
+    def test_package_load_failure_keeps_useful_stderr(self):
+        failed = __import__("subprocess").CompletedProcess(
+            "julia", 1, "", "root cause\nin expression starting at driver.jl:27\n")
+        with mock.patch.object(sweep_fair.os.path, "isfile", return_value=True), \
+             mock.patch.object(sweep_fair.shutil, "which", return_value="/bin/julia"), \
+             mock.patch.object(sweep_fair, "sh", return_value=failed):
+            ready, reason = sweep_fair.julia_preflight()
+        self.assertFalse(ready)
+        self.assertIn("root cause", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

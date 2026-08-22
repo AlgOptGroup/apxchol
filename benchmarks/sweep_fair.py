@@ -46,7 +46,7 @@ CSV parse, VRAM sidecar) lives in runner_common.py. Schema-2 timeout cells persi
 the exact wall-clock cap as `timeout_cap_s`; the charting pipeline never reconstructs
 that lower bound from later timings.
 """
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, shlex, shutil, subprocess, sys, time
 
 import runner_common as rc
 import parac_runner
@@ -84,6 +84,36 @@ PROV = {"boost":"on","boost_expected":"on","git_sha":rc.git_sha(),
 
 def classify(m):
     return rc.classify(m, TOL)
+
+
+def julia_preflight():
+    """Return (ready, reason) for the AC/AC2 runtime before a sweep starts.
+
+    Manifest.toml is intentionally gitignored, so an isolated worktree can have
+    a fully populated depot yet no mapping from Project.toml to those installed
+    package trees. That exact staging error otherwise turns every AC/AC2 cell
+    into the same misleading numerical ``failed`` outcome.
+    """
+    project = os.path.join(rc.ROOT, "benchmarks", "julia")
+    manifest = os.path.join(project, "Manifest.toml")
+    if not os.path.isfile(manifest):
+        return False, (f"missing {manifest}; instantiate this exact worktree with "
+                       f"`julia --project={project} -e 'using Pkg; Pkg.instantiate()'`")
+    julia = shutil.which("julia")
+    if not julia:
+        return False, "julia is not on PATH"
+    cmd = (f"{shlex.quote(julia)} --startup-file=no --project={shlex.quote(project)} "
+           f"-e {shlex.quote('using Laplacians')}")
+    try:
+        cp = sh(cmd, timeout=300)
+    except subprocess.TimeoutExpired:
+        return False, "`using Laplacians` exceeded the 300s environment-preflight cap"
+    if cp.returncode != 0:
+        detail = " | ".join(
+            line.strip() for line in (cp.stderr or cp.stdout or "").splitlines()[-8:]
+        ) or "no output"
+        return False, f"`using Laplacians` failed (rc={cp.returncode}): {detail}"
+    return True, "Laplacians load succeeded"
 
 
 def selected_matrices(families, only=()):
@@ -619,6 +649,11 @@ def main():
         # disables AC/AC2: leaving their cells empty silently understates coverage.
         # Use --no-julia explicitly when you want the speed (they are slow, and hit
         # the cap or OOM on the social giants -- recorded as timeout/failed cells).
+    if DEVICE == "cpu" and JULIA:
+        julia_ok, julia_reason = julia_preflight()
+        if not julia_ok:
+            sys.exit(f"AC/AC2 environment preflight failed: {julia_reason}. "
+                     "Use --no-julia only if omitting those planned cells is intentional.")
     if a.no_rchol:
         COMP = [c for c in COMP if c not in ("rchol","rchol_par")]
     if DEVICE == "gpu" and not os.path.exists(BIN["gpu"]):
