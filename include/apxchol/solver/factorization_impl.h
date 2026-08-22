@@ -47,19 +47,48 @@ namespace detail {
 // default degree_quantile=0.2, using |active| as the denominator silently made
 // min_is_fraction=0.05 mean "select at least 25% of the candidate pool".
 //
-// Once the residual is at or below the partitioner's handoff threshold there
-// is no profitable fallback left: the BK residual loop is skipped and a bail
-// sends every remaining vertex to the singleton peel.  Keep selecting there as
-// long as the rule makes any progress.  selected==0 remains the unconditional
-// escape from a stuck custom selector.
+// Near the partitioner's handoff threshold there is no profitable fallback:
+// BK stops at the threshold and a bail just above it sends almost the whole
+// threshold-sized residual to the singleton peel. Protect twice the handoff
+// size so integer/seed noise cannot turn a productive main selector into that
+// dependency-level cliff. selected==0 remains the unconditional escape from a
+// stuck custom selector.
 inline bool is_yield_too_small(size_t selected, size_t candidates,
                                size_t active, double min_fraction,
                                size_t residual_handoff_threshold) {
     if (selected == 0) return true;
-    if (residual_handoff_threshold != std::numeric_limits<size_t>::max() &&
-        active <= residual_handoff_threshold)
-        return false;
+    if (residual_handoff_threshold != std::numeric_limits<size_t>::max()) {
+        const size_t protected_tail = residual_handoff_threshold >
+                std::numeric_limits<size_t>::max() / 2
+            ? std::numeric_limits<size_t>::max()
+            : 2 * residual_handoff_threshold;
+        if (active <= protected_tail) return false;
+    }
     return selected < candidates * min_fraction;
+}
+
+// The relative yield at which the main selector stops should reflect both the
+// size and the density of the residual. BG/Luby/rootset rescan it; BK samples
+// bounded edge work after an O(active) hash pass. Keep min_is_fraction as the
+// sparse/small-residual base and preserve zero as "disable yield bailout".
+//
+// Adapt only while at least four handoff-sized chunks remain, so BK has enough
+// runway to amortize taking over and small residuals do not fall off a level
+// cliff. A large residual doubles the base; one whose average degree is itself
+// at least the final-tail size triples it. The 0.15 ceiling bounds the quality
+// trade even if a caller chose a larger handoff threshold.
+inline double adaptive_is_yield_fraction(
+        double base, size_t active, double average_degree,
+        size_t residual_handoff_threshold) {
+    if (!(base > 0.0) ||
+        residual_handoff_threshold == std::numeric_limits<size_t>::max() ||
+        residual_handoff_threshold > std::numeric_limits<size_t>::max() / 4 ||
+        active <= 4 * residual_handoff_threshold)
+        return base;
+    const double multiplier =
+        average_degree >= static_cast<double>(residual_handoff_threshold)
+            ? 3.0 : 2.0;
+    return std::max(base, std::min(0.15, multiplier * base));
 }
 
 // Eliminate vertices in the partition: record L-columns, add clique edges.
@@ -888,9 +917,12 @@ factorization factorize_impl(const Eliminator& elim,
         // desyncs the boundaries and mislabels the sequential peel tail as one
         // independent level -> incorrect triangular solve.
         if constexpr (!sample_bounded) {
+            const double min_yield = detail::adaptive_is_yield_fraction(
+                opts.min_is_fraction, active.size(), last_avg_degree,
+                residual_thresh);
             if (detail::is_yield_too_small(
                     part.num_regions(), last_candidate_count, active.size(),
-                    opts.min_is_fraction, residual_thresh))
+                    min_yield, residual_thresh))
                 break;
         } else {
             if (part.num_regions() == 0) {

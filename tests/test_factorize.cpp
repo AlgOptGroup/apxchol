@@ -930,22 +930,42 @@ Eigen::SparseMatrix<double> clique_laplacian(int n) {
 }  // namespace
 
 TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
+    using apxchol::detail::adaptive_is_yield_fraction;
     using apxchol::detail::is_yield_too_small;
     constexpr size_t none = std::numeric_limits<size_t>::max();
 
     // 9/200 is a 4.5% yield and therefore too small even though it is only
-    // 0.9% of the 1000 active vertices. The candidate pool is the denominator.
-    EXPECT_TRUE(is_yield_too_small(9, 200, 1000, 0.05, 500));
-    EXPECT_FALSE(is_yield_too_small(10, 200, 1000, 0.05, 500));
+    // 0.45% of the 2000 active vertices. The candidate pool is the denominator.
+    EXPECT_TRUE(is_yield_too_small(9, 200, 2000, 0.05, 500));
+    EXPECT_FALSE(is_yield_too_small(10, 200, 2000, 0.05, 500));
 
-    // Below the handoff threshold, one selected vertex is useful progress:
-    // bailing would skip BK and turn all 23 columns into singleton peel levels.
+    // Protect twice the handoff threshold. Bailing at active=524, for example,
+    // lets BK remove only 24 vertices and turns the remaining 500 columns into
+    // singleton peel levels. One selected vertex remains useful progress there.
     EXPECT_FALSE(is_yield_too_small(1, 5, 23, 0.05, 500));
+    EXPECT_FALSE(is_yield_too_small(1, 100, 1000, 0.05, 500));
+    EXPECT_TRUE(is_yield_too_small(1, 100, 1001, 0.05, 500));
     EXPECT_TRUE(is_yield_too_small(0, 5, 23, 0.05, 500));
 
     // A custom partitioner with no residual handoff trait keeps the ordinary
     // relative-yield rule at every active size.
     EXPECT_TRUE(is_yield_too_small(1, 100, 23, 0.05, none));
+
+    // Adaptation needs enough runway before the 500-vertex handoff. A large
+    // sparse residual doubles the public base; a large dense one triples it.
+    // Zero remains an exact bailout-off switch and a larger base is not cut.
+    EXPECT_DOUBLE_EQ(
+        adaptive_is_yield_fraction(0.05, 2000, 10000.0, 500), 0.05);
+    EXPECT_DOUBLE_EQ(
+        adaptive_is_yield_fraction(0.05, 2001, 499.9, 500), 0.10);
+    EXPECT_DOUBLE_EQ(
+        adaptive_is_yield_fraction(0.05, 2001, 500.0, 500), 0.15);
+    EXPECT_DOUBLE_EQ(
+        adaptive_is_yield_fraction(0.0, 10000, 10000.0, 500), 0.0);
+    EXPECT_DOUBLE_EQ(
+        adaptive_is_yield_fraction(0.20, 10000, 10000.0, 500), 0.20);
+    EXPECT_DOUBLE_EQ(adaptive_is_yield_fraction(
+        0.05, 10000, 10000.0, std::numeric_limits<size_t>::max()), 0.05);
 }
 
 TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
