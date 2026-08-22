@@ -65,7 +65,9 @@ struct factor_options {
     /// omp_threshold is also the absolute safeguard: a selection already that
     /// large is retained regardless of relative yield.
     double min_is_fraction = 0.05;
-    size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP.
+    size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP;
+                                     // elimination also engages when selected-degree
+                                     // work exceeds 24 times this value.
                                      // Also gates the partitioners' parallel paths;
                                      // lowering it below typical round sizes makes the
                                      // factor structure nondeterministic run to run

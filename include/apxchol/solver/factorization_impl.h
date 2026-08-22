@@ -101,6 +101,27 @@ inline double adaptive_is_yield_fraction(
     return std::max(base, std::min(0.15, 3.0 * base));
 }
 
+// The old elimination gate used only the number of independent vertices.
+// That misses small dense rounds: processing 500 columns with 200 live edges
+// each is much more work than processing 2000 mesh columns. Reuse the degree
+// prepass as a zero-traversal-cost work hint and compare it with the old vertex
+// threshold expressed as adjacency slots. 24 slots/vertex is conservative:
+// the representative sparse controls peak below this boundary, while the
+// social-graph rounds it admits carry 48k-200k slots each.
+inline constexpr size_t kEliminationWorkPerVertex = 24;
+
+inline bool elimination_parallel_worthwhile(
+        size_t vertices, size_t adjacency_work, size_t vertex_threshold,
+        size_t team_threads) {
+    if (team_threads <= 1) return false;
+    if (vertices > vertex_threshold) return true;
+    const size_t work_threshold = vertex_threshold >
+            std::numeric_limits<size_t>::max() / kEliminationWorkPerVertex
+        ? std::numeric_limits<size_t>::max()
+        : vertex_threshold * kEliminationWorkPerVertex;
+    return adjacency_work > work_threshold;
+}
+
 // Eliminate vertices in the partition: record L-columns, add clique edges.
 // Partition vertices across regions are pairwise non-adjacent (for singleton
 // regions, every vertex is its own region — same constraint as the old IS).
@@ -220,7 +241,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                    factorize_workspace& ws,
                                    const factor_options& opts,
                                    checkpoint* cp = nullptr,
-                                   bool capture_gpu_topology = false) {
+                                   bool capture_gpu_topology = false,
+                                   size_t work_hint = 0) {
     const size_t n_verts = part.num_vertices();
     // n_verts > 0 guaranteed by the dispatcher; early-exit not needed here.
     // The final column array is reserved to n before any round. Grow it once
@@ -235,16 +257,19 @@ void eliminate_partition_singleton(const Eliminator& elim,
     if (capture_gpu_topology) ws.gpu_topology_updates.clear();
 
     #ifdef _OPENMP
-    // Rounds whose IS is at or below omp_threshold take the fully serial path
-    // at the bottom of this function. (Running them on a small pinned team
-    // instead was the APXCHOL_TAIL_THREADS experiment, removed 2026-08-20:
-    // tail 4 at threshold 2000 measured neutral-to-worse on iter0040 /
-    // grid_2000, and the parallel path applies clique edges in thread-arrival
-    // order, so it also costs the tail's bit-determinism. See "Retired knobs"
-    // in AGENTS.md.)
-    if (n_verts > opts.omp_threshold) {
+    // Rounds below omp_threshold take the serial path unless the degree
+    // prepass says their selected columns still carry enough adjacency work.
+    // This differs from the retired APXCHOL_TAIL_THREADS experiment: that rule
+    // parallelized every small tail by vertex count and regressed sparse IPM /
+    // grid rounds; this gate leaves those rounds serial and admits only dense
+    // work. The parallel path applies clique edges in thread-arrival order, so
+    // the conservative work boundary also limits structural exposure.
+    const int team_threads = static_cast<int>(ws.threads.size());
+    const bool parallel_round = elimination_parallel_worthwhile(
+        n_verts, work_hint, opts.omp_threshold,
+        static_cast<size_t>(team_threads));
+    if (parallel_round) {
         // Team size for the fused paths: the full workspace team.
-        const int team_threads = static_cast<int>(ws.threads.size());
         if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
             // Mega-fused parallel region: compute + deactivate + apply all under
             // one fork-join.  On BG/BK with ~1k+ rounds this saves ~2 extra
@@ -507,7 +532,8 @@ void eliminate_partition(const Eliminator& elim,
                          factorize_workspace& ws,
                          const factor_options& opts,
                          checkpoint* cp = nullptr,
-                         bool capture_gpu_topology = false) {
+                         bool capture_gpu_topology = false,
+                         size_t work_hint = 0) {
     if (cp) { cp->descend("eliminate"); cp->tick(); }
     const size_t n_verts = part.num_vertices();
     if (std::getenv("APXCHOL_ROUND_TRACE"))  // one line per round: IS size this round
@@ -517,7 +543,7 @@ void eliminate_partition(const Eliminator& elim,
         return;
     }
     eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp,
-                                  capture_gpu_topology);
+                                  capture_gpu_topology, work_hint);
     if (cp) cp->ascend();
 }
 
@@ -964,6 +990,18 @@ factorization factorize_impl(const Eliminator& elim,
         result.rounds.push_back({active.size(), part.num_regions(), last_avg_degree, 0, 0});
 
         const size_t cols_before = cp ? factor_cols.size() : 0;
+        size_t elimination_work_hint = 0;
+        if constexpr (partitioner_degree_prepass_v<Partitioner>) {
+            for (node_index v : part.data) {
+                const size_t degree = static_cast<size_t>(live_degrees[v]);
+                if (elimination_work_hint >
+                    std::numeric_limits<size_t>::max() - degree) {
+                    elimination_work_hint = std::numeric_limits<size_t>::max();
+                    break;
+                }
+                elimination_work_hint += degree;
+            }
+        }
         const bool capture_gpu_topology =
 #if defined(APXCHOL_USE_CUDA)
             static_cast<bool>(gpu_frontend);
@@ -971,7 +1009,8 @@ factorization factorize_impl(const Eliminator& elim,
             false;
 #endif
         detail::eliminate_partition(elim, work, part, factor_cols, ws, opts, cp,
-                                    capture_gpu_topology);
+                                    capture_gpu_topology,
+                                    elimination_work_hint);
 #if defined(APXCHOL_USE_CUDA)
         if (gpu_frontend) {
             try {

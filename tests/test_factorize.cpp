@@ -978,6 +978,17 @@ TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
         0, 0, 20000, 100000, 0.10, 500, 2000));
 }
 
+TEST(EliminationParallelGate, UsesDegreeWorkAndProtectsSerialExecution) {
+    using apxchol::detail::elimination_parallel_worthwhile;
+    constexpr size_t max = std::numeric_limits<size_t>::max();
+
+    EXPECT_FALSE(elimination_parallel_worthwhile(2000, 48000, 2000, 16));
+    EXPECT_TRUE(elimination_parallel_worthwhile(2001, 0, 2000, 16));
+    EXPECT_TRUE(elimination_parallel_worthwhile(500, 48001, 2000, 16));
+    EXPECT_FALSE(elimination_parallel_worthwhile(500, max, 2000, 1));
+    EXPECT_FALSE(elimination_parallel_worthwhile(1, max, max, 16));
+}
+
 TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
     constexpr int n = 60;
     constexpr size_t thresh = 5;
