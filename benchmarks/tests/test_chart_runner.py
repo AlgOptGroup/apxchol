@@ -103,5 +103,37 @@ class CapReferenceTest(unittest.TestCase):
             self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 10.0)
 
 
+class FairSweepSelectionTest(unittest.TestCase):
+    def test_all_registry_entries_are_selected_once(self):
+        selected = list(sweep_fair.selected_matrices(
+            {"grids", "suitesparse", "ipm"}))
+        self.assertEqual(len(selected), len(rc.MATRICES))
+        self.assertEqual([mid for mid, _ in selected], list(rc.MATRICES))
+
+    def test_file_backed_families_survive_registry_schema(self):
+        selected = dict(sweep_fair.selected_matrices(
+            {"suitesparse", "ipm"}, {"parabolic_fem", "iter0010"}))
+        self.assertEqual(set(selected), {"parabolic_fem", "iter0010"})
+        self.assertEqual(selected["parabolic_fem"]["cls"], "sddm")
+        self.assertEqual(selected["iter0010"]["cls"], "sddm")
+        self.assertTrue(pathlib.Path(selected["parabolic_fem"]["spec"]).is_absolute())
+
+    def test_main_dispatches_suitesparse_and_ipm_without_unpacking_tuples(self):
+        argv = ["sweep_fair.py", "--families", "suitesparse,ipm", "--only",
+                "parabolic_fem,iter0010", "--no-julia", "--no-parac", "--no-cmg"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(sweep_fair, "do_matrix") as do_matrix, \
+             mock.patch.object(sweep_fair, "JULIA", []), \
+             mock.patch.object(sweep_fair, "RUN_PARAC", False), \
+             mock.patch.object(sweep_fair, "RUN_CMG", False), \
+             mock.patch("builtins.print"):
+            sweep_fair.main()
+
+        dispatched = {call.args[0]: call.args[1:] for call in do_matrix.call_args_list}
+        self.assertEqual(set(dispatched), {"parabolic_fem", "iter0010"})
+        self.assertEqual(dispatched["parabolic_fem"][0], "suitesparse")
+        self.assertEqual(dispatched["iter0010"][0], "ipm")
+
+
 if __name__ == "__main__":
     unittest.main()

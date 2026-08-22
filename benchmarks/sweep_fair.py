@@ -51,7 +51,7 @@ import argparse, json, os, re, subprocess, sys, time
 import runner_common as rc
 import parac_runner
 import cmg_matlab_runner
-from runner_common import ROOT, BIN, CELLS, GRIDS, SS, IPM, matrix_args, sh
+from runner_common import BIN, CELLS, matrix_args, sh
 
 # Dumped .mtx cache (grid Laplacians + the exact operator handed to the external
 # solvers). /tmp is a tmpfs on this box, i.e. RAM with a per-user quota, and the
@@ -84,6 +84,20 @@ PROV = {"boost":"on","boost_expected":"on","git_sha":rc.git_sha(),
 
 def classify(m):
     return rc.classify(m, TOL)
+
+
+def selected_matrices(families, only=()):
+    """Yield canonical registry records selected for a sweep.
+
+    Keep the sweep decoupled from the positional layout of GRIDS/SS/IPM.  In
+    particular, file-backed registry entries gained a fifth ``cls`` field when
+    grounding became explicit; consuming MATRICES avoids duplicating that tuple
+    schema here.
+    """
+    only = set(only)
+    for mid, matrix in rc.MATRICES.items():
+        if matrix["family"] in families and (not only or mid in only):
+            yield mid, matrix
 
 # What the BINARY reported about the operator it assembled for each matrix
 # (`MATRIX_META ...` on stderr): kind, n/nnz, and whether the assembled operator
@@ -588,7 +602,6 @@ def main():
     DEVICE = a.device
     fams = {f.strip() for f in a.families.split(",") if f.strip()}
     only = {x.strip() for x in a.only.split(",") if x.strip()}
-    want = lambda mid: (not only) or (mid in only)
     if a.no_julia: JULIA = []
     if a.no_parac: RUN_PARAC = False
     if a.parac_only: PARAC_ONLY = True
@@ -620,21 +633,11 @@ def main():
         print("    NOTE: CMG is OFF -> its cells stay empty. Fill them with "
               "`python3 benchmarks/cmg_matlab_runner.py`.", flush=True)
     # Resume-safe: cells with a terminal status are skipped (see cell_done).
-    # do_matrix reads the declared kind from the registry (rc.kind_of), so the
-    # loops here carry only WHERE the matrix comes from, never how to read it.
-    if "grids" in fams:
-        for mid,family,source,spec,is2d in GRIDS:
-            if not want(mid): continue
-            n = spec*spec if source=="grid" else spec*spec*spec
-            do_matrix(mid,family,source,spec,is2d,n,None)   # singular L, multi-component Dirichlet pin
-    if "suitesparse" in fams:
-        for mid,path,n,_kind in SS:
-            if not want(mid): continue
-            do_matrix(mid,"suitesparse","mtx",f"{ROOT}/{path}",False,n,None)
-    if "ipm" in fams:
-        for mid,path,n,_kind in IPM:
-            if not want(mid): continue
-            do_matrix(mid,"ipm","mtx",f"{ROOT}/{path}",False,n,None)
+    # MATRICES is the canonical, named registry view; do not unpack the backing
+    # GRIDS/SS/IPM tuples here, because their positional schemas can evolve.
+    for mid, matrix in selected_matrices(fams, only):
+        do_matrix(mid, matrix["family"], matrix["source"], matrix["spec"],
+                  matrix["is2d"], matrix["n"], None)
     print("FAIR sweep done")
 
 if __name__=="__main__":
