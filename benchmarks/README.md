@@ -246,11 +246,13 @@ the metric rather than storing a misleading value.
   report on and its printed `‖b − L·x‖ / ‖b‖` is against that `L`. We do **not**
   hand it a Dirichlet-pinned matrix — its RHS generator knows nothing about the
   pin, and the residual against the original `L` then floors at ~1e-3 (com-Amazon
-  1.4e-3, coAuthorsDBLP 2.0e-3) no matter how tight the tolerance. A
-  `kind=operator` matrix goes to its **physics** driver as the **published
-  operator**, AMD-reordered and then augmented with the ground row/column exactly
-  as ParAC's own `write_graph.jl physics_produce` does; physics mode's trim removes
-  that appended node, so what it solves is the published operator itself. Each
+  1.4e-3, coAuthorsDBLP 2.0e-3) no matter how tight the tolerance. Published
+  operators declared `class=laplacian` take this same graph route (`ecology1` is
+  the current example), because physics mode would trim a real vertex. A
+  `class=sddm` matrix goes to its **physics** driver as the **published operator**,
+  AMD-reordered and then augmented with the ground row/column exactly as ParAC's
+  own `write_graph.jl physics_produce` does; physics mode's trim removes that
+  appended node, so what it solves is the published operator itself. Each
   matrix runs **one** mode and the other cell is `n/a` with the reason recorded.
   ParAC's stopping test is absolute (`‖r‖` vs `sqrt(rel_tol)`) and on the
   recurrence residual, so the tolerance is **calibrated from one probe run** —
@@ -515,10 +517,11 @@ PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out benchmarks/lat
 ParAC is charted as **two drivers on both devices** — graph (Laplacian) and
 physics (SDDM). The same self-contained binary runs both: on GPU via driver.cu /
 driver_physics.cu, on CPU via one extra argv (`is_graph=0`). **Each matrix runs
-exactly one of them**, the one ParAC documents for it: `kind=graph` → graph
-(pure `L`, its own zero-sum RHS), `kind=operator` → physics (published operator
-plus ParAC's ground-node augmentation, which the mode's trim removes). The other
-cell is `n/a` and carries the reason, so a chart shows a deliberate gap rather
+exactly one of them**, chosen by operator class: `class=laplacian` → graph
+(pure `L`, its own zero-sum RHS), `class=sddm` → physics (published operator plus
+ParAC's ground-node augmentation, which the mode's trim removes). This routes the
+published `kind=operator,class=laplacian` matrix `ecology1` through graph mode.
+The other cell is `n/a` and carries the reason, so a chart shows a deliberate gap rather
 than a solver that silently vanished. Running the *other* mode is not a second
 data point but a wrong answer: physics on an un-augmented operator deletes a real
 degree of freedom (apache2 scores 3.1e-3 against the published matrix while ParAC

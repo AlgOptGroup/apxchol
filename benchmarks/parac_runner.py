@@ -18,7 +18,7 @@ benchmarks/parac_reorder_amd.jl and parac_nnz_sort.jl remain as the FALLBACK for
 an input their producer rejects; a cell prepared by the fallback records that,
 and the reason, in matrix_meta.parac_prep.
 
-kind=graph -> GRAPH mode (`driver <mtx> <threads> ""`).
+class=laplacian -> GRAPH mode (`driver <mtx> <threads> ""`).
   Dump the PURE L = D - A, one connected component at a time (--giant-dump
   --comp-rank R; rank 0 IS the whole matrix when it is connected), hand it to
   their `graph_produce(prefix, "amd")`, and let ParAC generate its own zero-sum
@@ -28,7 +28,8 @@ kind=graph -> GRAPH mode (`driver <mtx> <threads> ""`).
   about our pin, and the residual against the original L then floors around 1e-3
   no matter the tolerance (measured; see benchmarks/patches/parac/README.md). Its
   physics cell is n/a — physics mode trims a row, which on a pure Laplacian
-  deletes a real vertex.
+  deletes a real vertex. This includes both Laplacians assembled from
+  `kind=graph` inputs and a published Laplacian operator such as `ecology1`.
 
   graph_produce strips the diagonal, forces the off-diagonals negative and
   REBUILDS the diagonal as -colsum, i.e. re-derives the pure Laplacian. On our
@@ -36,7 +37,7 @@ kind=graph -> GRAPH mode (`driver <mtx> <threads> ""`).
   that rebuild is a no-op: verified byte-identical to a permutation-only reorder
   on com-Amazon (unweighted) and grid_1000 (weighted).
 
-kind=operator -> PHYSICS mode (`driver <mtx> <threads> "" 1`).
+class=sddm -> PHYSICS mode (`driver <mtx> <threads> "" 1`).
   Dump the operator as PUBLISHED and hand it to their `physics_produce(prefix,
   "amd")`: permute, then append the ground row/column, so the appended node is
   last. Physics mode trims exactly that node, so what it solves is the published
@@ -165,20 +166,31 @@ _g = lambda pat, o: (re.search(pat, o).group(1) if re.search(pat, o) else None)
 
 
 # ── shared: regularized/pure dump ───────────────────────────────────────────────
+def _uses_physics(mid):
+    """Whether ParAC must use its SDDM/physics route for this matrix.
+
+    Routing follows the operator class, not the file kind. A published singular
+    Laplacian such as ecology1 belongs on graph mode just like an assembled graph
+    Laplacian; only a full-rank SDDM needs ground-node augmentation followed by
+    the physics driver's matching trim.
+    """
+    return rc.class_of(mid) == "sddm"
+
+
 def _dump_tag(mid):
     """The dump variant for this matrix.
 
-    kind=operator -> 'op': the PUBLISHED operator, dumped untouched, which then
-    gets ParAC's own ground-node augmentation at the reorder step (--augment).
-    kind=graph -> 'pure': L = D - A as built, NOT Dirichlet-pinned. ParAC's graph
-    mode grounds a singular Laplacian itself, by generating a zero-sum RHS; a pin
-    it does not know about is what used to floor its residual against the
-    original L at ~1e-3.
+    class=sddm -> 'op': the PUBLISHED operator, dumped untouched, which then gets
+    ParAC's own ground-node augmentation at the reorder step (--augment).
+    class=laplacian -> 'pure': the published or assembled singular Laplacian,
+    NOT Dirichlet-pinned. ParAC's graph mode grounds it by generating a zero-sum
+    RHS; a pin it does not know about is what used to floor its residual against
+    the original L at ~1e-3.
 
     Knowable without dumping (registry class), which lets the GPU path tag its
     cache before the dump.
     """
-    return "op" if rc.class_of(mid) == "sddm" else "pure"
+    return "op" if _uses_physics(mid) else "pure"
 
 
 def _augments(mid):
@@ -188,7 +200,7 @@ def _augments(mid):
     kind=operator and class=laplacian — already singular, so appending a ground row
     would be wrong. kind says how to READ the file, class says whether the system it
     defines is singular; only the second one answers this question."""
-    return rc.class_of(mid) == "sddm"
+    return _uses_physics(mid)
 
 
 def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
@@ -580,7 +592,7 @@ PHYSICS_NA = ("ParAC physics mode grounds by trimming the last row/column — th
 
 
 def _run_cpu_operator(mid, family):
-    """ParAC CPU pass for a kind=operator matrix: its OWN physics route.
+    """ParAC CPU pass for a class=sddm matrix: its OWN physics route.
 
     ParAC benchmarks published operators through `driver <mtx> <threads> "" 1` —
     physics mode — and its own producer for that input is write_graph.jl's
@@ -622,14 +634,14 @@ def _run_cpu_operator(mid, family):
 def run_cpu(mid):
     """ParAC CPU pass for one matrix: one real cell and one n/a. Returns a status.
 
-    kind=operator -> physics mode on the augmented published operator
+    class=sddm -> physics mode on the augmented published operator
     (_run_cpu_operator); its graph cell is n/a.
-    kind=graph -> graph mode on the PURE L, per connected component
-    (_measure_cpu_graph_split); its physics cell is n/a, because a pure Laplacian
-    has no appended ground node for the trim to remove.
+    class=laplacian -> graph mode on the PURE L, per connected component
+    (_measure_cpu_graph_split); its physics cell is n/a, because a singular
+    Laplacian has no appended ground node for the trim to remove.
     """
     family = rc.MATRICES[mid]["family"]
-    if rc.class_of(mid) == "sddm":
+    if _uses_physics(mid):
         return _run_cpu_operator(mid, family)
     rc.emit_cell(family, mid, "parac_physics", "", "n/a", {}, THREADS, "cpu", PROV_CPU,
                  matrix_meta={"parac_mode": "n/a", "parac_na_reason": PHYSICS_NA})
@@ -734,11 +746,11 @@ def _calibrate_tol_gpu(driver, mtx, tau=float(TOL)):
 
 def _gpu_modes(mid):
     """The two published GPU series and whether each can take this matrix."""
-    is_operator = rc.class_of(mid) == "sddm"
+    uses_physics = _uses_physics(mid)
     for solver_key, driver in (("parac_graph", rc.PARAC_GPU_DRIVER),
                                ("parac_physics", rc.PARAC_GPU_DRIVER_PHYS)):
-        skip_reason = (GRAPH_NA if (is_operator and solver_key == "parac_graph")
-                       else PHYSICS_NA if (not is_operator and solver_key == "parac_physics")
+        skip_reason = (GRAPH_NA if (uses_physics and solver_key == "parac_graph")
+                       else PHYSICS_NA if (not uses_physics and solver_key == "parac_physics")
                        else None)
         # Read the toolchain off the driver intended for this series. This stays
         # useful provenance even when shared preprocessing fails before launch.

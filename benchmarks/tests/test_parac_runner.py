@@ -14,6 +14,25 @@ import parac_runner as parac  # noqa: E402
 import runner_common as rc  # noqa: E402
 
 
+class ParacRoutingTest(unittest.TestCase):
+    def test_route_is_by_operator_class_not_file_kind(self):
+        # ecology1 is a published operator file, but the operator is an exact
+        # singular Laplacian. It must use graph mode; physics mode would trim a
+        # real vertex. Full-rank operator matrices use physics as before.
+        self.assertEqual(rc.MATRICES["ecology1"]["kind"], "operator")
+        self.assertEqual(rc.class_of("ecology1"), "laplacian")
+        self.assertFalse(parac._uses_physics("ecology1"))
+        self.assertFalse(parac._uses_physics("com-Amazon"))
+        self.assertTrue(parac._uses_physics("iter0040"))
+
+        ecology_modes = {
+            key: reason for key, _driver, _provenance, reason
+            in parac._gpu_modes("ecology1")
+        }
+        self.assertIsNone(ecology_modes["parac_graph"])
+        self.assertEqual(ecology_modes["parac_physics"], parac.PHYSICS_NA)
+
+
 class ParacGpuFailureCellTest(unittest.TestCase):
     def read_cell(self, mid, solver):
         family = rc.MATRICES[mid]["family"]
