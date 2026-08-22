@@ -7,9 +7,11 @@ pip install apxchol
 ```
 
 Prebuilt wheels: Linux x86_64 (manylinux), CPython 3.10–3.14. CPU only.
-The wheels are built with 32-bit indices: inputs (and factors) beyond ~2.1e9
-nonzeros are unsupported — build from source with
-`-DAPXCHOL_64BIT_EDGE_INDICES=ON` for larger problems.
+The wheels accept input matrices with at most signed-int32-sized dimensions and
+nonzeros because their SciPy-to-Eigen import path uses 32-bit Eigen indices.
+The factor itself uses unsigned 32-bit edge offsets and may exceed 2.1e9 entries;
+com-Orkut therefore fits the default build. The Python import limit is separate
+from the core library's `APXCHOL_64BIT_EDGE_INDICES` factor/pool-width option.
 
 ```python
 import apxchol

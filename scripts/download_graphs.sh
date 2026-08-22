@@ -41,7 +41,7 @@ MATRICES=(
     "DIMACS10/coPapersDBLP"     # 540486 citation
     "SNAP/as-Skitter"           # 1696415 internet topology
     "SNAP/com-LiveJournal"      # 3997962 social
-    "SNAP/com-Orkut"            # 3072441 social (needs APXCHOL_64BIT_EDGE_INDICES)
+    "SNAP/com-Orkut"            # 3072441 social (fits default unsigned 32-bit offsets)
 )
 
 for entry in "${MATRICES[@]}"; do

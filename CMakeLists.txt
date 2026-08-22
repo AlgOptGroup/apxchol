@@ -73,7 +73,7 @@ find_package(OpenMP)
 # ── Build options ───────────────────────────────────
 option(APXCHOL_USE_CUDA "GPU build: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG with our own SpMV / vector kernels; links cudart only unless APXCHOL_CUDA_WITH_CUSPARSE" OFF)
 option(APXCHOL_CUDA_WITH_CUSPARSE "CUDA build only: also compile + link the cuSPARSE SpSV backend of the GPU SpTRSV (opt-in comparison baseline, env APXCHOL_GPU_SPTRSV=cusparse; the fp64 build's OOM-aware AUTO). OFF = the CUDA library links cudart alone (no cuSPARSE, no cuBLAS)" OFF)
-option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors with more than 2^31 nonzeros" OFF)
+option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
 option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
 option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
 option(APXCHOL_POOL_FP32 "fp32 residual-pool edge weights (reads promote to fp64; convergence unchanged); OFF gives an fp64 baseline" ON)

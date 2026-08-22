@@ -46,9 +46,9 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 
 # Fetch the SuiteSparse test matrices into data/matrices/ (gitignored).
-# Downloads ~3.3 GB total (com-Orkut alone is 1.7 GB and additionally needs
-# -DAPXCHOL_64BIT_EDGE_INDICES=ON); only ecology1 and com-Amazon are needed
-# for the smoke tests below.
+# Downloads ~3.3 GB total (com-Orkut alone is 1.7 GB, but its factor still fits
+# the default unsigned 32-bit edge offsets); only ecology1 and com-Amazon are
+# needed for the smoke tests below.
 ./scripts/download_graphs.sh
 
 # Solve a Matrix Market system against a generated random RHS. The input may

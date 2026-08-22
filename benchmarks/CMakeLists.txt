@@ -494,12 +494,22 @@ target_include_directories(apxchol_v1 PUBLIC ${PARENT_INCLUDE})
 if (OpenMP_CXX_FOUND)
     target_link_libraries(apxchol_v1 PUBLIC OpenMP::OpenMP_CXX)
 endif()
-# 64-bit indices for graphs whose apxchol FACTOR exceeds 2^31 nnz (e.g. com-Orkut:
-# 237M-nnz scale-free graph -> ~2-3e9-nnz factor -> int32 offset overflow -> SIGSEGV).
-# PUBLIC so benchmark.cpp's apxchol::index_t matches the linked library (else ABI UB).
-option(APXCHOL_64BIT_INDICES "64-bit apxchol indices for >2^31 nnz factors" OFF)
+# Match the root project's two unsigned index-width knobs. The default uint32
+# edge_index already handles com-Orkut's roughly 2.15e9-entry raw factor; widen
+# only when a factor or residual pool can exceed 2^32-1 entries. Definitions are
+# PUBLIC so benchmark.cpp and the linked library always agree on their ABI.
+option(APXCHOL_64BIT_EDGE_INDICES "64-bit apxchol edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
+option(APXCHOL_64BIT_NODE_INDICES "64-bit apxchol vertex indices (implies 64-bit edge indices)" OFF)
+option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
 if (APXCHOL_64BIT_INDICES)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_INDICES)
+    message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
+    set(APXCHOL_64BIT_EDGE_INDICES ON)
+endif()
+if (APXCHOL_64BIT_EDGE_INDICES)
+    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_EDGE_INDICES)
+endif()
+if (APXCHOL_64BIT_NODE_INDICES)
+    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_NODE_INDICES)
 endif()
 option(APXCHOL_USE_CUDA "GPU build of apxchol_v1: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG (own SpMV / vector kernels); links cudart only unless APXCHOL_CUDA_WITH_CUSPARSE" OFF)
 option(APXCHOL_CUDA_WITH_CUSPARSE "CUDA build only: also compile + link the cuSPARSE SpSV backend of the GPU SpTRSV (env APXCHOL_GPU_SPTRSV=cusparse) and the benchmark's legacy cuBLAS/cuSPARSE `apxchol_gpu` solver. OFF = apxchol_v1 links cudart alone (see the root CMakeLists.txt)" OFF)

@@ -553,7 +553,7 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
             run_parac(mid)
         return  # no Julia on the GPU axis
     t_apx = None
-    # com-Orkut is huge (~237M nnz) + int32-overflow-prone on CPU; the non-vec storage
+    # com-Orkut is huge (~237M input nnz, billion-scale factor offsets); the non-vec storage
     # backends (fwd_star/bstr) are almost never better than vec_pool yet cost a lot
     # of wall-time here, so keep only [vec] + [vec_pool] for it. "[vec]" does not match
     # "[vec_pool]"/"[bstr]" as a substring, so the gate is exact.

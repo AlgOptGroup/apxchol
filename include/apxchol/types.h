@@ -10,12 +10,13 @@
 ///                arrays (factor inner indices) never double.
 ///   edge_index : cumulative column offsets and edge ids, which DO reach billions
 ///                on dense factors / over-allocated pools -> the one widened by
-///                APXCHOL_64BIT_INDICES (com-Orkut's factor needs it).
+///                APXCHOL_64BIT_EDGE_INDICES once they exceed uint32 capacity.
 ///
 /// Two independent width knobs (CMake options of the same name):
 ///   APXCHOL_64BIT_EDGE_INDICES -> edge_index = uint64. Needed when the factor
-///       nnz / pool size exceeds 2^31 even though the vertex count does not
-///       (e.g. com-Orkut: 3.07M nodes but a >2.1e9-nnz factor).
+///       nnz / pool size exceeds 2^32-1 even though the vertex count does not.
+///       com-Orkut's roughly 2.15e9-entry raw factor exceeds signed int32 but
+///       fits the default unsigned edge_index; it does NOT need this option.
 ///   APXCHOL_64BIT_NODE_INDICES -> node_index = uint64. Needed for graphs with
 ///       more than ~4.29B vertices. Since #edges >= #vertices, a 64-bit node
 ///       index implies a 64-bit edge index -- this knob AUTO-WIDENS edges too.
@@ -60,9 +61,10 @@ using edge_index = std::uint32_t;
 
 /// Abort with a clear, actionable message when an edge_index counter (a factor
 /// column offset or an incidence-pool offset) would overflow its capacity.
-/// Turns the old silent signed-int wrap -- which surfaced as a SIGSEGV deep in
-/// the assembler on graphs like com-Orkut -- into a clean, fix-it error. Always
-/// on; the call sites are O(1)-per-grow, never per-edge.
+/// Turns a potential wrap into a clean, fix-it error. The move from signed to
+/// unsigned 32-bit already fixed com-Orkut's old signed-int wrap; this guard is
+/// for counts that exceed uint32 as well. Always on; the call sites are
+/// O(1)-per-grow, never per-edge.
 [[noreturn]] inline void edge_index_overflow(const char* where) {
     std::fprintf(stderr,
         "apxchol: %s: an edge_index counter exceeded its %zu-bit capacity. "

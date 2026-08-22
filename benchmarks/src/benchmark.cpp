@@ -174,7 +174,9 @@ static void emit_build_meta() {
 #endif
     std::cerr << "BUILD_META compiler=" << build_compiler()
               << " compiler_version=" << build_compiler_version()
-              << " openmp_runtime=" << build_openmp_runtime();
+              << " openmp_runtime=" << build_openmp_runtime()
+              << " node_index_bits=" << (8 * sizeof(apxchol::node_index))
+              << " edge_index_bits=" << (8 * sizeof(apxchol::edge_index));
 #ifdef APXCHOL_USE_CUDA
 #  ifdef APXCHOL_BUILD_CUDA_HOST_COMPILER
     const char* cuda_host = APXCHOL_BUILD_CUDA_HOST_COMPILER[0]

@@ -20,7 +20,7 @@ SELS = ["bg", "luby", "root", "bk"]
 PAT = re.compile(r"fwd_lvls=(\d+) \(max=(\d+)\) bck_lvls=(\d+)")
 
 # (matrix_id, family, bench-args, needs_reg) — the cross-family poster set + the
-# per-family ladders, minus com-Orkut (needs the 64-bit-index build).
+# per-family ladders, minus com-Orkut to keep this already CPU-heavy sweep bounded.
 MATS = [
     ("grid_2000", "g", "--graph grid --n 2000", False),
     ("grid_3000", "g", "--graph grid --n 3000", False),

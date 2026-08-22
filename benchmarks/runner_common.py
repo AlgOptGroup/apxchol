@@ -386,10 +386,11 @@ def parse_build_meta(stderr):
     """Lift the binary's `BUILD_META ...` line out of stderr into a dict.
 
     Twin of parse_matrix_meta, and merged into the cell's `provenance`. The
-    binary reports its own compiler, compiler version, OpenMP runtime, arch
-    flags (and CUDA host compiler on a CUDA build); the runner never infers them
-    from which build directory it invoked, because a stale binary in
-    build-clang/ is still a gcc binary and the directory name would lie about it.
+    binary reports its own compiler, compiler version, OpenMP runtime, node/edge
+    index widths, arch flags (and CUDA host compiler on a CUDA build); the runner
+    never infers them from which build directory it invoked, because a stale
+    binary in build-clang/ is still a gcc binary and the directory name would
+    lie about it.
 
     Emitted as the first line of main(), so a run that later times out or crashes
     still identifies its toolchain. Returns {} when the line is absent — an
