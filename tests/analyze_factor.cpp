@@ -46,7 +46,9 @@ struct cli_options {
 [[noreturn]] void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s <matrix.mtx> [--graph-storage vec|forward_star|bstr|vec_pool]"
-                 " [--is block_greedy|luby|baumann_kyng|rootset]\n",
+                 " [--is block_greedy|luby|baumann_kyng|rootset]"
+                 " [--min-is-frac FRACTION] [--parallel-residual-threshold N]"
+                 " [--profile|--bench-trsv|--sweep-threads]\n",
                  argv0);
     std::exit(1);
 }
@@ -94,9 +96,11 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.profile = true;
         } else if (arg == "--bench-trsv") {
             opts.bench_trsv = true;
-        } else if (arg == "--min-is-frac" && i + 1 < argc) {
-            opts.min_is_frac = std::atof(argv[++i]);
-            opts.parallel_residual_threshold = std::atoll(argv[++i]);
+        } else if (arg == "--min-is-frac") {
+            opts.min_is_frac = std::atof(require_value("--min-is-frac").c_str());
+        } else if (arg == "--parallel-residual-threshold") {
+            opts.parallel_residual_threshold =
+                std::atoll(require_value("--parallel-residual-threshold").c_str());
         } else if (arg == "--residual-peel" && i + 1 < argc) {
             std::string s = argv[++i];
             if (s == "natural")    opts.residual_peel = apxchol::residual_peel_strategy::natural;
@@ -241,8 +245,9 @@ const char* storage_name(graph_storage s) {
     case graph_storage::vec: return "vec";
     case graph_storage::forward_star: return "forward_star";
     case graph_storage::bstr: return "bstr";
-    default: return "unknown";
+    case graph_storage::vec_pool: return "vec_pool";
     }
+    return "unknown";
 }
 
 const char* is_name(const std::string& s) {
@@ -310,7 +315,7 @@ int main(int argc, char* argv[]) {
 #endif
                 apxchol::checkpoint cp;
                 auto F = apxchol::factorize(A, cli.storage, opts, &cp);
-                double find_is_ms  = cp.total("setup.find_is")           * 1000;
+                double find_is_ms  = cp.total("setup.find_partition")    * 1000;
                 double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;
                 double compute_ms  = cp.total("setup.eliminate.compute") * 1000;
                 double apply_ms    = cp.total("setup.eliminate.apply")   * 1000;

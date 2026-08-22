@@ -139,7 +139,7 @@ static bench_result run_one(const char* sname, const char* graph_name,
     }
 
     // Extract profile breakdown from checkpoint
-    r.find_is_ms   = cp.total("setup.find_is")           * 1000;
+    r.find_is_ms   = cp.total("setup.find_partition")    * 1000;
     r.eliminate_ms  = cp.total("setup.eliminate")          * 1000;
     r.merge_is_ms  = cp.total("setup.eliminate.merge_is") * 1000;
     r.compute_ms   = cp.total("setup.eliminate.compute")  * 1000;
@@ -338,7 +338,7 @@ int main(int argc, char* argv[]) {
                 }
                 if (rounds > 0) { avg_is /= rounds; avg_deg /= rounds; }
 
-                double find_is_ms  = cp.total("setup.find_is")    * 1000;
+                double find_is_ms  = cp.total("setup.find_partition") * 1000;
                 double elim_ms     = cp.total("setup.eliminate")   * 1000;
                 double fact_ms     = cp.total("setup")             * 1000;
 
@@ -368,7 +368,7 @@ int main(int argc, char* argv[]) {
                 auto G = build_fn();
                 auto F = apxchol::factorize_with_strategy(G, base_opts, &cp);
 
-                double find_is_ms  = cp.total("setup.find_is")            * 1000;
+                double find_is_ms  = cp.total("setup.find_partition")     * 1000;
                 double merge_is_ms = cp.total("setup.eliminate.merge_is") * 1000;
                 double compute_ms  = cp.total("setup.eliminate.compute")  * 1000;
                 double apply_ms    = cp.total("setup.eliminate.apply")    * 1000;
