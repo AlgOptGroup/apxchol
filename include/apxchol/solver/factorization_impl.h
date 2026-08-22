@@ -1010,8 +1010,50 @@ factorization factorize_impl(const Eliminator& elim,
     // peel sees at most 500 columns.  Only a partitioner that declares no
     // threshold leaves it at SIZE_MAX and skips the loop entirely.  It fires
     // only where the main loop bails with a large residual, i.e. on social
-    // graphs (as-Skitter enters at 69598 active, com-LiveJournal at 832288;
-    // iter0040 exits the main loop at 76 and grid_2000 at 1, so neither enters).
+    // graphs (under the candidate-relative yield rule, as-Skitter enters at
+    // 1696-2122 active across the measured seeds and com-LiveJournal at 30882;
+    // iter0040 and grids finish the main loop below the handoff, so they never
+    // enter this path).
+    //
+    // A heavily duplicated residual is rebuilt once before BK. This is exact
+    // with respect to the partitioner's multigraph degree: coalesce_active()
+    // stores each endpoint pair once but carries the represented edge count in
+    // a sidecar consumed by prune_and_degree(). The numerical pivot already
+    // aggregated those parallel weights in fp64, so only one fp32 store of the
+    // sum can perturb the later sampler. The conservative 256-vertex probe and
+    // ratio >= 4 gate are load-bearing: as-Skitter estimates 4.96-6.18 and its
+    // residual phase falls 185-192 -> 145-152 ms while graph heap falls about
+    // 720 -> 46-49 MB; com-LiveJournal estimates 1.20 and rebuilding it is a
+    // large regression; kron seed 42 estimates 3.91 and sits at break-even.
+    // APXCHOL_RESIDUAL_COALESCE=0 is the rollback.
+    if constexpr (std::is_same_v<Incidence, vec_pool_incidence>) {
+        const char* enabled_env =
+            std::getenv("APXCHOL_RESIDUAL_COALESCE");
+        const bool enabled = !enabled_env || !*enabled_env ||
+                             std::strcmp(enabled_env, "0") != 0;
+        constexpr size_t kMinActive = 1024;
+        constexpr double kMinDuplicateRatio = 4.0;
+        if (enabled && active.size() > residual_thresh &&
+            active.size() >= kMinActive) {
+            const double estimated_ratio =
+                detail::residual_coalescer<Incidence>::estimate(work, active);
+            if (estimated_ratio >= kMinDuplicateRatio) {
+                const auto stats =
+                    detail::residual_coalescer<Incidence>::rebuild(work, active);
+                if (std::getenv("APXCHOL_VERBOSE")) {
+                    std::fprintf(stderr,
+                                 "[apxchol] residual coalesce: active=%zu "
+                                 "estimate=%.3f edges=%zu->%zu graph=%.1f->%.1f MiB\n",
+                                 active.size(), estimated_ratio,
+                                 stats.multi_edges, stats.distinct_edges,
+                                 stats.bytes_before / 1048576.0,
+                                 stats.bytes_after / 1048576.0);
+                }
+                if (cp) (*cp)("coalesce_residual");
+            }
+        }
+    }
+
     if (active.size() > residual_thresh) {
         baumann_kyng_partitioner bk;
         // BK is sample-bounded here too, so an empty round means what it means

@@ -1,9 +1,20 @@
 #pragma once
 #include "apxchol/graph/incidence_list.h"
+#include <algorithm>
 #include <ranges>
+#include <span>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace apxchol {
+
+namespace detail {
+template<incidence_storage Incidence>
+struct residual_coalescer;
+}
 
 // Residual-pool edge weight storage type. fp32 under -DAPXCHOL_POOL_FP32 (ON by
 // default; pass =OFF for fp64). The residual graph is a MULTIGRAPH: add_edge/write_edge_at
@@ -12,10 +23,13 @@ namespace apxchol {
 // stored weight is a TERMINAL write -- fp32 is safe (verified: PCG iters/residual
 // unchanged across IPM incl. high-DR, social, grid). fp32 halves the 16 B edge
 // {node_index + double, alignment-padded} to 8 B {node_index + float}, ~halving
-// edges_ (the largest setup-transient array) with no convergence cost. This is
-// faithful to Kyng-Sachdeva (keep multi-edges, don't merge): merging would also
-// save memory but raises max leverage -> worse conditioning -> more PCG iters,
-// whereas fp32-multigraph keeps the conditioning and just narrows the bytes.
+// edges_ (the largest setup-transient array) with no convergence cost. The
+// main elimination remains append-only: maintaining one physical edge per
+// active endpoint pair would require a concurrent dynamic pair map, while
+// physically merging only the pivot's adjacency was measured slower than the
+// current transient fp64 aggregation in process_vertex(). A governed one-shot
+// rebuild may coalesce the late residual; it stores multiplicity separately so
+// the partitioner's degree heuristic remains the same.
 #ifdef APXCHOL_POOL_FP32
 using pool_value_t = float;
 #else
@@ -74,6 +88,7 @@ public:
     void add_edge(node_index u, node_index v, double w) {
         auto idx = static_cast<edge_index>(edges_.size());
         edges_.push_back({u ^ v, static_cast<pool_value_t>(w)});
+        if (!multiplicity_.empty()) multiplicity_.push_back(1);
         adj_.push(u, idx);
         adj_.push(v, idx);
         ++m_;
@@ -104,6 +119,7 @@ public:
     edge_index reserve_edge_pool(edge_index N) {
         auto start = static_cast<edge_index>(edges_.size());
         edges_.resize(start + N);
+        if (!multiplicity_.empty()) multiplicity_.resize(start + N, 1);
         m_ += N;  // bookkeeping; queried via m()
         return start;
     }
@@ -117,6 +133,8 @@ public:
         edges_pool_base_  = static_cast<edge_index>(edges_.size());
         edges_pool_count_ = 0;
         edges_.resize(edges_pool_base_ + N);
+        if (!multiplicity_.empty())
+            multiplicity_.resize(edges_pool_base_ + N, 1);
     }
 
     /// Atomic-claim a single slot from the pre-reserved range.
@@ -134,6 +152,8 @@ public:
     void finalize_edge_pool() {
         const edge_index claimed = edges_pool_count_;
         edges_.resize(edges_pool_base_ + claimed);
+        if (!multiplicity_.empty())
+            multiplicity_.resize(edges_pool_base_ + claimed);
         m_ += claimed;
     }
 
@@ -171,6 +191,7 @@ public:
     /// to call concurrently from different threads on different slots.
     void write_edge_at(edge_index slot, node_index u, node_index v, double w) {
         edges_[slot] = {u ^ v, static_cast<pool_value_t>(w)};
+        if (!multiplicity_.empty()) multiplicity_[slot] = 1;
     }
 
     /// Atomically prepend `e_slot` to vertex v's adjacency chain at
@@ -317,7 +338,7 @@ public:
             auto u = edges_[idx].traverse(v);
             if (!active_[u]) return false;
             visit(u);
-            ++count;
+            count += edge_multiplicity(idx);
             return true;
         });
         return count;
@@ -343,6 +364,9 @@ public:
         return edges_[idx].traverse(from);
     }
     double edge_weight(edge_index idx) const { return edges_[idx].w; }
+    node_index edge_multiplicity(edge_index idx) const {
+        return multiplicity_.empty() ? node_index{1} : multiplicity_[idx];
+    }
 
     /// Per-vertex excess diagonal (for SDDM matrices).
     /// For a pure Laplacian this is zero everywhere.
@@ -353,9 +377,160 @@ public:
     /// Approximate heap memory usage in bytes.
     std::size_t memory_bytes() const {
         return edges_.capacity() * sizeof(edge)
+             + multiplicity_.capacity() * sizeof(node_index)
              + adj_.memory_bytes()
              + active_.capacity() * sizeof(char)
              + excess_.capacity() * sizeof(double);
+    }
+
+private:
+    template<incidence_storage>
+    friend struct detail::residual_coalescer;
+
+    struct coalesce_stats {
+        std::size_t multi_edges = 0;
+        std::size_t distinct_edges = 0;
+        std::size_t bytes_before = 0;
+        std::size_t bytes_after = 0;
+    };
+
+    /// Estimate active multiedge / endpoint-pair ratio from evenly spaced
+    /// active vertices. This cheap guard avoids rebuilding low-duplication
+    /// residuals merely to discover that compaction cannot repay its pass.
+    template<typename I = Incidence>
+        requires std::same_as<I, vec_pool_incidence>
+    double estimate_active_duplicate_ratio(
+        std::span<const node_index> active,
+        std::size_t sample_vertices = 256) const {
+        const std::size_t samples =
+            std::min(sample_vertices, active.size());
+        if (samples == 0) return 1.0;
+        unsigned long long multi_total = 0;
+        unsigned long long distinct_total = 0;
+        #pragma omp parallel reduction(+:multi_total, distinct_total)
+        {
+            std::vector<node_index> targets;
+            #pragma omp for schedule(static)
+            for (std::size_t s = 0; s < samples; ++s) {
+                const node_index u = active[s * active.size() / samples];
+                targets.clear();
+                unsigned long long local_multi = 0;
+                for (const edge_index idx : adj_[u]) {
+                    const node_index v = edges_[idx].traverse(u);
+                    if (!active_[v]) continue;
+                    targets.push_back(v);
+                    local_multi += edge_multiplicity(idx);
+                }
+                std::ranges::sort(targets);
+                const auto unique_end = std::ranges::unique(targets).begin();
+                multi_total += local_multi;
+                distinct_total +=
+                    static_cast<unsigned long long>(unique_end - targets.begin());
+            }
+        }
+        return distinct_total
+            ? static_cast<double>(multi_total) / distinct_total
+            : 1.0;
+    }
+
+    /// Rebuild the active vec_pool residual with one physical edge per
+    /// endpoint pair. The multiplicity sidecar keeps prune_and_degree()
+    /// exactly faithful to the old multigraph while process_vertex() sees the
+    /// same summed numerical weight. This is a one-shot late-residual rebuild,
+    /// not a dynamic pair map.
+    template<typename I = Incidence>
+        requires std::same_as<I, vec_pool_incidence>
+    coalesce_stats coalesce_active(std::span<const node_index> active) {
+        struct pending_edge {
+            node_index u, v;
+            double weight;
+            node_index multiplicity;
+        };
+        struct local_neighbor {
+            node_index v;
+            double weight;
+            node_index multiplicity;
+        };
+
+        int num_threads = 1;
+#ifdef _OPENMP
+        num_threads = omp_get_max_threads();
+#endif
+        std::vector<std::vector<pending_edge>> pending(
+            static_cast<std::size_t>(num_threads));
+
+        #pragma omp parallel num_threads(num_threads)
+        {
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            auto& out = pending[static_cast<std::size_t>(tid)];
+            std::vector<local_neighbor> neighbors;
+            #pragma omp for schedule(static)
+            for (std::size_t k = 0; k < active.size(); ++k) {
+                const node_index u = active[k];
+                neighbors.clear();
+                for (const edge_index idx : adj_[u]) {
+                    const node_index v = edges_[idx].traverse(u);
+                    if (!active_[v] || v <= u) continue;
+                    neighbors.push_back({v, static_cast<double>(edges_[idx].w),
+                                         edge_multiplicity(idx)});
+                }
+                std::ranges::sort(neighbors, {}, &local_neighbor::v);
+                for (std::size_t i = 0; i < neighbors.size();) {
+                    const node_index v = neighbors[i].v;
+                    double weight = 0.0;
+                    node_index multiplicity = 0;
+                    do {
+                        weight += neighbors[i].weight;
+                        multiplicity += neighbors[i].multiplicity;
+                        ++i;
+                    } while (i < neighbors.size() && neighbors[i].v == v);
+                    out.push_back({u, v, weight, multiplicity});
+                }
+            }
+        }
+
+        coalesce_stats stats;
+        stats.bytes_before = memory_bytes();
+        for (const auto& list : pending) {
+            stats.distinct_edges += list.size();
+            for (const auto& edge : list)
+                stats.multi_edges += edge.multiplicity;
+        }
+
+        graph rebuilt(n_);
+        rebuilt.active_ = active_;
+        rebuilt.num_active_ = num_active_;
+        rebuilt.excess_ = excess_;
+        rebuilt.edges_.reserve(stats.distinct_edges);
+        rebuilt.multiplicity_.reserve(stats.distinct_edges);
+
+        std::vector<node_index> physical_degree(static_cast<std::size_t>(n_), 0);
+        for (const auto& list : pending) {
+            for (const auto& edge : list) {
+                ++physical_degree[edge.u];
+                ++physical_degree[edge.v];
+            }
+        }
+        for (const node_index v : active)
+            rebuilt.adj_.reserve_for(v, physical_degree[v]);
+
+        for (const auto& list : pending) {
+            for (const auto& edge : list) {
+                const edge_index idx = static_cast<edge_index>(rebuilt.edges_.size());
+                rebuilt.edges_.push_back(
+                    {edge.u ^ edge.v, static_cast<pool_value_t>(edge.weight)});
+                rebuilt.multiplicity_.push_back(edge.multiplicity);
+                rebuilt.adj_.push(edge.u, idx);
+                rebuilt.adj_.push(edge.v, idx);
+                ++rebuilt.m_;
+            }
+        }
+        stats.bytes_after = rebuilt.memory_bytes();
+        *this = std::move(rebuilt);
+        return stats;
     }
 
 
@@ -364,11 +539,34 @@ private:
     edge_index m_ = 0;          // edge count (can exceed 2^31)
     node_index num_active_ = 0; // active vertex count
     std::vector<edge> edges_;
+    // Empty until an exact coalesced-residual rebuild. Thereafter one count per
+    // physical edge; newly sampled edges use count 1.
+    std::vector<node_index> multiplicity_;
     Incidence adj_;
     std::vector<char> active_;
     std::vector<double> excess_;
     edge_index edges_pool_base_  = 0;
     edge_index edges_pool_count_ = 0;
 };
+
+namespace detail {
+
+/// Internal access seam for the one-shot late-residual rebuild. Keeping these
+/// operations here avoids growing graph's public API for one factorizer policy.
+template<incidence_storage Incidence>
+struct residual_coalescer {
+    static double estimate(const graph<Incidence>& g,
+                           std::span<const node_index> active,
+                           std::size_t sample_vertices = 256) {
+        return g.estimate_active_duplicate_ratio(active, sample_vertices);
+    }
+
+    static auto rebuild(graph<Incidence>& g,
+                        std::span<const node_index> active) {
+        return g.coalesce_active(active);
+    }
+};
+
+} // namespace detail
 
 } // namespace apxchol
