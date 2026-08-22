@@ -10,6 +10,7 @@
 
 #include "apxchol/solver/partitioner.h"
 #include "apxchol/solver/partitioner_helpers.h"
+#include "apxchol/solver/partition/luby_config.h"
 
 namespace apxchol {
 
@@ -61,10 +62,7 @@ private:
             if (!tiebreak) return h;
             return (uint64_t(degrees[v]) << 40) | (h >> 24);
         };
-        static const int kMaxIters = [] {
-            const char* e = std::getenv("APXCHOL_LUBY_ITERS");
-            return e ? std::atoi(e) : 16;
-        }();
+        const int kMaxIters = detail::luby_iteration_limit();
 
         // status_[v]: 0 undecided candidate, 1 chosen, 2 excluded.  Invariant:
         // 2 everywhere outside this call (reset over candidates at the end),

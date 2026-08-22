@@ -15,13 +15,18 @@
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
 #include "apxchol/env_knobs.h"
+#if defined(APXCHOL_USE_CUDA)
+#include "apxchol/solver/gpu_luby_frontend.h"
+#endif
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <span>
@@ -175,7 +180,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                    std::vector<factor_col>& factor_cols,
                                    factorize_workspace& ws,
                                    const factor_options& opts,
-                                   checkpoint* cp = nullptr) {
+                                   checkpoint* cp = nullptr,
+                                   bool capture_gpu_topology = false) {
     const size_t n_verts = part.num_vertices();
     // n_verts > 0 guaranteed by the dispatcher; early-exit not needed here.
     // The final column array is reserved to n before any round. Grow it once
@@ -187,6 +193,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
     auto output_col = [&](size_t k) -> factor_col& {
         return factor_cols[factor_base + k];
     };
+    if (capture_gpu_topology) ws.gpu_topology_updates.clear();
 
     #ifdef _OPENMP
     // Rounds whose IS is at or below omp_threshold take the fully serial path
@@ -332,6 +339,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     const size_t N_edges = e_offsets[num_threads];
                     if (N_edges > 0)
                         e_start = G.reserve_edge_pool(static_cast<edge_index>(N_edges));
+                    if (capture_gpu_topology)
+                        ws.gpu_topology_updates.resize(N_edges);
                     ws.touched_concat.clear();
                     for (int t = 0; t < num_threads; ++t)
                         ws.touched_concat.insert(
@@ -362,6 +371,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     const auto& ebuf = ws.threads[tid].edge_buffer;
                     for (size_t i = 0; i < ebuf.size(); ++i) {
                         auto [u, v, w] = ebuf[i];
+                        if (capture_gpu_topology)
+                            ws.gpu_topology_updates[base + i] = {u, v};
                         const edge_index es = e_start + static_cast<edge_index>(base + i);
                         G.write_edge_at(es, u, v, w);
                         G.adj_atomic_push_reserved(u, es);
@@ -432,8 +443,11 @@ void eliminate_partition_singleton(const Eliminator& elim,
             wt.excess_buffer.clear();
             process_vertex(elim, G, part.data[k], opts.seed, output_col(k), wt,
                            /*dedup_inline=*/true);
-            for (auto [u, v, w] : wt.edge_buffer)
+            for (auto [u, v, w] : wt.edge_buffer) {
+                if (capture_gpu_topology)
+                    ws.gpu_topology_updates.push_back({u, v});
                 G.add_edge(u, v, w);
+            }
             for (auto [v, delta] : wt.excess_buffer)
                 G.excess(v) += delta;
             G.deactivate(part.data[k]);
@@ -453,7 +467,8 @@ void eliminate_partition(const Eliminator& elim,
                          std::vector<factor_col>& factor_cols,
                          factorize_workspace& ws,
                          const factor_options& opts,
-                         checkpoint* cp = nullptr) {
+                         checkpoint* cp = nullptr,
+                         bool capture_gpu_topology = false) {
     if (cp) { cp->descend("eliminate"); cp->tick(); }
     const size_t n_verts = part.num_vertices();
     if (std::getenv("APXCHOL_ROUND_TRACE"))  // one line per round: IS size this round
@@ -462,7 +477,8 @@ void eliminate_partition(const Eliminator& elim,
         if (cp) cp->ascend();
         return;
     }
-    eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp);
+    eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp,
+                                  capture_gpu_topology);
     if (cp) cp->ascend();
 }
 
@@ -642,6 +658,107 @@ factorization factorize_impl(const Eliminator& elim,
     std::ranges::iota(active, node_index{0});
     std::vector<node_index> active_scratch;
 
+#if defined(APXCHOL_USE_CUDA)
+    constexpr bool gpu_frontend_eligible =
+        std::is_same_v<Partitioner, luby_partitioner> &&
+        std::is_same_v<Incidence, vec_pool_incidence> &&
+        std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
+    std::unique_ptr<detail::gpu_luby_frontend> gpu_frontend;
+    detail::gpu_luby_frontend::mode gpu_frontend_mode =
+        detail::gpu_luby_frontend::mode::disabled;
+    if constexpr (gpu_frontend_eligible) {
+        gpu_frontend_mode = detail::gpu_luby_frontend::configured_mode();
+        if (gpu_frontend_mode != detail::gpu_luby_frontend::mode::disabled &&
+            opts.exact_clique_max_degree != 0) {
+            if (gpu_frontend_mode == detail::gpu_luby_frontend::mode::forced)
+                throw std::invalid_argument(
+                    "APXCHOL_GPU_LUBY_FRONTEND=force requires the default "
+                    "d-1-edge tree sampler (exact clique mode can grow topology)");
+            gpu_frontend_mode = detail::gpu_luby_frontend::mode::disabled;
+        }
+        // The auto rule is unconditionally off below this size. Avoid walking
+        // every adjacency merely to rediscover that fixed size guard.
+        const char* gpu_init_stats_env =
+            std::getenv("APXCHOL_GPU_LUBY_INIT_STATS");
+        const bool gpu_init_stats = gpu_init_stats_env && *gpu_init_stats_env &&
+            std::strcmp(gpu_init_stats_env, "0") != 0;
+        if (gpu_frontend_mode == detail::gpu_luby_frontend::mode::automatic &&
+            n < detail::gpu_luby_frontend::automatic_min_vertices &&
+            !gpu_init_stats)
+            gpu_frontend_mode = detail::gpu_luby_frontend::mode::disabled;
+        if (gpu_frontend_mode != detail::gpu_luby_frontend::mode::disabled) {
+            std::size_t initial_incidence = 0;
+            std::size_t initial_incidence_ge32 = 0;
+            for (node_index v = 0; v < n; ++v) {
+                const auto av = work.adj(v);
+                const std::size_t degree = av.size();
+                initial_incidence += degree;
+                if (degree >= 32) initial_incidence_ge32 += degree;
+            }
+            const bool auto_mode = gpu_frontend_mode ==
+                detail::gpu_luby_frontend::mode::automatic;
+            bool enable_frontend = !auto_mode ||
+                detail::gpu_luby_frontend::automatic_worthwhile(
+                    n, initial_incidence, initial_incidence_ge32);
+            if (enable_frontend) {
+                const auto runtime = detail::gpu_luby_frontend::probe_runtime(
+                    n, static_cast<std::size_t>(work.m()));
+                if (!runtime.cooperative_launch || !runtime.memory_fits) {
+                    if (!auto_mode) {
+                        throw std::runtime_error(
+                            !runtime.cooperative_launch
+                                ? "APXCHOL_GPU_LUBY_FRONTEND=force requires a CUDA device "
+                                  "with cooperative-kernel launch support"
+                                : "APXCHOL_GPU_LUBY_FRONTEND=force does not fit in "
+                                  "currently free device memory");
+                    }
+                    enable_frontend = false;
+                    if (std::getenv("APXCHOL_VERBOSE")) {
+                        std::fprintf(stderr,
+                            "[apxchol] GPU Luby auto disabled: cooperative=%s "
+                            "estimated=%.1f MiB free=%.1f MiB\n",
+                            runtime.cooperative_launch ? "yes" : "no",
+                            runtime.estimated_bytes / 1048576.0,
+                            runtime.free_bytes / 1048576.0);
+                    }
+                }
+            }
+            if (gpu_init_stats) {
+                const long double incidence = initial_incidence;
+                const long double avg = n ? incidence / n : 0.0L;
+                std::fprintf(stderr,
+                    "[gpu-luby-init] n=%llu edges=%zu avg=%.3Lf "
+                    "inc_ge32=%.4Lf auto=%s\n",
+                    static_cast<unsigned long long>(n), initial_incidence / 2, avg,
+                    incidence > 0.0L ? initial_incidence_ge32 / incidence : 0.0L,
+                    enable_frontend ? "on" : "off");
+            }
+            if (cp) (*cp)("gpu_frontend_probe");
+            if (enable_frontend) {
+                try {
+                    std::vector<detail::gpu_topology_edge> initial_topology;
+                    initial_topology.reserve(static_cast<std::size_t>(work.m()));
+                    for (node_index v = 0; v < n; ++v) {
+                        for (auto idx : work.adj(v)) {
+                            const node_index u = work.edge_target(idx, v);
+                            if (v < u) initial_topology.push_back({v, u});
+                        }
+                    }
+                    gpu_frontend = std::make_unique<detail::gpu_luby_frontend>(
+                        n, initial_topology);
+                    if (cp) (*cp)("gpu_frontend_init");
+                } catch (const std::exception& ex) {
+                    if (!auto_mode) throw;
+                    std::fprintf(stderr,
+                        "[apxchol] GPU Luby auto fell back during initialization: %s\n",
+                        ex.what());
+                    gpu_frontend.reset();
+                }
+            }
+        }
+    }
+#endif
+
     // The partitioner's view of the run-constant services, the shared
     // selection structure, and the degree-prepass scratch (all owned here).
     selection sel;
@@ -660,6 +777,38 @@ factorization factorize_impl(const Eliminator& elim,
                                std::span<const node_index> act)
         -> const partition_result& {
         using P = std::remove_reference_t<decltype(p)>;
+#if defined(APXCHOL_USE_CUDA)
+        if constexpr (gpu_frontend_eligible &&
+                      std::is_same_v<P, luby_partitioner>) {
+            if (gpu_frontend) {
+                if (cp) { cp->descend("find_partition"); cp->tick(); }
+                try {
+                    const auto prep = gpu_frontend->prepare(act, opts.partition);
+                    last_candidate_count = prep.candidate_count;
+                    last_avg_degree = prep.average_degree;
+                    if (cp) (*cp)("prune");
+                    const partition_result& part =
+                        gpu_frontend->select(opts.seed, p.round);
+                    ++p.round;
+                    if (cp) {
+                        (*cp)("select");
+                        (*cp)("collect");
+                        cp->ascend();
+                    }
+                    return part;
+                } catch (const std::exception& ex) {
+                    if (cp) cp->ascend();
+                    if (gpu_frontend_mode ==
+                        detail::gpu_luby_frontend::mode::forced)
+                        throw;
+                    std::fprintf(stderr,
+                        "[apxchol] GPU Luby auto fell back during selection: %s\n",
+                        ex.what());
+                    gpu_frontend.reset();
+                }
+            }
+        }
+#endif
         sel.reset(g.n());
         last_avg_degree = 0.0;
         last_candidate_count = act.size();
@@ -755,7 +904,30 @@ factorization factorize_impl(const Eliminator& elim,
         result.rounds.push_back({active.size(), part.num_regions(), last_avg_degree, 0, 0});
 
         const size_t cols_before = cp ? factor_cols.size() : 0;
-        detail::eliminate_partition(elim, work, part, factor_cols, ws, opts, cp);
+        const bool capture_gpu_topology =
+#if defined(APXCHOL_USE_CUDA)
+            static_cast<bool>(gpu_frontend);
+#else
+            false;
+#endif
+        detail::eliminate_partition(elim, work, part, factor_cols, ws, opts, cp,
+                                    capture_gpu_topology);
+#if defined(APXCHOL_USE_CUDA)
+        if (gpu_frontend) {
+            try {
+                gpu_frontend->advance(part.data, ws.gpu_topology_updates);
+                if (cp) (*cp)("gpu_frontend_advance");
+            } catch (const std::exception& ex) {
+                if (gpu_frontend_mode ==
+                    detail::gpu_luby_frontend::mode::forced)
+                    throw;
+                std::fprintf(stderr,
+                    "[apxchol] GPU Luby auto fell back during topology update: %s\n",
+                    ex.what());
+                gpu_frontend.reset();
+            }
+        }
+#endif
         // Tally nnz added this round (only when caller wants the stats).
         if (cp) {
             size_t round_nnz = 0;
@@ -986,6 +1158,9 @@ factorization factorize_impl(const Eliminator& elim,
     // (grid_2000: ~960 MB of dead state under a 200 MB assembly; iter0040:
     // ~300 MB under 70 MB). Freeing them first moves the peak back to the
     // elimination phase itself. Pure lifetime change: bit-identical output.
+#if defined(APXCHOL_USE_CUDA)
+    gpu_frontend.reset();
+#endif
     work = graph<Incidence>();
     ws   = factorize_workspace();
     sel  = selection();

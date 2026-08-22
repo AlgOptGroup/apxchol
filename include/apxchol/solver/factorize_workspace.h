@@ -14,6 +14,16 @@
 
 namespace apxchol {
 
+/// Unweighted residual-topology update consumed by the optional GPU Luby
+/// front-end.  The numerical edge weight remains owned by graph<> on the CPU;
+/// selection needs only the endpoints (including multiplicity).
+namespace detail {
+struct gpu_topology_edge {
+    node_index u;
+    node_index v;
+};
+} // namespace detail
+
 struct factorize_workspace {
     struct per_thread {
         std::vector<weighted_neighbor>             neighbors;
@@ -42,6 +52,11 @@ struct factorize_workspace {
     /// 16 MB/round on grid_2000 and would dominate a small-IS tail round).
     std::vector<node_index> incoming;
 
+    /// Sampled clique endpoints created by the current elimination round.
+    /// Populated only when the guarded GPU setup front-end is active, so the
+    /// default CPU path pays neither the copy nor the retained allocation.
+    std::vector<detail::gpu_topology_edge> gpu_topology_updates;
+
     /// Round counter, incremented by the factorize loop once per round.
     uint64_t round_index = 0;
 
@@ -49,6 +64,7 @@ struct factorize_workspace {
     /// dedup_touched).  Allocations are kept.  Call at the top of each
     /// elimination round.
     void reset_for_round() {
+        gpu_topology_updates.clear();
         for (auto& t : threads) {
             t.edge_buffer.clear();
             t.excess_buffer.clear();

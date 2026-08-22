@@ -527,6 +527,8 @@ if (APXCHOL_USE_CUDA)
     # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow): one
     # persistent launch per sweep, 8 B/row of epoch-tagged state.
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_dataflow.cu)
+    # Runtime-guarded GPU residual-topology + exact Luby setup front-end.
+    target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_luby_frontend.cu)
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels (pcg_cuda.h).
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_pcg_kernels.cu)
     # cudart only; cuSPARSE (the opt-in SpSV backend) under APXCHOL_CUDA_WITH_CUSPARSE.

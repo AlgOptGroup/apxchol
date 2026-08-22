@@ -20,7 +20,12 @@
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/solver/partition/baumann_kyng.h"
+#include "apxchol/solver/partition/luby.h"
+#include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/solve.h"
+#if defined(APXCHOL_USE_CUDA)
+#include "apxchol/solver/gpu_luby_frontend.h"
+#endif
 
 // ── Helpers ──────────────────────────────────────────
 
@@ -1027,3 +1032,112 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
         << "round 0 ignored the caller's est_avg_degree seed (unseeded="
         << unseeded << ", seeded 4000 => " << inflated << ")";
 }
+
+#if defined(APXCHOL_USE_CUDA)
+TEST(GpuLubyFrontend, ConfigurationParsingIsStrict) {
+    using frontend = apxchol::detail::gpu_luby_frontend;
+    const char* old = std::getenv("APXCHOL_GPU_LUBY_FRONTEND");
+    const bool had_old = old != nullptr;
+    const std::string saved = old ? old : "";
+
+    unsetenv("APXCHOL_GPU_LUBY_FRONTEND");
+    EXPECT_EQ(frontend::configured_mode(), frontend::mode::disabled);
+    setenv("APXCHOL_GPU_LUBY_FRONTEND", "auto", 1);
+    EXPECT_EQ(frontend::configured_mode(), frontend::mode::automatic);
+    setenv("APXCHOL_GPU_LUBY_FRONTEND", "force", 1);
+    EXPECT_EQ(frontend::configured_mode(), frontend::mode::forced);
+    setenv("APXCHOL_GPU_LUBY_FRONTEND", "0", 1);
+    EXPECT_EQ(frontend::configured_mode(), frontend::mode::disabled);
+
+    if (had_old) setenv("APXCHOL_GPU_LUBY_FRONTEND", saved.c_str(), 1);
+    else unsetenv("APXCHOL_GPU_LUBY_FRONTEND");
+}
+
+TEST(GpuLubyFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly) {
+    using apxchol::detail::gpu_topology_edge;
+    constexpr apxchol::node_index n = 12;
+    const std::vector<gpu_topology_edge> initial = {
+        {0,1}, {1,2}, {2,3}, {3,4}, {4,5}, {5,6},
+        {6,7}, {7,8}, {8,9}, {9,10}, {10,11}, {11,0},
+        {0,6}, {1,7}, {2,8}, {3,9}, {4,10}, {5,11},
+        {0,2}, {2,4}, {4,6}, {6,8}, {8,10}, {10,0},
+    };
+
+    apxchol::graph<apxchol::vec_pool_incidence> cpu_graph(n);
+    for (const auto e : initial) cpu_graph.add_edge(e.u, e.v, 1.0);
+    apxchol::detail::gpu_luby_frontend gpu(n, initial);
+    apxchol::luby_partitioner cpu;
+
+    std::vector<apxchol::node_index> active(n);
+    std::iota(active.begin(), active.end(), apxchol::node_index{0});
+    std::vector<apxchol::node_index> cpu_degrees, degree_scratch;
+    std::vector<apxchol::node_index> live_degrees(n), eligible;
+    apxchol::selection cpu_selection;
+    apxchol::partition_options popts;
+
+    for (std::uint64_t round = 0; round < 3 && active.size() > 1; ++round) {
+        const auto prep = gpu.prepare(active, popts);
+        const double avg = apxchol::prune_and_degrees(
+            cpu_graph, active, cpu_degrees, 2000);
+        const double threshold = apxchol::is_degree_threshold(
+            cpu_degrees, active.size(), avg, popts, degree_scratch);
+        eligible.clear();
+        for (std::size_t i = 0; i < active.size(); ++i) {
+            live_degrees[active[i]] = cpu_degrees[i];
+            if (cpu_degrees[i] <= threshold) eligible.push_back(active[i]);
+        }
+
+        EXPECT_DOUBLE_EQ(prep.average_degree, avg);
+        EXPECT_EQ(prep.candidate_count, eligible.size());
+        EXPECT_EQ(std::vector<apxchol::node_index>(
+                      gpu.host_active_degrees().begin(),
+                      gpu.host_active_degrees().end()),
+                  cpu_degrees);
+        EXPECT_EQ(std::vector<apxchol::node_index>(
+                      gpu.host_candidates().begin(), gpu.host_candidates().end()),
+                  eligible);
+
+        apxchol::partition_context ctx{
+            .options = popts,
+            .seed = 42,
+            .omp_threshold = 2000,
+            .cp = nullptr,
+            .degrees = live_degrees,
+        };
+        cpu_selection.reset(n);
+        cpu.find_partition(cpu_graph, eligible, ctx, cpu_selection);
+        const std::vector<apxchol::node_index> expected =
+            cpu_selection.finalize().data;
+        const auto& got = gpu.select(42, round);
+        EXPECT_EQ(got.data, expected);
+
+        // select() restores its status scratch; repeating the same immutable
+        // round must be bit-deterministic.
+        for (int repeat = 0; repeat < 5; ++repeat)
+            EXPECT_EQ(gpu.select(42, round).data, expected);
+
+        for (const auto v : expected) cpu_graph.deactivate(v);
+        std::erase_if(active, [&](apxchol::node_index v) {
+            return !cpu_graph.is_active(v);
+        });
+
+        std::vector<gpu_topology_edge> updates;
+        if (round == 0 && active.size() >= 2) {
+            updates.push_back({active.front(), active.back()});
+            cpu_graph.add_edge(active.front(), active.back(), 1.0);
+        }
+        gpu.advance(expected, updates);
+    }
+}
+
+TEST(GpuLubyFrontend, ConservativeAutoGovernorSeparatesMeasuredShapes) {
+    using frontend = apxchol::detail::gpu_luby_frontend;
+    EXPECT_FALSE(frontend::automatic_worthwhile(250000, 998000, 0));
+    EXPECT_FALSE(frontend::automatic_worthwhile(524288, 7343110, 520000));
+    EXPECT_FALSE(frontend::automatic_worthwhile(334863, 1851744, 111500));
+    EXPECT_FALSE(frontend::automatic_worthwhile(65536, 4912142, 4526500));
+    EXPECT_TRUE(frontend::automatic_worthwhile(1134890, 5975248, 2698500));
+    EXPECT_TRUE(frontend::automatic_worthwhile(1696415, 22190596, 11872000));
+    EXPECT_TRUE(frontend::automatic_worthwhile(540486, 30491458, 26930000));
+}
+#endif

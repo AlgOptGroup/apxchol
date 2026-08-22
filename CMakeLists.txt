@@ -126,6 +126,9 @@ add_library(apxchol_core
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_cast.cu>
     # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow), same reason.
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_dataflow.cu>
+    # Optional GPU-resident residual-topology + exact Luby setup front-end.
+    # Runtime-guarded by APXCHOL_GPU_LUBY_FRONTEND=auto|1; the default is off.
+    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_luby_frontend.cu>
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
     # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>
