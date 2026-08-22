@@ -536,8 +536,13 @@ void eliminate_partition(const Eliminator& elim,
                          size_t work_hint = 0) {
     if (cp) { cp->descend("eliminate"); cp->tick(); }
     const size_t n_verts = part.num_vertices();
-    if (std::getenv("APXCHOL_ROUND_TRACE"))  // one line per round: IS size this round
-        std::fprintf(stderr, "[round] n_verts=%zu\n", n_verts);
+    // Diagnostic only: work_hint is the selected vertices' live-degree sum,
+    // already computed by the caller for the elimination gate. Keeping it on
+    // the existing opt-in round trace makes work-gated rounds auditable without
+    // another graph traversal or any default-path output.
+    if (std::getenv("APXCHOL_ROUND_TRACE"))
+        std::fprintf(stderr, "[round] n_verts=%zu adjacency_work=%zu\n",
+                     n_verts, work_hint);
     if (n_verts == 0) {
         if (cp) cp->ascend();
         return;
