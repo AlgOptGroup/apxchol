@@ -922,8 +922,21 @@ factorization factorize_impl(const Eliminator& elim,
                 residual_thresh);
             if (detail::is_yield_too_small(
                     part.num_regions(), last_candidate_count, active.size(),
-                    min_yield, residual_thresh))
+                    min_yield, residual_thresh)) {
+                if (std::getenv("APXCHOL_VERBOSE"))
+                    std::fprintf(stderr,
+                        "[apxchol] selector handoff: active=%zu candidates=%zu "
+                        "selected=%zu yield=%.6f base=%.6f effective=%.6f "
+                        "avg_degree=%.3f residual_threshold=%zu\n",
+                        active.size(), last_candidate_count,
+                        part.num_regions(), last_candidate_count
+                            ? static_cast<double>(part.num_regions()) /
+                                  static_cast<double>(last_candidate_count)
+                            : 0.0,
+                        opts.min_is_fraction, min_yield, last_avg_degree,
+                        residual_thresh);
                 break;
+            }
         } else {
             if (part.num_regions() == 0) {
                 if (++consecutive_empty >= kMaxEmptyRounds)
