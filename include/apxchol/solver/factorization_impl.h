@@ -67,6 +67,16 @@ inline bool is_yield_too_small(size_t selected, size_t candidates,
     return selected < candidates * min_fraction;
 }
 
+inline bool selection_should_handoff(
+        size_t selected_regions, size_t selected_vertices, size_t candidates,
+        size_t active, double min_fraction,
+        size_t residual_handoff_threshold, size_t omp_threshold) {
+    if (selected_regions == 0) return true;
+    if (omp_threshold != 0 && selected_vertices >= omp_threshold) return false;
+    return is_yield_too_small(selected_regions, candidates, active,
+                              min_fraction, residual_handoff_threshold);
+}
+
 // The relative yield at which the main selector stops should reflect both the
 // size and the density of the residual. BG/Luby/rootset rescan it; BK samples
 // bounded edge work after an O(active) hash pass. Keep min_is_fraction as the
@@ -74,21 +84,21 @@ inline bool is_yield_too_small(size_t selected, size_t candidates,
 //
 // Adapt only while at least four handoff-sized chunks remain, so BK has enough
 // runway to amortize taking over and small residuals do not fall off a level
-// cliff. A large residual doubles the base; one whose average degree is itself
-// at least the final-tail size triples it. The 0.15 ceiling bounds the quality
-// trade even if a caller chose a larger handoff threshold.
+// cliff. A residual whose average degree is itself at least the final-tail size
+// triples the base. Sparse residuals keep the user's base: switching them early
+// creates thousands of thin BK levels and can make the solve dominate the setup
+// saving. The 0.15 ceiling bounds the quality trade even if a caller chose a
+// larger handoff threshold.
 inline double adaptive_is_yield_fraction(
         double base, size_t active, double average_degree,
         size_t residual_handoff_threshold) {
     if (!(base > 0.0) ||
         residual_handoff_threshold == std::numeric_limits<size_t>::max() ||
         residual_handoff_threshold > std::numeric_limits<size_t>::max() / 4 ||
-        active <= 4 * residual_handoff_threshold)
+        active <= 4 * residual_handoff_threshold ||
+        average_degree < static_cast<double>(residual_handoff_threshold))
         return base;
-    const double multiplier =
-        average_degree >= static_cast<double>(residual_handoff_threshold)
-            ? 3.0 : 2.0;
-    return std::max(base, std::min(0.15, multiplier * base));
+    return std::max(base, std::min(0.15, 3.0 * base));
 }
 
 // Eliminate vertices in the partition: record L-columns, add clique edges.
@@ -920,9 +930,14 @@ factorization factorize_impl(const Eliminator& elim,
             const double min_yield = detail::adaptive_is_yield_fraction(
                 opts.min_is_fraction, active.size(), last_avg_degree,
                 residual_thresh);
-            if (detail::is_yield_too_small(
-                    part.num_regions(), last_candidate_count, active.size(),
-                    min_yield, residual_thresh)) {
+            // A low relative yield can still be a large, profitable round.
+            // Keep any non-empty selection that is already large enough for
+            // the parallel elimination path; the yield rule is for small
+            // selections whose scan cost is no longer amortized.
+            if (detail::selection_should_handoff(
+                    part.num_regions(), part.num_vertices(),
+                    last_candidate_count, active.size(), min_yield,
+                    residual_thresh, opts.omp_threshold)) {
                 if (std::getenv("APXCHOL_VERBOSE"))
                     std::fprintf(stderr,
                         "[apxchol] selector handoff: active=%zu candidates=%zu "

@@ -932,6 +932,7 @@ Eigen::SparseMatrix<double> clique_laplacian(int n) {
 TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
     using apxchol::detail::adaptive_is_yield_fraction;
     using apxchol::detail::is_yield_too_small;
+    using apxchol::detail::selection_should_handoff;
     constexpr size_t none = std::numeric_limits<size_t>::max();
 
     // 9/200 is a 4.5% yield and therefore too small even though it is only
@@ -951,13 +952,13 @@ TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
     // relative-yield rule at every active size.
     EXPECT_TRUE(is_yield_too_small(1, 100, 23, 0.05, none));
 
-    // Adaptation needs enough runway before the 500-vertex handoff. A large
-    // sparse residual doubles the public base; a large dense one triples it.
-    // Zero remains an exact bailout-off switch and a larger base is not cut.
+    // Adaptation needs enough runway before the 500-vertex handoff. Large
+    // sparse residuals keep the public base; large dense ones triple it. Zero
+    // remains an exact bailout-off switch and a larger base is not cut.
     EXPECT_DOUBLE_EQ(
         adaptive_is_yield_fraction(0.05, 2000, 10000.0, 500), 0.05);
     EXPECT_DOUBLE_EQ(
-        adaptive_is_yield_fraction(0.05, 2001, 499.9, 500), 0.10);
+        adaptive_is_yield_fraction(0.05, 2001, 499.9, 500), 0.05);
     EXPECT_DOUBLE_EQ(
         adaptive_is_yield_fraction(0.05, 2001, 500.0, 500), 0.15);
     EXPECT_DOUBLE_EQ(
@@ -966,6 +967,15 @@ TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
         adaptive_is_yield_fraction(0.20, 10000, 10000.0, 500), 0.20);
     EXPECT_DOUBLE_EQ(adaptive_is_yield_fraction(
         0.05, 10000, 10000.0, std::numeric_limits<size_t>::max()), 0.05);
+
+    // Relative yield does not discard a selection already large enough for
+    // parallel elimination. Zero progress still hands off unconditionally.
+    EXPECT_FALSE(selection_should_handoff(
+        3700, 3700, 37375, 173224, 0.10, 500, 2000));
+    EXPECT_TRUE(selection_should_handoff(
+        1900, 1900, 20000, 100000, 0.10, 500, 2000));
+    EXPECT_TRUE(selection_should_handoff(
+        0, 0, 20000, 100000, 0.10, 500, 2000));
 }
 
 TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {

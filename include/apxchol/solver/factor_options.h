@@ -62,7 +62,8 @@ struct factor_options {
     /// partitioner's default threshold): near that boundary a bail leaves too
     /// little BK runway and turns almost the whole tail into singleton peel
     /// levels. Zero progress always bails. This is an algorithmic yield knob;
-    /// omp_threshold is the separate absolute work-size knob.
+    /// omp_threshold is also the absolute safeguard: a selection already that
+    /// large is retained regardless of relative yield.
     double min_is_fraction = 0.05;
     size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP.
                                      // Also gates the partitioners' parallel paths;
