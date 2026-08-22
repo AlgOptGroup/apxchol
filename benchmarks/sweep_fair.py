@@ -314,6 +314,10 @@ def run_parac(mid):
         print(f"   {label:24} {res}")
     except Exception as e:
         print(f"   {label:24} ERROR: {e}")
+        if DEVICE == "gpu":
+            stamped = parac_runner.record_gpu_failure(
+                mid, "failed", f"unhandled ParAC runner error: {type(e).__name__}: {e}")
+            print(f"   {label:24} {stamped}")
 
 _CMG_STATE = {"probed": False, "ok": False, "why": ""}
 

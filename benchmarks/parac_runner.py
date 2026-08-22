@@ -80,9 +80,9 @@ The ParAC checkout itself is upstream 44ef39d plus ONE patch
 
 Resume semantics differ BY DESIGN: CPU treats failed/timeout as terminal;
 GPU retries them (transient CUDA hiccups). Unlike the old standalone runners,
-a dump/reorder timeout no longer crashes the pass: CPU emits 'timeout' cells
-for both modes (delete the cells to force a retry), GPU just skips (its
-terminal set retries anyway).
+a dump/reorder timeout no longer crashes the pass. Both axes emit terminal cells
+for the campaign audit; GPU keeps failed/timeout outside TERMINAL_GPU so a later
+resume still retries the transient preparation.
 """
 import os, re, statistics, subprocess, time
 
@@ -657,9 +657,14 @@ def _nnz_sort(mid, src, tag, augment=False):
     out = prefix + "-nnz-sorted.mtx"
     tfile, pfile = out + ".time", out + ".prep"
     if os.path.exists(out) and os.path.exists(tfile):
-        prep = (open(pfile).read() if os.path.exists(pfile)
-                else _PREP_UNKNOWN)
-        return out, float(open(tfile).read()), prep
+        with open(tfile) as handle:
+            secs = float(handle.read())
+        if os.path.exists(pfile):
+            with open(pfile) as handle:
+                prep = handle.read()
+        else:
+            prep = _PREP_UNKNOWN
+        return out, secs, prep
     mode = "physics" if augment else "graph"
     produced, secs, err = _produce_upstream(prefix, src, mode, "nnz-sort", TIMEOUT_GPU)
     if produced:
@@ -668,10 +673,20 @@ def _nnz_sort(mid, src, tag, augment=False):
         print(f"   [parac] upstream {mode}_produce refused {mid}: {err}\n"
               f"   [parac] falling back to benchmarks/parac_nnz_sort.jl", flush=True)
         flag = " --augment" if augment else ""
-        o = sh(f"julia {NNZ_SORT_JL} {src} {out}{flag}", timeout=TIMEOUT_GPU).stdout
+        cp = sh(f"julia {NNZ_SORT_JL} {src} {out}{flag}", timeout=TIMEOUT_GPU)
+        o = cp.stdout
         m = _PREP_TIME_RE.search(o)
         secs = float(m.group(1)) if m else 0.0
-        prep = f"benchmarks/parac_nnz_sort.jl (FALLBACK — upstream refused: {err})"
+        if cp.returncode == 0 and os.path.exists(out):
+            prep = f"benchmarks/parac_nnz_sort.jl (FALLBACK — upstream refused: {err})"
+        else:
+            tail = " | ".join(
+                line.strip() for line in (cp.stderr or cp.stdout or "").splitlines()[-4:]
+            ) or "no output"
+            prep = (f"benchmarks/parac_nnz_sort.jl FAILED (rc={cp.returncode}, "
+                    f"output={'present' if os.path.exists(out) else 'missing'}): {tail}; "
+                    f"upstream refused: {err}")
+            return None, secs, prep
     if os.path.exists(out):
         open(tfile, "w").write(str(secs))
         open(pfile, "w").write(prep)
@@ -717,13 +732,60 @@ def _calibrate_tol_gpu(driver, mtx, tau=float(TOL)):
     return (tau * PROBE_TOL_GPU / r0) if r0 > 0.0 else None
 
 
+def _gpu_modes(mid):
+    """The two published GPU series and whether each can take this matrix."""
+    is_operator = rc.class_of(mid) == "sddm"
+    for solver_key, driver in (("parac_graph", rc.PARAC_GPU_DRIVER),
+                               ("parac_physics", rc.PARAC_GPU_DRIVER_PHYS)):
+        skip_reason = (GRAPH_NA if (is_operator and solver_key == "parac_graph")
+                       else PHYSICS_NA if (not is_operator and solver_key == "parac_physics")
+                       else None)
+        # Read the toolchain off the driver intended for this series. This stays
+        # useful provenance even when shared preprocessing fails before launch.
+        prov = {**PROV_GPU, **rc.binary_toolchain(driver)}
+        yield solver_key, driver, prov, skip_reason
+
+
+def record_gpu_failure(mid, status, reason, prep=None):
+    """Stamp both GPU series after a shared preparation failure.
+
+    Exactly one mode applies to a matrix; it receives ``failed`` or ``timeout``.
+    The incompatible mode still receives its required explicit ``n/a`` cell.
+    Existing successful cells are never overwritten. Failed/timeouts remain
+    retryable because TERMINAL_GPU deliberately excludes them.
+    """
+    if status not in ("failed", "timeout"):
+        raise ValueError(f"GPU preparation outcome must be failed/timeout, got {status!r}")
+    family = rc.MATRICES[mid]["family"]
+    results = []
+    for solver_key, _driver, prov, skip_reason in _gpu_modes(mid):
+        if skip_reason:
+            rc.emit_cell(family, mid, solver_key, "", "n/a", {}, THREADS, "gpu", prov,
+                         matrix_meta={"parac_mode": "n/a",
+                                      "parac_na_reason": skip_reason})
+            results.append(f"{solver_key}[n/a]")
+            continue
+        if rc.cell_done(family, mid, solver_key, "", THREADS, "gpu",
+                        terminal=TERMINAL_GPU):
+            results.append(f"{solver_key}[skip(done)]")
+            continue
+        meta = {"parac_mode": "physics" if solver_key == "parac_physics" else "graph",
+                "parac_prep_failure": reason}
+        if prep:
+            meta["parac_prep"] = prep
+        kwargs = {"timeout_cap_s": TIMEOUT_GPU} if status == "timeout" else {}
+        rc.emit_cell(family, mid, solver_key, "", status, {}, THREADS, "gpu", prov,
+                     matrix_meta=meta, **kwargs)
+        results.append(f"{solver_key}[{status.upper()}(prep)]")
+    return " ".join(results)
+
+
 def run_gpu(mid, tol=TOL):
     """ParAC GPU pass for one matrix: one real cell and one n/a, the same split as
     the CPU axis — kind=graph runs driver.cu on the pure L, kind=operator runs
     driver_physics.cu on the augmented published operator."""
     family = rc.MATRICES[mid]["family"]
     tag = _dump_tag(mid)
-    is_operator = rc.class_of(mid) == "sddm"
     aug = _augments(mid)
     try:
         # Warm nnz-sort cache (+.time) -> the dump is unneeded; skip it.
@@ -731,28 +793,29 @@ def run_gpu(mid, tol=TOL):
         sorted_cached = f"{rc.PARAC_SORTED}/{mid}-{cache_tag}-nnz-sorted.mtx"
         if os.path.exists(sorted_cached) and os.path.exists(sorted_cached + ".time"):
             sorted_mtx = sorted_cached
-            sort_s = float(open(sorted_cached + ".time").read())
-            prep_prov = (open(sorted_cached + ".prep").read()
-                         if os.path.exists(sorted_cached + ".prep")
-                         else _PREP_UNKNOWN)
+            with open(sorted_cached + ".time") as handle:
+                sort_s = float(handle.read())
+            if os.path.exists(sorted_cached + ".prep"):
+                with open(sorted_cached + ".prep") as handle:
+                    prep_prov = handle.read()
+            else:
+                prep_prov = _PREP_UNKNOWN
         else:
             src, _tag = _dump(mid, DUMP_GPU, rc.BIN["gpu"], TIMEOUT_GPU)
-            if not src: return "SKIP(dump)"
+            if not src:
+                return record_gpu_failure(mid, "failed",
+                                          "GPU operator dump produced no matrix")
             sorted_mtx, sort_s, prep_prov = _nnz_sort(mid, src, tag, augment=aug)
-            if not sorted_mtx: return "SKIP(nnz-sort)"
-    except subprocess.TimeoutExpired:
-        return "TIMEOUT(dump/sort)"   # no cell: GPU terminal set retries anyway
+            if not sorted_mtx:
+                return record_gpu_failure(mid, "failed",
+                                          "ParAC nnz-sort produced no matrix",
+                                          prep=prep_prov)
+    except subprocess.TimeoutExpired as exc:
+        return record_gpu_failure(
+            mid, "timeout",
+            f"ParAC GPU dump/sort exceeded its {exc.timeout}s wall cap")
     results = []
-    for solver_key, driver in (("parac_graph", rc.PARAC_GPU_DRIVER),
-                               ("parac_physics", rc.PARAC_GPU_DRIVER_PHYS)):
-        # The toolchain of THE DRIVER ABOUT TO RUN, read off that file (ELF
-        # .comment + DT_NEEDED). build-cuda/ is a directory name and nothing more:
-        # a stale binary sitting in it would make any name-based claim a lie, so
-        # nothing here is inferred from the path.
-        prov = {**PROV_GPU, **rc.binary_toolchain(driver)}
-        skip_reason = (GRAPH_NA if (is_operator and solver_key == "parac_graph")
-                       else PHYSICS_NA if (not is_operator and solver_key == "parac_physics")
-                       else None)
+    for solver_key, driver, prov, skip_reason in _gpu_modes(mid):
         if skip_reason:
             rc.emit_cell(family, mid, solver_key, "", "n/a", {}, THREADS, "gpu", prov,
                          matrix_meta={"parac_mode": "n/a", "parac_na_reason": skip_reason})
@@ -760,7 +823,11 @@ def run_gpu(mid, tol=TOL):
         if rc.cell_done(family, mid, solver_key, "", THREADS, "gpu", terminal=TERMINAL_GPU):
             results.append(f"{solver_key}[skip(done)]"); continue
         if not os.path.exists(driver):
-            results.append(f"{solver_key}[SKIP(driver missing)]"); continue
+            rc.emit_cell(
+                family, mid, solver_key, "", "failed", {}, THREADS, "gpu", prov,
+                matrix_meta={"parac_mode": "physics" if solver_key == "parac_physics" else "graph",
+                             "parac_prep_failure": f"ParAC GPU driver missing: {driver}"})
+            results.append(f"{solver_key}[FAILED(driver missing)]"); continue
         try:
             cal = _calibrate_tol_gpu(driver, sorted_mtx) or float(tol)
             runs = [_run_once_gpu(driver, sorted_mtx, cal) for _ in range(REPS)]
