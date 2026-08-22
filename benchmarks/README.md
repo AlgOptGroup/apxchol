@@ -316,6 +316,10 @@ the metric rather than storing a misleading value.
 - **Reps**: 3, median — except the **CMG** cells, which are single-shot (`repeat=1`,
   one MATLAB run per matrix). **Threads**: 16 physical cores, pinned, run without contention.
 - **Metrics**: setup_s, solve_s, total_s, PCG iterations, rel_res, µs/nnz.
+- **Crash artifacts**: the shared shell harness disables core dumps for every
+  solver by default; a third-party crash is still recorded in its cell and logs,
+  but cannot leave a factor-sized core in the campaign directory. Set
+  `APXCHOL_BENCH_COREDUMP=1` only for an intentional diagnostic reproduction.
 - **Disconnected matrices (multi-component, e.g. the social giants `as-Skitter`,
   `kron_g500`, `thermal2`).** Solvers handle the per-component null space two ways.
   **apxchol** (native mean-centring) and **AMGCL** (+pin, its default) solve the **whole**

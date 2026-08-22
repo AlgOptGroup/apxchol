@@ -28,6 +28,37 @@ def record(status, total, *, threads=16, cap=None, solver="amgcl", config=""):
     return out
 
 
+class ShellHarnessTest(unittest.TestCase):
+    @staticmethod
+    def _popen():
+        process = mock.Mock()
+        process.communicate.return_value = ("", "")
+        process.args = ""
+        process.returncode = 0
+        return process
+
+    def test_core_dumps_are_disabled_by_default(self):
+        process = self._popen()
+        with mock.patch.object(rc.subprocess, "Popen", return_value=process) as popen:
+            rc.sh("worker --flag", env={})
+        self.assertEqual(popen.call_args.args[0], "ulimit -c 0; worker --flag")
+
+    def test_core_dumps_can_be_enabled_for_diagnostics(self):
+        process = self._popen()
+        with mock.patch.object(rc.subprocess, "Popen", return_value=process) as popen:
+            rc.sh("worker --flag", env={"APXCHOL_BENCH_COREDUMP": "1"})
+        self.assertEqual(popen.call_args.args[0], "worker --flag")
+
+    def test_core_and_memory_limits_compose(self):
+        process = self._popen()
+        with mock.patch.object(rc.subprocess, "Popen", return_value=process) as popen:
+            rc.sh("worker", env={}, mem_cap_gb=2)
+        self.assertEqual(
+            popen.call_args.args[0],
+            "ulimit -c 0; ulimit -v 2097152; worker",
+        )
+
+
 class SeriesRuleTest(unittest.TestCase):
     def test_label_maps_are_injective(self):
         rc.require_injective_labels(cpu.LABELS, "CPU")

@@ -7,7 +7,8 @@ level_stats.py:
 
   - sh()           hardened subprocess harness: process-group kill on timeout
                    (the orphan-on-timeout bug fix, 2026-06-11), optional env and
-                   per-call `ulimit -v` memory cap.
+                   per-call `ulimit -v` memory cap, and core dumps disabled by
+                   default.
   - matrix registry  GRIDS/SS/IPM + matrix_args()/margs_for() — the single list
                    the per-runner MATS were drifting copies of.
   - cell store     cell_path/emit_cell/cell_status/cell_done with the terminal
@@ -60,12 +61,23 @@ def sh(cmd, timeout=1800, env=None, mem_cap_gb=None):
     so a timed-out solver kept running, oversubscribing the cores for every
     subsequent cell (the fake-competitor-regression cascade of 2026-06-11).
 
+    Core dumps are disabled by default so a third-party crash cannot strand a
+    factor-sized file in a campaign directory. Set APXCHOL_BENCH_COREDUMP=1 in
+    the subprocess environment for a diagnostic run that intentionally keeps
+    them.
+
     mem_cap_gb > 0 prepends `ulimit -v` so a runaway solver dies with bad_alloc
     instead of OOM-killing the desktop (CPU only — CUDA reserves large host VM).
     Raises subprocess.TimeoutExpired (with captured output) on timeout.
     """
+    effective_env = os.environ if env is None else env
+    limits = []
+    if effective_env.get("APXCHOL_BENCH_COREDUMP") != "1":
+        limits.append("ulimit -c 0")
     if mem_cap_gb and mem_cap_gb > 0:
-        cmd = f"ulimit -v {int(mem_cap_gb * 1024 * 1024)}; {cmd}"
+        limits.append(f"ulimit -v {int(mem_cap_gb * 1024 * 1024)}")
+    if limits:
+        cmd = "; ".join([*limits, cmd])
     p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True, env=env, start_new_session=True)
     try:
