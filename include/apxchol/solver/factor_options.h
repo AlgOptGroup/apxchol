@@ -73,9 +73,8 @@ struct factor_options {
                                      // elimination also engages when selected-degree
                                      // work exceeds 24 times this value.
                                      // Also gates the partitioners' parallel paths;
-                                     // lowering it below typical round sizes makes the
-                                     // factor structure nondeterministic run to run
-                                     // (racy block_greedy conflicts -- see env_knobs.h)
+                                     // lowering it engages parallel selection earlier
+                                     // and can change the factor across thread counts.
     std::string is_select = "block_greedy";  // Partitioner name (runtime dispatch via dispatch_partitioner)
 
     // When the main IS-finding loop bails out

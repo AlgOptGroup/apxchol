@@ -35,15 +35,13 @@
 ///   APXCHOL_OMP_THRESHOLD = <int>
 ///     Overrides factor_options::omp_threshold (the IS-size gate below which an
 ///     elimination round runs the fully serial path). NOTE it also gates the
-///     PARTITIONER's parallel paths (partition_context.omp_threshold):
-///     block_greedy's cross-block conflict resolution is racy, so lowering
-///     this below typical round sizes makes the FACTOR STRUCTURE (nnz)
-///     nondeterministic run to run -- measured 12/50 failures of
-///     SpTRSVSetupMemory.SetupConsumingReleasesTheFactorAndSolvesIdentically
-///     at 256 vs 0/50 at the 2000 default (2026-08-19, T=4). Promoting 256 to
-///     the default was also perf-refuted: iter0040 10-rep paired medians show
-///     setup 0.867 s (2000/serial tail) vs 0.869 s (256/tail 4) -- the
-///     eliminate-stage win (~-22%) is offset elsewhere.
+///     PARTITIONER's parallel paths (partition_context.omp_threshold), so
+///     lowering it changes the factor by moving more rounds from serial to
+///     parallel selection. The parallel path is deterministic at a fixed seed
+///     and thread count; the old cross-block race was removed 2026-08-20.
+///     Promoting 256 to the default was perf-refuted: iter0040 10-rep paired
+///     medians show setup 0.867 s (2000/serial tail) vs 0.869 s (256/tail 4) --
+///     the eliminate-stage win (~-22%) is offset elsewhere.
 ///
 ///   APXCHOL_LUMP = 0 | 1                          (default: 1, ON)
 ///     M-matrix lumping of positive off-diagonals when the PRECONDITIONER is
