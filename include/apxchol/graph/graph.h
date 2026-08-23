@@ -30,26 +30,29 @@ struct residual_coalescer;
 // current transient fp64 aggregation in process_vertex(). A governed one-shot
 // rebuild may coalesce the late residual; it stores multiplicity separately so
 // the partitioner's degree heuristic remains the same.
-#ifdef APXCHOL_POOL_FP32
-using pool_value_t = float;
-#else
-using pool_value_t = double;
-#endif
-
-/// Mutable incidence-list graph with a flat edge pool.
+/// Mutable incidence-list graph.
 ///
-/// Each undirected edge {u,v,w} is stored once in the pool with XOR-encoded
-/// endpoints (u^v).  Both u and v reference the same pool entry;
-/// the target is recovered by XORing the stored value with the source vertex.
-/// The Incidence template parameter controls how per-vertex lists of
-/// edge indices are stored (vec_incidence, forward_star_incidence,
-/// bstr_incidence, or any user-provided type with the same interface).
+/// The traditional backends store each undirected edge {u,v,w} once in a flat
+/// pool with XOR-encoded endpoints (u^v); both endpoints store its edge index.
+/// directed_vec_pool_incidence instead duplicates {neighbor, weight} inline at
+/// both endpoints, avoiding the indexed pool read during adjacency scans.
+/// The Incidence template parameter controls how per-vertex lists are stored.
+/// The traditional implementations contain edge indices (vec_incidence,
+/// forward_star_incidence and bstr_incidence); directed_vec_pool_incidence
+/// contains the inline records themselves.
 template<incidence_storage Incidence = vec_pool_incidence>
 class graph {
 public:
     /// Expose the incidence backend for callers that want to specialize
     /// (e.g. parallel make_graph picks the vec_pool fast path via this).
     using incidence_type = Incidence;
+    static constexpr bool stores_directed_incidence = [] {
+        if constexpr (requires { typename Incidence::value_type; })
+            return std::same_as<typename Incidence::value_type,
+                                directed_pool_edge>;
+        else
+            return false;
+    }();
 
     struct edge {
         node_index to; pool_value_t w;   // w fp32 under -DAPXCHOL_POOL_FP32
@@ -76,21 +79,35 @@ public:
     // Yields {to, w} with w PROMOTED to double, so all consumers (elimination,
     // weighted-degree, conversions) compute in fp64 regardless of pool storage.
     auto neighbors(node_index v) const {
-        return adj_[v] | std::views::transform(
-            [this, v](edge_index i) {
-                struct nbr { node_index to; double w; };
-                return nbr{edges_[i].traverse(v), static_cast<double>(edges_[i].w)};
-            });
+        if constexpr (stores_directed_incidence) {
+            return adj_[v] | std::views::transform(
+                [](const directed_pool_edge& i) {
+                    struct nbr { node_index to; double w; };
+                    return nbr{i.to, static_cast<double>(i.w)};
+                });
+        } else {
+            return adj_[v] | std::views::transform(
+                [this, v](edge_index i) {
+                    struct nbr { node_index to; double w; };
+                    return nbr{edges_[i].traverse(v),
+                               static_cast<double>(edges_[i].w)};
+                });
+        }
     }
 
     // ── mutation ──
 
     void add_edge(node_index u, node_index v, double w) {
-        auto idx = static_cast<edge_index>(edges_.size());
-        edges_.push_back({u ^ v, static_cast<pool_value_t>(w)});
-        if (!multiplicity_.empty()) multiplicity_.push_back(1);
-        adj_.push(u, idx);
-        adj_.push(v, idx);
+        if constexpr (stores_directed_incidence) {
+            adj_.push(u, {v, static_cast<pool_value_t>(w)});
+            adj_.push(v, {u, static_cast<pool_value_t>(w)});
+        } else {
+            auto idx = static_cast<edge_index>(edges_.size());
+            edges_.push_back({u ^ v, static_cast<pool_value_t>(w)});
+            if (!multiplicity_.empty()) multiplicity_.push_back(1);
+            adj_.push(u, idx);
+            adj_.push(v, idx);
+        }
         ++m_;
     }
 
@@ -117,11 +134,28 @@ public:
     /// Caller fills slots in parallel.  Used together with `reserve_adj_pool`
     /// and `link_edge_atomic` for lock-free bulk insertion.
     edge_index reserve_edge_pool(edge_index N) {
-        auto start = static_cast<edge_index>(edges_.size());
+        static_assert(!stores_directed_incidence,
+                      "directed incidences must be inserted directly");
+        const edge_index start = static_cast<edge_index>(edges_.size());
         edges_.resize(start + N);
         if (!multiplicity_.empty()) multiplicity_.resize(start + N, 1);
         m_ += N;  // bookkeeping; queried via m()
         return start;
+    }
+
+    /// Directed-inline vec_pool: account for a bulk set of undirected edges
+    /// whose two incidences are written directly, without an edge-pool stage.
+    void record_edges_added(edge_index count) {
+        static_assert(stores_directed_incidence);
+        m_ += count;
+    }
+
+    /// Directed-inline vec_pool: materialize one endpoint incidence directly
+    /// into a slab already sized by adj_bulk_reserve_parallel().
+    void adj_atomic_push_directed(node_index from, node_index to, double w) {
+        static_assert(stores_directed_incidence);
+        adj_.atomic_push_reserved(
+            from, directed_pool_edge{to, static_cast<pool_value_t>(w)});
     }
 
     /// Pre-reserve N additional edge slots for parallel atomic claim.
@@ -213,7 +247,7 @@ public:
     /// vec_pool only: pre-reserve cap_[v] >= need before a parallel
     /// adj_atomic_push_reserved phase.  NOT thread-safe.
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     void adj_reserve_for(node_index v, node_index need) {
         adj_.reserve_for(v, need);
     }
@@ -222,7 +256,7 @@ public:
     /// inside an OpenMP parallel region; implementation has its own
     /// single + for split.
     template<typename I = Incidence, typename TouchedIter>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     void adj_bulk_reserve_parallel(TouchedIter begin, TouchedIter end,
                                    const std::vector<node_index>& incoming) {
         adj_.bulk_reserve_parallel(begin, end, incoming);
@@ -231,7 +265,7 @@ public:
     /// vec_pool only: current adjacency count for vertex v (used for
     /// reserve_for pre-pass).
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     node_index adj_count(node_index v) const {
         return static_cast<node_index>(adj_[v].size());
     }
@@ -240,15 +274,18 @@ public:
     /// must have called adj_reserve_for to ensure cap > current_count + N
     /// for the parallel section.
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     void adj_atomic_push_reserved(node_index v, edge_index e_slot) {
+        static_assert(!stores_directed_incidence,
+                      "directed incidences must be inserted directly");
         adj_.atomic_push_reserved(v, e_slot);
     }
 
-    /// Sort vertex v's adj slab in increasing edge_index order — used to
-    /// restore deterministic ordering after a parallel atomic-push phase.
+    /// Sort vertex v's adjacency slab — by edge index for the indexed backend,
+    /// or by (target, weight) for the directed-inline backend — to restore
+    /// deterministic ordering after a parallel atomic-push phase.
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     void adj_sort_slab(node_index v) {
         adj_.sort_slab(v);
     }
@@ -256,26 +293,26 @@ public:
     /// vec_pool only: compact pool to remove abandoned slabs from doubling.
     /// Reduces memory; rebuilds with tight cap=count for all vertices.
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     void compact_adj() { adj_.compact(); }
 
     /// vec_pool only: live fraction (1 - abandoned/pool_size).
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     double adj_live_fraction() const { return adj_.live_fraction(); }
 
     /// vec_pool only: pool diagnostics (grow/compact counts, worst fragmentation).
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     size_t adj_grow_count() const { return adj_.grow_count(); }
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     size_t adj_compact_count() const { return adj_.compact_count(); }
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     double adj_min_live_fraction() const { return adj_.min_live_fraction(); }
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     void adj_note_live_fraction() { adj_.note_live_fraction(); }
 
     /// Pool occupancy ratio (forward_star only).  Used as auto-compact trigger.
@@ -334,8 +371,8 @@ public:
     template<typename Visitor>
     node_index prune_and_visit(node_index v, Visitor&& visit) {
         node_index count = 0;
-        adj_.filter(v, [&](edge_index idx) {
-            auto u = edges_[idx].traverse(v);
+        adj_.filter(v, [&](const auto& idx) {
+            auto u = edge_target(idx, v);
             if (!active_[u]) return false;
             visit(u);
             count += edge_multiplicity(idx);
@@ -360,12 +397,32 @@ public:
 
     /// Raw access to adjacency list and edge pool (for tight inner loops).
     auto adj(node_index v) const { return adj_[v]; }
-    node_index edge_target(edge_index idx, node_index from) const {
-        return edges_[idx].traverse(from);
+    template<typename Entry>
+    node_index edge_target(const Entry& idx, node_index from) const {
+        if constexpr (std::same_as<std::remove_cvref_t<Entry>,
+                                   directed_pool_edge>)
+            return idx.to;
+        else
+            return edges_[static_cast<edge_index>(idx)].traverse(from);
     }
-    double edge_weight(edge_index idx) const { return edges_[idx].w; }
-    node_index edge_multiplicity(edge_index idx) const {
-        return multiplicity_.empty() ? node_index{1} : multiplicity_[idx];
+    template<typename Entry>
+    double edge_weight(const Entry& idx) const {
+        if constexpr (std::same_as<std::remove_cvref_t<Entry>,
+                                   directed_pool_edge>)
+            return idx.w;
+        else
+            return edges_[static_cast<edge_index>(idx)].w;
+    }
+    template<typename Entry>
+    node_index edge_multiplicity(const Entry& idx) const {
+        if constexpr (std::same_as<std::remove_cvref_t<Entry>,
+                                   directed_pool_edge>)
+            return 1;
+        else {
+            const edge_index edge_id = static_cast<edge_index>(idx);
+            return multiplicity_.empty() ? node_index{1}
+                                         : multiplicity_[edge_id];
+        }
     }
 
     /// Per-vertex excess diagonal (for SDDM matrices).

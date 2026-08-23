@@ -15,7 +15,8 @@ using AllStorages = ::testing::Types<
     apxchol::vec_incidence,
     apxchol::forward_star_incidence,
     apxchol::bstr_incidence,
-    apxchol::vec_pool_incidence
+    apxchol::vec_pool_incidence,
+    apxchol::directed_vec_pool_incidence
 >;
 
 template<typename Incidence>

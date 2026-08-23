@@ -56,6 +56,26 @@ using edge_index = std::uint64_t;          // offsets / edge ids: widened for >4
 using edge_index = std::uint32_t;
 #endif
 
+// Residual-pool edge weight storage type. This lives beside the index types so
+// the experimental directed-incidence layout can store {target, weight}
+// directly in its adjacency slabs without introducing a graph/incidence
+// include cycle.
+#ifdef APXCHOL_POOL_FP32
+using pool_value_t = float;
+#else
+using pool_value_t = double;
+#endif
+
+struct directed_pool_edge {
+    node_index to;
+    pool_value_t w;
+
+    friend bool operator<(const directed_pool_edge& a,
+                          const directed_pool_edge& b) {
+        return a.to < b.to || (a.to == b.to && a.w < b.w);
+    }
+};
+
 // (No `index_t` alias: every use is now explicitly node_index or edge_index so
 //  the node/edge width distinction is type-checked, not by-convention.)
 
@@ -75,6 +95,6 @@ using edge_index = std::uint32_t;
 
 /// graph_storage enumerates the available incidence list backends
 /// for runtime dispatch (CLI, factor_options).
-enum class graph_storage { vec, forward_star, bstr, vec_pool };
+enum class graph_storage { vec, forward_star, bstr, vec_pool, vec_pool_aos };
 
 } // namespace apxchol

@@ -175,7 +175,8 @@ using AllStorages = ::testing::Types<
     apxchol::vec_incidence,
     apxchol::forward_star_incidence,
     apxchol::bstr_incidence,
-    apxchol::vec_pool_incidence>;
+    apxchol::vec_pool_incidence,
+    apxchol::directed_vec_pool_incidence>;
 
 // ── Factorization structure tests ────────────────────
 
@@ -316,6 +317,32 @@ void expect_same_factor(const apxchol::factorization& a,
         << what << ": factor values differ";
 }
 } // namespace
+
+TEST(VecPoolAos, SerialFactorMatchesIndexedVecPoolByteForByte) {
+    // At one thread both representations consume every multiedge in the same
+    // order. This guards the AoS backend's defining claim: it changes where
+    // {target, weight} lives, not selection, sampling, or factor arithmetic.
+    const scoped_threads team(1);
+    const auto L = weighted_grid_laplacian(24, 25, 7.25, 0.03125);
+    apxchol::factor_options opts;
+    opts.seed = 19;
+
+    const auto indexed = apxchol::factorize(
+        L, apxchol::graph_storage::vec_pool, opts);
+    const auto aos = apxchol::factorize(
+        L, apxchol::graph_storage::vec_pool_aos, opts);
+    expect_same_factor(indexed, aos, "vec_pool vs vec_pool_aos at T=1");
+
+    ASSERT_EQ(indexed.rounds.size(), aos.rounds.size());
+    for (std::size_t r = 0; r < indexed.rounds.size(); ++r) {
+        SCOPED_TRACE("round " + std::to_string(r));
+        EXPECT_EQ(indexed.rounds[r].active, aos.rounds[r].active);
+        EXPECT_EQ(indexed.rounds[r].is_size, aos.rounds[r].is_size);
+        EXPECT_DOUBLE_EQ(indexed.rounds[r].avg_deg, aos.rounds[r].avg_deg);
+        EXPECT_EQ(indexed.rounds[r].nnz_added, aos.rounds[r].nnz_added);
+        EXPECT_EQ(indexed.rounds[r].nnz_total, aos.rounds[r].nnz_total);
+    }
+}
 
 TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
 #ifndef _OPENMP

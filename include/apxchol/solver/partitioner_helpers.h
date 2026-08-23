@@ -308,7 +308,7 @@ void apply_deferred_edges(graph<Incidence>& G,
         }
         // Clear per-thread buffers (consumed).
         for (auto& t : ws.threads) t.edge_buffer.clear();
-    } else if constexpr (std::is_same_v<Incidence, vec_pool_incidence>) {
+    } else if constexpr (is_vec_pool_incidence_v<Incidence>) {
         // vec_pool: serial pre-pass counts per-vertex incoming edges and
         // grows each slab to fit; parallel apply then uses atomic_push_reserved
         // for lock-free slot claim into the pre-sized slabs.
@@ -334,9 +334,13 @@ void apply_deferred_edges(graph<Incidence>& G,
             if (incoming[v] > 0)
                 G.adj_reserve_for(v, G.adj_count(v) + incoming[v]);
 
-        // Step 3: reserve edge pool for all (u,v,w) tuples in one block, then
-        // atomic-claim adj slots in parallel.
-        const edge_index e_start = G.reserve_edge_pool(static_cast<node_index>(N_edges));
+        // Step 3: reserve the indexed edge pool when present, then
+        // atomic-claim endpoint-incidence slots in parallel.
+        edge_index e_start = 0;
+        if constexpr (graph<Incidence>::stores_directed_incidence)
+            G.record_edges_added(static_cast<edge_index>(N_edges));
+        else
+            e_start = G.reserve_edge_pool(static_cast<edge_index>(N_edges));
 
         #pragma omp parallel
         {
@@ -347,9 +351,14 @@ void apply_deferred_edges(graph<Incidence>& G,
                 for (size_t i = 0; i < ebuf.size(); ++i) {
                     auto [u, v, w] = ebuf[i];
                     const edge_index es = e_start + static_cast<edge_index>(base + i);
-                    G.write_edge_at(es, u, v, w);
-                    G.adj_atomic_push_reserved(u, es);
-                    G.adj_atomic_push_reserved(v, es);
+                    if constexpr (graph<Incidence>::stores_directed_incidence) {
+                        G.adj_atomic_push_directed(u, v, w);
+                        G.adj_atomic_push_directed(v, u, w);
+                    } else {
+                        G.write_edge_at(es, u, v, w);
+                        G.adj_atomic_push_reserved(u, es);
+                        G.adj_atomic_push_reserved(v, es);
+                    }
                 }
             }
         }

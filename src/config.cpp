@@ -19,6 +19,7 @@ static const std::map<std::string, graph_storage> graph_storage_map = {
     {"forward_star", graph_storage::forward_star},
     {"bstr",         graph_storage::bstr},
     {"vec_pool",     graph_storage::vec_pool},
+    {"vec_pool_aos", graph_storage::vec_pool_aos},
 };
 
 static void setup_logging(bool quiet, bool verbose) {
@@ -114,9 +115,9 @@ run_config parse_args(int argc, char* argv[]) {
 
     std::string graph_storage_str = "vec_pool";
     app.add_option("--graph-storage", graph_storage_str,
-                   "Graph storage backend (vec_pool, forward_star, vec, bstr)")
+                   "Graph storage backend (vec_pool, vec_pool_aos, forward_star, vec, bstr)")
         ->capture_default_str()
-        ->check(CLI::IsMember({"vec_pool", "forward_star", "vec", "bstr"}));
+        ->check(CLI::IsMember({"vec_pool", "vec_pool_aos", "forward_star", "vec", "bstr"}));
 
     app.add_option("--is", cfg.solve_opts.factor_opts.is_select,
                    "Independent set strategy (block_greedy, priority_greedy, baumann_kyng)")

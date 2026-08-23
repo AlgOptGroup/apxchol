@@ -1,14 +1,14 @@
 #pragma once
 /// Incidence list storage backends for graph.
 ///
-/// Each backend manages per-vertex lists of edge_index values.
-/// The graph itself owns the flat edge pool; these types only
-/// store indices into that pool.
+/// Each backend manages per-vertex lists of one value type. Most backends store
+/// edge_index values into graph's flat undirected-edge pool. The experimental
+/// directed vec_pool stores {neighbor, weight} records inline instead.
 ///
 /// Required interface:
 ///   init(n)                   — set up n empty vertex lists
-///   operator[](v) const       — range of edge_index for vertex v
-///   push(v, idx)              — append edge_index to vertex v
+///   operator[](v) const       — range of backend values for vertex v
+///   push(v, value)            — append one backend value to vertex v
 ///   clear(v)                  — clear vertex v's list
 ///   filter(v, pred)           — erase entries where pred is false
 ///   filter(v, pred, on_keep)  — same, calling on_keep for survivors
@@ -34,19 +34,21 @@
 namespace apxchol {
 
 namespace detail {
-    struct edge_pred  { bool operator()(edge_index) const; };
-    struct edge_visit { void operator()(edge_index) const; };
+    struct edge_pred  {
+        template<typename T> bool operator()(const T&) const;
+    };
+    struct edge_visit {
+        template<typename T> void operator()(const T&) const;
+    };
 }
 
 /// Concept for incidence list storage backends.
 template<typename T>
 concept incidence_storage = requires(T t, const T ct, node_index n, node_index v,
-                                      edge_index idx,
                                       detail::edge_pred pred, detail::edge_visit visit) {
     t.init(n);
     { ct[v] } -> std::ranges::input_range;
-    requires std::same_as<std::ranges::range_value_t<decltype(ct[v])>, edge_index>;
-    t.push(v, idx);
+    t.push(v, *std::ranges::begin(ct[v]));
     t.clear(v);
     t.filter(v, pred);
     t.filter(v, pred, visit);
@@ -107,7 +109,7 @@ using forward_star_incidence = forward_star<edge_index>;
 
 // ── vec_pool storage ──
 //
-// One contiguous arena of edge_index slots, with per-vertex
+// One contiguous arena of Value slots, with per-vertex
 // {base, count, capacity} triples.  Push appends to a vertex's
 // reserved slab; if the slab fills, the vertex's slab is moved to
 // the end of the pool with doubled capacity (in-place doubling
@@ -203,10 +205,12 @@ inline node_index next_pow2_ge(node_index x) {
     return p;
 }
 
-struct vec_pool_incidence {
-    static constexpr graph_storage tag = graph_storage::vec_pool;
+template<typename Value, graph_storage Tag>
+struct basic_vec_pool_incidence {
+    static constexpr graph_storage tag = Tag;
     static constexpr node_index slab_align = APXCHOL_VEC_POOL_SLAB_ALIGN;
     static constexpr node_index align_threshold = APXCHOL_VEC_POOL_ALIGN_THRESHOLD;
+    using value_type = Value;
 
     void init(node_index n) {
         n_ = n;
@@ -217,12 +221,12 @@ struct vec_pool_incidence {
         abandoned_ = 0;
     }
 
-    std::span<const edge_index> operator[](node_index v) const {
-        return std::span<const edge_index>(
+    std::span<const value_type> operator[](node_index v) const {
+        return std::span<const value_type>(
             pool_.data() + base_[v], static_cast<size_t>(count_[v]));
     }
 
-    void push(node_index v, edge_index idx) {
+    void push(node_index v, value_type idx) {
         if (count_[v] == cap_[v])
             grow(v);
         pool_[base_[v] + count_[v]++] = idx;
@@ -278,7 +282,7 @@ struct vec_pool_incidence {
     /// count_[v] < cap_[v] when this call enters.  Multiple threads may
     /// invoke concurrently for any (v, slot) since the slot is atomically
     /// claimed.
-    void atomic_push_reserved(node_index v, edge_index idx) {
+    void atomic_push_reserved(node_index v, value_type idx) {
         const node_index slot = __atomic_fetch_add(
             &count_[v], 1, __ATOMIC_RELAXED);
         pool_[base_[v] + static_cast<size_t>(slot)] = idx;
@@ -286,17 +290,17 @@ struct vec_pool_incidence {
 
     void clear(node_index v) { count_[v] = 0; }
 
-    /// Sort vertex v's slab in increasing edge_index order. Used after a
-    /// parallel atomic_push_reserved phase to restore deterministic ordering
-    /// (the atomic-push arrival order depends on thread interleaving; the
-    /// edge_index values themselves are deterministic).
+    /// Sort vertex v's slab in value order. Used after a parallel
+    /// atomic_push_reserved phase to restore deterministic ordering (the
+    /// atomic-push arrival order depends on thread interleaving; the values
+    /// themselves are deterministic).
     void sort_slab(node_index v) {
-        edge_index* p = pool_.data() + base_[v];
+        value_type* p = pool_.data() + base_[v];
         std::sort(p, p + count_[v]);
     }
 
     void filter(node_index v, auto&& pred, auto&& on_keep) {
-        edge_index* p = pool_.data() + base_[v];
+        value_type* p = pool_.data() + base_[v];
         node_index out = 0;
         for (node_index i = 0; i < count_[v]; ++i) {
             if (pred(p[i])) {
@@ -308,11 +312,11 @@ struct vec_pool_incidence {
     }
 
     void filter(node_index v, auto&& pred) {
-        filter(v, pred, [](edge_index) {});
+        filter(v, pred, [](const value_type&) {});
     }
 
     std::size_t memory_bytes() const {
-        return pool_.capacity() * sizeof(edge_index)
+        return pool_.capacity() * sizeof(value_type)
              + base_.capacity() * sizeof(edge_index)
              + count_.capacity() * sizeof(node_index)
              + cap_.capacity() * sizeof(node_index);
@@ -556,7 +560,7 @@ private:
     // big_alloc: pool can grow to hundreds of MB on grid_3000+. Switching from
     // std::allocator to big_alloc (mmap + MADV_HUGEPAGE + MAP_POPULATE) cuts
     // TLB misses by ~512× and removes per-page minor faults on first touch.
-    std::vector<edge_index, util::big_alloc<edge_index>> pool_;
+    std::vector<value_type, util::big_alloc<value_type>> pool_;
     // base_[v] is an OFFSET into pool_ (can exceed 2^31 on dense factors) ->
     // edge_index. count_/cap_ are per-vertex slab sizes (<= degree < n) ->
     // node_index. base_[v] + count_[v] promotes to edge_index (pool index).
@@ -579,5 +583,15 @@ private:
     std::vector<size_t> bulk_abandoned_by_thread_;
     std::vector<std::vector<Grow>> bulk_thread_grows_;
 };
+
+using vec_pool_incidence = basic_vec_pool_incidence<
+    edge_index, graph_storage::vec_pool>;
+using directed_vec_pool_incidence = basic_vec_pool_incidence<
+    directed_pool_edge, graph_storage::vec_pool_aos>;
+
+template<typename T>
+inline constexpr bool is_vec_pool_incidence_v =
+    std::same_as<T, vec_pool_incidence> ||
+    std::same_as<T, directed_vec_pool_incidence>;
 
 } // namespace apxchol

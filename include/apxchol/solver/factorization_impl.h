@@ -351,7 +351,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
             // sub-phases separately without breaking the fusion. Emit one honest
             // label that reflects what was actually measured.
             if (cp) (*cp)("compute+apply_fused");
-        } else if constexpr (std::is_same_v<Incidence, vec_pool_incidence>) {
+        } else if constexpr (is_vec_pool_incidence_v<Incidence>) {
             // Mega-fused for vec_pool: compute + apply pre-pass + parallel
             // atomic push + deactivate all in ONE parallel region. Saves
             // the fork-join overhead of the legacy 2-region pattern
@@ -402,15 +402,20 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 }
                 #pragma omp barrier  // incoming[] complete before reserve_for
 
-                // Single: prefix-sum thread edge offsets + edge_pool reserve
-                // + concatenate touched_buffers for the bulk reserve below.
+                // Single: prefix-sum thread edge offsets, reserve the indexed
+                // edge pool when present, and concatenate touched buffers for
+                // the adjacency bulk reserve below.
                 #pragma omp single
                 {
                     for (int t = 0; t < num_threads; ++t)
                         e_offsets[t + 1] = e_offsets[t] + ws.threads[t].edge_buffer.size();
                     const size_t N_edges = e_offsets[num_threads];
-                    if (N_edges > 0)
-                        e_start = G.reserve_edge_pool(static_cast<edge_index>(N_edges));
+                    if (N_edges > 0) {
+                        if constexpr (graph<Incidence>::stores_directed_incidence)
+                            G.record_edges_added(static_cast<edge_index>(N_edges));
+                        else
+                            e_start = G.reserve_edge_pool(static_cast<edge_index>(N_edges));
+                    }
                     ws.touched_concat.clear();
                     for (int t = 0; t < num_threads; ++t)
                         ws.touched_concat.insert(
@@ -442,9 +447,14 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     for (size_t i = 0; i < ebuf.size(); ++i) {
                         auto [u, v, w] = ebuf[i];
                         const edge_index es = e_start + static_cast<edge_index>(base + i);
-                        G.write_edge_at(es, u, v, w);
-                        G.adj_atomic_push_reserved(u, es);
-                        G.adj_atomic_push_reserved(v, es);
+                        if constexpr (graph<Incidence>::stores_directed_incidence) {
+                            G.adj_atomic_push_directed(u, v, w);
+                            G.adj_atomic_push_directed(v, u, w);
+                        } else {
+                            G.write_edge_at(es, u, v, w);
+                            G.adj_atomic_push_reserved(u, es);
+                            G.adj_atomic_push_reserved(v, es);
+                        }
                     }
                     if (!capture_gpu_topology)
                         ws.threads[tid].edge_buffer.clear();
@@ -1033,7 +1043,7 @@ factorization factorize_impl(const Eliminator& elim,
         // vec_pool: pool defrag happens inside vec_pool's bulk_reserve_parallel
         // (built in, always on). Here we only sample the worst fragmentation
         // seen, for the APXCHOL_MEM_DUMP diagnostic.
-        if constexpr (std::is_same_v<Incidence, vec_pool_incidence>)
+        if constexpr (is_vec_pool_incidence_v<Incidence>)
             work.adj_note_live_fraction();
     }
 
@@ -1229,7 +1239,7 @@ factorization factorize_impl(const Eliminator& elim,
         size_t nnz = factor_cols.size();
         for (const auto& c : factor_cols) nnz += c.entry_count;
         double live_frac = -1.0;
-        if constexpr (std::is_same_v<Incidence, vec_pool_incidence> ||
+        if constexpr (is_vec_pool_incidence_v<Incidence> ||
                       std::is_same_v<Incidence, forward_star_incidence>)
             live_frac = work.adj_live_fraction();
         std::fprintf(stderr,
@@ -1237,14 +1247,25 @@ factorization factorize_impl(const Eliminator& elim,
             "pool_live_frac=%.3f  (1/live_frac=%.2fx)\n",
             result.peak_graph_bytes * MB, nnz, nnz * sizeof(node_index) * MB,
             live_frac, live_frac > 0 ? 1.0 / live_frac : 0.0);
-        if constexpr (std::is_same_v<Incidence, vec_pool_incidence>) {
+        if constexpr (is_vec_pool_incidence_v<Incidence>) {
             const size_t tot_edges = static_cast<size_t>(work.m());
-            std::fprintf(stderr,
-                "[mem] vec_pool: grows=%zu  compactions=%zu  min_live_frac=%.3f  "
-                "edges_=%zu (~%.0f MB)\n",
-                work.adj_grow_count(), work.adj_compact_count(),
-                work.adj_min_live_fraction(), tot_edges,
-                tot_edges * sizeof(typename std::remove_cvref_t<decltype(work)>::edge) * MB);
+            if constexpr (graph<Incidence>::stores_directed_incidence) {
+                std::fprintf(stderr,
+                    "[mem] vec_pool_aos: grows=%zu  compactions=%zu  "
+                    "min_live_frac=%.3f  undirected_edges_added=%zu  "
+                    "logical_directed_payload=%.0f MB\n",
+                    work.adj_grow_count(), work.adj_compact_count(),
+                    work.adj_min_live_fraction(), tot_edges,
+                    2.0 * tot_edges * sizeof(directed_pool_edge) * MB);
+            } else {
+                std::fprintf(stderr,
+                    "[mem] vec_pool: grows=%zu  compactions=%zu  "
+                    "min_live_frac=%.3f  edge_pool_entries=%zu (~%.0f MB)\n",
+                    work.adj_grow_count(), work.adj_compact_count(),
+                    work.adj_min_live_fraction(), tot_edges,
+                    tot_edges * sizeof(
+                        typename std::remove_cvref_t<decltype(work)>::edge) * MB);
+            }
         }
     }
 

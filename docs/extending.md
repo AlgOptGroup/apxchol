@@ -288,4 +288,6 @@ the `incidence_storage` concept
 ([incidence_list.h](../include/apxchol/graph/incidence_list.h))
 if you need a custom adjacency structure, and extend the `graph_storage`
 runtime dispatch in `src/factorization.cpp` if it must be reachable from the
-enum.
+enum. Most built-in backends store indices into one undirected-edge pool; the
+explicit-only `vec_pool_aos` research backend demonstrates that the concept may
+instead store a self-contained value and let `graph<>` interpret it.

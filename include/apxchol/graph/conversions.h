@@ -52,17 +52,18 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
     std::vector<double> diag(n, 0.0);
 
 #ifdef _OPENMP
-    if constexpr (std::is_same_v<Incidence, vec_pool_incidence>) {
+    if constexpr (is_vec_pool_incidence_v<Incidence>) {
         // ── Parallel build for vec_pool — O(n + nt) memory ────────
         // incoming[] is one shared array of size n (atomic increments in
         // PASS 1 to count per-vertex degree). Slot assignment in PASS 2 is
         // per-thread DETERMINISTIC: thread t processes a fixed column range
-        // [col_bs[t], col_bs[t+1]) and claims a contiguous block of edge_index
-        // values [per_thread_edges[t], per_thread_edges[t+1]). The per-
-        // thread offset array is O(nt) ints, not O(nt × n). Determinism is
-        // preserved by construction — col_bs is deterministic, per-thread
-        // count pre-pass is deterministic, slot ordering matches a single-
-        // threaded column-order scan.
+        // [col_bs[t], col_bs[t+1]). The indexed backend claims a contiguous
+        // block of edge_index values [per_thread_edges[t],
+        // per_thread_edges[t+1]); the directed-inline backend writes its two
+        // endpoint records directly. The per-thread offset array is O(nt)
+        // ints, not O(nt × n). Determinism is preserved by construction:
+        // col_bs and counts are deterministic, then every touched slab is
+        // sorted after the parallel writes.
         const int nt = std::max(1,
 #ifdef _OPENMP
             omp_get_max_threads()
@@ -120,7 +121,11 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
             // incoming[] (n counts) is consumed by the reserve; the edge pass
             // below reads only the matrix. Free it here, not at return.
             std::vector<node_index>().swap(incoming);
-            const edge_index e_start = g.reserve_edge_pool(off_diag_nnz);
+            edge_index e_start = 0;
+            if constexpr (G::stores_directed_incidence)
+                g.record_edges_added(off_diag_nnz);
+            else
+                e_start = g.reserve_edge_pool(off_diag_nnz);
 
             // Per-thread off-diag count (pre-pass for deterministic slot assignment).
             std::vector<edge_index> per_thread_edges(nt + 1, 0);
@@ -146,14 +151,19 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
                             const edge_index es = e_start + local_slot++;
                             const auto u = static_cast<node_index>(it.row());
                             const auto v = static_cast<node_index>(it.col());
-                            g.write_edge_at(es, u, v, -it.value());
-                            g.adj_atomic_push_reserved(u, es);
-                            g.adj_atomic_push_reserved(v, es);
+                            if constexpr (G::stores_directed_incidence) {
+                                g.adj_atomic_push_directed(u, v, -it.value());
+                                g.adj_atomic_push_directed(v, u, -it.value());
+                            } else {
+                                g.write_edge_at(es, u, v, -it.value());
+                                g.adj_atomic_push_reserved(u, es);
+                                g.adj_atomic_push_reserved(v, es);
+                            }
                         }
                     }
             }
-            // Sort each touched vertex's adj slab by edge_index for deterministic
-            // adj order (atomic-push arrival order is thread-interleaved).
+            // Sort each touched vertex's adjacency slab for deterministic order
+            // (atomic-push arrival order is thread-interleaved).
             #pragma omp parallel for schedule(static) if(touched.size() > 1024)
             for (std::size_t i = 0; i < touched.size(); ++i)
                 g.adj_sort_slab(touched[i]);
