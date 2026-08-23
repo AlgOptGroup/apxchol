@@ -59,7 +59,7 @@ def main():
     for mid, family, args, reg in MATS:
         regflag = "--reg-rel 1e-6" if reg else ""
         env = dict(os.environ, APXCHOL_LEVEL_DUMP="1")
-        cmd = (f"{BIN} {args} {regflag} --solver apxchol_v1 --v1-configs 'bg+tree[vec_pool]' "
+        cmd = (f"{BIN} {args} {regflag} --solver apxchol_v1 --v1-configs 'bg+tree[vec_pool_aos]' "
                f"--threads 16 --tol 1e-8 --maxiter 1 --repeat 1 --csv")
         # runner_common.sh = hardened (process-group kill on timeout)
         o = sh(cmd, timeout=900, env=env)

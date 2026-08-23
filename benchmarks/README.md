@@ -532,7 +532,8 @@ elimination tree and makes the cuSPARSE level-set SpTRSV ~1000× slower
 `factorization + reorder-compute` (no disk I/O, no CSR-conversion), the same way
 the CPU ParAC counts its AMD reorder, so all families are measured consistently.
 
-**Binary solver names**: `apxchol_v1` (with `--v1-configs bg+tree[vec_pool]`),
+**Binary solver names**: `apxchol_v1` (headline/default
+`--v1-configs bg+tree[vec_pool_aos]`),
 `rchol`, `rchol_par`, `hypre_boomeramg`, `amgcl`, `cholmod`, `cg`,
 `ldlt`. GPU variants (CUDA build): `hypre_boomeramg_gpu`,
 `amgcl_cuda`, plus apxchol's GPU-resident PCG (the default on CUDA builds).
@@ -825,20 +826,22 @@ absolute fill over the ×sparsest ratio).
 apxchol has two orthogonal design axes — the independent-set **selector** (bg =
 block-greedy, greedy = fixed-priority greedy, bk = Baumann-Kyng) and the incidence
 **storage backend** (`fwd_star` → `vec` → `bstr`
-(bit-string) → `vec_pool`). The full selector×storage sweep is shown as
+(bit-string) → indexed `vec_pool`). This historical full selector×storage sweep is shown as
 small-multiple heatmaps (total / setup / solve / iterations), each cell medianed
 over the family's matrices (a matrix set common to every config, for fairness),
 colour = ×best CPU cell (green = fastest). A trailing `vec_pool (GPU)` column shows
-the default backend's CPU→GPU shift (the GPU axis sweeps vec_pool only).
+that indexed ablation's CPU→GPU shift; the method headline now uses
+`vec_pool_aos` on both CPU and GPU.
 
-**Takeaway (read across the families):** vec_pool is the default because it is
-*robust*, not because it dominates everywhere. It is best-or-tied-best CPU on every
-family, and the only backend that doesn't collapse on the **high-degree IPM**
+**Takeaway (read across the families):** indexed vec_pool is robust and is the
+only legacy backend that does not collapse on the **high-degree IPM**
 matrices — there `fwd_star`'s per-edge linked-list pointer chase blows setup up to
 ~3× (median total ≈3.1–3.7 s across the four selectors vs vec_pool's ≈1.4–1.9 s). On the
 **low-degree grids** `fwd_star` is competitive (and marginally faster for `greedy` and `bk`,
 though not for `bg`/`root`), confirming the pointer chase only bites at high degree.
-The `vec` (dense array) and `bstr`
+The high-level default is now `vec_pool_aos`, whose inline records remove the
+indexed pool lookup; its separate 77-cell GH200 gate is documented in the root
+`AGENTS.md`. The `vec` (dense array) and `bstr`
 (bit-string) backends are middling — never the fastest. Among selectors `bg` / `greedy`
 / `root` are competitive and `bk` is consistently slowest. The GPU vec_pool column is
 fastest overall on grids (its solve is ≈4× the CPU's) and on most SuiteSparse, mixed
@@ -851,7 +854,7 @@ on IPM.
 ### apxchol IS selector × graph type
 
 A cross-family view of the same selector question: which IS selector wins on which
-**graph type**, at the default `vec_pool` storage (t16). Rows = the three selectors,
+**graph type**, at indexed `vec_pool` storage (t16). Rows = the three selectors,
 columns span the structured→irregular axis (2D/3D grids → FEM/planar → IPM →
 social/scale-free); colour normalises *per column* so green = the best selector for
 that graph and **bold** = the per-graph winner.

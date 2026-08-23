@@ -70,13 +70,14 @@ solution is written into it in place (no per-solve allocation) and returned as
 
 ```python
 solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
-                           storage="vec_pool", keep_factor=True)
+                           storage="vec_pool_aos", keep_factor=True)
 ```
 
 - `seed` — RNG seed for the randomized clique sampling.
 - `partitioner` — independent-set selector: `block_greedy` (default),
   `priority_greedy`, or `baumann_kyng`.
-- `storage` — graph backend: `vec_pool` (default), `forward_star`, `vec`, `bstr`.
+- `storage` — graph backend: `vec_pool_aos` (default), `vec_pool`,
+  `forward_star`, `vec`, `bstr`.
 - `keep_factor` — keep the factor arrays alive for export (default `True`).
   Costs one extra factor-sized copy in memory (~8 bytes per factor nonzero in
   the default fp32 wheels); with `keep_factor=False` the `chol()`/`L`/`D`

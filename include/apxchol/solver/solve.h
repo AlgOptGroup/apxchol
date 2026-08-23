@@ -16,7 +16,7 @@ struct solve_options {
     /// Check every N iterations whether residual improved by ≥50%.
     /// If not, declare stagnation and stop early.  0 = disabled.
     int    stagnation_window = 50;
-    graph_storage storage = graph_storage::vec_pool;  // benchmark-best default
+    graph_storage storage = graph_storage::vec_pool_aos;
     /// Keep the factor's row/value arrays alive after SpTRSV setup so
     /// cpu_solver::preconditioner().factor().L stays readable (costs one extra
     /// factor-sized copy in memory; the bindings' L/D/P export needs it).

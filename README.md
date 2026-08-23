@@ -64,7 +64,7 @@ ctest --test-dir build --output-on-failure
 
 Useful CLI knobs: `--tol`, `--maxiter`, `--input-kind {auto|laplacian|adjacency}`,
 `--is {block_greedy|priority_greedy|baumann_kyng}`,
-`--graph-storage {vec|forward_star|bstr|vec_pool}`,
+`--graph-storage {vec|forward_star|bstr|vec_pool|vec_pool_aos}`,
 `-o solution.mtx`, `--seed`. See `--help` for the full list.
 
 ## Library API
@@ -117,7 +117,7 @@ user-provided-memory hook — for allocation-free repeated solves use
 
 Laplacian vs SDDM is auto-detected: singular Laplacians get a rank-(n−1)
 factor with null-space centering; SDDM systems get the full-rank factor.
-Both `apxchol::solve` and `apx_cholesky` default to the `vec_pool` storage
+Both `apxchol::solve` and `apx_cholesky` default to the `vec_pool_aos` storage
 backend and the `block_greedy` independent-set partitioner — the best
 default across the benchmark suite. Benchmark charts show each selector as a
 separate series, and method-vs-method headlines use this declared default rather

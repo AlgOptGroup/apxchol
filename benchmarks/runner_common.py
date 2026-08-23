@@ -30,7 +30,7 @@ ROOT = str(Path(__file__).resolve().parents[1])
 BIN = {"cpu": f"{ROOT}/benchmarks/build/benchmark",
        "gpu": f"{ROOT}/benchmarks/build-cuda/benchmark"}
 CELLS = f"{ROOT}/results/cells"
-APXCHOL_DEFAULT_CONFIG = "bg+tree[vec_pool]"
+APXCHOL_DEFAULT_CONFIG = "bg+tree[vec_pool_aos]"
 
 
 def require_path(value, env_var, const, what, must_exist=True):

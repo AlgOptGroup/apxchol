@@ -29,6 +29,11 @@
 
 // ── Helpers ──────────────────────────────────────────
 
+TEST(DefaultOptions, HighLevelSolveUsesDirectedAosStorage) {
+    const apxchol::solve_options opts;
+    EXPECT_EQ(opts.storage, apxchol::graph_storage::vec_pool_aos);
+}
+
 // Convert the owned sparse_csc factor to an Eigen::SparseMatrix for tests
 // (the library no longer stores Eigen factors).
 static Eigen::SparseMatrix<double> factor_to_eigen(const apxchol::sparse_csc& L) {

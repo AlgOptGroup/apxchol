@@ -396,20 +396,21 @@ def dump_mtx(mid):
 # Solver set: (solver, config)
 APX_DEFAULT_CONFIG = rc.APXCHOL_DEFAULT_CONFIG
 APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
+       ("apxchol_v1","bg+tree[vec_pool]"),         # indexed-storage ablation
        ("apxchol_v1","bk+tree[vec_pool]"),         # Baumann-Kyng IS (ablation only)
        ("apxchol_v1","greedy+tree[vec_pool]"),     # priority-greedy IS (ablation only)
        # vec<vec> storage variants (ablation only) -- the dense-array incidence
-       # backend vs the default vec_pool. Swept on every family in the SAME run as
-       # vec_pool so the storage ablation is an honest same-session A/B (the old
+       # backend vs the indexed vec_pool. Swept on every family in the SAME run as
+       # the headline AoS backend so the storage ablation is an honest same-session A/B (the old
        # [vec] cells were sha aeac9836 "capped first pass", cross-run-incomparable).
        ("apxchol_v1","bg+tree[vec]"),
        ("apxchol_v1","bk+tree[vec]"),
        ("apxchol_v1","greedy+tree[vec]"),
        # Full selector x storage grid for the ablation heatmap: {bg,greedy,bk} x
        # {fwd_star, bstr}. (vec / vec_pool already covered above for all three
-       # selectors -> the 4-storage axis fwd_star/vec/bstr/vec_pool.) Shows the
+       # selectors -> the legacy 4-storage axis fwd_star/vec/bstr/vec_pool.) Shows the
        # backend progression forward_star (old linked-list default) -> vec
-       # (SBO) -> bstr (bit-string) -> vec_pool (the default, drops fwd_star's per-edge
+       # (SBO) -> bstr (bit-string) -> vec_pool (drops fwd_star's per-edge
        # pointer chase). forward_star uses the bare-named base combo; bstr has
        # dedicated combos in benchmark.cpp (one per selector).
        ("apxchol_v1","bg+tree[fwd_star]"),
@@ -639,7 +640,7 @@ def main():
     # CMG is serial MATLAB: it has no GPU axis, so its cells are device=cpu only.
     if a.no_cmg or DEVICE == "gpu": RUN_CMG = False
     if a.headline_only:
-        APX = [("apxchol_v1","bg+tree[vec_pool]"),
+        APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
                ("apxchol_v1","greedy+tree[vec_pool]"),
                ("apxchol_v1","bk+tree[vec_pool]")]
         # NOTE: --headline-only restricts the apxchol CONFIG list only. It no longer

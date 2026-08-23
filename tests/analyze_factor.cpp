@@ -68,7 +68,7 @@ graph_storage parse_storage(const std::string& s) {
     if (s == "vec") return graph_storage::vec;
     if (s == "forward_star") return graph_storage::forward_star;
     if (s == "bstr") return graph_storage::bstr;
-    if (s == "vec_pool") return graph_storage::vec_pool;   // library default
+    if (s == "vec_pool") return graph_storage::vec_pool;
     if (s == "vec_pool_aos") return graph_storage::vec_pool_aos;
     throw std::invalid_argument("unknown graph storage: " + s);
 }

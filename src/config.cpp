@@ -113,7 +113,7 @@ run_config parse_args(int argc, char* argv[]) {
                    "Check convergence every N iters, stop if <50% improvement (0=disable)")
         ->capture_default_str();
 
-    std::string graph_storage_str = "vec_pool";
+    std::string graph_storage_str = "vec_pool_aos";
     app.add_option("--graph-storage", graph_storage_str,
                    "Graph storage backend (vec_pool, vec_pool_aos, forward_star, vec, bstr)")
         ->capture_default_str()

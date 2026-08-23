@@ -1,9 +1,17 @@
+import inspect
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import cg, norm as spnorm, spsolve_triangular
 import pytest
 
 import apxchol
+
+
+def test_public_factorization_defaults_to_directed_aos_storage():
+    assert inspect.signature(apxchol.factorize).parameters["storage"].default \
+        == "vec_pool_aos"
+    assert inspect.signature(apxchol.Solver).parameters["storage"].default \
+        == "vec_pool_aos"
 
 
 def grid2d_laplacian(m):

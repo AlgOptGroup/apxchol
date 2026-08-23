@@ -44,7 +44,7 @@ TOL = 1e-8
 # The selectors keep their own dedicated per-matrix figures (ablation_*,
 # selector_*, poster_selectors_*), so nothing is hidden by declaring a default.
 LABELS = {
-    ("apxchol_v1", "bg+tree[vec_pool]"): "apxchol/bg",
+    ("apxchol_v1", "bg+tree[vec_pool_aos]"): "apxchol/bg",
     ("apxchol_v1", "greedy+tree[vec_pool]"): "apxchol/greedy",
     ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk",
     ("rchol", ""): "RCHOL",
@@ -372,8 +372,8 @@ def ablation_heatmap(recs, gpu_cfg, fam, out):
     """apxchol selector x storage ablation as small-multiple heatmaps (total / setup /
     solve / iters), t16. Rows = IS selector (bg/greedy/bk); cols = storage backend
     in the progression fwd_star -> vec -> bstr -> vec_pool, plus a vec_pool
-    GPU column (the GPU axis swept vec_pool only) so the default backend's CPU->GPU shift is
-    visible. Each metric is medianed over the matrix set COMMON to all CPU configs
+    GPU column for that indexed ablation. The method headline uses AoS separately.
+    Each metric is medianed over the matrix set COMMON to all CPU configs
     (fair); colour = value / best-in-grid (green = best), cells annotated with the
     absolute value. Blank (grey) = config not swept / did not converge."""
     from statistics import median
@@ -436,7 +436,7 @@ def ablation_heatmap(recs, gpu_cfg, fam, out):
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
 
 # Cross-family selector x graph heatmap (for the poster): which IS selector wins on
-# which GRAPH TYPE, at the default vec_pool storage. Columns span structured grids ->
+# which GRAPH TYPE, at indexed vec_pool storage. Columns span structured grids ->
 # FEM/planar -> social/scale-free so the selector spread by graph type is the message
 # (bg on structured, priority-greedy on scale-free). Curated representative set (a poster
 # can't show all 26); ordered along the structured->irregular axis.

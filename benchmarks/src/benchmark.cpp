@@ -2714,11 +2714,11 @@ int main(int argc, char** argv) {
             {.name="bg+tree[bstr]",   .is="block_greedy", .storage=gs::bstr},
             {.name="bk+tree[bstr]",   .is="baumann_kyng", .storage=gs::bstr},
             {.name="greedy+tree[bstr]", .is="priority_greedy", .storage=gs::bstr},
-            // vec_pool (charted backend)
+            // Indexed vec_pool (selector and storage ablations).
             {.name="bg+tree[vec_pool]",   .is="block_greedy", .storage=gs::vec_pool},
             {.name="bk+tree[vec_pool]",   .is="baumann_kyng", .storage=gs::vec_pool},
             {.name="greedy+tree[vec_pool]", .is="priority_greedy", .storage=gs::vec_pool},
-            // Directed AoS prototype: same vec_pool slab machinery, but each
+            // Directed AoS headline/default: same slab machinery, but each
             // endpoint stores {neighbor, weight} inline instead of an edge id.
             {.name="bg+tree[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos},
             // /hos: legacy heavy-oversample variant, kept so old --v1-configs strings still

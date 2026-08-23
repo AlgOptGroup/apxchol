@@ -48,7 +48,7 @@ COLORS = {"apxchol/bg (GPU)": "#0b5394",     # declared default = darkest blue
           "AMGCL (GPU)": "#8c564b"}
 # (solver, config) -> chart label for GPU cells. MUST stay injective (asserted below).
 LABELS = {
-    ("apxchol_v1", "bg+tree[vec_pool]"): "apxchol/bg (GPU)",
+    ("apxchol_v1", "bg+tree[vec_pool_aos]"): "apxchol/bg (GPU)",
     ("hypre_boomeramg_gpu", ""): "BoomerAMG (GPU)",
     ("hypre_boomeramg_gpu", "cut"): "BoomerAMG/cut (GPU)",
     ("amgcl_cuda", ""): "AMGCL (GPU)",

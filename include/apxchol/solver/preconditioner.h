@@ -530,7 +530,7 @@ private:
 
     struct factorization F_;
     factor_options opts_;
-    graph_storage storage_ = graph_storage::vec_pool;
+    graph_storage storage_ = graph_storage::vec_pool_aos;
     checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
     // Laplacian-path application counter of the center-k centring schedule

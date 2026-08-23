@@ -115,7 +115,7 @@ class Solver:
     """
 
     def __init__(self, A, *, seed=42, partitioner="block_greedy",
-                 storage="vec_pool", keep_factor=True, **advanced):
+                 storage="vec_pool_aos", keep_factor=True, **advanced):
         csc = _to_csc(A)
         self._n = int(csc.shape[0])
         self._nnz_A = int(csc.nnz)
@@ -278,7 +278,7 @@ class Solver:
         return (2 * self.factor_nnz - self._n) / self._nnz_A
 
 
-def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool",
+def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
               keep_factor=True, **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
@@ -304,7 +304,8 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool",
         "priority_greedy", or "baumann_kyng". Unknown names raise at
         factorization time.
     storage : str
-        Graph backend: "vec_pool" (default), "forward_star", "vec", "bstr".
+        Graph backend: "vec_pool_aos" (default), "vec_pool",
+        "forward_star", "vec", or "bstr".
     keep_factor : bool
         Keep the factor's row/value arrays alive so `chol()`/`L`/`D` can be
         exported. Costs one extra factor-sized copy in memory (~8 bytes per
