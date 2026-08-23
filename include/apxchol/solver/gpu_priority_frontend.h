@@ -40,7 +40,10 @@ public:
     /// Parse APXCHOL_GPU_PRIORITY_FRONTEND. Accepted values are 0/off and
     /// 1/on/force. Unknown values disable the optional path with a note.
     static mode configured_mode();
-    static runtime_probe probe_runtime(node_index n, std::size_t initial_edges);
+    /// Equivalent opt-in for the independent GPU block-greedy prototype.
+    static mode configured_block_mode();
+    static runtime_probe probe_runtime(node_index n, std::size_t initial_edges,
+                                       bool block_selector = false);
 
     gpu_priority_frontend(node_index n,
                       std::span<const gpu_topology_edge> initial_edges);
@@ -58,6 +61,7 @@ public:
     std::span<const node_index> host_candidates() const;
     std::span<const node_index> host_active_degrees() const;
     const partition_result &select(unsigned seed, std::uint64_t round);
+    const partition_result &select_block_greedy();
     std::size_t selected_degree_work() const;
 
     /// Commit a selection after CPU elimination succeeded and enqueue the

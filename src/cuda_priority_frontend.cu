@@ -245,6 +245,198 @@ priority_greedy_cooperative(const node_index *candidates, std::size_t count,
     }
 }
 
+__device__ bool block_priority_precedes(node_index a, node_index b,
+                                        const edge_index *degrees,
+                                        bool degree_tiebreak) {
+    if (!degree_tiebreak)
+        return a < b;
+    const node_index da = static_cast<node_index>(degrees[a]);
+    const node_index db = static_cast<node_index>(degrees[b]);
+    return da != db ? da < db : a < b;
+}
+
+__global__ void initialize_block_candidates(const node_index *candidates,
+                                             std::size_t count,
+                                             std::size_t region_count,
+                                             int *status,
+                                             node_index *region_of,
+                                             int *frontier,
+                                             unsigned char *scratch) {
+    const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    if (i >= count)
+        return;
+    const node_index v = candidates[i];
+    status[v] = 0;
+    region_of[v] = static_cast<node_index>(
+        (i * region_count) / count);
+    frontier[v] = 0;
+    scratch[v] = 0;
+}
+
+__global__ void block_greedy_regions(
+    const node_index *candidates, std::size_t count,
+    std::size_t region_count, const edge_index *row_offsets,
+    const node_index *neighbors, const node_index *region_of, int *status) {
+    constexpr unsigned kFullWarp = 0xffffffffU;
+    const unsigned lane = threadIdx.x & 31U;
+    const std::size_t warp =
+        (blockIdx.x * std::size_t(blockDim.x) + threadIdx.x) >> 5;
+    if (warp >= region_count)
+        return;
+    // initialize_block_candidates assigns i to floor(i * R / N).  The exact
+    // inverse interval is [ceil(N*r/R), ceil(N*(r+1)/R)); floor bounds would
+    // hand boundary candidates to the next warp while retaining the previous
+    // region label, defeating the within-region independence guarantee.
+    const std::size_t begin =
+        (count * warp + region_count - 1) / region_count;
+    const std::size_t end =
+        (count * (warp + 1) + region_count - 1) / region_count;
+    for (std::size_t i = begin; i < end; ++i) {
+        const node_index v = candidates[i];
+        bool blocked = false;
+        for (edge_index p = row_offsets[v] + lane;
+             p < row_offsets[v + 1]; p += 32) {
+            const node_index u = neighbors[p];
+            blocked |= status[u] == 1 && region_of[u] == warp;
+        }
+        const bool any = __any_sync(kFullWarp, blocked);
+        if (lane == 0 && !any)
+            status[v] = 1;
+        __syncwarp(kFullWarp);
+    }
+}
+
+__global__ void decide_block_conflicts(
+    const node_index *candidates, std::size_t count,
+    const edge_index *row_offsets, const node_index *neighbors,
+    const edge_index *degrees, const node_index *region_of, int *status,
+    unsigned char *drop, bool degree_tiebreak) {
+    const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    if (i >= count)
+        return;
+    const node_index v = candidates[i];
+    bool loses = false;
+    if (status[v] == 1) {
+        const node_index region = region_of[v];
+        for (edge_index p = row_offsets[v]; p < row_offsets[v + 1]; ++p) {
+            const node_index u = neighbors[p];
+            if (status[u] == 1 && region_of[u] != region &&
+                block_priority_precedes(u, v, degrees, degree_tiebreak)) {
+                loses = true;
+                break;
+            }
+        }
+    }
+    drop[v] = static_cast<unsigned char>(loses);
+}
+
+__global__ void apply_block_drops(const node_index *candidates,
+                                  std::size_t count, int *status,
+                                  const unsigned char *drop) {
+    const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    if (i < count && drop[candidates[i]])
+        status[candidates[i]] = 0;
+}
+
+__global__ void mark_block_repair_frontier(
+    const node_index *candidates, std::size_t count,
+    const edge_index *row_offsets, const node_index *neighbors, int *status,
+    int *frontier, unsigned char *drop) {
+    const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    if (i >= count)
+        return;
+    const node_index v = candidates[i];
+    if (!drop[v])
+        return;
+    frontier[v] = 1;
+    for (edge_index p = row_offsets[v]; p < row_offsets[v + 1]; ++p) {
+        const node_index u = neighbors[p];
+        if (status[u] != 2)
+            atomicExch(&frontier[u], 1);
+    }
+    drop[v] = 0;
+}
+
+__global__ void block_greedy_repair(
+    const node_index *candidates, std::size_t count,
+    const edge_index *row_offsets, const node_index *neighbors,
+    const edge_index *degrees, int *status, int *frontier,
+    unsigned char *winner, bool degree_tiebreak, int *has_pending) {
+    namespace cg = cooperative_groups;
+    const cg::grid_group grid = cg::this_grid();
+    const std::size_t first =
+        blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    const std::size_t stride = gridDim.x * std::size_t(blockDim.x);
+
+    for (;;) {
+        if (grid.thread_rank() == 0)
+            *has_pending = 0;
+        grid.sync();
+
+        // A frontier vertex blocked by a committed pick can never become free:
+        // the repair only adds picks. Free vertices become pending (2).
+        for (std::size_t i = first; i < count; i += stride) {
+            const node_index v = candidates[i];
+            if (frontier[v] == 0)
+                continue;
+            if (status[v] == 1) {
+                frontier[v] = 0;
+                continue;
+            }
+            bool free = true;
+            for (edge_index p = row_offsets[v]; p < row_offsets[v + 1]; ++p) {
+                if (status[neighbors[p]] == 1) {
+                    free = false;
+                    break;
+                }
+            }
+            if (free) {
+                frontier[v] = 2;
+                atomicExch(has_pending, 1);
+            } else {
+                frontier[v] = 0;
+            }
+        }
+        grid.sync();
+        if (*has_pending == 0)
+            break;
+
+        // Pick all minima of the pending frontier under the same strict order
+        // as the CPU repair. Decisions read a barrier-separated snapshot.
+        for (std::size_t i = first; i < count; i += stride) {
+            const node_index v = candidates[i];
+            if (frontier[v] != 2)
+                continue;
+            bool wins = true;
+            for (edge_index p = row_offsets[v]; p < row_offsets[v + 1]; ++p) {
+                const node_index u = neighbors[p];
+                if (frontier[u] == 2 &&
+                    block_priority_precedes(u, v, degrees,
+                                            degree_tiebreak)) {
+                    wins = false;
+                    break;
+                }
+            }
+            winner[v] = static_cast<unsigned char>(wins);
+        }
+        grid.sync();
+
+        for (std::size_t i = first; i < count; i += stride) {
+            const node_index v = candidates[i];
+            if (frontier[v] != 2)
+                continue;
+            if (winner[v]) {
+                status[v] = 1;
+                frontier[v] = 0;
+            } else {
+                frontier[v] = 1;
+            }
+            winner[v] = 0;
+        }
+        grid.sync();
+    }
+}
+
 struct status_equals {
     const int *status;
     int value;
@@ -321,17 +513,35 @@ struct gpu_priority_frontend::impl {
             throw std::runtime_error("GPU priority-greedy front-end requires "
                                      "cooperative-kernel launch support");
         int blocks_per_sm = 0;
+        int block_repair_blocks_per_sm = 0;
+        int block_scan_blocks_per_sm = 0;
         int sms = 0;
         cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                        &blocks_per_sm, priority_greedy_cooperative, kBlock, 0),
                    "query cooperative priority-greedy occupancy");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &block_repair_blocks_per_sm, block_greedy_repair,
+                       kBlock, 0),
+                   "query cooperative block-greedy repair occupancy");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &block_scan_blocks_per_sm, block_greedy_regions,
+                       kBlock, 0),
+                   "query block-greedy region-scan occupancy");
         cuda_check(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount,
                                           device),
                    "query CUDA multiprocessor count");
         cooperative_grid_limit = blocks_per_sm * sms;
+        block_repair_grid_limit = block_repair_blocks_per_sm * sms;
+        block_region_limit = block_scan_blocks_per_sm * sms * (kBlock / 32);
         if (cooperative_grid_limit <= 0)
             throw std::runtime_error(
                 "GPU priority-greedy front-end found no cooperative-kernel residency");
+        if (block_repair_grid_limit <= 0)
+            throw std::runtime_error(
+                "GPU block-greedy front-end found no cooperative-kernel residency");
+        if (block_region_limit <= 0)
+            throw std::runtime_error(
+                "GPU block-greedy front-end found no region-scan residency");
 
         coo[0].reserve(initial_edges.size());
         coo[1].reserve(initial_edges.size());
@@ -692,6 +902,109 @@ struct gpu_priority_frontend::impl {
         return result;
     }
 
+    std::size_t block_region_count() const {
+        const char *e = std::getenv("APXCHOL_GPU_BLOCKS");
+        if (e && *e) {
+            char *end = nullptr;
+            const unsigned long long parsed = std::strtoull(e, &end, 10);
+            if (end == e || *end != '\0' || parsed == 0)
+                throw std::invalid_argument(
+                    "APXCHOL_GPU_BLOCKS must be a positive integer");
+            return std::min<std::size_t>(candidate_count,
+                                         static_cast<std::size_t>(parsed));
+        }
+        // One contiguous candidate region per warp that can be resident in
+        // the region-scan kernel. This is a hardware occupancy choice, not a
+        // graph-size cutoff; APXCHOL_GPU_BLOCKS pins alternatives for A/B.
+        return std::min<std::size_t>(candidate_count,
+                                     static_cast<std::size_t>(block_region_limit));
+    }
+
+    const partition_result &select_block_greedy() {
+        const auto start = clock_type::now();
+        result.data.clear();
+        if (!candidate_count) {
+            selected_degree_work = 0;
+            last_select = elapsed_ms(start);
+            return result;
+        }
+
+        block_region.reserve(n);
+        block_frontier.reserve(n);
+        const std::size_t regions = block_region_count();
+        initialize_block_candidates<<<blocks_for(candidate_count), kBlock>>>(
+            candidates_original.get(), candidate_count, regions, status.get(),
+            block_region.get(), block_frontier.get(), pick.get());
+        cuda_check(cudaGetLastError(), "initialize block-greedy candidates");
+
+        constexpr std::size_t warps_per_block = kBlock / 32;
+        const std::size_t scan_blocks =
+            (regions + warps_per_block - 1) / warps_per_block;
+        block_greedy_regions<<<static_cast<int>(scan_blocks), kBlock>>>(
+            candidates_original.get(), candidate_count, regions,
+            row_offsets.get(), csr_neighbors.get(), block_region.get(),
+            status.get());
+        cuda_check(cudaGetLastError(), "scan block-greedy regions");
+
+        decide_block_conflicts<<<blocks_for(candidate_count), kBlock>>>(
+            candidates_original.get(), candidate_count, row_offsets.get(),
+            csr_neighbors.get(), degrees.get(), block_region.get(), status.get(),
+            pick.get(), current_options.degree_tiebreak);
+        cuda_check(cudaGetLastError(), "decide block-greedy conflicts");
+        apply_block_drops<<<blocks_for(candidate_count), kBlock>>>(
+            candidates_original.get(), candidate_count, status.get(), pick.get());
+        cuda_check(cudaGetLastError(), "apply block-greedy conflicts");
+        mark_block_repair_frontier<<<blocks_for(candidate_count), kBlock>>>(
+            candidates_original.get(), candidate_count, row_offsets.get(),
+            csr_neighbors.get(), status.get(), block_frontier.get(), pick.get());
+        cuda_check(cudaGetLastError(), "mark block-greedy repair frontier");
+
+        const int wanted = blocks_for(candidate_count);
+        const int grid =
+            std::max(1, std::min(wanted, block_repair_grid_limit));
+        const node_index *candidate_ptr = candidates_original.get();
+        const edge_index *row_ptr = row_offsets.get();
+        const node_index *neighbor_ptr = csr_neighbors.get();
+        const edge_index *degree_ptr = degrees.get();
+        int *status_ptr = status.get();
+        int *frontier_ptr = block_frontier.get();
+        unsigned char *winner_ptr = pick.get();
+        bool degree_tiebreak = current_options.degree_tiebreak;
+        int *pending_ptr = cooperative_flag.get();
+        void *args[] = {
+            &candidate_ptr, &candidate_count, &row_ptr,      &neighbor_ptr,
+            &degree_ptr,    &status_ptr,      &frontier_ptr, &winner_ptr,
+            &degree_tiebreak, &pending_ptr};
+        cuda_check(cudaLaunchCooperativeKernel(
+                       reinterpret_cast<void *>(block_greedy_repair), grid,
+                       kBlock, args, 0, nullptr),
+                   "launch cooperative block-greedy repair");
+        const std::size_t chosen = static_cast<std::size_t>(
+            select_if(candidates_original.get(), selected_ids.get(),
+                      candidate_count, status_equals{status.get(), 1}));
+        selected_degree_work = sum_selected_degrees(chosen);
+        result.data.resize(chosen);
+        if (chosen) {
+            cuda_check(cudaMemcpy(result.data.data(), selected_ids.get(),
+                                  chosen * sizeof(node_index),
+                                  cudaMemcpyDeviceToHost),
+                       "download block-greedy selection");
+        }
+        set_status<<<blocks_for(candidate_count), kBlock>>>(
+            candidates_original.get(), candidate_count, status.get(), 2);
+        cuda_check(cudaGetLastError(), "restore block-greedy candidate status");
+        cuda_check(cudaDeviceSynchronize(), "finish block-greedy selection");
+
+        last_select = elapsed_ms(start);
+        if (trace_enabled()) {
+            std::fprintf(stderr,
+                         "[gpu-block] select candidates=%zu regions=%zu "
+                         "chosen=%zu %.3f ms\n",
+                         candidate_count, regions, chosen, last_select);
+        }
+        return result;
+    }
+
     void advance(std::span<const node_index> eliminated,
                  std::span<const gpu_topology_edge> new_edges,
                  std::span<const gpu_topology_batch> new_edge_batches) {
@@ -804,6 +1117,8 @@ struct gpu_priority_frontend::impl {
     device_buffer<node_index> candidates_original;
     device_buffer<node_index> selected_ids;
     device_buffer<node_index> update_ids;
+    device_buffer<node_index> block_region;
+    device_buffer<int> block_frontier;
     device_buffer<deferred_edge> topology_staging;
     device_buffer<int> status;
     device_buffer<unsigned char> pick;
@@ -821,6 +1136,8 @@ struct gpu_priority_frontend::impl {
     std::size_t candidate_count = 0;
     std::size_t selected_degree_work = 0;
     int cooperative_grid_limit = 0;
+    int block_repair_grid_limit = 0;
+    int block_region_limit = 0;
     bool topology_dirty = true;
 
     double last_prepare = 0.0;
@@ -846,8 +1163,27 @@ gpu_priority_frontend::mode gpu_priority_frontend::configured_mode() {
     return mode::disabled;
 }
 
+gpu_priority_frontend::mode gpu_priority_frontend::configured_block_mode() {
+    const char *e = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
+    if (!e || !*e || std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||
+        std::strcmp(e, "false") == 0)
+        return mode::disabled;
+    if (std::strcmp(e, "1") == 0 || std::strcmp(e, "on") == 0 ||
+        std::strcmp(e, "force") == 0)
+        return mode::forced;
+    static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+    if (!warned.test_and_set())
+        std::fprintf(
+            stderr,
+            "[apxchol] unknown APXCHOL_GPU_BLOCK_FRONTEND='%s'; expected "
+            "0|off|1|on|force, disabling the GPU block-greedy prototype\n",
+            e);
+    return mode::disabled;
+}
+
 gpu_priority_frontend::runtime_probe
-gpu_priority_frontend::probe_runtime(node_index n, std::size_t initial_edges) {
+gpu_priority_frontend::probe_runtime(node_index n, std::size_t initial_edges,
+                                     bool block_selector) {
     runtime_probe result;
     int device = 0;
     int cooperative = 0;
@@ -892,6 +1228,10 @@ gpu_priority_frontend::probe_runtime(node_index n, std::size_t initial_edges) {
     valid &= add_allocation(bytes,
                             std::min(initial_edges, kTopologyStageEdges),
                             sizeof(deferred_edge));
+    if (block_selector) {
+        valid &= add_allocation(bytes, nv, sizeof(node_index));
+        valid &= add_allocation(bytes, nv, sizeof(int));
+    }
     // CUB scan/select scratch is implementation-dependent and much smaller
     // than the edge arrays; retain a conservative 64 MiB floor plus 5%.
     const std::size_t cub_floor = std::size_t{64} << 20;
@@ -936,6 +1276,10 @@ std::span<const node_index> gpu_priority_frontend::host_active_degrees() const {
 const partition_result &gpu_priority_frontend::select(unsigned seed,
                                                   std::uint64_t round) {
     return p_->select(seed, round);
+}
+
+const partition_result &gpu_priority_frontend::select_block_greedy() {
+    return p_->select_block_greedy();
 }
 
 std::size_t gpu_priority_frontend::selected_degree_work() const {

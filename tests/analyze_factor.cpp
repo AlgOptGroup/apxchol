@@ -303,15 +303,12 @@ int main(int argc, char* argv[]) {
             opts.fs_filter_append = (cli.fs_filter_append != 0);
 
 #if defined(APXCHOL_USE_CUDA)
-        // Analysis-only fairness: the benchmark driver prewarms the CUDA
-        // context before timing any solver.  Do the same here when the guarded
-        // setup front-end is requested, so its factorization profile does not
-        // include one process-wide lazy context creation.
-        if (const char* e = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
-            e && *e && std::strcmp(e, "0") != 0) {
-            if (const cudaError_t err = cudaFree(nullptr); err != cudaSuccess)
-                throw std::runtime_error(cudaGetErrorString(err));
-        }
+        // Analysis-only fairness: this CUDA build installs and benchmarks the
+        // GPU solve backend regardless of which setup selector is chosen. The
+        // benchmark driver prewarms the one-per-process CUDA context before
+        // timing every solver, so do the same for every arm here.
+        if (const cudaError_t err = cudaFree(nullptr); err != cudaSuccess)
+            throw std::runtime_error(cudaGetErrorString(err));
 #endif
 
         // ── Thread scaling sweep mode ────────────────────────

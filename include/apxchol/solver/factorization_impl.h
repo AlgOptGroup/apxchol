@@ -757,31 +757,43 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<node_index> active_scratch;
 
 #if defined(APXCHOL_USE_CUDA)
-    constexpr bool gpu_frontend_eligible =
+    constexpr bool gpu_priority_frontend_eligible =
         std::is_same_v<Partitioner, priority_greedy_partitioner> &&
         std::is_same_v<Incidence, vec_pool_incidence> &&
         std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
+    constexpr bool gpu_block_frontend_eligible =
+        std::is_same_v<Partitioner, block_greedy_partitioner> &&
+        std::is_same_v<Incidence, vec_pool_incidence> &&
+        std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
+    constexpr bool gpu_frontend_eligible =
+        gpu_priority_frontend_eligible || gpu_block_frontend_eligible;
     std::unique_ptr<detail::gpu_priority_frontend> gpu_frontend;
     detail::gpu_priority_frontend::mode gpu_frontend_mode =
         detail::gpu_priority_frontend::mode::disabled;
     if constexpr (gpu_frontend_eligible) {
-        gpu_frontend_mode = detail::gpu_priority_frontend::configured_mode();
+        if constexpr (gpu_block_frontend_eligible)
+            gpu_frontend_mode =
+                detail::gpu_priority_frontend::configured_block_mode();
+        else
+            gpu_frontend_mode =
+                detail::gpu_priority_frontend::configured_mode();
         if (gpu_frontend_mode != detail::gpu_priority_frontend::mode::disabled &&
             opts.exact_clique_max_degree != 0) {
             throw std::invalid_argument(
-                "APXCHOL_GPU_PRIORITY_FRONTEND=force requires the default "
+                "the forced GPU setup front-end requires the default "
                 "d-1-edge tree sampler (exact clique mode can grow topology)");
         }
         if (gpu_frontend_mode != detail::gpu_priority_frontend::mode::disabled) {
             const auto runtime = detail::gpu_priority_frontend::probe_runtime(
-                n, static_cast<std::size_t>(work.m()));
+                n, static_cast<std::size_t>(work.m()),
+                gpu_block_frontend_eligible);
             if (!runtime.cooperative_launch || !runtime.memory_fits) {
                 throw std::runtime_error(
                     !runtime.cooperative_launch
-                        ? "APXCHOL_GPU_PRIORITY_FRONTEND=force requires a CUDA device "
+                        ? "the forced GPU setup front-end requires a CUDA device "
                           "with cooperative-kernel launch support"
-                        : "APXCHOL_GPU_PRIORITY_FRONTEND=force does not fit in "
-                          "currently free device memory");
+                        : "the forced GPU setup front-end does not fit in currently "
+                          "free device memory");
             }
             if (cp) (*cp)("gpu_frontend_probe");
             std::vector<detail::gpu_topology_edge> initial_topology;
@@ -822,24 +834,30 @@ factorization factorize_impl(const Eliminator& elim,
         using P = std::remove_reference_t<decltype(p)>;
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (gpu_frontend_eligible &&
-                      std::is_same_v<P, priority_greedy_partitioner>) {
+                      (std::is_same_v<P, priority_greedy_partitioner> ||
+                       std::is_same_v<P, block_greedy_partitioner>)) {
             if (gpu_frontend) {
                 if (cp) { cp->descend("find_partition"); cp->tick(); }
                 const auto prep = gpu_frontend->prepare(act, opts.partition);
                 last_candidate_count = prep.candidate_count;
                 last_avg_degree = prep.average_degree;
                 if (cp) (*cp)("prune");
-                const partition_result& part =
-                    gpu_frontend->select(opts.seed, p.round);
+                const partition_result* part = nullptr;
+                if constexpr (std::is_same_v<P,
+                                             priority_greedy_partitioner>) {
+                    part = &gpu_frontend->select(opts.seed, p.round);
+                    ++p.round;
+                } else {
+                    part = &gpu_frontend->select_block_greedy();
+                }
                 gpu_elimination_work_hint =
                     gpu_frontend->selected_degree_work();
-                ++p.round;
                 if (cp) {
                     (*cp)("select");
                     (*cp)("collect");
                     cp->ascend();
                 }
-                return part;
+                return *part;
             }
         }
 #endif

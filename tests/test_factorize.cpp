@@ -1247,6 +1247,146 @@ TEST(GpuPriorityFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly)
     }
 }
 
+TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
+    using apxchol::detail::gpu_topology_edge;
+    constexpr apxchol::node_index n = 96;
+    std::vector<gpu_topology_edge> initial;
+    apxchol::graph<apxchol::vec_pool_incidence> graph(n);
+    for (apxchol::node_index v = 0; v < n; ++v) {
+        for (const apxchol::node_index delta : {1u, 7u, 23u}) {
+            const apxchol::node_index u = (v + delta) % n;
+            if (v < u) {
+                initial.push_back({v, u});
+                graph.add_edge(v, u, 1.0);
+            }
+        }
+    }
+    apxchol::detail::gpu_priority_frontend gpu(n, initial);
+    std::vector<apxchol::node_index> active(n);
+    std::iota(active.begin(), active.end(), apxchol::node_index{0});
+    apxchol::partition_options options;
+    (void)gpu.prepare(active, options);
+
+    const char* old_blocks = std::getenv("APXCHOL_GPU_BLOCKS");
+    const bool had_blocks = old_blocks != nullptr;
+    const std::string saved_blocks = old_blocks ? old_blocks : "";
+    setenv("APXCHOL_GPU_BLOCKS", "8", 1);
+    const auto first = gpu.select_block_greedy().data;
+    const auto second = gpu.select_block_greedy().data;
+    if (had_blocks) setenv("APXCHOL_GPU_BLOCKS", saved_blocks.c_str(), 1);
+    else unsetenv("APXCHOL_GPU_BLOCKS");
+    EXPECT_EQ(second, first);
+
+    // Independent CPU specification of the GPU algorithm: contiguous serial
+    // greedy regions, snapshot cross-region conflict removal, then ordered
+    // maximality repair over exactly the vertices a removal may have freed.
+    const auto candidate_view = gpu.host_candidates();
+    const std::vector<apxchol::node_index> candidates(candidate_view.begin(),
+                                                       candidate_view.end());
+    constexpr std::size_t regions = 8;
+    std::vector<apxchol::node_index> degree(n), region(n);
+    std::vector<unsigned char> candidate(n, 0), expected_selected(n, 0),
+        dropped(n, 0), frontier(n, 0), pending(n, 0), winner(n, 0);
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const auto v = candidates[i];
+        candidate[v] = 1;
+        region[v] = static_cast<apxchol::node_index>(i * regions /
+                                                     candidates.size());
+        for ([[maybe_unused]] const auto edge : graph.adj(v)) ++degree[v];
+    }
+    for (std::size_t r = 0; r < regions; ++r) {
+        const std::size_t begin =
+            (candidates.size() * r + regions - 1) / regions;
+        const std::size_t end =
+            (candidates.size() * (r + 1) + regions - 1) / regions;
+        for (std::size_t i = begin; i < end; ++i) {
+            const auto v = candidates[i];
+            bool blocked = false;
+            for (const auto edge : graph.adj(v)) {
+                const auto u = graph.edge_target(edge, v);
+                blocked |= region[u] == r && expected_selected[u];
+            }
+            if (!blocked) expected_selected[v] = 1;
+        }
+    }
+    const auto precedes = [&](apxchol::node_index u,
+                              apxchol::node_index v) {
+        return options.degree_tiebreak
+                   ? degree[u] < degree[v] ||
+                         (degree[u] == degree[v] && u < v)
+                   : u < v;
+    };
+    for (const auto v : candidates) {
+        if (!expected_selected[v]) continue;
+        for (const auto edge : graph.adj(v)) {
+            const auto u = graph.edge_target(edge, v);
+            if (expected_selected[u] && region[u] != region[v] &&
+                precedes(u, v)) {
+                dropped[v] = 1;
+                break;
+            }
+        }
+    }
+    for (const auto v : candidates) {
+        if (!dropped[v]) continue;
+        expected_selected[v] = 0;
+        frontier[v] = 1;
+        for (const auto edge : graph.adj(v)) {
+            const auto u = graph.edge_target(edge, v);
+            if (candidate[u]) frontier[u] = 1;
+        }
+    }
+    for (;;) {
+        bool any = false;
+        std::fill(pending.begin(), pending.end(), 0);
+        std::fill(winner.begin(), winner.end(), 0);
+        for (const auto v : candidates) {
+            if (!frontier[v]) continue;
+            bool free = true;
+            for (const auto edge : graph.adj(v))
+                free &= !expected_selected[graph.edge_target(edge, v)];
+            if (free) pending[v] = 1;
+            else frontier[v] = 0;
+        }
+        for (const auto v : candidates) {
+            if (!pending[v]) continue;
+            bool wins = true;
+            for (const auto edge : graph.adj(v)) {
+                const auto u = graph.edge_target(edge, v);
+                if (pending[u] && precedes(u, v)) {
+                    wins = false;
+                    break;
+                }
+            }
+            winner[v] = wins;
+            any |= wins;
+        }
+        if (!any) break;
+        for (const auto v : candidates) {
+            if (winner[v]) {
+                expected_selected[v] = 1;
+                frontier[v] = 0;
+            }
+        }
+    }
+    std::vector<apxchol::node_index> expected;
+    for (const auto v : candidates)
+        if (expected_selected[v]) expected.push_back(v);
+    EXPECT_EQ(first, expected);
+
+    std::vector<unsigned char> selected(n, 0);
+    for (const auto v : first) selected[v] = 1;
+    for (const auto v : gpu.host_candidates()) {
+        bool covered = selected[v] != 0;
+        for (const auto edge : graph.adj(v)) {
+            const auto u = graph.edge_target(edge, v);
+            EXPECT_FALSE(selected[v] && selected[u]);
+            covered |= selected[u] != 0;
+        }
+        EXPECT_TRUE(covered) << "uncovered candidate " << v;
+    }
+}
+
 TEST(GpuPriorityFrontend, IntegratedFactorizationMatchesCpuFrontend) {
     const char* old = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
     const bool had_old = old != nullptr;
