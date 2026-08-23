@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -18,6 +19,7 @@
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/factorization_impl.h"
+#include "apxchol/solver/solve.h"
 #include "apxchol/solver/sptrsv/omp.h"
 #include "apxchol/graph/incidence_list.h"
 #include "apxchol/graph/conversions.h"
@@ -38,8 +40,10 @@ struct cli_options {
     std::string input_path;
     graph_storage storage = graph_storage::forward_star;
     std::string is_select = "block_greedy";
+    unsigned seed = 42;
     bool sweep_threads = false;
     bool profile = false;
+    bool solve = false;
     bool bench_trsv = false;
     double min_is_frac = 0.05;
     long long parallel_residual_threshold = -1;  // <0 = leave default (disabled)
@@ -53,8 +57,9 @@ struct cli_options {
                  "Usage: %s <matrix.mtx> "
                  "[--graph-storage vec|forward_star|bstr|vec_pool|vec_pool_aos]"
                  " [--is block_greedy|priority_greedy|baumann_kyng]"
+                 " [--seed N]"
                  " [--min-is-frac FRACTION] [--parallel-residual-threshold N]"
-                 " [--profile|--bench-trsv|--sweep-threads]\n",
+                 " [--profile|--solve|--bench-trsv|--sweep-threads]\n",
                  argv0);
     std::exit(1);
 }
@@ -97,10 +102,21 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.storage = parse_storage(require_value("--graph-storage"));
         } else if (arg == "--is") {
             opts.is_select = parse_is(require_value("--is"));
+        } else if (arg == "--seed") {
+            const std::string value = require_value("--seed");
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+            if (value.empty() || *end != '\0'
+                || parsed > std::numeric_limits<unsigned>::max()) {
+                throw std::invalid_argument("invalid --seed: " + value);
+            }
+            opts.seed = static_cast<unsigned>(parsed);
         } else if (arg == "--sweep-threads") {
             opts.sweep_threads = true;
         } else if (arg == "--profile") {
             opts.profile = true;
+        } else if (arg == "--solve") {
+            opts.solve = true;
         } else if (arg == "--bench-trsv") {
             opts.bench_trsv = true;
         } else if (arg == "--min-is-frac") {
@@ -292,6 +308,7 @@ int main(int argc, char* argv[]) {
         }
 
         factor_options opts;
+        opts.seed = cli.seed;
         opts.is_select = cli.is_select;
         opts.min_is_fraction = cli.min_is_frac;
         if (cli.parallel_residual_threshold >= 0)
@@ -310,6 +327,31 @@ int main(int argc, char* argv[]) {
         if (const cudaError_t err = cudaFree(nullptr); err != cudaSuccess)
             throw std::runtime_error(cudaGetErrorString(err));
 #endif
+
+        // ── Warm-context one-RHS benchmark mode ─────────────
+        // The CUDA context was initialized above, outside all checkpointed
+        // solver work, exactly as in the standalone benchmark driver. This
+        // gives setup/solve measurements without pulling the competitor stack
+        // into this small diagnostic executable.
+        if (cli.solve) {
+            std::srand(opts.seed);
+            const Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
+            apxchol::solve_options solve_opts;
+            solve_opts.tol = 1e-8;
+            solve_opts.max_iter = 500;
+            solve_opts.storage = cli.storage;
+            solve_opts.factor_opts = opts;
+            const auto result = apxchol::solve(A, b, solve_opts);
+            const double setup_ms = result.timings.total("setup") * 1e3;
+            const double pcg_ms = result.timings.total("pcg") * 1e3;
+            std::printf(
+                "solve_result setup_ms=%.6f pcg_ms=%.6f total_ms=%.6f "
+                "iterations=%lld residual=%.17g vram_mb=%.3f\n",
+                setup_ms, pcg_ms, setup_ms + pcg_ms,
+                static_cast<long long>(result.iterations), result.residual,
+                result.solve_vram_mb);
+            return result.residual < solve_opts.tol ? 0 : 1;
+        }
 
         // ── Thread scaling sweep mode ────────────────────────
         if (cli.sweep_threads) {
