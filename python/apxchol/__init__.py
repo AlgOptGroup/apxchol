@@ -300,8 +300,9 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool",
         RNG seed for the randomized clique sampling (factorization is
         deterministic per seed at one thread only).
     partitioner : str
-        Independent-set selector: "block_greedy" (default), "luby",
-        "baumann_kyng", "rootset". Unknown names raise at factorization time.
+        Independent-set selector: "block_greedy" (default),
+        "priority_greedy", or "baumann_kyng". Unknown names raise at
+        factorization time.
     storage : str
         Graph backend: "vec_pool" (default), "forward_star", "vec", "bstr".
     keep_factor : bool

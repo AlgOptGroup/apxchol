@@ -33,20 +33,19 @@ TOL = 1e-8
 #   one row per method (the cross-method poster heatmap), it names a configuration
 #   DECLARED a priori (APX_DEFAULT below), never the per-cell fastest.
 #
-# This replaces the old rule, which mapped all four apxchol IS-selectors
-# (bg/luby/root/bk) onto one "apxchol" label and let _pick() take the FASTEST of the
-# four per matrix -- while BoomerAMG's two configurations (default / cut) stayed two
+# This replaces the old rule, which mapped all apxchol IS-selectors onto one
+# "apxchol" label and let _pick() take the FASTEST per matrix -- while
+# BoomerAMG's two configurations (default / cut) stayed two
 # separate series that each got no such minimum. That was best-of-4 for us against
 # best-of-1 for them: measured over the 27 CPU matrices in the store it handed
 # apxchol a geomean 5.6% (max 23.4%) discount versus its own declared default, and
 # 9.7% (max 2.33x) on the GPU axis -- and, because the timed-out-competitor cap is
 # 10x apxchol's total, it also shrank the bound every capped competitor is drawn at.
-# The four selectors keep their own dedicated per-matrix figures (ablation_*,
+# The selectors keep their own dedicated per-matrix figures (ablation_*,
 # selector_*, poster_selectors_*), so nothing is hidden by declaring a default.
 LABELS = {
     ("apxchol_v1", "bg+tree[vec_pool]"): "apxchol/bg",
-    ("apxchol_v1", "luby+tree[vec_pool]"): "apxchol/luby",
-    ("apxchol_v1", "root+tree[vec_pool]"): "apxchol/root",
+    ("apxchol_v1", "greedy+tree[vec_pool]"): "apxchol/greedy",
     ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk",
     ("rchol", ""): "RCHOL",
     ("rchol_par", ""): "pRCHOL",
@@ -66,21 +65,20 @@ require_injective_labels(LABELS, "CPU chart")
 # apxchol config is bg+tree"). Used wherever a figure needs exactly one apxchol row.
 # It is fixed a priori; it is never re-chosen from the timings.
 APX_DEFAULT = LABELS[("apxchol_v1", APXCHOL_DEFAULT_CONFIG)]
-APX_SERIES = ["apxchol/bg", "apxchol/luby", "apxchol/root", "apxchol/bk"]
+APX_SERIES = ["apxchol/bg", "apxchol/greedy", "apxchol/bk"]
 
 # Geometric MG excluded (structured-grid only, not a general-matrix solver).
 # AMGCL re-added: a distinct algebraic-MG competitor
 # (smoothed-aggregation + spai0), not redundant with BoomerAMG's classical AMG.
-# Every apxchol IS-selector is its own series, exactly as BoomerAMG's two
-# configurations are -- the reader sees the spread instead of only its minimum.
-ORDER = APX_SERIES + [
+# Headline charts stay compact and use the declared apxchol default only. The
+# selector spread is shown separately in the dedicated ablation figures.
+ORDER = [APX_DEFAULT] + [
          "RCHOL", "pRCHOL",
          "BoomerAMG", "BoomerAMG/cut", "AMGCL", "CMG (MATLAB)†", "ParAC Graph", "ParAC Physics",
          "AC (Jl ref)†", "AC2 (Jl ref)†"]
 COLORS = {"apxchol/bg": "#0b5394",     # declared default = the darkest blue
-          "apxchol/luby": "#3d7ebf",   # the other three selectors: lighter blues,
-          "apxchol/root": "#6fa8dc",   # same family, same treatment as
-          "apxchol/bk": "#a4c2f4",     # BoomerAMG / BoomerAMG-cut's two greens
+          "apxchol/greedy": "#3d7ebf",
+          "apxchol/bk": "#a4c2f4",
           "RCHOL": "#d62728", "pRCHOL": "#ff9896",
           "BoomerAMG": "#2ca02c", "BoomerAMG/cut": "#74c476",  # cut = lighter green
           "AMGCL": "#8c564b",   # brown (matches thread_scaling)
@@ -96,8 +94,17 @@ COLORS = {"apxchol/bg": "#0b5394",     # declared default = the darkest blue
 # than apxchol, so the comparison "our C++ vs the Julia reference" is meaningful.
 CHART_EXCLUDE = {"CMG (MATLAB)†"}
 
+def canonical_config(config):
+    # Historical `luby` cells are the same fixed-priority implementation that
+    # was renamed to `greedy`; retain their readability without exposing the
+    # inaccurate old selector name in new charts.
+    return config.replace("luby+tree", "greedy+tree")
+
+def is_legacy_priority_config(config):
+    return "luby+tree" in config
+
 def label(cell):
-    return LABELS.get((cell["solver"], cell.get("config", "")))
+    return LABELS.get((cell["solver"], canonical_config(cell.get("config", ""))))
 
 def load(root):
     # CPU charts read ONLY device=cpu cells. The store now also holds device=gpu
@@ -115,11 +122,12 @@ def load(root):
 
 def load_gpu_cfg(root):
     """device=gpu apxchol_v1 cells grouped by (family, config) -> {matrix: metrics}.
-    Unlike gpu_charts.load this does NOT collapse the four IS-selectors onto one
-    label, so the ablation can show the GPU number per individual config. Keeping it
+    Unlike gpu_charts.load this keeps each IS selector configuration separate,
+    so the ablation can show the GPU number per individual config. Keeping it
     per-matrix lets the ablation median GPU over the SAME matrix set as CPU. (Only the
     [vec_pool] selectors are swept on the GPU axis, so [vec] configs get no GPU bar.)"""
     rows = defaultdict(dict)
+    source_rank = {}
     if not os.path.isdir(root):
         return rows
     for p in glob.glob(f"{root}/**/*__gpu.json", recursive=True):
@@ -131,7 +139,14 @@ def load_gpu_cfg(root):
         if (cell.get("device") != "gpu" or c.get("status") != "complete"
                 or cell.get("solver") != "apxchol_v1"):
             continue
-        rows[(cell["family"], cell.get("config", ""))][cell["matrix_id"]] = c.get("metrics", {})
+        raw_config = cell.get("config", "")
+        config = canonical_config(raw_config)
+        group = (cell["family"], config)
+        slot = (group, cell["matrix_id"])
+        rank = 0 if is_legacy_priority_config(raw_config) else 1
+        if rank >= source_rank.get(slot, -1):
+            rows[group][cell["matrix_id"]] = c.get("metrics", {})
+            source_rank[slot] = rank
     return rows
 
 def matrix_order(recs, fam):
@@ -142,7 +157,7 @@ def matrix_order(recs, fam):
                 return r["metrics"]["nnz"]
         return 0
     # Tie-break on the id. Sorting a SET by nnz alone left tied matrices in set-iteration
-    # order, which varies with PYTHONHASHSEED -- the four IPM iters all have nnz=7867398,
+    # order, which varies with PYTHONHASHSEED -- the IPM iterates all have nnz=7867398,
     # so every ipm chart's column order (and summary.md's row order) was reshuffled on
     # each run. Deterministic now.
     return sorted(mats, key=lambda m: (key(m), m))
@@ -320,36 +335,58 @@ def convergence_chart(recs, fam, out, mats=None):
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
 
 import re as _re
-_ABL_RX = _re.compile(r"^(bg|luby|root|bk)\+tree\[(fwd_star|vec|bstr|vec_pool)\]$")
-_ABL_SELS = ["bg", "luby", "root", "bk"]               # heatmap rows (IS selector)
+_ABL_RX = _re.compile(r"^(bg|greedy|luby|bk)\+tree\[(fwd_star|vec|bstr|vec_pool)\]$")
+_ABL_SELS = ["bg", "greedy", "bk"]                  # heatmap rows (IS selector)
 _ABL_STOS = ["fwd_star", "vec", "bstr", "vec_pool"]  # cols (storage progression)
+
+def _ablation_key(config):
+    match = _ABL_RX.match(config)
+    if not match:
+        return None
+    selector = "greedy" if match.group(1) == "luby" else match.group(1)
+    return selector, match.group(2)
+
+def _cpu_selector_data(recs, family=None, storage=None):
+    """Canonical selector cells, preferring current `greedy` over legacy
+    `luby` when both exist for the same matrix/thread/storage."""
+    data = defaultdict(dict)
+    source_rank = {}
+    for record in recs:
+        cell = record["cell"]
+        if (cell["solver"] != "apxchol_v1" or cell.get("threads") != 16
+                or record["status"] != "complete"
+                or (family is not None and cell["family"] != family)):
+            continue
+        raw_config = cell.get("config", "")
+        key = _ablation_key(raw_config)
+        if not key or (storage is not None and key[1] != storage):
+            continue
+        slot = (key, cell["matrix_id"])
+        rank = 0 if is_legacy_priority_config(raw_config) else 1
+        if rank >= source_rank.get(slot, -1):
+            data[key][cell["matrix_id"]] = record["metrics"]
+            source_rank[slot] = rank
+    return data
 
 def ablation_heatmap(recs, gpu_cfg, fam, out):
     """apxchol selector x storage ablation as small-multiple heatmaps (total / setup /
-    solve / iters), t16. Rows = IS selector (bg/luby/root/bk); cols = storage backend
+    solve / iters), t16. Rows = IS selector (bg/greedy/bk); cols = storage backend
     in the progression fwd_star -> vec -> bstr -> vec_pool, plus a vec_pool
     GPU column (the GPU axis swept vec_pool only) so the default backend's CPU->GPU shift is
     visible. Each metric is medianed over the matrix set COMMON to all CPU configs
     (fair); colour = value / best-in-grid (green = best), cells annotated with the
     absolute value. Blank (grey) = config not swept / did not converge."""
     from statistics import median
-    cpu = defaultdict(dict)   # cpu[(sel,sto)][matrix] = metrics dict
-    for r in recs:
-        c = r["cell"]
-        if (c["family"] != fam or c["solver"] != "apxchol_v1"
-                or c.get("threads") != 16 or r["status"] != "complete"):
-            continue
-        m = _ABL_RX.match(c.get("config", ""))
-        if m: cpu[(m.group(1), m.group(2))][c["matrix_id"]] = r["metrics"]
+    cpu = _cpu_selector_data(recs, family=fam)
     if not cpu:
         return
     gpu = defaultdict(dict)   # gpu[sel][matrix] = metrics (vec_pool only)
     for (gf, cfg), per_mat in gpu_cfg.items():
         if gf != fam: continue
-        m = _ABL_RX.match(cfg)
-        if m and m.group(2) == "vec_pool":
+        key = _ablation_key(cfg)
+        if key and key[1] == "vec_pool":
             for mat, met in per_mat.items():
-                gpu[m.group(1)][mat] = met
+                gpu[key[0]][mat] = met
     # Median over the matrix set common to all CPU configs (apples-to-apples).
     common = set.intersection(*[set(d) for d in cpu.values()])
     if not common:
@@ -401,7 +438,7 @@ def ablation_heatmap(recs, gpu_cfg, fam, out):
 # Cross-family selector x graph heatmap (for the poster): which IS selector wins on
 # which GRAPH TYPE, at the default vec_pool storage. Columns span structured grids ->
 # FEM/planar -> social/scale-free so the selector spread by graph type is the message
-# (bg on structured, luby/root on scale-free). Curated representative set (a poster
+# (bg on structured, priority-greedy on scale-free). Curated representative set (a poster
 # can't show all 26); ordered along the structured->irregular axis.
 _SELMAT_COLS = [
     ("grid_3000",        "grid 2D"),
@@ -421,25 +458,21 @@ _SELMAT_COLS = [
 ]
 
 def selector_matrix_heatmap(recs, out, metric="total_s", mats=None):
-    """apxchol IS-selector x GRAPH heatmap at vec_pool storage, t16. Rows = the four
-    IS selectors (bg/luby/root/bk); columns = matrices spanning grid -> FEM -> social.
+    """apxchol IS-selector x GRAPH heatmap at vec_pool storage, t16. Rows = the
+    three selectors (bg/greedy/bk); columns = matrices spanning grid -> FEM -> social.
     Colour normalises PER COLUMN (per graph) so green = the best selector for that
     graph regardless of the graph's absolute scale -- the point is which selector wins
     where, not absolute time. Cells annotated with the absolute value. metric =
     total_s | setup_s | solve_s | iters."""
     cols = mats or _SELMAT_COLS
-    sels = _ABL_SELS  # bg luby root bk
-    by = defaultdict(dict)   # by[(sel,matrix)] = value
-    for r in recs:
-        c = r["cell"]
-        if (c["solver"] != "apxchol_v1" or c.get("threads") != 16
-                or r["status"] != "complete"):
-            continue
-        m = _ABL_RX.match(c.get("config", ""))
-        if m and m.group(2) == "vec_pool":
-            v = r["metrics"].get(metric)
-            if v is not None:
-                by[(m.group(1), c["matrix_id"])] = v
+    sels = _ABL_SELS  # bg, priority-greedy, bk
+    by = {}
+    for (selector, _storage), per_matrix in _cpu_selector_data(
+            recs, storage="vec_pool").items():
+        for matrix, metrics in per_matrix.items():
+            value = metrics.get(metric)
+            if value is not None:
+                by[(selector, matrix)] = value
     M = np.full((len(sels), len(cols)), np.nan)
     for j, (mid, _lab) in enumerate(cols):
         for i, sel in enumerate(sels):
@@ -481,28 +514,24 @@ def selector_matrix_heatmap(recs, out, metric="total_s", mats=None):
 
 def selector_family_panel(recs, gpu_cfg, fam, out, device="cpu"):
     """Per-family IS-selector × matrix small-multiple heatmaps (total/setup/solve/iters)
-    at vec_pool storage, t16, for ONE family and ONE device. Rows = bg/luby/root/bk;
+    at vec_pool storage, t16, for ONE family and ONE device. Rows = bg/greedy/bk;
     columns = this family's matrices (by nnz). Each metric normalises PER COLUMN so
     green = the best selector for that matrix and bold = the per-matrix winner."""
     sels = _ABL_SELS
     by = {}   # by[(sel, matrix)] = metrics dict
     if device == "cpu":
-        for r in recs:
-            c = r["cell"]
-            if (c["family"] != fam or c["solver"] != "apxchol_v1"
-                    or c.get("threads") != 16 or r["status"] != "complete"):
-                continue
-            m = _ABL_RX.match(c.get("config", ""))
-            if m and m.group(2) == "vec_pool":
-                by[(m.group(1), c["matrix_id"])] = r["metrics"]
+        for (selector, _storage), per_matrix in _cpu_selector_data(
+                recs, family=fam, storage="vec_pool").items():
+            for matrix, metrics in per_matrix.items():
+                by[(selector, matrix)] = metrics
     else:
         for (gf, cfg), per_mat in gpu_cfg.items():
             if gf != fam:
                 continue
-            m = _ABL_RX.match(cfg)
-            if m and m.group(2) == "vec_pool":
+            key = _ablation_key(cfg)
+            if key and key[1] == "vec_pool":
                 for mt, met in per_mat.items():
-                    by[(m.group(1), mt)] = met
+                    by[(key[0], mt)] = met
     mats = [mt for mt in matrix_order(recs, fam) if any((s, mt) in by for s in sels)]
     if not mats:
         return
@@ -724,10 +753,10 @@ def summary_md(recs, path):
              "persisted by the runner; `—` = solver doesn't support "
              "that de-singularization cell.\n",
              "**Series rule (uniform).** Every column is exactly ONE (solver, configuration); "
-             "no column is a per-cell minimum over configurations. apxchol's four IS-selectors "
-             f"are four columns (`{'`, `'.join(APX_SERIES)}`), exactly as BoomerAMG's two "
-             "configurations are two columns; its declared default is "
-             f"`{APX_DEFAULT}`. The chart thread count is selected a priori (t16, with "
+             "no column is a per-cell minimum over configurations. Headline tables and "
+             f"charts use apxchol's declared default, `{APX_DEFAULT}`; the selector "
+             f"spread (`{'`, `'.join(APX_SERIES)}`) is confined to dedicated compact "
+             "ablation figures. The chart thread count is selected a priori (t16, with "
              "a t1 fallback); duplicate cells are rejected, so neither status nor time "
              "can select the representative.\n",
              "## Total solve time (s)\n"]

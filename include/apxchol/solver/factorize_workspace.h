@@ -16,8 +16,8 @@
 
 namespace apxchol {
 
-/// Unweighted residual-topology update consumed by the optional GPU Luby
-/// front-end.  The numerical edge weight remains owned by graph<> on the CPU;
+/// Unweighted residual-topology update consumed by the optional GPU priority
+/// front-end. The numerical edge weight remains owned by graph<> on the CPU;
 /// selection needs only the endpoints (including multiplicity).
 namespace detail {
 struct gpu_topology_edge {

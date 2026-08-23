@@ -70,7 +70,8 @@ TIMEOUT_FLOOR = 60     # ...but never below this (so fast matrices still give so
 # natural-order fill blowup on the 237M-nnz com-Orkut hit 110GB RSS and OOM-killed the
 # desktop (2026-06-12) -- gets an address-space ceiling via `ulimit -v`, so it dies with
 # bad_alloc (recorded as 'oom') instead of exhausting system RAM. Legit com-Orkut apxchol
-# peaks ~62GB (root+tree[vec]); 100GB clears that comfortably and still leaves ~24GB
+# historically peaked ~62GB (retired root+tree[vec]); 100GB clears that
+# stress case comfortably and still leaves ~24GB
 # headroom on the 124GB box. NOT applied on GPU (CUDA reserves large host VM; breaks runs).
 MEM_CAP_GB = float(os.environ.get("APXCHOL_BENCH_MEM_CAP_GB", "100"))
 DEVICE = "cpu"   # set in main() from --device
@@ -395,31 +396,27 @@ def dump_mtx(mid):
 # Solver set: (solver, config)
 APX_DEFAULT_CONFIG = rc.APXCHOL_DEFAULT_CONFIG
 APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
-       ("apxchol_v1","root+tree[vec_pool]"),       # rootset IS (ablation/thread-scaling only)
        ("apxchol_v1","bk+tree[vec_pool]"),         # Baumann-Kyng IS (ablation only)
-       ("apxchol_v1","luby+tree[vec_pool]"),       # Luby IS (ablation only)
+       ("apxchol_v1","greedy+tree[vec_pool]"),     # priority-greedy IS (ablation only)
        # vec<vec> storage variants (ablation only) -- the dense-array incidence
        # backend vs the default vec_pool. Swept on every family in the SAME run as
        # vec_pool so the storage ablation is an honest same-session A/B (the old
        # [vec] cells were sha aeac9836 "capped first pass", cross-run-incomparable).
        ("apxchol_v1","bg+tree[vec]"),
-       ("apxchol_v1","root+tree[vec]"),
        ("apxchol_v1","bk+tree[vec]"),
-       ("apxchol_v1","luby+tree[vec]"),
-       # Full selector x storage grid for the ablation HEATMAP: {bg,luby,root,bk} x
-       # {fwd_star, bstr}. (vec / vec_pool already covered above for all four
+       ("apxchol_v1","greedy+tree[vec]"),
+       # Full selector x storage grid for the ablation heatmap: {bg,greedy,bk} x
+       # {fwd_star, bstr}. (vec / vec_pool already covered above for all three
        # selectors -> the 4-storage axis fwd_star/vec/bstr/vec_pool.) Shows the
        # backend progression forward_star (old linked-list default) -> vec
        # (SBO) -> bstr (bit-string) -> vec_pool (the default, drops fwd_star's per-edge
        # pointer chase). forward_star uses the bare-named base combo; bstr has
        # dedicated combos in benchmark.cpp (one per selector).
        ("apxchol_v1","bg+tree[fwd_star]"),
-       ("apxchol_v1","luby+tree[fwd_star]"),
-       ("apxchol_v1","root+tree[fwd_star]"),
+       ("apxchol_v1","greedy+tree[fwd_star]"),
        ("apxchol_v1","bk+tree[fwd_star]"),
        ("apxchol_v1","bg+tree[bstr]"),
-       ("apxchol_v1","luby+tree[bstr]"),
-       ("apxchol_v1","root+tree[bstr]"),
+       ("apxchol_v1","greedy+tree[bstr]"),
        ("apxchol_v1","bk+tree[bstr]")]
 # The single headline apxchol config is bg+tree.
 # CHOLMOD not included (direct solver; the suite compares preconditioned
@@ -450,8 +447,7 @@ NOCAP_TIMEOUT = int(os.environ.get("NOCAP_TIMEOUT_S", str(4 * 3600)))
 # is 2D-structured-grid only (added per-matrix in do_matrix). amgcl_cuda's host-side
 # AMG setup is now OpenMP-parallel (CMakeLists -Xcompiler=-fopenmp fix).
 APX_GPU = [("apxchol_v1", APX_DEFAULT_CONFIG),
-           ("apxchol_v1","luby+tree[vec_pool]"),   # luby/root produce shallow, deterministic
-           ("apxchol_v1","root+tree[vec_pool]"),    # factors -> faster + stable GPU SpTRSV than
+           ("apxchol_v1","greedy+tree[vec_pool]"), # priority-greedy is shallow and deterministic
            ("apxchol_v1","bk+tree[vec_pool]")]      # bg's variable depth; bk is the deep worst case
 COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda"]
 
@@ -643,8 +639,9 @@ def main():
     # CMG is serial MATLAB: it has no GPU axis, so its cells are device=cpu only.
     if a.no_cmg or DEVICE == "gpu": RUN_CMG = False
     if a.headline_only:
-        APX = [("apxchol_v1","bg+tree[vec_pool]"), ("apxchol_v1","luby+tree[vec_pool]"),
-               ("apxchol_v1","root+tree[vec_pool]"), ("apxchol_v1","bk+tree[vec_pool]")]
+        APX = [("apxchol_v1","bg+tree[vec_pool]"),
+               ("apxchol_v1","greedy+tree[vec_pool]"),
+               ("apxchol_v1","bk+tree[vec_pool]")]
         # NOTE: --headline-only restricts the apxchol CONFIG list only. It no longer
         # disables AC/AC2: leaving their cells empty silently understates coverage.
         # Use --no-julia explicitly when you want the speed (they are slow, and hit

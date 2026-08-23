@@ -2701,27 +2701,23 @@ int main(int argc, char** argv) {
             // forward_star (base)
             {"bg+tree",   "block_greedy"},
             {"bk+tree",   "baumann_kyng"},
-            {"root+tree", "rootset"},
-            {"luby+tree", "luby"},
+            {"greedy+tree", "priority_greedy"},
             // vec
             {"bg+tree",   "block_greedy", gs::vec},
             {"bk+tree",   "baumann_kyng", gs::vec},
-            {"root+tree", "rootset", gs::vec},
-            {"luby+tree", "luby", gs::vec},
+            {"greedy+tree", "priority_greedy", gs::vec},
             // bstr (bit-string): remaining storage backend across
-            // ALL four selectors -- completes the full selector x storage grid
-            // (fwd_star / vec / bstr / vec_pool  x  bg / bk / root / luby) for
+            // All selectors -- completes the selector x storage grid
+            // (fwd_star / vec / bstr / vec_pool x bg / bk / greedy) for
             // the ablation heatmap. fwd_star + vec are the bare-named combos above;
             // vec_pool below. Name carries the tag so --v1-configs selects it directly.
             {.name="bg+tree[bstr]",   .is="block_greedy", .storage=gs::bstr},
             {.name="bk+tree[bstr]",   .is="baumann_kyng", .storage=gs::bstr},
-            {.name="root+tree[bstr]", .is="rootset",      .storage=gs::bstr},
-            {.name="luby+tree[bstr]", .is="luby",         .storage=gs::bstr},
+            {.name="greedy+tree[bstr]", .is="priority_greedy", .storage=gs::bstr},
             // vec_pool (charted backend)
             {.name="bg+tree[vec_pool]",   .is="block_greedy", .storage=gs::vec_pool},
             {.name="bk+tree[vec_pool]",   .is="baumann_kyng", .storage=gs::vec_pool},
-            {.name="root+tree[vec_pool]", .is="rootset",      .storage=gs::vec_pool},
-            {.name="luby+tree[vec_pool]", .is="luby",         .storage=gs::vec_pool},
+            {.name="greedy+tree[vec_pool]", .is="priority_greedy", .storage=gs::vec_pool},
             // /hos: legacy heavy-oversample variant, kept so old --v1-configs strings still
             // resolve. It carries no extra knobs today (the oversampling levers were removed
             // from the library), so it behaves like bg+tree[vec_pool] -- which is the charted

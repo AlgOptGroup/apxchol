@@ -45,9 +45,9 @@ struct partition_options {
     /// Conflict resolution / greedy tie-break by (degree, index) instead of index
     /// alone: when two adjacent candidates compete, the LOWER-degree one wins
     /// (index breaks ties). Biases the IS toward low-degree vertices with no
-    /// per-block sort. block_greedy uses the (degree,index) resolution; luby and
-    /// rootset fold degree into their selection priority (degree-major, hash
-    /// tie-break). DEFAULT on — pairs with degree_quantile; small consistent
+    /// per-block sort. block_greedy uses the (degree,index) resolution;
+    /// priority_greedy folds degree into its selection priority (degree-major,
+    /// hash tie-break). DEFAULT on — pairs with degree_quantile; small consistent
     /// iteration win, O(1) per conflict (no sort).
     bool degree_tiebreak = true;
 };
@@ -87,7 +87,7 @@ struct factor_options {
     //
     // SIZE_MAX here does NOT mean "serial peel": it means "defer to the
     // partitioner", and every shipped partitioner that can bail out
-    // (block_greedy, luby, rootset) declares residual_handoff_threshold = 500,
+    // (block_greedy, priority_greedy) declares residual_handoff_threshold = 500,
     // so the BK residual loop IS on by default.  Set an explicit value to
     // override the trait; the serial peel is only reached for the last
     // `residual_handoff_threshold` vertices.
@@ -130,8 +130,8 @@ struct factor_options {
     // Empirical findings on grid + IPM Laplacians (16T, see fs-compact sweep):
     //   * grid_2000:  every threshold > 0 makes setup slower by 30-100% vs off,
     //                 and total time is also worse.
-    //   * LP-IPM Schur complements: helps root+tree (~25% total), neutral on
-    //                 bg+tree, hurts bk+tree.
+    //   * LP-IPM Schur complements: helped the now-retired rootset path
+    //                 (~25% total), was neutral on bg+tree, and hurt bk+tree.
     // So we ship it OFF by default and let callers opt in per matrix class.
     // forward_star storage only; other backends ignore this option.
     double fs_compact_threshold = 0.0;

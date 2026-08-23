@@ -442,7 +442,7 @@ def test_fill_ratio_and_version():
 
 def test_alternate_partitioner_converges():
     L = grid2d_laplacian(30)
-    slv = apxchol.factorize(L, partitioner="luby", seed=3)
+    slv = apxchol.factorize(L, partitioner="priority_greedy", seed=3)
     rng = np.random.default_rng(14)
     b = rng.standard_normal(L.shape[0]); b -= b.mean()
     res = slv.solve(b, rtol=1e-8, maxiter=500)

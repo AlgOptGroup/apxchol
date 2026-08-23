@@ -31,31 +31,24 @@ from runner_common import (APXCHOL_DEFAULT_CONFIG, mat_labels,
 
 # ── THE SERIES RULE (same as fair_charts) ────────────────────────────────────────
 # Every series is EXACTLY ONE (solver, configuration); no series is a per-cell
-# minimum over configurations. Previously all four apxchol IS-selectors mapped to a
-# single "apxchol (GPU)" label and load() kept the fastest of the four per matrix,
+# minimum over configurations. Previously all apxchol IS-selectors mapped to a
+# single "apxchol (GPU)" label and load() kept the fastest selector per matrix,
 # while BoomerAMG's two configurations stayed two separate series -- best-of-4 for
 # us, best-of-1 for them. On the 27 GPU matrices in the store that minimum was worth
 # a geomean 9.7% (max 2.33x on parabolic_fem) against apxchol's own declared
 # default, and it also shrank the 10x-apxchol cap that every timed-out competitor
-# bar is clamped to. The selector spread lives in the dedicated selector/ablation
-# figures, which read the per-config cells directly.
-APX_SERIES  = ["apxchol/bg (GPU)", "apxchol/luby (GPU)",
-               "apxchol/root (GPU)", "apxchol/bk (GPU)"]
+# bar is clamped to. Headline charts therefore show only the declared bg default;
+# selector spread lives in dedicated selector/ablation figures.
+APX_SERIES  = ["apxchol/bg (GPU)"]
 ORDER  = APX_SERIES + ["ParAC Graph (GPU)", "ParAC Physics (GPU)",
           "BoomerAMG (GPU)", "BoomerAMG/cut (GPU)", "AMGCL (GPU)"]
 COLORS = {"apxchol/bg (GPU)": "#0b5394",     # declared default = darkest blue
-          "apxchol/luby (GPU)": "#3d7ebf",   # the other selectors get their own
-          "apxchol/root (GPU)": "#6fa8dc",   # shades, exactly as BoomerAMG's two
-          "apxchol/bk (GPU)": "#a4c2f4",     # configurations get two greens
           "ParAC Graph (GPU)": "#ff8c00", "ParAC Physics (GPU)": "#e6550d",
           "BoomerAMG (GPU)": "#2ca02c", "BoomerAMG/cut (GPU)": "#74c476",
           "AMGCL (GPU)": "#8c564b"}
 # (solver, config) -> chart label for GPU cells. MUST stay injective (asserted below).
 LABELS = {
     ("apxchol_v1", "bg+tree[vec_pool]"): "apxchol/bg (GPU)",
-    ("apxchol_v1", "luby+tree[vec_pool]"): "apxchol/luby (GPU)",
-    ("apxchol_v1", "root+tree[vec_pool]"): "apxchol/root (GPU)",
-    ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk (GPU)",
     ("hypre_boomeramg_gpu", ""): "BoomerAMG (GPU)",
     ("hypre_boomeramg_gpu", "cut"): "BoomerAMG/cut (GPU)",
     ("amgcl_cuda", ""): "AMGCL (GPU)",

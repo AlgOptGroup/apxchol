@@ -83,6 +83,16 @@ class SeriesRuleTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gpu.load(handle.name)
 
+    def test_current_greedy_cell_wins_over_legacy_luby_regardless_of_order(self):
+        legacy = record("complete", 1.0, solver="apxchol_v1",
+                        config="luby+tree[vec_pool]")
+        current = record("complete", 2.0, solver="apxchol_v1",
+                         config="greedy+tree[vec_pool]")
+        for records in ([legacy, current], [current, legacy]):
+            data = cpu._cpu_selector_data(records, family="audit",
+                                           storage="vec_pool")
+            self.assertEqual(data[("greedy", "vec_pool")]["m"]["total_s"], 2.0)
+
 
 class CellSchemaTest(unittest.TestCase):
     def test_timeout_requires_and_persists_exact_cap(self):
@@ -130,7 +140,7 @@ class CapReferenceTest(unittest.TestCase):
                         threads=16, device="gpu", prov={})
             rc.emit_cell(config=sweep_fair.APX_DEFAULT_CONFIG,
                          metrics={"total_s": 10.0}, **base)
-            rc.emit_cell(config="luby+tree[vec_pool]", metrics={"total_s": 1.0}, **base)
+            rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0}, **base)
             self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 10.0)
 
 

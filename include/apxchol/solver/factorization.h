@@ -61,7 +61,7 @@ struct factorization {
 /// Partitioner controls the per-round IS / region selection strategy.
 /// Defaults to block_greedy_partitioner; callers can substitute any
 /// partitioner from partitioner_list.h at compile time:
-///   auto F = factorize<luby_partitioner>(G, opts);
+///   auto F = factorize<priority_greedy_partitioner>(G, opts);
 template<typename Partitioner = block_greedy_partitioner, incidence_storage Incidence>
 factorization factorize(graph<Incidence> G,
                         const factor_options& opts = {},

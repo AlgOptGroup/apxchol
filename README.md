@@ -63,7 +63,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 Useful CLI knobs: `--tol`, `--maxiter`, `--input-kind {auto|laplacian|adjacency}`,
-`--is {block_greedy|luby|baumann_kyng|rootset}`,
+`--is {block_greedy|priority_greedy|baumann_kyng}`,
 `--graph-storage {vec|forward_star|bstr|vec_pool}`,
 `-o solution.mtx`, `--seed`. See `--help` for the full list.
 

@@ -16,7 +16,7 @@ import numpy as np
 ROOT = str(Path(__file__).resolve().parents[1])   # repo root
 BIN = f"{ROOT}/benchmarks/build/benchmark"
 OUT_CSV = f"{ROOT}/results/selector_levels.csv"
-SELS = ["bg", "luby", "root", "bk"]
+SELS = ["bg", "greedy", "bk"]
 PAT = re.compile(r"fwd_lvls=(\d+) \(max=(\d+)\) bck_lvls=(\d+)")
 
 # (matrix_id, family, bench-args, needs_reg) — the cross-family poster set + the

@@ -74,8 +74,8 @@ solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
 ```
 
 - `seed` — RNG seed for the randomized clique sampling.
-- `partitioner` — independent-set selector: `block_greedy` (default), `luby`,
-  `baumann_kyng`, `rootset`.
+- `partitioner` — independent-set selector: `block_greedy` (default),
+  `priority_greedy`, or `baumann_kyng`.
 - `storage` — graph backend: `vec_pool` (default), `forward_star`, `vec`, `bstr`.
 - `keep_factor` — keep the factor arrays alive for export (default `True`).
   Costs one extra factor-sized copy in memory (~8 bytes per factor nonzero in

@@ -41,14 +41,11 @@ ENC = ("colour = solver  ·  GPU = black-outlined bar, CPU = plain"
 # (name, colour, cpu_label, gpu_label). cpu_label/gpu_label = None when the solver
 # has no bar on that device (RCHOL/pRCHOL/AC/AC2 are CPU-only).
 #
-# THE SERIES RULE (fair_charts.LABELS): one row per (solver, configuration). apxchol's
-# four IS-selectors are four bars, exactly as BoomerAMG's two configurations are two
-# bars -- neither is collapsed into a per-matrix minimum over the other.
+# THE SERIES RULE (fair_charts.LABELS): one row per (solver, configuration).
+# Headline figures show apxchol's declared bg default only; selector comparisons
+# live in the compact dedicated ablation heatmaps.
 SOLVERS = [
     ("apxchol/bg",    "#0b5394", "apxchol/bg",    "apxchol/bg (GPU)"),
-    ("apxchol/luby",  "#3d7ebf", "apxchol/luby",  "apxchol/luby (GPU)"),
-    ("apxchol/root",  "#6fa8dc", "apxchol/root",  "apxchol/root (GPU)"),
-    ("apxchol/bk",    "#a4c2f4", "apxchol/bk",    "apxchol/bk (GPU)"),
     ("BoomerAMG",     "#2ca02c", "BoomerAMG",     "BoomerAMG (GPU)"),
     ("BoomerAMG/cut", "#74c476", "BoomerAMG/cut", "BoomerAMG/cut (GPU)"),
     ("AMGCL",         "#8c564b", "AMGCL",         "AMGCL (GPU)"),

@@ -20,11 +20,11 @@
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/solver/partition/baumann_kyng.h"
-#include "apxchol/solver/partition/luby.h"
+#include "apxchol/solver/partition/priority_greedy.h"
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/solve.h"
 #if defined(APXCHOL_USE_CUDA)
-#include "apxchol/solver/gpu_luby_frontend.h"
+#include "apxchol/solver/gpu_priority_frontend.h"
 #endif
 
 // ── Helpers ──────────────────────────────────────────
@@ -276,10 +276,6 @@ TYPED_TEST(FactorizeTest, Deterministic) {
 //     ReleasesTheFactorAndSolvesIdentically — which factorizes a 120x120 grid
 //     twice and compares — failed 19/50 at T=8, 16/50 at T=16, 19/50 at T=32,
 //     and 0/50 at T=1 and T=4.
-//   * rootset's peel passes are `schedule(dynamic, 64)` into per-thread
-//     buffers, so the frontier ORDER (not the set) followed chunk arrival:
-//     same independent set, different labels, different stored factor.
-//
 // Both are selection-side, so one storage suffices here; the storage x
 // partitioner matrix was checked separately.
 namespace {
@@ -334,7 +330,8 @@ TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
     // block_greedy race needed.
     const scoped_threads team(16);
     const auto L = grid_laplacian(120, 120);
-    for (const char* sel : {"block_greedy", "luby", "rootset", "baumann_kyng"}) {
+    for (const char* sel :
+         {"block_greedy", "priority_greedy", "baumann_kyng"}) {
         apxchol::factor_options opts;
         opts.seed = 3;
         opts.omp_threshold = 256;
@@ -727,9 +724,8 @@ class StrategyConvergenceTest
 
 static const StrategyCombo all_combos[] = {
     {"block_greedy", "bg_tree"},
-    {"luby",         "luby_tree"},
+    {"priority_greedy", "priority_greedy_tree"},
     {"baumann_kyng", "bk_tree"},
-    {"rootset",      "root_tree"},
 };
 
 TEST_P(StrategyConvergenceTest, GridConverges) {
@@ -1074,27 +1070,67 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
         << unseeded << ", seeded 4000 => " << inflated << ")";
 }
 
+TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
+    constexpr apxchol::node_index n = 80;
+    apxchol::graph<apxchol::vec_pool_incidence> G(n);
+    for (apxchol::node_index v = 0; v < n; ++v) {
+        G.add_edge(v, (v + 1) % n, 1.0);
+        G.add_edge(v, (v + 7) % n, 1.0);
+        if ((v % 3) == 0) G.add_edge(v, (v + 19) % n, 1.0);
+    }
+    std::vector<apxchol::node_index> candidates(n), degrees;
+    std::iota(candidates.begin(), candidates.end(), apxchol::node_index{0});
+    (void)apxchol::prune_and_degrees(G, candidates, degrees, 2000);
+    apxchol::partition_context ctx{
+        .options = {}, .seed = 17, .omp_threshold = 2000, .cp = nullptr,
+        .degrees = degrees,
+    };
+    auto select = [&](int passes) {
+        apxchol::priority_greedy_partitioner p;
+        p.parallel_passes = passes;
+        apxchol::selection selected;
+        selected.reset(n);
+        p.find_partition(G, candidates, ctx, selected);
+        return selected.finalize().data;
+    };
+
+    const auto parallel = select(16);
+    const auto fallback = select(0);
+    EXPECT_EQ(fallback, parallel);
+
+    std::vector<unsigned char> in_set(n, 0);
+    for (const auto v : fallback) in_set[v] = 1;
+    for (const auto v : candidates) {
+        bool has_selected_neighbor = false;
+        for (const auto edge : G.adj(v)) {
+            const auto u = G.edge_target(edge, v);
+            EXPECT_FALSE(in_set[v] && in_set[u]);
+            has_selected_neighbor |= in_set[u] != 0;
+        }
+        EXPECT_TRUE(in_set[v] || has_selected_neighbor)
+            << "uncovered vertex " << v;
+    }
+}
+
 #if defined(APXCHOL_USE_CUDA)
-TEST(GpuLubyFrontend, ConfigurationParsingIsStrict) {
-    using frontend = apxchol::detail::gpu_luby_frontend;
-    const char* old = std::getenv("APXCHOL_GPU_LUBY_FRONTEND");
+TEST(GpuPriorityFrontend, ConfigurationParsingIsStrict) {
+    using frontend = apxchol::detail::gpu_priority_frontend;
+    const char* old = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
     const bool had_old = old != nullptr;
     const std::string saved = old ? old : "";
 
-    unsetenv("APXCHOL_GPU_LUBY_FRONTEND");
+    unsetenv("APXCHOL_GPU_PRIORITY_FRONTEND");
     EXPECT_EQ(frontend::configured_mode(), frontend::mode::disabled);
-    setenv("APXCHOL_GPU_LUBY_FRONTEND", "auto", 1);
-    EXPECT_EQ(frontend::configured_mode(), frontend::mode::automatic);
-    setenv("APXCHOL_GPU_LUBY_FRONTEND", "force", 1);
+    setenv("APXCHOL_GPU_PRIORITY_FRONTEND", "force", 1);
     EXPECT_EQ(frontend::configured_mode(), frontend::mode::forced);
-    setenv("APXCHOL_GPU_LUBY_FRONTEND", "0", 1);
+    setenv("APXCHOL_GPU_PRIORITY_FRONTEND", "0", 1);
     EXPECT_EQ(frontend::configured_mode(), frontend::mode::disabled);
 
-    if (had_old) setenv("APXCHOL_GPU_LUBY_FRONTEND", saved.c_str(), 1);
-    else unsetenv("APXCHOL_GPU_LUBY_FRONTEND");
+    if (had_old) setenv("APXCHOL_GPU_PRIORITY_FRONTEND", saved.c_str(), 1);
+    else unsetenv("APXCHOL_GPU_PRIORITY_FRONTEND");
 }
 
-TEST(GpuLubyFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly) {
+TEST(GpuPriorityFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly) {
     using apxchol::detail::gpu_topology_edge;
     constexpr apxchol::node_index n = 12;
     const std::vector<gpu_topology_edge> initial = {
@@ -1106,8 +1142,8 @@ TEST(GpuLubyFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly) {
 
     apxchol::graph<apxchol::vec_pool_incidence> cpu_graph(n);
     for (const auto e : initial) cpu_graph.add_edge(e.u, e.v, 1.0);
-    apxchol::detail::gpu_luby_frontend gpu(n, initial);
-    apxchol::luby_partitioner cpu;
+    apxchol::detail::gpu_priority_frontend gpu(n, initial);
+    apxchol::priority_greedy_partitioner cpu;
 
     std::vector<apxchol::node_index> active(n);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
@@ -1171,26 +1207,26 @@ TEST(GpuLubyFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly) {
     }
 }
 
-TEST(GpuLubyFrontend, IntegratedFactorizationMatchesCpuFrontend) {
-    const char* old = std::getenv("APXCHOL_GPU_LUBY_FRONTEND");
+TEST(GpuPriorityFrontend, IntegratedFactorizationMatchesCpuFrontend) {
+    const char* old = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
     const bool had_old = old != nullptr;
     const std::string saved = old ? old : "";
 
     auto L = grid_laplacian(48, 48);
     apxchol::factor_options opts;
     opts.seed = 42;
-    opts.is_select = "luby";
+    opts.is_select = "priority_greedy";
     opts.omp_threshold = 64;
 
-    setenv("APXCHOL_GPU_LUBY_FRONTEND", "0", 1);
+    setenv("APXCHOL_GPU_PRIORITY_FRONTEND", "0", 1);
     const auto cpu = apxchol::factorize(
         L, apxchol::graph_storage::vec_pool, opts);
-    setenv("APXCHOL_GPU_LUBY_FRONTEND", "force", 1);
+    setenv("APXCHOL_GPU_PRIORITY_FRONTEND", "force", 1);
     const auto gpu = apxchol::factorize(
         L, apxchol::graph_storage::vec_pool, opts);
 
-    if (had_old) setenv("APXCHOL_GPU_LUBY_FRONTEND", saved.c_str(), 1);
-    else unsetenv("APXCHOL_GPU_LUBY_FRONTEND");
+    if (had_old) setenv("APXCHOL_GPU_PRIORITY_FRONTEND", saved.c_str(), 1);
+    else unsetenv("APXCHOL_GPU_PRIORITY_FRONTEND");
 
     EXPECT_EQ(gpu.perm, cpu.perm);
     ASSERT_EQ(gpu.L.rows(), cpu.L.rows());
@@ -1207,14 +1243,4 @@ TEST(GpuLubyFrontend, IntegratedFactorizationMatchesCpuFrontend) {
                            gpu.L.valuePtr()));
 }
 
-TEST(GpuLubyFrontend, ConservativeAutoGovernorSeparatesMeasuredShapes) {
-    using frontend = apxchol::detail::gpu_luby_frontend;
-    EXPECT_FALSE(frontend::automatic_worthwhile(250000, 998000, 0));
-    EXPECT_FALSE(frontend::automatic_worthwhile(524288, 7343110, 520000));
-    EXPECT_FALSE(frontend::automatic_worthwhile(334863, 1851744, 111500));
-    EXPECT_FALSE(frontend::automatic_worthwhile(65536, 4912142, 4526500));
-    EXPECT_TRUE(frontend::automatic_worthwhile(1134890, 5975248, 2698500));
-    EXPECT_TRUE(frontend::automatic_worthwhile(1696415, 22190596, 11872000));
-    EXPECT_TRUE(frontend::automatic_worthwhile(540486, 30491458, 26930000));
-}
 #endif

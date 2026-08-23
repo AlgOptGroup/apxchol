@@ -39,6 +39,7 @@ Thumbs.db
 *.mexa64
 
 # Python
+.venv/
 __pycache__/
 *.pyc
 .pytest_cache/

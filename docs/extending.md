@@ -140,7 +140,7 @@ does before the call:
   applies the degree cap (`ctx.options.degree_quantile` /
   `degree_multiplier`): `candidates` is the *eligible* vertex list, and
   `ctx.degrees[v]` gives the current incident-edge count of every active
-  vertex. The shipped scan rules (block_greedy, luby, rootset) work this
+  vertex. The shipped scan rules (block_greedy, priority_greedy) work this
   way.
 - `false` — no O(active + edges) pre-pass: `candidates` is the raw active
   list (ascending original-index order) and `ctx.degrees` is empty.

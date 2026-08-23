@@ -25,7 +25,7 @@
 ///     and applies the degree cap (ctx.options.degree_quantile /
 ///     degree_multiplier): `candidates` is the ELIGIBLE vertex list, and
 ///     ctx.degrees[v] gives the current incident-edge count of every active
-///     vertex. The shipped scan rules (block_greedy, luby, rootset) use this.
+///     vertex. The shipped scan rules (block_greedy, priority_greedy) use this.
 ///   * false — no O(active + edges) pre-pass runs: `candidates` is the raw
 ///     active list (ascending original-index order) and ctx.degrees is
 ///     empty. baumann_kyng works this way — it estimates degrees from its
@@ -60,7 +60,7 @@
 /// sample_clique is called concurrently and each call must stay
 /// single-threaded. The parallelism cannot be hoisted into the orchestrator:
 /// the shipped rules parallelize over different structures (contiguous
-/// candidate blocks, repeated whole-set passes, DAG levels, a hash sample),
+/// candidate blocks, repeated whole-set passes, or a hash sample),
 /// so there is no common parallel skeleton to factor out.
 ///
 /// ── Determinism contract (REQUIRED of every partitioner) ──
@@ -74,11 +74,9 @@
 /// This is not a nicety. The round's selection is the elimination order, the
 /// elimination order is the permutation, and the permutation is the factor's
 /// stored structure — so a schedule-dependent selection makes nnz(L) itself
-/// wobble run to run. Two shipped rules violated it until 2026-08-20:
-/// block_greedy resolved cross-block conflicts against a mask other threads
-/// were concurrently clearing, and rootset built its peel frontier by
-/// concatenating `schedule(dynamic)` per-thread buffers. Both are fixed at
-/// their sites; the guard is FactorizeDeterminism.* in tests/test_factorize.cpp.
+/// wobble run to run. block_greedy once violated this contract by resolving
+/// cross-block conflicts against a mask other threads were concurrently
+/// clearing. The guard is FactorizeDeterminism.* in tests/test_factorize.cpp.
 ///
 /// The two patterns to avoid, concretely:
 ///   * reading `out.contains(u)` (or any shared flag) in a pass that also

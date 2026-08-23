@@ -21,7 +21,7 @@ import gpu_charts as gpu          # shared matrix × method heatmap (value_heatm
 
 FAMS = ["grids", "ipm", "suitesparse"]
 # solver key -> (label, colour), drawn/ordered in this list order:
-#   - apxchol per IS selector (bg/luby/root/bk): the order changes the factor density
+#   - apxchol per IS selector (bg/greedy/bk): the order changes the factor density
 #     (blues, darkest = bg);
 #   - AC/AC2 = Kyng16 approximate-Cholesky reference, Laplacian-only (so absent on the
 #     SDDM IPM matrices);
@@ -31,8 +31,7 @@ FAMS = ["grids", "ipm", "suitesparse"]
 #     differs and each is its own series (oranges).
 SOLVERS = [
     ("apxchol_bg",   "apxchol bg",   "#0b5394"),
-    ("apxchol_luby", "apxchol luby", "#3d85c6"),
-    ("apxchol_root", "apxchol root", "#6fa8dc"),
+    ("apxchol_greedy", "apxchol priority-greedy", "#3d85c6"),
     ("apxchol_bk",   "apxchol bk",   "#9fc5e8"),
     ("ac",  "AC [Kyng16]",  "#2ca02c"),
     ("ac2", "AC2 [Kyng16]", "#9467bd"),

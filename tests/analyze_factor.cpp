@@ -51,7 +51,7 @@ struct cli_options {
 [[noreturn]] void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s <matrix.mtx> [--graph-storage vec|forward_star|bstr|vec_pool]"
-                 " [--is block_greedy|luby|baumann_kyng|rootset]"
+                 " [--is block_greedy|priority_greedy|baumann_kyng]"
                  " [--min-is-frac FRACTION] [--parallel-residual-threshold N]"
                  " [--profile|--bench-trsv|--sweep-threads]\n",
                  argv0);
@@ -67,8 +67,8 @@ graph_storage parse_storage(const std::string& s) {
 }
 
 std::string parse_is(const std::string& s) {
-    if (s == "block_greedy" || s == "luby" || s == "baumann_kyng"
-        || s == "rootset") return s;
+    if (s == "block_greedy" || s == "priority_greedy"
+        || s == "baumann_kyng") return s;
     throw std::invalid_argument("unknown IS strategy: " + s);
 }
 
@@ -304,7 +304,7 @@ int main(int argc, char* argv[]) {
         // context before timing any solver.  Do the same here when the guarded
         // setup front-end is requested, so its factorization profile does not
         // include one process-wide lazy context creation.
-        if (const char* e = std::getenv("APXCHOL_GPU_LUBY_FRONTEND");
+        if (const char* e = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
             e && *e && std::strcmp(e, "0") != 0) {
             if (const cudaError_t err = cudaFree(nullptr); err != cudaSuccess)
                 throw std::runtime_error(cudaGetErrorString(err));

@@ -14,8 +14,8 @@ for methodology and [`latest/summary.md`](latest/summary.md) for the tables.
 
 | Solver | Type | Threads | Source |
 |---|---|---|---|
-| **apxchol** | Approximate Cholesky + PCG. **One series per IS-selector**; `apxchol/bg` is the declared default (see *Series rule* below) | 16 (C++) | this repo (`src/`, `include/apxchol/`) |
-| ↳ IS selectors | bg=block-greedy, luby, root=Blelloch rootset, bk=Baumann-Kyng; luby/root give shallow factors that the GPU SpTRSV prefers. Each is charted separately — the headline is never a min over the four | 16 (C++) | this repo |
+| **apxchol** | Approximate Cholesky + PCG. `apxchol/bg` is the declared headline default; selectors are compared in a separate compact ablation | 16 (C++) | this repo (`src/`, `include/apxchol/`) |
+| ↳ IS selectors | bg=block-greedy, greedy=fixed-priority greedy MIS, bk=Baumann-Kyng. Historical `luby` cells are read as `greedy`; redundant `root` is retired. | 16 (C++) | this repo |
 | **RCHOL** | Randomized Cholesky + **their own** PCG (`util/pcg.cpp`, MKL ILP64; serial factorization; x86 only) | serial factor | [ut-padas/rchol](https://github.com/ut-padas/rchol) |
 | **BoomerAMG** | Classical *algebraic* multigrid + PCG | 16 (C, OpenMP) | [Hypre](https://github.com/hypre-space/hypre) |
 | **AMGCL** | Smoothed-aggregation *algebraic* multigrid + PCG; Dirichlet-pin de-singularization, default config | 16 (C++) | [ddemidov/amgcl](https://github.com/ddemidov/amgcl) |
@@ -37,7 +37,7 @@ line) are the two multigrids kept.
   **iteration count** is the comparable signal (use it, not the wall-time).
 - **CHOLMOD** (direct supernodal Cholesky) is out of scope — the suite compares
   preconditioned iterative methods. `CG/LDLT [Eigen]` and the apxchol IS/storage
-  ablations (`bk/luby/root`, `vec`) exist in the binary but are not in the headline set.
+  ablations (`bk/greedy`, alternative storage) exist in the binary but are not in the headline set.
 
 ## Whose solve loop produced each number
 
@@ -138,12 +138,10 @@ the metric rather than storing a misleading value.
 
 - **Series rule — one series per (solver, configuration); no series is a minimum over
   configurations.** A chart series or a table column is exactly one solver at exactly
-  one configuration. Where a solver has several configurations, each gets its own
-  series: apxchol's four IS-selectors are `apxchol/bg` `/luby` `/root` `/bk`, exactly
-  as Hypre's two coarsenings are `BoomerAMG` and `BoomerAMG/cut`. The cross-method
-  poster uses one apxchol baseline **declared a priori** — `apxchol/bg`,
-  `fair_charts.APX_DEFAULT` — while keeping competitor configurations separate.
-  It never substitutes the per-column fastest selector.
+  one configuration. Cross-method headline charts use one apxchol baseline **declared
+  a priori** — `apxchol/bg`, `fair_charts.APX_DEFAULT` — while keeping competitor
+  configurations separate. The selector spread (`bg`, `greedy`, `bk`) appears only in
+  dedicated compact ablations. No chart substitutes the per-matrix fastest selector.
 
   This is enforced mechanically: `fair_charts.LABELS` and `gpu_charts.LABELS` pass
   a runtime injectivity check even under `python -O`, so a re-collapse fails loudly
@@ -806,7 +804,7 @@ This is the **fill-vs-iterations tradeoff** axis: a denser factor is a stronger
 preconditioner (fewer PCG iterations) but costs more memory and SpTRSV work. One
 consistent definition across the Cholesky-type solvers — AMG (BoomerAMG/AMGCL) has
 no triangular factor, so no comparable metric and they are absent here. Series:
-**apxchol per IS selector** (bg/luby/root/bk — the order changes the factor density),
+**apxchol per IS selector** (bg/greedy/bk — the order changes the factor density),
 the **AC/AC2** Kyng16 reference, **RCHOL/pRCHOL**, and **ParAC** split into
 **graph/physics × CPU/GPU** (the CPU AMD-reordered and GPU random-nnz-sort
 implementations factor differently, so their fill genuinely differs). apxchol and AC
@@ -825,7 +823,7 @@ absolute fill over the ×sparsest ratio).
 ### apxchol internal ablation: IS selector × storage backend
 
 apxchol has two orthogonal design axes — the independent-set **selector** (bg =
-block-greedy, luby, root = Blelloch rootset, bk = Baumann-Kyng) and the incidence
+block-greedy, greedy = fixed-priority greedy, bk = Baumann-Kyng) and the incidence
 **storage backend** (`fwd_star` → `vec` → `bstr`
 (bit-string) → `vec_pool`). The full selector×storage sweep is shown as
 small-multiple heatmaps (total / setup / solve / iterations), each cell medianed
@@ -838,10 +836,10 @@ the default backend's CPU→GPU shift (the GPU axis sweeps vec_pool only).
 family, and the only backend that doesn't collapse on the **high-degree IPM**
 matrices — there `fwd_star`'s per-edge linked-list pointer chase blows setup up to
 ~3× (median total ≈3.1–3.7 s across the four selectors vs vec_pool's ≈1.4–1.9 s). On the
-**low-degree grids** `fwd_star` is competitive (and marginally faster for `luby` and `bk`,
+**low-degree grids** `fwd_star` is competitive (and marginally faster for `greedy` and `bk`,
 though not for `bg`/`root`), confirming the pointer chase only bites at high degree.
 The `vec` (dense array) and `bstr`
-(bit-string) backends are middling — never the fastest. Among selectors `bg` / `luby`
+(bit-string) backends are middling — never the fastest. Among selectors `bg` / `greedy`
 / `root` are competitive and `bk` is consistently slowest. The GPU vec_pool column is
 fastest overall on grids (its solve is ≈4× the CPU's) and on most SuiteSparse, mixed
 on IPM.
@@ -853,16 +851,16 @@ on IPM.
 ### apxchol IS selector × graph type
 
 A cross-family view of the same selector question: which IS selector wins on which
-**graph type**, at the default `vec_pool` storage (t16). Rows = the four selectors,
+**graph type**, at the default `vec_pool` storage (t16). Rows = the three selectors,
 columns span the structured→irregular axis (2D/3D grids → FEM/planar → IPM →
 social/scale-free); colour normalises *per column* so green = the best selector for
 that graph and **bold** = the per-graph winner.
 
 **Takeaway:** on structured grids and FEM, `bg` is best and the spread is small;
-on the **dense social/citation graphs the selector matters a lot** — `root+tree`'s
-deep elimination tree makes its SpTRSV explode (coPapersDBLP ≈45 s, com-LiveJournal
-≈69 s) while `luby` stays robust and fastest there. `luby+tree` is the most uniformly
-good choice across graph types; `bk` is never the winner. (The iteration-count
+on the **dense social/citation graphs the selector matters a lot**. The retired
+`root+tree` path produced extremely deep elimination trees, while the same selected
+set emitted in candidate order by today's `greedy+tree` remains robust there.
+`greedy+tree` is the most uniformly good non-default choice; `bk` is rarely the winner. (The iteration-count
 variant is more uniform — the dramatic differences are in the SpTRSV solve, not the
 PCG iteration count.)
 
@@ -884,11 +882,11 @@ solve is scheduled in level sets (each level is a batch of columns with no remai
 dependencies), so the back-solve *level count* is the length of the critical path —
 fewer levels = a shallower factor = a faster SpTRSV. Dumping the per-`(selector,
 matrix)` level count (`APXCHOL_LEVEL_DUMP`, vec_pool, t16) shows exactly the structure
-behind the timing heatmap: `root+tree` builds a near-degenerate, very deep tree on the
+behind the historical timing heatmap: the retired `root+tree` built a near-degenerate, very deep tree on the
 dense social/citation graphs (coPapersDBLP **432,943** levels vs `bg`'s 4,956 — an 87×
 deeper critical path; as-Skitter 21,530 vs 7,214; grid3d 14,664 vs 1,368), which is why
 its SpTRSV explodes there. Conversely `bk+tree` deepens the structured grids and IPM
-ladders (iter0010 1,834 vs `bg`'s 156, a 12× blow-up). `bg`/`luby` stay shallow on every
+ladders (iter0010 1,834 vs `bg`'s 156, a 12× blow-up). `bg`/`greedy` stay shallow on every
 family — the level count is the single best predictor of the selector's solve cost.
 
 ![apxchol selector × matrix, SpTRSV back-solve level count](latest/figures/selector_levels.png)
@@ -947,9 +945,9 @@ bars *are* comparable — its physics driver is the per-component split on the p
 - **On IPM (SDDM), BoomerAMG leads** (10 iterations on every rung, to true 1e-8);
   apxchol tracks it within ~25% on total time (and wins `iter0010`); the other
   Cholesky-type solvers trail it by 1.5–9× (ParAC 1.5–3.5×, pRCHOL 2–3×, RCHOL 5–9×).
-  Among apxchol configs the IPM lead is
-  **`bg`/`luby`** (median total 1.42 s each vs `root` 1.47 s, `bk` 1.86 s); on the GPU
-  axis `luby` takes IPM (1.16 s vs `bg` 1.31). No selector generalizes: on the CPU
+  Among the historical apxchol configs the IPM lead was
+  **`bg`/`greedy`** (median total 1.42 s each vs retired `root` 1.47 s, `bk` 1.86 s); on the GPU
+  axis `greedy` takes IPM (1.16 s vs `bg` 1.31). No selector generalizes: on the CPU
   medians over the matrices every selector completed, `bg` leads grids (7.78 s) and
   SuiteSparse (1.15 s) with `root` third there (8.50 s / 1.25 s) and `bk` last
   everywhere. Pick per graph type — see the selector heatmaps above.

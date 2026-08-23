@@ -118,10 +118,11 @@ def ac_fill(mid, family, args, reg):
         emit(mid, family, solver, n, adjA, offL)
 
 
-# apxchol fill per IS-selector (bg/luby/root/bk): the elimination order differs, so the
+# apxchol fill per IS-selector (bg/greedy/bk): the elimination order differs, so the
 # factor density does too -- charted as separate series next to the AC reference.
-APX_SELECTORS = [("apxchol_bg", "bg+tree[vec_pool]"), ("apxchol_luby", "luby+tree[vec_pool]"),
-                 ("apxchol_root", "root+tree[vec_pool]"), ("apxchol_bk", "bk+tree[vec_pool]")]
+APX_SELECTORS = [("apxchol_bg", "bg+tree[vec_pool]"),
+                 ("apxchol_greedy", "greedy+tree[vec_pool]"),
+                 ("apxchol_bk", "bk+tree[vec_pool]")]
 
 def apxchol_fill(mid, family, args, reg):
     regflag = f"--reg-rel {REG}" if reg else ""

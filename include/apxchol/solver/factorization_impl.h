@@ -16,7 +16,7 @@
 #include "apxchol/checkpoint.h"
 #include "apxchol/env_knobs.h"
 #if defined(APXCHOL_USE_CUDA)
-#include "apxchol/solver/gpu_luby_frontend.h"
+#include "apxchol/solver/gpu_priority_frontend.h"
 #endif
 #include <algorithm>
 #include <array>
@@ -78,7 +78,7 @@ inline bool selection_should_handoff(
 }
 
 // The relative yield at which the main selector stops should reflect both the
-// size and the density of the residual. BG/Luby/rootset rescan it; BK samples
+// size and the density of the residual. BG/priority-greedy rescan it; BK samples
 // bounded edge work after an O(active) hash pass. Keep min_is_fraction as the
 // sparse/small-residual base and preserve zero as "disable yield bailout".
 //
@@ -737,101 +737,43 @@ factorization factorize_impl(const Eliminator& elim,
 
 #if defined(APXCHOL_USE_CUDA)
     constexpr bool gpu_frontend_eligible =
-        std::is_same_v<Partitioner, luby_partitioner> &&
+        std::is_same_v<Partitioner, priority_greedy_partitioner> &&
         std::is_same_v<Incidence, vec_pool_incidence> &&
         std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
-    std::unique_ptr<detail::gpu_luby_frontend> gpu_frontend;
-    detail::gpu_luby_frontend::mode gpu_frontend_mode =
-        detail::gpu_luby_frontend::mode::disabled;
+    std::unique_ptr<detail::gpu_priority_frontend> gpu_frontend;
+    detail::gpu_priority_frontend::mode gpu_frontend_mode =
+        detail::gpu_priority_frontend::mode::disabled;
     if constexpr (gpu_frontend_eligible) {
-        gpu_frontend_mode = detail::gpu_luby_frontend::configured_mode();
-        if (gpu_frontend_mode != detail::gpu_luby_frontend::mode::disabled &&
+        gpu_frontend_mode = detail::gpu_priority_frontend::configured_mode();
+        if (gpu_frontend_mode != detail::gpu_priority_frontend::mode::disabled &&
             opts.exact_clique_max_degree != 0) {
-            if (gpu_frontend_mode == detail::gpu_luby_frontend::mode::forced)
-                throw std::invalid_argument(
-                    "APXCHOL_GPU_LUBY_FRONTEND=force requires the default "
-                    "d-1-edge tree sampler (exact clique mode can grow topology)");
-            gpu_frontend_mode = detail::gpu_luby_frontend::mode::disabled;
+            throw std::invalid_argument(
+                "APXCHOL_GPU_PRIORITY_FRONTEND=force requires the default "
+                "d-1-edge tree sampler (exact clique mode can grow topology)");
         }
-        // The auto rule is unconditionally off below this size. Avoid walking
-        // every adjacency merely to rediscover that fixed size guard.
-        const char* gpu_init_stats_env =
-            std::getenv("APXCHOL_GPU_LUBY_INIT_STATS");
-        const bool gpu_init_stats = gpu_init_stats_env && *gpu_init_stats_env &&
-            std::strcmp(gpu_init_stats_env, "0") != 0;
-        if (gpu_frontend_mode == detail::gpu_luby_frontend::mode::automatic &&
-            n < detail::gpu_luby_frontend::automatic_min_vertices &&
-            !gpu_init_stats)
-            gpu_frontend_mode = detail::gpu_luby_frontend::mode::disabled;
-        if (gpu_frontend_mode != detail::gpu_luby_frontend::mode::disabled) {
-            std::size_t initial_incidence = 0;
-            std::size_t initial_incidence_ge32 = 0;
-            for (node_index v = 0; v < n; ++v) {
-                const auto av = work.adj(v);
-                const std::size_t degree = av.size();
-                initial_incidence += degree;
-                if (degree >= 32) initial_incidence_ge32 += degree;
-            }
-            const bool auto_mode = gpu_frontend_mode ==
-                detail::gpu_luby_frontend::mode::automatic;
-            bool enable_frontend = !auto_mode ||
-                detail::gpu_luby_frontend::automatic_worthwhile(
-                    n, initial_incidence, initial_incidence_ge32);
-            if (enable_frontend) {
-                const auto runtime = detail::gpu_luby_frontend::probe_runtime(
-                    n, static_cast<std::size_t>(work.m()));
-                if (!runtime.cooperative_launch || !runtime.memory_fits) {
-                    if (!auto_mode) {
-                        throw std::runtime_error(
-                            !runtime.cooperative_launch
-                                ? "APXCHOL_GPU_LUBY_FRONTEND=force requires a CUDA device "
-                                  "with cooperative-kernel launch support"
-                                : "APXCHOL_GPU_LUBY_FRONTEND=force does not fit in "
-                                  "currently free device memory");
-                    }
-                    enable_frontend = false;
-                    if (std::getenv("APXCHOL_VERBOSE")) {
-                        std::fprintf(stderr,
-                            "[apxchol] GPU Luby auto disabled: cooperative=%s "
-                            "estimated=%.1f MiB free=%.1f MiB\n",
-                            runtime.cooperative_launch ? "yes" : "no",
-                            runtime.estimated_bytes / 1048576.0,
-                            runtime.free_bytes / 1048576.0);
-                    }
-                }
-            }
-            if (gpu_init_stats) {
-                const long double incidence = initial_incidence;
-                const long double avg = n ? incidence / n : 0.0L;
-                std::fprintf(stderr,
-                    "[gpu-luby-init] n=%llu edges=%zu avg=%.3Lf "
-                    "inc_ge32=%.4Lf auto=%s\n",
-                    static_cast<unsigned long long>(n), initial_incidence / 2, avg,
-                    incidence > 0.0L ? initial_incidence_ge32 / incidence : 0.0L,
-                    enable_frontend ? "on" : "off");
+        if (gpu_frontend_mode != detail::gpu_priority_frontend::mode::disabled) {
+            const auto runtime = detail::gpu_priority_frontend::probe_runtime(
+                n, static_cast<std::size_t>(work.m()));
+            if (!runtime.cooperative_launch || !runtime.memory_fits) {
+                throw std::runtime_error(
+                    !runtime.cooperative_launch
+                        ? "APXCHOL_GPU_PRIORITY_FRONTEND=force requires a CUDA device "
+                          "with cooperative-kernel launch support"
+                        : "APXCHOL_GPU_PRIORITY_FRONTEND=force does not fit in "
+                          "currently free device memory");
             }
             if (cp) (*cp)("gpu_frontend_probe");
-            if (enable_frontend) {
-                try {
-                    std::vector<detail::gpu_topology_edge> initial_topology;
-                    initial_topology.reserve(static_cast<std::size_t>(work.m()));
-                    for (node_index v = 0; v < n; ++v) {
-                        for (auto idx : work.adj(v)) {
-                            const node_index u = work.edge_target(idx, v);
-                            if (v < u) initial_topology.push_back({v, u});
-                        }
-                    }
-                    gpu_frontend = std::make_unique<detail::gpu_luby_frontend>(
-                        n, initial_topology);
-                    if (cp) (*cp)("gpu_frontend_init");
-                } catch (const std::exception& ex) {
-                    if (!auto_mode) throw;
-                    std::fprintf(stderr,
-                        "[apxchol] GPU Luby auto fell back during initialization: %s\n",
-                        ex.what());
-                    gpu_frontend.reset();
+            std::vector<detail::gpu_topology_edge> initial_topology;
+            initial_topology.reserve(static_cast<std::size_t>(work.m()));
+            for (node_index v = 0; v < n; ++v) {
+                for (auto idx : work.adj(v)) {
+                    const node_index u = work.edge_target(idx, v);
+                    if (v < u) initial_topology.push_back({v, u});
                 }
             }
+            gpu_frontend = std::make_unique<detail::gpu_priority_frontend>(
+                n, initial_topology);
+            if (cp) (*cp)("gpu_frontend_init");
         }
     }
 #endif
@@ -856,47 +798,36 @@ factorization factorize_impl(const Eliminator& elim,
         using P = std::remove_reference_t<decltype(p)>;
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (gpu_frontend_eligible &&
-                      std::is_same_v<P, luby_partitioner>) {
+                      std::is_same_v<P, priority_greedy_partitioner>) {
             if (gpu_frontend) {
                 if (cp) { cp->descend("find_partition"); cp->tick(); }
-                try {
-                    const auto prep = gpu_frontend->prepare(act, opts.partition);
-                    last_candidate_count = prep.candidate_count;
-                    last_avg_degree = prep.average_degree;
-                    // The elimination work gate below indexes degrees by vertex.
-                    // The CPU prepass fills this array as part of candidate
-                    // filtering; the GPU frontend returns the same degrees in
-                    // active-list order, so mirror that contract here.  Without
-                    // this copy the first GPU-selected round reads an empty
-                    // live_degrees vector in release builds.
-                    if (live_degrees.size() < static_cast<size_t>(g.n()))
-                        live_degrees.resize(g.n());
-                    const auto gpu_degrees = gpu_frontend->host_active_degrees();
-                    assert(gpu_degrees.size() == act.size());
-                    #pragma omp parallel for schedule(static) \
-                        if(act.size() > opts.omp_threshold)
-                    for (size_t i = 0; i < act.size(); ++i)
-                        live_degrees[act[i]] = gpu_degrees[i];
-                    if (cp) (*cp)("prune");
-                    const partition_result& part =
-                        gpu_frontend->select(opts.seed, p.round);
-                    ++p.round;
-                    if (cp) {
-                        (*cp)("select");
-                        (*cp)("collect");
-                        cp->ascend();
-                    }
-                    return part;
-                } catch (const std::exception& ex) {
-                    if (cp) cp->ascend();
-                    if (gpu_frontend_mode ==
-                        detail::gpu_luby_frontend::mode::forced)
-                        throw;
-                    std::fprintf(stderr,
-                        "[apxchol] GPU Luby auto fell back during selection: %s\n",
-                        ex.what());
-                    gpu_frontend.reset();
+                const auto prep = gpu_frontend->prepare(act, opts.partition);
+                last_candidate_count = prep.candidate_count;
+                last_avg_degree = prep.average_degree;
+                // The elimination work gate below indexes degrees by vertex.
+                // The CPU prepass fills this array as part of candidate
+                // filtering; the GPU frontend returns the same degrees in
+                // active-list order, so mirror that contract here. Without
+                // this copy the first GPU-selected round reads an empty
+                // live_degrees vector in release builds.
+                if (live_degrees.size() < static_cast<size_t>(g.n()))
+                    live_degrees.resize(g.n());
+                const auto gpu_degrees = gpu_frontend->host_active_degrees();
+                assert(gpu_degrees.size() == act.size());
+                #pragma omp parallel for schedule(static) \
+                    if(act.size() > opts.omp_threshold)
+                for (size_t i = 0; i < act.size(); ++i)
+                    live_degrees[act[i]] = gpu_degrees[i];
+                if (cp) (*cp)("prune");
+                const partition_result& part =
+                    gpu_frontend->select(opts.seed, p.round);
+                ++p.round;
+                if (cp) {
+                    (*cp)("select");
+                    (*cp)("collect");
+                    cp->ascend();
                 }
+                return part;
             }
         }
 #endif
@@ -1039,18 +970,8 @@ factorization factorize_impl(const Eliminator& elim,
                                     elimination_work_hint);
 #if defined(APXCHOL_USE_CUDA)
         if (gpu_frontend) {
-            try {
-                gpu_frontend->advance(part.data, ws.gpu_topology_updates);
-                if (cp) (*cp)("gpu_frontend_advance");
-            } catch (const std::exception& ex) {
-                if (gpu_frontend_mode ==
-                    detail::gpu_luby_frontend::mode::forced)
-                    throw;
-                std::fprintf(stderr,
-                    "[apxchol] GPU Luby auto fell back during topology update: %s\n",
-                    ex.what());
-                gpu_frontend.reset();
-            }
+            gpu_frontend->advance(part.data, ws.gpu_topology_updates);
+            if (cp) (*cp)("gpu_frontend_advance");
         }
 #endif
         // Tally nnz added this round (only when caller wants the stats).
@@ -1130,7 +1051,7 @@ factorization factorize_impl(const Eliminator& elim,
     // peel — and they leave 4.9% less fill behind.
     //
     // Default: `parallel_residual_threshold` = SIZE_MAX means "defer to the
-    // partitioner", NOT "off" — block_greedy / luby / rootset all declare
+    // partitioner", NOT "off" — block_greedy / priority_greedy both declare
     // `residual_handoff_threshold` = 500, so this loop runs by default and the
     // peel sees at most 500 columns.  Only a partitioner that declares no
     // threshold leaves it at SIZE_MAX and skips the loop entirely.  It fires

@@ -119,9 +119,10 @@ run_config parse_args(int argc, char* argv[]) {
         ->check(CLI::IsMember({"vec_pool", "forward_star", "vec", "bstr"}));
 
     app.add_option("--is", cfg.solve_opts.factor_opts.is_select,
-                   "Independent set strategy (block_greedy, luby, baumann_kyng, rootset)")
+                   "Independent set strategy (block_greedy, priority_greedy, baumann_kyng)")
         ->capture_default_str()
-        ->check(CLI::IsMember({"block_greedy", "luby", "baumann_kyng", "rootset"}));
+        ->check(CLI::IsMember(
+            {"block_greedy", "priority_greedy", "baumann_kyng"}));
 
     app.add_option("--fs-compact", cfg.solve_opts.factor_opts.fs_compact_threshold,
                    "forward_star auto-compact threshold (live_fraction; 0=off)")

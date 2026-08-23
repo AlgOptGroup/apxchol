@@ -4,9 +4,8 @@
 
 #include "apxchol/solver/partitioner.h"
 #include "apxchol/solver/partition/block_greedy.h"
-#include "apxchol/solver/partition/luby.h"
+#include "apxchol/solver/partition/priority_greedy.h"
 #include "apxchol/solver/partition/baumann_kyng.h"
-#include "apxchol/solver/partition/rootset.h"
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -18,9 +17,8 @@ namespace apxchol {
 
 using partitioner_list = std::tuple<
     block_greedy_partitioner,
-    luby_partitioner,
-    baumann_kyng_partitioner,
-    rootset_partitioner
+    priority_greedy_partitioner,
+    baumann_kyng_partitioner
 >;
 
 /// Concept check: every entry in partitioner_list satisfies `partitioner`.

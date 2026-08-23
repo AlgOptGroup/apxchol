@@ -1,5 +1,4 @@
-#include "apxchol/solver/gpu_luby_frontend.h"
-#include "apxchol/solver/partition/luby_config.h"
+#include "apxchol/solver/gpu_priority_frontend.h"
 
 #include <cooperative_groups.h>
 #include <cub/cub.cuh>
@@ -24,7 +23,7 @@ namespace {
 using clock_type = std::chrono::steady_clock;
 
 [[noreturn]] void cuda_failure(cudaError_t err, const char *what) {
-    throw std::runtime_error(std::string("GPU Luby front-end: ") + what + ": " +
+    throw std::runtime_error(std::string("GPU priority-greedy front-end: ") + what + ": " +
                              cudaGetErrorString(err));
 }
 
@@ -70,7 +69,7 @@ constexpr int kBlock = 256;
 int blocks_for(std::size_t n) {
     const std::size_t blocks = (n + kBlock - 1) / kBlock;
     if (blocks > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-        throw std::overflow_error("GPU Luby front-end: CUDA grid is too large");
+        throw std::overflow_error("GPU priority-greedy front-end: CUDA grid is too large");
     return static_cast<int>(blocks);
 }
 
@@ -135,43 +134,44 @@ __global__ void deactivate_vertices(const node_index *ids, std::size_t count,
         active[ids[i]] = 0;
 }
 
-__device__ std::uint64_t luby_priority(node_index v, edge_index degree,
-                                       std::uint64_t round_seed,
-                                       bool degree_tiebreak) {
-    const std::uint64_t h =
-        (std::uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
-    if (!degree_tiebreak)
-        return h;
-    return (std::uint64_t(degree) << 40) | (h >> 24);
+__device__ bool priority_precedes(node_index a, edge_index degree_a,
+                                  node_index b, edge_index degree_b,
+                                  std::uint64_t round_seed,
+                                  bool degree_tiebreak) {
+    if (degree_tiebreak && degree_a != degree_b)
+        return degree_a < degree_b;
+    const std::uint64_t ha =
+        (std::uint64_t(a) ^ round_seed) * 11400714819323198485ULL;
+    const std::uint64_t hb =
+        (std::uint64_t(b) ^ round_seed) * 11400714819323198485ULL;
+    return ha != hb ? ha < hb : a < b;
 }
 
 __global__ void
-luby_cooperative(const node_index *candidates, std::size_t count,
+priority_greedy_cooperative(const node_index *candidates, std::size_t count,
                  const edge_index *row_offsets, const node_index *neighbors,
                  const edge_index *degrees, const unsigned char *active,
                  int *status, unsigned char *pick, std::uint64_t round_seed,
-                 bool degree_tiebreak, int max_iters, int *has_undecided) {
+                 bool degree_tiebreak, int *has_undecided) {
     namespace cg = cooperative_groups;
     const cg::grid_group grid = cg::this_grid();
     const std::size_t first =
         blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     const std::size_t stride = gridDim.x * std::size_t(blockDim.x);
 
-    for (int iter = 0; iter < max_iters; ++iter) {
+    for (;;) {
         for (std::size_t i = first; i < count; i += stride) {
             const node_index v = candidates[i];
             if (status[v] != 0) {
                 pick[v] = 0;
                 continue;
             }
-            const std::uint64_t pv =
-                luby_priority(v, degrees[v], round_seed, degree_tiebreak);
             bool local_minimum = true;
             for (edge_index p = row_offsets[v]; p < row_offsets[v + 1]; ++p) {
                 const node_index u = neighbors[p];
                 if (active[u] && status[u] == 0 &&
-                    luby_priority(u, degrees[u], round_seed, degree_tiebreak) <
-                        pv) {
+                    priority_precedes(u, degrees[u], v, degrees[v], round_seed,
+                                      degree_tiebreak)) {
                     local_minimum = false;
                     break;
                 }
@@ -193,18 +193,16 @@ luby_cooperative(const node_index *candidates, std::size_t count,
         }
         grid.sync();
 
-        if (iter + 1 < max_iters) {
-            if (grid.thread_rank() == 0)
-                *has_undecided = 0;
-            grid.sync();
-            for (std::size_t i = first; i < count; i += stride) {
-                if (status[candidates[i]] == 0)
-                    atomicExch(has_undecided, 1);
-            }
-            grid.sync();
-            if (*has_undecided == 0)
-                break;
+        if (grid.thread_rank() == 0)
+            *has_undecided = 0;
+        grid.sync();
+        for (std::size_t i = first; i < count; i += stride) {
+            if (status[candidates[i]] == 0)
+                atomicExch(has_undecided, 1);
         }
+        grid.sync();
+        if (*has_undecided == 0)
+            break;
     }
 }
 
@@ -229,7 +227,7 @@ double elapsed_ms(clock_type::time_point start) {
 }
 
 bool trace_enabled() {
-    const char *e = std::getenv("APXCHOL_GPU_LUBY_TRACE");
+    const char *e = std::getenv("APXCHOL_GPU_PRIORITY_TRACE");
     return e && *e && std::strcmp(e, "0") != 0;
 }
 
@@ -246,17 +244,17 @@ bool add_allocation(std::size_t &total, std::size_t count,
 
 } // namespace
 
-struct gpu_luby_frontend::impl {
+struct gpu_priority_frontend::impl {
     explicit impl(node_index n_in,
                   std::span<const gpu_topology_edge> initial_edges)
         : n(n_in), live_edge_count(initial_edges.size()) {
         if (static_cast<std::uint64_t>(n) + 1 >
             static_cast<std::uint64_t>(INT_MAX))
             throw std::overflow_error(
-                "GPU Luby front-end currently requires n < INT_MAX");
+                "GPU priority-greedy front-end currently requires n < INT_MAX");
         if (initial_edges.size() > static_cast<std::size_t>(INT_MAX))
             throw std::overflow_error(
-                "GPU Luby front-end currently requires live edges < INT_MAX");
+                "GPU priority-greedy front-end currently requires live edges < INT_MAX");
 
         int device = 0;
         int cooperative = 0;
@@ -265,20 +263,20 @@ struct gpu_luby_frontend::impl {
                                           cudaDevAttrCooperativeLaunch, device),
                    "query cooperative-launch support");
         if (!cooperative)
-            throw std::runtime_error("GPU Luby front-end requires "
+            throw std::runtime_error("GPU priority-greedy front-end requires "
                                      "cooperative-kernel launch support");
         int blocks_per_sm = 0;
         int sms = 0;
         cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                       &blocks_per_sm, luby_cooperative, kBlock, 0),
-                   "query cooperative Luby occupancy");
+                       &blocks_per_sm, priority_greedy_cooperative, kBlock, 0),
+                   "query cooperative priority-greedy occupancy");
         cuda_check(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount,
                                           device),
                    "query CUDA multiprocessor count");
         cooperative_grid_limit = blocks_per_sm * sms;
         if (cooperative_grid_limit <= 0)
             throw std::runtime_error(
-                "GPU Luby front-end found no cooperative-kernel residency");
+                "GPU priority-greedy front-end found no cooperative-kernel residency");
 
         coo[0].reserve(initial_edges.size());
         coo[1].reserve(initial_edges.size());
@@ -308,10 +306,8 @@ struct gpu_luby_frontend::impl {
                    "initialize active mask");
         if (n) {
             initialize_status<<<blocks_for(n), kBlock>>>(n, status.get());
-            cuda_check(cudaGetLastError(), "initialize Luby status");
+            cuda_check(cudaGetLastError(), "initialize priority-greedy status");
         }
-
-        max_iters = luby_iteration_limit();
 
         // Reserve the largest CUB workspace while construction can still
         // cleanly fall back to the CPU. Counts only shrink after round zero.
@@ -346,7 +342,7 @@ struct gpu_luby_frontend::impl {
 
     void require_cub_count(std::size_t count, const char *what) const {
         if (count > static_cast<std::size_t>(INT_MAX))
-            throw std::overflow_error(std::string("GPU Luby front-end: ") +
+            throw std::overflow_error(std::string("GPU priority-greedy front-end: ") +
                                       what + " exceeds CUB's item-count limit");
     }
 
@@ -403,13 +399,13 @@ struct gpu_luby_frontend::impl {
             const std::size_t total = kept + pending_edges.size();
             if (total > static_cast<std::size_t>(INT_MAX))
                 throw std::overflow_error(
-                    "GPU Luby front-end live topology exceeds INT_MAX edges");
+                    "GPU priority-greedy front-end live topology exceeds INT_MAX edges");
             // Eliminating an independent set removes sum(deg(v)) old edges and
             // emits at most sum(deg(v)-1) sampled edges. Isolated vertices emit
             // nothing, so multiplicity-aware topology never grows. The old COO
             // capacity is therefore sufficient for compacted + appended edges.
             if (total > old_count)
-                throw std::logic_error("GPU Luby front-end topology "
+                throw std::logic_error("GPU priority-greedy front-end topology "
                                        "unexpectedly grew after elimination");
             if (!pending_edges.empty()) {
                 cuda_check(
@@ -424,12 +420,12 @@ struct gpu_luby_frontend::impl {
         }
 
         if (live_edge_count > std::numeric_limits<std::size_t>::max() / 2)
-            throw std::overflow_error("GPU Luby front-end CSR size overflow");
+            throw std::overflow_error("GPU priority-greedy front-end CSR size overflow");
         const std::size_t directed = live_edge_count * 2;
         if (directed >
             static_cast<std::size_t>(std::numeric_limits<edge_index>::max()))
             throw std::overflow_error(
-                "GPU Luby front-end directed CSR exceeds edge_index range");
+                "GPU priority-greedy front-end directed CSR exceeds edge_index range");
 
         cuda_check(cudaMemset(degrees.get(), 0,
                               (std::size_t(n) + 1) * sizeof(edge_index)),
@@ -459,7 +455,7 @@ struct gpu_luby_frontend::impl {
         prepared_once = true;
     }
 
-    gpu_luby_frontend::prepare_result
+    gpu_priority_frontend::prepare_result
     prepare(std::span<const node_index> active,
             const partition_options &options) {
         const auto start = clock_type::now();
@@ -517,7 +513,7 @@ struct gpu_luby_frontend::impl {
         last_prepare = elapsed_ms(start);
         if (trace_enabled()) {
             std::fprintf(stderr,
-                         "[gpu-luby] prepare active=%zu candidates=%zu "
+                         "[gpu-priority] prepare active=%zu candidates=%zu "
                          "edges=%zu %.3f ms\n",
                          active.size(), candidate_count, live_edge_count,
                          last_prepare);
@@ -546,31 +542,29 @@ struct gpu_luby_frontend::impl {
             std::uint64_t(seed) ^
             (round * 6364136223846793005ULL + 1442695040888963407ULL);
 
-        if (max_iters > 0) {
-            const int wanted = blocks_for(candidate_count);
-            const int grid =
-                std::max(1, std::min(wanted, cooperative_grid_limit));
-            const node_index *candidate_ptr = candidates_original.get();
-            const edge_index *row_ptr = row_offsets.get();
-            const node_index *neighbor_ptr = csr_neighbors.get();
-            const edge_index *degree_ptr = degrees.get();
-            const unsigned char *active_ptr = active_mask.get();
-            int *status_ptr = status.get();
-            unsigned char *pick_ptr = pick.get();
-            std::uint64_t kernel_round_seed = round_seed;
-            bool degree_tiebreak = current_options.degree_tiebreak;
-            cooperative_flag.reserve(1);
-            int *flag_ptr = cooperative_flag.get();
-            void *args[] = {
-                &candidate_ptr,   &candidate_count, &row_ptr,
-                &neighbor_ptr,    &degree_ptr,      &active_ptr,
-                &status_ptr,      &pick_ptr,        &kernel_round_seed,
-                &degree_tiebreak, &max_iters,       &flag_ptr};
-            cuda_check(cudaLaunchCooperativeKernel(
-                           reinterpret_cast<void *>(luby_cooperative), grid,
-                           kBlock, args, 0, nullptr),
-                       "launch cooperative Luby passes");
-        }
+        const int wanted = blocks_for(candidate_count);
+        const int grid =
+            std::max(1, std::min(wanted, cooperative_grid_limit));
+        const node_index *candidate_ptr = candidates_original.get();
+        const edge_index *row_ptr = row_offsets.get();
+        const node_index *neighbor_ptr = csr_neighbors.get();
+        const edge_index *degree_ptr = degrees.get();
+        const unsigned char *active_ptr = active_mask.get();
+        int *status_ptr = status.get();
+        unsigned char *pick_ptr = pick.get();
+        std::uint64_t kernel_round_seed = round_seed;
+        bool degree_tiebreak = current_options.degree_tiebreak;
+        cooperative_flag.reserve(1);
+        int *flag_ptr = cooperative_flag.get();
+        void *args[] = {
+            &candidate_ptr,   &candidate_count, &row_ptr,
+            &neighbor_ptr,    &degree_ptr,      &active_ptr,
+            &status_ptr,      &pick_ptr,        &kernel_round_seed,
+            &degree_tiebreak, &flag_ptr};
+        cuda_check(cudaLaunchCooperativeKernel(
+                       reinterpret_cast<void *>(priority_greedy_cooperative), grid,
+                       kBlock, args, 0, nullptr),
+                   "launch cooperative priority-greedy passes");
 
         const std::size_t chosen = static_cast<std::size_t>(
             select_if(candidates_original.get(), selected_ids.get(),
@@ -585,11 +579,11 @@ struct gpu_luby_frontend::impl {
         set_status<<<blocks_for(candidate_count), kBlock>>>(
             candidates_original.get(), candidate_count, status.get(), 2);
         cuda_check(cudaGetLastError(), "restore candidate status");
-        cuda_check(cudaDeviceSynchronize(), "finish Luby selection");
+        cuda_check(cudaDeviceSynchronize(), "finish priority-greedy selection");
 
         last_select = elapsed_ms(start);
         if (trace_enabled()) {
-            std::fprintf(stderr, "[gpu-luby] select chosen=%zu %.3f ms\n",
+            std::fprintf(stderr, "[gpu-priority] select chosen=%zu %.3f ms\n",
                          chosen, last_select);
         }
         return result;
@@ -600,7 +594,7 @@ struct gpu_luby_frontend::impl {
         const auto start = clock_type::now();
         if (!pending_edges.empty())
             throw std::logic_error(
-                "GPU Luby front-end advance called before pending "
+                "GPU priority-greedy front-end advance called before pending "
                 "edges were consumed");
 
         update_ids.reserve(eliminated.size());
@@ -620,7 +614,7 @@ struct gpu_luby_frontend::impl {
         last_advance = elapsed_ms(start);
         if (trace_enabled()) {
             std::fprintf(
-                stderr, "[gpu-luby] advance eliminated=%zu added=%zu %.3f ms\n",
+                stderr, "[gpu-priority] advance eliminated=%zu added=%zu %.3f ms\n",
                 eliminated.size(), new_edges.size(), last_advance);
         }
     }
@@ -654,7 +648,6 @@ struct gpu_luby_frontend::impl {
     partition_result result;
     partition_options current_options;
     std::size_t candidate_count = 0;
-    int max_iters = 16;
     int cooperative_grid_limit = 0;
     bool topology_dirty = true;
     bool prepared_once = false;
@@ -664,13 +657,11 @@ struct gpu_luby_frontend::impl {
     double last_advance = 0.0;
 };
 
-gpu_luby_frontend::mode gpu_luby_frontend::configured_mode() {
-    const char *e = std::getenv("APXCHOL_GPU_LUBY_FRONTEND");
+gpu_priority_frontend::mode gpu_priority_frontend::configured_mode() {
+    const char *e = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
     if (!e || !*e || std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||
         std::strcmp(e, "false") == 0)
         return mode::disabled;
-    if (std::strcmp(e, "auto") == 0)
-        return mode::automatic;
     if (std::strcmp(e, "1") == 0 || std::strcmp(e, "on") == 0 ||
         std::strcmp(e, "force") == 0)
         return mode::forced;
@@ -678,28 +669,14 @@ gpu_luby_frontend::mode gpu_luby_frontend::configured_mode() {
     if (!warned.test_and_set())
         std::fprintf(
             stderr,
-            "[apxchol] unknown APXCHOL_GPU_LUBY_FRONTEND='%s'; expected "
-            "0|off|auto|1|on|force, disabling the optional GPU setup front-end\n",
+            "[apxchol] unknown APXCHOL_GPU_PRIORITY_FRONTEND='%s'; expected "
+            "0|off|1|on|force, disabling the optional GPU setup front-end\n",
             e);
     return mode::disabled;
 }
 
-bool gpu_luby_frontend::automatic_worthwhile(node_index n,
-                                             std::size_t incidence,
-                                             std::size_t incidence_ge32) {
-    // A warp is the natural crossover for the vector-CSR topology kernels.
-    // Below this scale, fixed per-round launch/compaction costs and the CPU's
-    // stale-adjacency elimination tax dominate.  This guard separated all
-    // seven measured controls: enabled on com-Youtube / as-Skitter /
-    // coPapersDBLP and disabled on grid_500 / iter0040 / com-Amazon / kron.
-    // It is intentionally conservative while the path is opt-in.
-    if (n < automatic_min_vertices || incidence == 0)
-        return false;
-    return static_cast<long double>(incidence_ge32) / incidence >= 0.30L;
-}
-
-gpu_luby_frontend::runtime_probe
-gpu_luby_frontend::probe_runtime(node_index n, std::size_t initial_edges) {
+gpu_priority_frontend::runtime_probe
+gpu_priority_frontend::probe_runtime(node_index n, std::size_t initial_edges) {
     runtime_probe result;
     int device = 0;
     int cooperative = 0;
@@ -758,36 +735,36 @@ gpu_luby_frontend::probe_runtime(node_index n, std::size_t initial_edges) {
     return result;
 }
 
-gpu_luby_frontend::gpu_luby_frontend(
+gpu_priority_frontend::gpu_priority_frontend(
     node_index n, std::span<const gpu_topology_edge> initial_edges)
     : p_(std::make_unique<impl>(n, initial_edges)) {}
 
-gpu_luby_frontend::~gpu_luby_frontend() = default;
-gpu_luby_frontend::gpu_luby_frontend(gpu_luby_frontend &&) noexcept = default;
-gpu_luby_frontend &
-gpu_luby_frontend::operator=(gpu_luby_frontend &&) noexcept = default;
+gpu_priority_frontend::~gpu_priority_frontend() = default;
+gpu_priority_frontend::gpu_priority_frontend(gpu_priority_frontend &&) noexcept = default;
+gpu_priority_frontend &
+gpu_priority_frontend::operator=(gpu_priority_frontend &&) noexcept = default;
 
-gpu_luby_frontend::prepare_result
-gpu_luby_frontend::prepare(std::span<const node_index> active,
+gpu_priority_frontend::prepare_result
+gpu_priority_frontend::prepare(std::span<const node_index> active,
                            const partition_options &options) {
     p_->current_options = options;
     return p_->prepare(active, options);
 }
 
-std::span<const node_index> gpu_luby_frontend::host_candidates() const {
+std::span<const node_index> gpu_priority_frontend::host_candidates() const {
     return p_->host_candidate_ids;
 }
 
-std::span<const node_index> gpu_luby_frontend::host_active_degrees() const {
+std::span<const node_index> gpu_priority_frontend::host_active_degrees() const {
     return p_->host_active_degrees;
 }
 
-const partition_result &gpu_luby_frontend::select(unsigned seed,
+const partition_result &gpu_priority_frontend::select(unsigned seed,
                                                   std::uint64_t round) {
     return p_->select(seed, round);
 }
 
-void gpu_luby_frontend::advance(std::span<const node_index> eliminated,
+void gpu_priority_frontend::advance(std::span<const node_index> eliminated,
                                 std::span<const gpu_topology_edge> new_edges) {
     p_->advance(eliminated, new_edges);
 }
