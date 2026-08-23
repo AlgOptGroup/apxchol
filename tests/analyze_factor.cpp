@@ -151,6 +151,48 @@ struct level_stats {
     std::vector<long long> level_nnz;
 };
 
+// A graph Laplacian has one null vector per connected component.  The usual
+// globally centred random RHS is compatible only when the graph is connected;
+// project component-wise for adjacency inputs, but leave connected inputs
+// byte-for-byte unchanged.
+void make_component_compatible(const Eigen::SparseMatrix<double>& A,
+                               Eigen::VectorXd& b) {
+    const Eigen::Index n = A.rows();
+    std::vector<Eigen::Index> component(static_cast<std::size_t>(n), -1);
+    std::vector<Eigen::Index> stack;
+    std::vector<double> sums;
+    std::vector<Eigen::Index> counts;
+    for (Eigen::Index root = 0; root < n; ++root) {
+        if (component[static_cast<std::size_t>(root)] >= 0) continue;
+        const Eigen::Index id = static_cast<Eigen::Index>(sums.size());
+        sums.push_back(0.0);
+        counts.push_back(0);
+        component[static_cast<std::size_t>(root)] = id;
+        stack.push_back(root);
+        while (!stack.empty()) {
+            const Eigen::Index v = stack.back();
+            stack.pop_back();
+            sums[static_cast<std::size_t>(id)] += b[v];
+            ++counts[static_cast<std::size_t>(id)];
+            for (Eigen::SparseMatrix<double>::InnerIterator it(A, v); it; ++it) {
+                const Eigen::Index u = it.row();
+                if (u == v || it.value() == 0.0
+                    || component[static_cast<std::size_t>(u)] >= 0)
+                    continue;
+                component[static_cast<std::size_t>(u)] = id;
+                stack.push_back(u);
+            }
+        }
+    }
+    if (sums.size() == 1) return;
+    for (Eigen::Index v = 0; v < n; ++v) {
+        const std::size_t id = static_cast<std::size_t>(
+            component[static_cast<std::size_t>(v)]);
+        b[v] -= sums[id] / static_cast<double>(counts[id]);
+    }
+    std::printf("rhs_components=%zu (projected component-wise)\n", sums.size());
+}
+
 level_stats analyze_forward_levels(const Eigen::SparseMatrix<double>& L11) {
     const node_index m = static_cast<node_index>(L11.rows());
     level_stats stats;
@@ -295,15 +337,16 @@ int main(int argc, char* argv[]) {
         // factorize() gives negative edge weights and a fill-free factor, so
         // every number this tool prints would be about a graph that isn't
         // there. See src/mtx_input.h.
+        apxchol::input_kind resolved_kind = apxchol::input_kind::automatic;
         {
             const auto scan = apxchol::scan_input(A);
             std::string reason;
-            const auto kind = apxchol::resolve_input_kind(
+            resolved_kind = apxchol::resolve_input_kind(
                 apxchol::input_kind::automatic, scan,
                 hdr.field == fast_matrix_market::pattern, reason);
             std::printf("%s\n",
-                        apxchol::describe_input(kind, scan, reason).c_str());
-            if (kind == apxchol::input_kind::adjacency)
+                        apxchol::describe_input(resolved_kind, scan, reason).c_str());
+            if (resolved_kind == apxchol::input_kind::adjacency)
                 apxchol::adjacency_to_laplacian(A);
         }
 
@@ -335,7 +378,9 @@ int main(int argc, char* argv[]) {
         // into this small diagnostic executable.
         if (cli.solve) {
             std::srand(opts.seed);
-            const Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
+            Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
+            if (resolved_kind == apxchol::input_kind::adjacency)
+                make_component_compatible(A, b);
             apxchol::solve_options solve_opts;
             solve_opts.tol = 1e-8;
             solve_opts.max_iter = 500;
