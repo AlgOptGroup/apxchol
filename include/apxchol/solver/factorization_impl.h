@@ -730,12 +730,12 @@ factorization factorize_impl(const Eliminator& elim,
     }
     if (cp) (*cp)("sddm_scan");
 
+    int num_threads_factorize = 1;
+#ifdef _OPENMP
+    num_threads_factorize = omp_get_max_threads();
+#endif
     factorize_workspace ws;
     {
-        int num_threads_factorize = 1;
-#ifdef _OPENMP
-        num_threads_factorize = omp_get_max_threads();
-#endif
         ws.threads.resize(num_threads_factorize);
         for (auto& t : ws.threads)
             t.factor_entries =
@@ -763,7 +763,7 @@ factorization factorize_impl(const Eliminator& elim,
         std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
     constexpr bool gpu_block_frontend_eligible =
         std::is_same_v<Partitioner, block_greedy_partitioner> &&
-        std::is_same_v<Incidence, vec_pool_incidence> &&
+        is_vec_pool_incidence_v<Incidence> &&
         std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
     constexpr bool gpu_frontend_eligible =
         gpu_priority_frontend_eligible || gpu_block_frontend_eligible;
@@ -777,24 +777,41 @@ factorization factorize_impl(const Eliminator& elim,
         else
             gpu_frontend_mode =
                 detail::gpu_priority_frontend::configured_mode();
+        const bool gpu_frontend_forced =
+            gpu_frontend_mode == detail::gpu_priority_frontend::mode::forced;
+        if constexpr (gpu_block_frontend_eligible) {
+            if (gpu_frontend_mode ==
+                    detail::gpu_priority_frontend::mode::automatic &&
+                !detail::gpu_priority_frontend::block_auto_enabled(
+                    num_threads_factorize))
+                gpu_frontend_mode =
+                    detail::gpu_priority_frontend::mode::disabled;
+        }
         if (gpu_frontend_mode != detail::gpu_priority_frontend::mode::disabled &&
             opts.exact_clique_max_degree != 0) {
-            throw std::invalid_argument(
-                "the forced GPU setup front-end requires the default "
-                "d-1-edge tree sampler (exact clique mode can grow topology)");
+            if (gpu_frontend_forced)
+                throw std::invalid_argument(
+                    "the forced GPU setup front-end requires the default "
+                    "d-1-edge tree sampler (exact clique mode can grow topology)");
+            gpu_frontend_mode = detail::gpu_priority_frontend::mode::disabled;
         }
         if (gpu_frontend_mode != detail::gpu_priority_frontend::mode::disabled) {
             const auto runtime = detail::gpu_priority_frontend::probe_runtime(
                 n, static_cast<std::size_t>(work.m()),
                 gpu_block_frontend_eligible);
             if (!runtime.cooperative_launch || !runtime.memory_fits) {
-                throw std::runtime_error(
-                    !runtime.cooperative_launch
-                        ? "the forced GPU setup front-end requires a CUDA device "
-                          "with cooperative-kernel launch support"
-                        : "the forced GPU setup front-end does not fit in currently "
-                          "free device memory");
+                if (gpu_frontend_forced)
+                    throw std::runtime_error(
+                        !runtime.cooperative_launch
+                            ? "the forced GPU setup front-end requires a CUDA device "
+                              "with cooperative-kernel launch support"
+                            : "the forced GPU setup front-end does not fit in currently "
+                              "free device memory");
+                gpu_frontend_mode =
+                    detail::gpu_priority_frontend::mode::disabled;
             }
+        }
+        if (gpu_frontend_mode != detail::gpu_priority_frontend::mode::disabled) {
             if (cp) (*cp)("gpu_frontend_probe");
             std::vector<detail::gpu_topology_edge> initial_topology;
             initial_topology.reserve(static_cast<std::size_t>(work.m()));

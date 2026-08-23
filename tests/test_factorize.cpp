@@ -1157,6 +1157,31 @@ TEST(GpuPriorityFrontend, ConfigurationParsingIsStrict) {
     else unsetenv("APXCHOL_GPU_PRIORITY_FRONTEND");
 }
 
+TEST(GpuBlockFrontend, AutomaticPolicyUsesMeasuredThreadCrossover) {
+    using frontend = apxchol::detail::gpu_priority_frontend;
+    const char* old = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
+    const bool had_old = old != nullptr;
+    const std::string saved = old ? old : "";
+
+    unsetenv("APXCHOL_GPU_BLOCK_FRONTEND");
+    EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::automatic);
+    setenv("APXCHOL_GPU_BLOCK_FRONTEND", "auto", 1);
+    EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::automatic);
+    setenv("APXCHOL_GPU_BLOCK_FRONTEND", "force", 1);
+    EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::forced);
+    setenv("APXCHOL_GPU_BLOCK_FRONTEND", "0", 1);
+    EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::disabled);
+
+    EXPECT_FALSE(frontend::block_auto_enabled(0));
+    EXPECT_TRUE(frontend::block_auto_enabled(1));
+    EXPECT_TRUE(frontend::block_auto_enabled(8));
+    EXPECT_FALSE(frontend::block_auto_enabled(9));
+    EXPECT_FALSE(frontend::block_auto_enabled(72));
+
+    if (had_old) setenv("APXCHOL_GPU_BLOCK_FRONTEND", saved.c_str(), 1);
+    else unsetenv("APXCHOL_GPU_BLOCK_FRONTEND");
+}
+
 TEST(GpuPriorityFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly) {
     using apxchol::detail::gpu_topology_edge;
     constexpr apxchol::node_index n = 12;

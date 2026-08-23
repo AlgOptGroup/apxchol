@@ -1165,7 +1165,9 @@ gpu_priority_frontend::mode gpu_priority_frontend::configured_mode() {
 
 gpu_priority_frontend::mode gpu_priority_frontend::configured_block_mode() {
     const char *e = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
-    if (!e || !*e || std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||
+    if (!e || !*e || std::strcmp(e, "auto") == 0)
+        return mode::automatic;
+    if (std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||
         std::strcmp(e, "false") == 0)
         return mode::disabled;
     if (std::strcmp(e, "1") == 0 || std::strcmp(e, "on") == 0 ||
@@ -1176,9 +1178,17 @@ gpu_priority_frontend::mode gpu_priority_frontend::configured_block_mode() {
         std::fprintf(
             stderr,
             "[apxchol] unknown APXCHOL_GPU_BLOCK_FRONTEND='%s'; expected "
-            "0|off|1|on|force, disabling the GPU block-greedy prototype\n",
+            "auto|0|off|1|on|force, disabling the GPU block-greedy front-end\n",
             e);
     return mode::disabled;
+}
+
+bool gpu_priority_frontend::block_auto_enabled(int max_threads) noexcept {
+    // GH200 single-RHS gate, nine matrices, bracketed CPU/GPU/CPU: total-time
+    // geomean is 0.927x at T=8, 1.050x at T=16 and 1.201x at T=72. The
+    // governor follows that measured CPU-selector scaling crossover; unlike
+    // the rejected n >= 500k rule, it does not guess from graph size.
+    return max_threads > 0 && max_threads <= 8;
 }
 
 gpu_priority_frontend::runtime_probe
