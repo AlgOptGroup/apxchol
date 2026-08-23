@@ -24,6 +24,14 @@ struct gpu_topology_edge {
     node_index u;
     node_index v;
 };
+
+/// A non-owning view of one elimination thread's deferred-edge buffer. The
+/// GPU front-end copies only each record's leading {u,v}; the CPU graph keeps
+/// sole ownership of the numerical weight.
+struct gpu_topology_batch {
+    const deferred_edge* data = nullptr;
+    std::size_t size = 0;
+};
 } // namespace detail
 
 struct factorize_workspace {
@@ -63,6 +71,7 @@ struct factorize_workspace {
     /// Populated only when the guarded GPU setup front-end is active, so the
     /// default CPU path pays neither the copy nor the retained allocation.
     std::vector<detail::gpu_topology_edge> gpu_topology_updates;
+    std::vector<detail::gpu_topology_batch> gpu_topology_batches;
 
     /// Round counter, incremented by the factorize loop once per round.
     uint64_t round_index = 0;
@@ -72,6 +81,7 @@ struct factorize_workspace {
     /// elimination round.
     void reset_for_round() {
         gpu_topology_updates.clear();
+        gpu_topology_batches.clear();
         for (auto& t : threads) {
             t.edge_buffer.clear();
             t.excess_buffer.clear();

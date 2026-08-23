@@ -259,7 +259,10 @@ void eliminate_partition_singleton(const Eliminator& elim,
     auto output_col = [&](size_t k) -> factor_col& {
         return factor_cols[factor_base + k];
     };
-    if (capture_gpu_topology) ws.gpu_topology_updates.clear();
+    if (capture_gpu_topology) {
+        ws.gpu_topology_updates.clear();
+        ws.gpu_topology_batches.clear();
+    }
 
     #ifdef _OPENMP
     // Rounds below omp_threshold take the serial path unless the degree
@@ -408,8 +411,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     const size_t N_edges = e_offsets[num_threads];
                     if (N_edges > 0)
                         e_start = G.reserve_edge_pool(static_cast<edge_index>(N_edges));
-                    if (capture_gpu_topology)
-                        ws.gpu_topology_updates.resize(N_edges);
                     ws.touched_concat.clear();
                     for (int t = 0; t < num_threads; ++t)
                         ws.touched_concat.insert(
@@ -440,14 +441,13 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     const auto& ebuf = ws.threads[tid].edge_buffer;
                     for (size_t i = 0; i < ebuf.size(); ++i) {
                         auto [u, v, w] = ebuf[i];
-                        if (capture_gpu_topology)
-                            ws.gpu_topology_updates[base + i] = {u, v};
                         const edge_index es = e_start + static_cast<edge_index>(base + i);
                         G.write_edge_at(es, u, v, w);
                         G.adj_atomic_push_reserved(u, es);
                         G.adj_atomic_push_reserved(v, es);
                     }
-                    ws.threads[tid].edge_buffer.clear();
+                    if (!capture_gpu_topology)
+                        ws.threads[tid].edge_buffer.clear();
                     // Apply excess atomically (each thread's own buffer).
                     for (auto [u, delta] : ws.threads[tid].excess_buffer)
                         G.atomic_add_excess(u, delta);
@@ -469,6 +469,17 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     G.set_inactive_unchecked(part.data[k]);
             }
             G.bulk_decrement_active(static_cast<node_index>(n_verts));
+
+            if (capture_gpu_topology) {
+                ws.gpu_topology_batches.reserve(ws.threads.size());
+                for (const auto& thread : ws.threads) {
+                    if (!thread.edge_buffer.empty()) {
+                        ws.gpu_topology_batches.push_back(
+                            {thread.edge_buffer.data(),
+                             thread.edge_buffer.size()});
+                    }
+                }
+            }
 
             if (cp) (*cp)("compute+apply_fused");
         } else {
@@ -792,6 +803,9 @@ factorization factorize_impl(const Eliminator& elim,
     // average (0 = not measured, for partitioners without the prepass).
     double last_avg_degree = 0.0;
     size_t last_candidate_count = 0;
+#if defined(APXCHOL_USE_CUDA)
+    size_t gpu_elimination_work_hint = 0;
+#endif
     auto run_partitioner = [&](auto& p, graph<Incidence>& g,
                                std::span<const node_index> act)
         -> const partition_result& {
@@ -804,23 +818,11 @@ factorization factorize_impl(const Eliminator& elim,
                 const auto prep = gpu_frontend->prepare(act, opts.partition);
                 last_candidate_count = prep.candidate_count;
                 last_avg_degree = prep.average_degree;
-                // The elimination work gate below indexes degrees by vertex.
-                // The CPU prepass fills this array as part of candidate
-                // filtering; the GPU frontend returns the same degrees in
-                // active-list order, so mirror that contract here. Without
-                // this copy the first GPU-selected round reads an empty
-                // live_degrees vector in release builds.
-                if (live_degrees.size() < static_cast<size_t>(g.n()))
-                    live_degrees.resize(g.n());
-                const auto gpu_degrees = gpu_frontend->host_active_degrees();
-                assert(gpu_degrees.size() == act.size());
-                #pragma omp parallel for schedule(static) \
-                    if(act.size() > opts.omp_threshold)
-                for (size_t i = 0; i < act.size(); ++i)
-                    live_degrees[act[i]] = gpu_degrees[i];
                 if (cp) (*cp)("prune");
                 const partition_result& part =
                     gpu_frontend->select(opts.seed, p.round);
+                gpu_elimination_work_hint =
+                    gpu_frontend->selected_degree_work();
                 ++p.round;
                 if (cp) {
                     (*cp)("select");
@@ -949,14 +951,22 @@ factorization factorize_impl(const Eliminator& elim,
         const size_t cols_before = cp ? factor_cols.size() : 0;
         size_t elimination_work_hint = 0;
         if constexpr (partitioner_degree_prepass_v<Partitioner>) {
-            for (node_index v : part.data) {
-                const size_t degree = static_cast<size_t>(live_degrees[v]);
-                if (elimination_work_hint >
-                    std::numeric_limits<size_t>::max() - degree) {
-                    elimination_work_hint = std::numeric_limits<size_t>::max();
-                    break;
+#if defined(APXCHOL_USE_CUDA)
+            if (gpu_frontend) {
+                elimination_work_hint = gpu_elimination_work_hint;
+            } else
+#endif
+            {
+                for (node_index v : part.data) {
+                    const size_t degree = static_cast<size_t>(live_degrees[v]);
+                    if (elimination_work_hint >
+                        std::numeric_limits<size_t>::max() - degree) {
+                        elimination_work_hint =
+                            std::numeric_limits<size_t>::max();
+                        break;
+                    }
+                    elimination_work_hint += degree;
                 }
-                elimination_work_hint += degree;
             }
         }
         const bool capture_gpu_topology =
@@ -970,7 +980,8 @@ factorization factorize_impl(const Eliminator& elim,
                                     elimination_work_hint);
 #if defined(APXCHOL_USE_CUDA)
         if (gpu_frontend) {
-            gpu_frontend->advance(part.data, ws.gpu_topology_updates);
+            gpu_frontend->advance(part.data, ws.gpu_topology_updates,
+                                  ws.gpu_topology_batches);
             if (cp) (*cp)("gpu_frontend_advance");
         }
 #endif

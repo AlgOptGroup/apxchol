@@ -1187,6 +1187,10 @@ TEST(GpuPriorityFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly)
             cpu_selection.finalize().data;
         const auto& got = gpu.select(42, round);
         EXPECT_EQ(got.data, expected);
+        std::size_t expected_work = 0;
+        for (const auto v : expected)
+            expected_work += live_degrees[v];
+        EXPECT_EQ(gpu.selected_degree_work(), expected_work);
 
         // select() restores its status scratch; repeating the same immutable
         // round must be bit-deterministic.
@@ -1199,11 +1203,20 @@ TEST(GpuPriorityFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly)
         });
 
         std::vector<gpu_topology_edge> updates;
-        if (round == 0 && active.size() >= 2) {
-            updates.push_back({active.front(), active.back()});
-            cpu_graph.add_edge(active.front(), active.back(), 1.0);
+        std::vector<apxchol::deferred_edge> deferred_updates;
+        std::vector<apxchol::detail::gpu_topology_batch> update_batches;
+        if (round <= 1 && active.size() >= 2) {
+            const gpu_topology_edge edge{active.front(), active.back()};
+            if (round == 0) {
+                deferred_updates.push_back({edge.u, edge.v, 1.0});
+                update_batches.push_back(
+                    {deferred_updates.data(), deferred_updates.size()});
+            } else {
+                updates.push_back(edge);
+            }
+            cpu_graph.add_edge(edge.u, edge.v, 1.0);
         }
-        gpu.advance(expected, updates);
+        gpu.advance(expected, updates, update_batches);
     }
 }
 

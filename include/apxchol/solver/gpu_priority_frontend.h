@@ -53,14 +53,18 @@ public:
 
     prepare_result prepare(std::span<const node_index> active,
                            const partition_options &options);
+    /// Debug/test views. Materializing either view downloads a full device
+    /// array; the production factorization path does not call these methods.
     std::span<const node_index> host_candidates() const;
     std::span<const node_index> host_active_degrees() const;
     const partition_result &select(unsigned seed, std::uint64_t round);
+    std::size_t selected_degree_work() const;
 
     /// Commit a selection after CPU elimination succeeded and enqueue the
     /// sampled clique endpoints that must be present in the next round.
     void advance(std::span<const node_index> eliminated,
-                 std::span<const gpu_topology_edge> new_edges);
+                 std::span<const gpu_topology_edge> new_edges,
+                 std::span<const gpu_topology_batch> new_edge_batches = {});
 
 private:
     struct impl;
