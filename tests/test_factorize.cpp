@@ -1171,6 +1171,42 @@ TEST(GpuLubyFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly) {
     }
 }
 
+TEST(GpuLubyFrontend, IntegratedFactorizationMatchesCpuFrontend) {
+    const char* old = std::getenv("APXCHOL_GPU_LUBY_FRONTEND");
+    const bool had_old = old != nullptr;
+    const std::string saved = old ? old : "";
+
+    auto L = grid_laplacian(48, 48);
+    apxchol::factor_options opts;
+    opts.seed = 42;
+    opts.is_select = "luby";
+    opts.omp_threshold = 64;
+
+    setenv("APXCHOL_GPU_LUBY_FRONTEND", "0", 1);
+    const auto cpu = apxchol::factorize(
+        L, apxchol::graph_storage::vec_pool, opts);
+    setenv("APXCHOL_GPU_LUBY_FRONTEND", "force", 1);
+    const auto gpu = apxchol::factorize(
+        L, apxchol::graph_storage::vec_pool, opts);
+
+    if (had_old) setenv("APXCHOL_GPU_LUBY_FRONTEND", saved.c_str(), 1);
+    else unsetenv("APXCHOL_GPU_LUBY_FRONTEND");
+
+    EXPECT_EQ(gpu.perm, cpu.perm);
+    ASSERT_EQ(gpu.L.rows(), cpu.L.rows());
+    ASSERT_EQ(gpu.L.nonZeros(), cpu.L.nonZeros());
+    const auto outer_count = static_cast<size_t>(cpu.L.cols()) + 1;
+    EXPECT_TRUE(std::equal(cpu.L.outerIndexPtr(),
+                           cpu.L.outerIndexPtr() + outer_count,
+                           gpu.L.outerIndexPtr()));
+    EXPECT_TRUE(std::equal(cpu.L.innerIndexPtr(),
+                           cpu.L.innerIndexPtr() + cpu.L.nonZeros(),
+                           gpu.L.innerIndexPtr()));
+    EXPECT_TRUE(std::equal(cpu.L.valuePtr(),
+                           cpu.L.valuePtr() + cpu.L.nonZeros(),
+                           gpu.L.valuePtr()));
+}
+
 TEST(GpuLubyFrontend, ConservativeAutoGovernorSeparatesMeasuredShapes) {
     using frontend = apxchol::detail::gpu_luby_frontend;
     EXPECT_FALSE(frontend::automatic_worthwhile(250000, 998000, 0));

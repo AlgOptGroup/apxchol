@@ -863,6 +863,20 @@ factorization factorize_impl(const Eliminator& elim,
                     const auto prep = gpu_frontend->prepare(act, opts.partition);
                     last_candidate_count = prep.candidate_count;
                     last_avg_degree = prep.average_degree;
+                    // The elimination work gate below indexes degrees by vertex.
+                    // The CPU prepass fills this array as part of candidate
+                    // filtering; the GPU frontend returns the same degrees in
+                    // active-list order, so mirror that contract here.  Without
+                    // this copy the first GPU-selected round reads an empty
+                    // live_degrees vector in release builds.
+                    if (live_degrees.size() < static_cast<size_t>(g.n()))
+                        live_degrees.resize(g.n());
+                    const auto gpu_degrees = gpu_frontend->host_active_degrees();
+                    assert(gpu_degrees.size() == act.size());
+                    #pragma omp parallel for schedule(static) \
+                        if(act.size() > opts.omp_threshold)
+                    for (size_t i = 0; i < act.size(); ++i)
+                        live_degrees[act[i]] = gpu_degrees[i];
                     if (cp) (*cp)("prune");
                     const partition_result& part =
                         gpu_frontend->select(opts.seed, p.round);
