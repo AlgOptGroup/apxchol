@@ -1,14 +1,14 @@
 #pragma once
-/// GPU-resident residual topology for the priority and block-region selectors.
+/// GPU-resident residual topology for the block-region selector.
 ///
 /// This is deliberately a narrow setup front-end: numerical elimination and
 /// factor construction stay on the CPU.  The GPU owns an unweighted COO copy
 /// of the live residual topology, rebuilds CSR after each elimination round,
 /// applies the same degree cap as the CPU partitioners, and returns selected
-/// vertex ids in candidate order. The priority selector is an explicit
-/// research path; the block-region selector is automatic through T=8.
+/// vertex ids in candidate order. The block-region selector is automatic
+/// through T=8.
 ///
-/// The implementation lives in src/cuda_priority_frontend.cu. At higher host
+/// The implementation lives in src/cuda_block_frontend.cu. At higher host
 /// thread counts, incompatible options, or a failed AUTO fitting probe, the
 /// CPU path has no topology capture or device-allocation overhead.
 
@@ -21,7 +21,7 @@
 
 namespace apxchol::detail {
 
-class gpu_priority_frontend {
+class gpu_block_frontend {
 public:
     enum class mode { disabled, automatic, forced };
 
@@ -38,26 +38,22 @@ public:
         std::size_t total_bytes = 0;
     };
 
-    /// Parse APXCHOL_GPU_PRIORITY_FRONTEND. Accepted values are 0/off and
-    /// 1/on/force. Unknown values disable the optional path with a note.
-    static mode configured_mode();
-    /// Parse the independent GPU block-greedy policy. Unset and `auto` select
+    /// Parse the GPU block-greedy policy. Unset and `auto` select
     /// automatic mode; 0/off disable it; 1/on/force bypass the governor.
     static mode configured_block_mode();
     /// CPU block-greedy overtakes the GPU selector beyond this measured
     /// host-thread crossover. Kept pure so the policy is unit-testable.
     static bool block_auto_enabled(int max_threads) noexcept;
-    static runtime_probe probe_runtime(node_index n, std::size_t initial_edges,
-                                       bool block_selector = false);
+    static runtime_probe probe_runtime(node_index n, std::size_t initial_edges);
 
-    gpu_priority_frontend(node_index n,
+    gpu_block_frontend(node_index n,
                       std::span<const gpu_topology_edge> initial_edges);
-    ~gpu_priority_frontend();
+    ~gpu_block_frontend();
 
-    gpu_priority_frontend(const gpu_priority_frontend &) = delete;
-    gpu_priority_frontend &operator=(const gpu_priority_frontend &) = delete;
-    gpu_priority_frontend(gpu_priority_frontend &&) noexcept;
-    gpu_priority_frontend &operator=(gpu_priority_frontend &&) noexcept;
+    gpu_block_frontend(const gpu_block_frontend &) = delete;
+    gpu_block_frontend &operator=(const gpu_block_frontend &) = delete;
+    gpu_block_frontend(gpu_block_frontend &&) noexcept;
+    gpu_block_frontend &operator=(gpu_block_frontend &&) noexcept;
 
     prepare_result prepare(std::span<const node_index> active,
                            const partition_options &options);
@@ -65,7 +61,6 @@ public:
     /// array; the production factorization path does not call these methods.
     std::span<const node_index> host_candidates() const;
     std::span<const node_index> host_active_degrees() const;
-    const partition_result &select(unsigned seed, std::uint64_t round);
     const partition_result &select_block_greedy();
     std::size_t selected_degree_work() const;
 

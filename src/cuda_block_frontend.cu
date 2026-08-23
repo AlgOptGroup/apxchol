@@ -1,4 +1,4 @@
-#include "apxchol/solver/gpu_priority_frontend.h"
+#include "apxchol/solver/gpu_block_frontend.h"
 
 #include <cooperative_groups.h>
 #include <cub/cub.cuh>
@@ -30,7 +30,7 @@ static_assert(offsetof(deferred_edge, v) == sizeof(node_index));
 static_assert(offsetof(deferred_edge, w) == sizeof(gpu_topology_edge));
 
 [[noreturn]] void cuda_failure(cudaError_t err, const char *what) {
-    throw std::runtime_error(std::string("GPU priority-greedy front-end: ") + what + ": " +
+    throw std::runtime_error(std::string("GPU block front-end: ") + what + ": " +
                              cudaGetErrorString(err));
 }
 
@@ -77,7 +77,7 @@ constexpr std::size_t kTopologyStageEdges = std::size_t{1} << 20;
 int blocks_for(std::size_t n) {
     const std::size_t blocks = (n + kBlock - 1) / kBlock;
     if (blocks > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-        throw std::overflow_error("GPU priority-greedy front-end: CUDA grid is too large");
+        throw std::overflow_error("GPU block front-end: CUDA grid is too large");
     return static_cast<int>(blocks);
 }
 
@@ -170,79 +170,6 @@ __global__ void extract_topology_edges(const deferred_edge *input,
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i < count)
         output[i] = {input[i].u, input[i].v};
-}
-
-__device__ bool priority_precedes(node_index a, node_index degree_a,
-                                  node_index b, node_index degree_b,
-                                  std::uint64_t round_seed,
-                                  bool degree_tiebreak) {
-    if (degree_tiebreak && degree_a != degree_b)
-        return degree_a < degree_b;
-    const std::uint64_t ha =
-        (std::uint64_t(a) ^ round_seed) * 11400714819323198485ULL;
-    const std::uint64_t hb =
-        (std::uint64_t(b) ^ round_seed) * 11400714819323198485ULL;
-    return ha != hb ? ha < hb : a < b;
-}
-
-__global__ void
-priority_greedy_cooperative(const node_index *candidates, std::size_t count,
-                 const edge_index *row_offsets, const node_index *neighbors,
-                 const edge_index *degrees, const unsigned char *active,
-                 int *status, unsigned char *pick, std::uint64_t round_seed,
-                 bool degree_tiebreak, int *has_undecided) {
-    namespace cg = cooperative_groups;
-    const cg::grid_group grid = cg::this_grid();
-    const std::size_t first =
-        blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    const std::size_t stride = gridDim.x * std::size_t(blockDim.x);
-
-    for (;;) {
-        for (std::size_t i = first; i < count; i += stride) {
-            const node_index v = candidates[i];
-            if (status[v] != 0) {
-                pick[v] = 0;
-                continue;
-            }
-            bool local_minimum = true;
-            for (edge_index p = row_offsets[v]; p < row_offsets[v + 1]; ++p) {
-                const node_index u = neighbors[p];
-                if (active[u] && status[u] == 0 &&
-                    priority_precedes(u, static_cast<node_index>(degrees[u]), v,
-                                      static_cast<node_index>(degrees[v]), round_seed,
-                                      degree_tiebreak)) {
-                    local_minimum = false;
-                    break;
-                }
-            }
-            pick[v] = static_cast<unsigned char>(local_minimum);
-        }
-        grid.sync();
-
-        for (std::size_t i = first; i < count; i += stride) {
-            const node_index v = candidates[i];
-            if (status[v] != 0 || !pick[v])
-                continue;
-            status[v] = 1;
-            for (edge_index p = row_offsets[v]; p < row_offsets[v + 1]; ++p) {
-                const node_index u = neighbors[p];
-                if (active[u])
-                    atomicCAS(&status[u], 0, 2);
-            }
-        }
-        grid.sync();
-
-        if (grid.thread_rank() == 0)
-            *has_undecided = 0;
-        grid.sync();
-        for (std::size_t i = first; i < count; i += stride) {
-            if (status[candidates[i]] == 0)
-                atomicExch(has_undecided, 1);
-        }
-        grid.sync();
-        if (*has_undecided == 0)
-            break;
-    }
 }
 
 __device__ bool block_priority_precedes(node_index a, node_index b,
@@ -474,7 +401,7 @@ double elapsed_ms(clock_type::time_point start) {
 }
 
 bool trace_enabled() {
-    const char *e = std::getenv("APXCHOL_GPU_PRIORITY_TRACE");
+    const char *e = std::getenv("APXCHOL_GPU_BLOCK_TRACE");
     return e && *e && std::strcmp(e, "0") != 0;
 }
 
@@ -491,17 +418,17 @@ bool add_allocation(std::size_t &total, std::size_t count,
 
 } // namespace
 
-struct gpu_priority_frontend::impl {
+struct gpu_block_frontend::impl {
     explicit impl(node_index n_in,
                   std::span<const gpu_topology_edge> initial_edges)
         : n(n_in), live_edge_count(initial_edges.size()), active_count(n_in) {
         if (static_cast<std::uint64_t>(n) + 1 >
             static_cast<std::uint64_t>(INT_MAX))
             throw std::overflow_error(
-                "GPU priority-greedy front-end currently requires n < INT_MAX");
+                "GPU block front-end currently requires n < INT_MAX");
         if (initial_edges.size() > static_cast<std::size_t>(INT_MAX))
             throw std::overflow_error(
-                "GPU priority-greedy front-end currently requires live edges < INT_MAX");
+                "GPU block front-end currently requires live edges < INT_MAX");
 
         int device = 0;
         int cooperative = 0;
@@ -510,15 +437,11 @@ struct gpu_priority_frontend::impl {
                                           cudaDevAttrCooperativeLaunch, device),
                    "query cooperative-launch support");
         if (!cooperative)
-            throw std::runtime_error("GPU priority-greedy front-end requires "
+            throw std::runtime_error("GPU block front-end requires "
                                      "cooperative-kernel launch support");
-        int blocks_per_sm = 0;
         int block_repair_blocks_per_sm = 0;
         int block_scan_blocks_per_sm = 0;
         int sms = 0;
-        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                       &blocks_per_sm, priority_greedy_cooperative, kBlock, 0),
-                   "query cooperative priority-greedy occupancy");
         cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                        &block_repair_blocks_per_sm, block_greedy_repair,
                        kBlock, 0),
@@ -530,12 +453,8 @@ struct gpu_priority_frontend::impl {
         cuda_check(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount,
                                           device),
                    "query CUDA multiprocessor count");
-        cooperative_grid_limit = blocks_per_sm * sms;
         block_repair_grid_limit = block_repair_blocks_per_sm * sms;
         block_region_limit = block_scan_blocks_per_sm * sms * (kBlock / 32);
-        if (cooperative_grid_limit <= 0)
-            throw std::runtime_error(
-                "GPU priority-greedy front-end found no cooperative-kernel residency");
         if (block_repair_grid_limit <= 0)
             throw std::runtime_error(
                 "GPU block-greedy front-end found no cooperative-kernel residency");
@@ -576,7 +495,7 @@ struct gpu_priority_frontend::impl {
                    "initialize active mask");
         if (n) {
             initialize_status<<<blocks_for(n), kBlock>>>(n, status.get());
-            cuda_check(cudaGetLastError(), "initialize priority-greedy status");
+            cuda_check(cudaGetLastError(), "initialize block-greedy status");
             initialize_vertex_ids<<<blocks_for(n), kBlock>>>(
                 n, active_ids[current_active].get());
             cuda_check(cudaGetLastError(), "initialize active vertex ids");
@@ -621,7 +540,7 @@ struct gpu_priority_frontend::impl {
 
     void require_cub_count(std::size_t count, const char *what) const {
         if (count > static_cast<std::size_t>(INT_MAX))
-            throw std::overflow_error(std::string("GPU priority-greedy front-end: ") +
+            throw std::overflow_error(std::string("GPU block front-end: ") +
                                       what + " exceeds CUB's item-count limit");
     }
 
@@ -714,12 +633,12 @@ struct gpu_priority_frontend::impl {
             return;
 
         if (live_edge_count > std::numeric_limits<std::size_t>::max() / 2)
-            throw std::overflow_error("GPU priority-greedy front-end CSR size overflow");
+            throw std::overflow_error("GPU block front-end CSR size overflow");
         const std::size_t directed = live_edge_count * 2;
         if (directed >
             static_cast<std::size_t>(std::numeric_limits<edge_index>::max()))
             throw std::overflow_error(
-                "GPU priority-greedy front-end directed CSR exceeds edge_index range");
+                "GPU block front-end directed CSR exceeds edge_index range");
 
         cuda_check(cudaMemset(degrees.get(), 0,
                               (std::size_t(n) + 1) * sizeof(edge_index)),
@@ -748,7 +667,7 @@ struct gpu_priority_frontend::impl {
         topology_dirty = false;
     }
 
-    gpu_priority_frontend::prepare_result
+    gpu_block_frontend::prepare_result
     prepare(std::span<const node_index> active,
             const partition_options &options) {
         const auto start = clock_type::now();
@@ -760,7 +679,7 @@ struct gpu_priority_frontend::impl {
         selected_ids.reserve(active.size());
         if (active.size() != active_count)
             throw std::logic_error(
-                "GPU priority-greedy active-list size diverged from CPU state");
+                "GPU block active-list size diverged from CPU state");
         host_active_degrees.clear();
         host_candidate_ids.clear();
         host_active_degrees_valid = false;
@@ -799,7 +718,7 @@ struct gpu_priority_frontend::impl {
         last_prepare = elapsed_ms(start);
         if (trace_enabled()) {
             std::fprintf(stderr,
-                         "[gpu-priority] prepare active=%zu candidates=%zu "
+                         "[gpu-block] prepare active=%zu candidates=%zu "
                          "edges=%zu %.3f ms\n",
                          active.size(), candidate_count, live_edge_count,
                          last_prepare);
@@ -835,71 +754,6 @@ struct gpu_priority_frontend::impl {
             host_active_degrees_valid = true;
         }
         return host_active_degrees;
-    }
-
-    const partition_result &select(unsigned seed, std::uint64_t round) {
-        const auto start = clock_type::now();
-        result.data.clear();
-        if (!candidate_count) {
-            selected_degree_work = 0;
-            last_select = elapsed_ms(start);
-            return result;
-        }
-
-        set_status<<<blocks_for(candidate_count), kBlock>>>(
-            candidates_original.get(), candidate_count, status.get(), 0);
-        cuda_check(cudaGetLastError(), "initialize candidate status");
-
-        const std::uint64_t round_seed =
-            std::uint64_t(seed) ^
-            (round * 6364136223846793005ULL + 1442695040888963407ULL);
-
-        const int wanted = blocks_for(candidate_count);
-        const int grid =
-            std::max(1, std::min(wanted, cooperative_grid_limit));
-        const node_index *candidate_ptr = candidates_original.get();
-        const edge_index *row_ptr = row_offsets.get();
-        const node_index *neighbor_ptr = csr_neighbors.get();
-        const edge_index *degree_ptr = degrees.get();
-        const unsigned char *active_ptr = active_mask.get();
-        int *status_ptr = status.get();
-        std::uint64_t kernel_round_seed = round_seed;
-        bool degree_tiebreak = current_options.degree_tiebreak;
-        cooperative_flag.reserve(1);
-        int *flag_ptr = cooperative_flag.get();
-        unsigned char *pick_ptr = pick.get();
-        void *args[] = {
-            &candidate_ptr,   &candidate_count, &row_ptr,
-            &neighbor_ptr,    &degree_ptr,      &active_ptr,
-            &status_ptr,      &pick_ptr,        &kernel_round_seed,
-            &degree_tiebreak, &flag_ptr};
-        cuda_check(cudaLaunchCooperativeKernel(
-                       reinterpret_cast<void *>(priority_greedy_cooperative),
-                       grid, kBlock, args, 0, nullptr),
-                   "launch cooperative priority-greedy passes");
-
-        const std::size_t chosen = static_cast<std::size_t>(
-            select_if(candidates_original.get(), selected_ids.get(),
-                      candidate_count, status_equals{status.get(), 1}));
-        selected_degree_work = sum_selected_degrees(chosen);
-        result.data.resize(chosen);
-        if (chosen) {
-            cuda_check(cudaMemcpy(result.data.data(), selected_ids.get(),
-                                  chosen * sizeof(node_index),
-                                  cudaMemcpyDeviceToHost),
-                       "download selected vertices");
-        }
-        set_status<<<blocks_for(candidate_count), kBlock>>>(
-            candidates_original.get(), candidate_count, status.get(), 2);
-        cuda_check(cudaGetLastError(), "restore candidate status");
-        cuda_check(cudaDeviceSynchronize(), "finish priority-greedy selection");
-
-        last_select = elapsed_ms(start);
-        if (trace_enabled()) {
-            std::fprintf(stderr, "[gpu-priority] select chosen=%zu %.3f ms\n",
-                         chosen, last_select);
-        }
-        return result;
     }
 
     std::size_t block_region_count() const {
@@ -1042,22 +896,22 @@ struct gpu_priority_frontend::impl {
         for (const auto batch : new_edge_batches) {
             if (batch.size > std::numeric_limits<std::size_t>::max() - added)
                 throw std::overflow_error(
-                    "GPU priority-greedy front-end topology batch size overflow");
+                    "GPU block front-end topology batch size overflow");
             added += batch.size;
         }
         if (added > std::numeric_limits<std::size_t>::max() - kept)
             throw std::overflow_error(
-                "GPU priority-greedy front-end live topology size overflow");
+                "GPU block front-end live topology size overflow");
         const std::size_t total = kept + added;
         if (total > static_cast<std::size_t>(INT_MAX))
             throw std::overflow_error(
-                "GPU priority-greedy front-end live topology exceeds INT_MAX edges");
+                "GPU block front-end live topology exceeds INT_MAX edges");
         // Eliminating an independent set removes sum(deg(v)) old edges and
         // emits at most sum(deg(v)-1) sampled edges. Isolated vertices emit
         // nothing, so multiplicity-aware topology never grows. The old COO
         // capacity is therefore sufficient for compacted + appended edges.
         if (total > old_count)
-            throw std::logic_error("GPU priority-greedy front-end topology "
+            throw std::logic_error("GPU block front-end topology "
                                    "unexpectedly grew after elimination");
 
         std::size_t offset = kept;
@@ -1093,7 +947,7 @@ struct gpu_priority_frontend::impl {
         last_advance = elapsed_ms(start);
         if (trace_enabled()) {
             std::fprintf(
-                stderr, "[gpu-priority] advance eliminated=%zu added=%zu %.3f ms\n",
+                stderr, "[gpu-block] advance eliminated=%zu added=%zu %.3f ms\n",
                 eliminated.size(), added, last_advance);
         }
     }
@@ -1135,7 +989,6 @@ struct gpu_priority_frontend::impl {
     partition_options current_options;
     std::size_t candidate_count = 0;
     std::size_t selected_degree_work = 0;
-    int cooperative_grid_limit = 0;
     int block_repair_grid_limit = 0;
     int block_region_limit = 0;
     bool topology_dirty = true;
@@ -1145,25 +998,7 @@ struct gpu_priority_frontend::impl {
     double last_advance = 0.0;
 };
 
-gpu_priority_frontend::mode gpu_priority_frontend::configured_mode() {
-    const char *e = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
-    if (!e || !*e || std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||
-        std::strcmp(e, "false") == 0)
-        return mode::disabled;
-    if (std::strcmp(e, "1") == 0 || std::strcmp(e, "on") == 0 ||
-        std::strcmp(e, "force") == 0)
-        return mode::forced;
-    static std::atomic_flag warned = ATOMIC_FLAG_INIT;
-    if (!warned.test_and_set())
-        std::fprintf(
-            stderr,
-            "[apxchol] unknown APXCHOL_GPU_PRIORITY_FRONTEND='%s'; expected "
-            "0|off|1|on|force, disabling the optional GPU setup front-end\n",
-            e);
-    return mode::disabled;
-}
-
-gpu_priority_frontend::mode gpu_priority_frontend::configured_block_mode() {
+gpu_block_frontend::mode gpu_block_frontend::configured_block_mode() {
     const char *e = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
     if (!e || !*e || std::strcmp(e, "auto") == 0)
         return mode::automatic;
@@ -1183,7 +1018,7 @@ gpu_priority_frontend::mode gpu_priority_frontend::configured_block_mode() {
     return mode::disabled;
 }
 
-bool gpu_priority_frontend::block_auto_enabled(int max_threads) noexcept {
+bool gpu_block_frontend::block_auto_enabled(int max_threads) noexcept {
     // GH200 single-RHS gate, nine matrices, bracketed CPU/GPU/CPU: total-time
     // geomean is 0.927x at T=8, 1.050x at T=16 and 1.201x at T=72. The
     // governor follows that measured CPU-selector scaling crossover; unlike
@@ -1191,9 +1026,8 @@ bool gpu_priority_frontend::block_auto_enabled(int max_threads) noexcept {
     return max_threads > 0 && max_threads <= 8;
 }
 
-gpu_priority_frontend::runtime_probe
-gpu_priority_frontend::probe_runtime(node_index n, std::size_t initial_edges,
-                                     bool block_selector) {
+gpu_block_frontend::runtime_probe
+gpu_block_frontend::probe_runtime(node_index n, std::size_t initial_edges) {
     runtime_probe result;
     int device = 0;
     int cooperative = 0;
@@ -1238,10 +1072,8 @@ gpu_priority_frontend::probe_runtime(node_index n, std::size_t initial_edges,
     valid &= add_allocation(bytes,
                             std::min(initial_edges, kTopologyStageEdges),
                             sizeof(deferred_edge));
-    if (block_selector) {
-        valid &= add_allocation(bytes, nv, sizeof(node_index));
-        valid &= add_allocation(bytes, nv, sizeof(int));
-    }
+    valid &= add_allocation(bytes, nv, sizeof(node_index));
+    valid &= add_allocation(bytes, nv, sizeof(int));
     // CUB scan/select scratch is implementation-dependent and much smaller
     // than the edge arrays; retain a conservative 64 MiB floor plus 5%.
     const std::size_t cub_floor = std::size_t{64} << 20;
@@ -1259,44 +1091,39 @@ gpu_priority_frontend::probe_runtime(node_index n, std::size_t initial_edges,
     return result;
 }
 
-gpu_priority_frontend::gpu_priority_frontend(
+gpu_block_frontend::gpu_block_frontend(
     node_index n, std::span<const gpu_topology_edge> initial_edges)
     : p_(std::make_unique<impl>(n, initial_edges)) {}
 
-gpu_priority_frontend::~gpu_priority_frontend() = default;
-gpu_priority_frontend::gpu_priority_frontend(gpu_priority_frontend &&) noexcept = default;
-gpu_priority_frontend &
-gpu_priority_frontend::operator=(gpu_priority_frontend &&) noexcept = default;
+gpu_block_frontend::~gpu_block_frontend() = default;
+gpu_block_frontend::gpu_block_frontend(gpu_block_frontend &&) noexcept = default;
+gpu_block_frontend &
+gpu_block_frontend::operator=(gpu_block_frontend &&) noexcept = default;
 
-gpu_priority_frontend::prepare_result
-gpu_priority_frontend::prepare(std::span<const node_index> active,
+gpu_block_frontend::prepare_result
+gpu_block_frontend::prepare(std::span<const node_index> active,
                            const partition_options &options) {
     p_->current_options = options;
     return p_->prepare(active, options);
 }
 
-std::span<const node_index> gpu_priority_frontend::host_candidates() const {
+std::span<const node_index> gpu_block_frontend::host_candidates() const {
     return p_->download_host_candidates();
 }
 
-std::span<const node_index> gpu_priority_frontend::host_active_degrees() const {
+std::span<const node_index> gpu_block_frontend::host_active_degrees() const {
     return p_->download_host_active_degrees();
 }
 
-const partition_result &gpu_priority_frontend::select(unsigned seed,
-                                                  std::uint64_t round) {
-    return p_->select(seed, round);
-}
-
-const partition_result &gpu_priority_frontend::select_block_greedy() {
+const partition_result &gpu_block_frontend::select_block_greedy() {
     return p_->select_block_greedy();
 }
 
-std::size_t gpu_priority_frontend::selected_degree_work() const {
+std::size_t gpu_block_frontend::selected_degree_work() const {
     return p_->selected_degree_work;
 }
 
-void gpu_priority_frontend::advance(std::span<const node_index> eliminated,
+void gpu_block_frontend::advance(std::span<const node_index> eliminated,
                                 std::span<const gpu_topology_edge> new_edges,
                                 std::span<const gpu_topology_batch> new_edge_batches) {
     p_->advance(eliminated, new_edges, new_edge_batches);

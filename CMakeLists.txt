@@ -126,10 +126,9 @@ add_library(apxchol_core
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_cast.cu>
     # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow), same reason.
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_dataflow.cu>
-    # GPU-resident residual topology for the exact priority-greedy research
-    # path and the block-region AUTO setup front-end. Both are runtime-guarded;
-    # the block path defaults to GPU only through the measured T=8 crossover.
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_priority_frontend.cu>
+    # GPU-resident residual topology for the block-region AUTO setup front-end,
+    # which defaults to GPU only through the measured T=8 crossover.
+    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_block_frontend.cu>
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
     # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>

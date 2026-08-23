@@ -24,7 +24,7 @@
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/solve.h"
 #if defined(APXCHOL_USE_CUDA)
-#include "apxchol/solver/gpu_priority_frontend.h"
+#include "apxchol/solver/gpu_block_frontend.h"
 #endif
 
 // ── Helpers ──────────────────────────────────────────
@@ -1140,25 +1140,8 @@ TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
 }
 
 #if defined(APXCHOL_USE_CUDA)
-TEST(GpuPriorityFrontend, ConfigurationParsingIsStrict) {
-    using frontend = apxchol::detail::gpu_priority_frontend;
-    const char* old = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
-    const bool had_old = old != nullptr;
-    const std::string saved = old ? old : "";
-
-    unsetenv("APXCHOL_GPU_PRIORITY_FRONTEND");
-    EXPECT_EQ(frontend::configured_mode(), frontend::mode::disabled);
-    setenv("APXCHOL_GPU_PRIORITY_FRONTEND", "force", 1);
-    EXPECT_EQ(frontend::configured_mode(), frontend::mode::forced);
-    setenv("APXCHOL_GPU_PRIORITY_FRONTEND", "0", 1);
-    EXPECT_EQ(frontend::configured_mode(), frontend::mode::disabled);
-
-    if (had_old) setenv("APXCHOL_GPU_PRIORITY_FRONTEND", saved.c_str(), 1);
-    else unsetenv("APXCHOL_GPU_PRIORITY_FRONTEND");
-}
-
 TEST(GpuBlockFrontend, AutomaticPolicyUsesMeasuredThreadCrossover) {
-    using frontend = apxchol::detail::gpu_priority_frontend;
+    using frontend = apxchol::detail::gpu_block_frontend;
     const char* old = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
     const bool had_old = old != nullptr;
     const std::string saved = old ? old : "";
@@ -1182,7 +1165,7 @@ TEST(GpuBlockFrontend, AutomaticPolicyUsesMeasuredThreadCrossover) {
     else unsetenv("APXCHOL_GPU_BLOCK_FRONTEND");
 }
 
-TEST(GpuPriorityFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly) {
+TEST(GpuBlockFrontend, TracksCandidatesAndDynamicUpdatesExactly) {
     using apxchol::detail::gpu_topology_edge;
     constexpr apxchol::node_index n = 12;
     const std::vector<gpu_topology_edge> initial = {
@@ -1194,14 +1177,12 @@ TEST(GpuPriorityFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly)
 
     apxchol::graph<apxchol::vec_pool_incidence> cpu_graph(n);
     for (const auto e : initial) cpu_graph.add_edge(e.u, e.v, 1.0);
-    apxchol::detail::gpu_priority_frontend gpu(n, initial);
-    apxchol::priority_greedy_partitioner cpu;
+    apxchol::detail::gpu_block_frontend gpu(n, initial);
 
     std::vector<apxchol::node_index> active(n);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     std::vector<apxchol::node_index> cpu_degrees, degree_scratch;
     std::vector<apxchol::node_index> live_degrees(n), eligible;
-    apxchol::selection cpu_selection;
     apxchol::partition_options popts;
 
     for (std::uint64_t round = 0; round < 3 && active.size() > 1; ++round) {
@@ -1226,28 +1207,17 @@ TEST(GpuPriorityFrontend, MatchesCpuCandidatesSelectionAndDynamicUpdatesExactly)
                       gpu.host_candidates().begin(), gpu.host_candidates().end()),
                   eligible);
 
-        apxchol::partition_context ctx{
-            .options = popts,
-            .seed = 42,
-            .omp_threshold = 2000,
-            .cp = nullptr,
-            .degrees = live_degrees,
-        };
-        cpu_selection.reset(n);
-        cpu.find_partition(cpu_graph, eligible, ctx, cpu_selection);
         const std::vector<apxchol::node_index> expected =
-            cpu_selection.finalize().data;
-        const auto& got = gpu.select(42, round);
-        EXPECT_EQ(got.data, expected);
+            gpu.select_block_greedy().data;
         std::size_t expected_work = 0;
         for (const auto v : expected)
             expected_work += live_degrees[v];
         EXPECT_EQ(gpu.selected_degree_work(), expected_work);
 
-        // select() restores its status scratch; repeating the same immutable
+        // Selection restores its status scratch; repeating the same immutable
         // round must be bit-deterministic.
         for (int repeat = 0; repeat < 5; ++repeat)
-            EXPECT_EQ(gpu.select(42, round).data, expected);
+            EXPECT_EQ(gpu.select_block_greedy().data, expected);
 
         for (const auto v : expected) cpu_graph.deactivate(v);
         std::erase_if(active, [&](apxchol::node_index v) {
@@ -1286,7 +1256,7 @@ TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
             }
         }
     }
-    apxchol::detail::gpu_priority_frontend gpu(n, initial);
+    apxchol::detail::gpu_block_frontend gpu(n, initial);
     std::vector<apxchol::node_index> active(n);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     apxchol::partition_options options;
@@ -1412,40 +1382,39 @@ TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
     }
 }
 
-TEST(GpuPriorityFrontend, IntegratedFactorizationMatchesCpuFrontend) {
-    const char* old = std::getenv("APXCHOL_GPU_PRIORITY_FRONTEND");
+TEST(GpuBlockFrontend, IntegratedFactorizationIsDeterministic) {
+    const char* old = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
     const bool had_old = old != nullptr;
     const std::string saved = old ? old : "";
 
     auto L = grid_laplacian(48, 48);
     apxchol::factor_options opts;
     opts.seed = 42;
-    opts.is_select = "priority_greedy";
+    opts.is_select = "block_greedy";
     opts.omp_threshold = 64;
 
-    setenv("APXCHOL_GPU_PRIORITY_FRONTEND", "0", 1);
-    const auto cpu = apxchol::factorize(
+    setenv("APXCHOL_GPU_BLOCK_FRONTEND", "force", 1);
+    const auto first = apxchol::factorize(
         L, apxchol::graph_storage::vec_pool, opts);
-    setenv("APXCHOL_GPU_PRIORITY_FRONTEND", "force", 1);
-    const auto gpu = apxchol::factorize(
+    const auto second = apxchol::factorize(
         L, apxchol::graph_storage::vec_pool, opts);
 
-    if (had_old) setenv("APXCHOL_GPU_PRIORITY_FRONTEND", saved.c_str(), 1);
-    else unsetenv("APXCHOL_GPU_PRIORITY_FRONTEND");
+    if (had_old) setenv("APXCHOL_GPU_BLOCK_FRONTEND", saved.c_str(), 1);
+    else unsetenv("APXCHOL_GPU_BLOCK_FRONTEND");
 
-    EXPECT_EQ(gpu.perm, cpu.perm);
-    ASSERT_EQ(gpu.L.rows(), cpu.L.rows());
-    ASSERT_EQ(gpu.L.nonZeros(), cpu.L.nonZeros());
-    const auto outer_count = static_cast<size_t>(cpu.L.cols()) + 1;
-    EXPECT_TRUE(std::equal(cpu.L.outerIndexPtr(),
-                           cpu.L.outerIndexPtr() + outer_count,
-                           gpu.L.outerIndexPtr()));
-    EXPECT_TRUE(std::equal(cpu.L.innerIndexPtr(),
-                           cpu.L.innerIndexPtr() + cpu.L.nonZeros(),
-                           gpu.L.innerIndexPtr()));
-    EXPECT_TRUE(std::equal(cpu.L.valuePtr(),
-                           cpu.L.valuePtr() + cpu.L.nonZeros(),
-                           gpu.L.valuePtr()));
+    EXPECT_EQ(second.perm, first.perm);
+    ASSERT_EQ(second.L.rows(), first.L.rows());
+    ASSERT_EQ(second.L.nonZeros(), first.L.nonZeros());
+    const auto outer_count = static_cast<size_t>(first.L.cols()) + 1;
+    EXPECT_TRUE(std::equal(first.L.outerIndexPtr(),
+                           first.L.outerIndexPtr() + outer_count,
+                           second.L.outerIndexPtr()));
+    EXPECT_TRUE(std::equal(first.L.innerIndexPtr(),
+                           first.L.innerIndexPtr() + first.L.nonZeros(),
+                           second.L.innerIndexPtr()));
+    EXPECT_TRUE(std::equal(first.L.valuePtr(),
+                           first.L.valuePtr() + first.L.nonZeros(),
+                           second.L.valuePtr()));
 }
 
 #endif
