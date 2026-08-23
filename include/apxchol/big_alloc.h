@@ -6,8 +6,10 @@
 /// For allocations >= 1 MB:
 ///   - mmap with MAP_PRIVATE | MAP_ANONYMOUS
 ///   - madvise MADV_HUGEPAGE: ask kernel to back with 2 MB pages (THP)
-///   - madvise MADV_POPULATE_WRITE: pre-fault all pages so no per-page minor
-///     faults during use
+///   - by default, madvise MADV_POPULATE_WRITE pre-faults all pages so there
+///     are no per-page minor faults during use. The Populate=false allocator
+///     variant leaves pages lazy for over-allocated containers whose unused
+///     capacity should not become resident.
 ///
 /// Effect: removes the per-page minor faults that std::vector value-init
 /// triggers during first touch. For 128 MB allocations with 4 KB pages this
@@ -36,14 +38,17 @@ inline std::size_t round_up(std::size_t n) {
     return (n + 4095) & ~std::size_t(4095);
 }
 
-template <typename T, std::size_t Align = 32>
+template <typename T, std::size_t Align = 32, bool Populate = true>
 class big_alloc {
 public:
     using value_type = T;
-    template <class U> struct rebind { using other = big_alloc<U, Align>; };
+    template <class U> struct rebind {
+        using other = big_alloc<U, Align, Populate>;
+    };
 
     big_alloc() = default;
-    template <class U> big_alloc(const big_alloc<U, Align>&) noexcept {}
+    template <class U>
+    big_alloc(const big_alloc<U, Align, Populate>&) noexcept {}
 
     [[nodiscard]] T* allocate(std::size_t n) {
         std::size_t padded = round_up(n * sizeof(T));
@@ -54,7 +59,8 @@ public:
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             if (raw == MAP_FAILED) throw std::bad_alloc{};
             madvise(raw, padded, MADV_HUGEPAGE);
-            madvise(raw, padded, MADV_POPULATE_WRITE);
+            if constexpr (Populate)
+                madvise(raw, padded, MADV_POPULATE_WRITE);
             return static_cast<T*>(raw);
         }
         return static_cast<T*>(::operator new(padded, std::align_val_t(align)));

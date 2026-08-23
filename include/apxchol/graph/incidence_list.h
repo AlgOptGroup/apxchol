@@ -557,10 +557,11 @@ private:
     }
 
     node_index n_ = 0;
-    // big_alloc: pool can grow to hundreds of MB on grid_3000+. Switching from
-    // std::allocator to big_alloc (mmap + MADV_HUGEPAGE + MAP_POPULATE) cuts
-    // TLB misses by ~512× and removes per-page minor faults on first touch.
-    std::vector<value_type, util::big_alloc<value_type>> pool_;
+    // The pool can grow to hundreds of MB on grid_3000+. Keep big_alloc's THP
+    // advice, but leave pages lazy: std::vector's unused geometric capacity can
+    // be hundreds of MB and must not become resident merely because it was
+    // reserved. resize() still initializes and commits every live slot.
+    std::vector<value_type, util::big_alloc<value_type, 32, false>> pool_;
     // base_[v] is an OFFSET into pool_ (can exceed 2^31 on dense factors) ->
     // edge_index. count_/cap_ are per-vertex slab sizes (<= degree < n) ->
     // node_index. base_[v] + count_[v] promotes to edge_index (pool index).
