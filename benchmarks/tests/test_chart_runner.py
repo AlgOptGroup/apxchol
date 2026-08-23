@@ -145,6 +145,20 @@ class CapReferenceTest(unittest.TestCase):
 
 
 class FairSweepSelectionTest(unittest.TestCase):
+    def test_orkut_size_gate_always_keeps_declared_default(self):
+        configs = [
+            ("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG),
+            ("apxchol_v1", "bg+tree[vec_pool]"),
+            ("apxchol_v1", "bg+tree[vec]"),
+            ("apxchol_v1", "bg+tree[bstr]"),
+        ]
+        with mock.patch.object(sweep_fair, "APX", configs):
+            self.assertEqual(
+                sweep_fair.cpu_apx_configs_for("com-Orkut"),
+                configs[:3],
+            )
+            self.assertIs(sweep_fair.cpu_apx_configs_for("iter0040"), configs)
+
     def test_all_registry_entries_are_selected_once(self):
         selected = list(sweep_fair.selected_matrices(
             {"grids", "suitesparse", "ipm"}))

@@ -130,6 +130,23 @@ def selected_matrices(families, only=()):
         if matrix["family"] in families and (not only or mid in only):
             yield mid, matrix
 
+
+def cpu_apx_configs_for(mid):
+    """Return the CPU apxchol configurations planned for one matrix.
+
+    com-Orkut is the one matrix where the exhaustive storage ablation is too
+    expensive.  Keep the declared default even when its storage spelling is new,
+    plus the indexed ``vec_pool`` and dense ``vec`` ablations.  Testing the
+    default by equality avoids silently dropping a future headline storage when
+    this size gate is updated less often than the public default.
+    """
+    if mid != "com-Orkut":
+        return APX
+    return [(solver, config) for solver, config in APX
+            if config == APX_DEFAULT_CONFIG
+            or "[vec_pool]" in config
+            or "[vec]" in config]
+
 # What the BINARY reported about the operator it assembled for each matrix
 # (`MATRIX_META ...` on stderr): kind, n/nnz, and whether the assembled operator
 # turned out to be a singular Laplacian (grounded) or full-rank (solved as-is).
@@ -551,11 +568,10 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
         return  # no Julia on the GPU axis
     t_apx = None
     # com-Orkut is huge (~237M input nnz, billion-scale factor offsets); the non-vec storage
-    # backends (fwd_star/bstr) are almost never better than vec_pool yet cost a lot
-    # of wall-time here, so keep only [vec] + [vec_pool] for it. "[vec]" does not match
-    # "[vec_pool]"/"[bstr]" as a substring, so the gate is exact.
-    apx_list = ([(s, c) for (s, c) in APX if "[vec_pool]" in c or "[vec]" in c]
-                if mid == "com-Orkut" else APX)
+    # backends (fwd_star/bstr) are almost never better than either pooled layout yet
+    # cost a lot of wall-time here, so keep the declared default plus [vec] and
+    # indexed [vec_pool].  cpu_apx_configs_for owns the exact spelling-sensitive gate.
+    apx_list = cpu_apx_configs_for(mid)
     for solver,config in apx_list:
         _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
         if config == APX_DEFAULT_CONFIG and m and m.get("total_s"):
@@ -597,9 +613,9 @@ def main():
     ap.add_argument("--device", choices=["cpu","gpu"], default="cpu",
                     help="cpu (build/) or gpu (build-cuda/, apxchol GPU-resident PCG)")
     ap.add_argument("--headline-only", action="store_true",
-                    help="run only the 4 [vec_pool] IS-selectors (best-eliminator for the "
-                         "comparison charts) + competitors; skip the vec/fwd_star/bstr "
-                         "storage-ablation configs AND Julia AC/AC2. Use for new large "
+                    help="run only the headline AoS config and 2 indexed IS-selector "
+                         "ablations (best eliminator for the comparison charts); skip the "
+                         "vec/fwd_star/bstr storage-ablation configs. Use for new large "
                          "matrices that only feed the comparison charts, not the ablation.")
     ap.add_argument("--no-rchol", action="store_true",
                     help="drop RCHOL / pRCHOL from the competitor set. They blow up (high "
