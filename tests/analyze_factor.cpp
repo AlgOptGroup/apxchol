@@ -338,14 +338,16 @@ int main(int argc, char* argv[]) {
         // every number this tool prints would be about a graph that isn't
         // there. See src/mtx_input.h.
         apxchol::input_kind resolved_kind = apxchol::input_kind::automatic;
+        apxchol::input_scan input_facts;
         {
-            const auto scan = apxchol::scan_input(A);
+            input_facts = apxchol::scan_input(A);
             std::string reason;
             resolved_kind = apxchol::resolve_input_kind(
-                apxchol::input_kind::automatic, scan,
+                apxchol::input_kind::automatic, input_facts,
                 hdr.field == fast_matrix_market::pattern, reason);
             std::printf("%s\n",
-                        apxchol::describe_input(resolved_kind, scan, reason).c_str());
+                        apxchol::describe_input(
+                            resolved_kind, input_facts, reason).c_str());
             if (resolved_kind == apxchol::input_kind::adjacency)
                 apxchol::adjacency_to_laplacian(A);
         }
@@ -379,7 +381,11 @@ int main(int argc, char* argv[]) {
         if (cli.solve) {
             std::srand(opts.seed);
             Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
-            if (resolved_kind == apxchol::input_kind::adjacency)
+            // An assembled pure Laplacian can be disconnected too.  Project
+            // it just like an adjacency input; leave SDDM/SPD operators alone.
+            if (resolved_kind == apxchol::input_kind::adjacency ||
+                (input_facts.excess_rows == 0 &&
+                 input_facts.deficient_rows == 0))
                 make_component_compatible(A, b);
             apxchol::solve_options solve_opts;
             solve_opts.tol = 1e-8;
