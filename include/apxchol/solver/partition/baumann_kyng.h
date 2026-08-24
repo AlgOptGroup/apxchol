@@ -45,10 +45,19 @@ struct baumann_kyng_partitioner {
     std::vector<node_index>                 deg_merge_;       // quantile nth_element scratch
     std::vector<std::vector<node_index>> local_sampled_;   // per-thread sampled lists
     std::vector<node_index>              sampled_all_;      // flattened sampled list
+    size_t selected_degree_work_ = 0;
+
+    /// Sum of the live degrees of the vertices selected by the last call.
+    /// Every selected vertex's degree was already measured by the sampler, so
+    /// exposing the sum lets factorization's dense-small-round gate make the
+    /// same decision for BK as it does for prepass-based selectors without an
+    /// extra residual-graph traversal.
+    size_t selected_degree_work() const { return selected_degree_work_; }
 
     template<incidence_storage Incidence>
     void find_partition(graph<Incidence>& G, std::span<const node_index> active,
                         const partition_context& ctx, selection& out) {
+        selected_degree_work_ = 0;
         if (active.empty()) return;
 
         const double c = sampling_constant;
@@ -83,11 +92,12 @@ struct baumann_kyng_partitioner {
 
         double sample_degree_sum = 0;
         long long sample_count = 0;
+        size_t selected_degree_work = 0;
 
         const bool two_pass = use_q || tiebreak;
         if (!two_pass) {
             // ── Legacy single-pass: fused prune + hash-priority IS + multiplier cap.
-            #pragma omp parallel reduction(+:sample_degree_sum, sample_count) \
+            #pragma omp parallel reduction(+:sample_degree_sum, sample_count, selected_degree_work) \
                 if(active.size() > ctx.omp_threshold)
             {
                 int tid = 0, nthreads = 1;
@@ -106,7 +116,10 @@ struct baumann_kyng_partitioner {
                     });
                     sample_degree_sum += deg; ++sample_count;
                     if (deg > degree_threshold) continue;
-                    if (ok) out.add(v);
+                    if (ok) {
+                        out.add(v);
+                        selected_degree_work += static_cast<size_t>(deg);
+                    }
                 }
             }
         } else {
@@ -155,7 +168,8 @@ struct baumann_kyng_partitioner {
             };
 
             // ── PASS 2: keep eligible sampled vertices that are priority-IS minima.
-            #pragma omp parallel if(active.size() > ctx.omp_threshold)
+            #pragma omp parallel reduction(+:selected_degree_work) \
+                if(active.size() > ctx.omp_threshold)
             {
                 #pragma omp for schedule(static) nowait
                 for (size_t idx = 0; idx < sampled_all_.size(); ++idx) {
@@ -166,7 +180,11 @@ struct baumann_kyng_partitioner {
                     G.prune_and_visit(v, [&](node_index u) {
                         if (ok && prio(u) <= hash_thresh && prio2(u) < pv) ok = false;
                     });
-                    if (ok) out.add(v);
+                    if (ok) {
+                        out.add(v);
+                        selected_degree_work +=
+                            static_cast<size_t>(deg_by_vertex_[v]);
+                    }
                 }
             }
         }
@@ -174,6 +192,7 @@ struct baumann_kyng_partitioner {
         // Update degree estimate from sampled vertices.
         if (sample_count > 0)
             est_avg_degree = sample_degree_sum / double(sample_count);
+        selected_degree_work_ = selected_degree_work;
 
         // Work trace: per-round iteration cost (active = the O(|active|) full scan) and
         // edge-visit cost (sample_deg = Σ deg over sampled vertices). Sum over rounds to

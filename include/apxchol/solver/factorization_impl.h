@@ -122,6 +122,11 @@ inline bool elimination_parallel_worthwhile(
     return adjacency_work > work_threshold;
 }
 
+inline constexpr int elimination_compute_chunk(
+        size_t vertices, size_t vertex_threshold) {
+    return vertices > vertex_threshold ? 64 : 1;
+}
+
 // Eliminate vertices in the partition: record L-columns, add clique edges.
 // Partition vertices across regions are pairwise non-adjacent (for singleton
 // regions, every vertex is its own region — same constraint as the old IS).
@@ -277,6 +282,14 @@ void eliminate_partition_singleton(const Eliminator& elim,
         n_verts, work_hint, opts.omp_threshold,
         static_cast<size_t>(team_threads));
     if (parallel_round) {
+        // Large independent sets amortize dynamic scheduling with coarse
+        // chunks. Dense-small rounds enter this path because their adjacency
+        // work is high despite having few vertices; a 64-vertex chunk can then
+        // leave almost the whole team idle (or even give the entire round to
+        // one thread). Give those rounds one pivot per claim so the work gate
+        // actually exposes their available inter-vertex parallelism.
+        const int compute_chunk =
+            elimination_compute_chunk(n_verts, opts.omp_threshold);
         // Team size for the fused paths: the full workspace team.
         if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
             // Mega-fused parallel region: compute + deactivate + apply all under
@@ -297,7 +310,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 ws.threads[tid].edge_buffer.clear();
                 ws.threads[tid].excess_buffer.clear();
 
-                #pragma omp for schedule(dynamic, 64)
+                #pragma omp for schedule(dynamic, compute_chunk)
                 for (size_t k = 0; k < n_verts; ++k)
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
@@ -376,7 +389,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 ws.threads[tid].edge_buffer.clear();
                 ws.threads[tid].excess_buffer.clear();
 
-                #pragma omp for schedule(dynamic, 64)
+                #pragma omp for schedule(dynamic, compute_chunk)
                 for (size_t k = 0; k < n_verts; ++k)
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
@@ -507,7 +520,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 ws.threads[tid].edge_buffer.clear();
                 ws.threads[tid].excess_buffer.clear();
 
-                #pragma omp for schedule(dynamic, 64) nowait
+                #pragma omp for schedule(dynamic, compute_chunk) nowait
                 for (size_t k = 0; k < n_verts; ++k)
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
@@ -975,7 +988,13 @@ factorization factorize_impl(const Eliminator& elim,
 
         const size_t cols_before = cp ? factor_cols.size() : 0;
         size_t elimination_work_hint = 0;
-        if constexpr (partitioner_degree_prepass_v<Partitioner>) {
+        if constexpr (requires(const Partitioner& p) {
+                          { p.selected_degree_work() } ->
+                              std::convertible_to<size_t>;
+                      }) {
+            elimination_work_hint =
+                static_cast<size_t>(partitioner.selected_degree_work());
+        } else if constexpr (partitioner_degree_prepass_v<Partitioner>) {
 #if defined(APXCHOL_USE_CUDA)
             if (gpu_frontend) {
                 elimination_work_hint = gpu_elimination_work_hint;
@@ -1215,7 +1234,9 @@ factorization factorize_impl(const Eliminator& elim,
             result.rounds.push_back({active.size(), bk_part.num_regions(),
                                      last_avg_degree, 0, 0});
             const size_t cols_before_bk = cp ? factor_cols.size() : 0;
-            detail::eliminate_partition(elim, work, bk_part, factor_cols, ws, opts, cp);
+            detail::eliminate_partition(
+                elim, work, bk_part, factor_cols, ws, opts, cp,
+                /*capture_gpu_topology=*/false, bk.selected_degree_work());
             if (cp) {
                 size_t bk_round_nnz = 0;
                 for (size_t ci = cols_before_bk; ci < factor_cols.size(); ++ci)

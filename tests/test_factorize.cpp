@@ -1102,6 +1102,42 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
         << unseeded << ", seeded 4000 => " << inflated << ")";
 }
 
+TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
+    const auto L = grid_laplacian(30, 30);
+    auto G = apxchol::make_graph<
+        apxchol::graph<apxchol::vec_pool_incidence>>(L);
+    std::vector<apxchol::node_index> active(900);
+    std::iota(active.begin(), active.end(), apxchol::node_index{0});
+    apxchol::partition_context ctx{
+        .options = {},
+        .seed = 42,
+        .omp_threshold = 1,
+        .cp = nullptr,
+        .degrees = {},
+    };
+    apxchol::baumann_kyng_partitioner bk;
+    bk.est_avg_degree = 4.0;
+    apxchol::selection selected;
+    selected.reset(G.n());
+    bk.find_partition(G, active, ctx, selected);
+    const auto& part = selected.finalize();
+
+    size_t expected = 0;
+    for (const auto v : part.data)
+        expected += static_cast<size_t>(G.prune_and_degree(v));
+    EXPECT_EQ(bk.selected_degree_work(), expected);
+
+    selected.reset(G.n());
+    bk.find_partition(G, std::span<const apxchol::node_index>{}, ctx, selected);
+    EXPECT_EQ(bk.selected_degree_work(), 0u);
+}
+
+TEST(EliminationWorkGate, DenseSmallRoundsUseFineSchedulingChunks) {
+    using apxchol::detail::elimination_compute_chunk;
+    EXPECT_EQ(elimination_compute_chunk(2000, 2000), 1);
+    EXPECT_EQ(elimination_compute_chunk(2001, 2000), 64);
+}
+
 TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
     constexpr apxchol::node_index n = 80;
     apxchol::graph<apxchol::vec_pool_incidence> G(n);
