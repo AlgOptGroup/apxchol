@@ -333,6 +333,10 @@ int main(int argc, char* argv[]) {
             std::ifstream f(cli.input_path);
             fast_matrix_market::read_matrix_market_eigen(f, hdr, A);
         }
+        if (A.rows() != A.cols())
+            throw std::runtime_error(
+                "matrix must be square, got " + std::to_string(A.rows()) +
+                "x" + std::to_string(A.cols()));
         // Same trap as the CLI: an adjacency/pattern .mtx handed straight to
         // factorize() gives negative edge weights and a fill-free factor, so
         // every number this tool prints would be about a graph that isn't
