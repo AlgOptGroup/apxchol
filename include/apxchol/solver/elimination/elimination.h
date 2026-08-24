@@ -157,16 +157,22 @@ callable_eliminator<std::decay_t<F>> as_eliminator(F&& fn) {
 
 namespace detail {
 
-inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
+inline bool radix_sort_neighbors(std::span<weighted_neighbor> values,
+                                 bool enabled) {
     constexpr size_t kMinDegree = 2048;
-    static const bool enabled = [] {
-        const char* env = std::getenv("APXCHOL_TREE_RADIX");
-        return env != nullptr && std::atoi(env) != 0;
-    }();
     if (!enabled || values.size() < kMinDegree) return false;
+    bool all_equal = true;
     for (const auto& value : values) {
         if (!std::isfinite(value.weight) || value.weight < 0.0)
             return false;
+        all_equal = all_equal && value.weight == values.front().weight;
+    }
+    if (all_equal) {
+        std::sort(values.begin(), values.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.vertex < b.vertex;
+                  });
+        return true;
     }
 
     constexpr unsigned kBits = 11;
@@ -200,9 +206,6 @@ inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
         source_is_values = !source_is_values;
     };
 
-    auto vertex_key = [](const weighted_neighbor& value) -> std::uint64_t {
-        return value.vertex;
-    };
     auto weight_key = [](const weighted_neighbor& value) -> std::uint64_t {
         // Numeric order and IEEE bit order agree for finite nonnegative
         // doubles. Normalize signed zero because the comparator treats both
@@ -210,13 +213,33 @@ inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
         return value.weight == 0.0 ? 0
             : std::bit_cast<std::uint64_t>(value.weight);
     };
-    for (unsigned shift = 0; shift < sizeof(node_index) * 8; shift += kBits)
-        pass(shift, vertex_key);
     for (unsigned shift = 0; shift < 64; shift += kBits)
         pass(shift, weight_key);
     if (!source_is_values)
         std::copy(scratch.begin(), scratch.end(), values.begin());
+    for (size_t first = 0; first < values.size();) {
+        size_t last = first + 1;
+        while (last < values.size() &&
+               values[last].weight == values[first].weight)
+            ++last;
+        if (last - first > 1) {
+            std::sort(values.begin() + static_cast<std::ptrdiff_t>(first),
+                      values.begin() + static_cast<std::ptrdiff_t>(last),
+                      [](const auto& a, const auto& b) {
+                          return a.vertex < b.vertex;
+                      });
+        }
+        first = last;
+    }
     return true;
+}
+
+inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("APXCHOL_TREE_RADIX");
+        return env != nullptr && std::atoi(env) != 0;
+    }();
+    return radix_sort_neighbors(values, enabled);
 }
 
 } // namespace detail
