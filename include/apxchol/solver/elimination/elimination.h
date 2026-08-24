@@ -229,16 +229,55 @@ struct tree_elimination {
             prefix[i] = prefix[i - 1] + neighbors[i].weight;
 
         random_stream rs{seed};
+        // A coarse inverse-CDF directory narrows each exact upper_bound to one
+        // cumulative-mass bucket. The final search and RNG are unchanged, so
+        // emitted edges remain byte-identical. Building the directory loses on
+        // small cliques; degree 512 is the conservative end-to-end validated
+        // cutoff on both x86-64 and Grace.
+        static thread_local std::vector<size_t> inverse_cdf;
+        constexpr size_t kDirectoryMinDegree = 512;
+        const bool use_buckets = d >= kDirectoryMinDegree &&
+                                 std::isfinite(prefix.back()) &&
+                                 prefix.back() > 0.0;
+        size_t bucket_count = 0;
+        double bucket_scale = 0.0;
+        if (use_buckets) {
+            bucket_count = std::min<size_t>(65'536, d / 8);
+            inverse_cdf.resize(bucket_count + 1);
+            bucket_scale = static_cast<double>(bucket_count) / prefix.back();
+            auto bucket_of = [&](double value) {
+                const double scaled = value * bucket_scale;
+                if (!(scaled > 0.0)) return size_t{0};
+                return std::min(bucket_count - 1,
+                                static_cast<size_t>(scaled));
+            };
+            size_t pos = 0;
+            inverse_cdf[0] = 0;
+            for (size_t bucket = 1; bucket < bucket_count; ++bucket) {
+                while (pos < d && bucket_of(prefix[pos]) < bucket) ++pos;
+                inverse_cdf[bucket] = pos;
+            }
+            inverse_cdf[bucket_count] = d;
+        }
         for (size_t i = 0; i + 1 < d; ++i) {
             const double suffix_sum = prefix.back() - prefix[i];
             if (suffix_sum <= 0.0) continue;
 
             const double r = rs.next_unit() * suffix_sum;
 
-            auto it = std::upper_bound(
-                prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1,
-                prefix.end(),
-                prefix[i] + r);
+            const double target = prefix[i] + r;
+            auto first = prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1;
+            auto last = prefix.end();
+            if (use_buckets) {
+                const double scaled = target * bucket_scale;
+                const size_t bucket = !(scaled > 0.0) ? 0 :
+                    std::min(bucket_count - 1, static_cast<size_t>(scaled));
+                first = prefix.begin() + static_cast<std::ptrdiff_t>(
+                    std::max(i + 1, inverse_cdf[bucket]));
+                last = prefix.begin() + static_cast<std::ptrdiff_t>(
+                    inverse_cdf[bucket + 1]);
+            }
+            auto it = std::upper_bound(first, last, target);
 
             size_t j = static_cast<size_t>(it - prefix.begin());
             if (j >= d) j = d - 1;
