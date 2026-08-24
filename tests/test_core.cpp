@@ -47,6 +47,29 @@ TYPED_TEST_SUITE(GraphTest, AllStorages);
 
 // ── Graph tests ──────────────────────────────────────
 
+TEST(ActiveState, ParallelClearsSharingWordsDoNotLoseUpdates) {
+    constexpr apxchol::node_index n = 4096;
+    apxchol::graph<apxchol::directed_vec_pool_incidence> G(n);
+
+    #pragma omp parallel for schedule(static, 1)
+    for (apxchol::node_index v = 0; v < n; ++v)
+        G.set_inactive_unchecked(v);
+    G.bulk_decrement_active(n);
+
+    EXPECT_EQ(G.num_active(), 0u);
+    for (apxchol::node_index v = 0; v < n; ++v)
+        EXPECT_FALSE(G.is_active(v));
+}
+
+TEST(ActiveState, RepeatedDeactivateDoesNotDoubleCount) {
+    apxchol::graph<apxchol::directed_vec_pool_incidence> G(65);
+    G.deactivate(64);
+    G.deactivate(64);
+    EXPECT_EQ(G.num_active(), 64u);
+    EXPECT_FALSE(G.is_active(64));
+    EXPECT_TRUE(G.is_active(63));
+}
+
 TYPED_TEST(GraphTest, BasicConstruction) {
     using Graph = typename TestFixture::Graph;
     Graph G(5);

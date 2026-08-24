@@ -1,6 +1,8 @@
 #pragma once
 #include "apxchol/graph/incidence_list.h"
 #include <algorithm>
+#include <cassert>
+#include <cstdint>
 #include <ranges>
 #include <span>
 #include <vector>
@@ -64,7 +66,9 @@ public:
     graph() = default;
 
     explicit graph(node_index n)
-        : n_(n), m_(0), num_active_(n), active_(n, true), excess_(n, 0.0) {
+        : n_(n), m_(0), num_active_(n),
+          active_(active_word_count(n), ~active_word{0}),
+          excess_(n, 0.0) {
         adj_.init(n);
     }
 
@@ -112,8 +116,7 @@ public:
     }
 
     void deactivate(node_index v) {
-        if (!active_[v]) return;
-        active_[v] = false;
+        if (!clear_active_bit(v)) return;
         --num_active_;
         adj_.clear(v);
     }
@@ -357,7 +360,9 @@ public:
     /// caller must invoke `bulk_decrement_active(k)` once after the
     /// parallel batch.  Adjacency chain is cleared (head reset to npos).
     void set_inactive_unchecked(node_index v) {
-        active_[v] = false;
+        const bool was_active = clear_active_bit(v);
+        assert(was_active);
+        (void)was_active;
         adj_.clear(v);
     }
 
@@ -373,7 +378,7 @@ public:
         node_index count = 0;
         adj_.filter(v, [&](const auto& idx) {
             auto u = edge_target(idx, v);
-            if (!active_[u]) return false;
+            if (!is_active(u)) return false;
             visit(u);
             count += edge_multiplicity(idx);
             return true;
@@ -392,7 +397,12 @@ public:
 
     // ── active-aware queries ──
 
-    bool is_active(node_index v) const { return active_[v]; }
+    bool is_active(node_index v) const {
+        const active_word word = __atomic_load_n(
+            &active_[static_cast<size_t>(v) / kActiveWordBits],
+            __ATOMIC_RELAXED);
+        return (word & active_mask(v)) != 0;
+    }
     node_index num_active() const { return num_active_; }
 
     /// Raw access to adjacency list and edge pool (for tight inner loops).
@@ -436,7 +446,7 @@ public:
         return edges_.capacity() * sizeof(edge)
              + multiplicity_.capacity() * sizeof(node_index)
              + adj_.memory_bytes()
-             + active_.capacity() * sizeof(char)
+             + active_.capacity() * sizeof(active_word)
              + excess_.capacity() * sizeof(double);
     }
 
@@ -474,7 +484,7 @@ private:
                 unsigned long long local_multi = 0;
                 for (const edge_index idx : adj_[u]) {
                     const node_index v = edges_[idx].traverse(u);
-                    if (!active_[v]) continue;
+                    if (!is_active(v)) continue;
                     targets.push_back(v);
                     local_multi += edge_multiplicity(idx);
                 }
@@ -530,7 +540,7 @@ private:
                 neighbors.clear();
                 for (const edge_index idx : adj_[u]) {
                     const node_index v = edges_[idx].traverse(u);
-                    if (!active_[v] || v <= u) continue;
+                    if (!is_active(v) || v <= u) continue;
                     neighbors.push_back({v, static_cast<double>(edges_[idx].w),
                                          edge_multiplicity(idx)});
                 }
@@ -592,6 +602,27 @@ private:
 
 
 private:
+    using active_word = std::uint64_t;
+    static constexpr size_t kActiveWordBits = 8 * sizeof(active_word);
+
+    static constexpr size_t active_word_count(node_index n) {
+        return (static_cast<size_t>(n) + kActiveWordBits - 1) /
+               kActiveWordBits;
+    }
+
+    static constexpr active_word active_mask(node_index v) {
+        return active_word{1} <<
+               (static_cast<size_t>(v) % kActiveWordBits);
+    }
+
+    bool clear_active_bit(node_index v) {
+        const active_word mask = active_mask(v);
+        const active_word old = __atomic_fetch_and(
+            &active_[static_cast<size_t>(v) / kActiveWordBits], ~mask,
+            __ATOMIC_RELAXED);
+        return (old & mask) != 0;
+    }
+
     node_index n_ = 0;          // vertex count
     edge_index m_ = 0;          // edge count (can exceed 2^31)
     node_index num_active_ = 0; // active vertex count
@@ -600,7 +631,12 @@ private:
     // physical edge; newly sampled edges use count 1.
     std::vector<node_index> multiplicity_;
     Incidence adj_;
-    std::vector<char> active_;
+    // Active status is probed randomly in nearly every residual-edge scan, so
+    // keep one bit per vertex rather than one byte.  Parallel elimination can
+    // clear distinct vertices that share a word; all reads and clears therefore
+    // use relaxed atomic operations.  Round barriers provide the phase ordering
+    // needed by later graph traversals.
+    std::vector<active_word> active_;
     std::vector<double> excess_;
     edge_index edges_pool_base_  = 0;
     edge_index edges_pool_count_ = 0;
