@@ -301,13 +301,26 @@ struct basic_vec_pool_incidence {
 
     void filter(node_index v, auto&& pred, auto&& on_keep) {
         value_type* p = pool_.data() + base_[v];
+        const node_index count = count_[v];
+
+        // Do not copy the clean prefix onto itself. In the common no-removal
+        // case this makes filter a read-only pass; after the first hole, the
+        // usual stable compaction resumes. This is the same first-hole shape
+        // used by remove_if, written out so on_keep still runs exactly once
+        // for every survivor.
         node_index out = 0;
-        for (node_index i = 0; i < count_[v]; ++i) {
-            if (pred(p[i])) {
-                p[out++] = p[i];
-                on_keep(p[i]);
-            }
+        while (out < count && pred(p[out])) {
+            on_keep(p[out]);
+            ++out;
         }
+        if (out == count) return;
+
+        for (node_index i = out + 1; i < count; ++i)
+            if (pred(p[i])) {
+                p[out] = p[i];
+                on_keep(p[out]);
+                ++out;
+            }
         count_[v] = out;
     }
 
