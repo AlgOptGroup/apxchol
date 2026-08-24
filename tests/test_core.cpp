@@ -70,6 +70,46 @@ TEST(ActiveState, RepeatedDeactivateDoesNotDoubleCount) {
     EXPECT_TRUE(G.is_active(63));
 }
 
+namespace {
+struct assignment_counted_slot {
+    int value = 0;
+    static inline int assignments = 0;
+
+    assignment_counted_slot() = default;
+    assignment_counted_slot(int x) : value(x) {}
+    assignment_counted_slot(const assignment_counted_slot&) = default;
+    assignment_counted_slot& operator=(const assignment_counted_slot& other) {
+        value = other.value;
+        ++assignments;
+        return *this;
+    }
+};
+}
+
+TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
+    using Incidence = apxchol::basic_vec_pool_incidence<
+        assignment_counted_slot, apxchol::graph_storage::vec_pool>;
+    Incidence adj;
+    adj.init(1);
+    for (int value : {1, 2, 3, 4}) adj.push(0, value);
+
+    assignment_counted_slot::assignments = 0;
+    adj.filter(0, [](const auto&) { return true; });
+    EXPECT_EQ(assignment_counted_slot::assignments, 0);
+
+    std::vector<int> kept;
+    assignment_counted_slot::assignments = 0;
+    adj.filter(0,
+               [](const auto& slot) { return slot.value != 2; },
+               [&](const auto& slot) { kept.push_back(slot.value); });
+    EXPECT_EQ(assignment_counted_slot::assignments, 2);
+    EXPECT_EQ(kept, (std::vector<int>{1, 3, 4}));
+    ASSERT_EQ(adj[0].size(), 3u);
+    EXPECT_EQ(adj[0][0].value, 1);
+    EXPECT_EQ(adj[0][1].value, 3);
+    EXPECT_EQ(adj[0][2].value, 4);
+}
+
 TYPED_TEST(GraphTest, BasicConstruction) {
     using Graph = typename TestFixture::Graph;
     Graph G(5);
