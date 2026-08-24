@@ -254,6 +254,15 @@ requires F16C (x86) and falls back to fp32 with a note otherwise.
 Everything else defaults OFF except the `APXCHOL_BUILD_EXAMPLES` /
 `APXCHOL_BUILD_TESTS` toggles. Release builds add `-march=native`.
 
+On CPU, `APXCHOL_CPU_SPTRSV=auto|levels` selects the triangular schedule
+(unset = `auto`). AUTO keeps fat elimination-round levels on the established
+level-set kernel and moves the contiguous thin tail to a single-pass
+critical-parent weak-barrier plan. Its factor scan is O(nnz+n) and flattening
+costs O(P*steps), where P is the setup OpenMP team size. At one thread, without
+round metadata, or without a thin suffix, AUTO is exactly level-set; `levels`
+is the explicit rollback. Both paths use the same stored factor and row
+arithmetic.
+
 One runtime knob (CPU/OpenMP backend): the SpTRSV setup drops factor
 off-diagonals below `1e-4 ×` their column's max |off-diagonal| before it
 builds its CSR/CSC, folding the dropped mass back into the kept entries of

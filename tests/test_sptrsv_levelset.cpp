@@ -130,6 +130,34 @@ sparse_csc make_round(node_index R, node_index B, unsigned seed, std::vector<nod
     return from_cols(m, col_rows, rng);
 }
 
+// Round-as-level factor with a genuinely mixed shape: a fat prefix followed by
+// a long contiguous thin tail. This is the structural shape the hybrid path is
+// meant to split, and mirrors elimination's large early IS rounds plus BK/peel
+// tail without depending on a graph factorization in this unit test.
+sparse_csc make_fat_prefix_thin_tail(
+        node_index fat_rounds, node_index fat_width,
+        node_index thin_rounds, node_index thin_width,
+        unsigned seed, std::vector<node_index>& bounds) {
+    std::mt19937 rng(seed);
+    const node_index rounds = fat_rounds + thin_rounds;
+    bounds.assign(static_cast<std::size_t>(rounds) + 1, 0);
+    for (node_index r = 0; r < rounds; ++r)
+        bounds[r + 1] = bounds[r] + (r < fat_rounds ? fat_width : thin_width);
+    const node_index m = bounds.back();
+    std::uniform_int_distribution<int> ulen(0, 24);
+    std::vector<std::vector<node_index>> col_rows(m);
+    for (node_index j = 0; j < m; ++j) col_rows[j].push_back(j);
+    for (node_index r = 1; r < rounds; ++r) {
+        std::uniform_int_distribution<node_index> ucol(0, bounds[r] - 1);
+        for (node_index i = bounds[r]; i < bounds[r + 1]; ++i) {
+            int len = ulen(rng);
+            if (i % 1009 == 0) len += 100;
+            for (int t = 0; t < len; ++t) col_rows[ucol(rng)].push_back(i);
+        }
+    }
+    return from_cols(m, col_rows, rng);
+}
+
 std::vector<double> random_x(node_index m, unsigned seed) {
     std::mt19937 rng(seed);
     std::uniform_real_distribution<double> ux(-1.0, 1.0);
@@ -279,4 +307,151 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
         }
     }
     set_threads(t_max);
+}
+
+TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    std::vector<node_index> bounds;
+    const sparse_csc L = make_fat_prefix_thin_tail(
+        4, apxchol::kSpTRSVOMPThreshold + 76, 130, 8, 551, bounds);
+    const auto x = random_x(L.rows(), 552);
+    set_threads(4);
+
+    apxchol::omp_sptrsv levels;
+    {
+        scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+        levels.set_round_bounds(bounds);
+        levels.setup(L, L.rows());
+    }
+    apxchol::omp_sptrsv hybrid;
+    {
+        scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+        hybrid.set_round_bounds(bounds);
+        hybrid.setup(L, L.rows());
+    }
+    ASSERT_TRUE(hybrid.uses_hybrid_schedule());
+    const node_index first_tail_row =
+        4 * (apxchol::kSpTRSVOMPThreshold + 76);
+    const auto assignment = apxchol::detail::assign_critical_schedule(
+        L.rows(), hybrid.csr_row_ptr().data(), hybrid.csr_col_idx().data(),
+        4, first_tail_row);
+    EXPECT_TRUE(apxchol::detail::critical_assignments_are_valid(
+        assignment, L.rows(), hybrid.csr_row_ptr().data(),
+        hybrid.csr_col_idx().data(), first_tail_row));
+    EXPECT_LT(hybrid.num_barriers(true), levels.num_barriers(true));
+    EXPECT_LT(hybrid.num_barriers(false), levels.num_barriers(false));
+    const pair_out reference = solve_pair(levels, x);
+    expect_same_bytes(reference, solve_pair(hybrid, x), "hybrid vs levels");
+
+    // A setup-time team mismatch takes the tail's natural serial fallback and
+    // must preserve both the bulk-prefix and critical-tail arithmetic.
+    set_threads(1);
+    expect_same_bytes(reference, solve_pair(hybrid, x),
+                      "hybrid after runtime thread-count change");
+    set_threads(4);
+}
+
+TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
+    if constexpr (!apxchol::omp_sptrsv::fp16_supported()) return;
+    scoped_env fp16_storage("APXCHOL_SPTRSV_FP16", "1");
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    std::vector<node_index> bounds;
+    const sparse_csc L = make_fat_prefix_thin_tail(
+        2, apxchol::kSpTRSVOMPThreshold + 8, 24, 8, 557, bounds);
+    const auto x = random_x(L.rows(), 558);
+    set_threads(4);
+
+    apxchol::omp_sptrsv levels;
+    {
+        scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+        levels.set_round_bounds(bounds);
+        levels.setup(L, L.rows());
+    }
+    apxchol::omp_sptrsv hybrid;
+    {
+        scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+        hybrid.set_round_bounds(bounds);
+        hybrid.setup(L, L.rows());
+    }
+    ASSERT_TRUE(hybrid.uses_hybrid_schedule());
+    expect_same_bytes(solve_pair(levels, x), solve_pair(hybrid, x),
+                      "fp16 hybrid vs levels");
+}
+
+TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    set_threads(4);
+
+    {
+        SCOPED_TRACE("all levels fat");
+        std::vector<node_index> bounds;
+        const sparse_csc L = make_round(
+            6, apxchol::kSpTRSVOMPThreshold + 8, 553, bounds);
+        const auto x = random_x(L.rows(), 554);
+        apxchol::omp_sptrsv levels;
+        {
+            scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+            levels.set_round_bounds(bounds);
+            levels.setup(L, L.rows());
+        }
+        apxchol::omp_sptrsv hybrid;
+        {
+            scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+            hybrid.set_round_bounds(bounds);
+            hybrid.setup(L, L.rows());
+        }
+        EXPECT_FALSE(hybrid.uses_hybrid_schedule());
+        EXPECT_EQ(hybrid.num_barriers(true), levels.num_barriers(true));
+        expect_same_bytes(solve_pair(levels, x), solve_pair(hybrid, x),
+                          "all-fat hybrid limit");
+    }
+    {
+        SCOPED_TRACE("all levels thin");
+        std::vector<node_index> bounds;
+        const sparse_csc L = make_round(130, 8, 555, bounds);
+        const auto x = random_x(L.rows(), 556);
+        apxchol::omp_sptrsv levels;
+        {
+            scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+            levels.set_round_bounds(bounds);
+            levels.setup(L, L.rows());
+        }
+        apxchol::omp_sptrsv hybrid;
+        {
+            scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+            hybrid.set_round_bounds(bounds);
+            hybrid.setup(L, L.rows());
+        }
+        ASSERT_TRUE(hybrid.uses_hybrid_schedule());
+        EXPECT_LT(hybrid.num_barriers(true), levels.num_barriers(true));
+        expect_same_bytes(solve_pair(levels, x), solve_pair(hybrid, x),
+                          "all-thin hybrid limit");
+    }
+}
+
+TEST(CriticalSchedule, AutoUsesAnyThinSuffixWithRoundsAndMultipleThreads) {
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+    std::vector<node_index> bounds;
+    const sparse_csc L = make_round(13, 8, 111, bounds);
+
+    set_threads(4);
+    apxchol::omp_sptrsv parallel;
+    parallel.set_round_bounds(bounds);
+    parallel.setup(L, L.rows());
+    EXPECT_TRUE(parallel.uses_hybrid_schedule());
+
+    apxchol::omp_sptrsv without_rounds;
+    without_rounds.setup(L, L.rows());
+    EXPECT_FALSE(without_rounds.uses_hybrid_schedule());
+
+    set_threads(1);
+    apxchol::omp_sptrsv serial;
+    serial.set_round_bounds(bounds);
+    serial.setup(L, L.rows());
+    EXPECT_FALSE(serial.uses_hybrid_schedule());
+    set_threads(4);
 }

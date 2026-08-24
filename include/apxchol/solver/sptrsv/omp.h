@@ -2,6 +2,7 @@
 #include "apxchol/types.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/big_alloc.h"
+#include "apxchol/solver/sptrsv/critical_schedule.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"   // the compacting drop (shared with the CUDA backend)
 #include "apxchol/solver/sptrsv/transpose.h"     // the CSC -> CSR transpose (shared with the CUDA backend)
 #include <algorithm>
@@ -13,7 +14,6 @@
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
-#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -38,16 +38,19 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 // shared with the CUDA backend; the "COMPACTING DROP" section below is the
 // authoritative description of what it does and why.
 
-/// OpenMP parallel sparse triangular solver: ONE level-set kernel for both
-/// sweeps (Anderson & Saad 1989; Naumov 2011).
+/// OpenMP sparse triangular solver: shared row arithmetic under either the
+/// established level-set schedule (Anderson & Saad 1989; Naumov 2011) or the
+/// critical-parent staleness-2 weak-barrier schedule in critical_schedule.h.
 ///
-/// setup() pre-computes the topological levels of the dependency DAG (or reads
-/// them off the elimination rounds, see round_bounds_); a solve is one
-/// persistent OpenMP team walking the levels in order with a barrier between
-/// levels. The forward solve (L y = x) walks the CSR of L11 -- row i, diagonal
-/// slot LAST, levels fwd_levels_ -- and the back solve (L^T z = y) walks the
-/// CSC -- column j, diagonal slot FIRST, levels bck_levels_ (already stored
-/// deepest-dependency-first, so both walks are index-ascending). Both are pure
+/// setup() resolves APXCHOL_CPU_SPTRSV=auto|levels. AUTO builds the round-level
+/// schedule and, for a multi-thread team, replaces its contiguous trailing run
+/// of thin levels with a critical-parent plan. Fat levels stay on the established
+/// level-set kernel. Without elimination-round metadata, without a thin suffix,
+/// or with one thread, AUTO is exactly the level-set schedule. `levels` is the
+/// explicit rollback.
+/// The forward solve (L y = x) walks CSR of L11 -- row i, diagonal slot LAST --
+/// and the back solve (L^T z = y) walks CSC -- column j, diagonal slot FIRST.
+/// Both are pure
 /// gathers of the same shape (per row / column: one dot product over the
 /// off-diagonal slots against y_out, one subtract, one divide by the diagonal),
 /// so they are ONE templated kernel, solve_levelset<Dir, V>, whose direction
@@ -66,8 +69,8 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// thread runs it and when -- so both sweeps return the SAME BYTES at every
 /// thread count (tests/test_sptrsv_levelset.cpp).
 ///
-/// Two schedule experiments were tried against this and REMOVED 2026-08-18
-/// as negative results (neither beat the schedule above; both were
+/// Earlier schedule experiments were tried and REMOVED 2026-08-18 as negative
+/// results (none preserved useful processor-local dependency chains; all were
 /// bit-identical to it): APXCHOL_SPTRSV_BALANCE=nnz (fat levels split into
 /// per-thread contiguous row ranges of equal stored-entry counts, cached per
 /// team size, instead of `omp for schedule(static)` by row count -- the
@@ -81,10 +84,11 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// A/B across the suite never showed it winning on any factor the
 /// elimination produces (power-law factors have a tiny AVERAGE level size,
 /// but a few very fat early levels carry nearly all the work), and the
-/// point-to-point experiment showed the barrier COUNT is not what the wall
-/// time is made of. APXCHOL_LEVEL_DUMP=1 still prints the thin-level counts
-/// and thin-run length histogram per direction (the structure those
-/// experiments targeted) next to the work-concentration signals.
+/// point-to-point experiment showed that barrier COUNT alone is not what the
+/// wall time is made of. The fused tail differs: it keeps same-processor
+/// dependencies in topological order and uses a staleness-2 weak barrier for
+/// cross-processor dependencies, while leaving the parallel fat prefix alone.
+/// APXCHOL_LEVEL_DUMP=1 prints both the level census and the resolved tail plan.
 
 // STORAGE (RUNTIME, per setup): the SpTRSV's CSR/CSC value arrays -- the two
 // largest copies of the factor -- hold either fp32 (`float`, the default) or
@@ -856,8 +860,92 @@ private:
         drop_vals.reset();
         L11_outer = nullptr; L11_inner = nullptr; L11_vals = nullptr; col_scale = nullptr;
 
-        build_levels(mark);
+        build_schedule(mark);
         ready_ = true;
+    }
+
+    static bool round_levels_disabled() {
+        const char* value = std::getenv("APXCHOL_ROUND_LEVELS");
+        return value != nullptr && std::atoi(value) == 0;
+    }
+
+    bool round_bounds_valid() const {
+        return !round_levels_disabled() && !round_bounds_.empty() &&
+               round_bounds_.back() <= static_cast<node_index>(m_);
+    }
+
+    template <class Mark>
+    void build_schedule(Mark&& mark) {
+        const auto mode = detail::cpu_sptrsv_schedule_from_env();
+        unsigned processors = 1;
+#ifdef _OPENMP
+        processors = static_cast<unsigned>(std::max(1, omp_get_max_threads()));
+#endif
+        hybrid_active_ = false;
+        hybrid_fwd_level_end_ = 0;
+        hybrid_bck_level_begin_ = 0;
+        critical_plan_.clear();
+        critical_barrier_.clear();
+        build_levels(mark);
+        if (mode == detail::cpu_sptrsv_schedule_mode::automatic)
+            build_hybrid_tail(processors, mark);
+
+        if (std::getenv("APXCHOL_VERBOSE")) {
+            std::fprintf(stderr,
+                "[apxchol] CPU SpTRSV schedule: %s (%s, processors=%u)\n",
+                hybrid_active_ ? "level-set+critical-tail" : "level-set",
+                mode == detail::cpu_sptrsv_schedule_mode::automatic
+                    ? "auto" : "levels forced",
+                processors);
+        }
+    }
+
+    // The round-level schedule normally has a
+    // fat prefix followed by the residual peel/BK tail as one contiguous run of
+    // thin levels. Preserve the established bulk level-set schedule for that
+    // prefix and build a critical-parent plan only for the tail rows. Forward
+    // executes prefix -> tail; backward's level vector is reversed and executes
+    // tail -> prefix. No input-size or whole-factor mean-width gate is involved.
+    template <class Mark>
+    void build_hybrid_tail(unsigned processors, Mark&& mark) {
+        if (processors <= 1 || !round_bounds_valid() || fwd_levels_.empty())
+            return;
+
+        std::size_t split = fwd_levels_.size();
+        while (split != 0 &&
+               fwd_levels_[split - 1].size() <=
+                   static_cast<std::size_t>(kSpTRSVOMPThreshold))
+            --split;
+        if (split == fwd_levels_.size()) return;  // no thin suffix
+
+        const node_index first_row = fwd_levels_[split].front();
+        std::size_t tail_rows = 0;
+        for (std::size_t level = split; level < fwd_levels_.size(); ++level)
+            tail_rows += fwd_levels_[level].size();
+        // Round levels partition factor order contiguously. Refuse rather than
+        // silently constructing a partial plan if that invariant ever changes.
+        if (tail_rows != static_cast<std::size_t>(m_ - first_row))
+            return;
+
+        critical_plan_ = detail::build_critical_schedule(
+            m_, csr_row_ptr_.data(), csr_col_idx_.data(), processors,
+            first_row);
+        critical_barrier_.setup(processors);
+        hybrid_fwd_level_end_ = split;
+        hybrid_bck_level_begin_ = fwd_levels_.size() - split;
+        hybrid_active_ = critical_plan_.row_count != 0;
+        if (hybrid_active_) {
+            mark("hybrid_critical_tail");
+            if (const char* value = std::getenv("APXCHOL_LEVEL_DUMP");
+                value && *value) {
+                std::fprintf(stderr,
+                    "[trsv-hybrid] processors=%u bulk_levels=%zu "
+                    "tail_levels=%zu tail_rows=%u critical_supersteps=%zu\n",
+                    processors, split, fwd_levels_.size() - split,
+                    static_cast<unsigned>(critical_plan_.row_count),
+                    critical_plan_.steps);
+            }
+        }
     }
 
     // ── Level sets (storage-INDEPENDENT: they read only the CSR/CSC
@@ -882,13 +970,7 @@ private:
         // SOLVE optimization (-6..-18% across grids/SS/IPM): the topological scan
         // minimizes level COUNT but leaves levels imbalanced; the round boundaries
         // distribute columns far more evenly -> better per-level load balance.
-        static const bool kRoundLevelsDisabled = [] {
-            const char* e = std::getenv("APXCHOL_ROUND_LEVELS");
-            return e && std::atoi(e) == 0;
-        }();
-        const bool use_rounds = !kRoundLevelsDisabled
-            && !round_bounds_.empty()
-            && round_bounds_.back() <= static_cast<node_index>(m_);
+        const bool use_rounds = round_bounds_valid();
         if (use_rounds) {
             std::vector<int> rof(m_);
             const node_index R = static_cast<node_index>(round_bounds_.size()) - 1;
@@ -1063,9 +1145,87 @@ private:
     template <class Dir>
     void solve_dispatch(const double* x_in, double* y_out) const {
         if (fp16_) {
-            if constexpr (fp16_supported()) { solve_levelset<Dir, fp16_t>(x_in, y_out); return; }
+            if constexpr (fp16_supported()) {
+                solve_selected<Dir, fp16_t>(x_in, y_out);
+                return;
+            }
         }
-        solve_levelset<Dir, float>(x_in, y_out);
+        solve_selected<Dir, float>(x_in, y_out);
+    }
+
+    template <class Dir, class V>
+    void solve_selected(const double* x_in, double* y_out) const {
+        if (hybrid_active_)
+            solve_hybrid<Dir, V>(x_in, y_out);
+        else
+            solve_levelset<Dir, V>(x_in, y_out);
+    }
+
+    template <class Dir, class V>
+    void solve_hybrid(const double* x_in, double* y_out) const {
+        bool team_ok = false;
+#ifdef _OPENMP
+        const unsigned processors = critical_plan_.processors;
+        team_ok = true;
+        // Keep both phases in one team. The last level-set workshare already
+        // barriers before the critical tail in the forward direction. The
+        // reverse direction needs one explicit phase barrier because a lane
+        // may leave the last weak superstep before every other lane has
+        // published its final tail row.
+        #pragma omp parallel num_threads(processors) shared(team_ok)
+        {
+            #pragma omp single
+            team_ok = static_cast<unsigned>(omp_get_num_threads()) == processors;
+            if (team_ok) {
+                if constexpr (Dir::forward) {
+                    solve_levelset_range_team<Dir, V>(
+                        x_in, y_out, 0, hybrid_fwd_level_end_);
+                    solve_critical_team<Dir, V>(x_in, y_out);
+                } else {
+                    solve_critical_team<Dir, V>(x_in, y_out);
+                    #pragma omp barrier
+                    solve_levelset_range_team<Dir, V>(
+                        x_in, y_out, hybrid_bck_level_begin_,
+                        Dir::levels(*this).size());
+                }
+            }
+        }
+#endif
+        if (!team_ok) {
+            // No row was touched unless the setup-time team materialized.
+            // Natural factor order is an exact fallback for both phases.
+            for (node_index k = 0; k < m_; ++k)
+                solve_row<Dir, V, /*Fat=*/false>(
+                    Dir::serial_vertex(k, m_, 0), x_in, y_out);
+        }
+    }
+
+    // One thread owns one processor lane. Rows in a (processor, step) slot
+    // stay in topological order, while cross-lane dependencies wait for the
+    // staleness-2 frontier. Called collectively by the hybrid's OpenMP team.
+    template <class Dir, class V>
+    void solve_critical_team(const double* x_in, double* y_out) const {
+#ifdef _OPENMP
+        const unsigned processor =
+            static_cast<unsigned>(omp_get_thread_num());
+        const std::size_t steps = critical_plan_.steps;
+        const auto& ptr = Dir::critical_ptr(*this);
+        const auto& rows = Dir::critical_rows(*this);
+        for (std::size_t step = 0; step < steps; ++step) {
+            const std::size_t slot =
+                static_cast<std::size_t>(processor) * steps + step;
+            const std::size_t begin = ptr[slot];
+            const std::size_t end = ptr[slot + 1];
+            if (begin != end)
+                critical_barrier_.wait(processor, 1);
+            for (std::size_t i = begin; i < end; ++i)
+                solve_row<Dir, V, /*Fat=*/false>(rows[i], x_in, y_out);
+            critical_barrier_.arrive(processor);
+        }
+#else
+        (void)x_in;
+        (void)y_out;
+#endif
     }
 
     // ── THE level-set kernel (both directions, both storages) ──────────
@@ -1094,26 +1254,45 @@ private:
     template <class Dir, class V>
     void solve_levelset(const double* x_in, double* y_out) const {
         const auto& levels  = Dir::levels(*this);
-        const std::size_t L = levels.size();
+        solve_levelset_range<Dir, V>(x_in, y_out, 0, levels.size());
+    }
+
+    template <class Dir, class V>
+    void solve_levelset_range(const double* x_in, double* y_out,
+                              std::size_t first_level,
+                              std::size_t level_end) const {
+        if (first_level == level_end) return;
         #pragma omp parallel
         {
-            for (std::size_t l = 0; l < L; ++l) {
-                const auto& level = levels[l];
-                const node_index level_sz = static_cast<node_index>(level.size());
-                const node_index* lv = level.data();
-                if (level_sz <= kSpTRSVOMPThreshold) {
-                    #pragma omp single
-                    for (node_index k = 0; k < level_sz; ++k) {
-                        prefetch_ahead<Dir, V>(lv, k, level_sz);
-                        solve_row<Dir, V, /*Fat=*/false>(lv[k], x_in, y_out);
-                    } // implicit barrier on omp single
-                } else {
-                    #pragma omp for schedule(static)
-                    for (node_index k = 0; k < level_sz; ++k) {
-                        prefetch_ahead<Dir, V>(lv, k, level_sz);
-                        solve_row<Dir, V, /*Fat=*/true>(lv[k], x_in, y_out);
-                    } // implicit barrier on omp for
-                }
+            solve_levelset_range_team<Dir, V>(
+                x_in, y_out, first_level, level_end);
+        }
+    }
+
+    // Called collectively from an existing OpenMP team. Keeping the range
+    // body separate lets the hybrid cross from bulk levels to weak
+    // supersteps without a second fork/join.
+    template <class Dir, class V>
+    void solve_levelset_range_team(const double* x_in, double* y_out,
+                                   std::size_t first_level,
+                                   std::size_t level_end) const {
+        const auto& levels = Dir::levels(*this);
+        for (std::size_t l = first_level; l < level_end; ++l) {
+            const auto& level = levels[l];
+            const node_index level_sz = static_cast<node_index>(level.size());
+            const node_index* lv = level.data();
+            if (level_sz <= kSpTRSVOMPThreshold) {
+                #pragma omp single
+                for (node_index k = 0; k < level_sz; ++k) {
+                    prefetch_ahead<Dir, V>(lv, k, level_sz);
+                    solve_row<Dir, V, /*Fat=*/false>(lv[k], x_in, y_out);
+                } // implicit barrier on omp single
+            } else {
+                #pragma omp for schedule(static)
+                for (node_index k = 0; k < level_sz; ++k) {
+                    prefetch_ahead<Dir, V>(lv, k, level_sz);
+                    solve_row<Dir, V, /*Fat=*/true>(lv[k], x_in, y_out);
+                } // implicit barrier on omp for
             }
         }
     }
@@ -1134,11 +1313,25 @@ private:
     }
 
 public:
-    int num_fwd_levels() const { return static_cast<int>(fwd_levels_.size()); }
-    int num_bck_levels() const { return static_cast<int>(bck_levels_.size()); }
+    int num_fwd_levels() const {
+        return static_cast<int>(hybrid_active_
+            ? hybrid_fwd_level_end_ + critical_plan_.steps
+            : fwd_levels_.size());
+    }
+    int num_bck_levels() const {
+        return static_cast<int>(hybrid_active_
+            ? critical_plan_.steps +
+                  (bck_levels_.size() - hybrid_bck_level_begin_)
+            : bck_levels_.size());
+    }
+    bool uses_hybrid_schedule() const { return hybrid_active_; }
     // Barriers one solve in that direction executes: one per level (thin or
     // fat) under the level-set schedule -- the critical-path length of a solve.
     std::size_t num_barriers(bool fwd) const {
+        if (hybrid_active_)
+            return critical_plan_.steps +
+                (fwd ? hybrid_fwd_level_end_
+                     : bck_levels_.size() - hybrid_bck_level_begin_);
         return (fwd ? fwd_levels_ : bck_levels_).size();
     }
 
@@ -1204,6 +1397,7 @@ public:
             b += lv->capacity() * sizeof(std::vector<node_index>);
             for (const auto& l : *lv) b += l.capacity() * sizeof(node_index);
         }
+        b += critical_plan_.memory_bytes() + critical_barrier_.memory_bytes();
         return b;
     }
 
@@ -1271,12 +1465,23 @@ private:
     // CSC), which level list, where the diagonal slot sits (last vs first),
     // and the input transform -- everything else is solve_levelset / solve_row.
     struct fwd_dir {
+        static constexpr bool forward = true;
         // Forward: L~ y = x on the CSR (row i; diagonal slot LAST).
         static const big_vec<edge_index>& ptr (const omp_sptrsv& s) { return s.csr_row_ptr_; }
         static const big_vec<node_index>& idx (const omp_sptrsv& s) { return s.csr_col_idx_; }
         template <class V>
         static const big_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csr(std::type_identity<V>{}); }
         static const std::vector<std::vector<node_index>>& levels(const omp_sptrsv& s) { return s.fwd_levels_; }
+        static const std::vector<std::size_t>& critical_ptr(const omp_sptrsv& s) {
+            return s.critical_plan_.forward_ptr;
+        }
+        static const std::vector<node_index>& critical_rows(const omp_sptrsv& s) {
+            return s.critical_plan_.forward_rows;
+        }
+        static node_index serial_vertex(node_index k, node_index,
+                                        node_index first_row) {
+            return first_row + k;
+        }
         // Off-diagonal slots of row i: [ptr[i], ptr[i+1] - 1); diagonal at ptr[i+1] - 1.
         static edge_index first(const edge_index* ptr, node_index i) { return ptr[i]; }
         static edge_index last (const edge_index* ptr, node_index i) { return ptr[i + 1] - 1; }
@@ -1286,12 +1491,23 @@ private:
         static double rhs(const omp_sptrsv&, node_index i, const double* x_in) { return x_in[i]; }
     };
     struct bck_dir {
+        static constexpr bool forward = false;
         // Back: L~^T z = D^-2 y' on the CSC (column j; diagonal slot FIRST).
         static const big_vec<edge_index>& ptr (const omp_sptrsv& s) { return s.csc_col_ptr_; }
         static const big_vec<node_index>& idx (const omp_sptrsv& s) { return s.csc_row_idx_; }
         template <class V>
         static const big_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csc(std::type_identity<V>{}); }
         static const std::vector<std::vector<node_index>>& levels(const omp_sptrsv& s) { return s.bck_levels_; }
+        static const std::vector<std::size_t>& critical_ptr(const omp_sptrsv& s) {
+            return s.critical_plan_.backward_ptr;
+        }
+        static const std::vector<node_index>& critical_rows(const omp_sptrsv& s) {
+            return s.critical_plan_.backward_rows;
+        }
+        static node_index serial_vertex(node_index k, node_index m,
+                                        node_index) {
+            return m - 1 - k;
+        }
         // Off-diagonal slots of column j: [ptr[j] + 1, ptr[j+1]); diagonal at ptr[j].
         static edge_index first(const edge_index* ptr, node_index j) { return ptr[j] + 1; }
         static edge_index last (const edge_index* ptr, node_index j) { return ptr[j + 1]; }
@@ -1447,6 +1663,13 @@ private:
     // Level sets.
     std::vector<std::vector<node_index>> fwd_levels_;
     std::vector<std::vector<node_index>> bck_levels_;
+    // Weak-barrier plan for the contiguous thin suffix. The fat prefix keeps
+    // its level sets; each flattened direction stores every tail row once.
+    detail::critical_schedule_plan critical_plan_;
+    detail::critical_weak_barrier critical_barrier_;
+    bool hybrid_active_ = false;
+    std::size_t hybrid_fwd_level_end_ = 0;
+    std::size_t hybrid_bck_level_begin_ = 0;
     // Optional: cumulative IS-size per elimination round (column->round boundaries).
     // When set + APXCHOL_ROUND_LEVELS, levels are read off the rounds instead of
     // an O(nnz) topological depth scan (same structure -- same-round IS columns are
