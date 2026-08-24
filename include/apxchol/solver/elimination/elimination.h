@@ -72,7 +72,6 @@
 #include <cmath>
 #include <concepts>
 #include <cstdint>
-#include <cstdlib>
 #include <span>
 #include <utility>
 #include <vector>
@@ -157,10 +156,13 @@ callable_eliminator<std::decay_t<F>> as_eliminator(F&& fn) {
 
 namespace detail {
 
-inline bool radix_sort_neighbors(std::span<weighted_neighbor> values,
-                                 bool enabled) {
+/// Reproduce the canonical (weight, vertex) order with a stable weight radix
+/// followed by a vertex sort inside each equal-weight run.  Comparison sort
+/// remains faster below the measured crossover; high-degree hub cliques are a
+/// serial setup bottleneck and repay the six linear passes.
+inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
     constexpr size_t kMinDegree = 2048;
-    if (!enabled || values.size() < kMinDegree) return false;
+    if (values.size() < kMinDegree) return false;
     bool all_equal = true;
     for (const auto& value : values) {
         if (!std::isfinite(value.weight) || value.weight < 0.0)
@@ -181,42 +183,33 @@ inline bool radix_sort_neighbors(std::span<weighted_neighbor> values,
     static thread_local std::vector<weighted_neighbor> scratch;
     static thread_local std::array<size_t, kBuckets> counts;
     scratch.resize(values.size());
-    bool source_is_values = true;
 
-    auto pass = [&](unsigned shift, auto key) {
+    auto pass = [&](std::span<const weighted_neighbor> source,
+                    std::span<weighted_neighbor> destination,
+                    unsigned shift) {
         std::fill(counts.begin(), counts.end(), size_t{0});
-        auto distribute = [&](auto source, auto destination) {
-            for (const auto& value : source)
-                ++counts[(key(value) >> shift) & kMask];
-            size_t offset = 0;
-            for (size_t& count : counts) {
-                const size_t next = offset + count;
-                count = offset;
-                offset = next;
-            }
-            for (const auto& value : source)
-                destination[counts[(key(value) >> shift) & kMask]++] = value;
+        auto key = [](const weighted_neighbor& value) -> std::uint64_t {
+            // Numeric order and IEEE bit order agree for finite nonnegative
+            // doubles. Normalize signed zero because the comparator treats
+            // both zero encodings as equal and then breaks the tie by vertex.
+            return value.weight == 0.0 ? 0
+                : std::bit_cast<std::uint64_t>(value.weight);
         };
-        if (source_is_values) {
-            distribute(std::span<const weighted_neighbor>(values),
-                       std::span<weighted_neighbor>(scratch));
-        } else {
-            distribute(std::span<const weighted_neighbor>(scratch), values);
+        for (const auto& value : source)
+            ++counts[(key(value) >> shift) & kMask];
+        size_t offset = 0;
+        for (size_t& count : counts) {
+            const size_t next = offset + count;
+            count = offset;
+            offset = next;
         }
-        source_is_values = !source_is_values;
+        for (const auto& value : source)
+            destination[counts[(key(value) >> shift) & kMask]++] = value;
     };
-
-    auto weight_key = [](const weighted_neighbor& value) -> std::uint64_t {
-        // Numeric order and IEEE bit order agree for finite nonnegative
-        // doubles. Normalize signed zero because the comparator treats both
-        // zero encodings as equal and then breaks the tie by vertex.
-        return value.weight == 0.0 ? 0
-            : std::bit_cast<std::uint64_t>(value.weight);
-    };
-    for (unsigned shift = 0; shift < 64; shift += kBits)
-        pass(shift, weight_key);
-    if (!source_is_values)
-        std::copy(scratch.begin(), scratch.end(), values.begin());
+    for (unsigned shift = 0; shift < 64; shift += 2 * kBits) {
+        pass(values, scratch, shift);
+        pass(scratch, values, shift + kBits);
+    }
     for (size_t first = 0; first < values.size();) {
         size_t last = first + 1;
         while (last < values.size() &&
@@ -232,14 +225,6 @@ inline bool radix_sort_neighbors(std::span<weighted_neighbor> values,
         first = last;
     }
     return true;
-}
-
-inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
-    static const bool enabled = [] {
-        const char* env = std::getenv("APXCHOL_TREE_RADIX");
-        return env != nullptr && std::atoi(env) != 0;
-    }();
-    return radix_sort_neighbors(values, enabled);
 }
 
 } // namespace detail

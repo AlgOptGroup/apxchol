@@ -140,7 +140,7 @@ TEST(TreeSampler, AcceleratedCanonicalOrderMatchesComparator) {
             auto expected = input;
             std::sort(expected.begin(), expected.end(), canonical_less);
             auto actual = input;
-            if (!detail::radix_sort_neighbors(actual, true))
+            if (!detail::radix_sort_neighbors(actual))
                 std::sort(actual.begin(), actual.end(), canonical_less);
 
             ASSERT_EQ(actual.size(), expected.size());
