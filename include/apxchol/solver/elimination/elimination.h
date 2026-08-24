@@ -67,9 +67,12 @@
 #include "apxchol/types.h"
 #include "apxchol/solver/factor_options.h"
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
+#include <cstdlib>
 #include <span>
 #include <utility>
 #include <vector>
@@ -152,6 +155,72 @@ callable_eliminator<std::decay_t<F>> as_eliminator(F&& fn) {
     return {std::forward<F>(fn)};
 }
 
+namespace detail {
+
+inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
+    constexpr size_t kMinDegree = 2048;
+    static const bool enabled = [] {
+        const char* env = std::getenv("APXCHOL_TREE_RADIX");
+        return env != nullptr && std::atoi(env) != 0;
+    }();
+    if (!enabled || values.size() < kMinDegree) return false;
+    for (const auto& value : values) {
+        if (!std::isfinite(value.weight) || value.weight < 0.0)
+            return false;
+    }
+
+    constexpr unsigned kBits = 11;
+    constexpr size_t kBuckets = size_t{1} << kBits;
+    constexpr std::uint64_t kMask = kBuckets - 1;
+    static thread_local std::vector<weighted_neighbor> scratch;
+    static thread_local std::array<size_t, kBuckets> counts;
+    scratch.resize(values.size());
+    bool source_is_values = true;
+
+    auto pass = [&](unsigned shift, auto key) {
+        std::fill(counts.begin(), counts.end(), size_t{0});
+        auto distribute = [&](auto source, auto destination) {
+            for (const auto& value : source)
+                ++counts[(key(value) >> shift) & kMask];
+            size_t offset = 0;
+            for (size_t& count : counts) {
+                const size_t next = offset + count;
+                count = offset;
+                offset = next;
+            }
+            for (const auto& value : source)
+                destination[counts[(key(value) >> shift) & kMask]++] = value;
+        };
+        if (source_is_values) {
+            distribute(std::span<const weighted_neighbor>(values),
+                       std::span<weighted_neighbor>(scratch));
+        } else {
+            distribute(std::span<const weighted_neighbor>(scratch), values);
+        }
+        source_is_values = !source_is_values;
+    };
+
+    auto vertex_key = [](const weighted_neighbor& value) -> std::uint64_t {
+        return value.vertex;
+    };
+    auto weight_key = [](const weighted_neighbor& value) -> std::uint64_t {
+        // Numeric order and IEEE bit order agree for finite nonnegative
+        // doubles. Normalize signed zero because the comparator treats both
+        // zero encodings as equal and then breaks the tie by vertex.
+        return value.weight == 0.0 ? 0
+            : std::bit_cast<std::uint64_t>(value.weight);
+    };
+    for (unsigned shift = 0; shift < sizeof(node_index) * 8; shift += kBits)
+        pass(shift, vertex_key);
+    for (unsigned shift = 0; shift < 64; shift += kBits)
+        pass(shift, weight_key);
+    if (!source_is_values)
+        std::copy(scratch.begin(), scratch.end(), values.begin());
+    return true;
+}
+
+} // namespace detail
+
 /// Tree elimination: spanning tree of the clique (CliqueTreeSample).
 /// The built-in (and default) eliminator; configured from factor_options
 /// (exact_clique_max_degree).
@@ -215,11 +284,13 @@ struct tree_elimination {
         // Canonical order for the suffix sampler (see the header comment).
         // Vertex id breaks weight ties so the order — and therefore the
         // sampling — does not depend on the schedule-dependent arrival order.
-        std::sort(neighbors.begin(), neighbors.end(),
-                  [](const auto& a, const auto& b) {
-                      return a.weight != b.weight ? a.weight < b.weight
-                                                  : a.vertex < b.vertex;
-                  });
+        if (!detail::radix_sort_neighbors(neighbors)) {
+            std::sort(neighbors.begin(), neighbors.end(),
+                      [](const auto& a, const auto& b) {
+                          return a.weight != b.weight ? a.weight < b.weight
+                                                      : a.vertex < b.vertex;
+                      });
+        }
 
         // Prefix sums of the sorted weights; per-thread reusable buffer.
         static thread_local std::vector<double> prefix;
