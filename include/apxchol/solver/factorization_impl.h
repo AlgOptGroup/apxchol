@@ -101,25 +101,24 @@ inline double adaptive_is_yield_fraction(
     return std::max(base, std::min(0.15, 3.0 * base));
 }
 
-// The old elimination gate used only the number of independent vertices.
-// That misses small dense rounds: processing 500 columns with 200 live edges
-// each is much more work than processing 2000 mesh columns. Reuse the degree
-// prepass as a zero-traversal-cost work hint and compare it with the old vertex
-// threshold expressed as adjacency slots. 24 slots/vertex is conservative:
-// the representative sparse controls peak below this boundary, while the
-// social-graph rounds it admits carry 48k-200k slots each.
-inline constexpr size_t kEliminationWorkPerVertex = 24;
+// process_vertex is the indivisible unit of elimination work. Size each small
+// round's team from both quantities that can keep workers useful: independent
+// pivots and their already-measured live adjacency work. Each additional
+// worker must be backed by at least 4096 adjacency slots. A singleton therefore
+// stays serial regardless of degree; a large independent set keeps the old
+// full-team policy. This is a resource-allocation rule, not a matrix heuristic.
+inline constexpr size_t kEliminationWorkPerThread = 4096;
 
-inline bool elimination_parallel_worthwhile(
+inline constexpr size_t elimination_round_team_size(
         size_t vertices, size_t adjacency_work, size_t vertex_threshold,
-        size_t team_threads) {
-    if (team_threads <= 1) return false;
-    if (vertices > vertex_threshold) return true;
-    const size_t work_threshold = vertex_threshold >
-            std::numeric_limits<size_t>::max() / kEliminationWorkPerVertex
-        ? std::numeric_limits<size_t>::max()
-        : vertex_threshold * kEliminationWorkPerVertex;
-    return adjacency_work > work_threshold;
+        size_t available_threads) {
+    if (available_threads <= 1 || vertices <= 1) return 1;
+    if (vertices > vertex_threshold)
+        return std::min(vertices, available_threads);
+    const size_t workers_from_work =
+        adjacency_work / kEliminationWorkPerThread;
+    return std::max<size_t>(1, std::min(
+        {vertices, available_threads, workers_from_work}));
 }
 
 inline constexpr int elimination_compute_chunk(
@@ -270,17 +269,14 @@ void eliminate_partition_singleton(const Eliminator& elim,
     }
 
     #ifdef _OPENMP
-    // Rounds below omp_threshold take the serial path unless the degree
-    // prepass says their selected columns still carry enough adjacency work.
-    // This differs from the retired APXCHOL_TAIL_THREADS experiment: that rule
-    // parallelized every small tail by vertex count and regressed sparse IPM /
-    // grid rounds; this gate leaves those rounds serial and admits only dense
-    // work. The parallel path applies clique edges in thread-arrival order, so
-    // the conservative work boundary also limits structural exposure.
-    const int team_threads = static_cast<int>(ws.threads.size());
-    const bool parallel_round = elimination_parallel_worthwhile(
-        n_verts, work_hint, opts.omp_threshold,
-        static_cast<size_t>(team_threads));
+    // Size a small round's team by both independent pivots and selected live
+    // adjacency work. This differs from the retired APXCHOL_TAIL_THREADS
+    // experiment: that rule gave every small tail the full team by vertex
+    // count and regressed sparse IPM / grid rounds. Here cheap rounds stay
+    // serial and increasingly dense rounds acquire workers continuously.
+    const int team_threads = static_cast<int>(elimination_round_team_size(
+        n_verts, work_hint, opts.omp_threshold, ws.threads.size()));
+    const bool parallel_round = team_threads > 1;
     if (parallel_round) {
         // Large independent sets amortize dynamic scheduling with coarse
         // chunks. Dense-small rounds enter this path because their adjacency
@@ -290,7 +286,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
         // actually exposes their available inter-vertex parallelism.
         const int compute_chunk =
             elimination_compute_chunk(n_verts, opts.omp_threshold);
-        // Team size for the fused paths: the full workspace team.
+        // The fused paths use exactly the work-sized team selected above.
         if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
             // Mega-fused parallel region: compute + deactivate + apply all under
             // one fork-join.  On BG/BK with ~1k+ rounds this saves ~2 extra
@@ -512,7 +508,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
             // does inline dedup + dead-edge filter, saving a full
             // adjacency traversal per IS vertex per round.
             // Team: the OpenMP default (as before).
-            #pragma omp parallel num_threads(omp_get_max_threads())
+            #pragma omp parallel num_threads(team_threads)
             {
                 int tid = omp_get_thread_num();
 

@@ -1006,15 +1006,17 @@ TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
         0, 0, 20000, 100000, 0.10, 500, 2000));
 }
 
-TEST(EliminationParallelGate, UsesDegreeWorkAndProtectsSerialExecution) {
-    using apxchol::detail::elimination_parallel_worthwhile;
+TEST(EliminationTeamSizing, UsesDegreeWorkAndProtectsSerialExecution) {
+    using apxchol::detail::elimination_round_team_size;
     constexpr size_t max = std::numeric_limits<size_t>::max();
 
-    EXPECT_FALSE(elimination_parallel_worthwhile(2000, 48000, 2000, 16));
-    EXPECT_TRUE(elimination_parallel_worthwhile(2001, 0, 2000, 16));
-    EXPECT_TRUE(elimination_parallel_worthwhile(500, 48001, 2000, 16));
-    EXPECT_FALSE(elimination_parallel_worthwhile(500, max, 2000, 1));
-    EXPECT_FALSE(elimination_parallel_worthwhile(1, max, max, 16));
+    EXPECT_EQ(elimination_round_team_size(8, 17000, 2000, 16), 4u);
+    EXPECT_EQ(elimination_round_team_size(8, 8191, 2000, 16), 1u);
+    EXPECT_EQ(elimination_round_team_size(8, 8192, 2000, 16), 2u);
+    EXPECT_EQ(elimination_round_team_size(1, max, 2000, 16), 1u);
+    EXPECT_EQ(elimination_round_team_size(500, max, 2000, 1), 1u);
+    EXPECT_EQ(elimination_round_team_size(3000, 1, 2000, 16), 16u);
+    EXPECT_EQ(elimination_round_team_size(70, max, 2000, 72), 70u);
 }
 
 TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
@@ -1132,7 +1134,7 @@ TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     EXPECT_EQ(bk.selected_degree_work(), 0u);
 }
 
-TEST(EliminationWorkGate, DenseSmallRoundsUseFineSchedulingChunks) {
+TEST(EliminationTeamSizing, DenseSmallRoundsUseFineSchedulingChunks) {
     using apxchol::detail::elimination_compute_chunk;
     EXPECT_EQ(elimination_compute_chunk(2000, 2000), 1);
     EXPECT_EQ(elimination_compute_chunk(2001, 2000), 64);
