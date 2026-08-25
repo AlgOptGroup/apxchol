@@ -70,8 +70,9 @@ struct factor_options {
     /// disable yield-based handoff, including the dense-residual adaptation.
     double min_is_fraction = 0.05;
     size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP;
-                                     // elimination also engages when selected-degree
-                                     // work exceeds 24 times this value.
+                                     // smaller elimination rounds size their team from
+                                     // selected pivots and live-degree work (4096
+                                     // adjacency slots per additional worker).
                                      // Also gates the partitioners' parallel paths;
                                      // lowering it engages parallel selection earlier
                                      // and can change the factor across thread counts.
