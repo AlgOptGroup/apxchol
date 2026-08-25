@@ -71,7 +71,10 @@ public:
         std::size_t padded = round_up(n * sizeof(T));
         if (padded >= MEGABYTE) { munmap(p, padded); return; }
         std::size_t align = std::max<std::size_t>(alignof(T), Align);
-        ::operator delete(p, padded, std::align_val_t(align));
+        // The sized aligned-delete overload is optional in Clang unless
+        // -fsized-deallocation is enabled.  The matching unsized aligned
+        // overload is always sufficient for memory obtained from aligned new.
+        ::operator delete(p, std::align_val_t(align));
     }
 
     bool operator==(const big_alloc&) const noexcept { return true; }
