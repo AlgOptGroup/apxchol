@@ -34,6 +34,20 @@ TEST(DefaultOptions, HighLevelSolveUsesDirectedAosStorage) {
     EXPECT_EQ(opts.storage, apxchol::graph_storage::vec_pool_aos);
 }
 
+TEST(SetupDiagnostics, WorkDistributionExposesConcentrationAndIdleWorkers) {
+    const auto balanced = apxchol::detail::summarize_work_distribution(
+        {9, 8, 7, 6}, 2);
+    EXPECT_EQ(balanced.total, 30u);
+    EXPECT_EQ(balanced.maximum, 9u);
+    EXPECT_DOUBLE_EQ(balanced.lpt_efficiency, 1.0);
+
+    const auto singleton = apxchol::detail::summarize_work_distribution(
+        {10}, 4);
+    EXPECT_EQ(singleton.total, 10u);
+    EXPECT_EQ(singleton.maximum, 10u);
+    EXPECT_DOUBLE_EQ(singleton.lpt_efficiency, 0.25);
+}
+
 // Convert the owned sparse_csc factor to an Eigen::SparseMatrix for tests
 // (the library no longer stores Eigen factors).
 static Eigen::SparseMatrix<double> factor_to_eigen(const apxchol::sparse_csc& L) {
