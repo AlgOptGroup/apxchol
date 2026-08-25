@@ -9,6 +9,9 @@ the *same* operator and is judged by the *same* true residual (see
 [Protocol](#protocol)). The latest results live in [`latest/`](latest/) and are
 committed so the charts render on GitHub — see [`latest/README.md`](latest/README.md)
 for methodology and [`latest/summary.md`](latest/summary.md) for the tables.
+CPU scaling and apxchol-only historical comparisons from CSCS Daint are kept
+separately in [`daint/`](daint/); they are not mixed into the laptop competitor
+bars.
 
 ## Solvers
 
