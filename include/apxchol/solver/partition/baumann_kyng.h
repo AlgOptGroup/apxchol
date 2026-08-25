@@ -26,9 +26,11 @@ struct baumann_kyng_partitioner {
     static constexpr bool sample_bounded = true;
 
     /// Sampling probability = 1/(c·d_avg); lower c → larger IS per round.
-    /// BK-specific, so it lives on the instance rather than in the shared
-    /// partition_options.
-    double sampling_constant = 0.3;
+    /// The measured single default avoids making the factor depend on the
+    /// caller's thread count.  c=0.1 wins from 2 through 72 threads while
+    /// remaining neutral at one thread; c=0.05 is faster in some tails but has
+    /// a weaker iteration-count margin.  See AGENTS.md for the campaign ledger.
+    double sampling_constant = 0.1;
 
     uint64_t round = 0;
     /// Average degree the sampling probability is derived from. Left at 0 it is
