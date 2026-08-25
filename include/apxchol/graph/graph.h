@@ -161,6 +161,24 @@ public:
             from, directed_pool_edge{to, static_cast<pool_value_t>(w)});
     }
 
+    /// Directed-inline vec_pool: write an incidence at a caller-assigned
+    /// offset in the pre-reserved suffix without an atomic slot claim.
+    void adj_write_reserved_directed_at(node_index from, node_index offset,
+                                        node_index to, double w) {
+        static_assert(stores_directed_incidence);
+        adj_.write_reserved_at(
+            from, offset,
+            directed_pool_edge{to, static_cast<pool_value_t>(w)});
+    }
+
+    /// Publish all preassigned suffix slots for one vec_pool vertex.
+    template<typename I = Incidence>
+        requires is_vec_pool_incidence_v<I>
+    void adj_commit_reserved_directed(node_index v, node_index count) {
+        static_assert(stores_directed_incidence);
+        adj_.commit_reserved(v, count);
+    }
+
     /// Pre-reserve N additional edge slots for parallel atomic claim.
     /// Grows edges_ size by N (default-initialised — cheap, trivial type)
     /// and resets the per-section claim counter. Must precede any

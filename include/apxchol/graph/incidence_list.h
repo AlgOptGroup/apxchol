@@ -288,6 +288,19 @@ struct basic_vec_pool_incidence {
         pool_[base_[v] + static_cast<size_t>(slot)] = idx;
     }
 
+    /// Write a caller-assigned slot relative to the current end of v's slab.
+    /// The caller must have reserved the whole batch and keep count_[v]
+    /// unchanged until every disjoint offset has been materialized.
+    void write_reserved_at(node_index v, node_index offset, value_type value) {
+        pool_[base_[v] + static_cast<size_t>(count_[v]) + offset] = value;
+    }
+
+    /// Publish a batch written through write_reserved_at(). One owner calls
+    /// this once for v after every writer has completed.
+    void commit_reserved(node_index v, node_index added) {
+        count_[v] += added;
+    }
+
     void clear(node_index v) { count_[v] = 0; }
 
     /// Sort vertex v's slab in value order. Used after a parallel

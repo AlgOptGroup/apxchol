@@ -48,6 +48,9 @@ struct factorize_workspace {
         // First-bump (0→1) pushes the vertex here, so the serial reserve_for
         // loop iterates only the touched vertices instead of all G.n().
         std::vector<node_index>     touched_buffer;
+        // Directed AoS apply reuses the histogram's atomic return values as
+        // endpoint slots, interleaved {u_offset,v_offset} per deferred edge.
+        std::vector<node_index> endpoint_offsets;
 
         // Exact-size factor-column allocations share one monotonic resource.
         // The owning pointer is moved out before the rest of the workspace is

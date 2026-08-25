@@ -394,19 +394,38 @@ void eliminate_partition_singleton(const Eliminator& elim,
 
                 // Parallel atomic histogram of incoming edges per vertex.
                 // Each thread sweeps its own edge_buffer and atomic-increments
-                // incoming[u] and incoming[v]. On first bump from 0→1 we push
-                // the vertex onto the per-thread `touched_buffer` so the
-                // serial reserve_for loop below can skip the full O(G.n())
-                // scan and iterate only the touched vertices.
+                // incoming[u] and incoming[v]. Directed AoS also retains each
+                // returned offset, so the apply pass can write that reserved
+                // slot without a second pair of atomics. On first bump from
+                // 0→1 we push the vertex onto touched_buffer, so reserve_for
+                // skips the full O(G.n()) scan.
                 {
                     auto& my_touched = ws.threads[tid].touched_buffer;
                     my_touched.clear();
                     const auto& my_buf = ws.threads[tid].edge_buffer;
-                    for (const auto& e : my_buf) {
-                        if (__atomic_fetch_add(&incoming[e.u], 1, __ATOMIC_RELAXED) == 0)
-                            my_touched.push_back(e.u);
-                        if (__atomic_fetch_add(&incoming[e.v], 1, __ATOMIC_RELAXED) == 0)
-                            my_touched.push_back(e.v);
+                    if constexpr (graph<Incidence>::stores_directed_incidence) {
+                        auto& offsets = ws.threads[tid].endpoint_offsets;
+                        offsets.resize(2 * my_buf.size());
+                        for (size_t i = 0; i < my_buf.size(); ++i) {
+                            const auto& e = my_buf[i];
+                            offsets[2 * i] = __atomic_fetch_add(
+                                &incoming[e.u], 1, __ATOMIC_RELAXED);
+                            offsets[2 * i + 1] = __atomic_fetch_add(
+                                &incoming[e.v], 1, __ATOMIC_RELAXED);
+                            if (offsets[2 * i] == 0)
+                                my_touched.push_back(e.u);
+                            if (offsets[2 * i + 1] == 0)
+                                my_touched.push_back(e.v);
+                        }
+                    } else {
+                        for (const auto& e : my_buf) {
+                            if (__atomic_fetch_add(&incoming[e.u], 1,
+                                                   __ATOMIC_RELAXED) == 0)
+                                my_touched.push_back(e.u);
+                            if (__atomic_fetch_add(&incoming[e.v], 1,
+                                                   __ATOMIC_RELAXED) == 0)
+                                my_touched.push_back(e.v);
+                        }
                     }
                 }
                 #pragma omp barrier  // incoming[] complete before reserve_for
@@ -449,17 +468,25 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         incoming);
                 }
 
-                // Apply phase: parallel atomic push into pre-reserved slabs.
+                // Apply phase: directed AoS uses the slots claimed by the
+                // histogram; indexed storage still claims reserved slots here.
                 {
                     const size_t base = e_offsets[tid];
                     const auto& ebuf = ws.threads[tid].edge_buffer;
-                    for (size_t i = 0; i < ebuf.size(); ++i) {
-                        auto [u, v, w] = ebuf[i];
-                        const edge_index es = e_start + static_cast<edge_index>(base + i);
-                        if constexpr (graph<Incidence>::stores_directed_incidence) {
-                            G.adj_atomic_push_directed(u, v, w);
-                            G.adj_atomic_push_directed(v, u, w);
-                        } else {
+                    if constexpr (graph<Incidence>::stores_directed_incidence) {
+                        const auto& offsets = ws.threads[tid].endpoint_offsets;
+                        for (size_t i = 0; i < ebuf.size(); ++i) {
+                            const auto& [u, v, w] = ebuf[i];
+                            G.adj_write_reserved_directed_at(
+                                u, offsets[2 * i], v, w);
+                            G.adj_write_reserved_directed_at(
+                                v, offsets[2 * i + 1], u, w);
+                        }
+                    } else {
+                        for (size_t i = 0; i < ebuf.size(); ++i) {
+                            auto [u, v, w] = ebuf[i];
+                            const edge_index es = e_start +
+                                static_cast<edge_index>(base + i);
                             G.write_edge_at(es, u, v, w);
                             G.adj_atomic_push_reserved(u, es);
                             G.adj_atomic_push_reserved(v, es);
@@ -473,14 +500,24 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     ws.threads[tid].excess_buffer.clear();
                 }
 
-                // Restore the all-zero invariant of ws.incoming over exactly
-                // the touched vertices (every vertex with incoming > 0 was
-                // pushed once, on its 0->1 bump). Safe here: the only reader
-                // of incoming[] is bulk_reserve_parallel's single section,
-                // which ended at that call's trailing omp-for barrier.
-                #pragma omp for schedule(static) nowait
-                for (size_t i = 0; i < ws.touched_concat.size(); ++i)
-                    incoming[ws.touched_concat[i]] = 0;
+                if constexpr (graph<Incidence>::stores_directed_incidence) {
+                    // Direct writers left count_[v] unchanged. Publish each
+                    // completed suffix once, after every writer is done.
+                    #pragma omp barrier
+                    #pragma omp for schedule(static) nowait
+                    for (size_t i = 0; i < ws.touched_concat.size(); ++i) {
+                        const node_index v = ws.touched_concat[i];
+                        G.adj_commit_reserved_directed(v, incoming[v]);
+                        incoming[v] = 0;
+                    }
+                } else {
+                    // Restore the all-zero invariant over exactly the touched
+                    // vertices. bulk_reserve_parallel's trailing barrier has
+                    // ended, so no reader of incoming[] remains.
+                    #pragma omp for schedule(static) nowait
+                    for (size_t i = 0; i < ws.touched_concat.size(); ++i)
+                        incoming[ws.touched_concat[i]] = 0;
+                }
 
                 // Deactivate partition vertices in parallel (disjoint).
                 #pragma omp for schedule(static) nowait

@@ -349,6 +349,25 @@ TEST(VecPoolAos, SerialFactorMatchesIndexedVecPoolByteForByte) {
     }
 }
 
+TEST(VecPoolAos, PreassignedOffsetsAreReproducibleInParallel) {
+#ifndef _OPENMP
+    GTEST_SKIP() << "serial build: there is no parallel apply path";
+#else
+    const scoped_threads team(16);
+    const auto L = weighted_grid_laplacian(120, 120, 7.25, 0.03125);
+    apxchol::factor_options opts;
+    opts.seed = 19;
+    opts.omp_threshold = 256;
+
+    const auto baseline = apxchol::factorize(
+        L, apxchol::graph_storage::vec_pool_aos, opts);
+    const auto repeated = apxchol::factorize(
+        L, apxchol::graph_storage::vec_pool_aos, opts);
+    expect_same_factor(baseline, repeated,
+                       "AoS preassigned endpoint offsets at T=16");
+#endif
+}
+
 TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
 #ifndef _OPENMP
     GTEST_SKIP() << "serial build: there is no parallel selection path";
