@@ -74,8 +74,9 @@ struct checkpoint {
                            int depth) -> double {
             double s = n.time;
             for (const auto& [name, c] : n.children) {
-                lines.push_back({depth, name, collect(c, depth + 1)});
-                s += lines.back().subtotal;
+                const double child_subtotal = collect(c, depth + 1);
+                lines.push_back({depth, name, child_subtotal});
+                s += child_subtotal;
             }
             return s;
         };
