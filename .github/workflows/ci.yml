@@ -3,7 +3,7 @@
 # doc/chart commits.
 #
 # Three jobs, each builds AND runs its test suite:
-#   library  — root CMake project, the full gtest suite (ctest)
+#   library  — root CMake project under GCC and Clang, full gtest suite (ctest)
 #   python   — manylinux wheel build + pytest (also the PORTABILITY check: the
 #              old-glibc environment the release wheels are built in)
 #   octave   — mkoctfile MEX + the 6-case Octave test suite
@@ -42,20 +42,34 @@ concurrency:
 
 jobs:
   library:
-    name: library (build + ctest)
+    name: library (${{ matrix.name }}, build + ctest)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GCC 14
+            cc: gcc-14
+            cxx: g++-14
+            packages: g++-14
+          - name: Clang 18
+            cc: clang-18
+            cxx: clang++-18
+            packages: clang-18 libomp-18-dev
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          # g++-14: the core uses C++23 "deducing this" (explicit object
-          # parameter), which needs GCC >= 14 — newer than the runner default.
-          sudo apt-get install -y g++-14 libeigen3-dev libomp-dev ninja-build
+          # The core uses C++23 explicit object parameters. Test both supported
+          # compiler families; the Python/Octave jobs below retain their own
+          # distribution-portability toolchains.
+          sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build
       - name: Configure + build (Release)
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_C_COMPILER=gcc-14
+                -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+                -DCMAKE_C_COMPILER=${{ matrix.cc }}
           cmake --build build -j"$(nproc)"
       - name: Run unit tests
         run: ctest --test-dir build --output-on-failure
