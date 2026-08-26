@@ -423,17 +423,17 @@ struct basic_vec_pool_incidence {
 #ifdef _OPENMP
         #pragma omp single
         {
-            // Downsize-defrag: when >25% of the pool is dead slabs, rebuild it
+            // Downsize-defrag: when more than half the pool is dead slabs,
+            // rebuild it
             // keeping each live slab sized to max(this-round-need, 2*count). This
             // reclaims BOTH the abandoned slabs left by past doublings AND the
             // "pruning bloat" -- slabs whose count shrank far below their cap as
             // neighbours were eliminated (up to 20x on dense IPM). Sizing to the
             // round's incoming makes the grow loop below a no-op when it fires.
-            // Numerically transparent (factor byte-identical), perf-neutral, frees
-            // 3-12% RSS on fill-heavy graphs; a no-op on low-fill grids.
-            // (The 25% trigger / 2x headroom are unswept heuristic guesses;
-            // a dedicated sweep could tune them if pool overhead shows up.)
-            if (abandoned_ > pool_.size() / 4)
+            // Numerically transparent.  A 25/50/disabled sweep found that
+            // rebuilding at 25% copied live pools prematurely; 50% retained a
+            // fragmentation safety valve while avoiding that setup work.
+            if (abandoned_ > pool_.size() / 2)
                 compact(&incoming);
             bulk_touched_n_ = static_cast<size_t>(touched_end - touched_begin);
             bulk_team_ = omp_get_num_threads();
@@ -509,7 +509,7 @@ struct basic_vec_pool_incidence {
         }
         #pragma omp barrier
 #else
-        if (abandoned_ > pool_.size() / 4) compact(&incoming);
+        if (abandoned_ > pool_.size() / 2) compact(&incoming);
         const auto& cfg = vec_pool_config::get();
         std::vector<Grow> grows;
         size_t cursor = pool_.size();
