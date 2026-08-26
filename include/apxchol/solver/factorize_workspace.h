@@ -44,6 +44,16 @@ struct factorize_workspace {
         // Indexed by vertex; entries are pool indices or npos.
         std::vector<node_index>     dedup_bucket;
         std::vector<node_index>  dedup_touched;
+        // Pooled backends deduplicate each pivot in a compact local hash table
+        // instead of probing a vertex-sized table. Epoch tags avoid clearing
+        // the retained allocation between pivots.
+        struct dedup_hash_entry {
+            node_index key = 0;
+            node_index value = 0;
+            std::uint32_t stamp = 0;
+        };
+        std::vector<dedup_hash_entry> dedup_hash;
+        std::uint32_t dedup_hash_epoch = 0;
         // Touched-vertex list populated during the vec_pool atomic histogram.
         // First-bump (0→1) pushes the vertex here, so the serial reserve_for
         // loop iterates only the touched vertices instead of all G.n().

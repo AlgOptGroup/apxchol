@@ -20,6 +20,7 @@
 #endif
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -286,23 +287,61 @@ void process_vertex(const Eliminator& elim,
     nbrs.clear();
     double edge_deg = 0.0;
     if (dedup_inline) {
-        static constexpr node_index npos = node_index(-1);
-        auto& first   = ws.dedup_bucket;
-        auto& touched = ws.dedup_touched;
-        if (first.size() < size_t(G.n())) first.assign(G.n(), npos);
-        touched.clear();
-        for (auto [u, w] : G.neighbors(v)) {
-            if (!G.is_active(u)) continue;
-            if (first[u] == npos) {
-                first[u] = static_cast<node_index>(nbrs.size());
-                touched.push_back(u);
-                nbrs.emplace_back(u, w);
-            } else {
-                nbrs[first[u]].weight += w;
+        if constexpr (is_vec_pool_incidence_v<Incidence>) {
+            // Pooled slabs expose their raw size in O(1), so deduplicate in a
+            // pivot-sized contiguous hash table. The old vertex-indexed table
+            // was one random access into an n-entry array per incidence and
+            // one such array per worker; it became a cache/TLB and RSS cost on
+            // large graphs. Preserve first-seen neighbor order exactly.
+            const size_t raw_count = G.adj(v).size();
+            const size_t table_size = std::bit_ceil(
+                std::max<size_t>(8, 2 * raw_count));
+            if (ws.dedup_hash.size() < table_size) {
+                ws.dedup_hash.assign(table_size, {});
+                ws.dedup_hash_epoch = 1;
+            } else if (++ws.dedup_hash_epoch == 0) {
+                for (auto& entry : ws.dedup_hash) entry.stamp = 0;
+                ws.dedup_hash_epoch = 1;
             }
-            edge_deg += w;
+            const size_t mask = table_size - 1;
+            const std::uint32_t epoch = ws.dedup_hash_epoch;
+            for (auto [u, w] : G.neighbors(v)) {
+                if (!G.is_active(u)) continue;
+                size_t slot = (static_cast<std::uint64_t>(u) *
+                               0x9e3779b97f4a7c15ULL) & mask;
+                while (ws.dedup_hash[slot].stamp == epoch &&
+                       ws.dedup_hash[slot].key != u)
+                    slot = (slot + 1) & mask;
+                auto& entry = ws.dedup_hash[slot];
+                if (entry.stamp != epoch) {
+                    entry.stamp = epoch;
+                    entry.key = u;
+                    entry.value = static_cast<node_index>(nbrs.size());
+                    nbrs.emplace_back(u, w);
+                } else {
+                    nbrs[entry.value].weight += w;
+                }
+                edge_deg += w;
+            }
+        } else {
+            static constexpr node_index npos = node_index(-1);
+            auto& first   = ws.dedup_bucket;
+            auto& touched = ws.dedup_touched;
+            if (first.size() < size_t(G.n())) first.assign(G.n(), npos);
+            touched.clear();
+            for (auto [u, w] : G.neighbors(v)) {
+                if (!G.is_active(u)) continue;
+                if (first[u] == npos) {
+                    first[u] = static_cast<node_index>(nbrs.size());
+                    touched.push_back(u);
+                    nbrs.emplace_back(u, w);
+                } else {
+                    nbrs[first[u]].weight += w;
+                }
+                edge_deg += w;
+            }
+            for (auto t : touched) first[t] = npos;
         }
-        for (auto t : touched) first[t] = npos;
     } else {
         for (auto [u, w] : G.neighbors(v)) {
             nbrs.emplace_back(u, w);

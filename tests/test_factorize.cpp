@@ -48,6 +48,41 @@ TEST(SetupDiagnostics, WorkDistributionExposesConcentrationAndIdleWorkers) {
     EXPECT_DOUBLE_EQ(singleton.lpt_efficiency, 0.25);
 }
 
+TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
+    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(12);
+    graph.add_edge(0, 1, 2.0);
+    graph.add_edge(0, 9, 4.0);  // 1 and 9 collide modulo the 8-slot table.
+    graph.add_edge(0, 1, 3.0);
+    graph.add_edge(0, 2, 5.0);
+
+    apxchol::factorize_workspace::per_thread scratch;
+    scratch.factor_entries =
+        std::make_unique<std::pmr::monotonic_buffer_resource>();
+    apxchol::detail::factor_col first;
+    apxchol::detail::process_vertex(apxchol::tree_elimination{}, graph, 0, 42,
+                                     first, scratch, true);
+
+    ASSERT_EQ(first.entry_count, 3u);
+    EXPECT_EQ(first.entries[0].neighbor, 1u);
+    EXPECT_EQ(first.entries[1].neighbor, 9u);
+    EXPECT_EQ(first.entries[2].neighbor, 2u);
+    EXPECT_FLOAT_EQ(first.entries[0].value,
+                    static_cast<float>(5.0 / std::sqrt(14.0)));
+    EXPECT_FLOAT_EQ(first.entries[1].value,
+                    static_cast<float>(4.0 / std::sqrt(14.0)));
+    EXPECT_FLOAT_EQ(first.entries[2].value,
+                    static_cast<float>(5.0 / std::sqrt(14.0)));
+
+    apxchol::detail::factor_col second;
+    apxchol::detail::process_vertex(apxchol::tree_elimination{}, graph, 0, 42,
+                                     second, scratch, true);
+    ASSERT_EQ(second.entry_count, first.entry_count);
+    for (std::size_t i = 0; i < first.entry_count; ++i) {
+        EXPECT_EQ(second.entries[i].neighbor, first.entries[i].neighbor);
+        EXPECT_EQ(second.entries[i].value, first.entries[i].value);
+    }
+}
+
 // Convert the owned sparse_csc factor to an Eigen::SparseMatrix for tests
 // (the library no longer stores Eigen factors).
 static Eigen::SparseMatrix<double> factor_to_eigen(const apxchol::sparse_csc& L) {
