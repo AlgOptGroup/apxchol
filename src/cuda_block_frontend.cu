@@ -1107,6 +1107,10 @@ gpu_block_frontend::prepare(std::span<const node_index> active,
     return p_->prepare(active, options);
 }
 
+std::size_t gpu_block_frontend::resident_region_capacity() const {
+    return static_cast<std::size_t>(p_->block_region_limit);
+}
+
 std::span<const node_index> gpu_block_frontend::host_candidates() const {
     return p_->download_host_candidates();
 }

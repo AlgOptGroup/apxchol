@@ -1036,16 +1036,26 @@ factorization factorize_impl(const Eliminator& elim,
                 last_candidate_count = prep.candidate_count;
                 last_avg_degree = prep.average_degree;
                 if (cp) (*cp)("prune");
-                const partition_result& part =
-                    gpu_frontend->select_block_greedy();
-                gpu_elimination_work_hint =
-                    gpu_frontend->selected_degree_work();
-                if (cp) {
-                    (*cp)("select");
-                    (*cp)("collect");
-                    cp->ascend();
+                // Once one resident warp is available per candidate, fixed
+                // kernel/round-trip latency dominates the region scan. The
+                // CPU graph is current already, so hand off permanently and
+                // redo this round through the ordinary CPU prepass. This is a
+                // hardware occupancy boundary, not a graph-size heuristic.
+                if (prep.candidate_count >
+                    gpu_frontend->resident_region_capacity()) {
+                    const partition_result& part =
+                        gpu_frontend->select_block_greedy();
+                    gpu_elimination_work_hint =
+                        gpu_frontend->selected_degree_work();
+                    if (cp) {
+                        (*cp)("select");
+                        (*cp)("collect");
+                        cp->ascend();
+                    }
+                    return part;
                 }
-                return part;
+                gpu_frontend.reset();
+                if (cp) cp->ascend();
             }
         }
 #endif

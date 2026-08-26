@@ -57,6 +57,9 @@ public:
 
     prepare_result prepare(std::span<const node_index> active,
                            const partition_options &options);
+    /// Maximum number of candidate regions that the region-scan kernel can
+    /// keep resident at once (one warp per region).
+    std::size_t resident_region_capacity() const;
     /// Debug/test views. Materializing either view downloads a full device
     /// array; the production factorization path does not call these methods.
     std::span<const node_index> host_candidates() const;
