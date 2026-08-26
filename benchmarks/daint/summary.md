@@ -13,17 +13,19 @@ Ratios are current divided by the geometric mean of the old-before/old-after bra
 
 ## Current setup scaling
 
-| threads | setup speedup | partition speedup | elimination speedup | SpTRSV-setup speedup |
-|---:|---:|---:|---:|---:|
-| 1 | 1.000x | 1.000x | 1.000x | 1.000x |
-| 2 | 1.399x | 1.708x | 1.213x | 1.026x |
-| 4 | 2.125x | 2.844x | 1.788x | 1.439x |
-| 8 | 3.052x | 4.378x | 2.379x | 1.872x |
-| 16 | 4.032x | 6.296x | 2.862x | 2.309x |
-| 36 | 4.934x | 8.404x | 3.165x | 2.859x |
-| 72 | 5.387x | 9.649x | 3.224x | 3.272x |
+`partition phase` includes degree pruning, IS selection, and collection; it is not the pure selector timing.
 
-At T=72, elimination is 41.9-60.0% of setup on all nine matrices; its 3.224x geomean speedup is the main remaining scaling limit.
+| threads | setup | partition phase | prune | IS selector | elimination | SpTRSV setup |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1.000x | 1.000x | 1.000x | 1.000x | 1.000x | 1.000x |
+| 2 | 1.399x | 1.708x | 2.208x | 0.800x | 1.213x | 1.026x |
+| 4 | 2.125x | 2.844x | 4.114x | 1.159x | 1.788x | 1.439x |
+| 8 | 3.052x | 4.378x | 7.122x | 1.602x | 2.379x | 1.872x |
+| 16 | 4.032x | 6.296x | 11.226x | 2.218x | 2.862x | 2.309x |
+| 36 | 4.934x | 8.404x | 15.633x | 3.040x | 3.165x | 2.859x |
+| 72 | 5.387x | 9.649x | 18.022x | 3.732x | 3.224x | 3.272x |
+
+At T=72 the whole partition phase reaches 9.649x because pruning reaches 18.022x; pure IS selection reaches only 3.732x. The selector is nevertheless a median 8.1% of setup, versus 45.7% for elimination. Elimination is 41.9-60.0% of setup on all nine matrices and its 3.224x geomean speedup is the main remaining scaling limit.
 
 ## Structural probe verdict
 

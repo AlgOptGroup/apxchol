@@ -253,7 +253,7 @@ def render_baseline_figure(path: Path, rows: list[dict]) -> None:
 def render_breakdown_figure(path: Path, medians: dict) -> None:
     matrices = sorted({matrix for matrix, _ in medians})
     stages = ("make_graph_ms", "find_partition_ms", "eliminate_ms", "assembly_ms", "sptrsv_setup_ms")
-    labels = ("graph", "partition", "eliminate", "assembly", "SpTRSV setup")
+    labels = ("graph", "partition phase", "eliminate", "assembly", "SpTRSV setup")
     bottoms = [0.0] * len(matrices)
     fig, ax = plt.subplots(figsize=(10.3, 5.0), constrained_layout=True)
     for stage, label in zip(stages, labels):
@@ -311,22 +311,60 @@ def write_summary(path: Path, scaling: list[dict], baseline: list[dict], pivots:
         "",
         "## Current setup scaling",
         "",
-        "| threads | setup speedup | partition speedup | elimination speedup | SpTRSV-setup speedup |",
-        "|---:|---:|---:|---:|---:|",
+        "`partition phase` includes degree pruning, IS selection, and collection; it is not "
+        "the pure selector timing.",
+        "",
+        "| threads | setup | partition phase | prune | IS selector | elimination | SpTRSV setup |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for threads in (1, 2, 4, 8, 16, 36, 72):
         speedups = []
-        for metric in ("setup_ms", "find_partition_ms", "eliminate_ms", "sptrsv_setup_ms"):
+        for metric in ("setup_ms", "find_partition_ms", "prune_ms", "select_ms",
+                       "eliminate_ms", "sptrsv_setup_ms"):
             speedups.append(geomean(
                 medians[(matrix, 1)][metric] / medians[(matrix, threads)][metric]
                 for matrix in matrices
             ))
         lines.append(f"| {threads} | " + " | ".join(f"{value:.3f}x" for value in speedups) + " |")
+
+    selector_speedup = geomean(
+        medians[(matrix, 1)]["select_ms"] / medians[(matrix, 72)]["select_ms"]
+        for matrix in matrices
+    )
+    partition_speedup = geomean(
+        medians[(matrix, 1)]["find_partition_ms"]
+        / medians[(matrix, 72)]["find_partition_ms"]
+        for matrix in matrices
+    )
+    prune_speedup = geomean(
+        medians[(matrix, 1)]["prune_ms"] / medians[(matrix, 72)]["prune_ms"]
+        for matrix in matrices
+    )
+    selector_share = statistics.median(
+        medians[(matrix, 72)]["select_ms"] / medians[(matrix, 72)]["setup_ms"]
+        for matrix in matrices
+    )
+    elimination_share = statistics.median(
+        medians[(matrix, 72)]["eliminate_ms"] / medians[(matrix, 72)]["setup_ms"]
+        for matrix in matrices
+    )
+    elimination_shares = [
+        medians[(matrix, 72)]["eliminate_ms"] / medians[(matrix, 72)]["setup_ms"]
+        for matrix in matrices
+    ]
+    elimination_speedup = geomean(
+        medians[(matrix, 1)]["eliminate_ms"] / medians[(matrix, 72)]["eliminate_ms"]
+        for matrix in matrices
+    )
     lines += [
         "",
-        "At T=72, elimination is 41.9-60.0% of setup on all nine matrices; "
-        "its 3.224x geomean speedup is the main "
-        "remaining scaling limit.",
+        f"At T=72 the whole partition phase reaches {partition_speedup:.3f}x because pruning reaches "
+        f"{prune_speedup:.3f}x; pure IS selection reaches only {selector_speedup:.3f}x. "
+        f"The selector is nevertheless a median {selector_share:.1%} of setup, versus "
+        f"{elimination_share:.1%} for elimination. Elimination is "
+        f"{min(elimination_shares):.1%}-{max(elimination_shares):.1%} of setup "
+        f"on all nine matrices and its {elimination_speedup:.3f}x geomean speedup is the main remaining "
+        "scaling limit.",
         "",
         "## Structural probe verdict",
         "",

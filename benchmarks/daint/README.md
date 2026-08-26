@@ -24,7 +24,9 @@ CSV extracts, a [summary](summary.md), and reproducible figures:
 - `pivot_summary.csv`: aggregated per-pivot concentration diagnostics.
 - `region_snapshots.csv`: candidate-induced component snapshots.
 - `figures/setup_scaling.png`: current setup strong scaling.
-- `figures/setup_t72_breakdown.png`: where T=72 setup time remains.
+- `figures/setup_t72_breakdown.png`: where T=72 setup time remains. Its
+  `partition phase` includes prune + IS selection + collection; `summary.md`
+  reports those scaling factors separately.
 - `figures/historical_total_ratio.png`: cumulative single-RHS improvement.
 
 Regenerate from downloaded campaign `results/` trees with:
