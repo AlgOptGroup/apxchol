@@ -491,6 +491,9 @@ private:
         std::size_t backbone_edges = 0;
         std::size_t bytes_before = 0;
         std::size_t bytes_after = 0;
+        std::size_t forest_candidates = 0;
+        std::size_t forest_shards = 1;
+        std::size_t rebuild_threads = 1;
         double coalesce_ms = 0.0;
         double collect_ms = 0.0;
         double order_ms = 0.0;
@@ -793,14 +796,102 @@ private:
             scratch[counts[(key >> shift) & (counts.size() - 1)]++] = index;
         }
         order.swap(scratch);
+        // The radix scratch now contains only the discarded iota order.
+        // Release it before allocating an equally wide double cache so the
+        // optimization does not add another O(m) live allocation.
+        std::vector<std::size_t>().swap(scratch);
         const double order_ms = std::chrono::duration<double, std::milli>(
             clock::now() - stage).count();
         stage = clock::now();
+        std::vector<std::size_t> filtered_order;
+        const std::vector<std::size_t>* forest_order = &order;
+        std::size_t forest_shards = 1;
+        if (!active.empty() && !items.empty()) {
+            std::size_t available_threads = 1;
+#ifdef _OPENMP
+            available_threads = static_cast<std::size_t>(
+                std::max(1, omp_get_max_threads()));
+#endif
+            const long double edge_density =
+                static_cast<long double>(items.size()) /
+                static_cast<long double>(active.size());
+            forest_shards = std::min<std::size_t>(
+                available_threads,
+                std::max<std::size_t>(1, static_cast<std::size_t>(
+                    std::floor(std::sqrt(edge_density)))));
+            if (forest_shards > 1) {
+                // Exact Kruskal filtering. Each shard is a contiguous slice of
+                // the already ordered edge stream. If its local forest drops
+                // edge e, earlier edges in the same shard already connect e's
+                // endpoints; the global ordered scan would therefore drop e
+                // as well. Concatenating shard forests in shard order retains
+                // every edge that can affect the original global decisions.
+                const node_index dense_npos = node_index(-1);
+                std::vector<node_index> dense_of(
+                    static_cast<std::size_t>(n_), dense_npos);
+#pragma omp parallel for schedule(static)
+                for (std::size_t i = 0; i < active.size(); ++i)
+                    dense_of[active[i]] = static_cast<node_index>(i);
+
+                std::vector<std::vector<std::size_t>> local_forests(
+                    forest_shards);
+#pragma omp parallel for num_threads(forest_shards) schedule(static, 1)
+                for (std::size_t shard = 0; shard < forest_shards; ++shard) {
+                    std::vector<node_index> local_parent(active.size());
+                    std::iota(local_parent.begin(), local_parent.end(),
+                              node_index{0});
+                    std::vector<unsigned char> local_rank(active.size(), 0);
+                    auto local_find = [&](node_index v) {
+                        node_index root = v;
+                        while (local_parent[root] != root)
+                            root = local_parent[root];
+                        while (local_parent[v] != v) {
+                            const node_index next = local_parent[v];
+                            local_parent[v] = root;
+                            v = next;
+                        }
+                        return root;
+                    };
+                    auto local_unite = [&](node_index u, node_index v) {
+                        u = local_find(u);
+                        v = local_find(v);
+                        if (u == v) return false;
+                        if (local_rank[u] < local_rank[v]) std::swap(u, v);
+                        local_parent[v] = u;
+                        if (local_rank[u] == local_rank[v]) ++local_rank[u];
+                        return true;
+                    };
+                    const std::size_t begin =
+                        order.size() * shard / forest_shards;
+                    const std::size_t end =
+                        order.size() * (shard + 1) / forest_shards;
+                    auto& local = local_forests[shard];
+                    local.reserve(std::min(active.size(), end - begin));
+                    for (std::size_t position = begin; position < end;
+                         ++position) {
+                        const std::size_t index = order[position];
+                        const item& edge = items[index];
+                        const node_index u = dense_of[edge.u];
+                        const node_index v = dense_of[edge.v];
+                        assert(u != dense_npos && v != dense_npos);
+                        if (local_unite(u, v)) local.push_back(index);
+                    }
+                }
+                std::size_t candidates = 0;
+                for (const auto& local : local_forests)
+                    candidates += local.size();
+                filtered_order.reserve(candidates);
+                for (auto& local : local_forests)
+                    filtered_order.insert(filtered_order.end(),
+                                          local.begin(), local.end());
+                forest_order = &filtered_order;
+            }
+        }
         std::size_t backbone_edges = 0;
         double total_weight = 0.0;
         double backbone_weight = 0.0;
         for (const item& edge : items) total_weight += edge.weight;
-        for (std::size_t index : order)
+        for (std::size_t index : *forest_order)
             if (unite(items[index].u, items[index].v)) {
                 items[index].backbone = true;
                 ++backbone_edges;
@@ -809,36 +900,41 @@ private:
         const double forest_ms = std::chrono::duration<double, std::milli>(
             clock::now() - stage).count();
         stage = clock::now();
-        auto importance_measure = [](const item& edge) {
-            return std::sqrt(edge.weight);
+        std::vector<double> importance(items.size());
+#pragma omp parallel for schedule(static)
+        for (std::size_t i = 0; i < items.size(); ++i)
+            importance[i] = std::sqrt(items[i].weight);
+        auto importance_measure = [&](std::size_t index) {
+            return importance[index];
         };
         const std::size_t off_tree = items.size() - backbone_edges;
         const double target = keep_probability * off_tree;
         double off_tree_measure = 0.0;
-        for (const item& edge : items)
-            if (!edge.backbone)
-                off_tree_measure += importance_measure(edge);
+        for (std::size_t i = 0; i < items.size(); ++i)
+            if (!items[i].backbone)
+                off_tree_measure += importance_measure(i);
         double importance_scale = target > 0.0 && off_tree_measure > 0.0
             ? target / off_tree_measure : 0.0;
         for (unsigned iteration = 0;
              iteration < 6 && importance_scale > 0.0; ++iteration) {
             double expected = 0.0;
-            for (const item& edge : items)
-                if (!edge.backbone)
+            for (std::size_t i = 0; i < items.size(); ++i)
+                if (!items[i].backbone)
                     expected += std::min(
-                        1.0, importance_scale * importance_measure(edge));
+                        1.0, importance_scale * importance_measure(i));
             if (expected <= 0.0) break;
             importance_scale *= target / expected;
         }
-        auto probability = [&](const item& edge) {
-            if (edge.backbone) return 1.0;
+        auto probability = [&](std::size_t index) {
+            if (items[index].backbone) return 1.0;
             return std::min(
-                1.0, importance_scale * importance_measure(edge));
+                1.0, importance_scale * importance_measure(index));
         };
         double expected_kept = 0.0;
         double min_offtree_probability = 1.0;
-        for (const item& edge : items) {
-            const double edge_probability = probability(edge);
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            const item& edge = items[i];
+            const double edge_probability = probability(i);
             expected_kept += edge_probability;
             if (!edge.backbone)
                 min_offtree_probability =
@@ -860,31 +956,163 @@ private:
         rebuilt.excess_ = excess_;
         std::vector<node_index> physical_degree(static_cast<std::size_t>(n_), 0);
         std::size_t kept = 0;
-        for (item& edge : items) {
-            edge.kept = draw(edge.u, edge.v) < probability(edge);
-            if (edge.kept) {
-                ++physical_degree[edge.u];
-                ++physical_degree[edge.v];
-                ++kept;
+        bool parallel_directed_rebuild = stores_directed_incidence;
+        std::size_t rebuild_threads = 1;
+        std::vector<node_index> dense_of;
+        std::vector<node_index> thread_offsets;
+        if (parallel_directed_rebuild && !active.empty() && !items.empty()) {
+            std::size_t available_threads = 1;
+#ifdef _OPENMP
+            available_threads = static_cast<std::size_t>(
+                std::max(1, omp_get_max_threads()));
+#endif
+            const long double edge_density =
+                static_cast<long double>(items.size()) /
+                static_cast<long double>(active.size());
+            rebuild_threads = std::min<std::size_t>(
+                available_threads,
+                std::max<std::size_t>(1, static_cast<std::size_t>(
+                    std::floor(std::sqrt(edge_density)))));
+            if (active.size() >
+                std::numeric_limits<std::size_t>::max() / rebuild_threads)
+                rebuild_threads = 1;
+            parallel_directed_rebuild = rebuild_threads > 1;
+        } else {
+            parallel_directed_rebuild = false;
+        }
+        if (!parallel_directed_rebuild) {
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                item& edge = items[i];
+                edge.kept = draw(edge.u, edge.v) < probability(i);
+                if (edge.kept) {
+                    ++physical_degree[edge.u];
+                    ++physical_degree[edge.v];
+                    ++kept;
+                }
             }
+        } else {
+            // Give each worker a contiguous edge interval and a private degree
+            // row over the active vertices. Prefixing those rows assigns a
+            // disjoint destination interval to every (worker, vertex) pair.
+            // The second scan can therefore write without endpoint atomics;
+            // worker intervals are in global item order, so every adjacency
+            // slab is already in the serial canonical order and needs no sort.
+            const node_index dense_npos = node_index(-1);
+            dense_of.assign(static_cast<std::size_t>(n_), dense_npos);
+            thread_offsets.assign(rebuild_threads * active.size(), 0);
+            std::vector<std::size_t> kept_by_thread(rebuild_threads, 0);
+            std::size_t actual_threads = 1;
+#pragma omp parallel num_threads(rebuild_threads)
+            {
+#ifdef _OPENMP
+                const std::size_t tid = static_cast<std::size_t>(
+                    omp_get_thread_num());
+                const std::size_t team = static_cast<std::size_t>(
+                    omp_get_num_threads());
+#else
+                const std::size_t tid = 0;
+                const std::size_t team = 1;
+#endif
+#pragma omp single
+                actual_threads = team;
+#pragma omp for schedule(static)
+                for (std::size_t i = 0; i < active.size(); ++i)
+                    dense_of[active[i]] = static_cast<node_index>(i);
+
+                node_index* local =
+                    thread_offsets.data() + tid * active.size();
+                const std::size_t begin = items.size() * tid / team;
+                const std::size_t end = items.size() * (tid + 1) / team;
+                std::size_t local_kept = 0;
+                for (std::size_t i = begin; i < end; ++i) {
+                    item& edge = items[i];
+                    edge.kept = draw(edge.u, edge.v) < probability(i);
+                    if (!edge.kept) continue;
+                    const node_index u = dense_of[edge.u];
+                    const node_index v = dense_of[edge.v];
+                    assert(u != dense_npos && v != dense_npos);
+                    ++local[u];
+                    ++local[v];
+                    ++local_kept;
+                }
+                kept_by_thread[tid] = local_kept;
+#pragma omp barrier
+#pragma omp single
+                kept = std::accumulate(
+                    kept_by_thread.begin(),
+                    kept_by_thread.begin() +
+                        static_cast<std::ptrdiff_t>(team), std::size_t{0});
+#pragma omp for schedule(static)
+                for (std::size_t i = 0; i < active.size(); ++i) {
+                    node_index offset = 0;
+                    for (std::size_t t = 0; t < team; ++t) {
+                        node_index& count =
+                            thread_offsets[t * active.size() + i];
+                        const node_index next = offset + count;
+                        count = offset;
+                        offset = next;
+                    }
+                    physical_degree[active[i]] = offset;
+                }
+
+                rebuilt.adj_.bulk_reserve_parallel(
+                    active.begin(), active.end(), physical_degree);
+                for (std::size_t i = begin; i < end; ++i) {
+                    const item& edge = items[i];
+                    if (!edge.kept) continue;
+                    const double inv_p = 1.0 / probability(i);
+                    const pool_value_t weight = static_cast<pool_value_t>(
+                        edge.weight * inv_p);
+                    const node_index u = dense_of[edge.u];
+                    const node_index v = dense_of[edge.v];
+                    if constexpr (stores_directed_incidence) {
+                        rebuilt.adj_.write_reserved_at(
+                            edge.u, local[u]++, {edge.v, weight});
+                        rebuilt.adj_.write_reserved_at(
+                            edge.v, local[v]++, {edge.u, weight});
+                    }
+                }
+#pragma omp barrier
+#pragma omp for schedule(static)
+                for (std::size_t i = 0; i < active.size(); ++i) {
+                    const node_index v = active[i];
+                    rebuilt.adj_.commit_reserved(v, physical_degree[v]);
+                }
+            }
+            rebuild_threads = actual_threads;
         }
         if constexpr (!stores_directed_incidence) {
             rebuilt.edges_.reserve(kept);
             rebuilt.multiplicity_.reserve(kept);
         }
-        for (node_index v : active)
-            rebuilt.adj_.reserve_for(v, physical_degree[v]);
-        for (const item& edge : items) {
-            if (!edge.kept) continue;
-            const double edge_probability = probability(edge);
-            const double inv_p = 1.0 / edge_probability;
-            const double weight = edge.weight * inv_p;
-            if constexpr (stores_directed_incidence) {
-                rebuilt.adj_.push(
-                    edge.u, {edge.v, static_cast<pool_value_t>(weight)});
-                rebuilt.adj_.push(
-                    edge.v, {edge.u, static_cast<pool_value_t>(weight)});
+        if constexpr (stores_directed_incidence) {
+            if (parallel_directed_rebuild) {
+                if (kept > std::numeric_limits<edge_index>::max())
+                    edge_index_overflow("residual sparsifier rebuild");
+                rebuilt.m_ = static_cast<edge_index>(kept);
             } else {
+                for (node_index v : active)
+                    rebuilt.adj_.reserve_for(v, physical_degree[v]);
+                for (std::size_t i = 0; i < items.size(); ++i) {
+                    const item& edge = items[i];
+                    if (!edge.kept) continue;
+                    const double inv_p = 1.0 / probability(i);
+                    const double weight = edge.weight * inv_p;
+                    rebuilt.adj_.push(
+                        edge.u, {edge.v, static_cast<pool_value_t>(weight)});
+                    rebuilt.adj_.push(
+                        edge.v, {edge.u, static_cast<pool_value_t>(weight)});
+                    ++rebuilt.m_;
+                }
+            }
+        } else {
+            for (node_index v : active)
+                rebuilt.adj_.reserve_for(v, physical_degree[v]);
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                const item& edge = items[i];
+                if (!edge.kept) continue;
+                const double inv_p = 1.0 / probability(i);
+                const double weight = edge.weight * inv_p;
                 const edge_index idx =
                     static_cast<edge_index>(rebuilt.edges_.size());
                 rebuilt.edges_.push_back(
@@ -907,8 +1135,8 @@ private:
                 rebuilt.multiplicity_.push_back(std::max(node_index{1}, rounded));
                 rebuilt.adj_.push(edge.u, idx);
                 rebuilt.adj_.push(edge.v, idx);
+                ++rebuilt.m_;
             }
-            ++rebuilt.m_;
         }
         sparsify_stats stats;
         stats.physical_before = coalesced.multi_edges;
@@ -917,6 +1145,9 @@ private:
         stats.backbone_edges = backbone_edges;
         stats.bytes_before = coalesced.bytes_before;
         stats.bytes_after = rebuilt.memory_bytes();
+        stats.forest_candidates = forest_order->size();
+        stats.forest_shards = forest_shards;
+        stats.rebuild_threads = rebuild_threads;
         stats.coalesce_ms = coalesce_ms;
         stats.collect_ms = collect_ms;
         stats.order_ms = order_ms;

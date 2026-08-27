@@ -1406,6 +1406,7 @@ factorization factorize_impl(const Eliminator& elim,
                     std::fprintf(stderr,
                         "[apxchol] residual sparsify: active=%zu p=%.2f "
                         "edges=%zu/%zu->%zu expected=%.1f backbone=%zu "
+                        "forest_candidates=%zu shards=%zu rebuild_threads=%zu "
                         "min_p=%.9g max_inv_p=%.3g "
                         "graph=%.1f->%.1f MiB stages_ms="
                         "%.3f/%.3f/%.3f/%.3f/%.3f\n",
@@ -1414,6 +1415,8 @@ factorization factorize_impl(const Eliminator& elim,
                         stats.physical_before, stats.distinct_before,
                         stats.kept_edges, stats.expected_kept_edges,
                         stats.backbone_edges,
+                        stats.forest_candidates, stats.forest_shards,
+                        stats.rebuild_threads,
                         stats.min_offtree_probability,
                         stats.max_inverse_probability,
                         stats.bytes_before / 1048576.0,

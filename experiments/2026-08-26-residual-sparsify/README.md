@@ -140,6 +140,71 @@ total 1.0413x. It captured only 0.0126 percentage points more residual weight;
 keep the one-pass coarse forest. Evidence:
 `/tmp/apxchol-residual-backbone-compatible-r3` and research commit `5cb107d`.
 
+## Exact stage parallelization follow-up
+
+The estimator above is unchanged. Three formerly serial implementation stages
+have exact parallel forms:
+
+1. Split the already weight-ordered edge stream into
+   `K = min(P, floor(sqrt(edges / active)))` contiguous shards, build a local
+   Kruskal forest in each shard, concatenate those forests, then run the
+   original global Kruskal scan. A locally rejected edge has an earlier
+   same-shard path, so it cannot affect the global ordered scan. The filter is
+   exact, not another sampled forest.
+2. Compute every `sqrt(weight)` once in parallel and retain the original serial
+   summation order. The cache replaces the obsolete radix scratch allocation,
+   so it adds no second O(edges) live buffer.
+3. Rebuild the directed AoS residual with the same derived `K`: each worker
+   owns a contiguous edge interval and a private degree row over active
+   vertices. Prefixing those rows gives disjoint slab offsets. This removes
+   endpoint atomics and slab sorting while preserving the serial global edge
+   order byte for byte.
+
+The first Daint implementation used endpoint atomics plus slab sorting for step
+3. Job 4547191 completed in 10:20 and checked **108/108 full solves**: six
+eligible matrices, T=36/72, three repetitions, with every candidate bracketed
+by exact baseline factors, iterations and residuals. Candidate / geometric
+baseline geomeans over all 36 cells were setup **0.9034x**, residual-sparsify
+**0.6112x**, PCG 0.9891x and single-RHS total **0.9219x**. Orkut setup was
+0.8060x at T=36 and 0.7760x at T=72. The one defect was Skitter at T=72:
+rebuild contention made setup 1.0660x despite a 0.2883x forest stage.
+Downloaded evidence: `/tmp/apxchol-residual-parallel-daint-r1-results`.
+
+The atomic-free prefix rebuild closes that mechanism locally. A 54-record,
+three-repetition T=16 gate kept factor nnz exact in every arm and measured
+setup **0.9170x**, residual-sparsify **0.6104x**, forest **0.2417x**, rebuild
+**0.4964x**, and peak RSS 0.9996x. Every matrix's setup geomean improved;
+Skitter was 0.9860x and Orkut 0.8723x. Evidence:
+`/tmp/apxchol-residual-prefix-rebuild-confirm-20260827`.
+
+Corrected Daint job 4547244 then completed in 9:58 and checked **108/108 full
+solves** with exact factors, iterations and residuals in every bracket. Across
+all 36 matrix/thread/repetition cells, candidate / geometric baseline was:
+
+| scope | setup | residual sparsify | forest | rebuild | PCG | one-RHS total |
+|---|---:|---:|---:|---:|---:|---:|
+| T=36 | **0.9022x** | **0.6187x** | **0.2403x** | **0.4648x** | 1.0035x | **0.9241x** |
+| T=72 | **0.8873x** | **0.5489x** | **0.2439x** | **0.3815x** | 1.0002x | **0.9104x** |
+| overall | **0.8947x** | **0.5828x** | **0.2421x** | **0.4211x** | 1.0019x | **0.9172x** |
+
+The Skitter defect is closed: setup is 0.9533x at T=36 and 0.9233x at T=72;
+its rebuild is 0.4261x and 0.3688x. The residual stage wins 36/36 cells; setup
+and total each win 32/36. Peak-RSS ratios are not decision-grade on these lazy
+segmented pools: unchanged baseline runs jump among approximately 256, 750 and
+1280 MiB page-residency tiers on YouTube. The graph's own logical-byte census
+and the T=16 process RSS are neutral, while the new largest explicit temporary
+is only `K * active * sizeof(node_index)` (56 MiB for Orkut even at K=72; the
+derived K is 20 there). Downloaded evidence:
+`/tmp/apxchol-residual-parallel-daint-r2-results`.
+
+Finally, a T=1 bracket on LiveJournal, coPapersDBLP and Orkut isolates the
+square-root cache while both parallel paths collapse to serial. Its setup and
+residual-stage geomeans are **0.9750x** and **0.9082x**; Orkut setup is neutral
+at 1.0002x while its residual stage is 0.9472x. Evidence:
+`/tmp/apxchol-residual-cache-t1-20260827`. Full tests pass 309/309. **Decision:
+promote the exact stages without separate runtime knobs; the existing whole
+feature rollback remains sufficient.**
+
 ## Breadth and validation
 
 The local matrix directory contains 30 inputs. Checked 23/30 supported square

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <map>
+#include <numeric>
 #include <random>
 #include <tuple>
 #include <vector>
@@ -12,6 +13,10 @@
 
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // ── Typed test fixture ───────────────────────────────
 
@@ -75,6 +80,7 @@ TEST(ActiveState, RepeatedDeactivateDoesNotDoubleCount) {
 }
 
 namespace {
+
 struct assignment_counted_slot {
     int value = 0;
     static inline int assignments = 0;
@@ -337,7 +343,69 @@ bool reachable_within(const apxchol::graph<Incidence>& G,
     return true;
 }
 
+template<typename Incidence>
+auto adjacency_records(const apxchol::graph<Incidence>& G) {
+    std::vector<std::tuple<apxchol::node_index,
+                           apxchol::node_index, double>> result;
+    for (apxchol::node_index u = 0; u < G.n(); ++u)
+        for (const auto& edge : G.neighbors(u))
+            result.emplace_back(u, edge.to, edge.w);
+    return result;
+}
+
 }  // namespace
+
+TEST(ResidualSparsifyTest,
+     ParallelForestAndDirectedRebuildAreByteEquivalentToSerial) {
+#ifdef _OPENMP
+    const int previous_threads = omp_get_max_threads();
+    omp_set_num_threads(4);
+#endif
+    using Incidence = apxchol::directed_vec_pool_incidence;
+    constexpr apxchol::node_index n = 16;
+    std::vector<apxchol::node_index> active(n);
+    std::iota(active.begin(), active.end(), apxchol::node_index{0});
+    auto make_dense = [=] {
+        apxchol::graph<Incidence> G(n);
+        for (apxchol::node_index u = 0; u < n; ++u)
+            for (apxchol::node_index v = u + 1; v < n; ++v)
+                G.add_edge(u, v, 1000.0 - 17.0 * u - v);
+        return G;
+    };
+    auto run = [&](auto& G) {
+        return apxchol::detail::residual_coalescer<Incidence>::sparsify(
+            G, active, 0.35, 0x123456789abcdef0ULL);
+    };
+
+#ifdef _OPENMP
+    omp_set_num_threads(1);
+#endif
+    auto serial = make_dense();
+    const auto serial_stats = run(serial);
+#ifdef _OPENMP
+    omp_set_num_threads(4);
+#endif
+    auto parallel = make_dense();
+    const auto parallel_stats = run(parallel);
+#ifdef _OPENMP
+    omp_set_num_threads(previous_threads);
+#endif
+#ifdef _OPENMP
+    ASSERT_GT(parallel_stats.forest_shards, 1u);
+    ASSERT_LT(parallel_stats.forest_candidates,
+              parallel_stats.distinct_before);
+    ASSERT_GT(parallel_stats.rebuild_threads, 1u);
+#else
+    EXPECT_EQ(parallel_stats.forest_shards, 1u);
+    EXPECT_EQ(parallel_stats.rebuild_threads, 1u);
+#endif
+    EXPECT_EQ(serial_stats.physical_before, parallel_stats.physical_before);
+    EXPECT_EQ(serial_stats.distinct_before, parallel_stats.distinct_before);
+    EXPECT_EQ(serial_stats.kept_edges, parallel_stats.kept_edges);
+    EXPECT_EQ(serial_stats.backbone_edges, parallel_stats.backbone_edges);
+    EXPECT_EQ(serial.m(), parallel.m());
+    EXPECT_EQ(adjacency_records(serial), adjacency_records(parallel));
+}
 
 TYPED_TEST(ResidualSparsifyTest,
            BackbonePreservesEveryComponentAndTheRealizationIsDeterministic) {
