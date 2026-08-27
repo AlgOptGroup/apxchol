@@ -2,8 +2,11 @@
 
 ## Mechanism
 
-`APXCHOL_EXPERIMENT_VIRTUAL_POOL` replaces the relocating `std::vector` used
-by the pooled incidence backends with stable mmap-backed segments. A vertex
+Compiling with the `APXCHOL_EXPERIMENT_VIRTUAL_POOL` definition replaces the
+relocating `std::vector` used by the pooled incidence backends with stable
+mmap-backed segments. This is not a runtime environment switch: every A/B uses
+two source-identical binaries, one built with the definition and one without.
+A vertex
 slab never crosses a segment, so the production integer-offset metadata stays
 valid. During bulk edge application each worker claims and copies its own
 growth ranges; only the final publication barrier remains. The production path
@@ -75,4 +78,3 @@ probe rather than retaining an optional storage mode.
   worse overall.
 - Replacing the offset with a direct pointer: helped only grid_500 in the
   controlled pass; regressed setup 1--5% elsewhere and added 2--7% RSS.
-
