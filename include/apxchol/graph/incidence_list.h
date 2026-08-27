@@ -476,7 +476,10 @@ template<typename Value, graph_storage Tag> struct basic_vec_pool_incidence {
         requires std::same_as<value_type, directed_pool_edge>
     std::pair<node_index, node_index> coalesce_slab(
             node_index v, IsLive&& is_live) {
-        value_type* p = pool_.data() + base_[v];
+        // claim() guarantees that a vertex slab never crosses a segment, so
+        // ptr(base) exposes the same contiguous range without assuming the
+        // whole pool has one backing allocation.
+        value_type* p = pool_.ptr(base_[v]);
         const node_index before = count_[v];
         std::sort(p, p + before);
         node_index out = 0;
