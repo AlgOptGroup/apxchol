@@ -1,5 +1,7 @@
-#include <gtest/gtest.h>
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <gtest/gtest.h>
 #include <random>
 #include <vector>
 
@@ -51,7 +53,7 @@ TEST(ActiveState, ParallelClearsSharingWordsDoNotLoseUpdates) {
     constexpr apxchol::node_index n = 4096;
     apxchol::graph<apxchol::directed_vec_pool_incidence> G(n);
 
-    #pragma omp parallel for schedule(static, 1)
+#pragma omp parallel for schedule(static, 1)
     for (apxchol::node_index v = 0; v < n; ++v)
         G.set_inactive_unchecked(v);
     G.bulk_decrement_active(n);
@@ -84,14 +86,15 @@ struct assignment_counted_slot {
         return *this;
     }
 };
-}
+} // namespace
 
 TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
-    using Incidence = apxchol::basic_vec_pool_incidence<
-        assignment_counted_slot, apxchol::graph_storage::vec_pool>;
+    using Incidence = apxchol::basic_vec_pool_incidence<assignment_counted_slot,
+                                                        apxchol::graph_storage::vec_pool>;
     Incidence adj;
     adj.init(1);
-    for (int value : {1, 2, 3, 4}) adj.push(0, value);
+    for (int value : {1, 2, 3, 4})
+        adj.push(0, value);
 
     assignment_counted_slot::assignments = 0;
     adj.filter(0, [](const auto&) { return true; });
@@ -99,15 +102,51 @@ TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
 
     std::vector<int> kept;
     assignment_counted_slot::assignments = 0;
-    adj.filter(0,
-               [](const auto& slot) { return slot.value != 2; },
-               [&](const auto& slot) { kept.push_back(slot.value); });
+    adj.filter(
+        0, [](const auto& slot) { return slot.value != 2; },
+        [&](const auto& slot) { kept.push_back(slot.value); });
     EXPECT_EQ(assignment_counted_slot::assignments, 2);
     EXPECT_EQ(kept, (std::vector<int>{1, 3, 4}));
     ASSERT_EQ(adj[0].size(), 3u);
     EXPECT_EQ(adj[0][0].value, 1);
     EXPECT_EQ(adj[0][1].value, 3);
     EXPECT_EQ(adj[0][2].value, 4);
+}
+
+TEST(SegmentedPool, ClaimsNeverCrossSegmentsAndClearReusesTheMap) {
+    apxchol::segmented_pool<std::uint32_t, 8, 64> pool;
+    pool.prepare();
+    const size_t first = pool.claim(6);
+    const size_t second = pool.claim(4);
+
+    EXPECT_EQ(first, 0u);
+    EXPECT_EQ(second, 8u);
+    EXPECT_EQ(pool.size(), 12u);
+    pool[second] = 42;
+    EXPECT_EQ(pool[second], 42u);
+
+    pool.clear();
+    EXPECT_EQ(pool.size(), 0u);
+    EXPECT_EQ(pool.claim(3), 0u);
+}
+
+TEST(SegmentedPool, ParallelClaimsAreDisjoint) {
+    apxchol::segmented_pool<std::uint32_t, 64, 4096> pool;
+    pool.prepare();
+    constexpr size_t claims = 128;
+    constexpr size_t slots_per_claim = 7;
+    std::vector<size_t> offsets(claims);
+
+#pragma omp parallel for schedule(static) num_threads(8)
+    for (size_t i = 0; i < claims; ++i)
+        offsets[i] = pool.claim(slots_per_claim);
+
+    std::sort(offsets.begin(), offsets.end());
+    for (size_t i = 0; i < offsets.size(); ++i) {
+        EXPECT_LE(offsets[i] % pool.max_claim_slots() + slots_per_claim, pool.max_claim_slots());
+        if (i != 0)
+            EXPECT_GE(offsets[i], offsets[i - 1] + slots_per_claim);
+    }
 }
 
 TYPED_TEST(GraphTest, BasicConstruction) {
