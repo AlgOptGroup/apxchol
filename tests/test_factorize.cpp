@@ -1074,6 +1074,23 @@ TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
         0, 0, 20000, 100000, 0.10, 500, 2000));
 }
 
+TEST(ResidualSparsifyGate, UsesObservedTrafficAndHandoffYield) {
+    using apxchol::detail::residual_sparsify_worthwhile;
+    // The six naturally eligible residuals from the breadth screen all repay
+    // the conservative eight-pass rebuild model.
+    EXPECT_TRUE(residual_sparsify_worthwhile(3040, 500, 89, 832.773438));
+    EXPECT_TRUE(residual_sparsify_worthwhile(4352, 500, 131, 380.308594));
+    EXPECT_TRUE(residual_sparsify_worthwhile(21518, 500, 209, 224.363281));
+    EXPECT_TRUE(residual_sparsify_worthwhile(74819, 500, 1377, 430.695312));
+    EXPECT_TRUE(residual_sparsify_worthwhile(9085, 500, 264, 286.738281));
+    EXPECT_TRUE(residual_sparsify_worthwhile(194925, 500, 1978, 909.019531));
+
+    // Sparse residuals and nearly-finished handoffs do not amortize a rebuild.
+    EXPECT_FALSE(residual_sparsify_worthwhile(10000, 500, 200, 2.1));
+    EXPECT_FALSE(residual_sparsify_worthwhile(700, 500, 150, 400.0));
+    EXPECT_FALSE(residual_sparsify_worthwhile(10000, 500, 0, 400.0));
+}
+
 TEST(EliminationTeamSizing, UsesDegreeWorkAndProtectsSerialExecution) {
     using apxchol::detail::elimination_round_team_size;
     constexpr size_t max = std::numeric_limits<size_t>::max();

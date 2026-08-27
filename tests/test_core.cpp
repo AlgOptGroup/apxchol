@@ -2,7 +2,9 @@
 #include <cmath>
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <map>
 #include <random>
+#include <tuple>
 #include <vector>
 
 #include <Eigen/Core>
@@ -275,6 +277,136 @@ TEST(VecPoolGraph, CoalescePreservesWeightsMultiplicityAndActiveState) {
     EXPECT_EQ(G.edge_multiplicity(slot), 1u);
     EXPECT_EQ(G.prune_and_degree(0), 4u);
     EXPECT_EQ(G.prune_and_degree(3), 2u);
+}
+
+namespace {
+
+using SparsifyStorages = ::testing::Types<
+    apxchol::vec_pool_incidence,
+    apxchol::directed_vec_pool_incidence>;
+
+template<typename Incidence>
+class ResidualSparsifyTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(ResidualSparsifyTest, SparsifyStorages);
+
+template<typename Incidence>
+apxchol::graph<Incidence> make_sparsify_graph() {
+    apxchol::graph<Incidence> G(8);
+    // Two connected components, both with many off-tree alternatives. Distinct
+    // weights make the coarse maximum-weight forest deterministic.
+    for (const auto [u, v, w] : std::vector<std::tuple<int, int, double>>{
+             {0, 1, 20.0}, {1, 2, 18.0}, {2, 3, 16.0},
+             {0, 2, 4.0}, {0, 3, 3.0}, {1, 3, 2.0},
+             {4, 5, 14.0}, {5, 6, 12.0}, {6, 7, 10.0},
+             {4, 6, 4.0}, {4, 7, 3.0}, {5, 7, 2.0}})
+        G.add_edge(u, v, w);
+    return G;
+}
+
+template<typename Incidence>
+auto canonical_edges(const apxchol::graph<Incidence>& G) {
+    std::vector<std::tuple<apxchol::node_index,
+                           apxchol::node_index, double>> result;
+    for (apxchol::node_index u = 0; u < G.n(); ++u)
+        for (const auto& edge : G.neighbors(u))
+            if (edge.to > u)
+                result.emplace_back(u, edge.to, edge.w);
+    std::ranges::sort(result);
+    return result;
+}
+
+template<typename Incidence>
+bool reachable_within(const apxchol::graph<Incidence>& G,
+                      apxchol::node_index first,
+                      apxchol::node_index last) {
+    std::vector<unsigned char> seen(G.n(), 0);
+    std::vector<apxchol::node_index> stack{first};
+    seen[first] = 1;
+    while (!stack.empty()) {
+        const auto u = stack.back();
+        stack.pop_back();
+        for (const auto& edge : G.neighbors(u))
+            if (edge.to >= first && edge.to <= last && !seen[edge.to]) {
+                seen[edge.to] = 1;
+                stack.push_back(edge.to);
+            }
+    }
+    for (auto v = first; v <= last; ++v)
+        if (!seen[v]) return false;
+    return true;
+}
+
+}  // namespace
+
+TYPED_TEST(ResidualSparsifyTest,
+           BackbonePreservesEveryComponentAndTheRealizationIsDeterministic) {
+    const std::vector<apxchol::node_index> active = {0, 1, 2, 3, 4, 5, 6, 7};
+    auto A = make_sparsify_graph<TypeParam>();
+    auto B = make_sparsify_graph<TypeParam>();
+    const auto a = apxchol::detail::residual_coalescer<TypeParam>::sparsify(
+        A, active, 1e-6, 0x123456789abcdef0ULL);
+    const auto b = apxchol::detail::residual_coalescer<TypeParam>::sparsify(
+        B, active, 1e-6, 0x123456789abcdef0ULL);
+
+    EXPECT_EQ(a.backbone_edges, 6u);
+    EXPECT_EQ(b.backbone_edges, 6u);
+    EXPECT_GE(a.kept_edges, a.backbone_edges);
+    EXPECT_TRUE(reachable_within(A, 0, 3));
+    EXPECT_TRUE(reachable_within(A, 4, 7));
+    EXPECT_EQ(canonical_edges(A), canonical_edges(B));
+    const auto edges = canonical_edges(A);
+    for (const auto expected : std::vector<std::pair<
+             apxchol::node_index, apxchol::node_index>>{
+             {0, 1}, {1, 2}, {2, 3}, {4, 5}, {5, 6}, {6, 7}})
+        EXPECT_TRUE(std::ranges::any_of(edges, [&](const auto& edge) {
+            return std::get<0>(edge) == expected.first &&
+                   std::get<1>(edge) == expected.second;
+        })) << "coarse maximum-weight forest omitted heavy edge "
+            << expected.first << "-" << expected.second;
+}
+
+TYPED_TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
+    using Incidence = TypeParam;
+    const std::vector<apxchol::node_index> active = {0, 1, 2};
+    constexpr int trials = 4096;
+    constexpr double keep_probability = 0.30;
+    double weight_sum = 0.0;
+    double multiplicity_sum = 0.0;
+    int retained = 0;
+    for (int seed = 0; seed < trials; ++seed) {
+        apxchol::graph<Incidence> G(3);
+        G.add_edge(0, 1, 10.0);
+        G.add_edge(1, 2, 9.0);
+        // Coalesces to one off-tree edge of weight 1 and multiplicity 2.
+        G.add_edge(0, 2, 0.25);
+        G.add_edge(0, 2, 0.75);
+        const auto stats =
+            apxchol::detail::residual_coalescer<Incidence>::sparsify(
+                G, active, keep_probability, static_cast<std::uint64_t>(seed));
+        EXPECT_NEAR(stats.expected_kept_edges,
+                    2.0 + keep_probability, 1e-12);
+        for (const auto idx : G.adj(0)) {
+            if (G.edge_target(idx, 0) != 2) continue;
+            ++retained;
+            const double weight = G.edge_weight(idx);
+            weight_sum += weight;
+            EXPECT_NEAR(weight, 1.0 / keep_probability, 1e-6);
+            if constexpr (std::same_as<Incidence,
+                                       apxchol::vec_pool_incidence>) {
+                multiplicity_sum += G.edge_multiplicity(idx);
+                EXPECT_TRUE(G.edge_multiplicity(idx) == 6u ||
+                            G.edge_multiplicity(idx) == 7u);
+            }
+        }
+        EXPECT_TRUE(reachable_within(G, 0, 2));
+    }
+
+    EXPECT_NEAR(static_cast<double>(retained) / trials,
+                keep_probability, 0.02);
+    EXPECT_NEAR(weight_sum / trials, 1.0, 0.07);
+    if constexpr (std::same_as<Incidence, apxchol::vec_pool_incidence>)
+        EXPECT_NEAR(multiplicity_sum / trials, 2.0, 0.14);
 }
 
 // ── Laplacian tests (storage-independent) ────────────

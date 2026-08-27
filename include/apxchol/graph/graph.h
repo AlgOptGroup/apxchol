@@ -499,6 +499,8 @@ private:
         double total_weight = 0.0;
         double backbone_weight = 0.0;
         double expected_kept_edges = 0.0;
+        double min_offtree_probability = 1.0;
+        double max_inverse_probability = 1.0;
     };
 
     struct active_sparsify_sample {
@@ -700,19 +702,17 @@ private:
         return stats;
     }
 
-    /// Connectivity-safe late-residual sparsification probe for indexed
-    /// vec_pool storage. Parallel edges are first combined exactly (retaining
-    /// their selector multiplicity). A spanning forest is always retained;
-    /// every remaining edge is Bernoulli-sampled and reweighted by 1/p, so the
-    /// numerical residual is unbiased while each connected component remains
-    /// connected in every realization.
+    /// Connectivity-safe late-residual sparsification for both pooled
+    /// adjacency layouts. Parallel edges are combined first and a spanning
+    /// forest is retained exactly. Off-tree numerical weights use independent
+    /// Bernoulli/Horvitz--Thompson estimates. The indexed pool applies the same
+    /// estimator to its multiplicity sidecar with deterministic stochastic
+    /// rounding; the directed-AoS pool keeps its distinct-neighbour degree.
     template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
+        requires is_vec_pool_incidence_v<I>
     sparsify_stats sparsify_active(std::span<const node_index> active,
                                    double keep_probability,
-                                   std::uint64_t seed,
-                                   int forest_mode,
-                                   int sample_mode) {
+                                   std::uint64_t seed) {
         using clock = std::chrono::steady_clock;
         auto stage = clock::now();
         keep_probability = std::clamp(keep_probability, 1e-6, 1.0);
@@ -720,237 +720,22 @@ private:
         const double coalesce_ms = std::chrono::duration<double, std::milli>(
             clock::now() - stage).count();
         stage = clock::now();
-
         struct item {
             node_index u, v;
             double weight;
             node_index multiplicity;
             bool backbone = false;
-        };
-        std::vector<item> items;
-        items.reserve(edges_.size());
-        for (node_index u : active)
-            for (edge_index idx : adj_[u]) {
-                const node_index v = edges_[idx].traverse(u);
-                if (v > u && is_active(v))
-                    items.push_back({u, v, static_cast<double>(edges_[idx].w),
-                                     edge_multiplicity(idx), false});
-            }
-        const double collect_ms = std::chrono::duration<double, std::milli>(
-            clock::now() - stage).count();
-        stage = clock::now();
-
-        const node_index npos = node_index(-1);
-        std::vector<node_index> parent(static_cast<std::size_t>(n_), npos);
-        std::vector<unsigned char> rank(static_cast<std::size_t>(n_), 0);
-        for (node_index v : active) parent[v] = v;
-        auto find = [&](node_index v) {
-            node_index root = v;
-            while (parent[root] != root) root = parent[root];
-            while (parent[v] != v) {
-                const node_index next = parent[v];
-                parent[v] = root;
-                v = next;
-            }
-            return root;
-        };
-        auto unite = [&](node_index u, node_index v) {
-            u = find(u);
-            v = find(v);
-            if (u == v) return false;
-            if (rank[u] < rank[v]) std::swap(u, v);
-            parent[v] = u;
-            if (rank[u] == rank[v]) ++rank[u];
-            return true;
-        };
-
-        std::vector<std::size_t> order(items.size());
-        std::iota(order.begin(), order.end(), std::size_t{0});
-        if (forest_mode != 0) {
-            std::vector<std::size_t> scratch(order.size());
-            auto weight_key = [&](std::size_t index) -> std::uint64_t {
-                if constexpr (sizeof(pool_value_t) == 4)
-                    return (~static_cast<std::uint64_t>(
-                        std::bit_cast<std::uint32_t>(static_cast<float>(
-                            items[index].weight)))) & 0xffffffffULL;
-                else
-                    return ~std::bit_cast<std::uint64_t>(items[index].weight);
-            };
-            constexpr unsigned key_bits = 8 * sizeof(pool_value_t);
-            const unsigned first_shift = forest_mode == 1
-                ? 0 : key_bits - 12;
-            const unsigned pass_bits = forest_mode == 1 ? 8 : 12;
-            const unsigned passes = forest_mode == 1
-                ? key_bits / 8 : 1;
-            std::vector<std::size_t> counts(std::size_t{1} << pass_bits);
-            for (unsigned pass = 0; pass < passes; ++pass) {
-                const unsigned shift = first_shift + pass * pass_bits;
-                std::ranges::fill(counts, 0);
-                for (std::size_t index : order) {
-                    const std::uint64_t key = weight_key(index);
-                    ++counts[(key >> shift) & (counts.size() - 1)];
-                }
-                std::size_t offset = 0;
-                for (std::size_t& count : counts) {
-                    const std::size_t next = offset + count;
-                    count = offset;
-                    offset = next;
-                }
-                for (std::size_t index : order) {
-                    const std::uint64_t key = weight_key(index);
-                    scratch[counts[(key >> shift) & (counts.size() - 1)]++] = index;
-                }
-                order.swap(scratch);
-            }
-        }
-        const double order_ms = std::chrono::duration<double, std::milli>(
-            clock::now() - stage).count();
-        stage = clock::now();
-        std::size_t backbone_edges = 0;
-        double total_weight = 0.0;
-        double backbone_weight = 0.0;
-        for (const item& edge : items) total_weight += edge.weight;
-        for (std::size_t index : order)
-            if (unite(items[index].u, items[index].v)) {
-                items[index].backbone = true;
-                ++backbone_edges;
-                backbone_weight += items[index].weight;
-            }
-        const double forest_ms = std::chrono::duration<double, std::milli>(
-            clock::now() - stage).count();
-        stage = clock::now();
-
-        auto importance_measure = [&](const item& edge) {
-            return sample_mode == 2 ? std::sqrt(edge.weight) : edge.weight;
-        };
-        double importance_scale = 0.0;
-        if (sample_mode != 0) {
-            const std::size_t off_tree = items.size() - backbone_edges;
-            const double target = keep_probability * off_tree;
-            double off_tree_measure = 0.0;
-            for (const item& edge : items)
-                if (!edge.backbone)
-                    off_tree_measure += importance_measure(edge);
-            if (target > 0.0 && off_tree_measure > 0.0) {
-                importance_scale = target / off_tree_measure;
-                for (unsigned iteration = 0; iteration < 6; ++iteration) {
-                    double expected = 0.0;
-                    for (const item& edge : items)
-                        if (!edge.backbone)
-                            expected += std::min(
-                                1.0, importance_scale *
-                                    importance_measure(edge));
-                    if (expected <= 0.0) break;
-                    importance_scale *= target / expected;
-                }
-            }
-        }
-        auto probability = [&](const item& edge) {
-            if (edge.backbone) return 1.0;
-            return sample_mode != 0
-                ? std::min(1.0, importance_scale * importance_measure(edge))
-                : keep_probability;
-        };
-        double expected_kept = 0.0;
-        for (const item& edge : items) expected_kept += probability(edge);
-
-        auto draw = [&](node_index u, node_index v) {
-            std::uint64_t z = seed ^
-                (static_cast<std::uint64_t>(u) * 0x9E3779B97F4A7C15ULL) ^
-                (static_cast<std::uint64_t>(v) * 0xBF58476D1CE4E5B9ULL);
-            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-            z ^= z >> 31;
-            return static_cast<double>(z >> 11) * 0x1.0p-53;
-        };
-
-        graph rebuilt(n_);
-        rebuilt.active_ = active_;
-        rebuilt.num_active_ = num_active_;
-        rebuilt.excess_ = excess_;
-        std::vector<node_index> physical_degree(static_cast<std::size_t>(n_), 0);
-        std::size_t kept = 0;
-        for (const item& edge : items)
-            if (draw(edge.u, edge.v) < probability(edge)) {
-                ++physical_degree[edge.u];
-                ++physical_degree[edge.v];
-                ++kept;
-            }
-        rebuilt.edges_.reserve(kept);
-        rebuilt.multiplicity_.reserve(kept);
-        for (node_index v : active)
-            rebuilt.adj_.reserve_for(v, physical_degree[v]);
-        for (const item& edge : items) {
-            const double edge_probability = probability(edge);
-            const bool keep = draw(edge.u, edge.v) < edge_probability;
-            if (!keep) continue;
-            const double inv_p = 1.0 / edge_probability;
-            const edge_index idx = static_cast<edge_index>(rebuilt.edges_.size());
-            rebuilt.edges_.push_back(
-                {edge.u ^ edge.v,
-                 static_cast<pool_value_t>(edge.weight * inv_p)});
-            const long double represented = edge.backbone
-                ? static_cast<long double>(edge.multiplicity)
-                : static_cast<long double>(edge.multiplicity) * inv_p;
-            rebuilt.multiplicity_.push_back(static_cast<node_index>(
-                std::min<long double>(
-                    std::numeric_limits<node_index>::max(),
-                    std::max<long double>(1.0L, std::llround(represented)))));
-            rebuilt.adj_.push(edge.u, idx);
-            rebuilt.adj_.push(edge.v, idx);
-            ++rebuilt.m_;
-        }
-
-        sparsify_stats stats;
-        stats.physical_before = coalesced.multi_edges;
-        stats.distinct_before = coalesced.distinct_edges;
-        stats.kept_edges = kept;
-        stats.backbone_edges = backbone_edges;
-        stats.bytes_before = coalesced.bytes_before;
-        stats.bytes_after = rebuilt.memory_bytes();
-        stats.coalesce_ms = coalesce_ms;
-        stats.collect_ms = collect_ms;
-        stats.order_ms = order_ms;
-        stats.forest_ms = forest_ms;
-        stats.rebuild_ms = std::chrono::duration<double, std::milli>(
-            clock::now() - stage).count();
-        stats.total_weight = total_weight;
-        stats.backbone_weight = backbone_weight;
-        stats.expected_kept_edges = expected_kept;
-        *this = std::move(rebuilt);
-        return stats;
-    }
-
-    /// Directed-AoS counterpart. Numerical weights and connectivity have the
-    /// same contract as the indexed probe; selector degree becomes the number
-    /// of retained distinct neighbours because the compact AoS record has no
-    /// multiplicity sidecar.
-    template<typename I = Incidence>
-        requires std::same_as<I, directed_vec_pool_incidence>
-    sparsify_stats sparsify_active(std::span<const node_index> active,
-                                   double keep_probability,
-                                   std::uint64_t seed,
-                                   int forest_mode,
-                                   int sample_mode) {
-        using clock = std::chrono::steady_clock;
-        auto stage = clock::now();
-        keep_probability = std::clamp(keep_probability, 1e-6, 1.0);
-        const coalesce_stats coalesced = coalesce_active(active);
-        const double coalesce_ms = std::chrono::duration<double, std::milli>(
-            clock::now() - stage).count();
-        stage = clock::now();
-        struct item {
-            node_index u, v;
-            double weight;
-            bool backbone = false;
+            bool kept = false;
         };
         std::vector<item> items;
         items.reserve(coalesced.distinct_edges);
         for (node_index u : active)
-            for (const directed_pool_edge& edge : adj_[u])
-                if (edge.to > u && is_active(edge.to))
-                    items.push_back(
-                        {u, edge.to, static_cast<double>(edge.w), false});
+            for (const auto& entry : adj_[u]) {
+                const node_index v = edge_target(entry, u);
+                if (v > u && is_active(v))
+                    items.push_back({u, v, edge_weight(entry),
+                                     edge_multiplicity(entry), false, false});
+            }
         const double collect_ms = std::chrono::duration<double, std::milli>(
             clock::now() - stage).count();
         stage = clock::now();
@@ -980,43 +765,34 @@ private:
         };
         std::vector<std::size_t> order(items.size());
         std::iota(order.begin(), order.end(), std::size_t{0});
-        if (forest_mode != 0) {
-            std::vector<std::size_t> scratch(order.size());
-            auto weight_key = [&](std::size_t index) -> std::uint64_t {
-                if constexpr (sizeof(pool_value_t) == 4)
-                    return (~static_cast<std::uint64_t>(
-                        std::bit_cast<std::uint32_t>(static_cast<float>(
-                            items[index].weight)))) & 0xffffffffULL;
-                else
-                    return ~std::bit_cast<std::uint64_t>(items[index].weight);
-            };
-            constexpr unsigned key_bits = 8 * sizeof(pool_value_t);
-            const unsigned first_shift = forest_mode == 1
-                ? 0 : key_bits - 12;
-            const unsigned pass_bits = forest_mode == 1 ? 8 : 12;
-            const unsigned passes = forest_mode == 1
-                ? key_bits / 8 : 1;
-            std::vector<std::size_t> counts(std::size_t{1} << pass_bits);
-            for (unsigned pass = 0; pass < passes; ++pass) {
-                const unsigned shift = first_shift + pass * pass_bits;
-                std::ranges::fill(counts, 0);
-                for (std::size_t index : order) {
-                    const std::uint64_t key = weight_key(index);
-                    ++counts[(key >> shift) & (counts.size() - 1)];
-                }
-                std::size_t offset = 0;
-                for (std::size_t& count : counts) {
-                    const std::size_t next = offset + count;
-                    count = offset;
-                    offset = next;
-                }
-                for (std::size_t index : order) {
-                    const std::uint64_t key = weight_key(index);
-                    scratch[counts[(key >> shift) & (counts.size() - 1)]++] = index;
-                }
-                order.swap(scratch);
-            }
+        std::vector<std::size_t> scratch(order.size());
+        auto weight_key = [&](std::size_t index) -> std::uint64_t {
+            if constexpr (sizeof(pool_value_t) == 4)
+                return (~static_cast<std::uint64_t>(
+                    std::bit_cast<std::uint32_t>(static_cast<float>(
+                        items[index].weight)))) & 0xffffffffULL;
+            else
+                return ~std::bit_cast<std::uint64_t>(items[index].weight);
+        };
+        constexpr unsigned key_bits = 8 * sizeof(pool_value_t);
+        constexpr unsigned pass_bits = 12;
+        constexpr unsigned shift = key_bits - pass_bits;
+        std::array<std::size_t, std::size_t{1} << pass_bits> counts{};
+        for (std::size_t index : order) {
+            const std::uint64_t key = weight_key(index);
+            ++counts[(key >> shift) & (counts.size() - 1)];
         }
+        std::size_t offset = 0;
+        for (std::size_t& count : counts) {
+            const std::size_t next = offset + count;
+            count = offset;
+            offset = next;
+        }
+        for (std::size_t index : order) {
+            const std::uint64_t key = weight_key(index);
+            scratch[counts[(key >> shift) & (counts.size() - 1)]++] = index;
+        }
+        order.swap(scratch);
         const double order_ms = std::chrono::duration<double, std::milli>(
             clock::now() - stage).count();
         stage = clock::now();
@@ -1033,41 +809,43 @@ private:
         const double forest_ms = std::chrono::duration<double, std::milli>(
             clock::now() - stage).count();
         stage = clock::now();
-        auto importance_measure = [&](const item& edge) {
-            return sample_mode == 2 ? std::sqrt(edge.weight) : edge.weight;
+        auto importance_measure = [](const item& edge) {
+            return std::sqrt(edge.weight);
         };
-        double importance_scale = 0.0;
-        if (sample_mode != 0) {
-            const std::size_t off_tree = items.size() - backbone_edges;
-            const double target = keep_probability * off_tree;
-            double off_tree_measure = 0.0;
+        const std::size_t off_tree = items.size() - backbone_edges;
+        const double target = keep_probability * off_tree;
+        double off_tree_measure = 0.0;
+        for (const item& edge : items)
+            if (!edge.backbone)
+                off_tree_measure += importance_measure(edge);
+        double importance_scale = target > 0.0 && off_tree_measure > 0.0
+            ? target / off_tree_measure : 0.0;
+        for (unsigned iteration = 0;
+             iteration < 6 && importance_scale > 0.0; ++iteration) {
+            double expected = 0.0;
             for (const item& edge : items)
                 if (!edge.backbone)
-                    off_tree_measure += importance_measure(edge);
-            if (target > 0.0 && off_tree_measure > 0.0) {
-                importance_scale = target / off_tree_measure;
-                for (unsigned iteration = 0; iteration < 6; ++iteration) {
-                    double expected = 0.0;
-                    for (const item& edge : items)
-                        if (!edge.backbone)
-                            expected += std::min(
-                                1.0, importance_scale *
-                                    importance_measure(edge));
-                    if (expected <= 0.0) break;
-                    importance_scale *= target / expected;
-                }
-            }
+                    expected += std::min(
+                        1.0, importance_scale * importance_measure(edge));
+            if (expected <= 0.0) break;
+            importance_scale *= target / expected;
         }
         auto probability = [&](const item& edge) {
             if (edge.backbone) return 1.0;
-            return sample_mode != 0
-                ? std::min(1.0, importance_scale * importance_measure(edge))
-                : keep_probability;
+            return std::min(
+                1.0, importance_scale * importance_measure(edge));
         };
         double expected_kept = 0.0;
-        for (const item& edge : items) expected_kept += probability(edge);
-        auto draw = [&](node_index u, node_index v) {
-            std::uint64_t z = seed ^
+        double min_offtree_probability = 1.0;
+        for (const item& edge : items) {
+            const double edge_probability = probability(edge);
+            expected_kept += edge_probability;
+            if (!edge.backbone)
+                min_offtree_probability =
+                    std::min(min_offtree_probability, edge_probability);
+        }
+        auto draw = [&](node_index u, node_index v, std::uint64_t salt = 0) {
+            std::uint64_t z = seed ^ salt ^
                 (static_cast<std::uint64_t>(u) * 0x9E3779B97F4A7C15ULL) ^
                 (static_cast<std::uint64_t>(v) * 0xBF58476D1CE4E5B9ULL);
             z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -1082,23 +860,54 @@ private:
         rebuilt.excess_ = excess_;
         std::vector<node_index> physical_degree(static_cast<std::size_t>(n_), 0);
         std::size_t kept = 0;
-        for (const item& edge : items)
-            if (draw(edge.u, edge.v) < probability(edge)) {
+        for (item& edge : items) {
+            edge.kept = draw(edge.u, edge.v) < probability(edge);
+            if (edge.kept) {
                 ++physical_degree[edge.u];
                 ++physical_degree[edge.v];
                 ++kept;
             }
+        }
+        if constexpr (!stores_directed_incidence) {
+            rebuilt.edges_.reserve(kept);
+            rebuilt.multiplicity_.reserve(kept);
+        }
         for (node_index v : active)
             rebuilt.adj_.reserve_for(v, physical_degree[v]);
         for (const item& edge : items) {
+            if (!edge.kept) continue;
             const double edge_probability = probability(edge);
-            const bool keep = draw(edge.u, edge.v) < edge_probability;
-            if (!keep) continue;
-            const double weight = edge.weight / edge_probability;
-            rebuilt.adj_.push(
-                edge.u, {edge.v, static_cast<pool_value_t>(weight)});
-            rebuilt.adj_.push(
-                edge.v, {edge.u, static_cast<pool_value_t>(weight)});
+            const double inv_p = 1.0 / edge_probability;
+            const double weight = edge.weight * inv_p;
+            if constexpr (stores_directed_incidence) {
+                rebuilt.adj_.push(
+                    edge.u, {edge.v, static_cast<pool_value_t>(weight)});
+                rebuilt.adj_.push(
+                    edge.v, {edge.u, static_cast<pool_value_t>(weight)});
+            } else {
+                const edge_index idx =
+                    static_cast<edge_index>(rebuilt.edges_.size());
+                rebuilt.edges_.push_back(
+                    {edge.u ^ edge.v, static_cast<pool_value_t>(weight)});
+                const long double represented =
+                    static_cast<long double>(edge.multiplicity) * inv_p;
+                const long double maximum =
+                    std::numeric_limits<node_index>::max();
+                node_index rounded;
+                if (represented >= maximum) {
+                    rounded = std::numeric_limits<node_index>::max();
+                } else {
+                    const long double lower = std::floor(represented);
+                    const long double fraction = represented - lower;
+                    rounded = static_cast<node_index>(lower) +
+                        (draw(edge.u, edge.v, 0xD1B54A32D192ED03ULL) <
+                                 fraction
+                             ? 1u : 0u);
+                }
+                rebuilt.multiplicity_.push_back(std::max(node_index{1}, rounded));
+                rebuilt.adj_.push(edge.u, idx);
+                rebuilt.adj_.push(edge.v, idx);
+            }
             ++rebuilt.m_;
         }
         sparsify_stats stats;
@@ -1117,6 +926,8 @@ private:
         stats.total_weight = total_weight;
         stats.backbone_weight = backbone_weight;
         stats.expected_kept_edges = expected_kept;
+        stats.min_offtree_probability = min_offtree_probability;
+        stats.max_inverse_probability = 1.0 / min_offtree_probability;
         *this = std::move(rebuilt);
         return stats;
     }
@@ -1172,7 +983,7 @@ private:
     node_index num_active_ = 0; // active vertex count
     std::vector<edge> edges_;
     // Empty until an exact coalesced-residual rebuild. Thereafter one count per
-    // physical edge; newly sampled edges use count 1.
+    // physical edge; residual sparsification stores its HT-reweighted count.
     std::vector<node_index> multiplicity_;
     Incidence adj_;
     // Active status is probed randomly in nearly every residual-edge scan, so
@@ -1212,11 +1023,8 @@ struct residual_coalescer {
     static auto sparsify(graph<Incidence>& g,
                          std::span<const node_index> active,
                          double keep_probability,
-                         std::uint64_t seed,
-                         int forest_mode,
-                         int sample_mode) {
-        return g.sparsify_active(active, keep_probability, seed,
-                                 forest_mode, sample_mode);
+                         std::uint64_t seed) {
+        return g.sparsify_active(active, keep_probability, seed);
     }
 };
 
