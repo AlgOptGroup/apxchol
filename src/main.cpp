@@ -55,6 +55,15 @@ int main(int argc, char* argv[]) try {
         spdlog::debug("generating random test RHS");
         std::srand(cfg.solve_opts.factor_opts.seed);  // Eigen::Random uses rand()
         b = generate_test_rhs(L.rows());
+        if (kind == input_kind::adjacency ||
+            (scan.excess_rows == 0 && scan.deficient_rows == 0)) {
+            const Eigen::Index components =
+                project_laplacian_rhs_components(L, b);
+            if (components > 1)
+                spdlog::info(
+                    "projected random RHS independently over {} connected components",
+                    components);
+        }
     } else {
         spdlog::error("no right-hand side: pass --rhs <file.mtx>, or --random-rhs "
                       "to solve against a random test vector");
@@ -90,9 +99,7 @@ int main(int argc, char* argv[]) try {
                               ? "an adjacency graph (L = D - A)"
                               : "an assembled Laplacian/SDDM operator");
         else
-            spdlog::error("did not reach tol {} in {} iterations (residual {}); on a "
-                          "disconnected Laplacian a globally generated RHS may be "
-                          "inconsistent per component.{}",
+            spdlog::error("did not reach tol {} in {} iterations (residual {}).{}",
                           cfg.solve_opts.tol, res.iterations, res.residual, why);
     }
     return converged ? 0 : 1;

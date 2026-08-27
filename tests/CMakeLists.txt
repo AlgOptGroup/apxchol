@@ -65,6 +65,14 @@ add_test(NAME cli_pattern_adjacency_converges
 set_tests_properties(cli_pattern_adjacency_converges PROPERTIES
         FAIL_REGULAR_EXPRESSION "LAPLACIAN/SDDM operator")
 
+# A globally centred random RHS is generally inconsistent on a disconnected
+# Laplacian. The CLI must project each connected component before solving.
+add_test(NAME cli_disconnected_adjacency_converges
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/disconnected_paths_pattern.mtx"
+                 --random-rhs --tol 1e-8)
+set_tests_properties(cli_disconnected_adjacency_converges PROPERTIES
+        PASS_REGULAR_EXPRESSION "projected random RHS independently over 2 connected components")
+
 # An assembled Laplacian keeps being solved as given.
 add_test(NAME cli_laplacian_converges
          COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_laplacian.mtx" --random-rhs --tol 1e-8)

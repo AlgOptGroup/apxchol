@@ -23,6 +23,8 @@ ctest --test-dir build --output-on-failure
 # CLI solver (a RHS is mandatory: --rhs file.mtx or --random-rhs). The input
 # .mtx may be an assembled Laplacian/SDDM operator or a graph adjacency/pattern
 # matrix; the kind is auto-detected and reported (`--input-kind` overrides).
+# For a disconnected pure Laplacian, --random-rhs is projected independently
+# on every connected component; an explicit --rhs is never altered.
 ./build/apxchol path/to/matrix.mtx --random-rhs --tol 1e-8
 ```
 

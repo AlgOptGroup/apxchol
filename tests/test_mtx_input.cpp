@@ -24,6 +24,7 @@ using apxchol::adjacency_to_laplacian;
 using apxchol::describe_input;
 using apxchol::input_kind;
 using apxchol::input_scan;
+using apxchol::project_laplacian_rhs_components;
 using apxchol::resolve_input_kind;
 using apxchol::scan_input;
 
@@ -289,6 +290,30 @@ TEST(AdjacencyToLaplacian, IsIdempotentOnAPureLaplacian) {
     Sparse again = L;
     adjacency_to_laplacian(again);
     EXPECT_NEAR((L - again).norm(), 0.0, 1e-12);
+}
+
+TEST(ComponentRhsProjection, LeavesConnectedRhsByteIdentical) {
+    const Sparse L = grid_laplacian(4, 5);
+    Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -2.0, 3.0);
+    const Eigen::VectorXd original = b;
+
+    EXPECT_EQ(project_laplacian_rhs_components(L, b), 1);
+    EXPECT_EQ(b, original);
+}
+
+TEST(ComponentRhsProjection, CentersEveryDisconnectedComponent) {
+    std::vector<Trip> edges{
+        {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0},
+        {3, 4, 1.0}, {4, 3, 1.0}, {4, 5, 1.0}, {5, 4, 1.0}};
+    Sparse L(6, 6);
+    L.setFromTriplets(edges.begin(), edges.end());
+    adjacency_to_laplacian(L);
+    Eigen::VectorXd b(6);
+    b << 1.0, 2.0, 6.0, -3.0, 4.0, 8.0;
+
+    EXPECT_EQ(project_laplacian_rhs_components(L, b), 2);
+    EXPECT_NEAR(b.head(3).sum(), 0.0, 1e-15);
+    EXPECT_NEAR(b.tail(3).sum(), 0.0, 1e-15);
 }
 
 // ── end-to-end regression: the adjacency-as-operator mistake ─────────────────

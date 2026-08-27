@@ -163,6 +163,51 @@ void adjacency_to_laplacian(Eigen::SparseMatrix<double>& M) {
     M.swap(L);
 }
 
+Eigen::Index project_laplacian_rhs_components(
+        const Eigen::SparseMatrix<double>& L, Eigen::VectorXd& b) {
+    const Eigen::Index n = L.rows();
+    if (L.cols() != n || b.size() != n)
+        throw std::invalid_argument(
+            "component RHS projection requires a square matrix and matching RHS");
+
+    std::vector<Eigen::Index> component(static_cast<std::size_t>(n), -1);
+    std::vector<Eigen::Index> stack;
+    std::vector<double> sums;
+    std::vector<Eigen::Index> counts;
+    stack.reserve(static_cast<std::size_t>(n));
+
+    for (Eigen::Index root = 0; root < n; ++root) {
+        if (component[static_cast<std::size_t>(root)] >= 0) continue;
+        const Eigen::Index id = static_cast<Eigen::Index>(sums.size());
+        sums.push_back(0.0);
+        counts.push_back(0);
+        component[static_cast<std::size_t>(root)] = id;
+        stack.push_back(root);
+        while (!stack.empty()) {
+            const Eigen::Index v = stack.back();
+            stack.pop_back();
+            sums[static_cast<std::size_t>(id)] += b[v];
+            ++counts[static_cast<std::size_t>(id)];
+            for (Eigen::SparseMatrix<double>::InnerIterator it(L, v); it; ++it) {
+                const Eigen::Index u = it.row();
+                if (u == v || it.value() == 0.0 ||
+                    component[static_cast<std::size_t>(u)] >= 0)
+                    continue;
+                component[static_cast<std::size_t>(u)] = id;
+                stack.push_back(u);
+            }
+        }
+    }
+
+    if (sums.size() == 1) return 1;
+    for (Eigen::Index v = 0; v < n; ++v) {
+        const std::size_t id = static_cast<std::size_t>(
+            component[static_cast<std::size_t>(v)]);
+        b[v] -= sums[id] / static_cast<double>(counts[id]);
+    }
+    return static_cast<Eigen::Index>(sums.size());
+}
+
 std::string describe_input(input_kind kind, const input_scan& s,
                            const std::string& reason) {
     if (kind == input_kind::adjacency)

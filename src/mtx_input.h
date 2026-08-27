@@ -27,6 +27,7 @@
 ///
 /// Everything here depends on Eigen only, so the unit tests can link it.
 
+#include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <string>
 
@@ -86,6 +87,16 @@ input_kind resolve_input_kind(input_kind requested, const input_scan& s,
 /// Taking |value| matches the benchmark suite's `load_mtx_as_adjacency`, so
 /// `--input-kind adjacency` reproduces the benchmark's reading of any file.
 void adjacency_to_laplacian(Eigen::SparseMatrix<double>& M);
+
+/// Project `b` onto the range of a graph Laplacian by subtracting its mean
+/// independently on every connected component of `L`. Returns the component
+/// count. A connected matrix leaves `b` byte-for-byte unchanged, preserving
+/// the historical --random-rhs stream on the common case.
+///
+/// The caller must already know that `L` is a pure Laplacian. Applying this to
+/// an SDDM/SPD operator would change a perfectly valid right-hand side.
+Eigen::Index project_laplacian_rhs_components(
+    const Eigen::SparseMatrix<double>& L, Eigen::VectorXd& b);
 
 /// The single line the CLI logs to say how it read the file.
 std::string describe_input(input_kind kind, const input_scan& s,
