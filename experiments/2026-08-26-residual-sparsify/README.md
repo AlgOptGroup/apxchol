@@ -1,7 +1,7 @@
 # Connectivity-safe late-residual sparsification
 
-Status: **production candidate at `p = 0.25`; local quality and interleaved
-timing gates passed, Daint 36/72-core validation remains before merge**.
+Status: **production candidate at `p = 0.25`; local quality, interleaved timing,
+and Daint 36/72-core gates passed**.
 
 ## Estimator
 
@@ -95,11 +95,50 @@ The smallest observed off-tree inclusion probabilities were 0.0229--0.0370,
 or maximum inverse weights of 27.1--43.8. This is far below the 374--659x local
 weight outliers measured in the rejected weighted-Pruefer experiment.
 
+The indexed-pool production implementation was rerun after adding unbiased
+stochastic rounding of the multiplicity sidecar: **checked 15/15 pairs** over
+the same five matrices and three seeds. Every solve converged, all 15 auto arms
+triggered, stored nnz was 0.8167x, and the iteration delta sum was +2 (10/15
+unchanged, range -1 to +2). Logs:
+`/tmp/apxchol-residual-indexed-clean-r2-20260827`.
+
 Orkut was checked separately for three seeds. Stored nnz, setup, PCG and total
 geomeans were 0.6405x, 0.8924x, 0.6684x and 0.8368x; iteration deltas were
 +1, 0 and 0. Seeds 43--44 are current-session runs; seed 42 is a recovered log
 and its timings were visibly noisier. Logs:
 `/tmp/apxchol-orkut-auto-gate-r2-20260827`.
+
+## Daint 36/72-core decision gate
+
+Daint job 4545868 checked **18/18 full-solve cells**: nine matrices at T=36/72,
+with every auto run bracketed by two byte-identical rollback controls. All 18
+residuals were below `1e-8`. Auto / geometric rollback:
+
+| scope | setup | elimination | PCG | one-RHS total | stored nnz |
+|---|---:|---:|---:|---:|---:|
+| all 18 cells | **0.8950** | **0.6281** | **0.7138** | **0.8466** | **0.8487** |
+| six eligible graphs, 12 cells | **0.8504** | **0.4984** | **0.6046** | **0.7821** | **0.7819** |
+| eligible T=36 | 0.8589 | 0.5001 | 0.6255 | 0.7954 | 0.7826 |
+| eligible T=72 | 0.8421 | 0.4967 | 0.5844 | 0.7690 | 0.7812 |
+
+The quality cost is bounded but real: iteration deltas sum to +7, with 11/18
+unchanged and every changed cell exactly +1. Per-matrix sums over T=36/72 are
+Skitter +1, coPapers +2, LiveJournal +2, YouTube +1, kron +1 and Orkut 0.
+Despite that, every eligible matrix wins one-RHS total: kron 0.710, LiveJournal
+0.744, coPapers 0.776, YouTube 0.816, Orkut 0.823 and Skitter 0.831. The three
+no-op controls are near one (Amazon 0.988, grid 0.990, iter0040 0.997).
+
+The 36-to-72-thread setup speedup changes only 1.099x -> 1.109x. This is a
+work-removal win, not a fundamental scaling fix. Downloaded evidence:
+`/tmp/apxchol-residual-segmented-daint-r2` (432/432 result checksums verified
+for the combined campaign).
+
+An exact maximum-weight forest was also tested as a possible way to recover the
+quality margin at `p = 0.20`. After correcting disconnected-graph RHSs, 15/15
+valid brackets showed 14 unchanged iterations and one +1, setup 1.0555x and
+total 1.0413x. It captured only 0.0126 percentage points more residual weight;
+keep the one-pass coarse forest. Evidence:
+`/tmp/apxchol-residual-backbone-compatible-r3` and research commit `5cb107d`.
 
 ## Breadth and validation
 
@@ -119,6 +158,7 @@ identical iterations and residuals.
 
 The production patch has one shared implementation for indexed and AoS pooled
 storage; the experimental trigger/probability/forest/sample controls and the
-traffic probes have been removed. Before integration, bracket the auto gate
-against rollback on Grace at 36 and 72 cores. Keep only the default auto rule
-and its rollback.
+traffic probes have been removed. **Decision: ship the default auto rule and
+its rollback.** The single-RHS total win is broad and much larger than the
+0-or-1 iteration cost; callers reusing one factor for many solves can disable
+the feature with `APXCHOL_RESIDUAL_SPARSIFY=0`.
