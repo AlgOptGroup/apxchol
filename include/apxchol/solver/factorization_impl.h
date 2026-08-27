@@ -234,6 +234,52 @@ void trace_candidate_regions(graph<Incidence>& G,
         internal_incidence / 2, boundary_incidence, boundary_fraction);
 }
 
+template<incidence_storage Incidence>
+void trace_residual_traffic(const graph<Incidence>& G,
+                            std::span<const node_index> active,
+                            std::uint64_t round_index,
+                            const char* phase) {
+    unsigned long long physical_incidences = 0;
+    unsigned long long multiplicity_incidences = 0;
+    unsigned long long distinct_incidences = 0;
+    long double weight_incidences = 0.0L;
+    #pragma omp parallel reduction(+:physical_incidences,multiplicity_incidences,distinct_incidences,weight_incidences)
+    {
+        std::vector<node_index> targets;
+        #pragma omp for schedule(dynamic, 256)
+        for (std::size_t k = 0; k < active.size(); ++k) {
+            const node_index u = active[k];
+            targets.clear();
+            for (const auto& entry : G.adj(u)) {
+                const node_index v = G.edge_target(entry, u);
+                if (!G.is_active(v)) continue;
+                ++physical_incidences;
+                multiplicity_incidences += G.edge_multiplicity(entry);
+                weight_incidences += G.edge_weight(entry);
+                targets.push_back(v);
+            }
+            std::ranges::sort(targets);
+            distinct_incidences += static_cast<unsigned long long>(
+                std::ranges::unique(targets).begin() - targets.begin());
+        }
+    }
+    const double physical_edges = 0.5 * physical_incidences;
+    const double distinct_edges = 0.5 * distinct_incidences;
+    std::fprintf(stderr,
+        "[residual-traffic] phase=%s round=%llu active=%zu "
+        "physical_edges=%.0f distinct_edges=%.0f multiplicity_edges=%.0f "
+        "avg_physical_degree=%.6f avg_distinct_degree=%.6f "
+        "duplicate_ratio=%.6f weight_mass=%.17Lg graph_mib=%.3f\n",
+        phase, static_cast<unsigned long long>(round_index), active.size(),
+        physical_edges, distinct_edges, 0.5 * multiplicity_incidences,
+        active.empty() ? 0.0 : physical_incidences /
+            static_cast<double>(active.size()),
+        active.empty() ? 0.0 : distinct_incidences /
+            static_cast<double>(active.size()),
+        distinct_edges > 0.0 ? physical_edges / distinct_edges : 1.0,
+        0.5L * weight_incidences, G.memory_bytes() / 1048576.0);
+}
+
 // Eliminate vertices in the partition: record L-columns, add clique edges.
 // Partition vertices across regions are pairwise non-adjacent (for singleton
 // regions, every vertex is its own region — same constraint as the old IS).
@@ -1161,6 +1207,21 @@ factorization factorize_impl(const Eliminator& elim,
         std::getenv("APXCHOL_REGION_PROBE") != nullptr;
     size_t next_region_probe_active = active.size();
     size_t last_region_probe_active = std::numeric_limits<size_t>::max();
+    const bool residual_traffic_enabled =
+        std::getenv("APXCHOL_RESIDUAL_TRAFFIC") != nullptr;
+    size_t next_residual_trace_active = active.size();
+    size_t last_residual_trace_active = std::numeric_limits<size_t>::max();
+    auto trace_residual = [&](const char* phase, bool force = false) {
+        if (!residual_traffic_enabled ||
+            last_residual_trace_active == active.size() ||
+            (!force && active.size() > next_residual_trace_active))
+            return;
+        detail::trace_residual_traffic(work, active, ws.round_index, phase);
+        last_residual_trace_active = active.size();
+        // Geometric snapshots retain the full density/absolute-edge trajectory
+        // without inserting another O(m) pass into every elimination round.
+        next_residual_trace_active = active.size() * 3 / 4;
+    };
     auto trace_regions = [&](bool force) {
         if constexpr (partitioner_degree_prepass_v<Partitioner>) {
             if (!region_probe_enabled || !last_candidates_host_resident ||
@@ -1179,6 +1240,7 @@ factorization factorize_impl(const Eliminator& elim,
 
     while (active.size() > 1) {
         ws.reset_for_round();
+        trace_residual("main");
         const auto& part = run_partitioner(partitioner, work, active);
 #ifndef NDEBUG
         detail::assert_partition_independent(work, part);
@@ -1210,6 +1272,7 @@ factorization factorize_impl(const Eliminator& elim,
                     last_candidate_count, active.size(), min_yield,
                     residual_thresh, opts.omp_threshold)) {
                 trace_regions(true);
+                trace_residual("handoff", true);
                 if (std::getenv("APXCHOL_VERBOSE"))
                     std::fprintf(stderr,
                         "[apxchol] selector handoff: active=%zu candidates=%zu "
@@ -1406,6 +1469,48 @@ factorization factorize_impl(const Eliminator& elim,
 
     if (active.size() > residual_thresh) {
         baumann_kyng_partitioner bk;
+        bool aos_residual_coalesced = false;
+        size_t aos_coalesce_active = 0;
+        bool residual_sparsified = false;
+        size_t residual_sparsify_active = 0;
+        double residual_sparsify_probability = 1.0;
+        bool residual_sparsify_adaptive_probability = false;
+        int residual_sparsify_forest_mode = 0;
+        int residual_sparsify_sample_mode = 0;
+        const bool residual_sparsify_probe_only =
+            std::getenv("APXCHOL_RESIDUAL_SPARSIFY_PROBE_ONLY") != nullptr;
+        if constexpr (std::same_as<Incidence,
+                                   directed_vec_pool_incidence>) {
+            if (const char* value =
+                    std::getenv("APXCHOL_AOS_COALESCE_ACTIVE"))
+                aos_coalesce_active = static_cast<size_t>(
+                    std::strtoull(value, nullptr, 10));
+        }
+        if constexpr (std::same_as<Incidence, vec_pool_incidence> ||
+                      std::same_as<Incidence,
+                                      directed_vec_pool_incidence>) {
+            if (const char* value =
+                    std::getenv("APXCHOL_RESIDUAL_SPARSIFY_ACTIVE"))
+                residual_sparsify_active = static_cast<size_t>(
+                    std::strtoull(value, nullptr, 10));
+            if (const char* value =
+                    std::getenv("APXCHOL_RESIDUAL_SPARSIFY_P")) {
+                residual_sparsify_adaptive_probability =
+                    std::strcmp(value, "adaptive") == 0;
+                if (!residual_sparsify_adaptive_probability)
+                    residual_sparsify_probability = std::atof(value);
+            }
+            if (const char* value =
+                    std::getenv("APXCHOL_RESIDUAL_SPARSIFY_TREE"))
+                residual_sparsify_forest_mode =
+                    std::strcmp(value, "max") == 0 ? 1 :
+                    std::strcmp(value, "bucket") == 0 ? 2 : 0;
+            if (const char* value =
+                    std::getenv("APXCHOL_RESIDUAL_SPARSIFY_SAMPLE"))
+                residual_sparsify_sample_mode =
+                    std::strcmp(value, "weight") == 0 ? 1 :
+                    std::strcmp(value, "sqrt_weight") == 0 ? 2 : 0;
+        }
         // BK is sample-bounded here too, so an empty round means what it means
         // in the main loop: THIS round's hash sample whiffed, not that the
         // residual has stopped shrinking.  Retry on the next round's seed under
@@ -1472,6 +1577,83 @@ factorization factorize_impl(const Eliminator& elim,
             bk.est_avg_degree = last_avg_degree;
         while (active.size() > residual_thresh) {
             ws.reset_for_round();
+            if constexpr (std::same_as<Incidence, vec_pool_incidence> ||
+                          std::same_as<Incidence,
+                                          directed_vec_pool_incidence>) {
+                if (!residual_sparsified && residual_sparsify_active > 0 &&
+                    active.size() <= residual_sparsify_active) {
+                    const auto sample =
+                        detail::residual_coalescer<Incidence>::sample(
+                            work, active);
+                    std::fprintf(stderr,
+                        "[residual-sparsify-guard] active=%zu samples=%zu "
+                        "duplicate_ratio=%.6f avg_distinct_degree=%.6f "
+                        "strongest_weight_share=%.9f\n",
+                        active.size(), sample.sampled_vertices,
+                        sample.duplicate_ratio, sample.avg_distinct_degree,
+                        sample.strongest_weight_share);
+                    const double keep_probability =
+                        residual_sparsify_adaptive_probability
+                        ? std::clamp(5.0 * sample.strongest_weight_share,
+                                     0.15, 0.40)
+                        : residual_sparsify_probability;
+                    residual_sparsified = true;
+                    if (!residual_sparsify_probe_only) {
+                        const auto stats =
+                            detail::residual_coalescer<Incidence>::sparsify(
+                                work, active, keep_probability,
+                                opts.seed ^ ws.round_index,
+                                residual_sparsify_forest_mode,
+                                residual_sparsify_sample_mode);
+                        std::fprintf(stderr,
+                        "[residual-sparsify-probe] round=%llu active=%zu p=%.6f "
+                        "tree=%s sample=%s edges=%zu/%zu->%zu expected=%.1f "
+                        "backbone=%zu "
+                        "backbone_mass=%.6f "
+                        "graph_mib=%.3f->%.3f stages_ms=%.3f/%.3f/%.3f/%.3f/%.3f\n",
+                        static_cast<unsigned long long>(ws.round_index),
+                        active.size(), keep_probability,
+                        residual_sparsify_forest_mode == 1 ? "maximum" :
+                        residual_sparsify_forest_mode == 2 ? "bucket" : "first",
+                        residual_sparsify_sample_mode == 1 ? "weight" :
+                        residual_sparsify_sample_mode == 2 ? "sqrt_weight" :
+                                                             "uniform",
+                        stats.physical_before, stats.distinct_before,
+                        stats.kept_edges, stats.expected_kept_edges,
+                        stats.backbone_edges,
+                        stats.total_weight > 0.0
+                            ? stats.backbone_weight / stats.total_weight : 0.0,
+                        stats.bytes_before / 1048576.0,
+                        stats.bytes_after / 1048576.0,
+                            stats.coalesce_ms, stats.collect_ms, stats.order_ms,
+                            stats.forest_ms, stats.rebuild_ms);
+                        if (cp) (*cp)("sparsify_residual_probe");
+                    }
+                }
+            }
+            if constexpr (std::same_as<Incidence,
+                                       directed_vec_pool_incidence>) {
+                if (!aos_residual_coalesced && aos_coalesce_active > 0 &&
+                    active.size() <= aos_coalesce_active) {
+                    const double estimate =
+                        detail::residual_coalescer<Incidence>::estimate(
+                            work, active);
+                    const auto stats =
+                        detail::residual_coalescer<Incidence>::rebuild(
+                            work, active);
+                    aos_residual_coalesced = true;
+                    std::fprintf(stderr,
+                        "[aos-coalesce-probe] round=%llu active=%zu "
+                        "estimate=%.6f edges=%zu->%zu graph_mib=%.3f->%.3f\n",
+                        static_cast<unsigned long long>(ws.round_index),
+                        active.size(), estimate, stats.multi_edges,
+                        stats.distinct_edges,
+                        stats.bytes_before / 1048576.0,
+                        stats.bytes_after / 1048576.0);
+                    if (cp) (*cp)("coalesce_residual_aos");
+                }
+            }
+            trace_residual("bk");
             const auto& bk_part = run_partitioner(bk, work, active);
             if (bk_part.num_regions() == 0) {
                 if (++bk_consecutive_empty >= kMaxEmptyRounds)
@@ -1509,6 +1691,7 @@ factorization factorize_impl(const Eliminator& elim,
             ++ws.round_index;
         }
     }
+    trace_residual("peel", true);
     if (!active.empty()) {
         detail::eliminate_remaining(elim, work, active, factor_cols, ws, opts);
     }

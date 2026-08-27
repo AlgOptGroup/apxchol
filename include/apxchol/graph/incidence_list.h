@@ -468,6 +468,32 @@ template<typename Value, graph_storage Tag> struct basic_vec_pool_incidence {
         std::sort(p, p + count_[v]);
     }
 
+    /// Directed-inline diagnostic: discard inactive endpoints and combine all
+    /// parallel records with the same target into one fp32 record. Sorting by
+    /// (target,weight) gives both endpoint slabs the same deterministic fp64
+    /// accumulation order.
+    template <class IsLive>
+        requires std::same_as<value_type, directed_pool_edge>
+    std::pair<node_index, node_index> coalesce_slab(
+            node_index v, IsLive&& is_live) {
+        value_type* p = pool_.data() + base_[v];
+        const node_index before = count_[v];
+        std::sort(p, p + before);
+        node_index out = 0;
+        for (node_index i = 0; i < before;) {
+            const node_index target = p[i].to;
+            double weight = 0.0;
+            do {
+                weight += static_cast<double>(p[i].w);
+                ++i;
+            } while (i < before && p[i].to == target);
+            if (is_live(target))
+                p[out++] = {target, static_cast<pool_value_t>(weight)};
+        }
+        count_[v] = out;
+        return {before, out};
+    }
+
     void filter(node_index v, auto&& pred, auto&& on_keep) {
         value_type* p = pool_.ptr(base_[v]);
         const node_index count = count_[v];
