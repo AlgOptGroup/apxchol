@@ -34,6 +34,24 @@ class ParacRoutingTest(unittest.TestCase):
 
 
 class ParacTimingContractTest(unittest.TestCase):
+    def test_gpu_provenance_records_repeat_count(self):
+        self.assertEqual(parac.PROV_GPU["repeat"], parac.REPS)
+
+    def test_gpu_cell_timeout_is_one_shared_deadline(self):
+        with mock.patch.object(parac.time, "monotonic", return_value=15.5):
+            self.assertEqual(parac._gpu_cell_remaining(20.0), 4.5)
+        with mock.patch.object(parac.time, "monotonic", return_value=20.0):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                parac._gpu_cell_remaining(20.0)
+
+    def test_gpu_calibration_tightens_but_never_relaxes_common_tolerance(self):
+        with mock.patch.object(parac, "_run_once_gpu", return_value={"rr": "5e-8"}):
+            self.assertAlmostEqual(parac._calibrate_tol_gpu("driver", "matrix", 1e-8),
+                                   2e-9)
+        with mock.patch.object(parac, "_run_once_gpu", return_value={"rr": "5e-9"}):
+            self.assertEqual(parac._calibrate_tol_gpu("driver", "matrix", 1e-8),
+                             1e-8)
+
     def test_cpu_setup_uses_complete_nonoverlapping_intervals(self):
         sample = {
             "factor": "1.0", "factor_setup": "2.0", "adapter": "3.0",

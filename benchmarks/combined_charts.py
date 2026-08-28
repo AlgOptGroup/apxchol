@@ -306,7 +306,7 @@ def _cpu_time_cell(recs, fam, mat, cpu_lab, metric):
     return (v if v is not None else np.nan), False, None
 
 def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mats=None,
-                     goutcomes=None):
+                     goutcomes=None, thread_label="t16"):
     """solver x matrix 'who wins where' heatmap for ONE metric (total / setup / solve /
     iters). rows = (solver, device), cols = matrix; colour = ratio to the best (lowest)
     in that matrix column (green = winner, log scale); each cell annotated with the
@@ -445,7 +445,7 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     legend = ("OOM = RAM/GPU · FAIL = errored · blank = not run/recorded" if is_mem
               else "≥/Timeout = timed out (real time unknown) · OOM = RAM/GPU · "
                    "FAIL = errored · blank = not run")
-    ax.set_title(f"{fam}: solver × matrix — {dev} {_METRIC_TITLE[metric]}, t16\n"
+    ax.set_title(f"{fam}: solver × matrix — {dev} {_METRIC_TITLE[metric]}, {thread_label}\n"
                  f"green = {unit} per matrix; cell = value / ×best{capnote}\n"
                  f"{legend}",
                  fontsize=8.0, wrap=True)

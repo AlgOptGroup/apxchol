@@ -64,8 +64,12 @@ and work around the kernel/conversion/SpSV intervals. Patch 0003 reports complet
 post-parse adapter, factor-setup, and solver-setup intervals from ParAC's own
 driver. It also reports a complete per-RHS interval and performs the D2H transfer
 needed to return the solution to a host caller before stopping that interval.
-Residual validation and cleanup remain outside. The runner uses the complete
-intervals; the original event timers remain diagnostics.
+Residual validation and cleanup remain outside. It also fixes an inconsistent
+GPU stopping test: the first check used an absolute preconditioned quantity while
+later checks used a relative one. Both now use `||r||/||r0||`, the recurrence
+residual norm the driver already computes. The runner calibrates that to the
+independently printed true residual, but never loosens the requested tolerance:
+`tol_used = min(1e-8, tol_calibrated)`. The original event timers remain diagnostics.
 
 ### The tolerance is ABSOLUTE, so it has to be calibrated
 

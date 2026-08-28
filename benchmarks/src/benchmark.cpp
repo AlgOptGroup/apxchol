@@ -87,7 +87,7 @@
 #include "sparse.hpp"
 #include "rchol.hpp"
 #include "util.hpp"
-#ifdef HAVE_MKL
+#if defined(HAVE_MKL) && !defined(APXCHOL_RCHOL_PORTABLE_PCG)
 // RCHOL's OWN PCG (util/pcg.cpp, compiled into rchol_lib). This is the solve loop
 // their ex_laplace.cpp drives; we call it instead of re-implementing the iteration.
 // pcg.hpp pulls in mkl_spblas.h/mkl.h itself, having first forced MKL_INT = size_t.
@@ -181,6 +181,13 @@ static void emit_build_meta() {
               << " hypre_cuda=on";
 #else
               << " hypre_cuda=off";
+#endif
+#ifdef APXCHOL_RCHOL_PORTABLE_PCG
+    std::cerr << " rchol_pcg=portable-eigen";
+#elif defined(HAVE_MKL)
+    std::cerr << " rchol_pcg=upstream-mkl";
+#else
+    std::cerr << " rchol_pcg=unavailable";
 #endif
 #ifdef APXCHOL_USE_CUDA
 #  ifdef APXCHOL_BUILD_CUDA_HOST_COMPILER
@@ -977,6 +984,116 @@ static SparseCSR eigen_to_csr(const Eigen::SparseMatrix<double, Eigen::RowMajor>
     return SparseCSR(rowPtr, colIdx, val);
 }
 
+#ifdef APXCHOL_RCHOL_PORTABLE_PCG
+// Architecture-portable translation of upstream util/pcg.cpp.  The RCHOL factor,
+// pRCHOL permutation, recurrence, alpha/beta formulas and stopping test are
+// unchanged; only MKL's vector, CSR SpMV and triangular-solve calls are replaced.
+// BUILD_META reports this as rchol_pcg=portable-eigen so it is never confused
+// with the upstream MKL implementation in a cross-machine chart.
+static void rchol_portable_matvec(
+    const SparseCSR& A, const Eigen::VectorXd& x, Eigen::VectorXd& y)
+{
+    const Eigen::Index n = static_cast<Eigen::Index>(A.N);
+    y.setZero(n);
+    for (Eigen::Index row = 0; row < n; ++row) {
+        double sum = 0.0;
+        for (size_t p = A.rowPtr[row]; p < A.rowPtr[row + 1]; ++p)
+            sum += A.val[p] * x[static_cast<Eigen::Index>(A.colIdx[p])];
+        y[row] = sum;
+    }
+}
+
+static void rchol_portable_precond(
+    const SparseCSR& upper, const Eigen::VectorXd& b, Eigen::VectorXd& result)
+{
+    const Eigen::Index n = static_cast<Eigen::Index>(upper.N);
+    Eigen::VectorXd lower_accum = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd intermediate(n);
+
+    // Upstream asks MKL for U^T y=b with U stored as upper-triangular CSR.
+    for (Eigen::Index row = 0; row < n; ++row) {
+        double diag = 0.0;
+        for (size_t p = upper.rowPtr[row]; p < upper.rowPtr[row + 1]; ++p)
+            if (upper.colIdx[p] == static_cast<size_t>(row)) diag += upper.val[p];
+        if (diag == 0.0 || !std::isfinite(diag))
+            throw std::runtime_error("RCHOL portable PCG: invalid factor diagonal");
+        intermediate[row] = (b[row] - lower_accum[row]) / diag;
+        for (size_t p = upper.rowPtr[row]; p < upper.rowPtr[row + 1]; ++p) {
+            const Eigen::Index col = static_cast<Eigen::Index>(upper.colIdx[p]);
+            if (col > row) lower_accum[col] += upper.val[p] * intermediate[row];
+        }
+    }
+
+    // U x=y.
+    result.setZero(n);
+    for (Eigen::Index row = n; row-- > 0;) {
+        double diag = 0.0;
+        double rhs = intermediate[row];
+        for (size_t p = upper.rowPtr[row]; p < upper.rowPtr[row + 1]; ++p) {
+            const Eigen::Index col = static_cast<Eigen::Index>(upper.colIdx[p]);
+            if (col == row) diag += upper.val[p];
+            else if (col > row) rhs -= upper.val[p] * result[col];
+        }
+        if (diag == 0.0 || !std::isfinite(diag))
+            throw std::runtime_error("RCHOL portable PCG: invalid factor diagonal");
+        result[row] = rhs / diag;
+    }
+}
+
+static void rchol_portable_pcg(
+    const SparseCSR& A, const std::vector<double>& b, double tol, int maxiter,
+    const SparseCSR& factor, std::vector<double>& x_out, double& relres, int& iters)
+{
+    const Eigen::Index n = static_cast<Eigen::Index>(A.N);
+    if (b.size() != static_cast<size_t>(n) || factor.N != A.N)
+        throw std::runtime_error("RCHOL portable PCG: dimension mismatch");
+    Eigen::Map<const Eigen::VectorXd> rhs(b.data(), n);
+    const double bnorm = rhs.norm();
+    Eigen::VectorXd x = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd r = rhs;
+    Eigen::VectorXd previous_r(n), previous_z(n), p(n), z(n), q(n);
+    iters = 0;
+    while (r.norm() > bnorm * tol && iters < maxiter) {
+        rchol_portable_precond(factor, r, z);
+        if (iters == 0) {
+            p = z;
+        } else {
+            const double denominator = previous_r.dot(previous_z);
+            if (denominator == 0.0 || !std::isfinite(denominator)) break;
+            p = (r.dot(z) / denominator) * p + z;
+        }
+        rchol_portable_matvec(A, p, q);
+        const double denominator = p.dot(q);
+        if (denominator == 0.0 || !std::isfinite(denominator)) break;
+        const double alpha = p.dot(r) / denominator;  // upstream util/pcg.cpp
+        x += alpha * p;
+        previous_r = r;
+        previous_z = z;
+        r -= alpha * q;
+        ++iters;
+    }
+    rchol_portable_matvec(A, x, q);
+    q -= rhs;
+    relres = q.norm() / (bnorm > 0.0 ? bnorm : 1.0);
+    x_out.assign(x.data(), x.data() + n);
+}
+#endif
+
+static void run_rchol_pcg_backend(
+    const SparseCSR& A, const std::vector<double>& b, double tol, int maxiter,
+    const SparseCSR& factor, std::vector<double>& x, double& relres, int& iters)
+{
+#ifdef APXCHOL_RCHOL_PORTABLE_PCG
+    rchol_portable_pcg(A, b, tol, maxiter, factor, x, relres, iters);
+#elif defined(HAVE_MKL)
+    pcg(A, b, tol, maxiter, factor, x, relres, iters);
+#else
+    (void)A; (void)b; (void)tol; (void)maxiter; (void)factor; (void)x;
+    (void)relres; (void)iters;
+    throw std::runtime_error("RCHOL PCG backend unavailable");
+#endif
+}
+
 static BenchResult run_rchol(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
@@ -1045,43 +1162,36 @@ static BenchResult run_rchol(
     double bnorm = b.norm();   // norm is permutation-invariant
 
     Eigen::VectorXd x_orig = Eigen::VectorXd::Zero(N);
-#ifdef HAVE_MKL
-    // THEIR solve loop, verbatim: rchol's util/pcg.cpp, the same call their
-    // ex_laplace.cpp makes. Their stop test (pcg.cpp:82) is
-    // dnrm2(r) > dnrm2(b)*tol on the recurrence residual — semantically identical
-    // to the one this function used to hand-roll, so adopting it imports no quirk;
-    // it just stops re-implementing an iteration they ship. Their kernels are MKL
-    // (mkl_sparse_d_mv / d_trsv). Note their create_sparse never calls
-    // mkl_sparse_optimize, so the triangular solve re-analyses on every iteration —
-    // yet it is still far faster than the Eigen transpose-triangular solve this
-    // replaced. Faster or slower, it is now THEIR solve cost, not our re-write's.
+#ifdef HAVE_RCHOL_PCG
+    // The MKL arm calls upstream util/pcg.cpp verbatim. The portable arm preserves
+    // its recurrence and stopping test while replacing only the MKL kernels; the
+    // BUILD_META rchol_pcg field makes the distinction explicit.
     std::vector<double> xv;          // empty on purpose: iteration() only resize()s it
     double relres = 0.0; int itr = 0;
     t.start();
-    pcg(Apcg, bpv, tol, maxiter, G, xv, relres, itr);
+    run_rchol_pcg_backend(Apcg, bpv, tol, maxiter, G, xv, relres, itr);
     r.iterations = itr;
     Eigen::Map<Eigen::VectorXd> x_perm(xv.data(), N);
     // Returning to the caller's ordering is mandatory per-RHS adapter work.
     x_orig = rchol_amd ? Eigen::VectorXd(perm.transpose() * x_perm) : x_perm;
     r.solve_time = t.elapsed();
 #else
-    // No MKL (aarch64: Grace / GH200 / Daint). Their PCG hard-includes mkl_spblas.h,
-    // so their shipped solve cannot run here — and substituting one of ours is exactly
-    // what this change removed. The row is FACTOR-ONLY: rchol()'s time and fill-in are
-    // real, the solve columns are the n/a sentinel (iters = rel_res = -1).
+    // Defensive factor-only path for a build that disabled every solve backend.
     (void)bpv; (void)Apcg; (void)tol; (void)maxiter; (void)Lp;
     r.solver_name += " [factor only; upstream solve needs MKL (x86)]";
     r.solve_time = 0.0;
     r.iterations = -1;
 #endif
     r.total_time = r.setup_time + r.solve_time;
-    // solve_rss_mb is NOT recorded for RCHOL: their create_sparse (pcg.cpp:33-53)
-    // allocates a second full copy of A and of G and never frees it (the delete[] is
-    // commented out upstream), so the number would measure their leak, not the memory
-    // a solve holds. -1 = unmeasured, the same sentinel solve_vram_mb uses.
+#if defined(HAVE_MKL) && !defined(APXCHOL_RCHOL_PORTABLE_PCG)
+    // Upstream pcg.cpp leaks its CSR copies (the delete[] is commented out), so
+    // solve-held RSS is not a meaningful reusable footprint on this backend.
     r.solve_rss_mb = -1.0;
+#else
+    r.solve_rss_mb = read_vmrss_mb();
+#endif
 
-#ifdef HAVE_MKL
+#ifdef HAVE_RCHOL_PCG
     center_if_laplacian(x_orig);
     Eigen::VectorXd res = b - L * x_orig;
     center_if_laplacian(res);
@@ -1166,25 +1276,29 @@ static BenchResult run_rchol_parallel(
     double bnorm = b.norm();   // norm is permutation-invariant
 
     Eigen::VectorXd x = Eigen::VectorXd::Zero(N);
-#ifdef HAVE_MKL
+#ifdef HAVE_RCHOL_PCG
     std::vector<double> xv;          // empty on purpose: iteration() only resize()s it
     double relres = 0.0; int itr = 0;
     t.start();
-    pcg(Aperm, bperm, tol, maxiter, G, xv, relres, itr);   // THEIR solve loop
+    run_rchol_pcg_backend(Aperm, bperm, tol, maxiter, G, xv, relres, itr);
     r.iterations = itr;
     for (int i = 0; i < N; ++i) x[static_cast<int>(perm[i])] = xv[i];   // unpermute
     r.solve_time = t.elapsed();
 #else
-    // See run_rchol: their PCG needs MKL (x86), so this is a FACTOR-ONLY row here.
+    // Defensive factor-only path for a build that disabled every solve backend.
     (void)Aperm; (void)bperm; (void)tol; (void)maxiter;
     r.solver_name += " [factor only; upstream solve needs MKL (x86)]";
     r.solve_time = 0.0;
     r.iterations = -1;
 #endif
     r.total_time = r.setup_time + r.solve_time;
-    r.solve_rss_mb = -1.0;   // not meaningful for RCHOL — see run_rchol
+#if defined(HAVE_MKL) && !defined(APXCHOL_RCHOL_PORTABLE_PCG)
+    r.solve_rss_mb = -1.0;   // upstream pcg.cpp leaks its CSR copies
+#else
+    r.solve_rss_mb = read_vmrss_mb();
+#endif
 
-#ifdef HAVE_MKL
+#ifdef HAVE_RCHOL_PCG
     center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
     center_if_laplacian(res);

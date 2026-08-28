@@ -73,8 +73,8 @@ endif()
 
 # ── Optional: MKL ────────────────────────────────────
 # MKL backs RCHOL's own PCG (their util/pcg.cpp, compiled into rchol_lib below) and the
-# ParAC CPU driver. Without it the rchol/rchol_par cells become FACTOR-ONLY rows and the
-# ParAC CPU driver is skipped entirely. Point at an install with
+# ParAC CPU driver. Without it RCHOL uses the explicitly labelled portable PCG below;
+# the ParAC CPU driver is skipped. Point at an install with
 # -DMKL_ROOT=/path/to/oneapi/mkl/<version>, via the MKLROOT environment variable (oneAPI's setvars.sh exports it), or from a
 # gitignored benchmarks/paths_local.cmake holding `set(MKL_ROOT ... CACHE PATH ...)`.
 if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/paths_local.cmake")
@@ -102,12 +102,55 @@ else()
                    "solvers disabled; set -DMKL_ROOT=... or MKLROOT to enable")
 endif()
 
-# ── Optional: METIS (system) ─────────────────────────
+# ── Optional: METIS (system, then portable source fallback) ───────────────────
+option(APXCHOL_BENCH_FETCH_METIS
+       "Fetch pinned GKlib/METIS sources when no system METIS is available" ON)
 find_library(METIS_LIB metis)
 find_path(METIS_INCLUDE metis.h)
 if (METIS_LIB AND METIS_INCLUDE)
     set(HAVE_METIS TRUE)
     message(STATUS "Found METIS: ${METIS_LIB}")
+elseif (APXCHOL_BENCH_FETCH_METIS)
+    # METIS itself is portable; treating a missing system package as an x86-only
+    # pRCHOL limitation left Grace/GH200 with a factor-only row.  Build only the
+    # library sources (not METIS' command-line programs) against pinned GKlib.
+    FetchContent_Declare(gklib
+        GIT_REPOSITORY https://github.com/KarypisLab/GKlib.git
+        GIT_TAG        3b7d61b9f885063c89901f3901fb4426f9cfb58f
+        GIT_SHALLOW    TRUE
+    )
+    set(GKLIB_BUILD_APPS OFF CACHE BOOL "" FORCE)
+    if (NOT (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))
+        set(NO_X86 ON CACHE BOOL "" FORCE)
+    endif()
+    FetchContent_MakeAvailable(gklib)
+    FetchContent_Declare(metis_source
+        GIT_REPOSITORY https://github.com/KarypisLab/METIS.git
+        GIT_TAG        272d4a91c5f66c92327493339a476c553ebf1f5d
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(metis_source)
+    if (NOT metis_source_POPULATED)
+        FetchContent_Populate(metis_source)
+    endif()
+    file(GLOB APXCHOL_BENCH_METIS_SOURCES
+         CONFIGURE_DEPENDS "${metis_source_SOURCE_DIR}/libmetis/*.c")
+    add_library(apxchol_bench_metis STATIC ${APXCHOL_BENCH_METIS_SOURCES})
+    target_include_directories(apxchol_bench_metis PUBLIC
+        ${metis_source_SOURCE_DIR}/include
+        ${metis_source_SOURCE_DIR}/libmetis)
+    target_link_libraries(apxchol_bench_metis PUBLIC GKlib::GKlib)
+    # METIS' standalone build configures these two values into build/xinclude/
+    # metis.h.  We compile only libmetis, so provide its documented/default ABI
+    # explicitly (32-bit graph indices and float weights).
+    target_compile_definitions(apxchol_bench_metis PUBLIC
+        IDXTYPEWIDTH=32 REALTYPEWIDTH=32)
+    set_target_properties(apxchol_bench_metis PROPERTIES
+        C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+    set(METIS_LIB apxchol_bench_metis)
+    set(METIS_INCLUDE ${metis_source_SOURCE_DIR}/include)
+    set(HAVE_METIS TRUE)
+    message(STATUS "System METIS not found — using pinned portable GKlib/METIS sources")
 else()
     set(HAVE_METIS FALSE)
     message(STATUS "METIS not found — parallel RCHOL disabled")
@@ -169,11 +212,14 @@ set(RCHOL_SOURCES
     ${RCHOL_DIR}/rchol_lap/spcol.cpp
     ${RCHOL_DIR}/util/util.cpp
 )
-if (HAVE_MKL)
+option(APXCHOL_RCHOL_PORTABLE_PCG
+       "Use the portable Eigen RCHOL PCG port even when upstream's MKL loop is available" OFF)
+if (HAVE_MKL AND NOT APXCHOL_RCHOL_PORTABLE_PCG)
     # Their SHIPPED PCG. Every rchol/rchol_par solve number now comes from this file
     # (the same loop their ex_laplace.cpp drives), not from a re-implementation of it
     # in benchmark.cpp. It hard-includes mkl_spblas.h/mkl.h, so it compiles only where
-    # MKL does (x86); without it the RCHOL rows are factor-only — see benchmark.cpp.
+    # MKL does (x86); without it benchmark.cpp supplies the explicitly labelled
+    # portable PCG path below.
     list(APPEND RCHOL_SOURCES ${RCHOL_DIR}/util/pcg.cpp)
 endif()
 if (HAVE_METIS)
@@ -204,10 +250,15 @@ if (HAVE_METIS)
         target_link_libraries(rchol_lib PUBLIC OpenMP::OpenMP_CXX)
     endif()
 endif()
-if (HAVE_MKL)
-    target_compile_definitions(rchol_lib PUBLIC HAVE_MKL)
+if (HAVE_MKL AND NOT APXCHOL_RCHOL_PORTABLE_PCG)
+    target_compile_definitions(rchol_lib PUBLIC HAVE_MKL HAVE_RCHOL_PCG)
     target_include_directories(rchol_lib PUBLIC ${MKL_INCLUDE})
     target_link_libraries(rchol_lib PUBLIC ${MKL_LIBRARIES})
+else()
+    # The factorization, permutation, recurrence and stopping test remain RCHOL's.
+    # Only MKL's sparse/vector calls are replaced by the explicit portable path in
+    # benchmark.cpp, and BUILD_META labels the distinction in every stored cell.
+    target_compile_definitions(rchol_lib PUBLIC APXCHOL_RCHOL_PORTABLE_PCG HAVE_RCHOL_PCG)
 endif()
 
 # ── AMGCL (header-only, FetchContent) ────────────────
@@ -294,7 +345,10 @@ if (BUILD_GPU_RCHOL)
         PATCH_COMMAND
             git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0001-configurable-tolerance-and-any-thread-count.patch
             COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0002-report-complete-setup-boundaries.patch
-            COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0003-report-complete-gpu-boundaries.patch
+            # Patch 0003 is generated with zero context so upstream's
+            # whitespace-only blank lines cannot make the patch ambiguous.
+            COMMAND git apply --unidiff-zero
+                    ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0003-report-complete-gpu-boundaries.patch
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git

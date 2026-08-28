@@ -1,108 +1,74 @@
-# apxchol — Scalable Approximate Cholesky for Laplacian/SDDM Systems
+# apxchol
 
-apxchol solves large sparse linear systems **Lx = b** where **L** is a graph
-Laplacian or SDDM matrix — the systems behind spectral graph algorithms,
-interior-point methods for network flow, and PDE/physics simulations on
-grids and networks.
-
-It builds a randomized approximate Cholesky factorization
-(Kyng–Sachdeva-style parallel elimination) and uses it as a PCG
-preconditioner. Parallel on CPU (OpenMP) with an optional CUDA solve path,
-deterministic for a fixed seed, no dependencies beyond a C++23 compiler and
-Eigen.
+`apxchol` solves sparse Laplacian and SDDM systems with a randomized
+approximate-Cholesky preconditioner and PCG. It supports parallel CPU setup and
+solve with OpenMP, plus an optional CUDA-resident solve. A fixed seed gives a
+deterministic factor at one thread.
 
 ```cpp
 #include "apxchol.h"
-auto res = apxchol::solve(L, b, {.tol = 1e-8});   // Eigen in, Eigen out
+
+auto result = apxchol::solve(L, b, {.tol = 1e-8});
 ```
 
-Python (`pip install apxchol`) and Octave/MATLAB bindings included; a
-standalone benchmark suite compares against Hypre BoomerAMG, AMGCL,
-RCHOL/pRCHOL, ParAC, CMG, and Laplacians.jl
-([charts](benchmarks/latest/)).
+Python and Octave/MATLAB bindings are included. The standalone
+[benchmark suite](benchmarks/README.md) compares against BoomerAMG, AMGCL,
+RCHOL/pRCHOL, ParAC, CMG, and Laplacians.jl.
 
-**Contact:** <apxchol@inf.ethz.ch> — questions, issues, and use cases
-welcome. Developed at ETH Zürich.
+Developed at ETH Zürich. Questions and use cases are welcome at
+<apxchol@inf.ethz.ch>.
 
----
+## Build and run
 
-Everything below is the detailed reference. The library is the header tree
-under `include/apxchol/` (namespace `apxchol::`) plus two compiled
-translation units in `src/` (CUDA builds add three device TUs); `python/`
-and `octave/` are self-contained bindings, `examples/` demonstrates the
-public customization seams, and `benchmarks/` is a standalone comparison
-suite with its own [README](benchmarks/README.md).
-
-## Quick start
+The core library needs CMake, a C++23 compiler, and Eigen. Eigen is fetched when
+it is not installed.
 
 ```bash
 git clone https://github.com/AlgOptGroup/apxchol
 cd apxchol
-
-# Core library + CLI + tests (needs GCC >= 14 or a comparable C++23 compiler;
-# Eigen is fetched automatically if not installed)
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
-
-# Fetch the SuiteSparse test matrices into data/matrices/ (gitignored).
-# Downloads ~3.3 GB total (com-Orkut alone is 1.7 GB, but its factor still fits
-# the default unsigned 32-bit edge offsets); only ecology1 and com-Amazon are
-# needed for the smoke tests below.
-./scripts/download_graphs.sh
-
-# Solve a Matrix Market system against a generated random RHS. The input may
-# be an assembled Laplacian/SDDM operator (ecology1) or a graph
-# adjacency/pattern matrix (com-Amazon and most SuiteSparse graphs), from
-# which L = D - A is built; which one it is, is auto-detected and reported on
-# the "input:" line — override with --input-kind laplacian|adjacency.
-./build/apxchol data/matrices/ecology1.mtx --random-rhs --tol 1e-8
-./build/apxchol data/matrices/com-Amazon.mtx --random-rhs --tol 1e-8
-# ... or bring your own right-hand side:
-./build/apxchol data/matrices/ecology1.mtx --rhs your_rhs.mtx  # MatrixMarket vector of length n
 ```
 
-Useful CLI knobs: `--tol`, `--maxiter`, `--input-kind {auto|laplacian|adjacency}`,
-`--is {block_greedy|priority_greedy|baumann_kyng}`,
-`--graph-storage {vec|forward_star|bstr|vec_pool|vec_pool_aos}`,
-`-o solution.mtx`, `--seed`. See `--help` for the full list.
+Solve a Matrix Market operator or graph adjacency matrix:
 
-## Library API
+```bash
+./build/apxchol matrix.mtx --random-rhs --tol 1e-8
+./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
+```
 
-The supported C++ consumption path is `add_subdirectory()` / FetchContent
-on this repository, linking the `apxchol_core` target (there are no
-`install()` rules yet).
+The CLI detects whether the input is an assembled Laplacian/SDDM operator or a
+graph from which it should form `L = D - A`, and reports the decision. Use
+`--input-kind` to override it. Run `./build/apxchol --help` for all options.
 
-One-shot solve (PCG with the approximate-Cholesky preconditioner):
+## C++ API
+
+One-shot solve:
 
 ```cpp
 #include "apxchol.h"
 
-Eigen::SparseMatrix<double> L = ...;   // Laplacian (singular) or SDDM (SPD)
-Eigen::VectorXd b = ...;
-auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 500});
-// res.x, res.iterations, res.residual
+Eigen::SparseMatrix<double> L = /* Laplacian or SDDM */;
+Eigen::VectorXd b = /* right-hand side */;
+
+auto result = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 500});
+// result.x, result.iterations, result.residual
 ```
 
-Repeated solves against one matrix — factor once with `cpu_solver`, then
-solve any number of right-hand sides (the recommended path; per-solve
-allocations can be avoided entirely by handing the solver your output
-memory):
+Factor once for repeated solves:
 
 ```cpp
-apxchol::cpu_solver slv(L);              // factorize + build the PCG operator once
-auto r1 = slv.solve(b1);                 // tol/max_iter from solve_options
-auto r2 = slv.solve(b2, 1e-10, 1000);    // per-call override; optional x0 warm start
-Eigen::VectorXd z = slv.apply(r);        // one preconditioner application M^{-1} r
+apxchol::cpu_solver solver(L);
+auto r1 = solver.solve(b1);
+auto r2 = solver.solve(b2, 1e-10, 1000);
 
-Eigen::VectorXd x(n);                    // caller-owned output memory:
-auto r3 = slv.solve(b3, x);              // solution written into x, no per-solve
-                                         // allocation (internal workspace reused)
+Eigen::VectorXd x(L.rows());
+auto r3 = solver.solve(b3, x);  // caller-owned output; workspace is reused
+Eigen::VectorXd z = solver.apply(r);  // one M^-1 application
 ```
 
-Or plug the preconditioner into Eigen's CG (template parameters: the matrix
-type, which triangular part of it CG reads — `Eigen::Lower` here — and the
-preconditioner type):
+The preconditioner also implements Eigen's interface:
 
 ```cpp
 Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower,
@@ -111,226 +77,118 @@ cg.compute(L);
 Eigen::VectorXd x = cg.solve(b);
 ```
 
-Note Eigen's CG allocates its own temporaries per solve and offers no
-user-provided-memory hook — for allocation-free repeated solves use
-`cpu_solver` above, which also runs a faster (parallel-SpMV) PCG loop.
+For allocation-free repeated solves, prefer `cpu_solver`; Eigen's CG allocates
+its own temporaries.
 
-Laplacian vs SDDM is auto-detected: singular Laplacians get a rank-(n−1)
-factor with null-space centering; SDDM systems get the full-rank factor.
-Both `apxchol::solve` and `apx_cholesky` default to the `vec_pool_aos` storage
-backend and the `block_greedy` independent-set partitioner — the best
-default across the benchmark suite. Benchmark charts show each selector as a
-separate series, and method-vs-method headlines use this declared default rather
-than choosing the fastest selector per matrix; reconfigure
-via `solve_options` / `set_storage` / `set_options`.
+Singular Laplacians are solved in their rank-`n-1` subspace; full-rank SDDM
+operators retain the full factor. The default setup uses block-greedy
+independent-set selection and the pooled AoS adjacency backend. Factorization
+and solve options are in
+[factor_options.h](include/apxchol/solver/factor_options.h) and the public
+headers under [include/apxchol](include/apxchol/).
 
-The factorization is randomized (`--seed` / `factor_options::seed`). The
-random draws are schedule-independent: the factor is bit-identical for a
-fixed seed at one thread; at T>1 merged edge weights can differ in their
-final ulps (accumulation order).
-
-With `-DAPXCHOL_USE_CUDA=ON` the triangular solves run on the GPU — by
-default through our sync-free dataflow kernel (one persistent launch per
-sweep, O(n) state, bit-deterministic) — and the one-shot `apxchol::solve` uses a
-fully GPU-resident PCG (our own CSR SpMV and fused vector kernels with
-deterministic reductions; nothing but three scalars per iteration crosses
-the bus). The CUDA build links `cudart` only — no cuSPARSE, no cuBLAS;
-`-DAPXCHOL_CUDA_WITH_CUSPARSE=ON` opts back into the cuSPARSE SpSV
-triangular-solve backend (`APXCHOL_GPU_SPTRSV=cusparse`) as a comparison
-baseline. The GPU-resident loop applies to the one-shot `apxchol::solve`
-only; `cpu_solver` on a CUDA build runs the host PCG with GPU triangular
-solves.
-
-### Customizing the solver
-
-Three research seams are public, each with a worked example under
-[examples/](examples/):
-
-- **Star-vertex elimination rule** — how the Schur-complement clique is
-  sparsified when a vertex is eliminated. Implement the `eliminator` concept
-  ([elimination.h](include/apxchol/solver/elimination/elimination.h)) and pass
-  an instance to `factorize`:
-  [examples/custom_eliminator.cpp](examples/custom_eliminator.cpp).
-- **Independent-set selection and elimination order** — which vertices are
-  eliminated each round, and in what order (the permutation *is* the selection
-  order). Implement the `partitioner` concept
-  ([partitioner.h](include/apxchol/solver/partitioner.h)); stateful instances
-  can be passed directly:
-  [examples/custom_order.cpp](examples/custom_order.cpp). Built-in
-  partitioners are runtime-selectable by name
-  (`factor_options::is_select`); custom ones can be added to
-  `partitioner_list` for name dispatch.
-- **External factorizations in the solver** — a factorization produced by any
-  of the above plugs back into the full PCG machinery via
-  `apx_cholesky::set_factor(F)` or `cpu_solver(L, F)`.
-
-A step-by-step guide to writing your own eliminator / partitioner /
-ordering — contracts, invariants, and how the pieces plug back into the
-solver — is in [docs/extending.md](docs/extending.md). The knobs of the
-default pipeline (degree quantile, exact-clique
-threshold, residual-peel order, …) live in
-[factor_options.h](include/apxchol/solver/factor_options.h), each with its
-empirical rationale.
-
-## Python package (CPU)
+## Python
 
 ```bash
-pip install apxchol        # wheels from PyPI (Linux x86_64, Python 3.10-3.14)
-# or build from a checkout: compiles the C++ extension from ../src, installs
-# it editable so python/ changes are picked up without reinstalling:
+pip install apxchol
+# From a checkout:
 pip install -e python
 ```
 
 ```python
-import numpy as np
+import apxchol
 import scipy.sparse as sp
 from scipy.io import mmread
-import apxchol
 
-A = sp.csc_matrix(mmread("laplacian.mtx"))   # any scipy sparse Laplacian/SDDM
-rng = np.random.default_rng(0)
-b = rng.standard_normal(A.shape[0]); b -= b.mean()  # zero-mean: orthogonal to the Laplacian null space
-
-solver = apxchol.factorize(A)        # factor built once, reusable
-res = solver.solve(b, rtol=1e-8)     # tuned PCG; res.x, res.iters, res.residual
-x = np.empty_like(b)
-res = solver.solve(b, out=x)         # ... writing into caller-owned memory x
-z = solver.apply(b)                  # one preconditioner application M^{-1} b
-P, L, D = solver.P, solver.L, solver.D   # factor export (P[v] = elimination position)
-p = np.argsort(P)                        # A[p][:, p] ≈ L @ scipy.sparse.diags(D) @ L.T
-
-# Interop: use apxchol as the M= preconditioner of scipy's Krylov solvers
-# (slower than solver.solve — scipy's Python-level CG loop — but composes
-# with scipy's callbacks and other methods like MINRES):
-M = solver.aspreconditioner()
-
-# A is the ASSEMBLED operator, never a graph adjacency matrix (which is
-# rejected with a ValueError, not converted silently). Convert one explicitly:
-L = apxchol.laplacian(sp.csc_matrix(mmread("com-Amazon.mtx")))   # L = D - A
+A = sp.csc_matrix(mmread("operator.mtx"))
+solver = apxchol.factorize(A)
+result = solver.solve(b, rtol=1e-8)
+z = solver.apply(b)
+P, L, D = solver.P, solver.L, solver.D
 ```
 
-See [python/README.md](python/README.md) for the full API.
+Python expects an assembled operator. Convert an adjacency matrix explicitly
+with `apxchol.laplacian(A)`. See [python/README.md](python/README.md).
 
-## Octave / MATLAB package (CPU)
+## Octave and MATLAB
 
 ```bash
-./octave/build.sh    # mkoctfile MEX; no MATLAB license needed
+./octave/build.sh
 ```
 
 ```matlab
 addpath('octave');
-s = apxchol_solver(A);            % sparse A; factor built once
-res = s.solve(b);                 % res.x, res.iters, res.residual, res.converged
-x = pcg(A, b, 1e-8, 500, @(r) s.apply(r));   % or as pcg's preconditioner
-
-% A is the ASSEMBLED operator, never a graph adjacency matrix (which raises
-% apxchol:adjacencyInput, not converted silently). Convert one explicitly:
-L = apxchol_laplacian(Adj);       % L = D - A
+s = apxchol_solver(A);
+result = s.solve(b);
+z = s.apply(b);
 ```
 
-The same source builds under MATLAB with `mex` (recipe in
-[octave/README.md](octave/README.md)); all heavy work happens inside the
-compiled MEX, so Octave-vs-MATLAB interpreter speed barely matters here.
-Prefer `s.solve(b)` (the C++ PCG) over wrapping `s.apply` in `pcg` unless
-you need `pcg`'s interface.
+The same source builds with MATLAB `mex`; see
+[octave/README.md](octave/README.md). Inputs are assembled operators. Use
+`apxchol_laplacian(Adj)` for an adjacency matrix.
 
-## Build options
+## Configuration
 
-Compile-time options (`APXCHOL_USE_CUDA`, `APXCHOL_POOL_FP32`,
-`APXCHOL_64BIT_EDGE_INDICES` / `APXCHOL_64BIT_NODE_INDICES`,
-`APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS` / `APXCHOL_BUILD_TOOLS`)
-are declared and documented where they live, in
-[CMakeLists.txt](CMakeLists.txt) — `cmake -LH build` lists them with their
-help strings. Factor values are stored fp32 (`APXCHOL_POOL_FP32` defaults
-ON for the setup pool's weights; the PCG recurrence stays fp64). One
-runtime env, `APXCHOL_SPTRSV_FP16=0|1`, narrows the SpTRSV off-diagonal
-factor storage further to per-column-scaled IEEE fp16 — the diagonal stays
-exact fp32 and absorbs the per-column rounding residual, which is what
-keeps iteration counts at the fp32 level on Laplacians; reads widen in
-registers, so only preconditioner quality changes, not the attainable
-residual (see [include/apxchol/lowprec.h](include/apxchol/lowprec.h)).
-Unset, it resolves ON on the GPU backend and OFF on CPU; the CPU fp16 path
-requires F16C (x86) and falls back to fp32 with a note otherwise.
-Everything else defaults OFF except the `APXCHOL_BUILD_EXAMPLES` /
-`APXCHOL_BUILD_TESTS` toggles. Release builds add `-march=native`.
+Common CMake options are:
 
-On CPU, `APXCHOL_CPU_SPTRSV=auto|levels` selects the triangular schedule
-(unset = `auto`). AUTO keeps fat elimination-round levels on the established
-level-set kernel and moves the contiguous thin tail to a single-pass
-critical-parent weak-barrier plan. Its factor scan is O(nnz+n) and flattening
-costs O(P*steps), where P is the setup OpenMP team size. At one thread, without
-round metadata, or without a thin suffix, AUTO is exactly level-set; `levels`
-is the explicit rollback. Both paths use the same stored factor and row
-arithmetic.
+| option | purpose |
+|---|---|
+| `APXCHOL_USE_CUDA=ON` | CUDA triangular solve and GPU-resident PCG |
+| `APXCHOL_POOL_FP32=ON` | fp32 residual-pool weights; default on |
+| `APXCHOL_64BIT_EDGE_INDICES=ON` | factors or pools exceeding 32-bit edge offsets |
+| `APXCHOL_64BIT_NODE_INDICES=ON` | graphs exceeding 32-bit vertex ids |
+| `APXCHOL_BUILD_TESTS=OFF` | skip unit tests |
+| `APXCHOL_BUILD_EXAMPLES=OFF` | skip examples |
 
-One runtime knob (CPU/OpenMP backend): the SpTRSV setup drops factor
-off-diagonals below `1e-4 ×` their column's max |off-diagonal| before it
-builds its CSR/CSC, folding the dropped mass back into the kept entries of
-the column (a compacting, column-sum-preserving drop — fewer stored entries,
-same preconditioner within the measured 0-iteration tolerance; see
-`kFactorDropRelDefault` in
-[include/apxchol/solver/sptrsv/omp.h](include/apxchol/solver/sptrsv/omp.h)).
-`APXCHOL_FACTOR_DROP=0` disables it, `APXCHOL_FACTOR_DROP=<rel>` overrides
-the threshold.
+`cmake -LH build` shows the complete list and help strings. Release builds use
+native architecture tuning.
+
+The default CUDA triangular solve is the project's persistent dataflow kernel;
+the core CUDA library links only `cudart`. cuSPARSE SpSV is an opt-in comparison
+backend through `APXCHOL_CUDA_WITH_CUSPARSE=ON`.
+
+Runtime storage controls include:
+
+- `APXCHOL_SPTRSV_FP16=0|1`: scaled fp16 off-diagonal factor storage (default on
+  for GPU, off for CPU);
+- `APXCHOL_FACTOR_DROP=0|<relative threshold>`: compensated column-relative
+  factor dropping;
+- `APXCHOL_CPU_SPTRSV=auto|levels`: hybrid CPU DAG schedule or pure level sets.
+
+The implementation headers document their numerical contracts and rollback
+switches.
+
+## Extending the algorithm
+
+Custom elimination rules, partitioners, and orderings plug into the same factor
+and PCG machinery. The contracts and worked examples are in
+[docs/extending.md](docs/extending.md) and [examples](examples/).
 
 ## Benchmarks
 
-The benchmark suite is a separate CMake project under `benchmarks/`
-(FetchContent pulls Hypre, AMGCL, and RCHOL — no submodules; ParAC, CMG
-(MATLAB), and Laplacians.jl are out-of-tree, wired via env vars — see
-[benchmarks/README.md](benchmarks/README.md)). It
-compares apxchol against BoomerAMG (Hypre, CPU+GPU), AMGCL (CPU+CUDA),
-RCHOL/pRCHOL, ParAC (CPU+GPU), CMG, and Laplacians.jl AC/AC2 on grid,
-SuiteSparse, and LP-IPM matrices (the LP-IPM ladder is not redistributed —
-see [benchmarks/README.md](benchmarks/README.md)) — on the **original
-singular Laplacians**, with each solver grounding the null space its own
-native way (symmetric Dirichlet pin per connected component for the
-multigrids; mean-centering for the Cholesky-types).
-Protocol, charts, and the result store are documented in
-[benchmarks/README.md](benchmarks/README.md); rendered charts live in
-[benchmarks/latest/](benchmarks/latest/).
+The benchmark project has its own build, dependencies, result store, and
+fairness checks:
 
-## Dependencies
-
-Core library: a C++23 compiler, CMake ≥ 3.16, Eigen3 (system or FetchContent),
-OpenMP (optional but strongly recommended). The root project also fetches
-CLI11, spdlog, and fast_matrix_market (CLI) and GoogleTest (tests;
-`-DAPXCHOL_BUILD_TESTS=OFF` to skip) at configure time. The benchmark and
-Python projects manage their own dependencies.
+- [benchmark protocol and headline figures](benchmarks/README.md)
+- [current laptop results](benchmarks/latest/)
+- [CSCS Daint results](benchmarks/daint/)
 
 ## References
 
-- Kyng & Sachdeva (2016). Approximate Gaussian Elimination for Laplacians.
-  [arXiv:1605.02353](https://arxiv.org/abs/1605.02353)
-- Kyng. Approximate Gaussian elimination for Laplacians (dissertation, Ch. 3).
-  [PDF](https://rasmuskyng.com/rjkyng-dissertation.pdf)
-- Gao, Kyng & Spielman (2023). Robust and Practical Solution of Laplacian
-  Equations by Approximate Elimination.
-  [arXiv:2303.00709](https://arxiv.org/abs/2303.00709) — reference benchmark
-  protocol; code at [SDDM2023](https://github.com/rjkyng/SDDM2023)
-- Baumann & Kyng (2024). A Framework for Parallelizing Approximate Gaussian
-  Elimination. SPAA 2024.
-  [doi:10.1145/3626183.3659987](https://dl.acm.org/doi/10.1145/3626183.3659987)
-- Chen, Liang, Biros (2020). RCHOL: Randomized Cholesky Factorization.
-  [arXiv:2011.07769](https://arxiv.org/abs/2011.07769) — code at
-  [ut-padas/rchol](https://github.com/ut-padas/rchol)
-- Liang et al. (2025). Parallel GPU-Accelerated Randomized Cholesky (ParAC).
-  [arXiv:2505.02977](https://arxiv.org/abs/2505.02977)
-- Spielman. [Laplacians.jl](https://github.com/danspielman/Laplacians.jl)
-- Demidov. [AMGCL](https://github.com/ddemidov/amgcl)
-- Falgout et al. [Hypre](https://github.com/hypre-space/hypre)
+- Kyng and Sachdeva, *Approximate Gaussian Elimination for Laplacians*, 2016
+  ([arXiv](https://arxiv.org/abs/1605.02353)).
+- Gao, Kyng, and Spielman, *Robust and Practical Solution of Laplacian
+  Equations by Approximate Elimination*, 2023
+  ([arXiv](https://arxiv.org/abs/2303.00709)).
+- Baumann and Kyng, *A Framework for Parallelizing Approximate Gaussian
+  Elimination*, SPAA 2024
+  ([DOI](https://dl.acm.org/doi/10.1145/3626183.3659987)).
 
-## Contributing
+Additional competitor references and versions are recorded in the benchmark
+result metadata.
 
-Build, test, and style conventions are in [CONTRIBUTING.md](CONTRIBUTING.md).
+## Contributing and license
 
-## License
-
-[BSD 4-Clause](LICENSE) (the original "BSD with advertising clause"
-license). Copyright (c) 2026 ETH Zürich and the apxchol contributors.
-
-## Citation
-
-If you use this software, cite it via [CITATION.cff](CITATION.cff) (GitHub's
-"Cite this repository" renders it as BibTeX/APA), together with the algorithm
-references above.
+See [CONTRIBUTING.md](CONTRIBUTING.md). The project uses the
+[BSD 4-Clause license](LICENSE). Cite releases through
+[CITATION.cff](CITATION.cff).

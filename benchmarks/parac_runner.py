@@ -52,7 +52,7 @@ class=sddm -> PHYSICS mode (`driver <mtx> <threads> "" 1`).
   with room: apache2 +2.20e4, ecology1 +2.05e-9, G3_circuit +6.91e8,
   parabolic_fem +2.00, thermal2 +2.01e3, iter0010..0040 +5.24e-1.
 
-TOLERANCE. ParAC's stopping test compares the residual NORM against
+CPU TOLERANCE. ParAC's CPU stopping test compares the residual NORM against
 sqrt(rel_tol): an ABSOLUTE test, and on the recurrence residual, which runs
 optimistic by a matrix-dependent factor. Rather than patch the test we calibrate
 it from one probe run using ParAC's own two printed numbers (see
@@ -72,7 +72,9 @@ GPU (`parac_graph` / `parac_physics`, device=gpu):
   degree-sort makes the level-set SpTRSV ~1000x slower, and physics_produce
   appends the ground node after it for an operator) -> the two CUDA drivers
   (driver.cu / driver_physics.cu), REPS medians. Those take the tolerance on argv
-  already, so the same calibration applies with no patch.
+  already. Patch 0003 makes their inconsistent first/subsequent stopping tests one
+  standard relative recurrence-residual test; one probe still calibrates recurrence
+  residual to the independently printed true residual.
   setup = sort + complete post-parse adapter/factor/solver-setup intervals;
   solve includes RHS work, PCG, and returning x to host; peak VRAM via the
   nvidia-smi sidecar.
@@ -141,6 +143,7 @@ TERMINAL_CPU = frozenset({"complete", "not_converged", "failed", "timeout"})
 TERMINAL_GPU = frozenset({"complete", "not_converged"})   # failed/timeout retry
 
 PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
+            "source_id": os.environ.get("APXCHOL_BENCH_SOURCE_ID", ""),
             "note": "ParAC at upstream 44ef39d + benchmarks/patches/parac/0001-0002 "
                     "(thread-count gate, configurable tolerance, and complete setup timing; "
                     "no numerics touched). kind=graph -> GRAPH "
@@ -164,9 +167,12 @@ PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
 # The GPU cells' toolchain is added per driver in run_gpu (two drivers, and both
 # are OURS to build — build-cuda/gpu_rchol_gpu_driver{,_physics}).
 PROV_GPU = {"source": "parac_runner.py", "git_sha": PROV_CPU["git_sha"],
-            "note": "ParAC upstream 44ef39d + benchmark-only patch 0003: complete "
+            "source_id": PROV_CPU["source_id"],
+            "repeat": REPS, "tier": "broad",
+            "note": "ParAC upstream 44ef39d + benchmark-only patch 0003: consistent "
+                    "relative recurrence-residual stopping test plus complete "
                     "post-parse adapter, factor setup, solver setup, and per-RHS timing; "
-                    "the per-RHS interval includes returning x to host. No numerics changed."}
+                    "the per-RHS interval includes returning x to host."}
 
 _g = lambda pat, o: (re.search(pat, o).group(1) if re.search(pat, o) else None)
 
@@ -673,7 +679,15 @@ def run_cpu(mid):
 
 
 # ── GPU axis ────────────────────────────────────────────────────────────────────
-def _nnz_sort(mid, src, tag, augment=False):
+def _gpu_cell_remaining(deadline):
+    """Seconds left in one logical ParAC GPU cell's wall-clock budget."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.0:
+        raise subprocess.TimeoutExpired("ParAC GPU cell", TIMEOUT_GPU)
+    return remaining
+
+
+def _nnz_sort(mid, src, tag, augment=False, deadline=None):
     """ParAC's OWN nnz-sort — write_graph.jl method "nnz-sort": a random
     permutation, THEN a per-column-nnz sort — run out of their checkout, the same
     `<mode>_produce` call the CPU axis makes with method "amd". Its printed "sort
@@ -701,14 +715,16 @@ def _nnz_sort(mid, src, tag, augment=False):
             prep = _PREP_UNKNOWN
         return out, secs, prep
     mode = "physics" if augment else "graph"
-    produced, secs, err = _produce_upstream(prefix, src, mode, "nnz-sort", TIMEOUT_GPU)
+    timeout = (_gpu_cell_remaining(deadline) if deadline is not None else TIMEOUT_GPU)
+    produced, secs, err = _produce_upstream(prefix, src, mode, "nnz-sort", timeout)
     if produced:
         prep = f"ParAC write_graph.jl {mode}_produce(path, \"nnz-sort\"), upstream and unmodified"
     else:
         print(f"   [parac] upstream {mode}_produce refused {mid}: {err}\n"
               f"   [parac] falling back to benchmarks/parac_nnz_sort.jl", flush=True)
         flag = " --augment" if augment else ""
-        cp = sh(f"julia {NNZ_SORT_JL} {src} {out}{flag}", timeout=TIMEOUT_GPU)
+        timeout = (_gpu_cell_remaining(deadline) if deadline is not None else TIMEOUT_GPU)
+        cp = sh(f"julia {NNZ_SORT_JL} {src} {out}{flag}", timeout=timeout)
         o = cp.stdout
         m = _PREP_TIME_RE.search(o)
         secs = float(m.group(1)) if m else 0.0
@@ -728,9 +744,10 @@ def _nnz_sort(mid, src, tag, augment=False):
     return (out if os.path.exists(out) else None), secs, prep
 
 
-def _run_once_gpu(driver, mtx, tol):
+def _run_once_gpu(driver, mtx, tol, deadline=None):
+    timeout = (_gpu_cell_remaining(deadline) if deadline is not None else TIMEOUT_GPU)
     with rc.VramSampler("gpu_rchol") as vram:   # matches both driver binaries
-        o = sh(f"{driver} {mtx} {BLOCKS} 1 {tol}", timeout=TIMEOUT_GPU).stdout
+        o = sh(f"{driver} {mtx} {BLOCKS} 1 {tol}", timeout=timeout).stdout
     # Keep the original narrow timers as diagnostics alongside patch 0003's
     # complete, non-overlapping phases.
     return dict(etree=_g(r"build etree:\s*([0-9.eE+-]+)", o),
@@ -751,23 +768,26 @@ def _run_once_gpu(driver, mtx, tol):
                 vram_mb=vram.peak_mb())
 
 
-def _calibrate_tol_gpu(driver, mtx, tau=float(TOL)):
+def _calibrate_tol_gpu(driver, mtx, tau=float(TOL), deadline=None):
     """The TOL to hand the CUDA driver so its own test stops at true residual tau.
 
-    Its test is on the PRECONDITIONED relative residual sqrt(<r,M^-1 r>)/sqrt(
-    <r0,M^-1 r0>), which is optimistic; but it is already RELATIVE and already a
-    CLI argument (argv[4]), and the driver already prints the true
-    ||Ax-b||/||b|| as `normalized diff norm`. So one probe rescales it, no patch:
+    Patch 0003 makes the upstream first-iteration and loop tests consistently use
+    the relative recurrence residual ||r||/||r0||. It remains optimistic relative
+    to the independently printed true ||Ax-b||/||b||, so one probe rescales the
+    existing CLI tolerance (argv[4]):
 
         TOL = tau * TOL_0 / R_0
 
     Returns None if the probe did not print a residual (caller falls back to TOL).
     """
-    p = _run_once_gpu(driver, mtx, PROBE_TOL_GPU)
+    p = _run_once_gpu(driver, mtx, PROBE_TOL_GPU, deadline=deadline)
     if not p["rr"]:
         return None
     r0 = float(p["rr"])
-    return (tau * PROBE_TOL_GPU / r0) if r0 > 0.0 else None
+    # A calibration may compensate for optimistic recurrence drift by tightening
+    # the native tolerance. It must never relax the common 1e-8 request merely
+    # because one randomized probe happened to look pessimistic.
+    return min(tau, tau * PROBE_TOL_GPU / r0) if r0 > 0.0 else None
 
 
 def _gpu_modes(mid):
@@ -825,6 +845,11 @@ def run_gpu(mid, tol=TOL):
     family = rc.MATRICES[mid]["family"]
     tag = _dump_tag(mid)
     aug = _augments(mid)
+    # TIMEOUT_GPU is one logical cell's wall-clock cap, including mandatory
+    # preprocessing, the calibration probe and all REPS timed executions.  It is
+    # deliberately not renewed for each subprocess: doing that made one cell cost
+    # up to (REPS + 1) times the advertised timeout and defeat Slurm resume jobs.
+    deadline = time.monotonic() + TIMEOUT_GPU
     try:
         # Warm nnz-sort cache (+.time) -> the dump is unneeded; skip it.
         cache_tag = f"{tag}-aug" if aug else tag
@@ -839,11 +864,13 @@ def run_gpu(mid, tol=TOL):
             else:
                 prep_prov = _PREP_UNKNOWN
         else:
-            src, _tag = _dump(mid, DUMP_GPU, rc.BIN["gpu"], TIMEOUT_GPU)
+            src, _tag = _dump(mid, DUMP_GPU, rc.BIN["gpu"],
+                              _gpu_cell_remaining(deadline))
             if not src:
                 return record_gpu_failure(mid, "failed",
                                           "GPU operator dump produced no matrix")
-            sorted_mtx, sort_s, prep_prov = _nnz_sort(mid, src, tag, augment=aug)
+            sorted_mtx, sort_s, prep_prov = _nnz_sort(
+                mid, src, tag, augment=aug, deadline=deadline)
             if not sorted_mtx:
                 return record_gpu_failure(mid, "failed",
                                           "ParAC nnz-sort produced no matrix",
@@ -867,8 +894,9 @@ def run_gpu(mid, tol=TOL):
                              "parac_prep_failure": f"ParAC GPU driver missing: {driver}"})
             results.append(f"{solver_key}[FAILED(driver missing)]"); continue
         try:
-            cal = _calibrate_tol_gpu(driver, sorted_mtx) or float(tol)
-            runs = [_run_once_gpu(driver, sorted_mtx, cal) for _ in range(REPS)]
+            cal = _calibrate_tol_gpu(driver, sorted_mtx, deadline=deadline) or float(tol)
+            runs = [_run_once_gpu(driver, sorted_mtx, cal, deadline=deadline)
+                    for _ in range(REPS)]
         except subprocess.TimeoutExpired:
             rc.emit_cell(family, mid, solver_key, "", "timeout", {}, THREADS, "gpu", prov,
                          matrix_meta={"parac_prep": prep_prov},

@@ -27,8 +27,12 @@ from pathlib import Path
 
 # Repo root, derived from this file's location (benchmarks/runner_common.py).
 ROOT = str(Path(__file__).resolve().parents[1])
-BIN = {"cpu": f"{ROOT}/benchmarks/build/benchmark",
-       "gpu": f"{ROOT}/benchmarks/build-cuda/benchmark"}
+BIN = {
+    "cpu": os.environ.get("APXCHOL_BENCH_CPU_BIN",
+                          f"{ROOT}/benchmarks/build/benchmark"),
+    "gpu": os.environ.get("APXCHOL_BENCH_GPU_BIN",
+                          f"{ROOT}/benchmarks/build-cuda/benchmark"),
+}
 CELLS = f"{ROOT}/results/cells"
 APXCHOL_DEFAULT_CONFIG = "bg+tree[vec_pool_aos]"
 
@@ -705,9 +709,13 @@ PARAC_REORD = os.environ.get("APXCHOL_PARAC_REORDER_DIR", "")
 PARAC_WRITE_GRAPH = os.environ.get("APXCHOL_PARAC_WRITE_GRAPH", "")
 # Runtime library path the CPU driver needs (its MKL/compiler runtime), if any.
 PARAC_LDLIB = os.environ.get("APXCHOL_PARAC_LDLIB", os.environ.get("LD_LIBRARY_PATH", ""))
-PARAC_SORTED = "/tmp/parac_gpu_sorted"                       # GPU input: random-nnz-sort cache
-PARAC_GPU_DRIVER = f"{ROOT}/benchmarks/build-cuda/gpu_rchol_gpu_driver"
-PARAC_GPU_DRIVER_PHYS = f"{ROOT}/benchmarks/build-cuda/gpu_rchol_gpu_driver_physics"
+PARAC_SORTED = os.environ.get("APXCHOL_PARAC_SORTED_DIR", "/tmp/parac_gpu_sorted")
+PARAC_GPU_DRIVER = os.environ.get(
+    "APXCHOL_PARAC_GPU_DRIVER",
+    f"{ROOT}/benchmarks/build-cuda/gpu_rchol_gpu_driver")
+PARAC_GPU_DRIVER_PHYS = os.environ.get(
+    "APXCHOL_PARAC_GPU_DRIVER_PHYS",
+    f"{ROOT}/benchmarks/build-cuda/gpu_rchol_gpu_driver_physics")
 
 # Machine-local overrides (gitignored; assigns the constants above by name).
 try:

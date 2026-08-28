@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -57,6 +58,28 @@ class ShellHarnessTest(unittest.TestCase):
             popen.call_args.args[0],
             "ulimit -c 0; ulimit -v 2097152; worker",
         )
+
+
+class JuliaDriverPathTest(unittest.TestCase):
+    def test_julia_driver_and_project_are_root_derived(self):
+        output = (
+            "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz\n"
+            "AC [Kyng16;Jl],m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750\n"
+        )
+        with mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
+             mock.patch.object(sweep_fair.time, "monotonic",
+                               side_effect=[100.0, 101.0, 102.0, 103.0]), \
+             mock.patch.object(sweep_fair, "sh", return_value=subprocess.CompletedProcess(
+                 "julia", 0, output, "")) as run:
+            status, _metrics, _meta = sweep_fair.run_julia(
+                "/tmp/operator.mtx", "ac", "laplacian", timeout=17)
+        command = run.call_args.args[0]
+        self.assertEqual(status, "complete")
+        self.assertEqual(run.call_count, sweep_fair.REPS)
+        self.assertEqual([call.kwargs["timeout"] for call in run.call_args_list],
+                         [16, 15, 14])
+        self.assertIn(f"--project={rc.ROOT}/benchmarks/julia", command)
+        self.assertIn(f"{rc.ROOT}/benchmarks/julia/bench_laplacians.jl", command)
 
 
 class SeriesRuleTest(unittest.TestCase):

@@ -80,6 +80,7 @@ DEVICE = "cpu"   # set in main() from --device
 MAXITER = {"cpu": 500, "gpu": 2000, "gpu_ipm": 1000}
 
 PROV = {"boost":"on","boost_expected":"on","git_sha":rc.git_sha(),
+        "source_id": os.environ.get("APXCHOL_BENCH_SOURCE_ID", ""),
         "note":"FAIR run","repeat":REPS,
         "tier":"broad","timestamp":time.strftime("%Y-%m-%dT%H:%M:%S")}
 
@@ -307,7 +308,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
     # nothing to fall back FROM.)
     return st,m
 
-def run_julia(mtx, solver, cls):
+def run_julia(mtx, solver, cls, timeout=TIMEOUT):
     """AC/AC2 (Laplacians.jl) on the DUMPED operator, with its declared class.
 
     They used to be handed the raw registry .mtx and re-derive a Laplacian from
@@ -334,22 +335,43 @@ def run_julia(mtx, solver, cls):
     Needs the Julia project instantiated once:
       julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
     """
-    cmd=(f"{rc.taskset_prefix(THREADS)} julia --project=benchmarks/julia "
-         f"benchmarks/julia/bench_laplacians.jl --operator {mtx} --class {cls} "
+    project = os.path.join(rc.ROOT, "benchmarks", "julia")
+    driver = os.path.join(project, "bench_laplacians.jl")
+    cmd=(f"{rc.taskset_prefix(THREADS)} julia --project={shlex.quote(project)} "
+         f"{shlex.quote(driver)} --operator {shlex.quote(mtx)} --class {cls} "
          f"--solver {solver} --tol {TOL} --maxiter 500 --csv")
-    try: cp = sh(cmd, timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return "timeout", None, {"na_reason": f"exceeded the {TIMEOUT}s per-cell wall cap"}
-    st, m = classify(rc.parse_csv(cp.stdout))
-    meta = {}
-    if st == "n/a":
-        hit = re.search(r"^\[n/a\][^:]*:\s*(.+)$", cp.stderr or "", re.M)
-        meta["na_reason"] = (hit.group(1).strip() if hit else
-                             "Laplacians.jl reported this operator unsupported "
-                             "(no reason line captured)")
-    elif st == "failed" and (cp.stderr or "").strip():
-        meta["na_reason"] = cp.stderr.strip().splitlines()[-1][:500]
-    return st, m, meta
+    runs = []
+    deadline = time.monotonic() + timeout
+    for _ in range(REPS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return "timeout", None, {
+                "na_reason": f"the {REPS}-repetition cell exceeded its {timeout}s wall cap"
+            }
+        try:
+            cp = sh(cmd, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            return "timeout", None, {
+                "na_reason": f"the {REPS}-repetition cell exceeded its {timeout}s wall cap"
+            }
+        st, metrics = classify(rc.parse_csv(cp.stdout))
+        meta = {}
+        if st == "n/a":
+            hit = re.search(r"^\[n/a\][^:]*:\s*(.+)$", cp.stderr or "", re.M)
+            meta["na_reason"] = (hit.group(1).strip() if hit else
+                                 "Laplacians.jl reported this operator unsupported "
+                                 "(no reason line captured)")
+            return st, metrics, meta
+        if st == "failed":
+            if (cp.stderr or "").strip():
+                meta["na_reason"] = cp.stderr.strip().splitlines()[-1][:500]
+            return st, metrics, meta
+        runs.append((st, metrics, meta))
+
+    # Match the C++ benchmark's full-run median: keep one internally consistent
+    # record rather than taking a field-wise median that never occurred.
+    runs.sort(key=lambda run: run[1]["total_s"])
+    return runs[len(runs) // 2]
 
 def run_parac(mid):
     # In-process via parac_runner (graph+physics cells, resume-safe). Per-step
@@ -599,7 +621,9 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
         if dumped:
             for s in JULIA:
                 step(family,mid,s,"",
-                     lambda ss=s: run_julia(dumped,ss,rc.class_of(mid)), s)
+                     lambda ss=s, cap=to: run_julia(
+                         dumped, ss, rc.class_of(mid), timeout=cap),
+                     s, timeout_cap_s=to)
         else:
             print(f"   {'AC/AC2':24} SKIP (operator dump failed)")
     if RUN_PARAC:      # ParAC graph+physics (resume-safe; the runner skips done cells)
@@ -659,6 +683,8 @@ def main():
     rc.CELLS = CELLS
     parac_runner.THREADS = THREADS
     parac_runner.REPS = REPS
+    parac_runner.PROV_CPU["repeat"] = REPS
+    parac_runner.PROV_GPU["repeat"] = REPS
     cmg_matlab_runner.THREADS = THREADS
     PROV["repeat"] = REPS
     fams = {f.strip() for f in a.families.split(",") if f.strip()}
