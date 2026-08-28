@@ -143,6 +143,15 @@ class CapReferenceTest(unittest.TestCase):
             rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0}, **base)
             self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 10.0)
 
+    def test_gpu_cap_reference_uses_campaign_thread_count(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(rc, "CELLS", store), \
+             mock.patch.object(sweep_fair, "THREADS", 72):
+            rc.emit_cell("audit", "m", "apxchol_v1",
+                         sweep_fair.APX_DEFAULT_CONFIG, "complete",
+                         {"total_s": 7.2}, 72, "gpu", {})
+            self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 7.2)
+
 
 class FairSweepSelectionTest(unittest.TestCase):
     def test_orkut_size_gate_always_keeps_declared_default(self):

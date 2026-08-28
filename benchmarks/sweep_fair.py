@@ -513,7 +513,7 @@ def gpu_apx_total(family, mid):
     This is intentionally one fixed configuration, not the fastest selector in the
     store. None means the CPU pass must fall back to the same declared default on
     its own device."""
-    path = rc.cell_path(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG, 16, "gpu")
+    path = rc.cell_path(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG, THREADS, "gpu")
     try:
         with open(path) as handle:
             c = json.load(handle)
