@@ -1,0 +1,11 @@
+records=900/900 groups=30/30 semantic_exact=30/30
+threads=36
+  t128 eliminate=1.015902 setup=1.009828 total=1.010675
+  t256 eliminate=0.983784 setup=0.997531 total=0.998258
+  t512 eliminate=0.980647 setup=0.994169 total=0.994468
+  t1024 eliminate=0.992853 setup=0.998610 total=0.999231
+threads=72
+  t128 eliminate=1.026354 setup=0.976885 total=0.978302
+  t256 eliminate=0.976422 setup=0.969826 total=0.971491
+  t512 eliminate=0.969878 setup=1.000476 total=1.001957
+  t1024 eliminate=0.992296 setup=0.970549 total=0.971420

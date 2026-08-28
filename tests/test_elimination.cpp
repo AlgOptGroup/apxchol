@@ -121,7 +121,8 @@ TEST(TreeSampler, AcceleratedCanonicalOrderMatchesComparator) {
                                     : a.vertex < b.vertex;
     };
     for (const node_index degree : {
-            node_index{512}, node_index{1024}, node_index{2048},
+            node_index{511}, node_index{512},
+            node_index{1024}, node_index{2048},
             node_index{4096}}) {
         for (int shape = 0; shape < 4; ++shape) {
             std::vector<weighted_neighbor> input;
@@ -140,7 +141,9 @@ TEST(TreeSampler, AcceleratedCanonicalOrderMatchesComparator) {
             auto expected = input;
             std::sort(expected.begin(), expected.end(), canonical_less);
             auto actual = input;
-            if (!detail::radix_sort_neighbors(actual))
+            const bool accelerated = detail::radix_sort_neighbors(actual);
+            EXPECT_EQ(accelerated, degree >= 512);
+            if (!accelerated)
                 std::sort(actual.begin(), actual.end(), canonical_less);
 
             ASSERT_EQ(actual.size(), expected.size());

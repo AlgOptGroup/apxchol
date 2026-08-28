@@ -158,10 +158,10 @@ namespace detail {
 
 /// Reproduce the canonical (weight, vertex) order with a stable weight radix
 /// followed by a vertex sort inside each equal-weight run.  Comparison sort
-/// remains faster below the measured crossover; high-degree hub cliques are a
-/// serial setup bottleneck and repay the six linear passes.
+/// remains faster below the measured crossover; larger cliques repay the six
+/// linear passes of the exact 11-bit radix.
 inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
-    constexpr size_t kMinDegree = 2048;
+    constexpr size_t kMinDegree = 512;
     if (values.size() < kMinDegree) return false;
     bool all_equal = true;
     for (const auto& value : values) {
