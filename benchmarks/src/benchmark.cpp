@@ -2685,6 +2685,16 @@ int main(int argc, char** argv) {
         }
     }
 
+    // No solver below this point consumes the graph-adjacency staging form;
+    // every one of them uses the assembled Eigen operator L.  Keeping `adj`
+    // alive was harmless on the ordinary suite but retained one separately
+    // allocated Edge vector per vertex on procedural giant grids.  At
+    // grid2d-11500 / grid3d-480 that pushed AMGCL's process RSS to the GH200
+    // module-local memory boundary even though its measured hierarchy fits.
+    // Release both the inner allocations and the outer vector capacity after
+    // the optional v0 arm has had its only opportunity to use them.
+    std::vector<std::vector<Edge>>().swap(adj);
+
 #ifdef HAVE_APXCHOL_V1
     if (args.solvers.count("apxchol_v1") ||
         args.solvers.count("apxchol_gpu")) {
