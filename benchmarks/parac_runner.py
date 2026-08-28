@@ -363,7 +363,7 @@ def _run_once_cpu(amd, physics, rel_tol=None):
     # host RSS on stderr, the ParAC analog of the C++ solvers' max_rss_mb (the
     # driver is one self-contained binary, so whole-driver peak is what we chart).
     arg5 = "1" if physics else ""
-    cp = sh(f"/usr/bin/time -f 'APXRSS %M' taskset -c 0-{THREADS-1} "
+    cp = sh(f"/usr/bin/time -f 'APXRSS %M' {rc.taskset_prefix(THREADS)} "
             f"{rc.PARAC_CPU_DRIVER} {amd} {THREADS} \"\" {arg5}".strip(),
             timeout=TIMEOUT_CPU, env=env, mem_cap_gb=MEM_CAP_GB)
     o = cp.stdout

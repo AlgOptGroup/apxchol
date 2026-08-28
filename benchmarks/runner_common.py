@@ -101,6 +101,43 @@ def boost_state():
     except Exception:
         return "unknown"
 
+
+def affinity_spec(threads):
+    """Return `taskset -c` CPUs relative to this process's granted affinity.
+
+    Slurm may bind packed ranks to disjoint physical IDs (for example 72-143).
+    Hard-coding 0..threads-1 then either fails or targets another rank's CPUs.
+    Select the first `threads` CPUs from sched_getaffinity instead.  A validated
+    APXCHOL_BENCH_CPUSET override is available for reproducible manual layouts.
+    """
+    if threads < 1:
+        raise ValueError(f"threads must be positive, got {threads}")
+    override = os.environ.get("APXCHOL_BENCH_CPUSET")
+    if override:
+        if not re.fullmatch(r"[0-9,-]+", override):
+            raise ValueError("APXCHOL_BENCH_CPUSET must be a taskset CPU list")
+        return override
+    allowed = sorted(os.sched_getaffinity(0))
+    if len(allowed) < threads:
+        raise RuntimeError(
+            f"requested {threads} threads but process affinity grants only "
+            f"{len(allowed)} CPUs: {allowed}")
+    chosen = allowed[:threads]
+    ranges = []
+    start = prev = chosen[0]
+    for cpu in chosen[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+            continue
+        ranges.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = cpu
+    ranges.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(ranges)
+
+
+def taskset_prefix(threads):
+    return f"taskset -c {affinity_spec(threads)}"
+
 # ── matrix registry ─────────────────────────────────────────────────────────────
 # Every entry DECLARES its kind. Two things can live in a .mtx file and they
 # define two different linear systems:

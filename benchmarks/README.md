@@ -533,6 +533,11 @@ python3 benchmarks/gpu_charts.py --root results/cells --out benchmarks/latest/fi
 PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out benchmarks/latest/figures
 ```
 
+`--threads T --repeat R --store DIR` make the same runner usable for isolated
+machine campaigns. CPU pinning is relative to the affinity granted to the runner
+(or the validated `APXCHOL_BENCH_CPUSET` override), so packed Slurm ranks use
+their own CPU ranges instead of all trying `0..T-1`.
+
 ParAC is charted as **two drivers on both devices** — graph (Laplacian) and
 physics (SDDM). The same self-contained binary runs both: on GPU via driver.cu /
 driver_physics.cu, on CPU via one extra argv (`is_graph=0`). **Each matrix runs

@@ -257,7 +257,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
     def _run(extra):
         envs = base_envs + extra
         envpfx = f"env {' '.join(envs)} " if envs else ""
-        inner=(f"{envpfx}taskset -c 0-{THREADS-1} {BIN[DEVICE]} {margs} --solver {solver} {cfg} "
+        inner=(f"{envpfx}{rc.taskset_prefix(THREADS)} {BIN[DEVICE]} {margs} --solver {solver} {cfg} "
                f"{gflag} {regflag} --threads {THREADS} --tol {TOL} --maxiter {mi} --repeat {REPS} --csv")
         # /usr/bin/time -f '%M': peak RSS (kbytes) -> stderr 'APXRSS <kb>'; the max over
         # all reps (setup-phase peak dominates). solve_rss_mb (held during solve) comes
@@ -334,7 +334,7 @@ def run_julia(mtx, solver, cls):
     Needs the Julia project instantiated once:
       julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
     """
-    cmd=(f"taskset -c 0-{THREADS-1} julia --project=benchmarks/julia "
+    cmd=(f"{rc.taskset_prefix(THREADS)} julia --project=benchmarks/julia "
          f"benchmarks/julia/bench_laplacians.jl --operator {mtx} --class {cls} "
          f"--solver {solver} --tol {TOL} --maxiter 500 --csv")
     try: cp = sh(cmd, timeout=TIMEOUT)
@@ -608,10 +608,16 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
         run_cmg(mid)
 
 def main():
-    global DEVICE, APX, JULIA, COMP
+    global DEVICE, APX, JULIA, COMP, THREADS, REPS, CELLS
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", choices=["cpu","gpu"], default="cpu",
                     help="cpu (build/) or gpu (build-cuda/, apxchol GPU-resident PCG)")
+    ap.add_argument("--threads", type=int, default=THREADS,
+                    help="threads and recorded cell thread count (default: 16)")
+    ap.add_argument("--repeat", type=int, default=REPS,
+                    help="repetitions inside each benchmark cell (default: 3)")
+    ap.add_argument("--store", default=CELLS,
+                    help="cell-store directory (default: results/cells)")
     ap.add_argument("--headline-only", action="store_true",
                     help="run only the headline AoS config and 2 indexed IS-selector "
                          "ablations (best eliminator for the comparison charts); skip the "
@@ -647,6 +653,14 @@ def main():
     a = ap.parse_args()
     global RUN_PARAC, PARAC_ONLY, NO_CAP, RUN_CMG
     DEVICE = a.device
+    if a.threads < 1 or a.repeat < 1:
+        ap.error("--threads and --repeat must be positive")
+    THREADS, REPS, CELLS = a.threads, a.repeat, os.path.abspath(a.store)
+    rc.CELLS = CELLS
+    parac_runner.THREADS = THREADS
+    parac_runner.REPS = REPS
+    cmg_matlab_runner.THREADS = THREADS
+    PROV["repeat"] = REPS
     fams = {f.strip() for f in a.families.split(",") if f.strip()}
     only = {x.strip() for x in a.only.split(",") if x.strip()}
     if a.no_julia: JULIA = []
