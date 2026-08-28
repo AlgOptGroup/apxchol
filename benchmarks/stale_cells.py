@@ -31,6 +31,18 @@ RCHOL = {"rchol", "rchol_par"}
 # nothing else in this file would notice.
 DUMP_CONSUMERS = {"parac", "parac_graph", "parac_physics", "cmg", "ac", "ac2"}
 
+# c915ad5 establishes the canonical timing boundary for every affected external
+# or in-process competitor. CPU AMGCL is intentionally absent: it already timed
+# its pin/conversion/constructor and returned host x; only its CUDA adapter was
+# undercounted. Hypre/RCHOL include their now-timed result retrieval/unpermutation.
+TIMING_REPAIRED = {
+    "amgcl_cuda",
+    "hypre_boomeramg", "hypre_boomeramg_gpu",
+    "rchol", "rchol_par",
+    "ac", "ac2", "cmg",
+    "parac", "parac_graph", "parac_physics",
+}
+
 # Matrices the deleted `is_laplacian_operator` ratio heuristic MISCLASSIFIED.
 # All four IPM normal equations carry a uniform +1e-6 diagonal shift, so their row
 # sums never vanish and only max|diag| moves; the ratio max|rowsum|/max|diag| slid
@@ -78,6 +90,9 @@ RULES = [
     ("2c95f53", "Laplacian-vs-SDDM was sniffed from a row-sum ratio; iter0020/0030/0040 "
                 "were pinned and their RHS mean-centred as if singular",
      lambda s, m, k: m in MISSNIFFED and s not in OWN_RHS),
+    ("c915ad5", "competitor timing omitted mandatory conversion/setup/result work or "
+                "included benchmark-only validation/cleanup",
+     lambda s, m, k: s in TIMING_REPAIRED),
 ]
 
 TIMEOUT_CAP_REASON = ("timeout outcome predates schema 2 and does not record the "
