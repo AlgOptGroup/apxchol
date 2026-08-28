@@ -145,6 +145,54 @@ inline bool residual_sparsify_worthwhile(
 // stays serial regardless of degree; a large independent set keeps the old
 // full-team policy. This is a resource-allocation rule, not a matrix heuristic.
 inline constexpr size_t kEliminationWorkPerThread = 4096;
+inline constexpr long double kIncrementalDegreeBreakEvenRatio = 10.0L;
+inline constexpr long double kIncrementalDegreeWorkRatio = 16.0L;
+// The exact endpoint reduction below is a four-pass byte radix for the
+// default 32-bit node_index.  Each worker contributes one 256-bin histogram
+// and participates in three barriers on every pass.  Each endpoint is also
+// scanned on every pass, so the pass count multiplies both the useful and
+// fixed work; the amortization floor is one endpoint per histogram bin.
+inline constexpr size_t kIncrementalDegreeRadixBins = 256;
+inline constexpr size_t kIncrementalDegreeMinWorkPerWorker =
+    kIncrementalDegreeRadixBins;
+
+inline bool incremental_degree_traffic_worthwhile(std::size_t active,
+                                                   double average_degree,
+                                                   std::size_t selected_work) {
+    if (selected_work == 0) return false;
+    const long double prune_work =
+        static_cast<long double>(active) * average_degree;
+    return prune_work >=
+        kIncrementalDegreeWorkRatio *
+            static_cast<long double>(selected_work);
+}
+
+inline bool incremental_degree_traffic_can_improve(std::size_t active,
+                                                    double average_degree,
+                                                    std::size_t selected_work) {
+    if (selected_work == 0) return false;
+    const long double prune_work =
+        static_cast<long double>(active) * average_degree;
+    return prune_work >=
+        kIncrementalDegreeBreakEvenRatio *
+            static_cast<long double>(selected_work);
+}
+
+inline bool incremental_degree_parallel_work_worthwhile(
+        std::size_t selected_work, std::size_t workers) {
+    return workers != 0 &&
+        selected_work / workers >= kIncrementalDegreeMinWorkPerWorker;
+}
+
+inline bool incremental_degree_worthwhile(std::size_t active,
+                                          double average_degree,
+                                          std::size_t selected_work,
+                                          std::size_t workers) {
+    return incremental_degree_traffic_worthwhile(
+               active, average_degree, selected_work) &&
+        incremental_degree_parallel_work_worthwhile(
+               selected_work, workers);
+}
 
 inline constexpr size_t elimination_round_team_size(
         size_t vertices, size_t adjacency_work, size_t vertex_threshold,
@@ -161,6 +209,52 @@ inline constexpr size_t elimination_round_team_size(
 inline constexpr int elimination_compute_chunk(
         size_t vertices, size_t vertex_threshold) {
     return vertices > vertex_threshold ? 64 : 1;
+}
+
+// Collective byte-radix over one exact-size endpoint stream. Every member of
+// the current OpenMP team must call this function. Fixed contiguous input
+// ranges and bucket-major/thread-major output ranges make the result
+// deterministic while avoiding both per-thread vector growth and atomics.
+inline void parallel_radix_sort_node_indices(
+        std::vector<node_index>& values,
+        std::vector<node_index>& scratch,
+        std::vector<std::array<std::size_t, 256>>& histograms,
+        int tid, int num_threads) {
+    const std::size_t begin = values.size() * static_cast<std::size_t>(tid) /
+                              static_cast<std::size_t>(num_threads);
+    const std::size_t end = values.size() * static_cast<std::size_t>(tid + 1) /
+                            static_cast<std::size_t>(num_threads);
+    node_index* source = values.data();
+    node_index* target = scratch.data();
+    for (unsigned byte = 0; byte < sizeof(node_index); ++byte) {
+        auto& local = histograms[static_cast<std::size_t>(tid)];
+        local.fill(0);
+        const unsigned shift = 8 * byte;
+        for (std::size_t i = begin; i < end; ++i)
+            ++local[(source[i] >> shift) & node_index{255}];
+#pragma omp barrier
+#pragma omp single
+        {
+            std::size_t prefix = 0;
+            for (std::size_t bucket = 0; bucket < 256; ++bucket) {
+                for (int worker = 0; worker < num_threads; ++worker) {
+                    auto& slot = histograms[static_cast<std::size_t>(worker)]
+                                           [bucket];
+                    const std::size_t next = prefix + slot;
+                    slot = prefix;
+                    prefix = next;
+                }
+            }
+        }
+#pragma omp barrier
+        for (std::size_t i = begin; i < end; ++i) {
+            const node_index value = source[i];
+            target[local[(value >> shift) & node_index{255}]++] = value;
+        }
+#pragma omp barrier
+        std::swap(source, target);
+    }
+    assert(source == values.data());
 }
 
 struct work_distribution {
@@ -314,12 +408,14 @@ void process_vertex(const Eliminator& elim,
                     std::uint64_t run_seed,
                     factor_col& col,
                     factorize_workspace::per_thread& ws,
-                    bool dedup_inline = false) {
+                    bool dedup_inline = false,
+                    std::span<node_index> degree_decrements = {}) {
     auto& nbrs       = ws.neighbors;
     auto& excess_out = ws.excess_buffer;
     col.entries = nullptr;
     col.entry_count = 0;
     nbrs.clear();
+    std::size_t decrement_pos = 0;
     double edge_deg = 0.0;
     if (dedup_inline) {
         if constexpr (is_vec_pool_incidence_v<Incidence>) {
@@ -342,6 +438,10 @@ void process_vertex(const Eliminator& elim,
             const std::uint32_t epoch = ws.dedup_hash_epoch;
             for (auto [u, w] : G.neighbors(v)) {
                 if (!G.is_active(u)) continue;
+                if (!degree_decrements.empty()) {
+                    assert(decrement_pos < degree_decrements.size());
+                    degree_decrements[decrement_pos++] = u;
+                }
                 size_t slot = (static_cast<std::uint64_t>(u) *
                                0x9e3779b97f4a7c15ULL) & mask;
                 while (ws.dedup_hash[slot].stamp == epoch &&
@@ -366,6 +466,10 @@ void process_vertex(const Eliminator& elim,
             touched.clear();
             for (auto [u, w] : G.neighbors(v)) {
                 if (!G.is_active(u)) continue;
+                if (!degree_decrements.empty()) {
+                    assert(decrement_pos < degree_decrements.size());
+                    degree_decrements[decrement_pos++] = u;
+                }
                 if (first[u] == npos) {
                     first[u] = static_cast<node_index>(nbrs.size());
                     touched.push_back(u);
@@ -384,6 +488,8 @@ void process_vertex(const Eliminator& elim,
         }
     }
 
+    assert(degree_decrements.empty() ||
+           decrement_pos == degree_decrements.size());
     if (nbrs.empty()) {
         double d = G.excess(v);
         col.vertex = v;
@@ -432,7 +538,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                    const factor_options& opts,
                                    checkpoint* cp = nullptr,
                                    bool capture_gpu_topology = false,
-                                   size_t work_hint = 0) {
+                                   size_t work_hint = 0,
+                                   std::vector<node_index>* live_degrees = nullptr) {
     const size_t n_verts = part.num_vertices();
     // n_verts > 0 guaranteed by the dispatcher; early-exit not needed here.
     // The final column array is reserved to n before any round. Grow it once
@@ -448,6 +555,38 @@ void eliminate_partition_singleton(const Eliminator& elim,
         ws.gpu_topology_updates.clear();
         ws.gpu_topology_batches.clear();
     }
+    if (live_degrees) {
+        auto& offsets = ws.degree_decrement_offsets;
+        offsets.resize(n_verts + 1);
+        offsets[0] = 0;
+        for (std::size_t k = 0; k < n_verts; ++k) {
+            const std::size_t degree = (*live_degrees)[part.data[k]];
+            if constexpr (is_vec_pool_incidence_v<Incidence>) {
+                const std::size_t physical = G.adj_count(part.data[k]);
+                assert(physical >= degree);
+                ws.degree_retired_dead_incidence += physical - degree;
+            }
+            if (offsets[k] > std::numeric_limits<std::size_t>::max() - degree)
+                throw std::overflow_error("incremental degree stream overflow");
+            offsets[k + 1] = offsets[k] + degree;
+        }
+        const std::size_t total = offsets.back();
+        if (ws.degree_decrements.capacity() < total) {
+            std::vector<node_index> exact(total);
+            ws.degree_decrements.swap(exact);
+        } else {
+            ws.degree_decrements.resize(total);
+        }
+        ws.degree_removed_incidence = total;
+        assert(work_hint == 0 || total == work_hint);
+    }
+    auto decrement_slice = [&](std::size_t k) -> std::span<node_index> {
+        if (!live_degrees) return {};
+        const auto& offsets = ws.degree_decrement_offsets;
+        const std::size_t count = offsets[k + 1] - offsets[k];
+        if (count == 0) return {};
+        return {ws.degree_decrements.data() + offsets[k], count};
+    };
 
     #ifdef _OPENMP
     // Size a small round's team by both independent pivots and selected live
@@ -491,7 +630,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 for (size_t k = 0; k < n_verts; ++k)
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
-                                   /*dedup_inline=*/true);
+                                   /*dedup_inline=*/true,
+                                   {});
                 // implicit barrier — edge_buffers populated before prefix-sum
 
                 // Single thread does prefix-sum + pool reservation.
@@ -558,6 +698,17 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 ws.incoming.assign(static_cast<size_t>(G.n()), 0);
             std::vector<node_index>& incoming = ws.incoming;
             edge_index e_start = 0;
+            if (live_degrees) {
+                const std::size_t total = ws.degree_decrements.size();
+                if (ws.degree_decrement_scratch.capacity() < total) {
+                    std::vector<node_index> exact(total);
+                    ws.degree_decrement_scratch.swap(exact);
+                } else {
+                    ws.degree_decrement_scratch.resize(total);
+                }
+                ws.degree_decrement_histograms.resize(
+                    static_cast<std::size_t>(num_threads));
+            }
 
             #pragma omp parallel num_threads(num_threads)
             {
@@ -570,8 +721,51 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 for (size_t k = 0; k < n_verts; ++k)
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
-                                   /*dedup_inline=*/true);
+                                   /*dedup_inline=*/true,
+                                   decrement_slice(k));
                 // implicit barrier — edge_buffers populated before pre-pass
+
+                if (live_degrees) {
+                    auto& decrements = ws.degree_decrements;
+                    const std::size_t begin = decrements.size() *
+                        static_cast<std::size_t>(tid) /
+                        static_cast<std::size_t>(num_threads);
+                    const std::size_t end = decrements.size() *
+                        static_cast<std::size_t>(tid + 1) /
+                        static_cast<std::size_t>(num_threads);
+#ifdef _OPENMP
+                    const double decrement_start = omp_get_wtime();
+#endif
+                    parallel_radix_sort_node_indices(
+                        decrements, ws.degree_decrement_scratch,
+                        ws.degree_decrement_histograms, tid, num_threads);
+                    std::size_t unique = 0;
+                    std::size_t i = begin;
+                    if (i > 0 && i < end) {
+                        const node_index continuation = decrements[i - 1];
+                        while (i < end && decrements[i] == continuation) ++i;
+                    }
+                    while (i < end) {
+                        const node_index u = decrements[i];
+                        std::size_t j = i + 1;
+                        while (j < decrements.size() && decrements[j] == u) ++j;
+                        assert(j - i <=
+                               std::numeric_limits<node_index>::max());
+                        const node_index delta = static_cast<node_index>(j - i);
+                        const node_index before = std::exchange(
+                            (*live_degrees)[u],
+                            (*live_degrees)[u] - delta);
+                        assert(before >= delta);
+                        (void)before;
+                        ++unique;
+                        i = j;
+                    }
+                    ws.threads[tid].degree_decrement_unique = unique;
+#ifdef _OPENMP
+                    ws.threads[tid].degree_decrement_ms =
+                        1000.0 * (omp_get_wtime() - decrement_start);
+#endif
+                }
 
                 // Parallel atomic histogram of incoming edges per vertex.
                 // Each thread sweeps its own edge_buffer and atomic-increments
@@ -619,6 +813,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     for (int t = 0; t < num_threads; ++t)
                         e_offsets[t + 1] = e_offsets[t] + ws.threads[t].edge_buffer.size();
                     const size_t N_edges = e_offsets[num_threads];
+                    if (live_degrees) ws.degree_fill_edges = N_edges;
                     if (N_edges > 0) {
                         if constexpr (graph<Incidence>::stores_directed_incidence)
                             G.record_edges_added(static_cast<edge_index>(N_edges));
@@ -688,6 +883,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     #pragma omp for schedule(static) nowait
                     for (size_t i = 0; i < ws.touched_concat.size(); ++i) {
                         const node_index v = ws.touched_concat[i];
+                        if (live_degrees)
+                            (*live_degrees)[v] += incoming[v];
                         G.adj_commit_reserved_directed(v, incoming[v]);
                         incoming[v] = 0;
                     }
@@ -700,8 +897,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         incoming[ws.touched_concat[i]] = 0;
                 }
 
-                // Deactivate partition vertices in parallel (disjoint).
-                #pragma omp for schedule(static) nowait
+#pragma omp for schedule(static) nowait
                 for (size_t k = 0; k < n_verts; ++k)
                     G.set_inactive_unchecked(part.data[k]);
             }
@@ -738,7 +934,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 for (size_t k = 0; k < n_verts; ++k)
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
-                                   /*dedup_inline=*/true);
+                                   /*dedup_inline=*/true,
+                                   {});
             }
             if (cp) { (*cp)("merge_is"); (*cp)("compute"); }
 
@@ -759,11 +956,23 @@ void eliminate_partition_singleton(const Eliminator& elim,
             wt.edge_buffer.clear();
             wt.excess_buffer.clear();
             process_vertex(elim, G, part.data[k], opts.seed, output_col(k), wt,
-                           /*dedup_inline=*/true);
+                           /*dedup_inline=*/true,
+                           decrement_slice(k));
+            if (live_degrees) {
+                for (node_index u : decrement_slice(k)) {
+                    assert((*live_degrees)[u] > 0);
+                    --(*live_degrees)[u];
+                }
+            }
             for (auto [u, v, w] : wt.edge_buffer) {
                 if (capture_gpu_topology)
                     ws.gpu_topology_updates.push_back({u, v});
                 G.add_edge(u, v, w);
+                if (live_degrees) {
+                    ++ws.degree_fill_edges;
+                    ++(*live_degrees)[u];
+                    ++(*live_degrees)[v];
+                }
             }
             for (auto [v, delta] : wt.excess_buffer)
                 G.excess(v) += delta;
@@ -786,7 +995,8 @@ void eliminate_partition(const Eliminator& elim,
                          const factor_options& opts,
                          checkpoint* cp = nullptr,
                          bool capture_gpu_topology = false,
-                         size_t work_hint = 0) {
+                         size_t work_hint = 0,
+                         std::vector<node_index>* live_degrees = nullptr) {
     if (cp) { cp->descend("eliminate"); cp->tick(); }
     const size_t n_verts = part.num_vertices();
     // Diagnostic only: work_hint is the selected vertices' live-degree sum,
@@ -803,7 +1013,21 @@ void eliminate_partition(const Eliminator& elim,
     }
     const size_t factor_base = factor_cols.size();
     eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp,
-                                  capture_gpu_topology, work_hint);
+                                  capture_gpu_topology, work_hint, live_degrees);
+    if (live_degrees && std::getenv("APXCHOL_INCREMENTAL_DEGREE_TRACE")) {
+        const std::size_t raw = ws.degree_decrements.size();
+        std::size_t unique = 0;
+        double maximum_ms = 0.0;
+        for (const auto& thread : ws.threads) {
+            unique += thread.degree_decrement_unique;
+            maximum_ms = std::max(maximum_ms, thread.degree_decrement_ms);
+        }
+        std::fprintf(stderr,
+            "[incremental-degree] round=%llu raw=%zu "
+            "unique_worker_endpoints=%zu max_reduce_ms=%.6f\n",
+            static_cast<unsigned long long>(ws.round_index), raw, unique,
+            maximum_ms);
+    }
     if (trace_round) {
         std::vector<size_t> pivot_work;
         pivot_work.reserve(n_verts);
@@ -1085,6 +1309,31 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<std::array<size_t, 256>> pre_histograms;
     std::vector<size_t> pre_filter_offsets;
     std::vector<node_index> live_degrees;   // vertex-indexed, for ctx.degrees
+    // Exact incremental degrees for block-greedy on the directed AoS pool.
+    // The first prepass establishes the cache. AUTO either classifies the run
+    // as a permanent no-op or maintains the cache through sparse-reduced
+    // decrements and the existing fill-edge histogram. `=0` is the rollback;
+    // `=1` forces maintenance for diagnostics.
+    const char* incremental_degree_value =
+        std::getenv("APXCHOL_INCREMENTAL_DEGREE_SPARSE");
+    const bool incremental_degree_disabled = incremental_degree_value &&
+        *incremental_degree_value == '0';
+    const bool incremental_degree_forced = incremental_degree_value &&
+        *incremental_degree_value && !incremental_degree_disabled &&
+        std::strcmp(incremental_degree_value, "auto") != 0;
+    const bool incremental_degree_capable =
+        std::is_same_v<Incidence, directed_vec_pool_incidence> &&
+        std::is_same_v<Partitioner, block_greedy_partitioner> &&
+        !incremental_degree_disabled;
+    const bool incremental_degree_auto = incremental_degree_capable &&
+        !incremental_degree_forced;
+    bool incremental_degree_active =
+        incremental_degree_capable && !incremental_degree_auto;
+    bool incremental_degree_ready = false;
+    bool incremental_degree_auto_decided = !incremental_degree_auto;
+    std::size_t incremental_live_incidence = 0;
+    std::size_t incremental_dead_incidence = 0;
+    constexpr double incremental_refresh_ratio = 0.10;
 
     // Shared round front-end: prepass (when the partitioner's trait asks for
     // it) + find_partition + finalize, with uniform profiling labels.
@@ -1145,8 +1394,51 @@ factorization factorize_impl(const Eliminator& elim,
         };
         if (cp) { cp->descend("find_partition"); cp->tick(); }
         if constexpr (partitioner_degree_prepass_v<P>) {
-            const double avg_deg =
-                prune_and_degrees(g, act, pre_degrees, opts.omp_threshold);
+            constexpr bool incremental_for_this_partitioner =
+                std::is_same_v<P, block_greedy_partitioner> &&
+                std::is_same_v<P, Partitioner>;
+            double avg_deg = 0.0;
+            const bool refresh_incremental =
+                incremental_for_this_partitioner &&
+                incremental_degree_active && incremental_degree_ready &&
+                incremental_dead_incidence > 0 &&
+                static_cast<long double>(incremental_dead_incidence) >=
+                    incremental_refresh_ratio *
+                    static_cast<long double>(incremental_live_incidence);
+            if (incremental_for_this_partitioner &&
+                incremental_degree_active && incremental_degree_ready &&
+                !refresh_incremental) {
+                pre_degrees.resize(act.size());
+                double total_degree = 0.0;
+#pragma omp parallel for reduction(+:total_degree) schedule(static) \
+    if(act.size() > opts.omp_threshold)
+                for (std::size_t i = 0; i < act.size(); ++i) {
+                    pre_degrees[i] = live_degrees[act[i]];
+                    total_degree += pre_degrees[i];
+                }
+                avg_deg = total_degree / static_cast<double>(act.size());
+            } else {
+                if (refresh_incremental &&
+                    std::getenv("APXCHOL_INCREMENTAL_DEGREE_TRACE"))
+                    std::fprintf(stderr,
+                        "[incremental-refresh] round=%llu dead=%zu live=%zu "
+                        "ratio=%.6f threshold=%.6f\n",
+                        static_cast<unsigned long long>(ws.round_index),
+                        incremental_dead_incidence,
+                        incremental_live_incidence,
+                        incremental_live_incidence == 0 ? 0.0 :
+                            static_cast<double>(incremental_dead_incidence) /
+                            static_cast<double>(incremental_live_incidence),
+                        incremental_refresh_ratio);
+                avg_deg =
+                    prune_and_degrees(g, act, pre_degrees, opts.omp_threshold);
+                if (incremental_for_this_partitioner &&
+                    incremental_degree_capable) {
+                    incremental_live_incidence = static_cast<std::size_t>(
+                        std::llround(avg_deg * static_cast<double>(act.size())));
+                    incremental_dead_incidence = 0;
+                }
+            }
             const double q = opts.partition.degree_quantile;
             const double thr = q > 0.0 && q < 1.0
                                    && act.size() > opts.omp_threshold
@@ -1172,6 +1464,9 @@ factorization factorize_impl(const Eliminator& elim,
             last_candidate_count = eligible_count;
             last_avg_degree = avg_deg;
             last_candidates_host_resident = true;
+            if (incremental_for_this_partitioner &&
+                incremental_degree_capable)
+                incremental_degree_ready = true;
             pctx.degrees = live_degrees;
             if (cp) (*cp)("prune");
             p.find_partition(g, std::span<const node_index>(
@@ -1305,9 +1600,77 @@ factorization factorize_impl(const Eliminator& elim,
 #else
             false;
 #endif
+        const long double prune_work =
+            static_cast<long double>(active.size()) * last_avg_degree;
+        const long double prune_to_update = elimination_work_hint == 0
+            ? 0.0L : prune_work /
+                static_cast<long double>(elimination_work_hint);
+        const size_t incremental_workers = detail::elimination_round_team_size(
+            part.num_vertices(), elimination_work_hint, opts.omp_threshold,
+            static_cast<size_t>(num_threads_factorize));
+        // Every host-resident ordinary prepass is an exact decision sample (a
+        // GPU frontend may own earlier rounds). Across the nine-graph screen
+        // the measured
+        // crossover lies near 10 adjacency visits per pivot update; require 16
+        // for margin. A sample below the measured break-even ratio 10 is a
+        // permanent OFF decision. Ratios in [10,16), and traffic-favourable
+        // rounds that are merely too small for the radix collective, remain
+        // pending while the residual evolves. Once both activation gates pass,
+        // updates keep the cache exact and the choice is permanently ON for
+        // the rest of the main-selector phase.
+        if (incremental_degree_auto && !incremental_degree_auto_decided &&
+            incremental_degree_ready && last_candidates_host_resident &&
+            std::is_same_v<Partitioner, block_greedy_partitioner>) {
+            const bool traffic_worthwhile =
+                detail::incremental_degree_traffic_worthwhile(
+                    active.size(), last_avg_degree, elimination_work_hint);
+            const bool traffic_can_improve =
+                detail::incremental_degree_traffic_can_improve(
+                    active.size(), last_avg_degree, elimination_work_hint);
+            if (!traffic_can_improve) {
+                incremental_degree_active = false;
+                incremental_degree_auto_decided = true;
+            } else if (traffic_worthwhile &&
+                       detail::incremental_degree_parallel_work_worthwhile(
+                           elimination_work_hint, incremental_workers)) {
+                incremental_degree_active = true;
+                incremental_degree_auto_decided = true;
+            }
+        }
+        if (incremental_degree_capable &&
+            std::getenv("APXCHOL_INCREMENTAL_DEGREE_TRACE")) {
+            std::fprintf(stderr,
+                "[incremental-gate] round=%llu active=%zu candidates=%zu "
+                "selected=%zu avg_degree=%.6f selected_work=%zu "
+                "workers=%zu work_per_worker=%zu "
+                "prune_to_update=%.6Lf active=%d decided=%d\n",
+                static_cast<unsigned long long>(ws.round_index), active.size(),
+                last_candidate_count, part.num_vertices(), last_avg_degree,
+                elimination_work_hint, incremental_workers,
+                incremental_workers == 0
+                    ? 0 : elimination_work_hint / incremental_workers,
+                prune_to_update,
+                incremental_degree_active ? 1 : 0,
+                incremental_degree_auto_decided ? 1 : 0);
+        }
         detail::eliminate_partition(elim, work, part, factor_cols, ws, opts, cp,
                                     capture_gpu_topology,
-                                    elimination_work_hint);
+                                    elimination_work_hint,
+                                    incremental_degree_active &&
+                                            incremental_degree_ready
+                                        ? &live_degrees : nullptr);
+        if (incremental_degree_active && incremental_degree_ready) {
+            const std::size_t removed = ws.degree_removed_incidence;
+            const std::size_t retired_dead =
+                ws.degree_retired_dead_incidence;
+            const std::size_t fill = ws.degree_fill_edges;
+            assert(incremental_live_incidence >= 2 * removed);
+            assert(incremental_dead_incidence >= retired_dead);
+            incremental_live_incidence -= 2 * removed;
+            incremental_live_incidence += 2 * fill;
+            incremental_dead_incidence -= retired_dead;
+            incremental_dead_incidence += removed;
+        }
 #if defined(APXCHOL_USE_CUDA)
         if (gpu_frontend) {
             gpu_frontend->advance(part.data, ws.gpu_topology_updates,

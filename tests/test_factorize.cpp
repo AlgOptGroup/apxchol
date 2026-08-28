@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <random>
 #include <span>
 #include <string>
 #include <Eigen/Core>
@@ -46,6 +47,30 @@ TEST(SetupDiagnostics, WorkDistributionExposesConcentrationAndIdleWorkers) {
     EXPECT_EQ(singleton.total, 10u);
     EXPECT_EQ(singleton.maximum, 10u);
     EXPECT_DOUBLE_EQ(singleton.lpt_efficiency, 0.25);
+}
+
+TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
+    std::mt19937_64 rng(1234567);
+    std::vector<apxchol::node_index> values(20000);
+    for (auto& value : values)
+        value = static_cast<apxchol::node_index>(rng());
+    values[0] = 0;
+    values[1] = std::numeric_limits<apxchol::node_index>::max();
+    values[2] = values[3] = 17;
+    auto expected = values;
+    std::sort(expected.begin(), expected.end());
+#ifdef _OPENMP
+    std::shuffle(values.begin(), values.end(), rng);
+    std::vector<apxchol::node_index> scratch(values.size());
+    std::vector<std::array<std::size_t, 256>> histograms(8);
+#pragma omp parallel num_threads(8)
+    apxchol::detail::parallel_radix_sort_node_indices(
+        values, scratch, histograms, omp_get_thread_num(),
+        omp_get_num_threads());
+    EXPECT_EQ(values, expected);
+#else
+    GTEST_SKIP() << "parallel build required for the collective radix path";
+#endif
 }
 
 TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
@@ -351,6 +376,26 @@ struct scoped_threads {
     }
 };
 
+struct scoped_environment {
+    std::string name;
+    std::string saved;
+    bool had_value = false;
+
+    scoped_environment(const char* variable, const char* value)
+        : name(variable) {
+        if (const char* old = std::getenv(variable)) {
+            saved = old;
+            had_value = true;
+        }
+        if (value) setenv(variable, value, 1);
+        else unsetenv(variable);
+    }
+    ~scoped_environment() {
+        if (had_value) setenv(name.c_str(), saved.c_str(), 1);
+        else unsetenv(name.c_str());
+    }
+};
+
 // Byte-for-byte equality of two factors: same column pointers, same row
 // indices, same values. Structure AND values, not a norm.
 void expect_same_factor(const apxchol::factorization& a,
@@ -415,6 +460,100 @@ TEST(VecPoolAos, PreassignedOffsetsAreReproducibleInParallel) {
     expect_same_factor(baseline, repeated,
                        "AoS preassigned endpoint offsets at T=16");
 #endif
+}
+
+TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
+    const scoped_threads team(8);
+    constexpr int clique_size = 32;
+    // 4096 candidates exceed the RTX 4090's 3648 resident-region handoff
+    // capacity, so the CUDA build's forced block frontend owns real early
+    // rounds before handing the graph back to this host-cache path.
+    constexpr int clique_count = 128;
+    constexpr int n = clique_size * clique_count;
+    std::vector<Eigen::Triplet<double>> triplets;
+    triplets.reserve(clique_count * clique_size * clique_size);
+    for (int c = 0; c < clique_count; ++c) {
+        const int first = c * clique_size;
+        for (int u = 0; u < clique_size; ++u) {
+            triplets.emplace_back(first + u, first + u, clique_size - 1.0);
+            for (int v = 0; v < clique_size; ++v)
+                if (u != v) triplets.emplace_back(first + u, first + v, -1.0);
+        }
+    }
+    Eigen::SparseMatrix<double> L(n, n);
+    L.setFromTriplets(triplets.begin(), triplets.end());
+    L.makeCompressed();
+
+    apxchol::factor_options opts;
+    opts.seed = 19;
+    opts.omp_threshold = 16;
+    opts.min_is_fraction = 0.0;
+    auto run = [&](const char* mode) {
+        const scoped_environment gate(
+            "APXCHOL_INCREMENTAL_DEGREE_SPARSE", mode);
+        return apxchol::factorize(
+            L, apxchol::graph_storage::vec_pool_aos, opts);
+    };
+    const auto baseline = run("0");
+    const auto automatic = run(nullptr);
+    const auto named_auto = run("auto");
+    ASSERT_FALSE(baseline.rounds.empty());
+    ASSERT_EQ(baseline.rounds.front().is_size,
+              static_cast<std::size_t>(clique_count));
+    EXPECT_TRUE(apxchol::detail::incremental_degree_worthwhile(
+        n, baseline.rounds.front().avg_deg,
+        clique_count * (clique_size - 1), 8));
+    expect_same_factor(baseline, automatic,
+                       "full prune vs default incremental degrees");
+    expect_same_factor(automatic, named_auto,
+                       "default vs explicitly named auto degrees");
+}
+
+TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
+    const scoped_threads team(8);
+    constexpr int small_size = 32;
+    constexpr int small_count = 72;
+    constexpr int residual_size = 100;
+    constexpr int n = small_size * small_count + residual_size;
+    std::vector<Eigen::Triplet<double>> triplets;
+    auto add_clique = [&](int first, int count) {
+        for (int u = 0; u < count; ++u) {
+            triplets.emplace_back(first + u, first + u, count - 1.0);
+            for (int v = 0; v < count; ++v)
+                if (u != v)
+                    triplets.emplace_back(first + u, first + v, -1.0);
+        }
+    };
+    for (int c = 0; c < small_count; ++c)
+        add_clique(c * small_size, small_size);
+    add_clique(small_count * small_size, residual_size);
+    Eigen::SparseMatrix<double> L(n, n);
+    L.setFromTriplets(triplets.begin(), triplets.end());
+    L.makeCompressed();
+
+    apxchol::factor_options opts;
+    opts.seed = 19;
+    opts.omp_threshold = 16;
+    opts.parallel_residual_threshold = 5;
+    auto run = [&](const char* mode) {
+        const scoped_environment gate(
+            "APXCHOL_INCREMENTAL_DEGREE_SPARSE", mode);
+        return apxchol::factorize(
+            L, apxchol::graph_storage::vec_pool_aos, opts);
+    };
+    const auto baseline = run("0");
+    const auto automatic = run(nullptr);
+    ASSERT_FALSE(baseline.rounds.empty());
+    EXPECT_TRUE(apxchol::detail::incremental_degree_worthwhile(
+        n, baseline.rounds.front().avg_deg,
+        small_count * (small_size - 1), 8))
+        << "fixture did not activate incremental degree maintenance";
+    std::size_t rounded = 0;
+    for (const auto& round : baseline.rounds) rounded += round.is_size;
+    EXPECT_GE(rounded, static_cast<std::size_t>(n - 5))
+        << "fixture did not exercise the BK residual loop";
+    expect_same_factor(baseline, automatic,
+                       "incremental main selector followed by BK residual");
 }
 
 TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
@@ -1102,6 +1241,47 @@ TEST(EliminationTeamSizing, UsesDegreeWorkAndProtectsSerialExecution) {
     EXPECT_EQ(elimination_round_team_size(500, max, 2000, 1), 1u);
     EXPECT_EQ(elimination_round_team_size(3000, 1, 2000, 16), 16u);
     EXPECT_EQ(elimination_round_team_size(70, max, 2000, 72), 70u);
+}
+
+TEST(IncrementalDegreeGate, RequiresTrafficSavingsAndRadixWorkPerWorker) {
+    using apxchol::detail::incremental_degree_worthwhile;
+    using apxchol::detail::incremental_degree_parallel_work_worthwhile;
+    using apxchol::detail::incremental_degree_traffic_can_improve;
+    using apxchol::detail::incremental_degree_traffic_worthwhile;
+    constexpr size_t min_work =
+        apxchol::detail::kIncrementalDegreeMinWorkPerWorker;
+
+    // A large traffic ratio is not enough when the collective radix has less
+    // useful input per worker than one 256-bin histogram pass.
+    EXPECT_FALSE(incremental_degree_worthwhile(
+        65536, 74.953339, 6321, 36));
+    EXPECT_FALSE(incremental_degree_worthwhile(
+        65536, 74.953339, 6321, 72));
+    EXPECT_TRUE(incremental_degree_traffic_worthwhile(
+        65536, 74.953339, 6321));
+    EXPECT_FALSE(incremental_degree_parallel_work_worthwhile(6321, 36));
+    EXPECT_FALSE(incremental_degree_parallel_work_worthwhile(6321, 72));
+    EXPECT_FALSE(incremental_degree_worthwhile(
+        100000, 100.0, min_work * 8 - 1, 8));
+
+    EXPECT_TRUE(incremental_degree_worthwhile(
+        100000, 100.0, min_work * 8, 8));
+    EXPECT_TRUE(incremental_degree_worthwhile(
+        540486, 56.414890, 214699, 72));
+
+    // Sufficient parallel work still does not override the traffic gate.
+    EXPECT_FALSE(incremental_degree_worthwhile(
+        299067, 6.538174, 128864, 72));
+    EXPECT_TRUE(incremental_degree_traffic_can_improve(
+        299067, 6.538174, 128864));
+    EXPECT_FALSE(incremental_degree_traffic_worthwhile(
+        299067, 6.538174, 128864));
+    EXPECT_FALSE(incremental_degree_traffic_can_improve(
+        1134890, 5.265046, 602539));
+    EXPECT_FALSE(incremental_degree_traffic_can_improve(
+        524288, 14.005871, 789977));
+    EXPECT_FALSE(incremental_degree_worthwhile(
+        100000, 100.0, min_work, 0));
 }
 
 TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {

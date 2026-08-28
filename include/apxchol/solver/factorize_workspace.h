@@ -8,6 +8,7 @@
 
 #include "apxchol/types.h"
 #include "apxchol/solver/elimination/elimination.h"
+#include <array>
 #include <limits>
 #include <memory>
 #include <memory_resource>
@@ -62,12 +63,28 @@ struct factorize_workspace {
         // endpoint slots, interleaved {u_offset,v_offset} per deferred edge.
         std::vector<node_index> endpoint_offsets;
 
+        // Per-worker diagnostics for the research incremental-degree path.
+        std::size_t degree_decrement_unique = 0;
+        double degree_decrement_ms = 0.0;
+
         // Exact-size factor-column allocations share one monotonic resource.
         // The owning pointer is moved out before the rest of the workspace is
         // released, keeping the allocations alive through CSC assembly.
         std::unique_ptr<std::pmr::monotonic_buffer_resource> factor_entries;
     };
     std::vector<per_thread> threads;
+
+    // Exact-size endpoint stream for incremental degree maintenance. Selected
+    // pivots own disjoint prefix-summed slices, so dynamic elimination can fill
+    // this array without atomics or append-vector over-allocation. The second
+    // exact-size array is the global parallel-radix destination.
+    std::vector<node_index> degree_decrements;
+    std::vector<node_index> degree_decrement_scratch;
+    std::vector<std::size_t> degree_decrement_offsets;
+    std::vector<std::array<std::size_t, 256>> degree_decrement_histograms;
+    std::size_t degree_removed_incidence = 0;
+    std::size_t degree_retired_dead_incidence = 0;
+    std::size_t degree_fill_edges = 0;
 
     /// Scratch for the vec_pool bulk-reserve path: concatenated per-thread
     /// touched_buffers, reused across rounds.
@@ -95,10 +112,16 @@ struct factorize_workspace {
     void reset_for_round() {
         gpu_topology_updates.clear();
         gpu_topology_batches.clear();
+        degree_decrements.clear();
+        degree_removed_incidence = 0;
+        degree_retired_dead_incidence = 0;
+        degree_fill_edges = 0;
         for (auto& t : threads) {
             t.edge_buffer.clear();
             t.excess_buffer.clear();
             t.dedup_touched.clear();
+            t.degree_decrement_unique = 0;
+            t.degree_decrement_ms = 0.0;
         }
     }
 };
