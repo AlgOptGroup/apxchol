@@ -52,6 +52,7 @@ inline double now_s() {
 // On exit, populates *r (already has solver_name + graph_name + n/nnz set).
 extern "C" void run_amgcl_cuda_impl(
     BenchResult* r,
+    double                host_prep_seconds,
     int m,
     const std::ptrdiff_t* row_ptr,   // size m+1
     const std::ptrdiff_t* col_idx,   // size row_ptr[m]
@@ -68,6 +69,13 @@ extern "C" void run_amgcl_cuda_impl(
     int                   relax_coarse)
 {
     using Backend = amgcl::backend::cuda<double>;
+
+    // The C++ wrapper has already spent host_prep_seconds grounding the
+    // Laplacian and materializing the solve/residual CSR arrays.  Keep the
+    // remaining CUDA-backend preparation in the same setup interval.  This
+    // must start before handle creation and before the module-local copies
+    // below; neither is shared benchmark input preparation.
+    double t0 = now_s();
 
     Backend::params bprm;
     cusparseHandle_t cusparse_handle = nullptr;
@@ -97,15 +105,16 @@ extern "C" void run_amgcl_cuda_impl(
     std::vector<double>          val(vals,    vals    + row_ptr[m]);
     auto A = std::tie(m, ptr, col, val);
 
-    double t0 = now_s();
     Solver solve(A, prm, bprm);
-    r->setup_time = now_s() - t0;
+    r->setup_time = host_prep_seconds + (now_s() - t0);
 
-    // Device vectors for RHS and solution.
+    // Device vectors are per-RHS work, so charge their allocation/upload to
+    // solve.  They were previously outside both setup_time and solve_time,
+    // making total_time smaller than the work actually performed.
+    t0 = now_s();
     thrust::device_vector<double> d_b(bsub, bsub + m);
     thrust::device_vector<double> d_x(m, 0.0);
 
-    t0 = now_s();
     auto [iters, error] = solve(d_b, d_x);
     cudaDeviceSynchronize();
     r->solve_time = now_s() - t0;

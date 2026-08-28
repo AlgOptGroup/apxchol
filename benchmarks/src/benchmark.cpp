@@ -337,6 +337,7 @@ namespace Eigen { namespace internal {
 #if defined(HAVE_AMGCL) && defined(APXCHOL_USE_CUDA)
 extern "C" void run_amgcl_cuda_impl(
     BenchResult* r,
+    double                host_prep_seconds,
     int m,
     const std::ptrdiff_t* row_ptr,
     const std::ptrdiff_t* col_idx,
@@ -1586,10 +1587,11 @@ static BenchResult run_amgcl(
     // AMGCL_PRINT=1 -> dump the SA hierarchy for the BoomerAMG-vs-AMGCL comparison.
     if (std::getenv("AMGCL_PRINT")) std::cerr << "[amgcl-hierarchy]\n" << solve.precond() << std::endl;
 
+    t.start();
+    // Per-RHS conversion/workspace is solve work.  Keep it inside total_s just
+    // as the CUDA adapter does for its device vectors.
     std::vector<double> rhs(rhs_v.data(), rhs_v.data() + n);
     std::vector<double> sol(n, 0.0);
-
-    t.start();
     auto [iters, error] = solve(rhs, sol); (void)error;
     r.solve_time = t.elapsed();
     r.total_time = r.setup_time + r.solve_time;
@@ -1620,6 +1622,11 @@ static BenchResult run_amgcl_cuda(
     r.n = static_cast<int>(L.rows());
     r.nnz = static_cast<int>(L.nonZeros());
     const int n = r.n;
+
+    // Match CPU AMGCL and both Hypre runners: solver-specific grounding and
+    // format conversion are setup, not free benchmark input preparation.
+    Timer setup_prep;
+    setup_prep.start();
 
     // Mirror the CPU run_amgcl 2-axis. ground = pin: Dirichlet-pin -> SPD -> AMGCL's
     // DEFAULT direct coarse solve. ground = coarse: keep the singular operator + relax
@@ -1656,8 +1663,9 @@ static BenchResult run_amgcl_cuda(
     for (std::ptrdiff_t p = 0; p < snnz; ++p) { sub_col[p]=Asolve.innerIndexPtr()[p]; sub_val[p]=Asolve.valuePtr()[p]; }
     for (std::ptrdiff_t p = 0; p < fnnz; ++p) { full_col[p]=Lrm.innerIndexPtr()[p];    full_val[p]=Lrm.valuePtr()[p]; }
 
+    const double host_prep_seconds = setup_prep.elapsed();
     run_amgcl_cuda_impl(
-        &r, m,
+        &r, host_prep_seconds, m,
         sub_row.data(), sub_col.data(), sub_val.data(),
         rhs_v.data(),
         tol, maxiter,

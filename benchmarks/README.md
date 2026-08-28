@@ -319,6 +319,11 @@ the metric rather than storing a misleading value.
 - **Reps**: 3, median — except the **CMG** cells, which are single-shot (`repeat=1`,
   one MATLAB run per matrix). **Threads**: 16 physical cores, pinned, run without contention.
 - **Metrics**: setup_s, solve_s, total_s, PCG iterations, rel_res, µs/nnz.
+  `setup_s` includes every solver-specific transformation from the shared Eigen
+  operator (grounding, format conversion and host/device upload) as well as
+  preconditioner construction. `solve_s` includes per-RHS workspace allocation,
+  upload and the iterative solve. Common input parsing/operator assembly and the
+  harness's post-solve true-residual grading are outside `total_s` for every row.
 - **Crash artifacts**: the shared shell harness disables core dumps for every
   solver by default; a third-party crash is still recorded in its cell and logs,
   but cannot leave a factor-sized core in the campaign directory. Set
