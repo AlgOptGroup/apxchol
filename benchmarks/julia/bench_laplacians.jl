@@ -314,8 +314,10 @@ function run_approxchol_operator(A, b, graph_name, tol, maxiter, is_lap; variant
         # Singular Laplacian: recover the adjacency it is the Laplacian OF
         # (A_adj = Diag(diag(A)) - A, exact, no reinterpretation) and use
         # approxchol_lap, which is Laplacian-native.
-        adj = sparse(Diagonal(diag(A))) - A
         t_setup = @elapsed begin
+            # This operator-to-adjacency conversion is required by Laplacians.jl's
+            # public approxchol_lap entry point, so it belongs to adapter setup.
+            adj = sparse(Diagonal(diag(A))) - A
             solver = approxchol_lap(adj; tol=tol, maxits=maxiter, params=params, pcgIts=pcg_its)
         end
     else

@@ -14,7 +14,7 @@
 #include <thrust/tuple.h>
 
 #include <amgcl/backend/cuda.hpp>
-#include <amgcl/adapter/crs_tuple.hpp>
+#include <amgcl/adapter/zero_copy.hpp>
 #include <amgcl/make_solver.hpp>
 #include <amgcl/amg.hpp>
 #include <amgcl/coarsening/smoothed_aggregation.hpp>
@@ -33,22 +33,16 @@ inline double now_s() {
 }
 }
 
-// Called from benchmark.cpp. Caller passes CSR-style arrays for L11 (the
-// pinned (n-1) x (n-1) submatrix), the RHS vector bsub, and the original
-// (full-size) data needed to recompute residual the same way the CPU
-// run_amgcl path does (so the printed RelRes is apples-to-apples).
+// Called from benchmark.cpp. Caller passes the mandatory solve operator as CRS,
+// the RHS, and output storage. Validation stays in benchmark.cpp so this adapter
+// neither materializes nor traverses a second, benchmark-only operator.
 //
-//   m        — submatrix dimension (n - 1)
+//   m        — solve-operator dimension
 //   row_ptr  — CSR row pointers, size m + 1
 //   col_idx  — CSR column indices, size row_ptr[m]
 //   vals     — CSR values, size row_ptr[m]
 //   bsub     — RHS, size m
 //   tol/maxiter — PCG params
-//   full_n   — original matrix dimension n (for residual recomputation)
-//   full_b   — original full-size RHS, size full_n (for residual)
-//   full_csr_row/col/val — original full L CSR (for residual computation)
-//   nnz_full — nnz of full L
-//
 // On exit, populates *r (already has solver_name + graph_name + n/nnz set).
 extern "C" void run_amgcl_cuda_impl(
     BenchResult* r,
@@ -58,14 +52,9 @@ extern "C" void run_amgcl_cuda_impl(
     const std::ptrdiff_t* col_idx,   // size row_ptr[m]
     const double*         vals,      // size row_ptr[m]
     const double*         bsub,      // size m
+    double*               solution,  // size m
     double                tol,
     int                   maxiter,
-    int                   full_n,
-    const double*         full_b,
-    const std::ptrdiff_t* full_row_ptr,
-    const std::ptrdiff_t* full_col_idx,
-    const double*         full_vals,
-    int                   is_laplacian,
     int                   relax_coarse)
 {
     using Backend = amgcl::backend::cuda<double>;
@@ -99,13 +88,13 @@ extern "C" void run_amgcl_cuda_impl(
     // mean-centering below, since the ORIGINAL L is a Laplacian either way.)
     if (relax_coarse) prm.precond.direct_coarse = false;
 
-    // Build CRS tuple from host arrays. AMGCL copies these to device.
-    std::vector<std::ptrdiff_t> ptr(row_ptr, row_ptr + m + 1);
-    std::vector<std::ptrdiff_t> col(col_idx, col_idx + row_ptr[m]);
-    std::vector<double>          val(vals,    vals    + row_ptr[m]);
-    auto A = std::tie(m, ptr, col, val);
+    // Use AMGCL's supplied non-owning adapter.  AMGCL copies this build matrix to
+    // its CUDA backend as part of Solver construction; no module-local host copy
+    // is needed.
+    auto A = amgcl::adapter::zero_copy(m, row_ptr, col_idx, vals);
 
     Solver solve(A, prm, bprm);
+    cudaDeviceSynchronize();
     r->setup_time = host_prep_seconds + (now_s() - t0);
 
     // Device vectors are per-RHS work, so charge their allocation/upload to
@@ -116,7 +105,7 @@ extern "C" void run_amgcl_cuda_impl(
     thrust::device_vector<double> d_x(m, 0.0);
 
     auto [iters, error] = solve(d_b, d_x);
-    cudaDeviceSynchronize();
+    thrust::copy(d_x.begin(), d_x.end(), solution);
     r->solve_time = now_s() - t0;
     r->total_time = r->setup_time + r->solve_time;
     r->iterations = static_cast<int>(iters);
@@ -128,44 +117,6 @@ extern "C" void run_amgcl_cuda_impl(
       if (cudaMemGetInfo(&mf, &mt) == cudaSuccess && mt >= mf)
           r->solve_vram_mb = (mt - mf) / (1024.0 * 1024.0); }
 
-    // Copy solution back to host and compute the full-system residual via
-    // the same recipe as the CPU run_amgcl path (mean-centered).
-    std::vector<double> sol(m, 0.0);
-    thrust::copy(d_x.begin(), d_x.end(), sol.begin());
-
-    // x = [sol; 0]. For a singular Laplacian, re-center into the range space
-    // (subtract the mean). For SDDM (is_laplacian==0, m==full_n) the solve is
-    // unique — no pin, no centering — matching the CPU run_amgcl path.
-    std::vector<double> x(full_n, 0.0);
-    double xs = 0.0;
-    for (int i = 0; i < m; ++i) { x[i] = sol[i]; xs += sol[i]; }
-    if (is_laplacian) {
-        const double xmean = xs / full_n;
-        for (int i = 0; i < full_n; ++i) x[i] -= xmean;
-    }
-
-    // res = b - L*x ; res -= res.mean()
-    std::vector<double> res(full_n);
-    for (int i = 0; i < full_n; ++i) res[i] = full_b[i];
-    for (int i = 0; i < full_n; ++i) {
-        double acc = 0.0;
-        const std::ptrdiff_t b0 = full_row_ptr[i];
-        const std::ptrdiff_t b1 = full_row_ptr[i + 1];
-        for (std::ptrdiff_t p = b0; p < b1; ++p)
-            acc += full_vals[p] * x[full_col_idx[p]];
-        res[i] -= acc;
-    }
-    double rs = 0.0;
-    for (int i = 0; i < full_n; ++i) rs += res[i];
-    const double rmean = is_laplacian ? rs / full_n : 0.0;
-    double rnorm2 = 0.0, bnorm2 = 0.0;
-    for (int i = 0; i < full_n; ++i) {
-        double rr = res[i] - rmean;
-        rnorm2 += rr * rr;
-        bnorm2 += full_b[i] * full_b[i];
-    }
-    const double bnorm = std::sqrt(bnorm2);
-    r->rel_residual = std::sqrt(rnorm2) / (bnorm > 0 ? bnorm : 1.0);
     r->fillin = 0;
     r->us_per_nnz = r->total_time / r->nnz * 1e6;
 

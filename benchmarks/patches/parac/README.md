@@ -5,15 +5,18 @@ Pinned at `44ef39d2f5c2c52aa577f58f005d62f2675cefbc`
 ("Update data README for graph matrix downloads", 2026-04-24).
 
 The benchmark runs ParAC from an out-of-tree checkout (`PARAC_CPU_DRIVER` /
-`benchmarks/paths_local.py`). **One** patch is applied to it. Everything else we
+`benchmarks/paths_local.py`). **Three** benchmark-only patches are applied (the
+third touches only the CUDA drivers). Everything else we
 need — the AMD reorder, the physics augmentation, the local build flags, the
 independent residual check — lives in this repo, so the ParAC checkout stays at
-upstream plus a single reviewable diff.
+upstream plus a small reviewable patch stack.
 
 ```bash
 cd $PARAC_CHECKOUT
 git checkout 44ef39d && git status --porcelain     # must be empty
 patch -p1 < $APXCHOL/benchmarks/patches/parac/0001-configurable-tolerance-and-any-thread-count.patch
+patch -p1 < $APXCHOL/benchmarks/patches/parac/0002-report-complete-setup-boundaries.patch
+patch -p1 < $APXCHOL/benchmarks/patches/parac/0003-report-complete-gpu-boundaries.patch
 bash $APXCHOL/benchmarks/parac_build.sh            # builds experiment/driver
 ```
 
@@ -35,6 +38,34 @@ bash $APXCHOL/benchmarks/parac_build.sh            # builds experiment/driver
   physics mode there.
 
 Both hunks are upstreamable as-is, and neither changes what the solver computes.
+
+## 0002 — report complete setup boundaries
+
+The upstream timing lines cover the elimination kernel and three tree-building
+subroutines, but omit mandatory work around them: triplet normalization and CSC
+construction, dependency counts, factor edge-pool/queue construction, and final
+factor CSR materialization. Patch 0002 adds two non-overlapping wall intervals in
+ParAC's own code:
+
+* `APX adapter preprocessing time` starts immediately after MatrixMarket parsing
+  and ends after ParAC has built its matrix and factor schedule;
+* `APX factor setup time` spans the complete factorization driver up to the call
+  to ParAC's PCG, including the existing elimination-kernel interval.
+
+The harness reports `setup = ParAC reorder + adapter preprocessing + factor
+setup`. The narrower upstream timers remain diagnostics. Input parsing,
+validation, and cleanup are excluded. This patch only prints timings and does not
+change data or control flow.
+
+## 0003 — complete CUDA setup and solve boundaries
+
+The CUDA driver's event timers omit host preparation, allocations, H2D traffic,
+and work around the kernel/conversion/SpSV intervals. Patch 0003 reports complete
+post-parse adapter, factor-setup, and solver-setup intervals from ParAC's own
+driver. It also reports a complete per-RHS interval and performs the D2H transfer
+needed to return the solution to a host caller before stopping that interval.
+Residual validation and cleanup remain outside. The runner uses the complete
+intervals; the original event timers remain diagnostics.
 
 ### The tolerance is ABSOLUTE, so it has to be calibrated
 
@@ -75,7 +106,8 @@ ParAC requires a fill-reducing ordering (its own scripts only ever run
 Its producer for both is `cpu_implementation/write_graph.jl`, and **that is what
 the runner calls** — read-only, from the ParAC checkout, via the dispatcher
 `benchmarks/parac_produce_upstream.jl`. This matters because the runner charges
-the preprocessing to ParAC's setup time (`setup = factor + prep + amds`): it has
+the preprocessing to ParAC's setup time (`setup = reorder + complete native
+adapter/factor intervals`): it has
 to be their code doing their work.
 
 Their producer takes a path PREFIX — it reads `<prefix>.mtx` and writes
@@ -202,7 +234,9 @@ usable when that project is not instantiated.
 ## What changes in the numbers
 
 3-rep medians, 16 threads, `MKL_NUM_THREADS=1`, `taskset -c 0-15`, boost on.
-`setup` = AMD reorder + etree/ftree/summary + elimination kernel.
+These historical measurements used the old partial setup formula: AMD reorder +
+etree/ftree/summary + elimination kernel. Cells must be regenerated under patches
+0002/0003 before these setup/total columns are used in current charts.
 `printed` is ParAC's own `relative residual:` line; **`scored`** is
 `parac_verify_residual.py` recomputing `‖b − A·x‖/‖b‖` against the matrix the
 benchmark reports on, from the raw `x` and `b`.
@@ -287,7 +321,8 @@ now passed (patch 0001) and calibrated; the driver's own printed residual is
 already the true `||Ax-b||/||b||`. On the GPU nothing at all is needed: the CUDA
 drivers already take `TOL` as `argv[4]` and already print
 `normalized diff norm` = `||Ax-b||/||b||`, so the same calibration applies with
-no patch. `gpu_implementation/solver.hpp` returns to pristine.
+no convergence patch. Patch 0003 adds timing and an output transfer around that
+upstream stopping test; the test itself remains pristine.
 
 ### 7af1674 "physics mode = graph (disable redundant trim)"
 

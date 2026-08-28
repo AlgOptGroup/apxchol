@@ -176,7 +176,12 @@ static void emit_build_meta() {
               << " compiler_version=" << build_compiler_version()
               << " openmp_runtime=" << build_openmp_runtime()
               << " node_index_bits=" << (8 * sizeof(apxchol::node_index))
-              << " edge_index_bits=" << (8 * sizeof(apxchol::edge_index));
+              << " edge_index_bits=" << (8 * sizeof(apxchol::edge_index))
+#ifdef APXCHOL_BENCH_HYPRE_CUDA
+              << " hypre_cuda=on";
+#else
+              << " hypre_cuda=off";
+#endif
 #ifdef APXCHOL_USE_CUDA
 #  ifdef APXCHOL_BUILD_CUDA_HOST_COMPILER
     const char* cuda_host = APXCHOL_BUILD_CUDA_HOST_COMPILER[0]
@@ -343,14 +348,9 @@ extern "C" void run_amgcl_cuda_impl(
     const std::ptrdiff_t* col_idx,
     const double*         vals,
     const double*         bsub,
+    double*               solution,
     double                tol,
     int                   maxiter,
-    int                   full_n,
-    const double*         full_b,
-    const std::ptrdiff_t* full_row_ptr,
-    const std::ptrdiff_t* full_col_idx,
-    const double*         full_vals,
-    int                   is_laplacian,
     int                   relax_coarse);
 #endif
 
@@ -990,6 +990,9 @@ static BenchResult run_rchol(
     r.nnz = static_cast<int>(L.nonZeros());
     int N = r.n;
 
+    Timer t;
+    t.start();   // setup: required shift + AMD + permutes + CSR + factorization
+
     // RCHOL needs strictly SDD — add small diagonal shift (only for factorization)
     Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm(L);
     double eps = 1e-6;
@@ -1003,9 +1006,6 @@ static BenchResult run_rchol(
     // permute + csr are all counted in setup (the cost a fair RCHOL user pays).
     // RCHOL_NO_AMD=1 reproduces the natural-order path for an A/B.
     const bool rchol_amd = std::getenv("RCHOL_NO_AMD") == nullptr;
-
-    Timer t;
-    t.start();   // setup: AMD + permute + csr + rchol factorization (all timed)
 
     Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, int> perm(N);
     if (rchol_amd) {
@@ -1044,7 +1044,7 @@ static BenchResult run_rchol(
     r.fillin = 2.0 * static_cast<double>(G.nnz()) / static_cast<double>(A.nnz());
     double bnorm = b.norm();   // norm is permutation-invariant
 
-    Eigen::VectorXd x = Eigen::VectorXd::Zero(N);
+    Eigen::VectorXd x_orig = Eigen::VectorXd::Zero(N);
 #ifdef HAVE_MKL
     // THEIR solve loop, verbatim: rchol's util/pcg.cpp, the same call their
     // ex_laplace.cpp makes. Their stop test (pcg.cpp:82) is
@@ -1059,9 +1059,11 @@ static BenchResult run_rchol(
     double relres = 0.0; int itr = 0;
     t.start();
     pcg(Apcg, bpv, tol, maxiter, G, xv, relres, itr);
-    r.solve_time = t.elapsed();
     r.iterations = itr;
-    x = Eigen::Map<Eigen::VectorXd>(xv.data(), N);
+    Eigen::Map<Eigen::VectorXd> x_perm(xv.data(), N);
+    // Returning to the caller's ordering is mandatory per-RHS adapter work.
+    x_orig = rchol_amd ? Eigen::VectorXd(perm.transpose() * x_perm) : x_perm;
+    r.solve_time = t.elapsed();
 #else
     // No MKL (aarch64: Grace / GH200 / Daint). Their PCG hard-includes mkl_spblas.h,
     // so their shipped solve cannot run here — and substituting one of ours is exactly
@@ -1080,14 +1082,12 @@ static BenchResult run_rchol(
     r.solve_rss_mb = -1.0;
 
 #ifdef HAVE_MKL
-    // unpermute the solution back to the original ordering: x = Pᵀ·y
-    Eigen::VectorXd x_orig = rchol_amd ? Eigen::VectorXd(perm.transpose() * x) : x;
     center_if_laplacian(x_orig);
     Eigen::VectorXd res = b - L * x_orig;
     center_if_laplacian(res);
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
 #else
-    (void)x; (void)bnorm;
+    (void)x_orig; (void)bnorm;
     r.rel_residual = -1.0;   // n/a sentinel: no solve ran, only the factorization
 #endif
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
@@ -1109,18 +1109,8 @@ static BenchResult run_rchol_parallel(
     r.nnz = static_cast<int>(L.nonZeros());
     int N = r.n;
 
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm(L);
-    SparseCSR A_unshifted = eigen_to_csr(Lrm);   // the PCG operator (grounding contract)
-    double eps = 1e-6;
-    for (int k = 0; k < Lrm.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Lrm, k); it; ++it)
-            if (it.row() == it.col()) it.valueRef() += eps;
-
-    SparseCSR A = eigen_to_csr(Lrm);             // + eps*I: rchol needs strictly SDD
-    SparseCSR G;
-    std::vector<size_t> perm;
-
-    // Skip pRCHOL on very dense graphs — METIS segfaults on dense random graphs
+    // Skip pRCHOL on very dense graphs — METIS segfaults on dense random graphs.
+    // This support check uses only common input metadata and does not marshal data.
     double density = static_cast<double>(r.nnz) / (static_cast<double>(N) * N);
     if (density > 0.01) {
         r.solver_name = "pRCHOL+PCG [Chen20;par] FAIL: too dense for METIS";
@@ -1133,7 +1123,18 @@ static BenchResult run_rchol_parallel(
     }
 
     Timer t;
-    t.start();
+    t.start();   // setup: required shifts/conversions + upstream factor/reorder
+    Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm(L);
+    SparseCSR A_unshifted = eigen_to_csr(Lrm);   // the PCG operator (grounding contract)
+    double eps = 1e-6;
+    for (int k = 0; k < Lrm.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Lrm, k); it; ++it)
+            if (it.row() == it.col()) it.valueRef() += eps;
+
+    SparseCSR A = eigen_to_csr(Lrm);             // + eps*I: rchol needs strictly SDD
+    SparseCSR G;
+    std::vector<size_t> perm;
+
     {
         std::streambuf* old = std::cout.rdbuf();
         std::ostringstream devnull;
@@ -1170,9 +1171,9 @@ static BenchResult run_rchol_parallel(
     double relres = 0.0; int itr = 0;
     t.start();
     pcg(Aperm, bperm, tol, maxiter, G, xv, relres, itr);   // THEIR solve loop
-    r.solve_time = t.elapsed();
     r.iterations = itr;
     for (int i = 0; i < N; ++i) x[static_cast<int>(perm[i])] = xv[i];   // unpermute
+    r.solve_time = t.elapsed();
 #else
     // See run_rchol: their PCG needs MKL (x86), so this is a FACTOR-ONLY row here.
     (void)Aperm; (void)bperm; (void)tol; (void)maxiter;
@@ -1451,9 +1452,10 @@ template<typename Fn>
 static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L,
                              const Eigen::VectorXd& b, const std::string& name,
                              double tol, int maxiter) {
-    Timer wall; wall.start();   // whole-split wall, to charge decomposition+extraction to setup
+    Timer prep; prep.start();
     auto comps = connected_components(L);
     if (comps.size() <= 1) return per_solver(L, b, name, tol, maxiter);
+    double split_prep = prep.elapsed();
     BenchResult r; r.graph_name=name; r.n=(int)L.rows(); r.nnz=(int)L.nonZeros(); r.fillin=0;
     double setup=0, solve=0, res2=0; int it=0; const double bn=b.norm();
     double rss=0, vram=-1;   // combined solve-held RSS/VRAM = MAX over components (peak
@@ -1465,6 +1467,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     for (auto& nodes : comps) {
         const int sn=(int)nodes.size();
         if (sn==1) continue;  // singleton component: trivially x=0 (b~0), no solve
+        prep.start();
         std::vector<int> g2l(L.rows(),-1);
         for (int i=0;i<sn;++i) g2l[nodes[i]]=i;
         // Build subL's CSC directly. nodes[] is in increasing global order so g2l is
@@ -1486,6 +1489,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
             }
         subL.makeCompressed();
         Eigen::VectorXd subb(sn); for (int i=0;i<sn;++i) subb[i]=b[nodes[i]];
+        split_prep += prep.elapsed();
         BenchResult rc = per_solver(subL, subb, name, tol, maxiter);
         setup += rc.setup_time; solve += rc.solve_time; it=std::max(it,rc.iterations);
         if (rc.solve_rss_mb > rss) rss = rc.solve_rss_mb;       // peak over components
@@ -1512,16 +1516,16 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
                 std::get<0>(dbg_rows[i]), std::get<1>(dbg_rows[i]),
                 std::get<2>(dbg_rows[i]), std::get<3>(dbg_rows[i]));
     }
-    // The split PREPROCESSING -- union-find decomposition + per-component triplet
-    // extraction + recombine -- is wall minus the summed per-component solve work; it
-    // belongs in setup (apples-to-apples with apxchol's graph build / a whole-matrix
-    // pin), not free. Charge it to setup_time.
-    const double overhead = std::max(0.0, wall.elapsed() - (setup + solve));
+    // Charge only the mandatory split PREPROCESSING -- component discovery and
+    // sub-operator/RHS extraction.  The old wall-minus-(setup+solve) residual also
+    // swept validation, diagnostics and destructor time into setup, so the reported
+    // number changed when benchmark-only work changed.  Explicit intervals make the
+    // boundary stable and match the whole-matrix runners' contract.
     if (std::getenv("PREP_TIME"))
-        std::fprintf(stderr, "[prep] %s split: decomp+extract overhead = %.3fs "
+        std::fprintf(stderr, "[prep] %s split: decomp+extract = %.3fs "
             "(of setup %.3fs incl per-comp builds %.3fs; solve %.3fs)\n",
-            name.c_str(), overhead, setup+overhead, setup, solve);
-    r.setup_time=setup+overhead; r.solve_time=solve; r.total_time=r.setup_time+solve;
+            name.c_str(), split_prep, setup+split_prep, setup, solve);
+    r.setup_time=setup+split_prep; r.solve_time=solve; r.total_time=r.setup_time+solve;
     r.iterations=it; r.rel_residual = std::sqrt(res2)/(bn>0?bn:1.0);
     r.us_per_nnz = r.total_time/std::max(1,r.nnz)*1e6;
     r.solve_rss_mb = rss; r.solve_vram_mb = vram;   // carry peak over components
@@ -1652,26 +1656,30 @@ static BenchResult run_amgcl_cuda(
     }
     const int m = n;  // Asolve is full-size (pin keeps n x n)
 
-    // ptrdiff_t CSR for the solve operator (Asolve) and the residual operator (L).
-    std::vector<std::ptrdiff_t> sub_row(n + 1), full_row(n + 1);
-    for (int i = 0; i <= n; ++i) { sub_row[i] = Asolve.outerIndexPtr()[i]; }
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm = L;
-    for (int i = 0; i <= n; ++i) { full_row[i] = Lrm.outerIndexPtr()[i]; }
-    const std::ptrdiff_t snnz = sub_row[n], fnnz = full_row[n];
-    std::vector<std::ptrdiff_t> sub_col(snnz), full_col(fnnz);
-    std::vector<double>          sub_val(snnz), full_val(fnnz);
-    for (std::ptrdiff_t p = 0; p < snnz; ++p) { sub_col[p]=Asolve.innerIndexPtr()[p]; sub_val[p]=Asolve.valuePtr()[p]; }
-    for (std::ptrdiff_t p = 0; p < fnnz; ++p) { full_col[p]=Lrm.innerIndexPtr()[p];    full_val[p]=Lrm.valuePtr()[p]; }
+    // AMGCL's CUDA backend accepts its own zero_copy CRS adapter, whose index type
+    // is ptrdiff_t.  Eigen uses int here, so widening the two index arrays is the
+    // only mandatory host marshalling.  Values remain a non-owning view; the old
+    // path copied every value here, copied it a second time in the CUDA TU, and
+    // materialized another full CSR used only by benchmark validation.
+    std::vector<std::ptrdiff_t> row(n + 1), col(Asolve.nonZeros());
+    for (int i = 0; i <= n; ++i) row[i] = Asolve.outerIndexPtr()[i];
+    for (Eigen::Index p = 0; p < Asolve.nonZeros(); ++p)
+        col[p] = Asolve.innerIndexPtr()[p];
+    Eigen::VectorXd x = Eigen::VectorXd::Zero(n);
 
     const double host_prep_seconds = setup_prep.elapsed();
     run_amgcl_cuda_impl(
         &r, host_prep_seconds, m,
-        sub_row.data(), sub_col.data(), sub_val.data(),
-        rhs_v.data(),
-        tol, maxiter,
-        n, b.data(),
-        full_row.data(), full_col.data(), full_val.data(),
-        is_laplacian ? 1 : 0, relax_coarse);
+        row.data(), col.data(), Asolve.valuePtr(), rhs_v.data(), x.data(),
+        tol, maxiter, relax_coarse);
+
+    // Validation is deliberately outside both timers and uses the common Eigen
+    // operator, just like every in-process solver.  The CUDA adapter returns x;
+    // it no longer needs a benchmark-only duplicate of L.
+    Eigen::VectorXd res = b - L * x;
+    if (is_laplacian) res.array() -= res.mean();
+    const double bnorm = b.norm() > 0 ? b.norm() : 1.0;
+    r.rel_residual = res.norm() / bnorm;
     return r;
 }
 #endif
@@ -2081,21 +2089,24 @@ static BenchResult run_hypre_boomeramg(
 
     t.start();
     HYPRE_ParCSRPCGSolve(pcg, parA, parB, parX);
-    r.solve_time = t.elapsed();
-    r.total_time = r.setup_time + r.solve_time;
-    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-
     HYPRE_Int iters_out;
     double final_res;
     HYPRE_PCGGetNumIterations(pcg, &iters_out);
     HYPRE_PCGGetFinalRelativeResidualNorm(pcg, &final_res);
+    // HYPRE owns the result vector.  Retrieving the caller-visible solution is
+    // mandatory per-RHS work (and a device-to-host transfer on the GPU build),
+    // so it belongs to solve rather than benchmark-only validation.
+    std::vector<double> xvals(m);
+    HYPRE_IJVectorGetValues(xij, m, idx.data(), xvals.data());
+    r.solve_time = t.elapsed();
+    r.total_time = r.setup_time + r.solve_time;
+    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
+
     r.iterations = static_cast<int>(iters_out);
     r.fillin = 0;
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
 
     // Extract solution; compute true residual against the original full system.
-    std::vector<double> xvals(m);
-    HYPRE_IJVectorGetValues(xij, m, idx.data(), xvals.data());
     Eigen::VectorXd x(n);
     x.head(m) = Eigen::Map<Eigen::VectorXd>(xvals.data(), m);
     if (is_laplacian)
@@ -2113,7 +2124,7 @@ static BenchResult run_hypre_boomeramg(
     return r;
 }
 
-#ifdef APXCHOL_USE_CUDA
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_BENCH_HYPRE_CUDA)
 static BenchResult run_hypre_boomeramg_gpu(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
@@ -2211,22 +2222,22 @@ static BenchResult run_hypre_boomeramg_gpu(
 
     t.start();
     HYPRE_ParCSRPCGSolve(pcg, parA, parB, parX);
-    r.solve_time = t.elapsed();
-    r.total_time = r.setup_time + r.solve_time;
-    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-
     HYPRE_Int iters_out;
     double final_res;
     HYPRE_PCGGetNumIterations(pcg, &iters_out);
     HYPRE_PCGGetFinalRelativeResidualNorm(pcg, &final_res);
+    std::vector<double> xvals(m);
+    HYPRE_IJVectorGetValues(xij, m, idx.data(), xvals.data());
+    r.solve_time = t.elapsed();
+    r.total_time = r.setup_time + r.solve_time;
+    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
+
     r.iterations = static_cast<int>(iters_out);
     r.fillin = 0;
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     r.solve_vram_mb = read_vram_mb();   // device VRAM held at solve end (GPU AMG hierarchy
                                         // + ParCSR operator + PCG vectors), before destroy.
 
-    std::vector<double> xvals(m);
-    HYPRE_IJVectorGetValues(xij, m, idx.data(), xvals.data());
     Eigen::VectorXd x(n);
     x.head(m) = Eigen::Map<Eigen::VectorXd>(xvals.data(), m);
     if (is_laplacian)
@@ -2262,6 +2273,18 @@ int main(int argc, char** argv) {
     HYPRE_Init();  // sequential build uses Hypre's MPI shim; no MPI_Init needed
 #endif
     Args args = parse_args(argc, argv);
+
+#if defined(APXCHOL_USE_CUDA) && !defined(APXCHOL_BENCH_HYPRE_CUDA)
+    if (args.solvers.count("hypre_boomeramg_gpu")) {
+        std::cerr << "hypre_boomeramg_gpu was requested, but this binary links a "
+                     "CPU-only Hypre build. Reconfigure with "
+                     "-DAPXCHOL_USE_CUDA=ON -DBENCH_HYPRE_USE_CUDA=ON.\n";
+#ifdef HAVE_HYPRE
+        HYPRE_Finalize();
+#endif
+        return 2;
+    }
+#endif
 
     // Thread setup must run for ALL solvers, not just apxchol_v1 (which had
     // its own omp_set_num_threads inside its `if(args.solvers.count(...))`
@@ -2883,7 +2906,7 @@ int main(int argc, char** argv) {
                const std::string& nm, double tl, int mi, ground_mode) {
                 return run_hypre_boomeramg(L_, b_, nm, tl, mi); }); }, R));
 
-#ifdef APXCHOL_USE_CUDA
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_BENCH_HYPRE_CUDA)
     if (args.solvers.count("hypre_boomeramg_gpu"))
         print(median_run([&]() { return run_desing("boomeramg", "BoomerAMG+PCG [Hypre;cuda]",
             [](const Eigen::SparseMatrix<double>& L_, const Eigen::VectorXd& b_,

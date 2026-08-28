@@ -33,6 +33,68 @@ class ParacRoutingTest(unittest.TestCase):
         self.assertEqual(ecology_modes["parac_physics"], parac.PHYSICS_NA)
 
 
+class ParacTimingContractTest(unittest.TestCase):
+    def test_cpu_setup_uses_complete_nonoverlapping_intervals(self):
+        sample = {
+            "factor": "1.0", "factor_setup": "2.0", "adapter": "3.0",
+            "solve": "4000", "etree": "0.2", "ftree": "0.3",
+            "summary": "0.4", "iters": "10", "rr": "1e-9",
+            "recur": "1e-9", "n": 100, "nnz": 500, "rss_mb": 12.0,
+        }
+        with mock.patch.object(rc, "cell_done", return_value=False), \
+             mock.patch.object(parac, "_calibrate_rel_tol", return_value=None), \
+             mock.patch.object(parac, "_run_once_cpu", return_value=sample), \
+             mock.patch.object(rc, "emit_cell") as emit:
+            parac._measure_cpu("synthetic", "grid_500", "input.mtx", 5.0,
+                               False, "parac")
+
+        metrics = emit.call_args.args[5]
+        self.assertEqual(metrics["adapter_setup_s"], 8.0)  # reorder + adapter
+        self.assertEqual(metrics["native_setup_s"], 2.0)
+        self.assertEqual(metrics["setup_s"], 10.0)
+        self.assertEqual(metrics["solve_s"], 4.0)
+        self.assertEqual(metrics["total_s"], 14.0)
+        # The narrower upstream kernel timer remains diagnostic only.
+        self.assertEqual(metrics["factor_kernel_s"], 1.0)
+
+    def test_gpu_setup_and_solve_use_complete_intervals(self):
+        sample = {
+            "adapter": "3.0", "factor_setup": "2.0", "solver_setup": "1.0",
+            "solve_total": "4.0", "factor": "500", "conv": "250",
+            "spsv": "125", "solve": "3500", "etree": "0.2",
+            "ftree": "0.3", "summary": "0.4", "iters": "10",
+            "rr": "1e-9", "n": "100", "nnz": "500", "vram_mb": 20.0,
+        }
+        with tempfile.TemporaryDirectory() as store, \
+             tempfile.TemporaryDirectory() as sorted_dir, \
+             tempfile.TemporaryDirectory() as drivers, \
+             mock.patch.object(rc, "CELLS", store), \
+             mock.patch.object(rc, "PARAC_SORTED", sorted_dir), \
+             mock.patch.object(rc, "PARAC_GPU_DRIVER", f"{drivers}/graph"), \
+             mock.patch.object(rc, "PARAC_GPU_DRIVER_PHYS", f"{drivers}/physics"), \
+             mock.patch.object(rc, "binary_toolchain", return_value={}), \
+             mock.patch.object(parac, "_calibrate_tol_gpu", return_value=1e-8), \
+             mock.patch.object(parac, "_run_once_gpu", return_value=sample):
+            pathlib.Path(drivers, "graph").touch()
+            pathlib.Path(drivers, "physics").touch()
+            cached = pathlib.Path(sorted_dir, "grid_500-pure-nnz-sorted.mtx")
+            cached.write_text("cached")
+            pathlib.Path(f"{cached}.time").write_text("5.0")
+            parac.run_gpu("grid_500")
+
+            path = rc.cell_path(rc.MATRICES["grid_500"]["family"], "grid_500",
+                                "parac_graph", "", 16, "gpu")
+            with open(path) as handle:
+                metrics = json.load(handle)["metrics"]
+
+        self.assertEqual(metrics["adapter_setup_s"], 8.0)
+        self.assertEqual(metrics["native_setup_s"], 3.0)
+        self.assertEqual(metrics["setup_s"], 11.0)
+        self.assertEqual(metrics["solve_s"], 4.0)
+        self.assertEqual(metrics["total_s"], 15.0)
+        self.assertEqual(metrics["pcg_kernel_s"], 3.5)
+
+
 class ParacGpuFailureCellTest(unittest.TestCase):
     def read_cell(self, mid, solver):
         family = rc.MATRICES[mid]["family"]

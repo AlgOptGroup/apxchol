@@ -1,0 +1,52 @@
+--- a/experiment/pre_process.hpp
++++ b/experiment/pre_process.hpp
+@@ -345,6 +345,10 @@
+             // read input into triplet
+             fast_matrix_market::read_matrix_market_triplet(
+                 input_stream, input_triplet.nrows, input_triplet.ncols, input_triplet.rows, input_triplet.cols, input_triplet.vals);
++
++            // MatrixMarket parsing is benchmark input I/O. Everything after it is
++            // ParAC-specific preparation of the operator and factor schedule.
++            const auto apx_adapter_start = std::chrono::high_resolution_clock::now();
+           
+             //std::cout << "row size: " << input_triplet.rows.size() << "\n";
+             // Sort the triplets
+@@ -425,6 +429,12 @@
+                 layer_sum += *it;
+             }
+             assert(layer_sum - 1 == mat.rows());
++
++            const auto apx_adapter_end = std::chrono::high_resolution_clock::now();
++            std::chrono::duration<double> apx_adapter_duration =
++                apx_adapter_end - apx_adapter_start;
++            std::cout << "APX adapter preprocessing time: "
++                      << apx_adapter_duration.count() << " seconds" << std::endl;
+             
+             
+         }
+--- a/experiment/driver_local.cpp
++++ b/experiment/driver_local.cpp
+@@ -716,6 +716,7 @@
+ template <typename type_int, typename type_data>
+ void factorization_driver(sparse_matrix_processor<type_int, type_data> &processor, type_int num_threads, char* path, bool is_graph)
+ {
++    const auto apx_factor_setup_start = std::chrono::high_resolution_clock::now();
+     assert(INT_MAX == 2147483647);
+     int space_multiply_factor = 5;
+     int edge_pool_size = processor.mat.nonZeros() * space_multiply_factor;
+@@ -1031,6 +1032,15 @@
+ 
+     custom_space::sparse_matrix<type_int, type_data> precond_M(processor.mat.rows(), processor.mat.cols(), std::move(csr_val_host), std::move(csr_col_ind_host), std::move(csr_rowptr_host));
+ 
++    // Complete factor setup: ParAC's lower-triangle/queue/edge-pool preparation,
++    // elimination kernel, and factor CSR materialization. The historical kernel
++    // timer covers only the OpenMP region and omits both sides.
++    const auto apx_factor_setup_end = std::chrono::high_resolution_clock::now();
++    std::chrono::duration<double> apx_factor_setup_duration =
++        apx_factor_setup_end - apx_factor_setup_start;
++    std::cout << "APX factor setup time: " << apx_factor_setup_duration.count()
++              << " seconds" << std::endl;
++
+     if(num_threads >= 1)
+     {
+        // The PCG parameters are already parameters of example_pcg_solver; they were

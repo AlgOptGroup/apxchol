@@ -25,6 +25,18 @@ for d in "$PARAC_CHECKOUT/experiment" "$MKLROOT/include" "$FMMINC"; do
     [ -d "$d" ] || { echo "missing: $d" >&2; exit 1; }
 done
 
+# The runner requires both benchmark-only patches.  Refuse to build a binary
+# whose output would silently fall back to the old partial timing contract.
+grep -Fq 'PARAC_REL_TOL' "$PARAC_CHECKOUT/experiment/driver_local.cpp" || {
+    echo "missing ParAC patch 0001 (configurable tolerance)" >&2; exit 1;
+}
+grep -Fq 'APX factor setup time:' "$PARAC_CHECKOUT/experiment/driver_local.cpp" || {
+    echo "missing ParAC patch 0002 (complete factor setup timing)" >&2; exit 1;
+}
+grep -Fq 'APX adapter preprocessing time:' "$PARAC_CHECKOUT/experiment/pre_process.hpp" || {
+    echo "missing ParAC patch 0002 (adapter timing)" >&2; exit 1;
+}
+
 cd "$PARAC_CHECKOUT/experiment"
 g++ -std=c++20 -O3 \
     -include climits -include cstdint \

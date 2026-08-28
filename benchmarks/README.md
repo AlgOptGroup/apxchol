@@ -59,13 +59,25 @@ Krylov loop and report the result as theirs. Per solver:
 | **AC / AC2** | `approxchol_lap` / `approxchol_sddm` closure | **their** `pcg`, including their `stag_test` | the `tol_eff` rescale for the sddm augmented basis. `AC2` = their `approxchol_lap` with `ApproxCholParams(:deg,5,2,2)`, **not** their separate `approxchol_lap2` |
 | `cg` / `icc` / `ldlt` / `cholmod` | — | Eigen's / SuiteSparse's own | nothing |
 
+**Timing boundary.** Parsing/assembling the common operator and benchmark-only
+validation/cleanup are excluded. `setup_s` includes every solver-required input
+conversion, grounding, reorder, upload, hierarchy/factor construction and analysis;
+`solve_s` includes per-RHS workspace/upload, the solver's iteration, and returning
+the solution to the caller (including GPU D2H and RCHOL unpermutation). We use a
+solver's supplied adapter/setup routine whenever it has one: AMGCL's `zero_copy`
+CRS adapter, Hypre's IJ API, RCHOL's own `reorder` and `pcg`, and ParAC's own
+`write_graph.jl` plus instrumented native driver intervals. AC/AC2 and CMG expose
+no assembled-operator adapter, so the minimal required operator conversion is in
+their setup interval. Split-component preparation is timed explicitly; validation
+or destructor time is never inferred from a wall-time remainder.
+
 **Documented calibrations and patches — these must stay visible wherever the table is
 published** (see [THE GRADING RULE](#grading-rule) for why a calibration, not a looser mark):
 
 | Solver | Their stop test | What we pass / change | Tolerance actually used |
 |---|---|---|---|
 | ParAC-CPU | **absolute**, `sqrt(dpar[4]) > sqrt(dpar[0])`, on the recurrence residual | `PARAC_REL_TOL` calibrated from one probe run (`_calibrate_rel_tol`); recorded per cell as `parac_rel_tol` | `rel_tol = (τ·r_recur,0/R_0)²`, per matrix, so their **printed true** residual lands under 1e-8 |
-| ParAC-GPU | **preconditioned**-residual ratio `√⟨r,M⁻¹r⟩/√⟨r₀,M⁻¹r₀⟩` — optimistic by ~10× | their `solver.hpp` **patched** to the true Euclidean ratio (`benchmarks/CMakeLists.txt`); the CG recurrence math is untouched, only the test | 1e-8, on the true relative residual |
+| ParAC-GPU | **preconditioned**-residual ratio `√⟨r,M⁻¹r⟩/√⟨r₀,M⁻¹r₀⟩` — optimistic by ~10× | its existing CLI tolerance is calibrated from one probe (`_calibrate_tol_gpu`); the upstream stopping test and recurrence are untouched | calibrated per matrix so its printed true relative residual lands under 1e-8 |
 | AC (`sddm` path) | `‖r‖/‖b‖` against the **augmented** RHS `[b; −Σb]` — a different basis | `tol_eff = tol·‖b‖/‖b_aug‖` (`bench_laplacians.jl`) | `tol_eff`, so the residual in *our* basis is 1e-8 |
 | AC / AC2 | `‖r‖/nb < tol` **plus `stag_test = 5`** — a stagnation early exit can return a non-converged `x` | nothing: their exit is theirs to keep | 1e-8; a stagnation exit is caught by our re-grade and lands as `not_converged` |
 | BoomerAMG | 2-norm **recurrence** residual (`TwoNorm=1`, `StopCrit=0`), on the **Dirichlet-pinned** subsystem — and it is pinned only when the matrix is *declared* singular | nothing. Recurrence drift was tested and ruled out: `HYPRE_PCGSetRecomputeResidual(1)` leaves iterations and residual bit-identical on iter0040 / grid_2000 / com-Amazon, so the knob was not kept. The "pin-vs-score gap" that used to be listed here was **our misclassification of the IPM matrices, now CLOSED — see below** | 1e-8, on hypre's system (pinned only where `--class laplacian`) |
@@ -509,8 +521,9 @@ cmake -B benchmarks/build-cuda -S benchmarks -DCMAKE_BUILD_TYPE=Release \
       -DAPXCHOL_USE_CUDA=ON -DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON
 cmake --build benchmarks/build-cuda -j$(nproc) benchmark
 # BENCH_HYPRE_USE_CUDA (Hypre GPU backend) and BUILD_GPU_RCHOL (FetchContents the
-# ParAC repo and builds its CPU+GPU drivers) both default OFF; without them the
-# hypre_*_gpu and ParAC-GPU cells can't run.
+# pinned ParAC commit and applies the benchmark-only patch stack) both default
+# OFF. A CUDA build with CPU-only Hypre rejects `hypre_boomeramg_gpu` instead of
+# emitting a CPU result under a GPU label; BUILD_META records hypre_cuda=on|off.
 # GPU cells written into the SAME results/cells store (device=gpu), resume-safe.
 # ParAC-GPU (both CUDA drivers; needs the ParAC repo + drivers built) runs
 # in-process as part of the sweep, or alone via parac_runner.py --device gpu:
@@ -537,8 +550,10 @@ permutation then a sort by column-nnz** (`parac_nnz_sort.jl`, matching their
 `write_graph.jl`). A deterministic degree-sort instead builds a very deep
 elimination tree and makes the cuSPARSE level-set SpTRSV ~1000× slower
 (1.5 s/iter vs ~1 ms/iter on a 250k-node grid). Setup is counted as
-`factorization + reorder-compute` (no disk I/O, no CSR-conversion), the same way
-the CPU ParAC counts its AMD reorder, so all families are measured consistently.
+`reorder + post-parse adapter + complete factor setup + solver analysis`; solve
+includes RHS work, PCG and returning `x` to host. The original kernel/conversion/
+SpSV timers remain diagnostics and are not summed. Disk I/O, residual validation
+and cleanup are excluded, matching the in-process solvers.
 
 **Binary solver names**: `apxchol_v1` (headline/default
 `--v1-configs bg+tree[vec_pool_aos]`),

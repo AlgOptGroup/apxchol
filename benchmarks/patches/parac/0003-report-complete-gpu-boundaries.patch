@@ -1,0 +1,109 @@
+--- a/gpu_implementation/pre_process.hpp
++++ b/gpu_implementation/pre_process.hpp
+@@ -332,6 +332,10 @@
+             // read input into triplet
+             fast_matrix_market::read_matrix_market_triplet(
+                 input_stream, input_triplet.nrows, input_triplet.ncols, input_triplet.rows, input_triplet.cols, input_triplet.vals);
++
++            // MatrixMarket parsing is benchmark input I/O. Everything after it is
++            // ParAC-specific preparation of the operator and factor schedule.
++            const auto apx_adapter_start = std::chrono::high_resolution_clock::now();
+           
+             //std::cout << "row size: " << input_triplet.rows.size() << "\n";
+             // Sort the triplets
+@@ -412,6 +416,12 @@
+                 layer_sum += *it;
+             }
+             assert(layer_sum - 1 == mat.rows());
++
++            const auto apx_adapter_end = std::chrono::high_resolution_clock::now();
++            std::chrono::duration<double> apx_adapter_duration =
++                apx_adapter_end - apx_adapter_start;
++            std::cout << "APX adapter preprocessing time: "
++                      << apx_adapter_duration.count() << " seconds" << std::endl;
+             
+             
+         }
+--- a/gpu_implementation/driver.cu
++++ b/gpu_implementation/driver.cu
+@@ -1551,6 +1551,7 @@
+ template <typename type_int, typename type_data>
+ void factorization_driver(sparse_matrix_processor<type_int, type_data> &processor, int num_blocks, bool check_solve, double tolerance)
+ {
++    const auto apx_gpu_factor_start = std::chrono::high_resolution_clock::now();
+     // this is a warmp up run
+     int *dummy_pt;
+     cudaMalloc((void**)&dummy_pt, 4);
+@@ -1891,4 +1892,11 @@
+         
+         std::cout << "total conversion time: " << duration.count() << " milliseconds" << std::endl;
+ 
++        cudaDeviceSynchronize();
++        const auto apx_gpu_factor_end = std::chrono::high_resolution_clock::now();
++        std::chrono::duration<double> apx_gpu_factor_duration =
++            apx_gpu_factor_end - apx_gpu_factor_start;
++        std::cout << "APX GPU factor setup time: " << apx_gpu_factor_duration.count()
++                  << " seconds" << std::endl;
++
+         prepare_and_solve(spmat_device, csr_rowptr_device, csr_val_device, csr_col_ind_device, diagonal_device, tolerance, 1, total_nnz, removal);
+--- a/gpu_implementation/driver_physics.cu
++++ b/gpu_implementation/driver_physics.cu
+@@ -1740,6 +1740,7 @@
+ template <typename type_int, typename type_data>
+ void factorization_driver(sparse_matrix_processor<type_int, type_data> &processor, int num_blocks, bool check_solve, double tolerance)
+ {
++    const auto apx_gpu_factor_start = std::chrono::high_resolution_clock::now();
+     // this is a warmp up run
+     int *dummy_pt;
+     cudaMalloc((void**)&dummy_pt, 4);
+@@ -2087,4 +2088,11 @@
+         duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+         std::cout << "total conversion time: " << duration.count() << " milliseconds" << std::endl;
+ 
++        cudaDeviceSynchronize();
++        const auto apx_gpu_factor_end = std::chrono::high_resolution_clock::now();
++        std::chrono::duration<double> apx_gpu_factor_duration =
++            apx_gpu_factor_end - apx_gpu_factor_start;
++        std::cout << "APX GPU factor setup time: " << apx_gpu_factor_duration.count()
++                  << " seconds" << std::endl;
++
+         prepare_and_solve(spmat_device, csr_rowptr_device, csr_val_device, csr_col_ind_device, diagonal_device, tolerance, 1, total_nnz, removal);
+--- a/gpu_implementation/solver.hpp
++++ b/gpu_implementation/solver.hpp
+@@ -237,6 +237,7 @@
+ int prepare_and_solve(sparse_matrix_device<type_int, type_data> &laplacian, type_int *csr_rowptr_device, 
+     type_data *csr_val_device, type_int *csr_col_ind_device, type_data *diagonal_entries_device, double tolerance, bool physics, type_int factorization_nnz, bool removal)
+ {
++    const auto apx_gpu_solver_setup_start = std::chrono::high_resolution_clock::now();
+     cudaEvent_t start, stop;
+     float milliseconds = 0;
+     
+@@ -415,1 +416,10 @@
+     printf("solve preprocess time: %f ms\n", milliseconds);
++
++    CHECK_CUDA(cudaDeviceSynchronize());
++    const auto apx_gpu_solver_setup_end = std::chrono::high_resolution_clock::now();
++    std::chrono::duration<double> apx_gpu_solver_setup_duration =
++        apx_gpu_solver_setup_end - apx_gpu_solver_setup_start;
++    std::cout << "APX GPU solver setup time: "
++              << apx_gpu_solver_setup_duration.count() << " seconds" << std::endl;
++
++    const auto apx_gpu_solve_start = std::chrono::high_resolution_clock::now();
+@@ -548,5 +558,17 @@
+     CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
+      
+     printf("pcg time: %f ms\n", milliseconds);
++
++    // A usable solver call returns x to its host caller. The upstream experiment
++    // only validates x on-device, so make this mandatory D2H transfer explicit
++    // and include it in the complete per-RHS interval.
++    std::vector<type_data> apx_solution(num_cols);
++    CHECK_CUDA(cudaMemcpy(apx_solution.data(), leftside_device,
++                          num_cols * sizeof(type_data), cudaMemcpyDeviceToHost));
++    const auto apx_gpu_solve_end = std::chrono::high_resolution_clock::now();
++    std::chrono::duration<double> apx_gpu_solve_duration =
++        apx_gpu_solve_end - apx_gpu_solve_start;
++    std::cout << "APX GPU solve phase time: " << apx_gpu_solve_duration.count()
++              << " seconds" << std::endl;
+     
+     CHECK_CUSPARSE( cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,

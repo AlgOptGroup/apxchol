@@ -10,7 +10,7 @@ The other mode's cell is n/a, with the reason recorded.
 PREPROCESSING IS THEIRS. Every input ParAC reads is prepared by ParAC's OWN
 cpu_implementation/write_graph.jl, invoked out of their checkout through the thin
 dispatcher benchmarks/parac_produce_upstream.jl. We charge that preprocessing to
-ParAC's setup time (setup = factor + prep + amds), so it has to be their code
+ParAC's setup time, so it has to be their code
 doing their work — not our reimplementation of it. Outputs land in OUR cache
 directories under THEIR naming convention (`<prefix>.mtx` in, `<prefix>-amd.mtx`
 / `<prefix>-nnz-sorted.mtx` out), so their checkout is never written to.
@@ -62,8 +62,9 @@ TOL; both it and the calibrated tolerance are recorded in the cell.
 
 CPU (`parac` / `parac_physics`, device=cpu):
   dump -> their write_graph.jl producer, method "amd" (cached with .time/.prep
-  sidecars) -> calibrate -> REPS runs of the driver. setup = AMD + host prep
-  (etree/ftree/summary) + elimination kernel; peak host RSS via /usr/bin/time.
+  sidecars) -> calibrate -> REPS runs of the driver. setup = AMD + complete
+  post-parse adapter interval + complete factor interval; peak host RSS via
+  /usr/bin/time.
 
 GPU (`parac_graph` / `parac_physics`, device=gpu):
   dump -> their write_graph.jl producer, method "nnz-sort" (their random
@@ -72,12 +73,13 @@ GPU (`parac_graph` / `parac_physics`, device=gpu):
   appends the ground node after it for an operator) -> the two CUDA drivers
   (driver.cu / driver_physics.cu), REPS medians. Those take the tolerance on argv
   already, so the same calibration applies with no patch.
-  setup = sort + etree/ftree/summary + kernel + CSR conversion + SpSV analysis
-  (ALL pre-solve work, apples-to-apples with apxchol); peak VRAM via the
+  setup = sort + complete post-parse adapter/factor/solver-setup intervals;
+  solve includes RHS work, PCG, and returning x to host; peak VRAM via the
   nvidia-smi sidecar.
 
-The ParAC checkout itself is upstream 44ef39d plus ONE patch
-(benchmarks/patches/parac/0001-*.patch), applied by benchmarks/parac_build.sh.
+The ParAC checkout itself is upstream 44ef39d plus the three benchmark-only
+patches under benchmarks/patches/parac/; CMake applies the stack automatically,
+and benchmarks/parac_build.sh verifies it for an external checkout.
 
 Resume semantics differ BY DESIGN: CPU treats failed/timeout as terminal;
 GPU retries them (transient CUDA hiccups). Unlike the old standalone runners,
@@ -139,8 +141,9 @@ TERMINAL_CPU = frozenset({"complete", "not_converged", "failed", "timeout"})
 TERMINAL_GPU = frozenset({"complete", "not_converged"})   # failed/timeout retry
 
 PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
-            "note": "ParAC at upstream 44ef39d + benchmarks/patches/parac/0001 (thread-count "
-                    "gate + configurable tolerance; no numerics touched). kind=graph -> GRAPH "
+            "note": "ParAC at upstream 44ef39d + benchmarks/patches/parac/0001-0002 "
+                    "(thread-count gate, configurable tolerance, and complete setup timing; "
+                    "no numerics touched). kind=graph -> GRAPH "
                     "mode on the PURE L per connected component, ParAC's own zero-sum RHS; "
                     "kind=operator -> PHYSICS mode on the PUBLISHED operator augmented ParAC's "
                     "own way (permute, then append the ground row/column the trim removes). "
@@ -160,7 +163,10 @@ PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
             **rc.binary_toolchain(rc.PARAC_CPU_DRIVER)}
 # The GPU cells' toolchain is added per driver in run_gpu (two drivers, and both
 # are OURS to build — build-cuda/gpu_rchol_gpu_driver{,_physics}).
-PROV_GPU = {"source": "parac_runner.py", "git_sha": PROV_CPU["git_sha"]}
+PROV_GPU = {"source": "parac_runner.py", "git_sha": PROV_CPU["git_sha"],
+            "note": "ParAC upstream 44ef39d + benchmark-only patch 0003: complete "
+                    "post-parse adapter, factor setup, solver setup, and per-RHS timing; "
+                    "the per-RHS interval includes returning x to host. No numerics changed."}
 
 _g = lambda pat, o: (re.search(pat, o).group(1) if re.search(pat, o) else None)
 
@@ -366,9 +372,15 @@ def _run_once_cpu(amd, physics, rel_tol=None):
         if ln.startswith("APXRSS "):
             try: rss_mb = round(int(ln.split()[1]) / 1024.0, 1)
             except ValueError: pass
-    # "Factorization execution time" wraps ONLY the elimination kernel; etree/
-    # ftree/summary host prep are printed separately (seconds) and count too.
+    # Patch 0002 adds two complete, non-overlapping setup intervals around work
+    # performed by ParAC itself.  `adapter` starts after MatrixMarket parsing and
+    # includes triplet normalization/CSC construction plus the etree schedule;
+    # `factor_setup` includes factor data structures, elimination, and final CSR.
+    # The narrower upstream timers remain diagnostics but must not be summed into
+    # setup (doing so omits the work around them).
     return dict(factor=_g(r"Factorization execution time:\s*([0-9.]+)", o),
+                factor_setup=_g(r"APX factor setup time:\s*([0-9.eE+-]+)", o),
+                adapter=_g(r"APX adapter preprocessing time:\s*([0-9.eE+-]+)", o),
                 solve=_g(r"Solve time taken:\s*([0-9]+)", o),
                 etree=_g(r"build etree:\s*([0-9.eE+-]+)", o),
                 ftree=_g(r"factorization tree:\s*([0-9.eE+-]+)", o),
@@ -425,19 +437,21 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
         rc.emit_cell(family, mid, solver, "", "timeout", {}, THREADS, "cpu", PROV_CPU,
                      matrix_meta=extra_meta, timeout_cap_s=TIMEOUT_CPU)
         return "TIMEOUT"
-    ok = [r for r in runs if r["factor"] and r["solve"] and r["iters"]]
+    ok = [r for r in runs if r["factor_setup"] and r["adapter"] and
+          r["solve"] and r["iters"]]
     if not ok:
         rc.emit_cell(family, mid, solver, "", "failed", {}, THREADS, "cpu", PROV_CPU,
                      matrix_meta=extra_meta)
         return "FAILED"
     med = lambda key: statistics.median(float(r[key] or 0) for r in ok)
-    factor = med("factor"); etree = med("etree"); ftree = med("ftree"); summ = med("summary")
+    factor = med("factor")
+    factor_setup = med("factor_setup")
+    adapter = med("adapter")
     solve = statistics.median(float(r["solve"]) / 1000 for r in ok)
     iters = int(statistics.median(int(r["iters"]) for r in ok))
     rr = statistics.median(float(r["rr"]) for r in ok if r["rr"])
-    prep = etree + ftree + summ
     n = int(ok[-1]["n"]); nnz = int(ok[-1]["nnz"])
-    setup = factor + prep + amds   # setup = reorder + full pre-solve factorization
+    setup = amds + adapter + factor_setup
     total = setup + solve
     # rel_res is ParAC's own ||Ax-b||/||b|| against the operator it solved, which
     # the input construction makes the operator we report on. THE GRADING RULE
@@ -448,7 +462,9 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
     metrics = {"n": n, "nnz": nnz, "setup_s": round(setup, 6), "solve_s": round(solve, 6),
                "total_s": round(total, 6), "iters": iters, "rel_res": rr, "fillin": 0.0,
                "us_per_nnz": round(total / nnz * 1e6, 4), "amd_reorder_s": round(amds, 6),
-               "factor_s": round(factor, 6), "prep_s": round(prep, 6)}
+               "adapter_setup_s": round(amds + adapter, 6),
+               "native_setup_s": round(factor_setup, 6),
+               "factor_kernel_s": round(factor, 6)}
     if rel_tol is not None:
         metrics["parac_rel_tol"] = rel_tol      # the calibrated value we passed
     rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
@@ -516,7 +532,7 @@ def _measure_cpu_graph_split(family, mid):
     sequentially), iters/rel_res are the worst (MAX) over components."""
     if rc.cell_done(family, mid, "parac", "", THREADS, "cpu", terminal=TERMINAL_CPU):
         return "skip(done)"
-    setup = solve = factor_tot = prep_tot = amds_tot = 0.0
+    setup = solve = factor_tot = prep_tot = native_tot = amds_tot = 0.0
     iters = 0; rr = 0.0; n_tot = nnz_tot = 0; rss_peak = 0.0
     n_solved = 0; n_comps_total = None; rank = 0; tol_used = None; preps = []
     try:
@@ -538,18 +554,22 @@ def _measure_cpu_graph_split(family, mid):
             if rel_tol is not None:
                 tol_used = rel_tol if tol_used is None else max(tol_used, rel_tol)
             runs = [_run_once_cpu(amd, False, rel_tol=rel_tol) for _ in range(REPS)]
-            ok = [r for r in runs if r["factor"] and r["solve"] and r["iters"]]
+            ok = [r for r in runs if r["factor_setup"] and r["adapter"] and
+                  r["solve"] and r["iters"]]
             if not ok:
                 rc.emit_cell(family, mid, "parac", "", "failed", {},
                              THREADS, "cpu", PROV_CPU)
                 return "FAILED"
             med = lambda key: statistics.median(float(r[key] or 0) for r in ok)
-            factor = med("factor"); prep = med("etree") + med("ftree") + med("summary")
+            factor = med("factor")
+            factor_setup = med("factor_setup")
+            adapter = med("adapter")
             c_solve = statistics.median(float(r["solve"]) / 1000 for r in ok)
             c_iters = int(statistics.median(int(r["iters"]) for r in ok))
             c_rr = statistics.median(float(r["rr"]) for r in ok if r["rr"])
-            factor_tot += factor; prep_tot += prep; amds_tot += amds
-            setup += factor + prep + amds; solve += c_solve
+            factor_tot += factor; prep_tot += adapter
+            native_tot += factor_setup; amds_tot += amds
+            setup += amds + adapter + factor_setup; solve += c_solve
             iters = max(iters, c_iters); rr = max(rr, c_rr)
             n_tot += int(ok[-1]["n"]); nnz_tot += int(ok[-1]["nnz"])
             rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
@@ -567,8 +587,11 @@ def _measure_cpu_graph_split(family, mid):
     metrics = {"n": n_tot, "nnz": nnz_tot, "setup_s": round(setup, 6),
                "solve_s": round(solve, 6), "total_s": round(total, 6), "iters": iters,
                "rel_res": rr, "fillin": 0.0, "us_per_nnz": round(total / nnz_tot * 1e6, 4),
-               "amd_reorder_s": round(amds_tot, 6), "factor_s": round(factor_tot, 6),
-               "prep_s": round(prep_tot, 6), "n_components_solved": n_solved,
+               "amd_reorder_s": round(amds_tot, 6),
+               "adapter_setup_s": round(amds_tot + prep_tot, 6),
+               "native_setup_s": round(native_tot, 6),
+               "factor_kernel_s": round(factor_tot, 6),
+               "n_components_solved": n_solved,
                "n_components_total": n_comps_total or n_solved}
     if tol_used is not None: metrics["parac_rel_tol"] = tol_used
     if rss_peak: metrics["max_rss_mb"] = round(rss_peak, 1)
@@ -708,12 +731,15 @@ def _nnz_sort(mid, src, tag, augment=False):
 def _run_once_gpu(driver, mtx, tol):
     with rc.VramSampler("gpu_rchol") as vram:   # matches both driver binaries
         o = sh(f"{driver} {mtx} {BLOCKS} 1 {tol}", timeout=TIMEOUT_GPU).stdout
-    # Pre-solve setup is NOT just the GPU kernel: host prep (etree/ftree/summary,
-    # seconds) + CSR conversion + cuSPARSE SpSV analysis (ms) all precede the
-    # first PCG iteration; counting only the kernel under-reported setup ~17x.
+    # Keep the original narrow timers as diagnostics alongside patch 0003's
+    # complete, non-overlapping phases.
     return dict(etree=_g(r"build etree:\s*([0-9.eE+-]+)", o),
                 ftree=_g(r"factorization tree:\s*([0-9.eE+-]+)", o),
                 summary=_g(r"generate summary:\s*([0-9.eE+-]+)", o),
+                adapter=_g(r"APX adapter preprocessing time:\s*([0-9.eE+-]+)", o),
+                factor_setup=_g(r"APX GPU factor setup time:\s*([0-9.eE+-]+)", o),
+                solver_setup=_g(r"APX GPU solver setup time:\s*([0-9.eE+-]+)", o),
+                solve_total=_g(r"APX GPU solve phase time:\s*([0-9.eE+-]+)", o),
                 factor=_g(r"Kernel execution time:\s*([0-9.]+)", o),       # ms
                 conv=_g(r"total conversion time:\s*([0-9.]+)", o),         # ms
                 spsv=_g(r"solve preprocess time:\s*([0-9.]+)", o),         # ms
@@ -848,18 +874,21 @@ def run_gpu(mid, tol=TOL):
                          matrix_meta={"parac_prep": prep_prov},
                          timeout_cap_s=TIMEOUT_GPU)
             results.append(f"{solver_key}[TIMEOUT]"); continue
-        ok = [r for r in runs if r["factor"] and r["solve"] and r["iters"]]
+        ok = [r for r in runs if r["adapter"] and r["factor_setup"] and
+              r["solver_setup"] and r["solve_total"] and r["iters"]]
         if not ok:
             rc.emit_cell(family, mid, solver_key, "", "failed", None, THREADS, "gpu", prov)
             results.append(f"{solver_key}[FAILED]"); continue
         med = lambda key, scale=1.0: statistics.median(float(r[key] or 0) * scale for r in ok)
-        etree = med("etree"); ftree = med("ftree"); summ = med("summary")
+        adapter = med("adapter"); factor_setup = med("factor_setup")
+        solver_setup = med("solver_setup"); solve = med("solve_total")
         factor = med("factor", 1/1000); conv = med("conv", 1/1000)
-        spsv = med("spsv", 1/1000); solve = med("solve", 1/1000)
+        spsv = med("spsv", 1/1000); pcg = med("solve", 1/1000)
         iters = int(statistics.median(int(r["iters"]) for r in ok))
         rr = statistics.median(float(r["rr"]) for r in ok if r["rr"])
-        # setup = EVERYTHING before the first PCG iteration (only disk I/O excluded).
-        setup = sort_s + etree + ftree + summ + factor + conv + spsv
+        # Complete non-overlapping intervals from ParAC's own code. The narrower
+        # kernel/conversion/SpSV/PCG timers below are diagnostics only.
+        setup = sort_s + adapter + factor_setup + solver_setup
         total = setup + solve
         # rr is the driver's own `normalized diff norm` = ||Ax-b||/||b||. Judge it
         # at the tolerance we report at, not a decade looser.
@@ -867,7 +896,11 @@ def run_gpu(mid, tol=TOL):
         metrics = {"n": int(ok[0]["n"]) if ok[0]["n"] else None,
                    "nnz": int(ok[0]["nnz"]) if ok[0]["nnz"] else None,
                    "setup_s": setup, "solve_s": solve, "total_s": total,
-                   "iters": iters, "rel_res": rr, "parac_tol": cal}
+                   "iters": iters, "rel_res": rr, "parac_tol": cal,
+                   "adapter_setup_s": sort_s + adapter,
+                   "native_setup_s": factor_setup + solver_setup,
+                   "factor_kernel_s": factor, "factor_conversion_s": conv,
+                   "spsv_analysis_s": spsv, "pcg_kernel_s": pcg}
         vram = [float(r["vram_mb"]) for r in ok if r.get("vram_mb")]
         if vram: metrics["max_vram_mb"] = round(max(vram), 1)   # peak VRAM over reps
         rc.emit_cell(family, mid, solver_key, "", status, metrics, THREADS, "gpu", prov,

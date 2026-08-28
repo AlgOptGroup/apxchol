@@ -290,8 +290,11 @@ option(BUILD_GPU_RCHOL "Build Liang et al. RCHOL drivers" OFF)
 if (BUILD_GPU_RCHOL)
     FetchContent_Declare(gpu_rchol
         GIT_REPOSITORY https://github.com/Tianyu-Liang/Parallel-Randomized-Cholesky.git
-        GIT_TAG        main
-        GIT_SHALLOW    TRUE
+        GIT_TAG        44ef39d2f5c2c52aa577f58f005d62f2675cefbc
+        PATCH_COMMAND
+            git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0001-configurable-tolerance-and-any-thread-count.patch
+            COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0002-report-complete-setup-boundaries.patch
+            COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0003-report-complete-gpu-boundaries.patch
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
@@ -309,22 +312,23 @@ if (BUILD_GPU_RCHOL)
 
     find_package(OpenMP QUIET)
 
-    # experiment/auxilliary.hpp uses INT_MAX (line ~121) without including
-    # <climits>; it only compiles where libstdc++ happens to leak the macro in.
-    # It is the copy the CPU driver actually sees (experiment/custom_cg.hpp
-    # includes it by quoted name from the same directory), and clang does not
-    # leak it, so add the include the source is missing.
-    set(_exp_aux_hpp "${gpu_rchol_SOURCE_DIR}/experiment/auxilliary.hpp")
-    file(READ "${_exp_aux_hpp}" _exp_aux_content)
-    string(FIND "${_exp_aux_content}" "#include <climits>" _exp_aux_pos)
-    if (_exp_aux_pos EQUAL -1)
-        string(REPLACE
-            "#include \"pre_process.hpp\""
-            "#include \"pre_process.hpp\"\n#include <climits>  // INT_MAX"
-            _exp_aux_content "${_exp_aux_content}")
-        file(WRITE "${_exp_aux_hpp}" "${_exp_aux_content}")
-        message(STATUS "Patched gpu_rchol experiment/auxilliary.hpp with the missing <climits>")
-    endif()
+    # A SOURCE_DIR override skips FetchContent's PATCH_COMMAND. Fail closed rather
+    # than build a driver whose partial timers our parser would silently accept.
+    file(READ "${gpu_rchol_SOURCE_DIR}/experiment/driver_local.cpp" _parac_cpu_driver)
+    file(READ "${gpu_rchol_SOURCE_DIR}/experiment/pre_process.hpp" _parac_cpu_prep)
+    file(READ "${gpu_rchol_SOURCE_DIR}/gpu_implementation/driver.cu" _parac_gpu_driver)
+    file(READ "${gpu_rchol_SOURCE_DIR}/gpu_implementation/solver.hpp" _parac_gpu_solver)
+    function(_parac_require_marker _content_var _needle _patch_name)
+        string(FIND "${${_content_var}}" "${_needle}" _found)
+        if (_found EQUAL -1)
+            message(FATAL_ERROR "gpu_rchol source is missing ${_patch_name}: ${_needle}")
+        endif()
+    endfunction()
+    _parac_require_marker(_parac_cpu_driver "PARAC_REL_TOL" "patch 0001")
+    _parac_require_marker(_parac_cpu_driver "APX factor setup time:" "patch 0002")
+    _parac_require_marker(_parac_cpu_prep "APX adapter preprocessing time:" "patch 0002")
+    _parac_require_marker(_parac_gpu_driver "APX GPU factor setup time:" "patch 0003")
+    _parac_require_marker(_parac_gpu_solver "APX GPU solve phase time:" "patch 0003")
 
     # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
     # this driver uses MKL's default 32-bit MKL_INT, so it must NOT get the ILP64 layer.
@@ -342,54 +346,17 @@ if (BUILD_GPU_RCHOL)
         target_link_libraries(gpu_rchol_cpu_driver PRIVATE
             OpenMP::OpenMP_CXX ${MKL_LIBRARIES_LP64}
         )
-        target_compile_options(gpu_rchol_cpu_driver PRIVATE -O3 -w)
+        # Upstream relies on transitive standard headers for INT_MAX/int64_t.
+        # Supply them as build flags, without rewriting its source tree.
+        target_compile_options(gpu_rchol_cpu_driver PRIVATE
+            -O3 -w -include climits -include cstdint)
         message(STATUS "GPU RCHOL CPU driver enabled (experiment/driver_local.cpp)")
     else()
         message(STATUS "GPU RCHOL CPU driver needs OpenMP + MKL (LP64) — skipped")
     endif()
 
-    # GPU driver (needs CUDA)
-    # Patch const-correctness for CUB 2.x (CUDA 13+)
-    set(_aux_hpp "${gpu_rchol_SOURCE_DIR}/gpu_implementation/auxilliary.hpp")
-    file(READ "${_aux_hpp}" _aux_content)
-    string(FIND "${_aux_content}" "compare_row_reference(Output<int, double> &a" _pos)
-    if (NOT _pos EQUAL -1)
-        string(REPLACE
-            "compare_row_reference(Output<int, double> &a, Output<int, double> &b)"
-            "compare_row_reference(const Output<int, double> &a, const Output<int, double> &b)"
-            _aux_content "${_aux_content}")
-        string(REPLACE
-            "compare_value_reference(Output<int, double> &a, Output<int, double> &b)"
-            "compare_value_reference(const Output<int, double> &a, const Output<int, double> &b)"
-            _aux_content "${_aux_content}")
-        file(WRITE "${_aux_hpp}" "${_aux_content}")
-        message(STATUS "Patched gpu_rchol auxilliary.hpp for CUDA 13+ const-correctness")
-    endif()
-
-    # Patch the GPU PCG stopping criterion to the TRUE Euclidean relative
-    # residual ||r||_2 / ||b||_2 (x0=0 => ||r0||_2 = ||b||_2) — the same metric
-    # Eigen CG / apxchol and the already-patched CPU ParAC driver use. The
-    # pristine solver.hpp stops on the PRECONDITIONED residual ratio
-    # sqrt(<r,M^-1 r>)/sqrt(<r0,M^-1 r0>), which is optimistic and halts at a true
-    # residual up to ~10x above tol on IPM matrices, making the iteration count
-    # an unfair apples-to-oranges vs every other solver (which all reach true
-    # <=1e-8). r1=<r,z> is still used for the CG alpha/beta recurrence; only the
-    # convergence TEST changes, so the iteration math is untouched.
-    set(_solver_hpp "${gpu_rchol_SOURCE_DIR}/gpu_implementation/solver.hpp")
-    file(READ "${_solver_hpp}" _solver_content)
-    string(FIND "${_solver_content}" "initial_exit_tol" _spos)
-    if (_spos EQUAL -1)
-        string(REPLACE
-            "bool tol_condition = r1 > TOL;"
-            "double initial_exit_tol = exit_tol;\n    bool tol_condition = (exit_tol / initial_exit_tol) > TOL;"
-            _solver_content "${_solver_content}")
-        string(REPLACE
-            "tol_condition = (sqrt(r1) / sqrt(initial_r1)) > TOL;"
-            "tol_condition = (exit_tol / initial_exit_tol) > TOL;"
-            _solver_content "${_solver_content}")
-        file(WRITE "${_solver_hpp}" "${_solver_content}")
-        message(STATUS "Patched gpu_rchol solver.hpp PCG to stop on true relative residual (fairness)")
-    endif()
+    # GPU driver (needs CUDA). The convergence test remains upstream: the runner
+    # calibrates its existing tolerance knob from the true residual it prints.
 
     include(CheckLanguage)
     # Remember the requested CUDA host compiler BEFORE check_language runs. check_language()
@@ -617,6 +584,12 @@ else()
 endif()
 target_link_libraries(benchmark PRIVATE HYPRE)
 target_compile_definitions(benchmark PRIVATE HAVE_HYPRE)
+if (APXCHOL_USE_CUDA AND BENCH_HYPRE_USE_CUDA)
+    # The benchmark must not expose a CPU-only Hypre build under the GPU label.
+    # This definition describes how the linked HYPRE target was configured; the
+    # generic APXCHOL_USE_CUDA definition says only that our own CUDA path exists.
+    target_compile_definitions(benchmark PRIVATE APXCHOL_BENCH_HYPRE_CUDA)
+endif()
 if (HAVE_CHOLMOD)
     target_compile_definitions(benchmark PRIVATE HAVE_CHOLMOD)
     target_include_directories(benchmark PRIVATE ${CHOLMOD_INCLUDE})

@@ -75,6 +75,10 @@ function bench_cmg(mtx_path, tol, maxiter, seed, reg_rel, as_operator)
         b = b / nb;
     end
 
+    % CMG requires a strictly SDD solve operator.  Start setup before the
+    % solver-specific pin/slice/regularization that produces that input; loading
+    % the common MatrixMarket operator and constructing the common RHS stay out.
+    tic;
     if as_operator
         % Published full-rank operator: solve it as it stands. No pin (there is
         % no null space to remove) and no eps*I (it is already strictly SDDM),
@@ -99,8 +103,7 @@ function bench_cmg(mtx_path, tol, maxiter, seed, reg_rel, as_operator)
         Lshift = Lsub + 1e-12 * speye(m);
     end
 
-    % CMG setup
-    tic;
+    % CMG hierarchy setup
     pfun = cmg_sdd(Lshift);
     setup_s = toc;
 
