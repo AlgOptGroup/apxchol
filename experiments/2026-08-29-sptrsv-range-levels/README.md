@@ -1,8 +1,7 @@
 # CPU SpTRSV implicit round-level ranges
 
-Status: **correctness prototype implemented, fully unit-tested, and locally
-screened**. The x86 screen passes; the decisive Grace 36/72-thread check is
-still pending.
+Status: **ship**. Correctness, local x86 screening, and the decisive lockstep
+Grace 36/72-thread gate all pass.
 
 ## Question
 
@@ -121,10 +120,63 @@ KiB for the baseline and 1,600,604 KiB for the candidate: **30,940 KiB less**,
 consistent with removing two four-million-entry row-id payloads. This is one
 measurement, not a distribution.
 
-Local verdict: retain the candidate. Before merge, require a current-source
-Grace campaign on the 16M/64M grids at 36 and 72 threads, exact solve quality,
-no solve-time regression above noise, and no RSS increase. The 64M case should
-remove 512 MiB of logical row-id payload, making it the decisive storage test.
+Local verdict: retain the candidate. The 64M case removes 512 MiB of logical
+row-id payload, making it the decisive Grace storage/setup test below.
+
+## Grace lockstep gate
+
+Candidate code commit `9466122a1249e7582e615f88c1d3edaceff70a1d` and base
+`96f460296d678ab96f19b0a2fc24f7c2fae5be1d` were built with Clang 22.1.8,
+LLVM libomp and `-mcpu=native`. Binary hashes were:
+
+```text
+baseline   4010de3e6f6ac9ace3a71874d098c4c524f50021802f1f6e0b6195b0bcc2e35a
+candidate  b70d8e355ae88c891d40319d22a1f9e8118850e1ab4a2ff9f6fae52f3481858e
+```
+
+An initial four-rank campaign completed 40/40 records but allowed ranks to
+advance independently. A candidate on one NUMA domain could therefore overlap
+a different-size baseline on another domain. Its structural result was useful
+(level construction collapsed and all quality fields matched), but its overall
+time aggregate is not used.
+
+The corrected job `4555311` ran every arm in lockstep: all four NUMA-local
+ranks used the same matrix size, thread count and binary, with seeds 42--45;
+the next arm began only after all four ranks finished. Each cell was
+baseline/candidate/baseline. It completed in 5:47 on one exclusive GH200 node
+(0.0964 node-hour), produced 72/72 records and 288/288 hash-verified result
+files. Ratios use candidate divided by the geometric mean of the two bracketing
+baselines.
+
+Setup-only cells (`maxiter=1`), four seeds per row:
+
+| grid side | threads | SpTRSV trace | level construction | total setup | one iteration | total | peak RSS |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4000 | 36 | 0.7428 | 0.0247 | 0.9775 | 1.0059 | 0.9824 | 1.0074 |
+| 4000 | 72 | 0.6965 | 0.0147 | 0.8572 | 0.9961 | 0.8820 | 1.0035 |
+| 8000 | 36 | 0.7208 | 0.0106 | 0.9144 | 0.9807 | 0.9251 | 1.0004 |
+| **8000** | **72** | **0.7782** | **0.0224** | **0.9252** | **0.9780** | **0.9341** | **1.0028** |
+| all 16 brackets | — | 0.7339 | 0.0171 | 0.9176 | 0.9901 | 0.9302 | 1.0035 |
+
+The bracketing baseline setup drift had geomean 1.022 and range
+0.956--1.150, so individual short 16M cells remain noisy. The 64M rows are the
+predeclared decision cells and agree at both thread counts.
+
+Full solves at T=72, four seeds per row:
+
+| grid side | SpTRSV trace | setup | solve | total | peak RSS |
+|---:|---:|---:|---:|---:|---:|
+| 4000 | 0.8740 | 0.9698 | 1.0108 | 0.9931 | 0.9978 |
+| **8000** | **0.7631** | **0.9192** | **0.9682** | **0.9454** | **1.0086** |
+| both sizes | 0.8167 | 0.9442 | 0.9893 | 0.9690 | 1.0032 |
+
+Factor nnz, stored nnz, iterations and residual matched both baselines in
+16/16 setup brackets and 8/8 full-solve brackets. The 64M/T72 gate required at
+least 5% lower SpTRSV setup contribution, no solve regression, exact quality,
+and no material RSS increase. It passes: traced SpTRSV setup is 22.2% lower,
+total setup 7.5% lower in setup cells and 8.1% lower in full solves, solve is
+2.2--3.2% lower, and peak RSS changes by less than 1% while the retained
+schedule payload is smaller. Verdict: merge the reviewed candidate.
 
 ## Validation
 
