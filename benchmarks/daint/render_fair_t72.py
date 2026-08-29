@@ -74,14 +74,29 @@ def geomean(values) -> float:
 
 
 def _diagnostic(record: dict) -> str:
+    status = record["status"]
+    metrics = record.get("metrics", {})
     if record["status"] == "timeout":
         cap = record.get("timeout_cap_s")
         return f"wall-clock cap {cap:g}s" if cap else "wall-clock timeout"
-    metrics = record.get("metrics", {})
+    if status == "not_converged":
+        residual = metrics.get("rel_res")
+        return (f"true residual {residual:.3g} > 1e-8" if residual is not None
+                else "independent true-residual check exceeded 1e-8")
     blob = "\n".join(str(metrics.get(key, ""))
                      for key in ("stdout_tail", "stderr_tail")).lower()
     if "insufficient resources" in blob and "cusparse" in blob:
         return "cuSPARSE insufficient resources during SpGEMM"
+    if "invalid factor diagonal" in blob:
+        return "portable PCG rejected an invalid factor diagonal"
+    returncode = metrics.get("returncode")
+    if returncode in (139, -11):
+        return "process terminated with SIGSEGV"
+    reason = str(record.get("matrix_meta", {}).get("na_reason", ""))
+    if status == "failed" and reason:
+        return "Julia driver failed" if "bench_laplacians.jl" in reason else reason[:160]
+    if status == "failed" and returncode is not None:
+        return f"process exit status {returncode}"
     return ""
 
 
