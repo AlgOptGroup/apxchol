@@ -31,6 +31,104 @@ namespace apxchol {
 // computational benefit of parallelizing a single level's rows/cols.
 inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 
+namespace detail {
+
+// A level whose row ids are the implicit contiguous interval [first, last).
+// Elimination appends factor columns round-major, so the round-derived base
+// schedule needs no per-row storage.  The vector-backed topological fallback
+// below presents the same size()/operator[] interface to the executor.
+struct contiguous_level_range {
+    node_index first = 0;
+    node_index last = 0;
+
+    std::size_t size() const {
+        assert(first <= last);
+        return static_cast<std::size_t>(last - first);
+    }
+    bool empty() const { return first == last; }
+    node_index operator[](std::size_t k) const {
+        assert(k < size());
+        return first + static_cast<node_index>(k);
+    }
+};
+
+// Non-owning interpretation of round_bounds as forward level ranges.  There
+// is one [bounds[r], bounds[r+1]) range per recorded round, followed by one
+// singleton range per residual serial-peel row.  Repeated boundaries therefore
+// remain empty levels; when no peel follows, trailing empty rounds are omitted,
+// exactly as the old row->round histogram (whose max level came from a row)
+// omitted them.  The m == 0 case keeps its historical single empty level.
+class round_level_ranges {
+public:
+    static bool valid_metadata(const std::vector<node_index>& bounds,
+                               node_index m) {
+        return bounds.size() >= 2 && bounds.front() == 0 &&
+               bounds.back() <= m && std::is_sorted(bounds.begin(), bounds.end());
+    }
+
+    round_level_ranges(const std::vector<node_index>& bounds, node_index m)
+        : bounds_(&bounds), levels_(level_count(bounds, m)) {
+        assert(valid_metadata(bounds, m));
+    }
+
+    std::size_t size() const { return levels_; }
+
+    contiguous_level_range forward(std::size_t level) const {
+        assert(level < levels_);
+        const std::size_t rounds = bounds_->size() - 1;
+        if (level < rounds)
+            return {(*bounds_)[level], (*bounds_)[level + 1]};
+        const node_index first = bounds_->back() +
+            static_cast<node_index>(level - rounds);
+        return {first, first + 1};
+    }
+
+    contiguous_level_range backward(std::size_t level) const {
+        assert(level < levels_);
+        return forward(levels_ - 1 - level);
+    }
+
+private:
+    static std::size_t level_count(const std::vector<node_index>& bounds,
+                                   node_index m) {
+        assert(valid_metadata(bounds, m));
+        const std::size_t rounds = bounds.size() - 1;
+        const node_index last = bounds.back();
+        if (last < m)
+            return rounds + static_cast<std::size_t>(m - last);
+        if (m == 0) return 1;
+
+        // The old materialization sized the vectors from max(row_round)+1, so
+        // recorded rounds after the last real row never became level slots.
+        std::size_t used_rounds = rounds;
+        while (used_rounds != 0 &&
+               bounds[used_rounds - 1] == bounds[used_rounds])
+            --used_rounds;
+        return used_rounds;
+    }
+
+    const std::vector<node_index>* bounds_;
+    std::size_t levels_;
+};
+
+template <bool Forward>
+class directional_round_levels {
+public:
+    directional_round_levels(const std::vector<node_index>& bounds, node_index m)
+        : ranges_(bounds, m) {}
+
+    std::size_t size() const { return ranges_.size(); }
+    contiguous_level_range operator[](std::size_t level) const {
+        if constexpr (Forward) return ranges_.forward(level);
+        else                   return ranges_.backward(level);
+    }
+
+private:
+    round_level_ranges ranges_;
+};
+
+} // namespace detail
+
 // kFactorDropRelDefault (the compacting drop's default threshold, 1e-4, and
 // the measurements behind it), factor_drop_rel_from_env(),
 // factor_column_scale() and the drop itself
@@ -55,9 +153,13 @@ inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 /// off-diagonal slots against y_out, one subtract, one divide by the diagonal),
 /// so they are ONE templated kernel, solve_levelset<Dir, V>, whose direction
 /// policy (fwd_dir / bck_dir, below the kernel) supplies the arrays, the level
-/// list, the off-diagonal slot range and diagonal slot of a row / column, and
+/// order, the off-diagonal slot range and diagonal slot of a row / column, and
 /// the input transform (identity, or the fp16 storage's folded x * r_j^2 on
 /// the back solve), and whose STORAGE type V is float or fp16_t.
+/// Round-derived levels are implicit contiguous ranges over a setup-time
+/// snapshot of the supplied round bounds;
+/// schedule construction without valid round metadata retains the materialized
+/// topological row lists.  Both feed the same templated level-loop body.
 /// forward_solve / transpose_solve are thin wrappers that branch on the
 /// storage the last setup() chose -- ONCE per solve, never per row.
 ///
@@ -870,8 +972,9 @@ private:
     }
 
     bool round_bounds_valid() const {
-        return !round_levels_disabled() && !round_bounds_.empty() &&
-               round_bounds_.back() <= static_cast<node_index>(m_);
+        return !round_levels_disabled() &&
+               detail::round_level_ranges::valid_metadata(
+                   pending_round_bounds_, m_);
     }
 
     template <class Mark>
@@ -904,27 +1007,40 @@ private:
     // fat prefix followed by the residual peel/BK tail as one contiguous run of
     // thin levels. Preserve the established bulk level-set schedule for that
     // prefix and build a critical-parent plan only for the tail rows. Forward
-    // executes prefix -> tail; backward's level vector is reversed and executes
+    // executes prefix -> tail; backward's level sequence is reversed and executes
     // tail -> prefix. No input-size or whole-factor mean-width gate is involved.
     template <class Mark>
     void build_hybrid_tail(unsigned processors, Mark&& mark) {
-        if (processors <= 1 || !round_bounds_valid() || fwd_levels_.empty())
+        if (processors <= 1 || !round_levels_active_ || round_level_count_ == 0)
             return;
 
-        std::size_t split = fwd_levels_.size();
+        const detail::directional_round_levels</*Forward=*/true> levels(
+            active_round_bounds_, m_);
+        std::size_t split = levels.size();
         while (split != 0 &&
-               fwd_levels_[split - 1].size() <=
+               levels[split - 1].size() <=
                    static_cast<std::size_t>(kSpTRSVOMPThreshold))
             --split;
-        if (split == fwd_levels_.size()) return;  // no thin suffix
+        if (split == levels.size()) return;  // no thin suffix
 
-        const node_index first_row = fwd_levels_[split].front();
+        node_index first_row = m_;
+        node_index next_row = m_;
         std::size_t tail_rows = 0;
-        for (std::size_t level = split; level < fwd_levels_.size(); ++level)
-            tail_rows += fwd_levels_[level].size();
+        for (std::size_t level = split; level < levels.size(); ++level) {
+            const auto range = levels[level];
+            if (range.empty()) continue;
+            if (first_row == m_) {
+                first_row = range.first;
+            } else if (range.first != next_row) {
+                return;
+            }
+            next_row = range.last;
+            tail_rows += range.size();
+        }
         // Round levels partition factor order contiguously. Refuse rather than
         // silently constructing a partial plan if that invariant ever changes.
-        if (tail_rows != static_cast<std::size_t>(m_ - first_row))
+        if (first_row == m_ || next_row != m_ ||
+            tail_rows != static_cast<std::size_t>(m_ - first_row))
             return;
 
         critical_plan_ = detail::build_critical_schedule(
@@ -932,7 +1048,7 @@ private:
             first_row);
         critical_barrier_.setup(processors);
         hybrid_fwd_level_end_ = split;
-        hybrid_bck_level_begin_ = fwd_levels_.size() - split;
+        hybrid_bck_level_begin_ = levels.size() - split;
         hybrid_active_ = critical_plan_.row_count != 0;
         if (hybrid_active_) {
             mark("hybrid_critical_tail");
@@ -941,10 +1057,32 @@ private:
                 std::fprintf(stderr,
                     "[trsv-hybrid] processors=%u bulk_levels=%zu "
                     "tail_levels=%zu tail_rows=%u critical_supersteps=%zu\n",
-                    processors, split, fwd_levels_.size() - split,
+                    processors, split, levels.size() - split,
                     static_cast<unsigned>(critical_plan_.row_count),
                     critical_plan_.steps);
             }
+        }
+    }
+
+    template <class Dir>
+    std::size_t base_level_count() const {
+        return round_levels_active_
+            ? round_level_count_
+            : Dir::materialized_levels(*this).size();
+    }
+
+    // Invoke one generic consumer with either the implicit round-range view or
+    // the materialized topological fallback. The solve loop below uses the same
+    // split so there is one executor source, not a range-specific kernel branch.
+    template <class Dir, class Fn>
+    void with_base_levels(Fn&& fn) const {
+        if (round_levels_active_) {
+            const detail::directional_round_levels<Dir::forward> levels(
+                active_round_bounds_, m_);
+            assert(levels.size() == round_level_count_);
+            fn(levels);
+        } else {
+            fn(Dir::materialized_levels(*this));
         }
     }
 
@@ -960,7 +1098,7 @@ private:
         // (forward) / later round (back, reversed), never the same level. Trailing
         // residual-peel columns get their own sequential levels.
         //
-        // Correctness hinges on round_bounds_ exactly matching the factor's
+        // Correctness hinges on the supplied round bounds exactly matching the factor's
         // column->round mapping. It does, now that the elimination loop no longer
         // records the bailed (min_is_fraction) round -- that round eliminates no
         // columns, and counting it used to desync the boundaries and mislabel the
@@ -972,96 +1110,104 @@ private:
         // distribute columns far more evenly -> better per-level load balance.
         const bool use_rounds = round_bounds_valid();
         if (use_rounds) {
-            std::vector<int> rof(m_);
-            const node_index R = static_cast<node_index>(round_bounds_.size()) - 1;
-            const node_index last = round_bounds_.back();
-            node_index r = 0;
-            for (node_index c = 0; c < m_; ++c) {
-                if (c >= last) { rof[c] = static_cast<int>(R + (c - last)); continue; }
-                while (r + 1 < round_bounds_.size() && c >= round_bounds_[r + 1]) ++r;
-                rof[c] = static_cast<int>(r);
-            }
-            int maxd = 0;
-            for (node_index c = 0; c < m_; ++c) maxd = std::max(maxd, rof[c]);
-            // Pre-size every level exactly (one O(m) histogram pass) so the
-            // fill below never reallocates; contents and order are unchanged.
-            // The fill itself stays serial: it is a stable multi-bucket
-            // append whose parallelization would need per-(thread, level)
-            // exact offsets — another full two-pass — for an O(m) loop that
-            // is small next to the transpose above.
-            std::vector<node_index> lvl_cnt(static_cast<size_t>(maxd) + 1, 0);
-            for (node_index c = 0; c < m_; ++c) lvl_cnt[rof[c]]++;
-            fwd_levels_.assign(maxd + 1, {});
-            bck_levels_.assign(maxd + 1, {});
-            for (int d = 0; d <= maxd; ++d) {
-                fwd_levels_[d].reserve(lvl_cnt[d]);
-                bck_levels_[maxd - d].reserve(lvl_cnt[d]);
-            }
-            for (node_index c = 0; c < m_; ++c) {
-                fwd_levels_[rof[c]].push_back(c);          // L solve: round order
-                bck_levels_[maxd - rof[c]].push_back(c);   // L^T solve: reversed
-            }
+            // set_round_bounds() supplies metadata for the NEXT setup. Move it
+            // into a setup-time snapshot so a later setter call cannot mutate
+            // an already-built schedule (the old materialized schedule had the
+            // same snapshot semantics). Consuming the pending value also keeps
+            // a later setup without new metadata from reusing stale rounds.
+            active_round_bounds_ = std::move(pending_round_bounds_);
+            std::vector<node_index>().swap(pending_round_bounds_);
+            // Factor columns are appended round-major and contiguous. Keep the
+            // active round bounds as the complete base schedule: a round is
+            // [bounds[r], bounds[r+1]), and each row after bounds.back() is a
+            // singleton residual-peel level. Backward reverses only the RANGE
+            // order; ids inside a range stay ascending, exactly like the old
+            // stable bucket fill. Drop any capacities from a prior fallback
+            // setup so the representation actually removes the 2*m row ids.
+            std::vector<std::vector<node_index>>().swap(fwd_levels_);
+            std::vector<std::vector<node_index>>().swap(bck_levels_);
+            round_levels_active_ = true;
+            round_level_count_ =
+                detail::round_level_ranges(active_round_bounds_, m_).size();
             mark("fwd_levels"); mark("bck_levels");
         } else {
-        // ── Forward level sets (for L solve) ────────────────────
-        // Row i depends on columns j < i where L(i,j) ≠ 0.
-        // The depth recurrence is inherently sequential (depth[i] reads the
-        // depths of earlier rows along the DAG's longest path), so it stays
-        // serial; the fill is pre-sized from a depth histogram so its
-        // push_backs never reallocate (contents and order unchanged).
-        {
-            std::vector<int> depth(m_, 0);
-            int max_depth = 0;
-            for (node_index i = 0; i < m_; ++i) {
-                int d = 0;
-                for (edge_index p = csr_row_ptr_[i]; p < csr_row_ptr_[i + 1] - 1; ++p)
-                    d = std::max(d, depth[csr_col_idx_[p]] + 1);
-                depth[i] = d;
-                max_depth = std::max(max_depth, d);
-            }
-            std::vector<node_index> lvl_cnt(static_cast<size_t>(max_depth) + 1, 0);
-            for (node_index i = 0; i < m_; ++i) lvl_cnt[depth[i]]++;
-            fwd_levels_.resize(max_depth + 1);
-            for (int d = 0; d <= max_depth; ++d)
-                fwd_levels_[d].reserve(lvl_cnt[d]);
-            for (node_index i = 0; i < m_; ++i)
-                fwd_levels_[depth[i]].push_back(i);
-        }
-        mark("fwd_levels");
-
-        // ── Backward level sets (for L^T solve) ─────────────────
-        // Column j: z[j] = (y[j] - Σ L(k,j)*z[k]) / L(j,j)  for k > j.
-        // So column j depends on z[k] for k > j where L(k,j) ≠ 0.
-        // Same structure as the forward scan: sequential depth recurrence
-        // (reverse direction), histogram-pre-sized fill.
-        {
-            std::vector<int> depth(m_, 0);
-            int max_depth = 0;
-            for (node_index j = m_; j-- > 0; ) {   // reverse: m_-1 .. 0 (unsigned-safe)
-                int d = 0;
-                for (edge_index p = csc_col_ptr_[j]; p < csc_col_ptr_[j + 1]; ++p) {
-                    node_index k = csc_row_idx_[p];
-                    if (k > j)
-                        d = std::max(d, depth[k] + 1);
+            std::vector<node_index>().swap(active_round_bounds_);
+            std::vector<node_index>().swap(pending_round_bounds_);
+            round_levels_active_ = false;
+            round_level_count_ = 0;
+            fwd_levels_.clear();
+            bck_levels_.clear();
+            // ── Forward level sets (for L solve) ────────────────────
+            // Row i depends on columns j < i where L(i,j) ≠ 0.
+            // The depth recurrence is inherently sequential (depth[i] reads the
+            // depths of earlier rows along the DAG's longest path), so it stays
+            // serial; the fill is pre-sized from a depth histogram so its
+            // push_backs never reallocate (contents and order unchanged).
+            {
+                std::vector<int> depth(m_, 0);
+                int max_depth = 0;
+                for (node_index i = 0; i < m_; ++i) {
+                    int d = 0;
+                    for (edge_index p = csr_row_ptr_[i];
+                         p < csr_row_ptr_[i + 1] - 1; ++p)
+                        d = std::max(d, depth[csr_col_idx_[p]] + 1);
+                    depth[i] = d;
+                    max_depth = std::max(max_depth, d);
                 }
-                depth[j] = d;
-                max_depth = std::max(max_depth, d);
+                std::vector<node_index> lvl_cnt(
+                    static_cast<size_t>(max_depth) + 1, 0);
+                for (node_index i = 0; i < m_; ++i) lvl_cnt[depth[i]]++;
+                fwd_levels_.resize(max_depth + 1);
+                for (int d = 0; d <= max_depth; ++d)
+                    fwd_levels_[d].reserve(lvl_cnt[d]);
+                for (node_index i = 0; i < m_; ++i)
+                    fwd_levels_[depth[i]].push_back(i);
             }
-            std::vector<node_index> lvl_cnt(static_cast<size_t>(max_depth) + 1, 0);
-            for (node_index j = 0; j < m_; ++j) lvl_cnt[depth[j]]++;
-            bck_levels_.resize(max_depth + 1);
-            for (int d = 0; d <= max_depth; ++d)
-                bck_levels_[d].reserve(lvl_cnt[d]);
-            for (node_index j = 0; j < m_; ++j)
-                bck_levels_[depth[j]].push_back(j);
-        }
-        mark("bck_levels");
+            mark("fwd_levels");
+
+            // ── Backward level sets (for L^T solve) ─────────────────
+            // Column j: z[j] = (y[j] - Σ L(k,j)*z[k]) / L(j,j) for k > j.
+            // So column j depends on z[k] for k > j where L(k,j) ≠ 0.
+            // Same structure as the forward scan: sequential depth recurrence
+            // (reverse direction), histogram-pre-sized fill.
+            {
+                std::vector<int> depth(m_, 0);
+                int max_depth = 0;
+                for (node_index j = m_; j-- > 0;) {
+                    int d = 0;
+                    for (edge_index p = csc_col_ptr_[j];
+                         p < csc_col_ptr_[j + 1]; ++p) {
+                        node_index k = csc_row_idx_[p];
+                        if (k > j)
+                            d = std::max(d, depth[k] + 1);
+                    }
+                    depth[j] = d;
+                    max_depth = std::max(max_depth, d);
+                }
+                std::vector<node_index> lvl_cnt(
+                    static_cast<size_t>(max_depth) + 1, 0);
+                for (node_index j = 0; j < m_; ++j) lvl_cnt[depth[j]]++;
+                bck_levels_.resize(max_depth + 1);
+                for (int d = 0; d <= max_depth; ++d)
+                    bck_levels_[d].reserve(lvl_cnt[d]);
+                for (node_index j = 0; j < m_; ++j)
+                    bck_levels_[depth[j]].push_back(j);
+            }
+            mark("bck_levels");
         }
 
         if (const char* e = std::getenv("APXCHOL_LEVEL_DUMP"); e && *e) {
             long long fwd_max = 0, bck_max = 0;
-            for (auto& l : fwd_levels_) fwd_max = std::max<long long>(fwd_max, (long long)l.size());
-            for (auto& l : bck_levels_) bck_max = std::max<long long>(bck_max, (long long)l.size());
+            with_base_levels<fwd_dir>([&](const auto& levels) {
+                for (std::size_t l = 0; l < levels.size(); ++l)
+                    fwd_max = std::max<long long>(
+                        fwd_max, static_cast<long long>(levels[l].size()));
+            });
+            with_base_levels<bck_dir>([&](const auto& levels) {
+                for (std::size_t l = 0; l < levels.size(); ++l)
+                    bck_max = std::max<long long>(
+                        bck_max, static_cast<long long>(levels[l].size()));
+            });
             // Back-solve WORK concentration. avg/count of levels is a MISLEADING
             // signal: power-law factors have a tiny average level size yet a
             // few very fat early levels carry nearly all the work (which is why
@@ -1072,26 +1218,34 @@ private:
             // tiny-level threshold).
             constexpr long long kTinyLevelSize = 512;   // diagnostic bucket only
             long long total_w = 0, max_lvl_w = 0, tiny_w = 0;
-            for (auto& lvl : bck_levels_) {
-                long long w = 0;
-                for (node_index j : lvl)
-                    w += (long long)(csc_col_ptr_[j + 1] - csc_col_ptr_[j] - 1);
-                total_w += w;
-                max_lvl_w = std::max(max_lvl_w, w);
-                if ((long long)lvl.size() < kTinyLevelSize) tiny_w += w;
-            }
+            with_base_levels<bck_dir>([&](const auto& levels) {
+                for (std::size_t l = 0; l < levels.size(); ++l) {
+                    const auto& level = levels[l];
+                    long long w = 0;
+                    for (std::size_t k = 0; k < level.size(); ++k) {
+                        const node_index j = level[k];
+                        w += static_cast<long long>(
+                            csc_col_ptr_[j + 1] - csc_col_ptr_[j] - 1);
+                    }
+                    total_w += w;
+                    max_lvl_w = std::max(max_lvl_w, w);
+                    if (static_cast<long long>(level.size()) < kTinyLevelSize)
+                        tiny_w += w;
+                }
+            });
             const double top1 = total_w ? (double)max_lvl_w / total_w : 0.0;
             const double tiny = total_w ? (double)tiny_w / total_w : 0.0;
             std::fprintf(stderr,
                 "[trsv-levels] m=%lld fwd_lvls=%zu (max=%lld) bck_lvls=%zu (max=%lld) "
                 "bck_work_top1_frac=%.4f bck_work_in_tiny_frac=%.4f\n",
-                (long long)m_, fwd_levels_.size(), fwd_max, bck_levels_.size(), bck_max,
+                (long long)m_, base_level_count<fwd_dir>(), fwd_max,
+                base_level_count<bck_dir>(), bck_max,
                 top1, tiny);
             // Thin-level structure: per direction, the number of levels of size
             // <= kSpTRSVOMPThreshold (each an `omp single` + barrier), and the
             // length distribution of the RUNS of consecutive thin levels (the
             // single-thread tail of a solve), as "len:count" pairs.
-            for (const auto* lv : {&fwd_levels_, &bck_levels_}) {
+            const auto dump_shape = [&]<class Dir>(const char* name) {
                 std::size_t thin_n = 0, fat_n = 0, runs = 0;
                 std::vector<std::pair<std::size_t, std::size_t>> hist;   // (run length, count), by length
                 std::size_t run = 0;
@@ -1102,20 +1256,30 @@ private:
                     if (it == hist.end()) hist.emplace_back(run, 1); else ++it->second;
                     run = 0;
                 };
-                for (const auto& l : *lv) {
-                    if (l.size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold)) { ++thin_n; ++run; }
-                    else { ++fat_n; flush(); }
-                }
+                with_base_levels<Dir>([&](const auto& levels) {
+                    for (std::size_t l = 0; l < levels.size(); ++l) {
+                        if (levels[l].size() <=
+                            static_cast<std::size_t>(kSpTRSVOMPThreshold)) {
+                            ++thin_n;
+                            ++run;
+                        } else {
+                            ++fat_n;
+                            flush();
+                        }
+                    }
+                });
                 flush();
                 std::sort(hist.begin(), hist.end());
                 std::fprintf(stderr, "[trsv-levels] %s: levels=%zu thin(<=%u)=%zu fat=%zu thin_runs=%zu barriers/solve=%zu"
                              " run_lengths(len:count)=",
-                             lv == &fwd_levels_ ? "fwd" : "bck", lv->size(),
+                             name, base_level_count<Dir>(),
                              static_cast<unsigned>(kSpTRSVOMPThreshold), thin_n, fat_n, runs,
-                             num_barriers(lv == &fwd_levels_));
+                             num_barriers(Dir::forward));
                 for (const auto& h : hist) std::fprintf(stderr, " %zu:%zu", h.first, h.second);
                 std::fprintf(stderr, "\n");
-            }
+            };
+            dump_shape.template operator()<fwd_dir>("fwd");
+            dump_shape.template operator()<bck_dir>("bck");
         }
     }
 
@@ -1186,18 +1350,47 @@ private:
                     #pragma omp barrier
                     solve_levelset_range_team<Dir, V>(
                         x_in, y_out, hybrid_bck_level_begin_,
-                        Dir::levels(*this).size());
+                        base_level_count<Dir>());
                 }
             }
         }
 #endif
         if (!team_ok) {
             // No row was touched unless the setup-time team materialized.
-            // Natural factor order is an exact fallback for both phases.
-            for (node_index k = 0; k < m_; ++k)
-                solve_row<Dir, V, /*Fat=*/false>(
-                    Dir::serial_vertex(k, m_, 0), x_in, y_out);
+            // Replay the snapshotted base levels serially, retaining each
+            // level's Fat template choice and row order. Natural factor order
+            // is mathematically valid, but it changes the established fat-row
+            // summation order and therefore breaks the byte-identity contract.
+            solve_levelset_range_serial<Dir, V>(
+                x_in, y_out, 0, base_level_count<Dir>());
         }
+    }
+
+    template <class Dir, class V>
+    void solve_levelset_range_serial(const double* x_in, double* y_out,
+                                     std::size_t first_level,
+                                     std::size_t level_end) const {
+        with_base_levels<Dir>([&](const auto& levels) {
+            assert(level_end <= levels.size());
+            for (std::size_t l = first_level; l < level_end; ++l) {
+                const auto& level = levels[l];
+                const node_index level_sz =
+                    static_cast<node_index>(level.size());
+                if (level_sz <= kSpTRSVOMPThreshold) {
+                    for (node_index k = 0; k < level_sz; ++k) {
+                        prefetch_ahead<Dir, V>(level, k, level_sz);
+                        solve_row<Dir, V, /*Fat=*/false>(
+                            level[k], x_in, y_out);
+                    }
+                } else {
+                    for (node_index k = 0; k < level_sz; ++k) {
+                        prefetch_ahead<Dir, V>(level, k, level_sz);
+                        solve_row<Dir, V, /*Fat=*/true>(
+                            level[k], x_in, y_out);
+                    }
+                }
+            }
+        });
     }
 
     // One thread owns one processor lane. Rows in a (processor, step) slot
@@ -1209,17 +1402,24 @@ private:
         const unsigned processor =
             static_cast<unsigned>(omp_get_thread_num());
         const std::size_t steps = critical_plan_.steps;
-        const auto& ptr = Dir::critical_ptr(*this);
-        const auto& rows = Dir::critical_rows(*this);
+        const auto& ptr = critical_plan_.forward_ptr;
+        const auto& rows = critical_plan_.forward_rows;
         for (std::size_t step = 0; step < steps; ++step) {
+            const std::size_t stored_step = Dir::forward
+                ? step : steps - 1 - step;
             const std::size_t slot =
-                static_cast<std::size_t>(processor) * steps + step;
+                static_cast<std::size_t>(processor) * steps + stored_step;
             const std::size_t begin = ptr[slot];
             const std::size_t end = ptr[slot + 1];
             if (begin != end)
                 critical_barrier_.wait(processor, 1);
-            for (std::size_t i = begin; i < end; ++i)
-                solve_row<Dir, V, /*Fat=*/false>(rows[i], x_in, y_out);
+            if constexpr (Dir::forward) {
+                for (std::size_t i = begin; i < end; ++i)
+                    solve_row<Dir, V, /*Fat=*/false>(rows[i], x_in, y_out);
+            } else {
+                for (std::size_t i = end; i-- > begin;)
+                    solve_row<Dir, V, /*Fat=*/false>(rows[i], x_in, y_out);
+            }
             critical_barrier_.arrive(processor);
         }
 #else
@@ -1253,8 +1453,8 @@ private:
     // implicit barrier of each carries the level dependency.
     template <class Dir, class V>
     void solve_levelset(const double* x_in, double* y_out) const {
-        const auto& levels  = Dir::levels(*this);
-        solve_levelset_range<Dir, V>(x_in, y_out, 0, levels.size());
+        solve_levelset_range<Dir, V>(
+            x_in, y_out, 0, base_level_count<Dir>());
     }
 
     template <class Dir, class V>
@@ -1276,22 +1476,32 @@ private:
     void solve_levelset_range_team(const double* x_in, double* y_out,
                                    std::size_t first_level,
                                    std::size_t level_end) const {
-        const auto& levels = Dir::levels(*this);
+        with_base_levels<Dir>([&](const auto& levels) {
+            solve_levelset_range_team_impl<Dir, V>(
+                x_in, y_out, levels, first_level, level_end);
+        });
+    }
+
+    template <class Dir, class V, class Levels>
+    void solve_levelset_range_team_impl(const double* x_in, double* y_out,
+                                        const Levels& levels,
+                                        std::size_t first_level,
+                                        std::size_t level_end) const {
+        assert(level_end <= levels.size());
         for (std::size_t l = first_level; l < level_end; ++l) {
             const auto& level = levels[l];
             const node_index level_sz = static_cast<node_index>(level.size());
-            const node_index* lv = level.data();
             if (level_sz <= kSpTRSVOMPThreshold) {
                 #pragma omp single
                 for (node_index k = 0; k < level_sz; ++k) {
-                    prefetch_ahead<Dir, V>(lv, k, level_sz);
-                    solve_row<Dir, V, /*Fat=*/false>(lv[k], x_in, y_out);
+                    prefetch_ahead<Dir, V>(level, k, level_sz);
+                    solve_row<Dir, V, /*Fat=*/false>(level[k], x_in, y_out);
                 } // implicit barrier on omp single
             } else {
                 #pragma omp for schedule(static)
                 for (node_index k = 0; k < level_sz; ++k) {
-                    prefetch_ahead<Dir, V>(lv, k, level_sz);
-                    solve_row<Dir, V, /*Fat=*/true>(lv[k], x_in, y_out);
+                    prefetch_ahead<Dir, V>(level, k, level_sz);
+                    solve_row<Dir, V, /*Fat=*/true>(level[k], x_in, y_out);
                 } // implicit barrier on omp for
             }
         }
@@ -1300,8 +1510,9 @@ private:
     // Two-stage prefetch: pull the row-pointer of the row 8 ahead (cheap ptr[]
     // load), the nnz payload (idx / vals) of the row 4 ahead, where most of
     // the cache-miss stalls occur.
-    template <class Dir, class V>
-    void prefetch_ahead(const node_index* level, node_index k, node_index level_sz) const {
+    template <class Dir, class V, class Level>
+    void prefetch_ahead(const Level& level, node_index k,
+                        node_index level_sz) const {
         const auto* ptr = Dir::ptr(*this).data();
         if (k + 8 < level_sz)
             __builtin_prefetch(&ptr[level[k + 8]]);
@@ -1316,13 +1527,13 @@ public:
     int num_fwd_levels() const {
         return static_cast<int>(hybrid_active_
             ? hybrid_fwd_level_end_ + critical_plan_.steps
-            : fwd_levels_.size());
+            : base_level_count<fwd_dir>());
     }
     int num_bck_levels() const {
         return static_cast<int>(hybrid_active_
             ? critical_plan_.steps +
-                  (bck_levels_.size() - hybrid_bck_level_begin_)
-            : bck_levels_.size());
+                  (base_level_count<bck_dir>() - hybrid_bck_level_begin_)
+            : base_level_count<bck_dir>());
     }
     bool uses_hybrid_schedule() const { return hybrid_active_; }
     // Barriers one solve in that direction executes: one per level (thin or
@@ -1331,26 +1542,32 @@ public:
         if (hybrid_active_)
             return critical_plan_.steps +
                 (fwd ? hybrid_fwd_level_end_
-                     : bck_levels_.size() - hybrid_bck_level_begin_);
-        return (fwd ? fwd_levels_ : bck_levels_).size();
+                     : base_level_count<bck_dir>() - hybrid_bck_level_begin_);
+        return fwd ? base_level_count<fwd_dir>()
+                   : base_level_count<bck_dir>();
     }
 
     // Diagnostics: per-level row/col counts and per-level off-diagonal nnz.
     void level_stats(bool fwd, std::vector<int>& sizes, std::vector<long long>& work) const {
-        const auto& levels = fwd ? fwd_levels_ : bck_levels_;
-        sizes.clear(); work.clear();
-        sizes.reserve(levels.size()); work.reserve(levels.size());
-        for (const auto& lvl : levels) {
-            long long w = 0;
-            for (node_index v : lvl) {
-                if (fwd)
-                    w += (csr_row_ptr_[v + 1] - csr_row_ptr_[v] - 1);
-                else
-                    w += (csc_col_ptr_[v + 1] - csc_col_ptr_[v] - 1);
-            }
-            sizes.push_back(static_cast<int>(lvl.size()));
-            work.push_back(w);
-        }
+        const auto collect = [&]<class Dir>() {
+            with_base_levels<Dir>([&](const auto& levels) {
+                sizes.clear(); work.clear();
+                sizes.reserve(levels.size()); work.reserve(levels.size());
+                const auto& ptr = Dir::ptr(*this);
+                for (std::size_t l = 0; l < levels.size(); ++l) {
+                    const auto& level = levels[l];
+                    long long w = 0;
+                    for (std::size_t k = 0; k < level.size(); ++k) {
+                        const node_index v = level[k];
+                        w += static_cast<long long>(ptr[v + 1] - ptr[v] - 1);
+                    }
+                    sizes.push_back(static_cast<int>(level.size()));
+                    work.push_back(w);
+                }
+            });
+        };
+        if (fwd) collect.template operator()<fwd_dir>();
+        else     collect.template operator()<bck_dir>();
     }
     bool ready() const { return ready_; }
 
@@ -1375,11 +1592,11 @@ public:
     const auto& fp16_diag()   const { return diag_; }
 
     /// Bytes held by this object's arrays (capacities, heap only): CSR + CSC +
-    /// level sets + round bounds (+ the fp16 storage's fp32 diag_ / scale_ /
-    /// inv_scale_). After setup() this is everything the
-    /// SpTRSV keeps -- setup's transients (L11 copy, compacted copy, transpose
-    /// bucket, scratch) are all released before it returns (guarded by
-    /// tests/test_sptrsv_memory.cpp).
+    /// materialized fallback level sets or implicit round bounds (+ the fp16
+    /// storage's fp32 diag_ / scale_ / inv_scale_). After setup() this is
+    /// everything the SpTRSV keeps -- setup's transients (L11 copy, compacted
+    /// copy, transpose bucket, scratch) are all released before it returns
+    /// (guarded by tests/test_sptrsv_memory.cpp).
     std::size_t memory_bytes() const {
         std::size_t b = csr_row_ptr_.capacity() * sizeof(edge_index)
                       + csr_col_idx_.capacity() * sizeof(node_index)
@@ -1389,7 +1606,8 @@ public:
                       + csc_row_idx_.capacity() * sizeof(node_index)
                       + csc_vals32_.capacity()  * sizeof(float)
                       + csc_vals16_.capacity()  * sizeof(fp16_t)
-                      + round_bounds_.capacity() * sizeof(node_index)
+                      + pending_round_bounds_.capacity() * sizeof(node_index)
+                      + active_round_bounds_.capacity() * sizeof(node_index)
                       + diag_.capacity()      * sizeof(float)
                       + scale_.capacity()     * sizeof(float)
                       + inv_scale_.capacity() * sizeof(float);
@@ -1462,7 +1680,7 @@ private:
     // column: the diagonal division (diag<Dir, V>) and, on the back solve of
     // the fp16 storage, the input scale (bck_dir::rhs). The DIRECTION is a
     // policy: what differs between the sweeps is only which arrays (CSR vs
-    // CSC), which level list, where the diagonal slot sits (last vs first),
+    // CSC), which level order, where the diagonal slot sits (last vs first),
     // and the input transform -- everything else is solve_levelset / solve_row.
     struct fwd_dir {
         static constexpr bool forward = true;
@@ -1471,13 +1689,8 @@ private:
         static const big_vec<node_index>& idx (const omp_sptrsv& s) { return s.csr_col_idx_; }
         template <class V>
         static const big_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csr(std::type_identity<V>{}); }
-        static const std::vector<std::vector<node_index>>& levels(const omp_sptrsv& s) { return s.fwd_levels_; }
-        static const std::vector<std::size_t>& critical_ptr(const omp_sptrsv& s) {
-            return s.critical_plan_.forward_ptr;
-        }
-        static const std::vector<node_index>& critical_rows(const omp_sptrsv& s) {
-            return s.critical_plan_.forward_rows;
-        }
+        static const std::vector<std::vector<node_index>>& materialized_levels(
+                const omp_sptrsv& s) { return s.fwd_levels_; }
         static node_index serial_vertex(node_index k, node_index,
                                         node_index first_row) {
             return first_row + k;
@@ -1497,13 +1710,8 @@ private:
         static const big_vec<node_index>& idx (const omp_sptrsv& s) { return s.csc_row_idx_; }
         template <class V>
         static const big_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csc(std::type_identity<V>{}); }
-        static const std::vector<std::vector<node_index>>& levels(const omp_sptrsv& s) { return s.bck_levels_; }
-        static const std::vector<std::size_t>& critical_ptr(const omp_sptrsv& s) {
-            return s.critical_plan_.backward_ptr;
-        }
-        static const std::vector<node_index>& critical_rows(const omp_sptrsv& s) {
-            return s.critical_plan_.backward_rows;
-        }
+        static const std::vector<std::vector<node_index>>& materialized_levels(
+                const omp_sptrsv& s) { return s.bck_levels_; }
         static node_index serial_vertex(node_index k, node_index m,
                                         node_index) {
             return m - 1 - k;
@@ -1661,10 +1869,17 @@ private:
     }
 
     // Level sets.
+    // Materialized row lists only for the topological fallback (no usable round
+    // metadata, or APXCHOL_ROUND_LEVELS=0). The normal round-derived schedule
+    // keeps these empty and reads contiguous ranges directly from the active
+    // setup-time bounds snapshot.
     std::vector<std::vector<node_index>> fwd_levels_;
     std::vector<std::vector<node_index>> bck_levels_;
+    bool round_levels_active_ = false;
+    std::size_t round_level_count_ = 0;
     // Weak-barrier plan for the contiguous thin suffix. The fat prefix keeps
-    // its level sets; each flattened direction stores every tail row once.
+    // its level sets. Tail rows are stored once in forward slot order; backward
+    // maps to the reversed step and traverses that same slot in reverse.
     detail::critical_schedule_plan critical_plan_;
     detail::critical_weak_barrier critical_barrier_;
     bool hybrid_active_ = false;
@@ -1674,9 +1889,12 @@ private:
     // When set + APXCHOL_ROUND_LEVELS, levels are read off the rounds instead of
     // an O(nnz) topological depth scan (same structure -- same-round IS columns are
     // independent; peel columns get their own sequential level).
-    std::vector<node_index> round_bounds_;
+    std::vector<node_index> pending_round_bounds_;
+    std::vector<node_index> active_round_bounds_;
 public:
-    void set_round_bounds(std::vector<node_index> b) { round_bounds_ = std::move(b); }
+    void set_round_bounds(std::vector<node_index> b) {
+        pending_round_bounds_ = std::move(b);
+    }
 };
 
 } // namespace apxchol

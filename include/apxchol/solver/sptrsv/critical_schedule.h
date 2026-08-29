@@ -52,18 +52,14 @@ struct critical_schedule_plan {
     node_index row_count = 0;
     std::vector<std::size_t> forward_ptr;
     std::vector<node_index> forward_rows;
-    std::vector<std::size_t> backward_ptr;
-    std::vector<node_index> backward_rows;
 
     std::size_t slot(unsigned processor, std::size_t step) const {
         return static_cast<std::size_t>(processor) * steps + step;
     }
 
     std::size_t memory_bytes() const {
-        return (forward_ptr.capacity() + backward_ptr.capacity()) *
-                   sizeof(std::size_t) +
-               (forward_rows.capacity() + backward_rows.capacity()) *
-                   sizeof(node_index);
+        return forward_ptr.capacity() * sizeof(std::size_t) +
+               forward_rows.capacity() * sizeof(node_index);
     }
 
     void clear() {
@@ -73,8 +69,6 @@ struct critical_schedule_plan {
         row_count = 0;
         std::vector<std::size_t>().swap(forward_ptr);
         std::vector<node_index>().swap(forward_rows);
-        std::vector<std::size_t>().swap(backward_ptr);
-        std::vector<node_index>().swap(backward_rows);
     }
 };
 
@@ -289,14 +283,11 @@ inline critical_schedule_plan flatten_critical_schedule(
         throw std::overflow_error("critical SpTRSV schedule is too large");
     const std::size_t slots = static_cast<std::size_t>(processors) * out.steps;
     std::vector<std::size_t> forward_count(slots, 0);
-    std::vector<std::size_t> backward_count(slots, 0);
     for (node_index v = first_row; v < rows; ++v) {
         const node_index local_v = v - first_row;
         const unsigned processor = schedule.processor[local_v];
         const std::size_t step = schedule.step[local_v];
         ++forward_count[static_cast<std::size_t>(processor) * out.steps + step];
-        ++backward_count[static_cast<std::size_t>(processor) * out.steps +
-                         (out.steps - 1 - step)];
     }
 
     auto prefix = [](const std::vector<std::size_t>& count) {
@@ -306,11 +297,8 @@ inline critical_schedule_plan flatten_critical_schedule(
         return ptr;
     };
     out.forward_ptr = prefix(forward_count);
-    out.backward_ptr = prefix(backward_count);
     out.forward_rows.resize(out.row_count);
-    out.backward_rows.resize(out.row_count);
     auto forward_next = out.forward_ptr;
-    auto backward_next = out.backward_ptr;
     for (node_index v = first_row; v < rows; ++v) {
         const node_index local_v = v - first_row;
         const unsigned processor = schedule.processor[local_v];
@@ -319,14 +307,10 @@ inline critical_schedule_plan flatten_critical_schedule(
             static_cast<std::size_t>(processor) * out.steps + step;
         out.forward_rows[forward_next[slot]++] = v;
     }
-    for (node_index v = rows; v-- > first_row;) {
-        const node_index local_v = v - first_row;
-        const unsigned processor = schedule.processor[local_v];
-        const std::size_t step = out.steps - 1 - schedule.step[local_v];
-        const std::size_t slot =
-            static_cast<std::size_t>(processor) * out.steps + step;
-        out.backward_rows[backward_next[slot]++] = v;
-    }
+    // Rows are ascending inside every forward (processor, step) slot. The
+    // backward executor maps step -> steps-1-step and traverses that same slot
+    // in reverse, reproducing the former backward_rows order without storing a
+    // second pointer table or a second copy of every tail row.
     return out;
 }
 

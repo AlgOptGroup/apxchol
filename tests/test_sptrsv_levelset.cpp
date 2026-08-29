@@ -178,6 +178,30 @@ pair_out solve_pair(const apxchol::omp_sptrsv& t, const std::vector<double>& x) 
     t.transpose_solve(o.w.data(), o.w.data());
     return o;
 }
+#ifdef _OPENMP
+// setup() records a four-lane critical plan. Entering solve from an outer team
+// while max_active_levels==1 forces its explicitly requested inner team to one
+// lane, exercising the real team-mismatch fallback instead of merely changing
+// omp_get_max_threads() (the inner region names num_threads(processors)).
+pair_out solve_pair_with_forced_team_mismatch(
+        const apxchol::omp_sptrsv& t, const std::vector<double>& x) {
+    const int saved_levels = omp_get_max_active_levels();
+    omp_set_max_active_levels(1);
+    pair_out out;
+    int outer_threads = 0;
+    #pragma omp parallel num_threads(2) shared(out, outer_threads)
+    {
+        #pragma omp single
+        {
+            outer_threads = omp_get_num_threads();
+            out = solve_pair(t, x);
+        }
+    }
+    omp_set_max_active_levels(saved_levels);
+    EXPECT_EQ(outer_threads, 2);
+    return out;
+}
+#endif
 void expect_same_bytes(const pair_out& a, const pair_out& b, const char* what) {
     const std::size_t n = a.y.size() * sizeof(double);
     EXPECT_EQ(0, std::memcmp(a.y.data(), b.y.data(), n)) << what << ": forward";
@@ -250,6 +274,173 @@ void set_threads(int t) {
 }
 
 } // namespace
+
+TEST(SpTRSVRoundRanges, PreserveOldLevelSlotsAndRowOrderAtEmptyBoundaries) {
+    using apxchol::detail::directional_round_levels;
+    using apxchol::detail::round_level_ranges;
+
+    // Five recorded rounds, including a leading, interior, and trailing empty
+    // one, then three residual-peel rows. The old stable bucket fill produced
+    // these exact level slots and kept ids ascending inside backward levels.
+    const std::vector<node_index> bounds = {0, 0, 3, 3, 7, 7};
+    ASSERT_TRUE(round_level_ranges::valid_metadata(bounds, 10));
+    const directional_round_levels<true> fwd(bounds, 10);
+    const directional_round_levels<false> bck(bounds, 10);
+    ASSERT_EQ(fwd.size(), 8u);
+    ASSERT_EQ(bck.size(), 8u);
+
+    const std::vector<std::pair<node_index, node_index>> expected_fwd = {
+        {0, 0}, {0, 3}, {3, 3}, {3, 7}, {7, 7},
+        {7, 8}, {8, 9}, {9, 10},
+    };
+    std::vector<node_index> fwd_rows, bck_rows;
+    for (std::size_t l = 0; l < fwd.size(); ++l) {
+        const auto fr = fwd[l];
+        EXPECT_EQ(std::pair(fr.first, fr.last), expected_fwd[l]);
+        const auto br = bck[l];
+        const auto expected_br = expected_fwd[expected_fwd.size() - 1 - l];
+        EXPECT_EQ(std::pair(br.first, br.last), expected_br);
+        for (std::size_t k = 0; k < fr.size(); ++k) fwd_rows.push_back(fr[k]);
+        for (std::size_t k = 0; k < br.size(); ++k) bck_rows.push_back(br[k]);
+    }
+    EXPECT_EQ(fwd_rows,
+              (std::vector<node_index>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}));
+    EXPECT_EQ(bck_rows,
+              (std::vector<node_index>{9, 8, 7, 3, 4, 5, 6, 0, 1, 2}));
+
+    // With no peel, the historical max(row_round)+1 sizing omitted trailing
+    // phantom rounds. Leading/interior empty ranges remain real barrier slots.
+    const std::vector<node_index> trailing = {0, 0, 3, 7, 7, 7};
+    const directional_round_levels<true> no_peel(trailing, 7);
+    ASSERT_EQ(no_peel.size(), 3u);
+    EXPECT_EQ(no_peel[0].size(), 0u);
+    EXPECT_EQ(no_peel[1].size(), 3u);
+    EXPECT_EQ(no_peel[2].size(), 4u);
+
+    // The previous empty-input histogram initialized max depth to zero.
+    const std::vector<node_index> empty = {0, 0, 0};
+    const directional_round_levels<true> empty_factor(empty, 0);
+    ASSERT_EQ(empty_factor.size(), 1u);
+    EXPECT_TRUE(empty_factor[0].empty());
+}
+
+TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+    scoped_env rounds_on("APXCHOL_ROUND_LEVELS", "1");
+    set_threads(4);
+
+    std::vector<node_index> logical_bounds;
+    const sparse_csc L = make_round(3, 4, 8801, logical_bounds);
+    ASSERT_EQ(logical_bounds,
+              (std::vector<node_index>{0, 4, 8, 12}));
+    // The first two logical rounds are recorded with phantom empty slots; the
+    // final logical round is deliberately represented as a serial peel.
+    const std::vector<node_index> bounds = {0, 0, 4, 4, 8, 8};
+    const std::vector<int> expected_fwd = {0, 4, 0, 4, 0, 1, 1, 1, 1};
+    const std::vector<int> expected_bck = {1, 1, 1, 1, 0, 4, 0, 4, 0};
+    const auto x = random_x(L.rows(), 8802);
+
+    for (const char* storage : {"0", "1"}) {
+        if (storage[0] == '1' && !apxchol::omp_sptrsv::fp16_supported())
+            continue;
+        SCOPED_TRACE(std::string("APXCHOL_SPTRSV_FP16=") + storage);
+        scoped_env storage_mode("APXCHOL_SPTRSV_FP16", storage);
+
+        apxchol::omp_sptrsv implicit;
+        implicit.set_round_bounds(bounds);
+        implicit.setup(L, L.rows());
+
+        // No round metadata takes the retained materialized topological path.
+        apxchol::omp_sptrsv materialized;
+        materialized.setup(L, L.rows());
+
+        std::vector<int> sizes;
+        std::vector<long long> work;
+        implicit.level_stats(true, sizes, work);
+        EXPECT_EQ(sizes, expected_fwd);
+        implicit.level_stats(false, sizes, work);
+        EXPECT_EQ(sizes, expected_bck);
+        EXPECT_EQ(implicit.num_barriers(true), expected_fwd.size());
+        EXPECT_EQ(implicit.num_barriers(false), expected_bck.size());
+        EXPECT_LT(implicit.memory_bytes(), materialized.memory_bytes());
+
+        const pair_out reference = solve_pair(materialized, x);
+        if (storage[0] == '0') expect_correct_pair(L, x, reference);
+        expect_same_bytes(reference, solve_pair(implicit, x),
+                          "implicit ranges vs materialized fallback");
+        set_threads(1);
+        expect_same_bytes(reference, solve_pair(implicit, x),
+                          "implicit ranges after runtime default-team change");
+        set_threads(4);
+    }
+}
+
+TEST(SpTRSVRoundRanges, PostSetupBoundsMutationDoesNotChangeActiveSchedule) {
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+    scoped_env rounds_on("APXCHOL_ROUND_LEVELS", "1");
+    set_threads(4);
+
+    std::vector<node_index> bounds;
+    const sparse_csc L = make_round(4, 32, 8803, bounds);
+    const auto x = random_x(L.rows(), 8804);
+    apxchol::omp_sptrsv trsv;
+    trsv.set_round_bounds(bounds);
+    trsv.setup(L, L.rows());
+    const pair_out reference = solve_pair(trsv, x);
+    std::vector<int> before_sizes, after_sizes;
+    std::vector<long long> before_work, after_work;
+    trsv.level_stats(true, before_sizes, before_work);
+
+    // This is valid metadata but would collapse dependency-bearing rounds into
+    // one unsafe level if the active schedule retained a view of setter state.
+    trsv.set_round_bounds({0, L.rows()});
+    trsv.level_stats(true, after_sizes, after_work);
+    EXPECT_EQ(after_sizes, before_sizes);
+    EXPECT_EQ(after_work, before_work);
+    expect_same_bytes(reference, solve_pair(trsv, x),
+                      "post-setup bounds mutation");
+}
+
+TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
+    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    scoped_env rounds_on("APXCHOL_ROUND_LEVELS", "1");
+    set_threads(4);
+
+    std::vector<node_index> bounds;
+    const sparse_csc L = make_fat_prefix_thin_tail(
+        1, apxchol::kSpTRSVOMPThreshold + 8, 8, 8, 8811, bounds);
+    ASSERT_GT(bounds.size(), 2u);
+    bounds.insert(bounds.begin() + 2, bounds[1]);
+    const auto x = random_x(L.rows(), 8812);
+
+    apxchol::omp_sptrsv level_reference;
+    {
+        scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+        level_reference.set_round_bounds(bounds);
+        level_reference.setup(L, L.rows());
+    }
+    const pair_out reference = solve_pair(level_reference, x);
+
+    apxchol::omp_sptrsv hybrid;
+    {
+        scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+        hybrid.set_round_bounds(bounds);
+        hybrid.setup(L, L.rows());
+    }
+    ASSERT_TRUE(hybrid.uses_hybrid_schedule());
+    expect_same_bytes(reference, solve_pair(hybrid, x),
+                      "empty first tail range");
+
+#ifdef _OPENMP
+    expect_same_bytes(reference,
+                      solve_pair_with_forced_team_mismatch(hybrid, x),
+                      "empty first tail range after runtime team mismatch");
+#endif
+}
 
 // The same bytes at every thread count, both shapes, both directions, in and
 // out of place; anchored to a correct solve at T=1.
@@ -344,12 +535,13 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
     const pair_out reference = solve_pair(levels, x);
     expect_same_bytes(reference, solve_pair(hybrid, x), "hybrid vs levels");
 
-    // A setup-time team mismatch takes the tail's natural serial fallback and
-    // must preserve both the bulk-prefix and critical-tail arithmetic.
-    set_threads(1);
-    expect_same_bytes(reference, solve_pair(hybrid, x),
-                      "hybrid after runtime thread-count change");
-    set_threads(4);
+#ifdef _OPENMP
+    // A true setup/runtime team mismatch must preserve both the bulk-prefix
+    // and critical-tail arithmetic, including the fat-prefix template path.
+    expect_same_bytes(reference,
+                      solve_pair_with_forced_team_mismatch(hybrid, x),
+                      "hybrid after forced runtime team mismatch");
+#endif
 }
 
 TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
