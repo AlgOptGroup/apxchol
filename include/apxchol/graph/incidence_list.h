@@ -597,6 +597,16 @@ template<typename Value, graph_storage Tag> struct basic_vec_pool_incidence {
         ++compact_count_;
     }
 
+    /// Serial decision/rebuild for the imminent parallel reserve. The caller
+    /// owns the surrounding OpenMP single region; its existing implicit
+    /// barrier publishes the decision and rebuilt pool to every worker before
+    /// bulk_reserve_parallel starts.
+    void compact_for_round_if_needed(
+            const std::vector<node_index>& incoming) {
+        if (abandoned_ > pool_.size() / 2)
+            compact(&incoming);
+    }
+
     /// Bulk parallel reserve_for. Caller is inside an OpenMP parallel region.
     /// Each thread computes and copies the grows for a stable slice of touched
     /// vertices. Atomic segment claims replace the old team prefix sum and
@@ -613,17 +623,6 @@ template<typename Value, graph_storage Tag> struct basic_vec_pool_incidence {
         const int tid = 0;
         const int team = 1;
 #endif
-        // Preserve the production defragmentation safety valve. Compaction is
-        // rare; when it fires, one worker rebuilds into a second lazy mapping
-        // while the implicit single barrier keeps all readers off the old map.
-        // The common path below still has only its one final publication barrier.
-        const bool need_compact = abandoned_ > pool_.size() / 2;
-        if (need_compact) {
-#ifdef _OPENMP
-#pragma omp single
-#endif
-            compact(&incoming);
-        }
         const size_t touched_n = static_cast<size_t>(touched_end - touched_begin);
         const size_t begin = touched_n * static_cast<size_t>(tid) / static_cast<size_t>(team);
         const size_t end = touched_n * static_cast<size_t>(tid + 1) / static_cast<size_t>(team);

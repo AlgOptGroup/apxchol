@@ -278,9 +278,19 @@ public:
         adj_.reserve_for(v, need);
     }
 
-    /// vec_pool only: bulk parallel reserve_for. Must be called from
-    /// inside an OpenMP parallel region; implementation has its own
-    /// single + for split.
+    /// vec_pool only: serial compaction decision for the imminent parallel
+    /// reserve. The caller provides the surrounding OpenMP single/barrier.
+    template<typename I = Incidence>
+        requires is_vec_pool_incidence_v<I>
+    void adj_compact_for_round_if_needed(
+            const std::vector<node_index>& incoming) {
+        adj_.compact_for_round_if_needed(incoming);
+    }
+
+    /// vec_pool only: bulk parallel reserve_for. Must be called from inside an
+    /// OpenMP parallel region after the caller's shared compaction decision;
+    /// the implementation partitions touched vertices and ends with a team
+    /// publication barrier.
     template<typename I = Incidence, typename TouchedIter>
         requires is_vec_pool_incidence_v<I>
     void adj_bulk_reserve_parallel(TouchedIter begin, TouchedIter end,

@@ -826,8 +826,13 @@ void eliminate_partition_singleton(const Eliminator& elim,
                             ws.touched_concat.end(),
                             ws.threads[t].touched_buffer.begin(),
                             ws.threads[t].touched_buffer.end());
+                    if (N_edges > 0)
+                        G.adj_compact_for_round_if_needed(incoming);
                 }
-                // implicit barrier after single — e_start + touched_concat visible.
+                // The implicit barrier after single publishes e_start,
+                // touched_concat, and any rebuilt adjacency pool. Keeping the
+                // compaction predicate inside single prevents late workers
+                // from observing its reset state and skipping a team barrier.
 
                 // Bulk parallel reserve_for: replaces the per-touched serial
                 // reserve_for loop. Per round trace on IPM iter40 (16T) shows
