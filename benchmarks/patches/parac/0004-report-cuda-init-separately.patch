@@ -1,0 +1,32 @@
+diff --git a/gpu_implementation/driver.cu b/gpu_implementation/driver.cu
+--- a/gpu_implementation/driver.cu
++++ b/gpu_implementation/driver.cu
+@@ -1554,5 +1554,7 @@ void factorization_driver(sparse_matrix_processor<type_int, type_data> &processor
+-    const auto apx_gpu_factor_start = std::chrono::high_resolution_clock::now();
+-    // this is a warmp up run
+-    int *dummy_pt;
+-    cudaMalloc((void**)&dummy_pt, 4);
+-    cudaFree(dummy_pt);
++    const auto apx_cuda_init_start = std::chrono::high_resolution_clock::now();
++    cudaFree(nullptr);
++    const auto apx_cuda_init_end = std::chrono::high_resolution_clock::now();
++    std::cout << "APX CUDA init time: "
++              << std::chrono::duration<double>(apx_cuda_init_end - apx_cuda_init_start).count()
++              << " seconds" << std::endl;
++    const auto apx_gpu_factor_start = std::chrono::high_resolution_clock::now();
+diff --git a/gpu_implementation/driver_physics.cu b/gpu_implementation/driver_physics.cu
+--- a/gpu_implementation/driver_physics.cu
++++ b/gpu_implementation/driver_physics.cu
+@@ -1743,5 +1743,7 @@ void factorization_driver(sparse_matrix_processor<type_int, type_data> &processor
+-    const auto apx_gpu_factor_start = std::chrono::high_resolution_clock::now();
+-    // this is a warmp up run
+-    int *dummy_pt;
+-    cudaMalloc((void**)&dummy_pt, 4);
+-    cudaFree(dummy_pt);
++    const auto apx_cuda_init_start = std::chrono::high_resolution_clock::now();
++    cudaFree(nullptr);
++    const auto apx_cuda_init_end = std::chrono::high_resolution_clock::now();
++    std::cout << "APX CUDA init time: "
++              << std::chrono::duration<double>(apx_cuda_init_end - apx_cuda_init_start).count()
++              << " seconds" << std::endl;
++    const auto apx_gpu_factor_start = std::chrono::high_resolution_clock::now();

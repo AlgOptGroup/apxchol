@@ -305,6 +305,16 @@ def _cpu_time_cell(recs, fam, mat, cpu_lab, metric):
         v = m["setup_s"] + m["solve_s"]
     return (v if v is not None else np.nan), False, None
 
+
+def _terminal_marker(status):
+    """Presentation category for a non-measurement outcome.
+
+    `None` is deliberately reserved for complete or genuinely absent records;
+    callers retain record presence separately, so `n/a` can never collapse
+    back into the white missing-cell category.
+    """
+    return status if status in ("timeout", "oom", "failed", "not_converged", "n/a") else None
+
 def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mats=None,
                      goutcomes=None, thread_label="t16"):
     """solver x matrix 'who wins where' heatmap for ONE metric (total / setup / solve /
@@ -331,42 +341,52 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     # those metrics it's marked 'T/O' (timed out) rather than a fabricated ≥cap value.
     clamp = metric == "total"
     goutcomes = goutcomes or {}
-    rows_data = []   # (rowlabel, vals, timeouts, timeout_caps, oom, failed, device)
+    # One row carries both measurements and terminal outcomes.  Keep `n/a`
+    # distinct from a genuinely missing/not-run cell, and keep an unsuccessful
+    # convergence grade distinct from an execution failure.
+    rows_data = []   # (rowlabel, vals, timeouts, caps, oom, failed, nconv, n/a, device)
     for name, col, cl, gl in SOLVERS:
         if mode in ("cpu", "combined") and cl:
-            vals, tmo, tcaps, oomf, failf = [], [], [], [], []
+            vals, tmo, tcaps, oomf, failf, nconvf, naf = [], [], [], [], [], [], []
             for m in mats:
                 v, t, cap = _cpu_time_cell(recs, fam, m, cl, metric)
                 if is_mem and not v:        # 0 / None memory = not recorded -> blank, not "0.0GB / inf×"
                     v = np.nan
                 st = _cpu_status(recs, fam, m, cl)
+                marker = _terminal_marker(st)
                 vals.append(v); tmo.append(t); tcaps.append(cap or np.nan)
-                oomf.append(st == "oom"); failf.append(st == "failed")
+                oomf.append(marker == "oom"); failf.append(marker == "failed")
+                nconvf.append(marker == "not_converged"); naf.append(marker == "n/a")
             # Memory heatmaps: a Timeout marker is informative NEXT TO real measurements
             # ("this config timed out, no memory recorded") but a row with ZERO memory
             # info (no value, no OOM -- e.g. ParAC's never-recorded solve-held RSS, all
             # cells Timeout) is noise -> dropped. OOM counts as info (it IS a memory
             # outcome). Time/iters heatmaps keep the old any-marker condition.
             keep = (any(np.isfinite(x) for x in vals) or any(oomf)) if is_mem else \
-                   (any(np.isfinite(x) for x in vals) or any(tmo) or any(oomf) or any(failf))
+                   (any(np.isfinite(x) for x in vals) or any(tmo) or any(oomf)
+                    or any(failf) or any(nconvf))
             if keep:
                 rows_data.append((f"{name} (CPU)" if mode == "combined" else name,
-                                  vals, tmo, tcaps, oomf, failf, "cpu"))
+                                  vals, tmo, tcaps, oomf, failf, nconvf, naf, "cpu"))
         if mode in ("gpu", "combined") and gl:
-            vals, tmo, tcaps, oomf, failf = [], [], [], [], []
+            vals, tmo, tcaps, oomf, failf, nconvf, naf = [], [], [], [], [], [], []
             for m in mats:
                 vals.append((_gpu(grows, fam, m, gl) or {}).get(metric) or np.nan)
                 outcome = goutcomes.get((fam, m, gl), {})
                 st = outcome.get("status")
-                tmo.append(st == "timeout")
+                marker = _terminal_marker(st)
+                tmo.append(marker == "timeout")
                 tcaps.append(outcome.get("timeout_cap_s") or np.nan)
-                oomf.append(st == "oom"); failf.append(st == "failed")
+                oomf.append(marker == "oom"); failf.append(marker == "failed")
+                nconvf.append(marker == "not_converged"); naf.append(marker == "n/a")
             # same row gate as the CPU branch: memory rows need real memory info.
             keep = (any(np.isfinite(x) for x in vals) or any(oomf)) if is_mem else \
-                   (any(np.isfinite(x) for x in vals) or any(tmo) or any(oomf) or any(failf))
+                   (any(np.isfinite(x) for x in vals) or any(tmo) or any(oomf)
+                    or any(failf) or any(nconvf))
             if keep:
-                rows_data.append((f"{name} (GPU)" if mode == "combined" else name,
-                                  vals, tmo, tcaps, oomf, failf, "gpu"))
+                gpu_tag = "GPU solve" if name.startswith("apxchol/") else "GPU"
+                rows_data.append((f"{name} ({gpu_tag})" if mode == "combined" else name,
+                                  vals, tmo, tcaps, oomf, failf, nconvf, naf, "gpu"))
     if not rows_data or not mats:
         return
     names = [r[0] for r in rows_data]
@@ -375,7 +395,9 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     TCAP = np.array([r[3] for r in rows_data], dtype=float)
     OOM = np.array([r[4] for r in rows_data], dtype=bool)
     FAIL = np.array([r[5] for r in rows_data], dtype=bool)
-    DEV = [r[6] for r in rows_data]
+    NCONV = np.array([r[6] for r in rows_data], dtype=bool)
+    NA = np.array([r[7] for r in rows_data], dtype=bool)
+    DEV = [r[8] for r in rows_data]
     # Clamp ONLY cells whose runtime we genuinely DON'T KNOW: a timed-out solver (no
     # real measurement -- e.g. RCHOL/pRCHOL hitting the cap) is rendered AT the cap with
     # '≥' + a black border. A solver that actually COMPLETED is rendered at its real
@@ -431,6 +453,16 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
                                            edgecolor="#a00000", lw=0.9))
                 ax.text(j, i, "FAIL", ha="center", va="center", fontsize=6.0,
                         color="black", fontweight="bold")
+            elif NCONV[i, j]:      # completed execution, but failed the common residual grade
+                ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, facecolor="#f6d58a",
+                                           edgecolor="#9a6700", lw=0.9))
+                ax.text(j, i, "N/C", ha="center", va="center", fontsize=6.0,
+                        color="black", fontweight="bold")
+            elif NA[i, j]:         # structurally inapplicable, not missing campaign data
+                ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, facecolor="#e1e1e1",
+                                           edgecolor="#b0b0b0", lw=0.6, hatch="//"))
+                ax.text(j, i, "n/a", ha="center", va="center", fontsize=5.8,
+                        color="#555555")
     cb = fig.colorbar(im, ax=ax, ticks=[1, 1.5, 2, 3, 4, 6, 8, 12, 16])
     cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:g}×"))
     cb.set_label("× best solver in column (log scale)")
@@ -443,8 +475,8 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     # mid-phrase onto a ragged extra line. Memory heatmaps don't mark timeouts (a
     # timeout is a time outcome, not a memory measurement -> blank), so drop that key.
     legend = ("OOM = RAM/GPU · FAIL = errored · blank = not run/recorded" if is_mem
-              else "≥/Timeout = timed out (real time unknown) · OOM = RAM/GPU · "
-                   "FAIL = errored · blank = not run")
+              else "≥/Timeout = timed out · N/C = did not converge · n/a = inapplicable · "
+                   "OOM = RAM/GPU · FAIL = errored · blank = missing")
     ax.set_title(f"{fam}: solver × matrix — {dev} {_METRIC_TITLE[metric]}, {thread_label}\n"
                  f"green = {unit} per matrix; cell = value / ×best{capnote}\n"
                  f"{legend}",

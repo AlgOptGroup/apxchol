@@ -111,7 +111,7 @@ otherwise it is `not_converged`. Recurrence residuals printed by a solver are
 diagnostics, not the grade.
 
 ParAC and AC require documented tolerance translations because their native
-stopping tests use a different residual or basis. The formulas and the three
+stopping tests use a different residual or basis. The formulas and the four
 reviewable ParAC patches are documented in
 [patches/parac/README.md](patches/parac/README.md). They never relax the common
 true-residual threshold.
@@ -123,6 +123,11 @@ solver-required work: grounding, format conversion, reordering, upload,
 hierarchy/factor construction, and triangular-solve analysis. `solve_s` includes
 per-RHS preparation, iteration, device transfers, and returning the solution in
 the caller's ordering. Independent residual grading and cleanup are excluded.
+The process-wide CUDA primary-context initialization is performed once before
+any solver timer and reported separately as `cuda_init`; solver-specific module
+loading, handles, allocations, preparation, and transfers remain charged where
+they first occur. This models multiple distinct systems in one GPU process while
+keeping an auditable cold-start cost outside the solver ranking.
 Any `timeout_cap_s` bounds one complete logical cell, including calibration and
 all requested repetitions; subprocesses do not each receive a fresh cap.
 

@@ -504,6 +504,9 @@ def parse_matrix_meta(stderr):
 # it, where matrix_meta says what was solved.
 
 _BUILD_RE = re.compile(r'^BUILD_META\s+(.*)$', re.M)
+_CUDA_INIT_RE = re.compile(
+    r'^\[bench\]\s+cuda_init\s+\(once, before any timed solver\):\s*'
+    r'([0-9]+(?:\.[0-9]+)?)\s*ms\s*$', re.M)
 
 def parse_build_meta(stderr):
     """Lift the binary's `BUILD_META ...` line out of stderr into a dict.
@@ -526,6 +529,17 @@ def parse_build_meta(stderr):
     for key, qval, val in re.findall(r'(\w+)=(?:"([^"]*)"|(\S+))', m.group(1)):
         out[key] = qval if qval else val
     return out
+
+
+def parse_cuda_init(stderr):
+    """Return the separately timed process-wide CUDA initialization in seconds.
+
+    This value is deliberately not part of setup or total.  Persisting it lets
+    a report reconstruct a cold-process cost without charging a once-per-process
+    platform event to every distinct system solved by that process.
+    """
+    match = _CUDA_INIT_RE.search(stderr or "")
+    return float(match.group(1)) / 1000.0 if match else None
 
 
 def _readelf(path, *args):

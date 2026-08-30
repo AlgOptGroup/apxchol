@@ -77,7 +77,8 @@ class ParacTimingContractTest(unittest.TestCase):
 
     def test_gpu_setup_and_solve_use_complete_intervals(self):
         sample = {
-            "adapter": "3.0", "factor_setup": "2.0", "solver_setup": "1.0",
+            "cuda_init": "0.75", "adapter": "3.0", "factor_setup": "2.0",
+            "solver_setup": "1.0",
             "solve_total": "4.0", "factor": "500", "conv": "250",
             "spsv": "125", "solve": "3500", "etree": "0.2",
             "ftree": "0.3", "summary": "0.4", "iters": "10",
@@ -111,6 +112,7 @@ class ParacTimingContractTest(unittest.TestCase):
         self.assertEqual(metrics["solve_s"], 4.0)
         self.assertEqual(metrics["total_s"], 15.0)
         self.assertEqual(metrics["pcg_kernel_s"], 3.5)
+        self.assertEqual(metrics["cuda_init_s"], 0.75)
 
 
 class ParacGpuFailureCellTest(unittest.TestCase):

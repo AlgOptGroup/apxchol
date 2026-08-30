@@ -11,10 +11,12 @@ BENCH = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BENCH))
 
 import fair_charts as cpu  # noqa: E402
+import combined_charts as combined  # noqa: E402
 import gpu_charts as gpu  # noqa: E402
 import runner_common as rc  # noqa: E402
 import stale_cells  # noqa: E402
 import sweep_fair  # noqa: E402
+import thread_scaling  # noqa: E402
 
 
 def record(status, total, *, threads=16, cap=None, solver="amgcl", config=""):
@@ -116,8 +118,66 @@ class SeriesRuleTest(unittest.TestCase):
                                            storage="vec_pool")
             self.assertEqual(data[("greedy", "vec_pool")]["m"]["total_s"], 2.0)
 
+    def test_terminal_chart_markers_keep_na_and_nonconvergence_distinct(self):
+        self.assertEqual(combined._terminal_marker("n/a"), "n/a")
+        self.assertEqual(combined._terminal_marker("not_converged"), "not_converged")
+        self.assertEqual(combined._terminal_marker("failed"), "failed")
+        self.assertIsNone(combined._terminal_marker("complete"))
+        self.assertIsNone(combined._terminal_marker(None))
+
+
+class ThreadScalingStoreTest(unittest.TestCase):
+    def test_cell_key_includes_solver_configuration(self):
+        self.assertNotEqual(
+            thread_scaling._cell_tag("apxchol_v1", "bg+tree[vec_pool]"),
+            thread_scaling._cell_tag("apxchol_v1", "bg+tree[vec_pool_aos]"),
+        )
+
+    def test_exact_scaling_denominator_is_validated(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store), \
+             mock.patch.object(thread_scaling, "MATS", [("m", "audit", "", False, False)]), \
+             mock.patch.object(thread_scaling, "CPP", [("A", "solver", "cfg")]), \
+             mock.patch.object(thread_scaling, "THREADS", [1]):
+            cell = {
+                "cell": {"matrix_id": "m", "family": "audit", "label": "A",
+                         "solver": "solver", "config": "cfg", "threads": 1,
+                         "device": "cpu"},
+                "metrics": {"total_s": 1.0}, "status": "complete",
+            }
+            path = pathlib.Path(store) / "m__solver_cfg__t1.json"
+            path.write_text(json.dumps(cell))
+            # ParAC is also part of the declared denominator.
+            parac = json.loads(json.dumps(cell))
+            parac["cell"].update(label="ParAC", solver="parac", config="")
+            (pathlib.Path(store) / "m__parac_none__t1.json").write_text(json.dumps(parac))
+            thread_scaling.validate_cells()
+            (pathlib.Path(store) / "m__parac_none__t1.json").unlink()
+            with self.assertRaises(RuntimeError):
+                thread_scaling.validate_cells()
+
+    def test_parac_scaling_uses_component_cache_route(self):
+        thread_scaling._PARAC_PREPARED.clear()
+        with mock.patch.object(thread_scaling.parac, "_uses_physics", return_value=False), \
+             mock.patch.object(thread_scaling.parac, "_dump_component",
+                               side_effect=[("component.mtx", 10000, 1), (None, 0, 0)]), \
+             mock.patch.object(thread_scaling.parac, "_reorder_amd",
+                               return_value=("component-amd.mtx", 0.25, "upstream")) as reorder:
+            self.assertEqual(
+                thread_scaling._prepare_parac("m"),
+                [("component-amd.mtx", 0.25, False)],
+            )
+            reorder.assert_called_once_with("m", "component.mtx", "comp0")
+        thread_scaling._PARAC_PREPARED.clear()
+
 
 class CellSchemaTest(unittest.TestCase):
+    def test_cuda_init_is_parsed_as_separate_seconds(self):
+        stderr = ("noise\n[bench] cuda_init (once, before any timed solver): "
+                  "629.6 ms\nmore noise\n")
+        self.assertAlmostEqual(rc.parse_cuda_init(stderr), 0.6296)
+        self.assertIsNone(rc.parse_cuda_init("no CUDA build"))
+
     def test_timeout_requires_and_persists_exact_cap(self):
         with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):
             with self.assertRaises(ValueError):

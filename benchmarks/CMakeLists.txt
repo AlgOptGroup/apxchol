@@ -349,6 +349,8 @@ if (BUILD_GPU_RCHOL)
             # whitespace-only blank lines cannot make the patch ambiguous.
             COMMAND git apply --unidiff-zero
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0003-report-complete-gpu-boundaries.patch
+            COMMAND git apply --unidiff-zero
+                    ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0004-report-cuda-init-separately.patch
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
@@ -383,6 +385,7 @@ if (BUILD_GPU_RCHOL)
     _parac_require_marker(_parac_cpu_prep "APX adapter preprocessing time:" "patch 0002")
     _parac_require_marker(_parac_gpu_driver "APX GPU factor setup time:" "patch 0003")
     _parac_require_marker(_parac_gpu_solver "APX GPU solve phase time:" "patch 0003")
+    _parac_require_marker(_parac_gpu_driver "APX CUDA init time:" "patch 0004")
 
     # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
     # this driver uses MKL's default 32-bit MKL_INT, so it must NOT get the ILP64 layer.

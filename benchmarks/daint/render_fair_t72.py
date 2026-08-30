@@ -55,7 +55,8 @@ FAMILIES = ("grids", "ipm", "suitesparse")
 CSV_FIELDS = (
     "family", "matrix_id", "device", "solver", "config", "threads", "status",
     "n", "nnz", "setup_s", "solve_s", "total_s", "iters", "rel_res", "fillin",
-    "us_per_nnz", "solve_rss_mb", "max_rss_mb", "max_vram_mb", "timeout_cap_s",
+    "us_per_nnz", "solve_rss_mb", "max_rss_mb", "max_vram_mb", "cuda_init_s",
+    "timeout_cap_s",
     "returncode", "diagnostic", "git_sha", "source_id", "repeat", "compiler",
     "compiler_version", "openmp_runtime", "node_index_bits", "edge_index_bits",
     "hypre_cuda", "rchol_pcg", "cuda_host_compiler", "arch_flags",
@@ -63,7 +64,8 @@ CSV_FIELDS = (
 INT_FIELDS = {"threads", "n", "nnz", "iters", "returncode", "repeat",
               "node_index_bits", "edge_index_bits"}
 FLOAT_FIELDS = {"setup_s", "solve_s", "total_s", "rel_res", "fillin", "us_per_nnz",
-                "solve_rss_mb", "max_rss_mb", "max_vram_mb", "timeout_cap_s"}
+                "solve_rss_mb", "max_rss_mb", "max_vram_mb", "cuda_init_s",
+                "timeout_cap_s"}
 
 
 def geomean(values) -> float:
@@ -113,6 +115,7 @@ def flatten(record: dict) -> dict[str, object]:
         row[field] = metrics.get(field, matrix.get(field, ""))
     for field in ("setup_s", "solve_s", "total_s", "iters", "rel_res", "fillin",
                   "us_per_nnz", "solve_rss_mb", "max_rss_mb", "max_vram_mb",
+                  "cuda_init_s",
                   "returncode"):
         row[field] = metrics.get(field, "")
     row["timeout_cap_s"] = record.get("timeout_cap_s", "")
@@ -157,7 +160,7 @@ def read_csv(path: Path) -> list[dict]:
                 field: typed[field]
                 for field in ("n", "nnz", "setup_s", "solve_s", "total_s", "iters",
                               "rel_res", "fillin", "us_per_nnz", "solve_rss_mb",
-                              "max_rss_mb", "max_vram_mb", "returncode")
+                              "max_rss_mb", "max_vram_mb", "cuda_init_s", "returncode")
                 if typed.get(field) is not None
             }
             provenance = {
@@ -278,6 +281,34 @@ def render_headline(records: list[dict], out: Path) -> None:
             mode="combined", metric="total", mats=matrices,
             goutcomes=outcomes, thread_label="T=72",
         )
+        combined.overview_heatmap(
+            cpu_records, gpu_rows, family,
+            out / f"fair_t72_solve_{family}.png",
+            mode="combined", metric="solve", mats=matrices,
+            goutcomes=outcomes, thread_label="T=72",
+        )
+
+        # Linear setup+solve bars remain useful alongside the ratio heatmaps:
+        # they show whether a total-time loss comes from setup or the iterative
+        # solve.  Reuse the same family splits as the laptop renderer so large
+        # social graphs cannot flatten the smaller SuiteSparse matrices.
+        headline = cpu.headline_mats(cpu_records, family)
+        for suffix, group in cpu.family_groups(cpu_records, family, headline, split=True):
+            selected = set(group)
+            subset = [record for record in cpu_records
+                      if record["cell"]["family"] != family
+                      or record["cell"]["matrix_id"] in selected]
+            combined._bars(
+                subset, gpu_rows, family,
+                out / f"fair_t72_breakdown_{family}{suffix}.png",
+                stacked=True,
+                val=lambda values: (values["setup"], values["solve"]),
+                goutcomes=outcomes,
+                device="both",
+                ycompress=suffix.startswith("_giants"),
+                ylabel="time (s) — T=72  [solid = setup, /// = solve]",
+                title=f"{family}{suffix}: CPU+GPU setup and solve",
+            )
 
 
 def _index(records: list[dict]) -> dict[tuple, dict]:

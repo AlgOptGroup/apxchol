@@ -5,8 +5,8 @@ Pinned at `44ef39d2f5c2c52aa577f58f005d62f2675cefbc`
 ("Update data README for graph matrix downloads", 2026-04-24).
 
 The benchmark runs ParAC from an out-of-tree checkout (`PARAC_CPU_DRIVER` /
-`benchmarks/paths_local.py`). **Three** benchmark-only patches are applied (the
-third touches only the CUDA drivers). Everything else we
+`benchmarks/paths_local.py`). **Four** benchmark-only patches are applied (the
+last two touch only the CUDA drivers). Everything else we
 need — the AMD reorder, the physics augmentation, the local build flags, the
 independent residual check — lives in this repo, so the ParAC checkout stays at
 upstream plus a small reviewable patch stack.
@@ -17,6 +17,7 @@ git checkout 44ef39d && git status --porcelain     # must be empty
 patch -p1 < $APXCHOL/benchmarks/patches/parac/0001-configurable-tolerance-and-any-thread-count.patch
 patch -p1 < $APXCHOL/benchmarks/patches/parac/0002-report-complete-setup-boundaries.patch
 patch -p1 < $APXCHOL/benchmarks/patches/parac/0003-report-complete-gpu-boundaries.patch
+patch -p1 < $APXCHOL/benchmarks/patches/parac/0004-report-cuda-init-separately.patch
 bash $APXCHOL/benchmarks/parac_build.sh            # builds experiment/driver
 ```
 
@@ -70,6 +71,18 @@ later checks used a relative one. Both now use `||r||/||r0||`, the recurrence
 residual norm the driver already computes. The runner calibrates that to the
 independently printed true residual, but never loosens the requested tolerance:
 `tol_used = min(1e-8, tol_calibrated)`. The original event timers remain diagnostics.
+
+## 0004 — report process-wide CUDA initialization separately
+
+The upstream CUDA drivers start their factor timer and then perform a dummy
+`cudaMalloc`/`cudaFree` as a runtime warm-up. That charges the once-per-process
+primary-context cost to ParAC while the shared C++ benchmark initializes CUDA
+before timing apxchol, AMGCL and Hypre. Patch 0004 replaces the dummy allocation
+with `cudaFree(nullptr)`, measures and prints it as `APX CUDA init time`, and
+starts ParAC's factor timer afterward. The first real allocation, module loads,
+all solver-specific handles, transfers and analysis remain inside ParAC's setup.
+The runner persists the excluded interval as `cuda_init_s`; it is not added to
+`setup_s` or `total_s`.
 
 ### The tolerance is ABSOLUTE, so it has to be calibrated
 

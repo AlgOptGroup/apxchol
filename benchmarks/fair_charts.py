@@ -370,9 +370,10 @@ def _cpu_selector_data(recs, family=None, storage=None):
 
 def ablation_heatmap(recs, gpu_cfg, fam, out):
     """apxchol selector x storage ablation as small-multiple heatmaps (total / setup /
-    solve / iters), t16. Rows = IS selector (bg/greedy/bk); cols = storage backend
-    in the progression fwd_star -> vec -> bstr -> vec_pool, plus a vec_pool
-    GPU column for that indexed ablation. The method headline uses AoS separately.
+    solve / iters), t16. Rows = measured IS selectors; cols = measured storage
+    backends, plus a GPU column when that indexed ablation is present. Backends
+    with no cells in this family are omitted instead of occupying an all-grey
+    column. The method headline uses AoS separately.
     Each metric is medianed over the matrix set COMMON to all CPU configs
     (fair); colour = value / best-in-grid (green = best), cells annotated with the
     absolute value. Blank (grey) = config not swept / did not converge."""
@@ -387,11 +388,21 @@ def ablation_heatmap(recs, gpu_cfg, fam, out):
         if key and key[1] == "vec_pool":
             for mat, met in per_mat.items():
                 gpu[key[0]][mat] = met
-    # Median over the matrix set common to all CPU configs (apples-to-apples).
-    common = set.intersection(*[set(d) for d in cpu.values()])
+    active_sels = [sel for sel in _ABL_SELS
+                   if any((sel, sto) in cpu for sto in _ABL_STOS) or sel in gpu]
+    active_stos = [sto for sto in _ABL_STOS
+                   if any((sel, sto) in cpu for sel in active_sels)]
+    cpu_series = [cpu[(sel, sto)] for sel in active_sels for sto in active_stos
+                  if (sel, sto) in cpu]
+    if not active_sels or not active_stos or not cpu_series:
+        return
+    # Median over the matrix set common to all displayed CPU configs
+    # (apples-to-apples).
+    common = set.intersection(*[set(d) for d in cpu_series])
     if not common:
-        common = set.union(*[set(d) for d in cpu.values()])
-    cols = _ABL_STOS + ["vec_pool\n(GPU)"]
+        common = set.union(*[set(d) for d in cpu_series])
+    show_gpu = any(sel in gpu for sel in active_sels)
+    cols = active_stos + (["vec_pool\n(GPU)"] if show_gpu else [])
     cmap = plt.cm.RdYlGn_r.copy(); cmap.set_bad("0.85")
 
     def med_of(d, key):
@@ -402,35 +413,35 @@ def ablation_heatmap(recs, gpu_cfg, fam, out):
     for ax, (name, key, unit) in zip(
             axes.flat, [("total", "total_s", "s"), ("setup", "setup_s", "s"),
                         ("solve", "solve_s", "s"), ("iters", "iters", "")]):
-        M = np.full((len(_ABL_SELS), len(cols)), np.nan)
-        for i, sel in enumerate(_ABL_SELS):
-            for j, sto in enumerate(_ABL_STOS):
+        M = np.full((len(active_sels), len(cols)), np.nan)
+        for i, sel in enumerate(active_sels):
+            for j, sto in enumerate(active_stos):
                 if (sel, sto) in cpu:
                     M[i, j] = med_of(cpu[(sel, sto)], key)
-            if sel in gpu:
-                M[i, len(_ABL_STOS)] = med_of(gpu[sel], key)
-        # Colour-normalise by the best CPU cell (the 5 CPU storage cols), NOT the
+            if show_gpu and sel in gpu:
+                M[i, len(active_stos)] = med_of(gpu[sel], key)
+        # Colour-normalise by the best CPU cell, NOT the
         # global min -- otherwise the much-faster GPU column flattens the whole CPU
         # grid to one colour and the selector x storage signal (the point of the
         # chart) is lost. A GPU cell that beats every CPU config just clamps to the
         # green end; its real value is always printed in the annotation.
-        cpu_cells = M[:, :len(_ABL_STOS)]
+        cpu_cells = M[:, :len(active_stos)]
         cpu_finite = cpu_cells[np.isfinite(cpu_cells)]
         best = cpu_finite.min() if cpu_finite.size else 1.0
         vmax = min(float(cpu_finite.max() / best) if cpu_finite.size else 2.0, 3.0)
         norm = np.ma.masked_invalid(M / best)
         ax.imshow(norm, cmap=cmap, aspect="auto", vmin=1.0, vmax=max(vmax, 1.01))
         ax.set_xticks(range(len(cols))); ax.set_xticklabels(cols, fontsize=7.5)
-        ax.set_yticks(range(len(_ABL_SELS)))
-        ax.set_yticklabels([f"{s}+tree" for s in _ABL_SELS], fontsize=8.5)
+        ax.set_yticks(range(len(active_sels)))
+        ax.set_yticklabels([f"{s}+tree" for s in active_sels], fontsize=8.5)
         ax.set_title(f"{name}" + (f" ({unit})" if unit else " (count)"), fontsize=10)
-        for i in range(len(_ABL_SELS)):
+        for i in range(len(active_sels)):
             for j in range(len(cols)):
                 v = M[i, j]
                 if np.isfinite(v):
                     ax.text(j, i, f"{v:.2f}" if unit else f"{int(round(v))}",
                             ha="center", va="center", fontsize=7.5)
-    fig.suptitle(f"apxchol  IS-selector x storage  ablation ({fam}, t16, tol 1e-8) — "
+    fig.suptitle(f"apxchol measured selector/storage ablation ({fam}, t16, tol 1e-8) — "
                  f"median over {len(common)} matrices · colour = ×best (green=fastest)",
                  fontsize=11)
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)

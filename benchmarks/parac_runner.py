@@ -77,9 +77,10 @@ GPU (`parac_graph` / `parac_physics`, device=gpu):
   residual to the independently printed true residual.
   setup = sort + complete post-parse adapter/factor/solver-setup intervals;
   solve includes RHS work, PCG, and returning x to host; peak VRAM via the
-  nvidia-smi sidecar.
+  nvidia-smi sidecar. Patch 0004 reports the once-per-process CUDA context
+  initialization separately as cuda_init_s, matching the shared C++ driver.
 
-The ParAC checkout itself is upstream 44ef39d plus the three benchmark-only
+The ParAC checkout itself is upstream 44ef39d plus the four benchmark-only
 patches under benchmarks/patches/parac/; CMake applies the stack automatically,
 and benchmarks/parac_build.sh verifies it for an external checkout.
 
@@ -129,7 +130,8 @@ except ImportError:
 # Laplacians — instantiate with
 #   julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').
 PRODUCE_JL = f"{ROOT}/benchmarks/parac_produce_upstream.jl"
-JULIA_PROJECT = f"{ROOT}/benchmarks/julia"
+JULIA_PROJECT = os.environ.get(
+    "APXCHOL_PARAC_JULIA_PROJECT", f"{ROOT}/benchmarks/julia")
 
 # OUR reimplementations, kept as the FALLBACK for an input their producer rejects.
 # These used to live untracked inside the ParAC checkout; they are our harness's
@@ -169,10 +171,11 @@ PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
 PROV_GPU = {"source": "parac_runner.py", "git_sha": PROV_CPU["git_sha"],
             "source_id": PROV_CPU["source_id"],
             "repeat": REPS, "tier": "broad",
-            "note": "ParAC upstream 44ef39d + benchmark-only patch 0003: consistent "
+            "note": "ParAC upstream 44ef39d + benchmark-only patches 0003-0004: consistent "
                     "relative recurrence-residual stopping test plus complete "
                     "post-parse adapter, factor setup, solver setup, and per-RHS timing; "
-                    "the per-RHS interval includes returning x to host."}
+                    "the per-RHS interval includes returning x to host; process-wide "
+                    "CUDA initialization is reported separately as cuda_init_s."}
 
 
 def _cpu_provenance():
@@ -763,6 +766,7 @@ def _run_once_gpu(driver, mtx, tol, deadline=None):
     return dict(etree=_g(r"build etree:\s*([0-9.eE+-]+)", o),
                 ftree=_g(r"factorization tree:\s*([0-9.eE+-]+)", o),
                 summary=_g(r"generate summary:\s*([0-9.eE+-]+)", o),
+                cuda_init=_g(r"APX CUDA init time:\s*([0-9.eE+-]+)", o),
                 adapter=_g(r"APX adapter preprocessing time:\s*([0-9.eE+-]+)", o),
                 factor_setup=_g(r"APX GPU factor setup time:\s*([0-9.eE+-]+)", o),
                 solver_setup=_g(r"APX GPU solver setup time:\s*([0-9.eE+-]+)", o),
@@ -912,8 +916,9 @@ def run_gpu(mid, tol=TOL):
                          matrix_meta={"parac_prep": prep_prov},
                          timeout_cap_s=TIMEOUT_GPU)
             results.append(f"{solver_key}[TIMEOUT]"); continue
-        ok = [r for r in runs if r["adapter"] and r["factor_setup"] and
-              r["solver_setup"] and r["solve_total"] and r["iters"]]
+        ok = [r for r in runs if r["cuda_init"] and r["adapter"]
+              and r["factor_setup"] and r["solver_setup"]
+              and r["solve_total"] and r["iters"]]
         if not ok:
             rc.emit_cell(family, mid, solver_key, "", "failed", None, THREADS, "gpu", prov)
             results.append(f"{solver_key}[FAILED]"); continue
@@ -939,6 +944,9 @@ def run_gpu(mid, tol=TOL):
                    "native_setup_s": factor_setup + solver_setup,
                    "factor_kernel_s": factor, "factor_conversion_s": conv,
                    "spsv_analysis_s": spsv, "pcg_kernel_s": pcg}
+        cuda_init = [float(r["cuda_init"]) for r in ok if r.get("cuda_init")]
+        if cuda_init:
+            metrics["cuda_init_s"] = statistics.median(cuda_init)
         vram = [float(r["vram_mb"]) for r in ok if r.get("vram_mb")]
         if vram: metrics["max_vram_mb"] = round(max(vram), 1)   # peak VRAM over reps
         rc.emit_cell(family, mid, solver_key, "", status, metrics, THREADS, "gpu", prov,
