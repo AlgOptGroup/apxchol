@@ -407,8 +407,10 @@ if (BUILD_GPU_RCHOL)
         )
         # Upstream relies on transitive standard headers for INT_MAX/int64_t.
         # Supply them as build flags, without rewriting its source tree.
+        # Keep each -include pair in one SHELL group: CMake otherwise de-duplicates
+        # the repeated `-include` token and leaves `cstdint` as a bogus input file.
         target_compile_options(gpu_rchol_cpu_driver PRIVATE
-            -O3 -w -include climits -include cstdint)
+            -O3 -w "SHELL:-include climits" "SHELL:-include cstdint")
         message(STATUS "GPU RCHOL CPU driver enabled (experiment/driver_local.cpp)")
     else()
         message(STATUS "GPU RCHOL CPU driver needs OpenMP + MKL (LP64) — skipped")
