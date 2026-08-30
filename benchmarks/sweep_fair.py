@@ -229,7 +229,10 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None,
     meta = dict(OBSERVED.get(mid) or {})
     if extra_meta:
         meta.update(extra_meta)
-    prov = {**PROV, **(julia_toolchain() if solver in JULIA_SOLVERS else build_toolchain())}
+    affinity = ({} if solver in JULIA_SOLVERS
+                else rc.benchmark_openmp_provenance(THREADS))
+    prov = {**PROV, **affinity,
+            **(julia_toolchain() if solver in JULIA_SOLVERS else build_toolchain())}
     return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, prov,
                         matrix_meta=meta or None,
                         timeout_cap_s=timeout_cap_s if status == "timeout" else None)
@@ -257,8 +260,11 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
         return d
     def _run(extra):
         envs = base_envs + extra
-        envpfx = f"env {' '.join(envs)} " if envs else ""
-        inner=(f"{envpfx}{rc.taskset_prefix(THREADS)} {BIN[DEVICE]} {margs} --solver {solver} {cfg} "
+        run_env = rc.benchmark_openmp_env(THREADS)
+        for assignment in envs:
+            key, value = assignment.split("=", 1)
+            run_env[key] = value
+        inner=(f"{rc.taskset_prefix(THREADS)} {BIN[DEVICE]} {margs} --solver {solver} {cfg} "
                f"{gflag} {regflag} --threads {THREADS} --tol {TOL} --maxiter {mi} --repeat {REPS} --csv")
         # /usr/bin/time -f '%M': peak RSS (kbytes) -> stderr 'APXRSS <kb>'; the max over
         # all reps (setup-phase peak dominates). solve_rss_mb (held during solve) comes
@@ -268,7 +274,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
         # dies with bad_alloc (-> 'oom') instead of OOM-killing the box.
         cap = MEM_CAP_GB if DEVICE == "cpu" else None
         with rc.VramSampler("benchmark", enabled=(DEVICE == "gpu")) as vram:
-            try: p=sh(cmd, timeout=timeout or TIMEOUT, mem_cap_gb=cap)
+            try: p=sh(cmd, timeout=timeout or TIMEOUT, env=run_env, mem_cap_gb=cap)
             except subprocess.TimeoutExpired as e:
                 # BUILD_META is the binary's FIRST stderr line, so even a run
                 # killed at the wall cap identifies the toolchain behind the

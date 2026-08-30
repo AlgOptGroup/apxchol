@@ -19,6 +19,7 @@ this is safe to run alongside other (timing) work. Run from repo root:
 import json, os, re, glob
 
 from runner_common import (margs_for, ROOT, CELLS, sh as _sh, parac_amd_mtx,
+                           benchmark_openmp_env, taskset_prefix,
                            PARAC_GPU_DRIVER as GPU_DRIVER,
                            PARAC_GPU_DRIVER_PHYS as GPU_DRIVER_PHYS,
                            PARAC_CPU_DRIVER as CPU_DRIVER,
@@ -92,7 +93,8 @@ def ac_mtx(mid, family, args, reg):
     tag = "op" if rc.kind_of(mid) == "operator" else "pure"
     p = f"{DUMP}/{mid}-{tag}.mtx"
     if not os.path.exists(p):
-        sh(f"{BIN} {args} --dump-mtx {p} --solver none")
+        sh(f"{BIN} {args} --dump-mtx {p} --solver none",
+           env=benchmark_openmp_env(16))
     return p if os.path.exists(p) else None
 
 def ac_fill(mid, family, args, reg):
@@ -129,7 +131,8 @@ def apxchol_fill(mid, family, args, reg):
     for solver_key, cfg in APX_SELECTORS:
         if done(mid, solver_key):
             continue
-        env = dict(os.environ, APXCHOL_REPORT_FILL="1")
+        env = benchmark_openmp_env(
+            16, dict(os.environ, APXCHOL_REPORT_FILL="1"))
         cmd = (f"{BIN} {args} {regflag} --solver apxchol_v1 --v1-configs '{cfg}' "
                f"--threads 16 --tol 1e-8 --maxiter 1 --repeat 1 --csv")
         o = sh(cmd, env=env)
@@ -176,7 +179,8 @@ def parac_cpu_fill(mid, family, solver_key, physics):
     if not amd or not os.path.exists(CPU_DRIVER):
         print(f"  {mid:16} {solver_key:16} SKIP (no AMD mtx / driver)"); return
     arg5 = "1" if physics else ""
-    o = sh(f'taskset -c 0-15 {CPU_DRIVER} {amd} 16 "" {arg5}'.strip()).stdout
+    o = sh(f'{taskset_prefix(16)} {CPU_DRIVER} {amd} 16 "" {arg5}'.strip(),
+           env=benchmark_openmp_env(16)).stdout
     g = lambda p: (int(re.search(p, o).group(1)) if re.search(p, o) else None)
     n = g(r"number of nodes:\s*(\d+)")
     if physics:

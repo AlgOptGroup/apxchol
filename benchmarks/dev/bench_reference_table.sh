@@ -16,6 +16,13 @@ set -euo pipefail
 
 OUTPUT=${1:-/tmp/bench_reference_table.txt}
 COOLDOWN_C=${COOLDOWN_C:-75}
+THREADS=16
+TASKSET=0-15
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=openmp_affinity.sh
+source "$SCRIPT_DIR/openmp_affinity.sh"
+apxchol_benchmark_openmp_env "$THREADS" "$TASKSET"
 
 # nnz for each workload (for µs/nnz calc).
 declare -A NNZ=([iter0010]=7867398 [iter0020]=7867398 [iter0030]=7867398
@@ -40,19 +47,19 @@ median_run() {
     local wl=$1 bin=$2 solver=$3 envk=$4
     local args
     if [[ "$wl" == "grid_2000" ]]; then args="--graph grid --n 2000"
-    else args="--mtx data/ipm/${wl}/matrix.mtx"
+    else args="--mtx data/ipm/${wl}/matrix.mtx --kind operator --class sddm"
     fi
     local v1cfg=""
     [[ "$solver" == "apxchol_v1" ]] && v1cfg="--v1-configs bg+tree[vec_pool]"
     # Warmup.
     wait_cool "$COOLDOWN_C"
-    env $envk OMP_NUM_THREADS=16 taskset -c 0-15 $bin $args --solver $solver $v1cfg --repeat 1 >/dev/null 2>&1
+    env $envk taskset -c "$TASKSET" $bin $args --solver $solver $v1cfg --repeat 1 >/dev/null 2>&1
     local -a sa oa ta ia
     sa=(); oa=(); ta=(); ia=()
     for r in 1 2 3; do
         wait_cool "$COOLDOWN_C"
         local OUT
-        OUT=$(env $envk OMP_NUM_THREADS=16 taskset -c 0-15 $bin $args --solver $solver $v1cfg --repeat 1 2>/dev/null \
+        OUT=$(env $envk taskset -c "$TASKSET" $bin $args --solver $solver $v1cfg --repeat 1 2>/dev/null \
               | awk 'NF >= 10 && $(NF-6) ~ /^[0-9.]+$/ {print $(NF-6), $(NF-5), $(NF-4), $(NF-3); exit}')
         [[ -z "$OUT" ]] && { echo "FAIL"; return 1; }
         sa+=($(echo $OUT|awk '{print $1}'))

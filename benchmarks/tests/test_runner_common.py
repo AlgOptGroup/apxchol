@@ -12,6 +12,7 @@ class AffinitySpecTest(unittest.TestCase):
                                return_value=set(range(72, 144))), \
              mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("APXCHOL_BENCH_CPUSET", None)
+            self.assertEqual(rc.affinity_cpus(4), [72, 73, 74, 75])
             self.assertEqual(rc.affinity_spec(4), "72-75")
             self.assertEqual(rc.taskset_prefix(4), "taskset -c 72-75")
 
@@ -25,6 +26,43 @@ class AffinitySpecTest(unittest.TestCase):
                              {"APXCHOL_BENCH_CPUSET": "0-3;hostname"}):
             with self.assertRaises(ValueError):
                 rc.affinity_spec(4)
+
+    def test_override_is_expanded_and_bounded_by_thread_count(self):
+        with mock.patch.dict(os.environ,
+                             {"APXCHOL_BENCH_CPUSET": "8-9,12,14"}):
+            self.assertEqual(rc.affinity_cpus(3), [8, 9, 12])
+            self.assertEqual(rc.affinity_spec(3), "8-9,12")
+
+    def test_rejects_duplicate_override_cpus(self):
+        with mock.patch.dict(os.environ,
+                             {"APXCHOL_BENCH_CPUSET": "1-2,2"}):
+            with self.assertRaises(ValueError):
+                rc.affinity_cpus(2)
+
+    def test_mixed_runtime_env_is_explicit_and_rank_local(self):
+        with mock.patch.object(os, "sched_getaffinity",
+                               return_value={72, 73, 74, 75}), \
+             mock.patch.dict(os.environ, {
+                 "UNRELATED": "kept",
+                 "GOMP_CPU_AFFINITY": "stale parent setting",
+             }, clear=True):
+            env = rc.benchmark_openmp_env(3)
+            self.assertEqual(env["OMP_NUM_THREADS"], "3")
+            self.assertEqual(env["OMP_DYNAMIC"], "FALSE")
+            self.assertEqual(env["OMP_PROC_BIND"], "close")
+            self.assertEqual(env["OMP_PLACES"], "{72},{73},{74}")
+            self.assertEqual(env["KMP_AFFINITY"], "norespect")
+            self.assertNotIn("GOMP_CPU_AFFINITY", env)
+            self.assertEqual(env["UNRELATED"], "kept")
+
+    def test_affinity_provenance_matches_subprocess_env(self):
+        with mock.patch.object(os, "sched_getaffinity",
+                               return_value={2, 3, 8, 10}):
+            self.assertEqual(rc.benchmark_openmp_provenance(3), {
+                "benchmark_cpuset": "2-3,8",
+                "benchmark_omp_places": "{2},{3},{8}",
+                "benchmark_kmp_affinity": "norespect",
+            })
 
 
 if __name__ == "__main__":

@@ -38,9 +38,15 @@
 #include <sstream>
 #include <fstream>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <set>
 #include <thread>
+#include <utility>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 // dlsym(RTLD_DEFAULT, ...) — asks the running process WHICH OpenMP runtime it
 // actually loaded (see emit_build_meta below). Probed with __has_include so a
@@ -134,6 +140,115 @@ static const char* build_compiler() {
     return "unknown";
 #endif
 }
+
+#if defined(__linux__)
+struct process_affinity_snapshot {
+    std::vector<int> cpus;
+    int physical_cores = 0;
+};
+
+static process_affinity_snapshot process_affinity() {
+    process_affinity_snapshot result;
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (sched_getaffinity(0, sizeof(mask), &mask) != 0)
+        return result;
+
+    std::set<std::pair<int, int>> cores;
+    bool topology_complete = true;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &mask)) continue;
+        result.cpus.push_back(cpu);
+
+        int package = -1, core = -1;
+        std::ifstream package_file(
+            "/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+            "/topology/physical_package_id");
+        std::ifstream core_file(
+            "/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+            "/topology/core_id");
+        if (!(package_file >> package) || !(core_file >> core)) {
+            topology_complete = false;
+        } else {
+            cores.emplace(package, core);
+        }
+    }
+    result.physical_cores = topology_complete
+        ? static_cast<int>(cores.size())
+        : static_cast<int>(result.cpus.size());
+    return result;
+}
+
+static std::string lowercase_ascii(const char* value) {
+    std::string out = value ? value : "";
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+static bool benchmark_binding_requested() {
+    if (const char* bind = std::getenv("OMP_PROC_BIND")) {
+        const std::string value = lowercase_ascii(bind);
+        if (!value.empty() && value != "false" && value != "off" && value != "0")
+            return true;
+    }
+    if (const char* affinity = std::getenv("GOMP_CPU_AFFINITY"))
+        return *affinity != '\0';
+    return false;
+}
+
+static bool kmp_ignores_inherited_thread_mask() {
+    return lowercase_ascii(std::getenv("KMP_AFFINITY")).find("norespect") !=
+           std::string::npos;
+}
+
+static std::string cpu_list(const std::vector<int>& cpus) {
+    std::ostringstream out;
+    for (std::size_t i = 0; i < cpus.size(); ++i) {
+        if (i) out << ',';
+        out << cpus[i];
+    }
+    return out.str();
+}
+
+// Return false rather than silently timing an N-thread run on one physical
+// core.  The benchmark executable can contain LLVM libomp (apxchol) and GNU
+// libgomp (system SuiteSparse/Hypre).  A libgomp constructor may apply
+// OMP_PROC_BIND before main(), narrowing this primary thread to one place;
+// libomp's default `respect` policy then treats that thread mask as the whole
+// allocation.  The Python runners prevent this with rank-local explicit places
+// plus KMP_AFFINITY=norespect.  Direct invocations need the same contract.
+static bool benchmark_affinity_is_safe(int requested_threads) {
+    if (requested_threads <= 1 || !benchmark_binding_requested() ||
+        kmp_ignores_inherited_thread_mask())
+        return true;
+    if (const char* allow = std::getenv("APXCHOL_BENCH_ALLOW_NARROW_AFFINITY")) {
+        if (std::string(allow) == "1") return true;
+    }
+
+    const auto affinity = process_affinity();
+    if (affinity.cpus.empty() || affinity.physical_cores >= requested_threads)
+        return true;
+
+    std::cerr
+        << "FATAL: invalid benchmark affinity: --threads=" << requested_threads
+        << ", but this process entered main() on only "
+        << affinity.physical_cores << " physical core(s) / "
+        << affinity.cpus.size() << " logical CPU(s) {"
+        << cpu_list(affinity.cpus) << "}.\n"
+           "This binary may load both GNU libgomp and LLVM libomp. With OpenMP "
+           "binding enabled, libgomp can narrow the primary thread before "
+           "libomp starts, producing a fake N-thread timing on one core.\n"
+           "Launch through benchmarks/runner_common.py (rank-local explicit "
+           "OMP_PLACES plus KMP_AFFINITY=norespect). Set "
+           "APXCHOL_BENCH_ALLOW_NARROW_AFFINITY=1 only for intentional "
+           "oversubscription diagnostics.\n";
+    return false;
+}
+#else
+static bool benchmark_affinity_is_safe(int) { return true; }
+#endif
 
 static std::string build_compiler_version() {
 #if defined(__clang__)
@@ -2274,7 +2389,8 @@ static BenchResult run_hypre_boomeramg_gpu(
     Eigen::VectorXd bsub = b;
     if (is_laplacian) for (int p : pinned) bsub(p) = 0.0;
 
-    // Switch Hypre to GPU execution. HYPRE_Init was already called in main().
+    // Switch Hypre to GPU execution. main() initializes Hypre only when a
+    // Hypre solver was requested, before reaching this function.
     HYPRE_SetMemoryLocation(HYPRE_MEMORY_DEVICE);
     HYPRE_SetExecutionPolicy(HYPRE_EXEC_DEVICE);
 
@@ -2383,10 +2499,36 @@ int main(int argc, char** argv) {
     // `failed` still carries the toolchain that produced it, because the runner
     // lifts this line out of whatever stderr it managed to capture.
     emit_build_meta();
-#ifdef HAVE_HYPRE
-    HYPRE_Init();  // sequential build uses Hypre's MPI shim; no MPI_Init needed
-#endif
     Args args = parse_args(argc, argv);
+
+    if (!benchmark_affinity_is_safe(args.threads))
+        return 2;
+
+    // --threads is the process-wide benchmark contract. omp_set_num_threads
+    // below reaches the runtime this translation unit was compiled against;
+    // the official runners publish the same value before process startup for
+    // libraries built against another OpenMP runtime. Keep the environment in
+    // sync here for libraries which inspect it lazily after main().
+    if (args.threads > 0) {
+        const std::string value = std::to_string(args.threads);
+#if defined(_WIN32)
+        _putenv_s("OMP_NUM_THREADS", value.c_str());
+#else
+        setenv("OMP_NUM_THREADS", value.c_str(), 1);
+#endif
+    }
+
+#ifdef HAVE_HYPRE
+    // Do not initialize a competitor runtime in a process that never requested
+    // that competitor. This is useful isolation, but it is NOT the affinity
+    // fix: a linked libgomp can run constructors before main(). The runner guard
+    // and benchmark_affinity_is_safe above address that earlier boundary.
+    const bool hypre_initialized =
+        args.solvers.count("hypre_boomeramg") != 0 ||
+        args.solvers.count("hypre_boomeramg_gpu") != 0;
+    if (hypre_initialized)
+        HYPRE_Init();  // sequential build uses Hypre's MPI shim; no MPI_Init needed
+#endif
 
 #if defined(APXCHOL_USE_CUDA) && !defined(APXCHOL_BENCH_HYPRE_CUDA)
     if (args.solvers.count("hypre_boomeramg_gpu")) {
@@ -2394,7 +2536,7 @@ int main(int argc, char** argv) {
                      "CPU-only Hypre build. Reconfigure with "
                      "-DAPXCHOL_USE_CUDA=ON -DBENCH_HYPRE_USE_CUDA=ON.\n";
 #ifdef HAVE_HYPRE
-        HYPRE_Finalize();
+        if (hypre_initialized) HYPRE_Finalize();
 #endif
         return 2;
     }
@@ -3031,7 +3173,7 @@ int main(int argc, char** argv) {
 #endif
 
 #ifdef HAVE_HYPRE
-    HYPRE_Finalize();
+    if (hypre_initialized) HYPRE_Finalize();
 #endif
     return 0;
 }

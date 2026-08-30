@@ -91,7 +91,8 @@ def _dump(mid):
     os.makedirs(DUMP_DIR, exist_ok=True)
     p = f"{DUMP_DIR}/{mid}.mtx"
     if not os.path.exists(p):
-        sh(f"{rc.BIN['cpu']} {rc.margs_for(mid)} --dump-mtx {p} --solver none", timeout=TIMEOUT)
+        sh(f"{rc.BIN['cpu']} {rc.margs_for(mid)} --dump-mtx {p} --solver none",
+           timeout=TIMEOUT, env=rc.benchmark_openmp_env(THREADS))
     return p if os.path.exists(p) else None
 
 

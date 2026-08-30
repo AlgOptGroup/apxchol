@@ -19,7 +19,7 @@ fwd:/bck:" lines. Writes results/level_stats.csv. Run from repo root:
 """
 import csv, os, re
 
-from runner_common import ROOT, sh
+from runner_common import ROOT, sh, benchmark_openmp_env, margs_for
 
 BIN = f"{ROOT}/benchmarks/build/benchmark"
 OUT = f"{ROOT}/results/level_stats.csv"
@@ -30,16 +30,16 @@ MATS = [
     ("grid_2000", "grids", "--graph grid --n 2000", False),
     ("grid3d_100", "grids", "--graph grid3d --n 100", False),
     ("grid3d_150", "grids", "--graph grid3d --n 150", False),
-    ("parabolic_fem", "suitesparse", f"--mtx {ROOT}/data/matrices/parabolic_fem.mtx", True),
-    ("apache2", "suitesparse", f"--mtx {ROOT}/data/matrices/apache2.mtx", True),
-    ("ecology1", "suitesparse", f"--mtx {ROOT}/data/matrices/ecology1.mtx", True),
-    ("G3_circuit", "suitesparse", f"--mtx {ROOT}/data/matrices/G3_circuit.mtx", True),
-    ("thermal2", "suitesparse", f"--mtx {ROOT}/data/matrices/thermal2.mtx", True),
-    ("com-Amazon", "suitesparse", f"--mtx {ROOT}/data/matrices/com-Amazon.mtx", True),
-    ("coAuthorsDBLP", "suitesparse", f"--mtx {ROOT}/data/matrices/coAuthorsDBLP.mtx", True),
-    ("kron_g500-logn16", "suitesparse", f"--mtx {ROOT}/data/matrices/kron_g500-logn16.mtx", True),
-    ("iter0010", "ipm", f"--mtx {ROOT}/data/ipm/iter0010/matrix.mtx", False),
-    ("iter0040", "ipm", f"--mtx {ROOT}/data/ipm/iter0040/matrix.mtx", False),
+    ("parabolic_fem", "suitesparse", margs_for("parabolic_fem"), True),
+    ("apache2", "suitesparse", margs_for("apache2"), True),
+    ("ecology1", "suitesparse", margs_for("ecology1"), True),
+    ("G3_circuit", "suitesparse", margs_for("G3_circuit"), True),
+    ("thermal2", "suitesparse", margs_for("thermal2"), True),
+    ("com-Amazon", "suitesparse", margs_for("com-Amazon"), True),
+    ("coAuthorsDBLP", "suitesparse", margs_for("coAuthorsDBLP"), True),
+    ("kron_g500-logn16", "suitesparse", margs_for("kron_g500-logn16"), True),
+    ("iter0010", "ipm", margs_for("iter0010"), False),
+    ("iter0040", "ipm", margs_for("iter0040"), False),
 ]
 
 PAT = re.compile(
@@ -58,7 +58,8 @@ def main():
     rows = []
     for mid, family, args, reg in MATS:
         regflag = "--reg-rel 1e-6" if reg else ""
-        env = dict(os.environ, APXCHOL_LEVEL_DUMP="1")
+        env = benchmark_openmp_env(
+            16, dict(os.environ, APXCHOL_LEVEL_DUMP="1"))
         cmd = (f"{BIN} {args} {regflag} --solver apxchol_v1 --v1-configs 'bg+tree[vec_pool_aos]' "
                f"--threads 16 --tol 1e-8 --maxiter 1 --repeat 1 --csv")
         # runner_common.sh = hardened (process-group kill on timeout)

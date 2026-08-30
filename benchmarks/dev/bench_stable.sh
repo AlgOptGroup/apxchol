@@ -57,6 +57,11 @@ SOLVER=${SOLVER:-apxchol_v1}
 CONFIG=${CONFIG:-bg+tree[vec_pool]}
 QUIET=${QUIET:-}
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=openmp_affinity.sh
+source "$SCRIPT_DIR/openmp_affinity.sh"
+apxchol_benchmark_openmp_env "$THREADS" "$TASKSET"
+
 # Resolve workload to bench args.
 case "$WORKLOAD" in
     iter*)
@@ -65,7 +70,7 @@ case "$WORKLOAD" in
             echo "ERROR: workload $WORKLOAD not found at $MTX_DIR" >&2
             exit 1
         fi
-        BENCH_ARGS="--mtx $MTX_DIR/matrix.mtx"
+        BENCH_ARGS="--mtx $MTX_DIR/matrix.mtx --kind operator --class sddm"
         ;;
     grid_*)
         N=${WORKLOAD#grid_}
@@ -123,7 +128,7 @@ run_once() {
     else
         solver_args="--solver $SOLVER"
     fi
-    OMP_NUM_THREADS=$THREADS taskset -c "$TASKSET" "$BINARY" \
+    taskset -c "$TASKSET" "$BINARY" \
         $BENCH_ARGS $solver_args --repeat 1 2>/dev/null \
         | awk 'NF >= 10 && $(NF-6) ~ /^[0-9.]+$/ && $(NF-5) ~ /^[0-9.]+$/ && $(NF-4) ~ /^[0-9.]+$/ && $(NF-3) ~ /^[0-9]+$/ {
             print $(NF-6), $(NF-5), $(NF-4), $(NF-3); exit

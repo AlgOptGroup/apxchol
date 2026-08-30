@@ -153,7 +153,7 @@ PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
                     "Input prepared by ParAC's OWN cpu_implementation/write_graph.jl "
                     "(graph_produce / physics_produce, method 'amd'), not by a reimplementation. "
                     "Tolerance calibrated from a probe run so ParAC's own printed "
-                    "relative residual lands under 1e-8. AMD-reordered, MKL serial, 16 cores",
+                    "relative residual lands under 1e-8. AMD-reordered, MKL serial",
             "repeat": REPS, "tier": "broad",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             # The toolchain behind these numbers, read off the ParAC CPU driver
@@ -173,6 +173,12 @@ PROV_GPU = {"source": "parac_runner.py", "git_sha": PROV_CPU["git_sha"],
                     "relative recurrence-residual stopping test plus complete "
                     "post-parse adapter, factor setup, solver setup, and per-RHS timing; "
                     "the per-RHS interval includes returning x to host."}
+
+
+def _cpu_provenance():
+    """CPU-cell provenance resolved after the campaign sets THREADS/REPS."""
+    return {**PROV_CPU, **rc.benchmark_openmp_provenance(THREADS),
+            "repeat": REPS}
 
 _g = lambda pat, o: (re.search(pat, o).group(1) if re.search(pat, o) else None)
 
@@ -225,7 +231,8 @@ def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
     p = f"{dump_dir}/{mid}-{tag}.mtx"
     if not os.path.exists(p):
         sh(f"{bin_path} {rc.margs_for(mid)} --dump-mtx {p} --solver none",
-           timeout=timeout, mem_cap_gb=mem_cap_gb)
+           timeout=timeout, env=rc.benchmark_openmp_env(THREADS),
+           mem_cap_gb=mem_cap_gb)
     return (p if os.path.exists(p) else None), tag
 
 
@@ -358,8 +365,9 @@ def _reorder_amd_ours(mid, src, amd, tag, augment):
 def _run_once_cpu(amd, physics, rel_tol=None):
     rc.require_path(rc.PARAC_CPU_DRIVER, "APXCHOL_PARAC_DRIVER", "PARAC_CPU_DRIVER",
                     "the ParAC CPU driver binary")
-    env = dict(os.environ, LD_LIBRARY_PATH=rc.PARAC_LDLIB, MKL_NUM_THREADS="1",
-               OMP_PROC_BIND="close", KMP_AFFINITY="norespect")
+    env = rc.benchmark_openmp_env(
+        THREADS,
+        dict(os.environ, LD_LIBRARY_PATH=rc.PARAC_LDLIB, MKL_NUM_THREADS="1"))
     if rel_tol is not None:
         # patch 0001 forwards these to example_pcg_solver's existing parameters.
         env["PARAC_REL_TOL"] = repr(float(rel_tol))
@@ -440,13 +448,13 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
         rel_tol = _calibrate_rel_tol(amd, physics)
         runs = [_run_once_cpu(amd, physics, rel_tol=rel_tol) for _ in range(REPS)]
     except subprocess.TimeoutExpired:
-        rc.emit_cell(family, mid, solver, "", "timeout", {}, THREADS, "cpu", PROV_CPU,
+        rc.emit_cell(family, mid, solver, "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
                      matrix_meta=extra_meta, timeout_cap_s=TIMEOUT_CPU)
         return "TIMEOUT"
     ok = [r for r in runs if r["factor_setup"] and r["adapter"] and
           r["solve"] and r["iters"]]
     if not ok:
-        rc.emit_cell(family, mid, solver, "", "failed", {}, THREADS, "cpu", PROV_CPU,
+        rc.emit_cell(family, mid, solver, "", "failed", {}, THREADS, "cpu", _cpu_provenance(),
                      matrix_meta=extra_meta)
         return "FAILED"
     med = lambda key: statistics.median(float(r[key] or 0) for r in ok)
@@ -475,7 +483,7 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
         metrics["parac_rel_tol"] = rel_tol      # the calibrated value we passed
     rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
     if rss: metrics["max_rss_mb"] = round(max(rss), 1)   # peak host RSS over reps
-    rc.emit_cell(family, mid, solver, "", status, metrics, THREADS, "cpu", PROV_CPU,
+    rc.emit_cell(family, mid, solver, "", status, metrics, THREADS, "cpu", _cpu_provenance(),
                  matrix_meta=extra_meta)
     return f"{status} it={iters} solve={solve:.3f}"
 
@@ -494,7 +502,8 @@ def _prep_amd(mid, tag, augment=False):
     src = f"{DUMP_CPU}/{mid}-{tag}.mtx"
     if not os.path.exists(src):
         sh(f"{rc.BIN['cpu']} {rc.margs_for(mid)} --dump-mtx {src} --solver none",
-           timeout=TIMEOUT_CPU, mem_cap_gb=MEM_CAP_GB)
+           timeout=TIMEOUT_CPU, env=rc.benchmark_openmp_env(THREADS),
+           mem_cap_gb=MEM_CAP_GB)
     if not os.path.exists(src):
         return None, 0.0, ""
     return _reorder_amd(mid, src, tag, augment=augment)
@@ -513,7 +522,8 @@ def _dump_component(mid, rank):
         n_nodes, n_comps = (int(x) for x in open(meta).read().split())
         return src, n_nodes, n_comps
     cp = sh(f"{rc.BIN['cpu']} {rc.margs_for(mid)} --giant-dump --comp-rank {rank} "
-            f"--dump-mtx {src} --solver none", timeout=TIMEOUT_CPU, mem_cap_gb=MEM_CAP_GB)
+            f"--dump-mtx {src} --solver none", timeout=TIMEOUT_CPU,
+            env=rc.benchmark_openmp_env(THREADS), mem_cap_gb=MEM_CAP_GB)
     # stderr: "[component-dump] rank R / K components: N / M nodes" (group1=K, group2=N).
     # "nothing to dump" (rank >= K) doesn't match -> (None, 0, 0).
     m = re.search(r"rank\s+\d+\s*/\s*(\d+)\s+components:\s*(\d+)\s*/", cp.stderr or "")
@@ -564,7 +574,7 @@ def _measure_cpu_graph_split(family, mid):
                   r["solve"] and r["iters"]]
             if not ok:
                 rc.emit_cell(family, mid, "parac", "", "failed", {},
-                             THREADS, "cpu", PROV_CPU)
+                             THREADS, "cpu", _cpu_provenance())
                 return "FAILED"
             med = lambda key: statistics.median(float(r[key] or 0) for r in ok)
             factor = med("factor")
@@ -582,11 +592,11 @@ def _measure_cpu_graph_split(family, mid):
             if rss: rss_peak = max(rss_peak, max(rss))
             n_solved += 1; rank += 1
     except subprocess.TimeoutExpired:
-        rc.emit_cell(family, mid, "parac", "", "timeout", {}, THREADS, "cpu", PROV_CPU,
+        rc.emit_cell(family, mid, "parac", "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
                      timeout_cap_s=TIMEOUT_CPU)
         return "TIMEOUT"
     if n_solved == 0 or nnz_tot == 0:
-        rc.emit_cell(family, mid, "parac", "", "failed", {}, THREADS, "cpu", PROV_CPU)
+        rc.emit_cell(family, mid, "parac", "", "failed", {}, THREADS, "cpu", _cpu_provenance())
         return "FAILED"
     total = setup + solve
     status = "complete" if rr <= float(TOL) else "not_converged"
@@ -601,7 +611,7 @@ def _measure_cpu_graph_split(family, mid):
                "n_components_total": n_comps_total or n_solved}
     if tol_used is not None: metrics["parac_rel_tol"] = tol_used
     if rss_peak: metrics["max_rss_mb"] = round(rss_peak, 1)
-    rc.emit_cell(family, mid, "parac", "", status, metrics, THREADS, "cpu", PROV_CPU,
+    rc.emit_cell(family, mid, "parac", "", status, metrics, THREADS, "cpu", _cpu_provenance(),
                  matrix_meta={"parac_mode": "graph",
                               "parac_input": "the PURE L = D - A, per connected "
                                              "component, AMD-reordered",
@@ -639,13 +649,13 @@ def _run_cpu_operator(mid, family):
     operator, apache2 scores 3.1e-3 while ParAC prints 8.8e-9, and G3_circuit does
     not converge at all.
     """
-    rc.emit_cell(family, mid, "parac", "", "n/a", {}, THREADS, "cpu", PROV_CPU,
+    rc.emit_cell(family, mid, "parac", "", "n/a", {}, THREADS, "cpu", _cpu_provenance(),
                  matrix_meta={"parac_mode": "n/a", "parac_na_reason": GRAPH_NA})
     try:
         amd, amds, prep_prov = _prep_amd(mid, "op", augment=True)
     except subprocess.TimeoutExpired:
         if not rc.cell_done(family, mid, "parac_physics", "", THREADS, "cpu", terminal=TERMINAL_CPU):
-            rc.emit_cell(family, mid, "parac_physics", "", "timeout", {}, THREADS, "cpu", PROV_CPU,
+            rc.emit_cell(family, mid, "parac_physics", "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
                          timeout_cap_s=TIMEOUT_CPU)
         return "graph[n/a] physics[TIMEOUT(dump/reorder)]"
     if not amd:
@@ -672,7 +682,7 @@ def run_cpu(mid):
     family = rc.MATRICES[mid]["family"]
     if _uses_physics(mid):
         return _run_cpu_operator(mid, family)
-    rc.emit_cell(family, mid, "parac_physics", "", "n/a", {}, THREADS, "cpu", PROV_CPU,
+    rc.emit_cell(family, mid, "parac_physics", "", "n/a", {}, THREADS, "cpu", _cpu_provenance(),
                  matrix_meta={"parac_mode": "n/a", "parac_na_reason": PHYSICS_NA})
     g = _measure_cpu_graph_split(family, mid)
     return f"graph[{g}] physics[n/a]"

@@ -142,6 +142,12 @@ work the competitor does not provide, and its provenance is recorded.
   remains unbounded.
 - The main laptop campaign uses three repetitions and the median at 16 physical
   cores. Daint campaigns record their own thread count and resource allocation.
+- The C++ driver may load LLVM `libomp` (apxchol) and GNU `libgomp` (system
+  competitors) in one process. All benchmark runners therefore pin with an
+  explicit rank-local `OMP_PLACES` list and `KMP_AFFINITY=norespect`; each cell
+  records that contract. The binary refuses a bound multi-thread run that
+  entered `main()` on fewer physical cores than `--threads`, instead of timing
+  an apparent N-thread run on one core. Use `sweep_fair.py` for published timing.
 - CPU RSS and GPU VRAM are separate metrics. Host RSS is never presented as a
   GPU solver's full footprint.
 
@@ -174,6 +180,11 @@ benchmarks/build/benchmark --graph grid --n 2000 \
   --solver apxchol_v1,hypre_boomeramg,amgcl \
   --threads 16 --tol 1e-8 --repeat 3 --csv
 ```
+
+The direct command is convenient for functional checks. Timing campaigns must
+go through the runners below so their OpenMP affinity and provenance are
+controlled; bound legacy runs without the recorded affinity fields should not
+be used for scaling claims.
 
 Run the resume-safe CPU campaign and render its charts:
 

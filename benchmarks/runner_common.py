@@ -106,8 +106,31 @@ def boost_state():
         return "unknown"
 
 
-def affinity_spec(threads):
-    """Return `taskset -c` CPUs relative to this process's granted affinity.
+def _parse_cpu_spec(spec):
+    """Expand a validated taskset-style CPU list, preserving its order."""
+    if not re.fullmatch(r"[0-9,-]+", spec):
+        raise ValueError("APXCHOL_BENCH_CPUSET must be a taskset CPU list")
+    cpus = []
+    for item in spec.split(","):
+        if not item:
+            raise ValueError("APXCHOL_BENCH_CPUSET contains an empty item")
+        if "-" not in item:
+            cpus.append(int(item))
+            continue
+        fields = item.split("-")
+        if len(fields) != 2 or not all(fields):
+            raise ValueError("APXCHOL_BENCH_CPUSET has an invalid range")
+        lo, hi = (int(field) for field in fields)
+        if hi < lo:
+            raise ValueError("APXCHOL_BENCH_CPUSET has a descending range")
+        cpus.extend(range(lo, hi + 1))
+    if len(set(cpus)) != len(cpus):
+        raise ValueError("APXCHOL_BENCH_CPUSET contains duplicate CPUs")
+    return cpus
+
+
+def affinity_cpus(threads):
+    """Return the exact CPU ids assigned to one benchmark subprocess.
 
     Slurm may bind packed ranks to disjoint physical IDs (for example 72-143).
     Hard-coding 0..threads-1 then either fails or targets another rank's CPUs.
@@ -118,15 +141,17 @@ def affinity_spec(threads):
         raise ValueError(f"threads must be positive, got {threads}")
     override = os.environ.get("APXCHOL_BENCH_CPUSET")
     if override:
-        if not re.fullmatch(r"[0-9,-]+", override):
-            raise ValueError("APXCHOL_BENCH_CPUSET must be a taskset CPU list")
-        return override
-    allowed = sorted(os.sched_getaffinity(0))
+        allowed = _parse_cpu_spec(override)
+    else:
+        allowed = sorted(os.sched_getaffinity(0))
     if len(allowed) < threads:
         raise RuntimeError(
             f"requested {threads} threads but process affinity grants only "
             f"{len(allowed)} CPUs: {allowed}")
-    chosen = allowed[:threads]
+    return allowed[:threads]
+
+
+def _compress_cpu_list(chosen):
     ranges = []
     start = prev = chosen[0]
     for cpu in chosen[1:]:
@@ -139,8 +164,53 @@ def affinity_spec(threads):
     return ",".join(ranges)
 
 
+def affinity_spec(threads):
+    """Return the selected CPUs in taskset's compact list syntax."""
+    return _compress_cpu_list(affinity_cpus(threads))
+
+
 def taskset_prefix(threads):
     return f"taskset -c {affinity_spec(threads)}"
+
+
+def benchmark_openmp_env(threads, base=None):
+    """Environment for the monolithic C++ benchmark executable.
+
+    The x86 benchmark links LLVM libomp for apxchol and, through the system
+    SuiteSparse/CHOLMOD dependency, GNU libgomp.  libgomp initializes first
+    when OMP_PROC_BIND is enabled and narrows the primary thread to the first
+    place.  libomp's default ``respect`` policy then mistakes that one-core
+    mask for the process allocation and puts every apxchol worker on it.
+
+    ``norespect`` lets libomp recover from that poisoned *thread* mask.  The
+    explicit standard OMP_PLACES list constrains both runtimes to the exact
+    CPUs chosen above, so norespect cannot escape a packed Slurm rank's
+    allocation. GNU libgomp reads those standard settings too. Do not also set
+    GOMP_CPU_AFFINITY: LLVM libomp treats it as a higher-priority alias and then
+    warns that it ignored OMP_PLACES/OMP_PROC_BIND. This is deliberately applied
+    only to benchmark subprocesses, not globally in sh().
+    """
+    env = dict(os.environ if base is None else base)
+    cpus = affinity_cpus(threads)
+    env.update({
+        "OMP_NUM_THREADS": str(threads),
+        "OMP_DYNAMIC": "FALSE",
+        "OMP_PROC_BIND": "close",
+        "OMP_PLACES": ",".join(f"{{{cpu}}}" for cpu in cpus),
+        "KMP_AFFINITY": "norespect",
+    })
+    env.pop("GOMP_CPU_AFFINITY", None)
+    return env
+
+
+def benchmark_openmp_provenance(threads):
+    """Cell metadata that makes the mixed-runtime affinity guard auditable."""
+    cpus = affinity_cpus(threads)
+    return {
+        "benchmark_cpuset": _compress_cpu_list(cpus),
+        "benchmark_omp_places": ",".join(f"{{{cpu}}}" for cpu in cpus),
+        "benchmark_kmp_affinity": "norespect",
+    }
 
 # ── matrix registry ─────────────────────────────────────────────────────────────
 # Every entry DECLARES its kind. Two things can live in a .mtx file and they

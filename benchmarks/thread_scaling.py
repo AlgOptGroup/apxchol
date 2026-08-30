@@ -12,6 +12,8 @@ import numpy as np
 from sweep_fair import UNKNOWN_TOOLCHAIN
 from runner_common import (margs_for, ROOT, sh, git_sha, boost_state, parse_csv,
                            parse_build_meta, binary_toolchain,
+                           benchmark_openmp_env, benchmark_openmp_provenance,
+                           taskset_prefix,
                            PARAC_CPU_DRIVER as DRIVER, PARAC_REORD as REORD,
                            PARAC_LDLIB as LDLIB)
 
@@ -70,9 +72,9 @@ def done(mid, lab, t):
 def run_cpp(margs, solver, config, reg, t):
     cfg = f"--v1-configs '{config}'" if solver == "apxchol_v1" else ""
     regf = "--reg-rel 1e-6" if reg else ""
-    cmd = (f"taskset -c 0-{t-1} {BIN} {margs} --solver {solver} {cfg} {regf} "
+    cmd = (f"{taskset_prefix(t)} {BIN} {margs} --solver {solver} {cfg} {regf} "
            f"--threads {t} --tol {TOL} --maxiter 500 --repeat {REPS} --csv")
-    try: p = sh(cmd, timeout=TIMEOUT)
+    try: p = sh(cmd, timeout=TIMEOUT, env=benchmark_openmp_env(t))
     except subprocess.TimeoutExpired as e:
         BUILD.update(parse_build_meta(e.stderr))   # even a timeout names its toolchain
         return "timeout", None
@@ -94,10 +96,10 @@ def run_parac(mid, t):
     amds = 0.0
     tf = f"{amd}.time"
     if os.path.exists(tf): amds = float(open(tf).read())
-    env = dict(os.environ, LD_LIBRARY_PATH=LDLIB, MKL_NUM_THREADS=str(t),
-               OMP_PROC_BIND="close", KMP_AFFINITY="norespect")
+    env = benchmark_openmp_env(
+        t, dict(os.environ, LD_LIBRARY_PATH=LDLIB, MKL_NUM_THREADS=str(t)))
     try:
-        o = sh(f"taskset -c 0-{t-1} {DRIVER} {amd} {t} \"\"", timeout=TIMEOUT, env=env).stdout
+        o = sh(f"{taskset_prefix(t)} {DRIVER} {amd} {t} \"\"", timeout=TIMEOUT, env=env).stdout
     except subprocess.TimeoutExpired:
         return "timeout", None
     g = lambda p: (re.search(p, o).group(1) if re.search(p, o) else None)
@@ -123,10 +125,11 @@ def sweep():
                     continue
                 if lab == "ParAC":
                     st, m = run_parac(mid, t)
-                    prov = binary_toolchain(DRIVER)   # off ParAC's own driver ELF
+                    prov = {**binary_toolchain(DRIVER),
+                            **benchmark_openmp_provenance(t)}
                 else:
                     st, m = run_cpp(margs, solver, config, reg, t)
-                    prov = BUILD                      # the binary's own BUILD_META
+                    prov = {**BUILD, **benchmark_openmp_provenance(t)}
                 emit(mid, fam, lab, t, m, st, prov)
                 print(f"   {lab:16} t{t:<2} {st} total={m['total_s'] if m else '-'}", flush=True)
 

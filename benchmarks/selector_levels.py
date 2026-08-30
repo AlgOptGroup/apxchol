@@ -13,6 +13,8 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from runner_common import benchmark_openmp_env, margs_for, sh, taskset_prefix
+
 ROOT = str(Path(__file__).resolve().parents[1])   # repo root
 BIN = f"{ROOT}/benchmarks/build/benchmark"
 OUT_CSV = f"{ROOT}/results/selector_levels.csv"
@@ -26,19 +28,19 @@ MATS = [
     ("grid_3000", "g", "--graph grid --n 3000", False),
     ("grid3d_100", "g", "--graph grid3d --n 100", False),
     ("grid3d_150", "g", "--graph grid3d --n 150", False),
-    ("parabolic_fem", "ss", f"--mtx {ROOT}/data/matrices/parabolic_fem.mtx", True),
-    ("ecology1", "ss", f"--mtx {ROOT}/data/matrices/ecology1.mtx", True),
-    ("G3_circuit", "ss", f"--mtx {ROOT}/data/matrices/G3_circuit.mtx", True),
-    ("thermal2", "ss", f"--mtx {ROOT}/data/matrices/thermal2.mtx", True),
-    ("iter0010", "ipm", f"--mtx {ROOT}/data/ipm/iter0010/matrix.mtx", False),
-    ("iter0040", "ipm", f"--mtx {ROOT}/data/ipm/iter0040/matrix.mtx", False),
-    ("com-Amazon", "ss", f"--mtx {ROOT}/data/matrices/com-Amazon.mtx", True),
-    ("coAuthorsDBLP", "ss", f"--mtx {ROOT}/data/matrices/coAuthorsDBLP.mtx", True),
-    ("kron_g500-logn16", "ss", f"--mtx {ROOT}/data/matrices/kron_g500-logn16.mtx", True),
-    ("com-Youtube", "ss", f"--mtx {ROOT}/data/matrices/com-Youtube.mtx", True),
-    ("coPapersDBLP", "ss", f"--mtx {ROOT}/data/matrices/coPapersDBLP.mtx", True),
-    ("as-Skitter", "ss", f"--mtx {ROOT}/data/matrices/as-Skitter.mtx", True),
-    ("com-LiveJournal", "ss", f"--mtx {ROOT}/data/matrices/com-LiveJournal.mtx", True),
+    ("parabolic_fem", "ss", margs_for("parabolic_fem"), True),
+    ("ecology1", "ss", margs_for("ecology1"), True),
+    ("G3_circuit", "ss", margs_for("G3_circuit"), True),
+    ("thermal2", "ss", margs_for("thermal2"), True),
+    ("iter0010", "ipm", margs_for("iter0010"), False),
+    ("iter0040", "ipm", margs_for("iter0040"), False),
+    ("com-Amazon", "ss", margs_for("com-Amazon"), True),
+    ("coAuthorsDBLP", "ss", margs_for("coAuthorsDBLP"), True),
+    ("kron_g500-logn16", "ss", margs_for("kron_g500-logn16"), True),
+    ("com-Youtube", "ss", margs_for("com-Youtube"), True),
+    ("coPapersDBLP", "ss", margs_for("coPapersDBLP"), True),
+    ("as-Skitter", "ss", margs_for("as-Skitter"), True),
+    ("com-LiveJournal", "ss", margs_for("com-LiveJournal"), True),
 ]
 
 def collect():
@@ -46,13 +48,13 @@ def collect():
     for mid, fam, args, reg in MATS:
         regf = "--reg-rel 1e-6" if reg else ""
         for sel in SELS:
-            env = dict(os.environ, APXCHOL_LEVEL_DUMP="1")
-            cmd = (f"taskset -c 0-15 {BIN} {args} {regf} --solver apxchol_v1 "
+            env = benchmark_openmp_env(
+                16, dict(os.environ, APXCHOL_LEVEL_DUMP="1"))
+            cmd = (f"{taskset_prefix(16)} {BIN} {args} {regf} --solver apxchol_v1 "
                    f"--v1-configs '{sel}+tree[vec_pool]' --threads 16 --tol 1e-8 "
                    f"--maxiter 1 --repeat 1 --csv")
             try:
-                o = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                                   env=env, timeout=900).stderr
+                o = sh(cmd, env=env, timeout=900).stderr
             except subprocess.TimeoutExpired:
                 print(f"  {mid:16} {sel:5} TIMEOUT", flush=True); continue
             m = PAT.search(o)
