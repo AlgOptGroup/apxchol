@@ -19,8 +19,12 @@ an input their producer rejects; a cell prepared by the fallback records that,
 and the reason, in matrix_meta.parac_prep.
 
 class=laplacian -> GRAPH mode (`driver <mtx> <threads> ""`).
-  Dump the PURE L = D - A, one connected component at a time (--giant-dump
-  --comp-rank R; rank 0 IS the whole matrix when it is connected), hand it to
+  For a connected file-backed input, hand the original file directly to
+  `graph_produce`: that producer itself constructs the PURE L = D - A, so an
+  intermediate rewrite would be redundant. A lightweight --component-info pass
+  checks the one-null-vector precondition without serializing another matrix.
+  For generated or disconnected inputs, dump the PURE L = D - A one connected
+  component at a time (--giant-dump --comp-rank R), then hand each component to
   their `graph_produce(prefix, "amd")`, and let ParAC generate its own zero-sum
   RHS. That RHS is consistent for a connected singular Laplacian, so ParAC solves
   the very L the benchmark reports on and its printed residual is against that L.
@@ -61,10 +65,11 @@ relative residual is ParAC's own `relative residual:` line and lands just under
 TOL; both it and the calibrated tolerance are recorded in the cell.
 
 CPU (`parac` / `parac_physics`, device=cpu):
-  dump -> their write_graph.jl producer, method "amd" (cached with .time/.prep
-  sidecars) -> calibrate -> REPS runs of the driver. setup = AMD + complete
-  post-parse adapter interval + complete factor interval; peak host RSS via
-  /usr/bin/time.
+  dump -> their write_graph.jl producer, method "amd" (cached with versioned
+  timing/provenance sidecars) -> calibrate -> REPS runs of the driver. setup =
+  complete producer call + complete post-parse adapter interval + complete factor interval; one
+  real median-total repetition supplies all reported fields. One logical-cell
+  deadline covers every stage and component; peak host RSS via /usr/bin/time.
 
 GPU (`parac_graph` / `parac_physics`, device=gpu):
   dump -> their write_graph.jl producer, method "nnz-sort" (their random
@@ -75,10 +80,12 @@ GPU (`parac_graph` / `parac_physics`, device=gpu):
   already. Patch 0003 makes their inconsistent first/subsequent stopping tests one
   standard relative recurrence-residual test; one probe still calibrates recurrence
   residual to the independently printed true residual.
-  setup = sort + complete post-parse adapter/factor/solver-setup intervals;
+  setup = complete producer + complete post-parse adapter/factor/solver-setup intervals;
   solve includes RHS work, PCG, and returning x to host; peak VRAM via the
   nvidia-smi sidecar. Patch 0004 reports the once-per-process CUDA context
   initialization separately as cuda_init_s, matching the shared C++ driver.
+  The graph row is n/a on disconnected inputs: the upstream GPU driver has no
+  component-wise RHS route, while one global zero-sum constraint is insufficient.
 
 The ParAC checkout itself is upstream 44ef39d plus the four benchmark-only
 patches under benchmarks/patches/parac/; CMake applies the stack automatically,
@@ -90,7 +97,7 @@ a dump/reorder timeout no longer crashes the pass. Both axes emit terminal cells
 for the campaign audit; GPU keeps failed/timeout outside TERMINAL_GPU so a later
 resume still retries the transient preparation.
 """
-import os, re, statistics, subprocess, time
+import os, re, subprocess, time
 
 import runner_common as rc
 from runner_common import ROOT, sh
@@ -101,10 +108,6 @@ THREADS = 16
 MAX_ITER = 2000               # ParAC's default is 1000; patch 0001 lets us raise it
 PROBE_REL_TOL = 1e-7          # ParAC's own default; the CPU calibration probe runs at it
 PROBE_TOL_GPU = 1e-7          # the CUDA drivers' tolerance is already argv[4]
-# Physics is split per connected component (each connected -> its single-node trim grounds
-# it -> fair). Run ParAC on every component with >= this many nodes; below it the component
-# is a singleton/pair speck solved trivially (negligible setup/solve). Tunable.
-COMP_THRESHOLD = int(os.environ.get("PARAC_COMP_THRESHOLD", "1000"))
 BLOCKS = 512                  # GPU driver block count
 # Per-step (dump/reorder/driver) wall caps. The >=1e8-nnz giants need more
 # than 1200s for the AMD reorder step -> override per run.
@@ -140,6 +143,32 @@ NNZ_SORT_JL = f"{ROOT}/benchmarks/parac_nnz_sort.jl"
 
 TERMINAL_CPU = frozenset({"complete", "not_converged", "failed", "timeout"})
 TERMINAL_GPU = frozenset({"complete", "not_converged"})   # failed/timeout retry
+
+
+def _representative_run(runs, elapsed):
+    """Return (zero-based index, run) for the median-total real repetition."""
+    if not runs:
+        raise ValueError("cannot select a representative run from an empty sequence")
+    ranked = sorted(enumerate(runs), key=lambda item: (elapsed(item[1]), item[0]))
+    return ranked[len(ranked) // 2]
+
+
+def _cell_remaining(deadline, cap, label):
+    """Remaining seconds in one logical cell, or its exact-cap timeout."""
+    if deadline is None:
+        return cap
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.0:
+        raise subprocess.TimeoutExpired(label, cap)
+    return remaining
+
+
+def _cpu_cell_remaining(deadline):
+    return _cell_remaining(deadline, TIMEOUT_CPU, "ParAC CPU cell")
+
+
+def _gpu_cell_remaining(deadline):
+    return _cell_remaining(deadline, TIMEOUT_GPU, "ParAC GPU cell")
 
 PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
             "source_id": os.environ.get("APXCHOL_BENCH_SOURCE_ID", ""),
@@ -221,26 +250,138 @@ def _augments(mid):
     return _uses_physics(mid)
 
 
+_DUMP_TIME_RE = re.compile(r"APX dump setup time:\s*([0-9.eE+-]+)")
+_COMPONENT_DISCOVERY_RE = re.compile(
+    r"APX component discovery time:\s*([0-9.eE+-]+)")
+_COMPONENT_SERIALIZATION_RE = re.compile(
+    r"APX component serialization time:\s*([0-9.eE+-]+)")
+_DUMP_TIMING_SCHEMA = "solver-input-dump-v2"
+_COMPONENT_INFO_RE = re.compile(
+    r"\[component-info\]\s+(\d+)\s+components:\s+largest\s+(\d+)\s*/")
+_COMPONENT_INFO_SCHEMA = "component-info-v1"
+
+
+def _dump_cache_valid(path, require_meta=False):
+    required = [path, path + ".dump-time", path + ".dump-schema"]
+    if require_meta:
+        required.append(path + ".meta")
+    if not all(os.path.exists(item) for item in required):
+        return False
+    with open(path + ".dump-schema") as handle:
+        return handle.read().strip() == _DUMP_TIMING_SCHEMA
+
+
+def _stamp_dump_cache(path, seconds):
+    with open(path + ".dump-time", "w") as handle:
+        handle.write(str(seconds))
+    with open(path + ".dump-schema", "w") as handle:
+        handle.write(_DUMP_TIMING_SCHEMA)
+
+
+def _dump_cache_seconds(path):
+    with open(path + ".dump-time") as handle:
+        return float(handle.read())
+
+
+def _invalidate_dump_cache(path):
+    for cached in (path, path + ".meta", path + ".dump-time", path + ".dump-schema"):
+        try:
+            os.remove(cached)
+        except FileNotFoundError:
+            pass
+
+
 def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
     """Dump the matrix the drivers read: the published operator for kind=operator,
-    the pure L = D - A for kind=graph. Returns (path|None, tag). mem_cap_gb: host
-    cap for the CPU axis only — the CUDA-build binary breaks under ulimit -v
-    (CUDA reserves large host VM), so the GPU axis passes None."""
+    the pure L = D - A for kind=graph. Returns (path|None, tag, adapter_seconds).
+    Common matrix parsing/assembly stays outside the printed adapter timer; component
+    extraction and Matrix Market serialization are charged. mem_cap_gb is for the
+    CPU axis only — CUDA reserves large host VM, so the GPU axis passes None."""
     tag = _dump_tag(mid)
     os.makedirs(dump_dir, exist_ok=True)
     p = f"{dump_dir}/{mid}-{tag}.mtx"
-    if not os.path.exists(p):
-        sh(f"{bin_path} {rc.margs_for(mid)} --dump-mtx {p} --solver none",
-           timeout=timeout, env=rc.benchmark_openmp_env(THREADS),
-           mem_cap_gb=mem_cap_gb)
-    return (p if os.path.exists(p) else None), tag
+    if _dump_cache_valid(p):
+        return p, tag, _dump_cache_seconds(p)
+    _invalidate_dump_cache(p)
+    cp = sh(f"{bin_path} {rc.margs_for(mid)} --dump-mtx {p} --solver none",
+            timeout=timeout, env=rc.benchmark_openmp_env(THREADS),
+            mem_cap_gb=mem_cap_gb)
+    match = _DUMP_TIME_RE.search(cp.stderr or "")
+    if not (os.path.exists(p) and match):
+        _invalidate_dump_cache(p)
+        return None, tag, 0.0
+    seconds = float(match.group(1))
+    _stamp_dump_cache(p, seconds)
+    return p, tag, seconds
+
+
+def _native_mtx(mid):
+    """Return the published file when ParAC's own producer can read it directly."""
+    matrix = rc.MATRICES[mid]
+    return matrix["spec"] if matrix["source"] == "mtx" else None
+
+
+def _file_identity(path):
+    """Cheap cache identity for a concrete Matrix Market input.
+
+    Derived matrices can be hundreds of gigabytes, so a cache lookup must not
+    hash the whole file.  Canonical path, byte size and nanosecond mtime catch
+    route changes and ordinary replacements while keeping validation O(1).
+    """
+    stat = os.stat(path)
+    return f"{os.path.realpath(path)}\n{stat.st_size}\n{stat.st_mtime_ns}"
+
+
+def _component_info(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
+    """Return (component_count, largest_size, discovery_seconds), cached.
+
+    This intentionally performs no Matrix Market serialization.  The check is
+    required only to decide whether ParAC's one-zero-sum-RHS graph driver may
+    consume a file directly or whether the CPU route must split it.
+    """
+    os.makedirs(dump_dir, exist_ok=True)
+    base = f"{dump_dir}/{mid}.components"
+    meta, schema, input_id = base + ".meta", base + ".schema", base + ".input"
+    expected_input = _file_identity(_native_mtx(mid))
+    if os.path.exists(meta) and os.path.exists(schema) and os.path.exists(input_id):
+        with open(schema) as handle:
+            valid = handle.read().strip() == _COMPONENT_INFO_SCHEMA
+        with open(input_id) as handle:
+            valid = valid and handle.read() == expected_input
+        if valid:
+            with open(meta) as handle:
+                count, largest, seconds = handle.read().split()
+            return int(count), int(largest), float(seconds)
+    for path in (meta, schema, input_id):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+    cp = sh(f"{bin_path} {rc.margs_for(mid)} --component-info --solver none",
+            timeout=timeout, env=rc.benchmark_openmp_env(THREADS),
+            mem_cap_gb=mem_cap_gb)
+    info = _COMPONENT_INFO_RE.search(cp.stderr or "")
+    discovery = _COMPONENT_DISCOVERY_RE.search(cp.stderr or "")
+    if cp.returncode != 0 or not (info and discovery):
+        return 0, 0, 0.0
+    count, largest = int(info.group(1)), int(info.group(2))
+    seconds = float(discovery.group(1))
+    with open(meta, "w") as handle:
+        handle.write(f"{count} {largest} {seconds}")
+    with open(input_id, "w") as handle:
+        handle.write(expected_input)
+    with open(schema, "w") as handle:
+        handle.write(_COMPONENT_INFO_SCHEMA)
+    return count, largest, seconds
 
 
 # ── ParAC's OWN preprocessing (their write_graph.jl) ────────────────────────────
-# "amd time:" / "sort time:" is what THEIR producer prints; both scripts print it
-# the same way, so the reorder seconds we charge are the ones their code measured.
-_PREP_TIME_RE = re.compile(r"(?:amd|sort|random|nd) time:\s*([0-9.eE+-]+)")
+# Their native "amd time:" / "sort time:" covers only the ordering kernel. Our
+# dispatcher brackets the complete producer call after Julia/package loading so
+# setup also includes permutation materialization, augmentation and file output.
+_PREP_TOTAL_RE = re.compile(r"APX complete preprocessing time:\s*([0-9.eE+-]+)")
 _PREP_SUFFIX = {"amd": "-amd.mtx", "nnz-sort": "-nnz-sorted.mtx"}
+_PREP_TIMING_SCHEMA = "complete-producer-no-jit-v4-input-route"
 # A cache entry written before the .prep sidecar existed came from our
 # reimplementation. Say so rather than claiming provenance we cannot check —
 # delete the cached *-amd.mtx to have their producer rebuild (and stamp) it.
@@ -249,6 +390,50 @@ _PREP_UNKNOWN = ("unrecorded: this cache entry predates the .prep sidecar, so it
                  "were byte-identical to ParAC's own producer on every matrix compared "
                  "(see benchmarks/patches/parac/README.md), but this particular file was "
                  "not checked; delete it to have their producer rebuild it")
+
+
+def _prep_cache_valid(path, src=None):
+    """True only for a cache whose time is the complete producer interval.
+
+    Historical ``.time`` files used the producer's narrow AMD/sort-kernel print.
+    The schema rejects that boundary; the optional input sidecar additionally
+    prevents a native-file result from aliasing a component-dump result.
+    """
+    schema = path + ".timing-schema"
+    required = [path, path + ".time", path + ".prep", schema]
+    if src is not None:
+        required.append(path + ".input")
+    if not all(os.path.exists(item) for item in required):
+        return False
+    with open(schema) as handle:
+        valid = handle.read().strip() == _PREP_TIMING_SCHEMA
+    if valid and src is not None:
+        with open(path + ".input") as handle:
+            valid = handle.read() == _file_identity(src)
+    return valid
+
+
+def _stamp_prep_cache(path, seconds, provenance, src=None):
+    with open(path + ".time", "w") as handle:
+        handle.write(str(seconds))
+    with open(path + ".prep", "w") as handle:
+        handle.write(provenance)
+    if src is not None:
+        with open(path + ".input", "w") as handle:
+            handle.write(_file_identity(src))
+    # Commit marker last: a partial record is never accepted as a warm cache.
+    with open(path + ".timing-schema", "w") as handle:
+        handle.write(_PREP_TIMING_SCHEMA)
+
+
+def _invalidate_prep_cache(path):
+    """Remove one derived cache entry whose timing contract is obsolete."""
+    for cached in (path, path + ".time", path + ".prep", path + ".timing-schema",
+                   path + ".input"):
+        try:
+            os.remove(cached)
+        except FileNotFoundError:
+            pass
 
 
 def _write_graph_jl():
@@ -270,7 +455,7 @@ def _produce_upstream(prefix, src, mode, method, timeout, mem_cap_gb=None):
 
     Their producer takes a path PREFIX: it reads `<prefix>.mtx` and writes
     `<prefix>-amd.mtx` / `<prefix>-nnz-sorted.mtx`. We honour that convention
-    inside OUR cache directory and point `<prefix>.mtx` at the dump with a
+    inside OUR cache directory and point `<prefix>.mtx` at the selected input with a
     symlink, so nothing is ever written into their checkout and the cache file
     names are unchanged.
 
@@ -296,19 +481,26 @@ def _produce_upstream(prefix, src, mode, method, timeout, mem_cap_gb=None):
     finally:
         if os.path.islink(link):
             os.remove(link)
-    text = open(log).read() if os.path.exists(log) else ""
+    if os.path.exists(log):
+        with open(log) as handle:
+            text = handle.read()
+    else:
+        text = ""
     if cp.returncode != 0 or not os.path.exists(out):
         tail = " | ".join(l.strip() for l in text.strip().splitlines()[-4:]) or "no output"
         return None, 0.0, f"{mode}_produce(\"{method}\") rc={cp.returncode}: {tail}"
-    m = _PREP_TIME_RE.search(text)
-    return out, (float(m.group(1)) if m else 0.0), None
+    m = _PREP_TOTAL_RE.search(text)
+    if not m:
+        return None, 0.0, (f"{mode}_produce(\"{method}\") omitted the complete "
+                           "preprocessing timer; refusing the narrow ordering-kernel time")
+    return out, float(m.group(1)), None
 
 
 # ── CPU axis ────────────────────────────────────────────────────────────────────
-def _reorder_amd(mid, src, tag, augment=False):
+def _reorder_amd(mid, src, tag, augment=False, deadline=None):
     """AMD reorder via ParAC's OWN write_graph.jl producer, cached. Returns
-    (path|None, seconds, prep_provenance); the .time and .prep sidecars keep both
-    available on a warm cache hit.
+    (path|None, seconds, prep_provenance); versioned sidecars keep both available
+    on a warm cache hit and invalidate the historical narrow-kernel timer.
 
     augment=True selects `physics_produce`, which permutes and then appends
     ParAC's ground row/column, so the appended node is last and physics mode's
@@ -329,40 +521,54 @@ def _reorder_amd(mid, src, tag, augment=False):
     prefix = f"{rc.PARAC_REORD}/{mid}-{tag}"
     amd = prefix + "-amd.mtx"
     tfile, pfile = amd + ".time", amd + ".prep"
-    if not os.path.exists(amd):
+    if not _prep_cache_valid(amd, src):
+        # The matrix and its timing are one cache record. Keeping an old matrix
+        # while replacing only its narrow timer would claim work we did not run;
+        # drop the derived record and rebuild it as one schema-stamped record.
+        _invalidate_prep_cache(amd)
         mode = "physics" if augment else "graph"
-        out, secs, err = _produce_upstream(prefix, src, mode, "amd",
-                                           TIMEOUT_CPU, MEM_CAP_GB)
+        out, secs, err = _produce_upstream(
+            prefix, src, mode, "amd", _cpu_cell_remaining(deadline), MEM_CAP_GB)
         if out:
             prep = f"ParAC write_graph.jl {mode}_produce(path, \"amd\"), upstream and unmodified"
         else:
             print(f"   [parac] upstream {mode}_produce refused {mid}: {err}\n"
                   f"   [parac] falling back to benchmarks/parac_reorder_amd.jl", flush=True)
-            secs = _reorder_amd_ours(mid, src, amd, tag, augment)
+            secs = _reorder_amd_ours(mid, src, amd, tag, augment, deadline=deadline)
             prep = f"benchmarks/parac_reorder_amd.jl (FALLBACK — upstream refused: {err})"
-        open(tfile, "w").write(str(secs))
-        open(pfile, "w").write(prep)
-    secs = float(open(tfile).read()) if os.path.exists(tfile) else 0.0
-    prep = open(pfile).read() if os.path.exists(pfile) else _PREP_UNKNOWN
+        if os.path.exists(amd):
+            _stamp_prep_cache(amd, secs, prep, src)
+    if os.path.exists(tfile):
+        with open(tfile) as handle:
+            secs = float(handle.read())
+    else:
+        secs = 0.0
+    if os.path.exists(pfile):
+        with open(pfile) as handle:
+            prep = handle.read()
+    else:
+        prep = _PREP_UNKNOWN
     return (amd if os.path.exists(amd) else None), secs, prep
 
 
-def _reorder_amd_ours(mid, src, amd, tag, augment):
+def _reorder_amd_ours(mid, src, amd, tag, augment, deadline=None):
     """FALLBACK reorder with our own parac_reorder_amd.jl (see _reorder_amd).
     Runs on julia's default environment, so it stays usable even when the
     benchmarks/julia project their producer needs is not instantiated."""
     log = f"/tmp/parac_fair_reord_{mid}_{tag}.log"
     flag = " --augment" if augment else ""
+    started = time.monotonic()
     sh(f"julia {REORDER_JL} {src} {amd}{flag} > {log} 2>&1",
-       timeout=TIMEOUT_CPU, mem_cap_gb=MEM_CAP_GB)
+       timeout=_cpu_cell_remaining(deadline), mem_cap_gb=MEM_CAP_GB)
+    wall = time.monotonic() - started
     if os.path.exists(log):
-        m = _PREP_TIME_RE.search(open(log).read())
+        m = _PREP_TOTAL_RE.search(open(log).read())
         if m:
             return float(m.group(1))
-    return 0.0
+    return wall
 
 
-def _run_once_cpu(amd, physics, rel_tol=None):
+def _run_once_cpu(amd, physics, rel_tol=None, deadline=None):
     rc.require_path(rc.PARAC_CPU_DRIVER, "APXCHOL_PARAC_DRIVER", "PARAC_CPU_DRIVER",
                     "the ParAC CPU driver binary")
     env = rc.benchmark_openmp_env(
@@ -379,7 +585,7 @@ def _run_once_cpu(amd, physics, rel_tol=None):
     arg5 = "1" if physics else ""
     cp = sh(f"/usr/bin/time -f 'APXRSS %M' {rc.taskset_prefix(THREADS)} "
             f"{rc.PARAC_CPU_DRIVER} {amd} {THREADS} \"\" {arg5}".strip(),
-            timeout=TIMEOUT_CPU, env=env, mem_cap_gb=MEM_CAP_GB)
+            timeout=_cpu_cell_remaining(deadline), env=env, mem_cap_gb=MEM_CAP_GB)
     o = cp.stdout
     rss_mb = None
     for ln in (cp.stderr or "").splitlines():
@@ -401,6 +607,7 @@ def _run_once_cpu(amd, physics, rel_tol=None):
                 summary=_g(r"generate summary:\s*([0-9.eE+-]+)", o),
                 iters=_g(r"Iterations:\s*([0-9]+)", o),
                 rr=_g(r"relative residual:\s*([0-9.eE+-]+)", o),
+                rhs_norm=_g(r"rhs norm:\s*([0-9.eE+-]+)", o),
                 # the RECURRENCE residual its stopping test actually looked at,
                 # needed to calibrate the tolerance (see _calibrate_rel_tol)
                 recur=_g(r"Final residual norm:\s*([0-9.eE+-]+)", o),
@@ -414,7 +621,7 @@ def _run_once_cpu(amd, physics, rel_tol=None):
                 rss_mb=rss_mb)
 
 
-def _calibrate_rel_tol(amd, physics, tau=float(TOL)):
+def _calibrate_rel_tol(amd, physics, tau=float(TOL), deadline=None):
     """The rel_tol that makes ParAC's own stopping test stop at true residual tau.
 
     Its test is `sqrt(dpar[4]) > sqrt(dpar[0])`: the RECURRENCE residual norm
@@ -430,7 +637,7 @@ def _calibrate_rel_tol(amd, physics, tau=float(TOL)):
     lands the true residual just under tau. Returns None if the probe did not
     produce both numbers, in which case the caller runs at the driver default.
     """
-    p = _run_once_cpu(amd, physics, rel_tol=PROBE_REL_TOL)
+    p = _run_once_cpu(amd, physics, rel_tol=PROBE_REL_TOL, deadline=deadline)
     if not (p["recur"] and p["rr"]):
         return None
     recur0, r0 = float(p["recur"]), float(p["rr"])
@@ -439,33 +646,37 @@ def _calibrate_rel_tol(amd, physics, tau=float(TOL)):
     return (tau * recur0 / r0) ** 2
 
 
-def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
+def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None,
+                 deadline=None, dump_s=0.0):
     """REPS runs of one driver mode (graph or physics), one cell. The probe run
     that calibrates the tolerance is NOT timed and NOT one of the REPS."""
     if rc.cell_done(family, mid, solver, "", THREADS, "cpu", terminal=TERMINAL_CPU):
         return "skip(done)"
     try:
-        rel_tol = _calibrate_rel_tol(amd, physics)
-        runs = [_run_once_cpu(amd, physics, rel_tol=rel_tol) for _ in range(REPS)]
+        rel_tol = _calibrate_rel_tol(amd, physics, deadline=deadline)
+        runs = [_run_once_cpu(amd, physics, rel_tol=rel_tol, deadline=deadline)
+                for _ in range(REPS)]
     except subprocess.TimeoutExpired:
         rc.emit_cell(family, mid, solver, "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
                      matrix_meta=extra_meta, timeout_cap_s=TIMEOUT_CPU)
         return "TIMEOUT"
     ok = [r for r in runs if r["factor_setup"] and r["adapter"] and
-          r["solve"] and r["iters"]]
-    if not ok:
+          r["solve"] and r["iters"] and r["rr"] and r["n"] and r["nnz"]]
+    if len(ok) != REPS:
         rc.emit_cell(family, mid, solver, "", "failed", {}, THREADS, "cpu", _cpu_provenance(),
                      matrix_meta=extra_meta)
         return "FAILED"
-    med = lambda key: statistics.median(float(r[key] or 0) for r in ok)
-    factor = med("factor")
-    factor_setup = med("factor_setup")
-    adapter = med("adapter")
-    solve = statistics.median(float(r["solve"]) / 1000 for r in ok)
-    iters = int(statistics.median(int(r["iters"]) for r in ok))
-    rr = statistics.median(float(r["rr"]) for r in ok if r["rr"])
-    n = int(ok[-1]["n"]); nnz = int(ok[-1]["nnz"])
-    setup = amds + adapter + factor_setup
+    rep_index, chosen = _representative_run(
+        ok, lambda r: (float(r["adapter"]) + float(r["factor_setup"])
+                       + float(r["solve"]) / 1000))
+    factor = float(chosen["factor"] or 0)
+    factor_setup = float(chosen["factor_setup"])
+    adapter = float(chosen["adapter"])
+    solve = float(chosen["solve"]) / 1000
+    iters = int(chosen["iters"])
+    rr = float(chosen["rr"])
+    n = int(chosen["n"]); nnz = int(chosen["nnz"])
+    setup = dump_s + amds + adapter + factor_setup
     total = setup + solve
     # rel_res is ParAC's own ||Ax-b||/||b|| against the operator it solved, which
     # the input construction makes the operator we report on. THE GRADING RULE
@@ -475,10 +686,13 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
     status = "complete" if rr <= float(TOL) else "not_converged"
     metrics = {"n": n, "nnz": nnz, "setup_s": round(setup, 6), "solve_s": round(solve, 6),
                "total_s": round(total, 6), "iters": iters, "rel_res": rr, "fillin": 0.0,
-               "us_per_nnz": round(total / nnz * 1e6, 4), "amd_reorder_s": round(amds, 6),
-               "adapter_setup_s": round(amds + adapter, 6),
+               "us_per_nnz": round(total / nnz * 1e6, 4),
+               "input_dump_s": round(dump_s, 6),
+               "amd_reorder_s": round(amds, 6),
+               "adapter_setup_s": round(dump_s + amds + adapter, 6),
                "native_setup_s": round(factor_setup, 6),
-               "factor_kernel_s": round(factor, 6)}
+               "factor_kernel_s": round(factor, 6),
+               "representative_repeat": rep_index + 1}
     if rel_tol is not None:
         metrics["parac_rel_tol"] = rel_tol      # the calibrated value we passed
     rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
@@ -488,106 +702,163 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None):
     return f"{status} it={iters} solve={solve:.3f}"
 
 
-def _prep_amd(mid, tag, augment=False):
-    """Dump one input variant + AMD-reorder it, cached by tag (the dump only feeds
-    the reorder; a warm {mid}-{tag}[-aug]-amd.mtx + .time sidecar skips the
-    re-dump). Returns (amd_path|None, reorder_seconds, prep_provenance)."""
-    cache_tag = f"{tag}-aug" if augment else tag
-    amd = f"{rc.PARAC_REORD}/{mid}-{cache_tag}-amd.mtx"
-    if os.path.exists(amd) and os.path.exists(amd + ".time"):
-        prep = (open(amd + ".prep").read() if os.path.exists(amd + ".prep")
-                else _PREP_UNKNOWN)
-        return amd, float(open(amd + ".time").read()), prep
-    os.makedirs(DUMP_CPU, exist_ok=True)
-    src = f"{DUMP_CPU}/{mid}-{tag}.mtx"
-    if not os.path.exists(src):
-        sh(f"{rc.BIN['cpu']} {rc.margs_for(mid)} --dump-mtx {src} --solver none",
-           timeout=TIMEOUT_CPU, env=rc.benchmark_openmp_env(THREADS),
-           mem_cap_gb=MEM_CAP_GB)
-    if not os.path.exists(src):
-        return None, 0.0, ""
-    return _reorder_amd(mid, src, tag, augment=augment)
+def _prep_amd(mid, tag, augment=False, deadline=None):
+    """Select the native input or dump a generated one, then AMD-reorder it.
+
+    Returns (amd_path|None, reorder_seconds, prep_provenance, dump_seconds).
+    The dump adapter and ParAC producer are distinct setup intervals, even on a
+    warm cache, because a deployment must perform both once for a new matrix.
+    """
+    src = _native_mtx(mid)
+    dump_s = 0.0
+    source_tag = f"native-{tag}" if src is not None else tag
+    if src is None:
+        src, _dump_tag_value, dump_s = _dump(
+            mid, DUMP_CPU, rc.BIN["cpu"], _cpu_cell_remaining(deadline), MEM_CAP_GB)
+        if not src:
+            return None, 0.0, "", dump_s
+    amd, reorder_s, prep = _reorder_amd(
+        mid, src, source_tag, augment=augment, deadline=deadline)
+    return amd, reorder_s, prep, dump_s
 
 
-def _dump_component(mid, rank):
+def _dump_component(mid, rank, deadline=None, timeout_cap=TIMEOUT_CPU,
+                    bin_path=None, mem_cap_gb=MEM_CAP_GB, dump_dir=None,
+                    discovery_charge_s=None):
     """Dump the rank-th largest connected component's PURE Laplacian (relabeled
-    0..cn-1) via --giant-dump --comp-rank. Returns (src_path|None, n_nodes, n_comps):
-    a None path means rank >= n_comps ('nothing to dump'). Cached, with a .meta
-    sidecar holding (n_nodes n_comps) so warm hits skip the re-dump. rank 0 on a
-    connected matrix is the full pure L."""
-    os.makedirs(DUMP_CPU, exist_ok=True)
-    src = f"{DUMP_CPU}/{mid}-comp{rank}.mtx"
+    0..cn-1) via --giant-dump --comp-rank. Returns
+    (src_path|None, n_nodes, n_comps, adapter_seconds): a None path means rank >=
+    n_comps. Versioned sidecars retain both metadata and the mandatory component
+    extraction/serialization setup cost. rank 0 on a connected matrix is the
+    full pure L."""
+    target_dir = dump_dir or DUMP_CPU
+    os.makedirs(target_dir, exist_ok=True)
+    src = f"{target_dir}/{mid}-comp{rank}.mtx"
     meta = src + ".meta"
-    if os.path.exists(src) and os.path.exists(meta):
-        n_nodes, n_comps = (int(x) for x in open(meta).read().split())
-        return src, n_nodes, n_comps
-    cp = sh(f"{rc.BIN['cpu']} {rc.margs_for(mid)} --giant-dump --comp-rank {rank} "
-            f"--dump-mtx {src} --solver none", timeout=TIMEOUT_CPU,
-            env=rc.benchmark_openmp_env(THREADS), mem_cap_gb=MEM_CAP_GB)
+    if _dump_cache_valid(src, require_meta=True):
+        with open(meta) as handle:
+            n_nodes, n_comps = (int(x) for x in handle.read().split())
+        return src, n_nodes, n_comps, _dump_cache_seconds(src)
+    _invalidate_dump_cache(src)
+    binary = bin_path or rc.BIN["cpu"]
+    cp = sh(f"{binary} {rc.margs_for(mid)} --giant-dump --comp-rank {rank} "
+            f"--dump-mtx {src} --solver none",
+            timeout=_cell_remaining(deadline, timeout_cap, "ParAC component preparation"),
+            env=rc.benchmark_openmp_env(THREADS), mem_cap_gb=mem_cap_gb)
     # stderr: "[component-dump] rank R / K components: N / M nodes" (group1=K, group2=N).
     # "nothing to dump" (rank >= K) doesn't match -> (None, 0, 0).
     m = re.search(r"rank\s+\d+\s*/\s*(\d+)\s+components:\s*(\d+)\s*/", cp.stderr or "")
-    if not m:
-        return None, 0, 0
+    discovery = _COMPONENT_DISCOVERY_RE.search(cp.stderr or "")
+    serialization = _COMPONENT_SERIALIZATION_RE.search(cp.stderr or "")
+    if not (m and discovery and serialization and os.path.exists(src)):
+        _invalidate_dump_cache(src)
+        return None, 0, 0, 0.0
     n_comps, n_nodes = int(m.group(1)), int(m.group(2))
-    if os.path.exists(src):
-        open(meta, "w").write(f"{n_nodes} {n_comps}")
-    return (src if os.path.exists(src) else None), n_nodes, n_comps
+    with open(meta, "w") as handle:
+        handle.write(f"{n_nodes} {n_comps}")
+    # Component discovery/sorting is shared setup for the split and belongs in
+    # rank 0 exactly once. Every rank still pays its own extraction/serialization
+    # adapter. The subprocess currently rediscovers components for later ranks,
+    # but that is a harness implementation inefficiency, not solver-required work.
+    seconds = float(serialization.group(1))
+    if rank == 0:
+        seconds += (float(discovery.group(1)) if discovery_charge_s is None
+                    else float(discovery_charge_s))
+    _stamp_dump_cache(src, seconds)
+    return src, n_nodes, n_comps, seconds
 
 
-def _measure_cpu_graph_split(family, mid):
+def _measure_cpu_graph_split(family, mid, deadline=None):
     """ParAC GRAPH mode over the connected-component split, into one `parac` cell.
 
     ParAC generates a globally zero-sum RHS, which is consistent for a connected
     singular Laplacian but NOT for a disconnected one (solvability needs one
-    constraint per component). So each component with >= COMP_THRESHOLD nodes is
-    dumped as its own PURE Laplacian (descending size), AMD-reordered, calibrated
-    and run REPS times. rank 0 IS the whole matrix when it is connected, which is
-    the common case; below the threshold the components are singleton/pair specks
-    with negligible cost. setup/solve are SUMMED (the components are solved
-    sequentially), iters/rel_res are the worst (MAX) over components."""
+    constraint per component). So every non-singleton component is dumped as its
+    own PURE Laplacian (descending size), AMD-reordered, calibrated and run REPS
+    times. Singleton Laplacian blocks have b=0 and x=0 exactly and require no
+    solve. Repetition i is aggregated across every component before selecting one
+    median-total repetition. The global residual is weighted exactly as
+    sqrt(sum ||r_c||^2) / sqrt(sum ||b_c||^2)."""
     if rc.cell_done(family, mid, "parac", "", THREADS, "cpu", terminal=TERMINAL_CPU):
         return "skip(done)"
-    setup = solve = factor_tot = prep_tot = native_tot = amds_tot = 0.0
-    iters = 0; rr = 0.0; n_tot = nnz_tot = 0; rss_peak = 0.0
+    reps = [dict(adapter=0.0, factor_setup=0.0, factor=0.0, solve=0.0,
+                 iters=0, residual_sq=0.0, rhs_sq=0.0) for _ in range(REPS)]
+    dump_tot = amds_tot = 0.0
+    nnz_tot = 0; rss_peak = 0.0
     n_solved = 0; n_comps_total = None; rank = 0; tol_used = None; preps = []
     try:
-        while True:
-            src, n_nodes, n_comps = _dump_component(mid, rank)
+        native = _native_mtx(mid)
+        direct_connected = False
+        discovery_s = None
+        largest = 0
+        if native is not None:
+            n_comps_total, largest, discovery_s = _component_info(
+                mid, DUMP_CPU, rc.BIN["cpu"], _cpu_cell_remaining(deadline),
+                MEM_CAP_GB)
+            if n_comps_total <= 0:
+                rc.emit_cell(
+                    family, mid, "parac", "", "failed", {}, THREADS, "cpu",
+                    _cpu_provenance(),
+                    matrix_meta={"parac_mode": "graph",
+                                 "parac_prep_failure":
+                                     "component-info probe produced no result"})
+                return "FAILED"
+            direct_connected = n_comps_total == 1
+        while n_comps_total is None or rank < n_comps_total:
+            if direct_connected and rank == 0:
+                src, n_nodes, n_comps, dump_s = (
+                    native, largest, 1, float(discovery_s))
+            else:
+                src, n_nodes, n_comps, dump_s = _dump_component(
+                    mid, rank, deadline=deadline,
+                    discovery_charge_s=(discovery_s if rank == 0 else None))
             if n_comps_total is None and n_comps:
                 n_comps_total = n_comps
             if src is None:                  # rank >= n_comps: no more components
                 break
-            if n_nodes < COMP_THRESHOLD:     # sorted descending -> the rest are smaller too
+            # The adapter already found/extracted/serialized this component.
+            # Charge that real work even when the descending size order tells us
+            # this and all later components are singleton zero blocks.
+            dump_tot += dump_s
+            if n_nodes < 2:                  # singleton blocks have b=x=0 exactly
                 break
-            amd, amds, prep_prov = _reorder_amd(mid, src, f"comp{rank}")
+            source_tag = f"{'native-' if direct_connected else ''}comp{rank}"
+            amd, amds, prep_prov = _reorder_amd(
+                mid, src, source_tag, deadline=deadline)
             if not amd:
-                rank += 1
-                continue
+                rc.emit_cell(
+                    family, mid, "parac", "", "failed", {}, THREADS, "cpu",
+                    _cpu_provenance(),
+                    matrix_meta={"parac_mode": "graph",
+                                 "parac_prep_failure":
+                                     f"AMD preprocessing failed for component {rank}",
+                                 "parac_prep": prep_prov})
+                return "FAILED"
             if prep_prov not in preps:
                 preps.append(prep_prov)
-            rel_tol = _calibrate_rel_tol(amd, False)
+            rel_tol = _calibrate_rel_tol(amd, False, deadline=deadline)
             if rel_tol is not None:
                 tol_used = rel_tol if tol_used is None else max(tol_used, rel_tol)
-            runs = [_run_once_cpu(amd, False, rel_tol=rel_tol) for _ in range(REPS)]
+            runs = [_run_once_cpu(amd, False, rel_tol=rel_tol, deadline=deadline)
+                    for _ in range(REPS)]
             ok = [r for r in runs if r["factor_setup"] and r["adapter"] and
-                  r["solve"] and r["iters"]]
-            if not ok:
+                  r["solve"] and r["iters"] and r["rr"] and r["rhs_norm"]]
+            if len(ok) != REPS:
                 rc.emit_cell(family, mid, "parac", "", "failed", {},
                              THREADS, "cpu", _cpu_provenance())
                 return "FAILED"
-            med = lambda key: statistics.median(float(r[key] or 0) for r in ok)
-            factor = med("factor")
-            factor_setup = med("factor_setup")
-            adapter = med("adapter")
-            c_solve = statistics.median(float(r["solve"]) / 1000 for r in ok)
-            c_iters = int(statistics.median(int(r["iters"]) for r in ok))
-            c_rr = statistics.median(float(r["rr"]) for r in ok if r["rr"])
-            factor_tot += factor; prep_tot += adapter
-            native_tot += factor_setup; amds_tot += amds
-            setup += amds + adapter + factor_setup; solve += c_solve
-            iters = max(iters, c_iters); rr = max(rr, c_rr)
-            n_tot += int(ok[-1]["n"]); nnz_tot += int(ok[-1]["nnz"])
+            for rep, run in zip(reps, runs):
+                rhs_norm = float(run["rhs_norm"])
+                abs_residual = float(run["rr"]) * rhs_norm
+                rep["adapter"] += float(run["adapter"])
+                rep["factor_setup"] += float(run["factor_setup"])
+                rep["factor"] += float(run["factor"] or 0)
+                rep["solve"] += float(run["solve"]) / 1000
+                rep["iters"] = max(rep["iters"], int(run["iters"]))
+                rep["residual_sq"] += abs_residual * abs_residual
+                rep["rhs_sq"] += rhs_norm * rhs_norm
+            amds_tot += amds
+            nnz_tot += int(runs[0]["nnz"])
             rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
             if rss: rss_peak = max(rss_peak, max(rss))
             n_solved += 1; rank += 1
@@ -598,15 +869,31 @@ def _measure_cpu_graph_split(family, mid):
     if n_solved == 0 or nnz_tot == 0:
         rc.emit_cell(family, mid, "parac", "", "failed", {}, THREADS, "cpu", _cpu_provenance())
         return "FAILED"
+    rep_index, chosen = _representative_run(
+        reps, lambda rep: (dump_tot + amds_tot + rep["adapter"]
+                           + rep["factor_setup"] + rep["solve"]))
+    setup = dump_tot + amds_tot + chosen["adapter"] + chosen["factor_setup"]
+    solve = chosen["solve"]
     total = setup + solve
+    if chosen["rhs_sq"] <= 0.0:
+        rc.emit_cell(family, mid, "parac", "", "failed", {},
+                     THREADS, "cpu", _cpu_provenance())
+        return "FAILED"
+    rr = (chosen["residual_sq"] / chosen["rhs_sq"]) ** 0.5
+    iters = chosen["iters"]
     status = "complete" if rr <= float(TOL) else "not_converged"
-    metrics = {"n": n_tot, "nnz": nnz_tot, "setup_s": round(setup, 6),
+    # Singleton zero blocks contribute vertices but no stored entries or work.
+    n_report = int(rc.MATRICES[mid]["n"])
+    metrics = {"n": n_report, "nnz": nnz_tot, "setup_s": round(setup, 6),
                "solve_s": round(solve, 6), "total_s": round(total, 6), "iters": iters,
                "rel_res": rr, "fillin": 0.0, "us_per_nnz": round(total / nnz_tot * 1e6, 4),
+               "input_dump_s": round(dump_tot, 6),
                "amd_reorder_s": round(amds_tot, 6),
-               "adapter_setup_s": round(amds_tot + prep_tot, 6),
-               "native_setup_s": round(native_tot, 6),
-               "factor_kernel_s": round(factor_tot, 6),
+               "adapter_setup_s": round(dump_tot + amds_tot + chosen["adapter"], 6),
+               "native_setup_s": round(chosen["factor_setup"], 6),
+               "factor_kernel_s": round(chosen["factor"], 6),
+               "rhs_norm": chosen["rhs_sq"] ** 0.5,
+               "representative_repeat": rep_index + 1,
                "n_components_solved": n_solved,
                "n_components_total": n_comps_total or n_solved}
     if tol_used is not None: metrics["parac_rel_tol"] = tol_used
@@ -630,7 +917,7 @@ PHYSICS_NA = ("ParAC physics mode grounds by trimming the last row/column — th
               "a real vertex; it goes through ParAC's graph path instead")
 
 
-def _run_cpu_operator(mid, family):
+def _run_cpu_operator(mid, family, deadline=None):
     """ParAC CPU pass for a class=sddm matrix: its OWN physics route.
 
     ParAC benchmarks published operators through `driver <mtx> <threads> "" 1` —
@@ -652,21 +939,29 @@ def _run_cpu_operator(mid, family):
     rc.emit_cell(family, mid, "parac", "", "n/a", {}, THREADS, "cpu", _cpu_provenance(),
                  matrix_meta={"parac_mode": "n/a", "parac_na_reason": GRAPH_NA})
     try:
-        amd, amds, prep_prov = _prep_amd(mid, "op", augment=True)
+        amd, amds, prep_prov, dump_s = _prep_amd(
+            mid, "op", augment=True, deadline=deadline)
     except subprocess.TimeoutExpired:
         if not rc.cell_done(family, mid, "parac_physics", "", THREADS, "cpu", terminal=TERMINAL_CPU):
             rc.emit_cell(family, mid, "parac_physics", "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
                          timeout_cap_s=TIMEOUT_CPU)
         return "graph[n/a] physics[TIMEOUT(dump/reorder)]"
     if not amd:
-        return "graph[n/a] physics[SKIP(dump/reorder)]"
+        rc.emit_cell(
+            family, mid, "parac_physics", "", "failed", {}, THREADS, "cpu",
+            _cpu_provenance(),
+            matrix_meta={"parac_mode": "physics",
+                         "parac_prep_failure": "dump/reorder produced no matrix",
+                         "parac_prep": prep_prov})
+        return "graph[n/a] physics[FAILED(dump/reorder)]"
     p = _measure_cpu(family, mid, amd, amds, True, "parac_physics",
                      extra_meta={"parac_mode": "physics",
                                  "parac_input": "the PUBLISHED operator, AMD-reordered then "
                                                 "augmented with ParAC's ground row/column",
                                  "parac_prep": prep_prov,
                                  "parac_grounding": "physics mode trims the appended ground "
-                                                    "node, leaving the published operator"})
+                                                    "node, leaving the published operator"},
+                     deadline=deadline, dump_s=dump_s)
     return f"graph[n/a] physics[{p}]"
 
 
@@ -680,29 +975,22 @@ def run_cpu(mid):
     Laplacian has no appended ground node for the trim to remove.
     """
     family = rc.MATRICES[mid]["family"]
+    deadline = time.monotonic() + TIMEOUT_CPU
     if _uses_physics(mid):
-        return _run_cpu_operator(mid, family)
+        return _run_cpu_operator(mid, family, deadline=deadline)
     rc.emit_cell(family, mid, "parac_physics", "", "n/a", {}, THREADS, "cpu", _cpu_provenance(),
                  matrix_meta={"parac_mode": "n/a", "parac_na_reason": PHYSICS_NA})
-    g = _measure_cpu_graph_split(family, mid)
+    g = _measure_cpu_graph_split(family, mid, deadline=deadline)
     return f"graph[{g}] physics[n/a]"
 
 
 # ── GPU axis ────────────────────────────────────────────────────────────────────
-def _gpu_cell_remaining(deadline):
-    """Seconds left in one logical ParAC GPU cell's wall-clock budget."""
-    remaining = deadline - time.monotonic()
-    if remaining <= 0.0:
-        raise subprocess.TimeoutExpired("ParAC GPU cell", TIMEOUT_GPU)
-    return remaining
-
-
 def _nnz_sort(mid, src, tag, augment=False, deadline=None):
     """ParAC's OWN nnz-sort — write_graph.jl method "nnz-sort": a random
     permutation, THEN a per-column-nnz sort — run out of their checkout, the same
-    `<mode>_produce` call the CPU axis makes with method "amd". Its printed "sort
-    time" (compute only, excluding the reindex + mmwrite I/O) is the reorder cost
-    we charge. Returns (path|None, seconds, prep_provenance).
+    `<mode>_produce` call the CPU axis makes with method "amd". We charge the
+    complete producer call, not its narrow sort-kernel diagnostic. Returns
+    (path|None, seconds, prep_provenance).
 
     augment=True selects physics_produce, which appends ParAC's ground row/column
     after the permutation; driver_physics.cu's trim then removes it — the GPU
@@ -715,7 +1003,7 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
     prefix = f"{rc.PARAC_SORTED}/{mid}-{tag}"
     out = prefix + "-nnz-sorted.mtx"
     tfile, pfile = out + ".time", out + ".prep"
-    if os.path.exists(out) and os.path.exists(tfile):
+    if _prep_cache_valid(out, src):
         with open(tfile) as handle:
             secs = float(handle.read())
         if os.path.exists(pfile):
@@ -724,6 +1012,7 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
         else:
             prep = _PREP_UNKNOWN
         return out, secs, prep
+    _invalidate_prep_cache(out)
     mode = "physics" if augment else "graph"
     timeout = (_gpu_cell_remaining(deadline) if deadline is not None else TIMEOUT_GPU)
     produced, secs, err = _produce_upstream(prefix, src, mode, "nnz-sort", timeout)
@@ -734,10 +1023,12 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
               f"   [parac] falling back to benchmarks/parac_nnz_sort.jl", flush=True)
         flag = " --augment" if augment else ""
         timeout = (_gpu_cell_remaining(deadline) if deadline is not None else TIMEOUT_GPU)
+        started = time.monotonic()
         cp = sh(f"julia {NNZ_SORT_JL} {src} {out}{flag}", timeout=timeout)
+        wall = time.monotonic() - started
         o = cp.stdout
-        m = _PREP_TIME_RE.search(o)
-        secs = float(m.group(1)) if m else 0.0
+        m = _PREP_TOTAL_RE.search(o)
+        secs = float(m.group(1)) if m else wall
         if cp.returncode == 0 and os.path.exists(out):
             prep = f"benchmarks/parac_nnz_sort.jl (FALLBACK — upstream refused: {err})"
         else:
@@ -749,8 +1040,7 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
                     f"upstream refused: {err}")
             return None, secs, prep
     if os.path.exists(out):
-        open(tfile, "w").write(str(secs))
-        open(pfile, "w").write(prep)
+        _stamp_prep_cache(out, secs, prep, src)
     return (out if os.path.exists(out) else None), secs, prep
 
 
@@ -849,6 +1139,22 @@ def record_gpu_failure(mid, status, reason, prep=None):
     return " ".join(results)
 
 
+def record_gpu_disconnected_na(mid, n_components):
+    """ParAC's GPU driver has one global zero-sum RHS, not one per component."""
+    family = rc.MATRICES[mid]["family"]
+    reason = (f"ParAC GPU graph mode generates one globally zero-sum RHS, which is "
+              f"not component-wise compatible for this {n_components}-component "
+              "Laplacian; the CPU route solves every non-singleton component")
+    results = []
+    for solver_key, _driver, prov, skip_reason in _gpu_modes(mid):
+        why = skip_reason or reason
+        rc.emit_cell(family, mid, solver_key, "", "n/a", {}, THREADS, "gpu", prov,
+                     matrix_meta={"parac_mode": "n/a", "parac_na_reason": why,
+                                  "n_components": n_components})
+        results.append(f"{solver_key}[n/a]")
+    return " ".join(results)
+
+
 def run_gpu(mid, tol=TOL):
     """ParAC GPU pass for one matrix: one real cell and one n/a, the same split as
     the CPU axis — kind=graph runs driver.cu on the pure L, kind=operator runs
@@ -861,11 +1167,51 @@ def run_gpu(mid, tol=TOL):
     # deliberately not renewed for each subprocess: doing that made one cell cost
     # up to (REPS + 1) times the advertised timeout and defeat Slurm resume jobs.
     deadline = time.monotonic() + TIMEOUT_GPU
+    src = None
+    dump_s = 0.0
+    native_source = False
     try:
-        # Warm nnz-sort cache (+.time) -> the dump is unneeded; skip it.
-        cache_tag = f"{tag}-aug" if aug else tag
+        # The graph driver generates one globally zero-sum RHS. That is valid
+        # only for a connected Laplacian; unlike CPU ParAC, the current GPU
+        # driver has no component-wise route. File-backed inputs go straight to
+        # ParAC's producer after a no-serialization component-info probe.
+        if not _uses_physics(mid):
+            src = _native_mtx(mid)
+            if src is not None:
+                native_source = True
+                n_components, _n_nodes, dump_s = _component_info(
+                    mid, DUMP_GPU, rc.BIN["gpu"], _gpu_cell_remaining(deadline),
+                    mem_cap_gb=None)
+            else:
+                src, _n_nodes, n_components, dump_s = _dump_component(
+                    mid, 0, deadline=deadline, timeout_cap=TIMEOUT_GPU,
+                    bin_path=rc.BIN["gpu"], mem_cap_gb=None, dump_dir=DUMP_GPU)
+            if n_components > 1:
+                return record_gpu_disconnected_na(mid, n_components)
+            if native_source and n_components <= 0:
+                return record_gpu_failure(
+                    mid, "failed", "ParAC component-info probe produced no result")
+            if not src or n_components <= 0:
+                return record_gpu_failure(
+                    mid, "failed", "ParAC component preparation produced no matrix")
+        else:
+            # physics_produce accepts the published operator directly and performs
+            # the mandatory permutation/augmentation itself. Rewriting the same
+            # Matrix Market input first would be benchmark-only work.
+            src = _native_mtx(mid)
+            dump_s = 0.0
+            native_source = src is not None
+            if src is None:
+                src, _tag, dump_s = _dump(
+                    mid, DUMP_GPU, rc.BIN["gpu"], _gpu_cell_remaining(deadline),
+                    mem_cap_gb=None)
+            if not src:
+                return record_gpu_failure(mid, "failed",
+                                          "GPU operator dump produced no matrix")
+        input_tag = f"native-{tag}" if native_source else tag
+        cache_tag = f"{input_tag}-aug" if aug else input_tag
         sorted_cached = f"{rc.PARAC_SORTED}/{mid}-{cache_tag}-nnz-sorted.mtx"
-        if os.path.exists(sorted_cached) and os.path.exists(sorted_cached + ".time"):
+        if _prep_cache_valid(sorted_cached, src):
             sorted_mtx = sorted_cached
             with open(sorted_cached + ".time") as handle:
                 sort_s = float(handle.read())
@@ -875,13 +1221,8 @@ def run_gpu(mid, tol=TOL):
             else:
                 prep_prov = _PREP_UNKNOWN
         else:
-            src, _tag = _dump(mid, DUMP_GPU, rc.BIN["gpu"],
-                              _gpu_cell_remaining(deadline))
-            if not src:
-                return record_gpu_failure(mid, "failed",
-                                          "GPU operator dump produced no matrix")
             sorted_mtx, sort_s, prep_prov = _nnz_sort(
-                mid, src, tag, augment=aug, deadline=deadline)
+                mid, src, input_tag, augment=aug, deadline=deadline)
             if not sorted_mtx:
                 return record_gpu_failure(mid, "failed",
                                           "ParAC nnz-sort produced no matrix",
@@ -915,35 +1256,40 @@ def run_gpu(mid, tol=TOL):
             results.append(f"{solver_key}[TIMEOUT]"); continue
         ok = [r for r in runs if r["cuda_init"] and r["adapter"]
               and r["factor_setup"] and r["solver_setup"]
-              and r["solve_total"] and r["iters"]]
-        if not ok:
+              and r["solve_total"] and r["iters"] and r["rr"]
+              and r["n"] and r["nnz"]]
+        if len(ok) != REPS:
             rc.emit_cell(family, mid, solver_key, "", "failed", None, THREADS, "gpu", prov)
             results.append(f"{solver_key}[FAILED]"); continue
-        med = lambda key, scale=1.0: statistics.median(float(r[key] or 0) * scale for r in ok)
-        adapter = med("adapter"); factor_setup = med("factor_setup")
-        solver_setup = med("solver_setup"); solve = med("solve_total")
-        factor = med("factor", 1/1000); conv = med("conv", 1/1000)
-        spsv = med("spsv", 1/1000); pcg = med("solve", 1/1000)
-        iters = int(statistics.median(int(r["iters"]) for r in ok))
-        rr = statistics.median(float(r["rr"]) for r in ok if r["rr"])
+        rep_index, chosen = _representative_run(
+            ok, lambda r: (float(r["adapter"]) + float(r["factor_setup"])
+                           + float(r["solver_setup"]) + float(r["solve_total"])))
+        val = lambda key, scale=1.0: float(chosen[key] or 0) * scale
+        adapter = val("adapter"); factor_setup = val("factor_setup")
+        solver_setup = val("solver_setup"); solve = val("solve_total")
+        factor = val("factor", 1/1000); conv = val("conv", 1/1000)
+        spsv = val("spsv", 1/1000); pcg = val("solve", 1/1000)
+        iters = int(chosen["iters"])
+        rr = float(chosen["rr"])
         # Complete non-overlapping intervals from ParAC's own code. The narrower
         # kernel/conversion/SpSV/PCG timers below are diagnostics only.
-        setup = sort_s + adapter + factor_setup + solver_setup
+        setup = dump_s + sort_s + adapter + factor_setup + solver_setup
         total = setup + solve
         # rr is the driver's own `normalized diff norm` = ||Ax-b||/||b||. Judge it
         # at the tolerance we report at, not a decade looser.
         status = "complete" if rr <= float(tol) else "not_converged"
-        metrics = {"n": int(ok[0]["n"]) if ok[0]["n"] else None,
-                   "nnz": int(ok[0]["nnz"]) if ok[0]["nnz"] else None,
+        metrics = {"n": int(chosen["n"]) if chosen["n"] else None,
+                   "nnz": int(chosen["nnz"]) if chosen["nnz"] else None,
                    "setup_s": setup, "solve_s": solve, "total_s": total,
                    "iters": iters, "rel_res": rr, "parac_tol": cal,
-                   "adapter_setup_s": sort_s + adapter,
+                   "input_dump_s": dump_s,
+                   "adapter_setup_s": dump_s + sort_s + adapter,
                    "native_setup_s": factor_setup + solver_setup,
                    "factor_kernel_s": factor, "factor_conversion_s": conv,
-                   "spsv_analysis_s": spsv, "pcg_kernel_s": pcg}
-        cuda_init = [float(r["cuda_init"]) for r in ok if r.get("cuda_init")]
-        if cuda_init:
-            metrics["cuda_init_s"] = statistics.median(cuda_init)
+                   "spsv_analysis_s": spsv, "pcg_kernel_s": pcg,
+                   "representative_repeat": rep_index + 1}
+        if chosen.get("cuda_init"):
+            metrics["cuda_init_s"] = float(chosen["cuda_init"])
         vram = [float(r["vram_mb"]) for r in ok if r.get("vram_mb")]
         if vram: metrics["max_vram_mb"] = round(max(vram), 1)   # peak VRAM over reps
         rc.emit_cell(family, mid, solver_key, "", status, metrics, THREADS, "gpu", prov,

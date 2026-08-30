@@ -9,9 +9,9 @@
 # It reproduces their ordering from graph_share "nnz-sort": a RANDOM permutation
 # first, THEN a sort by per-column nnz. Like parac_reorder_amd.jl it PRESERVES all
 # values (incl. the diagonal) so it is correct for SDDM too — it only applies
-# ParAC's depth-reducing permutation. It prints the SORT COMPUTE time (excluding
-# the reindex + mmwrite I/O), matching how their producer reports sort time, so
-# GPU and CPU ParAC count reorder time the SAME way.
+# ParAC's depth-reducing permutation. It retains the narrow sort-kernel
+# diagnostic and also prints the complete preprocessing interval charged by the
+# runner.
 #
 #   julia parac_nnz_sort.jl <in.mtx> <out.mtx> [--augment]
 #
@@ -24,42 +24,56 @@ using SparseArrays, LinearAlgebra, MatrixMarket, Random
 inpath  = ARGS[1]
 outpath = ARGS[2]
 augment = "--augment" in ARGS
-Random.seed!(0)                      # reproducible
 
-G = MatrixMarket.mmread(inpath)
-G = SparseMatrixCSC{Float64, Int64}(G)
-if !issymmetric(G)
-    G = (G + G') / 2
-end
-n = size(G, 1)
-deg = diff(G.colptr)                 # per-column nnz of G
-
-t1 = time()                          # time ONLY the permutation compute
-p = randperm(n)                      # break structure first (essential)
-q = sortperm(deg[p])                 # then sort by nnz ascending (stable-ish)
-order = p[q]                         # composed permutation
-println("sort time: ", time() - t1, " s")
-
-Gnew = G[order, order]
-
-if augment
-    # write_graph.jl physics_share: the appended column holds the per-row diagonal
-    # excess (clamped at 0) and the appended diagonal is their sum.
-    check_sum = sum(Gnew)
-    if check_sum < 0 && abs(check_sum) > 1e-9
-        error("not diagonally dominant: sum(G) = $check_sum")
+function produce(inpath, outpath, augment; report=false)
+    G = SparseMatrixCSC{Float64, Int64}(MatrixMarket.mmread(inpath))
+    if !issymmetric(G)
+        G = (G + G') / 2
     end
-    if check_sum > 1e-9
-        println("not directly laplacian, append to make laplacian")
-        col_append = -sum(Gnew, dims = 1)
-        col_append[findall(x -> x > 0, col_append)] .= 0
-        last_sum = -sum(col_append)
-        Gnew = vcat(Gnew, col_append)
-        Gnew = hcat(Gnew, [col_append'; last_sum])
-    else
-        println("already a laplacian, nothing appended")
+    n = size(G, 1)
+    deg = diff(G.colptr)
+
+    t1 = time()
+    p = randperm(n)
+    q = sortperm(deg[p])
+    order = p[q]
+    report && println("sort time: ", time() - t1, " s")
+
+    Gnew = G[order, order]
+    if augment
+        # write_graph.jl physics_share: the appended column holds the per-row
+        # diagonal excess (clamped at 0) and the appended diagonal is their sum.
+        check_sum = sum(Gnew)
+        if check_sum < 0 && abs(check_sum) > 1e-9
+            error("not diagonally dominant: sum(G) = $check_sum")
+        end
+        if check_sum > 1e-9
+            report && println("not directly laplacian, append to make laplacian")
+            col_append = -sum(Gnew, dims = 1)
+            col_append[findall(x -> x > 0, col_append)] .= 0
+            last_sum = -sum(col_append)
+            Gnew = vcat(Gnew, col_append)
+            Gnew = hcat(Gnew, [col_append'; last_sum])
+        else
+            report && println("already a laplacian, nothing appended")
+        end
     end
+
+    MatrixMarket.mmwrite(outpath, Gnew)
+    report && println("wrote ", outpath, "  n=", size(Gnew, 1), "  nnz=", nnz(Gnew))
 end
 
-MatrixMarket.mmwrite(outpath, Gnew)
-println("wrote ", outpath, "  n=", size(Gnew, 1), "  nnz=", nnz(Gnew))
+mktempdir() do warm_dir
+    warm_in = joinpath(warm_dir, "warm.mtx")
+    warm_out = joinpath(warm_dir, "warm-out.mtx")
+    warm = spdiagm(-1 => [-1.0, -1.0, -1.0],
+                    0 => [2.25, 2.25, 2.25, 2.25],
+                    1 => [-1.0, -1.0, -1.0])
+    MatrixMarket.mmwrite(warm_in, warm)
+    produce(warm_in, warm_out, augment)
+end
+
+Random.seed!(0)                      # preserve the fallback's actual permutation
+prep_start = time()
+produce(inpath, outpath, augment; report=true)
+println("APX complete preprocessing time: ", time() - prep_start)

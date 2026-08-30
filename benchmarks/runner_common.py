@@ -120,7 +120,8 @@ def git_sha():
 
 def boost_state():
     try:
-        return "off" if open("/sys/devices/system/cpu/cpufreq/boost").read().strip() == "0" else "on"
+        with open("/sys/devices/system/cpu/cpufreq/boost") as handle:
+            return "off" if handle.read().strip() == "0" else "on"
     except Exception:
         return "unknown"
 

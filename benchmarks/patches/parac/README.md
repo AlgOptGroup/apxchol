@@ -23,7 +23,8 @@ bash $APXCHOL/benchmarks/parac_build.sh            # builds experiment/driver
 
 ## 0001 — configurable tolerance, and run the solve at any thread count
 
-`experiment/driver_local.cpp`, two hunks, no numerics touched.
+`experiment/driver_local.cpp` plus one diagnostic print in
+`experiment/custom_cg.hpp`; no numerics are changed.
 
 * **`if(num_threads == 32)`** (upstream line 1033) gates the whole PCG solve on
   the thread count of the authors' Perlmutter node. At 16 threads the driver
@@ -37,8 +38,12 @@ bash $APXCHOL/benchmarks/parac_build.sh            # builds experiment/driver
   take the tolerance as `argv[4]` — so the CPU experiment driver is the odd one
   out. The environment is used rather than argv because `argv[4]` already selects
   physics mode there.
+* The independent residual check already computes `||b||`. The patch prints that
+  norm so the harness can combine disconnected component residuals as
+  `sqrt(sum ||r_c||^2) / sqrt(sum ||b_c||^2)` instead of taking a mathematically
+  incorrect maximum of per-component relative residuals.
 
-Both hunks are upstreamable as-is, and neither changes what the solver computes.
+All changes are upstreamable as-is, and none changes what the solver computes.
 
 ## 0002 — report complete setup boundaries
 
@@ -130,16 +135,30 @@ to be their code doing their work.
 Their producer takes a path PREFIX — it reads `<prefix>.mtx` and writes
 `<prefix>-amd.mtx` — so the dispatcher puts `<prefix>` inside **our** cache
 directory (`PARAC_REORD` / `PARAC_SORTED`) and symlinks `<prefix>.mtx` at the
-dump. Nothing is written into their tree, and the cache file names are the ones
-the runner already used. The "amd time:" / "sort time:" line their code prints is
-what we charge.
+native file or mandatory component dump. Nothing is written into their tree.
+Cache keys distinguish native and dumped routes, and an input-identity sidecar
+binds each derived matrix to the canonical source path, size, and nanosecond
+mtime. Their "amd time:" / "sort time:" line covers only the
+ordering kernel; the dispatcher times the complete producer call after
+Julia/package loading, including permutation materialization, augmentation, and
+Matrix Market output. That complete interval is what setup charges. A
+`complete-producer-no-jit-v4-input-route` timing-schema sidecar is written last;
+caches from
+the older narrow AMD/sort timer (or the transient full-call timer that still
+included Julia's reusable first-call compilation) have no such stamp and are
+rebuilt rather than silently reused.
 
-* **kind=graph** — dump the **pure** `L = D - A` (per connected component), call
+* **kind=graph** — on a connected file input, call
+  **`graph_produce(prefix, "amd")`** on that file directly: it constructs the
+  same pure `L = D - A`, so rewriting it first is redundant. A timed
+  `--component-info` pass verifies connectivity without serializing a matrix.
+  Generated inputs and disconnected files are dumped as the **pure** `L = D - A`
+  per connected component. Then call
   **`graph_produce(prefix, "amd")`**, feed the result to **graph mode**
   (`driver <mtx> <threads> ""`). ParAC generates its own zero-sum RHS, which is
   consistent for a connected singular Laplacian, and its residual is against that
   L. Do **not** hand it a Dirichlet-pinned matrix (see "dropped" below).
-* **kind=operator** — dump the operator as published, call
+* **kind=operator** — pass the published operator file directly and call
   **`physics_produce(prefix, "amd")`**: permute first, then append the ground
   row/column, so the appended node is **last**. **Physics mode**
   (`driver <mtx> <threads> "" 1`) trims exactly that node, and what it solves is
@@ -149,13 +168,14 @@ The augmentation is not optional. Physics mode's `remove_last_row_and_column` is
 how ParAC gets **back** to the published operator; run it on an un-augmented
 operator and it deletes a real degree of freedom.
 
-### `graph_produce` does not damage our graph dumps
+### `graph_produce` constructs the intended graph operator
 
 `graph_produce` strips the diagonal, forces the off-diagonals negative, permutes
 and then **rebuilds** the diagonal as `-colsum`. That rebuild would indeed destroy
-the diagonal of an SDDM operator — but graph mode never sees one. The only thing
-fed to it is a `--giant-dump` component, which already **is** the pure Laplacian
-of a connected component, so the rebuild reproduces it exactly. Measured
+the diagonal of an SDDM operator — but graph mode never sees one. It receives
+either the graph file from which it is supposed to construct `L = D - A`, or a
+`--giant-dump` component that already **is** a pure connected Laplacian, so the
+rebuild produces the intended operator. Measured
 (2026-08-20): its output is **byte-identical** to a permutation-only reorder of
 the same dump on `com-Amazon-comp0` (unweighted) and on `grid_1000-comp0`
 (weighted, where a differently-ordered summation could have moved the diagonal by
@@ -291,9 +311,17 @@ ParAC's zero-sum RHS is consistent only per connected component, so a
 disconnected Laplacian must be handed to it one component at a time. This is not
 a corner case: `kron_g500-logn16` has **10217 components** (giant = 55319 of
 65536 nodes), and graph mode on the whole pure `L` **diverges** — 2000 iterations
-to a residual of 2.6e+11. The runner therefore always goes through
-`--giant-dump --comp-rank R` (rank 0 IS the whole matrix when it is connected)
-and skips components below `PARAC_COMP_THRESHOLD` nodes as negligible specks.
+to a residual of 2.6e+11. The runner therefore uses
+`--giant-dump --comp-rank R` for disconnected inputs and runs every non-singleton
+component. Singleton Laplacian blocks have exactly zero right-hand side and
+solution, so they require no solver call. Connected file-backed graphs bypass
+that serialization after `--component-info` proves there is one component;
+generated graphs still need one dump because no input file exists for ParAC.
+
+The current CUDA driver has no component-wise RHS/solve route. Its graph series
+is therefore explicitly `n/a` on a disconnected Laplacian instead of running an
+incompatible whole-matrix RHS; connected graphs and all physics/operator inputs
+remain supported.
 
 ## Dropped
 

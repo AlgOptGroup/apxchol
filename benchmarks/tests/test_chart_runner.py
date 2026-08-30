@@ -133,6 +133,24 @@ class ThreadScalingStoreTest(unittest.TestCase):
             thread_scaling._cell_tag("apxchol_v1", "bg+tree[vec_pool_aos]"),
         )
 
+    def test_scaling_timeout_has_exact_cap_and_old_schema_reruns(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store), \
+             mock.patch.object(thread_scaling, "TIMEOUT", 123):
+            thread_scaling.emit("m", "audit", "A", "solver", "cfg", 4,
+                                None, "timeout")
+            path = pathlib.Path(store) / "m__solver_cfg__t4.json"
+            record = json.loads(path.read_text())
+            self.assertEqual(record["schema"], thread_scaling.SCALING_SCHEMA)
+            self.assertEqual(record["timeout_cap_s"], 123)
+            self.assertTrue(thread_scaling.done("m", "solver", "cfg", 4))
+
+            record.pop("schema")
+            path.write_text(json.dumps(record))
+            self.assertFalse(thread_scaling.done("m", "solver", "cfg", 4))
+            with self.assertRaises(RuntimeError):
+                thread_scaling._scaling_records()
+
     def test_exact_scaling_denominator_is_validated(self):
         with tempfile.TemporaryDirectory() as store, \
              mock.patch.object(thread_scaling, "CELLS", store), \
@@ -140,6 +158,7 @@ class ThreadScalingStoreTest(unittest.TestCase):
              mock.patch.object(thread_scaling, "CPP", [("A", "solver", "cfg")]), \
              mock.patch.object(thread_scaling, "THREADS", [1]):
             cell = {
+                "schema": thread_scaling.SCALING_SCHEMA,
                 "cell": {"matrix_id": "m", "family": "audit", "label": "A",
                          "solver": "solver", "config": "cfg", "threads": 1,
                          "device": "cpu"},
@@ -159,15 +178,37 @@ class ThreadScalingStoreTest(unittest.TestCase):
     def test_parac_scaling_uses_component_cache_route(self):
         thread_scaling._PARAC_PREPARED.clear()
         with mock.patch.object(thread_scaling.parac, "_uses_physics", return_value=False), \
+             mock.patch.object(thread_scaling.parac, "_native_mtx", return_value=None), \
              mock.patch.object(thread_scaling.parac, "_dump_component",
-                               side_effect=[("component.mtx", 10000, 1), (None, 0, 0)]), \
+                               side_effect=[("component.mtx", 10000, 2, 0.5),
+                                            ("singleton.mtx", 1, 2, 0.1)]), \
              mock.patch.object(thread_scaling.parac, "_reorder_amd",
                                return_value=("component-amd.mtx", 0.25, "upstream")) as reorder:
             self.assertEqual(
                 thread_scaling._prepare_parac("m"),
-                [("component-amd.mtx", 0.25, False)],
+                ([("component-amd.mtx", False)], 0.85),
             )
-            reorder.assert_called_once_with("m", "component.mtx", "comp0")
+            reorder.assert_called_once_with(
+                "m", "component.mtx", "comp0", deadline=None)
+        thread_scaling._PARAC_PREPARED.clear()
+
+    def test_parac_scaling_uses_native_connected_file_route(self):
+        thread_scaling._PARAC_PREPARED.clear()
+        with mock.patch.object(thread_scaling.parac, "_uses_physics", return_value=False), \
+             mock.patch.object(thread_scaling.parac, "_native_mtx",
+                               return_value="native.mtx"), \
+             mock.patch.object(thread_scaling.parac, "_component_info",
+                               return_value=(1, 10000, 0.2)), \
+             mock.patch.object(thread_scaling.parac, "_dump_component") as dump, \
+             mock.patch.object(thread_scaling.parac, "_reorder_amd",
+                               return_value=("native-amd.mtx", 0.25, "upstream")) as reorder:
+            self.assertEqual(
+                thread_scaling._prepare_parac("m"),
+                ([("native-amd.mtx", False)], 0.45),
+            )
+            dump.assert_not_called()
+            reorder.assert_called_once_with(
+                "m", "native.mtx", "native-comp0", deadline=None)
         thread_scaling._PARAC_PREPARED.clear()
 
 

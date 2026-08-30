@@ -30,6 +30,9 @@ done
 grep -Fq 'PARAC_REL_TOL' "$PARAC_CHECKOUT/experiment/driver_local.cpp" || {
     echo "missing ParAC patch 0001 (configurable tolerance)" >&2; exit 1;
 }
+grep -Fq 'rhs norm:' "$PARAC_CHECKOUT/experiment/custom_cg.hpp" || {
+    echo "missing ParAC patch 0001 (component residual weighting diagnostic)" >&2; exit 1;
+}
 grep -Fq 'APX factor setup time:' "$PARAC_CHECKOUT/experiment/driver_local.cpp" || {
     echo "missing ParAC patch 0002 (complete factor setup timing)" >&2; exit 1;
 }

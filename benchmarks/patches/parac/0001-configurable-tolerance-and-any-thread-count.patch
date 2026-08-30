@@ -23,6 +23,10 @@ is `sqrt(dpar[4]) > sqrt(dpar[0])`, i.e. it compares the residual norm against
 sqrt(rel_tol) and is therefore an ABSOLUTE test -- at the default 1e-7 it stops
 at ||r|| <= 3.16e-4 regardless of ||b||.
 
+The existing independent true-residual check already computes `||b||`; print it
+so a component-wise harness can combine residuals with the mathematically correct
+`sqrt(sum ||r_c||^2) / sqrt(sum ||b_c||^2)` weighting. This is diagnostic only.
+
 ---
 --- a/experiment/driver_local.cpp
 +++ b/experiment/driver_local.cpp
@@ -66,3 +70,10 @@ at ||r|| <= 3.16e-4 regardless of ||b||.
      {
          printf("\n");
      }
+
+--- a/experiment/custom_cg.hpp
++++ b/experiment/custom_cg.hpp
+@@ -252,2 +252,3 @@
+     double norm_rhs = cblas_dnrm2(n, b.data(), 1);
++    printf("rhs norm: %.17e\n", norm_rhs);
+     mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, A_handle, descr_A, x.data(), -1, b.data());

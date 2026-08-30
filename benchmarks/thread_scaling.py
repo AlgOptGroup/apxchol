@@ -4,7 +4,7 @@ representative matrices, then emit total/setup/solve speedup charts and a
 portable CSV. Cells go to results/scaling_cells/ (separate from the fair cells).
 Run from repo root, ALONE: python3 benchmarks/thread_scaling.py
 """
-import argparse, csv, json, os, re, statistics, subprocess, glob
+import argparse, csv, json, os, re, subprocess, glob, time
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,6 +23,7 @@ BIN = os.environ.get("APXCHOL_BENCH_CPU_BIN", f"{ROOT}/benchmarks/build/benchmar
 DUMP = "/tmp/parac_fair_dump"
 CELLS = os.environ.get("APXCHOL_SCALING_STORE", f"{ROOT}/results/scaling_cells")
 TOL = "1e-8"; THREADS = [1, 2, 4, 8, 16]; TIMEOUT = 900; REPS = 3
+SCALING_SCHEMA = 2
 
 # (mid, family, margs, reg, is2d)
 # reg=False everywhere: the current protocol runs the ORIGINAL singular Laplacians
@@ -70,20 +71,47 @@ def _cell_tag(solver, config):
 def emit(mid, family, lab, solver, config, t, m, status, prov=None):
     os.makedirs(CELLS, exist_ok=True)
     tag = _cell_tag(solver, config)
-    json.dump({"cell": {"matrix_id": mid, "family": family, "label": lab,
-                         "solver": solver, "config": config, "threads": t,
-                         "device": "cpu"},
-               "metrics": m or {}, "status": status, "provenance": {**PROV, **(prov or UNKNOWN_TOOLCHAIN)}},
-              open(f"{CELLS}/{mid}__{tag}__t{t}.json", "w"))
+    record = {"schema": SCALING_SCHEMA,
+              "cell": {"matrix_id": mid, "family": family, "label": lab,
+                       "solver": solver, "config": config, "threads": t,
+                       "device": "cpu"},
+              "metrics": m or {}, "status": status,
+              "provenance": {**PROV, **(prov or UNKNOWN_TOOLCHAIN)}}
+    if status == "timeout":
+        record["timeout_cap_s"] = TIMEOUT
+    with open(f"{CELLS}/{mid}__{tag}__t{t}.json", "w") as handle:
+        json.dump(record, handle)
 
 def done(mid, solver, config, t):
     tag = _cell_tag(solver, config)
     p = f"{CELLS}/{mid}__{tag}__t{t}.json"
     if not os.path.exists(p):
         return False
-    status = json.load(open(p)).get("status")
+    with open(p) as handle:
+        record = json.load(handle)
+    if record.get("schema") != SCALING_SCHEMA:
+        return False
+    status = record.get("status")
+    if status == "timeout" and rc.timeout_cap(record) is None:
+        return False
     return status not in RERUN_STATUSES and status in (
         "complete", "not_converged", "timeout", "failed", "oom", "n/a")
+
+
+def _scaling_records():
+    """Load only records that satisfy the current publication schema."""
+    records = []
+    for filename in sorted(glob.glob(f"{CELLS}/*.json")):
+        with open(filename) as handle:
+            record = json.load(handle)
+        if record.get("schema") != SCALING_SCHEMA:
+            raise RuntimeError(
+                f"stale scaling schema in {filename}: "
+                f"{record.get('schema')!r} != {SCALING_SCHEMA}")
+        if record.get("status") == "timeout" and rc.timeout_cap(record) is None:
+            raise RuntimeError(f"timeout without exact cap in {filename}")
+        records.append((filename, record))
+    return records
 
 def run_cpp(margs, solver, config, reg, t):
     cfg = f"--v1-configs '{config}'" if solver == "apxchol_v1" else ""
@@ -101,67 +129,115 @@ def run_cpp(margs, solver, config, reg, t):
     # tol, same for every solver, no grace factor. Kept in sync with rc.classify.
     return ("complete" if m["rel_res"] <= float(TOL) else "not_converged"), m
 
-def _prepare_parac(mid):
+def _prepare_parac(mid, deadline=None):
     """Reuse the canonical ParAC input route, including component handling.
 
     The old scaling runner guessed obsolete `pure/pin/reg` cache names, skipped
     ParAC's adapter interval and tolerance calibration, and silently emitted
     failures.  This prepares exactly the same AMD-reordered operands as
-    parac_runner.py and returns one entry per nontrivial connected component.
+    parac_runner.py and returns ``(operands, fixed_setup_s)``. Each operand is
+    ``(amd_path, physics_mode)``; fixed setup is the charged input-dump and
+    complete producer work, including the final singleton probe needed to learn
+    that no more nontrivial connected components remain.
     """
     if mid in _PARAC_PREPARED:
         return _PARAC_PREPARED[mid]
     prepared = []
+    fixed_setup_s = 0.0
     if parac._uses_physics(mid):
-        amd, reorder_s, _prep = parac._prep_amd(mid, "op", augment=True)
-        if amd:
-            prepared.append((amd, reorder_s, True))
+        amd, reorder_s, _prep, dump_s = parac._prep_amd(
+            mid, "op", augment=True, deadline=deadline)
+        fixed_setup_s += dump_s + reorder_s
+        if not amd:
+            _PARAC_PREPARED[mid] = ([], fixed_setup_s)
+            return _PARAC_PREPARED[mid]
+        prepared.append((amd, True))
     else:
+        native = parac._native_mtx(mid)
+        n_components = None
+        largest = 0
+        discovery_s = None
+        direct_connected = False
+        if native is not None:
+            n_components, largest, discovery_s = parac._component_info(
+                mid, parac.DUMP_CPU, rc.BIN["cpu"],
+                parac._cpu_cell_remaining(deadline), parac.MEM_CAP_GB)
+            if n_components <= 0:
+                _PARAC_PREPARED[mid] = ([], fixed_setup_s)
+                return _PARAC_PREPARED[mid]
+            direct_connected = n_components == 1
         rank = 0
-        while True:
-            src, n_nodes, _n_components = parac._dump_component(mid, rank)
-            if src is None or n_nodes < parac.COMP_THRESHOLD:
+        while n_components is None or rank < n_components:
+            if direct_connected and rank == 0:
+                src, n_nodes, dump_s = native, largest, float(discovery_s)
+            else:
+                src, n_nodes, _n_components, dump_s = parac._dump_component(
+                    mid, rank, deadline=deadline,
+                    discovery_charge_s=(discovery_s if rank == 0 else None))
+            fixed_setup_s += dump_s
+            if src is None or n_nodes < 2:
                 break
-            amd, reorder_s, _prep = parac._reorder_amd(mid, src, f"comp{rank}")
-            if amd:
-                prepared.append((amd, reorder_s, False))
+            source_tag = f"{'native-' if direct_connected else ''}comp{rank}"
+            amd, reorder_s, _prep = parac._reorder_amd(
+                mid, src, source_tag, deadline=deadline)
+            fixed_setup_s += reorder_s
+            if not amd:
+                _PARAC_PREPARED[mid] = ([], fixed_setup_s)
+                return _PARAC_PREPARED[mid]
+            prepared.append((amd, False))
             rank += 1
-    _PARAC_PREPARED[mid] = prepared
-    return prepared
+    _PARAC_PREPARED[mid] = (prepared, fixed_setup_s)
+    return _PARAC_PREPARED[mid]
 
 
 def run_parac(mid, t):
     """Three measured ParAC runs through the canonical fair-runner path."""
     parac.THREADS = t
     parac.TIMEOUT_CPU = TIMEOUT
+    deadline = time.monotonic() + TIMEOUT
     try:
-        operands = _prepare_parac(mid)
+        operands, fixed_setup_s = _prepare_parac(mid, deadline=deadline)
         if not operands:
             return "failed", None
-        setup = solve = 0.0
-        iters = 0
-        rel_res = 0.0
-        n = nnz = 0
-        for amd, reorder_s, physics in operands:
-            rel_tol = parac._calibrate_rel_tol(amd, physics, tau=float(TOL))
-            runs = [parac._run_once_cpu(amd, physics, rel_tol=rel_tol)
+        reps = [dict(adapter=0.0, factor_setup=0.0, solve=0.0,
+                     iters=0, residual_sq=0.0, rhs_sq=0.0)
+                for _ in range(REPS)]
+        nnz = 0
+        for amd, physics in operands:
+            rel_tol = parac._calibrate_rel_tol(
+                amd, physics, tau=float(TOL), deadline=deadline)
+            runs = [parac._run_once_cpu(
+                        amd, physics, rel_tol=rel_tol, deadline=deadline)
                     for _ in range(REPS)]
             ok = [run for run in runs
                   if run["factor_setup"] and run["adapter"] and run["solve"]
-                  and run["iters"] and run["rr"]]
+                  and run["iters"] and run["rr"] and run["rhs_norm"]]
             if len(ok) != REPS:
                 return "failed", None
-            med = lambda key: statistics.median(float(run[key]) for run in ok)
-            setup += reorder_s + med("adapter") + med("factor_setup")
-            solve += med("solve") / 1000.0
-            iters = max(iters, int(statistics.median(int(run["iters"]) for run in ok)))
-            rel_res = max(rel_res, med("rr"))
-            n += int(ok[-1]["n"] or 0)
-            nnz += int(ok[-1]["nnz"] or 0)
+            for rep, run in zip(reps, runs):
+                rhs_norm = float(run["rhs_norm"])
+                abs_residual = float(run["rr"]) * rhs_norm
+                rep["adapter"] += float(run["adapter"])
+                rep["factor_setup"] += float(run["factor_setup"])
+                rep["solve"] += float(run["solve"]) / 1000.0
+                rep["iters"] = max(rep["iters"], int(run["iters"]))
+                rep["residual_sq"] += abs_residual * abs_residual
+                rep["rhs_sq"] += rhs_norm * rhs_norm
+            nnz += int(runs[0]["nnz"] or 0)
+        rep_index, chosen = parac._representative_run(
+            reps, lambda rep: (fixed_setup_s + rep["adapter"]
+                               + rep["factor_setup"] + rep["solve"]))
+        if chosen["rhs_sq"] <= 0.0:
+            return "failed", None
+        setup = fixed_setup_s + chosen["adapter"] + chosen["factor_setup"]
+        solve = chosen["solve"]
+        rel_res = (chosen["residual_sq"] / chosen["rhs_sq"]) ** 0.5
         total = setup + solve
         return ("complete" if rel_res <= float(TOL) else "not_converged"), dict(
-            n=n, nnz=nnz, total_s=total, setup_s=setup, solve_s=solve,
-            iters=iters, rel_res=rel_res)
+            n=int(rc.MATRICES[mid]["n"]), nnz=nnz, total_s=total,
+            setup_s=setup, solve_s=solve, iters=chosen["iters"],
+            rel_res=rel_res, representative_repeat=rep_index + 1,
+            rhs_norm=chosen["rhs_sq"] ** 0.5)
     except subprocess.TimeoutExpired:
         return "timeout", None
 
@@ -194,9 +270,7 @@ def validate_cells():
                 for mid, *_ in MATS for _label, solver, config in solvers
                 for threads in THREADS}
     found = {}
-    for filename in sorted(glob.glob(f"{CELLS}/*.json")):
-        with open(filename) as handle:
-            record = json.load(handle)
+    for filename, record in _scaling_records():
         cell = record.get("cell", {})
         key = (cell.get("matrix_id"), cell.get("solver"), cell.get("config", ""),
                cell.get("threads"))
@@ -216,7 +290,7 @@ def validate_cells():
 
 
 def charts(out=f"{ROOT}/benchmarks/latest"):
-    recs = [json.load(open(f)) for f in glob.glob(f"{CELLS}/*.json")]
+    recs = [record for _filename, record in _scaling_records()]
     mats = sorted({r["cell"]["matrix_id"] for r in recs})
     # Only genuinely multi-threaded solvers belong on a thread-scaling chart.
     # RCHOL has a serial factorization, so its "speedup vs threads" is
@@ -280,9 +354,7 @@ def export_csv(path):
               "solve_s", "total_s", "iters", "rel_res", "git_sha", "repeat",
               "compiler", "compiler_version", "openmp_runtime")
     rows = []
-    for filename in sorted(glob.glob(f"{CELLS}/*.json")):
-        with open(filename) as handle:
-            record = json.load(handle)
+    for _filename, record in _scaling_records():
         cell = record["cell"]
         metrics = record.get("metrics", {})
         provenance = record.get("provenance", {})

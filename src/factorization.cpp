@@ -136,16 +136,17 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
     // cannot diverge. Throws (naming the failed condition) on a violation;
     // `op.matrix()` is L itself whenever nothing had to be lumped.
     //
-    // Deliberately OUTSIDE the checkpoint bracket below: this is input
-    // validation, not factorization work, and folding it into "make_graph"
-    // would silently move the bench's setup_time.
+    // The scan and optional M-matrix copy/lumping are required by apxchol's
+    // preconditioner (not common benchmark parsing), so they belong to setup.
+    // Keep the phase visible rather than hiding it inside make_graph.
+    if (cp) { cp->descend("setup"); cp->tick(); }
     const operator_view op(L);
+    if (cp) (*cp)("operator_prepare");
 
     // make_graph runs BEFORE factorize_with_strategy's own descend("setup") —
     // without its own bracket, its cost (~700 ms on IPM iter40: full
     // Eigen-sparse → graph conversion) shows up as un-accounted wall time
     // outside the profile. Wrap it here so the bench's setup_time captures it.
-    if (cp) { cp->descend("setup"); cp->tick(); }
     factor_options opts = opts_in;
 
     // Move the throwaway make_graph result into factorize_with_strategy's

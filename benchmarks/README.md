@@ -128,6 +128,11 @@ any solver timer and reported separately as `cuda_init`; solver-specific module
 loading, handles, allocations, preparation, and transfers remain charged where
 they first occur. This models multiple distinct systems in one GPU process while
 keeping an auditable cold-start cost outside the solver ranking.
+Hypre's process-wide `HYPRE_Init` is solver-specific and is charged once per
+reported Hypre row. apxchol's operator validation and optional M-matrix lumping
+are charged under setup as `operator_prepare`. ParAC charges its complete
+upstream producer call after reusable Julia load/JIT warm-up and selects one
+real median-total repetition rather than medianing fields independently.
 Any `timeout_cap_s` bounds one complete logical cell, including calibration and
 all requested repetitions; subprocesses do not each receive a fresh cap.
 

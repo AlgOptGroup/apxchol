@@ -405,13 +405,32 @@ enum class matrix_kind {
 //
 // Set once in main() from the DECLARATION, then read by every solver runner.
 static bool g_laplacian_mode = true;
+// Populated only for a disconnected operator, because split dispatch also needs
+// it for SDDM inputs. Centering consults it only in Laplacian mode. Connected
+// operators retain the historical single-mean path without keeping an O(n)
+// component list alive. A run_split subproblem has a smaller vector, so it also
+// takes that connected path; the full Laplacian takes one mean per component.
+static std::vector<std::vector<int>> g_laplacian_components;
+static Eigen::Index g_laplacian_dimension = 0;
+static std::size_t g_component_count = 0;
+static double g_component_discovery_seconds = 0.0;
 
 // Mean-centre `v` iff we are solving a singular Laplacian. Replaces the
 // unconditional `v.array() -= v.mean()` that every solver runner used to apply
 // to its solution and residual back when every benchmarked matrix was a
 // Laplacian by construction.
 static Eigen::VectorXd& center_if_laplacian(Eigen::VectorXd& v) {
-    if (g_laplacian_mode) v.array() -= v.mean();
+    if (!g_laplacian_mode) return v;
+    if (g_laplacian_components.empty() || v.size() != g_laplacian_dimension) {
+        v.array() -= v.mean();
+        return v;
+    }
+    for (const auto& component : g_laplacian_components) {
+        double sum = 0.0;
+        for (int vertex : component) sum += v[vertex];
+        const double mean = sum / static_cast<double>(component.size());
+        for (int vertex : component) v[vertex] -= mean;
+    }
     return v;
 }
 
@@ -439,11 +458,11 @@ public:
     template <class Rhs>
     Eigen::VectorXd solve(const Rhs& b) const {
         Eigen::VectorXd bb = b;
-        bb.array() -= bb.mean();
+        center_if_laplacian(bb);
         std::vector<double> bv(bb.data(), bb.data() + bb.size());
         auto xv = s_->solve(bv);
         Eigen::VectorXd x = Eigen::Map<Eigen::VectorXd>(xv.data(), xv.size());
-        x.array() -= x.mean();
+        center_if_laplacian(x);
         return x;
     }
 
@@ -579,8 +598,8 @@ static Eigen::VectorXd make_rhs(const Eigen::SparseMatrix<double>& L, unsigned s
     return b;
 }
 
-// Helper: run a solver function N times, return the result with median total_time.
-// The first run is a warmup when N > 1.
+// Run a solver function N times and return one coherent median-total result.
+// No repetition is silently discarded as a warmup.
 template<typename Fn>
 static BenchResult median_run(Fn&& fn, int repeats) {
     std::vector<BenchResult> results;
@@ -960,6 +979,7 @@ struct Args {
     // apxchol::scan_operator before anything runs.
     std::string cls;
     std::string dump_mtx;          // if set: write the built Laplacian to this path and exit
+    bool component_info = false;   // count connected components and exit; no serialization
     bool giant_dump = false;       // with --dump-mtx: write a connected component's PURE Laplacian
                                    // (relabeled 0..cn-1) -- the comp_rank-th LARGEST (0 = giant).
                                    // = the full pure L for a connected matrix. Lets ParAC physics
@@ -1021,6 +1041,7 @@ static Args parse_args(int argc, char** argv) {
             }
         }
         else if (arg == "--dump-mtx") a.dump_mtx = next();
+        else if (arg == "--component-info") a.component_info = true;
         else if (arg == "--giant-dump") a.giant_dump = true;
         else if (arg == "--comp-rank") a.comp_rank = std::stoi(next());
         else if (arg == "--reg-rel") a.reg_rel = std::stod(next());
@@ -1680,11 +1701,18 @@ static std::vector<std::vector<int>> connected_components(const Eigen::SparseMat
 template<typename Fn>
 static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L,
                              const Eigen::VectorXd& b, const std::string& name,
-                             double tol, int maxiter) {
-    Timer prep; prep.start();
-    auto comps = connected_components(L);
-    if (comps.size() <= 1) return per_solver(L, b, name, tol, maxiter);
-    double split_prep = prep.elapsed();
+                             double tol, int maxiter,
+                             const std::vector<std::vector<int>>& comps,
+                             std::size_t component_count,
+                             double component_discovery_seconds) {
+    if (component_count <= 1) {
+        BenchResult result = per_solver(L, b, name, tol, maxiter);
+        result.setup_time += component_discovery_seconds;
+        result.total_time += component_discovery_seconds;
+        return result;
+    }
+    double split_prep = component_discovery_seconds;
+    Timer prep;
     BenchResult r; r.graph_name=name; r.n=(int)L.rows(); r.nnz=(int)L.nonZeros(); r.fillin=0;
     double setup=0, solve=0, res2=0; int it=0; const double bn=b.norm();
     double rss=0, vram=-1;   // combined solve-held RSS/VRAM = MAX over components (peak
@@ -1832,7 +1860,7 @@ static BenchResult run_amgcl(
     r.iterations = static_cast<int>(iters);
     Eigen::VectorXd x = Eigen::Map<Eigen::VectorXd>(sol.data(), n);
     Eigen::VectorXd res = b - L * x;
-    if (is_laplacian) res.array() -= res.mean();
+    center_if_laplacian(res);
     const double bnorm = b.norm() > 0 ? b.norm() : 1.0;
     r.rel_residual = res.norm() / bnorm;
     r.fillin = 0;
@@ -1906,7 +1934,7 @@ static BenchResult run_amgcl_cuda(
     // operator, just like every in-process solver.  The CUDA adapter returns x;
     // it no longer needs a benchmark-only duplicate of L.
     Eigen::VectorXd res = b - L * x;
-    if (is_laplacian) res.array() -= res.mean();
+    center_if_laplacian(res);
     const double bnorm = b.norm() > 0 ? b.norm() : 1.0;
     r.rel_residual = res.norm() / bnorm;
     return r;
@@ -1922,6 +1950,11 @@ static BenchResult run_amgcl_cuda(
 #include <_hypre_parcsr_mv.h>  // for hypre_ParVectorLocalVector / hypre_VectorData
 #include <HYPRE_parcsr_ls.h>
 #include <HYPRE_krylov.h>
+
+// HYPRE_Init is solver-specific setup, but it is process-wide. main() measures
+// it after the shared CUDA-context warm-up; each independently reported Hypre
+// row receives the cost once, after component aggregation and repeat selection.
+static double g_hypre_init_seconds = 0.0;
 
 // Sequential-build shim: Hypre defines MPI_Comm/MPI_Op etc. via macros in
 // SEQUENTIAL mode, but does NOT expose MPI_COMM_WORLD as a public constant.
@@ -2184,10 +2217,10 @@ static BenchResult run_apxchol_gpu_pcg(
     cudaMemcpy(x_full.data(), d_x, m*sizeof(double), cudaMemcpyDeviceToHost);
     if (is_laplacian) {
         x_full(m) = 0;
-        x_full.array() -= x_full.mean();
+        center_if_laplacian(x_full);
     }
     Eigen::VectorXd res = b - L * x_full;
-    if (is_laplacian) res.array() -= res.mean();
+    center_if_laplacian(res);
     double bnorm_full = b.norm();
     r.rel_residual = res.norm() / (bnorm_full > 0 ? bnorm_full : 1.0);
 
@@ -2339,9 +2372,9 @@ static BenchResult run_hypre_boomeramg(
     Eigen::VectorXd x(n);
     x.head(m) = Eigen::Map<Eigen::VectorXd>(xvals.data(), m);
     if (is_laplacian)
-        x.array() -= x.mean();   // sol[pinned]=0 already from the solve; no x(n-1) hack
+        center_if_laplacian(x);  // sol[pinned]=0 already from the solve; no x(n-1) hack
     Eigen::VectorXd res = b - L * x;
-    if (is_laplacian) res.array() -= res.mean();
+    center_if_laplacian(res);
     double bnorm = b.norm();
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
 
@@ -2471,9 +2504,9 @@ static BenchResult run_hypre_boomeramg_gpu(
     Eigen::VectorXd x(n);
     x.head(m) = Eigen::Map<Eigen::VectorXd>(xvals.data(), m);
     if (is_laplacian)
-        x.array() -= x.mean();   // sol[pinned]=0 already from the solve; no x(n-1) hack
+        center_if_laplacian(x);  // sol[pinned]=0 already from the solve; no x(n-1) hack
     Eigen::VectorXd res = b - L * x;
-    if (is_laplacian) res.array() -= res.mean();
+    center_if_laplacian(res);
     double bnorm = b.norm();
     r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
 
@@ -2519,15 +2552,12 @@ int main(int argc, char** argv) {
     }
 
 #ifdef HAVE_HYPRE
-    // Do not initialize a competitor runtime in a process that never requested
-    // that competitor. This is useful isolation, but it is NOT the affinity
-    // fix: a linked libgomp can run constructors before main(). The runner guard
-    // and benchmark_affinity_is_safe above address that earlier boundary.
-    const bool hypre_initialized =
+    // Initialization is delayed until after thread setup and the process-wide
+    // CUDA warm-up, then charged once to each independently reported Hypre row.
+    const bool hypre_requested =
         args.solvers.count("hypre_boomeramg") != 0 ||
         args.solvers.count("hypre_boomeramg_gpu") != 0;
-    if (hypre_initialized)
-        HYPRE_Init();  // sequential build uses Hypre's MPI shim; no MPI_Init needed
+    bool hypre_initialized = false;
 #endif
 
 #if defined(APXCHOL_USE_CUDA) && !defined(APXCHOL_BENCH_HYPRE_CUDA)
@@ -2535,9 +2565,6 @@ int main(int argc, char** argv) {
         std::cerr << "hypre_boomeramg_gpu was requested, but this binary links a "
                      "CPU-only Hypre build. Reconfigure with "
                      "-DAPXCHOL_USE_CUDA=ON -DBENCH_HYPRE_USE_CUDA=ON.\n";
-#ifdef HAVE_HYPRE
-        if (hypre_initialized) HYPRE_Finalize();
-#endif
         return 2;
     }
 #endif
@@ -2583,6 +2610,19 @@ int main(int argc, char** argv) {
             std::chrono::high_resolution_clock::now() - t_cuda_init).count();
         std::cerr << "[bench] cuda_init (once, before any timed solver): "
                   << std::fixed << std::setprecision(1) << init_ms << " ms\n";
+    }
+#endif
+
+#ifdef HAVE_HYPRE
+    if (hypre_requested) {
+        const auto t_hypre_init = std::chrono::high_resolution_clock::now();
+        HYPRE_Init();  // sequential build uses Hypre's MPI shim; no MPI_Init needed
+        g_hypre_init_seconds = std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - t_hypre_init).count();
+        hypre_initialized = true;
+        std::cerr << "[bench] hypre_init (charged once per Hypre row): "
+                  << std::fixed << std::setprecision(6)
+                  << g_hypre_init_seconds << " s\n";
     }
 #endif
 
@@ -2802,7 +2842,7 @@ int main(int argc, char** argv) {
                                         : "by construction (L = D - A)";
         std::cerr << "[matrix] operator is "
                   << (g_laplacian_mode ? "a SINGULAR LAPLACIAN: grounded, solution and "
-                                         "residual mean-centred"
+                                         "residual mean-centred per connected component"
                                        : "FULL-RANK SDDM: solved and scored untouched, "
                                          "no pin, no mean-centring")
                   << " (" << provenance << ")\n";
@@ -2849,10 +2889,34 @@ int main(int argc, char** argv) {
                   << " interpretation=\"" << interpretation << "\"\n";
     }
 
+    // --component-info: expose the minimum topology check an adapter needs before
+    // handing a singular Laplacian to a solver whose RHS construction supports
+    // only one null vector.  Matrix parsing/assembly is shared benchmark input
+    // work and deliberately outside this timer; no derived matrix is serialized.
+    if (args.component_info) {
+        if (!g_laplacian_mode) {
+            std::cerr << "--component-info requires a singular Laplacian input\n";
+            return 1;
+        }
+        const auto component_begin = std::chrono::high_resolution_clock::now();
+        const auto comps = connected_components(L);
+        size_t largest = 0;
+        for (const auto& comp : comps) largest = std::max(largest, comp.size());
+        const double discovery_s = std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - component_begin).count();
+        std::cerr << "[component-info] " << comps.size() << " components: largest "
+                  << largest << " / " << L.rows() << " nodes\n"
+                  << "APX component discovery time: " << std::setprecision(17)
+                  << discovery_s << "\n";
+        return 0;
+    }
+
     // --dump-mtx: write the built Laplacian (lower triangle, symmetric) to a
     // Matrix Market file and exit. Lets external solvers (e.g. ParAC, which
     // requires an AMD-reordered .mtx) consume the EXACT same matrix we benchmark.
     if (!args.dump_mtx.empty()) {
+        const auto t_dump_start = std::chrono::high_resolution_clock::now();
+        double component_discovery_s = 0.0;
         std::ofstream out(args.dump_mtx);
         if (!out) { std::cerr << "cannot open " << args.dump_mtx << "\n"; return 1; }
         out << "%%MatrixMarket matrix coordinate real symmetric\n";
@@ -2865,11 +2929,14 @@ int main(int argc, char** argv) {
             // ParAC physics on each (single-node trim grounds a CONNECTED component) — the
             // per-component split. The "K components" count + per-rank size are printed so
             // the runner knows when to stop.
+            const auto component_begin = std::chrono::high_resolution_clock::now();
             auto comps = connected_components(L);
             std::vector<size_t> order(comps.size());
             std::iota(order.begin(), order.end(), static_cast<size_t>(0));
             std::sort(order.begin(), order.end(),
                       [&](size_t a, size_t b) { return comps[a].size() > comps[b].size(); });
+            component_discovery_s = std::chrono::duration<double>(
+                std::chrono::high_resolution_clock::now() - component_begin).count();
             const int rank = args.comp_rank;
             if (rank < 0 || rank >= static_cast<int>(comps.size())) {
                 std::cerr << "[component-dump] rank " << rank << " >= " << comps.size()
@@ -2906,8 +2973,36 @@ int main(int argc, char** argv) {
             for (Eigen::SparseMatrix<double>::InnerIterator it(Lc, k); it; ++it)
                 if (it.row() >= it.col())
                     out << (it.row() + 1) << ' ' << (it.col() + 1) << ' ' << it.value() << '\n';
+        out.flush();
+        if (!out) { std::cerr << "failed writing " << args.dump_mtx << "\n"; return 1; }
+        out.close();
+        const double dump_s = std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - t_dump_start).count();
         std::cerr << "dumped " << entries << " lower-triangle entries to " << args.dump_mtx << "\n";
+        if (args.giant_dump) {
+            std::cerr << "APX component discovery time: " << std::setprecision(17)
+                      << component_discovery_s << "\n"
+                      << "APX component serialization time: "
+                      << std::max(0.0, dump_s - component_discovery_s) << "\n";
+        }
+        std::cerr << "APX dump setup time: " << std::setprecision(17) << dump_s << "\n";
         return 0;
+    }
+
+    // The null space of a disconnected Laplacian has one constant vector per
+    // component. Keep the partition once: RHS projection and true-residual
+    // grading use it, and split-mode solvers no longer rediscover it per row.
+    g_laplacian_components.clear();
+    g_laplacian_dimension = 0;
+    g_component_count = 0;
+    const auto component_begin = std::chrono::steady_clock::now();
+    auto components = connected_components(L);
+    g_component_discovery_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - component_begin).count();
+    g_component_count = components.size();
+    if (components.size() > 1) {
+        g_laplacian_dimension = L.rows();
+        g_laplacian_components = std::move(components);
     }
 
     Eigen::VectorXd b = make_rhs(L, args.seed);
@@ -2924,7 +3019,7 @@ int main(int argc, char** argv) {
 
     // Whether L is disconnected -- computed once (benchmark-only classification, not
     // timed); drives decompose=auto + the whole+coarse validity gate.
-    const bool disconnected = connected_components(L).size() > 1;
+    const bool disconnected = g_component_count > 1;
 
     // De-singularization dispatch (2 axes; see resolve_desing). `single(L,b,nm,tol,mi,
     // ground)` solves one operator (whole or a single component) under `ground`. For
@@ -2946,7 +3041,9 @@ int main(int argc, char** argv) {
                                                   const Eigen::VectorXd& sb, const std::string& nm,
                                                   double tl, int mi) {
                        return single(sL, sb, nm, tl, mi, g);
-                   }, L, b, graph_name, args.tol, args.maxiter);
+                   }, L, b, graph_name, args.tol, args.maxiter,
+                   g_laplacian_components, g_component_count,
+                   g_component_discovery_seconds);
         return single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
     };
 
@@ -3156,18 +3253,28 @@ int main(int argc, char** argv) {
     // whole-matrix multi-pin, both reach tol once the PCG stop is relative). The
     // connected-grounding under split is `pin` (one Dirichlet pin per component);
     // native/nullspace are n/a (Hypre has no scalar singular-nullspace API).
-    if (args.solvers.count("hypre_boomeramg"))
-        print(median_run([&]() { return run_desing("boomeramg", "BoomerAMG+PCG [Hypre]",
+    if (args.solvers.count("hypre_boomeramg")) {
+        auto result = median_run([&]() { return run_desing("boomeramg", "BoomerAMG+PCG [Hypre]",
             [](const Eigen::SparseMatrix<double>& L_, const Eigen::VectorXd& b_,
                const std::string& nm, double tl, int mi, ground_mode) {
-                return run_hypre_boomeramg(L_, b_, nm, tl, mi); }); }, R));
+                return run_hypre_boomeramg(L_, b_, nm, tl, mi); }); }, R);
+        result.setup_time += g_hypre_init_seconds;
+        result.total_time += g_hypre_init_seconds;
+        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        print(result);
+    }
 
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_BENCH_HYPRE_CUDA)
-    if (args.solvers.count("hypre_boomeramg_gpu"))
-        print(median_run([&]() { return run_desing("boomeramg", "BoomerAMG+PCG [Hypre;cuda]",
+    if (args.solvers.count("hypre_boomeramg_gpu")) {
+        auto result = median_run([&]() { return run_desing("boomeramg", "BoomerAMG+PCG [Hypre;cuda]",
             [](const Eigen::SparseMatrix<double>& L_, const Eigen::VectorXd& b_,
                const std::string& nm, double tl, int mi, ground_mode) {
-                return run_hypre_boomeramg_gpu(L_, b_, nm, tl, mi); }); }, R));
+                return run_hypre_boomeramg_gpu(L_, b_, nm, tl, mi); }); }, R);
+        result.setup_time += g_hypre_init_seconds;
+        result.total_time += g_hypre_init_seconds;
+        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        print(result);
+    }
 #endif
 
 #endif
