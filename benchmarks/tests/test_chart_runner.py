@@ -11,9 +11,13 @@ BENCH = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BENCH))
 
 import fair_charts as cpu  # noqa: E402
+import chart_cells  # noqa: E402
 import combined_charts as combined  # noqa: E402
+import fill_chart  # noqa: E402
+import fill_pass  # noqa: E402
 import gpu_charts as gpu  # noqa: E402
 import runner_common as rc  # noqa: E402
+import selector_levels  # noqa: E402
 import stale_cells  # noqa: E402
 import sweep_fair  # noqa: E402
 import thread_scaling  # noqa: E402
@@ -126,6 +130,105 @@ class SeriesRuleTest(unittest.TestCase):
         self.assertIsNone(combined._terminal_marker(None))
 
 
+class CurrentChartCellTest(unittest.TestCase):
+    @staticmethod
+    def _apx_record(sha, total):
+        return {
+            "cell": {"family": "audit", "matrix_id": "com-Amazon",
+                     "solver": "apxchol_v1",
+                     "config": rc.APXCHOL_DEFAULT_CONFIG,
+                     "threads": 16, "device": "cpu"},
+            "matrix_meta": {"kind": "graph"},
+            "metrics": {"total_s": total},
+            "status": "complete",
+            "provenance": {"git_sha": sha},
+        }
+
+    def test_current_chart_filters_invalidated_cell_from_mixed_store(self):
+        with tempfile.TemporaryDirectory() as store:
+            root = pathlib.Path(store)
+            (root / "old.json").write_text(json.dumps(self._apx_record("old", 1.0)))
+            (root / "fresh.json").write_text(json.dumps(self._apx_record("fresh", 2.0)))
+            with mock.patch.object(
+                    chart_cells, "_sha_contains",
+                    side_effect=lambda sha, _commit: sha == "fresh"):
+                records = cpu.load(store)
+        self.assertEqual([r["provenance"]["git_sha"] for r in records], ["fresh"])
+
+    def test_exact_denominator_path_rejects_stale_cell(self):
+        with tempfile.TemporaryDirectory() as store:
+            path = pathlib.Path(store) / "old.json"
+            path.write_text(json.dumps(self._apx_record("old", 1.0)))
+            with mock.patch.object(chart_cells, "_sha_contains", return_value=False):
+                with self.assertRaisesRegex(chart_cells.StaleCellError,
+                                            "checked 1/1 selected cells"):
+                    chart_cells.load_current_entries(
+                        store, stale_policy="reject", announce=False)
+
+    def test_timeout_without_persisted_cap_is_filtered_without_git_rule(self):
+        timeout = record("timeout", None, solver="unscoped_solver")
+        with tempfile.TemporaryDirectory() as store:
+            (pathlib.Path(store) / "timeout.json").write_text(json.dumps(timeout))
+            records, report = chart_cells.load_current_records(
+                store, announce=False)
+        self.assertEqual(records, [])
+        self.assertEqual((report.selected, report.current, report.stale), (1, 0, 1))
+
+    def test_fill_chart_rejects_legacy_records_without_provenance(self):
+        legacy = {"family": "audit", "matrix_id": "m",
+                  "solver": "apxchol_bg", "fill": 1.0}
+        with tempfile.TemporaryDirectory() as store:
+            (pathlib.Path(store) / "legacy.json").write_text(json.dumps(legacy))
+            with self.assertRaisesRegex(chart_cells.CellStoreError,
+                                        "rerun fill_pass.py"):
+                fill_chart.load(store)
+
+    def test_fill_chart_loads_current_schema_after_stale_gate(self):
+        fill = {
+            "schema": fill_pass.FILL_SCHEMA,
+            "cell": {"family": "audit", "matrix_id": "com-Amazon",
+                     "solver": "apxchol_v1", "config": "bg+tree[vec_pool]",
+                     "threads": 16, "device": "cpu"},
+            "matrix_meta": {"kind": "graph"},
+            "metrics": {"fill": 1.25}, "status": "complete",
+            "provenance": {"git_sha": "fresh"}, "series": "apxchol_bg",
+        }
+        with tempfile.TemporaryDirectory() as store:
+            (pathlib.Path(store) / "fill.json").write_text(json.dumps(fill))
+            with mock.patch.object(chart_cells, "_sha_contains", return_value=True):
+                rows = fill_chart.load(store)
+        self.assertEqual(rows[("audit", "com-Amazon")]["apxchol_bg"], 1.25)
+
+    def test_fill_pass_emits_stale_cells_compatible_provenance(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(fill_pass, "OUT", store), \
+             mock.patch.object(fill_pass, "git_sha", return_value="fresh"), \
+             mock.patch.object(fill_pass.rc, "kind_of", return_value="graph"):
+            fill_pass.emit("m", "audit", "apxchol_bg", 4, 8, 6)
+            record = json.loads(
+                (pathlib.Path(store) / "m__apxchol_bg.json").read_text())
+        self.assertEqual(record["schema"], fill_pass.FILL_SCHEMA)
+        self.assertEqual(record["cell"]["solver"], "apxchol_v1")
+        self.assertEqual(record["cell"]["config"], "bg+tree[vec_pool]")
+        self.assertEqual(record["provenance"]["git_sha"], "fresh")
+        self.assertEqual(record["series"], "apxchol_bg")
+
+    def test_selector_level_plot_only_rejects_legacy_csv_row(self):
+        legacy = {"matrix_id": "grid_2000", "family": "g", "selector": "bg",
+                  "fwd_lvls": "10", "bck_lvls": "10"}
+        with self.assertRaisesRegex(chart_cells.CellStoreError,
+                                    "rerun selector_levels.py"):
+            selector_levels.validate_rows([legacy])
+
+    def test_selector_level_current_row_passes_stale_gate(self):
+        row = {"schema": selector_levels.LEVEL_SCHEMA,
+               "matrix_id": "grid_2000", "family": "g", "selector": "bg",
+               "config": "bg+tree[vec_pool]", "device": "cpu",
+               "git_sha": "fresh", "fwd_lvls": "10", "bck_lvls": "10"}
+        with mock.patch.object(chart_cells, "_sha_contains", return_value=True):
+            selector_levels.validate_rows([row])
+
+
 class ThreadScalingStoreTest(unittest.TestCase):
     def test_cell_key_includes_solver_configuration(self):
         self.assertNotEqual(
@@ -163,6 +266,7 @@ class ThreadScalingStoreTest(unittest.TestCase):
                          "solver": "solver", "config": "cfg", "threads": 1,
                          "device": "cpu"},
                 "metrics": {"total_s": 1.0}, "status": "complete",
+                "provenance": {"git_sha": thread_scaling.git_sha()},
             }
             path = pathlib.Path(store) / "m__solver_cfg__t1.json"
             path.write_text(json.dumps(cell))

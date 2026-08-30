@@ -14,6 +14,7 @@ import math
 from pathlib import Path
 import re
 import statistics
+import sys
 
 import matplotlib
 
@@ -33,6 +34,7 @@ TIMING_METRICS = (
     "pcg",
     "total",
 )
+SNAPSHOT_LABEL = "HISTORICAL SNAPSHOT · checksummed Daint setup campaign"
 TIMING_PATTERNS = {
     name: re.compile(rf"^\s*{re.escape(name)}\s+([0-9.]+) ms", re.MULTILINE)
     for name in TIMING_METRICS
@@ -215,7 +217,7 @@ def render_scaling_figure(path: Path, medians: dict) -> None:
     ax.set_xticks(threads, [str(t) for t in threads])
     ax.set_xlabel("OpenMP threads within one 72-core NUMA domain")
     ax.set_ylabel("setup speedup over T=1")
-    ax.set_title("apxchol setup scaling on Daint")
+    ax.set_title(f"apxchol setup scaling on Daint\n{SNAPSHOT_LABEL}")
     ax.grid(True, which="both", alpha=0.25)
     ax.legend(ncol=2, fontsize=8)
     fig.savefig(path, dpi=180)
@@ -243,7 +245,7 @@ def render_baseline_figure(path: Path, rows: list[dict]) -> None:
     ax.axhline(1.0, color="black", linewidth=1)
     ax.set_xticks(x, labels, rotation=32, ha="right")
     ax.set_ylabel("current / July-27 total time (lower is better)")
-    ax.set_title("Cumulative single-RHS improvement on Daint")
+    ax.set_title(f"Cumulative single-RHS improvement on Daint\n{SNAPSHOT_LABEL}")
     ax.grid(True, axis="y", alpha=0.25)
     ax.legend()
     fig.savefig(path, dpi=180)
@@ -264,7 +266,7 @@ def render_breakdown_figure(path: Path, medians: dict) -> None:
     remainder = [max(0.0, 100.0 - value) for value in bottoms]
     ax.bar(matrices, remainder, bottom=bottoms, label="other")
     ax.set_ylabel("share of setup at T=72 (%)")
-    ax.set_title("Current setup composition on Daint")
+    ax.set_title(f"Setup composition on Daint\n{SNAPSHOT_LABEL}")
     ax.tick_params(axis="x", rotation=32)
     ax.legend(ncol=1, fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
     fig.savefig(path, dpi=180)
@@ -278,6 +280,9 @@ def write_summary(path: Path, scaling: list[dict], baseline: list[dict], pivots:
     seeds = sorted({row["seed"] for row in baseline})
     lines = [
         "# Daint campaign summary",
+        "",
+        f"> **{SNAPSHOT_LABEL}.** This renderer consumes fixed, checksummed raw-log "
+        "campaigns rather than the current unified cell store.",
         "",
         "Both campaigns used one Daint node split into four NUMA-local 72-core ranks. "
         "Times are milliseconds; scaling cells are medians of three repetitions. "
@@ -400,6 +405,9 @@ def main() -> None:
                         help="completed historical A/B campaign results directory")
     parser.add_argument("--output", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
+
+    print(f"{SNAPSHOT_LABEL}: raw-log renderer, outside the unified cell store",
+          file=sys.stderr)
 
     args.output.mkdir(parents=True, exist_ok=True)
     figures = args.output / "figures"

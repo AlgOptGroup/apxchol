@@ -9,7 +9,7 @@ Non-converged / failed cells are drawn as hatched 'x' bars so the reader sees
 coverage honestly. Run AFTER the fair sweep + ParAC merge:
   PYTHONPATH=benchmarks python3 benchmarks/fair_charts.py --out benchmarks/latest
 """
-import argparse, csv, json, glob, os
+import argparse, csv, os
 from collections import defaultdict
 import matplotlib
 matplotlib.use("Agg")
@@ -18,6 +18,7 @@ import matplotlib.colors as mcolors
 from matplotlib.ticker import FuncFormatter
 import numpy as np
 import gpu_charts as gpu   # reuse the GPU CSV loader + colours/order for overlays
+import chart_cells
 # Matrix axis labels come from the registry, so a matrix we ASSEMBLED an operator
 # for (a graph file -> L = D - A) never appears under its bare file name.
 from runner_common import (APXCHOL_DEFAULT_CONFIG, mat_labels,
@@ -111,13 +112,12 @@ def load(root):
     # cells (same solver/config labels), so without this filter _pick() could
     # return a GPU cell for a CPU series — which made apxchol's CPU bar equal its
     # GPU bar and dropped it from the scaling chart (GPU cells carry no nnz).
-    recs = []
-    for p in glob.glob(f"{root}/**/*.json", recursive=True):
-        try:
-            c = json.load(open(p))
-            if c.get("cell", {}).get("device", "cpu") != "gpu":
-                recs.append(c)
-        except: pass
+    recs, _ = chart_cells.load_current_records(
+        root,
+        include=lambda c: c.get("cell", {}).get("device", "cpu") != "gpu",
+        stale_policy="filter",
+        source="fair_charts CPU input",
+    )
     return recs
 
 def load_gpu_cfg(root):
@@ -130,11 +130,15 @@ def load_gpu_cfg(root):
     source_rank = {}
     if not os.path.isdir(root):
         return rows
-    for p in glob.glob(f"{root}/**/*__gpu.json", recursive=True):
-        try:
-            c = json.load(open(p))
-        except Exception:
-            continue
+    records, _ = chart_cells.load_current_records(
+        root,
+        pattern="**/*__gpu.json",
+        include=lambda c: (c.get("cell", {}).get("device") == "gpu"
+                           and c.get("cell", {}).get("solver") == "apxchol_v1"),
+        stale_policy="filter",
+        source="fair_charts GPU ablation input",
+    )
+    for c in records:
         cell = c["cell"]
         if (cell.get("device") != "gpu" or c.get("status") != "complete"
                 or cell.get("solver") != "apxchol_v1"):

@@ -13,13 +13,17 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from runner_common import benchmark_openmp_env, margs_for, sh, taskset_prefix
+import chart_cells
+import runner_common as rc
+from runner_common import (benchmark_openmp_env, git_sha, margs_for, sh,
+                           taskset_prefix)
 
 ROOT = str(Path(__file__).resolve().parents[1])   # repo root
 BIN = f"{ROOT}/benchmarks/build/benchmark"
 OUT_CSV = f"{ROOT}/results/selector_levels.csv"
 SELS = ["bg", "greedy", "bk"]
 PAT = re.compile(r"fwd_lvls=(\d+) \(max=(\d+)\) bck_lvls=(\d+)")
+LEVEL_SCHEMA = 2
 
 # (matrix_id, family, bench-args, needs_reg) — the cross-family poster set + the
 # per-family ladders, minus com-Orkut to keep this already CPU-heavy sweep bounded.
@@ -45,6 +49,7 @@ MATS = [
 
 def collect():
     rows = []
+    source_sha = git_sha()
     for mid, fam, args, reg in MATS:
         regf = "--reg-rel 1e-6" if reg else ""
         for sel in SELS:
@@ -61,16 +66,52 @@ def collect():
             if not m:
                 print(f"  {mid:16} {sel:5} no level line", flush=True); continue
             fwd, bck = int(m.group(1)), int(m.group(3))
-            rows.append(dict(matrix_id=mid, family=fam, selector=sel, fwd_lvls=fwd, bck_lvls=bck))
+            rows.append(dict(schema=LEVEL_SCHEMA, matrix_id=mid, family=fam,
+                             selector=sel, config=f"{sel}+tree[vec_pool]",
+                             device="cpu", git_sha=source_sha,
+                             fwd_lvls=fwd, bck_lvls=bck))
             print(f"  {mid:16} {sel:5} fwd={fwd:5} bck={bck:5}", flush=True)
     os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
     with open(OUT_CSV, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["matrix_id", "family", "selector", "fwd_lvls", "bck_lvls"])
+        w = csv.DictWriter(f, fieldnames=["schema", "matrix_id", "family",
+                                          "selector", "config", "device",
+                                          "git_sha", "fwd_lvls", "bck_lvls"])
         w.writeheader(); w.writerows(rows)
     print(f"wrote {len(rows)} rows -> {OUT_CSV}")
     return rows
 
+
+def validate_rows(rows):
+    """Reject old plot-only CSV rows that current stale rules invalidate."""
+    stale = []
+    for row in rows:
+        if int(row.get("schema", 0)) != LEVEL_SCHEMA:
+            raise chart_cells.CellStoreError(
+                "selector-level CSV lacks current schema/provenance; rerun "
+                "selector_levels.py before plotting")
+        matrix_id = row["matrix_id"]
+        record = {
+            "cell": {"family": row["family"], "matrix_id": matrix_id,
+                     "solver": "apxchol_v1", "config": row["config"],
+                     "device": row["device"], "threads": 16},
+            "matrix_meta": {"kind": rc.kind_of(matrix_id)},
+            "metrics": {"fwd_lvls": int(row["fwd_lvls"]),
+                        "bck_lvls": int(row["bck_lvls"])},
+            "status": "complete",
+            "provenance": {"git_sha": row["git_sha"]},
+        }
+        reasons = chart_cells.stale_reasons(record)
+        if reasons:
+            stale.append((matrix_id, row["selector"], reasons[0]))
+    print(f"selector_levels plot input: checked {len(rows)}/{len(rows)} rows; "
+          f"current={len(rows) - len(stale)}, stale={len(stale)}", file=sys.stderr)
+    if stale:
+        examples = "; ".join(f"{m}/{s}: {reason}" for m, s, reason in stale[:3])
+        raise chart_cells.StaleCellError(
+            f"selector_levels plot input contains {len(stale)} stale rows: {examples}")
+
 def plot(rows, out=f"{ROOT}/benchmarks/latest/figures/selector_levels.png"):
+    validate_rows(rows)
     mats = [m for m, *_ in MATS if any(r["matrix_id"] == m for r in rows)]
     by = {(r["selector"], r["matrix_id"]): r["bck_lvls"] for r in rows}
     M = np.full((len(SELS), len(mats)), np.nan)
@@ -103,9 +144,10 @@ def plot(rows, out=f"{ROOT}/benchmarks/latest/figures/selector_levels.png"):
 
 if __name__ == "__main__":
     if "--plot-only" in sys.argv:
-        rows = [dict(matrix_id=r["matrix_id"], family=r["family"], selector=r["selector"],
-                     fwd_lvls=int(r["fwd_lvls"]), bck_lvls=int(r["bck_lvls"]))
-                for r in csv.DictReader(open(OUT_CSV))]
+        with open(OUT_CSV, newline="") as handle:
+            rows = [dict(r, fwd_lvls=int(r["fwd_lvls"]),
+                         bck_lvls=int(r["bck_lvls"]))
+                    for r in csv.DictReader(handle)]
     else:
         rows = collect()
     plot(rows)

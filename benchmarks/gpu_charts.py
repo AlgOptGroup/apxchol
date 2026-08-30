@@ -10,13 +10,14 @@ parac_runner.py), the same runner/store as the CPU axis.
 
   python3 benchmarks/gpu_charts.py --root results/cells --out benchmarks/latest/figures
 """
-import argparse, json, glob, os
+import argparse, os
 from collections import defaultdict
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.ticker import FuncFormatter
 import numpy as np
+import chart_cells
 # Matrix axis labels come from the registry, so a matrix we ASSEMBLED an operator
 # for (a graph file -> L = D - A) never appears under its bare file name.
 from runner_common import (APXCHOL_DEFAULT_CONFIG, mat_labels,
@@ -73,11 +74,16 @@ def load(root):
         raise ValueError("legacy GPU CSVs lack configuration/status provenance; "
                          "pass the unified per-cell store instead")
     seen = set()
-    for p in glob.glob(f"{root}/**/*__gpu.json", recursive=True):
-        try:
-            c = json.load(open(p))
-        except Exception:
-            continue
+    records, _ = chart_cells.load_current_records(
+        root,
+        pattern="**/*__gpu.json",
+        include=lambda c: (c.get("cell", {}).get("device") == "gpu"
+                           and (c.get("cell", {}).get("solver"),
+                                c.get("cell", {}).get("config", "")) in LABELS),
+        stale_policy="filter",
+        source="gpu_charts measurements",
+    )
+    for c in records:
         cell = c["cell"]
         if cell.get("device") != "gpu":
             continue
@@ -115,11 +121,16 @@ def load_outcomes(root):
     out = {}
     if os.path.isfile(root):
         raise ValueError("legacy GPU CSVs lack status and timeout-cap provenance")
-    for p in glob.glob(f"{root}/**/*__gpu.json", recursive=True):
-        try:
-            c = json.load(open(p))
-        except Exception:
-            continue
+    records, _ = chart_cells.load_current_records(
+        root,
+        pattern="**/*__gpu.json",
+        include=lambda c: (c.get("cell", {}).get("device") == "gpu"
+                           and (c.get("cell", {}).get("solver"),
+                                c.get("cell", {}).get("config", "")) in LABELS),
+        stale_policy="filter",
+        source="gpu_charts outcomes",
+    )
+    for c in records:
         cell = c["cell"]
         if cell.get("device") != "gpu":
             continue

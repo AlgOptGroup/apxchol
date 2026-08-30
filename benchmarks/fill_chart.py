@@ -12,12 +12,14 @@ measured grid).
 
   python3 benchmarks/fill_chart.py --out benchmarks/latest/figures
 """
-import argparse, glob, json, os
+import argparse, os
 from collections import defaultdict
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import gpu_charts as gpu          # shared matrix × method heatmap (value_heatmap)
+import chart_cells
+from fill_pass import FILL_SCHEMA
 
 FAMS = ["grids", "ipm", "suitesparse"]
 # solver key -> (label, colour), drawn/ordered in this list order:
@@ -46,9 +48,23 @@ SOLVERS = [
 
 def load(root):
     rows = defaultdict(dict)  # rows[(family,matrix)][solver] = fill
-    for f in glob.glob(f"{root}/*.json"):
-        d = json.load(open(f))
-        rows[(d["family"], d["matrix_id"])][d["solver"]] = d["fill"]
+    records, report = chart_cells.load_current_records(
+        root,
+        pattern="*.json",
+        stale_policy="filter",
+        source="fill_chart input",
+    )
+    if report.non_cells:
+        raise chart_cells.CellStoreError(
+            f"fill_chart input: {report.non_cells} legacy/non-cell JSON records; "
+            "rerun fill_pass.py to produce provenance-bearing schema-2 fill cells")
+    for record in records:
+        if record.get("schema") != FILL_SCHEMA:
+            raise chart_cells.CellStoreError(
+                f"fill_chart input: schema {record.get('schema')!r} != {FILL_SCHEMA}")
+        cell = record["cell"]
+        rows[(cell["family"], cell["matrix_id"])][record["series"]] = \
+            record["metrics"]["fill"]
     return rows
 
 

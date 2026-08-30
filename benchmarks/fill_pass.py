@@ -16,10 +16,12 @@ Writes results/fill_cells/<mid>__<solver>.json. No PCG-solve timing is used, so
 this is safe to run alongside other (timing) work. Run from repo root:
   python3 benchmarks/fill_pass.py
 """
-import json, os, re, glob
+import json, os, re
+import chart_cells
+import runner_common as rc
 
 from runner_common import (margs_for, ROOT, CELLS, sh as _sh, parac_amd_mtx,
-                           benchmark_openmp_env, taskset_prefix,
+                           benchmark_openmp_env, taskset_prefix, git_sha,
                            PARAC_GPU_DRIVER as GPU_DRIVER,
                            PARAC_GPU_DRIVER_PHYS as GPU_DRIVER_PHYS,
                            PARAC_CPU_DRIVER as CPU_DRIVER,
@@ -36,6 +38,24 @@ BIN = f"{ROOT}/benchmarks/build/benchmark"
 # trims the augmentation) mode.
 OUT = f"{ROOT}/results/fill_cells"
 REG = "1e-6"
+FILL_SCHEMA = 2
+
+# Derived fill records retain the standard cell identity needed by
+# stale_cells.py.  ``series`` remains the fill-chart row key; solver/config/device
+# describe the implementation that produced it.
+FILL_SOURCE = {
+    "apxchol_bg": ("apxchol_v1", "bg+tree[vec_pool]", "cpu"),
+    "apxchol_greedy": ("apxchol_v1", "greedy+tree[vec_pool]", "cpu"),
+    "apxchol_bk": ("apxchol_v1", "bk+tree[vec_pool]", "cpu"),
+    "ac": ("ac", "", "cpu"),
+    "ac2": ("ac2", "", "cpu"),
+    "rchol": ("rchol", "", "cpu"),
+    "rchol_par": ("rchol_par", "", "cpu"),
+    "parac_graph_cpu": ("parac", "", "cpu"),
+    "parac_physics_cpu": ("parac_physics", "", "cpu"),
+    "parac_graph_gpu": ("parac_graph", "", "gpu"),
+    "parac_physics_gpu": ("parac_physics", "", "gpu"),
+}
 
 # (matrix_id, family, apxchol-args, needs_reg, parac_sorted_mtx)
 MATS = [
@@ -67,16 +87,37 @@ def sh(cmd, timeout=900, env=None):
 
 
 def done(mid, solver):
-    return os.path.exists(f"{OUT}/{mid}__{solver}.json")
+    path = f"{OUT}/{mid}__{solver}.json"
+    if not os.path.exists(path):
+        return False
+    try:
+        record = json.load(open(path))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (record.get("schema") == FILL_SCHEMA
+            and not chart_cells.stale_reasons(record))
 
 
 def emit(mid, family, solver, n, adj_nnz, factor_offdiag):
     os.makedirs(OUT, exist_ok=True)
     fill = 2.0 * factor_offdiag / adj_nnz if adj_nnz else 0.0
-    json.dump({"matrix_id": mid, "family": family, "solver": solver,
-               "n": n, "adj_nnz": adj_nnz, "factor_offdiag": factor_offdiag,
-               "fill": round(fill, 4)},
-              open(f"{OUT}/{mid}__{solver}.json", "w"), indent=2)
+    source_solver, config, device = FILL_SOURCE[solver]
+    record = {
+        "schema": FILL_SCHEMA,
+        "cell": {"matrix_id": mid, "family": family,
+                 "solver": source_solver, "config": config,
+                 "device": device, "threads": 16},
+        "matrix_meta": {"kind": rc.kind_of(mid)},
+        "metrics": {"n": n, "adj_nnz": adj_nnz,
+                    "factor_offdiag": factor_offdiag,
+                    "fill": round(fill, 4)},
+        "status": "complete",
+        "provenance": {"git_sha": git_sha(),
+                       "measurement": "factor-fill"},
+        "series": solver,
+    }
+    with open(f"{OUT}/{mid}__{solver}.json", "w") as handle:
+        json.dump(record, handle, indent=2)
     print(f"  {mid:16} {solver:14} fill={fill:.3f}  (offdiag(L)={factor_offdiag} offdiag(A)={adj_nnz})")
     return fill
 
@@ -196,8 +237,15 @@ def rchol_from_cells(mid, family):
     # RCHOL stored fillin = 2*G.nnz()/A.nnz() (incl diagonal). Recover the
     # off-diagonal definition: G.nnz() = fillin*A.nnz()/2; offdiag(L)=G.nnz()-n.
     for solver in ("rchol", "rchol_par"):
-        for f in glob.glob(f"{CELLS}/{family}/{mid}__{solver}__*.json"):
-            d = json.load(open(f)); m = d.get("metrics", {})
+        records, _ = chart_cells.load_current_records(
+            f"{CELLS}/{family}",
+            pattern=f"{mid}__{solver}__*.json",
+            include=lambda c, solver=solver: c.get("cell", {}).get("solver") == solver,
+            stale_policy="filter",
+            source=f"fill_pass {mid}/{solver} source",
+        )
+        for d in records:
+            m = d.get("metrics", {})
             fillin, annz, n = m.get("fillin"), m.get("nnz"), m.get("n")
             if not (fillin and annz and n) or fillin == 0.0:
                 continue

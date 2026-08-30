@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Import and render the repaired T=72 fair-solver campaign from CSCS Daint.
+"""Reproduce the pinned historical T=72 fair-solver campaign from CSCS Daint.
 
 With ``--cells``, validate a downloaded unified cell store and refresh the
 committed compact CSV.  Without it, reproduce the summary and figures from that
-CSV alone.
+CSV alone.  This is intentionally a historical renderer: it requires one exact
+source revision and must not be used as a current-main chart path.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ EXPECTED_CELLS = 750
 EXPECTED_MATRICES = 27
 CORE_STATUS = {"complete": 578, "timeout": 8, "failed": 2}
 SOURCE_SHA = "2b75599748604439c2b51027ab2c6a428fed9c66"
+SNAPSHOT_LABEL = f"HISTORICAL SNAPSHOT · source {SOURCE_SHA[:8]}"
 EXTENSION_SOURCE_ID = "portable-competitors-20260828-r1"
 EXTENSION_SERIES = {
     ("cpu", "rchol", ""),
@@ -279,13 +281,13 @@ def render_headline(records: list[dict], out: Path) -> None:
             cpu_records, gpu_rows, family,
             out / f"fair_t72_total_{family}.png",
             mode="combined", metric="total", mats=matrices,
-            goutcomes=outcomes, thread_label="T=72",
+            goutcomes=outcomes, thread_label=f"T=72 · historical {SOURCE_SHA[:8]}",
         )
         combined.overview_heatmap(
             cpu_records, gpu_rows, family,
             out / f"fair_t72_solve_{family}.png",
             mode="combined", metric="solve", mats=matrices,
-            goutcomes=outcomes, thread_label="T=72",
+            goutcomes=outcomes, thread_label=f"T=72 · historical {SOURCE_SHA[:8]}",
         )
 
         # Linear setup+solve bars remain useful alongside the ratio heatmaps:
@@ -307,7 +309,8 @@ def render_headline(records: list[dict], out: Path) -> None:
                 device="both",
                 ycompress=suffix.startswith("_giants"),
                 ylabel="time (s) — T=72  [solid = setup, /// = solve]",
-                title=f"{family}{suffix}: CPU+GPU setup and solve",
+                title=(f"{family}{suffix}: CPU+GPU setup and solve\n"
+                       f"{SNAPSHOT_LABEL}"),
             )
 
 
@@ -351,7 +354,7 @@ def render_apx_device_crossover(records: list[dict], out: Path) -> None:
                 2 ** math.ceil(math.log2(hi) + 0.25))
     ax.set_xticks(x, mat_labels(ordered), rotation=42, ha="right", fontsize=8)
     ax.set_ylabel("CPU time / GPU time  (above 1 = GPU faster)")
-    ax.set_title("apxchol default CPU/GPU crossover on Daint, T=72")
+    ax.set_title(f"apxchol default CPU/GPU crossover on Daint, T=72\n{SNAPSHOT_LABEL}")
     ax.grid(True, axis="y", which="both", alpha=0.25)
     for family, begin, end in spans:
         if begin:
@@ -428,7 +431,8 @@ def render_ablation(records: list[dict], out: Path) -> None:
     colorbar = fig.colorbar(image, ax=axes, shrink=0.78)
     colorbar.set_label("ratio to bg / vec_pool_aos on the same matrices (lower is better)")
     fig.suptitle("apxchol CPU configuration ablation on Daint, T=72\n"
-                 "paired by matrix; Orkut omits fwd_star/bstr by the declared sweep gate",
+                 "paired by matrix; Orkut omits fwd_star/bstr by the declared sweep gate\n"
+                 f"{SNAPSHOT_LABEL}",
                  fontsize=12)
     fig.savefig(out, dpi=180)
     plt.close(fig)
@@ -498,6 +502,9 @@ def write_summary(path: Path, records: list[dict]) -> None:
                        if record["status"] == "complete")
     lines = [
         "# Daint T=72 fair-solver campaign",
+        "",
+        f"> **{SNAPSHOT_LABEL}.** This reproduces a pinned campaign; it is not a "
+        "current-main benchmark view.",
         "",
         f"The combined campaign contains **{len(records)}/{EXPECTED_CELLS} planned cells** over "
         f"{EXPECTED_MATRICES} matrices: {status_text}. "
@@ -571,6 +578,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=HERE / "figures")
     parser.add_argument("--summary", type=Path, default=HERE / "fair_t72_summary.md")
     args = parser.parse_args()
+
+    print(f"{SNAPSHOT_LABEL}: exact pinned campaign renderer", file=sys.stderr)
 
     if args.cells:
         records = load_cells(args.cells)

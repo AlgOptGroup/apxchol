@@ -4,10 +4,11 @@ representative matrices, then emit total/setup/solve speedup charts and a
 portable CSV. Cells go to results/scaling_cells/ (separate from the fair cells).
 Run from repo root, ALONE: python3 benchmarks/thread_scaling.py
 """
-import argparse, csv, json, os, re, subprocess, glob, time
+import argparse, csv, json, os, re, subprocess, time
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import chart_cells
 
 from sweep_fair import UNKNOWN_TOOLCHAIN
 import parac_runner as parac
@@ -100,10 +101,15 @@ def done(mid, solver, config, t):
 
 def _scaling_records():
     """Load only records that satisfy the current publication schema."""
+    entries, _ = chart_cells.load_current_entries(
+        CELLS,
+        pattern="*.json",
+        stale_policy="reject",
+        source="thread_scaling render/export input",
+    )
     records = []
-    for filename in sorted(glob.glob(f"{CELLS}/*.json")):
-        with open(filename) as handle:
-            record = json.load(handle)
+    for entry in entries:
+        filename, record = str(entry.path), entry.record
         if record.get("schema") != SCALING_SCHEMA:
             raise RuntimeError(
                 f"stale scaling schema in {filename}: "
