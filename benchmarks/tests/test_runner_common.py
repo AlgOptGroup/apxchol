@@ -95,5 +95,25 @@ class AffinitySpecTest(unittest.TestCase):
             })
 
 
+class CsvMetricTest(unittest.TestCase):
+    def test_parallel_rchol_effective_thread_count_is_preserved(self):
+        output = (
+            "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,"
+            "fillin,us_per_nnz,solve_rss_mb,solve_vram_mb\n"
+            "pRCHOL+PCG [Chen20;par] t=64,grid,10,20,1,2,3,4,5e-9,"
+            "6,7,8,-1\n"
+        )
+        metrics = rc.parse_csv(output)
+        self.assertEqual(metrics["effective_threads"], 64)
+
+    def test_unannotated_solver_does_not_invent_effective_threads(self):
+        output = (
+            "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,"
+            "fillin,us_per_nnz,solve_rss_mb,solve_vram_mb\n"
+            "AMGCL,grid,10,20,1,2,3,4,5e-9,6,7,8,-1\n"
+        )
+        self.assertNotIn("effective_threads", rc.parse_csv(output))
+
+
 if __name__ == "__main__":
     unittest.main()

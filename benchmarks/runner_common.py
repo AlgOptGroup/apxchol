@@ -641,6 +641,13 @@ def parse_csv(out):
         d = dict(n=int(f[2]), nnz=int(f[3]), setup_s=float(f[4]), solve_s=float(f[5]),
                  total_s=float(f[6]), iters=int(f[7]), rel_res=float(f[8]),
                  fillin=float(f[9]), us_per_nnz=float(f[10]))
+        # Upstream parallel RCHOL requires a power-of-two worker count.  Its
+        # adapter therefore reports the actual choice in the solver label
+        # (for example requested T=72 -> ``t=64``).  Preserve that fact in the
+        # cell instead of leaving the requested thread count as the only one.
+        effective = re.search(r"\bt=(\d+)\b", f[0])
+        if effective:
+            d["effective_threads"] = int(effective.group(1))
         if len(f) >= 12:                     # solve_rss_mb (host VmRSS held during solve)
             # < 0 = the binary declined to measure it. RCHOL is the case: their
             # util/pcg.cpp leaks a full extra copy of A and of G per construction
