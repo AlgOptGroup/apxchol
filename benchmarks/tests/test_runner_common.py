@@ -1,9 +1,39 @@
 #!/usr/bin/env python3
 import os
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 from benchmarks import runner_common as rc
+
+
+class ExternalPathConfigTest(unittest.TestCase):
+    def test_explicit_environment_wins_over_machine_default(self):
+        local = SimpleNamespace(PARAC_REORD="/machine/default")
+        with mock.patch.object(rc, "_paths_local", local), \
+             mock.patch.dict(os.environ,
+                             {"APXCHOL_PARAC_REORDER_DIR": "/campaign/cache"},
+                             clear=False):
+            self.assertEqual(
+                rc.external_path("APXCHOL_PARAC_REORDER_DIR", "PARAC_REORD"),
+                "/campaign/cache")
+
+    def test_explicit_empty_environment_disables_machine_default(self):
+        local = SimpleNamespace(PARAC_REORD="/machine/default")
+        with mock.patch.object(rc, "_paths_local", local), \
+             mock.patch.dict(os.environ,
+                             {"APXCHOL_PARAC_REORDER_DIR": ""}, clear=False):
+            self.assertEqual(
+                rc.external_path("APXCHOL_PARAC_REORDER_DIR", "PARAC_REORD"), "")
+
+    def test_machine_default_precedes_builtin_default(self):
+        local = SimpleNamespace(CMG_SOLVER="/machine/cmg")
+        with mock.patch.object(rc, "_paths_local", local), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("APXCHOL_CMG_SOLVER", None)
+            self.assertEqual(
+                rc.external_path("APXCHOL_CMG_SOLVER", "CMG_SOLVER", "/builtin"),
+                "/machine/cmg")
 
 
 class AffinitySpecTest(unittest.TestCase):

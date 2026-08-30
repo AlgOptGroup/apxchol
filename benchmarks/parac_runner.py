@@ -114,14 +114,10 @@ TIMEOUT_GPU = int(os.environ.get("PARAC_GPU_TIMEOUT_S", "600"))
 # bad_alloc instead of OOM-killing the box. GPU OOM is VRAM -> no host cap.
 MEM_CAP_GB = float(os.environ.get("PARAC_MEM_CAP_GB", "100"))
 
-DUMP_CPU = "/tmp/parac_fair_dump"     # keep the historical cache dirs (warm caches)
-DUMP_GPU = "/tmp/parac_gpu_dump"
-
-# Machine-local overrides (gitignored; assigns the path constants above by name).
-try:
-    from paths_local import *          # noqa: F401,F403
-except ImportError:
-    pass
+DUMP_CPU = rc.external_path(
+    "APXCHOL_PARAC_CPU_DUMP_DIR", "PARAC_DUMP_CPU", "/tmp/parac_fair_dump")
+DUMP_GPU = rc.external_path(
+    "APXCHOL_PARAC_GPU_DUMP_DIR", "PARAC_DUMP_GPU", "/tmp/parac_gpu_dump")
 
 # THEIR preprocessing, run from THEIR checkout. parac_produce_upstream.jl is a
 # dispatcher in OUR repo that includes ParAC's cpu_implementation/write_graph.jl
@@ -130,8 +126,9 @@ except ImportError:
 # Laplacians — instantiate with
 #   julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').
 PRODUCE_JL = f"{ROOT}/benchmarks/parac_produce_upstream.jl"
-JULIA_PROJECT = os.environ.get(
-    "APXCHOL_PARAC_JULIA_PROJECT", f"{ROOT}/benchmarks/julia")
+JULIA_PROJECT = rc.external_path(
+    "APXCHOL_PARAC_JULIA_PROJECT", "PARAC_JULIA_PROJECT",
+    f"{ROOT}/benchmarks/julia")
 
 # OUR reimplementations, kept as the FALLBACK for an input their producer rejects.
 # These used to live untracked inside the ParAC checkout; they are our harness's

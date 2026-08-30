@@ -43,18 +43,13 @@ TIMEOUT = int(os.environ.get("CMG_TIMEOUT_S", "1800"))
 # path). /tmp is a tmpfs on this box — RAM, with a per-user quota — and the
 # giants dump multi-GB files, so point this at a disk-backed directory before
 # sweeping them, exactly as APXCHOL_BENCH_DUMP_DIR does for sweep_fair.
-DUMP_DIR = os.environ.get("APXCHOL_CMG_DUMP_DIR", "/tmp/cmg_mtx")
+DUMP_DIR = rc.external_path(
+    "APXCHOL_CMG_DUMP_DIR", "CMG_DUMP_DIR", "/tmp/cmg_mtx")
 IMAGE = "apxchol-matlab-cmg:r2026a"
 # Out-of-tree installs, mounted read-only into the container: set the environment
 # variables below, or define the same names in a gitignored benchmarks/paths_local.py.
-MATLAB = os.environ.get("APXCHOL_MATLAB_ROOT", "")        # a MATLAB R2026a install tree
-CMG_SOLVER = os.environ.get("APXCHOL_CMG_SOLVER", "")     # Koutis' cmg-solver checkout
-
-# Machine-local overrides (gitignored; assigns the path constants above by name).
-try:
-    from paths_local import *          # noqa: F401,F403
-except ImportError:
-    pass
+MATLAB = rc.external_path("APXCHOL_MATLAB_ROOT", "MATLAB")
+CMG_SOLVER = rc.external_path("APXCHOL_CMG_SOLVER", "CMG_SOLVER")
 
 PROV = {"boost": "on", "git_sha": rc.git_sha(),
         "note": "CMG (Koutis) canonical MATLAB R2026a in matlab-deps container, "

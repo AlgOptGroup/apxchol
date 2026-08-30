@@ -245,8 +245,11 @@ provided. Optional integrations are enabled only when their dependencies exist:
 | CMG | MATLAB plus a `cmg-solver` checkout |
 
 Out-of-tree paths may be provided through environment variables or the gitignored
-`benchmarks/paths_local.py` / `benchmarks/paths_local.cmake`. The runner names the
-missing variable when a requested external solver is unavailable. See
+`benchmarks/paths_local.py` / `benchmarks/paths_local.cmake`. An explicit
+environment variable always overrides the machine-local default (including an
+explicit empty value). Long campaigns can also place ParAC's intermediate dumps
+with `APXCHOL_PARAC_CPU_DUMP_DIR` / `APXCHOL_PARAC_GPU_DUMP_DIR`. The runner names
+the missing variable when a requested external solver is unavailable. See
 [runner_common.py](runner_common.py) and [parac_runner.py](parac_runner.py) for
 the authoritative names.
 

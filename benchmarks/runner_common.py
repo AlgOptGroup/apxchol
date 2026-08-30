@@ -25,6 +25,25 @@ selector_levels) import these helpers rather than carrying their own copies.
 import json, math, os, re, signal, subprocess, threading
 from pathlib import Path
 
+try:
+    import paths_local as _paths_local
+except ImportError:
+    _paths_local = None
+
+
+def external_path(env_var, local_const, default=""):
+    """Resolve an out-of-tree path with explicit campaign settings first.
+
+    ``paths_local.py`` is a convenient machine default, never an override for an
+    explicitly supplied environment variable.  Testing membership rather than
+    truthiness also lets ``ENV_VAR=`` deliberately disable a local default.
+    """
+    if env_var in os.environ:
+        return os.environ[env_var]
+    if _paths_local is not None:
+        return getattr(_paths_local, local_const, default)
+    return default
+
 # Repo root, derived from this file's location (benchmarks/runner_common.py).
 ROOT = str(Path(__file__).resolve().parents[1])
 BIN = {
@@ -778,34 +797,32 @@ class VramSampler:
 # ── ParAC (external checkout) constants ─────────────────────────────────────────
 # The CPU driver and its AMD-reorder cache live in an out-of-tree ParAC checkout:
 # set the environment variables below, or define the same names in a gitignored
-# benchmarks/paths_local.py. Unset is fine unless a ParAC cell is actually run.
-PARAC_CPU_DRIVER = os.environ.get("APXCHOL_PARAC_DRIVER", "")   # 5th arg "1" => physics/SDDM mode
+# benchmarks/paths_local.py. Explicit environment settings win. Unset is fine
+# unless a ParAC cell is actually run.
+PARAC_CPU_DRIVER = external_path("APXCHOL_PARAC_DRIVER", "PARAC_CPU_DRIVER")
+# 5th driver argument "1" => physics/SDDM mode.
 # AMD-reorder cache. Point this OUTSIDE the ParAC checkout: it is our derived data
 # (tens of GB), and that checkout is meant to stay at upstream plus the one patch
 # in benchmarks/patches/parac/.
-PARAC_REORD = os.environ.get("APXCHOL_PARAC_REORDER_DIR", "")
+PARAC_REORD = external_path("APXCHOL_PARAC_REORDER_DIR", "PARAC_REORD")
 # ParAC's OWN input producer, cpu_implementation/write_graph.jl, which the runner
 # calls (READ-ONLY, from their checkout) instead of reimplementing its
 # preprocessing — that preprocessing is charged to ParAC's setup time, so it has
 # to be their code. Empty => parac_runner derives it from PARAC_CPU_DRIVER's
 # checkout (<checkout>/experiment/driver -> <checkout>/cpu_implementation/
 # write_graph.jl); set this only when the two do not sit in the same tree.
-PARAC_WRITE_GRAPH = os.environ.get("APXCHOL_PARAC_WRITE_GRAPH", "")
+PARAC_WRITE_GRAPH = external_path("APXCHOL_PARAC_WRITE_GRAPH", "PARAC_WRITE_GRAPH")
 # Runtime library path the CPU driver needs (its MKL/compiler runtime), if any.
-PARAC_LDLIB = os.environ.get("APXCHOL_PARAC_LDLIB", os.environ.get("LD_LIBRARY_PATH", ""))
-PARAC_SORTED = os.environ.get("APXCHOL_PARAC_SORTED_DIR", "/tmp/parac_gpu_sorted")
-PARAC_GPU_DRIVER = os.environ.get(
-    "APXCHOL_PARAC_GPU_DRIVER",
+PARAC_LDLIB = external_path(
+    "APXCHOL_PARAC_LDLIB", "PARAC_LDLIB", os.environ.get("LD_LIBRARY_PATH", ""))
+PARAC_SORTED = external_path(
+    "APXCHOL_PARAC_SORTED_DIR", "PARAC_SORTED", "/tmp/parac_gpu_sorted")
+PARAC_GPU_DRIVER = external_path(
+    "APXCHOL_PARAC_GPU_DRIVER", "PARAC_GPU_DRIVER",
     f"{ROOT}/benchmarks/build-cuda/gpu_rchol_gpu_driver")
-PARAC_GPU_DRIVER_PHYS = os.environ.get(
-    "APXCHOL_PARAC_GPU_DRIVER_PHYS",
+PARAC_GPU_DRIVER_PHYS = external_path(
+    "APXCHOL_PARAC_GPU_DRIVER_PHYS", "PARAC_GPU_DRIVER_PHYS",
     f"{ROOT}/benchmarks/build-cuda/gpu_rchol_gpu_driver_physics")
-
-# Machine-local overrides (gitignored; assigns the constants above by name).
-try:
-    from paths_local import *          # noqa: F401,F403
-except ImportError:
-    pass
 
 def parac_amd_mtx(mid, family=None):
     """The cached AMD-reordered .mtx parac_runner feeds the CPU driver. Tag =
