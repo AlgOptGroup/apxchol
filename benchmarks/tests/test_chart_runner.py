@@ -247,6 +247,19 @@ class CellSchemaTest(unittest.TestCase):
             with mock.patch.object(sweep_fair, "DEVICE", "cpu"):
                 self.assertFalse(sweep_fair.cell_done("audit", "m", "amgcl", ""))
 
+    def test_accounting_stale_rules_are_device_and_solver_scoped(self):
+        def commits(solver, matrix, device):
+            return {commit for commit, _reason in stale_cells.matching_rules(
+                solver, matrix, "graph", device)}
+
+        self.assertIn("5a18d14", commits("amgcl_cuda", "com-Amazon", "gpu"))
+        self.assertNotIn("5a18d14", commits("amgcl", "com-Amazon", "cpu"))
+        self.assertIn("a4938af", commits("apxchol_v1", "com-Amazon", "cpu"))
+        self.assertIn("a4938af", commits("parac", "com-Amazon", "cpu"))
+        self.assertIn("a4938af", commits("amgcl", "as-Skitter", "cpu"))
+        self.assertNotIn("a4938af", commits("amgcl", "com-Amazon", "cpu"))
+        self.assertNotIn("a4938af", commits("cmg", "as-Skitter", "cpu"))
+
     def test_new_timeout_is_terminal_for_sweep(self):
         new = record("timeout", None, cap=60)
         with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):

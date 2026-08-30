@@ -25,6 +25,12 @@ import runner_common as rc
 
 HYPRE = {"hypre_boomeramg", "hypre_boomeramg_gpu"}
 RCHOL = {"rchol", "rchol_par"}
+PARAC = {"parac", "parac_graph", "parac_physics"}
+IN_PROCESS_SOLVERS = {"apxchol_v1", "amgcl", "amgcl_cuda", *HYPRE, *RCHOL}
+# Complete component census with the current binary, 2026-08-30: checked all 8/8
+# file-backed graph inputs plus the only file-backed Laplacian operator. Only
+# these two graph Laplacians are disconnected; generated grids are connected.
+DISCONNECTED_LAPLACIANS = {"kron_g500-logn16", "as-Skitter"}
 # Solvers that do not read the matrix from us at all: they consume the .mtx we DUMP.
 # A change to what we dump invalidates their cells even when their own code and the
 # solver-side harness are untouched, which is why they need a rule of their own --
@@ -69,18 +75,18 @@ MISSNIFFED = {"iter0020", "iter0030", "iter0040"}
 # to stay correct if one is ever produced from a pre-fix checkout.)
 OWN_RHS = {"cmg", "parac", "parac_graph", "parac_physics"}
 
-# (commit, one-line reason, predicate over (solver, matrix_id, kind))
+# (commit, one-line reason, predicate over (solver, matrix_id, kind, device))
 RULES = [
     ("6a677bd", "BoomerAMG's hierarchy was built twice inside the setup timer",
-     lambda s, m, k: s in HYPRE),
+     lambda s, m, k, d: s in HYPRE),
     ("6a677bd", "RCHOL was driven by a PCG we wrote instead of the one it ships",
-     lambda s, m, k: s in RCHOL),
+     lambda s, m, k, d: s in RCHOL),
     ("9889d01", "operator files were read through the graph reader (diagonal discarded)",
-     lambda s, m, k: k == "operator"),
+     lambda s, m, k, d: k == "operator"),
     ("3bda0c9", "the dumped .mtx these solvers consume changed (--pin-dump dropped; "
                 "external solvers ground natively). 3bda0c9 also contains 9889d01, so "
                 "requiring it covers the operator-interpretation change to the dump too",
-     lambda s, m, k: s in DUMP_CONSUMERS),
+     lambda s, m, k, d: s in DUMP_CONSUMERS),
     # This is a RE-RUN rule, not a re-grade: the same flag drives center_if_laplacian
     # inside make_rhs, so mean-centring came off the RIGHT-HAND SIDE as well as off
     # the scoring. The system solved was different (measured on iter0040: sum(b)
@@ -89,11 +95,32 @@ RULES = [
     # recover it; they have to be produced again.
     ("2c95f53", "Laplacian-vs-SDDM was sniffed from a row-sum ratio; iter0020/0030/0040 "
                 "were pinned and their RHS mean-centred as if singular",
-     lambda s, m, k: m in MISSNIFFED and s not in OWN_RHS),
+     lambda s, m, k, d: m in MISSNIFFED and s not in OWN_RHS),
     ("c915ad5", "competitor timing omitted mandatory conversion/setup/result work or "
                 "included benchmark-only validation/cleanup",
-     lambda s, m, k: s in TIMING_REPAIRED),
+     lambda s, m, k, d: s in TIMING_REPAIRED),
+    ("5a18d14", "the CUDA primary-context creation was lazily charged inside the first "
+                "GPU solver instead of reported once as shared process initialization",
+     lambda s, m, k, d: d == "gpu"),
+    ("a4938af", "apxchol's mandatory operator scan and optional M-matrix lumping were "
+                "outside its setup timer",
+     lambda s, m, k, d: s == "apxchol_v1"),
+    ("a4938af", "HYPRE_Init was omitted and disconnected-component setup/scoring was not "
+                "accounted coherently",
+     lambda s, m, k, d: s in HYPRE),
+    ("a4938af", "ParAC omitted complete producer/serialization work, used incoherent "
+                "repetition medians, or handled components through an obsolete route",
+     lambda s, m, k, d: s in PARAC),
+    ("a4938af", "disconnected Laplacian RHS projection and residual grading used one "
+                "global mean instead of one constant null vector per component",
+     lambda s, m, k, d: s in IN_PROCESS_SOLVERS and m in DISCONNECTED_LAPLACIANS),
 ]
+
+
+def matching_rules(solver, matrix_id, kind, device):
+    """Rules whose semantic scope contains one cell, independent of its git SHA."""
+    return [(commit, reason) for commit, reason, pred in RULES
+            if pred(solver, matrix_id, kind, device)]
 
 TIMEOUT_CAP_REASON = ("timeout outcome predates schema 2 and does not record the "
                       "actual wall-clock cap used")
@@ -143,7 +170,7 @@ def main():
     for p in cells:
         d = json.loads(p.read_text())
         c = d["cell"]
-        s, m = c["solver"], c["matrix_id"]
+        s, m, device = c["solver"], c["matrix_id"], c.get("device", "")
         if timeout_cap_is_stale(d):
             stale.setdefault(p, []).append(TIMEOUT_CAP_REASON)
             why[f"schema-2  {TIMEOUT_CAP_REASON}"] += 1
@@ -151,8 +178,8 @@ def main():
         if k is None:
             unknown[m] += 1
         sha = (d.get("provenance") or {}).get("git_sha", "")
-        for commit, reason, pred in RULES:
-            if pred(s, m, k) and not (sha and sha_contains(sha, commit)):
+        for commit, reason in matching_rules(s, m, k, device):
+            if not (sha and sha_contains(sha, commit)):
                 stale.setdefault(p, []).append(reason)
                 why[f"{commit}  {reason}"] += 1
 
