@@ -494,6 +494,53 @@ class DaintCampaignRendererTest(unittest.TestCase):
         self.assertIsInstance(baseline[0]["seed"], int)
         self.assertIsInstance(pivots[0]["worst_parallel_lpt"], float)
 
+    def test_scaling_validator_enforces_189_record_grid_and_timing_identity(self):
+        scaling, _baseline, _pivots = daint_campaign.load_csv_inputs(BENCH / "daint")
+        max_delta = daint_campaign.validate_scaling_records(scaling)
+        self.assertLessEqual(max_delta, daint_campaign.SCALING_TOTAL_ABS_TOL_MS)
+
+        with self.assertRaisesRegex(RuntimeError, "checked 188/189"):
+            daint_campaign.validate_scaling_records(scaling[:-1])
+
+        inconsistent = [dict(row) for row in scaling]
+        inconsistent[0]["total_ms"] += 0.01
+        with self.assertRaisesRegex(RuntimeError, r"setup\+pcg=total"):
+            daint_campaign.validate_scaling_records(inconsistent)
+
+    def test_scaling_fixture_renders_three_panel_png(self):
+        scaling, _baseline, _pivots = daint_campaign.load_csv_inputs(BENCH / "daint")
+        daint_campaign.validate_scaling_records(scaling)
+        medians = daint_campaign.scaling_medians(scaling)
+        self.assertEqual(
+            daint_campaign.SCALING_PANELS,
+            (("total_ms", "Total"), ("pcg_ms", "PCG / solve"),
+             ("setup_ms", "Setup")),
+        )
+        with tempfile.TemporaryDirectory() as output, \
+             mock.patch.object(daint_campaign.plt, "subplots",
+                               wraps=daint_campaign.plt.subplots) as subplots:
+            path = pathlib.Path(output) / "scaling.png"
+            daint_campaign.render_scaling_figure(path, medians)
+            self.assertEqual(subplots.call_args.args, (1, 3))
+            self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertGreater(path.stat().st_size, 10_000)
+
+    def test_incomplete_scaling_fails_before_rendering(self):
+        scaling, baseline, pivots = daint_campaign.load_csv_inputs(BENCH / "daint")
+        with tempfile.TemporaryDirectory() as output, \
+             mock.patch.object(daint_campaign, "load_csv_inputs",
+                               return_value=(scaling[:-1], baseline, pivots)), \
+             mock.patch.object(daint_campaign, "render_scaling_figure") as scaling_fig, \
+             mock.patch.object(daint_campaign, "render_baseline_figure") as baseline_fig, \
+             mock.patch.object(daint_campaign, "render_breakdown_figure") as breakdown_fig:
+            with self.assertRaisesRegex(RuntimeError, "checked 188/189"):
+                daint_campaign.main([
+                    "--csv-input", str(BENCH / "daint"), "--output", output,
+                ])
+        scaling_fig.assert_not_called()
+        baseline_fig.assert_not_called()
+        breakdown_fig.assert_not_called()
+
     def test_csv_reproduction_bypasses_raw_logs_and_does_not_rewrite_extracts(self):
         with tempfile.TemporaryDirectory() as output, \
              mock.patch.object(daint_campaign, "parse_scaling") as parse_scaling, \

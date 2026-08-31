@@ -44,12 +44,19 @@ Reproduce the pinned figures and summary from the committed CSV:
 python3 benchmarks/daint/render_fair_t72.py
 ```
 
-## Historical setup scaling
+## Historical scaling snapshot
 
-The earlier apxchol-only campaign is a separate, checksummed archive. Its most
-useful views are [setup scaling](figures/setup_scaling.png),
-[T=72 setup breakdown](figures/setup_t72_breakdown.png), and
-[current/historical total ratio](figures/historical_total_ratio.png). See the
+The earlier apxchol-only campaign is a separate, checksummed archive. It is an
+explicitly historical snapshot, not current-main timing. On reproduction, its
+compact [three-panel speedup figure](figures/setup_scaling.png) shows total,
+PCG/solve, and setup speedup from the complete 189/189-record scaling extract
+(9 matrices × 7 thread counts × 3 repetitions). The legacy
+`setup_scaling.png` output path is retained so existing manifests and links do
+not orphan an artifact.
+
+Separate diagnostic views remain available for the
+[T=72 setup breakdown](figures/setup_t72_breakdown.png) and the within-snapshot
+[campaign-head/July-27 total ratio](figures/historical_total_ratio.png). See the
 [numerical summary](summary.md), [scaling data](scaling.csv), and
 [historical A/B data](historical_ab.csv) for boundaries and exact values.
 

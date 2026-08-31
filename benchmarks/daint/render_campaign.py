@@ -34,8 +34,27 @@ TIMING_METRICS = (
     "pcg",
     "total",
 )
-SNAPSHOT_LABEL = "HISTORICAL SNAPSHOT · checksummed Daint setup campaign"
+SNAPSHOT_LABEL = "HISTORICAL SNAPSHOT · checksummed Daint campaign"
+SCALING_MATRICES = (
+    "G3_circuit",
+    "as-Skitter",
+    "coPapersDBLP",
+    "com-Amazon",
+    "com-LiveJournal",
+    "com-Orkut",
+    "grid_500",
+    "iter0040",
+    "kron_g500-logn16",
+)
+SCALING_THREADS = (1, 2, 4, 8, 16, 36, 72)
+SCALING_REPS = (0, 1, 2)
 SCALING_RECORDS = 189
+SCALING_TOTAL_ABS_TOL_MS = 1.5e-3
+SCALING_PANELS = (
+    ("total_ms", "Total"),
+    ("pcg_ms", "PCG / solve"),
+    ("setup_ms", "Setup"),
+)
 BASELINE_RECORDS = 162
 PIVOT_RECORDS = 18
 TIMING_PATTERNS = {
@@ -224,6 +243,71 @@ def keyed(rows: list[dict], fields: tuple[str, ...]) -> dict[tuple, dict]:
     return {tuple(row[field] for field in fields): row for row in rows}
 
 
+def validate_scaling_records(rows: list[dict]) -> float:
+    """Require the complete historical scaling grid and its timing identity.
+
+    The three timing fields are independently rounded to 0.001 ms in the
+    committed extract, so their worst possible rounding disagreement is
+    0.0015 ms.  Return the largest observed disagreement for the audit line.
+    """
+    expected = {
+        (matrix, threads, rep)
+        for matrix in SCALING_MATRICES
+        for threads in SCALING_THREADS
+        for rep in SCALING_REPS
+    }
+    if len(expected) != SCALING_RECORDS:
+        raise RuntimeError(
+            f"internal scaling denominator mismatch: {len(expected)} != "
+            f"{SCALING_RECORDS}"
+        )
+
+    try:
+        keys = [(row["matrix"], row["threads"], row["rep"]) for row in rows]
+    except KeyError as exc:
+        raise RuntimeError(f"missing scaling key column: {exc.args[0]}") from exc
+    actual = set(keys)
+    duplicates = sorted(key for key in actual if keys.count(key) > 1)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    checked = len(actual & expected)
+    if len(rows) != SCALING_RECORDS or duplicates or missing or unexpected:
+        details = [f"rows={len(rows)}", f"unique={len(actual)}"]
+        if missing:
+            details.append(f"missing={missing[:3]}" + ("..." if len(missing) > 3 else ""))
+        if duplicates:
+            details.append(
+                f"duplicates={duplicates[:3]}" + ("..." if len(duplicates) > 3 else "")
+            )
+        if unexpected:
+            details.append(
+                f"unexpected={unexpected[:3]}" + ("..." if len(unexpected) > 3 else "")
+            )
+        raise RuntimeError(
+            f"scaling coverage failed: checked {checked}/{SCALING_RECORDS}; "
+            + "; ".join(details)
+        )
+
+    max_delta = 0.0
+    for row in rows:
+        key = (row["matrix"], row["threads"], row["rep"])
+        setup = row["setup_ms"]
+        pcg = row["pcg_ms"]
+        total = row["total_ms"]
+        if not all(math.isfinite(value) and value > 0.0 for value in (setup, pcg, total)):
+            raise RuntimeError(f"non-positive or non-finite timing at {key}")
+        delta = abs((setup + pcg) - total)
+        max_delta = max(max_delta, delta)
+        if delta > SCALING_TOTAL_ABS_TOL_MS:
+            raise RuntimeError(
+                "scaling timing consistency failed after checked "
+                f"{SCALING_RECORDS}/{SCALING_RECORDS}: setup+pcg=total differs "
+                f"by {delta:.12g} ms at {key}; allowed rounding tolerance is "
+                f"{SCALING_TOTAL_ABS_TOL_MS:.4g} ms"
+            )
+    return max_delta
+
+
 def scaling_medians(rows: list[dict]) -> dict[tuple[str, int], dict[str, float]]:
     groups: dict[tuple[str, int], list[dict]] = {}
     for row in rows:
@@ -245,30 +329,92 @@ def baseline_ratio(index: dict, matrix: str, threads: int, seed: int, metric: st
 
 
 def render_scaling_figure(path: Path, medians: dict) -> None:
-    matrices = sorted({matrix for matrix, _ in medians})
-    threads = sorted({threads for _, threads in medians})
-    fig, ax = plt.subplots(figsize=(8.6, 5.0), constrained_layout=True)
-    for matrix in matrices:
-        speedup = [medians[(matrix, 1)]["setup_ms"] / medians[(matrix, t)]["setup_ms"]
-                   for t in threads]
-        ax.plot(threads, speedup, marker="o", linewidth=1.2, alpha=0.55, label=matrix)
-    overall = [
-        geomean(medians[(matrix, 1)]["setup_ms"] / medians[(matrix, t)]["setup_ms"]
-                for matrix in matrices)
-        for t in threads
-    ]
-    ax.plot(threads, overall, color="black", marker="o", linewidth=2.8,
-            label="geomean")
-    ax.plot(threads, threads, color="0.7", linestyle="--", linewidth=1,
-            label="ideal")
-    ax.set_xscale("log", base=2)
-    ax.set_yscale("log", base=2)
-    ax.set_xticks(threads, [str(t) for t in threads])
-    ax.set_xlabel("OpenMP threads within one 72-core NUMA domain")
-    ax.set_ylabel("setup speedup over T=1")
-    ax.set_title(f"apxchol setup scaling on Daint\n{SNAPSHOT_LABEL}")
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend(ncol=2, fontsize=8)
+    matrices = list(SCALING_MATRICES)
+    threads = list(SCALING_THREADS)
+    colors = plt.get_cmap("tab10").colors
+    fig, axes = plt.subplots(
+        1, len(SCALING_PANELS), figsize=(13.2, 5.2), sharex=True, sharey=True
+    )
+    legend_handles = []
+    for panel, (ax, (metric, title)) in enumerate(zip(axes, SCALING_PANELS)):
+        for index, matrix in enumerate(matrices):
+            speedup = [
+                medians[(matrix, 1)][metric] / medians[(matrix, thread)][metric]
+                for thread in threads
+            ]
+            line, = ax.plot(
+                threads,
+                speedup,
+                color=colors[index],
+                marker="o",
+                markersize=3.2,
+                linewidth=1.15,
+                alpha=0.62,
+                label=matrix,
+            )
+            if panel == 0:
+                legend_handles.append(line)
+        overall = [
+            geomean(
+                medians[(matrix, 1)][metric] / medians[(matrix, thread)][metric]
+                for matrix in matrices
+            )
+            for thread in threads
+        ]
+        geomean_line, = ax.plot(
+            threads,
+            overall,
+            color="black",
+            marker="o",
+            markersize=4.2,
+            linewidth=2.6,
+            label="geomean",
+            zorder=5,
+        )
+        ideal_line, = ax.plot(
+            threads,
+            threads,
+            color="0.62",
+            linestyle="--",
+            linewidth=1.1,
+            label="ideal",
+            zorder=0,
+        )
+        if panel == 0:
+            legend_handles.extend((geomean_line, ideal_line))
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log", base=2)
+        ax.set_xticks(threads, [str(thread) for thread in threads])
+        ax.set_ylim(0.5, 96)
+        ax.set_title(f"({chr(ord('a') + panel)}) {title}", fontsize=11)
+        ax.grid(True, which="both", alpha=0.25)
+
+    axes[0].set_ylabel("speedup over T=1")
+    axes[0].set_yticks(
+        (0.5, 1, 2, 4, 8, 16, 32, 64),
+        ("0.5×", "1×", "2×", "4×", "8×", "16×", "32×", "64×"),
+    )
+    fig.suptitle(f"apxchol scaling on Daint\n{SNAPSHOT_LABEL}", fontsize=14, y=0.98)
+    fig.supxlabel("OpenMP threads within one 72-core NUMA domain", y=0.205)
+    fig.text(
+        0.5,
+        0.155,
+        f"checked {SCALING_RECORDS}/{SCALING_RECORDS} timing records · "
+        f"{len(SCALING_MATRICES)} matrices × {len(SCALING_THREADS)} thread counts × "
+        f"{len(SCALING_REPS)} reps · medians of 3 · setup + PCG = total validated",
+        ha="center",
+        fontsize=8.5,
+        color="0.25",
+    )
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.015),
+        ncol=6,
+        fontsize=7.7,
+        frameon=False,
+    )
+    fig.subplots_adjust(left=0.065, right=0.992, top=0.78, bottom=0.28, wspace=0.12)
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
@@ -293,8 +439,8 @@ def render_baseline_figure(path: Path, rows: list[dict]) -> None:
     ax.bar([v + width / 2 for v in x], values[72], width, label="T=72")
     ax.axhline(1.0, color="black", linewidth=1)
     ax.set_xticks(x, labels, rotation=32, ha="right")
-    ax.set_ylabel("current / July-27 total time (lower is better)")
-    ax.set_title(f"Cumulative single-RHS improvement on Daint\n{SNAPSHOT_LABEL}")
+    ax.set_ylabel("campaign head / July-27 total time (lower is better)")
+    ax.set_title(f"Within-snapshot single-RHS improvement on Daint\n{SNAPSHOT_LABEL}")
     ax.grid(True, axis="y", alpha=0.25)
     ax.legend()
     fig.savefig(path, dpi=180)
@@ -335,9 +481,9 @@ def write_summary(path: Path, scaling: list[dict], baseline: list[dict], pivots:
         "",
         "Both campaigns used one Daint node split into four NUMA-local 72-core ranks. "
         "Times are milliseconds; scaling cells are medians of three repetitions. "
-        "Historical ratios bracket each current run by two executions of the old binary.",
+        "Historical ratios bracket each campaign-head run by two executions of the old binary.",
         "",
-        "## Cumulative July-27 to current comparison",
+        "## Within-snapshot July-27 to campaign-head comparison",
         "",
         "| threads | setup ratio | PCG ratio | total ratio | RSS ratio | factor nnz ratio | iteration delta |",
         "|---:|---:|---:|---:|---:|---:|---:|",
@@ -360,10 +506,10 @@ def write_summary(path: Path, scaling: list[dict], baseline: list[dict], pivots:
         )
     lines += [
         "",
-        "Ratios are current divided by the geometric mean of the old-before/old-after bracket; "
+        "Ratios are campaign head divided by the geometric mean of the old-before/old-after bracket; "
         "below one is better. The iteration delta is summed over 27 matrix/seed cells.",
         "",
-        "## Current setup scaling",
+        "## Historical snapshot scaling",
         "",
         "`partition phase` includes degree pruning, IS selection, and collection; it is not "
         "the pure selector timing.",
@@ -449,7 +595,7 @@ def write_summary(path: Path, scaling: list[dict], baseline: list[dict], pivots:
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scaling", type=Path,
-                        help="completed current-scaling campaign results directory")
+                        help="completed historical scaling campaign results directory")
     parser.add_argument("--baseline", type=Path,
                         help="completed historical A/B campaign results directory")
     parser.add_argument("--csv-input", type=Path,
@@ -467,15 +613,25 @@ def main(argv=None) -> None:
     print(f"{SNAPSHOT_LABEL}: {mode}, outside the unified cell store",
           file=sys.stderr)
 
-    args.output.mkdir(parents=True, exist_ok=True)
-    figures = args.output / "figures"
-    figures.mkdir(exist_ok=True)
     if args.csv_input:
         scaling, baseline, pivots = load_csv_inputs(args.csv_input)
     else:
         scaling = parse_scaling(args.scaling)
         baseline = parse_baseline(args.baseline)
         pivots, regions = parse_structure(args.scaling)
+
+    max_total_delta = validate_scaling_records(scaling)
+    print(
+        f"scaling audit: checked {len(scaling)}/{SCALING_RECORDS}; "
+        "9 matrices x 7 thread counts x 3 reps; "
+        f"max |setup+pcg-total|={max_total_delta:.12g} ms",
+        file=sys.stderr,
+    )
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    figures = args.output / "figures"
+    figures.mkdir(exist_ok=True)
+    if not args.csv_input:
         write_csv(args.output / "scaling.csv", scaling)
         write_csv(args.output / "historical_ab.csv", baseline)
         write_csv(args.output / "pivot_summary.csv", pivots)
