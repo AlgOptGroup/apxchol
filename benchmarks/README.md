@@ -146,6 +146,8 @@ To inspect semantic invalidation without deleting anything:
 python3 benchmarks/stale_cells.py
 ```
 
-`python3 benchmarks/stale_cells.py --delete` removes only invalidated cells and
-is recoverable from Git. Add a stale-cell rule whenever a change alters the
-operator, RHS, timing boundary, convergence semantics, or solver result.
+`sweep_fair.py` uses the same stale predicate: reusable terminal cells skip, and
+invalidated terminal cells rerun while their old JSON remains in place until a
+replacement is ready. `stale_cells.py --delete` is optional cleanup, recoverable
+from Git. Add a stale-cell rule whenever a change alters the operator, RHS,
+timing boundary, convergence semantics, or solver result.

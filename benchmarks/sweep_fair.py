@@ -2,9 +2,9 @@
 """Single fair runner for ALL matrix families (grids + SuiteSparse + IPM), on
 either device (--device cpu | gpu). Both write the SAME per-cell JSON store
 (results/cells/<family>/<mid>__<solver>__<cfg>__t16__<device>.json) and are
-RESUME-SAFE: a cell that already has a terminal status is skipped, so re-running
-only fills empty cells. fair_charts.py / gpu_charts.py / combined_charts.py all
-read this one store.
+RESUME-SAFE: a reusable terminal cell is skipped, while a terminal cell invalidated
+by the current stale rules is re-run and replaced only after its runner finishes.
+fair_charts.py / gpu_charts.py / combined_charts.py all read this one store.
 
 Every matrix DECLARES how it is to be read (runner_common: kind=graph|operator),
 and the binary requires that declaration on the command line — nothing here
@@ -46,9 +46,10 @@ CSV parse, VRAM sidecar) lives in runner_common.py. Schema-2 timeout cells persi
 the exact wall-clock cap as `timeout_cap_s`; the charting pipeline never reconstructs
 that lower bound from later timings.
 """
-import argparse, json, os, re, shlex, shutil, subprocess, sys, time
+import argparse, contextlib, json, os, re, shlex, shutil, subprocess, sys, time
 
 import runner_common as rc
+import stale_cells
 import parac_runner
 import cmg_matlab_runner
 from runner_common import BIN, CELLS, matrix_args, sh
@@ -530,33 +531,77 @@ def planned_cell_count(matrices, device):
         total += 1 if RUN_CMG else 0
     return total
 
-def cell_done(family, mid, solver, config):
-    path = rc.cell_path(family, mid, solver, config, THREADS, DEVICE)
+def _stored_cell(family, mid, solver, config, threads, device):
+    """Load the cell at one exact key, rejecting malformed/mismatched records."""
+    path = rc.cell_path(family, mid, solver, config, threads, device)
     try:
         with open(path) as handle:
             cell = json.load(handle)
     except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(cell, dict) or not isinstance(cell.get("cell"), dict):
+        return None
+    expected = {
+        "family": family,
+        "matrix_id": mid,
+        "solver": solver,
+        "config": config,
+        "threads": threads,
+        "device": device,
+    }
+    if any(cell["cell"].get(key) != value for key, value in expected.items()):
+        return None
+    return cell
+
+
+def stored_cell_done(family, mid, solver, config, threads, device,
+                     terminal=rc.DEFAULT_TERMINAL, *, rerun_timeouts=False):
+    """Whether one stored cell is terminal, well-formed, and still reusable."""
+    cell = _stored_cell(family, mid, solver, config, threads, device)
+    if cell is None:
         return False
     st = cell.get("status")
     # --no-cap: a previously CLAMPED 'timeout' cell is NOT terminal -- re-run it
     # uncapped for an honest wall time. complete/oom/failed stay terminal (no point).
-    if NO_CAP and st == "timeout": return False
-    # Schema-1 timeout cells do not say which cap was actually used. They cannot
-    # support an honest lower bound and are deliberately resumed, not trusted.
-    if st == "timeout" and rc.timeout_cap(cell) is None:
+    if rerun_timeouts and st == "timeout":
         return False
-    return st in ("complete","not_converged","failed","timeout","oom")
+    if st not in terminal:
+        return False
+    return not stale_cells.cell_is_stale(cell)
+
+
+def cell_done(family, mid, solver, config):
+    return stored_cell_done(
+        family, mid, solver, config, THREADS, DEVICE,
+        terminal=rc.DEFAULT_TERMINAL, rerun_timeouts=NO_CAP,
+    )
+
+
+@contextlib.contextmanager
+def _stale_aware_embedded_resume():
+    """Give direct-emitting embedded runners the same stale-aware done check.
+
+    ParAC and CMG call ``runner_common.cell_done`` internally. Patch that read-only
+    decision only while a fair sweep is running, and always restore it afterward;
+    importing this module therefore changes no shared runner state.
+    """
+    original = rc.cell_done
+    rc.cell_done = stored_cell_done
+    try:
+        yield
+    finally:
+        rc.cell_done = original
 
 def cell_metrics(family, mid, solver, config):
     """(status, metrics) from an existing cell, or (None, None)."""
-    path = rc.cell_path(family, mid, solver, config, THREADS, DEVICE)
-    try:
-        c = json.load(open(path)); return c.get("status"), c.get("metrics")
-    except: return None, None
+    cell = _stored_cell(family, mid, solver, config, THREADS, DEVICE)
+    return ((cell.get("status"), cell.get("metrics"))
+            if cell is not None else (None, None))
 
 def step(family, mid, solver, config, runner, label, timeout_cap_s=TIMEOUT):
     """Run one cell. `runner` returns (status, metrics) or, when it has something
-    to say about the cell, (status, metrics, extra_meta)."""
+    to say about the cell, (status, metrics, extra_meta). Existing stale data is
+    left untouched until that return, then replaced by ``emit`` below."""
     if cell_done(family, mid, solver, config):
         print(f"   {label:24} (skip, done)")
         return cell_metrics(family, mid, solver, config)   # so resume can still read apxchol's time
@@ -574,14 +619,11 @@ def gpu_apx_total(family, mid):
     This is intentionally one fixed configuration, not the fastest selector in the
     store. None means the CPU pass must fall back to the same declared default on
     its own device."""
-    path = rc.cell_path(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG, THREADS, "gpu")
-    try:
-        with open(path) as handle:
-            c = json.load(handle)
-        if c.get("status") == "complete":
-            return c.get("metrics", {}).get("total_s")
-    except (OSError, json.JSONDecodeError):
-        pass
+    cell = _stored_cell(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG,
+                        THREADS, "gpu")
+    if (cell is not None and cell.get("status") == "complete"
+            and not stale_cells.cell_is_stale(cell)):
+        return cell.get("metrics", {}).get("total_s")
     return None
 
 def do_matrix(mid, family, source, spec, is2d, n, reg):
@@ -672,7 +714,9 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
 
 def main():
     global DEVICE, APX, JULIA, COMP, THREADS, REPS, CELLS
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Run or resume the fair benchmark sweep; reusable terminal cells "
+                    "skip, while stale terminal cells are replaced after their rerun.")
     ap.add_argument("--device", choices=["cpu","gpu"], default="cpu",
                     help="cpu (build/) or gpu (build-cuda/, apxchol GPU-resident PCG)")
     ap.add_argument("--threads", type=int, default=THREADS,
@@ -753,7 +797,8 @@ def main():
         sys.exit(f"GPU build not found: {BIN['gpu']} (configure with -DAPXCHOL_USE_CUDA=ON)")
     PROV["note"] = f"FAIR {DEVICE} run, singular L, multi-component Dirichlet pin (per-solver grounding)"
     print(f"=== fair sweep: device={DEVICE}, families={sorted(fams)}, "
-          f"headline_only={a.headline_only}, store={CELLS} (resume-safe) ===", flush=True)
+          f"headline_only={a.headline_only}, store={CELLS} "
+          f"(stale-aware resume) ===", flush=True)
     print(f"    external solvers: parac={'on' if RUN_PARAC else 'off'} "
           f"ac/ac2={'on' if JULIA else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)
     if not JULIA:
@@ -764,15 +809,17 @@ def main():
     if not RUN_CMG and DEVICE == "cpu":
         print("    NOTE: CMG is OFF -> its cells stay empty. Fill them with "
               "`python3 benchmarks/cmg_matlab_runner.py`.", flush=True)
-    # Resume-safe: cells with a terminal status are skipped (see cell_done).
+    # Resume-safe: reusable terminal cells skip; stale terminal cells rerun while
+    # their old JSON stays in place until the replacement runner has finished.
     # MATRICES is the canonical, named registry view; do not unpack the backing
     # GRIDS/SS/IPM tuples here, because their positional schemas can evolve.
     selected = list(selected_matrices(fams, only))
     print(f"    planned denominator: {planned_cell_count(selected, DEVICE)} cells "
           f"across {len(selected)} matrices", flush=True)
-    for mid, matrix in selected:
-        do_matrix(mid, matrix["family"], matrix["source"], matrix["spec"],
-                  matrix["is2d"], matrix["n"], None)
+    with _stale_aware_embedded_resume():
+        for mid, matrix in selected:
+            do_matrix(mid, matrix["family"], matrix["source"], matrix["spec"],
+                      matrix["is2d"], matrix["n"], None)
     print("FAIR sweep done")
 
 if __name__=="__main__":

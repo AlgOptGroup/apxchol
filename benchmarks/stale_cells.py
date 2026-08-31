@@ -2,12 +2,15 @@
 """Which stored cells a code change invalidated -- so a re-sweep refills only those.
 
 Every cell records the `git_sha` it was produced at (see PROV in sweep_fair.py), and
-the sweep is resume-safe: a cell with a terminal status is skipped. Those two facts
-together are the whole mechanism for a limited re-run:
+the sweep is resume-safe. Together they let the fair sweep perform a limited,
+non-destructive re-run:
 
     python3 benchmarks/stale_cells.py            # report, change nothing
-    python3 benchmarks/stale_cells.py --delete   # drop the stale cells
-    python3 benchmarks/sweep_fair.py ...         # refills exactly the gaps
+    python3 benchmarks/sweep_fair.py ...         # replaces stale cells as runs finish
+
+``--delete`` remains an optional, recoverable cleanup tool. It is not required
+before a fair sweep: the runner uses the predicate in this module and leaves an
+old cell in place until its replacement run has returned.
 
 A cell is stale when a rule below applies to it AND the commit that rule names is
 NOT an ancestor of the cell's git_sha -- i.e. the cell was produced before the fix.
@@ -18,10 +21,12 @@ and safer than remembering by hand.
 
 The report always states the denominator first: total cells, then the filter.
 """
-import argparse, collections, json, pathlib, subprocess, sys
+import argparse, collections, functools, json, pathlib, subprocess, sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import runner_common as rc
+try:
+    from . import runner_common as rc
+except ImportError:  # Executed as ``python3 benchmarks/stale_cells.py``.
+    import runner_common as rc
 
 HYPRE = {"hypre_boomeramg", "hypre_boomeramg_gpu"}
 RCHOL = {"rchol", "rchol_par"}
@@ -141,24 +146,70 @@ def kind_of_matrix():
     return {mid: rc.kind_of(mid) for mid in rc.MATRICES}
 
 
+@functools.cache
+def sha_contains(sha, commit):
+    """Whether the recorded revision contains one stale-rule fix.
+
+    Missing and unknown revisions fail closed: a scoped record is reusable only
+    when Git can prove that it contains the required semantic change.
+    """
+    if not sha:
+        return False
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, sha],
+        cwd=rc.ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def stale_reasons(cell, *, sha_contains_fn=None, kinds=None):
+    """Return every current invalidation rule matched by one stored cell.
+
+    The result is ``(rule, reason)`` pairs so reporting and resume decisions use
+    exactly the same predicate. ``sha_contains_fn`` is injectable for tests and
+    other read-only consumers; production defaults to the cached Git query above.
+    """
+    if not isinstance(cell, dict):
+        return ()
+    check = sha_contains if sha_contains_fn is None else sha_contains_fn
+    reasons = []
+    if timeout_cap_is_stale(cell):
+        reasons.append(("schema-2", TIMEOUT_CAP_REASON))
+
+    identity = cell.get("cell")
+    if not isinstance(identity, dict):
+        return tuple(reasons)
+    solver = identity.get("solver", "")
+    matrix_id = identity.get("matrix_id", "")
+    device = identity.get("device", "")
+    matrix_meta = cell.get("matrix_meta")
+    kind = matrix_meta.get("kind") if isinstance(matrix_meta, dict) else None
+    if kind is None:
+        registered = kind_of_matrix() if kinds is None else kinds
+        kind = registered.get(matrix_id)
+    provenance = cell.get("provenance")
+    sha = provenance.get("git_sha", "") if isinstance(provenance, dict) else ""
+    for commit, reason in matching_rules(solver, matrix_id, kind, device):
+        if not check(sha, commit):
+            reasons.append((commit, reason))
+    return tuple(reasons)
+
+
+def cell_is_stale(cell, *, sha_contains_fn=None, kinds=None):
+    """Authoritative stale predicate shared by reporting and fair-sweep resume."""
+    return bool(stale_reasons(cell, sha_contains_fn=sha_contains_fn, kinds=kinds))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--store", default="results/cells", help="cell store to examine")
     ap.add_argument("--delete", action="store_true",
-                    help="remove the stale cells (they are in git; restore with git checkout)")
+                    help="optionally remove stale cells (not needed before sweep_fair.py; "
+                         "tracked cells are recoverable from Git)")
     args = ap.parse_args()
-
-    contains = {}
-
-    def sha_contains(sha, commit):
-        """True if `commit` is an ancestor of `sha` -- the cell already has the fix."""
-        key = (sha, commit)
-        if key not in contains:
-            contains[key] = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", commit, sha],
-                capture_output=True).returncode == 0
-        return contains[key]
 
     kind = kind_of_matrix()
     cells = sorted(pathlib.Path(args.store).rglob("*.json"))
@@ -170,18 +221,13 @@ def main():
     for p in cells:
         d = json.loads(p.read_text())
         c = d["cell"]
-        s, m, device = c["solver"], c["matrix_id"], c.get("device", "")
-        if timeout_cap_is_stale(d):
-            stale.setdefault(p, []).append(TIMEOUT_CAP_REASON)
-            why[f"schema-2  {TIMEOUT_CAP_REASON}"] += 1
+        m = c["matrix_id"]
         k = (d.get("matrix_meta") or {}).get("kind") or kind.get(m)
         if k is None:
             unknown[m] += 1
-        sha = (d.get("provenance") or {}).get("git_sha", "")
-        for commit, reason in matching_rules(s, m, k, device):
-            if not (sha and sha_contains(sha, commit)):
-                stale.setdefault(p, []).append(reason)
-                why[f"{commit}  {reason}"] += 1
+        for rule, reason in stale_reasons(d, kinds=kind):
+            stale.setdefault(p, []).append(reason)
+            why[f"{rule}  {reason}"] += 1
 
     n = len(cells)
     print(f"store {args.store}: {n} cells total")

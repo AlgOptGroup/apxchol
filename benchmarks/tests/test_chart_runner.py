@@ -388,7 +388,7 @@ class CapReferenceTest(unittest.TestCase):
     def test_gpu_cap_reference_uses_declared_default_not_fastest_selector(self):
         with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):
             base = dict(family="audit", mid="m", solver="apxchol_v1", status="complete",
-                        threads=16, device="gpu", prov={})
+                        threads=16, device="gpu", prov={"git_sha": rc.git_sha()})
             rc.emit_cell(config=sweep_fair.APX_DEFAULT_CONFIG,
                          metrics={"total_s": 10.0}, **base)
             rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0}, **base)
@@ -400,7 +400,7 @@ class CapReferenceTest(unittest.TestCase):
              mock.patch.object(sweep_fair, "THREADS", 72):
             rc.emit_cell("audit", "m", "apxchol_v1",
                          sweep_fair.APX_DEFAULT_CONFIG, "complete",
-                         {"total_s": 7.2}, 72, "gpu", {})
+                         {"total_s": 7.2}, 72, "gpu", {"git_sha": rc.git_sha()})
             self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 7.2)
 
 
