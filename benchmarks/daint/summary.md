@@ -1,5 +1,7 @@
 # Daint campaign summary
 
+> **HISTORICAL SNAPSHOT · checksummed Daint setup campaign.** This renderer consumes committed extracts from fixed, checksummed raw-log campaigns rather than the current unified cell store.
+
 Both campaigns used one Daint node split into four NUMA-local 72-core ranks. Times are milliseconds; scaling cells are medians of three repetitions. Historical ratios bracket each current run by two executions of the old binary.
 
 ## Cumulative July-27 to current comparison
@@ -25,7 +27,7 @@ Ratios are current divided by the geometric mean of the old-before/old-after bra
 | 36 | 4.934x | 8.404x | 15.633x | 3.040x | 3.165x | 2.859x |
 | 72 | 5.387x | 9.649x | 18.022x | 3.732x | 3.224x | 3.272x |
 
-At T=72 the whole partition phase reaches 9.649x because pruning reaches 18.022x; pure IS selection reaches only 3.732x. The selector is nevertheless a median 8.1% of setup, versus 45.7% for elimination. Elimination is 41.9-60.0% of setup on all nine matrices and its 3.224x geomean speedup is the main remaining scaling limit.
+At T=72 the whole partition phase reaches 9.649x because pruning reaches 18.022x; pure IS selection reaches only 3.732x. The selector is nevertheless a median 8.1% of setup, versus 45.7% for elimination. Elimination is 41.9%-60.0% of setup on all nine matrices and its 3.224x geomean speedup is the main remaining scaling limit.
 
 ## Structural probe verdict
 

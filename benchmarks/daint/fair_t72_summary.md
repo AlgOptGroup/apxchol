@@ -1,5 +1,7 @@
 # Daint T=72 fair-solver campaign
 
+> **HISTORICAL SNAPSHOT · source 2b755997.** This reproduces a pinned campaign; it is not a current-main benchmark view.
+
 The combined campaign contains **750/750 planned cells** over 27 matrices: **670 complete**, **7 not converged**, **35 timeout**, **7 failed**, **31 n/a**. Every completed cell has true relative residual at most `9.936114e-09`.
 
 Times are medians of three full setup+solve repetitions at T=72. The CPU/GPU ratio below is CPU time divided by GPU time, so values above one favor the GPU.
