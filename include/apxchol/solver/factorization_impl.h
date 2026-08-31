@@ -20,6 +20,7 @@
 #endif
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cassert>
 #include <cmath>
@@ -263,6 +264,71 @@ struct work_distribution {
     double lpt_efficiency = 1.0;
 };
 
+// Round-local state for the compile-time cooperative-pivot probe. The outer
+// OpenMP loop still owns whole pivots. Only after every pivot has STARTED (so
+// helper work cannot perturb dynamic pivot ownership) may an owner expose
+// deterministic GKS source ranges to team members that have no pivot in flight.
+struct cooperative_pivot_round {
+    cooperative_pivot_round(size_t pivot_count, size_t team_size,
+                            size_t round_work)
+        : pivots(pivot_count), threads(team_size),
+          target_work(team_size == 0 ? 0 :
+              round_work / team_size + (round_work % team_size != 0)),
+          owner_work(team_size, 0) {}
+
+    std::atomic<size_t> started{0};
+    std::atomic<size_t> active_owners{0};
+    std::atomic<size_t> assisted_pivots{0};
+    std::atomic<size_t> sample_sources{0};
+    std::atomic<size_t> sample_tasks{0};
+    std::atomic<size_t> max_helpers{0};
+    size_t pivots;
+    size_t threads;
+    size_t target_work;
+    std::vector<size_t> owner_work;
+
+    size_t add_owner_work(size_t work) {
+#ifdef _OPENMP
+        const size_t tid = static_cast<size_t>(omp_get_thread_num());
+#else
+        const size_t tid = 0;
+#endif
+        assert(tid < owner_work.size());
+        owner_work[tid] += work;
+        return owner_work[tid];
+    }
+
+    void record_assist(size_t sources, size_t tasks, size_t helpers) {
+        assisted_pivots.fetch_add(1, std::memory_order_relaxed);
+        sample_sources.fetch_add(sources, std::memory_order_relaxed);
+        sample_tasks.fetch_add(tasks, std::memory_order_relaxed);
+        size_t observed = max_helpers.load(std::memory_order_relaxed);
+        while (observed < helpers &&
+               !max_helpers.compare_exchange_weak(
+                   observed, helpers, std::memory_order_relaxed)) {}
+    }
+};
+
+#if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE)
+inline constexpr bool kCooperativePivotsProbeBuild = true;
+#else
+inline constexpr bool kCooperativePivotsProbeBuild = false;
+#endif
+
+struct cooperative_pivot_owner {
+    explicit cooperative_pivot_owner(cooperative_pivot_round* round)
+        : round(round) {
+        if (!round) return;
+        round->active_owners.fetch_add(1, std::memory_order_relaxed);
+        round->started.fetch_add(1, std::memory_order_release);
+    }
+    ~cooperative_pivot_owner() {
+        if (round)
+            round->active_owners.fetch_sub(1, std::memory_order_release);
+    }
+    cooperative_pivot_round* round;
+};
+
 // Diagnostic-only lower bound on how well independent work items could occupy
 // a fixed team. LPT is deterministic and cheap enough for opt-in traces; the
 // production scheduler does not call this routine.
@@ -409,7 +475,9 @@ void process_vertex(const Eliminator& elim,
                     factor_col& col,
                     factorize_workspace::per_thread& ws,
                     bool dedup_inline = false,
-                    std::span<node_index> degree_decrements = {}) {
+                    std::span<node_index> degree_decrements = {},
+                    cooperative_pivot_round* cooperative = nullptr) {
+    cooperative_pivot_owner owner(cooperative);
     auto& nbrs       = ws.neighbors;
     auto& excess_out = ws.excess_buffer;
     col.entries = nullptr;
@@ -490,6 +558,8 @@ void process_vertex(const Eliminator& elim,
 
     assert(degree_decrements.empty() ||
            decrement_pos == degree_decrements.size());
+    const size_t owner_work = cooperative
+        ? cooperative->add_owner_work(nbrs.size()) : 0;
     if (nbrs.empty()) {
         double d = G.excess(v);
         col.vertex = v;
@@ -525,8 +595,47 @@ void process_vertex(const Eliminator& elim,
     // count and schedule.
     const std::uint64_t vseed =
         run_seed ^ ((std::uint64_t(v) + 1) * 0x9E3779B97F4A7C15ULL);
-    elim.sample_clique(std::span<weighted_neighbor>(nbrs), total_deg, vseed,
-                       edge_emitter(ws.edge_buffer));
+    if constexpr (std::is_same_v<std::remove_cvref_t<Eliminator>,
+                                 tree_elimination>) {
+#if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE) && defined(_OPENMP)
+        const bool exact_clique = elim.exact_clique_max_degree > 0 &&
+                                  nbrs.size() <= elim.exact_clique_max_degree;
+        if (cooperative && !exact_clique) {
+            const auto plan = prepare_tree_sample(
+                std::span<weighted_neighbor>(nbrs), total_deg, ws.tree_sample);
+            const bool all_started = cooperative->started.load(
+                std::memory_order_acquire) == cooperative->pivots;
+            const size_t owners = cooperative->active_owners.load(
+                std::memory_order_acquire);
+            const size_t helpers = owners < cooperative->threads
+                ? cooperative->threads - owners : 0;
+            const size_t sources = nbrs.size() > 1 ? nbrs.size() - 1 : 0;
+            const size_t participants = helpers + 1;
+            // Do not create more participants than independent source draws.
+            // This is a saturation condition derived from the ready work and
+            // idle team capacity, not an absolute degree/graph-size cutoff.
+            const bool owner_overloaded = cooperative->target_work != 0 &&
+                owner_work > cooperative->target_work;
+            if (all_started && owner_overloaded && helpers != 0 &&
+                sources >= participants &&
+                plan.every_source_draws) {
+                const size_t tasks = emit_prepared_tree_sample_tasks(
+                    plan, vseed, ws.edge_buffer, participants);
+                cooperative->record_assist(sources, tasks, helpers);
+            } else {
+                emit_prepared_tree_sample(
+                    plan, vseed, edge_emitter(ws.edge_buffer));
+            }
+        } else
+#endif
+        {
+            elim.sample_clique(std::span<weighted_neighbor>(nbrs), total_deg,
+                               vseed, edge_emitter(ws.edge_buffer));
+        }
+    } else {
+        elim.sample_clique(std::span<weighted_neighbor>(nbrs), total_deg, vseed,
+                           edge_emitter(ws.edge_buffer));
+    }
 }
 
 template<typename Eliminator, incidence_storage Incidence>
@@ -539,7 +648,9 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                    checkpoint* cp = nullptr,
                                    bool capture_gpu_topology = false,
                                    size_t work_hint = 0,
-                                   std::vector<node_index>* live_degrees = nullptr) {
+                                   std::vector<node_index>* live_degrees = nullptr,
+                                   bool enable_cooperative =
+                                       kCooperativePivotsProbeBuild) {
     const size_t n_verts = part.num_vertices();
     // n_verts > 0 guaranteed by the dispatcher; early-exit not needed here.
     // The final column array is reserved to n before any round. Grow it once
@@ -597,6 +708,22 @@ void eliminate_partition_singleton(const Eliminator& elim,
     const int team_threads = static_cast<int>(elimination_round_team_size(
         n_verts, work_hint, opts.omp_threshold, ws.threads.size()));
     const bool parallel_round = team_threads > 1;
+#if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE)
+    // Existing traces show the material LPT collapse when a work-sized team
+    // has at most one more whole pivot than workers (for example 8 pivots on 7
+    // workers). In that occupancy regime an owner can receive the sole extra
+    // pivot while peers become idle. This exact queue-shape boundary keeps the
+    // per-pivot atomics out of broad, already-balanced rounds.
+    std::unique_ptr<cooperative_pivot_round> cooperative_storage;
+    if (enable_cooperative && work_hint != 0 &&
+        n_verts <= static_cast<size_t>(team_threads) + 1) {
+        cooperative_storage = std::make_unique<cooperative_pivot_round>(
+            n_verts, static_cast<size_t>(team_threads), work_hint);
+    }
+    cooperative_pivot_round* cooperative = cooperative_storage.get();
+#else
+    cooperative_pivot_round* cooperative = nullptr;
+#endif
     if (parallel_round) {
         // Large independent sets amortize dynamic scheduling with coarse
         // chunks. Dense-small rounds enter this path because their adjacency
@@ -631,7 +758,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
                                    /*dedup_inline=*/true,
-                                   {});
+                                   {}, cooperative);
                 // implicit barrier — edge_buffers populated before prefix-sum
 
                 // Single thread does prefix-sum + pool reservation.
@@ -722,7 +849,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
                                    /*dedup_inline=*/true,
-                                   decrement_slice(k));
+                                   decrement_slice(k), cooperative);
                 // implicit barrier — edge_buffers populated before pre-pass
 
                 if (live_degrees) {
@@ -940,7 +1067,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
                                    /*dedup_inline=*/true,
-                                   {});
+                                   {}, cooperative);
             }
             if (cp) { (*cp)("merge_is"); (*cp)("compute"); }
 
@@ -985,6 +1112,20 @@ void eliminate_partition_singleton(const Eliminator& elim,
         }
         if (cp) { (*cp)("merge_is"); (*cp)("compute"); }
     }
+#if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE)
+    if (cooperative && std::getenv("APXCHOL_ROUND_TRACE") &&
+        cooperative->assisted_pivots.load(std::memory_order_relaxed) != 0) {
+        std::fprintf(stderr,
+            "[cooperative-pivot] round=%llu pivots=%zu team=%d "
+            "assisted=%zu sample_sources=%zu tasks=%zu max_helpers=%zu\n",
+            static_cast<unsigned long long>(ws.round_index), n_verts,
+            team_threads,
+            cooperative->assisted_pivots.load(std::memory_order_relaxed),
+            cooperative->sample_sources.load(std::memory_order_relaxed),
+            cooperative->sample_tasks.load(std::memory_order_relaxed),
+            cooperative->max_helpers.load(std::memory_order_relaxed));
+    }
+#endif
     // NOTE: no cp->ascend() here — the dispatcher (eliminate_partition) owns the
     // descend/ascend bracket around both the singleton and multi paths.
 }

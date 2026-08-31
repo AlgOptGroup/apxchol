@@ -108,6 +108,72 @@ TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
     }
 }
 
+#if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE) && defined(_OPENMP)
+TEST(CooperativePivot, SharedNeighborRoundProducesExactFactorBytes) {
+    constexpr apxchol::node_index small_degree = 64;
+    constexpr apxchol::node_index large_degree = 512;
+    constexpr apxchol::node_index first_neighbor = 3;
+    constexpr apxchol::node_index n = first_neighbor + large_degree;
+    apxchol::graph<apxchol::directed_vec_pool_incidence> initial(n);
+    for (apxchol::node_index i = 0; i < small_degree; ++i) {
+        const auto u = first_neighbor + i;
+        initial.add_edge(0, u, 1.0 + 0.001 * i);
+        initial.add_edge(1, u, 1.5 + 0.001 * i);
+    }
+    for (apxchol::node_index i = 0; i < large_degree; ++i)
+        initial.add_edge(2, first_neighbor + i, 2.0 + 0.001 * i);
+
+    const apxchol::partition_result part{{0, 1, 2}};
+    apxchol::factor_options opts;
+    opts.seed = 0x12345678;
+    opts.omp_threshold = 0;  // exactly two workers for three selected pivots
+
+    auto run = [&](bool cooperative) {
+        auto graph = initial;
+        apxchol::factorize_workspace workspace;
+        workspace.threads.resize(2);
+        for (auto& thread : workspace.threads) {
+            thread.factor_entries =
+                std::make_unique<std::pmr::monotonic_buffer_resource>();
+        }
+        std::vector<apxchol::detail::factor_col> columns;
+        columns.reserve(n);
+        workspace.reset_for_round();
+        apxchol::detail::eliminate_partition_singleton(
+            apxchol::tree_elimination{}, graph, part, columns, workspace, opts,
+            nullptr, false,
+            2 * static_cast<size_t>(small_degree) + large_degree,
+            nullptr, cooperative);
+
+        std::vector<apxchol::node_index> active;
+        active.reserve(large_degree);
+        for (apxchol::node_index u = first_neighbor; u < n; ++u)
+            active.push_back(u);
+        apxchol::detail::eliminate_remaining(
+            apxchol::tree_elimination{}, graph, active, columns, workspace, opts);
+        EXPECT_EQ(columns.size(), static_cast<size_t>(n));
+
+        apxchol::factorization result;
+        apxchol::detail::build_csc(result, columns, n, nullptr);
+        return result;
+    };
+
+    const auto baseline = run(false);
+    const auto candidate = run(true);
+    ASSERT_EQ(candidate.perm, baseline.perm);
+    ASSERT_EQ(candidate.L.nonZeros(), baseline.L.nonZeros());
+    EXPECT_EQ(std::memcmp(candidate.L.outerIndexPtr(), baseline.L.outerIndexPtr(),
+                          (static_cast<size_t>(n) + 1) *
+                              sizeof(apxchol::edge_index)), 0);
+    EXPECT_EQ(std::memcmp(candidate.L.innerIndexPtr(), baseline.L.innerIndexPtr(),
+                          static_cast<size_t>(baseline.L.nonZeros()) *
+                              sizeof(apxchol::node_index)), 0);
+    EXPECT_EQ(std::memcmp(candidate.L.valuePtr(), baseline.L.valuePtr(),
+                          static_cast<size_t>(baseline.L.nonZeros()) *
+                              sizeof(apxchol::factor_value_t)), 0);
+}
+#endif
+
 // Convert the owned sparse_csc factor to an Eigen::SparseMatrix for tests
 // (the library no longer stores Eigen factors).
 static Eigen::SparseMatrix<double> factor_to_eigen(const apxchol::sparse_csc& L) {

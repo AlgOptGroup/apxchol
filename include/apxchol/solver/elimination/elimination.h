@@ -69,6 +69,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
@@ -114,10 +115,11 @@ private:
 /// per-elimination seed, then draw.  Cheap (a few arithmetic ops per draw,
 /// no large state) and deterministic at any thread count.  splitmix64 core.
 struct random_stream {
+    static constexpr std::uint64_t increment = 0x9E3779B97F4A7C15ULL;
     std::uint64_t state;
 
     std::uint64_t next() {
-        std::uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
+        std::uint64_t z = (state += increment);
         z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
         z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
         return z ^ (z >> 31);
@@ -155,6 +157,22 @@ callable_eliminator<std::decay_t<F>> as_eliminator(F&& fn) {
 }
 
 namespace detail {
+
+struct tree_sample_workspace {
+    std::vector<double> prefix;
+    std::vector<size_t> inverse_cdf;
+};
+
+struct tree_sample_plan {
+    std::span<weighted_neighbor> neighbors;
+    std::span<const double> prefix;
+    std::span<const size_t> inverse_cdf;
+    double deg = 0.0;
+    double bucket_scale = 0.0;
+    size_t bucket_count = 0;
+    bool use_buckets = false;
+    bool every_source_draws = true;
+};
 
 /// Reproduce the canonical (weight, vertex) order with a stable weight radix
 /// followed by a vertex sort inside each equal-weight run.  Comparison sort
@@ -227,6 +245,152 @@ inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
     return true;
 }
 
+inline tree_sample_plan prepare_tree_sample(
+        std::span<weighted_neighbor> neighbors, double deg,
+        tree_sample_workspace& workspace) {
+    if (!radix_sort_neighbors(neighbors)) {
+        std::sort(neighbors.begin(), neighbors.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.weight != b.weight ? a.weight < b.weight
+                                                  : a.vertex < b.vertex;
+                  });
+    }
+
+    const size_t d = neighbors.size();
+    workspace.prefix.resize(d);
+    if (d != 0) {
+        workspace.prefix[0] = neighbors[0].weight;
+        for (size_t i = 1; i < d; ++i)
+            workspace.prefix[i] = workspace.prefix[i - 1] + neighbors[i].weight;
+    }
+
+    tree_sample_plan plan{
+        .neighbors = neighbors,
+        .prefix = workspace.prefix,
+        .inverse_cdf = {},
+        .deg = deg,
+    };
+    if (d < 2) return plan;
+
+    // A coarse inverse-CDF directory narrows each exact upper_bound to one
+    // cumulative-mass bucket. The final search and RNG are unchanged.
+    constexpr size_t kDirectoryMinDegree = 512;
+    plan.use_buckets = d >= kDirectoryMinDegree &&
+                       std::isfinite(plan.prefix.back()) &&
+                       plan.prefix.back() > 0.0;
+    if (plan.use_buckets) {
+        plan.bucket_count = std::min<size_t>(65'536, d / 8);
+        workspace.inverse_cdf.resize(plan.bucket_count + 1);
+        plan.bucket_scale = static_cast<double>(plan.bucket_count) /
+                            plan.prefix.back();
+        auto bucket_of = [&](double value) {
+            const double scaled = value * plan.bucket_scale;
+            if (!(scaled > 0.0)) return size_t{0};
+            return std::min(plan.bucket_count - 1,
+                            static_cast<size_t>(scaled));
+        };
+        size_t pos = 0;
+        workspace.inverse_cdf[0] = 0;
+        for (size_t bucket = 1; bucket < plan.bucket_count; ++bucket) {
+            while (pos < d && bucket_of(plan.prefix[pos]) < bucket) ++pos;
+            workspace.inverse_cdf[bucket] = pos;
+        }
+        workspace.inverse_cdf[plan.bucket_count] = d;
+        plan.inverse_cdf = workspace.inverse_cdf;
+    }
+
+    for (size_t i = 0; i + 1 < d; ++i) {
+        if (!(plan.prefix.back() - plan.prefix[i] > 0.0)) {
+            plan.every_source_draws = false;
+            break;
+        }
+    }
+    return plan;
+}
+
+inline deferred_edge sample_tree_source(const tree_sample_plan& plan,
+                                        size_t i, double unit_random) {
+    const size_t d = plan.neighbors.size();
+    assert(i + 1 < d);
+    const double suffix_sum = plan.prefix.back() - plan.prefix[i];
+    assert(suffix_sum > 0.0);
+    const double target = plan.prefix[i] + unit_random * suffix_sum;
+
+    auto first = plan.prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1;
+    auto last = plan.prefix.end();
+    if (plan.use_buckets) {
+        const double scaled = target * plan.bucket_scale;
+        const size_t bucket = !(scaled > 0.0) ? 0 :
+            std::min(plan.bucket_count - 1, static_cast<size_t>(scaled));
+        first = plan.prefix.begin() + static_cast<std::ptrdiff_t>(
+            std::max(i + 1, plan.inverse_cdf[bucket]));
+        last = plan.prefix.begin() + static_cast<std::ptrdiff_t>(
+            plan.inverse_cdf[bucket + 1]);
+    }
+    auto it = std::upper_bound(first, last, target);
+    size_t j = static_cast<size_t>(it - plan.prefix.begin());
+    if (j >= d) j = d - 1;
+
+    return {
+        plan.neighbors[i].vertex,
+        plan.neighbors[j].vertex,
+        plan.neighbors[i].weight * suffix_sum / plan.deg,
+    };
+}
+
+inline void emit_prepared_tree_sample(const tree_sample_plan& plan,
+                                      std::uint64_t seed,
+                                      edge_emitter out) {
+    random_stream rs{seed};
+    for (size_t i = 0; i + 1 < plan.neighbors.size(); ++i) {
+        const double suffix_sum = plan.prefix.back() - plan.prefix[i];
+        if (suffix_sum <= 0.0) continue;
+        out(sample_tree_source(plan, i, rs.next_unit()));
+    }
+}
+
+// Split only the independent source draws of one already-prepared GKS sample.
+// The caller owns `buffer`, has resized it once, and waits for this taskgroup
+// before allowing either the plan or buffer to move.  Source i writes slot i,
+// and its splitmix state is jumped to exactly the state reached by i serial
+// calls, so task execution order cannot change one bit of the emitted sequence.
+// Returns the number of task ranges created.
+inline size_t emit_prepared_tree_sample_tasks(
+        const tree_sample_plan& plan, std::uint64_t seed,
+        std::vector<deferred_edge>& buffer, size_t workers) {
+    const size_t sources = plan.neighbors.size() - 1;
+    assert(sources > 0);
+    assert(plan.every_source_draws);
+    const size_t task_count = std::min(workers, sources);
+    const size_t chunk = (sources + task_count - 1) / task_count;
+    const size_t base = buffer.size();
+    buffer.resize(base + sources);
+
+#ifdef _OPENMP
+    const tree_sample_plan* plan_ptr = &plan;
+    auto* buffer_ptr = &buffer;
+#pragma omp taskgroup
+    {
+        for (size_t begin = 0; begin < sources; begin += chunk) {
+            const size_t end = std::min(sources, begin + chunk);
+#pragma omp task firstprivate(plan_ptr, buffer_ptr, base, begin, end, seed)
+            {
+                random_stream rs{
+                    seed + begin * random_stream::increment};
+                for (size_t i = begin; i < end; ++i)
+                    (*buffer_ptr)[base + i] = sample_tree_source(
+                        *plan_ptr, i, rs.next_unit());
+            }
+        }
+    }
+#else
+    random_stream rs{seed};
+    for (size_t i = 0; i < sources; ++i)
+        buffer[base + i] = sample_tree_source(plan, i, rs.next_unit());
+#endif
+    return (sources + chunk - 1) / chunk;
+}
+
 } // namespace detail
 
 /// Tree elimination: spanning tree of the clique (CliqueTreeSample).
@@ -289,81 +453,14 @@ struct tree_elimination {
             return;
         }
 
-        // Canonical order for the suffix sampler (see the header comment).
-        // Vertex id breaks weight ties so the order — and therefore the
-        // sampling — does not depend on the schedule-dependent arrival order.
-        if (!detail::radix_sort_neighbors(neighbors)) {
-            std::sort(neighbors.begin(), neighbors.end(),
-                      [](const auto& a, const auto& b) {
-                          return a.weight != b.weight ? a.weight < b.weight
-                                                      : a.vertex < b.vertex;
-                      });
-        }
+        // Canonical order, exact prefix sums and the inverse-CDF directory.
+        // The workspace is retained per thread exactly as the two old local
+        // vectors were; prepare_tree_sample is also the internal seam used by
+        // the cooperative experiment.
+        static thread_local detail::tree_sample_workspace workspace;
+        const auto plan = detail::prepare_tree_sample(neighbors, deg, workspace);
 
-        // Prefix sums of the sorted weights; per-thread reusable buffer.
-        static thread_local std::vector<double> prefix;
-        prefix.resize(d);
-        prefix[0] = neighbors[0].weight;
-        for (size_t i = 1; i < d; ++i)
-            prefix[i] = prefix[i - 1] + neighbors[i].weight;
-
-        random_stream rs{seed};
-        // A coarse inverse-CDF directory narrows each exact upper_bound to one
-        // cumulative-mass bucket. The final search and RNG are unchanged, so
-        // emitted edges remain byte-identical. Building the directory loses on
-        // small cliques; degree 512 is the conservative end-to-end validated
-        // cutoff on both x86-64 and Grace.
-        static thread_local std::vector<size_t> inverse_cdf;
-        constexpr size_t kDirectoryMinDegree = 512;
-        const bool use_buckets = d >= kDirectoryMinDegree &&
-                                 std::isfinite(prefix.back()) &&
-                                 prefix.back() > 0.0;
-        size_t bucket_count = 0;
-        double bucket_scale = 0.0;
-        if (use_buckets) {
-            bucket_count = std::min<size_t>(65'536, d / 8);
-            inverse_cdf.resize(bucket_count + 1);
-            bucket_scale = static_cast<double>(bucket_count) / prefix.back();
-            auto bucket_of = [&](double value) {
-                const double scaled = value * bucket_scale;
-                if (!(scaled > 0.0)) return size_t{0};
-                return std::min(bucket_count - 1,
-                                static_cast<size_t>(scaled));
-            };
-            size_t pos = 0;
-            inverse_cdf[0] = 0;
-            for (size_t bucket = 1; bucket < bucket_count; ++bucket) {
-                while (pos < d && bucket_of(prefix[pos]) < bucket) ++pos;
-                inverse_cdf[bucket] = pos;
-            }
-            inverse_cdf[bucket_count] = d;
-        }
-        for (size_t i = 0; i + 1 < d; ++i) {
-            const double suffix_sum = prefix.back() - prefix[i];
-            if (suffix_sum <= 0.0) continue;
-
-            const double r = rs.next_unit() * suffix_sum;
-
-            const double target = prefix[i] + r;
-            auto first = prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1;
-            auto last = prefix.end();
-            if (use_buckets) {
-                const double scaled = target * bucket_scale;
-                const size_t bucket = !(scaled > 0.0) ? 0 :
-                    std::min(bucket_count - 1, static_cast<size_t>(scaled));
-                first = prefix.begin() + static_cast<std::ptrdiff_t>(
-                    std::max(i + 1, inverse_cdf[bucket]));
-                last = prefix.begin() + static_cast<std::ptrdiff_t>(
-                    inverse_cdf[bucket + 1]);
-            }
-            auto it = std::upper_bound(first, last, target);
-
-            size_t j = static_cast<size_t>(it - prefix.begin());
-            if (j >= d) j = d - 1;
-
-            out(neighbors[i].vertex, neighbors[j].vertex,
-                neighbors[i].weight * suffix_sum / deg);
-        }
+        detail::emit_prepared_tree_sample(plan, seed, out);
     }
 };
 

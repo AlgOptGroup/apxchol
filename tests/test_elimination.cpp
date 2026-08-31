@@ -115,6 +115,59 @@ TEST(TreeSampler, InverseCdfDirectoryMatchesIndependentFullSearch) {
     }
 }
 
+TEST(TreeSampler, CooperativeSourceRangesAreByteIdentical) {
+    for (const node_index degree : {
+            node_index{17}, node_index{512}, node_index{2049}}) {
+        for (int shape = 0; shape < 3; ++shape) {
+            std::vector<weighted_neighbor> input;
+            input.reserve(degree);
+            double sum = 0.0;
+            for (node_index i = 0; i < degree; ++i) {
+                double weight = 1.0;
+                if (shape == 1)
+                    weight = 0.125 * static_cast<double>(1 + (i * 37) % 29);
+                else if (shape == 2)
+                    weight = i + 4 >= degree
+                        ? 1.0 + static_cast<double>(i)
+                        : 1e-12 * static_cast<double>(1 + (i % 7));
+                input.push_back({degree - 1 - i, weight});
+                sum += weight;
+            }
+
+            for (const std::uint64_t seed : {
+                    std::uint64_t{0}, std::uint64_t{42},
+                    std::uint64_t{0x123456789abcdef0ULL}}) {
+                const auto expected = reference_tree_sample(input, sum, seed);
+                auto cooperative_input = input;
+                detail::tree_sample_workspace workspace;
+                const auto plan = detail::prepare_tree_sample(
+                    cooperative_input, sum, workspace);
+                ASSERT_TRUE(plan.every_source_draws);
+                std::vector<deferred_edge> actual;
+                size_t task_count = 0;
+#ifdef _OPENMP
+#pragma omp parallel num_threads(4)
+                {
+#pragma omp single
+                    task_count = detail::emit_prepared_tree_sample_tasks(
+                        plan, seed, actual, 4);
+                }
+#else
+                task_count = detail::emit_prepared_tree_sample_tasks(
+                    plan, seed, actual, 4);
+#endif
+                EXPECT_GT(task_count, 1u);
+                ASSERT_EQ(actual.size(), expected.size());
+                for (size_t i = 0; i < expected.size(); ++i) {
+                    EXPECT_EQ(actual[i].u, expected[i].u);
+                    EXPECT_EQ(actual[i].v, expected[i].v);
+                    EXPECT_DOUBLE_EQ(actual[i].w, expected[i].w);
+                }
+            }
+        }
+    }
+}
+
 TEST(TreeSampler, AcceleratedCanonicalOrderMatchesComparator) {
     const auto canonical_less = [](const auto& a, const auto& b) {
         return a.weight != b.weight ? a.weight < b.weight
