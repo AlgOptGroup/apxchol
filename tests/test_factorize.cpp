@@ -139,11 +139,13 @@ TEST(CooperativePivot, SharedNeighborRoundProducesExactFactorBytes) {
         std::vector<apxchol::detail::factor_col> columns;
         columns.reserve(n);
         workspace.reset_for_round();
+        // Deliberately exceed the unique-neighbor count: production's team
+        // work hint counts raw live incidences, which can include parallel
+        // occurrences. Cooperative load balancing must normalize the 640
+        // gathered neighbors, not this 8192-incidence team-sizing hint.
         apxchol::detail::eliminate_partition_singleton(
             apxchol::tree_elimination{}, graph, part, columns, workspace, opts,
-            nullptr, false,
-            2 * static_cast<size_t>(small_degree) + large_degree,
-            nullptr, cooperative);
+            nullptr, false, 8192, nullptr, cooperative);
 
         std::vector<apxchol::node_index> active;
         active.reserve(large_degree);
@@ -159,7 +161,26 @@ TEST(CooperativePivot, SharedNeighborRoundProducesExactFactorBytes) {
     };
 
     const auto baseline = run(false);
+    struct trace_guard {
+        std::string saved;
+        bool had = false;
+        trace_guard() {
+            if (const char* old = std::getenv("APXCHOL_ROUND_TRACE")) {
+                saved = old;
+                had = true;
+            }
+            setenv("APXCHOL_ROUND_TRACE", "1", 1);
+        }
+        ~trace_guard() {
+            if (had) setenv("APXCHOL_ROUND_TRACE", saved.c_str(), 1);
+            else unsetenv("APXCHOL_ROUND_TRACE");
+        }
+    } trace_env;
+    testing::internal::CaptureStderr();
     const auto candidate = run(true);
+    const std::string trace = testing::internal::GetCapturedStderr();
+    EXPECT_NE(trace.find("[cooperative-pivot]"), std::string::npos)
+        << "the equality test must exercise the cooperative source tasks";
     ASSERT_EQ(candidate.perm, baseline.perm);
     ASSERT_EQ(candidate.L.nonZeros(), baseline.L.nonZeros());
     EXPECT_EQ(std::memcmp(candidate.L.outerIndexPtr(), baseline.L.outerIndexPtr(),
