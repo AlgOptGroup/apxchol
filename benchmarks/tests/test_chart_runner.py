@@ -13,6 +13,8 @@ sys.path.insert(0, str(BENCH))
 import fair_charts as cpu  # noqa: E402
 import chart_cells  # noqa: E402
 import combined_charts as combined  # noqa: E402
+sys.path.insert(0, str(BENCH / "daint"))
+import render_campaign as daint_campaign  # noqa: E402
 import fill_chart  # noqa: E402
 import fill_pass  # noqa: E402
 import gpu_charts as gpu  # noqa: E402
@@ -128,6 +130,14 @@ class SeriesRuleTest(unittest.TestCase):
         self.assertEqual(combined._terminal_marker("failed"), "failed")
         self.assertIsNone(combined._terminal_marker("complete"))
         self.assertIsNone(combined._terminal_marker(None))
+
+    def test_nonmemory_heatmaps_retain_all_na_rows_but_missing_rows_stay_blank(self):
+        absent = dict(vals=[float("nan")], is_mem=False, timeouts=[False],
+                      oom=[False], failed=[False], nconv=[False], na=[False])
+        self.assertFalse(combined._keep_heatmap_row(**absent))
+        self.assertTrue(combined._keep_heatmap_row(**dict(absent, na=[True])))
+        self.assertFalse(combined._keep_heatmap_row(
+            **dict(absent, is_mem=True, na=[True])))
 
 
 class CurrentChartCellTest(unittest.TestCase):
@@ -395,6 +405,20 @@ class CapReferenceTest(unittest.TestCase):
 
 
 class FairSweepSelectionTest(unittest.TestCase):
+    def test_full_fair_plan_denominator_includes_indexed_gpu_bg_ablation(self):
+        selected = list(sweep_fair.selected_matrices(
+            {"grids", "suitesparse", "ipm"}))
+        self.assertEqual(sweep_fair.APX_GPU[0],
+                         ("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG))
+        self.assertIn(("apxchol_v1", "bg+tree[vec_pool]"), sweep_fair.APX_GPU[1:])
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 615)
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 243)
+        self.assertEqual(
+            sweep_fair.planned_cell_count(selected, "cpu")
+            + sweep_fair.planned_cell_count(selected, "gpu"),
+            858,
+        )
+
     def test_orkut_size_gate_always_keeps_declared_default(self):
         configs = [
             ("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG),
@@ -457,6 +481,40 @@ class JuliaPreflightTest(unittest.TestCase):
             ready, reason = sweep_fair.julia_preflight()
         self.assertFalse(ready)
         self.assertIn("root cause", reason)
+
+
+class DaintCampaignRendererTest(unittest.TestCase):
+    def test_committed_csv_extracts_are_typed_reproduction_inputs(self):
+        scaling, baseline, pivots = daint_campaign.load_csv_inputs(BENCH / "daint")
+        self.assertEqual(len(scaling), daint_campaign.SCALING_RECORDS)
+        self.assertEqual(len(baseline), daint_campaign.BASELINE_RECORDS)
+        self.assertEqual(len(pivots), daint_campaign.PIVOT_RECORDS)
+        self.assertIsInstance(scaling[0]["threads"], int)
+        self.assertIsInstance(scaling[0]["setup_ms"], float)
+        self.assertIsInstance(baseline[0]["seed"], int)
+        self.assertIsInstance(pivots[0]["worst_parallel_lpt"], float)
+
+    def test_csv_reproduction_bypasses_raw_logs_and_does_not_rewrite_extracts(self):
+        with tempfile.TemporaryDirectory() as output, \
+             mock.patch.object(daint_campaign, "parse_scaling") as parse_scaling, \
+             mock.patch.object(daint_campaign, "parse_baseline") as parse_baseline, \
+             mock.patch.object(daint_campaign, "parse_structure") as parse_structure, \
+             mock.patch.object(daint_campaign, "write_csv") as write_csv, \
+             mock.patch.object(daint_campaign, "render_scaling_figure") as scaling_fig, \
+             mock.patch.object(daint_campaign, "render_baseline_figure") as baseline_fig, \
+             mock.patch.object(daint_campaign, "render_breakdown_figure") as breakdown_fig, \
+             mock.patch.object(daint_campaign, "write_summary") as write_summary:
+            daint_campaign.main([
+                "--csv-input", str(BENCH / "daint"), "--output", output,
+            ])
+        parse_scaling.assert_not_called()
+        parse_baseline.assert_not_called()
+        parse_structure.assert_not_called()
+        write_csv.assert_not_called()
+        scaling_fig.assert_called_once()
+        baseline_fig.assert_called_once()
+        breakdown_fig.assert_called_once()
+        write_summary.assert_called_once()
 
 
 if __name__ == "__main__":

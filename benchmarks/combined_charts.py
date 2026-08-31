@@ -315,6 +315,21 @@ def _terminal_marker(status):
     """
     return status if status in ("timeout", "oom", "failed", "not_converged", "n/a") else None
 
+
+def _keep_heatmap_row(vals, *, is_mem, timeouts, oom, failed, nconv, na):
+    """Keep informative rows while reserving blank cells for missing data.
+
+    Memory views require an actual measurement or OOM outcome.  Other views
+    retain every explicit terminal outcome, including rows that are entirely
+    structurally inapplicable (``n/a``).
+    """
+    measured = any(np.isfinite(value) for value in vals)
+    if is_mem:
+        return measured or any(oom)
+    return (measured or any(timeouts) or any(oom) or any(failed)
+            or any(nconv) or any(na))
+
+
 def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mats=None,
                      goutcomes=None, thread_label="t16"):
     """solver x matrix 'who wins where' heatmap for ONE metric (total / setup / solve /
@@ -362,9 +377,9 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
             # info (no value, no OOM -- e.g. ParAC's never-recorded solve-held RSS, all
             # cells Timeout) is noise -> dropped. OOM counts as info (it IS a memory
             # outcome). Time/iters heatmaps keep the old any-marker condition.
-            keep = (any(np.isfinite(x) for x in vals) or any(oomf)) if is_mem else \
-                   (any(np.isfinite(x) for x in vals) or any(tmo) or any(oomf)
-                    or any(failf) or any(nconvf))
+            keep = _keep_heatmap_row(
+                vals, is_mem=is_mem, timeouts=tmo, oom=oomf, failed=failf,
+                nconv=nconvf, na=naf)
             if keep:
                 rows_data.append((f"{name} (CPU)" if mode == "combined" else name,
                                   vals, tmo, tcaps, oomf, failf, nconvf, naf, "cpu"))
@@ -380,9 +395,9 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
                 oomf.append(marker == "oom"); failf.append(marker == "failed")
                 nconvf.append(marker == "not_converged"); naf.append(marker == "n/a")
             # same row gate as the CPU branch: memory rows need real memory info.
-            keep = (any(np.isfinite(x) for x in vals) or any(oomf)) if is_mem else \
-                   (any(np.isfinite(x) for x in vals) or any(tmo) or any(oomf)
-                    or any(failf) or any(nconvf))
+            keep = _keep_heatmap_row(
+                vals, is_mem=is_mem, timeouts=tmo, oom=oomf, failed=failf,
+                nconv=nconvf, na=naf)
             if keep:
                 gpu_tag = "GPU solve" if name.startswith("apxchol/") else "GPU"
                 rows_data.append((f"{name} ({gpu_tag})" if mode == "combined" else name,

@@ -2,10 +2,12 @@
 """Collect SpTRSV level counts per (IS selector, matrix) at vec_pool, then plot a
 selector x matrix heatmap of the back-solve level count. The level count is the
 direct explainer for the selector x graph timing: a deep elimination tree (many
-SpTRSV levels) makes the triangular solve slow, so root's blow-up on dense social
-graphs shows up here as a high level count. Runs the bench with APXCHOL_LEVEL_DUMP=1
+SpTRSV levels) makes the triangular solve slow, so a selector's depth blow-up on
+dense social graphs shows up here as a high level count. Runs the bench with
+APXCHOL_LEVEL_DUMP=1
 maxiter=1 (factorize + dump only, no PCG) for each selector. CPU-heavy on the
-giants; run from repo root. Writes results/selector_levels.csv + the heatmap.
+giants; run from the repository top-level directory. Writes
+results/selector_levels.csv + the heatmap.
 """
 import csv, os, re, subprocess, sys
 from pathlib import Path

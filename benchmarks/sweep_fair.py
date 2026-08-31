@@ -500,9 +500,35 @@ NOCAP_TIMEOUT = int(os.environ.get("NOCAP_TIMEOUT_S", str(4 * 3600)))
 # is 2D-structured-grid only (added per-matrix in do_matrix). amgcl_cuda's host-side
 # AMG setup is now OpenMP-parallel (CMakeLists -Xcompiler=-fopenmp fix).
 APX_GPU = [("apxchol_v1", APX_DEFAULT_CONFIG),
+           # Storage-matched selector ablation.  The AoS default above remains
+           # the sole headline/cap reference; this indexed bg cell only closes
+           # the {bg,greedy,bk} x vec_pool GPU comparison.
+           ("apxchol_v1","bg+tree[vec_pool]"),
            ("apxchol_v1","greedy+tree[vec_pool]"), # priority-greedy is shallow and deterministic
            ("apxchol_v1","bk+tree[vec_pool]")]      # bg's variable depth; bk is the deep worst case
 COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda"]
+
+
+def planned_cell_count(matrices, device):
+    """Return the exact cell denominator for the selected fair-sweep axis."""
+    matrices = list(matrices)
+    if PARAC_ONLY:
+        return 2 * len(matrices)
+    if device == "gpu":
+        per_matrix = len(APX_GPU) + len(COMP_GPU)
+        per_matrix += int("hypre_boomeramg_gpu" in COMP_GPU)  # cut variant
+        per_matrix += 2 if RUN_PARAC else 0
+        return per_matrix * len(matrices)
+    if device != "cpu":
+        raise ValueError(f"unknown device: {device}")
+    total = 0
+    for mid, _matrix in matrices:
+        total += len(cpu_apx_configs_for(mid)) + len(COMP)
+        total += int("hypre_boomeramg" in COMP)  # cut variant
+        total += len(JULIA)
+        total += 2 if RUN_PARAC else 0
+        total += 1 if RUN_CMG else 0
+    return total
 
 def cell_done(family, mid, solver, config):
     path = rc.cell_path(family, mid, solver, config, THREADS, DEVICE)
@@ -656,8 +682,8 @@ def main():
     ap.add_argument("--store", default=CELLS,
                     help="cell-store directory (default: results/cells)")
     ap.add_argument("--headline-only", action="store_true",
-                    help="run only the headline AoS config and 2 indexed IS-selector "
-                         "ablations (best eliminator for the comparison charts); skip the "
+                    help="run only the headline AoS config and indexed IS-selector "
+                         "ablations; skip the "
                          "vec/fwd_star/bstr storage-ablation configs. Use for new large "
                          "matrices that only feed the comparison charts, not the ablation.")
     ap.add_argument("--no-rchol", action="store_true",
@@ -741,7 +767,10 @@ def main():
     # Resume-safe: cells with a terminal status are skipped (see cell_done).
     # MATRICES is the canonical, named registry view; do not unpack the backing
     # GRIDS/SS/IPM tuples here, because their positional schemas can evolve.
-    for mid, matrix in selected_matrices(fams, only):
+    selected = list(selected_matrices(fams, only))
+    print(f"    planned denominator: {planned_cell_count(selected, DEVICE)} cells "
+          f"across {len(selected)} matrices", flush=True)
+    for mid, matrix in selected:
         do_matrix(mid, matrix["family"], matrix["source"], matrix["spec"],
                   matrix["is2d"], matrix["n"], None)
     print("FAIR sweep done")

@@ -35,6 +35,9 @@ TIMING_METRICS = (
     "total",
 )
 SNAPSHOT_LABEL = "HISTORICAL SNAPSHOT · checksummed Daint setup campaign"
+SCALING_RECORDS = 189
+BASELINE_RECORDS = 162
+PIVOT_RECORDS = 18
 TIMING_PATTERNS = {
     name: re.compile(rf"^\s*{re.escape(name)}\s+([0-9.]+) ms", re.MULTILINE)
     for name in TIMING_METRICS
@@ -81,6 +84,52 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def read_csv(path: Path, *, expected: int, int_fields=(), float_fields=()) -> list[dict]:
+    """Read a committed campaign extract and restore its numeric field types."""
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = set(reader.fieldnames or ())
+        required = set(int_fields) | set(float_fields)
+        missing = sorted(required - fields)
+        if missing:
+            raise RuntimeError(f"missing columns in {path}: {', '.join(missing)}")
+        rows = list(reader)
+    if len(rows) != expected:
+        raise RuntimeError(f"expected {expected} records in {path}, got {len(rows)}")
+    try:
+        for row in rows:
+            for field in int_fields:
+                row[field] = int(row[field])
+            for field in float_fields:
+                row[field] = float(row[field])
+    except ValueError as exc:
+        raise RuntimeError(f"invalid numeric value in {path}: {exc}") from exc
+    return rows
+
+
+def load_csv_inputs(root: Path) -> tuple[list[dict], list[dict], list[dict]]:
+    """Load the committed extracts needed to reproduce figures and summary."""
+    timing_fields = tuple(f"{name}_ms" for name in TIMING_METRICS)
+    scaling = read_csv(
+        root / "scaling.csv", expected=SCALING_RECORDS,
+        int_fields=("threads", "rep", "factor_nnz", "iterations", "max_rss_kb"),
+        float_fields=(*timing_fields, "residual"),
+    )
+    baseline = read_csv(
+        root / "historical_ab.csv", expected=BASELINE_RECORDS,
+        int_fields=("threads", "seed", "factor_nnz", "iterations", "max_rss_kb"),
+        float_fields=(*timing_fields, "residual"),
+    )
+    pivots = read_csv(
+        root / "pivot_summary.csv", expected=PIVOT_RECORDS,
+        int_fields=("threads", "rounds", "total_sort_work", "max_pivot_degree",
+                    "max_pivot_sort_work"),
+        float_fields=("team1_sort_fraction", "imbalanced_sort_fraction",
+                      "worst_parallel_lpt"),
+    )
+    return scaling, baseline, pivots
+
+
 def parse_scaling(root: Path) -> list[dict]:
     rows = []
     for path in sorted(root.glob("timing/*/t*/rep*/run.log")):
@@ -91,8 +140,8 @@ def parse_scaling(root: Path) -> list[dict]:
             "rep": int(rep_dir[3:]),
             **parse_log(path),
         })
-    if len(rows) != 189:
-        raise RuntimeError(f"expected 189 scaling records, got {len(rows)}")
+    if len(rows) != SCALING_RECORDS:
+        raise RuntimeError(f"expected {SCALING_RECORDS} scaling records, got {len(rows)}")
     return rows
 
 
@@ -107,8 +156,8 @@ def parse_baseline(root: Path) -> list[dict]:
             "arm": arm,
             **parse_log(path),
         })
-    if len(rows) != 162:
-        raise RuntimeError(f"expected 162 baseline records, got {len(rows)}")
+    if len(rows) != BASELINE_RECORDS:
+        raise RuntimeError(f"expected {BASELINE_RECORDS} baseline records, got {len(rows)}")
     return rows
 
 
@@ -116,8 +165,8 @@ def parse_structure(root: Path) -> tuple[list[dict], list[dict]]:
     pivot_summary = []
     region_rows = []
     paths = sorted(root.glob("structure/*/t*/run.log"))
-    if len(paths) != 18:
-        raise RuntimeError(f"expected 18 structure records, got {len(paths)}")
+    if len(paths) != PIVOT_RECORDS:
+        raise RuntimeError(f"expected {PIVOT_RECORDS} structure records, got {len(paths)}")
     for path in paths:
         matrix, thread_dir = path.parts[-3:-1]
         threads = int(thread_dir[1:])
@@ -281,8 +330,8 @@ def write_summary(path: Path, scaling: list[dict], baseline: list[dict], pivots:
     lines = [
         "# Daint campaign summary",
         "",
-        f"> **{SNAPSHOT_LABEL}.** This renderer consumes fixed, checksummed raw-log "
-        "campaigns rather than the current unified cell store.",
+        f"> **{SNAPSHOT_LABEL}.** This renderer consumes committed extracts from "
+        "fixed, checksummed raw-log campaigns rather than the current unified cell store.",
         "",
         "Both campaigns used one Daint node split into four NUMA-local 72-core ranks. "
         "Times are milliseconds; scaling cells are medians of three repetitions. "
@@ -397,28 +446,40 @@ def write_summary(path: Path, scaling: list[dict], baseline: list[dict], pivots:
     path.write_text("\n".join(lines) + "\n")
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scaling", type=Path, required=True,
+    parser.add_argument("--scaling", type=Path,
                         help="completed current-scaling campaign results directory")
-    parser.add_argument("--baseline", type=Path, required=True,
+    parser.add_argument("--baseline", type=Path,
                         help="completed historical A/B campaign results directory")
+    parser.add_argument("--csv-input", type=Path,
+                        help="directory containing committed scaling.csv, "
+                             "historical_ab.csv, and pivot_summary.csv extracts")
     parser.add_argument("--output", type=Path, default=Path(__file__).parent)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    print(f"{SNAPSHOT_LABEL}: raw-log renderer, outside the unified cell store",
+    if args.csv_input and (args.scaling or args.baseline):
+        parser.error("--csv-input cannot be combined with --scaling or --baseline")
+    if not args.csv_input and not (args.scaling and args.baseline):
+        parser.error("provide --csv-input or both --scaling and --baseline")
+
+    mode = "CSV-extract reproduction" if args.csv_input else "raw-log renderer"
+    print(f"{SNAPSHOT_LABEL}: {mode}, outside the unified cell store",
           file=sys.stderr)
 
     args.output.mkdir(parents=True, exist_ok=True)
     figures = args.output / "figures"
     figures.mkdir(exist_ok=True)
-    scaling = parse_scaling(args.scaling)
-    baseline = parse_baseline(args.baseline)
-    pivots, regions = parse_structure(args.scaling)
-    write_csv(args.output / "scaling.csv", scaling)
-    write_csv(args.output / "historical_ab.csv", baseline)
-    write_csv(args.output / "pivot_summary.csv", pivots)
-    write_csv(args.output / "region_snapshots.csv", regions)
+    if args.csv_input:
+        scaling, baseline, pivots = load_csv_inputs(args.csv_input)
+    else:
+        scaling = parse_scaling(args.scaling)
+        baseline = parse_baseline(args.baseline)
+        pivots, regions = parse_structure(args.scaling)
+        write_csv(args.output / "scaling.csv", scaling)
+        write_csv(args.output / "historical_ab.csv", baseline)
+        write_csv(args.output / "pivot_summary.csv", pivots)
+        write_csv(args.output / "region_snapshots.csv", regions)
     medians = scaling_medians(scaling)
     render_scaling_figure(figures / "setup_scaling.png", medians)
     render_baseline_figure(figures / "historical_total_ratio.png", baseline)
