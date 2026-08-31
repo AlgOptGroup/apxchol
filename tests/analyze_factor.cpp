@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -50,6 +52,7 @@ struct cli_options {
     apxchol::residual_peel_strategy residual_peel = apxchol::residual_peel_strategy::natural;
     double fs_compact_threshold = -1.0;  // <0 = leave default
     int fs_filter_append = -1;  // <0 = leave default; 0 off; 1 on
+    std::string dump_factor_bytes;
 };
 
 [[noreturn]] void usage(const char* argv0) {
@@ -59,7 +62,8 @@ struct cli_options {
                  " [--is block_greedy|priority_greedy|baumann_kyng]"
                  " [--seed N]"
                  " [--min-is-frac FRACTION] [--parallel-residual-threshold N]"
-                 " [--profile|--solve|--bench-trsv|--sweep-threads]\n",
+                 " [--profile|--solve|--bench-trsv|--sweep-threads]"
+                 " [--dump-factor-bytes PATH]\n",
                  argv0);
     std::exit(1);
 }
@@ -134,6 +138,8 @@ cli_options parse_args(int argc, char* argv[]) {
             opts.fs_compact_threshold = std::atof(argv[++i]);
         } else if (arg == "--fs-filter-append" && i + 1 < argc) {
             opts.fs_filter_append = std::atoi(argv[++i]) ? 1 : 0;
+        } else if (arg == "--dump-factor-bytes") {
+            opts.dump_factor_bytes = require_value("--dump-factor-bytes");
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
         } else {
@@ -318,6 +324,54 @@ const char* storage_name(graph_storage s) {
 
 const char* is_name(const std::string& s) {
     return s.c_str();
+}
+
+void write_factor_bytes(const factorization& factor,
+                        const std::string& path) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out)
+        throw std::runtime_error("cannot open factor-byte output: " + path);
+
+    auto write = [&](const void* data, std::size_t bytes) {
+        if (bytes == 0) return;
+        out.write(static_cast<const char*>(data),
+                  static_cast<std::streamsize>(bytes));
+        if (!out)
+            throw std::runtime_error("failed writing factor-byte output: " +
+                                     path);
+    };
+    auto scalar = [&](const auto& value) { write(&value, sizeof(value)); };
+
+    // Padding-free, architecture-labelled envelope. Comparing these files
+    // byte-for-byte checks the permutation and every owned CSC byte, while a
+    // campaign can persist a standard sha256sum without adding a crypto
+    // dependency to this developer-only tool.
+    constexpr std::array<char, 8> magic{'A', 'P', 'X', 'F', 'A', 'C', '0', '1'};
+    constexpr std::uint32_t version = 1;
+    constexpr std::uint32_t node_bytes = sizeof(apxchol::node_index);
+    constexpr std::uint32_t edge_bytes = sizeof(apxchol::edge_index);
+    constexpr std::uint32_t value_bytes = sizeof(apxchol::factor_value_t);
+    const std::uint64_t n = factor.L.rows();
+    const std::uint64_t nnz = factor.L.nonZeros();
+    const std::uint64_t perm_size = factor.perm.size();
+    const std::uint8_t sddm = factor.sddm ? 1 : 0;
+
+    write(magic.data(), magic.size());
+    scalar(version);
+    scalar(node_bytes);
+    scalar(edge_bytes);
+    scalar(value_bytes);
+    scalar(n);
+    scalar(nnz);
+    scalar(perm_size);
+    scalar(sddm);
+    write(factor.perm.data(), factor.perm.size() * sizeof(apxchol::node_index));
+    write(factor.L.outerIndexPtr(),
+          (static_cast<std::size_t>(n) + 1) * sizeof(apxchol::edge_index));
+    write(factor.L.innerIndexPtr(),
+          static_cast<std::size_t>(nnz) * sizeof(apxchol::node_index));
+    write(factor.L.valuePtr(),
+          static_cast<std::size_t>(nnz) * sizeof(apxchol::factor_value_t));
 }
 
 
@@ -550,6 +604,14 @@ int main(int argc, char* argv[]) {
         }
 
         factorization F = apxchol::factorize(A, cli.storage, opts);
+        if (!cli.dump_factor_bytes.empty()) {
+            write_factor_bytes(F, cli.dump_factor_bytes);
+            std::printf("factor_bytes: path=%s n=%u nnz=%llu\n",
+                        cli.dump_factor_bytes.c_str(),
+                        static_cast<unsigned>(F.L.rows()),
+                        static_cast<unsigned long long>(F.L.nonZeros()));
+            return 0;
+        }
         const node_index m = static_cast<node_index>(F.sddm ? A.rows() : A.rows() - 1);
         Eigen::SparseMatrix<double> L11 = eigen_topleft(F.L, m);
 

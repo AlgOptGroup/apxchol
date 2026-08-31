@@ -39,9 +39,11 @@ struct factorize_workspace {
     struct per_thread {
         std::vector<weighted_neighbor>             neighbors;
         std::vector<detail::deferred_edge>         edge_buffer;
+#if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE)
         // Owner-resident GKS prefix/directory storage. Cooperative sample
         // tasks only read it, and the owner waits before reusing the vectors.
         detail::tree_sample_workspace              tree_sample;
+#endif
 
         std::vector<std::pair<node_index, double>> excess_buffer;
         // Dedup-bucket scratch for process_vertex / merge_parallel_edges.

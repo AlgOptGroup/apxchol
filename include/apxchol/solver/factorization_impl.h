@@ -477,7 +477,11 @@ void process_vertex(const Eliminator& elim,
                     bool dedup_inline = false,
                     std::span<node_index> degree_decrements = {},
                     cooperative_pivot_round* cooperative = nullptr) {
+#if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE)
     cooperative_pivot_owner owner(cooperative);
+#else
+    (void)cooperative;
+#endif
     auto& nbrs       = ws.neighbors;
     auto& excess_out = ws.excess_buffer;
     col.entries = nullptr;
@@ -558,8 +562,10 @@ void process_vertex(const Eliminator& elim,
 
     assert(degree_decrements.empty() ||
            decrement_pos == degree_decrements.size());
+#if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE)
     const size_t owner_work = cooperative
         ? cooperative->add_owner_work(nbrs.size()) : 0;
+#endif
     if (nbrs.empty()) {
         double d = G.excess(v);
         col.vertex = v;
@@ -722,6 +728,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
     }
     cooperative_pivot_round* cooperative = cooperative_storage.get();
 #else
+    (void)enable_cooperative;
     cooperative_pivot_round* cooperative = nullptr;
 #endif
     if (parallel_round) {
