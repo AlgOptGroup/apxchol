@@ -79,6 +79,15 @@ add_test(NAME cli_laplacian_converges
 set_tests_properties(cli_laplacian_converges PROPERTIES
         FAIL_REGULAR_EXPRESSION "ADJACENCY graph")
 
+# The research sampler uses the same CLI/C++ selector value and must complete
+# an actual SDDM solve, exercising its W/degree extension. GKS remains covered
+# by every CLI test that omits the option.
+add_test(NAME cli_bkz26_sampler_converges
+         COMMAND apxchol "${APXCHOL_CLI_DATA}/path5_sddm.mtx"
+                 --random-rhs --seed 42 --clique-sampler bkz26 --tol 1e-8)
+set_tests_properties(cli_bkz26_sampler_converges PROPERTIES
+        FAIL_REGULAR_EXPRESSION "unknown clique sampler")
+
 # So does an SDDM system (positive diagonal excess), which must NOT be rebuilt
 # as a Laplacian -- that would discard the excess.
 add_test(NAME cli_sddm_converges

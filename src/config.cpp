@@ -98,6 +98,12 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--seed", cfg.solve_opts.factor_opts.seed,
                    "Random seed for factorization and test RHS")
         ->capture_default_str();
+    app.add_option("--clique-sampler",
+                   cfg.solve_opts.factor_opts.clique_sampler,
+                   "Clique sampler: gks (default) or bkz26 (BKZ26 Algorithm 1 "
+                   "weighted-Pruefer clique sampler embedded in apxchol)")
+        ->capture_default_str()
+        ->check(CLI::IsMember({"gks", "bkz26"}));
     app.add_option("--degree-quantile", cfg.solve_opts.factor_opts.partition.degree_quantile,
                    "IS degree cap as a quantile of current degrees in (0,1); "
                    "0 = use --degree-multiplier")

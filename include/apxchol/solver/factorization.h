@@ -2,6 +2,7 @@
 #include "apxchol/graph/conversions.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/solver/elimination/elimination.h"
+#include "apxchol/solver/elimination/volume_tree.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/partitioner_list.h"
 #include "apxchol/sparse_csc.h"
@@ -100,7 +101,8 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
 
 /// Custom-eliminator overload: substitute your own star-vertex elimination
 /// rule (see elimination/elimination.h for the `eliminator` contract).
-/// The default overloads build the tree_elimination rule from `opts`.
+/// The default overloads dispatch the built-in sampler named by
+/// factor_options::clique_sampler (GKS unless explicitly changed).
 template<typename Partitioner = block_greedy_partitioner, eliminator E,
          incidence_storage Incidence>
 factorization factorize(graph<Incidence> G, const E& elim,

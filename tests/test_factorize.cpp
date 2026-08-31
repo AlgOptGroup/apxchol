@@ -443,6 +443,33 @@ TEST(VecPoolAos, SerialFactorMatchesIndexedVecPoolByteForByte) {
     }
 }
 
+TEST(Bkz26SamplerDispatch, ConfiguredPathMatchesExplicitEliminator) {
+    const scoped_threads team(1);
+    const auto L = weighted_grid_laplacian(12, 13, 7.25, 0.03125);
+
+    apxchol::factor_options bkz26_opts;
+    bkz26_opts.seed = 19;
+    bkz26_opts.clique_sampler = "bkz26";
+    const auto configured = apxchol::factorize(L, bkz26_opts);
+    const auto explicit_eliminator = apxchol::factorize(
+        L, apxchol::volume_tree_elimination{}, bkz26_opts);
+    expect_same_factor(configured, explicit_eliminator,
+                       "factor_options bkz26 vs explicit eliminator");
+
+    apxchol::factor_options gks_opts;
+    gks_opts.seed = 19;
+    const auto default_gks = apxchol::factorize(L, gks_opts);
+    const auto explicit_gks = apxchol::factorize(
+        L, apxchol::tree_elimination{}, gks_opts);
+    expect_same_factor(default_gks, explicit_gks,
+                       "default gks vs explicit GKS eliminator");
+
+    apxchol::factor_options invalid_opts;
+    invalid_opts.clique_sampler = "not-a-sampler";
+    EXPECT_THROW((void)apxchol::factorize(L, invalid_opts),
+                 std::invalid_argument);
+}
+
 TEST(VecPoolAos, PreassignedOffsetsAreReproducibleInParallel) {
 #ifndef _OPENMP
     GTEST_SKIP() << "serial build: there is no parallel apply path";

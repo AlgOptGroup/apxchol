@@ -1,0 +1,26 @@
+# Historical seed-42 structural A/B row payload preserved from
+# ba72922cfb713101d82a240910d166a4badffb70:experiments/2026-08-31-vac-prufer/historical-seed42.log
+# That source commit attributes the rows to
+# a9ee7a5:experiments/2026-08-21-residual-density/ab.log and records prototype
+# code commit 759719c. `tree` = GKS; `ust` = the alpha=1 weighted-Pruefer law.
+# Exact build flags, factor-drop state, and the untracked IPM fixture are not
+# preserved. nnz(L) is the printed raw factor count, not stored_nnz.
+# Setup timings were collected under load average 12--28 and are retained only
+# as raw provenance; do not use them as performance evidence.
+grid_200     tree   nnz(L)=216788      iters=41    resid=8.763e-09 setup=0.029s
+grid_200     ust    nnz(L)=217352      iters=40    resid=9.479e-09 setup=0.020s
+grid_1000    tree   nnz(L)=5459819     iters=51    resid=8.303e-09 setup=0.354s
+grid_1000    ust    nnz(L)=5485291     iters=54    resid=9.967e-09 setup=0.329s
+iter0010     tree   nnz(L)=8924765     iters=41    resid=7.666e-09 setup=1.195s
+iter0010     ust    nnz(L)=8866350     iters=90    resid=8.466e-09 setup=1.148s
+iter0040     tree   nnz(L)=9057211     iters=59    resid=9.999e-09 setup=1.342s
+iter0040     ust    nnz(L)=9150341     iters=76    resid=7.626e-09 setup=1.278s
+com-Amazon   tree   nnz(L)=1970398     iters=37    resid=5.529e-09 setup=0.282s
+com-Amazon   ust    nnz(L)=2054919     iters=40    resid=7.800e-09 setup=0.274s
+G3_circuit   tree   nnz(L)=8973167     iters=46    resid=6.973e-09 setup=0.776s
+G3_circuit   ust    nnz(L)=9068749     iters=51    resid=7.196e-09 setup=0.761s
+thermal2     tree   nnz(L)=7993169     iters=44    resid=7.385e-09 setup=0.826s
+thermal2     ust    nnz(L)=8069865     iters=50    resid=6.863e-09 setup=0.840s
+as-Skitter   tree   nnz(L)=18478294    iters=50    resid=1.482e+05 setup=5.212s
+as-Skitter   ust    nnz(L)=18907500    iters=34    resid=4.163e+07 setup=5.144s
+DONE_SENTINEL

@@ -108,6 +108,11 @@ Runtime controls and their numerical contracts are documented beside their
 implementations. The most common are `APXCHOL_SPTRSV_FP16`,
 `APXCHOL_FACTOR_DROP`, and `APXCHOL_CPU_SPTRSV`.
 
+This research branch additionally exposes `--clique-sampler bkz26` (default:
+`gks`). It is the [BKZ26 Algorithm 1 clique sampler embedded in
+apxchol](experiments/2026-08-31-bkz26-prufer/README.md), not the paper's full
+Algorithm 3.
+
 ## Documentation and benchmarks
 
 - [Extending the algorithm](docs/extending.md): custom elimination rules,
@@ -117,7 +122,8 @@ implementations. The most common are `APXCHOL_SPTRSV_FP16`,
 - [Laptop snapshot](benchmarks/latest/) and [CSCS Daint snapshot](benchmarks/daint/):
   machine-specific results and direct figure links.
 - [Contributing](CONTRIBUTING.md), [license](LICENSE), and
-  [citation metadata](CITATION.cff).
+  [software citation metadata](CITATION.cff). The BKZ26 manuscript entry is in
+  [CITATION.bib](CITATION.bib).
 
 ## References
 
@@ -129,3 +135,6 @@ implementations. The most common are `APXCHOL_SPTRSV_FP16`,
 - Baumann and Kyng, *A Framework for Parallelizing Approximate Gaussian
   Elimination*, SPAA 2024
   ([DOI](https://dl.acm.org/doi/10.1145/3626183.3659987)).
+- Baumann, Kyng, and Zöcklein, *VAC: A Volume-sampling-based Elimination Rule
+  for Approximate Cholesky Factorization*, manuscript, 2026
+  ([PDF](https://rasmuskyng.com/papers/BKZ26.pdf)).

@@ -681,6 +681,8 @@ static BenchResult run_apxchol_v1(
     r.nnz = static_cast<int>(L.nonZeros());
 
     apxchol::factor_options fopts{.seed = 42, .is_select = is};
+    if (const char* e = std::getenv("APXCHOL_CLIQUE_SAMPLER"))
+        fopts.clique_sampler = e;
     if (exact_clique_max_degree > 0)
         fopts.exact_clique_max_degree = exact_clique_max_degree;
     if (degree_multiplier_override > 0.0)

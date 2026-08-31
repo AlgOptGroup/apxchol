@@ -55,6 +55,10 @@ struct partition_options {
 struct factor_options {
     unsigned seed = 42;
     partition_options partition;     // selection knobs (see above)
+    /// Built-in clique sampler. "gks" is the production default.
+    /// "bkz26" selects the Algorithm 1 weighted-uniform spanning-tree sampler
+    /// embedded in apxchol; it is not the paper's full Algorithm 3.
+    std::string clique_sampler = "gks";
     /// Minimum selector yield before handing a large residual to the BK path:
     /// selected regions / vertices ELIGIBLE under the degree cap. Relative to
     /// the candidate pool, not to all active vertices. A non-empty selection is

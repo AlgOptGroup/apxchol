@@ -1252,7 +1252,10 @@ factorization factorize_impl(const Eliminator& elim,
     constexpr bool gpu_block_frontend_eligible =
         std::is_same_v<Partitioner, block_greedy_partitioner> &&
         is_vec_pool_incidence_v<Incidence> &&
-        std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
+        (std::is_same_v<std::remove_cvref_t<Eliminator>,
+                        detail::tree_elimination> ||
+         std::is_same_v<std::remove_cvref_t<Eliminator>,
+                        volume_tree_elimination>);
     std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
     detail::gpu_block_frontend::mode gpu_frontend_mode =
         detail::gpu_block_frontend::mode::disabled;
@@ -1271,7 +1274,7 @@ factorization factorize_impl(const Eliminator& elim,
             opts.exact_clique_max_degree != 0) {
             if (gpu_frontend_forced)
                 throw std::invalid_argument(
-                    "the forced GPU setup front-end requires the default "
+                    "the forced GPU setup front-end requires a built-in "
                     "d-1-edge tree sampler (exact clique mode can grow topology)");
             gpu_frontend_mode = detail::gpu_block_frontend::mode::disabled;
         }
@@ -2068,11 +2071,19 @@ factorization factorize_impl(const Eliminator& elim,
     return result;
 }
 
-// Build the tree eliminator from options. Single source of truth so the
-// fixed-partitioner and runtime-dispatch paths stay in sync.
-inline detail::tree_elimination make_tree_elim(const factor_options& opts) {
-    return detail::tree_elimination{
-        .exact_clique_max_degree = opts.exact_clique_max_degree};
+// Dispatch the built-in clique sampler once, outside the elimination loop, so
+// the default GKS path pays no per-pivot runtime branch.
+template<typename F>
+factorization dispatch_tree_eliminator(const factor_options& opts, F&& fn) {
+    if (opts.clique_sampler == "gks")
+        return std::forward<F>(fn)(detail::tree_elimination{
+            .exact_clique_max_degree = opts.exact_clique_max_degree});
+    if (opts.clique_sampler == "bkz26")
+        return std::forward<F>(fn)(volume_tree_elimination{
+            .exact_clique_max_degree = opts.exact_clique_max_degree});
+    throw std::invalid_argument(
+        "unknown clique sampler '" + opts.clique_sampler +
+        "' (expected 'gks' or 'bkz26')");
 }
 
 // Default-construct-the-partitioner convenience layer.
@@ -2091,7 +2102,9 @@ template<typename Partitioner, incidence_storage Incidence>
 factorization factorize(graph<Incidence> G,
                         const factor_options& opts,
                         checkpoint* cp) {
-    return factorize_impl<Partitioner>(make_tree_elim(opts), std::move(G), opts, cp);
+    return dispatch_tree_eliminator(opts, [&](const auto& elim) {
+        return factorize_impl<Partitioner>(elim, std::move(G), opts, cp);
+    });
 }
 
 template<typename Partitioner, eliminator E, incidence_storage Incidence>
@@ -2105,7 +2118,9 @@ template<partitioner P, incidence_storage Incidence>
 factorization factorize(graph<Incidence> G, P part,
                         const factor_options& opts,
                         checkpoint* cp) {
-    return factorize_impl(make_tree_elim(opts), part, std::move(G), opts, cp);
+    return dispatch_tree_eliminator(opts, [&](const auto& elim) {
+        return factorize_impl(elim, part, std::move(G), opts, cp);
+    });
 }
 
 template<partitioner P, eliminator E, incidence_storage Incidence>
@@ -2119,10 +2134,12 @@ template<incidence_storage Incidence>
 factorization factorize_with_strategy(graph<Incidence> G,
                                       const factor_options& opts,
                                       checkpoint* cp) {
-    return dispatch_partitioner<factorization>(opts.is_select,
-        [&]<typename P>() -> factorization {
-            return factorize_impl<P>(make_tree_elim(opts), std::move(G), opts, cp);
-        });
+    return dispatch_tree_eliminator(opts, [&](const auto& elim) {
+        return dispatch_partitioner<factorization>(opts.is_select,
+            [&]<typename P>() -> factorization {
+                return factorize_impl<P>(elim, std::move(G), opts, cp);
+            });
+    });
 }
 
 template<eliminator E, incidence_storage Incidence>
