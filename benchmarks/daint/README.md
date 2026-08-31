@@ -1,48 +1,60 @@
-# Daint benchmarks
+# Daint benchmark snapshot
 
-These results use one CSCS Daint GH200 node: a 72-core Grace CPU and its Hopper
-GPU. They are kept separate from the x86/RTX laptop campaign because absolute
-times are machine-specific.
+These historical results use one CSCS Daint GH200 node: a 72-core Grace CPU and
+its Hopper GPU. The fair-solver campaign is pinned to source revision
+`2b755997`; absolute times are machine-specific and must not be mixed with the
+x86/RTX [laptop snapshot](../latest/).
 
-## Fair T=72 solver comparison
+The T=72 campaign uses three full setup-and-solve repetitions per cell and grades
+every completed result by an independently recomputed true relative residual at
+`1e-8`. Exact coverage, outcomes, paired geometric means, and exclusions are in
+the [fair-solver summary](fair_t72_summary.md); [fair_t72.csv](fair_t72.csv) is
+the portable extract.
 
-The current campaign covers 27 matrices with three full setup-and-solve
-repetitions per cell. Every completed result is graded by an independently
-recomputed true relative residual at `1e-8`; timeouts and failures remain visible.
+## Fair-solver views
 
-| grids | LP-IPM | SuiteSparse |
-|---|---|---|
-| ![Grid total-time heatmap](figures/fair_t72_total_grids.png) | ![IPM total-time heatmap](figures/fair_t72_total_ipm.png) | ![SuiteSparse total-time heatmap](figures/fair_t72_total_suitesparse.png) |
+The renderer provides three complementary views for each matrix family:
 
-Each heatmap reports total time relative to the fastest completed method for
-that matrix. Read the [compact numerical summary](fair_t72_summary.md) for the
-exact denominator, convergence outcomes, paired geometric means, and coverage
-boundary; [fair_t72.csv](fair_t72.csv) is the portable cell extract.
+| family | total-time heatmap | solve-only heatmap | setup + solve |
+|---|---|---|---|
+| grids | [total](figures/fair_t72_total_grids.png) | [solve](figures/fair_t72_solve_grids.png) | [2D](figures/fair_t72_breakdown_grids_2d.png), [3D](figures/fair_t72_breakdown_grids_3d.png) |
+| LP-IPM | [total](figures/fair_t72_total_ipm.png) | [solve](figures/fair_t72_solve_ipm.png) | [breakdown](figures/fair_t72_breakdown_ipm.png) |
+| SuiteSparse | [total](figures/fair_t72_total_suitesparse.png) | [solve](figures/fair_t72_solve_suitesparse.png) | [small](figures/fair_t72_breakdown_suitesparse_small.png), [giants](figures/fair_t72_breakdown_suitesparse_giants.png), [largest](figures/fair_t72_breakdown_suitesparse_giants_xl.png) |
 
-Two focused apxchol views separate device crossover from implementation choices:
+Heatmap colour is time relative to the fastest completed CPU or GPU cell in the
+same matrix column; annotations give absolute time and ratio. A capped timeout
+is shown as a lower bound only on total time. Solve-only cells have no fabricated
+timeout duration. Breakdown bars are linear time, with solid setup and hatched
+solve segments; the family splits keep large matrices from flattening smaller
+ones.
 
-| CPU/GPU crossover | CPU selector/storage ablation |
-|---|---|
-| ![apxchol CPU/GPU crossover](figures/fair_t72_apxchol_cpu_gpu.png) | ![apxchol configuration ablation](figures/fair_t72_apxchol_ablation.png) |
+Focused views:
 
-The ARM64 campaign uses explicitly labelled portable paths where an x86-only
-dependency is avoidable: RCHOL/pRCHOL retain the upstream factorization and PCG
-recurrence but replace MKL kernels; AC/AC2 run under the official ARM64 Julia
-build; ParAC's CUDA drivers run natively. ParAC CPU still requires oneMKL, and
-CMG is omitted because native Linux MATLAB is x86-64. These omissions are not
-silently replaced by unlike timing baselines.
+- [apxchol CPU/GPU crossover](figures/fair_t72_apxchol_cpu_gpu.png)
+- [apxchol selector/storage ablation](figures/fair_t72_apxchol_ablation.png)
 
-Regenerate the committed extract and figures from a downloaded cell store:
+The ARM64 snapshot uses explicitly labelled portable paths where possible:
+RCHOL/pRCHOL retain upstream factorization and PCG semantics without MKL;
+AC/AC2 use the official ARM64 Julia build; ParAC CUDA runs natively. ParAC CPU
+and CMG are omitted rather than replaced by unlike timing baselines.
+
+Reproduce the pinned figures and summary from the committed CSV:
 
 ```bash
-python3 benchmarks/daint/render_fair_t72.py --cells /path/to/results-final
+python3 benchmarks/daint/render_fair_t72.py
 ```
 
-## Setup-scaling archive
+## Historical setup scaling
 
-The earlier apxchol-only campaign contains 189 timing records at
-T=1/2/4/8/16/36/72 plus 18 structural probes and a bracketed historical A/B.
-Its [summary](summary.md), [scaling data](scaling.csv), and existing figures are
-retained as the setup-scaling record; they are not mixed into the fair-solver
-heatmaps above. Reproduce them with `render_campaign.py` as documented in the
-script help.
+The earlier apxchol-only campaign is a separate, checksummed archive. Its most
+useful views are [setup scaling](figures/setup_scaling.png),
+[T=72 setup breakdown](figures/setup_t72_breakdown.png), and
+[current/historical total ratio](figures/historical_total_ratio.png). See the
+[numerical summary](summary.md), [scaling data](scaling.csv), and
+[historical A/B data](historical_ab.csv) for boundaries and exact values.
+
+Reproduce that archive from its committed extracts:
+
+```bash
+python3 benchmarks/daint/render_campaign.py --csv-input benchmarks/daint
+```
