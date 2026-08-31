@@ -415,6 +415,7 @@ void process_vertex(const Eliminator& elim,
     col.entries = nullptr;
     col.entry_count = 0;
     nbrs.clear();
+    std::size_t raw_neighbors = 0;
     std::size_t decrement_pos = 0;
     double edge_deg = 0.0;
     if (dedup_inline) {
@@ -425,6 +426,7 @@ void process_vertex(const Eliminator& elim,
             // one such array per worker; it became a cache/TLB and RSS cost on
             // large graphs. Preserve first-seen neighbor order exactly.
             const size_t raw_count = G.adj(v).size();
+            raw_neighbors = raw_count;
             const size_t table_size = std::bit_ceil(
                 std::max<size_t>(8, 2 * raw_count));
             if (ws.dedup_hash.size() < table_size) {
@@ -437,6 +439,7 @@ void process_vertex(const Eliminator& elim,
             const size_t mask = table_size - 1;
             const std::uint32_t epoch = ws.dedup_hash_epoch;
             for (auto [u, w] : G.neighbors(v)) {
+                ++raw_neighbors;
                 if (!G.is_active(u)) continue;
                 if (!degree_decrements.empty()) {
                     assert(decrement_pos < degree_decrements.size());
@@ -483,6 +486,7 @@ void process_vertex(const Eliminator& elim,
         }
     } else {
         for (auto [u, w] : G.neighbors(v)) {
+            ++raw_neighbors;
             nbrs.emplace_back(u, w);
             edge_deg += w;
         }
@@ -491,6 +495,8 @@ void process_vertex(const Eliminator& elim,
     assert(degree_decrements.empty() ||
            decrement_pos == degree_decrements.size());
     if (nbrs.empty()) {
+        ++ws.research_pivots;
+        ws.research_raw_neighbors += raw_neighbors;
         double d = G.excess(v);
         col.vertex = v;
         col.diag   = static_cast<factor_value_t>(d > 0.0 ? std::sqrt(d) : 1.0);
@@ -525,8 +531,13 @@ void process_vertex(const Eliminator& elim,
     // count and schedule.
     const std::uint64_t vseed =
         run_seed ^ ((std::uint64_t(v) + 1) * 0x9E3779B97F4A7C15ULL);
+    const std::size_t emitted_before = ws.edge_buffer.size();
     elim.sample_clique(std::span<weighted_neighbor>(nbrs), total_deg, vseed,
                        edge_emitter(ws.edge_buffer));
+    ++ws.research_pivots;
+    ws.research_raw_neighbors += raw_neighbors;
+    ws.research_unique_neighbors += nbrs.size();
+    ws.research_emitted_edges += ws.edge_buffer.size() - emitted_before;
 }
 
 template<typename Eliminator, incidence_storage Incidence>
@@ -2037,6 +2048,22 @@ factorization factorize_impl(const Eliminator& elim,
     for (auto& t : ws.threads)
         factor_entry_resources.push_back(std::move(t.factor_entries));
     work = graph<Incidence>();
+    if (std::getenv("APXCHOL_RESEARCH_LOCAL_TREE_STATS")) {
+        std::size_t pivots = 0;
+        std::size_t raw_neighbors = 0;
+        std::size_t unique_neighbors = 0;
+        std::size_t emitted_edges = 0;
+        for (const auto& thread : ws.threads) {
+            pivots += thread.research_pivots;
+            raw_neighbors += thread.research_raw_neighbors;
+            unique_neighbors += thread.research_unique_neighbors;
+            emitted_edges += thread.research_emitted_edges;
+        }
+        std::fprintf(stderr,
+                     "[apxchol] research clique work: pivots=%zu "
+                     "raw_neighbors=%zu unique_neighbors=%zu emitted_edges=%zu\n",
+                     pivots, raw_neighbors, unique_neighbors, emitted_edges);
+    }
     ws   = factorize_workspace();
     sel  = selection();
     std::vector<node_index>().swap(active);
@@ -2071,8 +2098,21 @@ factorization factorize_impl(const Eliminator& elim,
 // Build the tree eliminator from options. Single source of truth so the
 // fixed-partitioner and runtime-dispatch paths stay in sync.
 inline detail::tree_elimination make_tree_elim(const factor_options& opts) {
+    double local_two_tree_keep = -1.0;
+    if (const char* value =
+            std::getenv("APXCHOL_RESEARCH_LOCAL_TREE_KEEP");
+        value && *value) {
+        char* end = nullptr;
+        const double parsed = std::strtod(value, &end);
+        if (end == value || *end != '\0' || !std::isfinite(parsed) ||
+            !(parsed > 0.0 && parsed <= 1.0))
+            throw std::invalid_argument(
+                "APXCHOL_RESEARCH_LOCAL_TREE_KEEP must be in (0,1]");
+        local_two_tree_keep = parsed;
+    }
     return detail::tree_elimination{
-        .exact_clique_max_degree = opts.exact_clique_max_degree};
+        .exact_clique_max_degree = opts.exact_clique_max_degree,
+        .local_two_tree_keep = local_two_tree_keep};
 }
 
 // Default-construct-the-partitioner convenience layer.

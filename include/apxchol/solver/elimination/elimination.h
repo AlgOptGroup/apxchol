@@ -69,9 +69,11 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
+#include <numeric>
 #include <span>
 #include <utility>
 #include <vector>
@@ -261,13 +263,20 @@ struct tree_elimination {
     /// edges. Zero-variance where it is cheap (quadratic in d). 0 = off.
     size_t exact_clique_max_degree = 0;
 
+    /// Research-only two-tree/local-sparsify family. A negative value is the
+    /// byte-identical production rule. Otherwise generate two half-weight GKS
+    /// trees, retain a deterministic maximum-weight forest of their coalesced
+    /// union, and HT-sample the remaining cycle edges at this mean rate.
+    double local_two_tree_keep = -1.0;
+
     /// Upper bound on the number of edges one sample_clique call emits, for a
     /// vertex of the given degree (used by tests / capacity reservations).
     size_t max_clique_edges(node_index deg) const {
         const size_t d = static_cast<size_t>(deg);
         if (exact_clique_max_degree > 0 && d <= exact_clique_max_degree)
             return d * (d - 1) / 2;
-        return d == 0 ? 0 : d - 1;
+        if (d == 0) return 0;
+        return local_two_tree_keep >= 0.0 ? 2 * (d - 1) : d - 1;
     }
 
     void sample_clique(std::span<weighted_neighbor> neighbors,
@@ -338,12 +347,8 @@ struct tree_elimination {
             }
             inverse_cdf[bucket_count] = d;
         }
-        for (size_t i = 0; i + 1 < d; ++i) {
-            const double suffix_sum = prefix.back() - prefix[i];
-            if (suffix_sum <= 0.0) continue;
-
+        auto sample_partner = [&](size_t i, double suffix_sum) {
             const double r = rs.next_unit() * suffix_sum;
-
             const double target = prefix[i] + r;
             auto first = prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1;
             auto last = prefix.end();
@@ -357,9 +362,144 @@ struct tree_elimination {
                     inverse_cdf[bucket + 1]);
             }
             auto it = std::upper_bound(first, last, target);
+            return std::min(static_cast<size_t>(it - prefix.begin()), d - 1);
+        };
 
-            size_t j = static_cast<size_t>(it - prefix.begin());
-            if (j >= d) j = d - 1;
+        if (local_two_tree_keep >= 0.0) {
+            struct local_edge {
+                size_t i, j;
+                double weight;
+                bool backbone = false;
+            };
+            static thread_local std::vector<local_edge> edges;
+            static thread_local std::vector<size_t> order;
+            static thread_local std::vector<size_t> parent;
+            static thread_local std::vector<unsigned char> rank;
+            static thread_local std::vector<double> importance;
+            edges.clear();
+            edges.reserve(2 * (d - 1));
+
+            bool valid = true;
+            for (const auto& neighbor : neighbors)
+                valid = valid && std::isfinite(neighbor.weight) &&
+                        neighbor.weight > 0.0;
+            if (valid) {
+                for (size_t i = 0; i + 1 < d; ++i) {
+                    const double suffix_sum = prefix.back() - prefix[i];
+                    if (!(suffix_sum > 0.0)) {
+                        valid = false;
+                        break;
+                    }
+                    const double half_weight =
+                        0.5 * neighbors[i].weight * suffix_sum / deg;
+                    const size_t first = sample_partner(i, suffix_sum);
+                    const size_t second = sample_partner(i, suffix_sum);
+                    if (first == second)
+                        edges.push_back({i, first, 2.0 * half_weight});
+                    else {
+                        edges.push_back({i, first, half_weight});
+                        edges.push_back({i, second, half_weight});
+                    }
+                }
+            }
+            // Both constituent suffix samples are trees. If coalescing left
+            // exactly d-1 distinct edges, their union is already a tree: all
+            // edges are mandatory backbone edges and no forest/sampling work
+            // can change the output. This exact fast path covers every
+            // degree-2 pivot and many small late-factor cliques.
+            if (valid && edges.size() == d - 1) {
+                out.reserve(edges.size());
+                for (const auto& edge : edges)
+                    out(neighbors[edge.i].vertex,
+                        neighbors[edge.j].vertex, edge.weight);
+                return;
+            }
+            if (valid) {
+                order.resize(edges.size());
+                std::iota(order.begin(), order.end(), size_t{0});
+                std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                    if (edges[a].weight != edges[b].weight)
+                        return edges[a].weight > edges[b].weight;
+                    if (edges[a].i != edges[b].i)
+                        return edges[a].i < edges[b].i;
+                    return edges[a].j < edges[b].j;
+                });
+                parent.resize(d);
+                std::iota(parent.begin(), parent.end(), size_t{0});
+                rank.assign(d, 0);
+                auto find = [&](size_t v) {
+                    size_t root = v;
+                    while (parent[root] != root) root = parent[root];
+                    while (parent[v] != v) {
+                        const size_t next = parent[v];
+                        parent[v] = root;
+                        v = next;
+                    }
+                    return root;
+                };
+                auto unite = [&](size_t u, size_t v) {
+                    u = find(u);
+                    v = find(v);
+                    if (u == v) return false;
+                    if (rank[u] < rank[v]) std::swap(u, v);
+                    parent[v] = u;
+                    if (rank[u] == rank[v]) ++rank[u];
+                    return true;
+                };
+                size_t backbone_edges = 0;
+                for (size_t index : order) {
+                    auto& edge = edges[index];
+                    if (unite(edge.i, edge.j)) {
+                        edge.backbone = true;
+                        ++backbone_edges;
+                    }
+                }
+                assert(backbone_edges == d - 1);
+
+                const double keep = std::clamp(local_two_tree_keep, 1e-6, 1.0);
+                const size_t off_tree = edges.size() - backbone_edges;
+                const double target = keep * static_cast<double>(off_tree);
+                importance.resize(edges.size());
+                double measure = 0.0;
+                for (size_t i = 0; i < edges.size(); ++i) {
+                    importance[i] = std::sqrt(edges[i].weight);
+                    if (!edges[i].backbone) measure += importance[i];
+                }
+                double scale = target > 0.0 && measure > 0.0
+                    ? target / measure : 0.0;
+                for (unsigned iteration = 0;
+                     iteration < 6 && scale > 0.0; ++iteration) {
+                    double expected = 0.0;
+                    for (size_t i = 0; i < edges.size(); ++i)
+                        if (!edges[i].backbone)
+                            expected += std::min(1.0, scale * importance[i]);
+                    if (!(expected > 0.0)) break;
+                    scale *= target / expected;
+                }
+
+                random_stream retain{seed ^ 0xD1B54A32D192ED03ULL};
+                out.reserve(backbone_edges +
+                            static_cast<size_t>(std::ceil(target)));
+                for (size_t i = 0; i < edges.size(); ++i) {
+                    const auto& edge = edges[i];
+                    const double probability = edge.backbone ? 1.0 :
+                        std::min(1.0, scale * importance[i]);
+                    if (edge.backbone || retain.next_unit() < probability) {
+                        out(neighbors[edge.i].vertex,
+                            neighbors[edge.j].vertex,
+                            edge.weight / probability);
+                    }
+                }
+                return;
+            }
+            // Invalid product-clique weights retain the established GKS path.
+            rs = random_stream{seed};
+        }
+
+        for (size_t i = 0; i + 1 < d; ++i) {
+            const double suffix_sum = prefix.back() - prefix[i];
+            if (suffix_sum <= 0.0) continue;
+            const size_t j = sample_partner(i, suffix_sum);
 
             out(neighbors[i].vertex, neighbors[j].vertex,
                 neighbors[i].weight * suffix_sum / deg);

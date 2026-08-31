@@ -67,6 +67,14 @@ struct factorize_workspace {
         std::size_t degree_decrement_unique = 0;
         double degree_decrement_ms = 0.0;
 
+        // Research-only cumulative clique-work census. These counters are
+        // retained across reset_for_round() and printed only when explicitly
+        // requested; four integer additions per pivot are the only overhead.
+        std::size_t research_pivots = 0;
+        std::size_t research_raw_neighbors = 0;
+        std::size_t research_unique_neighbors = 0;
+        std::size_t research_emitted_edges = 0;
+
         // Exact-size factor-column allocations share one monotonic resource.
         // The owning pointer is moved out before the rest of the workspace is
         // released, keeping the allocations alive through CSC assembly.

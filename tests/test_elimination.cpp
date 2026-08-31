@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <numeric>
 #include <vector>
 
 using namespace apxchol;
@@ -72,6 +73,69 @@ TEST(EliminatorBounds, BoundIsSafeForRandomInput) {
         EXPECT_LE(buf.size(), tree_elimination{}.max_clique_edges(deg))
             << "tree, deg=" << deg;
     }
+}
+
+TEST(TreeSampler, LocalTwoTreeSparsifierIsAlwaysConnected) {
+    const std::vector<weighted_neighbor> input{
+        {0, 1.0}, {1, 2.0}, {2, 3.0}, {3, 5.0}, {4, 8.0}, {5, 13.0}};
+    tree_elimination local{.local_two_tree_keep = 0.25};
+    EXPECT_EQ(local.max_clique_edges(input.size()), 2 * (input.size() - 1));
+    for (std::uint64_t seed = 0; seed < 1000; ++seed) {
+        auto neighbors = input;
+        std::vector<deferred_edge> edges;
+        local.sample_clique(neighbors, 32.0, seed, edge_emitter(edges));
+        ASSERT_GE(edges.size(), input.size() - 1);
+        ASSERT_LE(edges.size(), 2 * (input.size() - 1));
+
+        std::vector<node_index> parent(input.size());
+        std::iota(parent.begin(), parent.end(), node_index{0});
+        auto find = [&](node_index v) {
+            node_index root = v;
+            while (parent[root] != root) root = parent[root];
+            while (parent[v] != v) {
+                const node_index next = parent[v];
+                parent[v] = root;
+                v = next;
+            }
+            return root;
+        };
+        for (const auto& edge : edges) {
+            ASSERT_GT(edge.w, 0.0);
+            const node_index u = find(edge.u);
+            const node_index v = find(edge.v);
+            if (u != v) parent[u] = v;
+        }
+        const node_index component = find(0);
+        for (node_index v = 1; v < input.size(); ++v)
+            EXPECT_EQ(find(v), component) << "seed=" << seed;
+    }
+}
+
+TEST(TreeSampler, LocalTwoTreeSparsifierIsUnbiased) {
+    const std::vector<weighted_neighbor> input{
+        {0, 1.0}, {1, 2.0}, {2, 4.0}, {3, 8.0}};
+    constexpr double degree = 15.0;
+    constexpr std::uint64_t trials = 200000;
+    tree_elimination local{.local_two_tree_keep = 0.5};
+    double sums[4][4]{};
+    for (std::uint64_t seed = 0; seed < trials; ++seed) {
+        auto neighbors = input;
+        std::vector<deferred_edge> edges;
+        local.sample_clique(neighbors, degree, seed, edge_emitter(edges));
+        for (const auto& edge : edges) {
+            const node_index u = std::min(edge.u, edge.v);
+            const node_index v = std::max(edge.u, edge.v);
+            sums[u][v] += edge.w;
+        }
+    }
+    for (node_index u = 0; u < input.size(); ++u)
+        for (node_index v = u + 1; v < input.size(); ++v) {
+            const double expected =
+                input[u].weight * input[v].weight / degree;
+            EXPECT_NEAR(sums[u][v] / static_cast<double>(trials), expected,
+                        0.04 * expected + 1e-4)
+                << "edge=" << u << ',' << v;
+        }
 }
 
 TEST(TreeSampler, InverseCdfDirectoryMatchesIndependentFullSearch) {
