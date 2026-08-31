@@ -19,6 +19,35 @@ the historical note/log from `ba72922`, both from
 `codex/vac-prufer-bkz26`, onto current main without cherry-picking their older
 base or their Python changes.
 
+## What the paper's Algorithm 3 is
+
+Algorithm 3, **Volume Approximate Cholesky (VAC)**, is the complete sequential
+factorization wrapper around Algorithm 1:
+
+1. draw a uniformly random permutation of all vertices;
+2. eliminate the vertices one at a time in that order;
+3. form the exact Cholesky column of the current pivot;
+4. remove the pivot star and replace its exact Schur clique by one weighted
+   spanning tree from Algorithm 1; and
+5. return the resulting approximate factor and permutation.
+
+The paper proves that Algorithm 1 is a positive-semidefinite unbiased clique
+estimator and invokes the resulting expectation identity
+`E[L_tilde L_tilde^T] = L` for Algorithm 3. That identity is not a
+high-probability spectral approximation or a PCG-convergence guarantee.
+Algorithm 1 also has a linear-work sequential realization and an
+`O(n log n)`-work, `O(log n)`-depth parallel realization, but Algorithm 3's
+outer pivot loop is still sequential as written.
+
+This branch intentionally isolates the new scientific question: it substitutes
+Algorithm 1 for apxchol's GKS clique sampler while holding apxchol's parallel
+independent-set rounds, adaptive order, residual graph, factor assembly, drop,
+and solver fixed. That makes it a cleaner A/B of the sampler than implementing
+all of Algorithm 3 at once. A literal Algorithm 3 implementation could still be
+useful as a small reference implementation or GPU research baseline, but the
+experiments below show that its defining clique sampler is not currently a
+competitive replacement for GKS in apxchol.
+
 ## Algorithm 1 and the apxchol embedding
 
 Let a pivot have distinct active-neighbor conductances
@@ -71,6 +100,30 @@ binary search, and decodes in linear work. Thus this implementation has
 `O(d log d)` sampling work even though the paper also describes a linear-work
 realization. Non-positive or non-finite weights are outside Algorithm 1's
 premise and retain apxchol's established GKS behavior.
+
+## Relation to the earlier implementations
+
+There have been three packaging stages, but not three different probability
+laws:
+
+- `a9ee7a5` (2026-08-21) contained the first standalone experiment,
+  `ust_elim.cpp`. It already drew iid weighted Prüfer symbols and emitted
+  `(W/D) a_i a_j/(a_i+a_j)`. Mathematically, this is the same BKZ26 Algorithm 1
+  estimator used here.
+- `463960d` put that sampler behind apxchol's eliminator seam on the first
+  `codex/vac-prufer-bkz26` branch.
+- this branch rebases the feature onto current main, gives it the unambiguous
+  `bkz26` name, moves it into a dedicated header, and adds configuration and
+  independent tests.
+
+The 2026-08-21 prototype used the residual's incoming neighbor order directly.
+The current implementation canonicalizes `(weight, vertex)` before consuming
+random numbers, so a fixed seed is independent of adjacency arrival order. It
+also validates the positive finite-weight premise, falls back safely to GKS
+outside it, handles apxchol's SDDM extension explicitly, and tests the
+exact-clique override. Those are reproducibility and integration improvements;
+there is no evidence that the old prototype sampled a better distribution or
+produced a better preconditioner.
 
 ## One selector across C++, CLI, and benchmark
 
@@ -163,7 +216,7 @@ separately. `stored_nnz` with drop enabled must not exceed its drop-off arm.
 Use multiple factor seeds for any quality conclusion; this four-arm smoke only
 isolates the drop policy.
 
-## Historical seed-42 log and limits
+## What failed in the experiments
 
 [`historical-seed42.log`](historical-seed42.log) preserves the row payload from
 the named source commit `ba72922`. That commit attributes the rows to
@@ -172,8 +225,85 @@ prototype to `759719c`. The log records a single factor seed (`42`). Its setup
 times were collected under load average 12--28 and are not performance
 evidence; the as-Skitter solves are invalid and remain only as raw provenance.
 
-The historical IPM fixture under `data/yves_ipm/` was untracked. A later
-five-seed memo also had no committed raw logs. **Neither the memo nor its
-five-seed numbers are reproducible from this branch**, and this branch does not
-present them as validation. Current claims must come from the tests and commands
-run against the committed branch.
+Even that weak first screen showed the important signal: on IPM `iter0010`, GKS
+needed 41 PCG iterations and the weighted Prüfer tree needed 90; on `iter0040`
+the counts were 59 and 76. Grids and com-Amazon were much closer. Both samplers
+emit `d-1` edges per sampled clique, so this was not explained by a different
+nominal per-pivot edge budget.
+
+A later study on `codex/sampling-study` (`0c693db`, `86bc4d2`, `2c47ab6`)
+repeated `iter0010` for factor seeds `{1,17,42,73,97}` with a fixed RHS:
+
+| sampler | PCG iterations | approximate `nnz(L)` |
+|---|---:|---:|
+| GKS | 40, 42, 42, 44, 42 | 8.91M |
+| BKZ26 weighted UST (`alpha=1`) | 93, 86, 92, 98, 83 | 8.85M |
+| best tested product-tree tilt (`alpha=1.75`) | 56, 60, 60, 56, 60 | 8.77M |
+| uniform Prüfer tree (`alpha=0`) | 3000, true residual about 4.4 | 9.62M |
+
+The study swept exponents
+`alpha = 0,.5,1,1.25,1.5,1.6,1.7,1.75,1.8,1.9,2,2.5,3` in
+`q_i proportional to a_i^alpha`, plus mixtures intended to protect leverage
+marginals. None matched GKS.
+
+A current-branch CLI smoke on 2026-09-01 independently checked that rebasing and
+hardening the implementation did not remove the loss. On the locally available
+`iter0010` fixture, seeds `{1,17,42,73,97}` gave GKS
+`41,42,43,45,42` iterations and BKZ26 `96,86,93,100,83`; every reported true
+residual was below `1e-8`. This smoke used `--random-rhs`, so the generated RHS
+varied with the factor seed and it does not replace the fixed-RHS historical
+study. The fixture is not part of this branch, either, so these numbers remain a
+local confirmation rather than a self-contained benchmark artifact.
+
+### Diagnosed mechanism
+
+Unbiased edge marginals, exact expected trace, and connectivity are not enough
+to control the error seen by later eliminations. On seed 42, the aggregate
+per-clique error in each neighbor's Schur-diagonal contribution was:
+
+| sampler | relative L1 | relative L2 | observed trace ratio |
+|---|---:|---:|---:|
+| GKS | 0.0836 | 0.1031 | 1.0000 |
+| BKZ26 weighted UST | 0.1299 | 0.2204 | 1.0004 |
+| `alpha=2` product tree | 0.1038 | 0.1314 | 0.9999 |
+| two half-weight GKS trees | 0.0544 | 0.0692 | 1.0000 |
+
+GKS sorts by weight and gives every source one edge into its heavier suffix.
+That construction controls how much Schur mass each individual neighbor
+receives. A Prüfer tree instead permits that mass to concentrate randomly on a
+few endpoints. The `alpha=2` tilt improved the average error but produced
+observed local clique-degree errors of 374--659 times the exact contribution on
+rare Horvitz--Thompson-reweighted edges. These local errors compound as the
+sampled graph becomes the input to subsequent elimination rounds. This explains
+why a one-clique expectation or trace check looked healthy while PCG quality
+degraded.
+
+Removing only the iid Prüfer symbol-count variance did not fix the endpoint
+pairing. An exact-marginal balanced-count variant was slower and had means
+91.0, 61.2, and 73.8 iterations for `alpha=1,1.75,2`, respectively, versus
+90.4, 58.4, and 71.8 for the iid variants.
+
+### Oversampling did not recover the single-RHS trade-off
+
+Two complete half-weight GKS trees reduced `iter0010` to 22--24 iterations, but
+grew the factor from about 8.91M to 12.19M entries and made observed setup about
+three times as expensive. Keeping one half-tree as a connectivity backbone and
+Bernoulli-thinning the other produced 310--338, 91--100, and 22--24 iterations
+at expected budgets of 1.25, 1.5, and 2 trees: thinning variance destroyed the
+useful interpolation.
+
+A more expensive even-cycle cancellation preserved every clique vertex's
+weighted degree while sparsifying two GKS trees. It reached 30--32 iterations
+and about 10.83M entries on `iter0010`, but the denser evolving residual and the
+cycle work still lost single-RHS total time. This may remain interesting only
+when factor setup can be amortized across many right-hand sides.
+
+### Reproducibility limit
+
+The detailed study code and memo are retained in repository history, but its
+IPM fixture and raw logs were not committed. Therefore the table above is
+attributed historical evidence, not a result reproducible from this branch
+alone. The branch's current reproducible claims are its unit/CLI tests and any
+new A/B run made with an independently supplied matrix. This limitation is why
+the opt-in implementation is published as a research branch rather than merged
+as the default sampler.
