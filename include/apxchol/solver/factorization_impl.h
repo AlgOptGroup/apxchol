@@ -2126,10 +2126,25 @@ inline detail::tree_elimination make_tree_elim(const factor_options& opts) {
         throw std::invalid_argument(
             "APXCHOL_RESEARCH_LOCAL_TREE_TRIGGER_REL requires "
             "APXCHOL_RESEARCH_LOCAL_TREE_KEEP");
+    bool local_two_tree_exact_budget = false;
+    if (const char* value =
+            std::getenv("APXCHOL_RESEARCH_LOCAL_TREE_EXACT_BUDGET");
+        value && *value) {
+        if (std::strcmp(value, "1") == 0)
+            local_two_tree_exact_budget = true;
+        else if (std::strcmp(value, "0") != 0)
+            throw std::invalid_argument(
+                "APXCHOL_RESEARCH_LOCAL_TREE_EXACT_BUDGET must be 0 or 1");
+    }
+    if (local_two_tree_exact_budget && local_two_tree_keep < 0.0)
+        throw std::invalid_argument(
+            "APXCHOL_RESEARCH_LOCAL_TREE_EXACT_BUDGET requires "
+            "APXCHOL_RESEARCH_LOCAL_TREE_KEEP");
     return detail::tree_elimination{
         .exact_clique_max_degree = opts.exact_clique_max_degree,
         .local_two_tree_keep = local_two_tree_keep,
-        .local_two_tree_trigger_rel = local_two_tree_trigger_rel};
+        .local_two_tree_trigger_rel = local_two_tree_trigger_rel,
+        .local_two_tree_exact_budget = local_two_tree_exact_budget};
 }
 
 // Default-construct-the-partitioner convenience layer.

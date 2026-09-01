@@ -98,6 +98,67 @@ TEST(EliminatorBounds, BoundIsSafeForRandomInput) {
     }
 }
 
+TEST(TreeSampler, ExactCappedProbabilityScaleMeetsRequestedBudget) {
+    const std::vector<std::vector<double>> cases{
+        {8.0, 4.0, 2.0, 1.0},
+        {1e12, 1e6, 1.0, 1e-6, 1e-12},
+        {3.0, 3.0, 3.0, 3.0},
+        {100.0, 1.0, 1.0, 1.0, 1.0, 1.0}};
+    for (const auto& importance : cases) {
+        for (double keep : {0.01, 0.2, 0.5, 0.8, 1.0}) {
+            const double target = keep * importance.size();
+            const double scale =
+                detail::exact_capped_probability_scale(importance, target);
+            double actual = 0.0;
+            for (double value : importance)
+                actual += std::min(1.0, scale * value);
+            EXPECT_NEAR(actual, target,
+                        64 * std::numeric_limits<double>::epsilon() *
+                            std::max(1.0, target))
+                << "keep=" << keep << ", n=" << importance.size();
+        }
+    }
+}
+
+TEST(TreeSampler, ExactBudgetRetainsConnectivityAndFiniteWeights) {
+    const std::vector<weighted_neighbor> input{
+        {0, 1e-12}, {1, 1e-6}, {2, 1.0},
+        {3, 1e6}, {4, 1e12}, {5, 2e12}};
+    const tree_elimination local{
+        .local_two_tree_keep = 0.25,
+        .local_two_tree_exact_budget = true};
+    for (std::uint64_t seed = 0; seed < 1000; ++seed) {
+        auto neighbors = input;
+        std::vector<deferred_edge> edges;
+        local.sample_clique(neighbors, 3.000001000001e12, seed,
+                            edge_emitter(edges));
+        ASSERT_GE(edges.size(), input.size() - 1);
+
+        std::vector<node_index> parent(input.size());
+        std::iota(parent.begin(), parent.end(), node_index{0});
+        auto find = [&](node_index v) {
+            node_index root = v;
+            while (parent[root] != root) root = parent[root];
+            while (parent[v] != v) {
+                const node_index next = parent[v];
+                parent[v] = root;
+                v = next;
+            }
+            return root;
+        };
+        for (const auto& edge : edges) {
+            ASSERT_TRUE(std::isfinite(edge.w));
+            ASSERT_GT(edge.w, 0.0);
+            const node_index u = find(edge.u);
+            const node_index v = find(edge.v);
+            if (u != v) parent[u] = v;
+        }
+        const node_index component = find(0);
+        for (node_index v = 1; v < input.size(); ++v)
+            EXPECT_EQ(find(v), component) << "seed=" << seed;
+    }
+}
+
 TEST(TreeSampler, LocalTwoTreeSparsifierIsAlwaysConnected) {
     const std::vector<weighted_neighbor> input{
         {0, 1.0}, {1, 2.0}, {2, 3.0}, {3, 5.0}, {4, 8.0}, {5, 13.0}};

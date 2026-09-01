@@ -28,7 +28,9 @@ The research control is
 `APXCHOL_RESEARCH_LOCAL_TREE_KEEP=<q>` with `q` in `(0,1]`.  When absent, the
 production GKS path and random stream are byte-identical.  Expected output is
 roughly `(1+q)(d-1)` before duplicate effects.  `q=1` is the coalesced full
-two-tree average.
+two-tree average only when capped probabilities are normalized exactly; the
+original six-pass approximation can still leave an extreme cycle edge below
+probability one.
 
 ## Decision protocol
 
@@ -278,3 +280,32 @@ q values.  Further work is justified only if it reduces the existing union /
 backbone setup cost without sacrificing the confirmed factor distribution.
 For the project's current single-RHS priority, return attention to setup
 parallelism and larger algorithmic changes.
+
+## Exact capped-probability follow-up
+
+The retained implementation approximately normalizes cycle-edge inclusion
+probabilities with six multiplicative passes.  This is unbiased for every
+positive probability, but `q` is only an approximate expected keep fraction:
+on sufficiently separated weights, six passes do not solve the cap equation
+exactly and even `q=1` need not retain the full sampled union.
+
+The opt-in A/B flag
+`APXCHOL_RESEARCH_LOCAL_TREE_EXACT_BUDGET=1` instead solves
+
+```
+sum_e min(1, lambda * sqrt(weight_e)) = q * number_of_cycle_edges
+```
+
+by water-filling over the already weight-sorted edge order.  A backward suffix
+sum avoids catastrophic cancellation between the heavy saturated prefix and
+the light IPM tail.  The two sampled trees, coalescing, maximum-weight
+connectivity backbone, retention random stream and HT reweighting are
+unchanged.  This is therefore an estimator-distribution test, not a mixed
+container or scheduling optimization.
+
+The first Daint screen is deliberately bounded: seed 42 on four IPM iterates
+and four controls, comparing approximate and exact budgets at q=0.20, 0.25
+and 0.30 between four exact baselines (80 records).  Advance only if exact
+normalization either improves the setup/quality frontier or reveals a
+materially different optimum; otherwise keep the already validated
+approximate q=0.25 repeated-RHS result.

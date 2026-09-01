@@ -73,6 +73,7 @@
 #include <cmath>
 #include <concepts>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -243,6 +244,42 @@ inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
     return true;
 }
 
+/// Return the unique scale lambda for
+///
+///   sum_i min(1, lambda * importance[i]) = target,
+///
+/// where `importance` is positive and sorted in descending order.  This is
+/// the capped proportional allocation (water-filling) used by the exact local
+/// two-tree research arm.  Saturated entries form a prefix, so one linear
+/// pass replaces the approximate arm's fixed-point rescans.
+inline double exact_capped_probability_scale(
+        std::span<const double> importance, double target) {
+    if (importance.empty() || !(target > 0.0)) return 0.0;
+    if (target >= static_cast<double>(importance.size()))
+        return std::numeric_limits<double>::infinity();
+
+    // Build each remaining measure from its smallest terms upward.  Repeatedly
+    // subtracting saturated heavy terms from one total loses the light tail on
+    // precisely the many-decade IPM stars for which this mode activates.
+    static thread_local std::vector<double> suffix;
+    suffix.resize(importance.size() + 1);
+    suffix.back() = 0.0;
+    for (size_t i = importance.size(); i-- > 0;)
+        suffix[i] = suffix[i + 1] + importance[i];
+
+    for (size_t saturated = 0; saturated < importance.size(); ++saturated) {
+        const double value = importance[saturated];
+        assert(std::isfinite(value) && value > 0.0);
+        const double scale =
+            (target - static_cast<double>(saturated)) / suffix[saturated];
+        // Strict comparison leaves an exactly-one final entry in the
+        // unsaturated suffix.  It avoids subtracting both remainders to zero
+        // for target == number of entries while producing the same p_i = 1.
+        if (!(scale * value > 1.0)) return scale;
+    }
+    return std::numeric_limits<double>::infinity();
+}
+
 } // namespace detail
 
 /// Tree elimination: spanning tree of the clique (CliqueTreeSample).
@@ -289,6 +326,12 @@ struct tree_elimination {
     /// pivots always use ordinary GKS because the two half-trees coalesce to
     /// the exact same single edge and can only add work.
     double local_two_tree_trigger_rel = -1.0;
+
+    /// Research A/B: solve the capped proportional cycle-edge budget exactly
+    /// rather than using six multiplicative normalization passes.  This
+    /// changes the estimator distribution and is intentionally not implied by
+    /// local_two_tree_keep.
+    bool local_two_tree_exact_budget = false;
 
     /// Upper bound on the number of edges one sample_clique call emits, for a
     /// vertex of the given degree (used by tests / capacity reservations).
@@ -405,6 +448,7 @@ struct tree_elimination {
             static thread_local std::vector<size_t> parent;
             static thread_local std::vector<unsigned char> rank;
             static thread_local std::vector<double> importance;
+            static thread_local std::vector<double> off_tree_importance;
             edges.clear();
             edges.reserve(2 * (d - 1));
 
@@ -494,16 +538,31 @@ struct tree_elimination {
                     importance[i] = std::sqrt(edges[i].weight);
                     if (!edges[i].backbone) measure += importance[i];
                 }
-                double scale = target > 0.0 && measure > 0.0
-                    ? target / measure : 0.0;
-                for (unsigned iteration = 0;
-                     iteration < 6 && scale > 0.0; ++iteration) {
-                    double expected = 0.0;
-                    for (size_t i = 0; i < edges.size(); ++i)
-                        if (!edges[i].backbone)
-                            expected += std::min(1.0, scale * importance[i]);
-                    if (!(expected > 0.0)) break;
-                    scale *= target / expected;
+                double scale = 0.0;
+                if (local_two_tree_exact_budget) {
+                    off_tree_importance.clear();
+                    off_tree_importance.reserve(off_tree);
+                    // `order` is descending by edge weight, hence also by
+                    // sqrt(weight).  Removing backbone entries preserves that
+                    // order and makes the water-filling pass linear.
+                    for (size_t index : order)
+                        if (!edges[index].backbone)
+                            off_tree_importance.push_back(importance[index]);
+                    scale = detail::exact_capped_probability_scale(
+                        off_tree_importance, target);
+                } else {
+                    scale = target > 0.0 && measure > 0.0
+                        ? target / measure : 0.0;
+                    for (unsigned iteration = 0;
+                         iteration < 6 && scale > 0.0; ++iteration) {
+                        double expected = 0.0;
+                        for (size_t i = 0; i < edges.size(); ++i)
+                            if (!edges[i].backbone)
+                                expected +=
+                                    std::min(1.0, scale * importance[i]);
+                        if (!(expected > 0.0)) break;
+                        scale *= target / expected;
+                    }
                 }
 
                 random_stream retain{seed ^ 0xD1B54A32D192ED03ULL};

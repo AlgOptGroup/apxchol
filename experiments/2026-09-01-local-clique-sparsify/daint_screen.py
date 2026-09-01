@@ -21,16 +21,24 @@ MATRICES = (
     ("iter0020", "ipm/iter0020/matrix.mtx"),
     ("iter0030", "ipm/iter0030/matrix.mtx"),
     ("iter0040", "ipm/iter0040/matrix.mtx"),
+    ("grid_500", "matrices/grid_500.mtx"),
+    ("G3_circuit", "matrices/G3_circuit.mtx"),
+    ("thermal2", "matrices/thermal2.mtx"),
+    ("com-Amazon", "matrices/com-Amazon.mtx"),
 )
 ARMS = (
-    ("baseline-before", None, None),
-    ("q0.25-rel1e-3", 0.25, 1e-3),
-    ("baseline-after", None, None),
+    ("baseline-0", None, None, False),
+    ("approx-q0.20", 0.20, 1e-3, False),
+    ("exact-q0.20", 0.20, 1e-3, True),
+    ("baseline-1", None, None, False),
+    ("approx-q0.25", 0.25, 1e-3, False),
+    ("exact-q0.25", 0.25, 1e-3, True),
+    ("baseline-2", None, None, False),
+    ("approx-q0.30", 0.30, 1e-3, False),
+    ("exact-q0.30", 0.30, 1e-3, True),
+    ("baseline-3", None, None, False),
 )
-SEEDS = (
-    1, 7, 13, 17, 23, 31, 37, 42, 43, 53,
-    61, 67, 73, 79, 83, 89, 97, 101, 107, 113,
-)
+SEEDS = (42,)
 SOLVE_RE = re.compile(
     r"solve_result setup_ms=(?P<setup>[0-9.]+) "
     r"pcg_ms=(?P<pcg>[0-9.]+) total_ms=(?P<total>[0-9.]+) "
@@ -92,6 +100,7 @@ def parse_output(text: str) -> dict[str, object]:
 
 def clean_environment(threads: int, keep: float | None,
                       trigger_rel: float | None,
+                      exact_budget: bool,
                       runner) -> dict[str, str]:
     env = os.environ.copy()
     for key in list(env):
@@ -109,6 +118,8 @@ def clean_environment(threads: int, keep: float | None,
         env["APXCHOL_RESEARCH_LOCAL_TREE_KEEP"] = str(keep)
     if trigger_rel is not None:
         env["APXCHOL_RESEARCH_LOCAL_TREE_TRIGGER_REL"] = str(trigger_rel)
+    if exact_budget:
+        env["APXCHOL_RESEARCH_LOCAL_TREE_EXACT_BUDGET"] = "1"
     return runner.benchmark_openmp_env(threads, base=env)
 
 
@@ -161,8 +172,9 @@ def run_rank(args: argparse.Namespace) -> int:
         "threads": args.threads,
         "seeds": SEEDS,
         "arms": [
-            {"name": name, "keep": keep, "trigger_rel": trigger_rel}
-            for name, keep, trigger_rel in ARMS
+            {"name": name, "keep": keep, "trigger_rel": trigger_rel,
+             "exact_budget": exact_budget}
+            for name, keep, trigger_rel, exact_budget in ARMS
         ],
         "affinity": runner.benchmark_openmp_provenance(args.threads),
         "allocation_affinity": sorted(os.sched_getaffinity(0)),
@@ -174,7 +186,7 @@ def run_rank(args: argparse.Namespace) -> int:
     cpu_set = runner.affinity_spec(args.threads)
     for matrix_name, matrix in matrices:
         for seed in SEEDS:
-            for arm, keep, trigger_rel in ARMS:
+            for arm, keep, trigger_rel, exact_budget in ARMS:
                 raw_path = raw_dir / f"{matrix_name}-s{seed}-{arm}.log"
                 command = [
                     "taskset", "-c", cpu_set, str(binary), str(matrix),
@@ -184,7 +196,7 @@ def run_rank(args: argparse.Namespace) -> int:
                 started = time.time()
                 completed = subprocess.run(
                     command, env=clean_environment(
-                        args.threads, keep, trigger_rel, runner),
+                        args.threads, keep, trigger_rel, exact_budget, runner),
                     text=True, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, timeout=args.timeout,
                 )
@@ -207,6 +219,7 @@ def run_rank(args: argparse.Namespace) -> int:
                     "arm": arm,
                     "keep": keep,
                     "trigger_rel": trigger_rel,
+                    "exact_budget": exact_budget,
                     "elapsed_wall_s": time.time() - started,
                     "raw": str(raw_path.relative_to(output)),
                     "raw_sha256": sha256(raw_path),
@@ -220,9 +233,9 @@ def run_rank(args: argparse.Namespace) -> int:
                          if row["matrix"] == matrix_name and
                          row["seed"] == seed and
                          str(row["arm"]).startswith("baseline-")]
-            if len(baselines) != 2:
+            if len(baselines) != 4:
                 raise RuntimeError(
-                    f"{matrix_name}/seed{seed}: expected two baselines, "
+                    f"{matrix_name}/seed{seed}: expected four baselines, "
                     f"found {len(baselines)}")
             signatures = {
                 (row["factor_nnz"], row["stored_nnz"], row["iterations"],
@@ -254,8 +267,9 @@ def merge(args: argparse.Namespace) -> int:
     expected_head = command_text(["git", "rev-parse", "HEAD"], source)
     expected_binary_sha = sha256(binary)
     expected_arms = [
-        {"name": name, "keep": keep, "trigger_rel": trigger_rel}
-        for name, keep, trigger_rel in ARMS
+        {"name": name, "keep": keep, "trigger_rel": trigger_rel,
+         "exact_budget": exact_budget}
+        for name, keep, trigger_rel, exact_budget in ARMS
     ]
     records: list[dict[str, object]] = []
     for rank in range(4):
@@ -272,8 +286,14 @@ def merge(args: argparse.Namespace) -> int:
                 observed_matrices != expected_matrices):
             raise RuntimeError(f"rank {rank} metadata mismatch: {metadata}")
         summary = json.loads((rank_dir / "summary.json").read_text())
-        if summary != {"baseline_exact_cells": 20, "checked_records": 60,
-                       "converged_records": 60, "planned_records": 60}:
+        rank_records_expected = (
+            len(expected_matrices) * len(SEEDS) * len(ARMS))
+        rank_cells_expected = len(expected_matrices) * len(SEEDS)
+        if summary != {
+                "baseline_exact_cells": rank_cells_expected,
+                "checked_records": rank_records_expected,
+                "converged_records": rank_records_expected,
+                "planned_records": rank_records_expected}:
             raise RuntimeError(f"rank {rank} summary mismatch: {summary}")
         rank_records = [json.loads(line) for line in
                         (rank_dir / "records.jsonl").read_text().splitlines()]
@@ -285,13 +305,20 @@ def merge(args: argparse.Namespace) -> int:
                     not raw.is_file() or sha256(raw) != row["raw_sha256"]):
                 raise RuntimeError(f"rank {rank} record mismatch: {row}")
         records.extend(rank_records)
-    if len(records) != 240:
-        raise RuntimeError(f"checked {len(records)}/240 records")
+    expected_records = len(MATRICES) * len(SEEDS) * len(ARMS)
+    expected_cells = len(MATRICES) * len(SEEDS)
+    if len(records) != expected_records:
+        raise RuntimeError(
+            f"checked {len(records)}/{expected_records} records")
 
     metrics = ("setup_ms", "pcg_ms", "total_ms", "factor_nnz",
                "stored_nnz", "iterations", "raw_neighbors",
                "unique_neighbors", "emitted_edges")
-    candidates = ("q0.25-rel1e-3",)
+    candidates = (
+        "approx-q0.20", "exact-q0.20",
+        "approx-q0.25", "exact-q0.25",
+        "approx-q0.30", "exact-q0.30",
+    )
     ratios = {candidate: {metric: [] for metric in metrics}
               for candidate in candidates}
     per_matrix: list[dict[str, object]] = []
@@ -300,8 +327,12 @@ def merge(args: argparse.Namespace) -> int:
             arms = {row["arm"]: row for row in records
                     if row["matrix"] == matrix and row["seed"] == seed}
             brackets = {
-                "q0.25-rel1e-3": (
-                    arms["baseline-before"], arms["baseline-after"]),
+                "approx-q0.20": (arms["baseline-0"], arms["baseline-1"]),
+                "exact-q0.20": (arms["baseline-0"], arms["baseline-1"]),
+                "approx-q0.25": (arms["baseline-1"], arms["baseline-2"]),
+                "exact-q0.25": (arms["baseline-1"], arms["baseline-2"]),
+                "approx-q0.30": (arms["baseline-2"], arms["baseline-3"]),
+                "exact-q0.30": (arms["baseline-2"], arms["baseline-3"]),
             }
             for candidate in candidates:
                 before, after = brackets[candidate]
@@ -322,6 +353,24 @@ def merge(args: argparse.Namespace) -> int:
                                        int(before["iterations"]),
                 })
 
+    exact_over_approx = {}
+    for keep in ("0.20", "0.25", "0.30"):
+        approximate = [row for row in records
+                       if row["arm"] == f"approx-q{keep}"]
+        exact = [row for row in records if row["arm"] == f"exact-q{keep}"]
+        approx_by_cell = {(row["matrix"], row["seed"]): row
+                          for row in approximate}
+        exact_by_cell = {(row["matrix"], row["seed"]): row for row in exact}
+        if approx_by_cell.keys() != exact_by_cell.keys():
+            raise RuntimeError(f"q={keep}: approximate/exact cell mismatch")
+        exact_over_approx[keep] = {
+            metric: geometric_mean([
+                float(exact_by_cell[cell][metric]) /
+                float(approx_by_cell[cell][metric])
+                for cell in sorted(approx_by_cell)])
+            for metric in metrics
+        }
+
     arm_order = [name for name, *_ in ARMS]
     with (output / "records.jsonl").open("w") as handle:
         for row in sorted(records, key=lambda item: (
@@ -330,11 +379,12 @@ def merge(args: argparse.Namespace) -> int:
                 arm_order.index(item["arm"]))):
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     summary = {
-        "checked_records": 240,
-        "planned_records": 240,
-        "baseline_exact_cells": 80,
-        "converged_records": 240,
+        "checked_records": expected_records,
+        "planned_records": expected_records,
+        "baseline_exact_cells": expected_cells,
+        "converged_records": expected_records,
         "per_matrix": per_matrix,
+        "geomean_exact_over_approx": exact_over_approx,
         "geomean_candidate_over_bracket": {
             candidate: {metric: geometric_mean(values)
                         for metric, values in candidate_metrics.items()}
@@ -343,8 +393,11 @@ def merge(args: argparse.Namespace) -> int:
     }
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    print("checked 240/240 records; baseline exact 80/80; converged 240/240")
+    print(f"checked {expected_records}/{expected_records} records; "
+          f"baseline exact {expected_cells}/{expected_cells}; "
+          f"converged {expected_records}/{expected_records}")
     print(json.dumps(summary["geomean_candidate_over_bracket"], sort_keys=True))
+    print(json.dumps(exact_over_approx, sort_keys=True))
     return 0
 
 
