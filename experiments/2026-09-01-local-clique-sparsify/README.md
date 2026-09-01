@@ -205,3 +205,9 @@ its own adjacent baseline bracket.  In parallel, reduce setup work in the
 connectivity-backbone/union pass; a quality-equivalent implementation needs
 roughly 27% less *incremental* setup cost to move the aggregate break-even
 from 1.38 RHS to one.
+
+The q-tuning successor fixes the spread gate at `1e-3` and evaluates
+`q = 0.10, 0.15, 0.20, 0.25, 0.30` over the four IPM iterates and five seeds.
+Every candidate sits between its own two exact baseline arms: 220/220 planned
+records and 20/20 six-baseline matrix/seed checks.  Report one-, two-, four-
+and eight-RHS totals separately; do not choose q from iterations alone.
