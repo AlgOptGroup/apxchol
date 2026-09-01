@@ -58,9 +58,12 @@ matrix or degree threshold.
 Daint job `4573421` completed in 10:02, including two clean builds and both
 test suites.  The macro-off build passed 321/321 tests and the candidate passed
 322/322; three platform-dependent low-precision/memory tests were skipped in
-each build.  The campaign checked 90/90 records and 30/30 exact-output cells;
-all 90 solves converged.  Independent download verification passed 90/90 raw
-log SHA-256 checks under `/tmp/apxchol-cooperative-pivot-daint-r1`.
+each build.  The campaign checked 90/90 records and 30/30 cells with equal
+factor nnz, stored nnz, iterations and residual text; all 90 solves converged.
+Those are structural/solve signatures, not Daint factor-byte hashes.  Byte
+identity is established by the focused local tests, not by this campaign.
+Independent download verification passed 90/90 raw log SHA-256 checks under
+`/tmp/apxchol-cooperative-pivot-daint-r1`.
 
 The rule activated only on com-Orkut: 6/30 cells, covering every Orkut seed and
 thread count.  It did real work there, but far too little of the factorization:
@@ -100,3 +103,48 @@ earlier owner can start a large serial sample before the final small pivot is
 prepared, and can never reconsider cooperation.  This reinforces the closure;
 neither successful peer execution nor selection of the true straggler is
 established by the current trace.
+
+## All-round structural upper bound
+
+Daint job `4573497` reused the exact tested macro-off binary and completed in
+34 seconds.  Checked 10/10 matrix/thread traces, 22,015 elimination rounds and
+23,857,102 selected pivots.  The downloaded copy passed 10/10 log SHA-256
+checks and independently reproduced the committed analyzer output byte for
+byte under `/tmp/apxchol-pivot-straggler-trace-r1`.
+
+The analyzer asks how much proxy span a perfect split could remove *inside the
+team the production work rule already created*.  It computes an LPT schedule
+of indivisible pivots, then compares it with perfectly divisible neighbor work
+and, separately, a `d log d` proxy.  Both are optimistic: cooperation splits
+only GKS source draws, not gather/dedup, factor-column construction, sorting,
+prefix/directory construction or apply.
+
+| matrix | T=36 linear / sort headroom | T=72 linear / sort headroom |
+|---|---:|---:|
+| com-Orkut | 3.168% / 3.336% | 3.542% / 3.611% |
+| com-LiveJournal | 0.178% / 0.164% | 0.190% / 0.170% |
+| iter0040 | 0.302% / 0.353% | 0.479% / 0.525% |
+| grid_2000 | 0.008% / 0.005% | 0.015% / 0.010% |
+| com-Amazon | 0.014% / 0.006% | 0.014% / 0.006% |
+
+On Orkut, elimination itself was 27.7% of setup at T=36 and 30.0% at T=72
+in the timing campaign.  Even assigning the complete optimistic proxy saving
+to elapsed elimination gives only about **0.9% / 1.1% of setup**.  The real
+source-only ceiling is smaller.
+
+**Decision:** close intra-pivot CPU cooperation; do not implement the more
+universal finishers-help descriptor queue.  It is a cleaner scheduler than the
+final-owner probe, but the current-team prize cannot justify its publication,
+claim and lifetime machinery.
+
+An intentionally unattainable second bound lets all 36/72 hardware threads
+divide every round at zero synchronization cost.  It is much larger on the
+social graphs (for example Orkut linear proxy 3.23x/5.72x and LiveJournal
+4.04x/7.26x).  That is not evidence for another source-task patch: those
+rounds were deliberately assigned small teams because there is too little
+work per additional worker.  It identifies a distinct, larger research
+question—persistent-team factorization or multi-round independent regions,
+which could amortize the synchronization boundary itself.  A previous pinned
+four-thread sub-threshold-tail experiment was neutral-to-worse on iter0040 and
+grid_2000, so any revisit must change that boundary rather than merely enlarge
+the team.
