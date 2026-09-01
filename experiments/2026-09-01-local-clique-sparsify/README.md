@@ -367,3 +367,26 @@ source passes 328/328 tests locally.  Its Daint gate uses two candidate runs
 bracketed by three copies of the preserved reference binary on every one of
 the same 20 matrix/seed cells (100 records); the middle-reference/null bracket
 measures timing drift in the same campaign.
+
+### Gather-removal A/B: refuted
+
+Daint job `4573170` completed in 1:29.  Checked **100/100 records**, 20/20
+output-exact matrix/seed cells, 100/100 converged solves and 328/328 tests
+(three platform skips).  The downloaded evidence verifies 100/100 raw hashes
+under `/tmp/local-clique-exact-waterfill-results-20260901-r3-optimization`.
+
+The two candidate repetitions measured setup 0.98148x and total 0.98415x
+against their adjacent reference binaries.  That apparent win is smaller than
+the untouched middle-reference null, which measured 0.96835x setup and
+0.97502x total against its endpoints.  Dividing by the null gives candidate
+setup **1.01356x** and total **1.00936x**, with only 10/20 cells winning on
+each metric.  Three of four IPM iterates lose in the null-normalized aggregate;
+only iter0040 shows a roughly 1.1% total reduction.
+
+**Decision:** refute the gather removal as a performance optimization and
+restore the shorter reference implementation.  All factor, stored-nnz,
+iteration, residual and elimination-work fields were exactly equal in all
+20/20 cells, so this is a clean implementation null rather than a hidden
+quality trade.  Exact q=0.20 remains a near-one-RHS research estimator, but
+crossing the line now requires reducing union/backbone work or a larger
+algorithmic change, not rearranging its small probability-normalization pass.

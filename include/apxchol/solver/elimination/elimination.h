@@ -448,7 +448,7 @@ struct tree_elimination {
             static thread_local std::vector<size_t> parent;
             static thread_local std::vector<unsigned char> rank;
             static thread_local std::vector<double> importance;
-            static thread_local std::vector<double> off_tree_suffix;
+            static thread_local std::vector<double> off_tree_importance;
             edges.clear();
             edges.reserve(2 * (d - 1));
 
@@ -536,42 +536,20 @@ struct tree_elimination {
                 double measure = 0.0;
                 for (size_t i = 0; i < edges.size(); ++i) {
                     importance[i] = std::sqrt(edges[i].weight);
-                    if (!local_two_tree_exact_budget &&
-                        !edges[i].backbone)
-                        measure += importance[i];
+                    if (!edges[i].backbone) measure += importance[i];
                 }
                 double scale = 0.0;
                 if (local_two_tree_exact_budget) {
-                    if (target >= static_cast<double>(off_tree)) {
-                        scale = std::numeric_limits<double>::infinity();
-                    } else {
-                        // Build the filtered suffix sums directly from
-                        // `order`; materializing the filtered importances first
-                        // would add another O(off_tree) gather and retained
-                        // scratch vector.  This visits and adds values in the
-                        // exact same order as exact_capped_probability_scale.
-                        off_tree_suffix.resize(off_tree + 1);
-                        off_tree_suffix.back() = 0.0;
-                        size_t position = off_tree;
-                        for (auto it = order.rbegin(); it != order.rend(); ++it)
-                            if (!edges[*it].backbone) {
-                                --position;
-                                off_tree_suffix[position] =
-                                    off_tree_suffix[position + 1] +
-                                    importance[*it];
-                            }
-                        assert(position == 0);
-
-                        size_t saturated = 0;
-                        for (size_t index : order) {
-                            if (edges[index].backbone) continue;
-                            scale =
-                                (target - static_cast<double>(saturated)) /
-                                off_tree_suffix[saturated];
-                            if (!(scale * importance[index] > 1.0)) break;
-                            ++saturated;
-                        }
-                    }
+                    off_tree_importance.clear();
+                    off_tree_importance.reserve(off_tree);
+                    // `order` is descending by edge weight, hence also by
+                    // sqrt(weight).  Removing backbone entries preserves that
+                    // order and makes the water-filling pass linear.
+                    for (size_t index : order)
+                        if (!edges[index].backbone)
+                            off_tree_importance.push_back(importance[index]);
+                    scale = detail::exact_capped_probability_scale(
+                        off_tree_importance, target);
                 } else {
                     scale = target > 0.0 && measure > 0.0
                         ? target / measure : 0.0;
