@@ -21,6 +21,4 @@ G3_circuit   tree   nnz(L)=8973167     iters=46    resid=6.973e-09 setup=0.776s
 G3_circuit   ust    nnz(L)=9068749     iters=51    resid=7.196e-09 setup=0.761s
 thermal2     tree   nnz(L)=7993169     iters=44    resid=7.385e-09 setup=0.826s
 thermal2     ust    nnz(L)=8069865     iters=50    resid=6.863e-09 setup=0.840s
-as-Skitter   tree   nnz(L)=18478294    iters=50    resid=1.482e+05 setup=5.212s
-as-Skitter   ust    nnz(L)=18907500    iters=34    resid=4.163e+07 setup=5.144s
 DONE_SENTINEL

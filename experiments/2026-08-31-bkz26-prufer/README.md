@@ -223,7 +223,8 @@ the named source commit `ba72922`. That commit attributes the rows to
 `a9ee7a5:experiments/2026-08-21-residual-density/ab.log` and the standalone
 prototype to `759719c`. The log records a single factor seed (`42`). Its setup
 times were collected under load average 12--28 and are not performance
-evidence; the as-Skitter solves are invalid and remain only as raw provenance.
+evidence. Two invalid as-Skitter rows with component-incompatible residuals
+were removed rather than presented as sampler evidence.
 
 Even that weak first screen showed the important signal: on IPM `iter0010`, GKS
 needed 41 PCG iterations and the weighted Prüfer tree needed 90; on `iter0040`
@@ -283,21 +284,6 @@ pairing. An exact-marginal balanced-count variant was slower and had means
 91.0, 61.2, and 73.8 iterations for `alpha=1,1.75,2`, respectively, versus
 90.4, 58.4, and 71.8 for the iid variants.
 
-### Oversampling did not recover the single-RHS trade-off
-
-Two complete half-weight GKS trees reduced `iter0010` to 22--24 iterations, but
-grew the factor from about 8.91M to 12.19M entries and made observed setup about
-three times as expensive. Keeping one half-tree as a connectivity backbone and
-Bernoulli-thinning the other produced 310--338, 91--100, and 22--24 iterations
-at expected budgets of 1.25, 1.5, and 2 trees: thinning variance destroyed the
-useful interpolation.
-
-A more expensive even-cycle cancellation preserved every clique vertex's
-weighted degree while sparsifying two GKS trees. It reached 30--32 iterations
-and about 10.83M entries on `iter0010`, but the denser evolving residual and the
-cycle work still lost single-RHS total time. This may remain interesting only
-when factor setup can be amortized across many right-hand sides.
-
 ### Reproducibility limit
 
 The detailed study code and memo are retained in repository history, but its
@@ -307,3 +293,19 @@ alone. The branch's current reproducible claims are its unit/CLI tests and any
 new A/B run made with an independently supplied matrix. This limitation is why
 the opt-in implementation is published as a research branch rather than merged
 as the default sampler.
+
+## Reproducible broad-sweep protocol
+
+The branch now includes `bkz26_quality_probe` and a checksum-guarded Daint
+campaign under [`daint-broad`](daint-broad). It parses each matrix once,
+generates one fixed component-compatible RHS independent of factor seed, and
+runs `GKS / BKZ26 / GKS` for seeds `{1,17,42,73,97}` with identical
+`APXCHOL_FACTOR_DROP=1e-4`. The denominator is eight valid inputs: the four IPM
+iterates plus grid_500, G3_circuit, thermal2 and com-Amazon. Every row records
+raw/stored factor size, independently recomputed true residual, iterations and
+wall intervals. The two GKS arms must match exactly for all 40 matrix/seed
+brackets before the 120-record campaign is accepted.
+
+Two-tree oversampling, thinning and even-cycle cancellation are intentionally
+absent from this BKZ report. They are separate clique-sampling experiments and
+do not test BKZ26 Algorithm 1.

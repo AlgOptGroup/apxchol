@@ -152,4 +152,9 @@ if (APXCHOL_BUILD_TOOLS)
     # so it needs the CLI's Laplacian-vs-adjacency interpretation too.
     target_link_libraries(analyze_factor PRIVATE apxchol_core apxchol_mtx_input
                           fast_matrix_market::fast_matrix_market)
+
+    add_executable(bkz26_quality_probe
+        ../experiments/2026-08-31-bkz26-prufer/bkz26_quality_probe.cpp)
+    target_link_libraries(bkz26_quality_probe PRIVATE
+        apxchol_core apxchol_mtx_input fast_matrix_market::fast_matrix_market)
 endif()
