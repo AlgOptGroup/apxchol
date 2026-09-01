@@ -2110,9 +2110,26 @@ inline detail::tree_elimination make_tree_elim(const factor_options& opts) {
                 "APXCHOL_RESEARCH_LOCAL_TREE_KEEP must be in (0,1]");
         local_two_tree_keep = parsed;
     }
+    double local_two_tree_trigger_rel = -1.0;
+    if (const char* value =
+            std::getenv("APXCHOL_RESEARCH_LOCAL_TREE_TRIGGER_REL");
+        value && *value) {
+        char* end = nullptr;
+        const double parsed = std::strtod(value, &end);
+        if (end == value || *end != '\0' || !std::isfinite(parsed) ||
+            !(parsed > 0.0 && parsed <= 1.0))
+            throw std::invalid_argument(
+                "APXCHOL_RESEARCH_LOCAL_TREE_TRIGGER_REL must be in (0,1]");
+        local_two_tree_trigger_rel = parsed;
+    }
+    if (local_two_tree_trigger_rel >= 0.0 && local_two_tree_keep < 0.0)
+        throw std::invalid_argument(
+            "APXCHOL_RESEARCH_LOCAL_TREE_TRIGGER_REL requires "
+            "APXCHOL_RESEARCH_LOCAL_TREE_KEEP");
     return detail::tree_elimination{
         .exact_clique_max_degree = opts.exact_clique_max_degree,
-        .local_two_tree_keep = local_two_tree_keep};
+        .local_two_tree_keep = local_two_tree_keep,
+        .local_two_tree_trigger_rel = local_two_tree_trigger_rel};
 }
 
 // Default-construct-the-partitioner convenience layer.

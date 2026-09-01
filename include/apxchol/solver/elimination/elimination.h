@@ -269,6 +269,13 @@ struct tree_elimination {
     /// union, and HT-sample the remaining cycle edges at this mean rate.
     double local_two_tree_keep = -1.0;
 
+    /// Optional graph-independent activation rule for the two-tree mode.
+    /// With a positive value tau, activate only when the sorted pivot star has
+    /// min_weight < tau * max_weight.  Negative disables the gate.  Degree-2
+    /// pivots always use ordinary GKS because the two half-trees coalesce to
+    /// the exact same single edge and can only add work.
+    double local_two_tree_trigger_rel = -1.0;
+
     /// Upper bound on the number of edges one sample_clique call emits, for a
     /// vertex of the given degree (used by tests / capacity reservations).
     size_t max_clique_edges(node_index deg) const {
@@ -365,7 +372,15 @@ struct tree_elimination {
             return std::min(static_cast<size_t>(it - prefix.begin()), d - 1);
         };
 
-        if (local_two_tree_keep >= 0.0) {
+        bool use_local_two_tree = local_two_tree_keep >= 0.0 && d > 2;
+        if (use_local_two_tree && local_two_tree_trigger_rel >= 0.0 &&
+            std::isfinite(neighbors.front().weight) &&
+            std::isfinite(neighbors.back().weight)) {
+            use_local_two_tree =
+                neighbors.front().weight <
+                local_two_tree_trigger_rel * neighbors.back().weight;
+        }
+        if (use_local_two_tree) {
             struct local_edge {
                 size_t i, j;
                 double weight;

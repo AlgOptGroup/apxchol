@@ -19,15 +19,20 @@ import time
 MATRICES = (
     ("iter0010", "ipm/iter0010/matrix.mtx"),
     ("iter0020", "ipm/iter0020/matrix.mtx"),
+    ("iter0030", "ipm/iter0030/matrix.mtx"),
     ("iter0040", "ipm/iter0040/matrix.mtx"),
     ("grid_500", "matrices/grid_500.mtx"),
+    ("G3_circuit", "matrices/G3_circuit.mtx"),
+    ("thermal2", "matrices/thermal2.mtx"),
+    ("com-Amazon", "matrices/com-Amazon.mtx"),
 )
 ARMS = (
-    ("baseline-before", None),
-    ("q0.15", 0.15),
-    ("q0.20", 0.20),
-    ("q0.25", 0.25),
-    ("baseline-after", None),
+    ("baseline-before", None, None),
+    ("q0.20-ungated", 0.20, None),
+    ("q0.20-rel1e-5", 0.20, 1e-5),
+    ("q0.20-rel1e-4", 0.20, 1e-4),
+    ("q0.20-rel1e-3", 0.20, 1e-3),
+    ("baseline-after", None, None),
 )
 SOLVE_RE = re.compile(
     r"solve_result setup_ms=(?P<setup>[0-9.]+) "
@@ -88,7 +93,9 @@ def parse_output(text: str) -> dict[str, object]:
     }
 
 
-def clean_environment(threads: int, keep: float | None, runner) -> dict[str, str]:
+def clean_environment(threads: int, keep: float | None,
+                      trigger_rel: float | None,
+                      runner) -> dict[str, str]:
     env = os.environ.copy()
     for key in list(env):
         if (key.startswith("APXCHOL_") or key.startswith("OMP_") or
@@ -103,6 +110,8 @@ def clean_environment(threads: int, keep: float | None, runner) -> dict[str, str
     })
     if keep is not None:
         env["APXCHOL_RESEARCH_LOCAL_TREE_KEEP"] = str(keep)
+    if trigger_rel is not None:
+        env["APXCHOL_RESEARCH_LOCAL_TREE_TRIGGER_REL"] = str(trigger_rel)
     return runner.benchmark_openmp_env(threads, base=env)
 
 
@@ -127,10 +136,14 @@ def run_rank(args: argparse.Namespace) -> int:
     source = args.source.resolve()
     binary = args.binary.resolve()
     output = args.output.resolve()
-    matrix_name, relative = MATRICES[rank]
-    matrix = args.data_root.resolve() / relative
-    if not binary.is_file() or not matrix.is_file():
-        raise RuntimeError(f"missing binary or matrix: {binary}, {matrix}")
+    assigned = MATRICES[rank::tasks]
+    matrices = [(name, args.data_root.resolve() / relative)
+                for name, relative in assigned]
+    if not binary.is_file():
+        raise RuntimeError(f"missing binary: {binary}")
+    missing = [str(matrix) for _, matrix in matrices if not matrix.is_file()]
+    if missing:
+        raise RuntimeError(f"missing matrices: {missing}")
     rank_dir = output / f"rank-{rank}"
     if rank_dir.exists():
         raise RuntimeError(f"refusing to overwrite {rank_dir}")
@@ -144,11 +157,16 @@ def run_rank(args: argparse.Namespace) -> int:
         **source_metadata(source, binary),
         "rank": rank,
         "tasks": tasks,
-        "matrix": matrix_name,
-        "matrix_path": str(matrix),
+        "matrices": [
+            {"name": name, "path": str(matrix)}
+            for name, matrix in matrices
+        ],
         "threads": args.threads,
         "seed": args.seed,
-        "arms": [{"name": name, "keep": keep} for name, keep in ARMS],
+        "arms": [
+            {"name": name, "keep": keep, "trigger_rel": trigger_rel}
+            for name, keep, trigger_rel in ARMS
+        ],
         "affinity": runner.benchmark_openmp_provenance(args.threads),
         "allocation_affinity": sorted(os.sched_getaffinity(0)),
     }
@@ -157,56 +175,73 @@ def run_rank(args: argparse.Namespace) -> int:
 
     records: list[dict[str, object]] = []
     cpu_set = runner.affinity_spec(args.threads)
-    for arm, keep in ARMS:
-        raw_path = raw_dir / f"{matrix_name}-{arm}.log"
-        command = [
-            "taskset", "-c", cpu_set, str(binary), str(matrix),
-            "--solve", "--graph-storage", "vec_pool_aos",
-            "--is", "block_greedy", "--seed", str(args.seed),
-        ]
-        started = time.time()
-        completed = subprocess.run(
-            command, env=clean_environment(args.threads, keep, runner),
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=args.timeout,
-        )
-        raw_path.write_text(completed.stdout)
-        if completed.returncode != 0:
-            raise RuntimeError(f"{arm} failed rc={completed.returncode}: {raw_path}")
-        parsed = parse_output(completed.stdout)
-        if not math.isfinite(float(parsed["residual"])) or \
-                float(parsed["residual"]) > 1e-8:
-            raise RuntimeError(f"{arm} did not converge: {parsed['residual_text']}")
-        record = {
-            "rank": rank,
-            "matrix": matrix_name,
-            "threads": args.threads,
-            "seed": args.seed,
-            "arm": arm,
-            "keep": keep,
-            "elapsed_wall_s": time.time() - started,
-            "raw": str(raw_path.relative_to(output)),
-            "raw_sha256": sha256(raw_path),
-            **parsed,
-        }
-        records.append(record)
-        with (rank_dir / "records.jsonl").open("a") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    for matrix_name, matrix in matrices:
+        for arm, keep, trigger_rel in ARMS:
+            raw_path = raw_dir / f"{matrix_name}-{arm}.log"
+            command = [
+                "taskset", "-c", cpu_set, str(binary), str(matrix),
+                "--solve", "--graph-storage", "vec_pool_aos",
+                "--is", "block_greedy", "--seed", str(args.seed),
+            ]
+            started = time.time()
+            completed = subprocess.run(
+                command, env=clean_environment(
+                    args.threads, keep, trigger_rel, runner),
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=args.timeout,
+            )
+            raw_path.write_text(completed.stdout)
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"{matrix_name}/{arm} failed rc={completed.returncode}: "
+                    f"{raw_path}")
+            parsed = parse_output(completed.stdout)
+            if not math.isfinite(float(parsed["residual"])) or \
+                    float(parsed["residual"]) > 1e-8:
+                raise RuntimeError(
+                    f"{matrix_name}/{arm} did not converge: "
+                    f"{parsed['residual_text']}")
+            record = {
+                "rank": rank,
+                "matrix": matrix_name,
+                "threads": args.threads,
+                "seed": args.seed,
+                "arm": arm,
+                "keep": keep,
+                "trigger_rel": trigger_rel,
+                "elapsed_wall_s": time.time() - started,
+                "raw": str(raw_path.relative_to(output)),
+                "raw_sha256": sha256(raw_path),
+                **parsed,
+            }
+            records.append(record)
+            with (rank_dir / "records.jsonl").open("a") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
 
-    baselines = [row for row in records if row["keep"] is None]
-    signatures = {
-        (row["factor_nnz"], row["stored_nnz"], row["iterations"],
-         row["residual_text"], row["raw_neighbors"],
-         row["unique_neighbors"], row["emitted_edges"])
-        for row in baselines
-    }
-    if len(signatures) != 1:
-        raise RuntimeError(f"baseline did not reproduce exactly: {signatures}")
-    summary = {"checked_records": 5, "planned_records": 5,
-               "baseline_exact": True, "converged_records": 5}
+        baselines = [row for row in records
+                     if row["matrix"] == matrix_name and
+                     str(row["arm"]).startswith("baseline-")]
+        if len(baselines) != 2:
+            raise RuntimeError(
+                f"{matrix_name}: expected two baselines, found {len(baselines)}")
+        signatures = {
+            (row["factor_nnz"], row["stored_nnz"], row["iterations"],
+             row["residual_text"], row["raw_neighbors"],
+             row["unique_neighbors"], row["emitted_edges"])
+            for row in baselines
+        }
+        if len(signatures) != 1:
+            raise RuntimeError(
+                f"{matrix_name}: baseline did not reproduce: {signatures}")
+
+    expected = len(matrices) * len(ARMS)
+    summary = {"checked_records": expected, "planned_records": expected,
+               "baseline_exact_cells": len(matrices),
+               "converged_records": expected}
     (rank_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    print(f"rank {rank} {matrix_name}: checked 5/5; baseline exact; all converged")
+    print(f"rank {rank}: checked {expected}/{expected}; "
+          f"baseline exact {len(matrices)}/{len(matrices)}; all converged")
     return 0
 
 
@@ -216,18 +251,21 @@ def merge(args: argparse.Namespace) -> int:
     for rank in range(4):
         rank_dir = output / f"rank-{rank}"
         summary = json.loads((rank_dir / "summary.json").read_text())
-        if summary != {"baseline_exact": True, "checked_records": 5,
-                       "converged_records": 5, "planned_records": 5}:
+        if summary != {"baseline_exact_cells": 2, "checked_records": 12,
+                       "converged_records": 12, "planned_records": 12}:
             raise RuntimeError(f"rank {rank} summary mismatch: {summary}")
         records.extend(json.loads(line) for line in
                        (rank_dir / "records.jsonl").read_text().splitlines())
-    if len(records) != 20:
-        raise RuntimeError(f"checked {len(records)}/20 records")
+    if len(records) != 48:
+        raise RuntimeError(f"checked {len(records)}/48 records")
 
     metrics = ("setup_ms", "pcg_ms", "total_ms", "factor_nnz",
                "stored_nnz", "iterations", "raw_neighbors",
                "unique_neighbors", "emitted_edges")
-    candidates = ("q0.15", "q0.20", "q0.25")
+    candidates = (
+        "q0.20-ungated", "q0.20-rel1e-5",
+        "q0.20-rel1e-4", "q0.20-rel1e-3",
+    )
     ratios = {candidate: {metric: [] for metric in metrics}
               for candidate in candidates}
     per_matrix: list[dict[str, object]] = []
@@ -250,17 +288,17 @@ def merge(args: argparse.Namespace) -> int:
                                    int(before["iterations"]),
             })
 
-    arm_order = [name for name, _ in ARMS]
+    arm_order = [name for name, *_ in ARMS]
     with (output / "records.jsonl").open("w") as handle:
         for row in sorted(records, key=lambda item: (
                 [name for name, _ in MATRICES].index(item["matrix"]),
                 arm_order.index(item["arm"]))):
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     summary = {
-        "checked_records": 20,
-        "planned_records": 20,
-        "baseline_exact_cells": 4,
-        "converged_records": 20,
+        "checked_records": 48,
+        "planned_records": 48,
+        "baseline_exact_cells": 8,
+        "converged_records": 48,
         "per_matrix": per_matrix,
         "geomean_candidate_over_bracket": {
             candidate: {metric: geometric_mean(values)
@@ -270,7 +308,7 @@ def merge(args: argparse.Namespace) -> int:
     }
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    print("checked 20/20 records; baseline exact 4/4; converged 20/20")
+    print("checked 48/48 records; baseline exact 8/8; converged 48/48")
     print(json.dumps(summary["geomean_candidate_over_bracket"], sort_keys=True))
     return 0
 

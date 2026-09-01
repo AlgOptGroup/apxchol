@@ -99,3 +99,31 @@ cost is too high, fall back to one GKS tree for that clique.
 
 Downloaded evidence: `/tmp/apxchol-local-clique-daint-r1`; all 20 raw-log
 SHA-256 checks pass.
+
+## Weight-spread activation follow-up
+
+The fixed `q=0.20` estimator is the only local oversample/sparsify arm that
+has improved single-RHS total on IPM, but applying it to every pivot is bad on
+the grid.  The next branch tests the smallest graph-independent rule suggested
+by that split:
+
+```
+activate two-tree q=0.20 iff min(star weight) < tau * max(star weight).
+```
+
+The comparison occurs after the canonical weight sort, so it adds no scan or
+data structure.  A rejected pivot takes the byte-identical ordinary GKS path.
+Degree-2 pivots also use GKS unconditionally: two half-trees can only coalesce
+to that same single edge, so oversampling them has no quality benefit.
+
+This is not a matrix-name or input-size gate.  It targets the local source of
+GKS variance: scale separation inside the pivot star.  The independent eager
+light/light census found that `tau=1e-4` classified 524181/524286 iter0010
+pivots but 0 grid_500 pivots; `tau=1e-5` and `1e-3` bracket the boundary.
+
+The first Daint screen uses seed 42 on 8/8 matrices: four IPM iterates,
+grid_500, G3_circuit, thermal2 and com-Amazon.  It brackets ungated `q=0.20`
+and the three thresholds between exact baselines, for 48/48 planned records.
+Advance to five seeds only if one threshold preserves the IPM solve/total win,
+is an exact or near-exact no-op on controls, and does not add setup work beyond
+the ungated estimator on activated trajectories.

@@ -44,6 +44,16 @@ std::vector<deferred_edge> reference_tree_sample(
     return result;
 }
 
+void expect_edges_exact(const std::vector<deferred_edge>& actual,
+                        const std::vector<deferred_edge>& expected) {
+    ASSERT_EQ(actual.size(), expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(actual[i].u, expected[i].u) << "edge=" << i;
+        EXPECT_EQ(actual[i].v, expected[i].v) << "edge=" << i;
+        EXPECT_DOUBLE_EQ(actual[i].w, expected[i].w) << "edge=" << i;
+    }
+}
+
 } // namespace
 
 TEST(EliminatorBounds, TreeReturnsDegMinusOne) {
@@ -136,6 +146,62 @@ TEST(TreeSampler, LocalTwoTreeSparsifierIsUnbiased) {
                         0.04 * expected + 1e-4)
                 << "edge=" << u << ',' << v;
         }
+}
+
+TEST(TreeSampler, LocalTwoTreeSpreadGateIsExactNoOpOnNarrowStar) {
+    const std::vector<weighted_neighbor> input{
+        {0, 1.0}, {1, 2.0}, {2, 3.0}, {3, 5.0}, {4, 8.0}};
+    const tree_elimination baseline;
+    const tree_elimination gated{
+        .local_two_tree_keep = 0.2,
+        .local_two_tree_trigger_rel = 1e-4};
+    for (std::uint64_t seed = 0; seed < 100; ++seed) {
+        auto baseline_input = input;
+        auto gated_input = input;
+        std::vector<deferred_edge> expected;
+        std::vector<deferred_edge> actual;
+        baseline.sample_clique(baseline_input, 19.0, seed,
+                               edge_emitter(expected));
+        gated.sample_clique(gated_input, 19.0, seed, edge_emitter(actual));
+        expect_edges_exact(actual, expected);
+    }
+}
+
+TEST(TreeSampler, LocalTwoTreeSpreadGateMatchesUngatedOnSeparatedStar) {
+    const std::vector<weighted_neighbor> input{
+        {0, 1e-8}, {1, 2.0}, {2, 4.0}, {3, 8.0}};
+    const tree_elimination ungated{.local_two_tree_keep = 0.2};
+    const tree_elimination gated{
+        .local_two_tree_keep = 0.2,
+        .local_two_tree_trigger_rel = 1e-4};
+    for (std::uint64_t seed = 0; seed < 100; ++seed) {
+        auto ungated_input = input;
+        auto gated_input = input;
+        std::vector<deferred_edge> expected;
+        std::vector<deferred_edge> actual;
+        ungated.sample_clique(ungated_input, 14.00000001, seed,
+                              edge_emitter(expected));
+        gated.sample_clique(gated_input, 14.00000001, seed,
+                            edge_emitter(actual));
+        expect_edges_exact(actual, expected);
+    }
+}
+
+TEST(TreeSampler, LocalTwoTreeDegreeTwoUsesExactBaselinePath) {
+    const std::vector<weighted_neighbor> input{{0, 1e-8}, {1, 8.0}};
+    const tree_elimination baseline;
+    const tree_elimination local{.local_two_tree_keep = 0.2};
+    for (std::uint64_t seed = 0; seed < 100; ++seed) {
+        auto baseline_input = input;
+        auto local_input = input;
+        std::vector<deferred_edge> expected;
+        std::vector<deferred_edge> actual;
+        baseline.sample_clique(baseline_input, 8.00000001, seed,
+                               edge_emitter(expected));
+        local.sample_clique(local_input, 8.00000001, seed,
+                            edge_emitter(actual));
+        expect_edges_exact(actual, expected);
+    }
 }
 
 TEST(TreeSampler, InverseCdfDirectoryMatchesIndependentFullSearch) {
