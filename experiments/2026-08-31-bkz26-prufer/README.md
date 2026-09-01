@@ -289,10 +289,10 @@ pairing. An exact-marginal balanced-count variant was slower and had means
 The detailed study code and memo are retained in repository history, but its
 IPM fixture and raw logs were not committed. Therefore the table above is
 attributed historical evidence, not a result reproducible from this branch
-alone. The branch's current reproducible claims are its unit/CLI tests and any
-new A/B run made with an independently supplied matrix. This limitation is why
-the opt-in implementation is published as a research branch rather than merged
-as the default sampler.
+alone. The broad campaign below supersedes it for current cross-matrix claims;
+its aggregate is committed and its scripts reproduce the run when the named
+matrices are supplied independently. The opt-in implementation remains a
+research branch rather than the default sampler.
 
 ## Reproducible broad-sweep protocol
 
@@ -309,3 +309,31 @@ brackets before the 120-record campaign is accepted.
 Two-tree oversampling, thinning and even-cycle cancellation are intentionally
 absent from this BKZ report. They are separate clique-sampling experiments and
 do not test BKZ26 Algorithm 1.
+
+## Broad Daint result
+
+Daint job `4571740` completed in 0:53 (one exclusive GH200 node, four isolated
+72-thread Grace ranks, Clang 22 native tuning). Checked **8/8 matrices, 5/5
+seeds, 120/120 records, and 40/40 exact repeated-GKS brackets**; all true
+residuals were at most `1e-8`. The downloaded result manifest verifies 48/48
+files under `/tmp/bkz26-broad-results-20260901`. The committed aggregate is
+[`result-aggregate.tsv`](daint-broad/result-aggregate.tsv).
+
+BKZ26 divided by the geometric mean of its two GKS brackets:
+
+| scope | mean iterations GKS -> BKZ26 | iteration delta | raw factor | stored factor | setup | solve | one-RHS total |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| four IPM iterates (20 pairs) | 46.35 -> 71.75 | +508 | 1.0062x | 1.0088x | 0.9404x | 1.4950x | **1.0952x** |
+| four controls (20 pairs) | 43.50 -> 48.05 | +91 | 1.0175x | 1.0175x | 1.1016x | 1.1387x | **1.1129x** |
+| all 40 pairs | 44.93 -> 59.90 | +599 | 1.0119x | 1.0132x | 1.0178x | 1.3047x | **1.1040x** |
+
+The loss is broad, not an iter0010 accident: every IPM iterate has a positive
+iteration delta in all five seeds; G3_circuit and thermal2 also lose every
+seed. `grid_500` is near neutral. `iter0040` is the lone total-time win
+(0.9254x) because its BKZ26 setup is 0.7885x despite iterations increasing
+56.2 -> 73.2; it does not reverse the aggregate single-RHS verdict.
+
+**Decision:** publish/retain BKZ26 Algorithm 1 as the requested research
+branch and reference implementation, but do not replace GKS. A linear-work or
+GPU realization can reduce sampler setup cost and can be embedded in a
+ParAC-style schedule, yet neither changes the observed estimator-quality gap.
