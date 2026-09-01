@@ -75,6 +75,7 @@
 #include <cstdint>
 #include <numeric>
 #include <span>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -105,8 +106,21 @@ public:
     void operator()(std::span<const deferred_edge> es) const {
         buf_->insert(buf_->end(), es.begin(), es.end());
     }
-    /// Reserve capacity for `n` additional edges.
-    void reserve(size_t n) const { buf_->reserve(buf_->size() + n); }
+    /// Reserve capacity for `n` additional edges without defeating the
+    /// vector's amortized-growth contract. Eliminators call this once per
+    /// pivot while a thread's round buffer accumulates many pivots; reserving
+    /// exactly size+n would otherwise reallocate and copy that accumulated
+    /// prefix repeatedly.
+    void reserve(size_t n) const {
+        if (n > buf_->max_size() - buf_->size())
+            throw std::length_error("edge emitter capacity overflow");
+        const size_t required = buf_->size() + n;
+        const size_t capacity = buf_->capacity();
+        if (required <= capacity) return;
+        const size_t doubled = capacity <= buf_->max_size() / 2
+            ? 2 * capacity : buf_->max_size();
+        buf_->reserve(std::max(required, std::max<size_t>(8, doubled)));
+    }
 
 private:
     std::vector<deferred_edge>* buf_;
