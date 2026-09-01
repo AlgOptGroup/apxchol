@@ -56,6 +56,19 @@ void expect_edges_exact(const std::vector<deferred_edge>& actual,
 
 } // namespace
 
+TEST(EdgeEmitter, ReserveKeepsAmortizedRoundBufferGrowth) {
+    std::vector<deferred_edge> edges;
+    edge_emitter out(edges);
+    out.reserve(3);
+    EXPECT_GE(edges.capacity(), 8u);
+    const size_t first_capacity = edges.capacity();
+    for (size_t i = 0; i < first_capacity; ++i)
+        out(0, 1, static_cast<double>(i + 1));
+    out.reserve(1);
+    EXPECT_GE(edges.capacity(), 2 * first_capacity);
+    EXPECT_EQ(edges.size(), first_capacity);
+}
+
 TEST(EliminatorBounds, TreeReturnsDegMinusOne) {
     EXPECT_EQ(tree_elimination{}.max_clique_edges(0), 0u);
     EXPECT_EQ(tree_elimination{}.max_clique_edges(1), 0u);
