@@ -29,11 +29,11 @@ MATRICES = (
 ARMS = (
     ("baseline-before", None, None),
     ("q0.20-ungated", 0.20, None),
-    ("q0.20-rel1e-5", 0.20, 1e-5),
-    ("q0.20-rel1e-4", 0.20, 1e-4),
+    ("baseline-mid", None, None),
     ("q0.20-rel1e-3", 0.20, 1e-3),
     ("baseline-after", None, None),
 )
+SEEDS = (1, 17, 42, 73, 97)
 SOLVE_RE = re.compile(
     r"solve_result setup_ms=(?P<setup>[0-9.]+) "
     r"pcg_ms=(?P<pcg>[0-9.]+) total_ms=(?P<total>[0-9.]+) "
@@ -162,7 +162,7 @@ def run_rank(args: argparse.Namespace) -> int:
             for name, matrix in matrices
         ],
         "threads": args.threads,
-        "seed": args.seed,
+        "seeds": SEEDS,
         "arms": [
             {"name": name, "keep": keep, "trigger_rel": trigger_rel}
             for name, keep, trigger_rel in ARMS
@@ -176,129 +176,169 @@ def run_rank(args: argparse.Namespace) -> int:
     records: list[dict[str, object]] = []
     cpu_set = runner.affinity_spec(args.threads)
     for matrix_name, matrix in matrices:
-        for arm, keep, trigger_rel in ARMS:
-            raw_path = raw_dir / f"{matrix_name}-{arm}.log"
-            command = [
-                "taskset", "-c", cpu_set, str(binary), str(matrix),
-                "--solve", "--graph-storage", "vec_pool_aos",
-                "--is", "block_greedy", "--seed", str(args.seed),
-            ]
-            started = time.time()
-            completed = subprocess.run(
-                command, env=clean_environment(
-                    args.threads, keep, trigger_rel, runner),
-                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=args.timeout,
-            )
-            raw_path.write_text(completed.stdout)
-            if completed.returncode != 0:
+        for seed in SEEDS:
+            for arm, keep, trigger_rel in ARMS:
+                raw_path = raw_dir / f"{matrix_name}-s{seed}-{arm}.log"
+                command = [
+                    "taskset", "-c", cpu_set, str(binary), str(matrix),
+                    "--solve", "--graph-storage", "vec_pool_aos",
+                    "--is", "block_greedy", "--seed", str(seed),
+                ]
+                started = time.time()
+                completed = subprocess.run(
+                    command, env=clean_environment(
+                        args.threads, keep, trigger_rel, runner),
+                    text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, timeout=args.timeout,
+                )
+                raw_path.write_text(completed.stdout)
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        f"{matrix_name}/seed{seed}/{arm} failed "
+                        f"rc={completed.returncode}: {raw_path}")
+                parsed = parse_output(completed.stdout)
+                if not math.isfinite(float(parsed["residual"])) or \
+                        float(parsed["residual"]) > 1e-8:
+                    raise RuntimeError(
+                        f"{matrix_name}/seed{seed}/{arm} did not converge: "
+                        f"{parsed['residual_text']}")
+                record = {
+                    "rank": rank,
+                    "matrix": matrix_name,
+                    "threads": args.threads,
+                    "seed": seed,
+                    "arm": arm,
+                    "keep": keep,
+                    "trigger_rel": trigger_rel,
+                    "elapsed_wall_s": time.time() - started,
+                    "raw": str(raw_path.relative_to(output)),
+                    "raw_sha256": sha256(raw_path),
+                    **parsed,
+                }
+                records.append(record)
+                with (rank_dir / "records.jsonl").open("a") as handle:
+                    handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+            baselines = [row for row in records
+                         if row["matrix"] == matrix_name and
+                         row["seed"] == seed and
+                         str(row["arm"]).startswith("baseline-")]
+            if len(baselines) != 3:
                 raise RuntimeError(
-                    f"{matrix_name}/{arm} failed rc={completed.returncode}: "
-                    f"{raw_path}")
-            parsed = parse_output(completed.stdout)
-            if not math.isfinite(float(parsed["residual"])) or \
-                    float(parsed["residual"]) > 1e-8:
-                raise RuntimeError(
-                    f"{matrix_name}/{arm} did not converge: "
-                    f"{parsed['residual_text']}")
-            record = {
-                "rank": rank,
-                "matrix": matrix_name,
-                "threads": args.threads,
-                "seed": args.seed,
-                "arm": arm,
-                "keep": keep,
-                "trigger_rel": trigger_rel,
-                "elapsed_wall_s": time.time() - started,
-                "raw": str(raw_path.relative_to(output)),
-                "raw_sha256": sha256(raw_path),
-                **parsed,
+                    f"{matrix_name}/seed{seed}: expected three baselines, "
+                    f"found {len(baselines)}")
+            signatures = {
+                (row["factor_nnz"], row["stored_nnz"], row["iterations"],
+                 row["residual_text"], row["raw_neighbors"],
+                 row["unique_neighbors"], row["emitted_edges"])
+                for row in baselines
             }
-            records.append(record)
-            with (rank_dir / "records.jsonl").open("a") as handle:
-                handle.write(json.dumps(record, sort_keys=True) + "\n")
+            if len(signatures) != 1:
+                raise RuntimeError(
+                    f"{matrix_name}/seed{seed}: baseline mismatch: "
+                    f"{signatures}")
 
-        baselines = [row for row in records
-                     if row["matrix"] == matrix_name and
-                     str(row["arm"]).startswith("baseline-")]
-        if len(baselines) != 2:
-            raise RuntimeError(
-                f"{matrix_name}: expected two baselines, found {len(baselines)}")
-        signatures = {
-            (row["factor_nnz"], row["stored_nnz"], row["iterations"],
-             row["residual_text"], row["raw_neighbors"],
-             row["unique_neighbors"], row["emitted_edges"])
-            for row in baselines
-        }
-        if len(signatures) != 1:
-            raise RuntimeError(
-                f"{matrix_name}: baseline did not reproduce: {signatures}")
-
-    expected = len(matrices) * len(ARMS)
+    expected = len(matrices) * len(SEEDS) * len(ARMS)
+    exact_cells = len(matrices) * len(SEEDS)
     summary = {"checked_records": expected, "planned_records": expected,
-               "baseline_exact_cells": len(matrices),
+               "baseline_exact_cells": exact_cells,
                "converged_records": expected}
     (rank_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(f"rank {rank}: checked {expected}/{expected}; "
-          f"baseline exact {len(matrices)}/{len(matrices)}; all converged")
+          f"baseline exact {exact_cells}/{exact_cells}; all converged")
     return 0
 
 
 def merge(args: argparse.Namespace) -> int:
     output = args.output.resolve()
+    source = args.source.resolve()
+    binary = args.binary.resolve()
+    expected_head = command_text(["git", "rev-parse", "HEAD"], source)
+    expected_binary_sha = sha256(binary)
+    expected_arms = [
+        {"name": name, "keep": keep, "trigger_rel": trigger_rel}
+        for name, keep, trigger_rel in ARMS
+    ]
     records: list[dict[str, object]] = []
     for rank in range(4):
         rank_dir = output / f"rank-{rank}"
+        metadata = json.loads((rank_dir / "metadata.json").read_text())
+        expected_matrices = [name for name, _ in MATRICES[rank::4]]
+        observed_matrices = [item["name"] for item in metadata["matrices"]]
+        if (metadata["head"] != expected_head or
+                metadata["tracked_status"] != "" or
+                metadata["binary_sha256"] != expected_binary_sha or
+                metadata["threads"] != args.threads or
+                metadata["seeds"] != list(SEEDS) or
+                metadata["arms"] != expected_arms or
+                observed_matrices != expected_matrices):
+            raise RuntimeError(f"rank {rank} metadata mismatch: {metadata}")
         summary = json.loads((rank_dir / "summary.json").read_text())
-        if summary != {"baseline_exact_cells": 2, "checked_records": 12,
-                       "converged_records": 12, "planned_records": 12}:
+        if summary != {"baseline_exact_cells": 10, "checked_records": 50,
+                       "converged_records": 50, "planned_records": 50}:
             raise RuntimeError(f"rank {rank} summary mismatch: {summary}")
-        records.extend(json.loads(line) for line in
-                       (rank_dir / "records.jsonl").read_text().splitlines())
-    if len(records) != 48:
-        raise RuntimeError(f"checked {len(records)}/48 records")
+        rank_records = [json.loads(line) for line in
+                        (rank_dir / "records.jsonl").read_text().splitlines()]
+        for row in rank_records:
+            raw = output / row["raw"]
+            if (row["rank"] != rank or row["matrix"] not in expected_matrices or
+                    row["seed"] not in SEEDS or
+                    row["arm"] not in [name for name, *_ in ARMS] or
+                    not raw.is_file() or sha256(raw) != row["raw_sha256"]):
+                raise RuntimeError(f"rank {rank} record mismatch: {row}")
+        records.extend(rank_records)
+    if len(records) != 200:
+        raise RuntimeError(f"checked {len(records)}/200 records")
 
     metrics = ("setup_ms", "pcg_ms", "total_ms", "factor_nnz",
                "stored_nnz", "iterations", "raw_neighbors",
                "unique_neighbors", "emitted_edges")
-    candidates = (
-        "q0.20-ungated", "q0.20-rel1e-5",
-        "q0.20-rel1e-4", "q0.20-rel1e-3",
-    )
+    candidates = ("q0.20-ungated", "q0.20-rel1e-3")
     ratios = {candidate: {metric: [] for metric in metrics}
               for candidate in candidates}
     per_matrix: list[dict[str, object]] = []
     for matrix, _ in MATRICES:
-        arms = {row["arm"]: row for row in records if row["matrix"] == matrix}
-        before, after = arms["baseline-before"], arms["baseline-after"]
-        for candidate in candidates:
-            row = arms[candidate]
-            candidate_ratios = {}
-            for metric in metrics:
-                base = math.sqrt(float(before[metric]) * float(after[metric]))
-                value = float(row[metric]) / base
-                ratios[candidate][metric].append(value)
-                candidate_ratios[metric] = value
-            per_matrix.append({
-                "matrix": matrix,
-                "candidate": candidate,
-                "ratios": candidate_ratios,
-                "iteration_delta": int(row["iterations"]) -
-                                   int(before["iterations"]),
-            })
+        for seed in SEEDS:
+            arms = {row["arm"]: row for row in records
+                    if row["matrix"] == matrix and row["seed"] == seed}
+            brackets = {
+                "q0.20-ungated": (
+                    arms["baseline-before"], arms["baseline-mid"]),
+                "q0.20-rel1e-3": (
+                    arms["baseline-mid"], arms["baseline-after"]),
+            }
+            for candidate in candidates:
+                before, after = brackets[candidate]
+                row = arms[candidate]
+                candidate_ratios = {}
+                for metric in metrics:
+                    base = math.sqrt(
+                        float(before[metric]) * float(after[metric]))
+                    value = float(row[metric]) / base
+                    ratios[candidate][metric].append(value)
+                    candidate_ratios[metric] = value
+                per_matrix.append({
+                    "matrix": matrix,
+                    "seed": seed,
+                    "candidate": candidate,
+                    "ratios": candidate_ratios,
+                    "iteration_delta": int(row["iterations"]) -
+                                       int(before["iterations"]),
+                })
 
     arm_order = [name for name, *_ in ARMS]
     with (output / "records.jsonl").open("w") as handle:
         for row in sorted(records, key=lambda item: (
                 [name for name, _ in MATRICES].index(item["matrix"]),
+                SEEDS.index(item["seed"]),
                 arm_order.index(item["arm"]))):
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     summary = {
-        "checked_records": 48,
-        "planned_records": 48,
-        "baseline_exact_cells": 8,
-        "converged_records": 48,
+        "checked_records": 200,
+        "planned_records": 200,
+        "baseline_exact_cells": 40,
+        "converged_records": 200,
         "per_matrix": per_matrix,
         "geomean_candidate_over_bracket": {
             candidate: {metric: geometric_mean(values)
@@ -308,7 +348,7 @@ def merge(args: argparse.Namespace) -> int:
     }
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    print("checked 48/48 records; baseline exact 8/8; converged 48/48")
+    print("checked 200/200 records; baseline exact 40/40; converged 200/200")
     print(json.dumps(summary["geomean_candidate_over_bracket"], sort_keys=True))
     return 0
 
@@ -320,7 +360,6 @@ def main() -> int:
     parser.add_argument("--data-root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--threads", type=int, default=72)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--merge", action="store_true")
     args = parser.parse_args()

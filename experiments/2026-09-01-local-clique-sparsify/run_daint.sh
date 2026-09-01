@@ -50,7 +50,7 @@ srun --uenv="${uenv_spec}" --view=default -n4 -c72 \
     --source "${source_dir}" \
     --binary "${build_dir}/tests/analyze_factor" \
     --data-root "${APXCHOL_DAINT_DATA}" \
-    --output "${APXCHOL_DAINT_OUTPUT}" --threads 72 --seed 42 --timeout 600
+    --output "${APXCHOL_DAINT_OUTPUT}" --threads 72 --timeout 600
 
 srun --uenv="${uenv_spec}" --view=default -N1 -n1 -c1 \
     --exclusive --exact --hint=nomultithread --cpu-bind=cores \
@@ -58,4 +58,4 @@ srun --uenv="${uenv_spec}" --view=default -N1 -n1 -c1 \
     --source "${source_dir}" \
     --binary "${build_dir}/tests/analyze_factor" \
     --data-root "${APXCHOL_DAINT_DATA}" \
-    --output "${APXCHOL_DAINT_OUTPUT}" --threads 72 --seed 42
+    --output "${APXCHOL_DAINT_OUTPUT}" --threads 72
