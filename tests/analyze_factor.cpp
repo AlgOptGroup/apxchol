@@ -459,6 +459,23 @@ int main(int argc, char* argv[]) {
                 setup_ms, pcg_ms, setup_ms + pcg_ms,
                 static_cast<long long>(result.iterations), result.residual,
                 result.solve_vram_mb);
+            std::printf(
+                "setup_breakdown find_partition_ms=%.6f eliminate_ms=%.6f "
+                "merge_is_ms=%.6f compute_ms=%.6f apply_ms=%.6f "
+                "compute_apply_fused_ms=%.6f "
+                "elim_remaining_ms=%.6f assembly_ms=%.6f "
+                "sptrsv_setup_ms=%.6f spmv_setup_ms=%.6f\n",
+                result.timings.total("setup.find_partition") * 1e3,
+                result.timings.total("setup.eliminate") * 1e3,
+                result.timings.total("setup.eliminate.merge_is") * 1e3,
+                result.timings.total("setup.eliminate.compute") * 1e3,
+                result.timings.total("setup.eliminate.apply") * 1e3,
+                result.timings.total(
+                    "setup.eliminate.compute+apply_fused") * 1e3,
+                result.timings.total("setup.elim_remaining") * 1e3,
+                result.timings.total("setup.assembly") * 1e3,
+                result.timings.total("setup.sptrsv_setup") * 1e3,
+                result.timings.total("setup.spmv_lrm_build") * 1e3);
             return result.residual < solve_opts.tol ? 0 : 1;
         }
 

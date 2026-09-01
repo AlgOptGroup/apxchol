@@ -1113,7 +1113,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
         if (cp) { (*cp)("merge_is"); (*cp)("compute"); }
     }
 #if defined(APXCHOL_COOPERATIVE_PIVOTS_PROBE)
-    if (cooperative && std::getenv("APXCHOL_ROUND_TRACE") &&
+    if (cooperative &&
+        std::getenv("APXCHOL_COOPERATIVE_PIVOT_TRACE") &&
         cooperative->assisted_pivots.load(std::memory_order_relaxed) != 0) {
         std::fprintf(stderr,
             "[cooperative-pivot] round=%llu pivots=%zu team=%d "

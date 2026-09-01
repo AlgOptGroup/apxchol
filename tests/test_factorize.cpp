@@ -165,15 +165,18 @@ TEST(CooperativePivot, SharedNeighborRoundProducesExactFactorBytes) {
         std::string saved;
         bool had = false;
         trace_guard() {
-            if (const char* old = std::getenv("APXCHOL_ROUND_TRACE")) {
+            if (const char* old =
+                    std::getenv("APXCHOL_COOPERATIVE_PIVOT_TRACE")) {
                 saved = old;
                 had = true;
             }
-            setenv("APXCHOL_ROUND_TRACE", "1", 1);
+            setenv("APXCHOL_COOPERATIVE_PIVOT_TRACE", "1", 1);
         }
         ~trace_guard() {
-            if (had) setenv("APXCHOL_ROUND_TRACE", saved.c_str(), 1);
-            else unsetenv("APXCHOL_ROUND_TRACE");
+            if (had)
+                setenv("APXCHOL_COOPERATIVE_PIVOT_TRACE", saved.c_str(), 1);
+            else
+                unsetenv("APXCHOL_COOPERATIVE_PIVOT_TRACE");
         }
     } trace_env;
     testing::internal::CaptureStderr();
