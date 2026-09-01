@@ -248,3 +248,33 @@ seeds on all four IPM iterates.  Each candidate has adjacent exact baselines:
 240/240 planned records and 80/80 matrix/seed baseline checks.  This wider
 seed set decides whether the near-one-RHS result is stable enough for an
 opt-in mode; it is not another parameter-selection pass.
+
+### Twenty-seed confirmation
+
+Daint job `4572164` completed in 1:53.  Checked **240/240 records**, 80/80
+exact matrix/seed baseline cells and 240/240 converged solves; 325/325 tests
+passed.  Merge and the downloaded evidence verify all 240 raw hashes under
+`/tmp/local-clique-spread-gate-results-20260901-r4-confirm`.
+
+Over the 80 IPM matrix/seed cells, q=0.25 has setup 1.1856x, PCG 0.6464x,
+one-RHS total 1.0203x, iterations 0.6060x, stored factor 1.0853x and emitted
+edges 1.2890x.  Time-weighted sums give nearly the same conclusion: one RHS
+1.0209x, two RHS **0.9323x**, four **0.8394x**, eight **0.7619x**; aggregate
+break-even is 1.19 RHS.
+
+The matrix split is stable and explains the remaining variance:
+
+| matrix | setup | PCG | one-RHS total | break-even RHS |
+|---|---:|---:|---:|---:|
+| iter0010 | 1.2076x | 0.6970x | 1.0657x | 1.78 |
+| iter0020 | 1.2393x | 0.7390x | 1.1047x | 2.49 |
+| iter0030 | 1.1751x | 0.5995x | 0.9917x | 0.93 |
+| iter0040 | 1.1262x | 0.5658x | 0.9351x | 0.56 |
+
+**Final decision for this phase:** the `min/max < 1e-3`, q=0.25 estimator is
+a validated repeated-RHS/solve mode, not a single-RHS default.  Keep the
+research branch and its exact rollback; do not add default heuristics or more
+q values.  Further work is justified only if it reduces the existing union /
+backbone setup cost without sacrificing the confirmed factor distribution.
+For the project's current single-RHS priority, return attention to setup
+parallelism and larger algorithmic changes.
