@@ -23,19 +23,14 @@ MATRICES = (
     ("iter0040", "ipm/iter0040/matrix.mtx"),
 )
 ARMS = (
-    ("baseline-0", None, None),
-    ("q0.10-rel1e-3", 0.10, 1e-3),
-    ("baseline-1", None, None),
-    ("q0.15-rel1e-3", 0.15, 1e-3),
-    ("baseline-2", None, None),
-    ("q0.20-rel1e-3", 0.20, 1e-3),
-    ("baseline-3", None, None),
+    ("baseline-before", None, None),
     ("q0.25-rel1e-3", 0.25, 1e-3),
-    ("baseline-4", None, None),
-    ("q0.30-rel1e-3", 0.30, 1e-3),
-    ("baseline-5", None, None),
+    ("baseline-after", None, None),
 )
-SEEDS = (1, 17, 42, 73, 97)
+SEEDS = (
+    1, 7, 13, 17, 23, 31, 37, 42, 43, 53,
+    61, 67, 73, 79, 83, 89, 97, 101, 107, 113,
+)
 SOLVE_RE = re.compile(
     r"solve_result setup_ms=(?P<setup>[0-9.]+) "
     r"pcg_ms=(?P<pcg>[0-9.]+) total_ms=(?P<total>[0-9.]+) "
@@ -225,9 +220,9 @@ def run_rank(args: argparse.Namespace) -> int:
                          if row["matrix"] == matrix_name and
                          row["seed"] == seed and
                          str(row["arm"]).startswith("baseline-")]
-            if len(baselines) != 6:
+            if len(baselines) != 2:
                 raise RuntimeError(
-                    f"{matrix_name}/seed{seed}: expected six baselines, "
+                    f"{matrix_name}/seed{seed}: expected two baselines, "
                     f"found {len(baselines)}")
             signatures = {
                 (row["factor_nnz"], row["stored_nnz"], row["iterations"],
@@ -277,8 +272,8 @@ def merge(args: argparse.Namespace) -> int:
                 observed_matrices != expected_matrices):
             raise RuntimeError(f"rank {rank} metadata mismatch: {metadata}")
         summary = json.loads((rank_dir / "summary.json").read_text())
-        if summary != {"baseline_exact_cells": 5, "checked_records": 55,
-                       "converged_records": 55, "planned_records": 55}:
+        if summary != {"baseline_exact_cells": 20, "checked_records": 60,
+                       "converged_records": 60, "planned_records": 60}:
             raise RuntimeError(f"rank {rank} summary mismatch: {summary}")
         rank_records = [json.loads(line) for line in
                         (rank_dir / "records.jsonl").read_text().splitlines()]
@@ -290,16 +285,13 @@ def merge(args: argparse.Namespace) -> int:
                     not raw.is_file() or sha256(raw) != row["raw_sha256"]):
                 raise RuntimeError(f"rank {rank} record mismatch: {row}")
         records.extend(rank_records)
-    if len(records) != 220:
-        raise RuntimeError(f"checked {len(records)}/220 records")
+    if len(records) != 240:
+        raise RuntimeError(f"checked {len(records)}/240 records")
 
     metrics = ("setup_ms", "pcg_ms", "total_ms", "factor_nnz",
                "stored_nnz", "iterations", "raw_neighbors",
                "unique_neighbors", "emitted_edges")
-    candidates = (
-        "q0.10-rel1e-3", "q0.15-rel1e-3", "q0.20-rel1e-3",
-        "q0.25-rel1e-3", "q0.30-rel1e-3",
-    )
+    candidates = ("q0.25-rel1e-3",)
     ratios = {candidate: {metric: [] for metric in metrics}
               for candidate in candidates}
     per_matrix: list[dict[str, object]] = []
@@ -308,16 +300,8 @@ def merge(args: argparse.Namespace) -> int:
             arms = {row["arm"]: row for row in records
                     if row["matrix"] == matrix and row["seed"] == seed}
             brackets = {
-                "q0.10-rel1e-3": (
-                    arms["baseline-0"], arms["baseline-1"]),
-                "q0.15-rel1e-3": (
-                    arms["baseline-1"], arms["baseline-2"]),
-                "q0.20-rel1e-3": (
-                    arms["baseline-2"], arms["baseline-3"]),
                 "q0.25-rel1e-3": (
-                    arms["baseline-3"], arms["baseline-4"]),
-                "q0.30-rel1e-3": (
-                    arms["baseline-4"], arms["baseline-5"]),
+                    arms["baseline-before"], arms["baseline-after"]),
             }
             for candidate in candidates:
                 before, after = brackets[candidate]
@@ -346,10 +330,10 @@ def merge(args: argparse.Namespace) -> int:
                 arm_order.index(item["arm"]))):
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     summary = {
-        "checked_records": 220,
-        "planned_records": 220,
-        "baseline_exact_cells": 20,
-        "converged_records": 220,
+        "checked_records": 240,
+        "planned_records": 240,
+        "baseline_exact_cells": 80,
+        "converged_records": 240,
         "per_matrix": per_matrix,
         "geomean_candidate_over_bracket": {
             candidate: {metric: geometric_mean(values)
@@ -359,7 +343,7 @@ def merge(args: argparse.Namespace) -> int:
     }
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    print("checked 220/220 records; baseline exact 20/20; converged 220/220")
+    print("checked 240/240 records; baseline exact 80/80; converged 240/240")
     print(json.dumps(summary["geomean_candidate_over_bracket"], sort_keys=True))
     return 0
 

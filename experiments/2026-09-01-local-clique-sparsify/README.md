@@ -242,3 +242,9 @@ five-value sweep and factor-seed totals remain variable, confirm it on a wider
 seed set before exposing even an opt-in production knob.  The implementation
 work target is now concrete: remove roughly 11% of q=0.25's incremental setup
 cost, or an equivalent absolute amount, to cross the one-RHS line.
+
+The confirmatory successor fixes q=0.25 and the `1e-3` gate over 20 factor
+seeds on all four IPM iterates.  Each candidate has adjacent exact baselines:
+240/240 planned records and 80/80 matrix/seed baseline checks.  This wider
+seed set decides whether the near-one-RHS result is stable enough for an
+opt-in mode; it is not another parameter-selection pass.
