@@ -63,3 +63,39 @@ demonstrates why final nnz understates setup cost.  After adding the exact
 already-a-tree fast path, one rollback/candidate/rollback timing bracket gave
 setup `1.080x`, PCG `0.820x`, and total `0.975x`; this single drifting cell is
 only the reason to run the bounded Daint screen, not an acceptance result.
+
+## Daint stage-one result
+
+Daint job `4569078` completed in 1:15.  Checked **20/20 records**: the two
+baseline arms matched exactly in all 4/4 matrix cells and all 20/20 solves
+converged.  On the three IPM matrices only, candidate divided by its adjacent
+controls was:
+
+| keep | setup | PCG | total | iterations | raw factor nnz |
+|---:|---:|---:|---:|---:|---:|
+| 0.15 | 1.1154x | 0.7875x | 1.0209x | 0.7607x | 1.0613x |
+| 0.20 | 1.0490x | 0.7301x | **0.9570x** | 0.6932x | 1.0794x |
+| 0.25 | 1.0879x | 0.6536x | **0.9645x** | 0.6119x | 1.0962x |
+
+`q=0.20` won single-RHS total on every IPM cell: iter0010 `0.9582x`, iter0020
+`0.9850x`, and iter0040 `0.9286x`.  At `q=0.25`, iter0010/20 require about two
+right-hand sides to repay setup, while iter0040 already wins one-RHS total.
+
+The grid control rejects a global fixed-q default: iteration counts changed
+45 -> 76/63/53 for q=0.15/0.20/0.25, and q=0.20/0.25 totals were 1.405x and
+1.283x.  The q=0.15 setup cell was additionally pathological (16.4x despite
+only 1.10x raw-neighbor traffic), consistent with a variance/topology outlier,
+not ordinary linear work.
+
+The next candidate should replace fixed q by a per-clique variance budget.
+For GKS source mass `s_i` and suffix probabilities `p_ij`, one sample's target
+diagonal variance is `s_i^2 * (1 - sum_j p_ij^2)`; two half samples save half
+of that.  Conditional HT thinning adds exactly
+`2 * sum_e h_e^2 * (1/q_e - 1)` to the squared diagonal-error proxy.  Choose
+`q_e` to keep the added term within the saved half, with the minimum expected
+edge count (`q_e` is proportional to `h_e`, capped at one).  This is a
+graph-independent rule tied directly to the approximation error; if its edge
+cost is too high, fall back to one GKS tree for that clique.
+
+Downloaded evidence: `/tmp/apxchol-local-clique-daint-r1`; all 20 raw-log
+SHA-256 checks pass.
