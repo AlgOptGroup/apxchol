@@ -309,3 +309,26 @@ and 0.30 between four exact baselines (80 records).  Advance only if exact
 normalization either improves the setup/quality frontier or reveals a
 materially different optimum; otherwise keep the already validated
 approximate q=0.25 repeated-RHS result.
+
+### One-seed exact-budget screen
+
+Daint job `4573081` completed in 2:01.  Checked **80/80 records**, 8/8 exact
+four-baseline cells, 80/80 converged true residuals and 328/328 tests (three
+platform-dependent skips).  The downloaded evidence independently verifies
+80/80 raw hashes under
+`/tmp/local-clique-exact-waterfill-results-20260901-r1`.
+
+The exact allocator changed almost nothing on the four controls: at q=0.20,
+0.25 and 0.30, emitted-edge ratios versus the approximate allocator were
+1.00007x, 0.99999x and 1.00001x.  On the four IPM iterates the corresponding
+ratios were 1.00124x, 1.00229x and 1.00501x.  Iteration ratios were 0.98377x,
+1.03711x and 0.97163x respectively.  Thus exact normalization may move the
+quality frontier at q=0.20 or q=0.30, while q=0.25 moved in the wrong
+direction on this seed.
+
+Timing is diagnostic only: adjacent baseline setup ratios ranged from 0.62x
+to 1.33x.  The apparent exact-budget setup/total wins therefore cannot be
+credited from this pass.  The successor restricts to the four IPM iterates,
+uses five seeds and all three q values (200 records), and reverses each
+approximate/exact pair on alternating seeds.  It advances an estimator only
+if the quality shift survives seeds and bracketed timing exceeds null drift.

@@ -21,10 +21,6 @@ MATRICES = (
     ("iter0020", "ipm/iter0020/matrix.mtx"),
     ("iter0030", "ipm/iter0030/matrix.mtx"),
     ("iter0040", "ipm/iter0040/matrix.mtx"),
-    ("grid_500", "matrices/grid_500.mtx"),
-    ("G3_circuit", "matrices/G3_circuit.mtx"),
-    ("thermal2", "matrices/thermal2.mtx"),
-    ("com-Amazon", "matrices/com-Amazon.mtx"),
 )
 ARMS = (
     ("baseline-0", None, None, False),
@@ -38,7 +34,7 @@ ARMS = (
     ("exact-q0.30", 0.30, 1e-3, True),
     ("baseline-3", None, None, False),
 )
-SEEDS = (42,)
+SEEDS = (1, 7, 13, 42, 97)
 SOLVE_RE = re.compile(
     r"solve_result setup_ms=(?P<setup>[0-9.]+) "
     r"pcg_ms=(?P<pcg>[0-9.]+) total_ms=(?P<total>[0-9.]+) "
@@ -52,6 +48,17 @@ WORK_RE = re.compile(
     r"unique_neighbors=(?P<unique>[0-9]+) "
     r"emitted_edges=(?P<emitted>[0-9]+)"
 )
+
+
+def arms_for_seed(seed_index: int):
+    if seed_index % 2 == 0:
+        return ARMS
+    # Reverse every adjacent estimator pair on alternating seeds so fixed
+    # thermal/system drift cannot consistently favor exact or approximate.
+    return (
+        ARMS[0], ARMS[2], ARMS[1], ARMS[3], ARMS[5],
+        ARMS[4], ARMS[6], ARMS[8], ARMS[7], ARMS[9],
+    )
 
 
 def sha256(path: Path) -> str:
@@ -176,6 +183,10 @@ def run_rank(args: argparse.Namespace) -> int:
              "exact_budget": exact_budget}
             for name, keep, trigger_rel, exact_budget in ARMS
         ],
+        "arm_order_by_seed": {
+            str(seed): [arm[0] for arm in arms_for_seed(index)]
+            for index, seed in enumerate(SEEDS)
+        },
         "affinity": runner.benchmark_openmp_provenance(args.threads),
         "allocation_affinity": sorted(os.sched_getaffinity(0)),
     }
@@ -185,8 +196,8 @@ def run_rank(args: argparse.Namespace) -> int:
     records: list[dict[str, object]] = []
     cpu_set = runner.affinity_spec(args.threads)
     for matrix_name, matrix in matrices:
-        for seed in SEEDS:
-            for arm, keep, trigger_rel, exact_budget in ARMS:
+        for seed_index, seed in enumerate(SEEDS):
+            for arm, keep, trigger_rel, exact_budget in arms_for_seed(seed_index):
                 raw_path = raw_dir / f"{matrix_name}-s{seed}-{arm}.log"
                 command = [
                     "taskset", "-c", cpu_set, str(binary), str(matrix),
@@ -271,6 +282,10 @@ def merge(args: argparse.Namespace) -> int:
          "exact_budget": exact_budget}
         for name, keep, trigger_rel, exact_budget in ARMS
     ]
+    expected_arm_order = {
+        str(seed): [arm[0] for arm in arms_for_seed(index)]
+        for index, seed in enumerate(SEEDS)
+    }
     records: list[dict[str, object]] = []
     for rank in range(4):
         rank_dir = output / f"rank-{rank}"
@@ -283,6 +298,7 @@ def merge(args: argparse.Namespace) -> int:
                 metadata["threads"] != args.threads or
                 metadata["seeds"] != list(SEEDS) or
                 metadata["arms"] != expected_arms or
+                metadata["arm_order_by_seed"] != expected_arm_order or
                 observed_matrices != expected_matrices):
             raise RuntimeError(f"rank {rank} metadata mismatch: {metadata}")
         summary = json.loads((rank_dir / "summary.json").read_text())

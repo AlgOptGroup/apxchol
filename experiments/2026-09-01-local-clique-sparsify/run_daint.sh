@@ -1,6 +1,6 @@
 #!/bin/bash -l
 # Fixed-source one-node Daint screen. Submission is external to this script.
-#SBATCH --job-name=apx-waterfill
+#SBATCH --job-name=apx-waterfill5
 #SBATCH --account=prep34
 #SBATCH --partition=normal
 #SBATCH --nodes=1
@@ -9,8 +9,8 @@
 #SBATCH --exclusive
 #SBATCH --mem=450G
 #SBATCH --time=00:30:00
-#SBATCH --output=apx-waterfill-%j.out
-#SBATCH --error=apx-waterfill-%j.err
+#SBATCH --output=apx-waterfill5-%j.out
+#SBATCH --error=apx-waterfill5-%j.err
 
 set -euo pipefail
 
