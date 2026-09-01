@@ -1,6 +1,6 @@
 #!/bin/bash -l
 # Fixed-source one-node Daint screen. Submission is external to this script.
-#SBATCH --job-name=apx-waterfill5
+#SBATCH --job-name=apx-waterfill-opt
 #SBATCH --account=prep34
 #SBATCH --partition=normal
 #SBATCH --nodes=1
@@ -9,8 +9,8 @@
 #SBATCH --exclusive
 #SBATCH --mem=450G
 #SBATCH --time=00:30:00
-#SBATCH --output=apx-waterfill5-%j.out
-#SBATCH --error=apx-waterfill5-%j.err
+#SBATCH --output=apx-waterfill-opt-%j.out
+#SBATCH --error=apx-waterfill-opt-%j.err
 
 set -euo pipefail
 
@@ -18,18 +18,21 @@ set -euo pipefail
 : "${APXCHOL_DAINT_DATA:?set to the matrix root}"
 : "${APXCHOL_DAINT_OUTPUT:?set to a new result directory}"
 : "${APXCHOL_DAINT_EXPECTED_HEAD:?set to the source commit}"
+: "${APXCHOL_DAINT_REFERENCE_BINARY:?set to the reference analyze_factor}"
 
 source_dir=$(realpath "${APXCHOL_DAINT_SOURCE}")
 build_dir=${APXCHOL_DAINT_BUILD:-"${source_dir}/build-daint"}
 uenv_spec=prgenv-gnu/26.3:v1
 llvm_root=/capstor/scratch/cscs/okulkov/llvm/LLVM-22.1.8-Linux-ARM64
 run_path=${llvm_root}/bin:/user-environment/env/default/bin:/usr/bin:/bin
+reference_binary=$(realpath "${APXCHOL_DAINT_REFERENCE_BINARY}")
 
 hostname -f
 test "$(git -C "${source_dir}" rev-parse HEAD)" = \
     "${APXCHOL_DAINT_EXPECTED_HEAD}"
 git -C "${source_dir}" diff --quiet HEAD --
 git -C "${source_dir}" diff --cached --quiet
+test -x "${reference_binary}"
 
 srun --uenv="${uenv_spec}" --view=default -N1 -n1 -c72 \
     --exclusive --exact --hint=nomultithread --cpu-bind=cores \
@@ -49,6 +52,7 @@ srun --uenv="${uenv_spec}" --view=default -n4 -c72 \
     env PATH="${run_path}" python3 "${runner}" \
     --source "${source_dir}" \
     --binary "${build_dir}/tests/analyze_factor" \
+    --reference-binary "${reference_binary}" \
     --data-root "${APXCHOL_DAINT_DATA}" \
     --output "${APXCHOL_DAINT_OUTPUT}" --threads 72 --timeout 600
 
@@ -57,5 +61,6 @@ srun --uenv="${uenv_spec}" --view=default -N1 -n1 -c1 \
     env PATH="${run_path}" python3 "${runner}" --merge \
     --source "${source_dir}" \
     --binary "${build_dir}/tests/analyze_factor" \
+    --reference-binary "${reference_binary}" \
     --data-root "${APXCHOL_DAINT_DATA}" \
     --output "${APXCHOL_DAINT_OUTPUT}" --threads 72

@@ -332,3 +332,38 @@ credited from this pass.  The successor restricts to the four IPM iterates,
 uses five seeds and all three q values (200 records), and reverses each
 approximate/exact pair on alternating seeds.  It advances an estimator only
 if the quality shift survives seeds and bracketed timing exceeds null drift.
+
+### Five-seed estimator verdict
+
+Daint job `4573130` completed in 1:13.  Checked **200/200 records**, 20/20
+exact four-baseline cells, 200/200 converged true residuals and the same
+328/328 tests.  The independently downloaded copy verifies 200/200 raw hashes
+under `/tmp/local-clique-exact-waterfill-results-20260901-r2-five-seed`.
+
+Exact divided by approximate at q=0.20, 0.25 and 0.30 was:
+
+| q | emitted edges | iterations | setup | one-RHS total |
+|---:|---:|---:|---:|---:|
+| 0.20 | 1.00137x | 1.00198x | **0.96641x** | **0.97183x** |
+| 0.25 | 1.00249x | 1.00161x | 1.03268x | 1.02763x |
+| 0.30 | 1.00500x | 1.00442x | 1.04873x | 1.03960x |
+
+The quality shift did not survive: exact normalization is iteration-neutral
+or slightly worse at every q.  The q=0.25 and q=0.30 exact variants are
+closed.  At q=0.20 the lower algorithmic normalization work remains a
+performance lead: 12/20 setup cells and 11/20 total cells won, and both pair
+orders favored exact (setup 0.9866x when approximate ran first, 0.9369x when
+exact ran first).  Time-weighted against production, exact q=0.20 measured
+setup 1.1566x, PCG 0.6863x and one-RHS total 1.0090x, for a 1.10-RHS
+break-even; approximate q=0.20 was 1.1986x / 0.6917x / 1.0396x and 1.42 RHS.
+
+The exact path still gathered all off-tree importances into one scratch vector
+and then built a second suffix vector.  The follow-up removes that gather and
+builds suffix sums directly while traversing the existing sorted edge order.
+It preserves the exact order of every floating-point addition and random draw:
+28,000 synthetic pivot samples over four q values and seven degrees produced
+the identical sequence hash `8550585b61fb73af` before and after.  The optimized
+source passes 328/328 tests locally.  Its Daint gate uses two candidate runs
+bracketed by three copies of the preserved reference binary on every one of
+the same 20 matrix/seed cells (100 records); the middle-reference/null bracket
+measures timing drift in the same campaign.
