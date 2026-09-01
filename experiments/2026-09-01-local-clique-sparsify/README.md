@@ -162,3 +162,46 @@ structure.  This is sufficient to advance quality, not to claim speed.
 q=0.20 and the `1e-3` spread gate.  The candidate survives only if it keeps
 the IPM iteration/fill benefit, remains structurally neutral on controls, and
 wins bracketed one-RHS total beyond the null-control timing variation.
+
+### Five-seed verdict: keep the gate and the solve lead; tune setup/q
+
+Daint job `4571995` completed in 2:13.  Checked **200/200 records**, exact
+three-baseline signatures in 40/40 matrix/seed cells, and 200/200 converged
+true residuals.  The same source passed 325/325 tests (three skips), merge
+rechecked the exact source/binary metadata and every raw-log hash, and the
+downloaded evidence independently verifies 200/200 hashes under
+`/tmp/local-clique-spread-gate-results-20260901-r2`.
+
+Across 20 IPM matrix/seed cells:
+
+| arm | setup | PCG | one-RHS total | iterations | stored factor | emitted edges |
+|---|---:|---:|---:|---:|---:|---:|
+| ungated q=0.20 | 1.2099x | 0.7012x | 1.0526x | 0.6621x | 1.0578x | 1.2317x |
+| spread-gated q=0.20 | **1.1796x** | **0.6977x** | **1.0317x** | **0.6585x** | **1.0576x** | **1.2314x** |
+
+Across 20 control cells, the gate changes only 0.06% of emitted edges and
+0.02% of raw factor entries: iterations are 1.0057x and stored factor is
+1.0001x.  Ungated q=0.20 instead raises control iterations to 1.6821x and
+stored factor to 1.0853x.  The activation rule therefore solves the
+IPM-versus-everything-else failure without giving up the IPM quality gain.
+
+The setup/solve trade is real.  Summing the bracketed IPM times (rather than
+geometrically weighting tiny and large matrices equally) gives setup 1.1837x,
+PCG 0.6924x, and one-RHS total 1.0350x.  The aggregate break-even is **1.38
+right-hand sides**: two RHS give 0.9554x total, four give 0.8720x, and eight
+give 0.8023x.  Per matrix, one-RHS total is 0.9410x on iter0030 and 0.9983x on
+iter0040, but 1.0617x on iter0010 and 1.1448x on iter0020.
+
+Short control timings still contain isolated system outliers (one grid
+baseline and one grid candidate each took about 4--5x their neighboring
+24-ms setups), so the 1.03x control total is not evidence of a structural
+regression; the structural counters above are the stable control result.
+
+**Decision:** retain `min/max < 1e-3` as the successful universal activation
+rule and retain local two-tree sparsification as a repeated-RHS/solve win.  It
+is not yet a single-RHS default.  The next contained campaign should tune q
+around 0.20 on the IPM ladder under this fixed gate, with each candidate in
+its own adjacent baseline bracket.  In parallel, reduce setup work in the
+connectivity-backbone/union pass; a quality-equivalent implementation needs
+roughly 27% less *incremental* setup cost to move the aggregate break-even
+from 1.38 RHS to one.
