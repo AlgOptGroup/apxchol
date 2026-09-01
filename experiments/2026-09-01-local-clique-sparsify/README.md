@@ -211,3 +211,34 @@ The q-tuning successor fixes the spread gate at `1e-3` and evaluates
 Every candidate sits between its own two exact baseline arms: 220/220 planned
 records and 20/20 six-baseline matrix/seed checks.  Report one-, two-, four-
 and eight-RHS totals separately; do not choose q from iterations alone.
+
+### Gated-q trade curve
+
+Daint job `4572100` completed in 1:44.  Checked **220/220 records**, 20/20
+exact six-baseline matrix/seed cells and 220/220 converged solves; 325/325
+tests passed.  Merge and the downloaded evidence verify all 220 raw hashes
+under `/tmp/local-clique-spread-gate-results-20260901-r3-qtune`.
+
+Geometric means over the 20 IPM matrix/seed cells are:
+
+| q | setup | PCG | one-RHS total | iterations | stored factor | emitted edges |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.10 | 1.0543x | 0.9529x | 1.0218x | 0.9320x | 0.9996x | 1.1153x |
+| 0.15 | 1.1707x | 0.7603x | 1.0416x | 0.7439x | 1.0288x | 1.1734x |
+| 0.20 | 1.1935x | 0.6897x | 1.0373x | 0.6585x | 1.0576x | 1.2314x |
+| **0.25** | **1.1740x** | **0.6440x** | **1.0136x** | **0.6068x** | 1.0854x | 1.2889x |
+| 0.30 | 1.2124x | 0.6269x | 1.0316x | 0.5822x | 1.1127x | 1.3466x |
+
+Time-weighted sums tell the same story.  q=0.25 is 1.0134x for one RHS,
+0.9270x for two, 0.8360x for four and 0.7598x for eight; its aggregate
+break-even is 1.12 RHS.  q=0.30 wins only by eight RHS (0.7528x versus
+0.7598x) and is effectively tied at four.  q=0.10 minimizes setup but saves
+too little solve work.
+
+**Parameter decision:** q=0.25 is the retained repeated-RHS setting; q=0.20
+is no longer the frontier.  No tested q establishes a single-RHS default,
+although q=0.25 misses by only 1.3%.  Because q=0.25 was selected from this
+five-value sweep and factor-seed totals remain variable, confirm it on a wider
+seed set before exposing even an opt-in production knob.  The implementation
+work target is now concrete: remove roughly 11% of q=0.25's incremental setup
+cost, or an equivalent absolute amount, to cross the one-RHS line.
