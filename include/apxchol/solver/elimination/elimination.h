@@ -397,24 +397,21 @@ struct tree_elimination {
                 local_two_tree_trigger_rel * neighbors.back().weight;
         }
         if (use_local_two_tree) {
-            struct local_edge {
-                size_t i, j;
+            struct source_group {
+                size_t first, second;
                 double weight;
-                bool backbone = false;
+                unsigned char backbone_mask = 0;
             };
-            static thread_local std::vector<local_edge> edges;
-            static thread_local std::vector<size_t> group_starts;
+            static thread_local std::vector<source_group> groups;
             static thread_local std::vector<size_t> order;
             static thread_local std::vector<size_t> parent;
             static thread_local std::vector<unsigned char> rank;
-            static thread_local std::vector<double> importance;
-            static thread_local std::vector<size_t> off_tree_indices;
-            edges.clear();
-            edges.reserve(2 * (d - 1));
-            group_starts.clear();
-            group_starts.reserve(d);
+            static thread_local std::vector<double> cycle_importance;
+            groups.clear();
+            groups.reserve(d - 1);
 
             bool valid = true;
+            size_t distinct_groups = 0;
             for (const auto& neighbor : neighbors)
                 valid = valid && std::isfinite(neighbor.weight) &&
                         neighbor.weight > 0.0;
@@ -425,7 +422,6 @@ struct tree_elimination {
                         valid = false;
                         break;
                     }
-                    group_starts.push_back(edges.size());
                     const double half_weight =
                         0.5 * neighbors[i].weight * suffix_sum / deg;
                     const double first_r = rs.next_unit() * suffix_sum;
@@ -442,25 +438,22 @@ struct tree_elimination {
                          second_target >= prefix[first - 1]);
                     const size_t second = same_bin
                         ? first : locate_partner(i, second_target);
-                    if (first == second)
-                        edges.push_back({i, first, 2.0 * half_weight});
-                    else {
-                        edges.push_back({i, first, half_weight});
-                        edges.push_back({i, second, half_weight});
-                    }
+                    const bool distinct = first != second;
+                    distinct_groups += static_cast<size_t>(distinct);
+                    groups.push_back({first, second,
+                        distinct ? half_weight : 2.0 * half_weight});
                 }
-                group_starts.push_back(edges.size());
             }
             // Both constituent suffix samples are trees. If coalescing left
             // exactly d-1 distinct edges, their union is already a tree: all
             // edges are mandatory backbone edges and no forest/sampling work
             // can change the output. This exact fast path covers every
             // degree-2 pivot and many small late-factor cliques.
-            if (valid && edges.size() == d - 1) {
-                out.reserve(edges.size());
-                for (const auto& edge : edges)
-                    out(neighbors[edge.i].vertex,
-                        neighbors[edge.j].vertex, edge.weight);
+            if (valid && distinct_groups == 0) {
+                out.reserve(groups.size());
+                for (size_t i = 0; i < groups.size(); ++i)
+                    out(neighbors[i].vertex,
+                        neighbors[groups[i].first].vertex, groups[i].weight);
                 return;
             }
             if (valid) {
@@ -473,8 +466,8 @@ struct tree_elimination {
                 order.resize(d - 1);
                 std::iota(order.begin(), order.end(), size_t{0});
                 std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-                    const double aw = edges[group_starts[a]].weight;
-                    const double bw = edges[group_starts[b]].weight;
+                    const double aw = groups[a].weight;
+                    const double bw = groups[b].weight;
                     return aw != bw ? aw > bw : a < b;
                 });
                 parent.resize(d);
@@ -500,51 +493,61 @@ struct tree_elimination {
                     return true;
                 };
                 size_t backbone_edges = 0;
-                auto accept_edge = [&](size_t index) {
-                    auto& edge = edges[index];
-                    if (unite(edge.i, edge.j)) {
-                        edge.backbone = true;
+                auto accept_edge = [&](size_t source, unsigned slot) {
+                    auto& group = groups[source];
+                    const size_t partner = slot == 0
+                        ? group.first : group.second;
+                    if (unite(source, partner)) {
+                        group.backbone_mask |=
+                            static_cast<unsigned char>(1u << slot);
                         ++backbone_edges;
                     }
                 };
-                for (size_t group : order) {
-                    const size_t begin = group_starts[group];
-                    const size_t end = group_starts[group + 1];
-                    assert(end == begin + 1 || end == begin + 2);
-                    if (end == begin + 1)
-                        accept_edge(begin);
-                    else if (edges[begin].j < edges[begin + 1].j) {
-                        accept_edge(begin);
-                        accept_edge(begin + 1);
+                for (size_t source : order) {
+                    const auto& group = groups[source];
+                    if (group.first == group.second)
+                        accept_edge(source, 0);
+                    else if (group.first < group.second) {
+                        accept_edge(source, 0);
+                        accept_edge(source, 1);
                     } else {
-                        accept_edge(begin + 1);
-                        accept_edge(begin);
+                        accept_edge(source, 1);
+                        accept_edge(source, 0);
                     }
                     if (backbone_edges == d - 1) break;
                 }
                 assert(backbone_edges == d - 1);
 
                 const double keep = std::clamp(local_two_tree_keep, 1e-6, 1.0);
-                const size_t off_tree = edges.size() - backbone_edges;
+                // The coalesced union has (d-1)+distinct_groups edges and its
+                // connected backbone has d-1, hence exactly distinct_groups
+                // cycle edges.
+                const size_t off_tree = distinct_groups;
                 const double target = keep * static_cast<double>(off_tree);
-                importance.resize(edges.size());
-                off_tree_indices.clear();
-                off_tree_indices.reserve(off_tree);
+                cycle_importance.clear();
+                cycle_importance.reserve(off_tree);
                 double measure = 0.0;
-                for (size_t i = 0; i < edges.size(); ++i) {
-                    if (!edges[i].backbone) {
-                        importance[i] = std::sqrt(edges[i].weight);
-                        measure += importance[i];
-                        off_tree_indices.push_back(i);
+                for (const auto& group : groups) {
+                    if ((group.backbone_mask & 1u) == 0) {
+                        const double importance = std::sqrt(group.weight);
+                        cycle_importance.push_back(importance);
+                        measure += importance;
+                    }
+                    if (group.first != group.second &&
+                        (group.backbone_mask & 2u) == 0) {
+                        const double importance = std::sqrt(group.weight);
+                        cycle_importance.push_back(importance);
+                        measure += importance;
                     }
                 }
+                assert(cycle_importance.size() == off_tree);
                 double scale = target > 0.0 && measure > 0.0
                     ? target / measure : 0.0;
                 for (unsigned iteration = 0;
                      iteration < 6 && scale > 0.0; ++iteration) {
                     double expected = 0.0;
-                    for (size_t i : off_tree_indices)
-                        expected += std::min(1.0, scale * importance[i]);
+                    for (double importance : cycle_importance)
+                        expected += std::min(1.0, scale * importance);
                     if (!(expected > 0.0)) break;
                     const double next_scale = scale * (target / expected);
                     if (next_scale == scale) break;
@@ -554,16 +557,24 @@ struct tree_elimination {
                 random_stream retain{seed ^ 0xD1B54A32D192ED03ULL};
                 out.reserve(backbone_edges +
                             static_cast<size_t>(std::ceil(target)));
-                for (size_t i = 0; i < edges.size(); ++i) {
-                    const auto& edge = edges[i];
-                    const double probability = edge.backbone ? 1.0 :
-                        std::min(1.0, scale * importance[i]);
-                    if (edge.backbone || retain.next_unit() < probability) {
-                        out(neighbors[edge.i].vertex,
-                            neighbors[edge.j].vertex,
-                            edge.weight / probability);
-                    }
+                size_t cycle = 0;
+                auto emit_edge = [&](size_t source, size_t partner,
+                                     double weight, bool backbone) {
+                    const double probability = backbone ? 1.0 :
+                        std::min(1.0, scale * cycle_importance[cycle++]);
+                    if (backbone || retain.next_unit() < probability)
+                        out(neighbors[source].vertex,
+                            neighbors[partner].vertex, weight / probability);
+                };
+                for (size_t source = 0; source < groups.size(); ++source) {
+                    const auto& group = groups[source];
+                    emit_edge(source, group.first, group.weight,
+                              (group.backbone_mask & 1u) != 0);
+                    if (group.first != group.second)
+                        emit_edge(source, group.second, group.weight,
+                                  (group.backbone_mask & 2u) != 0);
                 }
+                assert(cycle == cycle_importance.size());
                 return;
             }
             // Invalid product-clique weights retain the established GKS path.
