@@ -329,3 +329,38 @@ repeated prefix copies instead of geometric vector growth.  Amortized doubling
 does not change any emitted edge; the next Daint sequence brackets
 `old / grouped / amortized / grouped / old` repeatedly and records peak RSS as
 the memory-side gate.
+
+### Amortized-buffer result
+
+Daint job `4572751` completed in 1:39 (0.0275 node-hours).  Checked 160/160
+measured records, 160/160 downloaded raw hashes, 32/32 exact five-way factor
+signatures and 160/160 converged solves; the new source passed 326/326 tests.
+Each matrix used seed 42 and eight warmed symmetric repetitions.
+
+| comparison | setup | total | peak RSS | all structural/quality fields |
+|---|---:|---:|---:|---:|
+| amortized / grouped | **0.9846x** | 0.9886x | **0.9239x** | exactly 1.0x |
+| amortized / original q | **0.9839x** | 0.9892x | 0.9648x | exactly 1.0x |
+| grouped / original q | 0.9993x | 1.0006x | 1.0442x | exactly 1.0x |
+
+The grouped code's earlier nominal 0.9916 setup result does not reproduce in
+this tighter protocol, so it is not credited as a speedup.  Amortized reserve
+does: it wins 18/32 individual repetitions and its time-weighted setup ratios
+are 0.9867 versus grouped and 0.9859 versus the original q implementation.
+Per-matrix setup ratios versus grouped are 0.9883 / 0.9413 / 1.0287 / 0.9819
+on iter0010/20/30/40.  The lower peak is plausible despite geometric retained
+capacity: repeated exact reservations transiently overlap each accumulated old
+buffer with its replacement, while doubling usually avoids that copy.
+
+Applying the time-weighted 0.9859 setup ratio to the 20-seed q=0.25 campaign
+models setup at 1.1689x production and one-RHS total at about 1.0086x; the
+break-even drops from 1.19 to about 1.08 RHS.  This remains a model until a
+wide production bracket uses the final implementation.
+
+The last strict implementation candidate stores one 32-byte record per GKS
+source plus one double per cycle edge, instead of a 32-byte record and index
+scratch per logical union edge.  Its synthetic old/new output hash remains
+`2687c875e4c55b78`.  A repeated Daint bracket against the amortized arm decides
+whether this lower scratch traffic closes the remaining single-RHS gap; if it
+does not, further progress requires changing the estimator rather than more
+container variants.
