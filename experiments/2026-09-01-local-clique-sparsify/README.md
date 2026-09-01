@@ -278,3 +278,28 @@ q values.  Further work is justified only if it reduces the existing union /
 backbone setup cost without sacrificing the confirmed factor distribution.
 For the project's current single-RHS priority, return attention to setup
 parallelism and larger algorithmic changes.
+
+## Output-identical union/backbone optimization gate
+
+Branch `codex/local-clique-fast-union-r1` keeps the confirmed q=0.25 estimator
+and random streams exactly.  It exploits the two-tree union's source-group
+structure: source `i` contributes either one coalesced edge or two equal-weight
+edges, and no duplicate can cross source groups.  Sorting the `d-1` groups and
+expanding each group by ascending partner therefore reproduces the existing
+Kruskal order while sorting at most half as many items.  The same patch scans
+only off-tree edges in the six probability-normalization passes, reuses an
+inverse-CDF result when both partner draws land in the same prefix bin, and
+stops exact fixed-point or DSU work once its result cannot change.
+
+An independent old/new synthetic replay covered degrees 3 through 1024 and 80
+seeds per degree family; its sequence-sensitive 64-bit hash was
+`2687c875e4c55b78` for both implementations.  The local Clang Release build
+passed 325/325 tests.  These are correctness gates, not timing evidence.
+
+The Daint screen uses the previously checksummed `8cc1f0e` q=0.25 binary as
+both sides of an `old-q / new-q / old-q` bracket, with production controls
+outside it.  It covers four IPM iterates and five seeds at T=72 (100 planned
+records).  Every old/new q arm must match factor nnz, stored nnz, iterations,
+printed residual and cumulative clique-work counters exactly before timing is
+reported.  The optimization survives only if its setup gain exceeds the
+old-q bracket drift; the one-RHS target is about 1.9% of baseline setup.
