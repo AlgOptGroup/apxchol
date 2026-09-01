@@ -354,9 +354,7 @@ struct tree_elimination {
             }
             inverse_cdf[bucket_count] = d;
         }
-        auto sample_partner = [&](size_t i, double suffix_sum) {
-            const double r = rs.next_unit() * suffix_sum;
-            const double target = prefix[i] + r;
+        auto locate_partner = [&](size_t i, double target) {
             auto first = prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1;
             auto last = prefix.end();
             if (use_buckets) {
@@ -370,6 +368,10 @@ struct tree_elimination {
             }
             auto it = std::upper_bound(first, last, target);
             return std::min(static_cast<size_t>(it - prefix.begin()), d - 1);
+        };
+        auto sample_partner = [&](size_t i, double suffix_sum) {
+            const double r = rs.next_unit() * suffix_sum;
+            return locate_partner(i, prefix[i] + r);
         };
 
         bool use_local_two_tree = local_two_tree_keep >= 0.0 && d > 2;
@@ -387,12 +389,16 @@ struct tree_elimination {
                 bool backbone = false;
             };
             static thread_local std::vector<local_edge> edges;
+            static thread_local std::vector<size_t> group_starts;
             static thread_local std::vector<size_t> order;
             static thread_local std::vector<size_t> parent;
             static thread_local std::vector<unsigned char> rank;
             static thread_local std::vector<double> importance;
+            static thread_local std::vector<size_t> off_tree_indices;
             edges.clear();
             edges.reserve(2 * (d - 1));
+            group_starts.clear();
+            group_starts.reserve(d);
 
             bool valid = true;
             for (const auto& neighbor : neighbors)
@@ -405,10 +411,23 @@ struct tree_elimination {
                         valid = false;
                         break;
                     }
+                    group_starts.push_back(edges.size());
                     const double half_weight =
                         0.5 * neighbors[i].weight * suffix_sum / deg;
-                    const size_t first = sample_partner(i, suffix_sum);
-                    const size_t second = sample_partner(i, suffix_sum);
+                    const double first_r = rs.next_unit() * suffix_sum;
+                    const double first_target = prefix[i] + first_r;
+                    const double second_r = rs.next_unit() * suffix_sum;
+                    const double second_target = prefix[i] + second_r;
+                    const size_t first = locate_partner(i, first_target);
+                    // The two draws often hit the same heavy prefix bin on the
+                    // spread-gated IPM stars. Reuse that exact inverse-CDF
+                    // result; otherwise perform the unchanged exact lookup.
+                    const bool same_bin =
+                        second_target < prefix[first] &&
+                        (first == i + 1 ||
+                         second_target >= prefix[first - 1]);
+                    const size_t second = same_bin
+                        ? first : locate_partner(i, second_target);
                     if (first == second)
                         edges.push_back({i, first, 2.0 * half_weight});
                     else {
@@ -416,6 +435,7 @@ struct tree_elimination {
                         edges.push_back({i, second, half_weight});
                     }
                 }
+                group_starts.push_back(edges.size());
             }
             // Both constituent suffix samples are trees. If coalescing left
             // exactly d-1 distinct edges, their union is already a tree: all
@@ -430,14 +450,18 @@ struct tree_elimination {
                 return;
             }
             if (valid) {
-                order.resize(edges.size());
+                // Every source i contributes one coalesced edge of weight
+                // 2*h_i or two edges of equal weight h_i, and no edge can be
+                // duplicated across sources because i is its smaller endpoint.
+                // Sorting source groups therefore induces exactly the generic
+                // edge order (weight desc, i asc, j asc) while sorting d-1
+                // items instead of as many as 2(d-1).
+                order.resize(d - 1);
                 std::iota(order.begin(), order.end(), size_t{0});
                 std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-                    if (edges[a].weight != edges[b].weight)
-                        return edges[a].weight > edges[b].weight;
-                    if (edges[a].i != edges[b].i)
-                        return edges[a].i < edges[b].i;
-                    return edges[a].j < edges[b].j;
+                    const double aw = edges[group_starts[a]].weight;
+                    const double bw = edges[group_starts[b]].weight;
+                    return aw != bw ? aw > bw : a < b;
                 });
                 parent.resize(d);
                 std::iota(parent.begin(), parent.end(), size_t{0});
@@ -462,12 +486,27 @@ struct tree_elimination {
                     return true;
                 };
                 size_t backbone_edges = 0;
-                for (size_t index : order) {
+                auto accept_edge = [&](size_t index) {
                     auto& edge = edges[index];
                     if (unite(edge.i, edge.j)) {
                         edge.backbone = true;
                         ++backbone_edges;
                     }
+                };
+                for (size_t group : order) {
+                    const size_t begin = group_starts[group];
+                    const size_t end = group_starts[group + 1];
+                    assert(end == begin + 1 || end == begin + 2);
+                    if (end == begin + 1)
+                        accept_edge(begin);
+                    else if (edges[begin].j < edges[begin + 1].j) {
+                        accept_edge(begin);
+                        accept_edge(begin + 1);
+                    } else {
+                        accept_edge(begin + 1);
+                        accept_edge(begin);
+                    }
+                    if (backbone_edges == d - 1) break;
                 }
                 assert(backbone_edges == d - 1);
 
@@ -475,21 +514,27 @@ struct tree_elimination {
                 const size_t off_tree = edges.size() - backbone_edges;
                 const double target = keep * static_cast<double>(off_tree);
                 importance.resize(edges.size());
+                off_tree_indices.clear();
+                off_tree_indices.reserve(off_tree);
                 double measure = 0.0;
                 for (size_t i = 0; i < edges.size(); ++i) {
-                    importance[i] = std::sqrt(edges[i].weight);
-                    if (!edges[i].backbone) measure += importance[i];
+                    if (!edges[i].backbone) {
+                        importance[i] = std::sqrt(edges[i].weight);
+                        measure += importance[i];
+                        off_tree_indices.push_back(i);
+                    }
                 }
                 double scale = target > 0.0 && measure > 0.0
                     ? target / measure : 0.0;
                 for (unsigned iteration = 0;
                      iteration < 6 && scale > 0.0; ++iteration) {
                     double expected = 0.0;
-                    for (size_t i = 0; i < edges.size(); ++i)
-                        if (!edges[i].backbone)
-                            expected += std::min(1.0, scale * importance[i]);
+                    for (size_t i : off_tree_indices)
+                        expected += std::min(1.0, scale * importance[i]);
                     if (!(expected > 0.0)) break;
-                    scale *= target / expected;
+                    const double next_scale = scale * (target / expected);
+                    if (next_scale == scale) break;
+                    scale = next_scale;
                 }
 
                 random_stream retain{seed ^ 0xD1B54A32D192ED03ULL};
