@@ -303,3 +303,29 @@ records).  Every old/new q arm must match factor nnz, stored nnz, iterations,
 printed residual and cumulative clique-work counters exactly before timing is
 reported.  The optimization survives only if its setup gain exceeds the
 old-q bracket drift; the one-RHS target is about 1.9% of baseline setup.
+
+### First exact-optimization result
+
+Daint job `4572695` completed in 1:30 (0.025 node-hours).  Checked 100/100
+records and 100/100 downloaded raw hashes; all solves converged, 20/20
+production brackets matched exactly, and all three q=0.25 arms matched exactly
+in 20/20 cells.  The optimized q arm divided by its adjacent old-q controls
+was:
+
+| setup | PCG | total | factor / stored / iterations / emitted |
+|---:|---:|---:|---:|
+| **0.9916x** | 1.0170x | 0.9962x | exactly 1.0x |
+
+Against production in the same job, q=0.25 remained 1.1855x setup, 0.6567x
+PCG and 1.0228x one-RHS total.  The setup reduction is about 0.8% of the q arm,
+roughly half the remaining one-RHS gap.  Treat its exact magnitude cautiously:
+the old-q right/left setup ratio ranged from 0.805 to 1.250 even though its
+aggregate geometric mean was 1.0002, and only 11/20 optimized cells won.  A
+fixed-seed repeated bracket is needed before calling a sub-percent gain stable.
+
+The next exact arm fixes a separate accumulation bug: `edge_emitter::reserve`
+was called once per pivot with exactly `buffer.size()+expected_output`, forcing
+repeated prefix copies instead of geometric vector growth.  Amortized doubling
+does not change any emitted edge; the next Daint sequence brackets
+`old / grouped / amortized / grouped / old` repeatedly and records peak RSS as
+the memory-side gate.
