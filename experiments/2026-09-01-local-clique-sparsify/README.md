@@ -127,3 +127,38 @@ and the three thresholds between exact baselines, for 48/48 planned records.
 Advance to five seeds only if one threshold preserves the IPM solve/total win,
 is an exact or near-exact no-op on controls, and does not add setup work beyond
 the ungated estimator on activated trajectories.
+
+### One-seed Daint gate
+
+Daint job `4571971` completed in 1:58.  Checked **48/48 records** over 8/8
+matrices; exact baselines matched in 8/8 cells, all true residuals were at most
+`1e-8`, and 325/325 tests passed (three platform-dependent skips).  The
+downloaded raw-log hashes verify 48/48 under
+`/tmp/local-clique-spread-gate-results-20260901-r1`.
+
+The decisive structural comparison is:
+
+| scope / arm | emitted edges | raw-neighbor work | raw factor | iterations |
+|---|---:|---:|---:|---:|
+| IPM / ungated q=0.20 | 1.2320x | 1.1589x | 1.0822x | 0.6729x |
+| IPM / gated at 1e-3 | **1.2316x** | **1.1587x** | **1.0820x** | **0.6781x** |
+| controls / ungated q=0.20 | 1.2429x | 1.1495x | 1.0861x | 1.6592x |
+| controls / gated at 1e-3 | **1.0005x** | **1.0003x** | **1.0001x** | **1.0112x** |
+
+Thus the local rule preserves essentially the entire IPM estimator while
+removing essentially the entire control-graph regression.  `grid_500` is
+byte-identical to baseline; com-Amazon is exact through `1e-4` and differs by
+only 0.01% of emitted work at `1e-3`; G3_circuit and thermal2 also change only
+about 0.2% and 0.01% of emitted work respectively.
+
+The one-pass timing order is not an acceptance result: individual no-op setup
+ratios ranged widely (for example, byte-identical com-Amazon arms appeared
+about 20% faster, while a byte-identical grid arm appeared 20% slower).
+Across the four IPM cells, the 1e-3 gate measured setup 1.0286x, PCG 0.7128x,
+and total 0.9311x; controls measured total 1.0644x despite their near-exact
+structure.  This is sufficient to advance quality, not to claim speed.
+
+**Next gate:** five seeds, with adjacent baselines around each of ungated
+q=0.20 and the `1e-3` spread gate.  The candidate survives only if it keeps
+the IPM iteration/fill benefit, remains structurally neutral on controls, and
+wins bracketed one-RHS total beyond the null-control timing variation.
