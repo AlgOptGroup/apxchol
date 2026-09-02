@@ -28,6 +28,120 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol path/to/matrix.mtx --random-rhs --tol 1e-8
 ```
 
+## Daint / Slurm campaign gate
+
+Do not use a production Slurm allocation as the first integration test. Every
+new or materially changed campaign must pass these gates, in order, against
+the exact immutable source/package bytes that the production job will use:
+
+1. State the complete planned-record denominator, resource ceiling,
+   cancellation command, and whether a nonzero exit means infrastructure
+   failure or a deliberate scientific rejection.
+2. Run a package-owned login-node preflight. It must call the same prologue
+   implementation as the batch job (not a second look-alike validator) and
+   check the exact source commit/bundle and package hashes, clean source,
+   matrix/dependency/toolchain identities, all required environment variables,
+   and a fresh writable result namespace. Exercise missing, empty, and zero
+   forms of optional Slurm variables used by the prologue. Validate a compiler
+   by compiling and linking a tiny program with the campaign's exact compiler
+   and flags; do not infer that from the presence of a support toolchain's
+   `gcc`/`g++` driver binaries (for example, Clang may use that installation
+   only for GNU headers and runtime libraries). Check resolved CMake cache
+   values without assuming whether an explicitly supplied entry is typed as
+   `STRING` or `FILEPATH`. Execute package tests with the same absolute Python
+   interpreter used in batch; parsing the files with a newer Python is not a
+   compatibility test. Disable or redirect bytecode so validation cannot dirty
+   the immutable source checkout. For CUDA campaigns, record and validate
+   `CMAKE_CUDA_COMPILER` and `CMAKE_CUDA_HOST_COMPILER` separately; neither is
+   evidence for the C or C++ compiler identity.
+   The known-working Daint CUDA baseline is LLVM 22.1.8 `clang`/`clang++` for
+   C, C++, and nvcc's host compiler, with
+   `CMAKE_CUDA_FLAGS=--allow-unsupported-compiler` recorded explicitly. It
+   configured, built, and executed the GPU/dataflow backend on a GH200 on
+   2026-08-31. Do not silently replace it with GNU merely because GNU appears
+   in NVIDIA's supported-version table; any compiler change needs its own
+   compute-node smoke and numerical receipt before production.
+   Dependency Git identities must be canonical full object IDs (40 hexadecimal
+   characters for SHA-1 repositories), resolved and compared rather than
+   copied by eye. Reject ignored as well as untracked Python bytecode/cache
+   before importing package-local modules; a late scan cannot make an earlier
+   stale import trustworthy. Execute every package entry point with the exact
+   target Python before submission; a syntax-only parse under another version
+   is not runtime compatibility evidence.
+3. Keep `SLURM_SUBMIT_DIR`, stdout, stderr, builds, and results outside the
+   source checkout. Submit through a package-owned wrapper with explicit
+   absolute `--chdir`, `--output`, and `--error` paths. The wrapper must run
+   `sbatch --test-only` using the final account/resource arguments.
+4. Run a small compute-node smoke allocation that builds the exact target(s)
+   and exercises the relevant CPU/GPU runtime, affinity, and one tiny solver
+   path. Persist a receipt binding source/package hashes, compiler/runtime,
+   build outputs, and smoke results. Receipt verification must require the
+   exact named artifact set (no missing, duplicate, or extra entries), and the
+   production build must either reuse those immutable tested artifacts or
+   prove that its rebuilt binaries, caches, compile commands, build IDs, and
+   toolchain contract match the receipt. Every timing-producing entry point,
+   not only the advertised wrapper, must require the validated receipt. The
+   production job must verify it before starting; any source/package change
+   invalidates it. Receipt fields such as test counts, completion state, job
+   identity, and allocated resources must be derived from hashed smoke output
+   and scheduler evidence, never emitted as unconditional PASS constants.
+5. Only then submit the full campaign. Size wall time and per-process guards
+   from observed upper bounds with margin; a censored timeout is a lower bound,
+   not a runtime estimate. Preserve failed-run evidence in a separate result
+   namespace and never reuse a partial run root. Timing jobs must persist the
+   process mask and observed OpenMP-worker affinity; do not combine Slurm
+   binding with `KMP_AFFINITY=norespect` unless the resulting confinement is
+   explicitly verified. Concurrent ranks in one route-homogeneous phase are a
+   single blocked timing observation, not independent seed replicates; either
+   synchronize the measured stage and balance arms within each wave, or model
+   the whole phase as the experimental unit. Bootstrap or other resampling
+   must keep every measurement belonging to one declared independent cluster
+   together. Resource ceilings must include CPUs, memory, and every GRES that
+   Slurm grants implicitly (notably the GPUs granted by bare `--exclusive` on
+   Daint). If a claim requires byte-identical factors, persist and compare a
+   digest over factor structure and values; equal fill, iterations, and
+   residuals do not establish factor identity.
+
+Login nodes are for bounded validation, hashing, parsing, configuration probes,
+and `sbatch --test-only`, not compilation-heavy or solver timing work. A
+complete denominator that intentionally exits nonzero on a failed scientific
+quality gate is evidence; a launch/build/parser/provenance failure is not.
+
+### Submit rules learned from 92 non-completed jobs (2026-08-30..09-02)
+
+- Batch scripts execute from `/var/spool/slurmd/`: never derive paths from `BASH_SOURCE`/`$0`/cwd; require `--export=APXCHOL_SOURCE=<abs>` and assert `test -d "$APXCHOL_SOURCE/.git"` before anything else. <!-- e.g. job 4560009, 4559543, 4558607 -->
+- Pin every interpreter and tool by absolute path (`/usr/bin/python3.11` or `/user-environment/env/default/bin/python3`, `$LLVM/bin/clang++`); bare `python3` is 3.6.15 outside the uenv view. Never pass `env PATH=...` expanded by the batch shell into an `srun --view` step. <!-- e.g. job 4559960, 4559443, 4560221 -->
+- `srun` launches only a shell driver (`daint_build.sh`, `run_rank.sh`), never `cmake`/`python3` directly; every CMake line passes absolute `CMAKE_C_COMPILER`/`CMAKE_CXX_COMPILER` (+`CMAKE_CUDA_HOST_COMPILER`, `--allow-unsupported-compiler`) and asserts the identification lines. <!-- e.g. job 4559617, 4559632, 4560294, 4560272 -->
+- Clang-built binaries carry `-DCMAKE_BUILD_RPATH=$LLVM/lib/aarch64-unknown-linux-gnu` (and `-Wl,--build-id` if provenance needs it); the driver fails on any `ldd | grep 'not found'` before the first rank starts. <!-- e.g. job 4560227, 4560228, 4576826 -->
+- Every guard prints WHY to stderr before exiting (no bare `test ...` under `set -e`), and the batch stdout/stderr must carry each step's tail; a 0-byte log is a package defect. <!-- e.g. job 4568522, 4560313, 4582447 -->
+- Run every audit/summary/verify script on the login node against a fixture that mirrors the submitted topology (zeros in timing fields, 4 ranks, real traces) before sbatch; after a complete denominator the audit writes its verdict and exits 0 - it never fails the batch. <!-- e.g. job 4571850, 4568596, 4559544, 4559443 -->
+- `ctest` runs only tests whose executables the driver built (`--target apxchol analyze_factor unit_tests`, or `-R`); verify with `ctest -N` on the login node. <!-- e.g. job 4569010, 4576963, 4558309 -->
+- Slurm `--output/--error` and build/run roots live outside any tree the script asserts clean; use `git diff --quiet HEAD` not `status --short`. <!-- e.g. job 4569006, 4584187 -->
+- Never edit a script or lower `--time` after `sbatch`; `scancel` and resubmit, recording `sha256sum` of the script in the submit log. <!-- e.g. job 4559617, 4559638, 4559857 -->
+- Budget before submit: `records_per_rank * measured_s + startup <= 0.67 * walltime`, per-record watchdog >= 3x a measured single record, per-rank memory from a measured smoke; a TIMEOUT is not a measurement. <!-- e.g. job 4560318, 4568082, 4567831, 4558610 -->
+- Daint `normal` grants the whole exclusive node (cpu=288, gpu=4) for any request: assert `SLURM_CPUS_ON_NODE=288`, never a sub-node shape. <!-- e.g. job 4568522, 4576312 -->
+- A per-rank gate writes its verdict and exits 0; do not combine a nonzero gate with `--kill-on-bad-exit=1` (it destroys the other ranks' records). <!-- e.g. job 4571918, 4582001, 4577006 -->
+- CMake cache assertions use the type the script itself passes (`-DX:BOOL=ON` ⇔ `grep 'X:BOOL=ON'`) and are executed once against a login-node configure; `bash -n` + readonly-collision lint on every shell driver. <!-- e.g. job 4567920, 4575779, 4567992 -->
+- One package, one login preflight, one debug-partition smoke, then production; never fix one defect per allocation. <!-- e.g. jobs 4559617..4560243 (6 tries), 4575916..4582372 (8 tries) -->
+
+Taxonomy of those 92 jobs (157 total since 2026-08-30): harness/parser bug 21, unknown (empty or redirected logs) 21, walltime underestimate 11, bad path/missing file 10, user cancellation 8, CMake configure 5, Python-version syntax 4, compile/link 4, OOM 2, scientific gate rejection 2, Slurm resource shape 2, dependency identity 1, gcc-vs-clang 1. Only 2 of 92 were deliberate scientific rejections; 8.65 of 14.85 node-hours (58%) were infrastructure failures, 3.66 h of them TIMEOUTs. The recurring pattern was one defect fixed per allocation (block-sptrsv 6 tries, saturation-cut 6, r1b-correctness 8). Evidence: the sacct/log classification of 2026-09-02 (session scratch `final/daint_taxonomy.json`).
+
+### Login-node preflight checklist (run in this order; no allocation)
+
+- Identity: `git -C $APXCHOL_SOURCE rev-parse HEAD` == pinned commit; `git -C $APXCHOL_SOURCE diff --quiet HEAD --`; `test -d $APXCHOL_SOURCE/.git`; `sha256sum *.sbatch *.sh *.py > submit.sha256` (spool-copy rule, 4560009).
+- Static lint: `grep -nE 'BASH_SOURCE|\$\{?0\}?' *.sbatch` empty; `grep -nE '^\s*srun .*\b(cmake|python3?)\b' *.sh *.sbatch` empty; `grep -nE 'env PATH=' *.sh` reviewed; `bash -n` on every shell file; `grep -n readonly` vs later assignments (4559543, 4559617, 4567992).
+- Interpreter: for every `python` reference `command -v` resolves to an absolute path; `/usr/bin/python3.6 -m py_compile` (or the pinned interpreter) on every .py the batch shell runs OUTSIDE the view, and `uenv run prgenv-gnu/26.3:v1 --view=default -- <pinned python> -I -B -m py_compile` for view steps; then execute each entry point with `--self-test`/`--help` (4559443, 4559960).
+- Tools on the step PATH: `uenv run prgenv-gnu/26.3:v1 --view=default -- sh -c 'command -v clang++ nvcc cmake ninja git; c++ --version'` and assert clang++ is $LLVM/bin/clang++, not /usr/bin/c++ (4560221, 4559632).
+- Configure only (no build): `uenv run ... --view=default -- cmake -S $SRC -B $S/pf-build <exact -D flags>` under `timeout 120`; require '-- Configuring done' and the compiler identification lines; then run every `grep ... CMakeCache.txt` assertion from the driver verbatim; `cmake --build $S/pf-build -- -n` plus `ctest --test-dir $S/pf-build -N` to confirm target/test consistency (4559617, 4575779, 4569010).
+- Runtime linkage of any pre-existing binary: `ldd <bin> | grep -c 'not found'` == 0 and `readelf -d <bin> | grep -E 'RPATH|RUNPATH'` contains the LLVM runtime dir (4560227).
+- Dependencies/inputs: `test -d` every offline dependency dir and matrix; FetchContent source set equals the anchor; dependency SHAs are 40 hex (4568503, 4576779).
+- Audit/summary scripts against a fixture: `python summarize.py $S/fixture` with zero timing fields and 4-rank status records; `python audit.py --run-root $S/fixture` must print VALID; `verify_source.py` over the real `_deps` tree (4571850, 4568596, 4573575).
+- Output namespace: `mkdir -p` the parent of every --output/--error/run root and `test -w`; confirm they are outside $APXCHOL_SOURCE; `test ! -e <run root>` (4582964, 4569006).
+- Slurm shape: `#SBATCH --time` matches the budget line in README; `--ntasks-per-node=4 --cpus-per-task=72` (full node) and script assertions use 288 CPUs / 4 GPUs; `sbatch --test-only <script>` (user runs it) (4568522, 4576312).
+- Budget arithmetic printed: planned records, measured seconds per record (from previous run logs), startup, walltime, watchdog, per-rank memory; abort if `plan > 0.67 * walltime` (4560318, 4568082).
+- Only then: 5-minute `-p debug` smoke of build driver + one tiny record per rank; then production.
+
+
 Build options (root `CMakeLists.txt`):
 - `-DAPXCHOL_USE_CUDA=ON` — switch the SpTRSV backend from OpenMP level-sets to the GPU (`include/apxchol/solver/sptrsv/cuda.h`: **our sync-free dataflow kernel, the ONLY GPU SpTRSV backend of the library** — the AUTO choice since 2026-08-18, `cuda_dataflow.h` / `src/cuda_dataflow.cu`, see the paragraph after this one; plus cuSPARSE SpSV as an opt-in COMPARISON backend with env `APXCHOL_GPU_SPTRSV=cusparse` — ONLY on a build that opted in with `-DAPXCHOL_CUDA_WITH_CUSPARSE=ON` (default OFF; see the "No closed-source dependencies" bullet below)) + GPU-resident PCG (`pcg_cuda.h`, our own SpMV / vector kernels since 2026-08-18, `pcg_cuda_kernels.h` / `src/cuda_pcg_kernels.cu`). Defines `APXCHOL_USE_CUDA`, requires CUDAToolkit; **the CUDA library links `cudart` only** by default (no cuSPARSE, no cuBLAS). Runtime env knobs of the GPU SpTRSV (all read at every setup): `APXCHOL_GPU_SPTRSV=dataflow|cusparse` — an explicit override, exactly that backend, no fallback (`=cusparse` is NOT protected by any fitting check); **unset = AUTO = the dataflow backend, unconditionally**: it has no analysis buffer — its device state is the two CSRs the level-set backend needs anyway plus 8 B/row and O(n) batch tables — so there is nothing to fit and nothing to decide, and it beats cuSPARSE on every measured workload (`gpu_pcg_loop` ms/iter, RTX 4090 Laptop, T=16, bg+tree[vec_pool], default drop: **iter0040 cuSPARSE 1.08 → dataflow 0.98, grid_2000 3.54 → 3.20**) with bit-deterministic results. The pre-dataflow OOM-aware AUTO rule — cuSPARSE unless its two SpSV analysis buffers (`cusparseSpSV_bufferSize`, O(nnz): 129 MB iter0040-after-drop, 766 MB grid_2000, several GB on the giant social factors) fit into free device memory minus a 10%-of-total margin minus a caller-declared reserve (`cuda_sptrsv::set_reserve_bytes`) — was **removed 2026-08-20 with the fp64 build that was its only reachable caller**, along with `set_reserve_bytes` / `auto_prefers_dataflow` / `dataflow_supported`; an explicit `=cusparse` gets cuSPARSE with no fitting check. The decision is `cuda_sptrsv::backend_reason()`, printed under `APXCHOL_VERBOSE` as `[apxchol] GPU SpTRSV backend: ...` (`backend_forced()` false = AUTO). **The O(n)-schedule LEVEL-SET GPU backend (`cuda_levelset.h` / `src/cuda_levelset.cu`, `APXCHOL_GPU_SPTRSV=levelset`, `cuda_host::compute_levels`, `cuda_sptrsv::levelset()`) was REMOVED 2026-08-20** — the dataflow kernel beat it on every workload measured in the same session (`gpu_pcg_loop` ms/iter iter0040 0.98 vs 1.54, grid_2000 3.20 vs 6.26; s/iteration com-Orkut 0.77 vs 0.87, com-LiveJournal 0.21 vs 0.25), needs strictly less device state (no O(n) level schedule) and is deterministic in the same way; the value is now an unknown one, so it lands on AUTO with a stderr note, and `benchmarks/sweep_fair.py`'s retry-with-`levelset`-after-OOM went with it (AUTO has been O(n)-state since 2026-08-18, so there is nothing to fall back FROM). Its independent-implementation cross-check survives, retargeted to dataflow-vs-CPU (`GpuDataflow.*`). The dataflow backend is deterministic run to run, cuSPARSE SpSV is not (same factor, ±1 PCG iteration / different RelRes — the CUDA build's `SolveTest.DeterministicWithSameSeed` flaked under cuSPARSE and passes under the dataflow AUTO); measured on the RTX 4090 Laptop (T=16, bg+tree[vec_pool], `gpu_pcg_loop` ms/iter, 3 reps): cuSPARSE ≈ 3.7 ms/iter on grid_2000 vs level-set ≈ 6.5 (both far below GDDR bandwidth — launch/latency-bound, one launch per level; bg's IPM level count varies 79–138 run to run at T=16 and the level-set time scales with it), on iter0040 (5 interleaved reps, medians) the drop takes cuSPARSE from 6.6 (6.1–13.1) to 1.08 ms/iter and the level-set from 2.7 (2.6–6.6, 95–141 levels) to 1.58 (81–96 levels — the drop also removes dependency edges, so the DAG gets shallower), at unchanged iteration counts (T=1: iter0040 46/46, grid_2000 50/50, grid_500 42/42); the **compacting factor drop runs on this backend too** (same `APXCHOL_FACTOR_DROP` knob and default as the CPU, applied on the host L11 arrays before the upload — one implementation, `factor_drop.h`, see "Compacting factor drop"; `cuda_sptrsv::drop_stats()` / `stored_nnz()`, and the benchmark's FILL line prints `stored_nnz=` plus `gpu=<backend>/<storage> factor_dev_MB= dev_delta_MB= cusparse_buf_MB=`); `APXCHOL_GPU_DF_SPLIT=<off-diagonals>` — the dataflow kernel's ROW-SEGMENTATION threshold (see the dataflow bullet below): **unset = the derived per-direction default**, a positive value pins it, **`=0` turns segmentation off** and is the rollback switch (the plan, and the output, become bit-identical to the unsplit kernel); `APXCHOL_GPU_SPTRSV_STATS=1` prints each direction's row-length histogram and plan sizes at setup (`[df-stats]`), which is the evidence the threshold rule was derived from; `APXCHOL_GPU_SPTRSV_FP16=1` (default off) — **fp16 factor storage on our dataflow kernel** (AUTO = the fp16 dataflow kernel; `=cusparse` is impossible — a stderr note, then the AUTO choice: cuSPARSE 12.8 SpSV rejects `CUDA_R_16F` matrix values with `CUSPARSE_STATUS_NOT_SUPPORTED` for every A/vector/compute combination — probed): the CPU FP16_SCALED contract (`cuda_host.h` file header: binary16 of the column-scaled `L~ = L D^-1`, separate fp32 `diag[j] = fp32(L_jj)/s_j` and `inv_scale[j]`, forward returns `D y`, back reads its input times `inv_scale^2`, compute in `cuda_value_t` = fp32 after the half→float widen), host-side narrowing through `lowprec.h`'s `fp16_t` (same RNE / subnormal flush as the CPU build; `APXCHOL_FP16_KEEP_SUBNORMAL=1` honoured), and the column rounding residual folded into `diag[j]` BY DEFAULT (`APXCHOL_LOWPREC_DIAG_COMP=0` turns it off — the CPU reads the same variable with the opposite default; without it the Laplacian path pays iter0040 fp16 45 → 64 iterations, with it fp16 matches fp32's counts). Device factor bytes per stored entry: dataflow fp32 2×(4+4) B, fp16 2×(4+2) B + 8 B/row; cuSPARSE 4+4 B + its O(nnz) analysis buffers (iter0040 device factor 82.5 → 68.2 MB with fp16, grid_2000 414 → 358 MB). `APXCHOL_GPU_MEM_DEBUG=1` prints the device-memory lines. Host-side prep (`cuda_host.h`) is CUDA-free and unit-tested on every build (`GpuHostPrep.*` in `tests/test_sptrsv_drop.cpp`: the arrays the GPU uploads are the arrays `omp_sptrsv` stores; the fp16 storage contract; the dataflow batch packing).
   - **Retired fixed-priority GPU setup path (2026-08-23):** the CPU `priority_greedy` selector remains available, but its GPU residual-topology frontend and `APXCHOL_GPU_PRIORITY_FRONTEND` / `APXCHOL_GPU_PRIORITY_TRACE` knobs were removed rather than kept as indefinite research surface. The direct forced-GPU campaign checked 90/90 T=16 records over ten matrices and produced a 1.102x setup geomean versus the bracketed CPU path. A separate exact asynchronous persistent kernel, shaped after ECL-MIS but independently implemented with the repository's full priority order, preserved factors and iterations in 54/54 bracketed runs; it still made selector time 1.057x and `find_partition` 1.069x overall (including 1.580x selector time on com-Amazon), while setup was noise-level 0.989x. It therefore did not rescue the mode. The GPU block-region frontend below is independent and remains.
