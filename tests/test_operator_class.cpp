@@ -131,6 +131,32 @@ Eigen::VectorXd spmv_probe_b() {
     return b;
 }
 
+/// Compressed, sorted CSC with duplicate off-diagonal coordinates whose
+/// multiplicity errors cancel in the global upper/lower counts:
+///   (1,0) has two lower entries and one upper partner;
+///   (2,0) has one lower entry and two upper partners.
+/// The dense sums are symmetric, but direct array copying is not equivalent to
+/// selfadjointView<Lower> unless the fast path rejects the representation.
+Sparse spmv_balanced_duplicate_multiplicity_sddm() {
+    Sparse A(3, 3);
+    A.resizeNonZeros(9);
+    const int outer[] = {0, 4, 6, 9};
+    const int inner[] = {
+        0, 1, 1, 2,  // column 0: diagonal + canonical lower entries
+        0, 1,        // column 1: one upper partner + diagonal
+        0, 0, 2,     // column 2: two upper partners + diagonal
+    };
+    const double values[] = {
+        4.0, -0.25, -0.75, -2.0,
+        -1.0, 4.0,
+        -1.0, -1.0, 4.0,
+    };
+    std::copy(std::begin(outer), std::end(outer), A.outerIndexPtr());
+    std::copy(std::begin(inner), std::end(inner), A.innerIndexPtr());
+    std::copy(std::begin(values), std::end(values), A.valuePtr());
+    return A;
+}
+
 Eigen::MatrixXd dense(const Sparse& A) { return Eigen::MatrixXd(A); }
 
 /// Byte-exact snapshot of a sparse matrix's three storage arrays.
@@ -485,6 +511,32 @@ TEST(SpmvLrmBuild, OwnedFp32CopySurvivesCallerMutationAndDestruction) {
     A.reset();
     const auto after_destruction = slv.solve(b, 1e-15, 0, &x0);
     EXPECT_EQ(after_destruction.residual, 0.0);
+}
+
+TEST(SpmvLrmBuild, BalancedDuplicateMultiplicitiesUseGeneralFallback) {
+    const Sparse A = spmv_balanced_duplicate_multiplicity_sddm();
+    ASSERT_TRUE(A.isCompressed());
+    ASSERT_EQ(A.nonZeros(), 9);
+
+    // A's lower-authoritative operator has unique dense values -1 and -2.
+    // Supply a factor for that same operator; max_iter=0 makes this test probe
+    // only the SpMV residual at x0, independent of preconditioner quality.
+    const std::vector<Trip> canonical_entries{
+        {0, 0, 4.0}, {1, 1, 4.0}, {2, 2, 4.0},
+        {1, 0, -1.0}, {0, 1, -1.0},
+        {2, 0, -2.0}, {0, 2, -2.0},
+    };
+    Sparse canonical(3, 3);
+    canonical.setFromTriplets(canonical_entries.begin(), canonical_entries.end());
+    auto F = apxchol::factorize(canonical);
+    Eigen::VectorXd x0(3);
+    x0 << 8.0, -4.0, 2.0;
+    const Eigen::VectorXd b = A.selfadjointView<Eigen::Lower>() * x0;
+
+    const apxchol::cpu_solver slv(A, std::move(F));
+    const auto result = slv.solve(b, 1e-15, 0, &x0);
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_EQ(result.residual, 0.0);
 }
 
 TEST(SpmvLrmBuild, OneTriangleCustomOperatorKeepsGeneralFallback) {

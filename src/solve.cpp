@@ -143,33 +143,53 @@ bool copy_symmetric_csc_as_owned_csr(
     for (Eigen::Index col = 0; col < n; ++col) {
         dst_outer[col] = src_outer[col];
         const int col_i = static_cast<int>(col);
-        for (int p = src_outer[col]; p < src_outer[col + 1]; ++p) {
+        for (int p = src_outer[col]; p < src_outer[col + 1];) {
             const int row = src_inner[p];
-            dst_inner[p] = row;
-            double v = src_vals[p];
+            int run_end = p + 1;
+            while (run_end < src_outer[col + 1] &&
+                   src_inner[run_end] == row)
+                ++run_end;
+            const int run_size = run_end - p;
+
+            for (int q = p; q < run_end; ++q) {
+                dst_inner[q] = row;
+                dst_vals[q] = static_cast<S>(src_vals[q]);
+            }
             if (row < col_i) {
-                ++upper_nnz;
+                upper_nnz += run_size;
                 // Destination CSR(row=col, col=row) must use the canonical
-                // lower value L(col,row), found in source CSC column `row`.
+                // lower values L(col,row), found in source CSC column `row`.
+                // Compressed Eigen matrices may contain duplicate sorted
+                // inner indices, so require and copy the whole partner run
+                // one-for-one. A mere lower_bound hit plus globally balanced
+                // triangle counts can accept opposite multiplicity errors on
+                // two coordinates and silently change the operator.
                 const int begin = src_outer[row];
                 const int end = src_outer[row + 1];
-                const int* it = std::lower_bound(src_inner + begin,
-                                                 src_inner + end, col_i);
-                if (it != src_inner + end && *it == col_i)
-                    v = src_vals[it - src_inner];
-                else
+                const auto partners = std::equal_range(
+                    src_inner + begin, src_inner + end, col_i);
+                const int partner_begin = static_cast<int>(
+                    partners.first - src_inner);
+                const int partner_size = static_cast<int>(
+                    partners.second - partners.first);
+                if (partner_size == run_size) {
+                    for (int offset = 0; offset < run_size; ++offset)
+                        dst_vals[p + offset] = static_cast<S>(
+                            src_vals[partner_begin + offset]);
+                } else {
                     upper_is_paired = false;
+                }
             } else if (row > col_i) {
-                ++lower_nnz;
+                lower_nnz += run_size;
             }
-            dst_vals[p] = static_cast<S>(v);
+            p = run_end;
         }
     }
     dst_outer[n] = src_outer[n];
 
-    // Eigen SparseMatrix has unique sorted inner indices. Thus every upper
-    // entry having a lower partner plus equal triangle counts is a bijection;
-    // explicit-zero asymmetries also take the general fallback so they cannot
+    // Per-coordinate duplicate multiplicities now match for every upper run.
+    // Equal global triangle counts additionally exclude lower-only runs.
+    // Explicit-zero asymmetries take the general fallback so they cannot
     // perturb the SpMV's four-accumulator association through changed row
     // lengths.
     return upper_is_paired && upper_nnz == lower_nnz;
