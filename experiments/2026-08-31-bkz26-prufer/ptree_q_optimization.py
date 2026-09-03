@@ -173,6 +173,12 @@ def main() -> None:
         figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
         args.plot.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(args.plot, dpi=180, metadata={"Date": None})
+        # Matplotlib 3.11 leaves spaces at the ends of SVG path-data lines.
+        # Canonicalize them so regenerating the committed asset is byte-stable.
+        svg = args.plot.read_text()
+        args.plot.write_text(
+            "\n".join(line.rstrip() for line in svg.splitlines()) + "\n"
+        )
 
 
 if __name__ == "__main__":

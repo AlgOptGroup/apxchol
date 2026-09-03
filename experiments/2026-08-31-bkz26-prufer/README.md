@@ -10,10 +10,12 @@ Randomized Approximate Cholesky Factorization*
 ([SIAM J. Sci. Comput. 48(3), 2026](https://doi.org/10.1137/24M1673577)).
 
 The result is negative for changing apxchol's default: over the valid broad
-quality campaign, BKZ26 changed mean PCG iterations from `44.93` to `59.90`
-and lost iterations in every seed on 6/8 matrices. Raw and stored factor sizes
-were nearly unchanged. The implementation and experiment remain useful as a
-faithful, connected, unbiased reference.
+quality campaign, BKZ26 raised mean PCG iterations from `44.93` to `59.90` and
+required more iterations in every seed on 6/8 matrices. Raw and stored factor
+sizes changed by only `1.2%` and `1.3%` in aggregate, while the campaign's
+unsynchronized timings do not support a setup-speed conclusion. The
+implementation remains useful as a faithful, connected, edgewise-unbiased
+reference.
 
 ## Exact elimination and the two tree estimators
 
@@ -26,7 +28,10 @@ c_ij = a_i a_j / D,       i != j.
 ```
 
 For a pure Laplacian, `D=W`. Materializing every clique edge is quadratic in
-the pivot degree, so apxchol emits an unbiased spanning tree instead.
+the pivot degree, so apxchol emits an unbiased spanning tree instead. Both
+estimators below emit a connected `d-1`-edge tree and preserve every clique
+edge, hence every neighbor's clique degree, in expectation. The distinction is
+what they preserve in each individual sample.
 
 **GKS.** Sort neighbors by nondecreasing `a_i`. Each source `i`, except the
 last, chooses exactly one later (therefore no lighter) parent `j` with
@@ -37,10 +42,9 @@ h_i = a_i S_i / D.
 ```
 
 Thus every source emits exactly the same mass `h_i` in every sample; only its
-destination changes. That fixes the source's own contribution to its sampled
-clique degree. A vertex can still receive random edges from earlier sources,
-so this is not a claim that GKS makes every vertex's *total* degree
-deterministic.
+destination changes. GKS fixes that source contribution to the sampled clique
+degree. A vertex can still receive random edges from earlier sources, so its
+*total* sampled degree is not deterministic.
 
 **BKZ26 / weighted Prüfer.** Draw a Prüfer code of length `d-2` with iid symbol
 probabilities `q_i=a_i/W`. The decoded tree includes `{i,j}` with probability
@@ -50,13 +54,13 @@ probabilities `q_i=a_i/W`. The decoded tree includes `{i,j}` with probability
 (W/D) a_i a_j / (a_i+a_j).
 ```
 
-This makes every clique edge unbiased and the sampled clique connected, but it
-has no fixed one-edge contribution per neighbor. The realized per-neighbor
-degrees can therefore move together with the random Prüfer counts and selected
-endpoints. Those sampled edges become the next residual graph: degree errors
-change later neighborhoods, pivot priorities, sampled cliques, fill, and
-ultimately the preconditioner seen by PCG. This is a mechanism, not a theorem
-that one local metric orders global convergence.
+This makes every clique edge unbiased and the sampled clique connected, but
+there is no analogous fixed source contribution. Realized neighbor degrees can
+therefore move with the random Prüfer counts and selected endpoints. Those
+sampled edges become the next residual graph: degree errors change later
+neighborhoods, pivot priorities, sampled cliques, fill, and ultimately the
+preconditioner seen by PCG. This is a mechanism, not a theorem that one local
+metric orders global convergence.
 
 For SDDM pivots, the implementation's `W/D` factor is the unbiased extension
 of the paper's pure-Laplacian rule. The implementation is
@@ -74,6 +78,11 @@ The complete provenance and reproduction harness are under
 `6be1d2dda7ba70313e66f1a88da19804242b4dc3`, one exclusive node, a fixed
 component-compatible RHS per matrix, and seeds `{1,17,42,73,97}`. It ran
 `GKS-before / BKZ26 / GKS-after` for every seed.
+
+The harness contains eight valid matrices. `as-Skitter` is not one of them:
+its historical globally zero-sum RHS was incompatible with its 756 connected
+components, so those old residuals and iteration counts were removed rather
+than counted as a sampler failure.
 
 The quality denominator is **8/8 matrices, 5/5 seeds, 120/120 arm records,
 40/40 exact GKS brackets, and 120/120 converged true residuals**. “Raw” is the
@@ -96,23 +105,23 @@ show scale, not to rank close timings.
 | iter0010 | 41.0 → 90.0 | 0.993x | 0.992x | 0.993x | 2.141x | 1.266x |
 | iter0020 | 37.2 → 61.2 | 1.008x | 1.010x | 1.003x | 1.539x | 1.157x |
 | iter0030 | 51.0 → 62.6 | 1.013x | 1.014x | 0.996x | 1.217x | 1.061x |
-| iter0040 | 56.2 → 73.2 | 1.011x | 1.020x | 0.789x | 1.246x | **0.925x** |
+| iter0040 | 56.2 → 73.2 | 1.011x | 1.020x | 0.789x | 1.246x | 0.925x |
 | grid_500 | 47.2 → 48.6 | 1.006x | 1.006x | 1.007x | 1.007x | 1.006x |
 | G3_circuit | 46.2 → 52.6 | 1.012x | 1.012x | 1.157x | 1.168x | 1.159x |
 | thermal2 | 44.6 → 50.6 | 1.009x | 1.009x | 1.078x | 1.184x | 1.112x |
 | com-Amazon | 36.0 → 40.4 | 1.044x | 1.044x | 1.174x | 1.207x | 1.183x |
 | **all 40 pairs** | **44.93 → 59.90** | **1.012x** | **1.013x** | **1.018x** | **1.305x** | **1.104x** |
 
-The quality loss is not IPM-only. All five seeds lost iterations on every IPM
-iterate, `G3_circuit`, and `thermal2`; `grid_500` was nearly neutral, and
-`com-Amazon` was mixed but worse on average. `iter0040` had a nominal total-time
-win because its sampled setup happened to be much faster, but the timing
-protocol is not strong enough to treat that as a matrix-level result.
+`†` Exploratory only; see the timing-drift caveat above.
 
-`as-Skitter` is outside the denominator. Its historical RHS was only globally
-zero-sum, while the retained component audit reports 756 components, so its
-reported residuals and iterations were invalid. It was excluded rather than
-counted as a sampler failure.
+The quality loss is not IPM-only. BKZ26 required more iterations in all five
+seeds on every IPM iterate, `G3_circuit`, and `thermal2`; `grid_500` was nearly
+neutral, and `com-Amazon` was mixed but worse on average. Fill stayed close:
+the aggregate raw/stored ratios were `1.012x/1.013x`, with `com-Amazon` the
+largest increase at about `4.4%`. The run does not support a setup ranking: its
+aggregate setup ratio was `1.018x`, but matrix ratios ranged from `0.789x` to
+`1.174x` under substantial null-arm drift. In particular, `iter0040`'s nominal
+total-time win is not a matrix-level timing result.
 
 ## Exponent sweep: quality only
 
@@ -131,12 +140,11 @@ plotted by [`plot_alpha_sweep.py`](plot_alpha_sweep.py):
 | best tested, `alpha=1.75` | 56, 60, 60, 56, 60 | **58.4** | 8.768M |
 | `alpha=2` | 71, 82, 68, 70, 68 | 71.8 | 8.745M |
 
-The surprise is real: emphasizing heavy neighbors near `alpha=1.75` was
-substantially better than the mathematically natural BKZ value `alpha=1`, even
-while producing a slightly smaller raw factor. It still needed 39% more
-iterations than GKS on this matrix. The historical workstation was not
-isolated, so the recovered sweep supports iteration and raw-fill comparisons
-only—no setup, solve, or total-time claim.
+On `iter0010`, emphasizing heavy neighbors at `alpha=1.75` lowered the p-tree
+mean from `90.4` to `58.4` iterations while slightly shrinking the raw factor.
+It still required 39% more iterations than GKS's `42.0`. The historical
+workstation was not isolated, so the recovered sweep supports iteration and
+raw-fill comparisons only—no setup, solve, or total-time claim.
 
 The sweep source survives at git commit
 `2c47ab64d8a0a9d90849e80121b0db0782268726`. The complete raw all-alpha TSV
@@ -183,7 +191,8 @@ the generated values are in [`tiny-star-spectral.tsv`](tiny-star-spectral.tsv).
 
 ## Reproduction and decision
 
-From this directory, regenerate every local table/chart with:
+From this directory, regenerate every table and chart referenced by this
+report with:
 
 ```bash
 python3 small_star_error.py > small-star-error.tsv
@@ -215,6 +224,5 @@ Limitations: the broad quality result is one CPU node, one RHS per matrix,
 eight matrices, and five factor seeds; its unsynchronized four-rank layout
 makes timing exploratory. The exponent result is summary-level evidence on
 `iter0010`, not a broad timing campaign. The tiny-star optimizer is numerical
-rather than certified. The original 2026-09-02 analysis scripts and text
-outputs survived, but no original image did; the committed spectral chart is a
-reproducible scoped reconstruction.
+rather than certified. The committed charts are deterministic reconstructions
+from the retained scripts and TSV evidence.
