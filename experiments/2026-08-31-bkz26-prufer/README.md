@@ -10,9 +10,10 @@ Randomized Approximate Cholesky Factorization*
 ([SIAM J. Sci. Comput. 48(3), 2026](https://doi.org/10.1137/24M1673577)).
 
 The result is negative for changing apxchol's default: over the valid broad
-campaign, BKZ26 changed mean PCG iterations from `44.93` to `59.90`, solve time
-to `1.305x`, and one-right-hand-side total time to `1.104x`. The implementation
-and experiment remain useful as a faithful, connected, unbiased reference.
+quality campaign, BKZ26 changed mean PCG iterations from `44.93` to `59.90`
+and lost iterations in every seed on 6/8 matrices. Raw and stored factor sizes
+were nearly unchanged. The implementation and experiment remain useful as a
+faithful, connected, unbiased reference.
 
 ## Exact elimination and the two tree estimators
 
@@ -74,15 +75,23 @@ The complete provenance and reproduction harness are under
 component-compatible RHS per matrix, and seeds `{1,17,42,73,97}`. It ran
 `GKS-before / BKZ26 / GKS-after` for every seed.
 
-The denominator is **8/8 matrices, 5/5 seeds, 120/120 arm records, 40/40 exact
-GKS brackets, and 120/120 converged true residuals**. In the table, every
-non-iteration entry is BKZ26 divided by the geometric mean of its two GKS
-brackets. “Raw” is the assembled factor count; “stored” is the count after
-SpTRSV storage preparation. Pair-level values are in
+The quality denominator is **8/8 matrices, 5/5 seeds, 120/120 arm records,
+40/40 exact GKS brackets, and 120/120 converged true residuals**. “Raw” is the
+assembled factor count; “stored” is the count after SpTRSV storage preparation.
+Pair-level values are in
 [`result-pairs.tsv`](daint-broad/result-pairs.tsv), with aggregates in
 [`result-aggregate.tsv`](daint-broad/result-aggregate.tsv).
 
-| matrix | mean iterations GKS → BKZ26 | raw nnz | stored nnz | setup | solve | one-RHS total |
+The timing columns are exploratory, not acceptance-quality measurements. The
+four 72-core ranks advanced through different matrices without synchronizing
+their measured phases. In a post-run audit of the 40 unchanged GKS
+before/after pairs, symmetric drift exceeded 5% in 7 setup, 15 solve, and 5
+total measurements; maximum solve drift was `1.624x`. Values below divide
+BKZ26 by the geometric mean of its two surrounding GKS runs, which reduces
+local drift but cannot remove changing cross-rank load. They are included to
+show scale, not to rank close timings.
+
+| matrix | mean iterations GKS → BKZ26 | raw nnz | stored nnz | setup† | solve† | one-RHS total† |
 |---|---:|---:|---:|---:|---:|---:|
 | iter0010 | 41.0 → 90.0 | 0.993x | 0.992x | 0.993x | 2.141x | 1.266x |
 | iter0020 | 37.2 → 61.2 | 1.008x | 1.010x | 1.003x | 1.539x | 1.157x |
@@ -94,12 +103,11 @@ SpTRSV storage preparation. Pair-level values are in
 | com-Amazon | 36.0 → 40.4 | 1.044x | 1.044x | 1.174x | 1.207x | 1.183x |
 | **all 40 pairs** | **44.93 → 59.90** | **1.012x** | **1.013x** | **1.018x** | **1.305x** | **1.104x** |
 
-The loss is not IPM-only. All five seeds lost iterations on every IPM iterate,
-`G3_circuit`, and `thermal2`; `grid_500` was nearly neutral, and `com-Amazon`
-was mixed but slower overall. `iter0040` was the only matrix-level total-time
-win: a
-bracketed `0.789x` setup outweighed its iteration increase. These timing claims
-come only from this Daint campaign.
+The quality loss is not IPM-only. All five seeds lost iterations on every IPM
+iterate, `G3_circuit`, and `thermal2`; `grid_500` was nearly neutral, and
+`com-Amazon` was mixed but worse on average. `iter0040` had a nominal total-time
+win because its sampled setup happened to be much faster, but the timing
+protocol is not strong enough to treat that as a matrix-level result.
 
 `as-Skitter` is outside the denominator. Its historical RHS was only globally
 zero-sum, while the retained component audit reports 756 components, so its
@@ -203,9 +211,10 @@ binary-search overhead. What remains useful is:
   searches. It may improve setup, but cannot change this distribution's PCG
   iterations.
 
-Limitations: the broad result is one CPU node, one RHS per matrix, eight
-matrices, and five factor seeds. The exponent result is summary-level evidence
-on `iter0010`, not a broad timing campaign. The tiny-star optimizer is
-numerical rather than certified. The original 2026-09-02 analysis scripts and
-text outputs survived, but no original image did; the committed spectral chart
-is a reproducible scoped reconstruction.
+Limitations: the broad quality result is one CPU node, one RHS per matrix,
+eight matrices, and five factor seeds; its unsynchronized four-rank layout
+makes timing exploratory. The exponent result is summary-level evidence on
+`iter0010`, not a broad timing campaign. The tiny-star optimizer is numerical
+rather than certified. The original 2026-09-02 analysis scripts and text
+outputs survived, but no original image did; the committed spectral chart is a
+reproducible scoped reconstruction.

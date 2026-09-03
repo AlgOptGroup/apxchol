@@ -1,7 +1,8 @@
 # Daint broad GKS/BKZ26 campaign
 
-This is the performance-quality evidence used by the parent report. It is the
-only campaign here from which timing ratios are claimed.
+This is the broad quality evidence used by the parent report. It also records
+exploratory timings, but its four ranks did not synchronize measured phases,
+so those timings are not acceptance-quality comparisons.
 
 ## Provenance and denominator
 
@@ -31,6 +32,14 @@ subsequent PCG solve. Every ratio in [`result-pairs.tsv`](result-pairs.tsv) is
 BKZ26 divided by the geometric mean of the two surrounding GKS measurements.
 [`result-aggregate.tsv`](result-aggregate.tsv) takes geometric means of those
 pair ratios and arithmetic means of iteration counts.
+
+A post-run null audit compared the two unchanged GKS arms in all 40 brackets.
+The median symmetric before/after ratios were `1.008` for setup, `1.031` for
+solve, and `1.017` for total. Drift exceeded `1.05x` in 7/40, 15/40, and 5/40
+respectively; maximum solve drift was `1.624x`. This does not affect exact
+factor counts or iterations, but it prevents precise timing claims from this
+campaign. A timing-quality rerun would synchronize arms across ranks or use an
+isolated rank with its own stability gate.
 
 The complete package and raw records remain at
 `daint:/capstor/scratch/cscs/okulkov/apxchol-codex/bkz26-broad-20260901-r1`.
