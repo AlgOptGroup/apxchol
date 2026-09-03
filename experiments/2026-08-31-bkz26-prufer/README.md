@@ -1,144 +1,211 @@
-# BKZ26 weighted-Prüfer clique sampler
+# BKZ26 weighted-Prüfer clique experiment
 
-This branch provides an opt-in implementation of Algorithm 1 from:
+This branch contains an opt-in reference implementation of Algorithm 1 in
+Yves Baumann, Rasmus Kyng, and Gernot Zöcklein, *VAC: A
+Volume-sampling-based Elimination Rule for Approximate Cholesky
+Factorization* (July 28, 2026; [PDF](https://rasmuskyng.com/papers/BKZ26.pdf)).
+The comparison baseline is the current GKS tree sampler from Yuan Gao, Rasmus
+Kyng, and Daniel Spielman, *AC(k): Robust Solution of Laplacian Equations by
+Randomized Approximate Cholesky Factorization*
+([SIAM J. Sci. Comput. 48(3), 2026](https://doi.org/10.1137/24M1673577)).
 
-> Yves Baumann, Rasmus Kyng, and Gernot Zöcklein, “VAC: A
-> Volume-sampling-based Elimination Rule for Approximate Cholesky
-> Factorization,” manuscript, July 28, 2026.
-> [PDF](https://rasmuskyng.com/papers/BKZ26.pdf)
+The result is negative for changing apxchol's default: over the valid broad
+campaign, BKZ26 changed mean PCG iterations from `44.93` to `59.90`, solve time
+to `1.305x`, and one-right-hand-side total time to `1.104x`. The implementation
+and experiment remain useful as a faithful, connected, unbiased reference.
 
-It replaces only apxchol's GKS clique sampler. Pivot selection, parallel
-independent-set rounds, residual storage, factor assembly/drop, and PCG remain
-apxchol's. This is therefore a controlled sampler comparison, not the paper's
-complete VAC algorithm. GKS remains the default.
+## Exact elimination and the two tree estimators
 
-## Sampler
-
-For active-neighbor conductances `a[0],...,a[d-1]`, let `W=sum(a)` and let `D`
-be the pivot diagonal. The exact Schur clique contains
-
-```text
-c(i,j) = a[i] * a[j] / D.
-```
-
-The sampler draws a Prüfer code of length `d-2` with iid symbols
-`Pr[P[t]=i]=a[i]/W`. The decoded tree contains `{i,j}` with probability
-`(a[i]+a[j])/W`, so apxchol emits
+Suppose pivot `v` has active neighbors `i` with incident conductances `a_i`,
+total `W=sum_i a_i`, and diagonal `D`. Exact Schur elimination removes `v` and
+adds the dense clique
 
 ```text
-(W / D) * a[i] * a[j] / (a[i] + a[j]).
+c_ij = a_i a_j / D,       i != j.
 ```
 
-Its expected edge conductance is `c(i,j)`. For a pure Laplacian `D=W`, this is
-exactly BKZ26 Algorithm 1. The `W/D` factor is apxchol's unbiased extension to
-SDDM pivots with diagonal excess.
+For a pure Laplacian, `D=W`. Materializing every clique edge is quadratic in
+the pivot degree, so apxchol emits an unbiased spanning tree instead.
 
-The implementation is
+**GKS.** Sort neighbors by nondecreasing `a_i`. Each source `i`, except the
+last, chooses exactly one later (therefore no lighter) parent `j` with
+probability `a_j/S_i`, where `S_i=sum_{k>i} a_k`, and emits weight
+
+```text
+h_i = a_i S_i / D.
+```
+
+Thus every source emits exactly the same mass `h_i` in every sample; only its
+destination changes. That fixes the source's own contribution to its sampled
+clique degree. A vertex can still receive random edges from earlier sources,
+so this is not a claim that GKS makes every vertex's *total* degree
+deterministic.
+
+**BKZ26 / weighted Prüfer.** Draw a Prüfer code of length `d-2` with iid symbol
+probabilities `q_i=a_i/W`. The decoded tree includes `{i,j}` with probability
+`q_i+q_j=(a_i+a_j)/W`, so apxchol emits
+
+```text
+(W/D) a_i a_j / (a_i+a_j).
+```
+
+This makes every clique edge unbiased and the sampled clique connected, but it
+has no fixed one-edge contribution per neighbor. The realized per-neighbor
+degrees can therefore move together with the random Prüfer counts and selected
+endpoints. Those sampled edges become the next residual graph: degree errors
+change later neighborhoods, pivot priorities, sampled cliques, fill, and
+ultimately the preconditioner seen by PCG. This is a mechanism, not a theorem
+that one local metric orders global convergence.
+
+For SDDM pivots, the implementation's `W/D` factor is the unbiased extension
+of the paper's pure-Laplacian rule. The implementation is
 [`volume_tree_elimination`](../../include/apxchol/solver/elimination/volume_tree.h)
-and is selected with `factor_options::clique_sampler="bkz26"`, CLI option
-`--clique-sampler bkz26`, or benchmark environment variable
-`APXCHOL_CLIQUE_SAMPLER=bkz26`.
+and can be selected with `factor_options::clique_sampler="bkz26"`, CLI option
+`--clique-sampler bkz26`, or `APXCHOL_CLIQUE_SAMPLER=bkz26` in the benchmark.
+Only clique sampling changes; pivot selection, parallel rounds, residual
+storage, factor assembly, and PCG remain apxchol's. This is not the full VAC
+algorithm. GKS remains the default.
 
-### Linear-work implementation remains open
+## Broad matrix evidence: BKZ26 versus GKS
 
-The present reference builds one prefix CDF and performs `d-2` binary searches:
-`O(d log d)` sampling work, followed by linear Prüfer decoding. The paper's
-sequential `O(d)` bound can instead be realized by building one alias table in
-`O(d)` and reusing it for all iid symbols. Neither that version nor a Huffman
-decision tree has been implemented or timed here.
+The complete provenance and reproduction harness are under
+[`daint-broad`](daint-broad/README.md). Daint job `4571740` used source commit
+`6be1d2dda7ba70313e66f1a88da19804242b4dc3`, one exclusive node, a fixed
+component-compatible RHS per matrix, and seeds `{1,17,42,73,97}`. It ran
+`GKS-before / BKZ26 / GKS-after` for every seed.
 
-This is a legitimate implementation follow-up, especially for GPU use, but it
-does not explain the measured quality loss below: BKZ setup is only 1.018x GKS
-overall, whereas its solve is 1.305x. A linear sampler can remove setup overhead;
-it cannot change the sampled-tree distribution or its PCG iterations.
-
-## Broad comparison with GKS
-
-The reproducible Daint campaign under [`daint-broad`](daint-broad) parses each
-matrix once, uses one fixed component-compatible RHS, and runs
-`GKS / BKZ26 / GKS` for seeds `{1,17,42,73,97}` with the same factor-drop
-policy. Job `4571740` checked **8/8 matrices, 5/5 seeds, 120/120 runs, and 40/40
-exact repeated-GKS brackets**; every independently recomputed true residual was
-at most `1e-8`. The aggregate is
+The denominator is **8/8 matrices, 5/5 seeds, 120/120 arm records, 40/40 exact
+GKS brackets, and 120/120 converged true residuals**. In the table, every
+non-iteration entry is BKZ26 divided by the geometric mean of its two GKS
+brackets. “Raw” is the assembled factor count; “stored” is the count after
+SpTRSV storage preparation. Pair-level values are in
+[`result-pairs.tsv`](daint-broad/result-pairs.tsv), with aggregates in
 [`result-aggregate.tsv`](daint-broad/result-aggregate.tsv).
 
-BKZ26 divided by the geometric mean of its two GKS brackets:
+| matrix | mean iterations GKS → BKZ26 | raw nnz | stored nnz | setup | solve | one-RHS total |
+|---|---:|---:|---:|---:|---:|---:|
+| iter0010 | 41.0 → 90.0 | 0.993x | 0.992x | 0.993x | 2.141x | 1.266x |
+| iter0020 | 37.2 → 61.2 | 1.008x | 1.010x | 1.003x | 1.539x | 1.157x |
+| iter0030 | 51.0 → 62.6 | 1.013x | 1.014x | 0.996x | 1.217x | 1.061x |
+| iter0040 | 56.2 → 73.2 | 1.011x | 1.020x | 0.789x | 1.246x | **0.925x** |
+| grid_500 | 47.2 → 48.6 | 1.006x | 1.006x | 1.007x | 1.007x | 1.006x |
+| G3_circuit | 46.2 → 52.6 | 1.012x | 1.012x | 1.157x | 1.168x | 1.159x |
+| thermal2 | 44.6 → 50.6 | 1.009x | 1.009x | 1.078x | 1.184x | 1.112x |
+| com-Amazon | 36.0 → 40.4 | 1.044x | 1.044x | 1.174x | 1.207x | 1.183x |
+| **all 40 pairs** | **44.93 → 59.90** | **1.012x** | **1.013x** | **1.018x** | **1.305x** | **1.104x** |
 
-| scope | mean iterations GKS → BKZ26 | raw factor | setup | solve | one-RHS total |
-|---|---:|---:|---:|---:|---:|
-| four IPM iterates | 46.35 → 71.75 | 1.006x | 0.940x | 1.495x | **1.095x** |
-| grid_500, G3_circuit, thermal2, com-Amazon | 43.50 → 48.05 | 1.018x | 1.102x | 1.139x | **1.113x** |
-| all 40 pairs | 44.93 → 59.90 | 1.012x | 1.018x | 1.305x | **1.104x** |
+The loss is not IPM-only. All five seeds lost iterations on every IPM iterate,
+`G3_circuit`, and `thermal2`; `grid_500` was nearly neutral, and `com-Amazon`
+was mixed but slower overall. `iter0040` was the only matrix-level total-time
+win: a
+bracketed `0.789x` setup outweighed its iteration increase. These timing claims
+come only from this Daint campaign.
 
-The loss is not confined to one IPM matrix: every IPM iterate, G3_circuit, and
-thermal2 had more iterations in all five seeds. `grid_500` was near neutral.
-`iter0040` was the sole one-RHS time win (0.925x), caused by setup falling to
-0.789x despite iterations rising from 56.2 to 73.2.
+`as-Skitter` is outside the denominator. Its historical RHS was only globally
+zero-sum, while the retained component audit reports 756 components, so its
+reported residuals and iterations were invalid. It was excluded rather than
+counted as a sampler failure.
 
-An earlier exponent sweep sampled Prüfer symbols with
-`q_i proportional to a_i^alpha` and reweighted each selected edge by its exact
-inclusion probability. On `iter0010` with five seeds:
+## Exponent sweep: quality only
 
-| sampler | PCG iterations | approximate `nnz(L)` |
-|---|---:|---:|
-| GKS | 40, 42, 42, 44, 42 | 8.91M |
-| BKZ26 (`alpha=1`) | 93, 86, 92, 98, 83 | 8.85M |
-| best tested tilt (`alpha=1.75`) | 56, 60, 60, 56, 60 | 8.77M |
+An earlier experiment generalized the Prüfer symbol law to
+`q_i proportional to a_i^alpha` and divided each selected exact edge by its
+actual inclusion probability `q_i+q_j`. The five-seed `iter0010` summary was
+recovered into [`alpha-sweep-recovered.tsv`](alpha-sweep-recovered.tsv) and
+plotted by [`plot_alpha_sweep.py`](plot_alpha_sweep.py):
 
-The sweep covered `alpha=0,.5,1,1.25,1.5,1.6,1.7,1.75,1.8,1.9,2,2.5,3`
-and leverage-protecting mixtures. The surprising `1.75` result is real: tilting
-toward heavy vertices reduces local degree error on skewed stars, but none of
-the tested product-tree laws matched GKS.
+![Quality-only iter0010 exponent sweep](alpha-sweep-iter0010.svg)
 
-## Local-error evidence
+| sampler | iterations over seeds 1,17,42,73,97 | mean | mean raw nnz(L) |
+|---|---:|---:|---:|
+| GKS | 40, 42, 42, 44, 42 | **42.0** | 8.913M |
+| BKZ26, `alpha=1` | 93, 86, 92, 98, 83 | 90.4 | 8.853M |
+| best tested, `alpha=1.75` | 56, 60, 60, 56, 60 | **58.4** | 8.768M |
+| `alpha=2` | 71, 82, 68, 70, 68 | 71.8 | 8.745M |
 
-The original relative-error table was one realized seed-42 `iter0010`
-factorization, not an expected-error theorem. At every encountered pivot it
-compared each neighbor's sampled clique degree `d_hat[i]` with
-`d*[i]=a[i](W-a[i])/D`, then aggregated
+The surprise is real: emphasizing heavy neighbors near `alpha=1.75` was
+substantially better than the mathematically natural BKZ value `alpha=1`, even
+while producing a slightly smaller raw factor. It still needed 39% more
+iterations than GKS on this matrix. The historical workstation was not
+isolated, so the recovered sweep supports iteration and raw-fill comparisons
+only—no setup, solve, or total-time claim.
 
-```text
-relative L1 = sum |d_hat[i]-d*[i]| / sum d*[i]
-relative L2 = sqrt(sum (d_hat[i]-d*[i])^2 / sum d*[i]^2).
+The sweep source survives at git commit
+`2c47ab64d8a0a9d90849e80121b0db0782268726`. The complete raw all-alpha TSV
+does not; the committed table is recovered summary-level evidence. The
+source report also records nonconvergence at `alpha=0`, but the exact five raw
+records for `alpha=0` and `0.5` were not recoverable, so they are not plotted.
+
+## Local model: degree variance and spectral error
+
+The seed-42 full-factorization diagnostic compared each encountered neighbor's
+sampled degree with `t_i=a_i(W-a_i)/D`. It observed relative L1/L2 values
+`0.0836/0.1031` for GKS and `0.1299/0.2204` for BKZ26. This is a trajectory
+diagnostic: the samplers encounter different later stars, so it is not an
+identically distributed local experiment.
+
+Two exact small-star checks isolate the sampler. [`small_star_error.py`](small_star_error.py)
+enumerates all outcomes for six-neighbor stars and independently checks the
+second moments:
+
+| six-neighbor weights | GKS RMS degree error | BKZ | `alpha=1.75` |
+|---|---:|---:|---:|
+| all 1 | .5164 | **.4472** | .4472 |
+| 1, 2, 4, 8, 16, 32 | **.2411** | .3501 | .2883 |
+| 1, 1, 1, 1, 100, 100 | **.0195** | .1360 | .0333 |
+
+[`tiny_star_spectral.py`](tiny_star_spectral.py) reconstructs the preserved
+four-neighbor analysis. It enumerates all 16 labeled trees exactly for GKS and
+every p-tree point. The upper row below is normalized degree RMS; the lower row
+is `E ||C^{+1/2}(C_hat-C)C^{+1/2}||_2`. The dotted line is an
+objective-specific, deterministic multistart search over all tree
+distributions; it is a numerical lower comparator, **not a certified global
+optimum**.
+
+![Tiny-star degree and spectral comparison](tiny-star-spectral.svg)
+
+The model has no universal winner. BKZ beats GKS on the uniform star; GKS has
+lower degree and spectral error on the two skewed stars. Moving toward
+`alpha=1.75` improves degree error there, but can worsen spectral error. The
+all-tree comparator shows that neither named family is generally optimal.
+These four- and six-neighbor models explain plausible variance mechanisms;
+they do not turn a local norm into a global PCG prediction. The definitions and
+closed forms are in [`local-degree-moments.md`](local-degree-moments.md), and
+the generated values are in [`tiny-star-spectral.tsv`](tiny-star-spectral.tsv).
+
+## Reproduction and decision
+
+From this directory, regenerate every local table/chart with:
+
+```bash
+python3 small_star_error.py > small-star-error.tsv
+python3 tiny_star_spectral.py \
+  --tsv tiny-star-spectral.tsv --plot tiny-star-spectral.svg
+python3 plot_alpha_sweep.py \
+  --input alpha-sweep-recovered.tsv --output alpha-sweep-iter0010.svg
 ```
 
-The observed GKS/BKZ values were `0.0836/0.1031` and `0.1299/0.2204`.
-Different samplers encounter different later stars, so these values diagnose a
-full-factorization trajectory; they are not repeated samples of identical stars.
+The committed artifacts were validated with NumPy 2.5.2, SciPy 1.18.1, and
+Matplotlib 3.11.1.
 
-[`small_star_error.py`](small_star_error.py) supplies the missing controlled
-comparison. It exactly enumerates all outcomes for small stars and checks the
-L2 result against closed-form second moments:
+The broad campaign has separate [Daint instructions](daint-broad/README.md).
 
-| six-neighbor weights | GKS L1 / L2 | BKZ L1 / L2 | `alpha=1.75` L1 / L2 |
-|---|---:|---:|---:|
-| all 1 | .3867 / .5164 | .3858 / **.4472** | .3858 / .4472 |
-| 1, 1.5, 2, 3, 5, 8 | **.2325 / .3159** | .3187 / .3960 | .2949 / .3520 |
-| 1, 2, 4, 8, 16, 32 | **.1810 / .2411** | .2669 / .3501 | .2520 / .2883 |
-| 1, 1, 1, 1, 100, 100 | **.0146 / .0195** | .0392 / .1360 | .0158 / .0333 |
+Do not replace GKS with this BKZ26 sampler. The failure is broader than one IPM
+matrix and is dominated by solve quality, not by the reference sampler's
+binary-search overhead. What remains useful is:
 
-There is no universal ordering: BKZ is better on uniform stars. Across 2,000
-random eight-neighbor stars, BKZ had lower exact expected L2 on every uniform
-case and 1,035/2,000 half-decade cases; with one decade of weight spread, GKS
-won 1,941/2,000, and with two decades it won 1,991/2,000. This supports the
-observed mechanism: GKS's sorted one-outgoing-edge construction controls local
-Schur-degree error much better once neighbor weights spread, while the Prüfer
-tree can concentrate mass on a few endpoints. It does not prove a global PCG
-ordering.
+- a compact, connected, unbiased BKZ26 Algorithm 1 implementation for direct
+  comparison and future VAC integration;
+- reproducible broad and tiny-model harnesses that separate timing, global
+  quality, and local estimator questions;
+- a clear implementation optimization: one alias table would realize the
+  paper's linear sequential sampling work instead of the current `d-2` binary
+  searches. It may improve setup, but cannot change this distribution's PCG
+  iterations.
 
-The closed-form derivation and `q` optimization are in
-[`local-degree-moments.md`](local-degree-moments.md). BKZ's `q_i proportional
-to w_i` is not variance-optimal on skewed stars: the best power lies between
-1.44 and 1.88 in the examples. However, even unrestricted numerical optimization
-of every `q_i` remains worse than GKS on all four skewed profiles and often
-creates enormous rare-edge multipliers. This points to a limitation of the
-additive marginals `q_i+q_j`, not merely a poorly chosen fixed exponent.
-
-## Verdict
-
-Retain this branch as the requested BKZ26 Algorithm 1 reference and experiment,
-but do not replace GKS. The broad convergence loss is an estimator-quality
-effect, not merely an `iter0010` anomaly or the current binary-search overhead.
-An alias-table implementation remains worthwhile for faithfulness and setup
-performance, but it should be evaluated as such—not as a likely repair of solve
-quality.
+Limitations: the broad result is one CPU node, one RHS per matrix, eight
+matrices, and five factor seeds. The exponent result is summary-level evidence
+on `iter0010`, not a broad timing campaign. The tiny-star optimizer is
+numerical rather than certified. The original 2026-09-02 analysis scripts and
+text outputs survived, but no original image did; the committed spectral chart
+is a reproducible scoped reconstruction.
