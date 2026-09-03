@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -96,6 +97,38 @@ Sparse nearly_sddm(int rows, int cols, int flips, double shift = 0.05) {
     }
     A.makeCompressed();
     return A;
+}
+
+/// Tiny strictly diagonally-dominant operator for probing cpu_solver's SpMV
+/// storage. `upper_01_delta` changes only A(0,1); values within the operator
+/// symmetry tolerance are accepted, while selfadjointView<Lower> semantics
+/// must still source both mirrored slots from A(1,0).
+Sparse spmv_probe_sddm(double upper_01_delta = 0.0) {
+    std::vector<Trip> t{
+        {0, 0, 4.0}, {1, 1, 5.0}, {2, 2, 6.0},
+        {1, 0, -1.0}, {0, 1, -1.0 + upper_01_delta},
+        {2, 0, -0.5}, {0, 2, -0.5},
+        {2, 1, -1.25}, {1, 2, -1.25},
+    };
+    Sparse A(3, 3);
+    A.setFromTriplets(t.begin(), t.end());
+    A.makeCompressed();
+    return A;
+}
+
+Eigen::VectorXd spmv_probe_x() {
+    Eigen::VectorXd x(3);
+    x << 1048576.0, 2.0, -4.0;
+    return x;
+}
+
+Eigen::VectorXd spmv_probe_b() {
+    // Exactly B*x in binary arithmetic for B =
+    // spmv_probe_sddm().selfadjointView<Lower>(). Large x[0] makes a mistaken
+    // use of the tolerated upper-triangle perturbation plainly observable.
+    Eigen::VectorXd b(3);
+    b << 4194304.0, -1048561.0, -524314.5;
+    return b;
 }
 
 Eigen::MatrixXd dense(const Sparse& A) { return Eigen::MatrixXd(A); }
@@ -414,6 +447,76 @@ TEST(OperatorContract, MassNotCountIsWhatTheCeilingMeasures) {
 }
 
 // ── the operator PCG applies is untouched ───────────────────────────────────
+
+TEST(SpmvLrmBuild, AcceptedNearSymmetryStillUsesCanonicalLowerValues) {
+    // require_operator intentionally accepts tiny representation noise. The
+    // direct CSC-layout -> CSR path must not start applying A^T; it preserves
+    // the old selfadjointView<Lower> contract byte-for-byte.
+    Sparse A = spmv_probe_sddm(5e-11);
+    ASSERT_NE(A.coeff(0, 1), A.coeff(1, 0));
+    ASSERT_EQ(scan_operator(A).asymmetric, 0);
+
+    const Eigen::VectorXd x0 = spmv_probe_x();
+    const Eigen::VectorXd b = spmv_probe_b();
+    const apxchol::cpu_solver slv(A);
+    const auto res = slv.solve(b, 1e-15, 0, &x0);
+    EXPECT_EQ(res.iterations, 0);
+    EXPECT_EQ(res.residual, 0.0);
+}
+
+TEST(SpmvLrmBuild, OwnedFp32CopySurvivesCallerMutationAndDestruction) {
+    // Exact binary values select the fp32 operator. Leave the input
+    // uncompressed to exercise the local compression path, then prove the
+    // reusable solver does not retain a map/reference to caller storage.
+    auto A = std::make_unique<Sparse>(spmv_probe_sddm());
+    A->uncompress();
+    ASSERT_FALSE(A->isCompressed());
+
+    const Eigen::VectorXd x0 = spmv_probe_x();
+    const Eigen::VectorXd b = spmv_probe_b();
+    const apxchol::cpu_solver slv(*A);
+
+    for (int k = 0; k < A->outerSize(); ++k)
+        for (Sparse::InnerIterator it(*A, k); it; ++it)
+            it.valueRef() = 0.0;
+    const auto after_mutation = slv.solve(b, 1e-15, 0, &x0);
+    EXPECT_EQ(after_mutation.residual, 0.0);
+
+    A.reset();
+    const auto after_destruction = slv.solve(b, 1e-15, 0, &x0);
+    EXPECT_EQ(after_destruction.residual, 0.0);
+}
+
+TEST(SpmvLrmBuild, OneTriangleCustomOperatorKeepsGeneralFallback) {
+    // The adopting constructor historically accepts a one-triangle operator.
+    // It has no reusable CSC-as-CSR layout, so it must retain the general
+    // lower-reflection build while full symmetric inputs take the direct path.
+    const Sparse A = spmv_probe_sddm();
+    auto F = apxchol::factorize(A);
+    auto F_for_direct = F;
+    Sparse lower = A.triangularView<Eigen::Lower>();
+    lower.makeCompressed();
+    ASSERT_LT(lower.nonZeros(), A.nonZeros());
+
+    const Eigen::VectorXd x0 = spmv_probe_x();
+    const Eigen::VectorXd b = spmv_probe_b();
+    const apxchol::cpu_solver direct(A, std::move(F_for_direct));
+    const apxchol::cpu_solver reflected(lower, std::move(F));
+    const auto res = reflected.solve(b, 1e-15, 0, &x0);
+    EXPECT_EQ(res.iterations, 0);
+    EXPECT_EQ(res.residual, 0.0);
+
+    // More than the exact-x0 probe: with one identical factor installed in
+    // both solvers, the direct and reflected operator representations must
+    // drive the entire PCG recurrence bit-identically.
+    Eigen::VectorXd rhs(3);
+    rhs << 1.0, -2.0, 3.0;
+    const auto direct_res = direct.solve(rhs, 1e-12, 50);
+    const auto reflected_res = reflected.solve(rhs, 1e-12, 50);
+    EXPECT_EQ(direct_res.iterations, reflected_res.iterations);
+    EXPECT_EQ(direct_res.residual, reflected_res.residual);
+    EXPECT_TRUE((direct_res.x.array() == reflected_res.x.array()).all());
+}
 
 TEST(MMatrixLumping, OperatorIsBitIdenticalAfterPreconditionerConstruction) {
     // The contract that makes lumping safe: the transform belongs to the

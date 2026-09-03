@@ -106,8 +106,10 @@ public:
     Eigen::Index rows() const { return n_; }
 
 private:
-    /// Shared ctor tail: builds the row-major full-symmetric SpMV operator
-    /// (fp32 when lossless) once the preconditioner is ready.
+    /// Shared ctor tail: builds the owned row-major full-symmetric SpMV
+    /// operator (fp32 when lossless) once the preconditioner is ready. A full
+    /// symmetric CSC is copied in its already-compatible CSR array layout;
+    /// one-triangle custom inputs use the general lower-reflection fallback.
     void build_operator(const Eigen::SparseMatrix<double>& L, checkpoint* cp);
     /// PCG core: solution written into `x`; res.x is not touched.
     void solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
@@ -122,8 +124,9 @@ private:
     // Per-thread partial sums of the fused PCG kernels' deterministic
     // reductions (one cache line per thread; sized to the max team on use).
     mutable std::vector<double> part_;
-    // Row-major FULL symmetric operator for the parallel SpMV; exactly one of
-    // the two is populated (fp32 when every value round-trips float losslessly).
+    // Owned row-major FULL symmetric operator for the parallel SpMV; exactly
+    // one is populated (fp32 when every value round-trips float losslessly).
+    // These cannot map constructor input: a reusable solver may outlive it.
     Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm_;
     Eigen::SparseMatrix<float, Eigen::RowMajor>  Lrm_f_;
     bool op_fp32_ = false;

@@ -1,4 +1,5 @@
 #include "apxchol/solver/solve.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -98,6 +99,80 @@ inline bool operator_is_fp32_exact(const Eigen::SparseMatrix<double>& L) {
     for (Eigen::Index p = 0; p < nnz; ++p)
         if (static_cast<double>(static_cast<float>(v[p])) != v[p]) exact = false;
     return exact;
+}
+
+// A compressed column-major matrix and a row-major matrix have the same three
+// array layout when the sparsity pattern is symmetric: source column i is
+// destination row i, and both keep inner indices sorted. Copy that layout
+// directly while retaining the old selfadjointView<Lower>() value contract.
+// In particular, an accepted matrix may differ from its transpose within the
+// symmetry tolerance; an upper slot therefore takes the value of its lower
+// partner instead of blindly copying the caller's upper value.
+//
+// The destination owns all three arrays. cpu_solver is reusable and may
+// outlive (or be used after mutation of) the constructor's L, so a persistent
+// Eigen::Map over the caller's storage would be a lifetime bug.
+//
+// Returns false when the full stored pattern is not symmetric. The caller then
+// rebuilds from the lower triangle, preserving the custom-factor constructor's
+// historical support for one-triangle operators. A successful return produces
+// exactly the sorted CSR structure/value sequence of that general rebuild.
+template<class S>
+bool copy_symmetric_csc_as_owned_csr(
+        const Eigen::SparseMatrix<double>& L,
+        Eigen::SparseMatrix<S, Eigen::RowMajor>& Lrm) {
+    if (!L.isCompressed() || L.rows() != L.cols()) return false;
+
+    const Eigen::Index n = L.rows();
+    const Eigen::Index nnz = L.nonZeros();
+    const int* src_outer = L.outerIndexPtr();
+    const int* src_inner = L.innerIndexPtr();
+    const double* src_vals = L.valuePtr();
+
+    Lrm.resize(n, n);
+    Lrm.resizeNonZeros(nnz);
+    int* dst_outer = Lrm.outerIndexPtr();
+    int* dst_inner = Lrm.innerIndexPtr();
+    S* dst_vals = Lrm.valuePtr();
+
+    Eigen::Index lower_nnz = 0;
+    Eigen::Index upper_nnz = 0;
+    bool upper_is_paired = true;
+    #pragma omp parallel for schedule(static) \
+        reduction(+ : lower_nnz, upper_nnz) reduction(&& : upper_is_paired)
+    for (Eigen::Index col = 0; col < n; ++col) {
+        dst_outer[col] = src_outer[col];
+        const int col_i = static_cast<int>(col);
+        for (int p = src_outer[col]; p < src_outer[col + 1]; ++p) {
+            const int row = src_inner[p];
+            dst_inner[p] = row;
+            double v = src_vals[p];
+            if (row < col_i) {
+                ++upper_nnz;
+                // Destination CSR(row=col, col=row) must use the canonical
+                // lower value L(col,row), found in source CSC column `row`.
+                const int begin = src_outer[row];
+                const int end = src_outer[row + 1];
+                const int* it = std::lower_bound(src_inner + begin,
+                                                 src_inner + end, col_i);
+                if (it != src_inner + end && *it == col_i)
+                    v = src_vals[it - src_inner];
+                else
+                    upper_is_paired = false;
+            } else if (row > col_i) {
+                ++lower_nnz;
+            }
+            dst_vals[p] = static_cast<S>(v);
+        }
+    }
+    dst_outer[n] = src_outer[n];
+
+    // Eigen SparseMatrix has unique sorted inner indices. Thus every upper
+    // entry having a lower partner plus equal triangle counts is a bijection;
+    // explicit-zero asymmetries also take the general fallback so they cannot
+    // perturb the SpMV's four-accumulator association through changed row
+    // lengths.
+    return upper_is_paired && upper_nnz == lower_nnz;
 }
 
 // ── Fused PCG vector kernels ─────────────────────────────────────────────────
@@ -319,126 +394,135 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
 
 void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
                                 checkpoint* cp) {
-    // Build a row-major FULL symmetric copy of L for our parallel SpMV.
-    // L is the lower-triangle CSC; selfadjointView reflects across the
-    // diagonal. We convert once before PCG starts so per-iter SpMV is
-    // just a CSR row-scan.
+    // Build an owned row-major FULL symmetric operator for parallel SpMV.
+    // The common full-symmetric CSC needs no histogram/scatter/sort: its three
+    // arrays already have the CSR layout. A lower-triangle/custom input takes
+    // the retained general selfadjoint(Lower) reconstruction below.
     const bool pcg_trace_outer = std::getenv("APXCHOL_PCG_TRACE") != nullptr;
     {
+        // Direct array access needs compressed storage. Standard inputs already
+        // are compressed; keep the uncommon conversion local to setup so the
+        // solver still owns only its final CSR after this scope.
+        Eigen::SparseMatrix<double> compressed_L;
+        const Eigen::SparseMatrix<double>* src = &L;
+        if (!L.isCompressed()) {
+            compressed_L = L;
+            compressed_L.makeCompressed();
+            src = &compressed_L;
+        }
+        const Eigen::SparseMatrix<double>& Lcsc = *src;
+
+        // Operator A storage precision: fp32 when every caller value
+        // round-trips fp32 (lossless), else fp64. Resolve this BEFORE building
+        // so the direct path writes the final scalar width and never creates a
+        // transient fp64 Lrm merely to cast it. APXCHOL_FP32_OPERATOR
+        // overrides: "0" forces fp64, any other value forces fp32 (may floor
+        // if inexact).
+        { const char* e = std::getenv("APXCHOL_FP32_OPERATOR");
+          if (e && std::string(e) == "0")   op_fp32_ = false;
+          else if (e && *e != '\0')         op_fp32_ = true;
+          else                              op_fp32_ = operator_is_fp32_exact(Lcsc); }
+
         // Lrm conversion is one-time SETUP work for the parallel SpMV;
         // checkpoint it under "setup" so bench's setup_time/solve_time
         // split is accurate.
         const auto t0 = std::chrono::high_resolution_clock::now();
         if (cp) { cp->descend("setup"); cp->tick(); }
-        // Manual parallel selfadjoint(Lower) → full symmetric CSR build.
-        // Eigen's `Lrm = L.selfadjointView<Lower>()` triggers a serial
-        // conversion (~45 ms on IPM iter40). We walk L's CSC twice in
-        // parallel: PASS 1 counts row_nnz contributions, PASS 2 scatters.
-        // Memory cost: O(n) — one shared row_nnz array (also reused as
-        // row_pos for scatter cursor), no per-thread histograms.
-        const Eigen::Index n_eig = L.rows();
-        {
-        const int* L_outer = L.outerIndexPtr();  // CSC col ptrs, n_eig+1
-        const int* L_inner = L.innerIndexPtr();  // row indices
-        const double* L_vals = L.valuePtr();
-        std::vector<int> row_nnz(static_cast<size_t>(n_eig), 0);
-        // PASS 1: per column k, each LOWER-tri entry (row >= k) contributes
-        // +1 to row_nnz[row] (original lower) and, if row > k, +1 to row_nnz[k]
-        // (transpose mirror). selfadjointView<Lower> ignores upper entries
-        // (row < k) so we must filter to row >= k — the input L may store
-        // either only the lower triangle or both halves.
-        #pragma omp parallel for schedule(static)
-        for (Eigen::Index k = 0; k < n_eig; ++k) {
-            for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-                const int row = L_inner[p];
-                if (row < k) continue;  // upper-tri entry, ignore
-                __atomic_fetch_add(&row_nnz[row], 1, __ATOMIC_RELAXED);
-                if (row != k)
-                    __atomic_fetch_add(&row_nnz[k], 1, __ATOMIC_RELAXED);
-            }
-        }
-        Lrm_.resize(n_eig, n_eig);
-        // Build row_ptr (cumulative). Eigen's outerIndexPtr is the row_ptr in
-        // RowMajor mode. Serial prefix sum, ~ms.
-        int* Lrm_outer = Lrm_.outerIndexPtr();
-        Lrm_outer[0] = 0;
-        for (Eigen::Index i = 0; i < n_eig; ++i)
-            Lrm_outer[i + 1] = Lrm_outer[i] + row_nnz[i];
-        const int total_nnz = Lrm_outer[n_eig];
-        Lrm_.resizeNonZeros(total_nnz);
-        int* Lrm_inner = Lrm_.innerIndexPtr();
-        double* Lrm_vals = Lrm_.valuePtr();
-        // Per-row write cursor (atomic claim).
-        std::vector<int> row_pos(static_cast<size_t>(n_eig));
-        std::copy(Lrm_outer, Lrm_outer + n_eig, row_pos.begin());
-        // PASS 2: scatter entries to rows. Same filter as PASS 1 — skip
-        // upper-tri (row < k) since selfadjointView<Lower> ignores them.
-        #pragma omp parallel for schedule(static)
-        for (Eigen::Index k = 0; k < n_eig; ++k) {
-            for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-                const int row = L_inner[p];
-                if (row < k) continue;
-                const double v = L_vals[p];
-                // Lower entry: M(row, k) = v
-                const int slot = __atomic_fetch_add(&row_pos[row], 1, __ATOMIC_RELAXED);
-                Lrm_inner[slot] = static_cast<int>(k);
-                Lrm_vals[slot]  = v;
-                if (row != k) {
-                    // Upper transpose: M(k, row) = v
-                    const int slot2 = __atomic_fetch_add(&row_pos[k], 1, __ATOMIC_RELAXED);
-                    Lrm_inner[slot2] = row;
-                    Lrm_vals[slot2]  = v;
+        const bool copied = op_fp32_
+            ? copy_symmetric_csc_as_owned_csr(Lcsc, Lrm_f_)
+            : copy_symmetric_csc_as_owned_csr(Lcsc, Lrm_);
+        bool fallback_needs_fp32_cast = false;
+
+        if (!copied) {
+            // General parallel selfadjoint(Lower) → full symmetric CSR
+            // fallback. This preserves support for the adopting constructor's
+            // one-triangle operator without taxing the validated/full common
+            // path with atomics, a prefix sum, or per-row sorting.
+            if (op_fp32_)
+                Eigen::SparseMatrix<float, Eigen::RowMajor>().swap(Lrm_f_);
+
+            const Eigen::Index n_eig = Lcsc.rows();
+            const int* L_outer = Lcsc.outerIndexPtr();
+            const int* L_inner = Lcsc.innerIndexPtr();
+            const double* L_vals = Lcsc.valuePtr();
+            std::vector<int> row_nnz(static_cast<size_t>(n_eig), 0);
+            #pragma omp parallel for schedule(static)
+            for (Eigen::Index k = 0; k < n_eig; ++k) {
+                for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
+                    const int row = L_inner[p];
+                    if (row < k) continue;
+                    __atomic_fetch_add(&row_nnz[row], 1, __ATOMIC_RELAXED);
+                    if (row != k)
+                        __atomic_fetch_add(&row_nnz[k], 1, __ATOMIC_RELAXED);
                 }
             }
-        }
-        // Sort each row's columns in ascending order (Eigen expects sorted CSR).
-        // Per-thread reused kv buffer — avoids n_eig tiny allocations that
-        // dominated the previous version on grid_2000 (n=4M → 4M mallocs).
-        #pragma omp parallel
-        {
-            std::vector<std::pair<int, double>> kv;
-            #pragma omp for schedule(static)
-            for (Eigen::Index i = 0; i < n_eig; ++i) {
-                const int rs = Lrm_outer[i], re = Lrm_outer[i + 1];
-                if (re - rs < 2) continue;
-                kv.clear();
-                kv.reserve(re - rs);
-                for (int p = rs; p < re; ++p)
-                    kv.emplace_back(Lrm_inner[p], Lrm_vals[p]);
-                std::sort(kv.begin(), kv.end(),
-                          [](const auto& a, const auto& b) { return a.first < b.first; });
-                for (int p = rs; p < re; ++p) {
-                    Lrm_inner[p] = kv[p - rs].first;
-                    Lrm_vals[p]  = kv[p - rs].second;
+            Lrm_.resize(n_eig, n_eig);
+            int* Lrm_outer = Lrm_.outerIndexPtr();
+            Lrm_outer[0] = 0;
+            for (Eigen::Index i = 0; i < n_eig; ++i)
+                Lrm_outer[i + 1] = Lrm_outer[i] + row_nnz[i];
+            const int total_nnz = Lrm_outer[n_eig];
+            Lrm_.resizeNonZeros(total_nnz);
+            int* Lrm_inner = Lrm_.innerIndexPtr();
+            double* Lrm_vals = Lrm_.valuePtr();
+            std::vector<int> row_pos(static_cast<size_t>(n_eig));
+            std::copy(Lrm_outer, Lrm_outer + n_eig, row_pos.begin());
+            #pragma omp parallel for schedule(static)
+            for (Eigen::Index k = 0; k < n_eig; ++k) {
+                for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
+                    const int row = L_inner[p];
+                    if (row < k) continue;
+                    const double v = L_vals[p];
+                    const int slot = __atomic_fetch_add(
+                        &row_pos[row], 1, __ATOMIC_RELAXED);
+                    Lrm_inner[slot] = static_cast<int>(k);
+                    Lrm_vals[slot] = v;
+                    if (row != k) {
+                        const int slot2 = __atomic_fetch_add(
+                            &row_pos[k], 1, __ATOMIC_RELAXED);
+                        Lrm_inner[slot2] = row;
+                        Lrm_vals[slot2] = v;
+                    }
                 }
             }
+            #pragma omp parallel
+            {
+                std::vector<std::pair<int, double>> kv;
+                #pragma omp for schedule(static)
+                for (Eigen::Index i = 0; i < n_eig; ++i) {
+                    const int rs = Lrm_outer[i], re = Lrm_outer[i + 1];
+                    if (re - rs < 2) continue;
+                    kv.clear();
+                    kv.reserve(re - rs);
+                    for (int p = rs; p < re; ++p)
+                        kv.emplace_back(Lrm_inner[p], Lrm_vals[p]);
+                    std::sort(kv.begin(), kv.end(),
+                              [](const auto& a, const auto& b) {
+                                  return a.first < b.first;
+                              });
+                    for (int p = rs; p < re; ++p) {
+                        Lrm_inner[p] = kv[p - rs].first;
+                        Lrm_vals[p] = kv[p - rs].second;
+                    }
+                }
+            }
+            Lrm_.makeCompressed();
+            fallback_needs_fp32_cast = op_fp32_;
         }
-        Lrm_.makeCompressed();
+
         if (cp) { (*cp)("spmv_lrm_build"); cp->ascend(); }
         if (pcg_trace_outer) {
             const auto dt = std::chrono::duration<double>(
                 std::chrono::high_resolution_clock::now() - t0).count();
             std::fprintf(stderr, "[pcg] Lrm conversion: %.0f ms\n", dt*1000);
         }
-        } // end parallel-build block
-    }
-
-    // Operator A storage precision: fp32 when every value round-trips fp32 (lossless),
-    // else fp64. fp32 halves Lrm's value array for the whole solve and feeds the same
-    // fp32-load/fp64-accumulate SpMV; the Krylov recurrence stays fp64, so the 1e-8
-    // floor is preserved (same lever as the GPU operator). APXCHOL_FP32_OPERATOR
-    // overrides: "0" forces fp64, any other value forces fp32 (may floor if inexact).
-    { const char* e = std::getenv("APXCHOL_FP32_OPERATOR");
-      if (e && std::string(e) == "0")   op_fp32_ = false;
-      else if (e && *e != '\0')         op_fp32_ = true;
-      else                              op_fp32_ = operator_is_fp32_exact(L); }
-    if (op_fp32_) {
-        Lrm_f_ = Lrm_.cast<float>();
-        // Free the fp64 copy (steady-state fp32). Swap-with-empty: assigning an
-        // empty SparseMatrix only resets the sizes and KEEPS the value/index
-        // buffers allocated (Eigen's CompressedStorage never shrinks), i.e.
-        // `Lrm_ = SparseMatrix()` left the full fp64 operator resident.
-        Eigen::SparseMatrix<double, Eigen::RowMajor>().swap(Lrm_);
+        // Preserve the historical checkpoint/trace boundary on the uncommon
+        // fallback: its fp32 cast was never part of spmv_lrm_build. The direct
+        // path has no cast or transient fp64 matrix at all.
+        if (fallback_needs_fp32_cast) {
+            Lrm_f_ = Lrm_.cast<float>();
+            Eigen::SparseMatrix<double, Eigen::RowMajor>().swap(Lrm_);
+        }
     }
 
     // Memory breakdown of the major live arrays just before PCG (env-gated).
