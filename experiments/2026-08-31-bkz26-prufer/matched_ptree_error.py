@@ -16,7 +16,6 @@ import math
 
 from small_star_error import decode_pruefer, enumerate_gks, enumerate_ptree
 
-
 CASES = {
     "uniform": (1, 1, 1, 1, 1, 1),
     "mild": (1, 1.5, 2, 3, 5, 8),

@@ -5,7 +5,6 @@ import math
 import pathlib
 import sys
 
-
 EXPECTED = (
     "iter0010", "iter0020", "iter0030", "iter0040",
     "grid_500", "G3_circuit", "thermal2", "com-Amazon",

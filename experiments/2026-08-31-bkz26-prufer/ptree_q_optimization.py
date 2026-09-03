@@ -10,7 +10,6 @@ import pathlib
 import numpy as np
 from scipy.optimize import minimize, minimize_scalar
 
-
 CASES = {
     "uniform": (1, 1, 1, 1, 1, 1),
     "mild": (1, 1.5, 2, 3, 5, 8),
