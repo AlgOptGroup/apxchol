@@ -123,6 +123,10 @@ quality gate is evidence; a launch/build/parser/provenance failure is not.
 - A per-rank gate writes its verdict and exits 0; do not combine a nonzero gate with `--kill-on-bad-exit=1` (it destroys the other ranks' records). <!-- e.g. job 4571918, 4582001, 4577006 -->
 - CMake cache assertions use the type the script itself passes (`-DX:BOOL=ON` ⇔ `grep 'X:BOOL=ON'`) and are executed once against a login-node configure; `bash -n` + readonly-collision lint on every shell driver. <!-- e.g. job 4567920, 4575779, 4567992 -->
 - One package, one login preflight, one debug-partition smoke, then production; never fix one defect per allocation. <!-- e.g. jobs 4559617..4560243 (6 tries), 4575916..4582372 (8 tries) -->
+- If an independent package review is in flight, wait for its verdict before
+  `sbatch`.  A clean login preflight does not make an asynchronously reviewed
+  package submit-ready; otherwise a real evidence-chain defect can arrive just
+  after allocation and force cancellation. <!-- e.g. job 4601725 -->
 
 Taxonomy of those 92 jobs (157 total since 2026-08-30): harness/parser bug 21, unknown (empty or redirected logs) 21, walltime underestimate 11, bad path/missing file 10, user cancellation 8, CMake configure 5, Python-version syntax 4, compile/link 4, OOM 2, scientific gate rejection 2, Slurm resource shape 2, dependency identity 1, gcc-vs-clang 1. Only 2 of 92 were deliberate scientific rejections; 8.65 of 14.85 node-hours (58%) were infrastructure failures, 3.66 h of them TIMEOUTs. The recurring pattern was one defect fixed per allocation (block-sptrsv 6 tries, saturation-cut 6, r1b-correctness 8). Evidence: the sacct/log classification of 2026-09-02 (session scratch `final/daint_taxonomy.json`).
 
