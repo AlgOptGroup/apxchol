@@ -116,7 +116,7 @@ and `sbatch --test-only`, not compilation-heavy or solver timing work. A
 complete denominator that intentionally exits nonzero on a failed scientific
 quality gate is evidence; a launch/build/parser/provenance failure is not.
 
-### Submit rules learned from 92 non-completed jobs (2026-08-30..09-02)
+### Submit rules from the 92-job audit (2026-08-30..09-02) and follow-ups through 2026-09-04
 
 - Batch scripts execute from `/var/spool/slurmd/`: never derive paths from `BASH_SOURCE`/`$0`/cwd; require `--export=APXCHOL_SOURCE=<abs>` and assert `test -d "$APXCHOL_SOURCE/.git"` before anything else. <!-- e.g. job 4560009, 4559543, 4558607 -->
 - Pin every interpreter and tool by absolute path (`/usr/bin/python3.11` or `/user-environment/env/default/bin/python3`, `$LLVM/bin/clang++`); bare `python3` changes with the uenv/view boundary and is never a contract. Never pass `env PATH=...` expanded by the batch shell into an `srun --view` step. <!-- e.g. job 4559960, 4559443, 4560221 -->
@@ -128,7 +128,11 @@ quality gate is evidence; a launch/build/parser/provenance failure is not.
 - Slurm `--output/--error` and build/run roots live outside any tree the script asserts clean; use `git diff --quiet HEAD` not `status --short`. <!-- e.g. job 4569006, 4584187 -->
 - Never edit a script or lower `--time` after `sbatch`; `scancel` and resubmit, recording `sha256sum` of the script in the submit log. <!-- e.g. job 4559617, 4559638, 4559857 -->
 - Budget before submit: `records_per_rank * measured_s + startup <= 0.67 * walltime`, per-record watchdog >= 3x a measured single record, per-rank memory from a measured smoke; a TIMEOUT is not a measurement. <!-- e.g. job 4560318, 4568082, 4567831, 4558610 -->
-- An `--exclusive` Daint `normal` job grants the whole node (cpu=288, gpu=4): assert `SLURM_CPUS_ON_NODE=288`, never describe that allocation as a sub-node shape. <!-- e.g. job 4568522, 4576312 -->
+- Bare `--exclusive` on Daint `normal` is an implicit whole-node request
+  (cpu=288, gpu=4): assert `SLURM_CPUS_ON_NODE=288` and the parsed allocated
+  GPU TRES, and never describe that allocation as a sub-node shape. An
+  explicit GPU request remains the nested-step ceiling despite node
+  exclusivity. <!-- e.g. jobs 4568522, 4576312; clarified by 4603202 -->
 - Parse Slurm TRES/GRES by key and numeric value, accepting scheduler spellings
   such as `gres/gpu=1` and `gres/gpu:1`; never recognize one punctuation form
   with a substring assertion. <!-- job 4602916 -->
@@ -136,9 +140,10 @@ quality gate is evidence; a launch/build/parser/provenance failure is not.
   that step. Run tests requiring multiple visible GPUs in a separately bound
   multi-GPU step and require their exact names to pass; do not weaken the gate
   by accepting their skip inside a one-GPU task. Unexpected skips remain
-  failures. The outer job allocation must request at least the maximum GPU
-  count of any nested step; node exclusivity is not permission to consume
-  unallocated GRES. Test this resource inequality allocation-free.
+  failures. The outer job's allocated GRES—whether implicit from bare
+  `--exclusive` or explicit—must include at least the maximum GPU count of any
+  nested step; physical node exclusivity is not permission to consume beyond
+  that allocation. Test this resource inequality allocation-free.
   <!-- job 4603202; caught before the next allocation -->
 - A per-rank gate writes its verdict and exits 0; do not combine a nonzero gate with `--kill-on-bad-exit=1` (it destroys the other ranks' records). <!-- e.g. job 4571918, 4582001, 4577006 -->
 - CMake cache assertions use the type the script itself passes (`-DX:BOOL=ON` ⇔ `grep 'X:BOOL=ON'`) and are executed once against a login-node configure; `bash -n` + readonly-collision lint on every shell driver. <!-- e.g. job 4567920, 4575779, 4567992 -->
