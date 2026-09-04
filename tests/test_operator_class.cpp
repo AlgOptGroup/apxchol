@@ -539,6 +539,33 @@ TEST(SpmvLrmBuild, BalancedDuplicateMultiplicitiesUseGeneralFallback) {
     EXPECT_EQ(result.residual, 0.0);
 }
 
+TEST(SpmvLrmBuild, UnsortedCompressedInputUsesGeneralFallback) {
+    // Eigen exposes a low-level unordered compressed insertion path, and
+    // makeCompressed() does not sort a matrix that is already compressed.
+    // Preserve the matrix values while introducing one inversion per column.
+    const Sparse canonical = spmv_probe_sddm();
+    auto F = apxchol::factorize(canonical);
+    Sparse unsorted = canonical;
+    ASSERT_TRUE(unsorted.isCompressed());
+    for (int col = 0; col < unsorted.outerSize(); ++col) {
+        const int begin = unsorted.outerIndexPtr()[col];
+        const int end = unsorted.outerIndexPtr()[col + 1];
+        ASSERT_GE(end - begin, 2);
+        std::swap(unsorted.innerIndexPtr()[begin],
+                  unsorted.innerIndexPtr()[begin + 1]);
+        std::swap(unsorted.valuePtr()[begin],
+                  unsorted.valuePtr()[begin + 1]);
+        ASSERT_GT(unsorted.innerIndexPtr()[begin],
+                  unsorted.innerIndexPtr()[begin + 1]);
+    }
+
+    const Eigen::VectorXd x0 = spmv_probe_x();
+    const apxchol::cpu_solver slv(unsorted, std::move(F));
+    const auto result = slv.solve(spmv_probe_b(), 1e-15, 0, &x0);
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_EQ(result.residual, 0.0);
+}
+
 TEST(SpmvLrmBuild, OneTriangleCustomOperatorKeepsGeneralFallback) {
     // The adopting constructor historically accepts a one-triangle operator.
     // It has no reusable CSC-as-CSR layout, so it must retain the general

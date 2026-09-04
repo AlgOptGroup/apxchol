@@ -88,17 +88,37 @@ inline void print_sptrsv_banner_once() {
 // on a 7.9M-nnz LP-IPM matrix:
 //   Eigen selfadjoint SpMV:   6.4 ms @ any T  (10 GB/s)
 //   This parallel CSR SpMV:   2.4 ms @ T=16   (26 GB/s, 2.7x faster)
-// True iff every operator value round-trips fp32 (v == double(float(v))), so the
-// operator A can be stored fp32 losslessly. O(nnz) parallel scan (a few ms even at
-// 24M nnz -- negligible vs the multi-second setup); mirrors the GPU operator check.
-inline bool operator_is_fp32_exact(const Eigen::SparseMatrix<double>& L) {
+// One O(nnz) parallel storage scan resolves both direct-copy prerequisites.
+// Besides the fp32 test, explicitly check the nondecreasing-inner-index
+// property used by equal_range below. Eigen's normal insertion paths preserve
+// it, but its low-level unordered compressed API does not, and makeCompressed()
+// is a no-op for an already-compressed matrix.
+struct operator_storage_properties {
+    bool fp32_exact = true;
+    bool inner_indices_sorted = true;
+};
+
+inline operator_storage_properties scan_operator_storage(
+        const Eigen::SparseMatrix<double>& L) {
     const double* v = L.valuePtr();
-    const Eigen::Index nnz = L.nonZeros();
+    const int* outer = L.outerIndexPtr();
+    const int* inner = L.innerIndexPtr();
     bool exact = true;
-    #pragma omp parallel for schedule(static) reduction(&&:exact)
-    for (Eigen::Index p = 0; p < nnz; ++p)
-        if (static_cast<double>(static_cast<float>(v[p])) != v[p]) exact = false;
-    return exact;
+    bool sorted = true;
+    #pragma omp parallel for schedule(static) reduction(&& : exact, sorted)
+    for (Eigen::Index col = 0; col < L.outerSize(); ++col) {
+        const int begin = outer[col];
+        const int end = L.isCompressed()
+            ? outer[col + 1]
+            : begin + L.innerNonZeroPtr()[col];
+        for (int p = begin; p < end; ++p) {
+            if (static_cast<double>(static_cast<float>(v[p])) != v[p])
+                exact = false;
+            if (p > begin && inner[p - 1] > inner[p])
+                sorted = false;
+        }
+    }
+    return {exact, sorted};
 }
 
 // A compressed column-major matrix and a row-major matrix have the same three
@@ -120,8 +140,10 @@ inline bool operator_is_fp32_exact(const Eigen::SparseMatrix<double>& L) {
 template<class S>
 bool copy_symmetric_csc_as_owned_csr(
         const Eigen::SparseMatrix<double>& L,
-        Eigen::SparseMatrix<S, Eigen::RowMajor>& Lrm) {
-    if (!L.isCompressed() || L.rows() != L.cols()) return false;
+        Eigen::SparseMatrix<S, Eigen::RowMajor>& Lrm,
+        bool inner_indices_sorted) {
+    if (!L.isCompressed() || L.rows() != L.cols() || !inner_indices_sorted)
+        return false;
 
     const Eigen::Index n = L.rows();
     const Eigen::Index nnz = L.nonZeros();
@@ -431,6 +453,7 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
             src = &compressed_L;
         }
         const Eigen::SparseMatrix<double>& Lcsc = *src;
+        const operator_storage_properties storage = scan_operator_storage(Lcsc);
 
         // Operator A storage precision: fp32 when every caller value
         // round-trips fp32 (lossless), else fp64. Resolve this BEFORE building
@@ -441,7 +464,7 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
         { const char* e = std::getenv("APXCHOL_FP32_OPERATOR");
           if (e && std::string(e) == "0")   op_fp32_ = false;
           else if (e && *e != '\0')         op_fp32_ = true;
-          else                              op_fp32_ = operator_is_fp32_exact(Lcsc); }
+          else                              op_fp32_ = storage.fp32_exact; }
 
         // Lrm conversion is one-time SETUP work for the parallel SpMV;
         // checkpoint it under "setup" so bench's setup_time/solve_time
@@ -449,8 +472,10 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
         const auto t0 = std::chrono::high_resolution_clock::now();
         if (cp) { cp->descend("setup"); cp->tick(); }
         const bool copied = op_fp32_
-            ? copy_symmetric_csc_as_owned_csr(Lcsc, Lrm_f_)
-            : copy_symmetric_csc_as_owned_csr(Lcsc, Lrm_);
+            ? copy_symmetric_csc_as_owned_csr(
+                  Lcsc, Lrm_f_, storage.inner_indices_sorted)
+            : copy_symmetric_csc_as_owned_csr(
+                  Lcsc, Lrm_, storage.inner_indices_sorted);
         bool fallback_needs_fp32_cast = false;
 
         if (!copied) {
