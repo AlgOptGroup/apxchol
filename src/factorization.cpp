@@ -3,92 +3,201 @@
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace apxchol {
 
 namespace detail {
 
-// Fill the CSC arrays for the lower-triangular factor L (our sparse_csc).
-// Each factor_col maps to a permuted column; entries are sorted by permuted
-// row index to keep each column in ascending-row order. Each factor_col writes
-// to a distinct permuted column (perm is a true permutation), so the
-// per-column writes are embarrassingly parallel.
-//
-// Offsets are edge_index (can exceed 2^31 on dense factors, e.g. com-Orkut);
-// row indices are node_index. The cumulative nnz is overflow-checked.
-static void assemble_csc(sparse_csc& L,
-                         const std::vector<factor_col>& factor_cols,
-                         const std::vector<node_index>& perm,
-                         node_index n) {
-    edge_index total_offdiag = 0;
-    for (const auto& col : factor_cols) {
-        const edge_index add = static_cast<edge_index>(col.entry_count);
-        if (total_offdiag > sparse_csc::kEdgeMax - add)
-            edge_index_overflow("assemble_csc(off-diagonal)");
-        total_offdiag += add;
-    }
-    if (total_offdiag > sparse_csc::kEdgeMax - n)
-        edge_index_overflow("assemble_csc(nnz)");
-    const edge_index nnz = total_offdiag + n; // off-diagonal + one diagonal per column
+// Threshold-free production form. CSC assembly already needs a parallel team
+// for its independent column writes; use that same team for every invariant
+// prepass instead of paying extra launches and then guessing an amortization
+// cutoff. At one OpenMP thread this is the serial algorithm naturally.
+static void assemble_csc(
+        factorization& result,
+        const std::vector<factor_col>& factor_cols,
+        node_index n,
+        checkpoint* cp) {
+    auto& L = result.L;
+    auto& perm = result.perm;
+    assert(factor_cols.size() == static_cast<std::size_t>(n));
 
-    L.resize(n, n);
-    L.reserve(nnz);
+    const std::uint64_t edge_max =
+        static_cast<std::uint64_t>(sparse_csc::kEdgeMax);
+    const std::uint64_t nc = factor_cols.size();
+#ifdef _OPENMP
+    const int max_threads = omp_get_max_threads();
+#else
+    const int max_threads = 1;
+#endif
+    std::vector<std::uint64_t> block_total(
+        static_cast<std::size_t>(max_threads), 0);
+    std::vector<unsigned char> block_overflow(
+        static_cast<std::size_t>(max_threads), 0);
+    std::vector<edge_index> block_base(
+        static_cast<std::size_t>(max_threads) + 1, 0);
 
-    // Count entries per column (off-diag + 1 diagonal each). Per-column counts
-    // fit node_index (<= degree < n); the cumulative outer pointers are edge_index.
-    std::vector<node_index> col_counts(n, 1);
-    for (const auto& col : factor_cols)
-        col_counts[perm[col.vertex]] += col.entry_count;
+    bool overflow = false;
+    edge_index nnz = 0;
+    edge_index* outer_ptr = nullptr;
+    node_index* inner_idx = nullptr;
+    factor_value_t* values = nullptr;
+    std::exception_ptr error;
 
-    // Build outer pointer array (cumulative sum). Bounded by nnz (checked above).
-    auto* outerPtr = L.outerIndexPtr();
-    outerPtr[0] = 0;
-    for (node_index c = 0; c < n; ++c)
-        outerPtr[c + 1] = outerPtr[c] + col_counts[c];
-
-    // Allocate inner indices + values arrays.
-    L.resizeNonZeros(nnz);
-    auto* innerIdx = L.innerIndexPtr();
-    auto* values   = L.valuePtr();
-
-    // Fill each column in parallel: each factor_col writes to its own
-    // distinct permuted-column slot, so there are no cross-thread conflicts.
-    const std::ptrdiff_t nc = static_cast<std::ptrdiff_t>(factor_cols.size());
     #pragma omp parallel
     {
-        std::vector<std::pair<node_index, factor_value_t>> col_entries;
-        #pragma omp for schedule(dynamic, 256)
-        for (std::ptrdiff_t i = 0; i < nc; ++i) {
-            const auto& col = factor_cols[i];
-            node_index perm_col = perm[col.vertex];
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num();
+        const int team = omp_get_num_threads();
+#else
+        const int tid = 0;
+        const int team = 1;
+#endif
+        const std::uint64_t begin =
+            nc * static_cast<std::uint64_t>(tid) /
+            static_cast<std::uint64_t>(team);
+        const std::uint64_t end =
+            nc * static_cast<std::uint64_t>(tid + 1) /
+            static_cast<std::uint64_t>(team);
 
-            col_entries.clear();
-            col_entries.reserve(col.entry_count);
-            for (node_index j = 0; j < col.entry_count; ++j) {
-                const auto& [nbr, val] = col.entries[j];
-                col_entries.emplace_back(perm[nbr], static_cast<factor_value_t>(-val));
+        // One contiguous pass builds the inverse permutation and this
+        // worker's checked nnz subtotal (including one diagonal per column).
+        std::uint64_t local_total = 0;
+        bool local_overflow = false;
+        for (std::uint64_t c = begin; c < end; ++c) {
+            const auto& col = factor_cols[static_cast<std::size_t>(c)];
+            perm[col.vertex] = static_cast<node_index>(c);
+            const std::uint64_t count =
+                static_cast<std::uint64_t>(col.entry_count);
+            if (count == UINT64_MAX ||
+                local_total > UINT64_MAX - (count + 1)) {
+                local_overflow = true;
+            } else {
+                local_total += count + 1;
             }
-            std::sort(col_entries.begin(), col_entries.end());
+        }
+        block_total[static_cast<std::size_t>(tid)] = local_total;
+        block_overflow[static_cast<std::size_t>(tid)] = local_overflow;
 
-            edge_index pos = outerPtr[perm_col];
-            innerIdx[pos] = perm_col;
-            values[pos]   = col.diag;     // diagonal; narrows to fp32 under the flag
-            ++pos;
-            for (auto [row, val] : col_entries) {
-                innerIdx[pos] = row;
-                values[pos]   = val;
-                ++pos;
+        #pragma omp barrier
+        #pragma omp master
+        {
+            try {
+                if (cp) (*cp)("permutation");
+                std::uint64_t total = 0;
+                for (int t = 0; t < team; ++t) {
+                    const std::uint64_t add =
+                        block_total[static_cast<std::size_t>(t)];
+                    if (block_overflow[static_cast<std::size_t>(t)] ||
+                        total > edge_max || add > edge_max - total) {
+                        overflow = true;
+                        break;
+                    }
+                    block_base[static_cast<std::size_t>(t)] =
+                        static_cast<edge_index>(total);
+                    total += add;
+                }
+                if (!overflow) {
+                    block_base[static_cast<std::size_t>(team)] =
+                        static_cast<edge_index>(total);
+                    nnz = static_cast<edge_index>(total);
+                    L.resize(n, n);
+                    L.reserve(nnz);
+                    outer_ptr = L.outerIndexPtr();
+                    outer_ptr[n] = nnz;
+                    // sparse_csc owns independent vectors for the outer,
+                    // inner, and value arrays, so all storage can be acquired
+                    // in this one handoff before any worker writes it.
+                    L.resizeNonZeros(nnz);
+                    inner_idx = L.innerIndexPtr();
+                    values = L.valuePtr();
+                }
+            } catch (...) {
+                error = std::current_exception();
+            }
+        }
+        #pragma omp barrier
+
+        // The barrier publishes both the primary thread's overflow decision
+        // and allocation. Every worker therefore takes the same branch.
+        if (!overflow && !error) {
+            edge_index pos = block_base[static_cast<std::size_t>(tid)];
+            for (std::uint64_t c = begin; c < end; ++c) {
+                outer_ptr[c] = pos;
+                pos += static_cast<edge_index>(
+                    factor_cols[static_cast<std::size_t>(c)].entry_count) + 1;
+            }
+            assert(pos == block_base[static_cast<std::size_t>(tid) + 1]);
+
+            #pragma omp barrier
+
+            // Each factor_col writes to one distinct CSC column. Catch a
+            // worker allocation failure, finish the workshare collectively,
+            // and rethrow only after leaving OpenMP.
+            std::vector<std::pair<node_index, factor_value_t>> col_entries;
+            #pragma omp for schedule(dynamic, 256)
+            for (std::ptrdiff_t i = 0;
+                 i < static_cast<std::ptrdiff_t>(nc); ++i) {
+                try {
+                    const auto& col =
+                        factor_cols[static_cast<std::size_t>(i)];
+                    const node_index perm_col =
+                        static_cast<node_index>(i);
+                    assert(perm[col.vertex] == perm_col);
+
+                    col_entries.clear();
+                    col_entries.reserve(col.entry_count);
+                    for (node_index j = 0; j < col.entry_count; ++j) {
+                        const auto& [nbr, val] = col.entries[j];
+                        col_entries.emplace_back(
+                            perm[nbr], static_cast<factor_value_t>(-val));
+                    }
+                    std::sort(col_entries.begin(), col_entries.end());
+
+                    edge_index write = outer_ptr[perm_col];
+                    inner_idx[write] = perm_col;
+                    values[write] = col.diag;
+                    ++write;
+                    for (auto [row, val] : col_entries) {
+                        inner_idx[write] = row;
+                        values[write] = val;
+                        ++write;
+                    }
+                    assert(write == outer_ptr[perm_col + 1]);
+                } catch (...) {
+                    #pragma omp critical(apxchol_csc_assembly_exception)
+                    {
+                        if (!error)
+                            error = std::current_exception();
+                    }
+                }
             }
         }
     }
 
+    if (error)
+        std::rethrow_exception(error);
+    if (overflow)
+        edge_index_overflow("assemble_csc(nnz)");
+
+    // Keep the historical checkpoint boundary: all worker-local scratch has
+    // been destroyed and the OpenMP team has joined before assembly ends.
+    // These calls are outside an OpenMP structured block, so exceptions retain
+    // their ordinary propagation semantics.
     L.makeCompressed();
+    if (cp) (*cp)("assembly");
 }
 
 void build_csc(factorization& result,
@@ -99,13 +208,10 @@ void build_csc(factorization& result,
     // factor_cols is already in elimination order, so position i holds the
     // i-th eliminated vertex.
     result.perm.assign(n, 0);
-    for (node_index i = 0; i < n; ++i)
-        result.perm[factor_cols[i].vertex] = i;
-
-    if (cp) (*cp)("permutation");
-
-    assemble_csc(result.L, factor_cols, result.perm, n);
-    if (cp) (*cp)("assembly");
+    if (std::getenv("APXCHOL_VERBOSE"))
+        std::fprintf(stderr,
+                     "[apxchol] factor CSC assembly: fused invariant team\n");
+    assemble_csc(result, factor_cols, n, cp);
 }
 
 } // namespace detail

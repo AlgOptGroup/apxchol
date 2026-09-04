@@ -363,15 +363,19 @@ namespace {
 // whole binary in one process; ctest pins OMP_NUM_THREADS=4 for it).
 struct scoped_threads {
     int saved = 1;
+    int saved_dynamic = 0;
     explicit scoped_threads([[maybe_unused]] int n) {
 #ifdef _OPENMP
         saved = omp_get_max_threads();
+        saved_dynamic = omp_get_dynamic();
+        omp_set_dynamic(0);
         omp_set_num_threads(n);
 #endif
     }
     ~scoped_threads() {
 #ifdef _OPENMP
         omp_set_num_threads(saved);
+        omp_set_dynamic(saved_dynamic);
 #endif
     }
 };
@@ -416,6 +420,73 @@ void expect_same_factor(const apxchol::factorization& a,
         << what << ": factor values differ";
 }
 } // namespace
+
+TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
+    constexpr apxchol::node_index n = 32768;
+    std::vector<apxchol::detail::factor_col> cols(n);
+    std::vector<apxchol::detail::factor_entry> entries(n - 1);
+    auto vertex_at = [=](apxchol::node_index i) {
+        // n is a power of two and 5 is odd, hence this is a permutation.
+        return static_cast<apxchol::node_index>((5ULL * i) % n);
+    };
+    for (apxchol::node_index i = 0; i < n; ++i) {
+        cols[i].vertex = vertex_at(i);
+        cols[i].diag = static_cast<apxchol::factor_value_t>(2.0 + (i % 7));
+        if (i + 1 < n) {
+            entries[i] = {vertex_at(i + 1),
+                          static_cast<apxchol::factor_value_t>(0.25 + (i % 5))};
+            cols[i].entries = &entries[i];
+            cols[i].entry_count = 1;
+        }
+    }
+
+    apxchol::factorization serial;
+    {
+        const scoped_threads team(1);
+        apxchol::detail::build_csc(serial, cols, n, nullptr);
+    }
+    ASSERT_EQ(serial.perm.size(), static_cast<std::size_t>(n));
+    ASSERT_EQ(serial.L.rows(), n);
+    ASSERT_EQ(serial.L.cols(), n);
+    ASSERT_EQ(serial.L.nonZeros(),
+              static_cast<apxchol::edge_index>(2 * n - 1));
+    const auto* outer = serial.L.outerIndexPtr();
+    const auto* inner = serial.L.innerIndexPtr();
+    const auto* values = serial.L.valuePtr();
+    for (apxchol::node_index i = 0; i < n; ++i) {
+        EXPECT_EQ(serial.perm[vertex_at(i)], i);
+        EXPECT_EQ(outer[i], static_cast<apxchol::edge_index>(2) * i);
+        const apxchol::edge_index pos = outer[i];
+        EXPECT_EQ(inner[pos], i);
+        EXPECT_EQ(values[pos],
+                  static_cast<apxchol::factor_value_t>(2.0 + (i % 7)));
+        if (i + 1 < n) {
+            EXPECT_EQ(inner[pos + 1], i + 1);
+            EXPECT_EQ(values[pos + 1],
+                      static_cast<apxchol::factor_value_t>(
+                          -(0.25 + (i % 5))));
+        }
+    }
+    EXPECT_EQ(outer[n], static_cast<apxchol::edge_index>(2 * n - 1));
+
+#ifdef _OPENMP
+    for (const int threads : {2, 3, 8, 16}) {
+        apxchol::factorization parallel;
+        {
+            const scoped_threads team(threads);
+            int actual_threads = 0;
+            #pragma omp parallel
+            #pragma omp master
+            actual_threads = omp_get_num_threads();
+            ASSERT_EQ(actual_threads, threads);
+            apxchol::detail::build_csc(parallel, cols, n, nullptr);
+        }
+        expect_same_factor(
+            serial, parallel,
+            "serial vs invariant assembly at T=" + std::to_string(threads));
+    }
+#endif
+}
 
 TEST(VecPoolAos, SerialFactorMatchesIndexedVecPoolByteForByte) {
     // At one thread both representations consume every multiedge in the same
