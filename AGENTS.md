@@ -136,7 +136,10 @@ quality gate is evidence; a launch/build/parser/provenance failure is not.
   that step. Run tests requiring multiple visible GPUs in a separately bound
   multi-GPU step and require their exact names to pass; do not weaken the gate
   by accepting their skip inside a one-GPU task. Unexpected skips remain
-  failures. <!-- job 4603202 -->
+  failures. The outer job allocation must request at least the maximum GPU
+  count of any nested step; node exclusivity is not permission to consume
+  unallocated GRES. Test this resource inequality allocation-free.
+  <!-- job 4603202; caught before the next allocation -->
 - A per-rank gate writes its verdict and exits 0; do not combine a nonzero gate with `--kill-on-bad-exit=1` (it destroys the other ranks' records). <!-- e.g. job 4571918, 4582001, 4577006 -->
 - CMake cache assertions use the type the script itself passes (`-DX:BOOL=ON` ⇔ `grep 'X:BOOL=ON'`) and are executed once against a login-node configure; `bash -n` + readonly-collision lint on every shell driver. <!-- e.g. job 4567920, 4575779, 4567992 -->
 - One package, one login preflight, one debug-partition smoke, then production; never fix one defect per allocation. <!-- e.g. jobs 4559617..4560243 (6 tries), 4575916..4582372 (8 tries) -->
