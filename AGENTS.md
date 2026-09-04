@@ -123,10 +123,28 @@ quality gate is evidence; a launch/build/parser/provenance failure is not.
 - A per-rank gate writes its verdict and exits 0; do not combine a nonzero gate with `--kill-on-bad-exit=1` (it destroys the other ranks' records). <!-- e.g. job 4571918, 4582001, 4577006 -->
 - CMake cache assertions use the type the script itself passes (`-DX:BOOL=ON` ⇔ `grep 'X:BOOL=ON'`) and are executed once against a login-node configure; `bash -n` + readonly-collision lint on every shell driver. <!-- e.g. job 4567920, 4575779, 4567992 -->
 - One package, one login preflight, one debug-partition smoke, then production; never fix one defect per allocation. <!-- e.g. jobs 4559617..4560243 (6 tries), 4575916..4582372 (8 tries) -->
-- If an independent package review is in flight, wait for its verdict before
-  `sbatch`.  A clean login preflight does not make an asynchronously reviewed
-  package submit-ready; otherwise a real evidence-chain defect can arrive just
-  after allocation and force cancellation. <!-- e.g. job 4601725 -->
+- A content-addressed capability is the trust root, not package-owned Python:
+  the submit wrapper and spooled shell must authenticate the package manifest
+  and every helper needed to interpret capability fields *before* importing or
+  executing that helper.  A helper cannot establish its own identity, and a
+  mutually consistent replacement of helper plus manifest must be a negative
+  package test.  Hash and decode one captured byte string rather than hashing a
+  path and reopening it. <!-- caught before allocation by R2b review, 2026-09-04 -->
+- Exercise each path at the stage that consumes it: login-owned paths outside
+  the view, and `/user-environment` paths inside the exact `uenv` view.  A
+  login-only existence check cannot validate a later batch-view dereference.
+  Re-hash long-lived matrix/dependency inputs at campaign end before accepting
+  timing evidence. <!-- jobs 4600418, 4600521, 4600726 -->
+- Smoke fixtures must exercise zero/absent child metrics and finalization after
+  child exit.  Do not copy an expected matrix/RSS value into a record without
+  measuring the object the child actually used.  A late infrastructure
+  downgrade must scrub performance summaries and reseal a terminal failure;
+  changing only the Slurm exit code is insufficient. <!-- jobs 4600229, 4600606 -->
+- Independent review is one finite gate: implementer validation, one package
+  audit, and—only if blocked—one delta audit of the repair.  Never submit while
+  that audit is running, and do not restart a full review after it is clean.
+  A failed smoke must first become an allocation-free regression test before a
+  second smoke is submitted. <!-- job 4601725 -->
 
 Taxonomy of those 92 jobs (157 total since 2026-08-30): harness/parser bug 21, unknown (empty or redirected logs) 21, walltime underestimate 11, bad path/missing file 10, user cancellation 8, CMake configure 5, Python-version syntax 4, compile/link 4, OOM 2, scientific gate rejection 2, Slurm resource shape 2, dependency identity 1, gcc-vs-clang 1. Only 2 of 92 were deliberate scientific rejections; 8.65 of 14.85 node-hours (58%) were infrastructure failures, 3.66 h of them TIMEOUTs. The recurring pattern was one defect fixed per allocation (block-sptrsv 6 tries, saturation-cut 6, r1b-correctness 8). Evidence: the sacct/log classification of 2026-09-02 (session scratch `final/daint_taxonomy.json`).
 
@@ -140,6 +158,15 @@ Taxonomy of those 92 jobs (157 total since 2026-08-30): harness/parser bug 21, u
 - Runtime linkage of any pre-existing binary: `ldd <bin> | grep -c 'not found'` == 0 and `readelf -d <bin> | grep -E 'RPATH|RUNPATH'` contains the LLVM runtime dir (4560227).
 - Dependencies/inputs: `test -d` every offline dependency dir and matrix; FetchContent source set equals the anchor; dependency SHAs are 40 hex (4568503, 4576779).
 - Audit/summary scripts against a fixture: `python summarize.py $S/fixture` with zero timing fields and 4-rank status records; `python audit.py --run-root $S/fixture` must print VALID; `verify_source.py` over the real `_deps` tree (4571850, 4568596, 4573575).
+- Trust-bootstrap negatives: replace the capability, package helper, and
+  manifest independently and as a mutually consistent set; every case must be
+  rejected before helper import.  Require an exact package-test denominator,
+  not merely an `OK` substring (zero tests also print `OK`).
+- Lifecycle negatives: mutate a matrix after its initial manifest, tamper with
+  a manifest-excluded receipt reference, make terminal-manifest verification
+  fail, and force a late infrastructure downgrade after a ratio-bearing
+  summary; every case must end as sealed infrastructure failure with no public
+  performance aggregate.
 - Output namespace: `mkdir -p` the parent of every --output/--error/run root and `test -w`; confirm they are outside $APXCHOL_SOURCE; `test ! -e <run root>` (4582964, 4569006).
 - Slurm shape: `#SBATCH --time` matches the budget line in README; `--ntasks-per-node=4 --cpus-per-task=72` (full node) and script assertions use 288 CPUs / 4 GPUs; the agent runs `sbatch --test-only <script>` after the immutable package passes login preflight (4568522, 4576312).
 - Budget arithmetic printed: planned records, measured seconds per record (from previous run logs), startup, walltime, watchdog, per-rank memory; abort if `plan > 0.67 * walltime` (4560318, 4568082).
