@@ -67,11 +67,20 @@ the exact immutable source/package bytes that the production job will use:
    before importing package-local modules; a late scan cannot make an earlier
    stale import trustworthy. Execute every package entry point with the exact
    target Python before submission; a syntax-only parse under another version
-   is not runtime compatibility evidence.
+   is not runtime compatibility evidence. Do not require an exact `0644` or
+   `0755` mode after a cross-filesystem Git clone: Capstor's inherited ACL can
+   produce the more restrictive `0640`/`0750` even under `umask 022`. Validate
+   regular-file/no-symlink status, expected owner execute bits, and absence of
+   group/other write bits. If exact display modes are genuinely part of a
+   package contract, normalize and verify them at every clone site during the
+   allocation-free preflight.
 3. Keep `SLURM_SUBMIT_DIR`, stdout, stderr, builds, and results outside the
    source checkout. Submit through a package-owned wrapper with explicit
    absolute `--chdir`, `--output`, and `--error` paths. The wrapper must run
-   `sbatch --test-only` using the final account/resource arguments.
+   `sbatch --test-only` using the final account/resource arguments. The printed
+   submit command must be cwd-independent (or include its required `cd`);
+   emitting an otherwise valid command that fails from the login home is a
+   wrapper defect.
 4. Run a small compute-node smoke allocation that builds the exact target(s)
    and exercises the relevant CPU/GPU runtime, affinity, and one tiny solver
    path. Persist a receipt binding source/package hashes, compiler/runtime,
@@ -120,6 +129,14 @@ quality gate is evidence; a launch/build/parser/provenance failure is not.
 - Never edit a script or lower `--time` after `sbatch`; `scancel` and resubmit, recording `sha256sum` of the script in the submit log. <!-- e.g. job 4559617, 4559638, 4559857 -->
 - Budget before submit: `records_per_rank * measured_s + startup <= 0.67 * walltime`, per-record watchdog >= 3x a measured single record, per-rank memory from a measured smoke; a TIMEOUT is not a measurement. <!-- e.g. job 4560318, 4568082, 4567831, 4558610 -->
 - An `--exclusive` Daint `normal` job grants the whole node (cpu=288, gpu=4): assert `SLURM_CPUS_ON_NODE=288`, never describe that allocation as a sub-node shape. <!-- e.g. job 4568522, 4576312 -->
+- Parse Slurm TRES/GRES by key and numeric value, accepting scheduler spellings
+  such as `gres/gpu=1` and `gres/gpu:1`; never recognize one punctuation form
+  with a substring assertion. <!-- job 4602916 -->
+- A zero-skip GTest gate is valid only when every selected test is runnable in
+  that step. Run tests requiring multiple visible GPUs in a separately bound
+  multi-GPU step and require their exact names to pass; do not weaken the gate
+  by accepting their skip inside a one-GPU task. Unexpected skips remain
+  failures. <!-- job 4603202 -->
 - A per-rank gate writes its verdict and exits 0; do not combine a nonzero gate with `--kill-on-bad-exit=1` (it destroys the other ranks' records). <!-- e.g. job 4571918, 4582001, 4577006 -->
 - CMake cache assertions use the type the script itself passes (`-DX:BOOL=ON` ⇔ `grep 'X:BOOL=ON'`) and are executed once against a login-node configure; `bash -n` + readonly-collision lint on every shell driver. <!-- e.g. job 4567920, 4575779, 4567992 -->
 - One package, one login preflight, one debug-partition smoke, then production; never fix one defect per allocation. <!-- e.g. jobs 4559617..4560243 (6 tries), 4575916..4582372 (8 tries) -->
