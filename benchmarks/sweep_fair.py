@@ -61,6 +61,7 @@ from runner_common import BIN, CELLS, matrix_args, sh
 DUMP = os.environ.get("APXCHOL_BENCH_DUMP_DIR", "/tmp/fair_dump")
 TOL = "1e-8"
 REPS = 3
+WARMUP = 0
 THREADS = 16
 # 30 min/cell: the >=1e8-nnz giants (com-Orkut apxchol ~170s/rep x3, BoomerAMG
 # mega-hub setup, RCHOL fill blowup) can legitimately exceed the old 1200s.
@@ -266,7 +267,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             key, value = assignment.split("=", 1)
             run_env[key] = value
         inner=(f"{rc.taskset_prefix(THREADS)} {BIN[DEVICE]} {margs} --solver {solver} {cfg} "
-               f"{gflag} {regflag} --threads {THREADS} --tol {TOL} --maxiter {mi} --repeat {REPS} --csv")
+               f"{gflag} {regflag} --threads {THREADS} --tol {TOL} --maxiter {mi} --repeat {REPS} --warmup {WARMUP} --csv")
         # /usr/bin/time -f '%M': peak RSS (kbytes) -> stderr 'APXRSS <kb>'; the max over
         # all reps (setup-phase peak dominates). solve_rss_mb (held during solve) comes
         # from the binary's CSV; peak - solve_rss = the setup transient.
@@ -299,6 +300,8 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
                 st="oom"
             m = _diag(p.returncode, p.stdout, p.stderr)   # failed/oom cells keep the evidence
         if m is not None:
+            m["warmup_repeats"] = WARMUP
+            m["repeat_receipts"] = [line for line in p.stderr.splitlines() if line.startswith("BENCH_REPEAT ")]
             cuda_init_s = rc.parse_cuda_init(p.stderr)
             if cuda_init_s is not None:
                 m["cuda_init_s"] = cuda_init_s
@@ -707,7 +710,7 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
         run_cmg(mid)
 
 def main():
-    global DEVICE, APX, JULIA, COMP, THREADS, REPS, CELLS
+    global DEVICE, APX, JULIA, COMP, THREADS, REPS, CELLS, WARMUP
     ap = argparse.ArgumentParser(
         description="Run or resume the fair benchmark sweep; reusable terminal cells "
                     "skip, while stale terminal cells are replaced after their rerun.")
@@ -717,6 +720,7 @@ def main():
                     help="threads and recorded cell thread count (default: 16)")
     ap.add_argument("--repeat", type=int, default=REPS,
                     help="repetitions inside each benchmark cell (default: 3)")
+    ap.add_argument("--warmup", type=int, default=WARMUP, help="explicit C++ solver warmups before retained repeats")
     ap.add_argument("--store", default=CELLS,
                     help="cell-store directory (default: results/cells)")
     ap.add_argument("--headline-only", action="store_true",
@@ -756,6 +760,9 @@ def main():
     DEVICE = a.device
     if a.threads < 1 or a.repeat < 1:
         ap.error("--threads and --repeat must be positive")
+    if a.warmup < 0: ap.error("--warmup must be nonnegative")
+    WARMUP = a.warmup
+    PROV["warmup"] = WARMUP
     THREADS, REPS, CELLS = a.threads, a.repeat, os.path.abspath(a.store)
     rc.CELLS = CELLS
     parac_runner.THREADS = THREADS

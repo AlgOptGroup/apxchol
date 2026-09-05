@@ -1,3 +1,13 @@
+Current campaign repetition contract: the C++ driver accepts `--warmup N`
+(default 0) separately from `--repeat R` retained measurements. It emits every
+warmup and retained timing as `BENCH_REPEAT`, selects one coherent median-total
+retained result, and exports the maximum retained true residual. The common
+parser grades every retained repetition through that maximum. CUDA context
+initialization remains outside these solver intervals and is stored separately.
+`thread_scaling.py` accepts `--thread-counts`, `--matrices`, `--series`, `--device`,
+`--warmup`, and `--timeout`; declared scope is validated before rendering. This
+allows laptop and Daint to use the same converged-solve runner and figures.
+
 # apxchol benchmarks
 
 This standalone CMake project compares `apxchol` with randomized-Cholesky and

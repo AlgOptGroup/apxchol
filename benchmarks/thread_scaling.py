@@ -5,9 +5,6 @@ portable CSV. Cells go to results/scaling_cells/ (separate from the fair cells).
 Run from repo root, ALONE: python3 benchmarks/thread_scaling.py
 """
 import argparse, csv, json, os, re, subprocess, time
-import matplotlib; matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
 import chart_cells
 
 from sweep_fair import UNKNOWN_TOOLCHAIN
@@ -24,6 +21,9 @@ BIN = os.environ.get("APXCHOL_BENCH_CPU_BIN", f"{ROOT}/benchmarks/build/benchmar
 DUMP = "/tmp/parac_fair_dump"
 CELLS = os.environ.get("APXCHOL_SCALING_STORE", f"{ROOT}/results/scaling_cells")
 TOL = "1e-8"; THREADS = [1, 2, 4, 8, 16]; TIMEOUT = 900; REPS = 3
+WARMUP = 0
+DEVICE = "cpu"
+INCLUDE_PARAC = True
 SCALING_SCHEMA = 2
 
 # (mid, family, margs, reg, is2d)
@@ -75,17 +75,17 @@ def emit(mid, family, lab, solver, config, t, m, status, prov=None):
     record = {"schema": SCALING_SCHEMA,
               "cell": {"matrix_id": mid, "family": family, "label": lab,
                        "solver": solver, "config": config, "threads": t,
-                       "device": "cpu"},
+                       "device": DEVICE},
               "metrics": m or {}, "status": status,
               "provenance": {**PROV, **(prov or UNKNOWN_TOOLCHAIN)}}
     if status == "timeout":
         record["timeout_cap_s"] = TIMEOUT
-    with open(f"{CELLS}/{mid}__{tag}__t{t}.json", "w") as handle:
+    with open(f"{CELLS}/{mid}__{tag}__t{t}{'__gpu' if DEVICE == 'gpu' else ''}.json", "w") as handle:
         json.dump(record, handle)
 
 def done(mid, solver, config, t):
     tag = _cell_tag(solver, config)
-    p = f"{CELLS}/{mid}__{tag}__t{t}.json"
+    p = f"{CELLS}/{mid}__{tag}__t{t}{'__gpu' if DEVICE == 'gpu' else ''}.json"
     if not os.path.exists(p):
         return False
     with open(p) as handle:
@@ -119,21 +119,33 @@ def _scaling_records():
         records.append((filename, record))
     return records
 
-def run_cpp(margs, solver, config, reg, t):
+def run_cpp(margs, solver, config, reg, t, mid="matrix"):
     cfg = f"--v1-configs '{config}'" if solver == "apxchol_v1" else ""
     regf = "--reg-rel 1e-6" if reg else ""
     cmd = (f"{taskset_prefix(t)} {BIN} {margs} --solver {solver} {cfg} {regf} "
-           f"--threads {t} --tol {TOL} --maxiter 500 --repeat {REPS} --csv")
+           f"--threads {t} --tol {TOL} --maxiter 500 --repeat {REPS} --warmup {WARMUP} --csv")
     try: p = sh(cmd, timeout=TIMEOUT, env=benchmark_openmp_env(t))
     except subprocess.TimeoutExpired as e:
         BUILD.update(parse_build_meta(e.stderr))   # even a timeout names its toolchain
         return "timeout", None
     BUILD.update(parse_build_meta(p.stderr))       # what built the binary that just ran
+    raw_dir = os.path.join(CELLS, "raw")
+    os.makedirs(raw_dir, exist_ok=True)
+    stem = f"{mid}__{_cell_tag(solver, config)}__{DEVICE}__t{t}__{time.time_ns()}"
+    for suffix, contents in (("stdout", p.stdout), ("stderr", p.stderr)):
+        with open(os.path.join(raw_dir, f"{stem}.{suffix}"), "x") as handle:
+            handle.write(contents)
     m = parse_csv(p.stdout)
-    if m is None: return "failed", None
+    if m is None: return "failed", {"returncode": p.returncode, "stderr_tail": p.stderr[-4000:]}
+    m["warmup_repeats"] = WARMUP
+    m["raw_stdout"] = f"raw/{stem}.stdout"
+    m["raw_stderr"] = f"raw/{stem}.stderr"
+    init = rc.parse_cuda_init(p.stderr)
+    if init is not None: m["cuda_init_s"] = init
+    m["repeat_receipts"] = [line for line in p.stderr.splitlines() if line.startswith("BENCH_REPEAT ")]
     # THE GRADING RULE (benchmarks/README.md): true relative residual <= exactly
     # tol, same for every solver, no grace factor. Kept in sync with rc.classify.
-    return ("complete" if m["rel_res"] <= float(TOL) else "not_converged"), m
+    return rc.classify(m, TOL)
 
 def _prepare_parac(mid, deadline=None):
     """Reuse the canonical ParAC input route, including component handling.
@@ -264,7 +276,7 @@ def sweep():
         if ONLY_MATRICES and mid not in ONLY_MATRICES:
             continue
         print(f"[{mid}]", flush=True)
-        soln = list(CPP) + [("ParAC", "parac", "")]
+        soln = list(CPP) + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])
         for lab, solver, config in soln:
             if ONLY_SERIES and lab not in ONLY_SERIES and solver not in ONLY_SERIES:
                 continue
@@ -276,14 +288,14 @@ def sweep():
                     prov = {**binary_toolchain(DRIVER),
                             **benchmark_openmp_provenance(t)}
                 else:
-                    st, m = run_cpp(margs, solver, config, reg, t)
+                    st, m = run_cpp(margs, solver, config, reg, t, mid)
                     prov = {**BUILD, **benchmark_openmp_provenance(t)}
                 emit(mid, fam, lab, solver, config, t, m, st, prov)
                 print(f"   {lab:16} t{t:<2} {st} total={m['total_s'] if m else '-'}", flush=True)
 
 
 def validate_cells():
-    solvers = list(CPP) + [("ParAC", "parac", "")]
+    solvers = list(CPP) + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])
     expected = {(mid, solver, config, threads)
                 for mid, *_ in MATS for _label, solver, config in solvers
                 for threads in THREADS}
@@ -308,6 +320,9 @@ def validate_cells():
 
 
 def charts(out=f"{ROOT}/benchmarks/latest"):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     recs = [record for _filename, record in _scaling_records()]
     mats = sorted({r["cell"]["matrix_id"] for r in recs})
     # Only genuinely multi-threaded solvers belong on a thread-scaling chart.
@@ -402,6 +417,12 @@ if __name__ == "__main__":
                         help="benchmark executable to run")
     parser.add_argument("--out", default=f"{ROOT}/benchmarks/latest")
     parser.add_argument("--repeat", type=int, default=REPS)
+    parser.add_argument("--warmup", type=int, default=WARMUP)
+    parser.add_argument("--thread-counts", default=",".join(map(str, THREADS)))
+    parser.add_argument("--matrices", default="", help="declared matrix scope from the common registry")
+    parser.add_argument("--series", default="", help="declared solver scope, by display label or id")
+    parser.add_argument("--device", choices=["cpu", "gpu"], default=DEVICE)
+    parser.add_argument("--timeout", type=int, default=TIMEOUT)
     parser.add_argument("--only-series", default="",
                         help="comma-separated display labels or solver ids to run")
     parser.add_argument("--only-matrices", default="",
@@ -409,9 +430,36 @@ if __name__ == "__main__":
     parser.add_argument("--rerun-status", default="",
                         help="comma-separated terminal statuses to overwrite")
     parser.add_argument("--render-only", action="store_true")
+    parser.add_argument("--source-commit", default="", help="frozen source revision when running an archived package")
+    parser.add_argument("--measure-only", action="store_true",
+                        help="write cells without requiring plotting dependencies")
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be positive")
+    if args.warmup < 0 or args.timeout <= 0:
+        parser.error("warmup must be nonnegative and timeout positive")
+    WARMUP, TIMEOUT, DEVICE = args.warmup, args.timeout, args.device
+    try:
+        THREADS = [int(t) for t in args.thread_counts.split(",")]
+        if not THREADS or min(THREADS) < 1 or len(set(THREADS)) != len(THREADS): raise ValueError
+    except ValueError:
+        parser.error("--thread-counts needs unique positive integers")
+    if args.matrices:
+        selected = args.matrices.split(",")
+        if len(set(selected)) != len(selected) or not set(selected) <= set(rc.MATRICES):
+            parser.error("--matrices needs unique registered matrix ids")
+        MATS = [(mid, rc.MATRICES[mid]["family"], margs_for(mid), False, rc.MATRICES[mid]["is2d"]) for mid in selected]
+    if DEVICE == "gpu":
+        CPP = [("apxchol bg+tree", "apxchol_v1", rc.APXCHOL_DEFAULT_CONFIG),
+               ("AMGCL", "amgcl_cuda", ""), ("BoomerAMG", "hypre_boomeramg_gpu", "")]
+        INCLUDE_PARAC = False
+    if args.series:
+        selected = set(args.series.split(","))
+        all_series = CPP + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])
+        known = {x for lab, solver, _ in all_series for x in (lab, solver)}
+        if not selected <= known: parser.error("unknown --series")
+        INCLUDE_PARAC = INCLUDE_PARAC and bool(selected & {"ParAC", "parac"})
+        CPP = [x for x in CPP if x[0] in selected or x[1] in selected]
     CELLS = os.path.abspath(args.store)
     BIN = os.path.abspath(args.binary)
     REPS = args.repeat
@@ -425,10 +473,14 @@ if __name__ == "__main__":
     if not RERUN_STATUSES <= known_statuses:
         parser.error(f"unknown --rerun-status: {sorted(RERUN_STATUSES - known_statuses)}")
     rc.BIN["cpu"] = BIN
-    PROV["repeat"] = REPS
+    if args.source_commit:
+        if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit): parser.error("source commit must be a full git SHA")
+        PROV["git_sha"] = args.source_commit
+    PROV.update(repeat=REPS, warmup=WARMUP, device=DEVICE, timing_protocol="explicit-warmup-v1")
     if not args.render_only:
         sweep()
-    validate_cells()
-    charts(args.out)
-    export_csv(f"{args.out}/thread_scaling.csv")
+    if not args.measure_only:
+        validate_cells()
+        charts(args.out)
+        export_csv(f"{args.out}/thread_scaling.csv")
     print("thread-scaling done")

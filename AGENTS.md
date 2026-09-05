@@ -181,6 +181,11 @@ benchmark README. Do not commit generated proprietary comparison sources.
 Tag logical-cell timeouts explicitly; a budget shared by calibration and
 repetitions is not a numerical lower bound on one setup+solve invocation.
 
+The benchmark driver supports explicit `--warmup N` before `--repeat R` retained
+measurements. Preserve every retained residual when grading a cell; selecting
+a representative repetition changes timing selection only. Thread-scaling
+scopes and thread counts are configurable through the existing runner.
+
 Report setup, solve, memory, and factor reuse separately. Evaluate the user's
 actual objective; a faster solve with slightly slower one-RHS total is a
 tradeoff, not automatically a rejected improvement. Do not multiply isolated

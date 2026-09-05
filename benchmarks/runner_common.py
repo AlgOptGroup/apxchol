@@ -661,6 +661,9 @@ def parse_csv(out):
         # VRAM can't be cleanly isolated (whole-device cudaMemGetInfo is desktop+context
         # contaminated and doesn't span the separate amgcl TU), so we DON'T store it. The
         # reliable VRAM metric is peak per-process from the nvidia-smi sidecar (max_vram_mb).
+        if len(f) >= 16:
+            d.update(retained_repeats=int(f[13]), representative_repeat=int(f[14]),
+                     max_repeat_rel_res=float(f[15]))
         return d
     except (ValueError, IndexError):
         return None
@@ -686,7 +689,9 @@ def classify(m, tol):
     distinct from not_converged (ran, missed tol) and failed (no CSV row)."""
     if m is None: return "failed", None
     if m["rel_res"] < 0: return "n/a", m
-    return ("complete" if m["rel_res"] <= float(tol) else "not_converged"), m
+    worst = max(m["rel_res"], m.get("max_repeat_rel_res", m["rel_res"]))
+    return ("complete" if math.isfinite(worst) and worst <= float(tol)
+            else "not_converged"), m
 
 
 # ── per-cell result store (schema 2) ────────────────────────────────────────────

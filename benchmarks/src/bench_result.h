@@ -23,4 +23,7 @@ struct BenchResult {
     // PEAK VRAM is sampled externally by the sweep (nvidia-smi --query-compute-apps), the
     // device analog of /usr/bin/time -%M; peak - solve = the setup/analysis transient.
     double solve_vram_mb = -1;
+    int retained_repeats = 1;
+    int representative_repeat = 1;
+    double max_repeat_rel_residual = -1;
 };

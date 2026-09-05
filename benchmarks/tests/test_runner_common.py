@@ -7,6 +7,23 @@ from unittest import mock
 from benchmarks import runner_common as rc
 
 
+class RetainedResidualTest(unittest.TestCase):
+    def test_median_timing_cannot_hide_failed_retained_solve(self):
+        status, _ = rc.classify({"rel_res": 1e-9, "max_repeat_rel_res": 2e-8}, 1e-8)
+        self.assertEqual(status, "not_converged")
+
+    def test_nonfinite_retained_residual_is_not_complete(self):
+        status, _ = rc.classify({"rel_res": 1e-9, "max_repeat_rel_res": float("inf")}, 1e-8)
+        self.assertEqual(status, "not_converged")
+
+    def test_repeat_fields_survive_csv_parse(self):
+        metrics = rc.parse_csv("Apx,grid,4,12,0.01,0.02,0.03,7,1e-9,1,2,3,-1,3,2,9e-9\n")
+        self.assertEqual(metrics["retained_repeats"], 3)
+        self.assertEqual(metrics["representative_repeat"], 2)
+        self.assertEqual(metrics["max_repeat_rel_res"], 9e-9)
+        self.assertEqual(rc.classify(metrics, 1e-8)[0], "complete")
+
+
 class ExternalPathConfigTest(unittest.TestCase):
     def test_explicit_environment_wins_over_machine_default(self):
         local = SimpleNamespace(PARAC_REORD="/machine/default")

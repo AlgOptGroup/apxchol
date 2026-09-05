@@ -558,7 +558,7 @@ static void print_result_pretty(const BenchResult& r) {
 }
 
 static void print_csv_header() {
-    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb\n";
+    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res\n";
 }
 
 static void print_result_csv(const BenchResult& r) {
@@ -574,7 +574,10 @@ static void print_result_csv(const BenchResult& r) {
               << std::fixed << std::setprecision(4) << r.fillin << ","
               << r.us_per_nnz << ","
               << std::setprecision(1) << r.solve_rss_mb << ","
-              << std::setprecision(1) << r.solve_vram_mb << "\n";
+              << std::setprecision(1) << r.solve_vram_mb << ","
+              << r.retained_repeats << "," << r.representative_repeat << ","
+              << std::scientific << std::setprecision(9)
+              << r.max_repeat_rel_residual << "\n";
 }
 
 // ──────────────────── generate RHS ────────────────────
@@ -599,17 +602,35 @@ static Eigen::VectorXd make_rhs(const Eigen::SparseMatrix<double>& L, unsigned s
 
 // Run a solver function N times and return one coherent median-total result.
 // No repetition is silently discarded as a warmup.
+static int benchmark_warmups = 0;
 template<typename Fn>
 static BenchResult median_run(Fn&& fn, int repeats) {
     std::vector<BenchResult> results;
     results.reserve(repeats);
-    for (int i = 0; i < repeats; ++i)
-        results.push_back(fn());
+    double worst = -1;
+    for (int i = -benchmark_warmups; i < repeats; ++i) {
+        auto result = fn();
+        std::cerr << "BENCH_REPEAT phase=" << (i < 0 ? "warmup" : "retained")
+                  << " index=" << (i < 0 ? i + benchmark_warmups + 1 : i + 1)
+                  << " setup_s=" << std::setprecision(17) << result.setup_time
+                  << " solve_s=" << result.solve_time << " total_s=" << result.total_time
+                  << " iters=" << result.iterations << " rel_res=" << result.rel_residual
+                  << " solver=" << std::quoted(result.solver_name) << '\n';
+        if (i < 0) continue;
+        result.representative_repeat = i + 1;
+        worst = std::isfinite(result.rel_residual)
+            ? std::max(worst, result.rel_residual)
+            : std::numeric_limits<double>::infinity();
+        results.push_back(std::move(result));
+    }
     std::sort(results.begin(), results.end(),
               [](const BenchResult& a, const BenchResult& b) {
                   return a.total_time < b.total_time;
               });
-    return results[results.size() / 2];
+    auto chosen = results[results.size() / 2];
+    chosen.retained_repeats = repeats;
+    chosen.max_repeat_rel_residual = worst;
+    return chosen;
 }
 
 // ──────────────────── solver runners ────────────────────
@@ -992,6 +1013,7 @@ struct Args {
     bool csv = false;
     unsigned seed = 42;
     int repeat = 1;
+    int warmup = 0;
     int threads = 0;  // 0 = use current OMP setting
     // Optional subset filter for --solver apxchol_v1.
     // If non-empty, only configs whose label is in this set are run.
@@ -1046,6 +1068,10 @@ static Args parse_args(int argc, char** argv) {
         else if (arg == "--tol")   a.tol = std::stod(next());
         else if (arg == "--maxiter") a.maxiter = std::stoi(next());
         else if (arg == "--repeat")  a.repeat = std::max(1, std::stoi(next()));
+        else if (arg == "--warmup") {
+            a.warmup = std::stoi(next());
+            if (a.warmup < 0) throw std::runtime_error("--warmup must be nonnegative");
+        }
         else if (arg == "--threads") a.threads = std::stoi(next());
         else if (arg == "--seed")  a.seed = static_cast<unsigned>(std::stoul(next()));
         else if (arg == "--csv")   a.csv = true;
@@ -2368,6 +2394,7 @@ int main(int argc, char** argv) {
     // lifts this line out of whatever stderr it managed to capture.
     emit_build_meta();
     Args args = parse_args(argc, argv);
+    benchmark_warmups = args.warmup;
 
     if (!benchmark_affinity_is_safe(args.threads))
         return 2;
