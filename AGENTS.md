@@ -80,6 +80,9 @@ unless another change or unresolved failure justifies it.
   writer threads perform the first touch. Pointer, diagonal, scale, and other
   allocations retain the populated, value-initialized default. Require a full
   overwrite before first read when using the output-buffer specialization.
+- The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
+  owning arrays: the existing column copy writes every retained entry before
+  any read. Preserve their early release after compaction or their last use.
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
   is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
   factor storage (GPU default on, CPU default off); the old GPU-only alias is

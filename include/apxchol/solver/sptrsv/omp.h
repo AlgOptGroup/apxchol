@@ -632,8 +632,8 @@ private:
         // built-in topLeftCorner + makeCompressed is serial and costs
         // ~60 ms on IPM iter40 — manual parallel version drops it under 10 ms.
         std::vector<edge_index>     L11_outer_local;
-        std::vector<node_index>     L11_inner_local;
-        std::vector<factor_value_t> L11_vals_local;
+        std::unique_ptr<node_index[]>     L11_inner_local;
+        std::unique_ptr<factor_value_t[]> L11_vals_local;
         const edge_index*     L11_outer;
         const node_index*     L11_inner;
         const factor_value_t* L11_vals;     // the FACTOR's width: fp32
@@ -666,8 +666,11 @@ private:
             for (node_index j = 0; j < m_; ++j)
                 L11_outer_local[j + 1] = L11_outer_local[j] + col_kept[j];
             nnz = L11_outer_local[m_];
-            L11_inner_local.resize(static_cast<size_t>(nnz));
-            L11_vals_local.resize(static_cast<size_t>(nnz));
+            // Every retained entry is written by the column owner below.
+            // Avoid a redundant serial zero-fill of these temporary arrays;
+            // the parallel copy performs their first touch.
+            L11_inner_local = std::make_unique_for_overwrite<node_index[]>(static_cast<size_t>(nnz));
+            L11_vals_local = std::make_unique_for_overwrite<factor_value_t[]>(static_cast<size_t>(nnz));
             // PASS 2 (parallel): scatter entries to compacted positions.
             #pragma omp parallel for schedule(static)
             for (node_index j = 0; j < m_; ++j) {
@@ -680,8 +683,8 @@ private:
                 }
             }
             L11_outer = L11_outer_local.data();
-            L11_inner = L11_inner_local.data();
-            L11_vals  = L11_vals_local.data();
+            L11_inner = L11_inner_local.get();
+            L11_vals  = L11_vals_local.get();
             // L11 is a full copy: the input factor is dead from here on.
             if (consumed) consumed->release_values();
         }
@@ -773,8 +776,8 @@ private:
                 // transpose allocates its bucket (peak memory, not speed).
                 // (`v = {}` would only clear -- it keeps the capacity; swapping
                 // with an empty vector actually returns the memory.)
-                std::vector<node_index>().swap(L11_inner_local);
-                std::vector<factor_value_t>().swap(L11_vals_local);
+                L11_inner_local.reset();
+                L11_vals_local.reset();
                 std::vector<edge_index>().swap(L11_outer_local);
                 // SDDM path: L11 aliased the input factor, which the compacted
                 // copy has just replaced -- the input is dead now.
@@ -954,8 +957,8 @@ private:
         // swap-with-empty / reset, since `v = {}` / clear() keep the capacity).
         if (consumed) consumed->release_values();
         std::vector<edge_index>().swap(L11_outer_local);
-        std::vector<node_index>().swap(L11_inner_local);
-        std::vector<factor_value_t>().swap(L11_vals_local);
+        L11_inner_local.reset();
+        L11_vals_local.reset();
         std::vector<float>().swap(col_scale_local);
         std::vector<edge_index>().swap(drop_outer);
         drop_inner.reset();
