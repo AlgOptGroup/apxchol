@@ -132,7 +132,11 @@ TIMEOUT_CAP_REASON = ("timeout outcome predates schema 2 and does not record the
 
 def timeout_cap_is_stale(cell):
     """Schema-1 timeout outcomes cannot support a numerical lower bound."""
-    return cell.get("status") == "timeout" and rc.timeout_cap(cell) is None
+    # A recorded whole-cell deadline is valid outcome evidence even though it
+    # cannot support a per-solve lower-bound bar. Inspect the stored cap here;
+    # rc.timeout_cap continues to withhold logical-cell caps from such charts.
+    return (cell.get("status") == "timeout"
+            and rc.timeout_cap({"timeout_cap_s": cell.get("timeout_cap_s")}) is None)
 
 
 def kind_of_matrix():

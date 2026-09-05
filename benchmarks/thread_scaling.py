@@ -82,6 +82,7 @@ def emit(mid, family, lab, solver, config, t, m, status, prov=None):
               "provenance": {**PROV, **(prov or UNKNOWN_TOOLCHAIN)}}
     if status == "timeout":
         record["timeout_cap_s"] = TIMEOUT
+        record["matrix_meta"] = {"timeout_scope": "logical_cell"}
     with open(f"{CELLS}/{mid}__{tag}__t{t}{'__gpu' if DEVICE == 'gpu' else ''}.json", "w") as handle:
         json.dump(record, handle)
 
@@ -99,7 +100,7 @@ def done(mid, solver, config, t):
            ("git_sha", "repeat", "warmup", "timing_protocol")):
         return False
     status = record.get("status")
-    if status == "timeout" and rc.timeout_cap(record) is None:
+    if status == "timeout" and not record.get("timeout_cap_s"):
         return False
     return status not in RERUN_STATUSES and status in (
         "complete", "not_converged", "timeout", "failed", "oom", "n/a")
@@ -124,7 +125,7 @@ def _scaling_records():
             raise RuntimeError(
                 f"stale scaling schema in {filename}: "
                 f"{record.get('schema')!r} != {SCALING_SCHEMA}")
-        if record.get("status") == "timeout" and rc.timeout_cap(record) is None:
+        if record.get("status") == "timeout" and not record.get("timeout_cap_s"):
             raise RuntimeError(f"timeout without exact cap in {filename}")
         records.append((filename, record))
     return records
@@ -134,10 +135,13 @@ def run_cpp(margs, solver, config, reg, t, mid="matrix"):
     regf = "--reg-rel 1e-6" if reg else ""
     cmd = (f"{taskset_prefix(t)} {BIN} {margs} --solver {solver} {cfg} {regf} "
            f"--threads {t} --tol {TOL} --maxiter 500 --repeat {REPS} --warmup {WARMUP} --csv")
+    expired = False
     try: p = sh(cmd, timeout=TIMEOUT, env=benchmark_openmp_env(t))
     except subprocess.TimeoutExpired as e:
-        BUILD.update(parse_build_meta(e.stderr))   # even a timeout names its toolchain
-        return "timeout", None
+        expired = True
+        def as_text(value):
+            return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+        p = subprocess.CompletedProcess(cmd, -1, as_text(e.stdout), as_text(e.stderr))
     BUILD.update(parse_build_meta(p.stderr))       # what built the binary that just ran
     raw_dir = os.path.join(CELLS, "raw")
     os.makedirs(raw_dir, exist_ok=True)
@@ -145,14 +149,17 @@ def run_cpp(margs, solver, config, reg, t, mid="matrix"):
     for suffix, contents in (("stdout", p.stdout), ("stderr", p.stderr)):
         with open(os.path.join(raw_dir, f"{stem}.{suffix}"), "x") as handle:
             handle.write(contents)
-    m = parse_csv(p.stdout)
-    if m is None: return "failed", {"returncode": p.returncode, "stderr_tail": p.stderr[-4000:]}
+    m = parse_csv(p.stdout) or {}
     m["warmup_repeats"] = WARMUP
     m["raw_stdout"] = f"raw/{stem}.stdout"
     m["raw_stderr"] = f"raw/{stem}.stderr"
     init = rc.parse_cuda_init(p.stderr)
     if init is not None: m["cuda_init_s"] = init
     m["repeat_receipts"] = [line for line in p.stderr.splitlines() if line.startswith("BENCH_REPEAT ")]
+    if expired:
+        return "timeout", m
+    if "total_s" not in m:
+        return "failed", {**m, "returncode": p.returncode, "stderr_tail": p.stderr[-4000:]}
     # THE GRADING RULE (benchmarks/README.md): true relative residual <= exactly
     # tol, same for every solver, no grace factor. Kept in sync with rc.classify.
     return rc.classify(m, TOL)

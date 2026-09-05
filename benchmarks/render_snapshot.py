@@ -9,6 +9,8 @@ import subprocess
 import sys
 
 import chart_cells
+import fair_charts
+import gpu_charts
 import runner_common as rc
 
 HERE = Path(__file__).resolve().parent
@@ -61,21 +63,28 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
                 '--thread-counts', scaling_threads, '--out', str(output)], check=True)
     counts = collections.Counter(r['status'] for r in records)
     matrices = {r['cell']['matrix_id'] for r in records}
-    series = sorted({(r['cell'].get('device','cpu'),r['cell']['solver'],r['cell'].get('config','')) for r in records})
+    # Derive the denominator from the declared common headline rows, including
+    # series with no records at all on this platform.
+    series = sorted(
+        [('cpu', solver, config) for (solver, config), label in fair_charts.LABELS.items()
+         if label in fair_charts.ORDER]
+        + [('gpu', solver, config) for (solver, config), label in gpu_charts.LABELS.items()
+           if label in gpu_charts.ORDER])
     missing = [dict(matrix=mid, device=device, solver=solver, config=config)
                for mid in rc.MATRICES for device,solver,config in series
                if (mid,solver,config,device) not in set(keys)]
     (output/'coverage.json').write_text(json.dumps(dict(
         platform=platform,threads=threads,registered_matrices=len(rc.MATRICES),
         measured_matrices=len(matrices),present=len(records),
-        expected_in_present_series=len(rc.MATRICES)*len(series),status_counts=counts,
+        expected_headline_cells=len(rc.MATRICES)*len(series),status_counts=counts,
         missing=missing,series=series),indent=2)+'\n')
     def links(pattern):
         return ', '.join(f'[{p.stem.removeprefix("combined_")}]({p.relative_to(output).as_posix()})'
                          for p in sorted((output/'figures').glob(pattern))) or 'Pending measurements'
     lines = [f'# {platform} benchmark snapshot', '',
         f'This snapshot selects T={threads} before comparing outcomes. '
-        f'It contains {len(records)} cells over {len(matrices)}/{len(rc.MATRICES)} registered matrices.', '',
+        f'It contains {len(records)} cells over {len(matrices)}/{len(rc.MATRICES)} registered matrices. '
+        f'{len(missing)} of {len(rc.MATRICES)*len(series)} declared headline cells are missing.', '',
         'Every completed retained solve must meet the original-operator true-relative-residual '
         'target of `1e-8`. CUDA initialization is reported separately. Setup includes mandatory '
         'solver preparation; the solve column includes the remaining complete solver call. '
@@ -97,7 +106,8 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         'and serial Julia reference solvers retain their own labels and timing boundaries.', '',
         'Status counts: '+', '.join(f'{key}: {value}' for key,value in sorted(counts.items()))+'.', '']
     (output/'README.md').write_text('\n'.join(lines))
-    print(f'{platform}: checked {len(records)}/{len(records)} cells; {len(missing)} absent within present series')
+    print(f'{platform}: inspected {len(records)} records; '
+          f'{len(missing)} missing of {len(rc.MATRICES)*len(series)} declared headline cells')
 
 
 if __name__ == '__main__':

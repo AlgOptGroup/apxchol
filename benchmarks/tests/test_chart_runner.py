@@ -282,6 +282,8 @@ class ThreadScalingStoreTest(unittest.TestCase):
             record = json.loads(path.read_text())
             self.assertEqual(record["schema"], thread_scaling.SCALING_SCHEMA)
             self.assertEqual(record["timeout_cap_s"], 123)
+            self.assertIsNone(rc.timeout_cap(record))
+            self.assertFalse(stale_cells.timeout_cap_is_stale(record))
             self.assertTrue(thread_scaling.done("m", "solver", "cfg", 4))
 
             record.pop("schema")
@@ -289,6 +291,17 @@ class ThreadScalingStoreTest(unittest.TestCase):
             self.assertFalse(thread_scaling.done("m", "solver", "cfg", 4))
             with self.assertRaises(RuntimeError):
                 thread_scaling._scaling_records()
+
+    def test_timeout_preserves_partial_repeat_receipts(self):
+        receipt = b'BENCH_REPEAT phase=retained index=0 total_s=1.0\n'
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store), \
+             mock.patch.object(thread_scaling, "sh", side_effect=subprocess.TimeoutExpired(
+                 "benchmark", 5, output=b"partial output", stderr=receipt)):
+            status, metrics = thread_scaling.run_cpp("", "amgcl", "", False, 1)
+            self.assertEqual(status, "timeout")
+            self.assertEqual(metrics["repeat_receipts"], [receipt.decode().strip()])
+            self.assertEqual((pathlib.Path(store)/metrics["raw_stdout"]).read_text(), "partial output")
 
     def test_exact_scaling_denominator_is_validated(self):
         with tempfile.TemporaryDirectory() as store, \
