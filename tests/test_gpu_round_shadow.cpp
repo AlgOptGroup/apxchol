@@ -1919,6 +1919,222 @@ TEST(GpuRoundShadowDevice, OversizedPivotMatchesAuthoritativeCpu) {
         edges, input, device, bounds));
 }
 
+#if defined(APXCHOL_USE_CUDA)
+namespace {
+struct resident_selector_fixture {
+    static constexpr node_index n = 34;
+    static constexpr std::uint64_t seed = 71;
+    apxchol::graph<apxchol::directed_vec_pool_incidence> graph{n};
+    std::vector<apxchol::detail::gpu_topology_edge> initial;
+    std::vector<node_index> active;
+    apxchol::detail::gpu_round_shadow_device_state state;
+    std::unique_ptr<apxchol::detail::gpu_block_frontend> frontend;
+    apxchol::partition_options options;
+    std::size_t rounds = 0;
+
+    explicit resident_selector_fixture(bool with_edges = true) {
+        scoped_omp_threads one(1);
+        auto edge = [&](node_index u, node_index v, double w) {
+            graph.add_edge(u, v, w);
+            initial.push_back({u, v});
+        };
+        if (with_edges) {
+        for (node_index v = 0; v < 24; ++v) edge(v, (v + 1) % 24, 1.0);
+        edge(0, 1, 2.0); // Multigraph multiplicity must survive the projection.
+        edge(0, 1, 4.0);
+        for (node_index v = 24; v < 31; ++v) edge(v, v + 1, 1.0);
+        }
+        // Vertices 32 and 33 are isolated; 24..31 form a separate component.
+        active.resize(n);
+        std::iota(active.begin(), active.end(), node_index{0});
+        frontend = std::make_unique<apxchol::detail::gpu_block_frontend>(n, initial);
+        options.degree_multiplier = 100.0;
+    }
+
+    void round(bool certify = true) {
+        scoped_omp_threads one(1);
+        frontend->prepare(active, options);
+        const auto selected = frontend->select_block_greedy().data;
+        if (selected.empty()) throw std::logic_error("fixture exhausted too soon");
+        const auto capability = frontend->device_selection();
+        const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, selected, seed);
+        std::vector<gpu_round_shadow_excess_bound> bounds;
+        const auto report = apxchol::detail::run_verified_gpu_round_shadow(
+            state, input, &capability, seed, rounds != 0, &bounds);
+        EXPECT_EQ(report.resident_selection_consumed, rounds != 0);
+        if (rounds) EXPECT_EQ(report.round_state_upload_bytes, 0u);
+        const auto cpu = run_serial_cpu_round(graph, input, report, bounds);
+        EXPECT_EQ(cpu.bounded_excess_vertices, 0u);
+        if (certify) state.certify_cpu_round(true, fingerprint_graph(graph));
+        std::erase_if(active, [&](node_index v) { return !graph.is_active(v); });
+        ++rounds;
+    }
+
+    // Rebuild a separate selector from the CPU graph solely as the oracle.
+    // Its uploads are not inputs to frontend or the resident elimination state.
+    void compare_reference() {
+        const auto snapshot = apxchol::detail::make_gpu_round_shadow_input(
+            graph, std::span<const node_index>{}, seed);
+        std::vector<apxchol::detail::gpu_topology_edge> edges;
+        for (const auto& e : snapshot.incidences)
+            if (e.owner < e.neighbor && snapshot.active[e.owner] &&
+                snapshot.active[e.neighbor]) edges.push_back({e.owner, e.neighbor});
+        apxchol::detail::gpu_block_frontend reference(n, edges);
+        std::vector<node_index> inactive;
+        for (node_index v = 0; v < n; ++v)
+            if (!graph.is_active(v)) inactive.push_back(v);
+        reference.advance(inactive, {});
+        const auto actual = frontend->prepare(active, options);
+        const auto expected = reference.prepare(active, options);
+        EXPECT_EQ(actual.candidate_count, expected.candidate_count);
+        EXPECT_EQ(actual.average_degree, expected.average_degree);
+        EXPECT_EQ(std::vector<node_index>(frontend->host_active_degrees().begin(),
+                                         frontend->host_active_degrees().end()),
+                  std::vector<node_index>(reference.host_active_degrees().begin(),
+                                         reference.host_active_degrees().end()));
+        EXPECT_EQ(frontend->select_block_greedy().data,
+                  reference.select_block_greedy().data);
+    }
+};
+} // namespace
+#endif
+
+TEST(GpuRoundShadowDevice, ResidentSelectorProjectionTwoTransitions) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    resident_selector_fixture f;
+    for (int round = 0; round < 3; ++round) {
+        f.round();
+        f.state.advance_selector(*f.frontend);
+        const auto traffic = f.frontend->transfers();
+        EXPECT_EQ(traffic.host_update_bytes, 0u);
+        EXPECT_EQ(traffic.resident_advances, std::size_t(round + 1));
+        f.compare_reference();
+    }
+    std::fprintf(stderr, "[resident-selector-test] rounds=3 host_update_bytes=%zu "
+        "projection_scratch_peak_extra_bound=%zu\n",
+        f.frontend->transfers().host_update_bytes,
+        f.frontend->transfers().projection_scratch_peak_extra_bytes);
+#endif
+}
+
+TEST(GpuRoundShadowDevice, ResidentSelectorProjectionHandlesEmptyResidual) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    resident_selector_fixture f(false);
+    f.round();
+    ASSERT_TRUE(f.active.empty());
+    f.state.advance_selector(*f.frontend);
+    f.compare_reference();
+    EXPECT_EQ(f.frontend->transfers().host_update_bytes, 0u);
+#endif
+}
+
+TEST(GpuRoundShadowDevice, ResidentSelectorProjectionPreservesOrderAndExcessRefresh) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    for (bool parallel_order : {false, true}) {
+        resident_selector_fixture f;
+        f.round(false);
+        f.state.certify_cpu_round(!parallel_order, fingerprint_graph(f.graph),
+                                 !parallel_order);
+        f.state.advance_selector(*f.frontend);
+        f.frontend->prepare(f.active, f.options);
+        f.frontend->select_block_greedy();
+        expect_exception_contains([&] {
+            f.state.compute_resident(f.frontend->device_selection(), f.seed);
+        }, parallel_order ? "parallel-order reimport" : "excess refresh");
+        EXPECT_EQ(f.frontend->transfers().host_update_bytes, 0u);
+    }
+#endif
+}
+
+TEST(GpuRoundShadowDevice, ResidentSelectorProjectionRejectsLaterHostSelectedGeneration) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    resident_selector_fixture f;
+    f.round();
+    ASSERT_FALSE(f.active.empty());
+    // A previous producer binding must not authorize a later round that used
+    // host-selected pivots, even while its old capability remains published.
+    const std::vector<node_index> selected{f.active.front()};
+    const auto input = apxchol::detail::make_gpu_round_shadow_input(
+        f.graph, selected, f.seed);
+    std::vector<gpu_round_shadow_excess_bound> bounds;
+    const auto report = apxchol::detail::run_verified_gpu_round_shadow(f.state, input, &bounds);
+    const auto cpu = run_serial_cpu_round(f.graph, input, report, bounds);
+    f.state.certify_cpu_round(true, fingerprint_graph(f.graph),
+                             cpu.bounded_excess_vertices != 0);
+    expect_exception_contains([&] { f.state.advance_selector(*f.frontend); }, "CPU-certified");
+    EXPECT_EQ(f.frontend->transfers().resident_advances, 0u);
+#endif
+}
+
+TEST(GpuRoundShadowDevice, ResidentSelectorProjectionRequiresCpuCertification) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    resident_selector_fixture f;
+    f.round(false);
+    expect_exception_contains([&] { f.state.advance_selector(*f.frontend); },
+                              "CPU-certified");
+    EXPECT_EQ(f.frontend->transfers().resident_advances, 0u);
+    expect_exception_contains([&] { f.state.download_factor_log(); }, "poisoned");
+#endif
+}
+
+TEST(GpuRoundShadowDevice, ResidentSelectorProjectionRejectsReplayAndInterveningSelection) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    for (bool repeat_projection : {false, true}) {
+        resident_selector_fixture f;
+        f.round();
+        if (repeat_projection) f.state.advance_selector(*f.frontend);
+        else f.frontend->select_block_greedy();
+        EXPECT_THROW(f.state.advance_selector(*f.frontend), std::exception);
+        expect_exception_contains([&] { f.state.download_factor_log(); }, "poisoned");
+    }
+#endif
+}
+
+TEST(GpuRoundShadowDevice, ResidentSelectorProjectionRejectsDifferentProducerAndHostRebuild) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    for (bool host_rebuild : {false, true}) {
+        resident_selector_fixture f;
+        f.round();
+        if (host_rebuild) {
+            f.state.invalidate_for_authoritative_host_rebuild(fingerprint_graph(f.graph));
+            expect_exception_contains([&] { f.state.advance_selector(*f.frontend); },
+                                      "CPU-certified");
+        } else {
+            apxchol::detail::gpu_block_frontend other(f.n, f.initial);
+            std::vector<node_index> all(f.n);
+            std::iota(all.begin(), all.end(), node_index{0});
+            other.prepare(all, f.options);
+            other.select_block_greedy();
+            expect_exception_contains([&] { f.state.advance_selector(other); },
+                                      "different producer");
+            EXPECT_EQ(other.transfers().resident_advances, 0u);
+        }
+        expect_exception_contains([&] { f.state.download_factor_log(); }, "poisoned");
+    }
+#endif
+}
+
 TEST(GpuRoundShadowDevice,
      ResidentReuseRefreshAndParallelReimportHaveExactProvenance) {
 #if !defined(APXCHOL_USE_CUDA)

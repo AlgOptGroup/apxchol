@@ -1,8 +1,10 @@
 #include "apxchol/solver/gpu_block_frontend.h"
+#include "apxchol/solver/elimination/gpu_round_shadow.h"
 
 #include <cooperative_groups.h>
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
+#include <thrust/iterator/transform_iterator.h>
 
 #include <algorithm>
 #include <atomic>
@@ -70,6 +72,18 @@ public:
 private:
     T *ptr_ = nullptr;
     std::size_t capacity_ = 0;
+};
+
+struct residual_endpoints {
+    __host__ __device__ gpu_topology_edge operator()(
+            const gpu_round_shadow_incidence& incidence) const {
+        return {incidence.owner, incidence.neighbor};
+    }
+};
+struct canonical_endpoint_pair {
+    __host__ __device__ bool operator()(const gpu_topology_edge& edge) const {
+        return edge.u < edge.v;
+    }
 };
 
 constexpr int kBlock = 256;
@@ -584,8 +598,10 @@ struct gpu_block_frontend::impl {
             cuda_check(cudaGetLastError(), "initialize active vertex ids");
         }
 
-        // Reserve the largest CUB workspace while construction can still
-        // cleanly fall back to the CPU. Counts only shrink after round zero.
+        // Reserve the ordinary host-update path's largest CUB workspace;
+        // its counts only shrink after round zero. Resident projection selects
+        // directed incidences and may grow this scratch; advance_resident
+        // accounts for that additional allocation.
         std::size_t cub_bytes = 0;
         std::size_t bytes = 0;
         cuda_check(cub::DeviceScan::ExclusiveSum(
@@ -690,8 +706,8 @@ struct gpu_block_frontend::impl {
                    "CUB exclusive scan");
     }
 
-    template <class T, class Predicate>
-    int select_if(const T *input, T *output, std::size_t count,
+    template <class Input, class T, class Predicate>
+    int select_if(Input input, T *output, std::size_t count,
                   Predicate predicate) {
         require_cub_count(count, "selection");
         selected_count.reserve(1);
@@ -1015,6 +1031,62 @@ struct gpu_block_frontend::impl {
         return result;
     }
 
+    void advance_resident(const gpu_round_shadow_incidence* incidences,
+                          std::size_t directed_count, const std::uint8_t* active,
+                          const gpu_device_selection_content& expected) {
+        if (expected.vertex_count != n || expected.active_count > active_count ||
+            directed_count % 2 || directed_count / 2 > live_edge_count)
+            throw std::logic_error("GPU selector resident projection has invalid dimensions");
+        const std::size_t scratch_before = cub_temp.capacity();
+        const int next = 1 - current_coo;
+        // The accepted residual has paired directed incidences. Selecting one
+        // orientation retains EVERY multigraph edge; neither weights nor owner
+        // encounter order in the resident allocation are modified. Its edge
+        // count cannot grow after independent tree elimination, so the existing
+        // selector COO capacity suffices. No endpoint staging array is needed.
+        const std::size_t count = directed_count ? std::size_t(select_if(
+            thrust::make_transform_iterator(incidences, residual_endpoints{}), coo[next].get(),
+            directed_count, canonical_endpoint_pair{})) : 0;
+        if (count != directed_count / 2)
+            throw std::logic_error("GPU selector resident projection is not paired");
+        if (n)
+            cuda_check(cudaMemcpy(active_mask.get(), active, std::size_t(n),
+                                  cudaMemcpyDeviceToDevice),
+                       "copy resident active mask");
+        if (active_count) {
+            const int next_active = 1 - current_active;
+            active_count = std::size_t(select_if(
+                active_ids[current_active].get(), active_ids[next_active].get(),
+                active_count, vertex_is_active{active_mask.get()}));
+            current_active = next_active;
+        }
+        current_coo = next;
+        live_edge_count = count;
+        topology_dirty = true;
+        rebuild_topology();
+        cuda_check(cudaMemset(&prepare_status.get()->active, 0,
+                              sizeof(device_selection_digest)),
+                   "clear projected active digest");
+        if (active_count) {
+            gather_active_degrees<<<blocks_for(active_count), kBlock>>>(
+                active_ids[current_active].get(), active_count, degrees.get(),
+                active_degrees.get(), &prepare_status.get()->active);
+            cuda_check(cudaGetLastError(), "gather projected active digest");
+        }
+        sum_active_degree_values(active_count);
+        if (!gpu_device_selection_state_matches(selection_content, expected))
+            throw std::logic_error("GPU selector resident projection content mismatch");
+        candidate_count = 0;
+        host_active_degrees_valid = host_candidate_ids_valid = false;
+        cuda_check(cudaDeviceSynchronize(), "finish resident selector projection");
+        ++transfers.resident_advances;
+        const std::size_t scratch_after = cub_temp.capacity();
+        if (scratch_after > scratch_before)
+            transfers.projection_scratch_peak_extra_bytes = std::max(
+                transfers.projection_scratch_peak_extra_bytes,
+                2 * scratch_after - scratch_before);
+    }
+
     void advance(std::span<const node_index> eliminated,
                  std::span<const gpu_topology_edge> new_edges,
                  std::span<const gpu_topology_batch> new_edge_batches) {
@@ -1026,6 +1098,7 @@ struct gpu_block_frontend::impl {
                                   eliminated.size() * sizeof(node_index),
                                   cudaMemcpyHostToDevice),
                        "upload eliminated vertices");
+            transfers.host_update_bytes += eliminated.size_bytes();
             deactivate_vertices<<<blocks_for(eliminated.size()), kBlock>>>(
                 update_ids.get(), eliminated.size(), active_mask.get());
             cuda_check(cudaGetLastError(), "launch vertex deactivation");
@@ -1076,6 +1149,7 @@ struct gpu_block_frontend::impl {
                                   new_edges.size() * sizeof(gpu_topology_edge),
                                   cudaMemcpyHostToDevice),
                        "append contiguous sampled topology edges");
+            transfers.host_update_bytes += new_edges.size_bytes();
             offset += new_edges.size();
         }
         for (const auto batch : new_edge_batches) {
@@ -1088,6 +1162,7 @@ struct gpu_block_frontend::impl {
                                       count * sizeof(deferred_edge),
                                       cudaMemcpyHostToDevice),
                            "stage sampled topology edges");
+                transfers.host_update_bytes += count * sizeof(deferred_edge);
                 extract_topology_edges<<<blocks_for(count), kBlock>>>(
                     topology_staging.get(), count, coo[next].get() + offset);
                 cuda_check(cudaGetLastError(),
@@ -1108,6 +1183,7 @@ struct gpu_block_frontend::impl {
         }
     }
 
+    gpu_block_frontend::transfer_stats transfers;
     node_index n;
     device_buffer<gpu_topology_edge> coo[2];
     int current_coo = 0;
@@ -1377,6 +1453,26 @@ void gpu_block_frontend::advance(std::span<const node_index> eliminated,
         p_->poison_selection_producer();
         throw;
     }
+}
+
+void gpu_block_frontend::advance_resident(
+        const gpu_round_shadow_incidence* incidences, std::size_t directed_count,
+        const std::uint8_t* active,
+        const gpu_device_selection_content& expected) {
+    try {
+        p_->require_current_device();
+        p_->invalidate_selection();
+        p_->begin_topology_advance();
+        p_->advance_resident(incidences, directed_count, active, expected);
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
+}
+
+gpu_block_frontend::transfer_stats gpu_block_frontend::transfers() const {
+    p_->require_current_device();
+    return p_->transfers;
 }
 
 } // namespace apxchol::detail

@@ -1,5 +1,6 @@
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/sptrsv/cuda.h"
+#include "apxchol/solver/gpu_block_frontend.h"
 
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
@@ -1200,6 +1201,7 @@ struct gpu_round_shadow_device_state::impl {
     bool reusable = false;
     bool excess_may_differ = false;
     bool generation_accepted = false;
+    bool generation_has_device_selection = false;
     bool poisoned = false;
     reimport_reason next_reimport = reimport_reason::none;
     std::uint64_t generation = 0;
@@ -1289,6 +1291,7 @@ struct gpu_round_shadow_device_state::impl {
     void poison_failed_generation() noexcept {
         poisoned = true;
         generation_accepted = false;
+        generation_has_device_selection = false;
         certified = false;
         reusable = false;
     }
@@ -2276,6 +2279,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     generation_accepted = false;
     next_reimport = reimport_reason::none;
     generation = report.output_generation;
+    generation_has_device_selection = device_selection != nullptr;
     cuda_device = current_device;
     if (device_selection) {
         selection_producer = selected.producer_identity;
@@ -2478,6 +2482,30 @@ gpu_round_shadow_report gpu_round_shadow_device_state::compute_resident(
     const gpu_round_shadow_input no_host_state;
     return impl_->compute(
         no_host_state, nullptr, &selected, run_seed, true);
+}
+
+void gpu_round_shadow_device_state::advance_selector(gpu_block_frontend& frontend) {
+    impl::failed_generation_guard guard{*impl_};
+    guard.arm();
+    impl_->require_current_device("resident selector handoff");
+    if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted ||
+        !impl_->certified || !impl_->selection_producer_bound ||
+        !impl_->generation_has_device_selection ||
+        impl_->next_reimport == impl::reimport_reason::authoritative_host_rebuild)
+        throw std::logic_error("GPU selector handoff requires an accepted CPU-certified resident generation");
+    // Inspect the LIVE published selection before either state is mutated.
+    // Equality with the consumed generations also rejects a repeated projection,
+    // an intervening prepare/selection/advance, and a different producer.
+    const auto selected = frontend.device_selection().inspect();
+    const auto producer = impl_->selection_producer.lock();
+    if (!producer || producer != selected.producer_identity ||
+        selected.cuda_device != impl_->cuda_device ||
+        selected.generation != impl_->last_selection_generation ||
+        selected.topology_generation != impl_->last_selection_topology_generation)
+        throw std::invalid_argument("GPU selector handoff has a stale or different producer generation");
+    frontend.advance_resident(impl_->residual(impl_->current_slot).get(),
+        impl_->resident_count, impl_->active.get(), impl_->resident_selection_content);
+    guard.commit();
 }
 
 void gpu_round_shadow_device_state::accept_device_generation(

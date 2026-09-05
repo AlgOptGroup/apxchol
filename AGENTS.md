@@ -110,6 +110,14 @@ applications and concurrent tests can change it.
   metadata and host plans remain; do not call this fully resident setup or a
   measured speedup. Validate `GpuFactorFinalize.*`, `GpuRoundShadow*.*`,
   `GpuSptrsvAdoption*.*`, `GpuDataflow.*` and `GpuHostPrep.*` on a CUDA device.
+- With the round shadow and GPU block selector both explicitly enabled, an
+  accepted, CPU-certified resident residual projects its paired incidences
+  directly into the same selector's device COO/CSR and active mask. The handoff
+  preserves multigraph multiplicity and binds the live producer, CUDA device
+  and consumed selection/topology generations before mutation. It replaces
+  CPU-produced endpoint/id uploads for that handoff only; independent CPU
+  snapshots, elimination, certification, order/excess refreshes, occupancy
+  handoff and tail remain. No new public option or performance claim is implied.
 - The internal consuming finalizer also omits duplicate CPU prefix factor
   entries: workers stream the same fp32 entry hashes for the mandatory shadow
   comparison. Vertex/diagonal/count metadata and all CPU graph/RNG operations

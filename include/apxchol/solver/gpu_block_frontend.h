@@ -22,6 +22,9 @@
 
 namespace apxchol::detail {
 
+struct gpu_round_shadow_incidence;
+class gpu_round_shadow_device_state;
+
 /// Single-threaded producer. No method call, destruction, or consumption of a
 /// returned gpu_device_selection may overlap another operation on this object.
 /// The borrowed host spans and partition_result remain valid only until the
@@ -96,7 +99,24 @@ public:
                  std::span<const gpu_topology_edge> new_edges,
                  std::span<const gpu_topology_batch> new_edge_batches = {});
 
+    /// Internal audit counters exclude initial construction and scalar downloads.
+    struct transfer_stats {
+        std::size_t host_update_bytes = 0;
+        std::size_t resident_advances = 0;
+        // Conservative extra peak from any CUB scratch growth during projection.
+        std::size_t projection_scratch_peak_extra_bytes = 0;
+    };
+    transfer_stats transfers() const;
+
 private:
+    friend class gpu_round_shadow_device_state;
+    // Only an accepted, CPU-certified resident producer may supply these views.
+    // The caller binds its consumed selection identity/generations before entry;
+    // synchronous completion keeps the borrowed weighted state immutable/alive.
+    void advance_resident(const gpu_round_shadow_incidence* incidences,
+                          std::size_t directed_count,
+                          const std::uint8_t* active,
+                          const gpu_device_selection_content& expected);
     void reset() noexcept;
     struct impl;
     std::unique_ptr<impl> p_;

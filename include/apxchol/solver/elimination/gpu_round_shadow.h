@@ -1129,6 +1129,10 @@ public:
     gpu_round_shadow_report compute_resident(
         gpu_device_selection selected,
         std::uint64_t run_seed);
+    /// Project this accepted, CPU-certified weighted residual into the same
+    /// selector that supplied the consumed selection. No CPU ids/endpoints are
+    /// uploaded. This does not relax pending order/excess refresh requirements.
+    void advance_selector(gpu_block_frontend& frontend);
     /// Mark the current CUDA generation consumable after its independent audit
     /// passed. Passing any other generation fails closed.
     void accept_device_generation(std::uint64_t generation);
@@ -1436,6 +1440,12 @@ public:
     }
 
 #if defined(APXCHOL_USE_CUDA)
+    void advance_selector(gpu_block_frontend& frontend) {
+        if (!active_ || pending_ || !device_state_)
+            throw std::logic_error("GPU selector handoff requires a completed CPU audit");
+        device_state_->advance_selector(frontend);
+    }
+
     template<class Columns>
     std::shared_ptr<cuda_sptrsv_device_factor> finalize_fp32(
             const Columns& columns, std::span<const node_index> permutation,

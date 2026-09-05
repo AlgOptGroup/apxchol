@@ -1727,8 +1727,11 @@ factorization factorize_impl(const Eliminator& elim,
         }
 #if defined(APXCHOL_USE_CUDA)
         if (gpu_frontend) {
-            gpu_frontend->advance(part.data, ws.gpu_topology_updates,
-                                  ws.gpu_topology_batches);
+            if (gpu_round_shadow.active())
+                gpu_round_shadow.advance_selector(*gpu_frontend);
+            else
+                gpu_frontend->advance(part.data, ws.gpu_topology_updates,
+                                      ws.gpu_topology_batches);
             if (cp) (*cp)("gpu_frontend_advance");
         }
 #endif
