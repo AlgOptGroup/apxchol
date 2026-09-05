@@ -12,8 +12,11 @@
       "rows": 250000,
       "input_entries": 749000,
       "reference_iterations": 49,
-      "reference_rel_res": 8.07483e-9,
-      "accepted_iterations": [29, 89],
+      "reference_rel_res": 8.07483e-09,
+      "accepted_iterations": [
+        29,
+        89
+      ],
       "smoke": true
     },
     {
@@ -26,8 +29,11 @@
       "rows": 4000000,
       "input_entries": 11996000,
       "reference_iterations": 57,
-      "reference_rel_res": 8.86045e-9,
-      "accepted_iterations": [37, 97]
+      "reference_rel_res": 8.86045e-09,
+      "accepted_iterations": [
+        37,
+        97
+      ]
     },
     {
       "id": "grid3d_100",
@@ -39,8 +45,11 @@
       "rows": 1000000,
       "input_entries": 3970000,
       "reference_iterations": 34,
-      "reference_rel_res": 8.13052e-9,
-      "accepted_iterations": [14, 74]
+      "reference_rel_res": 8.13052e-09,
+      "accepted_iterations": [
+        14,
+        74
+      ]
     },
     {
       "id": "com-Amazon",
@@ -52,8 +61,11 @@
       "rows": 334863,
       "input_entries": 925872,
       "reference_iterations": 32,
-      "reference_rel_res": 7.70415e-9,
-      "accepted_iterations": [12, 72]
+      "reference_rel_res": 7.70415e-09,
+      "accepted_iterations": [
+        12,
+        72
+      ]
     },
     {
       "id": "coAuthorsDBLP",
@@ -65,8 +77,11 @@
       "rows": 299067,
       "input_entries": 977676,
       "reference_iterations": 24,
-      "reference_rel_res": 5.00112e-9,
-      "accepted_iterations": [4, 64]
+      "reference_rel_res": 5.00112e-09,
+      "accepted_iterations": [
+        4,
+        64
+      ]
     },
     {
       "id": "com-Youtube",
@@ -78,8 +93,11 @@
       "rows": 1134890,
       "input_entries": 2987624,
       "reference_iterations": 20,
-      "reference_rel_res": 5.94683e-9,
-      "accepted_iterations": [1, 60]
+      "reference_rel_res": 5.94683e-09,
+      "accepted_iterations": [
+        1,
+        60
+      ]
     },
     {
       "id": "coPapersDBLP",
@@ -91,21 +109,28 @@
       "rows": 540486,
       "input_entries": 15245729,
       "reference_iterations": 26,
-      "reference_rel_res": 6.2343e-9,
-      "accepted_iterations": [6, 66]
+      "reference_rel_res": 6.2343e-09,
+      "accepted_iterations": [
+        6,
+        66
+      ]
     },
     {
       "id": "ecology1",
       "family": "suitesparse",
-      "mode": "graph",
+      "mode": "physics",
       "path": "/capstor/scratch/cscs/okulkov/apxchol/data/matrices/ecology1.mtx",
       "bytes": 52298793,
       "sha256": "0135990b04b925d6dda6a416106ac6b38138c6069734812e4465523279d174e7",
       "rows": 1000000,
       "input_entries": 2998000,
       "reference_iterations": 57,
-      "reference_rel_res": 8.67558e-9,
-      "accepted_iterations": [37, 97]
+      "reference_rel_res": 8.67558e-09,
+      "accepted_iterations": [
+        37,
+        97
+      ],
+      "input_note": "Preserve the declared Laplacian operator diagonal. ParAC graph adapter instead rebuilds its diagonal."
     },
     {
       "id": "parabolic_fem",
@@ -117,8 +142,11 @@
       "rows": 525825,
       "input_entries": 2100225,
       "reference_iterations": 47,
-      "reference_rel_res": 8.22642e-9,
-      "accepted_iterations": [27, 87]
+      "reference_rel_res": 8.22642e-09,
+      "accepted_iterations": [
+        27,
+        87
+      ]
     },
     {
       "id": "apache2",
@@ -130,8 +158,11 @@
       "rows": 715176,
       "input_entries": 2766523,
       "reference_iterations": 38,
-      "reference_rel_res": 9.48435e-9,
-      "accepted_iterations": [18, 78]
+      "reference_rel_res": 9.48435e-09,
+      "accepted_iterations": [
+        18,
+        78
+      ]
     },
     {
       "id": "G3_circuit",
@@ -143,8 +174,11 @@
       "rows": 1585478,
       "input_entries": 4623152,
       "reference_iterations": 61,
-      "reference_rel_res": 8.01026e-9,
-      "accepted_iterations": [41, 101]
+      "reference_rel_res": 8.01026e-09,
+      "accepted_iterations": [
+        41,
+        101
+      ]
     },
     {
       "id": "thermal2",
@@ -156,8 +190,11 @@
       "rows": 1228045,
       "input_entries": 4904179,
       "reference_iterations": 42,
-      "reference_rel_res": 7.66549e-9,
-      "accepted_iterations": [22, 82]
+      "reference_rel_res": 7.66549e-09,
+      "accepted_iterations": [
+        22,
+        82
+      ]
     },
     {
       "id": "iter0010",
@@ -169,8 +206,11 @@
       "rows": 524288,
       "input_entries": 4195843,
       "reference_iterations": 38,
-      "reference_rel_res": 7.01561e-9,
-      "accepted_iterations": [18, 78],
+      "reference_rel_res": 7.01561e-09,
+      "accepted_iterations": [
+        18,
+        78
+      ],
       "smoke": true
     },
     {
@@ -183,8 +223,11 @@
       "rows": 524288,
       "input_entries": 4195843,
       "reference_iterations": 52,
-      "reference_rel_res": 8.50699e-9,
-      "accepted_iterations": [32, 92]
+      "reference_rel_res": 8.50699e-09,
+      "accepted_iterations": [
+        32,
+        92
+      ]
     }
   ]
 }
