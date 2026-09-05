@@ -240,6 +240,21 @@ class CurrentChartCellTest(unittest.TestCase):
 
 
 class ThreadScalingStoreTest(unittest.TestCase):
+    def test_failed_no_csv_cell_does_not_abort_later_cells(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store), \
+             mock.patch.object(thread_scaling, "MATS", [("m", "audit", "", False, False)]), \
+             mock.patch.object(thread_scaling, "CPP", [("A", "solver", "cfg")]), \
+             mock.patch.object(thread_scaling, "INCLUDE_PARAC", False), \
+             mock.patch.object(thread_scaling, "THREADS", [1, 2]), \
+             mock.patch.object(thread_scaling, "run_cpp", side_effect=[
+                 ("failed", {"returncode": 1}), ("complete", {"total_s": 1.0})]), \
+             mock.patch.object(thread_scaling, "benchmark_openmp_provenance", return_value={}):
+            thread_scaling.sweep()
+            statuses = [json.loads(path.read_text())["status"]
+                        for path in sorted(pathlib.Path(store).glob("*.json"))]
+            self.assertEqual(statuses, ["failed", "complete"])
+
     def test_cell_key_includes_solver_configuration(self):
         self.assertNotEqual(
             thread_scaling._cell_tag("apxchol_v1", "bg+tree[vec_pool]"),

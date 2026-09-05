@@ -24,7 +24,7 @@ TOL = "1e-8"; THREADS = [1, 2, 4, 8, 16]; TIMEOUT = 900; REPS = 3
 WARMUP = 0
 DEVICE = "cpu"
 INCLUDE_PARAC = True
-SCALING_SCHEMA = 2
+SCALING_SCHEMA = 3
 
 # (mid, family, margs, reg, is2d)
 # reg=False everywhere: the current protocol runs the ORIGINAL singular Laplacians
@@ -52,7 +52,8 @@ COLORS = {"apxchol bg+tree": "#0b5394",
 # sh used the UNHARDENED subprocess.run (orphan-on-timeout bug); the common one
 # kills the whole process group.
 BOOST = boost_state()
-PROV = {"note": "thread-scaling sweep", "git_sha": git_sha(), "boost": BOOST}
+PROV = {"note": "thread-scaling sweep", "git_sha": git_sha(), "boost": BOOST,
+        "repeat": REPS, "warmup": WARMUP, "timing_protocol": "explicit-warmup-v1"}
 LOCKED = " — freq-locked 2.5 GHz (boost off)" if BOOST == "off" else ""
 
 # Toolchain per cell, and this sweep runs TWO binaries: ours (which reports its
@@ -92,6 +93,10 @@ def done(mid, solver, config, t):
         record = json.load(handle)
     if record.get("schema") != SCALING_SCHEMA:
         return False
+    provenance = record.get("provenance", {})
+    if any(provenance.get(key) != PROV.get(key) for key in
+           ("git_sha", "repeat", "warmup", "timing_protocol")):
+        return False
     status = record.get("status")
     if status == "timeout" and rc.timeout_cap(record) is None:
         return False
@@ -104,6 +109,7 @@ def _scaling_records():
     entries, _ = chart_cells.load_current_entries(
         CELLS,
         pattern="*.json",
+        include=lambda record: record.get("cell", {}).get("device", "cpu") == DEVICE,
         stale_policy="reject",
         source="thread_scaling render/export input",
     )
@@ -291,7 +297,7 @@ def sweep():
                     st, m = run_cpp(margs, solver, config, reg, t, mid)
                     prov = {**BUILD, **benchmark_openmp_provenance(t)}
                 emit(mid, fam, lab, solver, config, t, m, st, prov)
-                print(f"   {lab:16} t{t:<2} {st} total={m['total_s'] if m else '-'}", flush=True)
+                print(f"   {lab:16} t{t:<2} {st} total={m.get('total_s', '-') if m else '-'}", flush=True)
 
 
 def validate_cells():
@@ -413,7 +419,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--store", default=CELLS,
                         help="isolated scaling-cell directory")
-    parser.add_argument("--binary", default=BIN,
+    parser.add_argument("--binary", default=None,
                         help="benchmark executable to run")
     parser.add_argument("--out", default=f"{ROOT}/benchmarks/latest")
     parser.add_argument("--repeat", type=int, default=REPS)
@@ -461,7 +467,7 @@ if __name__ == "__main__":
         INCLUDE_PARAC = INCLUDE_PARAC and bool(selected & {"ParAC", "parac"})
         CPP = [x for x in CPP if x[0] in selected or x[1] in selected]
     CELLS = os.path.abspath(args.store)
-    BIN = os.path.abspath(args.binary)
+    BIN = os.path.abspath(args.binary or rc.BIN[DEVICE])
     REPS = args.repeat
     ONLY_SERIES = {value.strip() for value in args.only_series.split(",") if value.strip()}
     ONLY_MATRICES = {value.strip() for value in args.only_matrices.split(",") if value.strip()}
