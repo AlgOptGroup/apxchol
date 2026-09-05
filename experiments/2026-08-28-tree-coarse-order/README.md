@@ -1,7 +1,11 @@
 # Exact GKS neighbor-order crossover
 
-Status: **accepted at degree 512** after a strict Grace 36/72-core gate. The
-production change is one constant; no new sorter or runtime knob remains.
+Status: **retired 2026-09-05**. The measured 1.3%/1.4% total improvement at
+T=36/72 did not justify retaining a second ordering implementation and its
+degree crossover. Production again comparison-sorts every sampled clique. The
+independent inverse-CDF directory and its crossover were removed in the same
+cleanup, leaving one full-suffix exact lookup path. The historical acceptance
+evidence remains below for provenance.
 
 ## Mechanism
 

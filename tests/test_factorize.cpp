@@ -787,25 +787,7 @@ TYPED_TEST(SolveTest, DeterministicWithSameSeed) {
     auto r1 = this->solve_with(L, b);
     auto r2 = this->solve_with(L, b);
     EXPECT_EQ(r1.iterations, r2.iterations);
-#ifdef APXCHOL_USE_CUDA
-    // The GPU-resident PCG is bit-deterministic run to run: its SpMV, vector
-    // passes and reductions are our own kernels with fixed grids and fixed-
-    // order partial sums (pcg_cuda_kernels.h -- no floating-point atomics),
-    // and so is our dataflow SpTRSV backend (the AUTO choice). NOT on
-    // cuSPARSE SpSV (APXCHOL_GPU_SPTRSV=cusparse --
-    // only where the build opted in
-    // with APXCHOL_CUDA_WITH_CUSPARSE): its atomics wobble the residual ~1e-2
-    // relative (measured 2e-3 .. 4e-3 on this 8x8 grid) and the iteration
-    // count by ±1. Exact where the SpTRSV is ours; a 5e-2 relative gate on
-    // cuSPARSE (still catches any real seed/algorithm change, which moves the
-    // residual by orders of magnitude; the earlier 1e-3 gate flaked).
-    const int  be = apxchol::cuda_sptrsv::backend_from_env();
-    const bool maybe_cusparse = apxchol::cuda_sptrsv::cusparse_available() && be < 0;
-    if (maybe_cusparse) EXPECT_NEAR(r1.residual, r2.residual, 5e-2 * r1.residual);
-    else                EXPECT_DOUBLE_EQ(r1.residual, r2.residual);
-#else
     EXPECT_DOUBLE_EQ(r1.residual, r2.residual);
-#endif
 }
 
 // ── Performance / timing sanity (storage-independent) ─
@@ -1301,6 +1283,33 @@ TEST(ResidualSparsifyGate, UsesObservedTrafficAndHandoffYield) {
     EXPECT_FALSE(residual_sparsify_worthwhile(10000, 500, 0, 400.0));
 }
 
+TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting) {
+    const scoped_threads team(4);
+    const scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
+    constexpr apxchol::node_index n = 96;
+    apxchol::graph<apxchol::vec_pool_incidence> graph(n);
+    for (apxchol::node_index u = 0; u < n; ++u)
+        for (apxchol::node_index v = u + 1; v < n; ++v)
+            for (int duplicate = 0; duplicate < 4; ++duplicate)
+                graph.add_edge(u, v, 0.25 * (1 + (u + v + duplicate) % 7));
+    const auto L = apxchol::laplacian(graph);
+    const auto b = apxchol::generate_test_rhs(n);
+    apxchol::factor_options options;
+    options.parallel_residual_threshold = 5;
+    options.min_is_fraction = 0.5;
+    for (const char* setting : {"0", "1"}) {
+        SCOPED_TRACE(setting);
+        const scoped_environment sparsify("APXCHOL_RESIDUAL_SPARSIFY", setting);
+        apxchol::checkpoint timings;
+        auto factor = apxchol::factorize(graph, options, &timings);
+        EXPECT_EQ(timings.total("setup.sparsify_residual") > 0.0, *setting == '1')
+            << "fixture must exercise the residual sparsification gate";
+        apxchol::cpu_solver solver(L, std::move(factor));
+        const auto result = solver.solve(b, 1e-8, 500);
+        EXPECT_LT((L * result.x - b).norm() / b.norm(), 1e-8);
+    }
+}
+
 TEST(EliminationTeamSizing, UsesDegreeWorkAndProtectsSerialExecution) {
     using apxchol::detail::elimination_round_team_size;
     constexpr size_t max = std::numeric_limits<size_t>::max();
@@ -1519,29 +1528,64 @@ TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
 }
 
 #if defined(APXCHOL_USE_CUDA)
-TEST(GpuBlockFrontend, AutomaticPolicyUsesMeasuredThreadCrossover) {
+TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
+    for (const char* choice : {static_cast<const char*>(nullptr), "", "dataflow"}) {
+        const scoped_environment selected("APXCHOL_GPU_SPTRSV", choice);
+        for (const char* storage : {static_cast<const char*>(nullptr), "0", "1"}) {
+            const scoped_environment fp16("APXCHOL_SPTRSV_FP16", storage);
+            EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(),
+                      !storage || *storage == '1');
+            apxchol::sparse_csc factor;
+            factor.n_ = 1;
+            factor.outer_ = {0, 1};
+            factor.inner_ = {0};
+            factor.vals_ = {2.0f};
+            apxchol::cuda_sptrsv trsv;
+            ASSERT_NO_THROW(trsv.setup(factor, 1));
+            EXPECT_STREQ(trsv.backend_name(), "dataflow");
+            EXPECT_EQ(trsv.fp16(), !storage || *storage == '1');
+        }
+    }
+}
+
+TEST(GpuSptrsvConfiguration, RejectsUnknownAndRetiredBackendsBeforeSetup) {
+    for (const char* choice : {"cusparse", "auto", "levelset", "typo"}) {
+        const scoped_environment selected("APXCHOL_GPU_SPTRSV", choice);
+        apxchol::cuda_sptrsv trsv;
+        EXPECT_THROW(trsv.setup(apxchol::sparse_csc{}, 0),
+                     std::invalid_argument);
+    }
+}
+
+TEST(GpuBlockFrontend, RequiresExplicitOptIn) {
     using frontend = apxchol::detail::gpu_block_frontend;
-    const char* old = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
-    const bool had_old = old != nullptr;
-    const std::string saved = old ? old : "";
+    for (const char* value : {static_cast<const char*>(nullptr), "", "0", "off", "false"}) {
+        const scoped_environment mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
+        EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::disabled);
+    }
+    for (const char* value : {"1", "on", "force"}) {
+        const scoped_environment mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
+        EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::forced);
+    }
+    for (const char* value : {"auto", "typo", "2"}) {
+        const scoped_environment mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
+        EXPECT_THROW(frontend::configured_block_mode(), std::invalid_argument);
+    }
+}
 
-    unsetenv("APXCHOL_GPU_BLOCK_FRONTEND");
-    EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::automatic);
-    setenv("APXCHOL_GPU_BLOCK_FRONTEND", "auto", 1);
-    EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::automatic);
-    setenv("APXCHOL_GPU_BLOCK_FRONTEND", "force", 1);
-    EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::forced);
-    setenv("APXCHOL_GPU_BLOCK_FRONTEND", "0", 1);
-    EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::disabled);
-
-    EXPECT_FALSE(frontend::block_auto_enabled(0));
-    EXPECT_TRUE(frontend::block_auto_enabled(1));
-    EXPECT_TRUE(frontend::block_auto_enabled(8));
-    EXPECT_FALSE(frontend::block_auto_enabled(9));
-    EXPECT_FALSE(frontend::block_auto_enabled(72));
-
-    if (had_old) setenv("APXCHOL_GPU_BLOCK_FRONTEND", saved.c_str(), 1);
-    else unsetenv("APXCHOL_GPU_BLOCK_FRONTEND");
+TEST(GpuBlockFrontend, RejectsIncompatibleFactorizationBeforeDeviceProbe) {
+    const auto L = grid_laplacian(4, 4);
+    const scoped_environment enabled("APXCHOL_GPU_BLOCK_FRONTEND", "on");
+    apxchol::factor_options options;
+    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec, options),
+                 std::invalid_argument);
+    options.is_select = "priority_greedy";
+    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool, options),
+                 std::invalid_argument);
+    options.is_select = "block_greedy";
+    options.exact_clique_max_degree = 8;
+    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool, options),
+                 std::invalid_argument);
 }
 
 TEST(GpuBlockFrontend, TracksCandidatesAndDynamicUpdatesExactly) {

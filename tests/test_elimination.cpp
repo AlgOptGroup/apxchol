@@ -74,8 +74,12 @@ TEST(EliminatorBounds, BoundIsSafeForRandomInput) {
     }
 }
 
-TEST(TreeSampler, InverseCdfDirectoryMatchesIndependentFullSearch) {
-    for (const node_index degree : {node_index{512}, node_index{2049}}) {
+TEST(TreeSampler, MatchesIndependentExactReference) {
+    // Retain coverage around the removed degree-512 directory/radix and
+    // degree-2048 radix boundaries to guard the byte-identical cleanup.
+    for (const node_index degree : {
+            node_index{511}, node_index{512},
+            node_index{2047}, node_index{2048}, node_index{2049}}) {
         for (int shape = 0; shape < 3; ++shape) {
             std::vector<weighted_neighbor> input;
             input.reserve(degree);
@@ -110,46 +114,6 @@ TEST(TreeSampler, InverseCdfDirectoryMatchesIndependentFullSearch) {
                     EXPECT_EQ(actual[i].v, expected[i].v);
                     EXPECT_DOUBLE_EQ(actual[i].w, expected[i].w);
                 }
-            }
-        }
-    }
-}
-
-TEST(TreeSampler, AcceleratedCanonicalOrderMatchesComparator) {
-    const auto canonical_less = [](const auto& a, const auto& b) {
-        return a.weight != b.weight ? a.weight < b.weight
-                                    : a.vertex < b.vertex;
-    };
-    for (const node_index degree : {
-            node_index{511}, node_index{512},
-            node_index{1024}, node_index{2048},
-            node_index{4096}}) {
-        for (int shape = 0; shape < 4; ++shape) {
-            std::vector<weighted_neighbor> input;
-            input.reserve(degree);
-            for (node_index i = 0; i < degree; ++i) {
-                double weight = 1.0;
-                if (shape == 1)
-                    weight = 0.125 * static_cast<double>(1 + (i * 37) % 29);
-                else if (shape == 2 && i == 3)
-                    weight = 2.0;  // misses the spread probes intentionally
-                else if (shape == 3)
-                    weight = static_cast<double>(1 + (i % 7));
-                input.push_back({degree - 1 - i, weight});
-            }
-
-            auto expected = input;
-            std::sort(expected.begin(), expected.end(), canonical_less);
-            auto actual = input;
-            const bool accelerated = detail::radix_sort_neighbors(actual);
-            EXPECT_EQ(accelerated, degree >= 512);
-            if (!accelerated)
-                std::sort(actual.begin(), actual.end(), canonical_less);
-
-            ASSERT_EQ(actual.size(), expected.size());
-            for (size_t i = 0; i < expected.size(); ++i) {
-                EXPECT_EQ(actual[i].vertex, expected[i].vertex);
-                EXPECT_DOUBLE_EQ(actual[i].weight, expected[i].weight);
             }
         }
     }

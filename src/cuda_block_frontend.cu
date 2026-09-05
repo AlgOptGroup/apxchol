@@ -1000,30 +1000,16 @@ struct gpu_block_frontend::impl {
 
 gpu_block_frontend::mode gpu_block_frontend::configured_block_mode() {
     const char *e = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
-    if (!e || !*e || std::strcmp(e, "auto") == 0)
-        return mode::automatic;
+    if (!e || !*e) return mode::disabled;
     if (std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||
         std::strcmp(e, "false") == 0)
         return mode::disabled;
     if (std::strcmp(e, "1") == 0 || std::strcmp(e, "on") == 0 ||
         std::strcmp(e, "force") == 0)
         return mode::forced;
-    static std::atomic_flag warned = ATOMIC_FLAG_INIT;
-    if (!warned.test_and_set())
-        std::fprintf(
-            stderr,
-            "[apxchol] unknown APXCHOL_GPU_BLOCK_FRONTEND='%s'; expected "
-            "auto|0|off|1|on|force, disabling the GPU block-greedy front-end\n",
-            e);
-    return mode::disabled;
-}
-
-bool gpu_block_frontend::block_auto_enabled(int max_threads) noexcept {
-    // GH200 single-RHS gate, nine matrices, bracketed CPU/GPU/CPU: total-time
-    // geomean is 0.927x at T=8, 1.050x at T=16 and 1.201x at T=72. The
-    // governor follows that measured CPU-selector scaling crossover; unlike
-    // the rejected n >= 500k rule, it does not guess from graph size.
-    return max_threads > 0 && max_threads <= 8;
+    throw std::invalid_argument(
+        std::string("unknown APXCHOL_GPU_BLOCK_FRONTEND='") + e +
+        "'; expected 0|off|false|1|on|force");
 }
 
 gpu_block_frontend::runtime_probe

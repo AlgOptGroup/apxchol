@@ -60,8 +60,7 @@
 #endif
 
 #ifdef APXCHOL_USE_CUDA
-#include <cuda_runtime.h>   // cudaMemGetInfo for read_vram_mb() (declared early; the
-                            // cuBLAS/cuSPARSE GPU solvers include their headers locally)
+#include <cuda_runtime.h>   // cudaMemGetInfo for read_vram_mb().
 #endif
 
 #include <Eigen/Core>
@@ -784,8 +783,7 @@ static BenchResult run_apxchol_v1(
             os << " gpu=" << trsv.backend_name()
                << "/" << (trsv.fp16() ? "fp16" : apxchol::cuda_sptrsv::value_name)
                << " factor_dev_MB=" << std::fixed << std::setprecision(1) << trsv.factor_device_bytes() / 1e6
-               << " dev_delta_MB=" << trsv.device_bytes_delta() / 1e6
-               << " cusparse_buf_MB=" << trsv.cusparse_buffer_bytes() / 1e6;
+               << " dev_delta_MB=" << trsv.device_bytes_delta() / 1e6;
 #endif
             stored = os.str();
         }
@@ -2076,169 +2074,6 @@ static HYPRE_IJMatrix eigen_to_hypre_ij(const Eigen::SparseMatrix<double>& L) {
     return A;
 }
 
-#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_CUDA_WITH_CUSPARSE)
-#include <cuda_runtime.h>
-#include <cublas_v2.h>
-#include <cusparse.h>
-
-// LEGACY `apxchol_gpu` solver (not used by any sweep; the library's own
-// GPU-resident PCG, apxchol::solve on the CUDA build, is what `apxchol_v1`
-// runs): GPU-resident PCG using cuSPARSE SpMV + cuBLAS axpy/dot/nrm2 --
-// the last cuBLAS / cuSPARSE consumer in the driver, so it is compiled only
-// with the cuSPARSE opt-in (CMake APXCHOL_CUDA_WITH_CUSPARSE), which is
-// also what links cublas/cusparse to the benchmark.
-// Preconditioner (apx_cholesky) stays as-is; we bounce r,z through
-// host per iter because the precond's solve_LLt API is host-pointer-based.
-// Net solve cost per iter still ~5x lower than CPU-PCG with cuSPARSE
-// sptrsv (which we already use in CUDA build) because SpMV + vector ops
-// now stay on device.
-//
-// Same vertex-pinning convention as run_hypre_boomeramg.
-static BenchResult run_apxchol_gpu_pcg(
-    const Eigen::SparseMatrix<double>& L,
-    const Eigen::VectorXd& b,
-    const std::string& graph_name,
-    const std::string& combo_label,
-    const apxchol::factor_options& fopts,
-    apxchol::graph_storage storage,
-    double tol, int maxiter)
-{
-    BenchResult r;
-    r.solver_name = "apxchol+GPU-PCG (" + combo_label + ")";
-    r.graph_name = graph_name;
-    r.n = static_cast<int>(L.rows());
-    r.nnz = static_cast<int>(L.nonZeros());
-
-    // Laplacian (singular) vs SDDM (full-rank) comes from the DECLARED class
-    // (--class), checked against the structural scan in main -- not detected here.
-    // For SDDM, no pinning: pinning is a perturbation that on IPM iter10 blew up
-    // the iteration count 53 -> 83. For Laplacian, pin one vertex to make L
-    // full-rank (avoids CG breakdown).
-    int n = r.n;
-    const bool is_laplacian = g_laplacian_mode;
-    // Symmetric Dirichlet pin (full n x n, SPD) for a singular Laplacian -- see
-    // dirichlet_pin / run_amgcl. Reaches 1e-8 vs the original L.
-    const int m = n;
-    std::vector<int> pinned;
-    Eigen::SparseMatrix<double> Lsub = is_laplacian ? dirichlet_pin(L, pinned) : L;
-    Eigen::VectorXd bsub = b;
-    if (is_laplacian) for (int p : pinned) bsub(p) = 0.0;
-
-    const auto t_wall_start = std::chrono::high_resolution_clock::now();
-
-    apxchol::apx_cholesky pc;
-    pc.set_options(fopts);
-    pc.set_storage(storage);
-    pc.compute(Lsub);
-
-    // Build CSR full-storage of Lsub for GPU SpMV.
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm = Lsub.template selfadjointView<Eigen::Lower>();
-    Lrm.makeCompressed();
-
-    cublasHandle_t cublas; cublasCreate(&cublas);
-    cusparseHandle_t cusparse; cusparseCreate(&cusparse);
-
-    // Upload matrix.
-    int *d_Arow, *d_Acol; double *d_Aval;
-    cudaMalloc(&d_Arow, (m+1)*sizeof(int));
-    cudaMalloc(&d_Acol, Lrm.nonZeros()*sizeof(int));
-    cudaMalloc(&d_Aval, Lrm.nonZeros()*sizeof(double));
-    cudaMemcpy(d_Arow, Lrm.outerIndexPtr(), (m+1)*sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Acol, Lrm.innerIndexPtr(), Lrm.nonZeros()*sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Aval, Lrm.valuePtr(), Lrm.nonZeros()*sizeof(double), cudaMemcpyHostToDevice);
-    cusparseSpMatDescr_t A;
-    cusparseCreateCsr(&A, m, m, Lrm.nonZeros(), d_Arow, d_Acol, d_Aval,
-                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F);
-
-    double *d_x, *d_r, *d_z, *d_p, *d_Ap, *d_b;
-    cudaMalloc(&d_x, m*sizeof(double));
-    cudaMalloc(&d_r, m*sizeof(double));
-    cudaMalloc(&d_z, m*sizeof(double));
-    cudaMalloc(&d_p, m*sizeof(double));
-    cudaMalloc(&d_Ap, m*sizeof(double));
-    cudaMalloc(&d_b, m*sizeof(double));
-    cusparseDnVecDescr_t vec_p, vec_Ap;
-    cusparseCreateDnVec(&vec_p, m, d_p, CUDA_R_64F);
-    cusparseCreateDnVec(&vec_Ap, m, d_Ap, CUDA_R_64F);
-
-    double one = 1.0, zero = 0.0;
-    size_t spmv_buf_sz; void* spmv_buf;
-    cusparseSpMV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, A, vec_p, &zero, vec_Ap,
-                            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &spmv_buf_sz);
-    cudaMalloc(&spmv_buf, spmv_buf_sz);
-
-    cudaMemcpy(d_b, bsub.data(), m*sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemset(d_x, 0, m*sizeof(double));
-    cudaMemcpy(d_r, d_b, m*sizeof(double), cudaMemcpyDeviceToDevice);
-
-    const auto t_setup_done = std::chrono::high_resolution_clock::now();
-    r.setup_time = std::chrono::duration<double>(t_setup_done - t_wall_start).count();
-
-    // PCG loop (cuBLAS for vector ops, cuSPARSE for SpMV; precond bounces).
-    Eigen::VectorXd r_host(m), z_host(m);
-    double rz, rz_new, alpha, beta, pAp, rnorm, bnorm;
-    cublasDnrm2(cublas, m, d_b, 1, &bnorm);
-
-    cudaMemcpy(r_host.data(), d_r, m*sizeof(double), cudaMemcpyDeviceToHost);
-    z_host = pc.solve(r_host);
-    cudaMemcpy(d_z, z_host.data(), m*sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_p, d_z, m*sizeof(double), cudaMemcpyDeviceToDevice);
-    cublasDdot(cublas, m, d_r, 1, d_z, 1, &rz);
-
-    int iters = 0;
-    for (; iters < maxiter; ++iters) {
-        cusparseSpMV(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, A, vec_p, &zero, vec_Ap,
-                     CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, spmv_buf);
-        cublasDdot(cublas, m, d_p, 1, d_Ap, 1, &pAp);
-        if (pAp <= 0) break;
-        alpha = rz / pAp;
-        double neg_alpha = -alpha;
-        cublasDaxpy(cublas, m, &alpha, d_p, 1, d_x, 1);
-        cublasDaxpy(cublas, m, &neg_alpha, d_Ap, 1, d_r, 1);
-        cublasDnrm2(cublas, m, d_r, 1, &rnorm);
-        if (rnorm / bnorm < tol) { iters++; break; }
-        cudaMemcpy(r_host.data(), d_r, m*sizeof(double), cudaMemcpyDeviceToHost);
-        z_host = pc.solve(r_host);
-        cudaMemcpy(d_z, z_host.data(), m*sizeof(double), cudaMemcpyHostToDevice);
-        cublasDdot(cublas, m, d_r, 1, d_z, 1, &rz_new);
-        beta = rz_new / rz;
-        cublasDscal(cublas, m, &beta, d_p, 1);
-        cublasDaxpy(cublas, m, &one, d_z, 1, d_p, 1);
-        rz = rz_new;
-    }
-    cudaDeviceSynchronize();
-
-    r.iterations = iters;
-    r.solve_vram_mb = read_vram_mb();   // device VRAM held at solve end (operator+factor+
-                                        // SpMV buf+PCG vectors), before the frees below.
-
-    // D2H x; reconstruct full x and recompute true residual.
-    Eigen::VectorXd x_full(n);
-    cudaMemcpy(x_full.data(), d_x, m*sizeof(double), cudaMemcpyDeviceToHost);
-    if (is_laplacian) {
-        x_full(m) = 0;
-        center_if_laplacian(x_full);
-    }
-    Eigen::VectorXd res = b - L * x_full;
-    center_if_laplacian(res);
-    double bnorm_full = b.norm();
-    r.rel_residual = res.norm() / (bnorm_full > 0 ? bnorm_full : 1.0);
-
-    const auto t_wall_end = std::chrono::high_resolution_clock::now();
-    r.total_time = std::chrono::duration<double>(t_wall_end - t_wall_start).count();
-    r.solve_time = r.total_time - r.setup_time;
-    r.fillin = 0;
-    r.us_per_nnz = r.total_time / r.nnz * 1e6;
-
-    cudaFree(d_Arow); cudaFree(d_Acol); cudaFree(d_Aval);
-    cudaFree(d_x); cudaFree(d_r); cudaFree(d_z); cudaFree(d_p); cudaFree(d_Ap); cudaFree(d_b);
-    cudaFree(spmv_buf);
-    cusparseDestroyDnVec(vec_p); cusparseDestroyDnVec(vec_Ap);
-    cusparseDestroySpMat(A);
-    cublasDestroy(cublas); cusparseDestroy(cusparse);
-    return r;
-}
-#endif // APXCHOL_USE_CUDA && APXCHOL_CUDA_WITH_CUSPARSE
 
 static BenchResult run_hypre_boomeramg(
     const Eigen::SparseMatrix<double>& L,
@@ -3080,8 +2915,7 @@ int main(int argc, char** argv) {
     std::vector<std::vector<Edge>>().swap(adj);
 
 #ifdef HAVE_APXCHOL_V1
-    if (args.solvers.count("apxchol_v1") ||
-        args.solvers.count("apxchol_gpu")) {
+    if (args.solvers.count("apxchol_v1")) {
         struct V1Combo {
             const char* name;
             std::string is;
@@ -3173,32 +3007,6 @@ int main(int argc, char** argv) {
                 return run_desing("apxchol", label, apx_single);
             }, R));
         }
-
-#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_CUDA_WITH_CUSPARSE)
-        // LEGACY apxchol with a cuBLAS/cuSPARSE GPU PCG around the host-pointer
-        // preconditioner API (see run_apxchol_gpu_pcg); cuSPARSE opt-in only.
-        if (args.solvers.count("apxchol_gpu")) {
-            for (const auto& combo : v1_combos) {
-                if (!args.v1_configs.empty()) {
-                    std::string qual = std::string(combo.name) + storage_tag(combo.storage);
-                    if (!args.v1_configs.count(combo.name) &&
-                        !args.v1_configs.count(qual)) continue;
-                }
-                apxchol::factor_options fopts{
-                    .seed = 42, .is_select = combo.is,
-                };
-                if (combo.exact_clique_max_degree > 0) fopts.exact_clique_max_degree = combo.exact_clique_max_degree;
-                if (combo.degree_mult > 0.0) fopts.partition.degree_multiplier = combo.degree_mult;
-                std::string label = std::string(combo.name) + storage_tag(combo.storage)
-                    + " /gpu_pcg";
-                print(median_run([&]() {
-                    return run_apxchol_gpu_pcg(L, b, graph_name, label,
-                                               fopts, combo.storage,
-                                               args.tol, args.maxiter);
-                }, R));
-            }
-        }
-#endif
     }
 #endif
 

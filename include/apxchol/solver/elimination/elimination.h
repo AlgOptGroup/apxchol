@@ -67,9 +67,6 @@
 #include "apxchol/types.h"
 #include "apxchol/solver/factor_options.h"
 #include <algorithm>
-#include <array>
-#include <bit>
-#include <cmath>
 #include <concepts>
 #include <cstdint>
 #include <span>
@@ -154,81 +151,6 @@ callable_eliminator<std::decay_t<F>> as_eliminator(F&& fn) {
     return {std::forward<F>(fn)};
 }
 
-namespace detail {
-
-/// Reproduce the canonical (weight, vertex) order with a stable weight radix
-/// followed by a vertex sort inside each equal-weight run.  Comparison sort
-/// remains faster below the measured crossover; larger cliques repay the six
-/// linear passes of the exact 11-bit radix.
-inline bool radix_sort_neighbors(std::span<weighted_neighbor> values) {
-    constexpr size_t kMinDegree = 512;
-    if (values.size() < kMinDegree) return false;
-    bool all_equal = true;
-    for (const auto& value : values) {
-        if (!std::isfinite(value.weight) || value.weight < 0.0)
-            return false;
-        all_equal = all_equal && value.weight == values.front().weight;
-    }
-    if (all_equal) {
-        std::sort(values.begin(), values.end(),
-                  [](const auto& a, const auto& b) {
-                      return a.vertex < b.vertex;
-                  });
-        return true;
-    }
-
-    constexpr unsigned kBits = 11;
-    constexpr size_t kBuckets = size_t{1} << kBits;
-    constexpr std::uint64_t kMask = kBuckets - 1;
-    static thread_local std::vector<weighted_neighbor> scratch;
-    static thread_local std::array<size_t, kBuckets> counts;
-    scratch.resize(values.size());
-
-    auto pass = [&](std::span<const weighted_neighbor> source,
-                    std::span<weighted_neighbor> destination,
-                    unsigned shift) {
-        std::fill(counts.begin(), counts.end(), size_t{0});
-        auto key = [](const weighted_neighbor& value) -> std::uint64_t {
-            // Numeric order and IEEE bit order agree for finite nonnegative
-            // doubles. Normalize signed zero because the comparator treats
-            // both zero encodings as equal and then breaks the tie by vertex.
-            return value.weight == 0.0 ? 0
-                : std::bit_cast<std::uint64_t>(value.weight);
-        };
-        for (const auto& value : source)
-            ++counts[(key(value) >> shift) & kMask];
-        size_t offset = 0;
-        for (size_t& count : counts) {
-            const size_t next = offset + count;
-            count = offset;
-            offset = next;
-        }
-        for (const auto& value : source)
-            destination[counts[(key(value) >> shift) & kMask]++] = value;
-    };
-    for (unsigned shift = 0; shift < 64; shift += 2 * kBits) {
-        pass(values, scratch, shift);
-        pass(scratch, values, shift + kBits);
-    }
-    for (size_t first = 0; first < values.size();) {
-        size_t last = first + 1;
-        while (last < values.size() &&
-               values[last].weight == values[first].weight)
-            ++last;
-        if (last - first > 1) {
-            std::sort(values.begin() + static_cast<std::ptrdiff_t>(first),
-                      values.begin() + static_cast<std::ptrdiff_t>(last),
-                      [](const auto& a, const auto& b) {
-                          return a.vertex < b.vertex;
-                      });
-        }
-        first = last;
-    }
-    return true;
-}
-
-} // namespace detail
-
 /// Tree elimination: spanning tree of the clique (CliqueTreeSample).
 /// The built-in (and default) eliminator; configured from factor_options
 /// (exact_clique_max_degree).
@@ -292,13 +214,11 @@ struct tree_elimination {
         // Canonical order for the suffix sampler (see the header comment).
         // Vertex id breaks weight ties so the order — and therefore the
         // sampling — does not depend on the schedule-dependent arrival order.
-        if (!detail::radix_sort_neighbors(neighbors)) {
-            std::sort(neighbors.begin(), neighbors.end(),
-                      [](const auto& a, const auto& b) {
-                          return a.weight != b.weight ? a.weight < b.weight
-                                                      : a.vertex < b.vertex;
-                      });
-        }
+        std::sort(neighbors.begin(), neighbors.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.weight != b.weight ? a.weight < b.weight
+                                                  : a.vertex < b.vertex;
+                  });
 
         // Prefix sums of the sorted weights; per-thread reusable buffer.
         static thread_local std::vector<double> prefix;
@@ -308,55 +228,17 @@ struct tree_elimination {
             prefix[i] = prefix[i - 1] + neighbors[i].weight;
 
         random_stream rs{seed};
-        // A coarse inverse-CDF directory narrows each exact upper_bound to one
-        // cumulative-mass bucket. The final search and RNG are unchanged, so
-        // emitted edges remain byte-identical. Building the directory loses on
-        // small cliques; degree 512 is the conservative end-to-end validated
-        // cutoff on both x86-64 and Grace.
-        static thread_local std::vector<size_t> inverse_cdf;
-        constexpr size_t kDirectoryMinDegree = 512;
-        const bool use_buckets = d >= kDirectoryMinDegree &&
-                                 std::isfinite(prefix.back()) &&
-                                 prefix.back() > 0.0;
-        size_t bucket_count = 0;
-        double bucket_scale = 0.0;
-        if (use_buckets) {
-            bucket_count = std::min<size_t>(65'536, d / 8);
-            inverse_cdf.resize(bucket_count + 1);
-            bucket_scale = static_cast<double>(bucket_count) / prefix.back();
-            auto bucket_of = [&](double value) {
-                const double scaled = value * bucket_scale;
-                if (!(scaled > 0.0)) return size_t{0};
-                return std::min(bucket_count - 1,
-                                static_cast<size_t>(scaled));
-            };
-            size_t pos = 0;
-            inverse_cdf[0] = 0;
-            for (size_t bucket = 1; bucket < bucket_count; ++bucket) {
-                while (pos < d && bucket_of(prefix[pos]) < bucket) ++pos;
-                inverse_cdf[bucket] = pos;
-            }
-            inverse_cdf[bucket_count] = d;
-        }
         for (size_t i = 0; i + 1 < d; ++i) {
             const double suffix_sum = prefix.back() - prefix[i];
             if (suffix_sum <= 0.0) continue;
 
             const double r = rs.next_unit() * suffix_sum;
 
-            const double target = prefix[i] + r;
-            auto first = prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1;
-            auto last = prefix.end();
-            if (use_buckets) {
-                const double scaled = target * bucket_scale;
-                const size_t bucket = !(scaled > 0.0) ? 0 :
-                    std::min(bucket_count - 1, static_cast<size_t>(scaled));
-                first = prefix.begin() + static_cast<std::ptrdiff_t>(
-                    std::max(i + 1, inverse_cdf[bucket]));
-                last = prefix.begin() + static_cast<std::ptrdiff_t>(
-                    inverse_cdf[bucket + 1]);
-            }
-            auto it = std::upper_bound(first, last, target);
+            // Keep one exact lookup path at every degree: search the full
+            // remaining suffix of the cumulative weights.
+            auto it = std::upper_bound(
+                prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1,
+                prefix.end(), prefix[i] + r);
 
             size_t j = static_cast<size_t>(it - prefix.begin());
             if (j >= d) j = d - 1;

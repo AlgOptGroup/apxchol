@@ -10,8 +10,7 @@
 // DEVICE -- OFF on the CPU, ON on the GPU -- because the two have different
 // measured verdicts, see the backend headers). Before 2026-08-20 the CPU side
 // was a CMake cache variable, APXCHOL_SPTRSV_LOWPREC=OFF|FP16_SCALED, and the
-// GPU side a separate env, APXCHOL_GPU_SPTRSV_FP16; both are gone. The old
-// GPU name is still READ, as a deprecated alias with a one-shot stderr note.
+// GPU side a separate env, APXCHOL_GPU_SPTRSV_FP16; both are gone.
 //
 // The shape of the storage:
 //
@@ -54,7 +53,6 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <type_traits>
 #if defined(__F16C__)
@@ -66,25 +64,9 @@ namespace apxchol {
 /// THE fp16-storage switch, read by BOTH SpTRSV backends at every setup:
 /// APXCHOL_SPTRSV_FP16=0|1. Tri-state: -1 unset (each backend applies its own
 /// default -- OFF on the CPU, ON on the GPU), else 0/1.
-///
-/// APXCHOL_GPU_SPTRSV_FP16, the GPU-only name this replaced on 2026-08-20, is
-/// still read as a DEPRECATED alias when the new name is unset; setting it
-/// prints a one-shot stderr note. Note that, being an alias of the UNIFIED
-/// variable, it now governs the CPU backend too.
 inline int sptrsv_fp16_env_tristate() {
     if (const char* e = std::getenv("APXCHOL_SPTRSV_FP16"); e && *e)
         return std::atoi(e) != 0 ? 1 : 0;
-    if (const char* e = std::getenv("APXCHOL_GPU_SPTRSV_FP16"); e && *e) {
-        static const bool warned = [] {
-            std::fprintf(stderr,
-                "[apxchol] APXCHOL_GPU_SPTRSV_FP16 is DEPRECATED: the fp16 factor storage is one knob for both"
-                " devices now, APXCHOL_SPTRSV_FP16=0|1 (unset = on for the GPU, off for the CPU). Reading the"
-                " old name as an alias -- which means it governs the CPU SpTRSV as well.\n");
-            return true;
-        }();
-        (void)warned;
-        return std::atoi(e) != 0 ? 1 : 0;
-    }
     return -1;
 }
 

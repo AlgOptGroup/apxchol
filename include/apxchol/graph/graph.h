@@ -576,50 +576,8 @@ private:
         return result;
     }
 
-    /// Estimate active multiedge / endpoint-pair ratio from evenly spaced
-    /// active vertices. This cheap guard avoids rebuilding low-duplication
-    /// residuals merely to discover that compaction cannot repay its pass.
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
-    double estimate_active_duplicate_ratio(
-        std::span<const node_index> active,
-        std::size_t sample_vertices = 256) const {
-        const std::size_t samples =
-            std::min(sample_vertices, active.size());
-        if (samples == 0) return 1.0;
-        unsigned long long multi_total = 0;
-        unsigned long long distinct_total = 0;
-        #pragma omp parallel reduction(+:multi_total, distinct_total)
-        {
-            std::vector<node_index> targets;
-            #pragma omp for schedule(static)
-            for (std::size_t s = 0; s < samples; ++s) {
-                const node_index u = active[s * active.size() / samples];
-                targets.clear();
-                unsigned long long local_multi = 0;
-                for (const auto& idx : adj_[u]) {
-                    const node_index v = edge_target(idx, u);
-                    if (!is_active(v)) continue;
-                    targets.push_back(v);
-                    local_multi += edge_multiplicity(idx);
-                }
-                std::ranges::sort(targets);
-                const auto unique_end = std::ranges::unique(targets).begin();
-                multi_total += local_multi;
-                distinct_total +=
-                    static_cast<unsigned long long>(unique_end - targets.begin());
-            }
-        }
-        return distinct_total
-            ? static_cast<double>(multi_total) / distinct_total
-            : 1.0;
-    }
-
-    /// Rebuild the active vec_pool residual with one physical edge per
-    /// endpoint pair. The multiplicity sidecar keeps prune_and_degree()
-    /// exactly faithful to the old multigraph while process_vertex() sees the
-    /// same summed numerical weight. This is a one-shot late-residual rebuild,
-    /// not a dynamic pair map.
+    /// Coalesce endpoint pairs before sparsification. The sidecar preserves
+    /// their represented multigraph degree while numerical weights are summed.
     template<typename I = Incidence>
         requires std::same_as<I, vec_pool_incidence>
     coalesce_stats coalesce_active(std::span<const node_index> active) {
@@ -1248,12 +1206,6 @@ struct residual_coalescer {
                        std::span<const node_index> active,
                        std::size_t sample_vertices = 256) {
         return g.estimate_active_sparsify_sample(active, sample_vertices);
-    }
-
-    static double estimate(const graph<Incidence>& g,
-                           std::span<const node_index> active,
-                           std::size_t sample_vertices = 256) {
-        return g.estimate_active_duplicate_ratio(active, sample_vertices);
     }
 
     static auto rebuild(graph<Incidence>& g,

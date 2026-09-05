@@ -24,7 +24,7 @@
 //
 // Header-only, CUDA-free, OpenMP-parallel; templated on the offset / index /
 // value types so the CPU backend runs it on the factor's (edge_index,
-// node_index, factor_value_t) arrays and the GPU backend on its int32 cuSPARSE
+// node_index, factor_value_t) arrays and the GPU backend on its int32 dataflow
 // arrays -- the same code, so the two backends' compacted factors are
 // identical (tests/test_sptrsv_drop.cpp states that).
 #include "apxchol/types.h"

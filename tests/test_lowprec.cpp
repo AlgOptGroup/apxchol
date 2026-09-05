@@ -704,7 +704,7 @@ TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
     for (node_index j = 0; j < 3; ++j) { EXPECT_TRUE(std::isfinite(y[j])); EXPECT_TRUE(std::isfinite(z[j])); }
 }
 
-TEST(LowPrecFp16, TheEnvIsTheOnlySwitchAndTheRetiredGpuNameIsAnAlias) {
+TEST(LowPrecFp16, TheUnifiedEnvIsTheOnlyStorageSwitch) {
     sparse_csc L;
     L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
     auto storage_of = [&](const char* var, const char* value) {
@@ -718,10 +718,10 @@ TEST(LowPrecFp16, TheEnvIsTheOnlySwitchAndTheRetiredGpuNameIsAnAlias) {
     EXPECT_FALSE(storage_of("APXCHOL_SPTRSV_FP16", nullptr));
     EXPECT_FALSE(storage_of("APXCHOL_SPTRSV_FP16", "0"));
     EXPECT_EQ(storage_of("APXCHOL_SPTRSV_FP16", "1"), fp16_available());
-    // The retired GPU-only name is read as an alias of the unified one.
-    EXPECT_EQ(storage_of("APXCHOL_GPU_SPTRSV_FP16", "1"), fp16_available());
+    // The retired GPU-only name no longer changes either backend.
+    EXPECT_FALSE(storage_of("APXCHOL_GPU_SPTRSV_FP16", "1"));
     EXPECT_FALSE(storage_of("APXCHOL_GPU_SPTRSV_FP16", "0"));
-    // The new name wins over the alias.
+    // A stale GPU-only variable cannot override the supported name.
     {
         scoped_env a("APXCHOL_SPTRSV_FP16", "0");
         scoped_env b("APXCHOL_GPU_SPTRSV_FP16", "1");

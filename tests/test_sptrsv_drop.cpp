@@ -1503,8 +1503,7 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
                 {
                     scoped_env be("APXCHOL_GPU_SPTRSV", "dataflow");
                     apxchol::cuda_sptrsv t; t.setup(L, m);
-                    ASSERT_TRUE(t.dataflow());
-                    EXPECT_STREQ(t.backend_name(), "dataflow");
+                    ASSERT_STREQ(t.backend_name(), "dataflow");
                     EXPECT_EQ(t.fp16(), fp16);
                     EXPECT_GE(t.dataflow_grid(), 1);
                     t.solve_LLt(x.data(), y_df.data());

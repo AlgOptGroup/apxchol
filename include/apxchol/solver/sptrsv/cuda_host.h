@@ -1,9 +1,9 @@
 #pragma once
 // HOST-side preparation of the GPU SpTRSV backend (cuda.h): everything
 // cuda_sptrsv::setup does to the factor BEFORE the upload -- the L11 extraction
-// into cuSPARSE's int32 arrays, the compacting factor drop (the shared
+// into the dataflow kernels' int32 arrays, the compacting factor drop (the shared
 // factor_drop.h implementation, the same one omp_sptrsv::setup runs), the
-// fp16 per-column-scaled narrowing of our kernel backends' opt-in fp16
+// fp16 per-column-scaled narrowing of the runtime fp16
 // storage (APXCHOL_SPTRSV_FP16=1), the CSR transpose (the shared
 // transpose.h implementation, the one omp_sptrsv::setup runs), the dataflow
 // schedules and the dataflow batch tables. Deliberately CUDA-FREE (no cuda_runtime.h, no __half: fp16
@@ -48,7 +48,7 @@
 namespace apxchol::cuda_host {
 
 /// An owning m x m CSR (or CSC -- the same three arrays) with int32 offsets
-/// and indices (cuSPARSE CUSPARSE_INDEX_32I) and Val values. idx / vals are
+/// and indices, as required by the dataflow kernels, and Val values. idx / vals are
 /// allocated uninitialized by the builders below (every slot written once).
 template <class Val>
 struct csr_int {
@@ -62,7 +62,7 @@ struct csr_int {
 /// L11 = top-left m x m block of the factor L as int CSC arrays (== CSR of
 /// L11^T). For the Laplacian case (m < n) entries in the grounded last row
 /// (n-1) are filtered out. Offsets are read as edge_index and emitted as int:
-/// a factor exceeding int32 cannot use cuSPARSE's 32-bit index API anyway.
+/// a factor exceeding int32 cannot use the dataflow kernels' index type.
 template <class Val>
 inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
     const edge_index* Lo = L.outerIndexPtr();
@@ -74,7 +74,7 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
         Lo[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
         throw std::runtime_error("apxchol cuda_sptrsv: the factor (m=" + std::to_string(m) + ", nnz=" +
                                  std::to_string(static_cast<unsigned long long>(Lo[m])) +
-                                 ") exceeds the GPU backend's 32-bit index range (cuSPARSE CUSPARSE_INDEX_32I)");
+                                 ") exceeds the dataflow GPU backend's 32-bit index range");
     out.m = static_cast<int>(m);
     out.ptr.assign(static_cast<std::size_t>(m) + 1, 0);
     if (m == n) {

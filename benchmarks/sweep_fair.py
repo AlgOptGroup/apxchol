@@ -289,9 +289,8 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
         BUILD.update(rc.parse_build_meta(p.stderr))   # what built the binary that just ran
         st,m = classify(rc.parse_csv(p.stdout))
         if m is None:
-            # No CSV row = crash. Distinguish OUT-OF-MEMORY (the giants: cuSPARSE SpSV
-            # OOMs ~8.8GB on Orkut; CPU bad_alloc / OOM-killer SIGKILL=-9/137) from a
-            # generic failure, so the charts can show "doesn't fit" apart from "broke".
+            # No CSV row = crash. Distinguish allocation failures across all
+            # solvers, including third-party CUDA libraries, from other errors.
             blob=((p.stdout or "")+(p.stderr or "")).lower()
             if (p.returncode in (-9,137) or any(s in blob for s in
                     ("out of memory","bad_alloc","cudaerrormemoryalloc","cuda_error_out_of_memory",
@@ -315,11 +314,6 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             OBSERVED[mid] = meta
         return st,m
     st,m = _run([])
-    # (The "retry with APXCHOL_GPU_SPTRSV=levelset after an OOM" fallback that used
-    # to sit here went with the level-set backend on 2026-08-20. It existed because
-    # AUTO used to be cuSPARSE, whose O(nnz) SpSV analysis buffer OOMs the giants;
-    # AUTO has been our O(n)-state dataflow kernel since 2026-08-18, so there is
-    # nothing to fall back FROM.)
     return st,m
 
 def run_julia(mtx, solver, cls, timeout=TIMEOUT):

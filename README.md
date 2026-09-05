@@ -101,8 +101,23 @@ Common CMake options:
 
 `cmake -LH build` lists every option. The default CUDA triangular solve is the
 project's persistent dataflow kernel; the core CUDA library links only
-`cudart`. cuSPARSE SpSV is an opt-in comparison backend through
-`APXCHOL_CUDA_WITH_CUSPARSE=ON`.
+`cudart`. The former cuSPARSE SpSV comparison backend and
+`APXCHOL_CUDA_WITH_CUSPARSE` build option have been removed.
+
+`APXCHOL_GPU_SPTRSV=dataflow` remains accepted for compatibility; other
+nonempty values, including `cusparse`, `auto` and `levelset`, fail at setup.
+`APXCHOL_SPTRSV_FP16=0|1` controls factor storage (unset = on for GPU, off
+for CPU). The deprecated GPU-only alias is no longer read.
+
+Factor setup uses the CPU unless `APXCHOL_GPU_BLOCK_FRONTEND=1|on|force`
+explicitly enables the GPU block frontend. `0|off|false` disables it;
+`auto` and other invalid values fail. An enabled frontend requires the
+standard tree sampler, cooperative launch support and sufficient GPU memory.
+
+The standalone `APXCHOL_RESIDUAL_COALESCE` policy has been removed.
+`APXCHOL_RESIDUAL_SPARSIFY` keeps its existing behavior and still coalesces
+edges internally. Indexed-pool factors may change where the former
+standalone coalescing gate ran.
 
 Runtime controls and their numerical contracts are documented beside their
 implementations. The most common are `APXCHOL_SPTRSV_FP16`,

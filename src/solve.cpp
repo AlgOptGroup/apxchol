@@ -48,19 +48,10 @@ inline void print_sptrsv_banner_once() {
     static const bool printed = [] {
         if (!std::getenv("APXCHOL_VERBOSE")) return true;
 #if defined(APXCHOL_USE_CUDA)
-        // Runtime backend / storage modes of the GPU SpTRSV (env, resolved
-        // per setup by cuda_sptrsv; the banner is one-shot, so it reports the
-        // value at first solve): APXCHOL_GPU_SPTRSV=dataflow|cusparse
-        // (unset = AUTO: the dataflow backend) and its fp16 storage
-        // APXCHOL_SPTRSV_FP16=0|1 (unset = ON where the dataflow kernel
-        // resolves).
+        // Dataflow is the GPU backend; report the shared storage switch
+        // as it resolves at first solve (unset = fp16 on this device).
         const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_resolved();
-        const int  gpu_be   = apxchol::cuda_sptrsv::backend_from_env();
-        const bool gpu_cus  = apxchol::cuda_sptrsv::cusparse_available();
-        const char* backend = gpu_be > 0 ? "GPU/dataflow (APXCHOL_GPU_SPTRSV=dataflow)"
-                            : gpu_be < 0 ? "GPU/cuSPARSE (APXCHOL_GPU_SPTRSV=cusparse)"
-                            : gpu_cus ? "GPU/auto: dataflow (the default; APXCHOL_GPU_SPTRSV=cusparse overrides)"
-                                      : "GPU/auto: dataflow (the default; cuSPARSE not compiled in)";
+        const char* backend = "GPU/dataflow";
         const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_SPTRSV_FP16=0 opts out)"
                                        : apxchol::cuda_sptrsv::value_name;
         const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;
@@ -827,7 +818,6 @@ solve_result solve(const Eigen::SparseMatrix<double>& L,
         precond.set_storage(opts.storage);
         if (!std::getenv("APXCHOL_NO_CHECKPOINT"))
             precond.set_checkpoint(&res.timings);
-        // The GPU SpTRSV's AUTO backend decision (cuda.h: cuSPARSE unless its
         precond.compute(L);
         // Lumping (if any) happened inside compute(), on a private copy; the
         // GPU operator below is built from L itself.

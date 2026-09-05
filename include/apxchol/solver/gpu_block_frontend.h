@@ -5,12 +5,12 @@
 /// factor construction stay on the CPU.  The GPU owns an unweighted COO copy
 /// of the live residual topology, rebuilds CSR after each elimination round,
 /// applies the same degree cap as the CPU partitioners, and returns selected
-/// vertex ids in candidate order. The block-region selector is automatic
-/// through T=8.
+/// vertex ids in candidate order. Enable it explicitly with
+/// APXCHOL_GPU_BLOCK_FRONTEND=1|on|force (unset = disabled).
 ///
-/// The implementation lives in src/cuda_block_frontend.cu. At higher host
-/// thread counts, incompatible options, or a failed AUTO fitting probe, the
-/// CPU path has no topology capture or device-allocation overhead.
+/// The implementation lives in src/cuda_block_frontend.cu. The default CPU
+/// setup has no topology capture or device-allocation overhead. An explicit
+/// GPU request rejects incompatible options or an unsuccessful runtime probe.
 
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/factorize_workspace.h"
@@ -23,7 +23,7 @@ namespace apxchol::detail {
 
 class gpu_block_frontend {
 public:
-    enum class mode { disabled, automatic, forced };
+    enum class mode { disabled, forced };
 
     struct prepare_result {
         std::size_t candidate_count = 0;
@@ -38,12 +38,9 @@ public:
         std::size_t total_bytes = 0;
     };
 
-    /// Parse the GPU block-greedy policy. Unset and `auto` select
-    /// automatic mode; 0/off disable it; 1/on/force bypass the governor.
+    /// Unset/empty and 0/off/false disable; 1/on/force enable. Other values
+    /// (including the removed auto policy) throw invalid_argument.
     static mode configured_block_mode();
-    /// CPU block-greedy overtakes the GPU selector beyond this measured
-    /// host-thread crossover. Kept pure so the policy is unit-testable.
-    static bool block_auto_enabled(int max_threads) noexcept;
     static runtime_probe probe_runtime(node_index n, std::size_t initial_edges);
 
     gpu_block_frontend(node_index n,

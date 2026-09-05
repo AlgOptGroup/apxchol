@@ -5,8 +5,7 @@
 // Device kernels of the GPU-resident PCG loop (pcg_cuda.h) -- OUR OWN CSR SpMV
 // and fused vector kernels with DETERMINISTIC reductions, replacing cuSPARSE
 // SpMV and the cuBLAS dot / nrm2 / axpy / scal the loop used to call, so the
-// CUDA library build links cudart only (the cuSPARSE SpSV backend of the
-// SpTRSV is a separate opt-in, CMake APXCHOL_CUDA_WITH_CUSPARSE). Defined in
+// CUDA library build links cudart only. Defined in
 // src/cuda_pcg_kernels.cu (nvcc; the .cpp TUs are host-compiled and cannot
 // host __global__), mirroring cuda_cast.cu / cuda_dataflow.cu.
 //

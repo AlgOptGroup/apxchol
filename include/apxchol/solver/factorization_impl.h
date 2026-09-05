@@ -1254,43 +1254,28 @@ factorization factorize_impl(const Eliminator& elim,
         is_vec_pool_incidence_v<Incidence> &&
         std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
     std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
-    detail::gpu_block_frontend::mode gpu_frontend_mode =
-        detail::gpu_block_frontend::mode::disabled;
-    if constexpr (gpu_block_frontend_eligible) {
-        gpu_frontend_mode =
-            detail::gpu_block_frontend::configured_block_mode();
-        const bool gpu_frontend_forced =
-            gpu_frontend_mode == detail::gpu_block_frontend::mode::forced;
-        if (gpu_frontend_mode ==
-                detail::gpu_block_frontend::mode::automatic &&
-            !detail::gpu_block_frontend::block_auto_enabled(
-                num_threads_factorize))
-            gpu_frontend_mode =
-                detail::gpu_block_frontend::mode::disabled;
-        if (gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled &&
-            opts.exact_clique_max_degree != 0) {
-            if (gpu_frontend_forced)
-                throw std::invalid_argument(
-                    "the forced GPU setup front-end requires the default "
-                    "d-1-edge tree sampler (exact clique mode can grow topology)");
-            gpu_frontend_mode = detail::gpu_block_frontend::mode::disabled;
-        }
+    const auto gpu_frontend_mode =
+        detail::gpu_block_frontend::configured_block_mode();
+    if constexpr (!gpu_block_frontend_eligible) {
+        if (gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled)
+            throw std::invalid_argument(
+                "the GPU setup front-end requires block_greedy, pooled "
+                "graph storage and the standard tree sampler");
+    } else {
         if (gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled) {
+            if (opts.exact_clique_max_degree != 0)
+                throw std::invalid_argument(
+                    "the GPU setup front-end requires the default "
+                    "d-1-edge tree sampler (exact clique mode can grow topology)");
             const auto runtime = detail::gpu_block_frontend::probe_runtime(
                 n, static_cast<std::size_t>(work.m()));
-            if (!runtime.cooperative_launch || !runtime.memory_fits) {
-                if (gpu_frontend_forced)
-                    throw std::runtime_error(
-                        !runtime.cooperative_launch
-                            ? "the forced GPU setup front-end requires a CUDA device "
-                              "with cooperative-kernel launch support"
-                            : "the forced GPU setup front-end does not fit in currently "
-                              "free device memory");
-                gpu_frontend_mode =
-                    detail::gpu_block_frontend::mode::disabled;
-            }
-        }
-        if (gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled) {
+            if (!runtime.cooperative_launch || !runtime.memory_fits)
+                throw std::runtime_error(
+                    !runtime.cooperative_launch
+                        ? "the GPU setup front-end requires a CUDA device "
+                          "with cooperative-kernel launch support"
+                        : "the GPU setup front-end does not fit in currently "
+                          "free device memory");
             if (cp) (*cp)("gpu_frontend_probe");
             std::vector<detail::gpu_topology_edge> initial_topology;
             initial_topology.reserve(static_cast<std::size_t>(work.m()));
@@ -1743,7 +1728,6 @@ factorization factorize_impl(const Eliminator& elim,
         !residual_sparsify_enabled_value ||
         !*residual_sparsify_enabled_value ||
         std::strcmp(residual_sparsify_enabled_value, "0") != 0;
-    bool auto_residual_sparsified = false;
     if constexpr (std::same_as<Incidence, vec_pool_incidence> ||
                   std::same_as<Incidence, directed_vec_pool_incidence>) {
         if (residual_sparsify_enabled && active.size() > residual_thresh &&
@@ -1769,7 +1753,6 @@ factorization factorize_impl(const Eliminator& elim,
                         work, active,
                         detail::kResidualSparsifyKeepProbability,
                         opts.seed ^ ws.round_index);
-                auto_residual_sparsified = true;
                 if (std::getenv("APXCHOL_VERBOSE"))
                     std::fprintf(stderr,
                         "[apxchol] residual sparsify: active=%zu p=%.2f "
@@ -1829,46 +1812,6 @@ factorization factorize_impl(const Eliminator& elim,
     // iter0040 and grids finish the main loop below the handoff, so they never
     // enter this path).
     //
-    // A heavily duplicated residual is rebuilt once before BK. This is exact
-    // with respect to the partitioner's multigraph degree: coalesce_active()
-    // stores each endpoint pair once but carries the represented edge count in
-    // a sidecar consumed by prune_and_degree(). The numerical pivot already
-    // aggregated those parallel weights in fp64, so only one fp32 store of the
-    // sum can perturb the later sampler. The conservative 256-vertex probe and
-    // ratio >= 4 gate are load-bearing: as-Skitter estimates 4.96-6.18 and its
-    // residual phase falls 185-192 -> 145-152 ms while graph heap falls about
-    // 720 -> 46-49 MB; com-LiveJournal estimates 1.20 and rebuilding it is a
-    // large regression; kron seed 42 estimates 3.91 and sits at break-even.
-    // APXCHOL_RESIDUAL_COALESCE=0 is the rollback.
-    if constexpr (std::is_same_v<Incidence, vec_pool_incidence>) {
-        const char* enabled_env =
-            std::getenv("APXCHOL_RESIDUAL_COALESCE");
-        const bool enabled = !enabled_env || !*enabled_env ||
-                             std::strcmp(enabled_env, "0") != 0;
-        constexpr size_t kMinActive = 1024;
-        constexpr double kMinDuplicateRatio = 4.0;
-        if (!auto_residual_sparsified && enabled &&
-            active.size() > residual_thresh &&
-            active.size() >= kMinActive) {
-            const double estimated_ratio =
-                detail::residual_coalescer<Incidence>::estimate(work, active);
-            if (estimated_ratio >= kMinDuplicateRatio) {
-                const auto stats =
-                    detail::residual_coalescer<Incidence>::rebuild(work, active);
-                if (std::getenv("APXCHOL_VERBOSE")) {
-                    std::fprintf(stderr,
-                                 "[apxchol] residual coalesce: active=%zu "
-                                 "estimate=%.3f edges=%zu->%zu graph=%.1f->%.1f MiB\n",
-                                 active.size(), estimated_ratio,
-                                 stats.multi_edges, stats.distinct_edges,
-                                 stats.bytes_before / 1048576.0,
-                                 stats.bytes_after / 1048576.0);
-                }
-                if (cp) (*cp)("coalesce_residual");
-            }
-        }
-    }
-
     if (active.size() > residual_thresh) {
         baumann_kyng_partitioner bk;
         // BK is sample-bounded here too, so an empty round means what it means

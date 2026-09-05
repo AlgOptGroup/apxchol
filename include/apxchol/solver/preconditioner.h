@@ -136,7 +136,7 @@ inline double det_sum(const double* v, Eigen::Index n, double* part) {
 ///
 /// Triangular solve backend selected at compile time:
 ///   - Default: OpenMP level-set parallel SpTRSV (CPU)
-///   - APXCHOL_USE_CUDA: cuSPARSE GPU-accelerated SpSV
+///   - APXCHOL_USE_CUDA: our persistent dataflow SpTRSV
 class apx_cholesky : public Eigen::SparseSolverBase<apx_cholesky> {
     using Base = Eigen::SparseSolverBase<apx_cholesky>;
 
@@ -232,7 +232,7 @@ private:
         // For Laplacians (rank n-1) the last row/col is unused.
         // For SDDM (full rank) we use the complete n×n factor.
         const node_index factor_dim = static_cast<node_index>(F_.sddm ? n_ : n_ - 1);
-        // sptrsv setup (level sets / cuSPARSE analysis) is a real ~900ms
+        // sptrsv setup (CPU schedules / GPU dataflow preparation) is a real ~900ms
         // cost on IPM-scale matrices. Track it as part of "setup" so the
         // bench's setup_time / solve_time split is honest.
         if (cp_) { cp_->descend("setup"); cp_->tick(); }

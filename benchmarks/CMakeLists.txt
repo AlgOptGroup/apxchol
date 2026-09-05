@@ -539,8 +539,7 @@ endif()
 if (APXCHOL_64BIT_NODE_INDICES)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_NODE_INDICES)
 endif()
-option(APXCHOL_USE_CUDA "GPU build of apxchol_v1: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG (own SpMV / vector kernels); links cudart only unless APXCHOL_CUDA_WITH_CUSPARSE" OFF)
-option(APXCHOL_CUDA_WITH_CUSPARSE "CUDA build only: also compile + link the cuSPARSE SpSV backend of the GPU SpTRSV (env APXCHOL_GPU_SPTRSV=cusparse) and the benchmark's legacy cuBLAS/cuSPARSE `apxchol_gpu` solver. OFF = apxchol_v1 links cudart alone (see the root CMakeLists.txt)" OFF)
+option(APXCHOL_USE_CUDA "GPU build of apxchol_v1: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG (own SpMV / vector kernels); links cudart only" OFF)
 option(APXCHOL_POOL_FP32 "Store residual-pool edge weights in fp32 (halves edges_; reads promote to fp64; multigraph terminal writes keep it safe). DEFAULT ON (measured -23% setup IPM / -6.5% social, neutral grids, convergence unchanged); -DAPXCHOL_POOL_FP32=OFF for fp64 baseline" ON)
 if (APXCHOL_POOL_FP32)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_POOL_FP32)
@@ -559,12 +558,8 @@ if (APXCHOL_USE_CUDA)
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_block_frontend.cu)
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels (pcg_cuda.h).
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_pcg_kernels.cu)
-    # cudart only; cuSPARSE (the opt-in SpSV backend) under APXCHOL_CUDA_WITH_CUSPARSE.
+    # Our library uses only cudart; competitor libraries are linked separately.
     target_link_libraries(apxchol_v1 PUBLIC CUDA::cudart)
-    if (APXCHOL_CUDA_WITH_CUSPARSE)
-        target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_CUDA_WITH_CUSPARSE)
-        target_link_libraries(apxchol_v1 PUBLIC CUDA::cusparse)
-    endif()
     # Pin the CUDA dialect to 20: the target's host features are cxx_std_23, but nvcc
     # (13.x) + recent CMake reject a "CUDA23" dialect, so the cuda_cast.cu sources must
     # compile as C++20 (same reason amgcl_cuda.cu/benchmark pin CUDA_STANDARD 20 below).
@@ -621,17 +616,9 @@ if (APXCHOL_USE_CUDA AND Boost_FOUND)
     set_target_properties(benchmark PROPERTIES
         CUDA_STANDARD 20
         CUDA_STANDARD_REQUIRED OFF)
-    # AMGCL's CUDA backend is cuSPARSE-based (thrust + cusparseSpMV): the one
-    # closed-source dependency the benchmark DRIVER keeps whenever AMGCL-CUDA
-    # is in (the apxchol library itself links cudart only).
+    # AMGCL uses cuSPARSE. This dependency belongs to the competitor driver;
+    # our apxchol library links cudart only.
     target_link_libraries(benchmark PRIVATE CUDA::cudart CUDA::cusparse)
-endif()
-# The benchmark's legacy `apxchol_gpu` solver (run_apxchol_gpu_pcg: a cuBLAS
-# axpy/dot/nrm2 + cuSPARSE SpMV PCG around the host-pointer preconditioner
-# API; not used by any sweep) is the only cuBLAS consumer left -- compiled
-# and linked only with the cuSPARSE opt-in.
-if (APXCHOL_USE_CUDA AND APXCHOL_CUDA_WITH_CUSPARSE)
-    target_link_libraries(benchmark PRIVATE CUDA::cudart CUDA::cusparse CUDA::cublas)
 endif()
 
 if (Boost_FOUND)

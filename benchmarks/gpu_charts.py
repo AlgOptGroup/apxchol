@@ -23,12 +23,9 @@ import chart_cells
 from runner_common import (APXCHOL_DEFAULT_CONFIG, mat_labels,
                            require_injective_labels, timeout_cap)
 
-# apxchol (GPU) = the GPU-RESIDENT PCG (cuda_pcg: all PCG vectors stay on device,
-# cuBLAS axpy/dot/nrm2 + cuSPARSE SpMV, precond via cuda_sptrsv::solve_LLt_dev). It
-# is 2-4.5x faster per iter than the host-PCG hybrid (measured RTX 4090, locked
-# clocks), so the hybrid is dropped. apxchol stays blue; competitors match the CPU
-# chart colours (BoomerAMG green, AMGCL brown, ParAC orange). Geometric MG is excluded
-# (geometric MG is structured-grid-only, not a general-matrix solver).
+# apxchol (GPU) uses our device-resident PCG vector/SpMV kernels and dataflow
+# SpTRSV. Competitor colours match the CPU charts. Geometric MG is excluded
+# because it is a structured-grid solver, not a general-matrix solver.
 
 # ── THE SERIES RULE (same as fair_charts) ────────────────────────────────────────
 # Every series is EXACTLY ONE (solver, configuration); no series is a per-cell

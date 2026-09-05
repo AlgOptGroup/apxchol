@@ -233,7 +233,7 @@ TEST(VecPoolGraph, CoalescePreservesWeightsMultiplicityAndActiveState) {
     EXPECT_EQ(G.prune_and_degree(3), 1u);
     EXPECT_DOUBLE_EQ(
         apxchol::detail::residual_coalescer<apxchol::vec_pool_incidence>::
-            estimate(G, active, active.size()),
+            sample(G, active, active.size()).duplicate_ratio,
         14.0 / 8.0);
 
     const auto stats =
@@ -269,7 +269,7 @@ TEST(VecPoolGraph, CoalescePreservesWeightsMultiplicityAndActiveState) {
     EXPECT_EQ(find_edge(1, 2), (std::pair{15.0, apxchol::node_index{3}}));
     EXPECT_DOUBLE_EQ(
         apxchol::detail::residual_coalescer<apxchol::vec_pool_incidence>::
-            estimate(G, active, active.size()),
+            sample(G, active, active.size()).duplicate_ratio,
         14.0 / 8.0);
 
     // Future sampled edges append with multiplicity one; the sidecar remains
