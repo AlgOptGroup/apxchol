@@ -58,7 +58,7 @@ def parse_driver(stdout, stderr):
 def classify(values, returncode, independent_residual=None):
     if values is None:
         return "oom" if returncode in (137, -9) else "failed"
-    if values["setup_flag"] == -1:
+    if values["setup_flag"] == -1 or (values["setup_flag"] == 2 and not values["hierarchy_valid"]):
         return "n/a"
     residuals = [values["rel_res"]]
     if independent_residual is not None:

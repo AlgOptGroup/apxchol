@@ -21,6 +21,9 @@ class NativeCmgOutput(unittest.TestCase):
         values = self.good()
         values['setup_flag'] = -1
         self.assertEqual(cmg.classify(values, 1), 'n/a')
+        values['setup_flag'] = 2
+        values['hierarchy_valid'] = 0
+        self.assertEqual(cmg.classify(values, 1), 'n/a')
 
     def test_inconsistent_timer_is_rejected(self):
         with self.assertRaises(ValueError):

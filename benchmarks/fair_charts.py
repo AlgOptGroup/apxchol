@@ -76,7 +76,7 @@ APX_SERIES = ["apxchol/bg", "apxchol/greedy", "apxchol/bk"]
 # selector spread is shown separately in the dedicated ablation figures.
 ORDER = [APX_DEFAULT] + [
          "RCHOL", "pRCHOL",
-         "BoomerAMG", "BoomerAMG/cut", "AMGCL", "CMG (MATLAB)†", "ParAC Graph", "ParAC Physics",
+         "BoomerAMG", "BoomerAMG/cut", "AMGCL", "CMG (MATLAB)†", "CMG (packed, serial)", "ParAC Graph", "ParAC Physics",
          "AC (Jl ref)†", "AC2 (Jl ref)†"]
 COLORS = {"apxchol/bg": "#0b5394",     # declared default = the darkest blue
           "apxchol/greedy": "#3d7ebf",
@@ -84,7 +84,7 @@ COLORS = {"apxchol/bg": "#0b5394",     # declared default = the darkest blue
           "RCHOL": "#d62728", "pRCHOL": "#ff9896",
           "BoomerAMG": "#2ca02c", "BoomerAMG/cut": "#74c476",  # cut = lighter green
           "AMGCL": "#8c564b",   # brown (matches thread_scaling)
-          "CMG (MATLAB)†": "#e377c2", "ParAC Graph": "#ff8c00", "ParAC Physics": "#e6550d",
+          "CMG (MATLAB)†": "#e377c2", "CMG (packed, serial)": "#ad3795", "ParAC Graph": "#ff8c00", "ParAC Physics": "#e6550d",
           "AC (Jl ref)†": "#7f7f7f", "AC2 (Jl ref)†": "#bcbd22"}
 
 # CMG runs as the canonical MATLAB CMG (Koutis' cmg-solver, MEX recompiled, in the
