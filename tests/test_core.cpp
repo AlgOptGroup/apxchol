@@ -2,12 +2,16 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <gtest/gtest.h>
 #include <map>
 #include <numeric>
 #include <random>
 #include <tuple>
 #include <vector>
+#ifdef __linux__
+#include <unistd.h>
+#endif
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -633,4 +637,39 @@ TEST(DirectedCscGraph, DerivedStorageKeepsTheGenericIncidenceContract) {
     static_assert(apxchol::incidence_storage<custom_directed>);
     static_assert(!apxchol::is_vec_pool_incidence_v<custom_directed>);
     expect_directed_csc_matches_general<custom_directed>(csc_edge_fixture());
+}
+
+TEST(SegmentedPool, SmallTouchDoesNotPopulateGiantSegmentPages) {
+#ifndef __linux__
+    GTEST_SKIP() << "Linux mapping residency contract";
+#else
+    constexpr std::size_t slots = std::size_t{1} << 27;
+    constexpr std::size_t bytes = slots * sizeof(std::uint64_t);
+    const long page = ::sysconf(_SC_PAGESIZE);
+    ASSERT_GT(page, 0);
+    apxchol::segmented_pool<std::uint64_t, slots> pool;
+    const std::size_t used = 3 * static_cast<std::size_t>(page);
+    ASSERT_EQ(pool.claim(used / sizeof(std::uint64_t)), 0u);
+    // Touch a complete PMD-aligned region when possible: an unaligned prefix
+    // alone can hide the unwanted huge-page fault even under the old policy.
+    const auto huge = apxchol::detail::lazy_pool_thp_bytes();
+    const auto address = reinterpret_cast<std::uintptr_t>(pool.ptr(0));
+    const auto offset = huge > 0 && huge <= bytes / 2
+        ? (huge - address % huge) % huge : 0;
+    if (offset) pool.claim(offset / sizeof(std::uint64_t));
+    std::memset(reinterpret_cast<char*>(pool.ptr(0)) + offset, 1, used);
+    std::vector<unsigned char> resident(bytes / page, 0);
+    ASSERT_EQ(::mincore(pool.ptr(0), bytes, resident.data()), 0);
+    const std::size_t present = std::count_if(
+        resident.begin(), resident.end(), [](unsigned char value) {
+            return (value & 1) != 0;
+        });
+    // Exactly three base pages were written. Small THPs remain permitted;
+    // allow two granules if the claim straddles their boundary. Large THPs
+    // must not populate hundreds of MiB of untouched reservation.
+    const auto maximum = apxchol::detail::lazy_pool_uses_thp()
+        ? std::max<std::size_t>(4, 2 * apxchol::detail::lazy_pool_thp_bytes() / page)
+        : std::size_t{4};
+    EXPECT_LE(present, maximum);
+#endif
 }

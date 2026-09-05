@@ -24,6 +24,7 @@
 #include <bit>
 #include <concepts>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <functional>
@@ -44,6 +45,30 @@ namespace detail {
     struct edge_visit {
         template<typename T> void operator()(const T&) const;
     };
+#ifdef __linux__
+    // Lazy reservations benefit from the measured 2 MiB THP granularity,
+    // but a 512 MiB PMD page can populate almost an entire unused segment.
+    // Only request the small, validated granularity; unknown geometry and
+    // larger THPs use base pages. This is a cached kernel property, not a
+    // matrix-size or architecture heuristic; the sysfs read happens only once.
+    inline std::size_t lazy_pool_thp_bytes() {
+        static const std::size_t bytes = [] {
+            auto* file = std::fopen(
+                "/sys/kernel/mm/transparent_hugepage/hpage_pmd_size", "r");
+            if (!file) return std::size_t{0};
+            unsigned long long value = 0;
+            const bool parsed = std::fscanf(file, "%llu", &value) == 1;
+            std::fclose(file);
+            return parsed && value <= std::numeric_limits<std::size_t>::max()
+                ? static_cast<std::size_t>(value) : std::size_t{0};
+        }();
+        return bytes;
+    }
+    inline bool lazy_pool_uses_thp() {
+        const auto bytes = lazy_pool_thp_bytes();
+        return bytes > 0 && bytes <= 2 * 1024 * 1024;
+    }
+#endif
 }
 
 /// Concept for incidence list storage backends.
@@ -331,7 +356,10 @@ private:
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (raw == MAP_FAILED)
             throw std::bad_alloc{};
-        madvise(raw, bytes, MADV_HUGEPAGE);
+        // Explicit NOHUGEPAGE also protects lazy capacity under THP=always.
+        // Fully sized factor buffers retain their separate allocator policy.
+        madvise(raw, bytes,
+                detail::lazy_pool_uses_thp() ? MADV_HUGEPAGE : MADV_NOHUGEPAGE);
         T* candidate = static_cast<T*>(raw);
         T* expected = nullptr;
         if (!segments_[i].compare_exchange_strong(expected, candidate, std::memory_order_release,

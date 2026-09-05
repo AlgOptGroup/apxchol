@@ -93,6 +93,12 @@ unless another change or unresolved failure justifies it.
   incidences by column ownership; upper incidences use canonical lower weights.
   Duplicate, uncompressed, one-triangle or unpaired stored patterns retain the
   general graph builder. No extra public builder or runtime knob is exposed.
+- Lazy segmented adjacency reservations request THPs only when the kernel's
+  reported PMD granularity is at most 2 MiB (cached once); larger or unknown
+  granularities use `MADV_NOHUGEPAGE`. This preserves the measured laptop
+  benefit while preventing Daint's 512 MiB first-touch inflation. Intermediate
+  geometries are not claimed performance-optimal. Fully sized factor/output
+  buffers retain their separate `big_alloc` policies; there is no runtime knob.
 - Pooled compaction must remain inside the factorizer's collective `omp single`:
   moving its decision to independently arriving workers can diverge barriers.
   Preserve factor-buffer lifetime through assembly and release transients at
