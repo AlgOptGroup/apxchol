@@ -46,6 +46,25 @@ include(GoogleTest)
 # properties if a specific test needs more.
 gtest_discover_tests(unit_tests PROPERTIES TIMEOUT 120
         ENVIRONMENT "OMP_NUM_THREADS=4")
+if (APXCHOL_USE_CUDA)
+    # Device-wide free-memory accounting also sees other GPU applications.
+    # Check this process's repeated finalizer allocations with the CUDA tool.
+    find_program(APXCHOL_COMPUTE_SANITIZER NAMES compute-sanitizer
+            HINTS "${CUDAToolkit_BIN_DIR}")
+    mark_as_advanced(APXCHOL_COMPUTE_SANITIZER)
+    if (APXCHOL_COMPUTE_SANITIZER)
+        add_test(NAME gpu_factor_finalize_leak_check
+                COMMAND "${CMAKE_COMMAND}"
+                "-DSANITIZER=${APXCHOL_COMPUTE_SANITIZER}"
+                "-DUNIT_TESTS=$<TARGET_FILE:unit_tests>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/run_gpu_factor_finalize_leak_check.cmake")
+        set_tests_properties(gpu_factor_finalize_leak_check PROPERTIES
+                TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4"
+                SKIP_REGULAR_EXPRESSION "APXCHOL_GPU_FINALIZER_LEAK_CHECK_SKIPPED")
+    else()
+        message(STATUS "Compute Sanitizer not found: GPU finalizer leak check is not registered")
+    endif()
+endif()
 
 # ── CLI-level tests ─────────────────────────────────
 # The Laplacian-vs-adjacency bug was in the CLI, not the core, so it gets

@@ -2695,13 +2695,12 @@ TEST(GpuFactorFinalize, InvalidCoveragePermutationAndCoordinatesFailClosed) {
       EXPECT_THROW(state.finalize_fp32(perm, 3, tail), std::invalid_argument); }
     // Failed read-only finalization must leave the audited prefix reusable.
     EXPECT_NO_THROW(state.finalize_fp32(perm, 3, tail));
-    cudaDeviceSynchronize();
-    std::size_t before = 0, after = 0, total = 0;
-    ASSERT_EQ(cudaMemGetInfo(&before, &total), cudaSuccess);
+    // The optional gpu_factor_finalize_leak_check CTest checks these repeated
+    // allocations with Compute Sanitizer. cudaMemGetInfo is device-wide and
+    // cannot distinguish our leaks from another process's allocations/frees.
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     for (int i = 0; i < 8; ++i) EXPECT_NO_THROW(state.finalize_fp32(perm, 3, tail));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    ASSERT_EQ(cudaMemGetInfo(&after, &total), cudaSuccess);
-    EXPECT_EQ(before, after);
 }
 
 TEST(GpuFactorFinalize, NormalPreconditionerInstallsAndReplacesResidentFactors) {

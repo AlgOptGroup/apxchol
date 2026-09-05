@@ -52,6 +52,15 @@ cannot establish GPU correctness. Do not run timing campaigns concurrently
 with builds or other laptop workloads. Stop repeating checks once they pass
 unless another change or unresolved failure justifies it.
 
+CUDA builds register `gpu_factor_finalize_leak_check` when `compute-sanitizer`
+is available. It runs the repeated-finalization fixture with process-local
+allocation/leak checking; run it with
+`ctest --test-dir build-cuda -R '^gpu_factor_finalize_leak_check$' --output-on-failure`.
+If the tool is absent, configuration reports that the check is not registered:
+the regular correctness tests then do not establish leak freedom. Do not use
+device-wide `cudaMemGetInfo` equality as a process-leak assertion, since other
+applications and concurrent tests can change it.
+
 ## Architecture and contracts
 
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
