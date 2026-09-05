@@ -101,6 +101,13 @@ unless another change or unresolved failure justifies it.
   metadata and host plans remain; do not call this fully resident setup or a
   measured speedup. Validate `GpuFactorFinalize.*`, `GpuRoundShadow*.*`,
   `GpuSptrsvAdoption*.*`, `GpuDataflow.*` and `GpuHostPrep.*` on a CUDA device.
+- The internal consuming finalizer also omits duplicate CPU prefix factor
+  entries: workers stream the same fp32 entry hashes for the mandatory shadow
+  comparison. Vertex/diagonal/count metadata and all CPU graph/RNG operations
+  remain. CPU tail entries are still allocated for finalizer upload; public,
+  custom and `keep_factor=true` paths retain their payloads. The assembly trace
+  reports requested/written/omitted factor-entry bytes, excluding monotonic
+  allocator chunk slack and metadata; these are not peak-RSS measurements.
 - Keep substantial mechanisms: compensated factor dropping, GPU long-row
   segmentation, critical-tail solving, incremental degrees, and connectivity
   preserving residual sparsification. Standalone residual coalescing policy

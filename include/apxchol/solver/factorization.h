@@ -211,6 +211,8 @@ struct factor_col {
     // Exact-size off-diagonal ranges come from one monotonic resource per
     // elimination thread. They remain valid until assembly and avoid both one
     // heap allocation per vertex and geometric append-buffer growth.
+    // An audited device prefix in an internal consuming solve may omit this
+    // payload (nullptr) while retaining entry_count and a streamed CPU digest.
     factor_entry* entries = nullptr;
     node_index entry_count = 0;
 };

@@ -503,12 +503,28 @@ void process_vertex(const Eliminator& elim,
     double sqrt_deg = std::sqrt(total_deg);
     col.vertex = v;
     col.diag = static_cast<factor_value_t>(sqrt_deg);
-    col.entries = static_cast<factor_entry*>(ws.factor_entries->allocate(
-        nbrs.size() * sizeof(factor_entry), alignof(factor_entry)));
-    for (const auto& [u, w] : nbrs) {
-        std::construct_at(col.entries + col.entry_count,
-            factor_entry{u, static_cast<factor_value_t>(w / sqrt_deg)});
-        ++col.entry_count;
+    if (ws.retain_factor_payload) {
+        col.entries = static_cast<factor_entry*>(ws.factor_entries->allocate(
+            nbrs.size() * sizeof(factor_entry), alignof(factor_entry)));
+        for (const auto& [u, w] : nbrs) {
+            std::construct_at(col.entries + col.entry_count,
+                factor_entry{u, static_cast<factor_value_t>(w / sqrt_deg)});
+            ++col.entry_count;
+        }
+    } else {
+        // The audited device log already owns this prefix. Compute the same
+        // fp32 values solely for the independent CPU digest, without allocating
+        // or constructing duplicate factor entries. Neighbor scratch, excess
+        // propagation and clique sampling below retain their existing order.
+        col.entry_count = static_cast<node_index>(nbrs.size());
+        for (const auto& [u, w] : nbrs) {
+            const auto value = static_cast<factor_value_t>(w / sqrt_deg);
+            const std::uint64_t hash = gpu_round_shadow_item_hash(
+                gpu_round_shadow_tags::factor_entry, v, u,
+                gpu_round_shadow_factor_bits(value));
+            ws.streamed_factor_entries[0] ^= hash;
+            ws.streamed_factor_entries[1] += hash;
+        }
     }
 
     // Propagate excess to neighbors (deferred for thread safety). Runs BEFORE
@@ -1211,6 +1227,9 @@ factorization factorize_impl(const Eliminator& elim,
     if (cp) (*cp)("graph_copy");
     auto gpu_round_shadow =
         detail::make_gpu_round_shadow_session<Eliminator, Incidence>(elim);
+    const bool finalize_on_device = detail::gpu_factor_finalize_requested();
+    const bool omit_shadow_factor_payload = !retain_host_factor &&
+        gpu_round_shadow.active() && finalize_on_device;
 
     if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
         if (opts.fs_filter_append) work.set_adj_filter_append(true);
@@ -1232,12 +1251,27 @@ factorization factorize_impl(const Eliminator& elim,
     factorize_workspace ws;
     {
         ws.threads.resize(num_threads_factorize);
-        for (auto& t : ws.threads)
+        for (auto& t : ws.threads) {
             t.factor_entries =
                 std::make_unique<std::pmr::monotonic_buffer_resource>();
+            t.retain_factor_payload = !omit_shadow_factor_payload;
+        }
     }
     std::vector<detail::factor_col> factor_cols;
     factor_cols.reserve(n);
+    auto verify_shadow_round = [&](std::size_t factor_base) {
+        if (!gpu_round_shadow.active()) return;
+        detail::gpu_round_shadow_digest streamed_entries;
+        if (omit_shadow_factor_payload) {
+            for (const auto& t : ws.threads) {
+                streamed_entries.xor_hash ^= t.streamed_factor_entries[0];
+                streamed_entries.sum_hash += t.streamed_factor_entries[1];
+            }
+        }
+        gpu_round_shadow.verify_cpu_round(
+            work, std::span<const detail::factor_col>(factor_cols).subspan(factor_base),
+            omit_shadow_factor_payload ? &streamed_entries : nullptr);
+    };
 
     constexpr bool sample_bounded = partitioner_sample_bounded_v<Partitioner>;
     constexpr size_t residual_handoff_default =
@@ -1678,12 +1712,7 @@ factorization factorize_impl(const Eliminator& elim,
                                     incremental_degree_active &&
                                             incremental_degree_ready
                                         ? &live_degrees : nullptr);
-        if (gpu_round_shadow.active()) {
-            gpu_round_shadow.verify_cpu_round(
-                work,
-                std::span<const detail::factor_col>(factor_cols).subspan(
-                    shadow_factor_base));
-        }
+        verify_shadow_round(shadow_factor_base);
         if (incremental_degree_active && incremental_degree_ready) {
             const std::size_t removed = ws.degree_removed_incidence;
             const std::size_t retired_dead =
@@ -1943,12 +1972,7 @@ factorization factorize_impl(const Eliminator& elim,
             detail::eliminate_partition(
                 elim, work, bk_part, factor_cols, ws, opts, cp,
                 /*capture_gpu_topology=*/false, bk.selected_degree_work());
-            if (gpu_round_shadow.active()) {
-                gpu_round_shadow.verify_cpu_round(
-                    work,
-                    std::span<const detail::factor_col>(factor_cols).subspan(
-                        cols_before_bk));
-            }
+            verify_shadow_round(cols_before_bk);
             if (cp) {
                 size_t bk_round_nnz = 0;
                 for (size_t ci = cols_before_bk; ci < factor_cols.size(); ++ci)
@@ -1972,6 +1996,9 @@ factorization factorize_impl(const Eliminator& elim,
             ++ws.round_index;
         }
     }
+    // The tail is not present in the audited device prefix and must still be
+    // materialized on the CPU for the finalizer's existing tail upload.
+    for (auto& t : ws.threads) t.retain_factor_payload = true;
     if (!active.empty()) {
         detail::eliminate_remaining(elim, work, active, factor_cols, ws, opts);
     }
@@ -2049,7 +2076,6 @@ factorization factorize_impl(const Eliminator& elim,
 
     bool build_host_values = true;
 #if defined(APXCHOL_USE_CUDA)
-    const bool finalize_on_device = detail::gpu_factor_finalize_requested();
     build_host_values = retain_host_factor || !finalize_on_device;
 #else
     (void)retain_host_factor;
@@ -2060,15 +2086,23 @@ factorization factorize_impl(const Eliminator& elim,
         result.research_device_factor = gpu_round_shadow.finalize_fp32(
             factor_cols, result.perm, result.sddm ? n : n - 1);
         if (cp) (*cp)("gpu_factor_finalize");
+        std::size_t payload_bytes = 0, omitted_payload_bytes = 0;
+        for (const auto& column : factor_cols) {
+            const std::size_t bytes = column.entry_count * sizeof(detail::factor_entry);
+            (column.entries ? payload_bytes : omitted_payload_bytes) += bytes;
+        }
         std::fprintf(stderr,
             "[gpu-factor-assembly] host_csc=%s host_csc_array_bytes=%zu "
-            "host_metadata_bytes=%zu raw_factor_nnz=%zu\n",
+            "host_metadata_bytes=%zu raw_factor_nnz=%zu "
+            "host_factor_entry_alloc_bytes=%zu host_factor_entry_write_bytes=%zu "
+            "host_factor_entry_omitted_bytes=%zu\n",
             build_host_values ? "retained" : "omitted",
             result.L.inner_.capacity() * sizeof(node_index) +
                 result.L.vals_.capacity() * sizeof(factor_value_t),
             result.perm.size() * sizeof(node_index) +
                 result.L.outer_.size() * sizeof(edge_index),
-            static_cast<std::size_t>(result.L.nonZeros()));
+            static_cast<std::size_t>(result.L.nonZeros()),
+            payload_bytes, payload_bytes, omitted_payload_bytes);
     }
 #endif
     // The per-column ranges and their monotonic resources are consumed: free

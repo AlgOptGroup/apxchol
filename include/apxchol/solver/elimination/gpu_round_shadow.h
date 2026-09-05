@@ -946,7 +946,8 @@ gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
         const gpu_round_shadow_report& expected,
         std::span<const gpu_round_shadow_excess_bound> excess_bounds,
         const graph<Incidence>& residual,
-        const FactorColumns& columns) {
+        const FactorColumns& columns,
+        const gpu_round_shadow_digest* streamed_entries = nullptr) {
     auto mismatch = [](const std::string& field) {
         throw std::runtime_error(
             "GPU round shadow/CPU mismatch: " + field);
@@ -966,6 +967,14 @@ gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
                 gpu_round_shadow_tags::factor_diag,
                 column.vertex, column.vertex,
                 gpu_round_shadow_factor_bits(column.diag)));
+        if (streamed_entries) {
+            if (column.entries != nullptr)
+                mismatch("streamed factor round contains materialized entries");
+            factor_entries += column.entry_count;
+            continue;
+        }
+        if (column.entry_count != 0 && column.entries == nullptr)
+            mismatch("factor entries missing without a streamed audit");
         for (std::size_t i = 0; i < column.entry_count; ++i) {
             const auto& entry = column.entries[i];
             gpu_round_shadow_digest_add(
@@ -976,6 +985,10 @@ gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
                     gpu_round_shadow_factor_bits(entry.value)));
             ++factor_entries;
         }
+    }
+    if (streamed_entries) {
+        factor.xor_hash ^= streamed_entries->xor_hash;
+        factor.sum_hash += streamed_entries->sum_hash;
     }
     if (factor != expected.factor) mismatch("factor digest");
     if (factor_entries != expected.factor_entries)
@@ -1281,7 +1294,8 @@ public:
 
     template<incidence_storage Incidence, class FactorColumns>
     void verify_cpu_round(const graph<Incidence>& residual,
-                          const FactorColumns& columns) {
+                          const FactorColumns& columns,
+                          const gpu_round_shadow_digest* streamed_entries = nullptr) {
         if (!active_) return;
         if (!pending_)
             throw std::logic_error(
@@ -1290,7 +1304,7 @@ public:
             pending_report_,
             std::span<const gpu_round_shadow_excess_bound>(
                 pending_excess_bounds_),
-            residual, columns);
+            residual, columns, streamed_entries);
 #if defined(APXCHOL_USE_CUDA)
         const auto cpu_state = fingerprint_gpu_round_shadow_input(
             make_gpu_round_shadow_input(

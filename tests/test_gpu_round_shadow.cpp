@@ -869,6 +869,64 @@ TEST(GpuRoundShadowReference,
 #endif
 }
 
+TEST(GpuRoundShadowReference, StreamedFactorAuditNeedsNoPayloadAllocation) {
+    scoped_omp_threads team(2);
+    const std::vector<undirected_edge> edges = {
+        {0, 2, 1.0}, {0, 2, 2.0}, {0, 3, 4.0}, {0, 4, 2.0},
+        {1, 2, 3.0}, {1, 3, 5.0}, {1, 5, 7.0},
+        {2, 4, 6.0}, {3, 5, 8.0}};
+    for (const std::vector<node_index>& pivots :
+         {std::vector<node_index>{0}, std::vector<node_index>{0, 1}}) {
+        SCOPED_TRACE(pivots.size());
+        apxchol::graph<apxchol::directed_vec_pool_incidence> graph(6);
+        for (const auto& e : edges) graph.add_edge(e.u, e.v, e.weight);
+        graph.excess(0) = 3.0;
+        const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, pivots, 42);
+        std::vector<gpu_round_shadow_excess_bound> bounds;
+        const auto expected = apxchol::detail::reference_gpu_round_shadow(input, &bounds);
+        apxchol::factorize_workspace ws;
+        ws.threads.resize(2);
+        for (auto& t : ws.threads) {
+            // Any factor payload allocation would throw, including the first
+            // upstream chunk request made by a monotonic resource.
+            t.factor_entries = std::make_unique<std::pmr::monotonic_buffer_resource>(
+                std::pmr::null_memory_resource());
+            t.retain_factor_payload = false;
+        }
+        apxchol::partition_result part;
+        part.data = pivots;
+        apxchol::factor_options opts;
+        opts.seed = 42;
+        opts.omp_threshold = 0;
+        std::vector<apxchol::detail::factor_col> columns;
+        ASSERT_NO_THROW(apxchol::detail::eliminate_partition(
+            apxchol::detail::tree_elimination{}, graph, part, columns,
+            ws, opts, nullptr, false, expected.gathered_incidences));
+        apxchol::detail::gpu_round_shadow_digest digest;
+        for (const auto& t : ws.threads) {
+            digest.xor_hash ^= t.streamed_factor_entries[0];
+            digest.sum_hash += t.streamed_factor_entries[1];
+        }
+        std::size_t entries = 0;
+        for (const auto& c : columns) {
+            EXPECT_EQ(c.entries, nullptr);
+            entries += c.entry_count;
+        }
+        EXPECT_EQ(entries, expected.factor_entries);
+        EXPECT_GT(entries, 0u);
+        EXPECT_NO_THROW(apxchol::detail::compare_gpu_round_shadow_with_cpu(
+            expected, bounds, graph, columns, &digest));
+        EXPECT_THROW(apxchol::detail::compare_gpu_round_shadow_with_cpu(
+            expected, bounds, graph, columns), std::runtime_error);
+        digest.xor_hash ^= 1;
+        EXPECT_THROW(apxchol::detail::compare_gpu_round_shadow_with_cpu(
+            expected, bounds, graph, columns, &digest), std::runtime_error);
+        ws.reset_for_round();
+        for (const auto& t : ws.threads)
+            EXPECT_EQ(t.streamed_factor_entries, (std::array<std::uint64_t, 2>{}));
+    }
+}
+
 TEST(GpuRoundShadowReference, ExcessBoundsNameOnlyCollidingAtomicTargets) {
     const std::vector<undirected_edge> edges = {
         {0, 2, 2.0}, {0, 3, 6.0},
@@ -2726,7 +2784,9 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         apxchol::checkpoint cp;
         apxchol::apx_cholesky consuming;
         consuming.set_checkpoint(&cp);
+        testing::internal::CaptureStderr();
         consuming.compute(A);
+        const std::string consuming_trace = testing::internal::GetCapturedStderr();
         ASSERT_TRUE(consuming.trsv().adopted_device_factor());
         const auto& F = consuming.factor();
         EXPECT_TRUE(F.L.vals_.empty()); EXPECT_TRUE(F.L.inner_.empty());
@@ -2735,6 +2795,10 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         EXPECT_EQ(F.L.nonZeros(), reference.L.nonZeros());
         EXPECT_EQ(cp.total("setup.assembly"), 0.0);
         EXPECT_GT(cp.total("setup.factor_metadata"), 0.0);
+        EXPECT_EQ(gpu_round_trace_size(consuming_trace, "host_factor_entry_alloc_bytes="), 0u);
+        EXPECT_EQ(gpu_round_trace_size(consuming_trace, "host_factor_entry_write_bytes="), 0u);
+        EXPECT_EQ(gpu_round_trace_size(consuming_trace, "host_factor_entry_omitted_bytes="),
+                  (reference.L.nonZeros() - n) * sizeof(apxchol::detail::factor_entry));
         Eigen::VectorXd b(n);
         for (int i = 0; i < n; ++i) b[i] = std::sin(i + 0.25);
         b.array() -= b.mean();
@@ -2773,5 +2837,54 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         const Eigen::VectorXd ordinary_result = ordinary.solve(b);
         EXPECT_EQ(std::memcmp(ordinary_result.data(), observed.data(), n * sizeof(double)), 0);
     }
+}
+
+TEST(GpuFactorFinalize, ConsumingPrefixOmissionRetainsTheCpuTailPayload) {
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "0");
+    scoped_omp_threads serial(1);
+    constexpr node_index n = 20;
+    auto factorize = [&](bool retain) {
+        apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
+        for (node_index v = 0; v < 4; ++v) graph.add_edge(v, (v + 1) % 4, 1.0);
+        for (node_index v = 4; v < n; ++v) graph.add_edge(v, v % 4, 1.0);
+        // One audited leaf round, then an explicitly empty selection sends
+        // the nontrivial four-cycle to the ordinary CPU tail.
+        auto partitioner = apxchol::as_partitioner(
+            [](auto&, std::span<const node_index> active,
+               const apxchol::partition_context&, apxchol::selection& out) {
+                for (auto v : active) if (v >= 4) out.add(v);
+            });
+        apxchol::factor_options opts;
+        opts.parallel_residual_threshold = n;
+        return apxchol::factorize_impl(apxchol::detail::tree_elimination{},
+            partitioner, std::move(graph), opts, nullptr, retain);
+    };
+    auto exported = factorize(true);
+    testing::internal::CaptureStderr();
+    auto consuming = factorize(false);
+    const std::string trace = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(consuming.perm, exported.perm);
+    EXPECT_EQ(consuming.L.outer_, exported.L.outer_);
+    const auto allocated = gpu_round_trace_size(trace, "host_factor_entry_alloc_bytes=");
+    const auto omitted = gpu_round_trace_size(trace, "host_factor_entry_omitted_bytes=");
+    EXPECT_GT(allocated, 0u);
+    EXPECT_EQ(omitted, 16 * sizeof(apxchol::detail::factor_entry));
+    EXPECT_EQ(allocated + omitted,
+              (exported.L.nonZeros() - n) * sizeof(apxchol::detail::factor_entry));
+    EXPECT_EQ(gpu_round_trace_size(trace, "host_factor_entry_write_bytes="), allocated);
+    apxchol::cuda_sptrsv upload, adopted;
+    upload.setup(exported.L, n - 1);
+    adopted.setup_adopting_device_factor_for_research(
+        std::move(*consuming.research_device_factor));
+    std::vector<double> b(n - 1), expected(n - 1), actual(n - 1);
+    for (node_index v = 0; v < n - 1; ++v) b[v] = std::cos(v + 0.25);
+    upload.solve_LLt(b.data(), expected.data());
+    adopted.solve_LLt(b.data(), actual.data());
+    EXPECT_EQ(actual, expected);
 }
 #endif

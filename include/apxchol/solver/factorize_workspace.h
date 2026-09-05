@@ -71,6 +71,11 @@ struct factorize_workspace {
         // The owning pointer is moved out before the rest of the workspace is
         // released, keeping the allocations alive through CSC assembly.
         std::unique_ptr<std::pmr::monotonic_buffer_resource> factor_entries;
+        // Only audited rounds of an internal consuming GPU finalization may
+        // omit this duplicate CPU payload. Keep the same per-entry audit hash
+        // in worker-local scalars; ordinary/exported factors retain entries.
+        bool retain_factor_payload = true;
+        std::array<std::uint64_t, 2> streamed_factor_entries{};
     };
     std::vector<per_thread> threads;
 
@@ -122,6 +127,7 @@ struct factorize_workspace {
             t.dedup_touched.clear();
             t.degree_decrement_unique = 0;
             t.degree_decrement_ms = 0.0;
+            t.streamed_factor_entries = {};
         }
     }
 };
