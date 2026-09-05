@@ -113,6 +113,8 @@ cells. Its generated core is serial; record actual affinity and effective
 threads separately. Preserve original-operator grading, independent returned
 solution checks, and the packed-port canonical exception documented in the
 benchmark README. Do not commit generated proprietary comparison sources.
+Tag logical-cell timeouts explicitly; a budget shared by calibration and
+repetitions is not a numerical lower bound on one setup+solve invocation.
 
 Report setup, solve, memory, and factor reuse separately. Evaluate the user's
 actual objective; a faster solve with slightly slower one-RHS total is a

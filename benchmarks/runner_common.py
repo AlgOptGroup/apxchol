@@ -696,7 +696,7 @@ def classify(m, tol):
 DEFAULT_TERMINAL = frozenset({"complete", "not_converged", "failed", "timeout", "oom"})
 
 def timeout_cap(cell):
-    """Return a persisted positive finite timeout cap, otherwise None."""
+    """Return a persisted per-solve lower-bound cap, otherwise None."""
     # A deadline spent across calibration/repetitions/verification is not a
     # lower bound on one setup+solve. Keep that deadline in the raw cell while
     # withholding it from charts that interpret this helper as T >= cap.

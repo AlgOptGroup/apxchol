@@ -55,9 +55,11 @@ Common file parsing and operator assembly happen before solver timers.
 - Hypre's process-wide initialization is charged once per reported Hypre row.
   ParAC reports one real median-total repetition after reusable Julia load/JIT
   warm-up; fields are not medianed independently.
-- A timeout cap covers one complete logical cell, including calibration and all
-  requested repetitions. A timed-out cell is a lower bound, never a fabricated
-  completed time.
+- A complete logical-cell deadline can include calibration and all requested
+  repetitions. Persist that scope: time spent on earlier repetitions is not a
+  lower bound on one setup+solve. Native CMG tags such deadlines `logical_cell`,
+  so charts show `T` without a numerical single-solve bound. Never fabricate a
+  completed time from a timeout.
 
 ### Series and status
 
