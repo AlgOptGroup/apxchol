@@ -54,6 +54,7 @@ LABELS = {
     ("hypre_boomeramg", "cut"): "BoomerAMG/cut",
     ("amgcl", ""): "AMGCL",
     ("cmg", ""): "CMG (MATLAB)†",
+    ("cmg_packed", "original-operator"): "CMG (packed, serial)",
     ("parac", ""): "ParAC Graph",
     ("parac_physics", ""): "ParAC Physics",
     ("ac", ""): "AC (Jl ref)†",

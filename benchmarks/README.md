@@ -93,10 +93,34 @@ PYTHONPATH=benchmarks python3 benchmarks/dev/audit_series_rule.py
 | ParAC graph / physics | upstream CPU/CUDA drivers plus the audited patch stack |
 | AC / AC2 | Laplacians.jl reference implementation and oversampled variant |
 | CMG | canonical MATLAB `cmg-solver`; cross-language wall time is caveated |
+| `cmg_packed/original-operator` | private generated CMG packed port; serial native core, unshifted operator |
 
 ParAC CPU requires MKL. On ARM64, RCHOL/pRCHOL use the labelled portable path,
-AC/AC2 use the official Julia build, and CMG is omitted because native Linux
-MATLAB is x86-64. The snapshot pages state the exact coverage boundary.
+AC/AC2 use the official Julia build. Canonical native Linux MATLAB is x86-64;
+the separately labelled CMG packed port runs on ARM without a MATLAB runtime.
+The snapshot pages state the exact historical coverage boundary.
+
+To opt into native CMG, build `benchmarks/cmg/native` with
+`CMG_GENERATED_DIR` pointing to the private recovered generated source,
+`FMM_SOURCE_DIR` to an existing fast_matrix_market checkout, and optionally
+`EIGEN_INCLUDE_DIR` to bundled Eigen headers. Set `APXCHOL_CMG_NATIVE_BIN` to
+the resulting absolute executable path. The ordinary CMG sweep step then
+writes `cmg_packed/original-operator` cells through `cmg_native_runner.py`.
+Generated source is deliberately not tracked or distributed with this adapter.
+
+The native series uses compatible `b=A*g` with NumPy PCG64 seed 42, normalized
+to unit norm, and records exact input/operator/RHS hashes. It applies no shift
+or pin. This shares the original-operator grading contract, but is not a
+bit-identical RHS to another language's RNG and is not canonical MATLAB CMG:
+the packed port has a documented valid terminal hierarchy where canonical
+shallow_water1 setup errors at `H{0}`. Its generated core is serial; requested
+CPU affinity and effective thread count 1 are recorded separately. Every
+returned solution is independently checked with SciPy before acceptance.
+Setup includes the one-based CSC adapter and hierarchy construction. The
+packed PCG call includes hierarchy destruction in solve time; it cannot be
+separated without changing generated implementation. Calibration and all
+retained runs share one persisted per-cell timeout. All retained repetitions
+must pass, and timing fields come from one median-total repetition.
 
 ## Build and run
 

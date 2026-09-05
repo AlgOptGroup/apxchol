@@ -106,6 +106,14 @@ solver-complete setup/solve boundaries and report CUDA initialization
 separately. Portable competitor implementations must retain their own
 provenance labels and stopping semantics.
 
+Native CMG is an opt-in external competitor: build `benchmarks/cmg/native`
+against the private generated source and set `APXCHOL_CMG_NATIVE_BIN`.
+The existing sweep writes separately labelled `cmg_packed/original-operator`
+cells. Its generated core is serial; record actual affinity and effective
+threads separately. Preserve original-operator grading, independent returned
+solution checks, and the packed-port canonical exception documented in the
+benchmark README. Do not commit generated proprietary comparison sources.
+
 Report setup, solve, memory, and factor reuse separately. Evaluate the user's
 actual objective; a faster solve with slightly slower one-RHS total is a
 tradeoff, not automatically a rejected improvement. Do not multiply isolated

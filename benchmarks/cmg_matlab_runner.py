@@ -96,6 +96,9 @@ def available():
 
     Probed ONCE by the sweep, so a machine without MATLAB says so in one loud
     line instead of failing 27 times or, worse, leaving 27 silent gaps."""
+    native = rc.external_path("APXCHOL_CMG_NATIVE_BIN", "CMG_NATIVE_BIN")
+    if native:
+        return (True, "") if os.path.isfile(native) and os.access(native, os.X_OK) else (False, f"native CMG binary is not executable: {native}")
     for val, what in ((MATLAB, "the MATLAB R2026a install tree "
                                "($APXCHOL_MATLAB_ROOT / paths_local.MATLAB)"),
                       (CMG_SOLVER, "the cmg-solver checkout "
@@ -140,6 +143,9 @@ def _run_matlab_cmg(mtx_basename, as_operator):
 
 
 def run_one(mid):
+    if rc.external_path("APXCHOL_CMG_NATIVE_BIN", "CMG_NATIVE_BIN"):
+        import cmg_native_runner
+        return cmg_native_runner.run_one(mid, THREADS)
     fam = rc.MATRICES[mid]["family"]
     if rc.cell_done(fam, mid, "cmg", "", THREADS, "cpu", terminal=TERMINAL):
         return "skip(done)"
