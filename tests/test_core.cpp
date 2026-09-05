@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <gtest/gtest.h>
@@ -532,4 +533,104 @@ TEST(Laplacian, PathGraph) {
     EXPECT_NEAR(L.coeff(1, 1), 2.0, 1e-15);
     EXPECT_NEAR(L.coeff(0, 1), -1.0, 1e-15);
     EXPECT_NEAR(L.coeff(0, 2), 0.0, 1e-15);
+}
+
+namespace {
+template<class Incidence = apxchol::directed_vec_pool_incidence>
+void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
+    const auto reference = apxchol::make_graph<
+        apxchol::graph<apxchol::vec_pool_incidence>>(L);
+    const auto candidate = apxchol::make_graph<apxchol::graph<Incidence>>(L);
+    ASSERT_EQ(reference.n(), candidate.n());
+    ASSERT_EQ(reference.m(), candidate.m());
+    for (apxchol::node_index v = 0; v < reference.n(); ++v) {
+        SCOPED_TRACE(v);
+        using item = std::pair<apxchol::node_index, double>;
+        std::vector<item> expected, actual;
+        for (auto e : reference.neighbors(v)) expected.emplace_back(e.to, e.w);
+        for (auto e : candidate.neighbors(v)) actual.emplace_back(e.to, e.w);
+        EXPECT_TRUE(std::is_sorted(actual.begin(), actual.end()));
+        std::sort(expected.begin(), expected.end());
+        ASSERT_EQ(expected.size(), actual.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_EQ(expected[i].first, actual[i].first);
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(expected[i].second),
+                      std::bit_cast<std::uint64_t>(actual[i].second));
+        }
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(reference.excess(v)),
+                  std::bit_cast<std::uint64_t>(candidate.excess(v)));
+    }
+}
+Eigen::SparseMatrix<double> csc_edge_fixture() {
+    // Straddle a float midpoint with an upper/lower difference below the
+    // accepted symmetry tolerance: blindly copying the upper value is wrong.
+    const double midpoint = 1.0 + std::ldexp(1.0, -24);
+    std::vector<Eigen::Triplet<double>> entries{
+        {0,0,5}, {1,1,5}, {2,2,5}, {3,3,5}, {4,4,2},
+        {1,0,-(midpoint+1e-12)}, {0,1,-(midpoint-1e-12)},
+        {2,0,-0.0}, {0,2,-0.0},
+        {3,1,-0.125}, {1,3,-0.125},
+        {3,2,-1e-20}, {2,3,-1e-20}};
+    Eigen::SparseMatrix<double> L(5,5);
+    L.setFromTriplets(entries.begin(), entries.end());
+    return L;
+}
+}
+
+TEST(DirectedCscGraph, FullColumnsKeepCanonicalWeightsZerosAndIsolatedVertices) {
+    const auto L = csc_edge_fixture();
+#ifdef _OPENMP
+    const int prior = omp_get_max_threads();
+    for (int t : {1, 4, 16}) {
+        omp_set_num_threads(t);
+        expect_directed_csc_matches_general(L);
+    }
+    omp_set_num_threads(prior);
+#else
+    expect_directed_csc_matches_general(L);
+#endif
+}
+
+TEST(DirectedCscGraph, OneTriangleAndBalancedUnpairedPatternUseGeneralPath) {
+    auto full = csc_edge_fixture();
+    Eigen::SparseMatrix<double> lower = full.triangularView<Eigen::Lower>();
+    expect_directed_csc_matches_general(lower);
+    std::vector<Eigen::Triplet<double>> entries{
+        {0,0,3}, {1,1,3}, {2,2,3}, {3,3,3},
+        {1,0,-1}, {3,2,-2}, {0,2,-1}, {2,3,-2}};
+    Eigen::SparseMatrix<double> asymmetric(4,4);
+    asymmetric.setFromTriplets(entries.begin(), entries.end());
+    expect_directed_csc_matches_general(asymmetric);
+}
+
+TEST(DirectedCscGraph, UncompressedAndDuplicateCoordinatesUseGeneralPath) {
+    auto L = csc_edge_fixture();
+    L.reserve(Eigen::VectorXi::Constant(5, 7));
+    ASSERT_FALSE(L.isCompressed());
+    expect_directed_csc_matches_general(L);
+    const int outer[]{0,3,6};
+    const int inner[]{0,1,1,0,0,1};
+    const double values[]{4,-2,-1,-1,-2,4};
+    const Eigen::Map<const Eigen::SparseMatrix<double>> mapped(
+        2,2,6,outer,inner,values);
+    Eigen::SparseMatrix<double> duplicate = mapped;
+    ASSERT_EQ(duplicate.nonZeros(), 6);
+    expect_directed_csc_matches_general(duplicate);
+}
+
+TEST(DirectedCscGraph, EmptyAndDiagonalOnlyInputs) {
+    Eigen::SparseMatrix<double> empty(0,0);
+    expect_directed_csc_matches_general(empty);
+    Eigen::SparseMatrix<double> diagonal(3,3);
+    diagonal.insert(0,0)=1;
+    diagonal.insert(2,2)=2;
+    diagonal.makeCompressed();
+    expect_directed_csc_matches_general(diagonal);
+}
+
+TEST(DirectedCscGraph, DerivedStorageKeepsTheGenericIncidenceContract) {
+    struct custom_directed : apxchol::directed_vec_pool_incidence {};
+    static_assert(apxchol::incidence_storage<custom_directed>);
+    static_assert(!apxchol::is_vec_pool_incidence_v<custom_directed>);
+    expect_directed_csc_matches_general<custom_directed>(csc_edge_fixture());
 }

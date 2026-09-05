@@ -8,6 +8,7 @@
 #include "apxchol/graph/graph.h"
 #include <Eigen/Sparse>
 #include <algorithm>
+#include <ranges>
 #include <vector>
 
 #ifdef _OPENMP
@@ -52,6 +53,80 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
     std::vector<double> diag(n, 0.0);
 
 #ifdef _OPENMP
+    // A full symmetric CSC already lists every incidence of a vertex in its
+    // column. Give that column one writer instead of atomically counting and
+    // appending both endpoints of each lower-triangle entry, then sorting.
+    // The general path below remains authoritative for uncompressed storage,
+    // duplicate indices, and one-triangle/asymmetric stored patterns.
+    bool built_from_columns = false;
+    if constexpr (G::stores_directed_incidence && is_vec_pool_incidence_v<Incidence>) {
+        if (L.isCompressed() && L.rows() == L.cols()) {
+            const int* ptr = L.outerIndexPtr();
+            const int* idx = L.innerIndexPtr();
+            const double* val = L.valuePtr();
+            std::vector<node_index> incoming(static_cast<size_t>(n), 0);
+            bool unique_sorted = true;
+            #pragma omp parallel for schedule(static) reduction(&& : unique_sorted)
+            for (node_index col = 0; col < n; ++col) {
+                node_index count = 0;
+                for (int p = ptr[col]; p < ptr[col + 1]; ++p) {
+                    if (p > ptr[col] && idx[p - 1] >= idx[p])
+                        unique_sorted = false;
+                    if (idx[p] == static_cast<int>(col)) diag[col] = val[p];
+                    else ++count;
+                }
+                incoming[col] = count;
+            }
+            if (unique_sorted) {
+                // Reserve in the same vertex order as the general builder.
+                // iota avoids another materialized O(n) touched-vertex list.
+                const auto vertices = std::views::iota(node_index{0}, n);
+                g.adj_bulk_reserve_parallel(
+                    vertices.begin(), vertices.end(), incoming);
+                edge_index lower = 0, upper = 0;
+                bool paired = true;
+                #pragma omp parallel for schedule(static) \
+                    reduction(+ : lower, upper) reduction(&& : paired)
+                for (node_index col = 0; col < n; ++col) {
+                    node_index offset = 0;
+                    for (int p = ptr[col]; p < ptr[col + 1]; ++p) {
+                        const int row = idx[p];
+                        if (row == static_cast<int>(col)) continue;
+                        double weight = -val[p];
+                        if (row < static_cast<int>(col)) {
+                            ++upper;
+                            const int* mate = std::lower_bound(
+                                idx + ptr[row], idx + ptr[row + 1],
+                                static_cast<int>(col));
+                            if (mate == idx + ptr[row + 1] ||
+                                *mate != static_cast<int>(col)) {
+                                paired = false;
+                            } else {
+                                // Like the general builder, both incidences
+                                // use the LOWER value, including tolerated
+                                // asymmetry, signed zero, and fp32 narrowing.
+                                weight = -val[mate - idx];
+                            }
+                        } else {
+                            ++lower;
+                        }
+                        g.adj_write_reserved_directed_at(
+                            col, offset++, static_cast<node_index>(row), weight);
+                    }
+                    g.adj_commit_reserved_directed(col, offset);
+                }
+                if (paired && upper == lower) {
+                    g.record_edges_added(lower);
+                    built_from_columns = true;
+                } else {
+                    // The speculative slabs have never escaped this call.
+                    // Rebuild from the lower triangle under the old contract.
+                    g = G(n);
+                }
+            }
+        }
+    }
+    if (!built_from_columns) {
     if constexpr (is_vec_pool_incidence_v<Incidence>) {
         // ── Parallel build for vec_pool — O(n + nt) memory ────────
         // incoming[] is one shared array of size n (atomic increments in
@@ -182,6 +257,10 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
                     diag[k] = it.value();
             }
     }
+
+#ifdef _OPENMP
+    } // !built_from_columns
+#endif
 
     // Phase 2: excess = diag − weighted degree.  Zero for pure Laplacians.
     //

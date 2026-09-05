@@ -89,6 +89,10 @@ unless another change or unresolved failure justifies it.
   segmentation, critical-tail solving, incremental degrees, and connectivity
   preserving residual sparsification. Standalone residual coalescing policy
   is retired; coalescing and multiplicity remain sparsification internals.
+- Full symmetric CSC inputs with unique sorted indices construct directed pool
+  incidences by column ownership; upper incidences use canonical lower weights.
+  Duplicate, uncompressed, one-triangle or unpaired stored patterns retain the
+  general graph builder. No extra public builder or runtime knob is exposed.
 - Pooled compaction must remain inside the factorizer's collective `omp single`:
   moving its decision to independently arriving workers can diverge barriers.
   Preserve factor-buffer lifetime through assembly and release transients at
