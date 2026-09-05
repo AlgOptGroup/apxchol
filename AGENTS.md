@@ -75,6 +75,11 @@ unless another change or unresolved failure justifies it.
   AUTO uses the structural critical-tail schedule when metadata permits;
   `levels` is the reference. Share row arithmetic across schedules and storage.
   Research schedules on other branches are not production modes.
+- CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
+  `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
+  writer threads perform the first touch. Pointer, diagonal, scale, and other
+  allocations retain the populated, value-initialized default. Require a full
+  overwrite before first read when using the output-buffer specialization.
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
   is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
   factor storage (GPU default on, CPU default off); the old GPU-only alias is

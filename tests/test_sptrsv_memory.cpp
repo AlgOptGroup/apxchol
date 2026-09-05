@@ -82,6 +82,23 @@ constexpr std::size_t MB = 1024 * 1024;
 
 } // namespace
 
+TEST(BigAlloc, OutputBufferSpecializationPreservesTheDefaultContract) {
+    using initialized_alloc = apxchol::util::big_alloc<std::uint32_t>;
+    using output_alloc =
+        apxchol::util::big_alloc<std::uint32_t, 32, false, false>;
+
+    std::vector<std::uint32_t, initialized_alloc> initialized(64);
+    EXPECT_TRUE(std::all_of(initialized.begin(), initialized.end(),
+                            [](std::uint32_t value) { return value == 0; }));
+
+    std::vector<std::uint32_t, output_alloc> output;
+    output.resize(64);
+    for (std::size_t i = 0; i < output.size(); ++i)
+        output[i] = static_cast<std::uint32_t>(3 * i + 1);
+    for (std::size_t i = 0; i < output.size(); ++i)
+        EXPECT_EQ(output[i], static_cast<std::uint32_t>(3 * i + 1));
+}
+
 // The Laplacian path (m = n-1) with the compacting drop active exercises every
 // setup transient: L11 copy -> drop copy (L11 freed) -> CSR + transpose bucket
 // -> CSC copy (drop copy freed) -> level sets.

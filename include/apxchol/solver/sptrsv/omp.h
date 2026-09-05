@@ -1634,31 +1634,39 @@ private:
     // bandwidth-bound IPM workloads.
     template<typename T>
     using big_vec = std::vector<T, util::big_alloc<T>>;
+    // Index/value output arrays are overwritten in full by the immediately
+    // following parallel transpose/copy. Leave their mmap pages lazy and do
+    // not value-initialize the elements: the writer threads then perform the
+    // first touch instead of setup paying two serial zero-fill passes
+    // (MADV_POPULATE_WRITE plus vector::resize value initialization).
+    template<typename T>
+    using big_output_vec =
+        std::vector<T, util::big_alloc<T, 32, false, false>>;
 
     // CSR of L11 (forward solve). row_ptr is an offset array (edge_index);
     // col_idx holds column ids (node_index). Exactly ONE of the two value
     // arrays is populated by a setup: the storage it resolved.
     big_vec<edge_index>     csr_row_ptr_;
-    big_vec<node_index>     csr_col_idx_;
-    big_vec<float>          csr_vals32_;
-    big_vec<fp16_t>         csr_vals16_;
+    big_output_vec<node_index> csr_col_idx_;
+    big_output_vec<float>      csr_vals32_;
+    big_output_vec<fp16_t>     csr_vals16_;
 
     // CSC of L11 (back solve). col_ptr is an offset array (edge_index);
     // row_idx holds row ids (node_index).
     big_vec<edge_index>     csc_col_ptr_;
-    big_vec<node_index>     csc_row_idx_;
-    big_vec<float>          csc_vals32_;
-    big_vec<fp16_t>         csc_vals16_;
+    big_output_vec<node_index> csc_row_idx_;
+    big_output_vec<float>      csc_vals32_;
+    big_output_vec<fp16_t>     csc_vals16_;
 
     // Storage-array selection by type, for the templated setup / kernels.
-    big_vec<float>&  vals_csr(std::type_identity<float>)  { return csr_vals32_; }
-    big_vec<fp16_t>& vals_csr(std::type_identity<fp16_t>) { return csr_vals16_; }
-    big_vec<float>&  vals_csc(std::type_identity<float>)  { return csc_vals32_; }
-    big_vec<fp16_t>& vals_csc(std::type_identity<fp16_t>) { return csc_vals16_; }
-    const big_vec<float>&  vals_csr(std::type_identity<float>)  const { return csr_vals32_; }
-    const big_vec<fp16_t>& vals_csr(std::type_identity<fp16_t>) const { return csr_vals16_; }
-    const big_vec<float>&  vals_csc(std::type_identity<float>)  const { return csc_vals32_; }
-    const big_vec<fp16_t>& vals_csc(std::type_identity<fp16_t>) const { return csc_vals16_; }
+    big_output_vec<float>&  vals_csr(std::type_identity<float>)  { return csr_vals32_; }
+    big_output_vec<fp16_t>& vals_csr(std::type_identity<fp16_t>) { return csr_vals16_; }
+    big_output_vec<float>&  vals_csc(std::type_identity<float>)  { return csc_vals32_; }
+    big_output_vec<fp16_t>& vals_csc(std::type_identity<fp16_t>) { return csc_vals16_; }
+    const big_output_vec<float>&  vals_csr(std::type_identity<float>)  const { return csr_vals32_; }
+    const big_output_vec<fp16_t>& vals_csr(std::type_identity<fp16_t>) const { return csr_vals16_; }
+    const big_output_vec<float>&  vals_csc(std::type_identity<float>)  const { return csc_vals32_; }
+    const big_output_vec<fp16_t>& vals_csc(std::type_identity<fp16_t>) const { return csc_vals16_; }
 
     // fp32 diagonal, i < m_ (the fp16 storage only; see the file header): the
     // scaled L(i,i) / s_i (one fp32 division, stored_diag()) plus the column's
@@ -1686,9 +1694,9 @@ private:
         static constexpr bool forward = true;
         // Forward: L~ y = x on the CSR (row i; diagonal slot LAST).
         static const big_vec<edge_index>& ptr (const omp_sptrsv& s) { return s.csr_row_ptr_; }
-        static const big_vec<node_index>& idx (const omp_sptrsv& s) { return s.csr_col_idx_; }
+        static const big_output_vec<node_index>& idx (const omp_sptrsv& s) { return s.csr_col_idx_; }
         template <class V>
-        static const big_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csr(std::type_identity<V>{}); }
+        static const big_output_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csr(std::type_identity<V>{}); }
         static const std::vector<std::vector<node_index>>& materialized_levels(
                 const omp_sptrsv& s) { return s.fwd_levels_; }
         static node_index serial_vertex(node_index k, node_index,
@@ -1707,9 +1715,9 @@ private:
         static constexpr bool forward = false;
         // Back: L~^T z = D^-2 y' on the CSC (column j; diagonal slot FIRST).
         static const big_vec<edge_index>& ptr (const omp_sptrsv& s) { return s.csc_col_ptr_; }
-        static const big_vec<node_index>& idx (const omp_sptrsv& s) { return s.csc_row_idx_; }
+        static const big_output_vec<node_index>& idx (const omp_sptrsv& s) { return s.csc_row_idx_; }
         template <class V>
-        static const big_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csc(std::type_identity<V>{}); }
+        static const big_output_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csc(std::type_identity<V>{}); }
         static const std::vector<std::vector<node_index>>& materialized_levels(
                 const omp_sptrsv& s) { return s.bck_levels_; }
         static node_index serial_vertex(node_index k, node_index m,

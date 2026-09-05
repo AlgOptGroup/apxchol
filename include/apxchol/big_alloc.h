@@ -9,7 +9,9 @@
 ///   - by default, madvise MADV_POPULATE_WRITE pre-faults all pages so there
 ///     are no per-page minor faults during use. The Populate=false allocator
 ///     variant leaves pages lazy for over-allocated containers whose unused
-///     capacity should not become resident.
+///     capacity should not become resident. ValueInitialize=false additionally
+///     skips scalar value initialization and is valid only for trivial output
+///     buffers that are overwritten in full before their first read.
 ///
 /// Effect: removes the per-page minor faults that std::vector value-init
 /// triggers during first touch. For 128 MB allocations with 4 KB pages this
@@ -21,6 +23,8 @@
 #include <cstdlib>
 #include <new>
 #include <sys/mman.h>
+#include <type_traits>
+#include <utility>
 
 // Linux 5.14 uapi constant; absent from older glibc headers (e.g. the
 // manylinux_2_28 wheel-build image, glibc 2.28). Define the raw value and let
@@ -38,17 +42,44 @@ inline std::size_t round_up(std::size_t n) {
     return (n + 4095) & ~std::size_t(4095);
 }
 
-template <typename T, std::size_t Align = 32, bool Populate = true>
+// ValueInitialize=false is for output buffers whose caller overwrites every
+// element before the first read. It starts the lifetime of trivial elements
+// without writing their representation, avoiding std::vector::resize's
+// otherwise mandatory value-initialization pass. Keep the default true: most
+// big_alloc users are ordinary containers and may rely on zero-initialization.
+template <typename T, std::size_t Align = 32, bool Populate = true,
+          bool ValueInitialize = true>
 class big_alloc {
 public:
     using value_type = T;
     template <class U> struct rebind {
-        using other = big_alloc<U, Align, Populate>;
+        using other = big_alloc<U, Align, Populate, ValueInitialize>;
     };
+
+    static_assert(ValueInitialize ||
+                  (std::is_trivially_default_constructible_v<T> &&
+                   std::is_trivially_destructible_v<T>),
+                  "uninitialized big_alloc requires a trivial value type");
 
     big_alloc() = default;
     template <class U>
-    big_alloc(const big_alloc<U, Align, Populate>&) noexcept {}
+    big_alloc(const big_alloc<U, Align, Populate, ValueInitialize>&) noexcept {}
+
+    template <class U>
+    void construct(U* p) {
+        static_assert(ValueInitialize ||
+                      std::is_trivially_default_constructible_v<U>);
+        if constexpr (ValueInitialize)
+            ::new (static_cast<void*>(p)) U();
+        else
+            ::new (static_cast<void*>(p)) U;
+    }
+
+    template <class U, class Arg, class... Args>
+    void construct(U* p, Arg&& arg, Args&&... args) {
+        ::new (static_cast<void*>(p))
+            U(std::forward<Arg>(arg), std::forward<Args>(args)...);
+    }
 
     [[nodiscard]] T* allocate(std::size_t n) {
         std::size_t padded = round_up(n * sizeof(T));

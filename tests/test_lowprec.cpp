@@ -246,7 +246,10 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
     scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
 
     scoped_drop_off drop_off;   // storage contract on the un-dropped factor
-    for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose */}) {
+    // Reuse output storage across growth and shrink as well as the serial
+    // and parallel transpose paths; every new factor must overwrite it.
+    apxchol::omp_sptrsv trsv;
+    for (node_index m : {node_index(3000), node_index(60000), node_index(2000)}) {
         SCOPED_TRACE("m=" + std::to_string(m));
         // Wide value range so FP16_SCALED sees ratios spanning many binades
         // (fp16 subnormals / flushes included).
@@ -257,7 +260,6 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
         for (node_index j = 0; j < m; ++j)
             ASSERT_EQ(apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]), s[j]);
 
-        apxchol::omp_sptrsv trsv;
         trsv.setup(L, m);
         ASSERT_EQ(trsv.csc_vals().size(), static_cast<size_t>(L.nonZeros()));
         std::uint64_t offdiag = 0;
@@ -616,14 +618,14 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
     if (!fp16_available()) GTEST_SKIP() << "build has no F16C: fp16 storage not compiled";
     scoped_drop_off drop_off;                              // storage contract on the un-dropped factor
     scoped_env fp16("APXCHOL_SPTRSV_FP16", "1");
-    for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose */}) {
+    apxchol::omp_sptrsv trsv;
+    for (node_index m : {node_index(3000), node_index(60000), node_index(2000)}) {
         SCOPED_TRACE("m=" + std::to_string(m));
         sparse_csc L = make_random_lower(m, 4.0, 77, -2.0, 2.0);
         for (edge_index p = 0; p < L.nonZeros(); ++p)
             if ((p % 7) == 3) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-7);
         const std::vector<float> s = reference_scales(L);
 
-        apxchol::omp_sptrsv trsv;
         trsv.setup(L, m);
         ASSERT_TRUE(trsv.fp16());
         EXPECT_EQ(trsv.value_bytes(), 2u);
