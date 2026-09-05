@@ -151,6 +151,25 @@ callable_eliminator<std::decay_t<F>> as_eliminator(F&& fn) {
     return {std::forward<F>(fn)};
 }
 
+namespace detail {
+
+// Exact upper_bound on one nondecreasing suffix. Preserve the comparator
+// target < middle (including rounded-equal CDF entries); express the next
+// offset and length as conditional selections.
+inline std::size_t suffix_upper_bound(std::span<const double> values,
+                                      double target) {
+    std::size_t first = 0, count = values.size();
+    while (count != 0) {
+        const std::size_t half = count / 2;
+        const bool right = !(target < values[first + half]);
+        first += static_cast<std::size_t>(right) * (half + 1);
+        count = right ? count - half - 1 : half;
+    }
+    return first;
+}
+
+} // namespace detail
+
 /// Tree elimination: spanning tree of the clique (CliqueTreeSample).
 /// The built-in (and default) eliminator; configured from factor_options
 /// (exact_clique_max_degree).
@@ -236,11 +255,8 @@ struct tree_elimination {
 
             // Keep one exact lookup path at every degree: search the full
             // remaining suffix of the cumulative weights.
-            auto it = std::upper_bound(
-                prefix.begin() + static_cast<std::ptrdiff_t>(i) + 1,
-                prefix.end(), prefix[i] + r);
-
-            size_t j = static_cast<size_t>(it - prefix.begin());
+            size_t j = i + 1 + detail::suffix_upper_bound(
+                std::span<const double>(prefix).subspan(i + 1), prefix[i] + r);
             if (j >= d) j = d - 1;
 
             out(neighbors[i].vertex, neighbors[j].vertex,

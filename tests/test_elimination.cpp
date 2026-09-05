@@ -2,8 +2,12 @@
 #include "apxchol/solver/elimination/elimination.h"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <random>
 #include <vector>
 
 using namespace apxchol;
@@ -14,6 +18,7 @@ std::vector<deferred_edge> reference_tree_sample(
         std::vector<weighted_neighbor> neighbors,
         double deg,
         std::uint64_t seed) {
+    if (neighbors.empty()) return {};
     std::sort(neighbors.begin(), neighbors.end(),
               [](const auto& a, const auto& b) {
                   return a.weight != b.weight ? a.weight < b.weight
@@ -78,6 +83,8 @@ TEST(TreeSampler, MatchesIndependentExactReference) {
     // Retain coverage around the removed degree-512 directory/radix and
     // degree-2048 radix boundaries to guard the byte-identical cleanup.
     for (const node_index degree : {
+            node_index{0}, node_index{1}, node_index{2}, node_index{3},
+            node_index{15}, node_index{16}, node_index{17},
             node_index{511}, node_index{512},
             node_index{2047}, node_index{2048}, node_index{2049}}) {
         for (int shape = 0; shape < 3; ++shape) {
@@ -112,8 +119,55 @@ TEST(TreeSampler, MatchesIndependentExactReference) {
                 for (size_t i = 0; i < expected.size(); ++i) {
                     EXPECT_EQ(actual[i].u, expected[i].u);
                     EXPECT_EQ(actual[i].v, expected[i].v);
-                    EXPECT_DOUBLE_EQ(actual[i].w, expected[i].w);
+                    EXPECT_EQ(std::bit_cast<std::uint64_t>(actual[i].w),
+                              std::bit_cast<std::uint64_t>(expected[i].w));
                 }
+            }
+        }
+    }
+}
+
+TEST(TreeSampler, SuffixUpperBoundPreservesExactBoundarySemantics) {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    for (const std::vector<double> cdf : {
+            std::vector<double>{}, {1.0}, {-0.0, 0.0, 0.0, 1.0},
+            {tiny, tiny, 2*tiny, 1.0}, {1.0, 1.0, 1.0, 2.0, 3.0},
+            {0x1p53, 0x1p53 + 1.0, 0x1p53 + 2.0, inf}}) {
+        std::vector<double> targets{-inf, -0.0, 0.0, 0.5, 1.0, inf,
+                                    std::numeric_limits<double>::quiet_NaN()};
+        for (double x : cdf) {
+            targets.push_back(x);
+            targets.push_back(std::nextafter(x, -inf));
+            targets.push_back(std::nextafter(x, inf));
+        }
+        for (std::size_t start=0; start<=cdf.size(); ++start) {
+            const auto suffix=std::span<const double>(cdf).subspan(start);
+            for (double target : targets) {
+                const auto expected=std::upper_bound(suffix.begin(), suffix.end(), target);
+                EXPECT_EQ(detail::suffix_upper_bound(suffix,target),
+                          static_cast<std::size_t>(expected-suffix.begin()));
+            }
+        }
+    }
+}
+
+TEST(TreeSampler, SuffixUpperBoundMatchesAllRandomizedSuffixes) {
+    std::mt19937_64 rng(42);
+    for (std::size_t size=0; size<=257; ++size) {
+        std::vector<double> cdf(size);
+        double total=0;
+        for (auto& x : cdf) {
+            total += static_cast<double>(rng()%5); // includes repeated CDF entries
+            x=total;
+        }
+        for (std::size_t start=0; start<=size; ++start) {
+            const auto suffix=std::span<const double>(cdf).subspan(start);
+            for (unsigned trial=0; trial<8; ++trial) {
+                const double target=static_cast<double>(rng()%(2*size+3))/2;
+                const auto expected=std::upper_bound(suffix.begin(), suffix.end(), target);
+                ASSERT_EQ(detail::suffix_upper_bound(suffix,target),
+                          static_cast<std::size_t>(expected-suffix.begin()));
             }
         }
     }
