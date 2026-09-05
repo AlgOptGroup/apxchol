@@ -697,6 +697,11 @@ DEFAULT_TERMINAL = frozenset({"complete", "not_converged", "failed", "timeout", 
 
 def timeout_cap(cell):
     """Return a persisted positive finite timeout cap, otherwise None."""
+    # A deadline spent across calibration/repetitions/verification is not a
+    # lower bound on one setup+solve. Keep that deadline in the raw cell while
+    # withholding it from charts that interpret this helper as T >= cap.
+    if cell.get("matrix_meta", {}).get("timeout_scope") == "logical_cell":
+        return None
     cap = cell.get("timeout_cap_s")
     if isinstance(cap, bool) or not isinstance(cap, (int, float)):
         return None

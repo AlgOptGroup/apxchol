@@ -114,6 +114,7 @@ def run_prepared(record, prepared, *, binary, threads, output, repetitions=3, ti
     import numpy as np
     import scipy.io
     A, b, operator, rhs, metadata = prepared
+    metadata = {**metadata, "timeout_scope": "logical_cell"}
     env = rc.benchmark_openmp_env(threads)
     env.update({"OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"})
     output.mkdir()
@@ -194,8 +195,10 @@ def run_one(mid, threads=16):
     dumped = cmg_matlab_runner._dump(mid)
     if not dumped:
         raise RuntimeError("common benchmark operator dump failed")
+    # The common seam has already assembled every input, including graph L.
+    # Preserve its diagonal exactly instead of interpreting that dump again.
     record = {"id": mid, "path": dumped, "family": rc.MATRICES[mid]["family"],
-              "mode": "physics" if rc.class_of(mid) == "sddm" else "graph"}
+              "mode": "physics"}
     root = Path(rc.external_path("APXCHOL_CMG_NATIVE_RESULTS", "CMG_NATIVE_RESULTS", f"{rc.ROOT}/results/cmg-native"))
     root.mkdir(parents=True, exist_ok=True)
     out = root / f"{mid}-t{threads}-{time.time_ns()}"
