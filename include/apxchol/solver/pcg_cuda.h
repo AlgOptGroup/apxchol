@@ -46,6 +46,7 @@
 // check_cuda lives in apxchol/solver/sptrsv/cuda.h (already included
 // transitively via preconditioner.h).
 #include "apxchol/solver/pcg_cuda_kernels.h"
+#include "apxchol/solver/pcg_cuda_host.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol {
@@ -290,11 +291,10 @@ private:
     // nnz = row_ptr[n] (col_idx/vals hold exactly that many entries; they are
     // plain arrays, not vectors — see the allocation note below).
     //
-    // Parallel build: PASS 1 uses atomic-fetch-add on shared row_ptr counts;
-    // PASS 2 uses atomic-fetch-add on shared row_pos to claim slots; per-row
-    // sort runs as a parallel-for. Identical cache behavior pattern to our
-    // make_graph/csc_to_csr parallel builds — works well here because n_perm
-    // is large and the atomic-counter cache lines spread thin.
+    // Fully paired, unique sorted CSC uses column ownership: source column k
+    // owns output row perm[k], retaining the sort by permuted column indices.
+    // The general fallback below counts and scatters through atomic row
+    // counters, then sorts each row. Both preserve canonical lower values.
     // fp32_exact (out) := every operator value round-trips fp32 (v == double(float(v))),
     // so storing A in fp32 is LOSSLESS. Computed FOR FREE as an OMP reduction in PASS 2's
     // existing value loop -- no separate scan. (A is symmetric; PASS 2 visits the upper
@@ -310,6 +310,9 @@ private:
         int64_t& nnz,
         bool& fp32_exact)
     {
+        if (detail::try_build_permuted_symmetric_csr(
+                L, perm, row_ptr, col_idx, vals, nnz, fp32_exact))
+            return;
         const int n = static_cast<int>(L.rows());
         const int* L_outer = L.outerIndexPtr();
         const int* L_inner = L.innerIndexPtr();

@@ -23,6 +23,7 @@ add_executable(unit_tests
         test_lowprec.cpp
         test_mtx_input.cpp
         test_operator_class.cpp
+        test_pcg_cuda_host.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE

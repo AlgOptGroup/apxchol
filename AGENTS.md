@@ -108,6 +108,11 @@ unless another change or unresolved failure justifies it.
   custom and `keep_factor=true` paths retain their payloads. The assembly trace
   reports requested/written/omitted factor-entry bytes, excluding monotonic
   allocator chunk slack and metadata; these are not peak-RSS measurements.
+- GPU PCG's host operator builder uses column ownership for compressed,
+  strictly sorted, unique, fully paired symmetric CSC input. Preserve canonical
+  lower values, lower-only fp32 exactness and sorting by permuted column ids.
+  Unsorted, duplicate, unpaired and uncompressed inputs retain the general
+  atomic builder. The CUDA-free helper is internal; no new runtime knob exists.
 - Keep substantial mechanisms: compensated factor dropping, GPU long-row
   segmentation, critical-tail solving, incremental degrees, and connectivity
   preserving residual sparsification. Standalone residual coalescing policy
