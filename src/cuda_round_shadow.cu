@@ -1202,6 +1202,8 @@ struct gpu_round_shadow_device_state::impl {
     bool excess_may_differ = false;
     bool generation_accepted = false;
     bool generation_has_device_selection = false;
+    bool device_owned_prefix = false;
+    bool owned_prefix_materialized = false;
     bool poisoned = false;
     reimport_reason next_reimport = reimport_reason::none;
     std::uint64_t generation = 0;
@@ -2484,12 +2486,70 @@ gpu_round_shadow_report gpu_round_shadow_device_state::compute_resident(
         no_host_state, nullptr, &selected, run_seed, true);
 }
 
+gpu_round_shadow_report gpu_round_shadow_device_state::compute_owned_prefix(
+        const gpu_round_shadow_input* initial, gpu_device_selection selected,
+        std::uint64_t seed) {
+    impl::failed_generation_guard guard{*impl_};
+    guard.arm();
+    if (impl_->poisoned || impl_->owned_prefix_materialized ||
+        (initial ? impl_->has_state : !impl_->device_owned_prefix))
+        throw std::logic_error("GPU-owned prefix generation is out of order");
+    impl_->device_owned_prefix = true;
+    const gpu_round_shadow_input empty;
+    auto report = impl_->compute(initial ? *initial : empty, nullptr, &selected, seed, !initial);
+    // Owned acceptance is intentionally not CPU certification. The current
+    // producer/generation and the round's CUDA validation remain mandatory.
+    if (!impl_->generation_has_device_selection || !report.gpu_executed ||
+        impl_->generation != report.output_generation)
+        throw std::logic_error("GPU-owned prefix did not publish its selected generation");
+    impl_->generation_accepted = true;
+    guard.commit();
+    return report;
+}
+
+gpu_owned_prefix_handback gpu_round_shadow_device_state::download_owned_prefix() {
+    impl::failed_generation_guard guard{*impl_};
+    guard.arm();
+    impl_->require_current_device("owned prefix handback");
+    if (impl_->poisoned || !impl_->device_owned_prefix || impl_->owned_prefix_materialized ||
+        !impl_->has_state || !impl_->generation_accepted)
+        throw std::logic_error("GPU-owned prefix handback requires its current accepted generation");
+    gpu_owned_prefix_handback result;
+    auto& input = result.residual;
+    input.vertex_count = impl_->vertex_count;
+    const std::size_t n = input.vertex_count;
+    std::vector<std::uint32_t> offsets(n + 1);
+    input.incidences.resize(impl_->resident_count);
+    input.active.resize(n);
+    input.excess.resize(n);
+    result.columns.resize(impl_->factor_column_count);
+    copy_to_host(offsets.data(), impl_->owner_offsets(impl_->current_slot).get(), n + 1,
+                 "download owned residual offsets");
+    input.owner_offsets.assign(offsets.begin(), offsets.end());
+    copy_to_host(input.incidences.data(), impl_->residual(impl_->current_slot).get(),
+                 input.incidences.size(), "download owned ordered residual");
+    copy_to_host(input.active.data(), impl_->active.get(), n, "download owned active mask");
+    copy_to_host(input.excess.data(), impl_->excess.get(), n, "download owned excess");
+    copy_to_host(result.columns.data(), impl_->factor_columns.get(), result.columns.size(),
+                 "download owned factor headers");
+    result.fingerprint = impl_->fingerprint;
+    validate_owned_prefix_handback(result, impl_->factor_entry_count);
+    result.download_bytes = offsets.size() * sizeof(offsets[0]) +
+        input.incidences.size() * sizeof(input.incidences[0]) +
+        input.active.size() + input.excess.size() * sizeof(double) +
+        result.columns.size() * sizeof(result.columns[0]);
+    impl_->owned_prefix_materialized = true;
+    guard.commit();
+    return result;
+}
+
 void gpu_round_shadow_device_state::advance_selector(gpu_block_frontend& frontend) {
     impl::failed_generation_guard guard{*impl_};
     guard.arm();
     impl_->require_current_device("resident selector handoff");
     if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted ||
-        !impl_->certified || !impl_->selection_producer_bound ||
+        (!impl_->certified && !(impl_->device_owned_prefix && !impl_->owned_prefix_materialized)) ||
+        !impl_->selection_producer_bound ||
         !impl_->generation_has_device_selection ||
         impl_->next_reimport == impl::reimport_reason::authoritative_host_rebuild)
         throw std::logic_error("GPU selector handoff requires an accepted CPU-certified resident generation");
@@ -2523,8 +2583,9 @@ gpu_round_shadow_device_state::finalize_fp32(
         std::span<const node_index> permutation, node_index factor_dim,
         const gpu_round_shadow_factor_log& tail) {
     impl_->require_current_device("factor finalization");
-    if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted)
-        throw std::logic_error("GPU finalizer requires an accepted resident generation");
+    if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted ||
+        (impl_->device_owned_prefix && !impl_->owned_prefix_materialized))
+        throw std::logic_error("GPU finalizer requires an accepted resident generation and completed handback");
     if (cuda_sptrsv::fp16_resolved() || factor_drop_rel_from_env() != 0.0)
         throw std::invalid_argument("GPU finalizer prototype requires APXCHOL_SPTRSV_FP16=0 and APXCHOL_FACTOR_DROP=0");
     const std::size_t n = permutation.size(), m = factor_dim;
@@ -2610,9 +2671,10 @@ gpu_round_shadow_device_state::finalize_fp32(
     const std::size_t upload = n * sizeof(node_index) +
         tail.columns.size() * sizeof(gpu_round_shadow_factor_column) +
         tail.entries.size() * sizeof(gpu_round_shadow_factor_entry);
-    std::fprintf(stderr, "[gpu-factor-finalize] device_prefix_columns=%zu device_prefix_entries=%zu cpu_tail_columns=%zu cpu_tail_entries=%zu m=%zu nnz=%d host_upload_bytes=%zu scalar_download_bytes=%zu prefix_download_bytes=0 scratch_and_output_peak_bytes=%zu cpu_shadow=retained\n",
+    std::fprintf(stderr, "[gpu-factor-finalize] device_prefix_columns=%zu device_prefix_entries=%zu cpu_tail_columns=%zu cpu_tail_entries=%zu m=%zu nnz=%d host_upload_bytes=%zu scalar_download_bytes=%zu prefix_download_bytes=0 scratch_and_output_peak_bytes=%zu cpu_shadow=%s\n",
         prefix, impl_->factor_entry_count, tail.columns.size(), tail.entries.size(),
-        m, nnz, upload, 4 * sizeof(int), tracker.peak);
+        m, nnz, upload, 4 * sizeof(int), tracker.peak,
+        impl_->device_owned_prefix ? "omitted_owned_prefix" : "retained");
     return result;
 }
 

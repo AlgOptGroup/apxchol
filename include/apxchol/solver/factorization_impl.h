@@ -1329,6 +1329,59 @@ factorization factorize_impl(const Eliminator& elim,
     }
 #endif
 
+#if defined(APXCHOL_USE_CUDA)
+    if constexpr (gpu_block_frontend_eligible &&
+                  std::is_same_v<Incidence, directed_vec_pool_incidence>) {
+        // Bounded experimental ownership milestone: an internal consuming
+        // finalizer may run up to two device-owned rounds before one ordered
+        // handback. Public/exported factors retain their CPU-audited route.
+        // This is BEFORE every CPU degree/cache/selection structure below.
+        if (omit_shadow_factor_payload && gpu_frontend) {
+            std::size_t owned_rounds = 0, previous_nnz = 0;
+            result.peak_graph_bytes = std::max(result.peak_graph_bytes, work.memory_bytes());
+            for (; owned_rounds < 2 && active.size() > 2; ++owned_rounds) {
+                const auto prep = gpu_frontend->prepare(active, opts.partition);
+                if (prep.candidate_count <= gpu_frontend->resident_region_capacity()) break;
+                const auto part = gpu_frontend->select_block_greedy();
+                const double min_yield = detail::adaptive_is_yield_fraction(
+                    opts.min_is_fraction, active.size(), prep.average_degree, residual_thresh);
+                if (part.data.empty() || part.data.size() >= active.size() - 1 ||
+                    detail::selection_should_handoff(part.num_regions(), part.num_vertices(),
+                        prep.candidate_count, active.size(), min_yield,
+                        residual_thresh, opts.omp_threshold)) break;
+                const auto report = gpu_round_shadow.run_owned_prefix_round(
+                    work, part.data, gpu_frontend->device_selection(), opts.seed);
+                const std::size_t nnz = report.factor_log_columns + report.factor_log_entries;
+                result.rounds.push_back({active.size(), part.num_regions(), prep.average_degree,
+                    cp ? nnz - previous_nnz : 0, cp ? nnz : 0});
+                previous_nnz = nnz;
+                gpu_round_shadow.advance_selector(*gpu_frontend);
+                // The device selector returns natural active-id order. This
+                // is host metadata maintenance, not a read of the stale graph.
+                std::size_t selected = 0;
+                std::erase_if(active, [&](node_index v) {
+                    if (selected < part.data.size() && part.data[selected] == v) {
+                        ++selected; return true;
+                    }
+                    return false;
+                });
+                if (selected != part.data.size())
+                    throw std::logic_error("GPU-owned prefix selection lost natural active order");
+                ++ws.round_index;
+            }
+            if (owned_rounds) {
+                gpu_round_shadow.materialize_owned_prefix(work, active, factor_cols);
+                // No stale occupancy fallback can touch work. Subsequent CPU
+                // rounds, sparsification and peel start from this materialized
+                // graph with freshly constructed caches and retained payloads.
+                gpu_frontend.reset();
+                for (auto& t : ws.threads) t.retain_factor_payload = true;
+                if (cp) (*cp)("gpu_owned_prefix_and_handback");
+            }
+        }
+    }
+#endif
+
     // The partitioner's view of the run-constant services, the shared
     // selection structure, and the degree-prepass scratch (all owned here).
     selection sel;

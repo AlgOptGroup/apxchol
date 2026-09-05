@@ -125,6 +125,16 @@ applications and concurrent tests can change it.
   custom and `keep_factor=true` paths retain their payloads. The assembly trace
   reports requested/written/omitted factor-entry bytes, excluding monotonic
   allocator chunk slack and metadata; these are not peak-RSS measurements.
+- An internal consuming solve with all three existing GPU block, round-shadow
+  and factor-finalizer flags forced may execute an at-most-two-round GPU-owned
+  prefix, then download the full ordered residual and factor-column headers
+  once. It performs no CPU numerical replay or full snapshots between those
+  rounds. Direct slab handback preserves per-owner order, duplicate weights,
+  active/excess state and ever-added edge accounting. CPU continuation starts
+  with fresh caches and retained factor entries; device prefix entries remain
+  resident. Owned acceptance is separate from CPU certification. Public/custom/
+  keep-factor paths retain the audited route; ordinary defaults are unchanged.
+  This bounded ownership milestone is not full GPU residency or a speedup claim.
 - GPU PCG's host operator builder uses column ownership for compressed,
   strictly sorted, unique, fully paired symmetric CSC input. Preserve canonical
   lower values, lower-only fp32 exactness and sorting by permuted column ids.
