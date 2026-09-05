@@ -604,10 +604,17 @@ inline std::string dataflow_plan_check(const dataflow_plan& pl, int m, bool reve
     const int nb = pl.n_batches();
     if (static_cast<int>(pl.batch_start.size()) != nb + 1) return "batch_start size != n_batches + 1";
     if (pl.batch_start.front() != 0 || pl.batch_start.back() != m) return "batch_start does not span [0, m)";
-    std::vector<char> seen(static_cast<std::size_t>(m), 0);
+    // Adjacent ranges telescope from 0 to m. Monotonicity and the bounds
+    // check below make them disjoint; each positive-width range is consumed
+    // completely by a plain batch or a one-position finalizer. Zero-width
+    // segments consume nothing. Thus every sweep position is covered exactly
+    // once without allocating, clearing, writing and rescanning a seen bitmap.
     for (int b = 0; b < nb; ++b) {
         const int q0 = pl.batch_start[b], q1 = pl.batch_start[b + 1];
         if (q1 < q0) return "batch_start is not monotone at batch " + std::to_string(b);
+        // q0 is 0 or the preceding checked q1. Reject an oversized range
+        // before dereferencing len, rather than waiting for a later descent.
+        if (q1 > m) return "batch_start exceeds m at batch " + std::to_string(b);
         const int sb = pl.batch_spec[b];
         if (sb >= static_cast<int>(pl.spec.size())) return "batch_spec out of range at batch " + std::to_string(b);
         if (sb >= 0) {
@@ -618,7 +625,6 @@ inline std::string dataflow_plan_check(const dataflow_plan& pl, int m, bool reve
                 if (q1 != q0 + 1) return "finalizer batch " + std::to_string(b) + " does not own one position";
                 const int row = reverse ? m - 1 - q0 : q0;
                 if (~sp.row != row) return "finalizer batch " + std::to_string(b) + " is at the wrong position";
-                seen[static_cast<std::size_t>(q0)] = 1;
             }
             continue;
         }
@@ -632,11 +638,8 @@ inline std::string dataflow_plan_check(const dataflow_plan& pl, int m, bool reve
             if (len[row] > G * pre && q1 - q0 != 1)   // the implicit warp-sharing property
                 return "multi-chunk row " + std::to_string(row) + " shares batch " + std::to_string(b);
             pos += G;
-            seen[static_cast<std::size_t>(q)] = 1;
         }
     }
-    for (int q = 0; q < m; ++q)
-        if (!seen[static_cast<std::size_t>(q)]) return "sweep position " + std::to_string(q) + " is in no batch";
     for (std::size_t k = 0; k < pl.spec.size(); ++k) {
         const dataflow_spec& sp = pl.spec[k];
         if (sp.row >= 0) continue;

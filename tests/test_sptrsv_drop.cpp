@@ -1036,6 +1036,41 @@ TEST(GpuHostPrep, DataflowPlanCheckRejectsBrokenPlans) {
       EXPECT_NE(why.find("multi-chunk"), std::string::npos) << why; }
 }
 
+TEST(GpuHostPrep, DataflowPlanCoverageRejectsInvalidBoundariesAndFinalizers) {
+    using apxchol::cuda_host::dataflow_plan;
+    using apxchol::cuda_host::dataflow_plan_check;
+    const int len[] = {1, 1};
+    for (bool reverse : {false, true}) {
+        const int row = reverse ? 1 : 0;
+        dataflow_plan good;
+        good.batch_start = {0, 0, 1, 2};
+        good.batch_spec = {0, 1, -1};
+        good.spec = {{row, 0, 1, 0}, {~row, 0, 1, 0}};
+        good.n_slots = good.n_split = 1;
+        auto check = [&](const dataflow_plan& plan) {
+            return dataflow_plan_check(plan, 2, reverse, len, 8);
+        };
+        ASSERT_EQ(check(good), "");
+        // Reject before any row-length read, including backward
+        // sweeps where an oversized sweep index would become a negative row.
+        for (int boundary : {-1, 3, std::numeric_limits<int>::max()}) {
+            auto bad = good;
+            bad.batch_start[1] = boundary;
+            EXPECT_NE(check(bad), "");
+            bad.batch_spec[0] = -1;
+            EXPECT_NE(check(bad), "");
+        }
+        // A segment cannot hide a missing finalizer's positive-width range.
+        { auto bad = good; bad.batch_spec[1] = 0; EXPECT_NE(check(bad), ""); }
+        // Reusing a finalizer at a second position cannot cover that row.
+        { auto bad = good; bad.batch_spec[2] = 1; EXPECT_NE(check(bad), ""); }
+        { auto bad = good; bad.batch_start[2] = 0; EXPECT_NE(check(bad), ""); }
+    }
+    dataflow_plan empty;
+    empty.batch_start = {0};
+    EXPECT_EQ(dataflow_plan_check(empty, 0, false, nullptr, 8), "");
+}
+
 // max_seg caps S even for an absurdly long row, so one row can never occupy
 // an unbounded slice of the ticket window.
 TEST(GpuHostPrep, DataflowPlanCapsTheSegmentCountPerRow) {
