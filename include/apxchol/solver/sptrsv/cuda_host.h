@@ -255,6 +255,95 @@ inline csr_int<V> transpose_csr(const csr_int<V>& in) {
     return out;
 }
 
+/// Validate the two int32 CSR structures accepted by the research-only
+/// device-factor adoption boundary in cuda.h. `L` is the lower-triangular
+/// forward operand and `LT` is its exact structural transpose (the
+/// upper-triangular back operand). Values deliberately do not cross this host
+/// boundary; the caller separately promises that corresponding value arrays
+/// are transposes of one another.
+///
+/// The adoption path already has to download both structures to build the
+/// current host dataflow plans. Do the complete, collision-free structural
+/// check over those bytes before any pointer ownership is committed instead
+/// of relying on a digest. Returns an empty string on success and a precise
+/// rejection reason otherwise. CUDA-free so malformed-boundary tests run in
+/// every build.
+inline std::string dataflow_factor_structure_check(
+        int m, std::int64_t nnz,
+        const int* L_ptr, const int* L_idx,
+        const int* LT_ptr, const int* LT_idx) {
+    if (m <= 0) return "dimension must be positive";
+    if (nnz < m || nnz > std::numeric_limits<int>::max())
+        return "nnz must contain one diagonal per row and fit int32";
+    if (!L_ptr || !L_idx || !LT_ptr || !LT_idx)
+        return "CSR pointers must be non-null";
+
+    auto check_one = [&](const char* name, const int* ptr, const int* idx,
+                         bool lower) -> std::string {
+        if (ptr[0] != 0)
+            return std::string(name) + " rowptr[0] is not zero";
+        if (ptr[m] != nnz)
+            return std::string(name) + " rowptr[m] does not equal nnz";
+        for (int row = 0; row < m; ++row) {
+            const int beg = ptr[row], end = ptr[row + 1];
+            if (beg < 0 || end < beg || end > nnz)
+                return std::string(name) + " rowptr is not a bounded monotone prefix at row " +
+                       std::to_string(row);
+            int previous = -1;
+            int diagonals = 0;
+            for (int p = beg; p < end; ++p) {
+                const int col = idx[p];
+                if (col < 0 || col >= m)
+                    return std::string(name) + " has an out-of-range column at entry " +
+                           std::to_string(p);
+                if (col <= previous)
+                    return std::string(name) + " row " + std::to_string(row) +
+                           " is not strictly column-sorted";
+                if ((lower && col > row) || (!lower && col < row))
+                    return std::string(name) + " has an entry outside its triangular half at (" +
+                           std::to_string(row) + "," + std::to_string(col) + ")";
+                diagonals += col == row;
+                previous = col;
+            }
+            if (diagonals != 1)
+                return std::string(name) + " row " + std::to_string(row) +
+                       " does not contain exactly one diagonal";
+        }
+        return {};
+    };
+
+    if (std::string why = check_one("CSR(L)", L_ptr, L_idx, true); !why.empty())
+        return why;
+    if (std::string why = check_one("CSR(L^T)", LT_ptr, LT_idx, false); !why.empty())
+        return why;
+
+    // Exact structural transpose, reconstructed in the same stable source-row
+    // order as transpose_csr(). This also checks both row-pointer arrays rather
+    // than accepting an order-independent coordinate hash.
+    std::vector<int> expected_ptr(static_cast<std::size_t>(m) + 1, 0);
+    for (std::int64_t p = 0; p < nnz; ++p)
+        ++expected_ptr[static_cast<std::size_t>(LT_idx[p]) + 1];
+    for (int row = 0; row < m; ++row)
+        expected_ptr[static_cast<std::size_t>(row) + 1] +=
+            expected_ptr[static_cast<std::size_t>(row)];
+    for (int row = 0; row <= m; ++row)
+        if (expected_ptr[static_cast<std::size_t>(row)] != L_ptr[row])
+            return "CSR(L) row pointers are not the transpose of CSR(L^T)";
+
+    std::vector<int> cursor = expected_ptr;
+    std::vector<int> expected_idx(static_cast<std::size_t>(nnz));
+    for (int row = 0; row < m; ++row)
+        for (int p = LT_ptr[row]; p < LT_ptr[row + 1]; ++p) {
+            const int out_row = LT_idx[p];
+            expected_idx[static_cast<std::size_t>(cursor[out_row]++)] = row;
+        }
+    for (std::int64_t p = 0; p < nnz; ++p)
+        if (expected_idx[static_cast<std::size_t>(p)] != L_idx[p])
+            return "CSR(L) column indices are not the transpose of CSR(L^T) at entry " +
+                   std::to_string(p);
+    return {};
+}
+
 /// The dataflow backend's lane-group size of a row of `entries` CSR entries
 /// (diagonal slot included): the smallest power of two G <= 32 with G * pre
 /// >= entries (`pre` = the kernel's per-lane prefetch depth,
@@ -438,10 +527,13 @@ struct dataflow_plan {
 /// what makes a forced S = 1 split BIT-IDENTICAL to the unsplit kernel in
 /// BOTH directions: lane `sub` gets exactly the entries it would have got
 /// there. `dpos` is found by scanning the row; the diagonal-first (CSR of
-/// L^T) / diagonal-last (CSR of L) convention is not relied on.
+/// L^T) / diagonal-last (CSR of L) convention is used only when the caller
+/// supplies a sorted-triangular construction certificate; otherwise it is
+/// checked by scanning the supplied indices.
 inline dataflow_plan dataflow_build_plan(int m, bool reverse, const int* rowptr,
                                          const int* colidx, const int* len, int pre,
-                                         const dataflow_seg_params& p) {
+                                         const dataflow_seg_params& p,
+                                         bool sorted_triangular = false) {
     const int C = 32 * pre;
     dataflow_plan pl;
     pl.batch_start.reserve(static_cast<std::size_t>(m) / 32 + 2);
@@ -453,9 +545,12 @@ inline dataflow_plan dataflow_build_plan(int m, bool reverse, const int* rowptr,
         const int l   = len[row];
         if (p.seg > 0 && l - 1 > p.split_min) {
             const int beg = rowptr[row], end = rowptr[row + 1];
-            int dpos = -1;
-            for (int t = beg; t < end; ++t)
-                if (colidx[t] == row) { dpos = t; break; }
+            // A device-finalized, sorted triangular CSR has its diagonal at
+            // the appropriate end; no O(nnz) index download is needed for plans.
+            int dpos = sorted_triangular ? (reverse ? beg : end - 1) : -1;
+            if (!sorted_triangular)
+                for (int t = beg; t < end; ++t)
+                    if (colidx[t] == row) { dpos = t; break; }
             if (dpos < 0)
                 throw std::runtime_error("apxchol cuda_sptrsv: row " + std::to_string(row) +
                                          " has no diagonal entry; the dataflow plan needs it");

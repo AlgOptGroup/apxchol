@@ -7,6 +7,7 @@
 #include "apxchol/sparse_csc.h"
 #include <Eigen/Sparse>
 #include <cstddef>
+#include <memory>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -14,6 +15,9 @@
 namespace apxchol {
 
 struct checkpoint;
+#if defined(APXCHOL_USE_CUDA)
+class cuda_sptrsv_device_factor;
+#endif
 
 /// Result of the approximate Cholesky factorization.
 ///
@@ -21,6 +25,12 @@ struct checkpoint;
 /// permutation P such that P^T L L^T P ≈ original Laplacian.
 /// Used as a preconditioner for PCG.
 struct factorization {
+#if defined(APXCHOL_USE_CUDA)
+    // Research bridge only: finalized CUDA values are consumed by install_factor.
+    // Exported factors retain host L; a consuming solve may keep only its
+    // dimensions/column pointers while this capsule supplies the device arrays.
+    std::shared_ptr<cuda_sptrsv_device_factor> research_device_factor;
+#endif
     sparse_csc L;                                           // lower-triangular factor (owned CSC)
     // Elimination-order permutation: perm[original_vertex] = new_position.
     //   to permuted space   : x_perm[perm[v]] = b[v]   (scatter)
@@ -177,6 +187,13 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
 
 namespace detail {
 
+// Internal consuming route used only by the preconditioner. Public factorize()
+// always retains exportable host arrays; the resident solve may omit them.
+factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
+                                  graph_storage storage,
+                                  const factor_options& opts,
+                                  checkpoint* cp, bool retain_host_factor);
+
 struct factor_entry {
     node_index neighbor;
     factor_value_t value;
@@ -204,7 +221,7 @@ struct factor_col {
 void build_csc(factorization& result,
                const std::vector<factor_col>& factor_cols,
                node_index n,
-               checkpoint* cp);
+               checkpoint* cp, bool build_values = true);
 
 } // namespace detail
 

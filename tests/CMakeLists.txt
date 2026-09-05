@@ -16,6 +16,7 @@ add_executable(unit_tests
         test_custom_hooks.cpp
         test_sptrsv_transpose.cpp
         test_sptrsv_drop.cpp
+        test_gpu_round_shadow.cpp
         test_sptrsv_memory.cpp
         test_sptrsv_levelset.cpp
         test_sptrsv_kernels.cpp

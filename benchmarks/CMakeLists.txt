@@ -556,6 +556,7 @@ if (APXCHOL_USE_CUDA)
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_dataflow.cu)
     # Runtime-guarded GPU residual-topology + block-region front-end.
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_block_frontend.cu)
+    target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_round_shadow.cu)
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels (pcg_cuda.h).
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_pcg_kernels.cu)
     # Our library uses only cudart; competitor libraries are linked separately.

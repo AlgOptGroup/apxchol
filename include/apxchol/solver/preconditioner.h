@@ -193,7 +193,7 @@ public:
         // construct a solver and never factor.
         cuda_ctx::prewarm();
         n_ = A.rows();
-        F_ = apxchol::factorize(A, storage_, opts_, cp_);
+        F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, keep_factor_);
         install_factor();
         return *this;
     }
@@ -281,7 +281,19 @@ private:
         if (std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below
             std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                          "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
-        trsv_.setup(F_.L, factor_dim);
+        if (F_.research_device_factor &&
+            F_.research_device_factor.use_count() == 1 &&
+            !F_.research_device_factor->empty()) {
+            trsv_.setup_adopting_device_factor_for_research(
+                std::move(*F_.research_device_factor));
+            F_.research_device_factor.reset();
+        } else {
+            // Independent copies must not race to move the shared capsule.
+            // Only a unique owner may adopt; copied public factors keep their
+            // ordinary host-array installation path without mutating the capsule.
+            F_.research_device_factor.reset();
+            trsv_.setup(F_.L, factor_dim);
+        }
 #endif
         if (cp_) { (*cp_)("sptrsv_setup"); cp_->ascend(); }
 

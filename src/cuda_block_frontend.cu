@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -91,14 +92,72 @@ template <class T> __device__ T atomic_increment(T *p) {
     }
 }
 
+struct device_selection_digest {
+    unsigned long long xor_hash;
+    unsigned long long sum_hash;
+};
+
+struct device_prepare_status {
+    unsigned long long degree_sum;
+    device_selection_digest topology;
+    device_selection_digest active;
+};
+static_assert(sizeof(device_prepare_status) == 40);
+
+struct device_selected_status {
+    unsigned long long degree_sum;
+    device_selection_digest selection;
+};
+static_assert(sizeof(device_selected_status) == 24);
+
+__device__ void block_selection_digest_add(
+        unsigned long long item, device_selection_digest* digest,
+        unsigned long long* warp_xor,
+        unsigned long long* warp_sum) {
+    constexpr unsigned kWarp = 32;
+    constexpr unsigned kWarpsPerBlock = kBlock / kWarp;
+    const unsigned lane = threadIdx.x % kWarp;
+    const unsigned warp = threadIdx.x / kWarp;
+    unsigned long long xor_value = item;
+    unsigned long long sum_value = item;
+    for (unsigned offset = kWarp / 2; offset; offset >>= 1) {
+        xor_value ^= __shfl_down_sync(0xffffffffU, xor_value, offset);
+        sum_value += __shfl_down_sync(0xffffffffU, sum_value, offset);
+    }
+    if (lane == 0) {
+        warp_xor[warp] = xor_value;
+        warp_sum[warp] = sum_value;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        xor_value = lane < kWarpsPerBlock ? warp_xor[lane] : 0;
+        sum_value = lane < kWarpsPerBlock ? warp_sum[lane] : 0;
+        for (unsigned offset = kWarp / 2; offset; offset >>= 1) {
+            xor_value ^= __shfl_down_sync(0xffffffffU, xor_value, offset);
+            sum_value += __shfl_down_sync(0xffffffffU, sum_value, offset);
+        }
+        if (lane == 0) {
+            atomicXor(&digest->xor_hash, xor_value);
+            atomicAdd(&digest->sum_hash, sum_value);
+        }
+    }
+}
+
 __global__ void count_degrees(const gpu_topology_edge *edges, std::size_t m,
-                              edge_index *degrees) {
+                              edge_index *degrees,
+                              device_selection_digest* topology_digest) {
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i >= m)
-        return;
-    const auto e = edges[i];
-    atomic_increment(&degrees[e.u]);
-    atomic_increment(&degrees[e.v]);
+    unsigned long long item_hash = 0;
+    if (i < m) {
+        const auto e = edges[i];
+        atomic_increment(&degrees[e.u]);
+        atomic_increment(&degrees[e.v]);
+        item_hash = gpu_device_selection_topology_hash(e.u, e.v);
+    }
+    __shared__ unsigned long long warp_xor[kBlock / 32];
+    __shared__ unsigned long long warp_sum[kBlock / 32];
+    block_selection_digest_add(
+        item_hash, topology_digest, warp_xor, warp_sum);
 }
 
 __global__ void scatter_csr(const gpu_topology_edge *edges, std::size_t m,
@@ -116,10 +175,19 @@ __global__ void scatter_csr(const gpu_topology_edge *edges, std::size_t m,
 __global__ void gather_active_degrees(const node_index *active_ids,
                                       std::size_t count,
                                       const edge_index *degrees,
-                                      node_index *output) {
+                                      node_index *output,
+                                      device_selection_digest* active_digest) {
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i < count)
-        output[i] = static_cast<node_index>(degrees[active_ids[i]]);
+    unsigned long long item_hash = 0;
+    if (i < count) {
+        const node_index vertex = active_ids[i];
+        output[i] = static_cast<node_index>(degrees[vertex]);
+        item_hash = gpu_device_selection_active_hash(vertex);
+    }
+    __shared__ unsigned long long warp_xor[kBlock / 32];
+    __shared__ unsigned long long warp_sum[kBlock / 32];
+    block_selection_digest_add(
+        item_hash, active_digest, warp_xor, warp_sum);
 }
 
 __global__ void initialize_vertex_ids(std::size_t count, node_index *ids) {
@@ -137,11 +205,19 @@ __global__ void sum_degree_values(const node_index *values, std::size_t count,
 
 __global__ void sum_vertex_degrees(const node_index *ids, std::size_t count,
                                    const edge_index *degrees,
-                                   unsigned long long *sum) {
+                                   device_selected_status *status) {
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i < count)
-        atomicAdd(sum, static_cast<unsigned long long>(
-                           static_cast<node_index>(degrees[ids[i]])));
+    unsigned long long item_hash = 0;
+    if (i < count) {
+        const node_index vertex = ids[i];
+        atomicAdd(&status->degree_sum, static_cast<unsigned long long>(
+            static_cast<node_index>(degrees[vertex])));
+        item_hash = gpu_device_selection_selected_hash(i, vertex);
+    }
+    __shared__ unsigned long long warp_xor[kBlock / 32];
+    __shared__ unsigned long long warp_sum[kBlock / 32];
+    block_selection_digest_add(
+        item_hash, &status->selection, warp_xor, warp_sum);
 }
 
 __global__ void set_status(const node_index *ids, std::size_t count,
@@ -420,8 +496,10 @@ bool add_allocation(std::size_t &total, std::size_t count,
 
 struct gpu_block_frontend::impl {
     explicit impl(node_index n_in,
-                  std::span<const gpu_topology_edge> initial_edges)
-        : n(n_in), live_edge_count(initial_edges.size()), active_count(n_in) {
+                  std::span<const gpu_topology_edge> initial_edges,
+                  std::shared_ptr<gpu_device_selection_producer> producer)
+        : n(n_in), live_edge_count(initial_edges.size()), active_count(n_in),
+          selection_producer(std::move(producer)) {
         if (static_cast<std::uint64_t>(n) + 1 >
             static_cast<std::uint64_t>(INT_MAX))
             throw std::overflow_error(
@@ -433,6 +511,7 @@ struct gpu_block_frontend::impl {
         int device = 0;
         int cooperative = 0;
         cuda_check(cudaGetDevice(&device), "query active CUDA device");
+        selection_producer->bind_device(device);
         cuda_check(cudaDeviceGetAttribute(&cooperative,
                                           cudaDevAttrCooperativeLaunch, device),
                    "query cooperative-launch support");
@@ -489,8 +568,12 @@ struct gpu_block_frontend::impl {
         topology_staging.reserve(
             std::min(initial_edges.size(), kTopologyStageEdges));
         selected_count.reserve(1);
-        degree_sum.reserve(1);
+        selected_status.reserve(1);
+        prepare_status.reserve(1);
         cooperative_flag.reserve(1);
+        cuda_check(cudaMemset(prepare_status.get(), 0,
+                              sizeof(device_prepare_status)),
+                   "initialize producer content status");
         cuda_check(cudaMemset(active_mask.get(), 1, n),
                    "initialize active mask");
         if (n) {
@@ -536,6 +619,55 @@ struct gpu_block_frontend::impl {
             cub_bytes = std::max(cub_bytes, bytes);
         }
         cub_temp.reserve(cub_bytes);
+    }
+
+    void require_current_device() const {
+        int current_device = -1;
+        cuda_check(cudaGetDevice(&current_device),
+                   "query active CUDA device for producer operation");
+        if (current_device != selection_producer->cuda_device())
+            throw std::invalid_argument(
+                "GPU block front-end operation uses the wrong CUDA device");
+        selection_producer->require_usable();
+    }
+
+    /// Invalidate before, rather than after, every producer mutation. Thus an
+    /// exception cannot leave an earlier view apparently current.
+    void invalidate_selection() {
+        selected_size = 0;
+        selection_producer->invalidate_selection();
+    }
+
+    void publish_selection() {
+        selection_producer->publish_selection(
+            selected_ids.get(), selected_size, selection_content,
+            /*independence_certified=*/true);
+    }
+
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+    void inject_device_selection_fault_for_test(
+            std::span<const node_index> replacement) {
+        if (selected_size == 0 || replacement.size() != selected_size)
+            throw std::logic_error(
+                "GPU block front-end test fault has the wrong selection size");
+        cuda_check(cudaMemcpy(selected_ids.get(), replacement.data(),
+                              replacement.size_bytes(),
+                              cudaMemcpyHostToDevice),
+                   "inject device-selection test fault");
+    }
+#endif
+
+    void begin_topology_advance() {
+        selection_producer->begin_topology_advance();
+    }
+
+    void poison_selection_producer() noexcept {
+        selection_producer->poison();
+        selected_size = 0;
+    }
+
+    void retire_selection_producer() noexcept {
+        selection_producer->retire();
     }
 
     void require_cub_count(std::size_t count, const char *what) const {
@@ -597,35 +729,50 @@ struct gpu_block_frontend::impl {
     }
 
     unsigned long long sum_active_degree_values(std::size_t count) {
-        if (!count)
-            return 0;
-        cuda_check(cudaMemset(degree_sum.get(), 0,
+        cuda_check(cudaMemset(&prepare_status.get()->degree_sum, 0,
                               sizeof(unsigned long long)),
-                   "clear degree sum");
-        sum_degree_values<<<blocks_for(count), kBlock>>>(
-            active_degrees.get(), count, degree_sum.get());
-        cuda_check(cudaGetLastError(), "sum active degrees");
-        unsigned long long result = 0;
-        cuda_check(cudaMemcpy(&result, degree_sum.get(), sizeof(result),
-                              cudaMemcpyDeviceToHost),
-                   "download active-degree sum");
-        return result;
+                   "clear active-degree sum");
+        if (count) {
+            sum_degree_values<<<blocks_for(count), kBlock>>>(
+                active_degrees.get(), count,
+                &prepare_status.get()->degree_sum);
+            cuda_check(cudaGetLastError(), "sum active degrees");
+        }
+        device_prepare_status host_status{};
+        // This replaces the old 8-byte degree-sum readback: the same bounded
+        // synchronization also publishes the producer-owned content digest.
+        cuda_check(cudaMemcpy(&host_status, prepare_status.get(),
+                              sizeof(host_status), cudaMemcpyDeviceToHost),
+                   "download active-degree sum and selection content");
+        selection_content = {
+            n,
+            count,
+            {host_status.topology.xor_hash,
+             host_status.topology.sum_hash},
+            {host_status.active.xor_hash,
+             host_status.active.sum_hash},
+            {}};
+        return host_status.degree_sum;
     }
 
     unsigned long long sum_selected_degrees(std::size_t count) {
+        selection_content.selection = {};
         if (!count)
             return 0;
-        cuda_check(cudaMemset(degree_sum.get(), 0,
-                              sizeof(unsigned long long)),
-                   "clear selected-degree sum");
+        cuda_check(cudaMemset(selected_status.get(), 0,
+                              sizeof(device_selected_status)),
+                   "clear selected-degree/content status");
         sum_vertex_degrees<<<blocks_for(count), kBlock>>>(
-            selected_ids.get(), count, degrees.get(), degree_sum.get());
+            selected_ids.get(), count, degrees.get(), selected_status.get());
         cuda_check(cudaGetLastError(), "sum selected degrees");
-        unsigned long long result = 0;
-        cuda_check(cudaMemcpy(&result, degree_sum.get(), sizeof(result),
-                              cudaMemcpyDeviceToHost),
-                   "download selected-degree sum");
-        return result;
+        device_selected_status host_status{};
+        cuda_check(cudaMemcpy(&host_status, selected_status.get(),
+                              sizeof(host_status), cudaMemcpyDeviceToHost),
+                   "download selected-degree sum and ordered selection digest");
+        selection_content.selection = {
+            host_status.selection.xor_hash,
+            host_status.selection.sum_hash};
+        return host_status.degree_sum;
     }
 
     void rebuild_topology() {
@@ -643,9 +790,13 @@ struct gpu_block_frontend::impl {
         cuda_check(cudaMemset(degrees.get(), 0,
                               (std::size_t(n) + 1) * sizeof(edge_index)),
                    "clear degree counts");
+        cuda_check(cudaMemset(&prepare_status.get()->topology, 0,
+                              sizeof(device_selection_digest)),
+                   "clear producer topology digest");
         if (live_edge_count) {
             count_degrees<<<blocks_for(live_edge_count), kBlock>>>(
-                coo[current_coo].get(), live_edge_count, degrees.get());
+                coo[current_coo].get(), live_edge_count, degrees.get(),
+                &prepare_status.get()->topology);
             cuda_check(cudaGetLastError(), "launch degree count");
         }
         exclusive_sum(degrees.get(), row_offsets.get(), std::size_t(n) + 1);
@@ -685,10 +836,13 @@ struct gpu_block_frontend::impl {
         host_active_degrees_valid = false;
         host_candidate_ids_valid = false;
 
+        cuda_check(cudaMemset(&prepare_status.get()->active, 0,
+                              sizeof(device_selection_digest)),
+                   "clear producer active-set digest");
         if (!active.empty()) {
             gather_active_degrees<<<blocks_for(active.size()), kBlock>>>(
                 active_ids[current_active].get(), active.size(), degrees.get(),
-                active_degrees.get());
+                active_degrees.get(), &prepare_status.get()->active);
             cuda_check(cudaGetLastError(), "launch active-degree gather");
         }
 
@@ -778,6 +932,7 @@ struct gpu_block_frontend::impl {
         const auto start = clock_type::now();
         result.data.clear();
         if (!candidate_count) {
+            selected_size = 0;
             selected_degree_work = 0;
             last_select = elapsed_ms(start);
             return result;
@@ -836,6 +991,7 @@ struct gpu_block_frontend::impl {
         const std::size_t chosen = static_cast<std::size_t>(
             select_if(candidates_original.get(), selected_ids.get(),
                       candidate_count, status_equals{status.get(), 1}));
+        selected_size = chosen;
         selected_degree_work = sum_selected_degrees(chosen);
         result.data.resize(chosen);
         if (chosen) {
@@ -977,7 +1133,8 @@ struct gpu_block_frontend::impl {
     device_buffer<int> status;
     device_buffer<unsigned char> pick;
     device_buffer<int> selected_count;
-    device_buffer<unsigned long long> degree_sum;
+    device_buffer<device_selected_status> selected_status;
+    device_buffer<device_prepare_status> prepare_status;
     device_buffer<int> cooperative_flag;
     device_buffer<unsigned char> cub_temp;
 
@@ -988,10 +1145,13 @@ struct gpu_block_frontend::impl {
     partition_result result;
     partition_options current_options;
     std::size_t candidate_count = 0;
+    std::size_t selected_size = 0;
     std::size_t selected_degree_work = 0;
     int block_repair_grid_limit = 0;
     int block_region_limit = 0;
     bool topology_dirty = true;
+    gpu_device_selection_content selection_content;
+    std::shared_ptr<gpu_device_selection_producer> selection_producer;
 
     double last_prepare = 0.0;
     double last_select = 0.0;
@@ -1060,6 +1220,10 @@ gpu_block_frontend::probe_runtime(node_index n, std::size_t initial_edges) {
                             sizeof(deferred_edge));
     valid &= add_allocation(bytes, nv, sizeof(node_index));
     valid &= add_allocation(bytes, nv, sizeof(int));
+    valid &= add_allocation(bytes, 1, sizeof(int)); // selected count
+    valid &= add_allocation(bytes, 1, sizeof(device_selected_status));
+    valid &= add_allocation(bytes, 1, sizeof(device_prepare_status));
+    valid &= add_allocation(bytes, 1, sizeof(int)); // cooperative flag
     // CUB scan/select scratch is implementation-dependent and much smaller
     // than the edge arrays; retain a conservative 64 MiB floor plus 5%.
     const std::size_t cub_floor = std::size_t{64} << 20;
@@ -1079,44 +1243,140 @@ gpu_block_frontend::probe_runtime(node_index n, std::size_t initial_edges) {
 
 gpu_block_frontend::gpu_block_frontend(
     node_index n, std::span<const gpu_topology_edge> initial_edges)
-    : p_(std::make_unique<impl>(n, initial_edges)) {}
+    : p_(std::make_unique<impl>(
+          n, initial_edges,
+          std::shared_ptr<gpu_device_selection_producer>(
+              new gpu_device_selection_producer()))) {}
 
-gpu_block_frontend::~gpu_block_frontend() = default;
+void gpu_block_frontend::reset() noexcept {
+    if (!p_) return;
+    p_->retire_selection_producer();
+    // Destruction is nonconcurrent by contract. If the caller left another
+    // device current, free on the producer's device and restore it best-effort.
+    int original_device = -1;
+    bool switched_device = false;
+    if (cudaGetDevice(&original_device) == cudaSuccess &&
+        original_device != p_->selection_producer->cuda_device() &&
+        cudaSetDevice(p_->selection_producer->cuda_device()) == cudaSuccess)
+        switched_device = true;
+    p_.reset();
+    if (switched_device) (void)cudaSetDevice(original_device);
+}
+
+gpu_block_frontend::~gpu_block_frontend() { reset(); }
 gpu_block_frontend::gpu_block_frontend(gpu_block_frontend &&) noexcept = default;
 gpu_block_frontend &
-gpu_block_frontend::operator=(gpu_block_frontend &&) noexcept = default;
+gpu_block_frontend::operator=(gpu_block_frontend && other) noexcept {
+    if (this != &other) {
+        reset();
+        p_ = std::move(other.p_);
+    }
+    return *this;
+}
 
 gpu_block_frontend::prepare_result
 gpu_block_frontend::prepare(std::span<const node_index> active,
                            const partition_options &options) {
-    p_->current_options = options;
-    return p_->prepare(active, options);
+    try {
+        p_->require_current_device();
+        p_->invalidate_selection();
+        p_->current_options = options;
+        return p_->prepare(active, options);
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
 }
 
 std::size_t gpu_block_frontend::resident_region_capacity() const {
-    return static_cast<std::size_t>(p_->block_region_limit);
+    try {
+        p_->require_current_device();
+        return static_cast<std::size_t>(p_->block_region_limit);
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
 }
 
 std::span<const node_index> gpu_block_frontend::host_candidates() const {
-    return p_->download_host_candidates();
+    try {
+        p_->require_current_device();
+        return p_->download_host_candidates();
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
 }
 
 std::span<const node_index> gpu_block_frontend::host_active_degrees() const {
-    return p_->download_host_active_degrees();
+    try {
+        p_->require_current_device();
+        return p_->download_host_active_degrees();
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
 }
 
 const partition_result &gpu_block_frontend::select_block_greedy() {
-    return p_->select_block_greedy();
+    try {
+        p_->require_current_device();
+        p_->invalidate_selection();
+        const auto& selected = p_->select_block_greedy();
+        if (!selected.data.empty()) p_->publish_selection();
+        return selected;
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
 }
 
 std::size_t gpu_block_frontend::selected_degree_work() const {
-    return p_->selected_degree_work;
+    try {
+        p_->require_current_device();
+        return p_->selected_degree_work;
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
 }
+
+gpu_device_selection gpu_block_frontend::device_selection() const {
+    try {
+        p_->require_current_device();
+        return gpu_device_selection::issue(p_->selection_producer);
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
+}
+
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+void gpu_block_frontend::inject_device_selection_fault_for_test(
+        std::span<const node_index> replacement) {
+    try {
+        p_->require_current_device();
+        p_->inject_device_selection_fault_for_test(replacement);
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
+}
+#endif
 
 void gpu_block_frontend::advance(std::span<const node_index> eliminated,
                                 std::span<const gpu_topology_edge> new_edges,
-                                std::span<const gpu_topology_batch> new_edge_batches) {
-    p_->advance(eliminated, new_edges, new_edge_batches);
+                                std::span<const gpu_topology_batch>
+                                    new_edge_batches) {
+    try {
+        p_->require_current_device();
+        p_->invalidate_selection();
+        p_->begin_topology_advance();
+        p_->advance(eliminated, new_edges, new_edge_batches);
+    } catch (...) {
+        p_->poison_selection_producer();
+        throw;
+    }
 }
 
 } // namespace apxchol::detail

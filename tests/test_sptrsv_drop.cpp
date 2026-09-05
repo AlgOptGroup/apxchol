@@ -1052,6 +1052,50 @@ TEST(GpuHostPrep, DataflowPlanCapsTheSegmentCountPerRow) {
     EXPECT_LE(pl.n_slots, 8 + 3);
 }
 
+// The direct device-factor adoption API consumes exactly the two CSR
+// structures the existing upload path prepares. Its host validator must accept
+// that pair byte-for-byte and reject a malformed or non-transposed boundary.
+// CUDA-free: this guard runs even where no driver is available.
+TEST(GpuSptrsvAdoptionHost, CsrPairIsExactlyTheExistingUploadPair) {
+    const node_index n = 4001, m = n - 1;
+    const sparse_csc factor = make_wide_magnitude_lower(n);
+    auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(factor, m);
+    const auto scales = apxchol::cuda_host::column_scales(LT);
+    const auto stats = apxchol::cuda_host::apply_factor_drop(
+        LT, scales, 1e-4, /*fp16_storage=*/false);
+    ASSERT_EQ(stats.nnz_stored, static_cast<std::uint64_t>(LT.nnz));
+    const auto L = apxchol::cuda_host::transpose_csr(LT);
+
+    EXPECT_EQ(apxchol::cuda_host::dataflow_factor_structure_check(
+                  static_cast<int>(m), LT.nnz,
+                  L.ptr.data(), L.idx.get(), LT.ptr.data(), LT.idx.get()),
+              "");
+
+    std::vector<int> short_L_ptr = L.ptr;
+    --short_L_ptr.back();
+    const std::string bad_extent =
+        apxchol::cuda_host::dataflow_factor_structure_check(
+            static_cast<int>(m), LT.nnz,
+            short_L_ptr.data(), L.idx.get(), LT.ptr.data(), LT.idx.get());
+    EXPECT_NE(bad_extent.find("rowptr[m]"), std::string::npos) << bad_extent;
+
+    std::vector<int> bad_L_idx(
+        L.idx.get(), L.idx.get() + static_cast<std::size_t>(L.nnz));
+    std::size_t offdiag = 0;
+    while (offdiag < bad_L_idx.size() &&
+           bad_L_idx[offdiag] == static_cast<int>(
+               std::upper_bound(L.ptr.begin(), L.ptr.end(),
+                                static_cast<int>(offdiag)) -
+               L.ptr.begin() - 1))
+        ++offdiag;
+    ASSERT_LT(offdiag, bad_L_idx.size());
+    bad_L_idx[offdiag] = bad_L_idx[offdiag] + 1;
+    EXPECT_NE(apxchol::cuda_host::dataflow_factor_structure_check(
+                  static_cast<int>(m), LT.nnz,
+                  L.ptr.data(), bad_L_idx.data(), LT.ptr.data(), LT.idx.get()),
+              "");
+}
+
 #ifdef APXCHOL_USE_CUDA
 // ── The GPU dataflow kernel against an independent CPU reference ────────────
 //
@@ -1308,6 +1352,168 @@ void run_sweep(const df_factor& F, const dev_plan& dp, bool reverse, bool fp16,
 }
 } // namespace
 
+namespace {
+struct test_device_allocations {
+    std::vector<void*> pointers;
+
+    ~test_device_allocations() {
+        for (void* pointer : pointers) (void)cudaFree(pointer);
+    }
+
+    template<class T>
+    T* upload(const T* host, std::size_t count) {
+        pointers.push_back(nullptr);
+        T* device = nullptr;
+        apxchol::detail::check_cuda(
+            cudaMalloc(&device, count * sizeof(T)), "test adoption cudaMalloc");
+        pointers.back() = device;
+        apxchol::detail::check_cuda(
+            cudaMemcpy(device, host, count * sizeof(T), cudaMemcpyHostToDevice),
+            "test adoption cudaMemcpy");
+        return device;
+    }
+
+    void relinquish() noexcept { pointers.clear(); }
+};
+
+struct prepared_adoption {
+    apxchol::cuda_sptrsv_device_factor factor;
+    const void* lifetime_probe = nullptr;
+    std::int64_t nnz = 0;
+    apxchol::factor_drop_stats stats;
+};
+
+prepared_adoption prepare_adoption(
+        const sparse_csc& source, node_index m, bool fp16,
+        bool corrupt_L_extent = false) {
+    auto LT = apxchol::cuda_host::build_L11_csc_int<apxchol::cuda_value_t>(
+        source, m);
+    std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
+    if (fp16)
+        for (node_index j = 0; j < m; ++j) {
+            const float scale = scales[static_cast<std::size_t>(j)];
+            const float diag = static_cast<float>(
+                LT.vals[LT.ptr[static_cast<std::size_t>(j)]]);
+            if (!std::isfinite(1.0f / scale) ||
+                !std::isfinite(diag / scale))
+                scales[static_cast<std::size_t>(j)] = 1.0f;
+        }
+    const auto stats = apxchol::cuda_host::apply_factor_drop(
+        LT, scales, 1e-4, fp16);
+    test_device_allocations allocations;
+    int current_device = -1;
+    apxchol::detail::check_cuda(
+        cudaGetDevice(&current_device), "test adoption cudaGetDevice");
+
+    if (!fp16) {
+        auto L = apxchol::cuda_host::transpose_csr(LT);
+        auto* d_L_ptr = allocations.upload(
+            L.ptr.data(), static_cast<std::size_t>(m) + 1);
+        auto* d_L_idx = allocations.upload(
+            L.idx.get(), static_cast<std::size_t>(L.nnz));
+        auto* d_L_val = allocations.upload(
+            L.vals.get(), static_cast<std::size_t>(L.nnz));
+        auto* d_LT_ptr = allocations.upload(
+            LT.ptr.data(), static_cast<std::size_t>(m) + 1);
+        auto* d_LT_idx = allocations.upload(
+            LT.idx.get(), static_cast<std::size_t>(LT.nnz));
+        auto* d_LT_val = allocations.upload(
+            LT.vals.get(), static_cast<std::size_t>(LT.nnz));
+        if (corrupt_L_extent) {
+            const int bad = L.ptr.back() - 1;
+            apxchol::detail::check_cuda(
+                cudaMemcpy(d_L_ptr + m, &bad, sizeof(bad), cudaMemcpyHostToDevice),
+                "test adoption corrupt rowptr");
+        }
+        auto owner = apxchol::cuda_sptrsv_device_factor::own_fp32(
+            current_device, static_cast<std::int64_t>(m), LT.nnz,
+            {{d_L_ptr, (static_cast<std::size_t>(m) + 1) * sizeof(int)},
+             {d_L_idx, static_cast<std::size_t>(L.nnz) * sizeof(int)},
+             {d_L_val, static_cast<std::size_t>(L.nnz) * sizeof(apxchol::cuda_value_t)}},
+            {{d_LT_ptr, (static_cast<std::size_t>(m) + 1) * sizeof(int)},
+             {d_LT_idx, static_cast<std::size_t>(LT.nnz) * sizeof(int)},
+             {d_LT_val, static_cast<std::size_t>(LT.nnz) * sizeof(apxchol::cuda_value_t)}},
+            stats);
+        allocations.relinquish();
+        return {std::move(owner), d_L_ptr, LT.nnz, stats};
+    }
+
+    auto narrowed = apxchol::cuda_host::narrow_fp16_scaled(LT, scales);
+    std::vector<double> inv_scale2(static_cast<std::size_t>(m));
+    for (node_index j = 0; j < m; ++j) {
+        const double inv = narrowed.inv_scale[static_cast<std::size_t>(j)];
+        inv_scale2[static_cast<std::size_t>(j)] = inv * inv;
+    }
+    apxchol::cuda_host::csr_int<std::uint16_t> LT16;
+    LT16.m = LT.m;
+    LT16.nnz = LT.nnz;
+    LT16.ptr = LT.ptr;
+    LT16.idx = std::move(LT.idx);
+    LT16.vals = std::move(narrowed.vals);
+    auto L16 = apxchol::cuda_host::transpose_csr(LT16);
+    auto* d_L_ptr = allocations.upload(
+        L16.ptr.data(), static_cast<std::size_t>(m) + 1);
+    auto* d_L_idx = allocations.upload(
+        L16.idx.get(), static_cast<std::size_t>(L16.nnz));
+    auto* d_L_val = allocations.upload(
+        L16.vals.get(), static_cast<std::size_t>(L16.nnz));
+    auto* d_LT_ptr = allocations.upload(
+        LT16.ptr.data(), static_cast<std::size_t>(m) + 1);
+    auto* d_LT_idx = allocations.upload(
+        LT16.idx.get(), static_cast<std::size_t>(LT16.nnz));
+    auto* d_LT_val = allocations.upload(
+        LT16.vals.get(), static_cast<std::size_t>(LT16.nnz));
+    auto* d_diag = allocations.upload(
+        narrowed.diag.data(), static_cast<std::size_t>(m));
+    auto* d_inv_scale2 = allocations.upload(
+        inv_scale2.data(), static_cast<std::size_t>(m));
+    if (corrupt_L_extent) {
+        const int bad = L16.ptr.back() - 1;
+        apxchol::detail::check_cuda(
+            cudaMemcpy(d_L_ptr + m, &bad, sizeof(bad), cudaMemcpyHostToDevice),
+            "test adoption corrupt rowptr");
+    }
+    auto owner = apxchol::cuda_sptrsv_device_factor::own_fp16_scaled(
+        current_device, static_cast<std::int64_t>(m), LT16.nnz,
+        {{d_L_ptr, (static_cast<std::size_t>(m) + 1) * sizeof(int)},
+         {d_L_idx, static_cast<std::size_t>(L16.nnz) * sizeof(int)},
+         {d_L_val, static_cast<std::size_t>(L16.nnz) * sizeof(std::uint16_t)}},
+        {{d_LT_ptr, (static_cast<std::size_t>(m) + 1) * sizeof(int)},
+         {d_LT_idx, static_cast<std::size_t>(LT16.nnz) * sizeof(int)},
+         {d_LT_val, static_cast<std::size_t>(LT16.nnz) * sizeof(std::uint16_t)}},
+        {d_diag, static_cast<std::size_t>(m) * sizeof(float)},
+        {d_inv_scale2, static_cast<std::size_t>(m) * sizeof(double)},
+        stats,
+        narrowed.flushed, narrowed.subnormal);
+    allocations.relinquish();
+    return {std::move(owner), d_L_ptr, LT16.nnz, stats};
+}
+
+bool live_device_allocation(const void* pointer) {
+    cudaPointerAttributes attributes{};
+    const cudaError_t status = cudaPointerGetAttributes(&attributes, pointer);
+    if (status != cudaSuccess) {
+        (void)cudaGetLastError();
+        return false;
+    }
+#if CUDART_VERSION >= 10000
+    return attributes.type == cudaMemoryTypeDevice;
+#else
+    return attributes.memoryType == cudaMemoryTypeDevice;
+#endif
+}
+
+void expect_drop_stats_equal(const apxchol::factor_drop_stats& a,
+                             const apxchol::factor_drop_stats& b) {
+    EXPECT_EQ(a.rel, b.rel);
+    EXPECT_EQ(a.nnz_factor, b.nnz_factor);
+    EXPECT_EQ(a.nnz_stored, b.nnz_stored);
+    EXPECT_EQ(a.dropped, b.dropped);
+    EXPECT_EQ(a.dropped_threshold, b.dropped_threshold);
+    EXPECT_EQ(a.dropped_flush, b.dropped_flush);
+}
+} // namespace
+
 // Every sweep, on both factors, against the SERIAL DOUBLE reference over the
 // same arrays -- with segmentation off, at the shipped setting, and in the
 // TORTURE setting (every row split into 256-entry pieces) -- plus
@@ -1526,5 +1732,105 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
             }
         }
     }
+}
+
+TEST(GpuSptrsvAdoptionDevice, Fp32AndFp16MatchTheExistingUploadPathBitForBit) {
+    const node_index n = 4097, m = n - 1;
+    const sparse_csc factor = make_dominant_lower(n);
+    std::vector<double> input(static_cast<std::size_t>(m));
+    {
+        std::mt19937 rng(404);
+        std::uniform_real_distribution<double> value(-1.0, 1.0);
+        for (double& item : input) item = value(rng);
+    }
+
+    scoped_drop_env drop("1e-4");
+    scoped_env backend("APXCHOL_GPU_SPTRSV", "dataflow");
+    scoped_env split("APXCHOL_GPU_DF_SPLIT", "256");
+    for (bool fp16 : {false, true}) {
+        SCOPED_TRACE(fp16 ? "fp16" : "fp32");
+        scoped_env storage("APXCHOL_SPTRSV_FP16", fp16 ? "1" : "0");
+        apxchol::cuda_sptrsv uploaded;
+        uploaded.setup(factor, m);
+        ASSERT_FALSE(uploaded.adopted_device_factor());
+        ASSERT_EQ(uploaded.adoption_host_download_bytes(), 0u);
+
+        prepared_adoption prepared = prepare_adoption(factor, m, fp16);
+        const void* lifetime_probe = prepared.lifetime_probe;
+        ASSERT_TRUE(live_device_allocation(lifetime_probe));
+        std::vector<double> uploaded_result(static_cast<std::size_t>(m));
+        std::vector<double> adopted_result(static_cast<std::size_t>(m));
+        std::vector<double> adopted_repeat(static_cast<std::size_t>(m));
+        {
+            apxchol::cuda_sptrsv adopted;
+            adopted.setup_adopting_device_factor_for_research(
+                std::move(prepared.factor));
+            EXPECT_TRUE(prepared.factor.empty());
+            ASSERT_TRUE(adopted.ready());
+            EXPECT_TRUE(adopted.adopted_device_factor());
+            EXPECT_STREQ(adopted.backend_name(), "dataflow");
+            EXPECT_EQ(adopted.fp16(), fp16);
+            EXPECT_EQ(adopted.stored_nnz(), uploaded.stored_nnz());
+            expect_drop_stats_equal(adopted.drop_stats(), uploaded.drop_stats());
+            const std::size_t expected_download =
+                2 * (static_cast<std::size_t>(m) + 1) * sizeof(int) +
+                2 * static_cast<std::size_t>(prepared.nnz) * sizeof(int) +
+                (fp16 ? static_cast<std::size_t>(m) *
+                            (sizeof(float) + sizeof(double))
+                      : 0u);
+            EXPECT_EQ(adopted.adoption_host_download_bytes(), expected_download);
+
+            uploaded.solve_LLt(input.data(), uploaded_result.data());
+            adopted.solve_LLt(input.data(), adopted_result.data());
+            adopted.solve_LLt(input.data(), adopted_repeat.data());
+            EXPECT_EQ(0, std::memcmp(
+                uploaded_result.data(), adopted_result.data(),
+                adopted_result.size() * sizeof(double)));
+            EXPECT_EQ(0, std::memcmp(
+                adopted_result.data(), adopted_repeat.data(),
+                adopted_result.size() * sizeof(double)));
+        }
+        EXPECT_FALSE(live_device_allocation(lifetime_probe))
+            << "cuda_sptrsv did not release an adopted factor allocation";
+    }
+}
+
+TEST(GpuSptrsvAdoptionDevice, InvalidStructureRollsBackOwnershipAndDestination) {
+    const node_index n = 1025, m = n - 1;
+    const sparse_csc factor = make_dominant_lower(n);
+    scoped_drop_env drop("1e-4");
+    scoped_env backend("APXCHOL_GPU_SPTRSV", "dataflow");
+    scoped_env storage("APXCHOL_SPTRSV_FP16", "0");
+
+    apxchol::cuda_sptrsv destination;
+    prepared_adoption malformed =
+        prepare_adoption(factor, m, /*fp16=*/false,
+                         /*corrupt_L_extent=*/true);
+    const void* failed_probe = malformed.lifetime_probe;
+    ASSERT_TRUE(live_device_allocation(failed_probe));
+    try {
+        destination.setup_adopting_device_factor_for_research(
+            std::move(malformed.factor));
+        FAIL() << "malformed adopted structure was accepted";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("rowptr[m]"),
+                  std::string::npos) << error.what();
+    }
+    EXPECT_TRUE(malformed.factor.empty());
+    EXPECT_FALSE(destination.ready());
+    EXPECT_FALSE(destination.adopted_device_factor());
+    EXPECT_EQ(destination.adoption_host_download_bytes(), 0u);
+    EXPECT_FALSE(live_device_allocation(failed_probe))
+        << "failed adoption did not release transferred ownership";
+
+    // The failed transaction leaves no latent partial setup: the same object
+    // can immediately accept a valid owner and solve.
+    prepared_adoption valid = prepare_adoption(factor, m, /*fp16=*/false);
+    const void* success_probe = valid.lifetime_probe;
+    destination.setup_adopting_device_factor_for_research(
+        std::move(valid.factor));
+    EXPECT_TRUE(destination.ready());
+    EXPECT_TRUE(destination.adopted_device_factor());
+    EXPECT_TRUE(live_device_allocation(success_probe));
 }
 #endif // APXCHOL_USE_CUDA

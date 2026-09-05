@@ -88,6 +88,19 @@ unless another change or unresolved failure justifies it.
   factor storage (GPU default on, CPU default off); the old GPU-only alias is
   retired. GPU block setup is explicit opt-in
   through `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, independent of host threads.
+- Resident factor finalization is research-only. With
+  `APXCHOL_GPU_ROUND_SHADOW=force`, `APXCHOL_GPU_FACTOR_FINALIZE=force`,
+  `APXCHOL_SPTRSV_FP16=0`, `APXCHOL_FACTOR_DROP=0` and `vec_pool_aos`, the
+  device append log becomes fp32 CSR L/LT and is adopted by dataflow SpTRSV.
+  The audited prefix stays on device; the CPU tail and permutation upload.
+  The trusted finalizer downloads only O(n) row pointers for host plan packing;
+  external adoption capsules retain full structural validation. Unique internal
+  consuming solves omit host CSC row/value arrays; public factorization,
+  custom factors and `keep_factor=true` retain exportable arrays. Copied public
+  capsules use ordinary host setup. CPU authoritative elimination, CPU tail,
+  metadata and host plans remain; do not call this fully resident setup or a
+  measured speedup. Validate `GpuFactorFinalize.*`, `GpuRoundShadow*.*`,
+  `GpuSptrsvAdoption*.*`, `GpuDataflow.*` and `GpuHostPrep.*` on a CUDA device.
 - Keep substantial mechanisms: compensated factor dropping, GPU long-row
   segmentation, critical-tail solving, incremental degrees, and connectivity
   preserving residual sparsification. Standalone residual coalescing policy

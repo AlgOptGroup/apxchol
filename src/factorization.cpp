@@ -203,15 +203,34 @@ static void assemble_csc(
 void build_csc(factorization& result,
                const std::vector<factor_col>& factor_cols,
                node_index n,
-               checkpoint* cp) {
+               checkpoint* cp, bool build_values) {
     // Permutation: perm[original_vertex] = new (elimination-order) index.
     // factor_cols is already in elimination order, so position i holds the
     // i-th eliminated vertex.
     result.perm.assign(n, 0);
-    if (std::getenv("APXCHOL_VERBOSE"))
-        std::fprintf(stderr,
-                     "[apxchol] factor CSC assembly: fused invariant team\n");
-    assemble_csc(result, factor_cols, n, cp);
+    if (build_values) {
+        if (std::getenv("APXCHOL_VERBOSE"))
+            std::fprintf(stderr,
+                         "[apxchol] factor CSC assembly: fused invariant team\n");
+        assemble_csc(result, factor_cols, n, cp);
+    } else {
+        // Match the metadata left by release_values() without allocating,
+        // sorting or filling the two O(nnz) host arrays. The ordinary export
+        // route keeps its current fused parallel assembly unchanged.
+        for (node_index i = 0; i < n; ++i)
+            result.perm[factor_cols[i].vertex] = i;
+        if (cp) (*cp)("permutation");
+        result.L.resize(n, n);
+        auto* outer = result.L.outerIndexPtr();
+        for (node_index i = 0; i < n; ++i) {
+            const edge_index offdiag = factor_cols[i].entry_count;
+            if (offdiag == sparse_csc::kEdgeMax ||
+                outer[i] > sparse_csc::kEdgeMax - offdiag - 1)
+                edge_index_overflow("factor_metadata(nnz)");
+            outer[i + 1] = outer[i] + offdiag + 1;
+        }
+        if (cp) (*cp)("factor_metadata");
+    }
 }
 
 } // namespace detail
@@ -232,10 +251,11 @@ template factorization factorize_with_strategy<vec_pool_incidence>(
 template factorization factorize_with_strategy<directed_vec_pool_incidence>(
     graph<directed_vec_pool_incidence>, const factor_options&, checkpoint*);
 
-factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        graph_storage storage,
-                        const factor_options& opts_in,
-                        checkpoint* cp) {
+factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
+                                          graph_storage storage,
+                                          const factor_options& opts_in,
+                                          checkpoint* cp,
+                                          bool retain_host_factor) {
     // Assert the operator contract and lump positive off-diagonals if the
     // matrix needs it. Same `operator_view` the header's factorize() overloads
     // use — one implementation, so the CLI, the C++ API and both bindings
@@ -259,7 +279,12 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
     // by-value graph parameter — no defensive deep-copy on the dispatch path.
     auto do_factorize = [&](auto&& G) {
         if (cp) { (*cp)("make_graph"); cp->ascend(); }
-        factorization F = factorize_with_strategy(std::move(G), opts, cp);
+        factorization F = dispatch_partitioner<factorization>(opts.is_select,
+            [&]<typename P>() -> factorization {
+                P partitioner;
+                return factorize_impl(make_tree_elim(opts), partitioner,
+                    std::move(G), opts, cp, retain_host_factor);
+            });
         F.lumped_offdiag = op.lumped();
         return F;
     };
@@ -287,6 +312,13 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
         return do_factorize(std::move(G));
     }
     }
+}
+
+// Public factorization remains exportable, including under the research mode.
+factorization factorize(const Eigen::SparseMatrix<double>& L,
+                        graph_storage storage, const factor_options& opts,
+                        checkpoint* cp) {
+    return detail::factorize_for_solver(L, storage, opts, cp, true);
 }
 
 } // namespace apxchol

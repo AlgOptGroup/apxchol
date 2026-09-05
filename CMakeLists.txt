@@ -170,6 +170,7 @@ add_library(apxchol_core
     # GPU-resident residual topology for the block-region AUTO setup front-end,
     # which defaults to GPU only through the measured T=8 crossover.
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_block_frontend.cu>
+    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_round_shadow.cu>
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
     # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>

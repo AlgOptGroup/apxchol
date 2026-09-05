@@ -9,6 +9,7 @@
 
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/elimination/elimination.h"
+#include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/partitioner_list.h"
 #include "apxchol/solver/factorize_workspace.h"
@@ -524,7 +525,7 @@ void process_vertex(const Eliminator& elim,
     // pure function of (run seed, vertex): draws are identical at any thread
     // count and schedule.
     const std::uint64_t vseed =
-        run_seed ^ ((std::uint64_t(v) + 1) * 0x9E3779B97F4A7C15ULL);
+        gpu_round_shadow_pivot_seed(run_seed, v);
     elim.sample_clique(std::span<weighted_neighbor>(nbrs), total_deg, vseed,
                        edge_emitter(ws.edge_buffer));
 }
@@ -1186,7 +1187,7 @@ factorization factorize_impl(const Eliminator& elim,
                              Partitioner& partitioner,
                              graph<Incidence> G,
                              const factor_options& opts_in,
-                             checkpoint* cp) {
+                             checkpoint* cp, bool retain_host_factor = true) {
     const node_index n = G.n();
     if (n == 0)
         return {};
@@ -1208,6 +1209,8 @@ factorization factorize_impl(const Eliminator& elim,
     if (cp) cp->tick();
     graph<Incidence> work(std::move(G));
     if (cp) (*cp)("graph_copy");
+    auto gpu_round_shadow =
+        detail::make_gpu_round_shadow_session<Eliminator, Incidence>(elim);
 
     if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
         if (opts.fs_filter_append) work.set_adj_filter_append(true);
@@ -1643,12 +1646,44 @@ factorization factorize_impl(const Eliminator& elim,
                 incremental_degree_active ? 1 : 0,
                 incremental_degree_auto_decided ? 1 : 0);
         }
+        const size_t shadow_factor_base = gpu_round_shadow.active()
+            ? factor_cols.size() : 0;
+#if defined(APXCHOL_USE_CUDA)
+        detail::gpu_device_selection round_device_selection;
+        const detail::gpu_device_selection* round_device_selection_ptr = nullptr;
+        if (gpu_frontend) {
+            round_device_selection = gpu_frontend->device_selection();
+            round_device_selection_ptr = &round_device_selection;
+        }
+#endif
+        // This is the benchmark boundary for the complete FORCE-only R2b
+        // call.  Keep the tick before begin_round(): that call owns the host
+        // residual snapshot, independent reference, capacity planning and all
+        // phase-local/resident allocations in addition to the CUDA work.  The
+        // CUDA-event total reported by the sidecar intentionally cannot cover
+        // those host intervals.
+        if (cp && gpu_round_shadow.active()) cp->tick();
+        gpu_round_shadow.begin_round(
+            work, part.data, opts.seed, ws.round_index,
+            incremental_workers == 1
+#if defined(APXCHOL_USE_CUDA)
+            , round_device_selection_ptr
+#endif
+        );
+        if (cp && gpu_round_shadow.active())
+            (*cp)("gpu_round_shadow");
         detail::eliminate_partition(elim, work, part, factor_cols, ws, opts, cp,
                                     capture_gpu_topology,
                                     elimination_work_hint,
                                     incremental_degree_active &&
                                             incremental_degree_ready
                                         ? &live_degrees : nullptr);
+        if (gpu_round_shadow.active()) {
+            gpu_round_shadow.verify_cpu_round(
+                work,
+                std::span<const detail::factor_col>(factor_cols).subspan(
+                    shadow_factor_base));
+        }
         if (incremental_degree_active && incremental_degree_ready) {
             const std::size_t removed = ws.degree_removed_incidence;
             const std::size_t retired_dead =
@@ -1753,6 +1788,7 @@ factorization factorize_impl(const Eliminator& elim,
                         work, active,
                         detail::kResidualSparsifyKeepProbability,
                         opts.seed ^ ws.round_index);
+                gpu_round_shadow.authoritative_host_rebuild(work);
                 if (std::getenv("APXCHOL_VERBOSE"))
                     std::fprintf(stderr,
                         "[apxchol] residual sparsify: active=%zu p=%.2f "
@@ -1890,10 +1926,29 @@ factorization factorize_impl(const Eliminator& elim,
             bk_consecutive_empty = 0;
             result.rounds.push_back({active.size(), bk_part.num_regions(),
                                      last_avg_degree, 0, 0});
-            const size_t cols_before_bk = cp ? factor_cols.size() : 0;
+            const size_t cols_before_bk =
+                (cp || gpu_round_shadow.active()) ? factor_cols.size() : 0;
+            // Match the main-loop timing boundary above.  In particular, do
+            // not let eliminate_partition()'s entry tick discard the complete
+            // sidecar call from a future R2b benchmark.
+            if (cp && gpu_round_shadow.active()) cp->tick();
+            gpu_round_shadow.begin_round(
+                work, bk_part.data, opts.seed, ws.round_index,
+                detail::elimination_round_team_size(
+                    bk_part.num_vertices(), bk.selected_degree_work(),
+                    opts.omp_threshold,
+                    static_cast<std::size_t>(num_threads_factorize)) == 1);
+            if (cp && gpu_round_shadow.active())
+                (*cp)("gpu_round_shadow");
             detail::eliminate_partition(
                 elim, work, bk_part, factor_cols, ws, opts, cp,
                 /*capture_gpu_topology=*/false, bk.selected_degree_work());
+            if (gpu_round_shadow.active()) {
+                gpu_round_shadow.verify_cpu_round(
+                    work,
+                    std::span<const detail::factor_col>(factor_cols).subspan(
+                        cols_before_bk));
+            }
             if (cp) {
                 size_t bk_round_nnz = 0;
                 for (size_t ci = cols_before_bk; ci < factor_cols.size(); ++ci)
@@ -1921,6 +1976,7 @@ factorization factorize_impl(const Eliminator& elim,
         detail::eliminate_remaining(elim, work, active, factor_cols, ws, opts);
     }
     if (cp) (*cp)("elim_remaining");
+    gpu_round_shadow.finish();
 
     // Quantify incidence-pool over-allocation: peak working-graph bytes vs the
     // factor's "useful" size, and the live fraction (1 - abandoned-slab share).
@@ -1991,7 +2047,30 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<std::array<size_t, 256>>().swap(pre_histograms);
     std::vector<size_t>().swap(pre_filter_offsets);
 
-    detail::build_csc(result, factor_cols, n, cp);
+    bool build_host_values = true;
+#if defined(APXCHOL_USE_CUDA)
+    const bool finalize_on_device = detail::gpu_factor_finalize_requested();
+    build_host_values = retain_host_factor || !finalize_on_device;
+#else
+    (void)retain_host_factor;
+#endif
+    detail::build_csc(result, factor_cols, n, cp, build_host_values);
+#if defined(APXCHOL_USE_CUDA)
+    if (finalize_on_device) {
+        result.research_device_factor = gpu_round_shadow.finalize_fp32(
+            factor_cols, result.perm, result.sddm ? n : n - 1);
+        if (cp) (*cp)("gpu_factor_finalize");
+        std::fprintf(stderr,
+            "[gpu-factor-assembly] host_csc=%s host_csc_array_bytes=%zu "
+            "host_metadata_bytes=%zu raw_factor_nnz=%zu\n",
+            build_host_values ? "retained" : "omitted",
+            result.L.inner_.capacity() * sizeof(node_index) +
+                result.L.vals_.capacity() * sizeof(factor_value_t),
+            result.perm.size() * sizeof(node_index) +
+                result.L.outer_.size() * sizeof(edge_index),
+            static_cast<std::size_t>(result.L.nonZeros()));
+    }
+#endif
     // The per-column ranges and their monotonic resources are consumed: free
     // both here, not at return.
     std::vector<detail::factor_col>().swap(factor_cols);

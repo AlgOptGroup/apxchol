@@ -322,10 +322,15 @@ struct forward_star {
         }
     };
 
-    template<typename Self>
-    auto operator[](this Self&& self, node_index v) {
+    auto operator[](node_index v) {
         return std::ranges::subrange(
-            iterator_<Self>{&self, self.head_[v]}, std::default_sentinel);
+            iterator_<forward_star>{this, head_[v]}, std::default_sentinel);
+    }
+
+    auto operator[](node_index v) const {
+        return std::ranges::subrange(
+            iterator_<const forward_star>{this, head_[v]},
+            std::default_sentinel);
     }
 
 private:

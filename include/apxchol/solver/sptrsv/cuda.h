@@ -6,23 +6,291 @@
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <limits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace apxchol {
+namespace detail { class gpu_round_shadow_device_state; }
 
 // GPU SpTRSV value type = the shared sptrsv_value_t (fp32): the factor
 // (d_vals_) AND the internal solve vectors (d_x_/d_y_) all use this; the
 // PCG-facing interface stays fp64 and casts at the boundary.
 using cuda_value_t = sptrsv_value_t;
 static_assert(sizeof(cuda_value_t) == 4, "the GPU SpTRSV runs in fp32");
+
+/// Non-owning allocation descriptions used to spell the ownership handoff
+/// below. `bytes` is the complete cudaMalloc allocation capacity, not only its
+/// logical prefix, so geometrically grown R2b buffers remain honestly
+/// accounted after transfer.
+template<class T>
+struct cuda_sptrsv_device_allocation {
+    T* data = nullptr;
+    std::size_t bytes = 0;
+};
+
+/// Non-owning allocation triples used only to spell the ownership handoff
+/// below without six positional `void*` arguments. Every member must describe
+/// the base of a distinct cudaMalloc allocation on `cuda_device`.
+struct cuda_sptrsv_device_csr_fp32 {
+    cuda_sptrsv_device_allocation<int> row_ptr;
+    cuda_sptrsv_device_allocation<int> col_idx;
+    cuda_sptrsv_device_allocation<cuda_value_t> values;
+};
+
+struct cuda_sptrsv_device_csr_fp16 {
+    cuda_sptrsv_device_allocation<int> row_ptr;
+    cuda_sptrsv_device_allocation<int> col_idx;
+    cuda_sptrsv_device_allocation<std::uint16_t> values;
+};
+
+/// Move-only ownership capsule for the research-only direct CUDA SpTRSV
+/// installation boundary. A successful own_*() call takes immediate ownership
+/// of every supplied cudaMalloc base pointer. Destruction frees them on the
+/// recorded CUDA device; moving leaves the source empty.
+///
+/// The arrays are already-final SpTRSV storage, not a raw elimination factor:
+/// compacting drop, transpose construction, and (for fp16) scaled narrowing
+/// have happened before this boundary. `stats` is mandatory provenance for
+/// that preprocessing. own_*() validates only host metadata and pointer
+/// uniqueness before ownership transfers; cuda_sptrsv's adoption call validates
+/// the live allocations and downloaded CSR structures.
+class cuda_sptrsv_device_factor {
+public:
+    enum class storage { fp32, fp16_scaled };
+
+    cuda_sptrsv_device_factor() = default;
+    cuda_sptrsv_device_factor(const cuda_sptrsv_device_factor&) = delete;
+    cuda_sptrsv_device_factor& operator=(const cuda_sptrsv_device_factor&) = delete;
+
+    cuda_sptrsv_device_factor(cuda_sptrsv_device_factor&& other) noexcept {
+        move_from(other);
+    }
+    cuda_sptrsv_device_factor& operator=(cuda_sptrsv_device_factor&& other) noexcept {
+        if (this != &other) {
+            reset();
+            move_from(other);
+        }
+        return *this;
+    }
+
+    ~cuda_sptrsv_device_factor() { reset(); }
+
+    /// On success the returned capsule owns all six allocations. If metadata
+    /// validation throws, ownership has NOT transferred and the caller still
+    /// owns the raw pointers.
+    static cuda_sptrsv_device_factor own_fp32(
+            int cuda_device, std::int64_t m, std::int64_t nnz,
+            cuda_sptrsv_device_csr_fp32 L,
+            cuda_sptrsv_device_csr_fp32 LT,
+            factor_drop_stats stats) {
+        const std::size_t rows = static_cast<std::size_t>(m);
+        const std::size_t entries = static_cast<std::size_t>(nnz);
+        validate_metadata(cuda_device, m, nnz, stats,
+                          {{L.row_ptr.data, L.row_ptr.bytes, (rows + 1) * sizeof(int)},
+                           {L.col_idx.data, L.col_idx.bytes, entries * sizeof(int)},
+                           {L.values.data, L.values.bytes, entries * sizeof(cuda_value_t)},
+                           {LT.row_ptr.data, LT.row_ptr.bytes, (rows + 1) * sizeof(int)},
+                           {LT.col_idx.data, LT.col_idx.bytes, entries * sizeof(int)},
+                           {LT.values.data, LT.values.bytes, entries * sizeof(cuda_value_t)}});
+        cuda_sptrsv_device_factor out;
+        out.cuda_device_ = cuda_device;
+        out.m_ = m;
+        out.nnz_ = nnz;
+        out.storage_ = storage::fp32;
+        out.stats_ = stats;
+        out.L_row_ptr_ = L.row_ptr.data;
+        out.L_col_idx_ = L.col_idx.data;
+        out.L_values_ = L.values.data;
+        out.LT_row_ptr_ = LT.row_ptr.data;
+        out.LT_col_idx_ = LT.col_idx.data;
+        out.LT_values_ = LT.values.data;
+        out.allocation_bytes_ = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
+                                 LT.row_ptr.bytes, LT.col_idx.bytes, LT.values.bytes,
+                                 0, 0};
+        return out;
+    }
+
+    /// FP16_SCALED form of the same handoff. `diag` and `inv_scale2` are
+    /// separate cudaMalloc base allocations of m floats / m doubles. The two
+    /// counters are the narrowing diagnostics reported by the upload path.
+    static cuda_sptrsv_device_factor own_fp16_scaled(
+            int cuda_device, std::int64_t m, std::int64_t nnz,
+            cuda_sptrsv_device_csr_fp16 L,
+            cuda_sptrsv_device_csr_fp16 LT,
+            cuda_sptrsv_device_allocation<float> diag,
+            cuda_sptrsv_device_allocation<double> inv_scale2,
+            factor_drop_stats stats,
+            std::uint64_t flushed, std::uint64_t subnormal) {
+        const std::size_t rows = static_cast<std::size_t>(m);
+        const std::size_t entries = static_cast<std::size_t>(nnz);
+        validate_metadata(cuda_device, m, nnz, stats,
+                          {{L.row_ptr.data, L.row_ptr.bytes, (rows + 1) * sizeof(int)},
+                           {L.col_idx.data, L.col_idx.bytes, entries * sizeof(int)},
+                           {L.values.data, L.values.bytes, entries * sizeof(std::uint16_t)},
+                           {LT.row_ptr.data, LT.row_ptr.bytes, (rows + 1) * sizeof(int)},
+                           {LT.col_idx.data, LT.col_idx.bytes, entries * sizeof(int)},
+                           {LT.values.data, LT.values.bytes, entries * sizeof(std::uint16_t)},
+                           {diag.data, diag.bytes, rows * sizeof(float)},
+                           {inv_scale2.data, inv_scale2.bytes, rows * sizeof(double)}});
+        cuda_sptrsv_device_factor out;
+        out.cuda_device_ = cuda_device;
+        out.m_ = m;
+        out.nnz_ = nnz;
+        out.storage_ = storage::fp16_scaled;
+        out.stats_ = stats;
+        out.fp16_flushed_ = flushed;
+        out.fp16_subnormal_ = subnormal;
+        out.L_row_ptr_ = L.row_ptr.data;
+        out.L_col_idx_ = L.col_idx.data;
+        out.L_values_ = L.values.data;
+        out.LT_row_ptr_ = LT.row_ptr.data;
+        out.LT_col_idx_ = LT.col_idx.data;
+        out.LT_values_ = LT.values.data;
+        out.diag_ = diag.data;
+        out.inv_scale2_ = inv_scale2.data;
+        out.allocation_bytes_ = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
+                                 LT.row_ptr.bytes, LT.col_idx.bytes, LT.values.bytes,
+                                 diag.bytes, inv_scale2.bytes};
+        return out;
+    }
+
+    bool empty() const noexcept { return L_row_ptr_ == nullptr; }
+    int cuda_device() const noexcept { return cuda_device_; }
+    std::int64_t rows() const noexcept { return m_; }
+    std::int64_t nonzeros() const noexcept { return nnz_; }
+    storage value_storage() const noexcept { return storage_; }
+
+private:
+    friend class cuda_sptrsv;
+    friend class detail::gpu_round_shadow_device_state;
+
+    struct allocation_metadata {
+        const void* data;
+        std::size_t bytes;
+        std::size_t required;
+    };
+
+    static void validate_metadata(
+            int cuda_device, std::int64_t m, std::int64_t nnz,
+            const factor_drop_stats& stats,
+            std::initializer_list<allocation_metadata> allocations) {
+        if (cuda_device < 0)
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: CUDA device must be nonnegative");
+        if (m <= 0 || m > std::numeric_limits<int>::max())
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: dimension must be positive and fit int32");
+        if (nnz < m || nnz > std::numeric_limits<int>::max())
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: nnz must contain every diagonal and fit int32");
+        if (!std::isfinite(stats.rel) || stats.rel < 0.0 ||
+            stats.nnz_stored != static_cast<std::uint64_t>(nnz) ||
+            stats.nnz_factor < stats.nnz_stored ||
+            stats.dropped != stats.dropped_threshold + stats.dropped_flush ||
+            stats.nnz_factor - stats.nnz_stored != stats.dropped)
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: inconsistent factor-drop provenance");
+        std::vector<const void*> sorted;
+        sorted.reserve(allocations.size());
+        for (const allocation_metadata& allocation : allocations) {
+            if (!allocation.data)
+                throw std::invalid_argument(
+                    "apxchol cuda_sptrsv adoption: every device allocation is required");
+            if (allocation.bytes < allocation.required)
+                throw std::invalid_argument(
+                    "apxchol cuda_sptrsv adoption: a device allocation is smaller than its logical array");
+            sorted.push_back(allocation.data);
+        }
+        std::sort(sorted.begin(), sorted.end(), std::less<const void*>{});
+        if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end())
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: device allocations must be distinct bases");
+    }
+
+    void clear() noexcept {
+        cuda_device_ = -1;
+        m_ = nnz_ = 0;
+        storage_ = storage::fp32;
+        finalized_sorted_triangular_ = false;
+        stats_ = factor_drop_stats{};
+        fp16_flushed_ = fp16_subnormal_ = 0;
+        L_row_ptr_ = LT_row_ptr_ = nullptr;
+        L_col_idx_ = LT_col_idx_ = nullptr;
+        L_values_ = LT_values_ = nullptr;
+        diag_ = nullptr;
+        inv_scale2_ = nullptr;
+        allocation_bytes_.fill(0);
+    }
+
+    void move_from(cuda_sptrsv_device_factor& other) noexcept {
+        cuda_device_ = other.cuda_device_;
+        m_ = other.m_;
+        nnz_ = other.nnz_;
+        storage_ = other.storage_;
+        finalized_sorted_triangular_ = other.finalized_sorted_triangular_;
+        stats_ = other.stats_;
+        fp16_flushed_ = other.fp16_flushed_;
+        fp16_subnormal_ = other.fp16_subnormal_;
+        L_row_ptr_ = other.L_row_ptr_;
+        L_col_idx_ = other.L_col_idx_;
+        L_values_ = other.L_values_;
+        LT_row_ptr_ = other.LT_row_ptr_;
+        LT_col_idx_ = other.LT_col_idx_;
+        LT_values_ = other.LT_values_;
+        diag_ = other.diag_;
+        inv_scale2_ = other.inv_scale2_;
+        allocation_bytes_ = other.allocation_bytes_;
+        other.clear();
+    }
+
+    void reset() noexcept {
+        if (empty()) return;
+        int saved_device = -1;
+        bool restore = false;
+        if (cudaGetDevice(&saved_device) == cudaSuccess &&
+            saved_device != cuda_device_ &&
+            cudaSetDevice(cuda_device_) == cudaSuccess)
+            restore = true;
+        for (void* p : {static_cast<void*>(L_row_ptr_),
+                        static_cast<void*>(L_col_idx_), L_values_,
+                        static_cast<void*>(LT_row_ptr_),
+                        static_cast<void*>(LT_col_idx_), LT_values_,
+                        static_cast<void*>(diag_),
+                        static_cast<void*>(inv_scale2_)})
+            if (p) (void)cudaFree(p);
+        clear();
+        if (restore) (void)cudaSetDevice(saved_device);
+    }
+
+    int cuda_device_ = -1;
+    std::int64_t m_ = 0;
+    std::int64_t nnz_ = 0;
+    storage storage_ = storage::fp32;
+    bool finalized_sorted_triangular_ = false;
+    factor_drop_stats stats_;
+    std::uint64_t fp16_flushed_ = 0;
+    std::uint64_t fp16_subnormal_ = 0;
+    int* L_row_ptr_ = nullptr;
+    int* L_col_idx_ = nullptr;
+    void* L_values_ = nullptr;
+    int* LT_row_ptr_ = nullptr;
+    int* LT_col_idx_ = nullptr;
+    void* LT_values_ = nullptr;
+    float* diag_ = nullptr;
+    double* inv_scale2_ = nullptr;
+    std::array<std::size_t, 8> allocation_bytes_{};
+};
+
 
 namespace detail {
 
@@ -174,6 +442,7 @@ public:
 
         size_t free_before = 0, total = 0;
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
+        cleanup_needed_ = true;
         factor_bytes_ = 0;
         auto dev_alloc = [&](void** p, std::size_t bytes) {
             APXCHOL_CUDA_CHECK(cudaMalloc(p, bytes));
@@ -290,6 +559,221 @@ public:
         ready_ = true;
     }
 
+    /// Research-only installation boundary for a factor whose final CSR(L)
+    /// and CSR(L^T) storage already lives on the active CUDA device. This call
+    /// is used by the FORCE-only resident-finalizer prototype. The ordinary
+    /// production path remains the default and owns host preprocessing.
+    ///
+    /// Ownership and rollback:
+    ///   * pass a move-only cuda_sptrsv_device_factor by value;
+    ///   * existing factor state is destroyed, as in ordinary setup();
+    ///   * ownership is consumed on entry even when validation/setup throws;
+    ///   * before the final commit the capsule owns the factor allocations and
+    ///     this object owns only newly allocated solve/schedule state;
+    ///   * on failure both owners free their respective allocations and this
+    ///     object is reset to empty; on success every factor allocation moves
+    ///     here and lives until this cuda_sptrsv is destroyed.
+    ///
+    /// This first boundary still downloads both int32 CSR structures to build
+    /// and validate the existing HOST dataflow plan (plus fp16 diag/inv-scale
+    /// metadata when applicable), then uploads the O(m) plan tables. It never
+    /// downloads factor values and never uploads any CSR structure or value.
+    /// Capsules made by the private resident finalizer additionally avoid all
+    /// index downloads: sorted triangular diagonals are known by construction,
+    /// and the host planner needs only the two O(m) row-pointer arrays.
+    void setup_adopting_device_factor_for_research(
+            cuda_sptrsv_device_factor factor) {
+        // A prior failed ordinary setup may have left partial allocations. The
+        // ordinary setup calls destroy() before reuse too; make the fresh-state
+        // precondition concrete before adopting another owner.
+        destroy();
+        if (factor.empty())
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: factor ownership capsule is empty");
+
+        int current_device = -1;
+        APXCHOL_CUDA_CHECK(cudaGetDevice(&current_device));
+        if (current_device != factor.cuda_device_)
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: active CUDA device differs from the factor owner");
+        validate_backend_env();
+        const bool requested_fp16 = fp16_resolved();
+        const bool factor_fp16 =
+            factor.storage_ == cuda_sptrsv_device_factor::storage::fp16_scaled;
+        if (requested_fp16 != factor_fp16)
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: device storage does not match APXCHOL_SPTRSV_FP16 resolution");
+        const double requested_drop = factor_drop_rel_from_env();
+        if (factor.stats_.rel != requested_drop)
+            throw std::invalid_argument(
+                "apxchol cuda_sptrsv adoption: preprocessed drop provenance does not match APXCHOL_FACTOR_DROP");
+
+        const int m = static_cast<int>(factor.m_);
+        const std::size_t rows = static_cast<std::size_t>(m);
+        const std::size_t nnz = static_cast<std::size_t>(factor.nnz_);
+        const std::size_t ptr_bytes = (rows + 1) * sizeof(int);
+        const std::size_t idx_bytes = nnz * sizeof(int);
+        const std::size_t val_bytes = nnz * (factor_fp16
+            ? sizeof(std::uint16_t) : sizeof(cuda_value_t));
+
+        std::size_t adopted_bytes = 0;
+        std::size_t allocation_index = 0;
+        auto account = [&](const void* pointer, std::size_t required,
+                           const char* name) {
+            const std::size_t bytes =
+                factor.allocation_bytes_[allocation_index++];
+            if (bytes < required)
+                throw std::logic_error(
+                    "apxchol cuda_sptrsv adoption: ownership metadata lost its validated capacity");
+            validate_device_allocation(pointer, current_device, name);
+            if (bytes > std::numeric_limits<std::size_t>::max() - adopted_bytes)
+                throw std::overflow_error(
+                    "apxchol cuda_sptrsv adoption: device allocation byte total overflows size_t");
+            adopted_bytes += bytes;
+        };
+        account(factor.L_row_ptr_, ptr_bytes, "CSR(L) row pointers");
+        account(factor.L_col_idx_, idx_bytes, "CSR(L) column indices");
+        account(factor.L_values_, val_bytes, "CSR(L) values");
+        account(factor.LT_row_ptr_, ptr_bytes, "CSR(L^T) row pointers");
+        account(factor.LT_col_idx_, idx_bytes, "CSR(L^T) column indices");
+        account(factor.LT_values_, val_bytes, "CSR(L^T) values");
+        if (factor_fp16) {
+            account(factor.diag_, rows * sizeof(float), "fp16 scaled diagonal");
+            account(factor.inv_scale2_, rows * sizeof(double), "fp16 inverse scale squared");
+        }
+
+        const bool trace = std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
+        auto t_prev = std::chrono::steady_clock::now();
+        auto mark = [&](const char* what) {
+            if (!trace) return;
+            APXCHOL_CUDA_CHECK(cudaDeviceSynchronize());
+            const auto now = std::chrono::steady_clock::now();
+            std::fprintf(stderr, "[sptrsv-adopt gpu] %-22s %8.2f ms\n", what,
+                         std::chrono::duration<double, std::milli>(now - t_prev).count());
+            t_prev = std::chrono::steady_clock::now();
+        };
+
+        std::vector<int> L_ptr(rows + 1), LT_ptr(rows + 1);
+        std::vector<int> L_idx, LT_idx;
+        APXCHOL_CUDA_CHECK(cudaMemcpy(
+            L_ptr.data(), factor.L_row_ptr_, ptr_bytes, cudaMemcpyDeviceToHost));
+        APXCHOL_CUDA_CHECK(cudaMemcpy(
+            LT_ptr.data(), factor.LT_row_ptr_, ptr_bytes, cudaMemcpyDeviceToHost));
+        std::size_t adoption_download_bytes = 2 * ptr_bytes;
+        if (factor.finalized_sorted_triangular_) {
+            // The private finalizer constructed both sorted triangular CSRs
+            // from one validated coordinate stream and checked duplicates on
+            // device. Only O(m) row pointers are needed for host plan packing.
+            for (const auto* ptr : {&L_ptr, &LT_ptr}) {
+                if (ptr->front() != 0 || ptr->back() != factor.nnz_)
+                    throw std::invalid_argument("apxchol cuda_sptrsv adoption: invalid finalized pointer endpoints");
+                for (int row = 0; row < m; ++row)
+                    if ((*ptr)[row] >= (*ptr)[row + 1])
+                        throw std::invalid_argument("apxchol cuda_sptrsv adoption: empty or unordered finalized row");
+            }
+            mark("download row pointers");
+        } else {
+            L_idx.resize(nnz); LT_idx.resize(nnz);
+            APXCHOL_CUDA_CHECK(cudaMemcpy(
+                L_idx.data(), factor.L_col_idx_, idx_bytes, cudaMemcpyDeviceToHost));
+            APXCHOL_CUDA_CHECK(cudaMemcpy(
+                LT_idx.data(), factor.LT_col_idx_, idx_bytes, cudaMemcpyDeviceToHost));
+            adoption_download_bytes += 2 * idx_bytes;
+            mark("download CSR structure");
+            const std::string structure_error =
+                cuda_host::dataflow_factor_structure_check(
+                    m, factor.nnz_, L_ptr.data(), L_idx.data(),
+                    LT_ptr.data(), LT_idx.data());
+            if (!structure_error.empty())
+                throw std::invalid_argument("apxchol cuda_sptrsv adoption: " + structure_error);
+        }
+
+        if (factor_fp16) {
+            std::vector<float> diag(rows);
+            std::vector<double> inv_scale2(rows);
+            APXCHOL_CUDA_CHECK(cudaMemcpy(
+                diag.data(), factor.diag_, rows * sizeof(float),
+                cudaMemcpyDeviceToHost));
+            APXCHOL_CUDA_CHECK(cudaMemcpy(
+                inv_scale2.data(), factor.inv_scale2_, rows * sizeof(double),
+                cudaMemcpyDeviceToHost));
+            adoption_download_bytes +=
+                rows * (sizeof(float) + sizeof(double));
+            for (int row = 0; row < m; ++row)
+                if (!(std::isfinite(diag[static_cast<std::size_t>(row)]) &&
+                      diag[static_cast<std::size_t>(row)] != 0.0f &&
+                      std::isfinite(inv_scale2[static_cast<std::size_t>(row)])))
+                    throw std::invalid_argument(
+                        "apxchol cuda_sptrsv adoption: invalid fp16 scaled metadata at row " +
+                        std::to_string(row));
+        }
+        mark("validate adoption input");
+
+        size_t free_before = 0, total = 0;
+        APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
+        try {
+            cleanup_needed_ = true;
+            m_ = factor.m_;
+            nnz_ = factor.nnz_;
+            stats_ = factor.stats_;
+            fp16_ = factor_fp16;
+            fp16_flushed_ = factor.fp16_flushed_;
+            fp16_subnormal_ = factor.fp16_subnormal_;
+            adopted_device_factor_ = true;
+            adopted_cuda_device_ = current_device;
+            adoption_host_download_bytes_ = adoption_download_bytes;
+            factor_bytes_ = adopted_bytes;
+
+            APXCHOL_CUDA_CHECK(cudaMalloc(&d_x_, rows * sizeof(cuda_value_t)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&d_y_, rows * sizeof(cuda_value_t)));
+            h_stage_.resize(rows);
+            mark("allocate solve vectors");
+            setup_kernel_backend(LT_ptr, L_ptr, LT_idx.data(), L_idx.data(),
+                                 factor.finalized_sorted_triangular_);
+            mark("kernel backend tables");
+
+            size_t free_after = 0;
+            APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_after, &total));
+            device_delta_bytes_ =
+                free_before >= free_after ? free_before - free_after : 0;
+
+            // Final no-throw ownership commit. Until here `factor` remained the
+            // sole owner of every input allocation.
+            d_L_rowptr_ = factor.L_row_ptr_;
+            d_L_colidx_ = factor.L_col_idx_;
+            d_rowPtr_ = factor.LT_row_ptr_;
+            d_colIdx_ = factor.LT_col_idx_;
+            if (fp16_) {
+                d_L_vals16_ = static_cast<std::uint16_t*>(factor.L_values_);
+                d_vals16_ = static_cast<std::uint16_t*>(factor.LT_values_);
+                d_diag_ = factor.diag_;
+                d_inv_scale2_ = factor.inv_scale2_;
+            } else {
+                d_L_vals_ = static_cast<cuda_value_t*>(factor.L_values_);
+                d_vals_ = static_cast<cuda_value_t*>(factor.LT_values_);
+            }
+            factor.clear();
+            ready_ = true;
+
+            if (std::getenv("APXCHOL_VERBOSE") ||
+                std::getenv("APXCHOL_GPU_MEM_DEBUG"))
+                std::fprintf(stderr,
+                    "[apxchol] sptrsv storage GPU/dataflow adopted %s: "
+                    "stored_nnz=%llu factor_device_bytes=%.1f MB "
+                    "host_structure_download=%.1f MB install_delta=%.1f MB\n",
+                    fp16_ ? "fp16" : value_name,
+                    static_cast<unsigned long long>(stats_.nnz_stored),
+                    factor_bytes_ / 1e6,
+                    adoption_host_download_bytes_ / 1e6,
+                    device_delta_bytes_ / 1e6);
+        } catch (...) {
+            // Factor pointers have not moved before the no-throw commit above;
+            // destroy() owns only partial solve/plan allocations here.
+            destroy();
+            throw;
+        }
+    }
+
     /// Combined forward + back solve on GPU: computes L^{-T} L^{-1} x.
     /// Reads x_in[0..m-1] from host, writes result to x_out[0..m-1] on host.
     /// x_in and x_out may alias (ping-pong stays on GPU).
@@ -337,6 +821,14 @@ public:
     /// free-memory delta across the whole setup, at allocation granularity.
     std::size_t factor_device_bytes() const { return factor_bytes_; }
     std::size_t device_bytes_delta() const { return device_delta_bytes_; }
+    /// True only for setup_adopting_device_factor_for_research(). The ordinary
+    /// production upload path always reports false / zero.
+    bool adopted_device_factor() const { return adopted_device_factor_; }
+    /// Exact D2H bytes: row pointers for trusted finalized factors; complete
+    /// int32 structures and fp16 metadata for externally supplied capsules.
+    std::size_t adoption_host_download_bytes() const {
+        return adoption_host_download_bytes_;
+    }
 private:
     static void validate_backend_env() {
         const char* value = std::getenv("APXCHOL_GPU_SPTRSV");
@@ -346,11 +838,33 @@ private:
                 "' is unsupported; the GPU backend is dataflow");
     }
 
+    static void validate_device_allocation(
+            const void* pointer, int expected_device,
+            const char* name) {
+        cudaPointerAttributes attributes{};
+        const cudaError_t attr_status =
+            cudaPointerGetAttributes(&attributes, pointer);
+        if (attr_status != cudaSuccess)
+            throw std::invalid_argument(
+                std::string("apxchol cuda_sptrsv adoption: cannot inspect ") +
+                name + ": " + cudaGetErrorString(attr_status));
+#if CUDART_VERSION >= 10000
+        const cudaMemoryType memory_type = attributes.type;
+#else
+        const cudaMemoryType memory_type = attributes.memoryType;
+#endif
+        if (memory_type != cudaMemoryTypeDevice ||
+            attributes.device != expected_device)
+            throw std::invalid_argument(
+                std::string("apxchol cuda_sptrsv adoption: ") + name +
+                " is not device memory on the recorded CUDA device");
+    }
+
     // The dataflow backend's host-side tables (cuda_dataflow.h): no levels at
     // all -- the warp batch tables of both directions (from the CSR row
     // lengths), the m tagged words, the control ints, the resident grid.
     void setup_kernel_backend(const std::vector<int>& LT_ptr, const std::vector<int>& L_ptr,
-                              const int* LT_idx, const int* L_idx) {
+                              const int* LT_idx, const int* L_idx, bool sorted_triangular = false) {
         const int mi = static_cast<int>(m_);
         const std::vector<int> len_L  = cuda_host::csr_row_lengths(mi, L_ptr.data());
         const std::vector<int> len_LT = cuda_host::csr_row_lengths(mi, LT_ptr.data());
@@ -363,9 +877,9 @@ private:
         const cuda_host::dataflow_seg_params sp_f = dataflow_seg_params_for(pre, st_L);
         const cuda_host::dataflow_seg_params sp_b = dataflow_seg_params_for(pre, st_LT);
         const cuda_host::dataflow_plan fwd = cuda_host::dataflow_build_plan(
-            mi, false, L_ptr.data(), L_idx, len_L.data(), pre, sp_f);
+            mi, false, L_ptr.data(), L_idx, len_L.data(), pre, sp_f, sorted_triangular);
         const cuda_host::dataflow_plan bck = cuda_host::dataflow_build_plan(
-            mi, true, LT_ptr.data(), LT_idx, len_LT.data(), pre, sp_b);
+            mi, true, LT_ptr.data(), LT_idx, len_LT.data(), pre, sp_b, sorted_triangular);
         // The kernel relies on the plan's warp-sharing property implicitly
         // (see cuda_host.h dataflow_plan_check); O(m), so just check it.
         for (int dir = 0; dir < 2; ++dir) {
@@ -516,8 +1030,21 @@ private:
         }
     }
 
-    void destroy() {
-        if (!ready_) return;
+    void destroy() noexcept {
+        // setup() calls destroy() on a pristine object. Do not turn that host-
+        // only no-op into cudaFree(nullptr): it would be eligible to create the
+        // lazy CUDA context inside the timed production setup boundary.
+        if (!cleanup_needed_) return;
+        int saved_device = -1;
+        bool restore_device = false;
+        if (adopted_device_factor_ && adopted_cuda_device_ >= 0 &&
+            cudaGetDevice(&saved_device) == cudaSuccess &&
+            saved_device != adopted_cuda_device_ &&
+            cudaSetDevice(adopted_cuda_device_) == cudaSuccess)
+            restore_device = true;
+
+        // Free by pointer presence, not by ready_: setup/adoption exceptions can
+        // leave a valid partial allocation graph before the final ready commit.
         cudaFree(d_L_rowptr_); cudaFree(d_L_colidx_); cudaFree(d_L_vals_); cudaFree(d_L_vals16_);
         cudaFree(d_vals16_); cudaFree(d_diag_); cudaFree(d_inv_scale2_);
         cudaFree(d_df_tag_); cudaFree(d_df_ctrl_);
@@ -548,17 +1075,27 @@ private:
         factor_bytes_ = device_delta_bytes_ = 0;
         fp16_flushed_ = fp16_subnormal_ = 0;
         stats_ = factor_drop_stats{};
+        adopted_device_factor_ = false;
+        adopted_cuda_device_ = -1;
+        adoption_host_download_bytes_ = 0;
+        m_ = nnz_ = 0;
+        cleanup_needed_ = false;
+        if (restore_device) (void)cudaSetDevice(saved_device);
     }
 
     int64_t m_ = 0;
     int64_t nnz_ = 0;
     bool ready_ = false;
+    bool cleanup_needed_ = false;
 
     // What the compacting drop did (factor_drop.h) and the device footprint.
     factor_drop_stats stats_;
     std::size_t factor_bytes_ = 0;         // cudaMalloc'd factor arrays (see factor_device_bytes)
     std::size_t device_delta_bytes_ = 0;   // cudaMemGetInfo free delta over setup
     std::uint64_t fp16_flushed_ = 0, fp16_subnormal_ = 0;
+    bool adopted_device_factor_ = false;
+    int adopted_cuda_device_ = -1;
+    std::size_t adoption_host_download_bytes_ = 0;
 
     // Device memory (values + solve vectors at cuda_value_t width).
     int*          d_rowPtr_ = nullptr;
