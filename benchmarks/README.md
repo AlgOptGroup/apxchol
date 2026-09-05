@@ -177,3 +177,22 @@ invalidated terminal cells rerun while their old JSON remains in place until a
 replacement is ready. `stale_cells.py --delete` is optional cleanup, recoverable
 from Git. Add a stale-cell rule whenever a change alters the operator, RHS,
 timing boundary, convergence semantics, or solver result.
+
+
+### ParAC input and calibration eligibility
+
+Both CPU and GPU physics routes reject any strictly positive stored
+MatrixMarket off-diagonal before preprocessing or cache lookup: ParAC's
+`-abs(weight)` conversion would change that original operator. Such cells are
+`n/a` with a count and reason; malformed inputs are `failed`. Graph mode keeps
+its intended adjacency-to-Laplacian normalization.
+
+A CPU probe at its iteration cap, with an explicit failed stopping flag, a
+nonzero exit, or missing/nonfinite calibration statistics produces a failed
+cell and no retained runs for that probe. The GPU probe also rejects its
+upstream 300-iteration cap and invalid statistics; upstream provides no
+trustworthy recurrence-stop flag, so below-cap iteration count is not a proof
+of recurrence convergence. Every retained CPU, component-aggregated CPU and
+GPU true residual must pass the requested tolerance. Timing fields still
+come from one real median-total repetition; `repeat_rel_res` preserves the
+other residuals. Calibration is an estimate, not a convergence guarantee.

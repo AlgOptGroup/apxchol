@@ -42,8 +42,9 @@ class=laplacian -> GRAPH mode (`driver <mtx> <threads> ""`).
   on com-Amazon (unweighted) and grid_1000 (weighted).
 
 class=sddm -> PHYSICS mode (`driver <mtx> <threads> "" 1`).
-  Dump the operator as PUBLISHED and hand it to their `physics_produce(prefix,
-  "amd")`: permute, then append the ground row/column, so the appended node is
+  First reject positive stored off-diagonals: the driver replaces those with
+  -abs(weight), changing the original physics operator. Eligible inputs go to
+  their `physics_produce(prefix, "amd")`: permute, then append the ground row/column, so the appended node is
   last. Physics mode trims exactly that node, so what it solves is the published
   operator itself. The augmentation is not optional — run physics mode on an
   un-augmented operator and the trim deletes a real degree of freedom (measured:
@@ -51,6 +52,7 @@ class=sddm -> PHYSICS mode (`driver <mtx> <threads> "" 1`).
   G3_circuit does not converge at all). Its graph cell is n/a — graph mode
   grounds a Laplacian, which a full-rank operator is not.
 
+  Its total-entry-sum check does not establish this sign eligibility.
   physics_produce refuses (`@assert false`, "not diagonally dominant") an input
   whose TOTAL entry sum is below -1e-9. All nine kind=operator matrices clear it
   with room: apache2 +2.20e4, ecology1 +2.05e-9, G3_circuit +6.91e8,
@@ -61,8 +63,8 @@ sqrt(rel_tol): an ABSOLUTE test, and on the recurrence residual, which runs
 optimistic by a matrix-dependent factor. Rather than patch the test we calibrate
 it from one probe run using ParAC's own two printed numbers (see
 _calibrate_rel_tol) and pass the result through PARAC_REL_TOL. The achieved true
-relative residual is ParAC's own `relative residual:` line and lands just under
-TOL; both it and the calibrated tolerance are recorded in the cell.
+relative residual is ParAC's own `relative residual:` line; calibration is an
+estimate, and every retained repetition must independently pass TOL.
 
 CPU (`parac` / `parac_physics`, device=cpu):
   dump -> their write_graph.jl producer, method "amd" (cached with versioned
@@ -97,7 +99,10 @@ a dump/reorder timeout no longer crashes the pass. Both axes emit terminal cells
 for the campaign audit; GPU keeps failed/timeout outside TERMINAL_GPU so a later
 resume still retries the transient preparation.
 """
-import os, re, subprocess, time
+import math, os, re, subprocess, time
+
+from parac_contract import (CalibrationFailed, UnsupportedOperator,
+                            calibrated_cpu_tolerance, require_original_physics)
 
 import runner_common as rc
 from runner_common import ROOT, sh
@@ -105,6 +110,7 @@ from runner_common import ROOT, sh
 TOL = "1e-8"
 REPS = 3
 THREADS = 16
+GPU_MAX_ITER = 300            # upstream 44ef39d gpu_implementation/solver.hpp
 MAX_ITER = 2000               # ParAC's default is 1000; patch 0001 lets us raise it
 PROBE_REL_TOL = 1e-7          # ParAC's own default; the CPU calibration probe runs at it
 PROBE_TOL_GPU = 1e-7          # the CUDA drivers' tolerance is already argv[4]
@@ -176,12 +182,12 @@ PROV_CPU = {"boost": "on", "boost_expected": "on", "git_sha": rc.git_sha(),
                     "(thread-count gate, configurable tolerance, and complete setup timing; "
                     "no numerics touched). kind=graph -> GRAPH "
                     "mode on the PURE L per connected component, ParAC's own zero-sum RHS; "
-                    "kind=operator -> PHYSICS mode on the PUBLISHED operator augmented ParAC's "
+                    "kind=operator -> PHYSICS mode only without positive off-diagonals; augmented ParAC's "
                     "own way (permute, then append the ground row/column the trim removes). "
                     "Input prepared by ParAC's OWN cpu_implementation/write_graph.jl "
                     "(graph_produce / physics_produce, method 'amd'), not by a reimplementation. "
                     "Tolerance calibrated from a probe run so ParAC's own printed "
-                    "relative residual lands under 1e-8. AMD-reordered, MKL serial",
+                    "relative residual targets 1e-8; every retained run is graded independently. AMD-reordered, MKL serial",
             "repeat": REPS, "tier": "broad",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             # The toolchain behind these numbers, read off the ParAC CPU driver
@@ -210,6 +216,29 @@ def _cpu_provenance():
             "repeat": REPS}
 
 _g = lambda pat, o: (re.search(pat, o).group(1) if re.search(pat, o) else None)
+
+
+def _number_after(label, output):
+    token = _g(re.escape(label) + r"\s*(\S+)", output)
+    try:
+        float(token)
+    except (TypeError, ValueError):
+        return None
+    return token
+
+
+def _residual_pass(value, tau):
+    try:
+        residual = float(value)
+        return math.isfinite(residual) and 0 <= residual <= tau
+    except (TypeError, ValueError):
+        return False
+
+
+def _calibration_failure_meta(error, extra=None):
+    return {**(extra or {}), "parac_calibration_failure": str(error),
+            "parac_calibration_probe": error.probe,
+            "retained_attempts": 0}
 
 
 # ── shared: regularized/pure dump ───────────────────────────────────────────────
@@ -513,6 +542,8 @@ def _reorder_amd(mid, src, tag, augment=False, deadline=None):
     diagonally-deficient matrix — we fall back to benchmarks/parac_reorder_amd.jl
     and return the reason, which the caller records in the cell.
     """
+    if augment:
+        require_original_physics(src)
     rc.require_path(rc.PARAC_REORD, "APXCHOL_PARAC_REORDER_DIR", "PARAC_REORD",
                     "the ParAC AMD-reorder cache directory", must_exist=False)
     os.makedirs(rc.PARAC_REORD, exist_ok=True)
@@ -606,11 +637,13 @@ def _run_once_cpu(amd, physics, rel_tol=None, deadline=None):
                 ftree=_g(r"factorization tree:\s*([0-9.eE+-]+)", o),
                 summary=_g(r"generate summary:\s*([0-9.eE+-]+)", o),
                 iters=_g(r"Iterations:\s*([0-9]+)", o),
-                rr=_g(r"relative residual:\s*([0-9.eE+-]+)", o),
+                rr=_number_after("relative residual:", o),
+                recurrence_reached=_g(r"APX recurrence tolerance reached:\s*([01])", o),
+                returncode=cp.returncode,
                 rhs_norm=_g(r"rhs norm:\s*([0-9.eE+-]+)", o),
                 # the RECURRENCE residual its stopping test actually looked at,
                 # needed to calibrate the tolerance (see _calibrate_rel_tol)
-                recur=_g(r"Final residual norm:\s*([0-9.eE+-]+)", o),
+                recur=_number_after("Final residual norm:", o),
                 # "number of nodes/nonzeros" is what the driver READ, which in
                 # physics mode includes the appended ground node. Report the
                 # operator it actually SOLVED: the trimmed size.
@@ -634,16 +667,12 @@ def _calibrate_rel_tol(amd, physics, tau=float(TOL), deadline=None):
 
         rel_tol = ( tau * recur_0 / R_0 ) ** 2
 
-    lands the true residual just under tau. Returns None if the probe did not
-    produce both numbers, in which case the caller runs at the driver default.
+    estimates a tolerance targeting tau; it is not a convergence guarantee.
+    A capped, failed, missing or nonfinite probe raises CalibrationFailed and
+    launches no retained repetitions. Every retained true residual is graded.
     """
     p = _run_once_cpu(amd, physics, rel_tol=PROBE_REL_TOL, deadline=deadline)
-    if not (p["recur"] and p["rr"]):
-        return None
-    recur0, r0 = float(p["recur"]), float(p["rr"])
-    if not (recur0 > 0.0 and r0 > 0.0):
-        return None
-    return (tau * recur0 / r0) ** 2
+    return calibrated_cpu_tolerance(p, tau, MAX_ITER)
 
 
 def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None,
@@ -656,6 +685,10 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None,
         rel_tol = _calibrate_rel_tol(amd, physics, deadline=deadline)
         runs = [_run_once_cpu(amd, physics, rel_tol=rel_tol, deadline=deadline)
                 for _ in range(REPS)]
+    except CalibrationFailed as error:
+        rc.emit_cell(family, mid, solver, "", "failed", {}, THREADS, "cpu", _cpu_provenance(),
+                     matrix_meta=_calibration_failure_meta(error, extra_meta))
+        return "FAILED(calibration)"
     except subprocess.TimeoutExpired:
         rc.emit_cell(family, mid, solver, "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
                      matrix_meta=extra_meta, timeout_cap_s=TIMEOUT_CPU)
@@ -683,7 +716,9 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None,
     # (benchmarks/README.md): exactly TOL, the same mark every other solver gets.
     # ParAC's optimistic absolute test is handled by CALIBRATING the tolerance we
     # pass it (_calibrate_rel_tol), never by relaxing this comparison.
-    status = "complete" if rr <= float(TOL) else "not_converged"
+    status = ("complete" if all(_residual_pass(r["rr"], float(TOL)) and
+                                  r.get("returncode", 0) == 0 for r in runs)
+              else "not_converged")
     metrics = {"n": n, "nnz": nnz, "setup_s": round(setup, 6), "solve_s": round(solve, 6),
                "total_s": round(total, 6), "iters": iters, "rel_res": rr, "fillin": 0.0,
                "us_per_nnz": round(total / nnz * 1e6, 4),
@@ -692,7 +727,8 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None,
                "adapter_setup_s": round(dump_s + amds + adapter, 6),
                "native_setup_s": round(factor_setup, 6),
                "factor_kernel_s": round(factor, 6),
-               "representative_repeat": rep_index + 1}
+               "representative_repeat": rep_index + 1,
+               "repeat_rel_res": [r["rr"] for r in runs]}
     if rel_tol is not None:
         metrics["parac_rel_tol"] = rel_tol      # the calibrated value we passed
     rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
@@ -782,7 +818,7 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
     if rc.cell_done(family, mid, "parac", "", THREADS, "cpu", terminal=TERMINAL_CPU):
         return "skip(done)"
     reps = [dict(adapter=0.0, factor_setup=0.0, factor=0.0, solve=0.0,
-                 iters=0, residual_sq=0.0, rhs_sq=0.0) for _ in range(REPS)]
+                 iters=0, residual_sq=0.0, rhs_sq=0.0, valid=True) for _ in range(REPS)]
     dump_tot = amds_tot = 0.0
     nnz_tot = 0; rss_peak = 0.0
     n_solved = 0; n_comps_total = None; rank = 0; tol_used = None; preps = []
@@ -848,6 +884,8 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
                              THREADS, "cpu", _cpu_provenance())
                 return "FAILED"
             for rep, run in zip(reps, runs):
+                rep["valid"] &= (_residual_pass(run["rr"], float("inf")) and
+                                 run.get("returncode", 0) == 0)
                 rhs_norm = float(run["rhs_norm"])
                 abs_residual = float(run["rr"]) * rhs_norm
                 rep["adapter"] += float(run["adapter"])
@@ -862,6 +900,12 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
             rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
             if rss: rss_peak = max(rss_peak, max(rss))
             n_solved += 1; rank += 1
+    except CalibrationFailed as error:
+        rc.emit_cell(family, mid, "parac", "", "failed", {}, THREADS, "cpu", _cpu_provenance(),
+                     matrix_meta=_calibration_failure_meta(error, {"component_rank": rank}) |
+                                 {"retained_attempts": n_solved * REPS,
+                                  "component_retained_attempts": 0})
+        return "FAILED(calibration)"
     except subprocess.TimeoutExpired:
         rc.emit_cell(family, mid, "parac", "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
                      timeout_cap_s=TIMEOUT_CPU)
@@ -881,7 +925,10 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
         return "FAILED"
     rr = (chosen["residual_sq"] / chosen["rhs_sq"]) ** 0.5
     iters = chosen["iters"]
-    status = "complete" if rr <= float(TOL) else "not_converged"
+    status = ("complete" if all(rep["valid"] and rep["rhs_sq"] > 0 and
+                                  _residual_pass((rep["residual_sq"] / rep["rhs_sq"]) ** 0.5,
+                                                 float(TOL)) for rep in reps)
+              else "not_converged")
     # Singleton zero blocks contribute vertices but no stored entries or work.
     n_report = int(rc.MATRICES[mid]["n"])
     metrics = {"n": n_report, "nnz": nnz_tot, "setup_s": round(setup, 6),
@@ -895,7 +942,9 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
                "rhs_norm": chosen["rhs_sq"] ** 0.5,
                "representative_repeat": rep_index + 1,
                "n_components_solved": n_solved,
-               "n_components_total": n_comps_total or n_solved}
+               "n_components_total": n_comps_total or n_solved,
+               "repeat_rel_res": [str((rep["residual_sq"] / rep["rhs_sq"]) ** 0.5)
+                                  if rep["rhs_sq"] > 0 else None for rep in reps]}
     if tol_used is not None: metrics["parac_rel_tol"] = tol_used
     if rss_peak: metrics["max_rss_mb"] = round(rss_peak, 1)
     rc.emit_cell(family, mid, "parac", "", status, metrics, THREADS, "cpu", _cpu_provenance(),
@@ -924,7 +973,8 @@ def _run_cpu_operator(mid, family, deadline=None):
     physics mode — and its own producer for that input is write_graph.jl's
     `physics_produce`: permute, THEN append a ground row/column that turns the
     SDDM operator into a Laplacian. Physics mode's `remove_last_row_and_column`
-    takes exactly that node back off, so what it solves is the published operator.
+    takes exactly that node back off. We reject positive stored off-diagonals
+    before cache lookup because the driver would sign-change those entries.
     We run THEIR physics_produce, out of their checkout (see _produce_upstream).
 
     (The claim that its data README says physics matrices are "used as-is" does
@@ -941,6 +991,13 @@ def _run_cpu_operator(mid, family, deadline=None):
     try:
         amd, amds, prep_prov, dump_s = _prep_amd(
             mid, "op", augment=True, deadline=deadline)
+    except (ValueError, OSError) as error:
+        unsupported = isinstance(error, UnsupportedOperator)
+        status = "n/a" if unsupported else "failed"
+        key = "parac_na_reason" if unsupported else "parac_prep_failure"
+        rc.emit_cell(family, mid, "parac_physics", "", status, {}, THREADS, "cpu",
+                     _cpu_provenance(), matrix_meta={"parac_mode": "physics", key: str(error)})
+        return f"graph[n/a] physics[{status}]"
     except subprocess.TimeoutExpired:
         if not rc.cell_done(family, mid, "parac_physics", "", THREADS, "cpu", terminal=TERMINAL_CPU):
             rc.emit_cell(family, mid, "parac_physics", "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
@@ -997,6 +1054,8 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
     counterpart of the CPU physics route. The tag carries '-aug' so the two can
     never alias. On rejection we fall back to benchmarks/parac_nnz_sort.jl and
     say so, exactly as _reorder_amd does."""
+    if augment:
+        require_original_physics(src)
     os.makedirs(rc.PARAC_SORTED, exist_ok=True)
     if augment:
         tag = f"{tag}-aug"
@@ -1047,7 +1106,8 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
 def _run_once_gpu(driver, mtx, tol, deadline=None):
     timeout = (_gpu_cell_remaining(deadline) if deadline is not None else TIMEOUT_GPU)
     with rc.VramSampler("gpu_rchol") as vram:   # matches both driver binaries
-        o = sh(f"{driver} {mtx} {BLOCKS} 1 {tol}", timeout=timeout).stdout
+        cp = sh(f"{driver} {mtx} {BLOCKS} 1 {tol}", timeout=timeout)
+        o = cp.stdout
     # Keep the original narrow timers as diagnostics alongside patch 0003's
     # complete, non-overlapping phases.
     return dict(etree=_g(r"build etree:\s*([0-9.eE+-]+)", o),
@@ -1063,7 +1123,8 @@ def _run_once_gpu(driver, mtx, tol, deadline=None):
                 spsv=_g(r"solve preprocess time:\s*([0-9.]+)", o),         # ms
                 solve=_g(r"pcg time:\s*([0-9.]+)", o),                     # ms
                 iters=_g(r"final iteration:\s*([0-9]+)", o),
-                rr=_g(r"normalized diff norm:\s*([0-9.eE+-]+)", o),
+                rr=_number_after("normalized diff norm:", o),
+                returncode=cp.returncode,
                 n=_g(r"num cols:\s*([0-9]+)", o),
                 nnz=_g(r"laplacian nnz:\s*([0-9]+)", o),
                 vram_mb=vram.peak_mb())
@@ -1079,16 +1140,25 @@ def _calibrate_tol_gpu(driver, mtx, tau=float(TOL), deadline=None):
 
         TOL = tau * TOL_0 / R_0
 
-    Returns None if the probe did not print a residual (caller falls back to TOL).
+    Reject failed/invalid/capped probes; no retained runs at a fallback tolerance.
+    A below-cap count alone is not proof of a finite recurrence stop: upstream
+    prints no trustworthy stopping flag. Final acceptance uses all true residuals.
     """
     p = _run_once_gpu(driver, mtx, PROBE_TOL_GPU, deadline=deadline)
-    if not p["rr"]:
-        return None
-    r0 = float(p["rr"])
-    # A calibration may compensate for optimistic recurrence drift by tightening
-    # the native tolerance. It must never relax the common 1e-8 request merely
-    # because one randomized probe happened to look pessimistic.
-    return min(tau, tau * PROBE_TOL_GPU / r0) if r0 > 0.0 else None
+    try:
+        r0 = float(p["rr"])
+        if not 0 < int(p["iters"]) < GPU_MAX_ITER or p.get("returncode", 0) != 0:
+            raise ValueError("failed or iteration-limit probe")
+        if not math.isfinite(r0) or r0 <= 0:
+            raise ValueError("invalid residual statistics")
+        # Preserve the existing tighten-only rule.
+        tolerance = min(tau, tau * PROBE_TOL_GPU / r0)
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            raise ValueError("invalid derived tolerance")
+        return tolerance
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise CalibrationFailed(f"ParAC GPU calibration failed: {error}", p) from error
+
 
 
 def _gpu_modes(mid):
@@ -1208,6 +1278,8 @@ def run_gpu(mid, tol=TOL):
             if not src:
                 return record_gpu_failure(mid, "failed",
                                           "GPU operator dump produced no matrix")
+        if aug:
+            require_original_physics(src)
         input_tag = f"native-{tag}" if native_source else tag
         cache_tag = f"{input_tag}-aug" if aug else input_tag
         sorted_cached = f"{rc.PARAC_SORTED}/{mid}-{cache_tag}-nnz-sorted.mtx"
@@ -1227,6 +1299,14 @@ def run_gpu(mid, tol=TOL):
                 return record_gpu_failure(mid, "failed",
                                           "ParAC nnz-sort produced no matrix",
                                           prep=prep_prov)
+    except UnsupportedOperator as error:
+        for solver_key, _driver, prov, skip_reason in _gpu_modes(mid):
+            rc.emit_cell(family, mid, solver_key, "", "n/a", {}, THREADS, "gpu", prov,
+                         matrix_meta={"parac_mode": "n/a",
+                                      "parac_na_reason": skip_reason or str(error)})
+        return "graph[n/a] physics[n/a]"
+    except (ValueError, OSError) as error:
+        return record_gpu_failure(mid, "failed", str(error))
     except subprocess.TimeoutExpired as exc:
         return record_gpu_failure(
             mid, "timeout",
@@ -1246,9 +1326,13 @@ def run_gpu(mid, tol=TOL):
                              "parac_prep_failure": f"ParAC GPU driver missing: {driver}"})
             results.append(f"{solver_key}[FAILED(driver missing)]"); continue
         try:
-            cal = _calibrate_tol_gpu(driver, sorted_mtx, deadline=deadline) or float(tol)
+            cal = _calibrate_tol_gpu(driver, sorted_mtx, tau=float(tol), deadline=deadline)
             runs = [_run_once_gpu(driver, sorted_mtx, cal, deadline=deadline)
                     for _ in range(REPS)]
+        except CalibrationFailed as error:
+            rc.emit_cell(family, mid, solver_key, "", "failed", {}, THREADS, "gpu", prov,
+                         matrix_meta=_calibration_failure_meta(error, {"parac_prep": prep_prov}))
+            results.append(f"{solver_key}[FAILED(calibration)]"); continue
         except subprocess.TimeoutExpired:
             rc.emit_cell(family, mid, solver_key, "", "timeout", {}, THREADS, "gpu", prov,
                          matrix_meta={"parac_prep": prep_prov},
@@ -1277,7 +1361,9 @@ def run_gpu(mid, tol=TOL):
         total = setup + solve
         # rr is the driver's own `normalized diff norm` = ||Ax-b||/||b||. Judge it
         # at the tolerance we report at, not a decade looser.
-        status = "complete" if rr <= float(tol) else "not_converged"
+        status = ("complete" if all(_residual_pass(r["rr"], float(tol)) and
+                                      r.get("returncode", 0) == 0 for r in runs)
+                  else "not_converged")
         metrics = {"n": int(chosen["n"]) if chosen["n"] else None,
                    "nnz": int(chosen["nnz"]) if chosen["nnz"] else None,
                    "setup_s": setup, "solve_s": solve, "total_s": total,
@@ -1287,7 +1373,8 @@ def run_gpu(mid, tol=TOL):
                    "native_setup_s": factor_setup + solver_setup,
                    "factor_kernel_s": factor, "factor_conversion_s": conv,
                    "spsv_analysis_s": spsv, "pcg_kernel_s": pcg,
-                   "representative_repeat": rep_index + 1}
+                   "representative_repeat": rep_index + 1,
+               "repeat_rel_res": [r["rr"] for r in runs]}
         if chosen.get("cuda_init"):
             metrics["cuda_init_s"] = float(chosen["cuda_init"])
         vram = [float(r["vram_mb"]) for r in ok if r.get("vram_mb")]

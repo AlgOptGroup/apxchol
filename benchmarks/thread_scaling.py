@@ -206,7 +206,7 @@ def run_parac(mid, t):
         if not operands:
             return "failed", None
         reps = [dict(adapter=0.0, factor_setup=0.0, solve=0.0,
-                     iters=0, residual_sq=0.0, rhs_sq=0.0)
+                     iters=0, residual_sq=0.0, rhs_sq=0.0, valid=True)
                 for _ in range(REPS)]
         nnz = 0
         for amd, physics in operands:
@@ -221,6 +221,8 @@ def run_parac(mid, t):
             if len(ok) != REPS:
                 return "failed", None
             for rep, run in zip(reps, runs):
+                rep["valid"] &= (parac._residual_pass(run["rr"], float("inf")) and
+                                 run.get("returncode", 0) == 0)
                 rhs_norm = float(run["rhs_norm"])
                 abs_residual = float(run["rr"]) * rhs_norm
                 rep["adapter"] += float(run["adapter"])
@@ -239,11 +241,21 @@ def run_parac(mid, t):
         solve = chosen["solve"]
         rel_res = (chosen["residual_sq"] / chosen["rhs_sq"]) ** 0.5
         total = setup + solve
-        return ("complete" if rel_res <= float(TOL) else "not_converged"), dict(
+        accepted = all(rep["valid"] and rep["rhs_sq"] > 0 and
+                       parac._residual_pass((rep["residual_sq"] / rep["rhs_sq"]) ** 0.5,
+                                            float(TOL)) for rep in reps)
+        return ("complete" if accepted else "not_converged"), dict(
             n=int(rc.MATRICES[mid]["n"]), nnz=nnz, total_s=total,
             setup_s=setup, solve_s=solve, iters=chosen["iters"],
             rel_res=rel_res, representative_repeat=rep_index + 1,
             rhs_norm=chosen["rhs_sq"] ** 0.5)
+    except parac.UnsupportedOperator as error:
+        return "n/a", {"total_s": None, "parac_failure_reason": str(error)}
+    except parac.CalibrationFailed as error:
+        return "failed", {"total_s": None, "parac_failure_reason": str(error),
+                          "parac_calibration_probe": error.probe}
+    except (ValueError, OSError) as error:
+        return "failed", {"total_s": None, "parac_failure_reason": str(error)}
     except subprocess.TimeoutExpired:
         return "timeout", None
 

@@ -184,3 +184,11 @@ the published benchmark charts. Keep internal reports and private comparison
 sources outside tracked files. Do not publish them or contact collaborators
 without authorization. Preserve source and evidence before any worktree
 retirement; obey the user's destructive-operation approval requirements.
+
+
+ParAC benchmark eligibility: physics inputs with positive stored off-diagonals
+are unsupported for original-operator comparison, before all preparation cache
+hits and fallbacks. Failed/capped calibration probes must not launch retained
+runs at a fallback tolerance. Grade every retained true residual; a median
+repetition selects timing fields only. Preserve the full planned denominator
+and original campaign verdict when recording unsupported or unattempted cells.

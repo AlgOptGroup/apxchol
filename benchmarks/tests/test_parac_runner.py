@@ -58,7 +58,7 @@ class ParacTimingContractTest(unittest.TestCase):
                 sample(0.5, 0.5, 1000, 22, 7e-9),
                 sample(1.0, 1.0, 4000, 33, 6e-9)]
         with mock.patch.object(rc, "cell_done", return_value=False), \
-             mock.patch.object(parac, "_calibrate_rel_tol", return_value=None), \
+             mock.patch.object(parac, "_calibrate_rel_tol", return_value=1e-16), \
              mock.patch.object(parac, "_run_once_cpu", side_effect=runs), \
              mock.patch.object(rc, "emit_cell") as emit:
             parac._measure_cpu("synthetic", "grid_500", "input.mtx", 5.0,
@@ -142,10 +142,10 @@ class ParacTimingContractTest(unittest.TestCase):
                 parac._cpu_cell_remaining(20.0)
 
     def test_gpu_calibration_tightens_but_never_relaxes_common_tolerance(self):
-        with mock.patch.object(parac, "_run_once_gpu", return_value={"rr": "5e-8"}):
+        with mock.patch.object(parac, "_run_once_gpu", return_value={"rr": "5e-8", "iters": "20"}):
             self.assertAlmostEqual(parac._calibrate_tol_gpu("driver", "matrix", 1e-8),
                                    2e-9)
-        with mock.patch.object(parac, "_run_once_gpu", return_value={"rr": "5e-9"}):
+        with mock.patch.object(parac, "_run_once_gpu", return_value={"rr": "5e-9", "iters": "20"}):
             self.assertEqual(parac._calibrate_tol_gpu("driver", "matrix", 1e-8),
                              1e-8)
 
@@ -158,7 +158,7 @@ class ParacTimingContractTest(unittest.TestCase):
             "n": 100, "nnz": 500, "rss_mb": 12.0,
         }
         with mock.patch.object(rc, "cell_done", return_value=False), \
-             mock.patch.object(parac, "_calibrate_rel_tol", return_value=None), \
+             mock.patch.object(parac, "_calibrate_rel_tol", return_value=1e-16), \
              mock.patch.object(parac, "_run_once_cpu", return_value=sample), \
              mock.patch.object(rc, "emit_cell") as emit:
             parac._measure_cpu("synthetic", "grid_500", "input.mtx", 5.0,
@@ -194,7 +194,7 @@ class ParacTimingContractTest(unittest.TestCase):
              mock.patch.object(parac, "_reorder_amd",
                                side_effect=[("large-amd.mtx", 0.1, "upstream"),
                                             ("pair-amd.mtx", 0.1, "upstream")]) as reorder, \
-             mock.patch.object(parac, "_calibrate_rel_tol", return_value=None), \
+             mock.patch.object(parac, "_calibrate_rel_tol", return_value=1e-16), \
              mock.patch.object(parac, "_run_once_cpu", side_effect=runs), \
              mock.patch.object(rc, "emit_cell") as emit:
             parac._measure_cpu_graph_split("grids", "grid_500")
@@ -293,6 +293,7 @@ class ParacGpuFailureCellTest(unittest.TestCase):
              mock.patch.object(rc, "CELLS", store), \
              mock.patch.object(rc, "PARAC_SORTED", sorted_dir), \
              mock.patch.object(parac, "_nnz_sort", side_effect=timeout), \
+             mock.patch.object(parac, "require_original_physics"), \
              mock.patch.object(rc, "binary_toolchain", return_value={}):
             parac.run_gpu("iter0010")
 
