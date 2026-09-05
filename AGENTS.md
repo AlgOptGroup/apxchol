@@ -185,6 +185,9 @@ The benchmark driver supports explicit `--warmup N` before `--repeat R` retained
 measurements. Preserve every retained residual when grading a cell; selecting
 a representative repetition changes timing selection only. Thread-scaling
 scopes and thread counts are configurable through the existing runner.
+`render_snapshot.py` supplies one presentation path for both machines. Benchmark
+`--dump-rhs` exports the common RHS without running a solver; native CMG can
+consume an explicit `rhs_path` without normalization.
 
 Report setup, solve, memory, and factor reuse separately. Evaluate the user's
 actual objective; a faster solve with slightly slower one-RHS total is a

@@ -11,6 +11,20 @@ import cmg_native_runner as cmg
 
 
 class NativeCmgOutput(unittest.TestCase):
+    def test_explicit_common_rhs_is_preserved_without_normalization(self):
+        import numpy as np
+        import scipy.io
+        import scipy.sparse
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matrix = root / 'A.mtx'; rhs = root / 'b.mtx'
+            scipy.io.mmwrite(matrix, scipy.sparse.eye(2))
+            scipy.io.mmwrite(rhs, np.array([[3.0], [4.0]]))
+            out = root / 'prepared'; out.mkdir()
+            prepared = cmg.prepare({'id': 'fixture', 'path': str(matrix),
+                                    'mode': 'physics', 'rhs_path': str(rhs)}, out)
+            np.testing.assert_array_equal(prepared[1], [3.0, 4.0])
+
     def good(self):
         return cmg.parse_driver('CMG n=1024 nnz=4992 hierarchy_valid=1 levels=2 setup_flag=0 pcg_flag=0 iter=22 reported_relres=1e-9 true_relres=1e-9 adaptation_s=0.01 setup_s=0.2 solve_s=0.3 total_s=0.5 setup_calls=1 converged=1', 'CMGRSS 10240')
 

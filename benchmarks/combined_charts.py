@@ -50,6 +50,7 @@ SOLVERS = [
     ("BoomerAMG/cut", "#74c476", "BoomerAMG/cut", "BoomerAMG/cut (GPU)"),
     ("AMGCL",         "#8c564b", "AMGCL",         "AMGCL (GPU)"),
     ("CMG (MATLAB)†", "#e377c2", "CMG (MATLAB)†", None),
+    ("CMG (packed, serial)", "#ad3795", "CMG (packed, serial)", None),
     ("ParAC Graph",   "#ff8c00", "ParAC Graph",   "ParAC Graph (GPU)"),
     ("ParAC Physics", "#e6550d", "ParAC Physics", "ParAC Physics (GPU)"),
     ("RCHOL",         "#d62728", "RCHOL",         None),
@@ -505,10 +506,12 @@ def main():
     ap.add_argument("--gpu-root", default="results/cells",
                     help="unified per-cell store containing device=gpu cells")
     ap.add_argument("--out", default="benchmarks/latest/figures")
+    ap.add_argument("--threads", type=int, default=16)
     a = ap.parse_args()
-    recs = cpu.load(a.cells)          # device=cpu only (fair_charts filters)
-    grows = gpu.load(a.gpu_root)
-    goutcomes = gpu.load_outcomes(a.gpu_root)
+    cpu.CHART_THREADS = a.threads
+    recs = cpu.load(a.cells, a.threads)          # device=cpu only (fair_charts filters)
+    grows = gpu.load(a.gpu_root, a.threads)
+    goutcomes = gpu.load_outcomes(a.gpu_root, a.threads)
     os.makedirs(a.out, exist_ok=True)
     n = 0
     sd = lambda d: (d["setup"], d["solve"])
@@ -542,7 +545,7 @@ def main():
                       # <1s for the rest). _find_break auto-gates, so non-bimodal GPU
                       # charts render normally; CPU non-giant charts stay un-broken.
                       ycompress=suffix.startswith("_giants") or dev == "gpu",
-                      ylabel="time (s) — t16  [solid = setup, /// = solve]",
+                      ylabel=f"time (s) — t{a.threads}  [solid = setup, /// = solve]",
                       title=f"{fam}{suffix}: all solvers {lab}, setup+solve (sorted fastest→slowest)")
                 n += 1
         for suffix, hmats in cpu.family_groups(recs, fam, cpu.matrix_order(recs, fam)):
@@ -562,7 +565,7 @@ def main():
                 for mode, tag in modes:
                     overview_heatmap(rsub, grows, fam, f"{base}_{stem}{tag}_{fam}{suffix}.png",
                                      mode=mode, metric=metric, mats=hmats,
-                                     goutcomes=goutcomes)
+                                     goutcomes=goutcomes, thread_label=f"t{a.threads}")
                     n += 1
     print(f"combined_charts: {len(recs)} cpu + {len(grows)} gpu cells -> {n} figures in {a.out}")
 

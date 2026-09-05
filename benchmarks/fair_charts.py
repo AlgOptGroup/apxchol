@@ -25,6 +25,7 @@ from runner_common import (APXCHOL_DEFAULT_CONFIG, mat_labels,
                            require_injective_labels, timeout_cap)
 
 TOL = 1e-8
+CHART_THREADS = 16
 
 # canonical solver label + display order + colour
 #
@@ -108,20 +109,21 @@ def is_legacy_priority_config(config):
 def label(cell):
     return LABELS.get((cell["solver"], canonical_config(cell.get("config", ""))))
 
-def load(root):
+def load(root, threads=None):
     # CPU charts read ONLY device=cpu cells. The store now also holds device=gpu
     # cells (same solver/config labels), so without this filter _pick() could
     # return a GPU cell for a CPU series — which made apxchol's CPU bar equal its
     # GPU bar and dropped it from the scaling chart (GPU cells carry no nnz).
     recs, _ = chart_cells.load_current_records(
         root,
-        include=lambda c: c.get("cell", {}).get("device", "cpu") != "gpu",
+        include=lambda c: (c.get("cell", {}).get("device", "cpu") != "gpu"
+                           and (threads is None or c.get("cell", {}).get("threads") == threads)),
         stale_policy="filter",
         source="fair_charts CPU input",
     )
     return recs
 
-def load_gpu_cfg(root):
+def load_gpu_cfg(root, threads=None):
     """device=gpu apxchol_v1 cells grouped by (family, config) -> {matrix: metrics}.
     Unlike gpu_charts.load this keeps each IS selector configuration separate,
     so the ablation can show the GPU number per individual config. Keeping it
@@ -135,6 +137,7 @@ def load_gpu_cfg(root):
         root,
         pattern="**/*__gpu.json",
         include=lambda c: (c.get("cell", {}).get("device") == "gpu"
+                           and (threads is None or c.get("cell", {}).get("threads") == threads)
                            and c.get("cell", {}).get("solver") == "apxchol_v1"),
         stale_policy="filter",
         source="fair_charts GPU ablation input",
@@ -298,7 +301,7 @@ def scaling_chart(recs, fam, out, gpu_rows=None, device="cpu"):
     if not drawn:
         plt.close(fig); return
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("nnz"); ax.set_ylabel(f"total solve time (s) — t16 ({device.upper()})")
+    ax.set_xlabel("nnz"); ax.set_ylabel(f"total solve time (s) — t{CHART_THREADS} ({device.upper()})")
     cap_note = ("\n× = timed out; plotted at the exact persisted wall-clock cap "
                 "true time unknown" if capped_any else "")
     ax.set_title(f"{fam} ({device.upper()}): scaling vs nnz (per-solver grounding, tol 1e-8)"
@@ -446,7 +449,7 @@ def ablation_heatmap(recs, gpu_cfg, fam, out):
                 if np.isfinite(v):
                     ax.text(j, i, f"{v:.2f}" if unit else f"{int(round(v))}",
                             ha="center", va="center", fontsize=7.5)
-    fig.suptitle(f"apxchol measured selector/storage ablation ({fam}, t16, tol 1e-8) — "
+    fig.suptitle(f"apxchol measured selector/storage ablation ({fam}, t{CHART_THREADS}, tol 1e-8) — "
                  f"median over {len(common)} matrices · colour = ×best (green=fastest)",
                  fontsize=11)
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
@@ -522,7 +525,7 @@ def selector_matrix_heatmap(recs, out, metric="total_s", mats=None):
                         fontweight="bold" if v == best else "normal")
     metric_name = {"total_s": "total time", "setup_s": "setup time",
                    "solve_s": "solve time", "iters": "PCG iterations"}[metric]
-    ax.set_title(f"apxchol  IS-selector × graph  —  {metric_name} (vec_pool, t16, tol 1e-8)\n"
+    ax.set_title(f"apxchol  IS-selector × graph  —  {metric_name} (vec_pool, t{CHART_THREADS}, tol 1e-8)\n"
                  f"colour = × best selector in each column (green = best);  bold = best per graph",
                  fontsize=10.5)
     fig.tight_layout(); fig.savefig(out, dpi=140); plt.close(fig)
@@ -582,7 +585,7 @@ def selector_family_panel(recs, gpu_cfg, fam, out, device="cpu"):
                     best = np.nanmin(M[:, j])
                     ax.text(j, i, txt, ha="center", va="center", fontsize=7,
                             fontweight="bold" if v == best else "normal")
-    fig.suptitle(f"apxchol  IS-selector × matrix  ablation — {fam} ({device.upper()}, vec_pool, t16, tol 1e-8)\n"
+    fig.suptitle(f"apxchol  IS-selector × matrix  ablation — {fam} ({device.upper()}, vec_pool, t{CHART_THREADS}, tol 1e-8)\n"
                  f"colour = × best selector per column (green = best);  bold = best per matrix", fontsize=11)
     fig.tight_layout(); fig.savefig(out, dpi=140); plt.close(fig)
 
@@ -716,12 +719,12 @@ def poster_charts(recs, outdir):
     """The two side-by-side poster heatmaps (CPU, total time, shared columns)."""
     sel_rows = [(f"{s}+tree", ("sel", s)) for s in _ABL_SELS]
     _poster_heatmap(recs, sel_rows, f"{outdir}/poster_selectors_cpu.png",
-        "apxchol  IS-selector × graph  —  CPU total time (vec_pool, t16, tol 1e-8)\n"
+        f"apxchol  IS-selector × graph  —  CPU total time (vec_pool, t{CHART_THREADS}, tol 1e-8)\n"
         "colour = × fastest selector per column (green = best);  bold = best per graph")
     cmp_rows = [(s, ("lab", s)) for s in POSTER_SOLVERS]
     _poster_heatmap(recs, cmp_rows, f"{outdir}/poster_comparison_cpu.png",
         f"apxchol ({APX_DEFAULT.split('/')[1]}+tree, the declared default — NOT the per-column best selector)"
-        "  vs multigrid / Cholesky\nCPU total time (t16, tol 1e-8);  one configuration per row for every solver.  "
+        f"  vs multigrid / Cholesky\nCPU total time (t{CHART_THREADS}, tol 1e-8);  one configuration per row for every solver.  "
         "colour = × fastest per column;  bold = best;  ≥ = timed out at the cap")
 
 
@@ -750,7 +753,7 @@ def _pick(recs, fam, mat, lab):
              and r["cell"]["matrix_id"] == mat and label(r["cell"]) == lab]
     if not cands:
         return None
-    t16 = [r for r in cands if r["cell"].get("threads") == 16]
+    t16 = [r for r in cands if r["cell"].get("threads") == CHART_THREADS]
     t1 = [r for r in cands if r["cell"].get("threads") == 1]
     chosen = t16 or t1
     if not chosen and len(cands) == 1:
@@ -762,7 +765,7 @@ def _pick(recs, fam, mat, lab):
 
 def summary_md(recs, path):
     fams = sorted({r["cell"]["family"] for r in recs})
-    lines = ["# Latest benchmark summary — t16, tol 1e-8, original singular L (per-solver grounding; ParAC per-component-consistent RHS scored vs original L, CMG reg-rel)\n",
+    lines = [f"# Benchmark summary — t{CHART_THREADS}, tol 1e-8, original singular L (per-solver grounding; ParAC per-component-consistent RHS scored vs original L, CMG reg-rel)\n",
              "`† CMG (MATLAB)` = canonical Koutis CMG (MEX, matlab-deps container). MATLAB-pcg wall-time isn't cross-language-comparable, so its **iteration count** is the comparable signal — see below.",
              "Blank = not run; `X` = ran but did not reach 1e-8; `T` = timed out "
              "without a recoverable cap; `T≥seconds` = timed out at the exact cap "
@@ -772,7 +775,7 @@ def summary_md(recs, path):
              "no column is a per-cell minimum over configurations. Headline tables and "
              f"charts use apxchol's declared default, `{APX_DEFAULT}`; the selector "
              f"spread (`{'`, `'.join(APX_SERIES)}`) is confined to dedicated compact "
-             "ablation figures. The chart thread count is selected a priori (t16, with "
+             f"ablation figures. The chart thread count is selected a priori (t{CHART_THREADS}, with "
              "a t1 fallback); duplicate cells are rejected, so neither status nor time "
              "can select the representative.\n",
              "## Total solve time (s)\n"]
@@ -810,17 +813,20 @@ def summary_md(recs, path):
     open(path, "w").write("\n".join(lines) + "\n")
 
 def main():
+    global CHART_THREADS
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="results/cells")
     ap.add_argument("--out", default="benchmarks/latest")
+    ap.add_argument("--threads", type=int, default=16)
     a = ap.parse_args()
-    recs = load(a.root)
+    CHART_THREADS = a.threads
+    recs = load(a.root, a.threads)
     # GPU overlay for the grid scaling chart. Default: the SAME per-cell store the
     # gpu_charts / combined_charts read (gpu.load filters device=gpu), so ParAC and
     # every other GPU solver appear. The old default pointed at a stale flat CSV,
     # which silently froze this chart (missing ParAC, pre-patch numbers).
-    gpu_rows = gpu.load(a.root)
-    gpu_cfg = load_gpu_cfg(a.root)   # per-config GPU cells for the ablation CPU/GPU split
+    gpu_rows = gpu.load(a.root, a.threads)
+    gpu_cfg = load_gpu_cfg(a.root, a.threads)   # per-config GPU cells for the ablation CPU/GPU split
     os.makedirs(f"{a.out}/figures", exist_ok=True)
     for fam in sorted({r["cell"]["family"] for r in recs}):
         # Column charts are the LINEAR setup+solve breakdown (every family, incl IPM);

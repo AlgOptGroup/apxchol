@@ -4,7 +4,7 @@ representative matrices, then emit total/setup/solve speedup charts and a
 portable CSV. Cells go to results/scaling_cells/ (separate from the fair cells).
 Run from repo root, ALONE: python3 benchmarks/thread_scaling.py
 """
-import argparse, csv, json, os, re, subprocess, time
+import argparse, csv, json, math, os, re, subprocess, time
 import chart_cells
 
 from sweep_fair import UNKNOWN_TOOLCHAIN
@@ -24,6 +24,7 @@ TOL = "1e-8"; THREADS = [1, 2, 4, 8, 16]; TIMEOUT = 900; REPS = 3
 WARMUP = 0
 DEVICE = "cpu"
 INCLUDE_PARAC = True
+SCOPE_FILTER = False
 SCALING_SCHEMA = 3
 
 # (mid, family, margs, reg, is2d)
@@ -109,7 +110,10 @@ def _scaling_records():
     entries, _ = chart_cells.load_current_entries(
         CELLS,
         pattern="*.json",
-        include=lambda record: record.get("cell", {}).get("device", "cpu") == DEVICE,
+        include=lambda record: (record.get("cell", {}).get("device", "cpu") == DEVICE
+            and (not SCOPE_FILTER or (record.get("cell", {}).get("matrix_id") in {m[0] for m in MATS}
+                 and (record.get("cell", {}).get("solver"), record.get("cell", {}).get("config", ""))
+                 in {(solver, config) for _, solver, config in CPP + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])}))),
         stale_policy="reject",
         source="thread_scaling render/export input",
     )
@@ -341,9 +345,11 @@ def charts(out=f"{ROOT}/benchmarks/latest"):
     def fig_for(field, phase, kind, fname):
         # Setup and solve scale very differently, so they get separate charts;
         # total is the user-facing single-RHS outcome.
-        fig, axes = plt.subplots(1, len(mats), figsize=(4.2 * len(mats), 4.2), squeeze=False)
+        cols = min(4, len(mats)); rows = math.ceil(len(mats) / cols)
+        fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.8 * rows), squeeze=False)
+        for ax in list(axes.flat)[len(mats):]: ax.set_visible(False)
         for j, mid in enumerate(mats):
-            ax = axes[0][j]
+            ax = axes.flat[j]
             labs = sorted({r["cell"]["label"] for r in recs
                            if r["cell"]["matrix_id"] == mid and r["cell"]["label"] in KEEP})
             for lab in labs:
@@ -363,11 +369,11 @@ def charts(out=f"{ROOT}/benchmarks/latest"):
             ax.grid(True, alpha=0.3)
         # one global legend (union across panels) so no line is missing from it
         hl = {}
-        for ax in axes[0]:
+        for ax in axes.flat:
             for h, l in zip(*ax.get_legend_handles_labels()):
                 hl.setdefault(l, h)
         fig.legend(hl.values(), hl.keys(), loc="lower center", ncol=max(1, len(hl)), fontsize=8)
-        fig.suptitle(f"{phase} {kind} vs threads (tol 1e-8){LOCKED}")
+        fig.suptitle(f"{DEVICE.upper()} {phase} {kind} vs threads (tol 1e-8){LOCKED}")
         fig.tight_layout(rect=[0, 0.06, 1, 1])
         fig.savefig(fname, dpi=130); plt.close(fig)
 
@@ -377,7 +383,7 @@ def charts(out=f"{ROOT}/benchmarks/latest"):
     # speedup data divided by the thread count.
     for field, phase in (("total_s", "Total"), ("setup_s", "Setup"),
                          ("solve_s", "Solve")):
-        fig_for(field, phase, "speedup", f"{out}/figures/threads_{phase.lower()}_speedup.png")
+        fig_for(field, phase, "speedup", f"{out}/figures/threads_{'gpu_' if DEVICE == 'gpu' else ''}{phase.lower()}_speedup.png")
     # Remove stale efficiency and ambiguously named legacy charts.
     for old in ("threads_speedup.png", "threads_efficiency.png",
                 "threads_setup_efficiency.png", "threads_solve_efficiency.png"):
@@ -389,7 +395,7 @@ def charts(out=f"{ROOT}/benchmarks/latest"):
 
 def export_csv(path):
     """Portable extract for the exact cells behind the scaling figures."""
-    fields = ("matrix", "family", "label", "solver", "config", "threads", "status", "setup_s",
+    fields = ("matrix", "family", "label", "solver", "config", "threads", "device", "status", "setup_s",
               "solve_s", "total_s", "iters", "rel_res", "git_sha", "repeat",
               "compiler", "compiler_version", "openmp_runtime")
     rows = []
@@ -400,7 +406,7 @@ def export_csv(path):
         rows.append({
             "matrix": cell["matrix_id"], "family": cell["family"],
             "label": cell["label"], "solver": cell.get("solver", ""),
-            "config": cell.get("config", ""), "threads": cell["threads"],
+            "config": cell.get("config", ""), "threads": cell["threads"], "device": cell.get("device", "cpu"),
             "status": record["status"],
             **{key: metrics.get(key, "")
                for key in ("setup_s", "solve_s", "total_s", "iters", "rel_res")},
@@ -466,6 +472,7 @@ if __name__ == "__main__":
         if not selected <= known: parser.error("unknown --series")
         INCLUDE_PARAC = INCLUDE_PARAC and bool(selected & {"ParAC", "parac"})
         CPP = [x for x in CPP if x[0] in selected or x[1] in selected]
+    SCOPE_FILTER = bool(args.matrices or args.series)
     CELLS = os.path.abspath(args.store)
     BIN = os.path.abspath(args.binary or rc.BIN[DEVICE])
     REPS = args.repeat
@@ -488,5 +495,5 @@ if __name__ == "__main__":
     if not args.measure_only:
         validate_cells()
         charts(args.out)
-        export_csv(f"{args.out}/thread_scaling.csv")
+        export_csv(f"{args.out}/thread_scaling{'_gpu' if DEVICE == 'gpu' else ''}.csv")
     print("thread-scaling done")

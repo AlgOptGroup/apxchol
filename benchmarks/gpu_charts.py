@@ -60,7 +60,7 @@ FAMS = ["grids", "ipm", "suitesparse"]
 GIANT_MATS = {"as-Skitter", "coPapersDBLP", "com-LiveJournal", "com-Orkut", "com-Youtube"}
 TOL = 1e-8
 
-def load(root):
+def load(root, threads=None):
     """Load GPU cells (device=gpu) from the per-cell JSON store into
     rows[(family,matrix)][label] = dict(setup,solve,total,iters,rel_res).
 
@@ -75,6 +75,7 @@ def load(root):
         root,
         pattern="**/*__gpu.json",
         include=lambda c: (c.get("cell", {}).get("device") == "gpu"
+                           and (threads is None or c.get("cell", {}).get("threads") == threads)
                            and (c.get("cell", {}).get("solver"),
                                 c.get("cell", {}).get("config", "")) in LABELS),
         stale_policy="filter",
@@ -113,7 +114,7 @@ def load(root):
             vram_peak=m.get("max_vram_mb"))
     return rows
 
-def load_outcomes(root):
+def load_outcomes(root, threads=None):
     """Outcome metadata for every charted GPU cell, including exact timeout caps."""
     out = {}
     if os.path.isfile(root):
@@ -122,6 +123,7 @@ def load_outcomes(root):
         root,
         pattern="**/*__gpu.json",
         include=lambda c: (c.get("cell", {}).get("device") == "gpu"
+                           and (threads is None or c.get("cell", {}).get("threads") == threads)
                            and (c.get("cell", {}).get("solver"),
                                 c.get("cell", {}).get("config", "")) in LABELS),
         stale_policy="filter",
@@ -140,9 +142,9 @@ def load_outcomes(root):
                         "timeout_cap_s": timeout_cap(c)}
     return out
 
-def load_status(root):
+def load_status(root, threads=None):
     """Compatibility view used by GPU-only marker charts."""
-    return {key: value["status"] for key, value in load_outcomes(root).items()}
+    return {key: value["status"] for key, value in load_outcomes(root, threads).items()}
 
 
 def mats_of(rows, fam, reduce_grids=True):
@@ -280,10 +282,11 @@ def main():
     ap.add_argument("--root", default="results/cells",
                     help="unified per-cell JSON store containing device=gpu cells")
     ap.add_argument("--out", default="benchmarks/latest/figures")
+    ap.add_argument("--threads", type=int, default=16)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    rows = load(a.root)
-    gstatus = load_status(a.root)   # non-complete GPU cells (oom/timeout/failed) for marks
+    rows = load(a.root, a.threads)
+    gstatus = load_status(a.root, a.threads)   # non-complete GPU cells (oom/timeout/failed) for marks
     GIANT_NNZ = 20_000_000   # match fair_charts: split SuiteSparse small vs social giants
     def _nnz(fam, m):
         return max((v.get("nnz", 0) for v in rows[(fam, m)].values()), default=0)

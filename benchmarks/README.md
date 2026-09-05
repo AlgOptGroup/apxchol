@@ -1,3 +1,11 @@
+Use `render_snapshot.py --cells STORE --out OUTPUT --threads T --platform NAME`
+for the same current-cell CSV, README and figure views on laptop and Daint.
+The common driver supports `--dump-rhs rhs.mtx` in a separate invocation from
+`--dump-mtx operator.mtx`; both use the declared operator and the RHS exporter
+calls the same component-aware generator as the measured solvers. Native CMG
+manifests may specify `rhs_path` to consume that vector without alteration.
+Native CMG's combined-chart row is `CMG (packed, serial)` on both platforms.
+
 Current campaign repetition contract: the C++ driver accepts `--warmup N`
 (default 0) separately from `--repeat R` retained measurements. It emits every
 warmup and retained timing as `BENCH_REPEAT`, selects one coherent median-total

@@ -998,6 +998,7 @@ struct Args {
     // apxchol::scan_operator before anything runs.
     std::string cls;
     std::string dump_mtx;          // if set: write the built Laplacian to this path and exit
+    std::string dump_rhs;          // export the common RHS after component projection
     bool component_info = false;   // count connected components and exit; no serialization
     bool giant_dump = false;       // with --dump-mtx: write a connected component's PURE Laplacian
                                    // (relabeled 0..cn-1) -- the comp_rank-th LARGEST (0 = giant).
@@ -1061,6 +1062,7 @@ static Args parse_args(int argc, char** argv) {
             }
         }
         else if (arg == "--dump-mtx") a.dump_mtx = next();
+        else if (arg == "--dump-rhs") a.dump_rhs = next();
         else if (arg == "--component-info") a.component_info = true;
         else if (arg == "--giant-dump") a.giant_dump = true;
         else if (arg == "--comp-rank") a.comp_rank = std::stoi(next());
@@ -2394,6 +2396,8 @@ int main(int argc, char** argv) {
     // lifts this line out of whatever stderr it managed to capture.
     emit_build_meta();
     Args args = parse_args(argc, argv);
+    if (!args.dump_mtx.empty() && !args.dump_rhs.empty())
+        throw std::runtime_error("--dump-mtx and --dump-rhs are separate export invocations");
     benchmark_warmups = args.warmup;
 
     if (!benchmark_affinity_is_safe(args.threads))
@@ -2868,6 +2872,15 @@ int main(int argc, char** argv) {
     }
 
     Eigen::VectorXd b = make_rhs(L, args.seed);
+    if (!args.dump_rhs.empty()) {
+        std::ofstream output(args.dump_rhs);
+        if (!output) throw std::runtime_error("cannot open RHS export");
+        output << "%%MatrixMarket matrix array real general\n"
+               << b.size() << " 1\n" << std::setprecision(17);
+        for (Eigen::Index i = 0; i < b.size(); ++i) output << b[i] << '\n';
+        if (!output) throw std::runtime_error("failed writing RHS export");
+        return 0;
+    }
 
     if (args.csv) print_csv_header();
     else print_header_pretty();

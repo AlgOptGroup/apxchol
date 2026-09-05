@@ -92,11 +92,16 @@ def prepare(record, output):
     if asym.nnz and np.max(np.abs(asym.data)) > 1e-12 * max(1, np.max(np.abs(A.data))):
         raise ValueError("matrix is not symmetric")
     # b is in range(A), including all disconnected Laplacian components.
-    g = np.random.Generator(np.random.PCG64(42)).standard_normal(A.shape[0])
-    b = A @ g
-    norm = np.linalg.norm(b)
-    if norm:
-        b /= norm
+    if record.get("rhs_path"):
+        b = np.asarray(scipy.io.mmread(record["rhs_path"]), dtype=np.float64).reshape(-1)
+        if b.shape != (A.shape[0],) or not np.isfinite(b).all():
+            raise ValueError("explicit RHS shape or values are invalid")
+    else:
+        g = np.random.Generator(np.random.PCG64(42)).standard_normal(A.shape[0])
+        b = A @ g
+        norm = np.linalg.norm(b)
+        if norm:
+            b /= norm
     operator = output / "operator.mtx"
     rhs = output / "rhs.mtx"
     scipy.io.mmwrite(operator, A, symmetry="general", precision=17)
@@ -220,8 +225,8 @@ def main():
     parser.add_argument("--shards", type=int, default=1)
     args = parser.parse_args()
     records = json.loads(args.manifest.read_text())["matrices"]
-    if len(records) != 14 or len({row["id"] for row in records}) != 14:
-        raise ValueError("expected exactly 14 unique planned matrices")
+    if not records or len({row["id"] for row in records}) != len(records):
+        raise ValueError("expected a nonempty manifest of unique planned matrices")
     if args.smoke:
         records = [row for row in records if row.get("smoke")]
     if args.repetitions < 1 or args.timeout <= 0 or not 0 <= args.shard < args.shards:

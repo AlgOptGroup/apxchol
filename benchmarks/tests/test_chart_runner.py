@@ -91,6 +91,17 @@ class JuliaDriverPathTest(unittest.TestCase):
 
 
 class SeriesRuleTest(unittest.TestCase):
+    def test_gpu_thread_scope_does_not_mix_t16_with_t72(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(chart_cells, "_sha_contains", return_value=True):
+            for threads in (16, 72):
+                cell = record("complete", float(threads), threads=threads,
+                              solver="amgcl_cuda")
+                cell["cell"]["device"] = "gpu"
+                (pathlib.Path(directory) / f"m_t{threads}__gpu.json").write_text(json.dumps(cell))
+            rows = gpu.load(directory, threads=72)
+            self.assertEqual(rows[("audit", "m")]["AMGCL (GPU)"]["total"], 72)
+
     def test_label_maps_are_injective(self):
         rc.require_injective_labels(cpu.LABELS, "CPU")
         rc.require_injective_labels(gpu.LABELS, "GPU")
