@@ -73,7 +73,7 @@ def load(root, threads=None):
     seen = set()
     records, _ = chart_cells.load_current_records(
         root,
-        pattern="**/*__gpu.json",
+        pattern="**/*.json",
         include=lambda c: (c.get("cell", {}).get("device") == "gpu"
                            and (threads is None or c.get("cell", {}).get("threads") == threads)
                            and (c.get("cell", {}).get("solver"),
@@ -121,7 +121,7 @@ def load_outcomes(root, threads=None):
         raise ValueError("legacy GPU CSVs lack status and timeout-cap provenance")
     records, _ = chart_cells.load_current_records(
         root,
-        pattern="**/*__gpu.json",
+        pattern="**/*.json",
         include=lambda c: (c.get("cell", {}).get("device") == "gpu"
                            and (threads is None or c.get("cell", {}).get("threads") == threads)
                            and (c.get("cell", {}).get("solver"),

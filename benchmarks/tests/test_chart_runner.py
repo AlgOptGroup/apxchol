@@ -142,10 +142,10 @@ class SeriesRuleTest(unittest.TestCase):
         self.assertIsNone(combined._terminal_marker("complete"))
         self.assertIsNone(combined._terminal_marker(None))
 
-    def test_nonmemory_heatmaps_retain_all_na_rows_but_missing_rows_stay_blank(self):
+    def test_nonmemory_heatmaps_retain_declared_missing_and_na_rows(self):
         absent = dict(vals=[float("nan")], is_mem=False, timeouts=[False],
                       oom=[False], failed=[False], nconv=[False], na=[False])
-        self.assertFalse(combined._keep_heatmap_row(**absent))
+        self.assertTrue(combined._keep_heatmap_row(**absent))
         self.assertTrue(combined._keep_heatmap_row(**dict(absent, na=[True])))
         self.assertFalse(combined._keep_heatmap_row(
             **dict(absent, is_mem=True, na=[True])))

@@ -22,12 +22,14 @@ This standalone CMake project compares `apxchol` with randomized-Cholesky and
 multigrid solvers on generated grids, SuiteSparse matrices, and an LP-IPM
 sequence.
 
-Results are machine-specific snapshots, not a live leaderboard:
+Daint is the primary performance source. Laptop campaigns are retired because
+their local environment is unstable; the laptop snapshot remains historical
+evidence. Results are machine-specific snapshots, not a live leaderboard:
 
 | snapshot | useful views | data |
 |---|---|---|
-| Ryzen 9 7945HX + RTX 4090 Laptop, T=16 | [laptop index](latest/) and [generated tables](latest/summary.md) | [CSV](latest/results.csv) |
-| CSCS Daint GH200, 72-core Grace + Hopper, T=72 | [Daint index](daint/) and [fair-solver summary](daint/fair_t72_summary.md) | [CSV](daint/fair_t72.csv) |
+| **Primary:** CSCS Daint GH200, 72-core Grace + Hopper, T=72 | [Daint index](daint/) and [coverage](daint/coverage.json) | [CSV](daint/results.csv) |
+| Historical: Ryzen 9 7945HX + RTX 4090 Laptop, T=16 | [laptop index](latest/) and [generated tables](latest/summary.md) | [CSV](latest/results.csv) |
 
 Do not compare absolute times across these machines. The auditable source is the
 [cell store](../results/cells/); committed CSVs, summaries, and figures are

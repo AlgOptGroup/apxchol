@@ -1,0 +1,463 @@
+{
+  "platform": "Daint (primary)",
+  "threads": 72,
+  "registered_matrices": 27,
+  "measured_matrices": 27,
+  "present": 459,
+  "expected_headline_cells": 486,
+  "status_counts": {
+    "complete": 423,
+    "failed": 17,
+    "timeout": 6,
+    "n/a": 6,
+    "not_converged": 7
+  },
+  "missing": [
+    {
+      "matrix": "grid_500",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid_1000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid_2000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid_3000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid3d_100",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid3d_150",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid3d_200",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid_4000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid3d_250",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "grid_5000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "parabolic_fem",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "apache2",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "ecology1",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "G3_circuit",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "thermal2",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "com-Amazon",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "coAuthorsDBLP",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "kron_g500-logn16",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "com-Youtube",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "coPapersDBLP",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "as-Skitter",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "com-LiveJournal",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "com-Orkut",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "iter0010",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "iter0020",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "iter0030",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    },
+    {
+      "matrix": "iter0040",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": ""
+    }
+  ],
+  "series": [
+    [
+      "cpu",
+      "ac",
+      ""
+    ],
+    [
+      "cpu",
+      "ac2",
+      ""
+    ],
+    [
+      "cpu",
+      "amgcl",
+      ""
+    ],
+    [
+      "cpu",
+      "apxchol_v1",
+      "bg+tree[vec_pool_aos]"
+    ],
+    [
+      "cpu",
+      "cmg",
+      ""
+    ],
+    [
+      "cpu",
+      "cmg_packed",
+      "original-operator"
+    ],
+    [
+      "cpu",
+      "hypre_boomeramg",
+      ""
+    ],
+    [
+      "cpu",
+      "hypre_boomeramg",
+      "cut"
+    ],
+    [
+      "cpu",
+      "parac",
+      ""
+    ],
+    [
+      "cpu",
+      "parac_physics",
+      ""
+    ],
+    [
+      "cpu",
+      "rchol",
+      ""
+    ],
+    [
+      "cpu",
+      "rchol_par",
+      ""
+    ],
+    [
+      "gpu",
+      "amgcl_cuda",
+      ""
+    ],
+    [
+      "gpu",
+      "apxchol_v1",
+      "bg+tree[vec_pool_aos]"
+    ],
+    [
+      "gpu",
+      "hypre_boomeramg_gpu",
+      ""
+    ],
+    [
+      "gpu",
+      "hypre_boomeramg_gpu",
+      "cut"
+    ],
+    [
+      "gpu",
+      "parac_graph",
+      ""
+    ],
+    [
+      "gpu",
+      "parac_physics",
+      ""
+    ]
+  ],
+  "platform_role": "primary",
+  "availability_exceptions": [
+    {
+      "matrix": "grid_500",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid_1000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid_2000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid_3000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid3d_100",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid3d_150",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid3d_200",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid_4000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid3d_250",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "grid_5000",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "parabolic_fem",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "apache2",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "ecology1",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "G3_circuit",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "thermal2",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "com-Amazon",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "coAuthorsDBLP",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "kron_g500-logn16",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "com-Youtube",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "coPapersDBLP",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "as-Skitter",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "com-LiveJournal",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "com-Orkut",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "iter0010",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "iter0020",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "iter0030",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    },
+    {
+      "matrix": "iter0040",
+      "device": "cpu",
+      "solver": "cmg",
+      "config": "",
+      "reason": "canonical MATLAB runtime unavailable on Daint ARM64"
+    }
+  ]
+}

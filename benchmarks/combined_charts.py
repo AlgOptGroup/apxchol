@@ -35,8 +35,8 @@ import gpu_charts as gpu
 FAMS = ["grids", "ipm", "suitesparse"]
 TOL = 1e-8
 ENC = ("colour = solver  ·  GPU = black-outlined bar, CPU = plain"
-       "  ·  solid = setup, /// = solve  ·  bars sorted fastest→slowest"
-       "  ·  red frame + ≥ (last) = timed out at its persisted cap")
+       "  ·  solid = setup, /// = solve\n"
+       "bars sorted fastest→slowest  ·  red frame + ≥ (last) = per-solve timeout lower bound")
 
 # (name, colour, cpu_label, gpu_label). cpu_label/gpu_label = None when the solver
 # has no bar on that device (RCHOL/pRCHOL/AC/AC2 are CPU-only).
@@ -97,13 +97,25 @@ def _cpu_status(recs, fam, mat, lab):
 def _cpu_outcome(recs, fam, mat, lab):
     return cpu._pick(recs, fam, mat, lab) if lab else None
 
-def _collect(recs, grows, fam, goutcomes=None, device="both"):
+def _axis_records(recs, grows, goutcomes):
+    """Matrix-axis metadata from both devices, never numerical outcome records."""
+    axes = list(recs)
+    present = {(r["cell"]["family"], r["cell"]["matrix_id"]) for r in recs}
+    keys = set(grows) | {(fam, mat) for fam, mat, _ in goutcomes}
+    for fam, mat in sorted(keys - present):
+        nnz = max((r.get("nnz", 0) for r in grows.get((fam, mat), {}).values()), default=0)
+        axes.append({"cell": {"family": fam, "matrix_id": mat}, "metrics": {"nnz": nnz}})
+    return axes
+
+
+def _collect(recs, grows, fam, goutcomes=None, device="both", mats=None):
     """-> mats (present), data[mat] = list of (name, colour, device, vals). Completed
     solvers sort by total; timed-out solvers get a sentinel bar only when the cell
     records the exact cap used. Such bars always sort last.
     device: 'both' | 'cpu' | 'gpu' -> filter which device's bars to include."""
     goutcomes = goutcomes or {}
-    mats = cpu.headline_mats(recs, fam)
+    if mats is None:
+        mats = cpu.headline_mats(_axis_records(recs, grows, goutcomes), fam)
     present, data = [], {}
     for mat in mats:
         bars = []
@@ -161,14 +173,14 @@ def _find_break(heights):
 
 
 def _bars(recs, grows, fam, out, *, ylabel, title, logy=False, val=None, stacked=False,
-          goutcomes=None, device="both", ycompress=False):
+          goutcomes=None, device="both", ycompress=False, mats=None):
     """Every (solver,device) bar individually, sorted by total per matrix; TIMED-OUT
     solvers (no breakdown) sort LAST as a red-framed '≥cap' bar. device filters CPU/GPU.
     val(vals) -> scalar; for the stacked breakdown val(vals) -> (setup, solve).
     ycompress: use a BROKEN linear y-axis (not log) when the heights are bimodal, so one
     towering bar (e.g. BoomerAMG 212s) stops flattening the <45s field while the bulk
     keeps true linear proportion; plain linear when the spread is continuous."""
-    mats, data = _collect(recs, grows, fam, goutcomes, device)
+    mats, data = _collect(recs, grows, fam, goutcomes, device, mats=mats)
     if not mats:
         return
     maxslots = max(len(data[m]) for m in mats)
@@ -276,7 +288,7 @@ def _bars(recs, grows, fam, out, *, ylabel, title, logy=False, val=None, stacked
                    ncol=4, fontsize=6.3, loc="upper left", handlelength=1.7)
     for gax in grid_axes:
         gax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
+    fig.tight_layout(rect=(0, 0, 1, 0.94)); fig.savefig(out, dpi=130, bbox_inches="tight"); plt.close(fig)
 
 
 
@@ -320,15 +332,14 @@ def _terminal_marker(status):
 def _keep_heatmap_row(vals, *, is_mem, timeouts, oom, failed, nconv, na):
     """Keep informative rows while reserving blank cells for missing data.
 
-    Memory views require an actual measurement or OOM outcome.  Other views
-    retain every explicit terminal outcome, including rows that are entirely
-    structurally inapplicable (``n/a``).
+    Memory views require an actual measurement or OOM outcome. Other views
+    retain every declared series on both platforms, including wholly missing
+    rows. A missing measurement stays blank; it never becomes ``n/a``.
     """
     measured = any(np.isfinite(value) for value in vals)
     if is_mem:
         return measured or any(oom)
-    return (measured or any(timeouts) or any(oom) or any(failed)
-            or any(nconv) or any(na))
+    return True
 
 
 def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mats=None,
@@ -347,7 +358,7 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     mats: matrix columns (default headline_mats; the heatmap callers pass the FULL
     matrix_order so every measured grid shows)."""
     if mats is None:
-        mats = cpu.headline_mats(recs, fam)
+        mats = cpu.headline_mats(_axis_records(recs, grows, goutcomes or {}), fam)
     is_iters = metric == "iters"
     is_rss = metric in ("rss_peak", "rss_solve")
     is_vram = metric == "vram_peak"
@@ -512,11 +523,12 @@ def main():
     recs = cpu.load(a.cells, a.threads)          # device=cpu only (fair_charts filters)
     grows = gpu.load(a.gpu_root, a.threads)
     goutcomes = gpu.load_outcomes(a.gpu_root, a.threads)
+    axes = _axis_records(recs, grows, goutcomes)
     os.makedirs(a.out, exist_ok=True)
     n = 0
     sd = lambda d: (d["setup"], d["solve"])
     for fam in FAMS:
-        if not any(r["cell"]["family"] == fam for r in recs):
+        if not any(r["cell"]["family"] == fam for r in axes):
             continue
         base = f"{a.out}/combined"
         # SuiteSparse splits into _small/_giants (the social giants flatten the FEM
@@ -534,12 +546,12 @@ def main():
         # Each section (combined / CPU-only / GPU-only) is the SAME chart, just device-
         # filtered: bars via _bars(device=), heatmaps via overview_heatmap(mode=).
         DEV = (("both", "", "CPU+GPU"), ("cpu", "_cpu", "CPU"), ("gpu", "_gpu", "GPU"))
-        for suffix, gmats in cpu.family_groups(recs, fam, cpu.headline_mats(recs, fam),
+        for suffix, gmats in cpu.family_groups(axes, fam, cpu.headline_mats(axes, fam),
                                                split=True):
             rs = rsub_of(gmats)
             for dev, tag, lab in DEV:
                 _bars(rs, grows, fam, f"{base}_breakdown{tag}_{fam}{suffix}.png",
-                      stacked=True, val=sd, goutcomes=goutcomes, device=dev,
+                      stacked=True, val=sd, goutcomes=goutcomes, device=dev, mats=gmats,
                       # broken axis on the giants (all devices) + every GPU breakdown:
                       # the GPU has the extreme outliers (e.g. ParAC on kron_g500 ~7s vs
                       # <1s for the rest). _find_break auto-gates, so non-bimodal GPU
@@ -548,7 +560,7 @@ def main():
                       ylabel=f"time (s) — t{a.threads}  [solid = setup, /// = solve]",
                       title=f"{fam}{suffix}: all solvers {lab}, setup+solve (sorted fastest→slowest)")
                 n += 1
-        for suffix, hmats in cpu.family_groups(recs, fam, cpu.matrix_order(recs, fam)):
+        for suffix, hmats in cpu.family_groups(axes, fam, cpu.matrix_order(axes, fam)):
             rsub = rsub_of(hmats)
             for metric in ("total", "setup", "solve", "iters", "rss_peak", "rss_solve",
                            "vram_peak"):

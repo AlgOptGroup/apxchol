@@ -55,7 +55,6 @@ COLORS = {"apxchol bg+tree": "#0b5394",
 BOOST = boost_state()
 PROV = {"note": "thread-scaling sweep", "git_sha": git_sha(), "boost": BOOST,
         "repeat": REPS, "warmup": WARMUP, "timing_protocol": "explicit-warmup-v1"}
-LOCKED = " — freq-locked 2.5 GHz (boost off)" if BOOST == "off" else ""
 
 # Toolchain per cell, and this sweep runs TWO binaries: ours (which reports its
 # own BUILD_META) and ParAC's driver (read off its ELF). A thread-scaling curve
@@ -133,8 +132,10 @@ def _scaling_records():
 def run_cpp(margs, solver, config, reg, t, mid="matrix"):
     cfg = f"--v1-configs '{config}'" if solver == "apxchol_v1" else ""
     regf = "--reg-rel 1e-6" if reg else ""
+    # Keep the default runner compatible with binaries predating explicit warmup.
+    warmup_flag = f"--warmup {WARMUP}" if WARMUP else ""
     cmd = (f"{taskset_prefix(t)} {BIN} {margs} --solver {solver} {cfg} {regf} "
-           f"--threads {t} --tol {TOL} --maxiter 500 --repeat {REPS} --warmup {WARMUP} --csv")
+           f"--threads {t} --tol {TOL} --maxiter 500 --repeat {REPS} {warmup_flag} --csv")
     expired = False
     try: p = sh(cmd, timeout=TIMEOUT, env=benchmark_openmp_env(t))
     except subprocess.TimeoutExpired as e:
@@ -158,7 +159,7 @@ def run_cpp(margs, solver, config, reg, t, mid="matrix"):
     m["repeat_receipts"] = [line for line in p.stderr.splitlines() if line.startswith("BENCH_REPEAT ")]
     if expired:
         return "timeout", m
-    if "total_s" not in m:
+    if p.returncode != 0 or "total_s" not in m:
         return "failed", {**m, "returncode": p.returncode, "stderr_tail": p.stderr[-4000:]}
     # THE GRADING RULE (benchmarks/README.md): true relative residual <= exactly
     # tol, same for every solver, no grace factor. Kept in sync with rc.classify.
@@ -380,7 +381,7 @@ def charts(out=f"{ROOT}/benchmarks/latest"):
             for h, l in zip(*ax.get_legend_handles_labels()):
                 hl.setdefault(l, h)
         fig.legend(hl.values(), hl.keys(), loc="lower center", ncol=max(1, len(hl)), fontsize=8)
-        fig.suptitle(f"{DEVICE.upper()} {phase} {kind} vs threads (tol 1e-8){LOCKED}")
+        fig.suptitle(f"{DEVICE.upper()} {phase} {kind} vs threads (tol 1e-8)")
         fig.tight_layout(rect=[0, 0.06, 1, 1])
         fig.savefig(fname, dpi=130); plt.close(fig)
 

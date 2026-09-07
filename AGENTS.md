@@ -171,6 +171,14 @@ applications and concurrent tests can change it.
 
 ## Benchmarks and experiments
 
+Daint is the primary performance snapshot (`benchmarks/daint`); laptop data and
+figures remain historical. The shared renderer preserves the common 27-matrix,
+18-series denominator, including unavailable canonical MATLAB CMG cells.
+Record effective threads separately from the requested thread budget. Whole-cell
+and prerequisite deadlines are not per-solve lower bounds. Every retained
+residual must satisfy the common tolerance. Source, binary and selected-cell
+hashes accompany snapshots; rendering does not run benchmarks.
+
 Read [benchmarks/README.md](benchmarks/README.md) for the actual runner and
 solver contracts. Use the existing runner/parser where it fits; do not make
 adopting a new general harness a prerequisite for a small experiment.

@@ -65,13 +65,13 @@ TIMING_REPAIRED = {
 # Every other registry matrix was classified correctly, so only these three flip.
 MISSNIFFED = {"iter0020", "iter0030", "iter0040"}
 
-# Solvers that build their OWN right-hand side, outside the benchmark binary, from
+# Historical adapters that built their OWN right-hand side outside the binary,
 # the dumped matrix -- so the flag never reached them and their cells on the
 # missniffed matrices stand. The dump itself is unaffected: --dump-mtx writes L
 # and exits (benchmark.cpp) before make_rhs is ever called.
-#   cmg   bench_cmg.m:44 `is_singular = ~as_operator` -- for a kind=operator matrix
-#         it already skipped the mean-centring and the pin, i.e. it was already on
-#         the post-fix system.
+#   cmg   the legacy bench_cmg.m skipped mean-centring for operator inputs.
+#         Its own-RHS/shifted protocol is superseded by the separate CMG rule
+#         below; current bench_cmg_common.m consumes the shared explicit A/b.
 #   parac ParAC generates its own zero-sum RHS in graph mode and uses its own
 #         physics entry point on an operator; neither consults our flag.
 # ac/ac2 are NOT here: bench_laplacians.jl carried its own copy of the same ratio
@@ -82,6 +82,9 @@ OWN_RHS = {"cmg", "parac", "parac_graph", "parac_physics"}
 
 # (commit, one-line reason, predicate over (solver, matrix_id, kind, device))
 RULES = [
+    ("e60188ed", "canonical MATLAB CMG used a local RHS or shifted operator instead "
+                 "of shared explicit A/b with component gauges and retained-run grading",
+     lambda s, m, k, d: s == "cmg"),
     ("6a677bd", "BoomerAMG's hierarchy was built twice inside the setup timer",
      lambda s, m, k, d: s in HYPRE),
     ("6a677bd", "RCHOL was driven by a PCG we wrote instead of the one it ships",

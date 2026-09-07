@@ -36,21 +36,29 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
     ):
         subprocess.run([sys.executable, str(HERE/script), *flags,
                         '--threads', str(threads)], check=True)
-    fields = ['family', 'matrix', 'device', 'solver', 'config', 'threads', 'status',
+    fields = ['family', 'matrix', 'device', 'solver', 'config', 'threads', 'effective_threads', 'status',
               'n', 'nnz', 'setup_s', 'solve_s', 'total_s', 'iters', 'rel_res',
               'max_repeat_rel_res', 'cuda_init_s', 'warmup_repeats',
               'retained_repeats', 'representative_repeat', 'max_rss_mb',
-              'max_vram_mb', 'timeout_cap_s', 'git_sha', 'binary_sha256']
+              'max_vram_mb', 'timeout_cap_s', 'timeout_scope',
+              'per_solve_timeout_lower_bound_s', 'git_sha', 'binary_sha256']
     rows = []
     for r in records:
         c, m, p = r['cell'], r.get('metrics', {}), r.get('provenance', {})
+        meta = r.get('matrix_meta', {})
         row = {k: m.get(k, '') for k in fields}
         row.update({k: c.get(k, '') for k in ('family','device','solver','config','threads')})
-        row.update(matrix=c['matrix_id'], status=r['status'], timeout_cap_s=rc.timeout_cap(r),
+        row.update(matrix=c['matrix_id'], status=r['status'],
+                   effective_threads=m.get('effective_threads', p.get('effective_threads', '')),
+                   timeout_cap_s=r.get('timeout_cap_s', ''),
+                   timeout_scope=meta.get('timeout_scope', ''),
+                   per_solve_timeout_lower_bound_s=rc.timeout_cap(r),
+                   warmup_repeats=m.get('warmup_repeats', meta.get('warmup_runs', p.get('warmup', ''))),
+                   retained_repeats=m.get('retained_repeats', meta.get('retained_count', '')),
                    git_sha=p.get('git_sha', ''), binary_sha256=p.get('binary_sha256', p.get('driver_sha256', '')))
         rows.append(row)
     with (output/'results.csv').open('w', newline='') as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(sorted(rows, key=lambda r: (r['family'], r['matrix'], r['device'], r['solver'], r['config'])))
     if scaling_store:
@@ -84,18 +92,22 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
     lines = [f'# {platform} benchmark snapshot', '',
         f'This snapshot selects T={threads} before comparing outcomes. '
         f'It contains {len(records)} cells over {len(matrices)}/{len(rc.MATRICES)} registered matrices. '
-        f'{len(missing)} of {len(rc.MATRICES)*len(series)} declared headline cells are missing.', '',
+        f'{len(missing)} of {len(rc.MATRICES)*len(series)} declared headline cells are missing. '
+        'T is the requested headline thread budget; the CSV records effective thread '
+        'counts separately for serial and thread-limited solvers.', '',
         'Every completed retained solve must meet the original-operator true-relative-residual '
         'target of `1e-8`. CUDA initialization is reported separately. Setup includes mandatory '
         'solver preparation; the solve column includes the remaining complete solver call. '
-        'Explicit warmup and retained-repetition fields are preserved in the CSV.', '',
+        'The CSV preserves configured warmup counts and observed retained counts. '
+        'Timeout scope and the raw deadline are separate from any valid per-solve lower bound.', '',
         '[Values and outcomes](results.csv) · [Coverage and missing cells](coverage.json) · '
         '[Common protocol](../README.md)', '',
         '| View | Figures |', '|---|---|',
         '| Total time | '+links('combined_overview_grids*.png')+', '+links('combined_overview_ipm*.png')+', '+links('combined_overview_suitesparse*.png')+' |',
         '| CPU totals | '+links('combined_overview_cpu_*.png')+' |',
         '| GPU totals | '+links('combined_overview_gpu_*.png')+' |',
-        '| Setup and solve | '+links('combined_breakdown_*.png')+' |',
+        '| CPU setup and solve | '+links('combined_breakdown_cpu_*.png')+' |',
+        '| GPU setup and solve | '+links('combined_breakdown_gpu_*.png')+' |',
         '| Setup scaling | '+links('threads*setup_speedup.png')+' |',
         '| Converged-solve scaling | '+links('threads*solve_speedup.png')+' |', '',
         'Heatmap colours normalize within each matrix column; they do not compare absolute '
@@ -105,6 +117,21 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         'Native CMG is labelled as a serial packed implementation; canonical MATLAB CMG '
         'and serial Julia reference solvers retain their own labels and timing boundaries.', '',
         'Status counts: '+', '.join(f'{key}: {value}' for key,value in sorted(counts.items()))+'.', '']
+    if (output/'PLATFORM.md').is_file():
+        lines += ['[Platform-specific availability and exceptions](PLATFORM.md)', '']
+    # Both snapshots show the same principal views directly in the README.
+    # Additional breakdowns remain linked above rather than duplicating them.
+    for title, name in (
+        ('Grid total times', 'combined_overview_grids.png'),
+        ('IPM total times', 'combined_overview_ipm.png'),
+        ('SuiteSparse total times', 'combined_overview_suitesparse.png'),
+        ('CPU setup scaling', 'threads_setup_speedup.png'),
+        ('CPU converged-solve scaling', 'threads_solve_speedup.png'),
+        ('GPU setup scaling', 'threads_gpu_setup_speedup.png'),
+        ('GPU converged-solve scaling', 'threads_gpu_solve_speedup.png'),
+    ):
+        if (output/'figures'/name).is_file():
+            lines += [f'## {title}', '', f'![{title}](figures/{name})', '']
     (output/'README.md').write_text('\n'.join(lines))
     print(f'{platform}: inspected {len(records)} records; '
           f'{len(missing)} missing of {len(rc.MATRICES)*len(series)} declared headline cells')

@@ -1,67 +1,76 @@
-# Daint benchmark snapshot
+# Daint benchmark snapshot — primary performance source
 
-These historical results use one CSCS Daint GH200 node: a 72-core Grace CPU and
-its Hopper GPU. The fair-solver campaign is pinned to source revision
-`2b755997`; absolute times are machine-specific and must not be mixed with the
-x86/RTX [laptop snapshot](../latest/).
+Daint is the primary performance source; the [laptop snapshot](../latest/) is historical.
 
-The T=72 campaign uses three full setup-and-solve repetitions per cell and grades
-every completed result by an independently recomputed true relative residual at
-`1e-8`. Exact coverage, outcomes, paired geometric means, and exclusions are in
-the [fair-solver summary](fair_t72_summary.md); [fair_t72.csv](fair_t72.csv) is
-the portable extract.
+This snapshot selects T=72 before comparing outcomes. It contains 459 cells over 27/27 registered matrices. 27 of 486 declared headline cells are missing. T is the requested headline thread budget; the CSV records effective thread counts separately for serial and thread-limited solvers.
 
-## Fair-solver views
+Every completed retained solve must meet the original-operator true-relative-residual target of `1e-8`. CUDA initialization is reported separately. Setup includes mandatory solver preparation; the solve column includes the remaining complete solver call. The CSV preserves configured warmup counts and observed retained counts. Timeout scope and the raw deadline are separate from any valid per-solve lower bound.
 
-The renderer provides three complementary views for each matrix family:
+[Values and outcomes](results.csv) · [Coverage and missing cells](coverage.json) · [Common protocol](../README.md) · [Selected-source provenance](selection_provenance.json) · [Historical Daint campaigns](HISTORICAL.md)
 
-| family | total-time heatmap | solve-only heatmap | setup + solve |
-|---|---|---|---|
-| grids | [total](figures/fair_t72_total_grids.png) | [solve](figures/fair_t72_solve_grids.png) | [2D](figures/fair_t72_breakdown_grids_2d.png), [3D](figures/fair_t72_breakdown_grids_3d.png) |
-| LP-IPM | [total](figures/fair_t72_total_ipm.png) | [solve](figures/fair_t72_solve_ipm.png) | [breakdown](figures/fair_t72_breakdown_ipm.png) |
-| SuiteSparse | [total](figures/fair_t72_total_suitesparse.png) | [solve](figures/fair_t72_solve_suitesparse.png) | [small](figures/fair_t72_breakdown_suitesparse_small.png), [giants](figures/fair_t72_breakdown_suitesparse_giants.png), [largest](figures/fair_t72_breakdown_suitesparse_giants_xl.png) |
+| View | Figures |
+|---|---|
+| Total time | [overview_grids](figures/combined_overview_grids.png), [overview_ipm](figures/combined_overview_ipm.png), [overview_suitesparse](figures/combined_overview_suitesparse.png) |
+| CPU totals | [overview_cpu_grids](figures/combined_overview_cpu_grids.png), [overview_cpu_ipm](figures/combined_overview_cpu_ipm.png), [overview_cpu_suitesparse](figures/combined_overview_cpu_suitesparse.png) |
+| GPU totals | [overview_gpu_grids](figures/combined_overview_gpu_grids.png), [overview_gpu_ipm](figures/combined_overview_gpu_ipm.png), [overview_gpu_suitesparse](figures/combined_overview_gpu_suitesparse.png) |
+| CPU setup and solve | [breakdown_cpu_grids_2d](figures/combined_breakdown_cpu_grids_2d.png), [breakdown_cpu_grids_3d](figures/combined_breakdown_cpu_grids_3d.png), [breakdown_cpu_ipm](figures/combined_breakdown_cpu_ipm.png), [breakdown_cpu_suitesparse_giants](figures/combined_breakdown_cpu_suitesparse_giants.png), [breakdown_cpu_suitesparse_giants_xl](figures/combined_breakdown_cpu_suitesparse_giants_xl.png), [breakdown_cpu_suitesparse_small](figures/combined_breakdown_cpu_suitesparse_small.png) |
+| GPU setup and solve | [breakdown_gpu_grids_2d](figures/combined_breakdown_gpu_grids_2d.png), [breakdown_gpu_grids_3d](figures/combined_breakdown_gpu_grids_3d.png), [breakdown_gpu_ipm](figures/combined_breakdown_gpu_ipm.png), [breakdown_gpu_suitesparse_giants](figures/combined_breakdown_gpu_suitesparse_giants.png), [breakdown_gpu_suitesparse_giants_xl](figures/combined_breakdown_gpu_suitesparse_giants_xl.png), [breakdown_gpu_suitesparse_small](figures/combined_breakdown_gpu_suitesparse_small.png) |
+| Setup scaling | [threads_gpu_setup_speedup](figures/threads_gpu_setup_speedup.png), [threads_setup_speedup](figures/threads_setup_speedup.png) |
+| Converged-solve scaling | [threads_gpu_solve_speedup](figures/threads_gpu_solve_speedup.png), [threads_solve_speedup](figures/threads_solve_speedup.png) |
 
-Heatmap colour is time relative to the fastest completed CPU or GPU cell in the
-same matrix column; annotations give absolute time and ratio. A capped timeout
-is shown as a lower bound only on total time. Solve-only cells have no fabricated
-timeout duration. Breakdown bars are linear time, with solid setup and hatched
-solve segments; the family splits keep large matrices from flattening smaller
-ones.
+Heatmap colours normalize within each matrix column; they do not compare absolute speed between machines. Timeout, numerical non-convergence, execution failure, unsupported input, and missing measurement remain distinct.
 
-Focused views:
+The 2D grids have a coefficient jump from 1 to 0.01. The 3D grids have unit weights. Native CMG is labelled as a serial packed implementation; canonical MATLAB CMG and serial Julia reference solvers retain their own labels and timing boundaries.
 
-- [apxchol CPU/GPU crossover](figures/fair_t72_apxchol_cpu_gpu.png)
-- [apxchol selector/storage ablation](figures/fair_t72_apxchol_ablation.png)
+Status counts: complete: 423, failed: 17, n/a: 6, not_converged: 7, timeout: 6.
 
-The ARM64 snapshot uses explicitly labelled portable paths where possible:
-RCHOL/pRCHOL retain upstream factorization and PCG semantics without MKL;
-AC/AC2 use the official ARM64 Julia build; ParAC CUDA runs natively. ParAC CPU
-and CMG are omitted rather than replaced by unlike timing baselines.
+[Platform-specific availability and exceptions](PLATFORM.md)
 
-Reproduce the pinned figures and summary from the committed CSV:
+## Grid total times
 
-```bash
-python3 benchmarks/daint/render_fair_t72.py
-```
+![Grid total times](figures/combined_overview_grids.png)
 
-## Historical scaling snapshot
+## IPM total times
 
-The earlier apxchol-only campaign is a separate, checksummed archive. It is an
-explicitly historical snapshot, not current-main timing. On reproduction, its
-compact [three-panel speedup figure](figures/setup_scaling.png) shows total,
-PCG/solve, and setup speedup from the complete 189/189-record scaling extract
-(9 matrices × 7 thread counts × 3 repetitions). The legacy
-`setup_scaling.png` output path is retained so existing manifests and links do
-not orphan an artifact.
+![IPM total times](figures/combined_overview_ipm.png)
 
-Separate diagnostic views remain available for the
-[T=72 setup breakdown](figures/setup_t72_breakdown.png) and the within-snapshot
-[campaign-head/July-27 total ratio](figures/historical_total_ratio.png). See the
-[numerical summary](summary.md), [scaling data](scaling.csv), and
-[historical A/B data](historical_ab.csv) for boundaries and exact values.
+## SuiteSparse total times
 
-Reproduce that archive from its committed extracts:
+![SuiteSparse total times](figures/combined_overview_suitesparse.png)
 
-```bash
-python3 benchmarks/daint/render_campaign.py --csv-input benchmarks/daint
-```
+## CPU setup scaling
+
+![CPU setup scaling](figures/threads_setup_speedup.png)
+
+## CPU converged-solve scaling
+
+![CPU converged-solve scaling](figures/threads_solve_speedup.png)
+
+## GPU setup scaling
+
+![GPU setup scaling](figures/threads_gpu_setup_speedup.png)
+
+## GPU converged-solve scaling
+
+![GPU converged-solve scaling](figures/threads_gpu_solve_speedup.png)
+
+## Snapshot provenance
+
+This refresh selects 459/486 headline identities from the audited 2026-09-07
+selection: 423 complete, 17 failed, 7 nonconverged, 6 timeout and 6 recorded n/a.
+All 108 ParAC Graph/Physics CPU/GPU identities are represented (103 complete,
+5 failed). The 27 remaining numerical gaps are canonical MATLAB CMG platform
+exceptions; packed native CMG has its own 27 recorded cells. Corrected Eigen
+ordering replaces four RCHOL results, preserving the as-Skitter nonconvergence.
+
+Cell hashes and source/binary revisions are recorded in selection_provenance.json;
+the CSV preserves measurement values without mixing in pending optimization
+experiments. Scaling contains 84 CPU and 84 GPU converged records. The recorded
+thread count denotes host threads; GPU-solve scaling also reflects the factors
+produced by those host-thread configurations, not GPU thread-count scaling.
+
+Regenerate from the matching selected raw-cell stores with
+`python3 benchmarks/render_snapshot.py --cells CELLS --out OUTPUT --threads 72
+--platform Daint --scaling-store SCALING --scaling-matrices MATRICES
+--scaling-threads 1,2,4,8,16,36,72`. The committed CSVs are presentation extracts;
+archived historical renderers remain linked separately.
