@@ -17,6 +17,22 @@ unsynchronized timings do not support a setup-speed conclusion. The
 implementation remains useful as a faithful, connected, edgewise-unbiased
 reference.
 
+## Follow-up: CAST and the input-dependent result (2026-09-08)
+
+The original broad negative result below remains valid for its recorded
+apxchol setting. The [self-contained reconciliation](RECONCILIATION.md)
+explains why it can coexist with a CAST improvement elsewhere: matched
+sampler/order controls, degree-two arithmetic and RNG interventions, a complete
+49-triangle Spielman census, and exact tiny-star optima with matched edge
+budgets. On that Spielman case, exact triangle updates give one-iteration PCG
+at unchanged stored fill; three near-uniform triangles dominate the local
+error that an earlier four-star sample missed. [Evidence and executable
+reproduction](reconciliation/README.md) accompany the explanation.
+
+The experiments and decision below are the preserved original report. Its
+old numerical tiny-star comparator is separate from the newly certified
+relative-Frobenius optima in the follow-up.
+
 ## Exact elimination and the two tree estimators
 
 Suppose pivot `v` has active neighbors `i` with incident conductances `a_i`,

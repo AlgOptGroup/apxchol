@@ -1,0 +1,11 @@
+package = "Laplacians"
+version = "1.4.1"
+source = "https://github.com/danspielman/Laplacians.jl"
+
+[files]
+"src/approxChol.jl" = "78fedc673f4965d66bafdd41f1e842533c194006c330f530d45d974d93ae633b"
+"src/approxCholTypes.jl" = "00a8c27af1fe867654789dcad2e4076586eb20e9a402064ccc59eedff02efefe"
+"src/pcg.jl" = "db6f2d0c0cb6b38c6b6f11a4a6f05c78d2e868275e69e861b30fbe9f44ba9de9"
+"src/graphOps.jl" = "44880935b2b74d46aebd89807e74713486fbd48335980307dcdbb3b6f6b07757"
+"src/graphUtils.jl" = "6a0e54dbc079f79913d14c92ebe97a26de45eef7fd753c0244c39bb2124f6b2e"
+"Project.toml" = "62127ec8a44bca31982587a98473704e3df0ea512dc30e4bbf729a9cc43ca255"

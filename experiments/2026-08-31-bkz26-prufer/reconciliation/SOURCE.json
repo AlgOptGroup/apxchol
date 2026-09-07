@@ -1,0 +1,22 @@
+{
+  "adapter_origin": "Experiment-only adaptation of public Laplacians.jl 1.4.1; numerical files copied without modification from the executed package.",
+  "julia_files": {
+    "adapter.jl": "c67df08725c6c41d44cf73ef51b4d0261fd4d5018690a9f3b8f9ceee570c0479",
+    "reference_adapter.jl": "9dfca48005491712c59980e953760c66a1bb5a69f9c750e5c09b83a0f886c76d",
+    "verify_source.jl": "cbb2514f5b5e26bc5244cd8cbec58b85cc80bf0acefec8612b0f6a74ce10a6ef",
+    "run_case.jl": "f71e279d9249c0f0242922c4eaae5f38a0687acf2b02138000b223063b49ca75",
+    "test_adapter.jl": "c42de5910e9846500f7089f6e920c9d1d47be0b68e57e79634243e5a0f70f7a6",
+    "gate.jl": "8166a544e4ea9504c19e78241744fea03c94425a474a879d91e585805d315f4b"
+  },
+  "star_table": {
+    "git_commit": "b1c54a48e786222f4590dc800fd6088f6488e69a",
+    "path": "experiments/2026-09-03-cast-reconciliation/star_k50-paper-protocol.tsv",
+    "sha256": "9636b5123ca999d4a6f50d33336c07751a3296a4aea717f01bd25ff71992bcaa"
+  },
+  "historical_fixture_original_sha256": {
+    "historical-gks.toml": "4c0f8f5e7b045c79c289a19542d732d8d0f5eab3d8c0ed76a8ef44852c5d1c6c",
+    "historical-cast.toml": "7e2f84d12ca291dad9fe21f3d1128fd9c47a61379366d06213c5018b7c63e0a3"
+  },
+  "historical_fixture_export": "Only factor/pivot/RHS/iteration/solution identity fields retained; five fields used by run_case.jl.",
+  "scope": "Public-safe data projection. Private filesystem paths, account names, scheduler wrappers and unrelated implementation sources omitted. No raw solution vectors are included."
+}
