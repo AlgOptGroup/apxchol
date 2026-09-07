@@ -632,5 +632,48 @@ class DaintCampaignRendererTest(unittest.TestCase):
         write_summary.assert_called_once()
 
 
+class CompactScalingPlotTest(unittest.TestCase):
+    def test_gap_and_measured_reference_survive_log_axes(self):
+        import math
+        from matplotlib.figure import Figure
+        records = []
+        for threads, status, value in [(1, "complete", 10), (2, "failed", None),
+                                       (4, "complete", 4)]:
+            row = record(status, value, threads=threads, solver="solver")
+            row["cell"]["label"] = "A"
+            if value is not None:
+                row["metrics"].update(setup_s=value, solve_s=value)
+            row["provenance"] = {"git_sha": "fresh"}
+            if threads == 4:
+                row["provenance"]["scaling_baseline"] = {
+                    "setup_s": 12, "solve_s": 12}
+            records.append((str(threads), row))
+        captured = {}
+        def capture(fig, filename, **kwargs):
+            ax = fig.axes[0]
+            captured[pathlib.Path(filename).name] = (
+                list(ax.lines[0].get_ydata()), ax.get_xscale(), ax.get_yscale(),
+                [line.get_label() for line in ax.lines])
+        with tempfile.TemporaryDirectory() as out, \
+             mock.patch.object(thread_scaling, "_scaling_records", return_value=records), \
+             mock.patch.object(thread_scaling, "MATS", [("m", "audit", "", False, False)]), \
+             mock.patch.object(thread_scaling, "CPP", [("A", "solver", "")]), \
+             mock.patch.object(thread_scaling, "THREADS", [1, 2, 4]), \
+             mock.patch.object(Figure, "savefig", capture):
+            thread_scaling.charts(out, compact=True)
+        self.assertEqual(len(captured), 4)
+        for name, (values, xscale, yscale, labels) in captured.items():
+            self.assertEqual((xscale, yscale), ("log", "log"))
+            self.assertTrue(math.isnan(values[1]))
+            self.assertEqual(values[2], 3 if "speedup" in name else 4)
+            self.assertEqual("ideal" in labels, "speedup" in name)
+
+    def test_compact_rejects_more_than_three_panels(self):
+        with mock.patch.object(thread_scaling, "_scaling_records", return_value=[]), \
+             mock.patch.object(thread_scaling, "MATS", [(str(i),) for i in range(4)]):
+            with self.assertRaisesRegex(ValueError, "at most three"):
+                thread_scaling.charts(compact=True)
+
+
 if __name__ == "__main__":
     unittest.main()

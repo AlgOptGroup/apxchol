@@ -348,12 +348,15 @@ def _scaling_baseline(record, field, main_t1):
     return value
 
 
-def charts(out=f"{ROOT}/results/plots"):
+def charts(out=f"{ROOT}/results/plots", compact=False):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     recs = [record for _filename, record in _scaling_records()]
-    mats = sorted({r["cell"]["matrix_id"] for r in recs})
+    mats = ([mid for mid, *_ in MATS] if compact else
+            sorted({r["cell"]["matrix_id"] for r in recs}))
+    if compact and len(mats) > 3:
+        raise ValueError("compact charts require an explicit scope of at most three matrices")
     # Only genuinely multi-threaded solvers belong on a thread-scaling chart.
     # RCHOL has a serial factorization, so its "speedup vs threads" is
     # meaningless; pRCHOL is the parallel series retained from that family.
@@ -364,8 +367,8 @@ def charts(out=f"{ROOT}/results/plots"):
     def fig_for(field, phase, kind, fname):
         # Setup and solve scale very differently, so they get separate charts;
         # total is the user-facing single-RHS outcome.
-        cols = min(4, len(mats)); rows = math.ceil(len(mats) / cols)
-        fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.8 * rows), squeeze=False)
+        cols = min(3 if compact else 4, len(mats)); rows = math.ceil(len(mats) / cols)
+        fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.8 * rows), squeeze=False, sharey=compact)
         for ax in list(axes.flat)[len(mats):]: ax.set_visible(False)
         for j, mid in enumerate(mats):
             ax = axes.flat[j]
@@ -376,21 +379,42 @@ def charts(out=f"{ROOT}/results/plots"):
                        for r in recs if r["cell"]["matrix_id"] == mid
                        and r["cell"]["label"] == lab and r["status"] == "complete"
                        and r["metrics"].get(field)}
-                if 1 not in pts or len(pts) < 2: continue
-                ts = sorted(pts); t1 = pts[1]
+                if not pts or (kind != "seconds" and (1 not in pts or len(pts) < 2)): continue
+                ts = sorted(THREADS) if compact else sorted(pts)
+                t1 = pts.get(1)
                 references = {r["cell"]["threads"]: _scaling_baseline(r, field, t1)
                               for r in recs if r["cell"]["matrix_id"] == mid
                               and r["cell"]["label"] == lab and r["status"] == "complete"}
-                sp = [references[t] / pts[t] for t in ts]
-                ys = sp if kind == "speedup" else [s / t for s, t in zip(sp, ts)]
+                if kind == "seconds":
+                    ys = [pts.get(t, math.nan) for t in ts]
+                else:
+                    sp = [references[t] / pts[t] if t in pts else math.nan for t in ts]
+                    ys = sp if kind == "speedup" else [s / t for s, t in zip(sp, ts)]
                 ax.plot(ts, ys, marker="o", label=lab, color=COLORS.get(lab, "#888"))
             has_reference = any(r["cell"]["matrix_id"] == mid
                                 and r.get("provenance", {}).get("scaling_baseline")
                                 for r in recs)
             ax.set_title(mid + ("*" if has_reference else ""), fontsize=10); ax.set_xlabel("threads")
             ax.set_xscale("log", base=2); ax.set_xticks(THREADS); ax.set_xticklabels(THREADS)
-            ax.set_ylabel(f"{phase} " + ("speedup (t1/tN)" if kind == "speedup"
+            ax.set_ylabel(f"{phase} " + ("time (s)" if kind == "seconds" else
+                                         "speedup (T1/TN)" if kind == "speedup"
                                          else "parallel efficiency"))
+            if compact:
+                ax.set_yscale("log", base=10 if kind == "seconds" else 2)
+                if kind == "seconds":
+                    from matplotlib.ticker import FuncFormatter
+                    formatter = FuncFormatter(lambda value, _pos: f"{value:g}")
+                    ax.yaxis.set_major_formatter(formatter)
+                    ax.yaxis.set_minor_formatter(formatter)
+                if kind == "speedup":
+                    from matplotlib.ticker import ScalarFormatter
+                    ax.yaxis.set_major_formatter(ScalarFormatter())
+                    ax.plot(THREADS, THREADS, "--", color="#999999", linewidth=1, label="ideal")
+                missing = sum(r["status"] != "complete" for r in recs
+                              if r["cell"]["matrix_id"] == mid)
+                if missing:
+                    ax.text(.02, .98, f"{missing} non-complete cells; gaps retained",
+                            transform=ax.transAxes, va="top", fontsize=8)
             ax.grid(True, alpha=0.3)
         # one global legend (union across panels) so no line is missing from it
         hl = {}
@@ -406,6 +430,13 @@ def charts(out=f"{ROOT}/results/plots"):
                      ha="center", fontsize=9)
         fig.tight_layout(rect=[0, 0.06, 1, 1])
         fig.savefig(fname, dpi=130); plt.close(fig)
+
+    if compact:
+        for field, phase in (("setup_s", "Setup"), ("solve_s", "Solve")):
+            for kind in ("seconds", "speedup"):
+                fig_for(field, phase, kind,
+                        f"{out}/figures/threads_{DEVICE}_representative_{phase.lower()}_{kind}.png")
+        return
 
     # Keep total, setup and solve speedups together.  Total is the user-facing
     # single-RHS outcome; the two phase charts explain why its curve bends.
@@ -485,6 +516,8 @@ if __name__ == "__main__":
     parser.add_argument("--rerun-status", default="",
                         help="comma-separated terminal statuses to overwrite")
     parser.add_argument("--render-only", action="store_true")
+    parser.add_argument("--compact", action="store_true",
+                        help="render at most three selected matrices as log-log absolute times and speedups")
     parser.add_argument("--source-commit", default="", help="frozen source revision when running an archived package")
     parser.add_argument("--measure-only", action="store_true",
                         help="write cells without requiring plotting dependencies")
@@ -537,6 +570,7 @@ if __name__ == "__main__":
         sweep()
     if not args.measure_only:
         validate_cells()
-        charts(args.out)
-        export_csv(f"{args.out}/thread_scaling{'_gpu' if DEVICE == 'gpu' else ''}.csv")
+        charts(args.out, compact=args.compact)
+        suffix = f"_{DEVICE}_representative" if args.compact else ("_gpu" if DEVICE == "gpu" else "")
+        export_csv(f"{args.out}/thread_scaling{suffix}.csv")
     print("thread-scaling done")

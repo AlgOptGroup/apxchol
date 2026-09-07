@@ -49,7 +49,24 @@ Source: `1a782c8d`, CPU campaign 4619429.
 
 The 12 matrices cover T=1,2,4,8,16,36,72, one warmup and three retained repetitions per point. Each phase comes from the same retained repeat selected by median total time. Orkut ran across nodes: its six multi-thread points use each node’s measured T=1 control, giving **10.68× setup** at T=72. Other matrices use their main T=1 cell. The explicit reference times are exported in the CSV.
 
-![CPU setup scaling](figures/threads_setup_speedup.png)
+The main view uses three representative matrices: a four-million-row grid,
+LP-IPM `iter0040`, and the 1.70-million-row SuiteSparse `as-Skitter` graph.
+These plots currently contain the audited apxchol series only. Matched
+AMGCL, default Hypre, and ParAC Graph thread sweeps are pending; the T=72
+headline cells are not substituted for missing scaling curves.
+
+Both axes are logarithmic. Equal spacing shows equal multiplicative changes;
+the dashed speedup line is ideal linear scaling. The shared seconds scale
+compares absolute costs across panels, while speedup compares each solver with
+its own T=1 reference. Log axes make wide timing ranges readable but compress
+absolute differences, so the [21-row extract](thread_scaling_cpu_representative.csv)
+retains the exact times.
+
+[Representative CPU setup times](figures/threads_cpu_representative_setup_seconds.png)
+
+![Representative CPU setup scaling](figures/threads_cpu_representative_setup_speedup.png)
+
+[Full 12-matrix setup scaling](figures/threads_setup_speedup.png)
 
 ## CPU converged-solve scaling
 
@@ -57,13 +74,28 @@ Source: `1a782c8d`, CPU campaign 4619429.
 
 These are full solves at true relative residual ≤1e-8. Thread count changes the preconditioner and iteration count: Orkut’s same-node speedup is **21.15×**, with iterations changing 50→18. The diagnostics separate average time per iteration from full solve speedup. Factor fill was not measured and remains blank.
 
-![CPU converged-solve scaling](figures/threads_solve_speedup.png)
+[Representative CPU converged-solve times](figures/threads_cpu_representative_solve_seconds.png)
+
+![Representative CPU converged-solve scaling](figures/threads_cpu_representative_solve_speedup.png)
+
+[Full 12-matrix converged-solve scaling](figures/threads_solve_speedup.png)
+
+Current apxchol absolute times at T=72 (seconds):
+
+| Matrix | Setup | Converged solve | Total |
+|---|---:|---:|---:|
+| grid_2000 | 0.1445 | 0.1824 | 0.3269 |
+| iter0040 | 0.2114 | 0.1202 | 0.3316 |
+| as-Skitter | 0.5144 | 0.2467 | 0.7610 |
 
 ## CPU total scaling
 
 Source: `1a782c8d`, CPU campaign 4619429.
 
-![CPU total scaling](figures/threads_total_speedup.png)
+[Full 12-matrix total scaling](figures/threads_total_speedup.png)
+
+<details>
+<summary>Full comparison with the historical CPU snapshot</summary>
 
 ## Comparison with the historical CPU snapshot
 
@@ -84,6 +116,11 @@ The [previous 84 CPU cells and figures](historical/cpu-scaling-ea01/) are preser
 | grid_500 | 6.49× | 6.61× | 17.74× | 18.30× |
 | iter0040 | 5.89× | 6.25× | 7.03× | 7.66× |
 
+</details>
+
+<details>
+<summary>Historical GPU scaling: all 12 matrices</summary>
+
 ## GPU setup scaling
 
 Historical source: `ea01e2ff`; these figures were not rerun by the CPU campaign.
@@ -101,6 +138,8 @@ Historical source: `ea01e2ff`; these figures were not rerun by the CPU campaign.
 Historical source: `ea01e2ff`.
 
 ![GPU total scaling](figures/threads_gpu_total_speedup.png)
+
+</details>
 
 ## Snapshot provenance
 

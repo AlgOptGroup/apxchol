@@ -17,7 +17,10 @@ It is excluded from current comparisons.
 
 CPU scaling on Daint now uses source `1a782c8d` across all 12 matrices and seven
 thread counts; [setup and converged-solve figures](daint/#cpu-setup-scaling)
-include Orkut’s same-node T1 references. The existing headline tables and
+include Orkut’s same-node T1 references. The main view presents three representative
+matrices with absolute setup/solve times and log-log speedups; full 12-matrix
+plots remain linked as drilldown. Competitor curves require their own matched
+thread sweep and are not inferred from headline T=72 cells. The existing headline tables and
 historical source-ea01 GPU scaling were not rerun by that CPU campaign.
 
 The Daint [coverage](daint/coverage.json) and [CPU scaling provenance](daint/cpu_scaling_provenance.json)
@@ -206,8 +209,9 @@ python3 benchmarks/stale_cells.py
 
 `sweep_fair.py` uses the same stale predicate: reusable terminal cells skip, and
 invalidated terminal cells rerun while their old JSON remains in place until a
-replacement is ready. `stale_cells.py --delete` is optional cleanup, recoverable
-from Git. Add a stale-cell rule whenever a change alters the operator, RHS,
+replacement is ready. `stale_cells.py --delete` is optional cleanup; preserve
+the selected private cell store before deleting evidence, since new raw cells
+are not tracked in Git. Add a stale-cell rule whenever a change alters the operator, RHS,
 timing boundary, convergence semantics, or solver result.
 
 
@@ -228,3 +232,20 @@ of recurrence convergence. Every retained CPU, component-aggregated CPU and
 GPU true residual must pass the requested tolerance. Timing fields still
 come from one real median-total repetition; `repeat_rel_res` preserves the
 other residuals. Calibration is an estimate, not a convergence guarantee.
+
+### Compact thread-scaling presentation
+
+Use an audited scaling store with an explicit scope; this command only renders
+existing cells and writes a separate extract, preserving the full-study CSV.
+Add competitor series only when their declared thread denominators are present.
+
+```bash
+PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compact \
+  --store /path/to/audited/scaling-cells --matrices grid_2000,iter0040,as-Skitter \
+  --series 'apxchol bg+tree' --thread-counts 1,2,4,8,16,36,72 --out results/plots
+```
+
+Compact views share a logarithmic seconds axis across matrices and use log-log
+speedups with an ideal line. They emphasize multiplicative differences; exact
+absolute costs remain in the CSV. Non-complete cells stay in the denominator
+and appear as gaps rather than interpolated timings.

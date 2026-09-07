@@ -272,7 +272,10 @@ performance source: committed extracts, coverage and source/protocol metadata
 live in `benchmarks/daint/`; audited campaign cell stores remain private.
 `results/cells/` is a generated local store, not automatically the source of
 published Daint data. Renderers default to ignored `results/plots/` previews;
-publication requires an explicitly selected store and output. The retired
+publication requires an explicitly selected store and output.
+`thread_scaling.py --compact` renders up to three scoped matrices as absolute
+setup/solve times and log-log speedups, with separate extract names; full-study
+figures and data remain available. The retired
 laptop snapshot and its 612 legacy T16 cells are preserved in
 `benchmarks/archive/laptop-20260908/`; do not blend them into current results.
 Keep internal reports and private comparison sources outside tracked files. Do not publish them or contact collaborators
