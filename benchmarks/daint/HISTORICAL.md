@@ -7,7 +7,7 @@ refresh. It is separate from the older one-iteration scaling diagnostic below.
 These historical results use one CSCS Daint GH200 node: a 72-core Grace CPU and
 its Hopper GPU. The fair-solver campaign is pinned to source revision
 `2b755997`; absolute times are machine-specific and must not be mixed with the
-x86/RTX [laptop snapshot](../latest/).
+x86/RTX [laptop snapshot](../archive/laptop-20260908/).
 
 The T=72 campaign uses three full setup-and-solve repetitions per cell and grades
 every completed result by an independently recomputed true relative residual at

@@ -348,7 +348,7 @@ def _scaling_baseline(record, field, main_t1):
     return value
 
 
-def charts(out=f"{ROOT}/benchmarks/latest"):
+def charts(out=f"{ROOT}/results/plots"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -470,7 +470,7 @@ if __name__ == "__main__":
                         help="isolated scaling-cell directory")
     parser.add_argument("--binary", default=None,
                         help="benchmark executable to run")
-    parser.add_argument("--out", default=f"{ROOT}/benchmarks/latest")
+    parser.add_argument("--out", default=f"{ROOT}/results/plots")
     parser.add_argument("--repeat", type=int, default=REPS)
     parser.add_argument("--warmup", type=int, default=WARMUP)
     parser.add_argument("--thread-counts", default=",".join(map(str, THREADS)))

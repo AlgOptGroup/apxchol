@@ -8,7 +8,7 @@ the de-singularization protocol in benchmarks/README.md). GPU cells are produced
 `python3 benchmarks/sweep_fair.py --device gpu` (ParAC in-process via
 parac_runner.py), the same runner/store as the CPU axis.
 
-  python3 benchmarks/gpu_charts.py --root results/cells --out benchmarks/latest/figures
+  python3 benchmarks/gpu_charts.py --root results/cells --out results/plots/figures
 """
 import argparse, os
 from collections import defaultdict
@@ -281,7 +281,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="results/cells",
                     help="unified per-cell JSON store containing device=gpu cells")
-    ap.add_argument("--out", default="benchmarks/latest/figures")
+    ap.add_argument("--out", default="results/plots/figures")
     ap.add_argument("--threads", type=int, default=16)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)

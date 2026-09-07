@@ -29,16 +29,19 @@ evidence. Results are machine-specific snapshots, not a live leaderboard:
 | snapshot | useful views | data |
 |---|---|---|
 | **Primary:** CSCS Daint GH200, 72-core Grace + Hopper, T=72 | [Daint index](daint/) and [coverage](daint/coverage.json) | [CSV](daint/results.csv) |
-| Historical: Ryzen 9 7945HX + RTX 4090 Laptop, T=16 | [laptop index](latest/) and [generated tables](latest/summary.md) | [CSV](latest/results.csv) |
+
+The [archive](archive/) preserves the retired laptop snapshot and its legacy cell store.
+It is excluded from current comparisons.
 
 CPU scaling on Daint now uses source `1a782c8d` across all 12 matrices and seven
 thread counts; [setup and converged-solve figures](daint/#cpu-setup-scaling)
 include Orkut’s same-node T1 references. The existing headline tables and
 historical source-ea01 GPU scaling were not rerun by that CPU campaign.
 
-Do not compare absolute times across these machines. The auditable source is the
-[cell store](../results/cells/); committed CSVs, summaries, and figures are
-presentation extracts.
+The Daint [coverage](daint/coverage.json) and [CPU scaling provenance](daint/cpu_scaling_provenance.json)
+identify the selected campaign evidence behind the committed presentation extracts.
+Raw campaign stores are private; an arbitrary local `results/cells/` directory is
+not the source of the published snapshot. Do not compare absolute times across machines.
 
 ## Fairness contract
 
@@ -173,8 +176,8 @@ affinity-controlled runner for timing:
 ```bash
 julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
 python3 benchmarks/sweep_fair.py
-PYTHONPATH=benchmarks python3 benchmarks/fair_charts.py --out benchmarks/latest
-PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out benchmarks/latest/figures
+PYTHONPATH=benchmarks python3 benchmarks/fair_charts.py --out results/plots
+PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out results/plots/figures
 ```
 
 CUDA build and sweep:
@@ -184,8 +187,8 @@ cmake -S benchmarks -B benchmarks/build-cuda -DCMAKE_BUILD_TYPE=Release \
   -DAPXCHOL_USE_CUDA=ON -DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON
 cmake --build benchmarks/build-cuda -j"$(nproc)" --target benchmark
 python3 benchmarks/sweep_fair.py --device gpu
-PYTHONPATH=benchmarks python3 benchmarks/gpu_charts.py --out benchmarks/latest/figures
-PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out benchmarks/latest/figures
+PYTHONPATH=benchmarks python3 benchmarks/gpu_charts.py --out results/plots/figures
+PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out results/plots/figures
 ```
 
 Useful runner controls are `--only`, `--threads`, `--repeat`, and `--store`.

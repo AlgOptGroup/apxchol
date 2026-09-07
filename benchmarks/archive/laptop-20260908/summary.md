@@ -1,4 +1,4 @@
-# Latest benchmark summary — t16, tol 1e-8, original singular L (per-solver grounding; ParAC per-component-consistent RHS scored vs original L, CMG reg-rel)
+# Archived laptop benchmark summary — t16, tol 1e-8, original singular L (per-solver grounding; ParAC per-component-consistent RHS scored vs original L, CMG reg-rel)
 
 `† CMG (MATLAB)` = canonical Koutis CMG (MEX, matlab-deps container). MATLAB-pcg wall-time isn't cross-language-comparable, so its **iteration count** is the comparable signal — see below.
 Blank = not run; `X` = ran but did not reach 1e-8; `T` = timed out (> 10× apxchol's wall time on that matrix); `—` = solver doesn't support that de-singularization cell.

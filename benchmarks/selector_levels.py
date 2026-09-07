@@ -112,7 +112,7 @@ def validate_rows(rows):
         raise chart_cells.StaleCellError(
             f"selector_levels plot input contains {len(stale)} stale rows: {examples}")
 
-def plot(rows, out=f"{ROOT}/benchmarks/latest/figures/selector_levels.png"):
+def plot(rows, out=f"{ROOT}/results/plots/figures/selector_levels.png"):
     validate_rows(rows)
     mats = [m for m, *_ in MATS if any(r["matrix_id"] == m for r in rows)]
     by = {(r["selector"], r["matrix_id"]): r["bck_lvls"] for r in rows}

@@ -1,13 +1,13 @@
-# Laptop benchmark snapshot
+# Archived laptop benchmark snapshot
 
 This directory is a committed presentation snapshot for an AMD Ryzen 9 7945HX
 (16 physical cores), 128 GB RAM, and an NVIDIA RTX 4090 Laptop GPU (16 GB).
 Absolute times apply only to that machine and run environment; use the
-[Daint snapshot](../daint/) only as a separate machine study.
+[Daint snapshot](../../daint/) only as a separate machine study.
 
 The campaign uses pinned T=16 runs and a true relative-residual target of
 `1e-8`. The common operator, grading, timing, timeout, and series rules are in
-the [benchmark protocol](../README.md). Per-cell provenance in the result store
+the [benchmark protocol](../../README.md). Per-cell provenance in the result store
 is authoritative: this directory is historical, and missing or differently
 grounded cells must not be silently combined into a new denominator.
 
@@ -43,6 +43,13 @@ iteration, accuracy, fill, and family-split views.
 - RCHOL/pRCHOL and ParAC include required reordering and conversion in setup.
 - Grids are weighted anisotropic problems, not uniform Poisson matrices.
 
-Regenerate this snapshot through the commands in the
-[benchmark README](../README.md#build-and-run); the renderers filter stale cells
-and refuse ambiguous series.
+This snapshot was retired on 2026-09-08. Its 99 figures, CSV, and 612 legacy T16
+[cell records](cells/) are retained without numerical changes; the two Markdown
+pages only update archive labels and links. The CSV is a 297-row CPU extract,
+not a complete projection of the 612-cell mixed CPU/GPU store. Some legacy cells
+lack platform/compiler metadata. Use per-cell source and status fields when
+interpreting them; do not treat the archived store as a fresh campaign.
+
+Current renderer defaults write disposable `results/plots/` previews. Reproducing
+this historical snapshot may require its historical renderer revision; do not
+run a fresh sweep into this archive.

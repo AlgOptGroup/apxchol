@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the illustrative benchmark artifacts for benchmarks/latest/ from the
+"""Generate the illustrative benchmark artifacts for results/plots/ from the
 per-cell results (results/cells). Produces, per family (grids / ipm / suitesparse):
   - a grouped bar chart of total solve time per matrix, one bar per solver (t16)
   - a log-log scaling curve (total_s vs nnz), one line per solver
@@ -7,7 +7,7 @@ plus a flat results.csv export and a markdown summary table.
 
 Non-converged / failed cells are drawn as hatched 'x' bars so the reader sees
 coverage honestly. Run AFTER the fair sweep + ParAC merge:
-  PYTHONPATH=benchmarks python3 benchmarks/fair_charts.py --out benchmarks/latest
+  PYTHONPATH=benchmarks python3 benchmarks/fair_charts.py --out results/plots
 """
 import argparse, csv, os
 from collections import defaultdict
@@ -816,7 +816,7 @@ def main():
     global CHART_THREADS
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="results/cells")
-    ap.add_argument("--out", default="benchmarks/latest")
+    ap.add_argument("--out", default="results/plots")
     ap.add_argument("--threads", type=int, default=16)
     a = ap.parse_args()
     CHART_THREADS = a.threads

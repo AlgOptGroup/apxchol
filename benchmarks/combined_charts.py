@@ -17,7 +17,7 @@ Per family it emits:
 Reuses the two loaders (no data duplication): fair_charts.load / _pick / headline_mats
 for CPU (device=cpu cells), gpu_charts.load for GPU.
 
-  PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out benchmarks/latest/figures
+  PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out results/plots/figures
 """
 import argparse, os
 import matplotlib; matplotlib.use("Agg")
@@ -516,7 +516,7 @@ def main():
     ap.add_argument("--cells", default="results/cells")
     ap.add_argument("--gpu-root", default="results/cells",
                     help="unified per-cell store containing device=gpu cells")
-    ap.add_argument("--out", default="benchmarks/latest/figures")
+    ap.add_argument("--out", default="results/plots/figures")
     ap.add_argument("--threads", type=int, default=16)
     a = ap.parse_args()
     cpu.CHART_THREADS = a.threads

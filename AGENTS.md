@@ -267,9 +267,15 @@ result path, exact remote job ID/status, and next action in one durable local
 ledger. Confirm the checkpoint exists. An agent's assignment is not evidence
 that implementation or a cluster job started.
 
-`data/` and `results/` are ignored except tracked `results/cells/`, which feeds
-the published benchmark charts. Keep internal reports and private comparison
-sources outside tracked files. Do not publish them or contact collaborators
+`data/`, `results/` and `benchmarks/results/` are ignored. Daint is the current
+performance source: committed extracts, coverage and source/protocol metadata
+live in `benchmarks/daint/`; audited campaign cell stores remain private.
+`results/cells/` is a generated local store, not automatically the source of
+published Daint data. Renderers default to ignored `results/plots/` previews;
+publication requires an explicitly selected store and output. The retired
+laptop snapshot and its 612 legacy T16 cells are preserved in
+`benchmarks/archive/laptop-20260908/`; do not blend them into current results.
+Keep internal reports and private comparison sources outside tracked files. Do not publish them or contact collaborators
 without authorization. Preserve source and evidence before any worktree
 retirement; obey the user's destructive-operation approval requirements.
 

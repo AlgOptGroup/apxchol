@@ -10,7 +10,7 @@ triangular factor and so no comparable number -- they are intentionally absent.
 One figure per family: a matrix × method heatmap (fill_heatmap_{fam}.png, every
 measured grid).
 
-  python3 benchmarks/fill_chart.py --out benchmarks/latest/figures
+  python3 benchmarks/fill_chart.py --out results/plots/figures
 """
 import argparse, os
 from collections import defaultdict
@@ -106,7 +106,7 @@ def heatmap(rows, fam, out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cells", default="results/fill_cells")
-    ap.add_argument("--out", default="benchmarks/latest/figures")
+    ap.add_argument("--out", default="results/plots/figures")
     a = ap.parse_args()
     rows = load(a.cells)
     os.makedirs(a.out, exist_ok=True)

@@ -11,11 +11,10 @@ compile_commands.json
 
 # Data & results (download/generate locally)
 data/
-# results/ is generated locally, EXCEPT results/cells/ -- the per-cell benchmark store
-# is the source-of-truth the committed benchmarks/latest/ charts are rendered from, so
-# it is tracked for reproducibility (small: ~0.8MB of JSON). Sweeps will churn these diffs.
+# Generated cell stores and plot previews stay local. The retired laptop store
+# is preserved under benchmarks/archive/laptop-20260908/cells/. Current Daint
+# extracts and their source/protocol metadata are committed under benchmarks/daint/.
 results/*
-!results/cells/
 benchmarks/results/
 scripts/baselines/
 

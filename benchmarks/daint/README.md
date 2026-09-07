@@ -1,6 +1,6 @@
 # Daint benchmark snapshot — primary performance source
 
-Daint is the primary performance source; the [laptop snapshot](../latest/) is historical.
+Daint is the primary performance source; the [laptop snapshot](../archive/laptop-20260908/) is historical.
 
 CPU thread scaling was refreshed on source `1a782c8d` (job 4619429): all 84 points and 17 controls completed converged solves. The T=72 headline tables retain their existing selected cells; the GPU scaling figures remain historical source `ea01e2ff`.
 

@@ -129,8 +129,8 @@ implementations. The most common are `APXCHOL_SPTRSV_FP16`,
   partitioners, and orderings.
 - [Examples](examples/): small integration examples.
 - [Benchmark protocol](benchmarks/README.md): fairness and timing definitions.
-- [Laptop snapshot](benchmarks/latest/) and [CSCS Daint snapshot](benchmarks/daint/):
-  machine-specific results and direct figure links.
+- [CSCS Daint benchmarks](benchmarks/daint/): current performance results and direct figure links.
+  Retired laptop results are preserved in the [benchmark archive](benchmarks/archive/).
 - [Contributing](CONTRIBUTING.md), [license](LICENSE), and
   [citation metadata](CITATION.cff).
 
