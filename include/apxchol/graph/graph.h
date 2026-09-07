@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/graph/incidence_list.h"
+#include "apxchol/graph/residual_normalization.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -877,22 +878,10 @@ private:
         };
         const std::size_t off_tree = items.size() - backbone_edges;
         const double target = keep_probability * off_tree;
-        double off_tree_measure = 0.0;
-        for (std::size_t i = 0; i < items.size(); ++i)
-            if (!items[i].backbone)
-                off_tree_measure += importance_measure(i);
-        double importance_scale = target > 0.0 && off_tree_measure > 0.0
-            ? target / off_tree_measure : 0.0;
-        for (unsigned iteration = 0;
-             iteration < 6 && importance_scale > 0.0; ++iteration) {
-            double expected = 0.0;
-            for (std::size_t i = 0; i < items.size(); ++i)
-                if (!items[i].backbone)
-                    expected += std::min(
-                        1.0, importance_scale * importance_measure(i));
-            if (expected <= 0.0) break;
-            importance_scale *= target / expected;
-        }
+        const auto normalization = detail::normalize_residual_importance(
+            std::span<const item>(items), std::span<const double>(importance),
+            target);
+        const double importance_scale = normalization.scale;
         auto probability = [&](std::size_t index) {
             if (items[index].backbone) return 1.0;
             return std::min(

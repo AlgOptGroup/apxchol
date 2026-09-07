@@ -11,6 +11,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(unit_tests
         test_core.cpp
+        test_residual_normalization.cpp
         test_factorize.cpp
         test_elimination.cpp
         test_custom_hooks.cpp

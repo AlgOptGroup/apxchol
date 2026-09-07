@@ -144,6 +144,14 @@ applications and concurrent tests can change it.
   segmentation, critical-tail solving, incremental degrees, and connectivity
   preserving residual sparsification. Standalone residual coalescing policy
   is retired; coalescing and multiplicity remain sparsification internals.
+- Private blocked-normalization experiment: residual importance uses fixed
+  16,384-item ordered partial sums followed by an ordered block fold, with one
+  persistent OpenMP team for the initial sum and up to six updates. The same
+  ordered input gives the same normalization at every thread count; arithmetic
+  intentionally differs from the legacy global serial fold. Final statistics,
+  conditional Bernoulli/HT law and connectivity backbone remain unchanged.
+  `ResidualBlockedNormalization.*` and `ResidualBlockedGraph/*.*` check the new
+  contract. No runtime knob is added; this branch is not yet measured.
 - Full symmetric CSC inputs with unique sorted indices construct directed pool
   incidences by column ownership; upper incidences use canonical lower weights.
   Duplicate, uncompressed, one-triangle or unpaired stored patterns retain the
