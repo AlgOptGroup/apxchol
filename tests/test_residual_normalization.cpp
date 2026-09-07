@@ -191,7 +191,7 @@ TYPED_TEST_SUITE(ResidualBlockedGraph, block_storages);
 TYPED_TEST(ResidualBlockedGraph, CrossBlockSamplingIsRepeatableAndConnected) {
     omp_settings settings;
     constexpr apxchol::node_index n = 193; //18,528 distinct edges: two blocks.
-    const auto make = [] {
+    const auto make = [n] {
         apxchol::graph<TypeParam> graph(n);
         for (apxchol::node_index u = 0; u < n; ++u)
             for (apxchol::node_index v = u + 1; v < n; ++v)
