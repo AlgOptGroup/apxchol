@@ -1105,9 +1105,9 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
 
 def _run_once_gpu(driver, mtx, tol, deadline=None):
     timeout = (_gpu_cell_remaining(deadline) if deadline is not None else TIMEOUT_GPU)
-    with rc.VramSampler("gpu_rchol") as vram:   # matches both driver binaries
-        cp = sh(f"{driver} {mtx} {BLOCKS} 1 {tol}", timeout=timeout)
-        o = cp.stdout
+    # Calibration and retained calls must not run a memory poller.
+    cp = sh(f"{driver} {mtx} {BLOCKS} 1 {tol}", timeout=timeout)
+    o = cp.stdout
     # Keep the original narrow timers as diagnostics alongside patch 0003's
     # complete, non-overlapping phases.
     return dict(etree=_g(r"build etree:\s*([0-9.eE+-]+)", o),
@@ -1127,7 +1127,7 @@ def _run_once_gpu(driver, mtx, tol, deadline=None):
                 returncode=cp.returncode,
                 n=_g(r"num cols:\s*([0-9]+)", o),
                 nnz=_g(r"laplacian nnz:\s*([0-9]+)", o),
-                vram_mb=vram.peak_mb())
+                gpu_memory_polling=False)
 
 
 def _calibrate_tol_gpu(driver, mtx, tau=float(TOL), deadline=None):
@@ -1377,8 +1377,7 @@ def run_gpu(mid, tol=TOL):
                "repeat_rel_res": [r["rr"] for r in runs]}
         if chosen.get("cuda_init"):
             metrics["cuda_init_s"] = float(chosen["cuda_init"])
-        vram = [float(r["vram_mb"]) for r in ok if r.get("vram_mb")]
-        if vram: metrics["max_vram_mb"] = round(max(vram), 1)   # peak VRAM over reps
+        metrics["gpu_memory_polling"] = False
         rc.emit_cell(family, mid, solver_key, "", status, metrics, THREADS, "gpu", prov,
                      matrix_meta={"parac_prep": prep_prov})
         results.append(f"{solver_key}[{status} it={iters} solve={solve:.3f}]")

@@ -178,6 +178,9 @@ Record effective threads separately from the requested thread budget. Whole-cell
 and prerequisite deadlines are not per-solve lower bounds. Every retained
 residual must satisfy the common tolerance. Source, binary and selected-cell
 hashes accompany snapshots; rendering does not run benchmarks.
+Do not wrap timed C++ or ParAC calls in `VramSampler`: nvidia-smi polling
+perturbs GH200 setup. Collect peak VRAM in separate diagnostic runs; missing
+peak measurements stay unknown.
 
 Read [benchmarks/README.md](benchmarks/README.md) for the actual runner and
 solver contracts. Use the existing runner/parser where it fits; do not make

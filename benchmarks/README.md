@@ -61,6 +61,11 @@ changes are documented in [patches/parac/README.md](patches/parac/README.md).
 
 ### Timing and accounting
 
+GPU peak-memory polling is excluded from timed C++ and ParAC driver calls,
+including calibration: frequent `nvidia-smi` queries were measured to perturb
+GPU setup on Daint. Peak-memory diagnostics must run separately. Missing VRAM
+measurements remain unknown, never zero.
+
 Common file parsing and operator assembly happen before solver timers.
 
 - `setup_s` includes every solver-required grounding, conversion, reordering,

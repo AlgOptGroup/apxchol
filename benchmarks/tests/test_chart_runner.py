@@ -68,6 +68,35 @@ class ShellHarnessTest(unittest.TestCase):
         )
 
 
+class GpuTimingIsolationTest(unittest.TestCase):
+    def test_cpp_timing_does_not_start_memory_poller(self):
+        output = (
+            "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz\n"
+            "AMGCL,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750\n"
+        )
+        with mock.patch.object(sweep_fair, "DEVICE", "gpu"), \
+             mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
+             mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
+             mock.patch.object(rc, "VramSampler", side_effect=AssertionError("timing polluted")), \
+             mock.patch.object(sweep_fair, "sh", return_value=subprocess.CompletedProcess(
+                 "benchmark", 0, output, "")):
+            status, metrics = sweep_fair.run_cpp("", "amgcl_cuda", "", False)
+        self.assertEqual(status, "complete")
+        self.assertIs(metrics["gpu_memory_polling"], False)
+        self.assertNotIn("max_vram_mb", metrics)
+
+    def test_parac_shared_calibration_and_timing_path_has_no_memory_poller(self):
+        import parac_runner
+        with mock.patch.object(rc, "VramSampler", side_effect=AssertionError("timing polluted")), \
+             mock.patch.object(parac_runner, "sh", return_value=subprocess.CompletedProcess(
+                 "gpu_rchol", 0, "APX GPU solve phase time: 0.02\n", "")):
+            metrics = parac_runner._run_once_gpu("gpu_rchol", "matrix.mtx", 1e-8)
+        self.assertEqual(metrics["solve_total"], "0.02")
+        self.assertIs(metrics["gpu_memory_polling"], False)
+        self.assertNotIn("vram_mb", metrics)
+        self.assertNotIn("max_vram_mb", metrics)
+
+
 class JuliaDriverPathTest(unittest.TestCase):
     def test_julia_driver_and_project_are_root_derived(self):
         output = (

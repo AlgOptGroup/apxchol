@@ -275,18 +275,18 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
         # CPU only: rc.sh's mem_cap ceils the address space so a memory-bomb solver
         # dies with bad_alloc (-> 'oom') instead of OOM-killing the box.
         cap = MEM_CAP_GB if DEVICE == "cpu" else None
-        with rc.VramSampler("benchmark", enabled=(DEVICE == "gpu")) as vram:
-            try: p=sh(cmd, timeout=timeout or TIMEOUT, env=run_env, mem_cap_gb=cap)
-            except subprocess.TimeoutExpired as e:
-                # BUILD_META is the binary's FIRST stderr line, so even a run
-                # killed at the wall cap identifies the toolchain behind the
-                # 'timeout' cell it is about to write.
-                BUILD.update(rc.parse_build_meta(e.stderr))
-                diag = _diag(None, e.output, e.stderr)
-                cuda_init_s = rc.parse_cuda_init(e.stderr)
-                if cuda_init_s is not None:
-                    diag["cuda_init_s"] = cuda_init_s
-                return "timeout", diag
+        # Keep peak-memory diagnostics separate: nvidia-smi polling perturbs GH200 setup.
+        try: p=sh(cmd, timeout=timeout or TIMEOUT, env=run_env, mem_cap_gb=cap)
+        except subprocess.TimeoutExpired as e:
+            # BUILD_META is the binary's FIRST stderr line, so even a run
+            # killed at the wall cap identifies the toolchain behind the
+            # 'timeout' cell it is about to write.
+            BUILD.update(rc.parse_build_meta(e.stderr))
+            diag = _diag(None, e.output, e.stderr)
+            cuda_init_s = rc.parse_cuda_init(e.stderr)
+            if cuda_init_s is not None:
+                diag["cuda_init_s"] = cuda_init_s
+            return "timeout", diag
         BUILD.update(rc.parse_build_meta(p.stderr))   # what built the binary that just ran
         st,m = classify(rc.parse_csv(p.stdout))
         if m is None:
@@ -309,8 +309,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
                 if ln.startswith("APXRSS "):
                     try: m["max_rss_mb"]=round(int(ln.split()[1])/1024.0,1)
                     except: pass
-            pk = vram.peak_mb()                 # whole-run peak VRAM (GPU axis; sidecar)
-            if pk: m["max_vram_mb"] = pk
+            m["gpu_memory_polling"] = False
         # How the binary read this matrix, straight from its own report.
         meta = rc.parse_matrix_meta(p.stderr)
         if meta and mid:
