@@ -1,5 +1,9 @@
 # Daint benchmark snapshot
 
+The [preserved source-ea01 CPU scaling series](historical/cpu-scaling-ea01/)
+contains 84 converged cells and the three figures replaced by the source-1a CPU
+refresh. It is separate from the older one-iteration scaling diagnostic below.
+
 These historical results use one CSCS Daint GH200 node: a 72-core Grace CPU and
 its Hopper GPU. The fair-solver campaign is pinned to source revision
 `2b755997`; absolute times are machine-specific and must not be mixed with the

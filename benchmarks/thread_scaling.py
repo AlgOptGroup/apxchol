@@ -337,6 +337,17 @@ def validate_cells():
     print(f"thread-scaling denominator -> {len(found)}/{len(expected)} cells")
 
 
+def _scaling_baseline(record, field, main_t1):
+    """Use an explicit measured reference when a point ran on another node."""
+    reference = record.get("provenance", {}).get("scaling_baseline")
+    if reference is None:
+        return main_t1
+    value = reference.get(field)
+    if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"invalid per-point scaling baseline for {field}")
+    return value
+
+
 def charts(out=f"{ROOT}/benchmarks/latest"):
     import matplotlib
     matplotlib.use("Agg")
@@ -367,10 +378,16 @@ def charts(out=f"{ROOT}/benchmarks/latest"):
                        and r["metrics"].get(field)}
                 if 1 not in pts or len(pts) < 2: continue
                 ts = sorted(pts); t1 = pts[1]
-                sp = [t1 / pts[t] for t in ts]
+                references = {r["cell"]["threads"]: _scaling_baseline(r, field, t1)
+                              for r in recs if r["cell"]["matrix_id"] == mid
+                              and r["cell"]["label"] == lab and r["status"] == "complete"}
+                sp = [references[t] / pts[t] for t in ts]
                 ys = sp if kind == "speedup" else [s / t for s, t in zip(sp, ts)]
                 ax.plot(ts, ys, marker="o", label=lab, color=COLORS.get(lab, "#888"))
-            ax.set_title(mid, fontsize=10); ax.set_xlabel("threads")
+            has_reference = any(r["cell"]["matrix_id"] == mid
+                                and r.get("provenance", {}).get("scaling_baseline")
+                                for r in recs)
+            ax.set_title(mid + ("*" if has_reference else ""), fontsize=10); ax.set_xlabel("threads")
             ax.set_xscale("log", base=2); ax.set_xticks(THREADS); ax.set_xticklabels(THREADS)
             ax.set_ylabel(f"{phase} " + ("speedup (t1/tN)" if kind == "speedup"
                                          else "parallel efficiency"))
@@ -381,7 +398,12 @@ def charts(out=f"{ROOT}/benchmarks/latest"):
             for h, l in zip(*ax.get_legend_handles_labels()):
                 hl.setdefault(l, h)
         fig.legend(hl.values(), hl.keys(), loc="lower center", ncol=max(1, len(hl)), fontsize=8)
-        fig.suptitle(f"{DEVICE.upper()} {phase} {kind} vs threads (tol 1e-8)")
+        revisions = sorted({r.get("provenance", {}).get("git_sha", "unknown") for r in recs})
+        source_note = "source " + ", ".join(sha[:8] for sha in revisions)
+        fig.suptitle(f"{DEVICE.upper()} {phase} {kind} vs threads (tol 1e-8)\n{source_note}")
+        if any(r.get("provenance", {}).get("scaling_baseline") for r in recs):
+            fig.text(0.5, 0.032, "* Uses a measured same-node T1 reference for each multi-thread point.",
+                     ha="center", fontsize=9)
         fig.tight_layout(rect=[0, 0.06, 1, 1])
         fig.savefig(fname, dpi=130); plt.close(fig)
 
@@ -405,17 +427,30 @@ def export_csv(path):
     """Portable extract for the exact cells behind the scaling figures."""
     fields = ("matrix", "family", "label", "solver", "config", "threads", "device", "status", "setup_s",
               "solve_s", "total_s", "iters", "rel_res", "git_sha", "repeat",
-              "compiler", "compiler_version", "openmp_runtime")
+              "compiler", "compiler_version", "openmp_runtime", "baseline_kind",
+              "baseline_setup_s", "baseline_solve_s", "baseline_total_s",
+              "baseline_cell_sha256", "baseline_node_rank")
     rows = []
-    for _filename, record in _scaling_records():
+    records = _scaling_records()
+    main_t1 = {(r["cell"]["matrix_id"], r["cell"]["label"]): r.get("metrics", {})
+               for _path, r in records if r["cell"]["threads"] == 1 and r["status"] == "complete"}
+    for _filename, record in records:
         cell = record["cell"]
         metrics = record.get("metrics", {})
         provenance = record.get("provenance", {})
+        reference = provenance.get("scaling_baseline", {})
+        fallback = main_t1.get((cell["matrix_id"], cell["label"]), {})
+        baseline = {"baseline_" + key: _scaling_baseline(record, key, fallback.get(key, ""))
+                    for key in ("setup_s", "solve_s", "total_s")}
         rows.append({
             "matrix": cell["matrix_id"], "family": cell["family"],
             "label": cell["label"], "solver": cell.get("solver", ""),
             "config": cell.get("config", ""), "threads": cell["threads"], "device": cell.get("device", "cpu"),
             "status": record["status"],
+            "baseline_kind": reference.get("kind", "main T1"),
+            "baseline_cell_sha256": reference.get("source_cell_sha256", ""),
+            "baseline_node_rank": reference.get("rank", ""),
+            **baseline,
             **{key: metrics.get(key, "")
                for key in ("setup_s", "solve_s", "total_s", "iters", "rel_res")},
             **{key: provenance.get(key, "")

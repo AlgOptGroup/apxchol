@@ -31,6 +31,11 @@ evidence. Results are machine-specific snapshots, not a live leaderboard:
 | **Primary:** CSCS Daint GH200, 72-core Grace + Hopper, T=72 | [Daint index](daint/) and [coverage](daint/coverage.json) | [CSV](daint/results.csv) |
 | Historical: Ryzen 9 7945HX + RTX 4090 Laptop, T=16 | [laptop index](latest/) and [generated tables](latest/summary.md) | [CSV](latest/results.csv) |
 
+CPU scaling on Daint now uses source `1a782c8d` across all 12 matrices and seven
+thread counts; [setup and converged-solve figures](daint/#cpu-setup-scaling)
+include Orkut’s same-node T1 references. The existing headline tables and
+historical source-ea01 GPU scaling were not rerun by that CPU campaign.
+
 Do not compare absolute times across these machines. The auditable source is the
 [cell store](../results/cells/); committed CSVs, summaries, and figures are
 presentation extracts.

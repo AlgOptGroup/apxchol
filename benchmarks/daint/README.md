@@ -2,6 +2,8 @@
 
 Daint is the primary performance source; the [laptop snapshot](../latest/) is historical.
 
+CPU thread scaling was refreshed on source `1a782c8d` (job 4619429): all 84 points and 17 controls completed converged solves. The T=72 headline tables retain their existing selected cells; the GPU scaling figures remain historical source `ea01e2ff`.
+
 This snapshot selects T=72 before comparing outcomes. It contains 459 cells over 27/27 registered matrices. 27 of 486 declared headline cells are missing. T is the requested headline thread budget; the CSV records effective thread counts separately for serial and thread-limited solvers.
 
 Every completed retained solve must meet the original-operator true-relative-residual target of `1e-8`. CUDA initialization is reported separately. Setup includes mandatory solver preparation; the solve column includes the remaining complete solver call. The CSV preserves configured warmup counts and observed retained counts. Timeout scope and the raw deadline are separate from any valid per-solve lower bound.
@@ -17,6 +19,7 @@ Every completed retained solve must meet the original-operator true-relative-res
 | GPU setup and solve | [breakdown_gpu_grids_2d](figures/combined_breakdown_gpu_grids_2d.png), [breakdown_gpu_grids_3d](figures/combined_breakdown_gpu_grids_3d.png), [breakdown_gpu_ipm](figures/combined_breakdown_gpu_ipm.png), [breakdown_gpu_suitesparse_giants](figures/combined_breakdown_gpu_suitesparse_giants.png), [breakdown_gpu_suitesparse_giants_xl](figures/combined_breakdown_gpu_suitesparse_giants_xl.png), [breakdown_gpu_suitesparse_small](figures/combined_breakdown_gpu_suitesparse_small.png) |
 | Setup scaling | [threads_gpu_setup_speedup](figures/threads_gpu_setup_speedup.png), [threads_setup_speedup](figures/threads_setup_speedup.png) |
 | Converged-solve scaling | [threads_gpu_solve_speedup](figures/threads_gpu_solve_speedup.png), [threads_solve_speedup](figures/threads_solve_speedup.png) |
+| Total scaling | [threads_gpu_total_speedup](figures/threads_gpu_total_speedup.png), [threads_total_speedup](figures/threads_total_speedup.png) |
 
 Heatmap colours normalize within each matrix column; they do not compare absolute speed between machines. Timeout, numerical non-convergence, execution failure, unsupported input, and missing measurement remain distinct.
 
@@ -40,19 +43,64 @@ Status counts: complete: 426, failed: 14, n/a: 6, not_converged: 7, timeout: 6.
 
 ## CPU setup scaling
 
+Source: `1a782c8d`, CPU campaign 4619429.
+
+[84 measured cells](thread_scaling.csv) · [Baseline and iteration diagnostics](cpu_scaling_diagnostics.csv) · [Campaign provenance and controls](cpu_scaling_provenance.json)
+
+The 12 matrices cover T=1,2,4,8,16,36,72, one warmup and three retained repetitions per point. Each phase comes from the same retained repeat selected by median total time. Orkut ran across nodes: its six multi-thread points use each node’s measured T=1 control, giving **10.68× setup** at T=72. Other matrices use their main T=1 cell. The explicit reference times are exported in the CSV.
+
 ![CPU setup scaling](figures/threads_setup_speedup.png)
 
 ## CPU converged-solve scaling
 
+Source: `1a782c8d`, CPU campaign 4619429.
+
+These are full solves at true relative residual ≤1e-8. Thread count changes the preconditioner and iteration count: Orkut’s same-node speedup is **21.15×**, with iterations changing 50→18. The diagnostics separate average time per iteration from full solve speedup. Factor fill was not measured and remains blank.
+
 ![CPU converged-solve scaling](figures/threads_solve_speedup.png)
 
+## CPU total scaling
+
+Source: `1a782c8d`, CPU campaign 4619429.
+
+![CPU total scaling](figures/threads_total_speedup.png)
+
+## Comparison with the historical CPU snapshot
+
+The [previous 84 CPU cells and figures](historical/cpu-scaling-ea01/) are preserved on source `ea01e2ff`. The table compares the displayed T=72 speedups; [all 84 absolute-time comparisons](cpu_scaling_vs_ea01.csv) are available. These are separate campaigns, not an interleaved old/new-binary test. Historical curves retain their original main-T1 reference; current Orkut points use same-node controls.
+
+| Matrix | Historical setup speedup | Current setup speedup | Historical solve speedup | Current solve speedup |
+|---|---:|---:|---:|---:|
+| as-Skitter | 7.97× | 8.26× | 11.64× | 12.05× |
+| coPapersDBLP | 9.83× | 10.24× | 14.08× | 14.27× |
+| com-Amazon | 6.65× | 6.60× | 17.01× | 17.38× |
+| com-LiveJournal | 7.62× | 8.88× | 10.32× | 11.55× |
+| com-Orkut | 9.63× | 10.68× | 20.54× | 21.15× |
+| ecology1 | 10.86× | 10.87× | 20.91× | 20.95× |
+| grid3d_100 | 9.32× | 9.45× | 15.49× | 15.11× |
+| grid_1000 | 10.91× | 11.28× | 18.06× | 20.51× |
+| grid_2000 | 15.72× | 16.01× | 21.69× | 21.79× |
+| grid_4000 | 13.25× | 15.35× | 22.76× | 22.90× |
+| grid_500 | 6.49× | 6.61× | 17.74× | 18.30× |
+| iter0040 | 5.89× | 6.25× | 7.03× | 7.66× |
+
 ## GPU setup scaling
+
+Historical source: `ea01e2ff`; these figures were not rerun by the CPU campaign.
 
 ![GPU setup scaling](figures/threads_gpu_setup_speedup.png)
 
 ## GPU converged-solve scaling
 
+Historical source: `ea01e2ff`; these figures were not rerun by the CPU campaign.
+
 ![GPU converged-solve scaling](figures/threads_gpu_solve_speedup.png)
+
+## GPU total scaling
+
+Historical source: `ea01e2ff`.
+
+![GPU total scaling](figures/threads_gpu_total_speedup.png)
 
 ## Snapshot provenance
 
@@ -65,7 +113,9 @@ ordering replaces four RCHOL results, preserving the as-Skitter nonconvergence.
 
 Cell hashes and source/binary revisions are recorded in selection_provenance.json;
 the CSV preserves measurement values without mixing in pending optimization
-experiments. Scaling contains 84 CPU and 84 GPU converged records. The recorded
+experiments. CPU scaling now contains 84 source-1a records from job 4619429;
+the 84 source-ea01 GPU scaling records are unchanged. This refresh does not
+replace any headline solver cell or reinterpret an older failure. The recorded
 thread count denotes host threads; GPU-solve scaling also reflects the factors
 produced by those host-thread configurations, not GPU thread-count scaling.
 
@@ -73,7 +123,13 @@ Regenerate from the matching selected raw-cell stores with
 `python3 benchmarks/render_snapshot.py --cells CELLS --out OUTPUT --threads 72
 --platform Daint --scaling-store SCALING --scaling-matrices MATRICES
 --scaling-threads 1,2,4,8,16,36,72`. The committed CSVs are presentation extracts;
-archived historical renderers remain linked separately.
+archived historical renderers remain linked separately. For CPU job 4619429,
+the six Orkut rendering records carry `provenance.scaling_baseline` copied from
+the audited same-node T=1 control (setup/solve/total, kind, rank and control-cell
+hash). The shared renderer uses these references and exports them; all original
+measured metrics remain unchanged. Without an override it retains the main-T1
+normalization. The recorded 17 controls are empirical variation checks, not
+confidence intervals or a new acceptance threshold.
 
 Three Physics GPU grid outcomes were refreshed after the compensated global-sum
 producer repair (job 4616880): grid_3000/4000/5000 now pass all warmup/retained
