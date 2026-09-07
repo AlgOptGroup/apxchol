@@ -1,21 +1,3 @@
-Use `render_snapshot.py --cells STORE --out OUTPUT --threads T --platform NAME`
-for the same current-cell CSV, README and figure views on laptop and Daint.
-The common driver supports `--dump-rhs rhs.mtx` in a separate invocation from
-`--dump-mtx operator.mtx`; both use the declared operator and the RHS exporter
-calls the same component-aware generator as the measured solvers. Native CMG
-manifests may specify `rhs_path` to consume that vector without alteration.
-Native CMG's combined-chart row is `CMG (packed, serial)` on both platforms.
-
-Current campaign repetition contract: the C++ driver accepts `--warmup N`
-(default 0) separately from `--repeat R` retained measurements. It emits every
-warmup and retained timing as `BENCH_REPEAT`, selects one coherent median-total
-retained result, and exports the maximum retained true residual. The common
-parser grades every retained repetition through that maximum. CUDA context
-initialization remains outside these solver intervals and is stored separately.
-`thread_scaling.py` accepts `--thread-counts`, `--matrices`, `--series`, `--device`,
-`--warmup`, and `--timeout`; declared scope is validated before rendering. This
-allows laptop and Daint to use the same converged-solve runner and figures.
-
 # apxchol benchmarks
 
 This standalone CMake project compares `apxchol` with randomized-Cholesky and
@@ -68,6 +50,15 @@ original-operator series. ParAC's tolerance translation and audited driver
 changes are documented in [patches/parac/README.md](patches/parac/README.md).
 
 ### Timing and accounting
+
+Current campaign repetition contract: the C++ driver accepts `--warmup N`
+(default 0) separately from `--repeat R` retained measurements. It emits every
+warmup and retained timing as `BENCH_REPEAT`, selects one coherent median-total
+retained result, and exports the maximum retained true residual. The common
+parser grades every retained repetition through that maximum. CUDA context
+initialization remains outside these solver intervals and is stored separately.
+`thread_scaling.py` accepts `--thread-counts`, `--matrices`, `--series`, `--device`,
+`--warmup`, and `--timeout`; declared scope is validated before rendering. Scope selection does not run a new benchmark during rendering.
 
 GPU peak-memory polling is excluded from timed C++ and ParAC driver calls,
 including calibration: frequent `nvidia-smi` queries were measured to perturb
@@ -158,6 +149,14 @@ retained runs share one persisted per-cell timeout. All retained repetitions
 must pass, and timing fields come from one median-total repetition.
 
 ## Build and run
+
+Use `render_snapshot.py --cells STORE --out OUTPUT --threads T --platform NAME`
+to render an explicitly selected Daint cell store into CSV, README and figures.
+The common driver supports `--dump-rhs rhs.mtx` in a separate invocation from
+`--dump-mtx operator.mtx`; both use the declared operator and the RHS exporter
+calls the same component-aware generator as the measured solvers. Native CMG
+manifests may specify `rhs_path` to consume that vector without alteration.
+Native CMG's combined-chart row is `CMG (packed, serial)`.
 
 The root library and benchmark suite use separate build trees:
 
