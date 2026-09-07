@@ -1,7 +1,7 @@
 # Deterministic blocked residual normalization
 
-This private candidate starts from measured5d529ab6. It contains no collection,
-static-row or exact-fixed-point variant. It accelerates the initial importance
+This implementation was integrated from validated commit `1a782c8d`, based on
+`5d529ab6`. It accelerates the initial importance
 sum and existing six normalization updates by changing their floating-point
 association deliberately; the sampling formula and final statistics remain.
 
@@ -49,8 +49,8 @@ Six native test instances cover no-team boundaries, multiple blocks including
 74blocks across1/2/4/72threads, repeats, a higher-precision scalar reference,
 finite clipping and conditional HT expectation, uniform zero/nonfinite/
 expected-underflow exits, and actual two-block graph sampling/connectivity
-in both pool layouts acrossT1/4/72. Their code was independently reviewed;
-compilation/execution is pending on Daint. The high-precision test explicitly
+in both pool layouts acrossT1/4/72. Their code was independently reviewed and
+compiled and executed on Daint. The high-precision test explicitly
 skips platforms where longdouble adds no mantissa precision; the GH200 gate
 must not silently accept an unavailable reference.
 
@@ -60,4 +60,26 @@ its same-call12.145522s setup. It is an upper bound on eliminable time, not a
 promised gain. The former1.041s composite also contains importance preparation,
 final statistics and reconstruction, all left unchanged here. LiveJournalT72
 normalization134.818ms andSkitter6.416ms supply smaller endpoints; grid2000
-executes none of this path. No new local numerical work was performed.
+executes none of this path.
+
+## Measured result and integration
+
+Daint job 4618482 checked 420 CPU tests, 40 normalization fixtures and 70 solve
+checks across 30 processes. In its matched T72 measurements, LiveJournal setup
+fell 9.09% and Orkut setup fell 5.92%. Orkut normalization itself fell from
+761.734 to 45.303 ms; complete setup fell from 12.609 to 11.865 seconds. These
+are measured whole-setup improvements, not a multiplication of stage ratios.
+
+The broader original acceptance predicate remains false: a grid RSS control
+was unstable, and the Orkut total-time gain did not exceed its control spread.
+The retained integration claim is the bounded CPU setup improvement, not a
+universal total-time or memory improvement. No sampling formula or stopping
+criterion was changed to obtain acceptance.
+
+Source-correct build 4619381 subsequently passed 56 CUDA tests and four CPU
+benchmark smoke repetitions. Full scaling job 4619429 then measured the
+integrated runtime on 12 matrices at seven thread counts: 84 displayed cells
+and 17 controls, with all 404 solves converged at relative residual at most
+`1e-8`. See [the Daint benchmark presentation](benchmarks/daint/README.md).
+That scaling campaign is a measurement of the integrated implementation; its
+comparison with historical plots does not isolate normalization's contribution.
