@@ -1663,10 +1663,14 @@
         "",
         72
       ],
-      "status": "failed",
-      "selected_cell_sha256": "42153e8953438116e4aa56eb6406f6566f4b022f5cb51ed6b4132b9db031a81b",
+      "status": "complete",
+      "selected_cell_sha256": "4625cec071227a36dd28ac18beb0a3ab3028284447db99cbb3456556efc83b48",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
-      "binary_sha256": "18633bf80732fc978eba537b27ca096be8d2381e45bdef13c29774c1c6943c1b"
+      "binary_sha256": "18633bf80732fc978eba537b27ca096be8d2381e45bdef13c29774c1c6943c1b",
+      "producer_fix": "neumaier-global-sum-v1",
+      "producer_sha256": "366bf06d5ab6c6c4e6f10bae84d1616bd97b6c0c1bfde18d3cef00535c2f2e0d",
+      "producer_patch_sha256": "e1e1f1872521266bdffaeed879e29464fc531c00c4f644bf2b20256a41ba272f",
+      "repair_job_id": 4616880
     },
     {
       "identity": [
@@ -1901,10 +1905,14 @@
         "",
         72
       ],
-      "status": "failed",
-      "selected_cell_sha256": "cd1d04c944986afd2754df63ad9c82919cf049e6011af02f6badcac6aa355f04",
+      "status": "complete",
+      "selected_cell_sha256": "427cafa21714fb7295461e374f5d34f6fab1cee3ac5f505e19823e2acce664d5",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
-      "binary_sha256": "18633bf80732fc978eba537b27ca096be8d2381e45bdef13c29774c1c6943c1b"
+      "binary_sha256": "18633bf80732fc978eba537b27ca096be8d2381e45bdef13c29774c1c6943c1b",
+      "producer_fix": "neumaier-global-sum-v1",
+      "producer_sha256": "366bf06d5ab6c6c4e6f10bae84d1616bd97b6c0c1bfde18d3cef00535c2f2e0d",
+      "producer_patch_sha256": "e1e1f1872521266bdffaeed879e29464fc531c00c4f644bf2b20256a41ba272f",
+      "repair_job_id": 4616880
     },
     {
       "identity": [
@@ -2377,10 +2385,14 @@
         "",
         72
       ],
-      "status": "failed",
-      "selected_cell_sha256": "564c58bdf0ffa7b9ce5fe8aa96774e2c250909c5e86fb6038e3ad6b4eb7893ca",
+      "status": "complete",
+      "selected_cell_sha256": "e051d809027c56b1244e887831184c64ef39cf727ca57b0f7d6b18c36fd83b68",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
-      "binary_sha256": "18633bf80732fc978eba537b27ca096be8d2381e45bdef13c29774c1c6943c1b"
+      "binary_sha256": "18633bf80732fc978eba537b27ca096be8d2381e45bdef13c29774c1c6943c1b",
+      "producer_fix": "neumaier-global-sum-v1",
+      "producer_sha256": "366bf06d5ab6c6c4e6f10bae84d1616bd97b6c0c1bfde18d3cef00535c2f2e0d",
+      "producer_patch_sha256": "e1e1f1872521266bdffaeed879e29464fc531c00c4f644bf2b20256a41ba272f",
+      "repair_job_id": 4616880
     },
     {
       "identity": [
@@ -6429,5 +6441,5 @@
       "binary_sha256": null
     }
   ],
-  "private_selection_manifest_sha256": "93b931ef9d9ac777a53e97e4c6489d9ebc9850b574f132caa94318ea8c99e4f2"
+  "private_selection_manifest_sha256": "2042570798339b422ccd63984430906157cbf71eb1d360b997df80f3086f3809"
 }

@@ -181,6 +181,10 @@ hashes accompany snapshots; rendering does not run benchmarks.
 Do not wrap timed C++ or ParAC calls in `VramSampler`: nvidia-smi polling
 perturbs GH200 setup. Collect peak VRAM in separate diagnostic runs; missing
 peak measurements stay unknown.
+ParAC patch 0005 uses Neumaier compensation for the Physics producer global
+sum; retain both existing ±1e-9 thresholds and preserve ordering/per-column
+sums. Fresh FetchContent checkouts apply it; external checkouts need the patch
+before rebuilding. Regenerated cells retain original-A,b residual checks.
 
 Read [benchmarks/README.md](benchmarks/README.md) for the actual runner and
 solver contracts. Use the existing runner/parser where it fits; do not make

@@ -5,8 +5,8 @@ Pinned at `44ef39d2f5c2c52aa577f58f005d62f2675cefbc`
 ("Update data README for graph matrix downloads", 2026-04-24).
 
 The benchmark runs ParAC from an out-of-tree checkout (`PARAC_CPU_DRIVER` /
-`benchmarks/paths_local.py`). **Four** benchmark-only patches are applied (the
-last two touch only the CUDA drivers). Everything else we
+`benchmarks/paths_local.py`). **Five** benchmark patches are applied (0003/0004 touch only CUDA
+drivers; 0005 corrects the Physics producer global reduction). Everything else we
 need — the AMD reorder, the physics augmentation, the local build flags, the
 independent residual check — lives in this repo, so the ParAC checkout stays at
 upstream plus a small reviewable patch stack.
@@ -18,6 +18,7 @@ patch -p1 < $APXCHOL/benchmarks/patches/parac/0001-configurable-tolerance-and-an
 patch -p1 < $APXCHOL/benchmarks/patches/parac/0002-report-complete-setup-boundaries.patch
 patch -p1 < $APXCHOL/benchmarks/patches/parac/0003-report-complete-gpu-boundaries.patch
 patch -p1 < $APXCHOL/benchmarks/patches/parac/0004-report-cuda-init-separately.patch
+patch -p1 < $APXCHOL/benchmarks/patches/parac/0005-compensate-physics-global-sum.patch
 bash $APXCHOL/benchmarks/parac_build.sh            # builds experiment/driver
 ```
 
@@ -399,3 +400,32 @@ into their tree.
 **Moved out of their tree** to `benchmarks/parac_build.sh` and
 `benchmarks/parac_reorder_amd.jl`. Our preprocessing and our build recipe are
 ours to own.
+
+## 0005 — compensated Physics global reduction
+
+The Physics producer sums the represented matrix entries to choose its existing
+±1e-9 validation/augmentation branches. Plain summation after permutation
+erroneously crossed the negative threshold on grid_3000/4000/5000. Diagnostic
+job 4616696 established exact represented sums of 4.68445e-14/6.24570e-14/7.80695e-14,
+while the old sums were approximately -2.57e-9/-3.86e-9/-9.66e-9.
+
+Neumaier compensation corrects this global reduction. Both thresholds, individual
+rows, ordering, per-column sums and graph sampling remain unchanged. Avoid
+fast-math/SIMD reassociation in its error-recovery expressions. This does not
+claim to fix every non-diagonally-dominant input or change the original solver
+operator/RHS. It is a producer numerical fix, not only a timing label.
+
+Repair job 4616880 reran the three Physics GPU cases: all 15 native/calibration
+calls completed and all 12 graded warmup/retained solutions passed 1e-8 against
+the original A,b. The exact diagnostic classification, permutation and original
+system bytes were checked before native execution; full preparation remained
+charged. The updated benchmark selection records the measured producer SHA
+`366bf06d5ab6c6c4e6f10bae84d1616bd97b6c0c1bfde18d3cef00535c2f2e0d`
+and experimental patch SHA
+`e1e1f1872521266bdffaeed879e29464fc531c00c4f644bf2b20256a41ba272f`.
+
+The maintained 0005 patch carries the identical helper/replacement, with paths
+and context adapted to pinned upstream 44ef39d2; its patch SHA therefore differs.
+Fresh CMake FetchContent checkouts apply it after 0004. Existing external
+checkouts must apply it explicitly; the manual build script checks for the
+compensated call. Historical prepared caches are not retroactively relabelled.

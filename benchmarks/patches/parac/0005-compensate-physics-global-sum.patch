@@ -1,0 +1,40 @@
+--- a/cpu_implementation/write_graph.jl
++++ b/cpu_implementation/write_graph.jl
+@@ -95,6 +95,27 @@
+ end
+ 
+ 
++# Sum represented Float64 entries with Neumaier compensation. Ordinary global
++# reduction crossed -1e-9 on large permuted grids although exact sums were
++# positive (diagnostic4616696). Preserve the producer thresholds and all rows.
++# Do not add @fastmath/SIMD reassociation to these error-recovery expressions.
++function apx_compensated_global_sum(G)
++    total = 0.0
++    correction = 0.0
++    for value in nonzeros(G)
++        updated = total + value
++        if abs(total) >= abs(value)
++            correction += (total - updated) + value
++        else
++            correction += (value - updated) + total
++        end
++        total = updated
++    end
++    result = total + correction
++    isfinite(result) || error("nonfinite compensated global matrix sum")
++    result
++end
++
+ function physics_produce(path::String, method::String; negate::Bool=false)
+     G = MatrixMarket.mmread(path * ".mtx")
+     G = SparseMatrixCSC{Float64, Int64}(G)
+@@ -145,7 +166,8 @@
+         throw("specified permutation not implemented")
+     end
+ 
+-    check_sum = sum(G_new)
++    check_sum = apx_compensated_global_sum(G_new)
++    println("APX Physics global sum: ", repr(check_sum))
+     if check_sum < 0 && abs(check_sum) > 1e-9
+         println("not diagonally dominant")
+         @assert false

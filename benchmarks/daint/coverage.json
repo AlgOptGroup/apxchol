@@ -6,8 +6,8 @@
   "present": 459,
   "expected_headline_cells": 486,
   "status_counts": {
-    "complete": 423,
-    "failed": 17,
+    "complete": 426,
+    "failed": 14,
     "timeout": 6,
     "n/a": 6,
     "not_converged": 7

@@ -22,7 +22,7 @@ Heatmap colours normalize within each matrix column; they do not compare absolut
 
 The 2D grids have a coefficient jump from 1 to 0.01. The 3D grids have unit weights. Native CMG is labelled as a serial packed implementation; canonical MATLAB CMG and serial Julia reference solvers retain their own labels and timing boundaries.
 
-Status counts: complete: 423, failed: 17, n/a: 6, not_converged: 7, timeout: 6.
+Status counts: complete: 426, failed: 14, n/a: 6, not_converged: 7, timeout: 6.
 
 [Platform-specific availability and exceptions](PLATFORM.md)
 
@@ -57,9 +57,9 @@ Status counts: complete: 423, failed: 17, n/a: 6, not_converged: 7, timeout: 6.
 ## Snapshot provenance
 
 This refresh selects 459/486 headline identities from the audited 2026-09-07
-selection: 423 complete, 17 failed, 7 nonconverged, 6 timeout and 6 recorded n/a.
-All 108 ParAC Graph/Physics CPU/GPU identities are represented (103 complete,
-5 failed). The 27 remaining numerical gaps are canonical MATLAB CMG platform
+selection: 426 complete, 14 failed, 7 nonconverged, 6 timeout and 6 recorded n/a.
+All 108 ParAC Graph/Physics CPU/GPU identities are represented (106 complete,
+2 failed). The 27 remaining numerical gaps are canonical MATLAB CMG platform
 exceptions; packed native CMG has its own 27 recorded cells. Corrected Eigen
 ordering replaces four RCHOL results, preserving the as-Skitter nonconvergence.
 
@@ -74,3 +74,10 @@ Regenerate from the matching selected raw-cell stores with
 --platform Daint --scaling-store SCALING --scaling-matrices MATRICES
 --scaling-threads 1,2,4,8,16,36,72`. The committed CSVs are presentation extracts;
 archived historical renderers remain linked separately.
+
+Three Physics GPU grid outcomes were refreshed after the compensated global-sum
+producer repair (job 4616880): grid_3000/4000/5000 now pass all warmup/retained
+original-system residual checks. Full timed preparation remains in setup;
+common input loading remains outside that interval. The two G3_circuit Graph
+calibration failures remain unchanged. The maintained producer correction is
+[ParAC patch 0005](../patches/parac/README.md#0005--compensated-physics-global-reduction).
