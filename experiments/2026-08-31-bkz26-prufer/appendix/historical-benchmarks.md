@@ -19,36 +19,36 @@ reference.
 
 ## Exact elimination and the two tree estimators
 
-Suppose pivot `v` has active neighbors `i` with incident conductances `a_i`,
-total `W=sum_i a_i`, and diagonal `D`. Exact Schur elimination removes `v` and
+Suppose pivot $v$ has active neighbors $i$ with incident conductances $a_i$,
+total $W=\sum_i a_i$, and diagonal $D$. Exact Schur elimination removes $v$ and
 adds the dense clique
 
 ```text
 c_ij = a_i a_j / D,       i != j.
 ```
 
-For a pure Laplacian, `D=W`. Materializing every clique edge is quadratic in
+For a pure Laplacian, $D=W$. Materializing every clique edge is quadratic in
 the pivot degree, so apxchol emits an unbiased spanning tree instead. Both
-estimators below emit a connected `d-1`-edge tree and preserve every clique
+estimators below emit a connected $d-1$-edge tree and preserve every clique
 edge, hence every neighbor's clique degree, in expectation. The distinction is
 what they preserve in each individual sample.
 
-**GKS.** Sort neighbors by nondecreasing `a_i`. Each source `i`, except the
-last, chooses exactly one later (therefore no lighter) parent `j` with
-probability `a_j/S_i`, where `S_i=sum_{k>i} a_k`, and emits weight
+**GKS.** Sort neighbors by nondecreasing $a_i$. Each source $i$, except the
+last, chooses exactly one later (therefore no lighter) parent $j$ with
+probability $a_j/S_i$, where $S_i=\sum_{k>i} a_k$, and emits weight
 
 ```text
 h_i = a_i S_i / D.
 ```
 
-Thus every source emits exactly the same mass `h_i` in every sample; only its
+Thus every source emits exactly the same mass $h_i$ in every sample; only its
 destination changes. GKS fixes that source contribution to the sampled clique
 degree. A vertex can still receive random edges from earlier sources, so its
 *total* sampled degree is not deterministic.
 
-**BKZ26 / weighted Prüfer.** Draw a Prüfer code of length `d-2` with iid symbol
-probabilities `q_i=a_i/W`. The decoded tree includes `{i,j}` with probability
-`q_i+q_j=(a_i+a_j)/W`, so apxchol emits
+**BKZ26 / weighted Prüfer.** Draw a Prüfer code of length $d-2$ with iid symbol
+probabilities $q_i=a_i/W$. The decoded tree includes $\{i,j\}$ with probability
+$q_i+q_j=(a_i+a_j)/W$, so apxchol emits
 
 ```text
 (W/D) a_i a_j / (a_i+a_j).
@@ -62,7 +62,7 @@ neighborhoods, pivot priorities, sampled cliques, fill, and ultimately the
 preconditioner seen by PCG. This is a mechanism, not a theorem that one local
 metric orders global convergence.
 
-For SDDM pivots, the implementation's `W/D` factor is the unbiased extension
+For SDDM pivots, the implementation's $W/D$ factor is the unbiased extension
 of the paper's pure-Laplacian rule. The implementation is
 [`volume_tree_elimination`](../../../include/apxchol/solver/elimination/volume_tree.h)
 and can be selected with `factor_options::clique_sampler="bkz26"`, CLI option
@@ -126,8 +126,8 @@ total-time win is not a matrix-level timing result.
 ## Exponent sweep: quality only
 
 An earlier experiment generalized the Prüfer symbol law to
-`q_i proportional to a_i^alpha` and divided each selected exact edge by its
-actual inclusion probability `q_i+q_j`. The five-seed `iter0010` summary was
+$q_i\propto a_i^\alpha$ and divided each selected exact edge by its
+actual inclusion probability $q_i+q_j$. The five-seed `iter0010` summary was
 recovered into [`alpha-sweep-recovered.tsv`](../alpha-sweep-recovered.tsv) and
 plotted by [`plot_alpha_sweep.py`](../plot_alpha_sweep.py):
 
@@ -136,11 +136,11 @@ plotted by [`plot_alpha_sweep.py`](../plot_alpha_sweep.py):
 | sampler | iterations over seeds 1,17,42,73,97 | mean | mean raw nnz(L) |
 |---|---:|---:|---:|
 | GKS | 40, 42, 42, 44, 42 | **42.0** | 8.913M |
-| BKZ26, `alpha=1` | 93, 86, 92, 98, 83 | 90.4 | 8.853M |
-| best tested, `alpha=1.75` | 56, 60, 60, 56, 60 | **58.4** | 8.768M |
-| `alpha=2` | 71, 82, 68, 70, 68 | 71.8 | 8.745M |
+| BKZ26, $\alpha=1$ | 93, 86, 92, 98, 83 | 90.4 | 8.853M |
+| best tested, $\alpha=1.75$ | 56, 60, 60, 56, 60 | **58.4** | 8.768M |
+| $\alpha=2$ | 71, 82, 68, 70, 68 | 71.8 | 8.745M |
 
-On `iter0010`, emphasizing heavy neighbors at `alpha=1.75` lowered the p-tree
+On `iter0010`, emphasizing heavy neighbors at $\alpha=1.75$ lowered the p-tree
 mean from `90.4` to `58.4` iterations while slightly shrinking the raw factor.
 It still required 39% more iterations than GKS's `42.0`. The historical
 workstation was not isolated, so the recovered sweep supports iteration and
@@ -149,13 +149,13 @@ raw-fill comparisons only—no setup, solve, or total-time claim.
 The sweep source survives at git commit
 `2c47ab64d8a0a9d90849e80121b0db0782268726`. The complete raw all-alpha TSV
 does not; the committed table is recovered summary-level evidence. The
-source report also records nonconvergence at `alpha=0`, but the exact five raw
-records for `alpha=0` and `0.5` were not recoverable, so they are not plotted.
+source report also records nonconvergence at $\alpha=0$, but the exact five raw
+records for $\alpha=0$ and `0.5` were not recoverable, so they are not plotted.
 
 ## Local model: degree variance and spectral error
 
 The seed-42 full-factorization diagnostic compared each encountered neighbor's
-sampled degree with `t_i=a_i(W-a_i)/D`. It observed relative L1/L2 values
+sampled degree with $t_i=a_i(W-a_i)/D$. It observed relative L1/L2 values
 `0.0836/0.1031` for GKS and `0.1299/0.2204` for BKZ26. This is a trajectory
 diagnostic: the samplers encounter different later stars, so it is not an
 identically distributed local experiment.
@@ -164,7 +164,7 @@ Two exact small-star checks isolate the sampler. [`small_star_error.py`](../smal
 enumerates all outcomes for six-neighbor stars and independently checks the
 second moments:
 
-| six-neighbor weights | GKS RMS degree error | BKZ | `alpha=1.75` |
+| six-neighbor weights | GKS RMS degree error | BKZ | $\alpha=1.75$ |
 |---|---:|---:|---:|
 | all 1 | .5164 | **.4472** | .4472 |
 | 1, 2, 4, 8, 16, 32 | **.2411** | .3501 | .2883 |
@@ -173,7 +173,7 @@ second moments:
 [`tiny_star_spectral.py`](../tiny_star_spectral.py) reconstructs the preserved
 four-neighbor analysis. It enumerates all 16 labeled trees exactly for GKS and
 every p-tree point. The upper row below is normalized degree RMS; the lower row
-is `E ||C^{+1/2}(C_hat-C)C^{+1/2}||_2`. The dotted line is an
+is $\mathbb E\lVert C^{+1/2}(\widehat C-C)C^{+1/2}\rVert_2$. The dotted line is an
 objective-specific, deterministic multistart search over all tree
 distributions; it is a numerical lower comparator, **not a certified global
 optimum**.
@@ -182,7 +182,7 @@ optimum**.
 
 The model has no universal winner. BKZ beats GKS on the uniform star; GKS has
 lower degree and spectral error on the two skewed stars. Moving toward
-`alpha=1.75` improves degree error there, but can worsen spectral error. The
+$\alpha=1.75$ improves degree error there, but can worsen spectral error. The
 all-tree comparator shows that neither named family is generally optimal.
 These four- and six-neighbor models explain plausible variance mechanisms;
 they do not turn a local norm into a global PCG prediction. The definitions and
@@ -216,7 +216,7 @@ binary-search overhead. What remains useful is:
 - reproducible broad and tiny-model harnesses that separate timing, global
   quality, and local estimator questions;
 - a clear implementation optimization: one alias table would realize the
-  paper's linear sequential sampling work instead of the current `d-2` binary
+  paper's linear sequential sampling work instead of the current $d-2$ binary
   searches. It may improve setup, but cannot change this distribution's PCG
   iterations.
 
