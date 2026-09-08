@@ -55,24 +55,31 @@ Choose `j` with probability `q_ij>0` and emit `c_ij/q_ij`. Its expected contribu
 Cauchy–Schwarz gives `Σ t_ij²/q_ij ≥ (Σ t_ij)²`, with unique equality at
 
 \[
-\boxed{q_{ij}=\frac{a_i+a_j}{m_i a_i+S_i}}.
+\boxed{q_{ij}=\frac{a_i+a_j}{\sum_{\ell>i}(a_\ell+a_i)}=\frac{a_i+a_j}{m_i a_i+S_i}}.
 \]
 
 This is optimal for this **one-parent component**. Independent centered components have additive variances, making the formula useful in a larger construction. It is not an optimum over arbitrary correlated trees. Its emitted edge has constant normalized trace `(m_i a_i+S_i)/A` for that source, regardless of the parent chosen.
 
-The equivalent difference form makes a possible implementation shortcut explicit. Put `G_i=Σ_{j>i}(a_j−a_i)`. Then
+The exact improvement over the ordinary GKS parent law is also calculable.
+Let `U_i=Σ_{j>i}1/a_j`. For the same source and later-neighbor set,
 
 \[
-q_{ij}=\frac{2a_i+(a_j-a_i)}{2m_i a_i+G_i}.
+J_{\mathrm{GKS},i}-J_{q,i}
+=\frac{a_i^2}{A^2}\left(S_iU_i-m_i^2\right)\ge0.
 \]
 
-With probability `2m_i a_i/(2m_i a_i+G_i)`, choose a uniform later vertex; otherwise choose proportionally to `a_j−a_i`. Equal weights give a uniform draw with no gap-branch division. Using only differences would assign zero probability to some positive target edges when weights tie and break unbiasedness. A stable nonnegative expression is
+The inequality follows from Cauchy–Schwarz; equality holds exactly when all
+later weights are equal, including the trivial one-parent case. Independent
+source errors add, so using this rule for every source gives a tree whose
+ideal local `J` is no larger than GKS's. This optimizes probabilities over all
+positive categorical parent laws, not only uniform draws.
 
-\[
-G_i=\sum_{k=i+1}^d(d-k+1)(a_k-a_{k-1}).
-\]
-
-This avoids cancellation in `S_i−m_i a_i`. The mixture is an exact algebraic alternative, not a measured optimization or unchanged RNG transcript.
+For every fixed cycle core, the same inequality applies to the light
+attachments. Optimizing each method's cutoff over the same heavy-suffix family
+preserves it: evaluate the q-rule at the GKS rule's best cutoff, then minimize.
+Thus both tree-q and cycle-q have local Frobenius guarantees against their
+respective independent-GKS comparators. This does not guarantee better
+conditioning, PCG iteration counts, finite-precision behavior or total time.
 
 ## A heavy cycle and all possible suffix cuts
 
