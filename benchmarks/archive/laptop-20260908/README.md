@@ -1,55 +1,15 @@
-# Archived laptop benchmark snapshot
+# Retired laptop benchmarks
 
-This directory is a committed presentation snapshot for an AMD Ryzen 9 7945HX
-(16 physical cores), 128 GB RAM, and an NVIDIA RTX 4090 Laptop GPU (16 GB).
-Absolute times apply only to that machine and run environment; use the
-[Daint snapshot](../../daint/) only as a separate machine study.
+Historical T16 snapshot: Ryzen 9 7945HX,128GB RAM, RTX 4090 Laptop16GB.
+The unstable laptop environment is retired; use [Daint](../../daint/) for current
+performance. Do not compare absolute times across machines.
 
-The campaign uses pinned T=16 runs and a true relative-residual target of
-`1e-8`. The common operator, grading, timing, timeout, and series rules are in
-the [benchmark protocol](../../README.md). Per-cell provenance in the result store
-is authoritative: this directory is historical, and missing or differently
-grounded cells must not be silently combined into a new denominator.
+[CSV](results.csv) · [Tables](summary.md) · [612 legacy cells](cells/) · [Figures](figures/)
 
-## Useful views
+The CSV contains 297 CPU rows; the mixed CPU/GPU cell store is larger. Some cells
+lack platform/compiler metadata. Preserve per-cell source, grounding and status;
+shifted CMG and differently grounded systems are not interchangeable.
 
-| question | direct views |
-|---|---|
-| total time | [grids](figures/combined_overview_grids.png), [LP-IPM](figures/combined_overview_ipm.png), [SuiteSparse](figures/combined_overview_suitesparse.png) |
-| CPU totals | [grids](figures/combined_overview_cpu_grids.png), [LP-IPM](figures/combined_overview_cpu_ipm.png), [SuiteSparse](figures/combined_overview_cpu_suitesparse.png) |
-| GPU totals | [grids](figures/combined_overview_gpu_grids.png), [LP-IPM](figures/combined_overview_gpu_ipm.png), [SuiteSparse](figures/combined_overview_gpu_suitesparse.png) |
-| setup versus solve | [CPU grids](figures/combined_breakdown_cpu_grids_2d.png), [GPU grids](figures/combined_breakdown_gpu_grids_2d.png), [CPU SuiteSparse](figures/combined_breakdown_cpu_suitesparse_small.png), [GPU SuiteSparse](figures/combined_breakdown_gpu_suitesparse_small.png) |
-| apxchol choices | [selector overview](figures/poster_selectors_cpu.png), [SuiteSparse ablation](figures/ablation_suitesparse.png) |
-| scaling | [setup](figures/threads_setup_speedup.png), [solve](figures/threads_solve_speedup.png), [GPU grids](figures/scaling_gpu_grids.png) |
-
-The heatmaps normalize each matrix column to the fastest completed displayed
-cell and annotate absolute values. Timeout cells show lower bounds where a cap
-is known; failures, non-convergence, OOM, `n/a`, and missing cells remain
-distinct. Linear breakdown plots use solid setup and hatched solve segments.
-
-For exact values and outcomes, use the [generated summary](summary.md) and
-[CSV extract](results.csv). The `figures/` directory also contains memory,
-iteration, accuracy, fill, and family-split views.
-
-## Interpretation boundaries
-
-- The plotted apxchol row is a declared configuration, not a per-matrix best of
-  several selectors. Selector and storage variants belong in ablation views.
-- CMG uses the canonical MATLAB MEX path. Its iteration count is the useful
-  algorithmic signal; MATLAB wall time is not a C++ speed baseline. Labelled
-  regularized CMG cells are not part of original-operator comparisons.
-- AC/AC2 are serial Julia reference implementations; their iteration counts are
-  more meaningful than cross-language wall time.
-- RCHOL/pRCHOL and ParAC include required reordering and conversion in setup.
-- Grids are weighted anisotropic problems, not uniform Poisson matrices.
-
-This snapshot was retired on 2026-09-08. Its 99 figures, CSV, and 612 legacy T16
-[cell records](cells/) are retained without numerical changes; the two Markdown
-pages only update archive labels and links. The CSV is a 297-row CPU extract,
-not a complete projection of the 612-cell mixed CPU/GPU store. Some legacy cells
-lack platform/compiler metadata. Use per-cell source and status fields when
-interpreting them; do not treat the archived store as a fresh campaign.
-
-Current renderer defaults write disposable `results/plots/` previews. Reproducing
-this historical snapshot may require its historical renderer revision; do not
-run a fresh sweep into this archive.
+Archived 2026-09-08 from `benchmarks/latest/` and `results/cells/`. Data/figures
+remain historical; current renderers write previews elsewhere. Reproduction may
+require the [historical renderer/protocol](https://github.com/AlgOptGroup/apxchol/blob/1a526f25aec8829e8a9217b558ac2290a3840ae0/benchmarks/archive/laptop-20260908/README.md).

@@ -1,7 +1,9 @@
-# Archived laptop benchmark summary — t16, tol 1e-8, original singular L (per-solver grounding; ParAC per-component-consistent RHS scored vs original L, CMG reg-rel)
+# Archived laptop T16 summary
 
-`† CMG (MATLAB)` = canonical Koutis CMG (MEX, matlab-deps container). MATLAB-pcg wall-time isn't cross-language-comparable, so its **iteration count** is the comparable signal — see below.
-Blank = not run; `X` = ran but did not reach 1e-8; `T` = timed out (> 10× apxchol's wall time on that matrix); `—` = solver doesn't support that de-singularization cell.
+Historical true-residual target 1e-8; original Laplacian with per-solver grounding
+and per-component ParAC RHS. CMG regularization is separately labelled; MATLAB
+wall time is not a C++ comparison. Blank=not run; X=nonconverged; T=historical
+10×reference timeout; —=unsupported. [CSV](results.csv).
 
 ## Total solve time (s)
 
@@ -48,7 +50,7 @@ Blank = not run; `X` = ran but did not reach 1e-8; `T` = timed out (> 10× apxch
 | com-LiveJournal | 25.99 | T | T | T | T | T |  | 787.74 | 871.00 |  |  |
 | com-Orkut | 102.66 | X | T | T | T | 31.38 |  | T | T |  |  |
 
-## PCG iterations (preconditioner quality, threads-independent)
+## PCG iterations
 
 
 ### grids

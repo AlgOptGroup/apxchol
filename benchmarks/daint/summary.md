@@ -1,9 +1,17 @@
-# Benchmark summary — t72, tol 1e-8, original singular L (per-solver grounding; ParAC per-component-consistent RHS scored vs original L, CMG reg-rel)
+# Daint T72 summary
 
-`† CMG (MATLAB)` = canonical Koutis CMG (MEX, matlab-deps container). MATLAB-pcg wall-time isn't cross-language-comparable, so its **iteration count** is the comparable signal — see below.
-Blank = not run; `X` = ran but did not reach 1e-8; `T` = timed out without a recoverable cap; `T≥seconds` = timed out at the exact cap persisted by the runner; `—` = solver doesn't support that de-singularization cell.
+Original-operator target: true relative residual≤1e-8. One declared solver/configuration
+per column; no per-matrix best-of selection. [CSV/statuses](results.csv) and
+[coverage](coverage.json) are authoritative.
 
-**Series rule (uniform).** Every column is exactly ONE (solver, configuration); no column is a per-cell minimum over configurations. Headline tables and charts use apxchol's declared default, `apxchol/bg`; the selector spread (`apxchol/bg`, `apxchol/greedy`, `apxchol/bk`) is confined to dedicated compact ablation figures. The chart thread count is selected a priori (t72, with a t1 fallback); duplicate cells are rejected, so neither status nor time can select the representative.
+Blank=not run; X=unsuccessful (failure/nonconvergence distinguished in CSV);
+T=timeout; —=unsupported. A numeric timeout label
+requires its recorded scope: a whole-cell cap is not a per-solve lower bound.
+Canonical MATLAB CMG and shifted CMG are separately labelled; cross-language
+wall time is caveated. Iterations measure these recorded factors, not thread invariance.
+
+ParAC timings include avoidable adapter interchange/audit costs; see the
+[provisional comparison caveat](README.md). Values are unchanged.
 
 ## Total solve time (s)
 
@@ -50,7 +58,7 @@ Blank = not run; `X` = ran but did not reach 1e-8; `T` = timed out without a rec
 | com-LiveJournal | 5.01 | T | T | 149.04 | 68.36 | 83.74 |  | 261.27 | 578.82 | 580.88 | 104.18 | 175.87 |
 | com-Orkut | 16.30 | X | T | X | 214.60 | 11.45 |  | T | 2514.99 | 2500.74 | T | T |
 
-## PCG iterations (preconditioner quality, threads-independent)
+## PCG iterations
 
 
 ### grids

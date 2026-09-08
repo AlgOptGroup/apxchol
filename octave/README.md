@@ -1,74 +1,47 @@
-# apxchol (Octave, CPU)
+# apxchol for Octave / MATLAB
 
-Approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems,
-as an Octave MEX extension. Same API concept as the Python package: build the
-factor once, solve many right-hand sides.
+CPU approximate-Cholesky preconditioning and PCG. Factor once, solve many:
 
 ```matlab
 addpath('/path/to/apxchol/octave');
-
-s   = apxchol_solver(A);          % A: sparse SPD Laplacian or SDDM; factor built once
-res = s.solve(b);                 % res.x, res.iters, res.residual, res.converged
-res = s.solve(b2, 1e-10, 1000);   % per-solve tol / maxiter
-
-z = s.apply(r);                   % one preconditioner application, z = M\r
-x = pcg(A, b, 1e-8, 500, @(r) s.apply(r));   % drop into Octave's pcg as M
-
-res = apxchol_solve(A, b);        % one-shot convenience
+s = apxchol_solver(A);
+res = s.solve(b);                 % x, iters, residual, converged
+res = s.solve(b2, 1e-10, 1000);
+z = s.apply(r);
+x = pcg(A, b, 1e-8, 500, @(r) s.apply(r));
+res = apxchol_solve(A, b);        % one-shot
 ```
 
-`A` must be the **assembled operator** (Laplacian or SDDM), not the adjacency
-matrix of a graph. The operator contract — symmetric, positive diagonal,
-non-positive off-diagonals — is asserted, and a violation raises
-`apxchol:badInput` naming which condition failed. An adjacency matrix carries
-no positive diagonal anywhere, so it is caught there, never converted silently.
-`apxchol_laplacian` does the conversion explicitly:
+Supply an assembled operator. For adjacency input, explicitly use
+`apxchol_laplacian(Adj)` to form `D - Adj` with self-loops removed.
+Validation is shared with C++; positive off-diagonal pairs are lumped onto
+the diagonal for preconditioning, while PCG and residual checks retain the
+original operator. Laplacian nullspaces are handled componentwise.
+The binding exposes default settings; GPU and wide indices are unavailable.
 
-```matlab
-A = mmread('com-Amazon.mtx');     % adjacency matrix
-L = apxchol_laplacian(A);         % L = D - A, self-loops dropped
-res = apxchol_solve(L, b);
-```
+## Octave build
 
-Laplacian vs SDDM is auto-detected (singular Laplacians get the rank-(n−1)
-factor with null-space centering). Defaults only — no tuning knobs exposed.
-
-A symmetric operator that is SPD but carries a few POSITIVE off-diagonals (so
-not an M-matrix) is repaired rather than refused: each positive pair is lumped
-onto the diagonal, `a_ii += a_ij; a_jj += a_ij; a_ij = 0`, when the
-preconditioner is built. Row sums are preserved and the PCG keeps applying `A`
-itself, so `res.residual` is for the system you passed.
-
-## Build
-
-Needs `mkoctfile` (Octave dev tools), Eigen3 headers, and an OpenMP-capable
-**g++ >= 14** (the core uses C++23 "deducing this"). The MEX compiles the two
-core library TUs directly — no dependency on the root CMake build:
+Requires `mkoctfile` (Octave development tools), Eigen3 and an OpenMP-capable
+C++23 compiler (GCC ≥14 or equivalent). Use matching C/C++ compiler families
+and one OpenMP runtime.
 
 ```bash
-cd octave && ./build.sh
+cd octave
+./build.sh                       # optionally: CC=gcc-14 CXX=g++-14 ./build.sh
+octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
 ```
 
-If the default compiler is older, point `mkoctfile` at a newer one via `CXX`
-(`build.sh` sets `CXXFLAGS` but leaves the compiler to `mkoctfile`):
+The extension directly compiles the three core CPU sources; it does not
+require a root CMake build.
 
-```bash
-cd octave && CXX=g++-14 ./build.sh
-```
+## MATLAB build
 
-Test: `octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"`
-
-## MATLAB
-
-The `.m` wrappers and `tests/test_apxchol.m` run unchanged on MATLAB; the MEX
-source is plain `mex.h` API. Only the binary differs (`.mexa64` for MATLAB vs
-`.mex` for Octave — ABI-incompatible), so rebuild with MATLAB's `mex`. The core
-needs **C++23** ("deducing this", `std::ranges::iota`), so GCC ≥ 14 is required —
-newer than MATLAB's officially "supported" GCC 12, which it accepts with a warning:
+The wrappers/tests are shared, but MATLAB and Octave MEX binaries are
+ABI-incompatible. From `octave/`, this GCC/OpenMP command requires GCC ≥14:
 
 ```matlab
-mex -R2018a apxchol_mex.cpp ../src/factorization.cpp ../src/solve.cpp ...
-    ../src/mtx_input.cpp ...
+mex -R2018a apxchol_mex.cpp ../src/factorization.cpp ...
+    ../src/operator_class.cpp ../src/solve.cpp ...
     -I../include -I../src -I/usr/include/eigen3 ...
     -DAPXCHOL_POOL_FP32 ...
     CXXFLAGS='$CXXFLAGS -std=c++23 -fopenmp -O3 -fPIC' ...
@@ -76,31 +49,6 @@ mex -R2018a apxchol_mex.cpp ../src/factorization.cpp ../src/solve.cpp ...
 addpath(pwd); run('tests/test_apxchol.m')
 ```
 
-Validated on **MATLAB R2026a**, GCC 14, 6/6 tests passing.
-
-### Troubleshooting on recent Linux distributions
-
-1. **MATLAB won't launch**: its FlexLM licensing can segfault (`lc_new_job`)
-   against a very new system glibc. Run MATLAB inside MathWorks' dependency
-   container (`mathworks/matlab-deps:<release>`, Ubuntu-based, older glibc),
-   mounting the MATLAB install read-only. Use `--network=host` so a node-locked
-   license still sees the host's MAC address.
-
-2. **`GLIBCXX` version error when loading the MEX**: a GCC-14 build needs a newer
-   `libstdc++` than the one MATLAB bundles. Preload the system library (it is
-   ABI-backward-compatible, so MATLAB still works):
-
-   ```bash
-   LD_PRELOAD="$(g++ -print-file-name=libstdc++.so.6)" matlab -batch "..."
-   ```
-
-3. **`mkoctfile` not found**: it ships in Octave's development package
-   (`octave-dev` on Debian/Ubuntu, `octave-devel` elsewhere), not in the base
-   Octave package.
-
-CPU only; GPU and 64-bit indices are not exposed in this version.
-
-## License
-
-Same terms as the rest of the repository — see the root
-[LICENSE](../LICENSE).
+MATLAB's selected compiler and C++ runtime must support the required language
+features. See [historical Linux troubleshooting](https://github.com/AlgOptGroup/apxchol/blob/1a526f25aec8829e8a9217b558ac2290a3840ae0/octave/README.md#troubleshooting-on-recent-linux-distributions)
+for previously encountered runtime issues. [License](../LICENSE).

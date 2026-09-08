@@ -1,71 +1,19 @@
-# Daint benchmark snapshot
+# Historical Daint studies
 
-The [preserved source-ea01 CPU scaling series](historical/cpu-scaling-ea01/)
-contains 84 converged cells and the three figures replaced by the source-1a CPU
-refresh. It is separate from the older one-iteration scaling diagnostic below.
+These are pinned snapshots, not current-main results. [Current index](README.md).
 
-These historical results use one CSCS Daint GH200 node: a 72-core Grace CPU and
-its Hopper GPU. The fair-solver campaign is pinned to source revision
-`2b755997`; absolute times are machine-specific and must not be mixed with the
-x86/RTX [laptop snapshot](../archive/laptop-20260908/).
+| Study | Data and views | Boundary |
+|---|---|---|
+| CPU scaling, `ea01e2ff` | [84 cells and figures](historical/cpu-scaling-ea01/) |12 matrices×7 threads; converged solves; original main-T1 references |
+| GPU scaling, `ea01e2ff` | [CSV](thread_scaling_gpu.csv), [setup](figures/threads_gpu_setup_speedup.png), [solve](figures/threads_gpu_solve_speedup.png), [total](figures/threads_gpu_total_speedup.png) |84 converged points; not rerun with current CPU study |
+| Fair T72, `2b755997` | [750-cell summary](fair_t72_summary.md), [CSV](fair_t72.csv), [figures](figures/) |Historical coverage excludes ParAC CPU/canonical CMG; not current availability |
+| Setup diagnostic | [summary](historical_summary.md), [scaling](scaling.csv), [A/B](historical_ab.csv) |189 one-iteration scaling records; not converged-solve scaling |
 
-The T=72 campaign uses three full setup-and-solve repetitions per cell and grades
-every completed result by an independently recomputed true relative residual at
-`1e-8`. Exact coverage, outcomes, paired geometric means, and exclusions are in
-the [fair-solver summary](fair_t72_summary.md); [fair_t72.csv](fair_t72.csv) is
-the portable extract.
+Reproduce committed historical extracts:
 
-## Fair-solver views
-
-The renderer provides three complementary views for each matrix family:
-
-| family | total-time heatmap | solve-only heatmap | setup + solve |
-|---|---|---|---|
-| grids | [total](figures/fair_t72_total_grids.png) | [solve](figures/fair_t72_solve_grids.png) | [2D](figures/fair_t72_breakdown_grids_2d.png), [3D](figures/fair_t72_breakdown_grids_3d.png) |
-| LP-IPM | [total](figures/fair_t72_total_ipm.png) | [solve](figures/fair_t72_solve_ipm.png) | [breakdown](figures/fair_t72_breakdown_ipm.png) |
-| SuiteSparse | [total](figures/fair_t72_total_suitesparse.png) | [solve](figures/fair_t72_solve_suitesparse.png) | [small](figures/fair_t72_breakdown_suitesparse_small.png), [giants](figures/fair_t72_breakdown_suitesparse_giants.png), [largest](figures/fair_t72_breakdown_suitesparse_giants_xl.png) |
-
-Heatmap colour is time relative to the fastest completed CPU or GPU cell in the
-same matrix column; annotations give absolute time and ratio. A capped timeout
-is shown as a lower bound only on total time. Solve-only cells have no fabricated
-timeout duration. Breakdown bars are linear time, with solid setup and hatched
-solve segments; the family splits keep large matrices from flattening smaller
-ones.
-
-Focused views:
-
-- [apxchol CPU/GPU crossover](figures/fair_t72_apxchol_cpu_gpu.png)
-- [apxchol selector/storage ablation](figures/fair_t72_apxchol_ablation.png)
-
-The ARM64 snapshot uses explicitly labelled portable paths where possible:
-RCHOL/pRCHOL retain upstream factorization and PCG semantics without MKL;
-AC/AC2 use the official ARM64 Julia build; ParAC CUDA runs natively. ParAC CPU
-and CMG are omitted rather than replaced by unlike timing baselines.
-
-Reproduce the pinned figures and summary from the committed CSV:
-
-```bash
+```sh
 python3 benchmarks/daint/render_fair_t72.py
-```
-
-## Historical scaling snapshot
-
-The earlier apxchol-only campaign is a separate, checksummed archive. It is an
-explicitly historical snapshot, not current-main timing. On reproduction, its
-compact [three-panel speedup figure](figures/setup_scaling.png) shows total,
-PCG/solve, and setup speedup from the complete 189/189-record scaling extract
-(9 matrices × 7 thread counts × 3 repetitions). The legacy
-`setup_scaling.png` output path is retained so existing manifests and links do
-not orphan an artifact.
-
-Separate diagnostic views remain available for the
-[T=72 setup breakdown](figures/setup_t72_breakdown.png) and the within-snapshot
-[campaign-head/July-27 total ratio](figures/historical_total_ratio.png). See the
-[numerical summary](historical_summary.md), [scaling data](scaling.csv), and
-[historical A/B data](historical_ab.csv) for boundaries and exact values.
-
-Reproduce that archive from its committed extracts:
-
-```bash
 python3 benchmarks/daint/render_campaign.py --csv-input benchmarks/daint
 ```
+
+[Original campaign explanation](https://github.com/AlgOptGroup/apxchol/blob/1a526f25aec8829e8a9217b558ac2290a3840ae0/benchmarks/daint/HISTORICAL.md)

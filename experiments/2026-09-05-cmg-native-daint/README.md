@@ -1,37 +1,30 @@
-# Native CMG packed benchmark on Daint
+# Native CMG Daint benchmark protocol
 
-The fixed denominator is the existing ParAC portable campaign's 14 input files,
-T=72 and16, with one warmup and three retained processes per cell:28cells and
-84retained solves (112calls including warmup). Input SHA-256 hashes are copied
-unchanged from that campaign's879ef9f6source. A first invalid/unsupported solve
-stops that cell and retains explicit missing repetitions; unrelated cells run.
+This experiment prepares an explicitly labelled native CMG comparison. Its
+private generated core is serial: requested affinity T=16/72 does not mean
+16/72 effective solver threads. Keep it separate from canonical MATLAB CMG
+and from our algorithms. Generated proprietary sources must remain external.
 
-The native port runs the original unshifted operator and compatible normalized
-b=A*g with NumPy PCG64(42), preserving graph D-|A| assembly and physics diagonal.
-RHS sequences differ from ParAC's Julia/C++ generator; do not call these equal
-RHS timings. Every solution is checked against the original operator by SciPy,
-independently of the driver's Eigen residual. All three retained solves must
-pass1e-8. The port is serial; requested CPU affinity16/72is not effective
-parallelism and cells record effective_threads=1. Native and canonical MATLAB
-CMG stay separately labelled; shallow_water1's known canonical setup exception
-is recorded in each cell. Generated sources remain private and unchanged.
+The planned denominator is fourteen inputs at two affinities: 28 cells,
+three retained repetitions per cell (84), plus 28 warmups. This README records
+the plan, not proof that every invocation completed or converged.
 
-Build and pilot:one exclusive debug node,72task CPUs,200GiB,10minutes. Four
-pilot cells (two actual matrices and both affinity settings),one warmup and one
-retained solve each. Production reuses the pilot binary after SHAverification.
+Grade against the original, unshifted operator. The experiment generates
+$b=Ag$ using NumPy PCG64 seed 42, normalizes the right-hand side, and checks
+every returned solution independently against relative residual tolerance
+$10^{-8}$. Its generated RHS protocol differs from ParAC's; do not claim
+matched right-hand sides. A representative repetition selects timing only;
+all retained residuals must pass.
 
-Production:one four-node debug job,one72CPU/200GiB task per node,30minutes.
-Assign the28cells round-robin into four fixed7cell shards; complete cell cap
-210seconds including warmup, three solves, and result verification leaves
-5.5minutes for common input preparation. Every node reserves288CPUs and4GPUs,
-so production ceiling is2node-hours,576allocated CPU-hours,8reserved GPU-hours.
-The code uses no GPU. The runner preserves timeout caps and all failures rather
-than selecting only passing matrices. A Slurm timeout must be reconciled against
-the frozen28cell plan, including cells never reached.
+The [matrix plan](matrices.json) and [Slurm script](job.sbatch) describe the
+campaign. The pilot bounds are one node, 72 task CPUs, 200 GiB and ten minutes.
+The production plan uses four nodes, 200 GiB per node and thirty minutes,
+with a 210-second whole-cell watchdog. Exclusive-node allocations also reserve
+unused GPUs; count those resources even though CMG performs no GPU work.
 
-Use an immutable package with MANIFEST.sha256 and SOURCE_COMMIT, submit with
-absolute `--chdir` and output paths. `job.sbatch smoke` uses its default shape;
-production overrides `--nodes=4 --ntasks=4 --time=00:30:00` and receives the
-verified pilot executable path and SHA256. Run `sbatch --test-only` first.
-Cancel only if authorized, with `ssh daint 'scancel JOB_ID'`; resubmission of
-the preserved package is recovery. Local shutdown is safe after job submission.
+Use the existing [native CMG runner](../../benchmarks/cmg_native_runner.py)
+and [benchmark guide](../../benchmarks/README.md). The Slurm script depends on
+external private sources, executable paths, and hashes: the public files alone
+do not reproduce the generated binary. Validate those prerequisites and use
+`sbatch --test-only` before submission. The [full historical protocol](https://github.com/AlgOptGroup/apxchol/blob/1a526f25aec8829e8a9217b558ac2290a3840ae0/experiments/2026-09-05-cmg-native-daint/README.md)
+preserves the original package instructions and canonical-port exception.

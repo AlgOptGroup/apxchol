@@ -2,20 +2,13 @@
 
 ## Scope and evidence
 
-Keep this file current when build steps, public APIs, defaults, or architecture
-change. Deliver the requested scope. Prefer removing a redundant path over
-adding a new policy, mode, framework, or tuning knob.
-
-State a claim as verified only when this session produced supporting evidence.
-Label historical results and untested hypotheses. Equal fill, iteration counts,
-or residuals do not prove equal factors: use a digest over structure and values
-when identity matters. Enumerate the complete denominator before an audit and
-report checked/total plus anything not checked.
-
-Historical rationale, measurements, and rejected experiments are preserved in
-[implementation-history.md](docs/implementation-history.md). Consult the
-relevant entry before changing an established algorithm or default; historical
-numbers and retired configuration examples are not current verification.
+Keep this file current when builds, APIs, defaults or architecture change.
+Deliver the requested scope; prefer removing redundancy to adding modes or knobs.
+Verify claims with current-session evidence; label historical results and hypotheses.
+Factor identity requires structure/value digests, not equal fill or residuals.
+Audits report the complete denominator, checked/total and exclusions.
+Consult [implementation history](docs/implementation-history.md) before changing
+an established algorithm/default; historical examples are not current verification.
 
 ## Build and tests
 
@@ -46,26 +39,21 @@ Relevant build options:
   `APXCHOL_64BIT_NODE_INDICES=ON` additionally widens vertices and implies
   wide edges. Do not use the deprecated combined index option in new code.
 
-Use focused regressions for affected behavior, then the relevant full suite.
-Test CUDA changes with the required backend build options. A CPU-only test
-cannot establish GPU correctness. Do not run timing campaigns concurrently
-with builds or other laptop workloads. Stop repeating checks once they pass
-unless another change or unresolved failure justifies it.
+Run focused regressions, then the relevant full suite; repeat only after changes
+or unresolved failures. CUDA correctness requires the appropriate build and device.
+Do not time alongside builds or other laptop workloads.
 
-CUDA builds register `gpu_factor_finalize_leak_check` when `compute-sanitizer`
-is available. It runs the repeated-finalization fixture with process-local
-allocation/leak checking; run it with
+When `compute-sanitizer` is available, CUDA builds register
+`gpu_factor_finalize_leak_check`; run it with:
 `ctest --test-dir build-cuda -R '^gpu_factor_finalize_leak_check$' --output-on-failure`.
-If the tool is absent, configuration reports that the check is not registered:
-the regular correctness tests then do not establish leak freedom. Do not use
-device-wide `cudaMemGetInfo` equality as a process-leak assertion, since other
-applications and concurrent tests can change it.
+Without it, ordinary tests do not establish leak freedom. Device-wide
+`cudaMemGetInfo` equality is not a process-leak assertion.
 
 ## Architecture and contracts
 
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
-  convenience entry point. `src/factorization.cpp` and `src/solve.cpp` provide
-  the compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
+  convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
+  `src/solve.cpp` provide the CPU compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
   M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
   adjacency versus an assembled operator. Bindings must use the operator
@@ -171,63 +159,43 @@ applications and concurrent tests can change it.
 
 ## Benchmarks and experiments
 
-Daint is the primary performance snapshot (`benchmarks/daint`); laptop data and
-figures remain historical. The shared renderer preserves the common 27-matrix,
-18-series denominator, including unavailable canonical MATLAB CMG cells.
-Record effective threads separately from the requested thread budget. Whole-cell
-and prerequisite deadlines are not per-solve lower bounds. Every retained
-residual must satisfy the common tolerance. Source, binary and selected-cell
-hashes accompany snapshots; rendering does not run benchmarks.
-Do not wrap timed C++ or ParAC calls in `VramSampler`: nvidia-smi polling
-perturbs GH200 setup. Collect peak VRAM in separate diagnostic runs; missing
-peak measurements stay unknown.
-ParAC patch 0005 uses Neumaier compensation for the Physics producer global
-sum; retain both existing ±1e-9 thresholds and preserve ordering/per-column
-sums. Fresh FetchContent checkouts apply it; external checkouts need the patch
-before rebuilding. Regenerated cells retain original-A,b residual checks.
+Daint is primary (`benchmarks/daint`); laptop data are historical. Preserve the
+shared 27-matrix/18-series denominator, unavailable canonical MATLAB CMG cells,
+effective versus requested threads, and source/binary/cell hashes.
+[benchmarks/README.md](benchmarks/README.md) defines runner/solver contracts;
+use the existing harness. Rendering runs no benchmarks.
 
-Read [benchmarks/README.md](benchmarks/README.md) for the actual runner and
-solver contracts. Use the existing runner/parser where it fits; do not make
-adopting a new general harness a prerequisite for a small experiment.
+Grade **every retained original-system residual** against the common tolerance.
+Calibration failures/caps must not trigger fallback retained runs. A median
+repetition selects timing fields only. Whole-cell/prerequisite deadlines are
+not lower bounds on individual solves. Report setup, solve, memory and reuse
+separately; preserve complete timing boundaries and separate CUDA initialization.
+Do not wrap timed calls in `VramSampler`: nvidia-smi polling perturbs GH200 setup.
+Measure VRAM separately; missing peaks stay unknown.
 
-`runner_common.classify()` accepts a solve only when the independently
-recomputed true relative residual is at most `tol`, for every solver. Preserve
-solver-complete setup/solve boundaries and report CUDA initialization
-separately. Portable competitor implementations must retain their own
-provenance labels and stopping semantics.
+ParAC: patch0005 uses Neumaier compensation for the Physics producer global
+sum; preserve ordering, per-column sums and both ±1e-9 thresholds. External
+checkouts require patching before rebuilding. Physics inputs with positive
+stored off-diagonals are unsupported for original-operator comparison,
+**before** preparation cache hits or fallbacks.
 
-Native CMG is an opt-in external competitor: build `benchmarks/cmg/native`
-against the private generated source and set `APXCHOL_CMG_NATIVE_BIN`.
-The existing sweep writes separately labelled `cmg_packed/original-operator`
-cells. Its generated core is serial; record actual affinity and effective
-threads separately. Preserve original-operator grading, independent returned
-solution checks, and the packed-port canonical exception documented in the
-benchmark README. Do not commit generated proprietary comparison sources.
-Tag logical-cell timeouts explicitly; a budget shared by calibration and
-repetitions is not a numerical lower bound on one setup+solve invocation.
+Native CMG is opt-in via `APXCHOL_CMG_NATIVE_BIN` and `benchmarks/cmg/native`.
+Keep private generated sources untracked. Its generated core is serial;
+record affinity/effective threads and the `cmg_packed/original-operator` label.
+Preserve independent returned-solution checks, explicit RHS support and the
+canonical exception in the benchmark README.
 
-The benchmark driver supports explicit `--warmup N` before `--repeat R` retained
-measurements. Preserve every retained residual when grading a cell; selecting
-a representative repetition changes timing selection only. Thread-scaling
-scopes and thread counts are configurable through the existing runner.
-`render_snapshot.py` supplies one presentation path for both machines. Benchmark
-`--dump-rhs` exports the common RHS without running a solver; native CMG can
-consume an explicit `rhs_path` without normalization.
+Use `--warmup N`, `--repeat R` and existing thread-scaling scopes as needed.
+`--dump-rhs` exports the common RHS without solving. `render_snapshot.py`
+provides the common presentation path.
 
-Report setup, solve, memory, and factor reuse separately. Evaluate the user's
-actual objective; a faster solve with slightly slower one-RHS total is a
-tradeoff, not automatically a rejected improvement. Do not multiply isolated
-optimization ratios and call the product a measured cumulative improvement.
-
-For timing, record source/binary/input identity, affinity, repetitions, raw
-outputs, and the full planned denominator. Balance arm order and use suitable
-null controls. Concurrent ranks on one node are not independent machines.
-Separate correctness, timing validity, and the performance decision. If one
-metric or cell fails a control, identify that exact scope, preserve valid
-observations, and withhold affected conclusions; do not silently discard data
-or manufacture a whole-campaign performance aggregate from a passing subset.
-Retain the original preregistered verdict. Label later subset analysis as
-retrospective, with its selection rule and narrower denominator.
+Timing campaigns record immutable source/binary/input identities, affinity,
+repetitions, raw outputs and the entire planned denominator. Balance arm order
+and use null controls. Concurrent ranks on one node are not independent machines.
+Separate correctness, timing validity and the performance decision. Preserve
+original verdicts and valid observations when a subset fails; label later
+subset analysis retrospective. A faster solve with slower one-RHS total is a
+tradeoff. Never multiply isolated ratios into a cumulative speedup claim.
 
 Before a Daint submission:
 
@@ -281,11 +249,3 @@ laptop snapshot and its 612 legacy T16 cells are preserved in
 Keep internal reports and private comparison sources outside tracked files. Do not publish them or contact collaborators
 without authorization. Preserve source and evidence before any worktree
 retirement; obey the user's destructive-operation approval requirements.
-
-
-ParAC benchmark eligibility: physics inputs with positive stored off-diagonals
-are unsupported for original-operator comparison, before all preparation cache
-hits and fallbacks. Failed/capped calibration probes must not launch retained
-runs at a fallback tolerance. Grade every retained true residual; a median
-repetition selects timing fields only. Preserve the full planned denominator
-and original campaign verdict when recording unsupported or unattempted cells.

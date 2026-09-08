@@ -1,146 +1,79 @@
 # apxchol
 
-`apxchol` solves sparse Laplacian and SDDM systems with a randomized
-approximate-Cholesky preconditioner and PCG. It provides parallel CPU setup and
-solve with OpenMP, plus an optional CUDA-resident solve.
+Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
+and SDDM systems. CPU setup and solve use OpenMP; CUDA provides an optional
+GPU-resident solve. C++, Python and Octave/MATLAB interfaces are included.
 
-```cpp
-#include "apxchol.h"
+## Build and run
 
-auto result = apxchol::solve(L, b, {.tol = 1e-8});
-```
-
-Python and Octave/MATLAB bindings are included. Developed at ETH Zürich;
-questions and use cases are welcome at <apxchol@inf.ethz.ch>.
-
-## Quick start
-
-The core library needs CMake, a C++23 compiler, and Eigen. CMake fetches Eigen
-when it is not installed.
+Requires CMake, a C++23 compiler, and Eigen (fetched if absent).
 
 ```bash
 git clone https://github.com/AlgOptGroup/apxchol
 cd apxchol
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
+cmake --build build -j6
 ctest --test-dir build --output-on-failure
-```
-
-The CLI requires either an explicit right-hand side or `--random-rhs`:
-
-```bash
 ./build/apxchol matrix.mtx --random-rhs --tol 1e-8
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-It detects an assembled Laplacian/SDDM operator versus a graph adjacency matrix
-from which it forms `L = D - A`, and reports the decision. Use `--input-kind` to
-override detection and `./build/apxchol --help` for all options.
+The CLI requires an explicit RHS or `--random-rhs`. It reports whether input
+is an assembled operator or adjacency matrix, forming `L = D - A` for the
+latter. `--input-kind` overrides detection; `--help` lists options.
 
-## Library interfaces
-
-For repeated C++ solves, factor once and reuse the workspace:
+## Interfaces
 
 ```cpp
-apxchol::cpu_solver solver(L);
+#include "apxchol.h"
+auto result = apxchol::solve(L, b, {.tol = 1e-8});
+
+apxchol::cpu_solver solver(L);       // factor once, solve many
 auto r1 = solver.solve(b1);
 auto r2 = solver.solve(b2, 1e-10, 1000);
-Eigen::VectorXd z = solver.apply(r);  // one preconditioner application
+Eigen::VectorXd z = solver.apply(r);
 ```
 
-`apxchol::apx_cholesky` also implements Eigen's preconditioner interface.
-Singular Laplacians are solved in their compatible subspace; full-rank SDDM
-operators retain the full factor. Public headers live under
-[include/apxchol](include/apxchol/), with options documented in
-[factor_options.h](include/apxchol/solver/factor_options.h).
-
-Python:
+`apxchol::apx_cholesky` provides Eigen's preconditioner interface. Singular
+Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
 ```bash
-pip install apxchol
-# or, from a checkout:
-pip install -e python
+pip install apxchol                 # or: pip install -e python
 ```
 
 ```python
-import apxchol
-
 solver = apxchol.factorize(A)
 result = solver.solve(b, rtol=1e-8)
 ```
 
-Python expects an assembled operator; use `apxchol.laplacian(A)` for an
-adjacency matrix. See [python/README.md](python/README.md).
-
-Octave and MATLAB:
-
-```bash
-./octave/build.sh
-```
-
-```matlab
-s = apxchol_solver(A);
-result = s.solve(b);
-```
-
-Use `apxchol_laplacian(Adj)` for adjacency input. The MATLAB MEX build and usage
-are documented in [octave/README.md](octave/README.md).
+Bindings expect assembled operators. Use `apxchol.laplacian(Adj)` in Python
+or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
+[Python](python/README.md) and [Octave/MATLAB](octave/README.md) guides.
 
 ## Configuration
 
-Common CMake options:
-
-| option | purpose |
+| CMake option | Purpose |
 |---|---|
-| `APXCHOL_USE_CUDA=ON` | CUDA triangular solve and GPU-resident PCG |
-| `APXCHOL_POOL_FP32=ON` | fp32 residual-pool weights; default on |
-| `APXCHOL_64BIT_EDGE_INDICES=ON` | widen factor and pool offsets |
-| `APXCHOL_64BIT_NODE_INDICES=ON` | widen vertex ids |
-| `APXCHOL_BUILD_TESTS=OFF` | skip unit tests |
-| `APXCHOL_BUILD_EXAMPLES=OFF` | skip examples |
+| `APXCHOL_USE_CUDA=ON` | Dataflow triangular solve and GPU PCG; core links only `cudart` |
+| `APXCHOL_POOL_FP32=OFF` | fp64 residual-pool weights instead of default fp32 |
+| `APXCHOL_64BIT_EDGE_INDICES=ON` | Wide factor/pool offsets |
+| `APXCHOL_64BIT_NODE_INDICES=ON` | Wide vertices and offsets |
 
-`cmake -LH build` lists every option. The default CUDA triangular solve is the
-project's persistent dataflow kernel; the core CUDA library links only
-`cudart`. The former cuSPARSE SpSV comparison backend and
-`APXCHOL_CUDA_WITH_CUSPARSE` build option have been removed.
+`cmake -LH build` lists build options. Algorithm defaults live in
+[factor_options.h](include/apxchol/solver/factor_options.h).
+`APXCHOL_SPTRSV_FP16=0|1` controls factor storage (GPU default on, CPU off).
+Setup remains CPU-based unless the experimental GPU block frontend is
+explicitly enabled with `APXCHOL_GPU_BLOCK_FRONTEND=on`.
 
-`APXCHOL_GPU_SPTRSV=dataflow` remains accepted for compatibility; other
-nonempty values, including `cusparse`, `auto` and `levelset`, fail at setup.
-`APXCHOL_SPTRSV_FP16=0|1` controls factor storage (unset = on for GPU, off
-for CPU). The deprecated GPU-only alias is no longer read.
+## Further reading
 
-Factor setup uses the CPU unless `APXCHOL_GPU_BLOCK_FRONTEND=1|on|force`
-explicitly enables the GPU block frontend. `0|off|false` disables it;
-`auto` and other invalid values fail. An enabled frontend requires the
-standard tree sampler, cooperative launch support and sufficient GPU memory.
+- [Daint results](benchmarks/daint/) and [benchmark protocol](benchmarks/README.md).
+  Laptop measurements are [historical](benchmarks/archive/).
+- [Examples](examples/), [extending the algorithm](docs/extending.md),
+  [contributing](CONTRIBUTING.md), [implementation history](docs/implementation-history.md).
+- Kyng–Sachdeva ([2016](https://arxiv.org/abs/1605.02353)),
+  Gao–Kyng–Spielman ([2023](https://arxiv.org/abs/2303.00709)),
+  Baumann–Kyng ([2024](https://dl.acm.org/doi/10.1145/3626183.3659987)).
 
-The standalone `APXCHOL_RESIDUAL_COALESCE` policy has been removed.
-`APXCHOL_RESIDUAL_SPARSIFY` keeps its existing behavior and still coalesces
-edges internally. Indexed-pool factors may change where the former
-standalone coalescing gate ran.
-
-Runtime controls and their numerical contracts are documented beside their
-implementations. The most common are `APXCHOL_SPTRSV_FP16`,
-`APXCHOL_FACTOR_DROP`, and `APXCHOL_CPU_SPTRSV`.
-
-## Documentation and benchmarks
-
-- [Extending the algorithm](docs/extending.md): custom elimination rules,
-  partitioners, and orderings.
-- [Examples](examples/): small integration examples.
-- [Benchmark protocol](benchmarks/README.md): fairness and timing definitions.
-- [CSCS Daint benchmarks](benchmarks/daint/): current performance results and direct figure links.
-  Retired laptop results are preserved in the [benchmark archive](benchmarks/archive/).
-- [Contributing](CONTRIBUTING.md), [license](LICENSE), and
-  [citation metadata](CITATION.cff).
-
-## References
-
-- Kyng and Sachdeva, *Approximate Gaussian Elimination for Laplacians*, 2016
-  ([arXiv](https://arxiv.org/abs/1605.02353)).
-- Gao, Kyng, and Spielman, *Robust and Practical Solution of Laplacian
-  Equations by Approximate Elimination*, 2023
-  ([arXiv](https://arxiv.org/abs/2303.00709)).
-- Baumann and Kyng, *A Framework for Parallelizing Approximate Gaussian
-  Elimination*, SPAA 2024
-  ([DOI](https://dl.acm.org/doi/10.1145/3626183.3659987)).
+Developed at ETH Zürich. Contact: <apxchol@inf.ethz.ch>.
+[License](LICENSE) · [Citation](CITATION.cff).

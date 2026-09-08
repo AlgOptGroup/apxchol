@@ -1,10 +1,13 @@
-# Daint T=72 fair-solver campaign
+# Historical Daint T72 campaign: 2b755997
 
-> **HISTORICAL SNAPSHOT · source 2b755997.** This reproduces a pinned campaign; it is not a current-main benchmark view.
+750/750 planned cells: 670 complete, 7 nonconverged, 35 timeout, 7 failed, 31 n/a.
+Maximum completed true relative residual 9.936114e-9. Three full repetitions per
+cell; table times are medians. Historical scope omitted ParAC CPU and CMG;
+[current coverage](coverage.json) differs.
 
-The combined campaign contains **750/750 planned cells** over 27 matrices: **670 complete**, **7 not converged**, **35 timeout**, **7 failed**, **31 n/a**. Every completed cell has true relative residual at most `9.936114e-09`.
-
-Times are medians of three full setup+solve repetitions at T=72. The CPU/GPU ratio below is CPU time divided by GPU time, so values above one favor the GPU.
+CPU/GPU ratios are CPU divided by GPU. Competitor ratios are competitor divided
+by apxchol-default. Both use paired completed cells; excluded failures/timeouts
+remain in the outcome table. Ratios above 1 favor GPU/apxchol respectively.
 
 ## CPU/GPU crossover on paired completed cells
 
@@ -15,11 +18,7 @@ Times are medians of three full setup+solve repetitions at T=72. The CPU/GPU rat
 | BoomerAMG | 23 | 0.560× | 5.434× | 0.667× |
 | BoomerAMG/cut | 25 | 0.522× | 7.558× | 0.750× |
 
-The GPU frequently accelerates the iterative solve but pays a larger setup interval (device preparation, factor upload, and GPU triangular-solve setup). For the apxchol default it wins total time on the largest 2D grid and the two largest social graphs, while the 72-core CPU path remains faster on most smaller inputs.
-
 ## Headline total-time comparison
-
-Ratios are competitor/apxchol-default on paired completed cells; above one favors apxchol. Timeouts and failures are excluded from the geometric mean, but remain visible in the heatmaps and outcome table.
 
 | device | competitor | pairs | competitor/apxchol | apxchol wins | competitor wins |
 |---|---|---:|---:|---:|---:|
@@ -91,5 +90,3 @@ Ratios are competitor/apxchol-default on paired completed cells; above one favor
 | thermal2 | GPU | `parac_physics` | not_converged | true residual 0.747 > 1e-8 |
 
 ## Coverage boundary
-
-Daint's ARM64 environment supports the 13 CPU apxchol configurations, AMGCL, BoomerAMG default/cut, portable-PCG RCHOL/pRCHOL, AC/AC2 under native ARM64 Julia, three GPU apxchol configurations, AMGCL-CUDA, genuine Hypre-CUDA default/cut, and ParAC's CUDA graph/physics drivers. The existing main sweep intentionally omits six fwd_star/bstr Orkut ablations. ParAC-CPU remains excluded because its upstream driver requires oneMKL; CMG remains excluded because native MATLAB for Linux is x86-64 and Octave timing is not the same series.

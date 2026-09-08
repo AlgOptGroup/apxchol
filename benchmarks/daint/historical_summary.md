@@ -1,8 +1,14 @@
-# Daint campaign summary
+# Historical Daint setup study
 
-> **HISTORICAL SNAPSHOT · checksummed Daint setup campaign.** This renderer consumes committed extracts from fixed, checksummed raw-log campaigns rather than the current unified cell store.
+Fixed checksummed extracts, not current-main performance. Times are milliseconds;
+scaling uses three-repeat medians. The 189 scaling records run one iteration,
+not converged solves. Historical A/B ratios divide current by the geometric mean
+of old-before/old-after; below 1 is faster. Iteration deltas sum 27 matrix/seed cases.
 
-Both campaigns used one Daint node split into four NUMA-local 72-core ranks. Times are milliseconds; scaling cells are medians of three repetitions. Historical ratios bracket each current run by two executions of the old binary.
+Partition includes degree pruning, selection and collection. The tables retain
+historical structural probes, not a current optimization recommendation.
+All 54 historical-comparison cells converged at true residual≤1e-8; 207 scaling/probe
+and 162 historical records had campaign completion/checksum receipts.
 
 ## Cumulative July-27 to current comparison
 
@@ -11,11 +17,7 @@ Both campaigns used one Daint node split into four NUMA-local 72-core ranks. Tim
 | 16 | 0.5384 | 0.3008 | 0.4250 | 0.8351 | 0.9788 | -43 |
 | 72 | 0.4836 | 0.1935 | 0.3315 | 0.8070 | 0.9785 | -34 |
 
-Ratios are current divided by the geometric mean of the old-before/old-after bracket; below one is better. The iteration delta is summed over 27 matrix/seed cells.
-
-## Current setup scaling
-
-`partition phase` includes degree pruning, IS selection, and collection; it is not the pure selector timing.
+## Historical setup scaling
 
 | threads | setup | partition phase | prune | IS selector | elimination | SpTRSV setup |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -26,8 +28,6 @@ Ratios are current divided by the geometric mean of the old-before/old-after bra
 | 16 | 4.032x | 6.296x | 11.226x | 2.218x | 2.862x | 2.309x |
 | 36 | 4.934x | 8.404x | 15.633x | 3.040x | 3.165x | 2.859x |
 | 72 | 5.387x | 9.649x | 18.022x | 3.732x | 3.224x | 3.272x |
-
-At T=72 the whole partition phase reaches 9.649x because pruning reaches 18.022x; pure IS selection reaches only 3.732x. The selector is nevertheless a median 8.1% of setup, versus 45.7% for elimination. Elimination is 41.9%-60.0% of setup on all nine matrices and its 3.224x geomean speedup is the main remaining scaling limit.
 
 ## Structural probe verdict
 
@@ -51,7 +51,3 @@ At T=72 the whole partition phase reaches 9.649x because pruning reaches 18.022x
 | iter0040 | 72 | 0.078% | 0.000% | 0.9652 |
 | kron_g500-logn16 | 16 | 47.521% | 0.000% | 0.9556 |
 | kron_g500-logn16 | 72 | 47.237% | 0.000% | 0.9475 |
-
-A general intra-pivot team is not justified: eight matrices keep parallel-round LPT efficiency above 0.947, while only Orkut puts substantial work (about 14.6%) in rounds below 80% efficiency. Candidate-induced components are balanced in early rounds, then often collapse into one giant component. The next region prototype should eliminate balanced small components and route an oversized component through the existing MIS selector; this has IS and full-region elimination as limiting cases.
-
-All 54 historical-comparison cells converged to true relative residual at most 1e-8. All 207 scaling/probe records and all 162 historical records were covered by their campaign completion markers and downloaded checksum manifests.

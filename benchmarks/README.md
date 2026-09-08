@@ -1,251 +1,88 @@
-# apxchol benchmarks
+# Benchmarks
 
-This standalone CMake project compares `apxchol` with randomized-Cholesky and
-multigrid solvers on generated grids, SuiteSparse matrices, and an LP-IPM
-sequence.
+[Daint results](daint/) are the current performance reference. [Laptop results](archive/)
+are retired. Raw campaign stores are private; committed CSVs and provenance identify
+selected measurements. Local `results/cells/` is not automatically the published source.
 
-Daint is the primary performance source. Laptop campaigns are retired because
-their local environment is unstable; the laptop snapshot remains historical
-evidence. Results are machine-specific snapshots, not a live leaderboard:
+## Measurement contract
 
-| snapshot | useful views | data |
-|---|---|---|
-| **Primary:** CSCS Daint GH200, 72-core Grace + Hopper, T=72 | [Daint index](daint/) and [coverage](daint/coverage.json) | [CSV](daint/results.csv) |
+- Inputs declare graph adjacency (`L=D-A`) or an assembled operator, and Laplacian
+  or SDDM class. Preserve the original operator/RHS and component-wise nullspace.
+- Accept only when **every retained true residual** `||b-Ax||/||b|| ≤ 1e-8`.
+  A recurrence residual is insufficient. Keep shifted CMG series separately labelled.
+- Select one coherent median-total repetition after explicit warmups; never select
+  timing fields independently or minimize across configurations.
+- Setup includes required conversion, grounding, ordering, uploads, factor/hierarchy
+  construction and triangular analysis. Solve includes RHS work, iterations,
+  transfers and returning the solution. Total is setup + solve.
+- Common parsing/assembly and independent grading are excluded. Process-wide CUDA
+  initialization is separately reported; solver-specific allocations/module loading
+  remain charged. Hypre initialization is charged once per row.
+- Whole-cell deadlines may cover calibration and all repetitions: a timeout is **not**
+  a lower bound on one solve. Preserve failure, nonconvergence, timeout, unsupported,
+  unattempted and missing statuses. Unknown memory is not zero.
+- Pin CPU affinity; record requested/effective threads, source/binary hashes,
+  compiler/runtime, warmups and retained receipts. Never poll `nvidia-smi` inside
+  timed C++ or ParAC calls.
 
-The [archive](archive/) preserves the retired laptop snapshot and its legacy cell store.
-It is excluded from current comparisons.
+## Solvers
 
-CPU scaling on Daint now uses source `1a782c8d` across all 12 matrices and seven
-thread counts; [setup and converged-solve figures](daint/#cpu-setup-scaling)
-include Orkut’s same-node T1 references. The main view presents three representative
-matrices with absolute setup/solve times and log-log speedups; full 12-matrix
-plots remain linked as drilldown. Competitor curves require their own matched
-thread sweep and are not inferred from headline T=72 cells. The existing headline tables and
-historical source-ea01 GPU scaling were not rerun by that CPU campaign.
+Hypre/BoomerAMG and AMGCL have CPU/CUDA series; AC/AC2 are Julia references.
+RCHOL/pRCHOL retain upstream factors with labelled MKL or portable PCG.
+[ParAC Graph/Physics](patches/parac/) currently charges preparation that also
+includes avoidable interchange/audit work. Its published algorithm-performance
+comparison is provisional pending adapter repair and fresh measurement; do not
+subtract that overhead retrospectively. The bundled CPU build needs MKL;
+Daint’s separately labelled portable implementation has a serial solve. Positive stored Physics off-diagonals are unsupported. Failed/capped
+calibration must not launch fallback-tolerance retained runs.
 
-The Daint [coverage](daint/coverage.json) and [CPU scaling provenance](daint/cpu_scaling_provenance.json)
-identify the selected campaign evidence behind the committed presentation extracts.
-Raw campaign stores are private; an arbitrary local `results/cells/` directory is
-not the source of the published snapshot. Do not compare absolute times across machines.
-
-## Fairness contract
-
-### Inputs and grading
-
-Every registry entry declares whether the Matrix Market file is a `graph` or an
-assembled `operator`, and whether the resulting system is `laplacian` or
-full-rank `sddm`. A graph is assembled as `L = D - A`; the benchmark binary
-checks these declarations instead of guessing from stored values.
-
-Singular Laplacians are solved on the original operator. Each solver removes the
-component-wise constant null space through its supported route: native
-rank-aware solving, safe Dirichlet pins, or component-wise decomposition. For
-the original-operator series, the stored grade is independently recomputed as
-
-```text
-||b - A x||_2 / ||b||_2
-```
-
-against the original assembled operator. `complete` means this value is at most
-`1e-8`; a solver's recurrence residual is diagnostic only. CMG cells using the
-older lightly regularized operator are labelled and must not be merged with the
-original-operator series. ParAC's tolerance translation and audited driver
-changes are documented in [patches/parac/README.md](patches/parac/README.md).
-
-### Timing and accounting
-
-Current campaign repetition contract: the C++ driver accepts `--warmup N`
-(default 0) separately from `--repeat R` retained measurements. It emits every
-warmup and retained timing as `BENCH_REPEAT`, selects one coherent median-total
-retained result, and exports the maximum retained true residual. The common
-parser grades every retained repetition through that maximum. CUDA context
-initialization remains outside these solver intervals and is stored separately.
-`thread_scaling.py` accepts `--thread-counts`, `--matrices`, `--series`, `--device`,
-`--warmup`, and `--timeout`; declared scope is validated before rendering. Scope selection does not run a new benchmark during rendering.
-
-GPU peak-memory polling is excluded from timed C++ and ParAC driver calls,
-including calibration: frequent `nvidia-smi` queries were measured to perturb
-GPU setup on Daint. Peak-memory diagnostics must run separately. Missing VRAM
-measurements remain unknown, never zero.
-
-Common file parsing and operator assembly happen before solver timers.
-
-- `setup_s` includes every solver-required grounding, conversion, reordering,
-  upload, hierarchy or factor construction, and triangular-solve analysis.
-- `solve_s` includes per-RHS preparation, iteration, device transfers, and
-  returning the solution in the caller's ordering.
-- `total_s = setup_s + solve_s`. Independent residual grading and cleanup are
-  excluded.
-- Process-wide CUDA primary-context creation is prewarmed once and reported as
-  `cuda_init`, outside solver ranking. Solver-specific module loading, handles,
-  allocations, preparation, and transfers remain charged to that solver.
-- Hypre's process-wide initialization is charged once per reported Hypre row.
-  ParAC reports one real median-total repetition after reusable Julia load/JIT
-  warm-up; fields are not medianed independently.
-- A complete logical-cell deadline can include calibration and all requested
-  repetitions. Persist that scope: time spent on earlier repetitions is not a
-  lower bound on one setup+solve. Native CMG tags such deadlines `logical_cell`,
-  so charts show `T` without a numerical single-solve bound. Never fabricate a
-  completed time from a timeout.
-
-### Series and status
-
-One plotted row is one declared `(solver, configuration, device)` tuple. No
-headline series takes a per-matrix minimum over selectors, seeds, or toolchains;
-apxchol's default and its ablations are shown separately.
-
-`complete`, `not_converged`, `timeout`, `failed`, `oom`, and `n/a` remain
-distinct. CPU RSS and GPU VRAM are separate metrics. Each cell records source,
-compiler/runtime, thread count, repetitions, affinity, and solver-specific
-provenance. Renderers reject ambiguous series and stale cells invalidated by
-changes to the operator, RHS, timing, convergence, or solver semantics.
-
-Published CPU timing uses explicit rank-local OpenMP pinning. Because the driver
-may contain both LLVM `libomp` and GNU `libgomp`, use `sweep_fair.py`; the binary
-rejects a bound multi-thread run that enters `main()` with too few physical
-cores.
-
-Run the series audit with:
-
-```bash
-PYTHONPATH=benchmarks python3 benchmarks/dev/audit_series_rule.py
-```
-
-## Compared solvers
-
-| series | implementation |
-|---|---|
-| `apxchol/bg` | this repository's declared default; other selectors/storage are ablations |
-| BoomerAMG | Hypre PCG with BoomerAMG, CPU and CUDA |
-| AMGCL | smoothed-aggregation AMG with CG, CPU and CUDA |
-| RCHOL / pRCHOL | upstream factors; MKL PCG on x86 or explicitly labelled portable PCG |
-| ParAC graph / physics | upstream CPU/CUDA drivers plus the audited patch stack |
-| AC / AC2 | Laplacians.jl reference implementation and oversampled variant |
-| CMG | canonical MATLAB `cmg-solver`; cross-language wall time is caveated |
-| `cmg_packed/original-operator` | private generated CMG packed port; serial native core, unshifted operator |
-
-ParAC CPU requires MKL. On ARM64, RCHOL/pRCHOL use the labelled portable path,
-AC/AC2 use the official Julia build. Canonical native Linux MATLAB is x86-64;
-the separately labelled CMG packed port runs on ARM without a MATLAB runtime.
-The snapshot pages state the exact historical coverage boundary.
-
-To opt into native CMG, build `benchmarks/cmg/native` with
-`CMG_GENERATED_DIR` pointing to the private recovered generated source,
-`FMM_SOURCE_DIR` to an existing fast_matrix_market checkout, and optionally
-`EIGEN_INCLUDE_DIR` to bundled Eigen headers. Set `APXCHOL_CMG_NATIVE_BIN` to
-the resulting absolute executable path. The ordinary CMG sweep step then
-writes `cmg_packed/original-operator` cells through `cmg_native_runner.py`.
-Generated source is deliberately not tracked or distributed with this adapter.
-
-The native series uses compatible `b=A*g` with NumPy PCG64 seed 42, normalized
-to unit norm, and records exact input/operator/RHS hashes. It applies no shift
-or pin. This shares the original-operator grading contract, but is not a
-bit-identical RHS to another language's RNG and is not canonical MATLAB CMG:
-the packed port has a documented valid terminal hierarchy where canonical
-shallow_water1 setup errors at `H{0}`. Its generated core is serial; requested
-CPU affinity and effective thread count 1 are recorded separately. Every
-returned solution is independently checked with SciPy before acceptance.
-Setup includes the one-based CSC adapter and hierarchy construction. The
-packed PCG call includes hierarchy destruction in solve time; it cannot be
-separated without changing generated implementation. Calibration and all
-retained runs share one persisted per-cell timeout. All retained repetitions
-must pass, and timing fields come from one median-total repetition.
+Canonical MATLAB CMG is unavailable on ARM64. The separate `cmg_packed` port is
+serial, uses private generated source, and is not canonical MATLAB CMG: even
+terminal hierarchy behavior can differ. Its default normalized `b=A*g` uses NumPy
+PCG64 seed 42; an explicit `rhs_path` avoids cross-language RNG differences.
+Original-operator grading is independent. Setup charges CSC conversion; solve
+includes generated hierarchy destruction. Build `benchmarks/cmg/native` with
+`CMG_GENERATED_DIR`, `FMM_SOURCE_DIR`, optionally `EIGEN_INCLUDE_DIR`; set
+`APXCHOL_CMG_NATIVE_BIN`. Do not distribute generated proprietary sources.
 
 ## Build and run
 
-Use `render_snapshot.py --cells STORE --out OUTPUT --threads T --platform NAME`
-to render an explicitly selected Daint cell store into CSV, README and figures.
-The common driver supports `--dump-rhs rhs.mtx` in a separate invocation from
-`--dump-mtx operator.mtx`; both use the declared operator and the RHS exporter
-calls the same component-aware generator as the measured solvers. Native CMG
-manifests may specify `rhs_path` to consume that vector without alteration.
-Native CMG's combined-chart row is `CMG (packed, serial)`.
-
-The root library and benchmark suite use separate build trees:
-
-```bash
+```sh
 cmake -S benchmarks -B benchmarks/build -DCMAKE_BUILD_TYPE=Release
-cmake --build benchmarks/build -j"$(nproc)" --target benchmark
-
-benchmarks/build/benchmark --graph grid --n 2000 \
-  --solver apxchol_v1,hypre_boomeramg,amgcl \
-  --threads 16 --tol 1e-8 --repeat 3 --csv
+cmake --build benchmarks/build -j6 --target benchmark
+python3 benchmarks/sweep_fair.py --threads 72 --store results/cells
 ```
 
-The direct command is suitable for functional checks. Use the resume-safe,
-affinity-controlled runner for timing:
+For CUDA, use a separate build directory and add `-DAPXCHOL_USE_CUDA=ON
+-DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON`; sweep with `--device gpu`.
+Optional solvers require their runtimes. Julia dependencies:
 
-```bash
+```sh
 julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
-python3 benchmarks/sweep_fair.py
-PYTHONPATH=benchmarks python3 benchmarks/fair_charts.py --out results/plots
-PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out results/plots/figures
 ```
 
-CUDA build and sweep:
+Runner controls include `--only`, `--threads`, `--repeat`, `--store`.
+Machine-local paths belong in ignored `paths_local.py`/`paths_local.cmake`;
+[runner_common.py](runner_common.py) defines defaults. `--dump-mtx` and
+`--dump-rhs` export the shared operator/RHS in separate driver invocations.
 
-```bash
-cmake -S benchmarks -B benchmarks/build-cuda -DCMAKE_BUILD_TYPE=Release \
-  -DAPXCHOL_USE_CUDA=ON -DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON
-cmake --build benchmarks/build-cuda -j"$(nproc)" --target benchmark
-python3 benchmarks/sweep_fair.py --device gpu
-PYTHONPATH=benchmarks python3 benchmarks/gpu_charts.py --out results/plots/figures
-PYTHONPATH=benchmarks python3 benchmarks/combined_charts.py --out results/plots/figures
-```
+## Render selected results
 
-Useful runner controls are `--only`, `--threads`, `--repeat`, and `--store`.
-External build and cache paths can be supplied through environment variables or
-the gitignored `paths_local.py` / `paths_local.cmake`; authoritative names are in
-[runner_common.py](runner_common.py) and [parac_runner.py](parac_runner.py).
-CMake fetches Hypre, AMGCL, RCHOL, Eigen, and test helpers when they are not
-provided; optional solvers remain disabled when their required runtime is
-unavailable.
+Rendering does not run solvers. Defaults write ignored `results/plots` previews.
+Publication requires an explicitly selected, audited store:
 
-To inspect semantic invalidation without deleting anything:
-
-```bash
-python3 benchmarks/stale_cells.py
-```
-
-`sweep_fair.py` uses the same stale predicate: reusable terminal cells skip, and
-invalidated terminal cells rerun while their old JSON remains in place until a
-replacement is ready. `stale_cells.py --delete` is optional cleanup; preserve
-the selected private cell store before deleting evidence, since new raw cells
-are not tracked in Git. Add a stale-cell rule whenever a change alters the operator, RHS,
-timing boundary, convergence semantics, or solver result.
-
-
-### ParAC input and calibration eligibility
-
-Both CPU and GPU physics routes reject any strictly positive stored
-MatrixMarket off-diagonal before preprocessing or cache lookup: ParAC's
-`-abs(weight)` conversion would change that original operator. Such cells are
-`n/a` with a count and reason; malformed inputs are `failed`. Graph mode keeps
-its intended adjacency-to-Laplacian normalization.
-
-A CPU probe at its iteration cap, with an explicit failed stopping flag, a
-nonzero exit, or missing/nonfinite calibration statistics produces a failed
-cell and no retained runs for that probe. The GPU probe also rejects its
-upstream 300-iteration cap and invalid statistics; upstream provides no
-trustworthy recurrence-stop flag, so below-cap iteration count is not a proof
-of recurrence convergence. Every retained CPU, component-aggregated CPU and
-GPU true residual must pass the requested tolerance. Timing fields still
-come from one real median-total repetition; `repeat_rel_res` preserves the
-other residuals. Calibration is an estimate, not a convergence guarantee.
-
-### Compact thread-scaling presentation
-
-Use an audited scaling store with an explicit scope; this command only renders
-existing cells and writes a separate extract, preserving the full-study CSV.
-Add competitor series only when their declared thread denominators are present.
-
-```bash
+```sh
+PYTHONPATH=benchmarks python3 benchmarks/render_snapshot.py \
+  --cells STORE --out OUTPUT --threads 72 --platform Daint
 PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compact \
-  --store /path/to/audited/scaling-cells --matrices grid_2000,iter0040,as-Skitter \
-  --series 'apxchol bg+tree' --thread-counts 1,2,4,8,16,36,72 --out results/plots
+  --store SCALING_STORE --matrices grid_2000,iter0040,as-Skitter \
+  --series 'apxchol bg+tree,AMGCL,BoomerAMG,ParAC' \
+  --thread-counts 1,2,4,8,16,36,72 --out results/plots
 ```
 
-Compact views share a logarithmic seconds axis across matrices and use log-log
-speedups with an ideal line. They emphasize multiplicative differences; exact
-absolute costs remain in the CSV. Non-complete cells stay in the denominator
-and appear as gaps rather than interpolated timings.
+Compact plots show absolute times and log-log speedups; no complete T1 means no
+speedup. Full-study extracts remain separate. `stale_cells.py` checks semantic
+invalidation without deleting evidence; renderers reject stale/ambiguous cells.
+Use `benchmarks/dev/audit_series_rule.py` for the declared-series audit.
+
+[Earlier protocol detail](https://github.com/AlgOptGroup/apxchol/blob/1a526f25aec8829e8a9217b558ac2290a3840ae0/benchmarks/README.md)
