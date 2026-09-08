@@ -469,57 +469,64 @@
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 1,
-      "status": "unattempted",
-      "cell_sha256": "",
-      "presentation_only": true
+      "status": "complete",
+      "cell_sha256": "aac25bcd8fc65c8b46e1b96911bd8cf214230aa0a1e80fcee4ab928d1eca964e",
+      "presentation_only": false,
+      "job_id": "4622020"
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 2,
-      "status": "unattempted",
-      "cell_sha256": "",
-      "presentation_only": true
+      "status": "complete",
+      "cell_sha256": "899cd2b95919ea4610a503e638517ed08b3d338d6dad7bfe9086e03d2bdb1e9b",
+      "presentation_only": false,
+      "job_id": "4622020"
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 4,
-      "status": "unattempted",
-      "cell_sha256": "",
-      "presentation_only": true
+      "status": "complete",
+      "cell_sha256": "359c219f6a8b5bd2fdf5dc71e56fe3fa01e2a9f4a642b918651fa3c6ff005c3f",
+      "presentation_only": false,
+      "job_id": "4622020"
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 8,
-      "status": "unattempted",
-      "cell_sha256": "",
-      "presentation_only": true
+      "status": "complete",
+      "cell_sha256": "9bd2ad3680e84cc6be5d943ea619694478e469501ecb4bc71b0e3975cef24122",
+      "presentation_only": false,
+      "job_id": "4622020"
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 16,
-      "status": "unattempted",
-      "cell_sha256": "",
-      "presentation_only": true
+      "status": "complete",
+      "cell_sha256": "bd6ed67c8d736ece0603a2f49c656ed3a2b845475a9b05895122074b5055e918",
+      "presentation_only": false,
+      "job_id": "4622020"
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 36,
-      "status": "unattempted",
-      "cell_sha256": "",
-      "presentation_only": true
+      "status": "complete",
+      "cell_sha256": "4de14f494490d6e52c7da97f87dd58af44d10e185c982ad54c72d8ca7a60bd45",
+      "presentation_only": false,
+      "job_id": "4622020"
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 72,
-      "status": "unattempted",
-      "cell_sha256": "",
-      "presentation_only": true
+      "status": "complete",
+      "cell_sha256": "886bc5618d4e4202c966e39742c3d013d098bafc1fc68b2645aa6457d59ab86f",
+      "presentation_only": false,
+      "job_id": "4622020"
     }
   ],
   "notes": [
@@ -527,6 +534,143 @@
     "Ours and competitors are separate campaigns; curves use per-solver same-campaign T1 references.",
     "ParAC Graph uses portable-cpp serial solve; requested threads apply to native factorization; serial preparation is charged at every T.",
     "Whole-cell timeouts are not per-solve lower bounds.",
-    "Unattempted placeholders contain no timing or binary receipt; their planned source is not evidence of execution."
-  ]
+    "Unattempted placeholders contain no timing or binary receipt; their planned source is not evidence of execution.",
+    "The original 4619591 verdict and63-cell counts above are preserved. Current selection replaces only its seven unattempted Skitter ParAC placeholders with the matched4622020 follow-up curve."
+  ],
+  "current_dispositions": {
+    "complete": 78,
+    "timeout": 2,
+    "unattempted": 4
+  },
+  "followup": {
+    "job_id": "4622020",
+    "planned": 7,
+    "complete": 7,
+    "reason": "Only previously unattempted Skitter ParAC points; all seven threads share the fresh follow-up campaign.",
+    "audit_sha256": "aee57bc99ebd162bf90f6e197af50da0952266733e4ef3a5af8ff9c1be404e6c",
+    "series_sha256": "0d71ed3351afc4649cfff239ffbeb22c6415417741e92a971c724730be43383f",
+    "original_dispositions": [
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 1,
+        "status": "unattempted",
+        "cell_sha256": "",
+        "presentation_only": true
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 2,
+        "status": "unattempted",
+        "cell_sha256": "",
+        "presentation_only": true
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 4,
+        "status": "unattempted",
+        "cell_sha256": "",
+        "presentation_only": true
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 8,
+        "status": "unattempted",
+        "cell_sha256": "",
+        "presentation_only": true
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 16,
+        "status": "unattempted",
+        "cell_sha256": "",
+        "presentation_only": true
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 36,
+        "status": "unattempted",
+        "cell_sha256": "",
+        "presentation_only": true
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 72,
+        "status": "unattempted",
+        "cell_sha256": "",
+        "presentation_only": true
+      }
+    ],
+    "selected_cells": [
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 1,
+        "status": "complete",
+        "cell_sha256": "aac25bcd8fc65c8b46e1b96911bd8cf214230aa0a1e80fcee4ab928d1eca964e",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 2,
+        "status": "complete",
+        "cell_sha256": "899cd2b95919ea4610a503e638517ed08b3d338d6dad7bfe9086e03d2bdb1e9b",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 4,
+        "status": "complete",
+        "cell_sha256": "359c219f6a8b5bd2fdf5dc71e56fe3fa01e2a9f4a642b918651fa3c6ff005c3f",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 8,
+        "status": "complete",
+        "cell_sha256": "9bd2ad3680e84cc6be5d943ea619694478e469501ecb4bc71b0e3975cef24122",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 16,
+        "status": "complete",
+        "cell_sha256": "bd6ed67c8d736ece0603a2f49c656ed3a2b845475a9b05895122074b5055e918",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 36,
+        "status": "complete",
+        "cell_sha256": "4de14f494490d6e52c7da97f87dd58af44d10e185c982ad54c72d8ca7a60bd45",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 72,
+        "status": "complete",
+        "cell_sha256": "886bc5618d4e4202c966e39742c3d013d098bafc1fc68b2645aa6457d59ab86f",
+        "presentation_only": false,
+        "job_id": "4622020"
+      }
+    ]
+  }
 }

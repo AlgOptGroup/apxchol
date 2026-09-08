@@ -414,8 +414,8 @@ def charts(out=f"{ROOT}/results/plots", compact=False):
                 missing = sum(r["status"] != "complete" for r in recs
                               if r["cell"]["matrix_id"] == mid)
                 if missing:
-                    ax.text(.98, .02, f"{missing} non-complete cells; gaps retained",
-                            transform=ax.transAxes, ha="right", va="bottom", fontsize=8)
+                    ax.set_title(ax.get_title() + f"\n{missing} non-complete cells; gaps retained",
+                                 fontsize=10)
             ax.grid(True, alpha=0.3)
         # one global legend (union across panels) so no line is missing from it
         hl = {}

@@ -43,7 +43,7 @@ Status counts: complete: 426, failed: 14, n/a: 6, not_converged: 7, timeout: 6.
 
 ## CPU setup scaling
 
-apxchol source `1a782c8d` (4619429); representative competitors: AMGCL/Hypre `ea01e2ff` and ParAC adapter `8827024f` (4619591).
+apxchol source `1a782c8d` (4619429); representative competitors: AMGCL/Hypre `ea01e2ff` and ParAC adapter `8827024f` (4619591; Skitter follow-up 4622020).
 
 [84 measured cells](thread_scaling.csv) · [Baseline and iteration diagnostics](cpu_scaling_diagnostics.csv) · [Campaign provenance and controls](cpu_scaling_provenance.json)
 
@@ -51,13 +51,14 @@ The 12 matrices cover T=1,2,4,8,16,36,72, one warmup and three retained repetiti
 
 The main view uses three representative matrices: a four-million-row grid,
 LP-IPM `iter0040`, and the 1.70-million-row SuiteSparse `as-Skitter` graph.
-The representative denominator is **84 points: 71 complete, 2 whole-cell
-timeouts and 11 unattempted**. It combines 21 apxchol points with all 63 planned
-competitor dispositions. AMGCL, default Hypre and ParAC Graph each have full
-grid/IPM curves; Skitter has a complete AMGCL curve and one Hypre T=2 absolute
-point. Hypre Skitter has no complete T=1 baseline, so no speedup curve is drawn.
+The representative denominator is **84 points: 78 complete, 2 whole-cell
+timeouts and 4 unattempted**. It combines 21 apxchol points with all 63 planned
+competitor identities, with seven previously unattempted ParAC points supplied
+by the separate Skitter follow-up. AMGCL and ParAC Graph have complete curves
+on all three matrices; default Hypre has full grid/IPM curves and one Skitter
+T=2 absolute point. Hypre Skitter has no complete T=1 baseline, so no speedup curve is drawn.
 No historical endpoint is substituted. [Selection and audit provenance](representative_scaling_provenance.json)
-records both campaigns; this is not an interleaved comparison between solvers.
+records each campaign; this is not an interleaved comparison between solvers.
 
 Both axes are logarithmic. Equal spacing shows equal multiplicative changes;
 the dashed speedup line is ideal linear scaling. The shared seconds scale
@@ -74,7 +75,7 @@ retains the exact times.
 
 ## CPU converged-solve scaling
 
-apxchol source `1a782c8d` (4619429); representative competitors: AMGCL/Hypre `ea01e2ff` and ParAC adapter `8827024f` (4619591).
+apxchol source `1a782c8d` (4619429); representative competitors: AMGCL/Hypre `ea01e2ff` and ParAC adapter `8827024f` (4619591; Skitter follow-up 4622020).
 
 These are full solves at true relative residual ≤1e-8. Thread count changes the preconditioner and iteration count: Orkut’s same-node speedup is **21.15×**, with iterations changing 50→18. The diagnostics separate average time per iteration from full solve speedup. Factor fill was not measured and remains blank.
 
@@ -90,20 +91,25 @@ Absolute times at T=72 (seconds; each entry is **setup / solve**):
 |---|---:|---:|---:|---:|
 | grid_2000 | 0.144 / 0.182 | 0.305 / 0.103 | 1.596 / 0.410 | 28.613 / 3.905 |
 | iter0040 | 0.211 / 0.120 | 7.826 / 0.213 | 0.425 / 0.208 | 12.014 / 1.257 |
-| as-Skitter | 0.514 / 0.247 | 1.842 / 4.907 | unattempted | unattempted |
+| as-Skitter | 0.514 / 0.247 | 1.842 / 4.907 | unattempted | 62.893 / 1.580 |
 
 ParAC Graph uses the **portable-cpp serial solve**, not a parallel PCG backend.
 Requested T applies to native factorization. Fixed serial preparation is charged
-at every T, including cache reuse: 24.837 s on the grid and 10.452 s on IPM,
-about 87% of T=72 setup. The nearly flat curves therefore describe this portable
+at every T, including cache reuse: 24.837 s on the grid, 10.452 s on IPM
+and 58.097 s on Skitter—about 87%, 87% and 92% of T=72 setup respectively. The nearly flat curves therefore describe this portable
 implementation and its complete setup boundary; worker utilization was not traced.
 
 Hypre Skitter T=2 completed at **218.208 s setup / 4.712 s solve**. T=1 exhausted
 its 900 s whole-cell budget after three converged partial repeats; T=4 received
 only 84 s of remaining shard budget. Neither timeout is a numerical convergence
-failure or a lower bound on one solve. Hypre T=8/16/36/72 and all seven Skitter
-ParAC points were unattempted. The original campaign verdict remains FAILED85;
-a follow-up is being prepared only for the never-started ParAC curve.
+failure or a lower bound on one solve. Hypre T=8/16/36/72 remain unattempted.
+The original 4619591 campaign verdict remains FAILED85 (50 complete, 2 timeout,
+11 unattempted). Follow-up 4622020 completed only the seven never-started ParAC
+points on one node, using its own fresh T=1 reference. All 28 warmup/retained
+solutions passed original-system grading; seven calibration probes are separate.
+Skitter ParAC setup changes 64.920→62.893 s (1.032×) and solve 1.501→1.580 s
+(0.950×), with 19→20 iterations. No Hypre retry or historical endpoint splicing
+was used.
 
 The grid Hypre solve downturn from **0.1495 s at T=36 to 0.4099 s at T=72** is
 retained. Its fresh T=72 solve is 24% slower than the old endpoint using the
