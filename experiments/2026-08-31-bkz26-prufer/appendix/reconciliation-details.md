@@ -20,7 +20,7 @@ A sampled update $X$ is the Laplacian of the emitted weighted graph. All methods
 
 | Name | Meaning in these experiments |
 |---|---|
-| **GKS** | Sort weights increasingly; source $i$ chooses one later parent $j$ with probability $a_j/S_i$, where $S_i=\sum_{j>i}a_j$, and emits conductance $a_i S_i/D$. Independent choices produce a connected $d-1$-edge tree. |
+| **GKS** | Sort weights increasingly; source $i$ chooses one later parent $j$ with probability $a_j/S_i$, where $S_i=\sum_{j\gt i}a_j$, and emits conductance $a_i S_i/D$. Independent choices produce a connected $d-1$-edge tree. |
 | **Weighted Prüfer / BKZ26** | Draw $d-2$ independent Prüfer symbols with probabilities $a_i/W$, decode the tree, and give selected edge $ij$ conductance $(W/D)a_i a_j/(a_i+a_j)$. |
 | **CAST-1** | The same one-copy weighted-Prüfer ideal law. Our CAST implementation uses an alias sampler; the original BKZ26 implementation used inverse-CDF lookup. Their mappings from seed to tree differ, but their intended distributions agree. |
 | **CAST-2** | Split each neighbor into two copies of weight $a_i/2$, draw **one tree on all $2d$ copies**, then contract copies. Discard loops and combine repeated terminal pairs. It is not an average of two independent CAST-1 trees. |
@@ -28,15 +28,15 @@ A sampled update $X$ is the Laplacian of the emitted weighted graph. All methods
 
 The same expansion/contraction idea can be applied to GKS: linearity preserves unbiasedness. It does not automatically improve variance. For two equal original terminals, ordinary GKS is exact; a recorded exact duplicated-GKS example produces conductance $1/4$ with probability $1/3$ or $5/8$ with probability $2/3$, preserving mean $1/2$ but adding variance $1/32$. CAST-2 is also distinct from public AC2's persistent multiedge split/merge mechanism.
 
-For Prüfer sampling, $\Pr(ij\text{ is selected})=(a_i+a_j)/W$, so the stated conductance is exactly $c_{ij}/\Pr(ij)$. The distinction from GKS is dependence and how selected edges are weighted, not unbiasedness or connectivity. Either sampler can change subsequent degrees, pivot priorities and residual weights.
+Writing $E$ for the sampled edge set, Prüfer sampling has $\Pr(ij\in E)=(a_i+a_j)/W$, so the stated conductance is exactly $c_{ij}/\Pr(ij\in E)$. The distinction from GKS is dependence and how selected edges are weighted, not unbiasedness or connectivity. Either sampler can change subsequent degrees, pivot priorities and residual weights.
 
 ## 2. What the local metric measures
 
 Define
 
 $$
-T=\frac WD\operatorname{diag}(a_i),\qquad R=T^{-1/2},\qquad
-J=\mathbb E\|R(X-C)R\|_F^2.
+T=\frac WD\mathrm{diag}(a_i),\qquad R=T^{-1/2},\qquad
+J=\mathbb E\lVert R(X-C)R\rVert_F^2.
 $$
 
 This is the expected **relative Frobenius error of the entire sampled clique Laplacian**, including diagonal and off-diagonal errors. It is different from the degree-only RMS metric in the original README.
@@ -46,7 +46,7 @@ Write $v_i=\sqrt{a_i/W}$. Then $RCR=I-vv^T$, the identity on the clique's non-nu
 $$
 J=\mathbb E\left[
  \sum_i\frac{\delta s_i^2}{T_{ii}^2}
- +2\sum_{i<j}\frac{\delta w_{ij}^2}{T_{ii}T_{jj}}
+ +2\sum_{i\lt j}\frac{\delta w_{ij}^2}{T_{ii}T_{jj}}
 \right].
 $$
 
@@ -152,7 +152,7 @@ The [sampling-model note](sampling-model.md) gives the full importance-sampling 
 ## 7. Quick screen: q alone versus q inside a cycle rule
 
 A subsequent direct comparison separated the parent probability
-$q(i,j)=(a_i+a_j)/\sum_{l>i}(a_l+a_i)$ from the larger cycle construction.
+$q(i,j)=(a_i+a_j)/\sum_{l\gt i}(a_l+a_i)$ from the larger cycle construction.
 **No arm uses K2 coordination.** Ordinary GKS and the pure q tree each emit
 $d-1$ edges. The two cycle rules use a heavy-suffix cycle and independent
 light-parent choices, emitting $d$ edges for degree at least three. Each

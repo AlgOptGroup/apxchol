@@ -35,7 +35,7 @@ what they preserve in each individual sample.
 
 **GKS.** Sort neighbors by nondecreasing $a_i$. Each source $i$, except the
 last, chooses exactly one later (therefore no lighter) parent $j$ with
-probability $a_j/S_i$, where $S_i=\sum_{k>i} a_k$, and emits weight
+probability $a_j/S_i$, where $S_i=\sum_{k\gt i} a_k$, and emits weight
 
 ```text
 h_i = a_i S_i / D.

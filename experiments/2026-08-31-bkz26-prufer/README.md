@@ -15,7 +15,7 @@ $D$ creates clique conductances $c_{ij}=a_i a_j/D$. The sampled graph must
 preserve these conductances in expectation.
 
 - **GKS:** sort weights increasingly. Each vertex except the last independently
-  chooses a later parent with probability $a_j/S_i$, where $S_i=\sum_{j>i}a_j$,
+  chooses a later parent with probability $a_j/S_i$, where $S_i=\sum_{j\gt i}a_j$,
   emitting weight $a_i S_i/D$. This gives a connected $d-1$-edge tree.
 - **Weighted Prüfer / CAST-1:** draw $d-2$ independent Prüfer symbols with
   probabilities $a_i/A$. Selected edge $ij$ has inclusion probability
@@ -31,7 +31,7 @@ preserve these conductances in expectation.
   This is not a matched Julia CAST-2/AC2 comparison.
 - **Current cycle-q candidate:** put a random Hamiltonian cycle on a heavy
   suffix and independently attach lighter vertices using
-  $q(i,j)=(a_i+a_j)/\sum_{l>i}(a_l+a_i)$. Choose the suffix minimizing this
+  $q(i,j)=(a_i+a_j)/\sum_{l\gt i}(a_l+a_i)$. Choose the suffix minimizing this
   construction's relative-Frobenius variance. It uses $d$ edges for $d\ge 3$
   (one edge at $d=2$), with no K2 coordination; it remains research code.
 
@@ -67,7 +67,7 @@ not significance claims.
 
 ## Distance from a specified optimum
 
-Here $J=\mathbb E\lVert R(X-C)R\rVert_F^2$, with $R=[(A/D)\operatorname{diag}(a)]^{-1/2}$, measures whole-clique
+Here $J=\mathbb E\lVert R(X-C)R\rVert_F^2$, with $R=[(A/D)\mathrm{diag}(a)]^{-1/2}$, measures whole-clique
 relative variance, including degree and off-diagonal errors. The table gives
 **percent above the global infimum**, allowing arbitrary connected supports,
 probabilities and positive outcome-dependent weights. Each column uses its

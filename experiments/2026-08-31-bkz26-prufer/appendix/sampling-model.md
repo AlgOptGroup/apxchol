@@ -4,17 +4,17 @@ This note supplies the mathematics behind the [experimental reconciliation](reco
 
 ## Relative normalization and the role of trace
 
-Take $d\ge 2$; degree-zero/one pivots have trivial clique updates and are excluded from the trace decomposition. Let positive star weights be $a_1,\ldots,a_d$, $A=\sum_i a_i$, and eliminated pivot $D>0$. The target clique is
+Take $d\ge 2$; degree-zero/one pivots have trivial clique updates and are excluded from the trace decomposition. Let positive star weights be $a_1,\ldots,a_d$, $A=\sum_i a_i$, and eliminated pivot $D\gt 0$. The target clique is
 
 $$
-C=\frac AD\operatorname{diag}(a)-\frac{aa^T}{D},\quad
-T=\frac AD\operatorname{diag}(a),\quad R=T^{-1/2}.
+C=\frac AD\mathrm{diag}(a)-\frac{aa^T}{D},\quad
+T=\frac AD\mathrm{diag}(a),\quad R=T^{-1/2}.
 $$
 
-For $D>A$, the full SDDM Schur update also retains diagonal terms; this model concerns its sampled clique contribution. With $u_i=\sqrt{a_i/A}$ and $P=I-uu^T$, we have $RCR=P$. Every sampled Laplacian $X$ gives $Y=RXR$ with $Yu=0$. Thus
+For $D\gt A$, the full SDDM Schur update also retains diagonal terms; this model concerns its sampled clique contribution. With $u_i=\sqrt{a_i/A}$ and $P=I-uu^T$, we have $RCR=P$. Every sampled Laplacian $X$ gives $Y=RXR$ with $Yu=0$. Thus
 
 $$
-J=\mathbb E\|Y-P\|_F^2
+J=\mathbb E\lVert Y-P\rVert_F^2
  =\left(\frac DA\right)^2\mathbb E\sum_{i,j}\frac{(X-C)_{ij}^2}{a_i a_j}.
 $$
 
@@ -25,43 +25,43 @@ t_{ij}=c_{ij}R_{ij}=\frac{a_i+a_j}{A},\qquad
 R_{ij}=\frac DA\left(\frac1{a_i}+\frac1{a_j}\right).
 $$
 
-Here $R_{ij}$ denotes a scalar endpoint factor, not an entry of the diagonal matrix $R$. An emitted edge of conductance $w$ contributes $w R_{ij}$ to $\operatorname{tr}(Y)$. For its positive rank-one matrix atom, trace, Frobenius norm and spectral norm coincide. A vertex's total raw incident conductance is a different quantity.
+Here $R_{ij}$ denotes a scalar endpoint factor, not an entry of the diagonal matrix $R$. An emitted edge of conductance $w$ contributes $w R_{ij}$ to $\mathrm{tr}(Y)$. For its positive rank-one matrix atom, trace, Frobenius norm and spectral norm coincide. A vertex's total raw incident conductance is a different quantity.
 
-Unbiasedness implies $\mathbb E\operatorname{tr}(Y)=r=d-1$. The exact orthogonal decomposition
+Unbiasedness implies $\mathbb E\mathrm{tr}(Y)=r=d-1$. The exact orthogonal decomposition
 
 $$
-\|Y-P\|_F^2
-=\left\|Y-\frac{\operatorname{tr}Y}{r}P\right\|_F^2
- +\frac{(\operatorname{tr}Y-r)^2}{r}
+\lVert Y-P\rVert_F^2
+=\left\lVert Y-\frac{\mathrm{tr}Y}{r}P\right\rVert_F^2
+ +\frac{(\mathrm{tr}Y-r)^2}{r}
 $$
 
-shows which scalar error term disappears when every outcome has trace $r$. Fixing trace can nevertheless constrain other improvements; it does not establish global optimality. Scaling a positive preconditioner changes its trace without changing its condition number. Also, $\rho=\lVert Y-P\rVert_2<1$ gives the bound $\kappa(Y|_{u^\perp})\le(1+\rho)/(1-\rho)$, but ordering $\rho$ need not order actual condition numbers or PCG iterations.
+shows which scalar error term disappears when every outcome has trace $r$. Fixing trace can nevertheless constrain other improvements; it does not establish global optimality. Scaling a positive preconditioner changes its trace without changing its condition number. Also, $\rho=\lVert Y-P\rVert_2\lt 1$ gives the bound $\kappa(Y\vert_{u^\perp})\le(1+\rho)/(1-\rho)$, but ordering $\rho$ need not order actual condition numbers or PCG iterations.
 
 ## Why the later-parent probability uses a sum
 
-Fix source $i$, let $m_i=d-i$, $S_i=\sum_{j>i}a_j$, and require exactly one later-parent edge. Define its exact normalized atom
+Fix source $i$, let $m_i=d-i$, $S_i=\sum_{j\gt i}a_j$, and require exactly one later-parent edge. Define its exact normalized atom
 
 $$
 M_{ij}=c_{ij}R(e_i-e_j)(e_i-e_j)^TR.
 $$
 
-Choose $j$ with probability $q_{ij}>0$ and emit $c_{ij}/q_{ij}$. Its expected contribution is fixed, while its variance is
+Choose $j$ with probability $q_{ij}\gt 0$ and emit $c_{ij}/q_{ij}$. Its expected contribution is fixed, while its variance is
 
 $$
-\sum_{j>i}\frac{\|M_{ij}\|_F^2}{q_{ij}}
- -\left\|\sum_{j>i}M_{ij}\right\|_F^2.
+\sum_{j\gt i}\frac{\lVert M_{ij}\rVert_F^2}{q_{ij}}
+ -\left\lVert \sum_{j\gt i}M_{ij}\right\rVert_F^2.
 $$
 
 Cauchy–Schwarz gives $\sum_j t_{ij}^2/q_{ij}\ge(\sum_j t_{ij})^2$, with unique equality at
 
 $$
-\boxed{q_{ij}=\frac{a_i+a_j}{\sum_{\ell>i}(a_\ell+a_i)}=\frac{a_i+a_j}{m_i a_i+S_i}}.
+\boxed{q_{ij}=\frac{a_i+a_j}{\sum_{\ell\gt i}(a_\ell+a_i)}=\frac{a_i+a_j}{m_i a_i+S_i}}.
 $$
 
 This is optimal for this **one-parent component**. Independent centered components have additive variances, making the formula useful in a larger construction. It is not an optimum over arbitrary correlated trees. Its emitted edge has constant normalized trace $(m_i a_i+S_i)/A$ for that source, regardless of the parent chosen.
 
 The exact improvement over the ordinary GKS parent law is also calculable.
-Let $U_i=\sum_{j>i}1/a_j$. For the same source and later-neighbor set,
+Let $U_i=\sum_{j\gt i}1/a_j$. For the same source and later-neighbor set,
 
 $$
 J_{\mathrm{GKS},i}-J_{q,i}
@@ -101,7 +101,7 @@ $$
 \Delta J=\frac{4(h-2)xS+(h-1)^2x^2-(2h-5)Q}{2A^2}.
 $$
 
-If all current weights are at most $2x$, then $Q\le 2xS$, so the numerator is at least $2xS+(h-1)^2x^2>0$. Every later suffix inherits this range bound. Therefore **$\max(a)/\min(a)\le 2$ guarantees that the full cycle minimizes this family's objective**. The condition is sufficient, not necessary; it is not a global spectral-optimality theorem or a fitted runtime threshold.
+If all current weights are at most $2x$, then $Q\le 2xS$, so the numerator is at least $2xS+(h-1)^2x^2\gt 0$. Every later suffix inherits this range bound. Therefore **$\max(a)/\min(a)\le 2$ guarantees that the full cycle minimizes this family's objective**. The condition is sufficient, not necessary; it is not a global spectral-optimality theorem or a fitted runtime threshold.
 
 For a uniform Hamiltonian **path** on an $h$-vertex core, edge inclusion is $2/h$, so the inverse-probability conductance is $h c_{ij}/2$. Its core variance is
 
@@ -118,7 +118,7 @@ For equal weights and $d\ge 3$, a uniform Hamiltonian cycle globally minimizes e
 In normalized coordinates $P=I-\mathbf1\mathbf1^T/d$, write the outcome edge weights as $z_e$ and weighted degrees as $\delta_i$. Unbiasedness gives $\mathbb E\delta_i=(d-1)/d$ and $\mathbb E\sum_e z_e=(d-1)/2$. Jensen and Cauchy–Schwarz imply
 
 $$
-\mathbb E\|Y\|_F^2
+\mathbb E\lVert Y\rVert_F^2
 =\mathbb E\sum_i\delta_i^2+2\mathbb E\sum_e z_e^2
 \ge\frac{(d-1)^2}{d}+\frac{(d-1)^2}{2d}.
 $$
@@ -133,7 +133,7 @@ A uniform Hamiltonian cycle attains equality with every normalized selected edge
 
 ## Weighted Prüfer already has the same plus-weight edge sizes
 
-For iid Prüfer symbol probabilities $\theta_i>0$, $\sum_i\theta_i=1$, the tree law is
+For iid Prüfer symbol probabilities $\theta_i\gt 0$, $\sum_i\theta_i=1$, the tree law is
 
 $$
 \Pr(T)=\prod_i\theta_i^{\deg_T(i)-1}.
@@ -153,8 +153,8 @@ Thus the **sum-of-endpoint-weights idea is already present in weighted Prüfer**
 For fixed inverse-marginal weights, full variance includes
 
 $$
-J=\sum_e(1/\pi_e-1)\|M_e\|_F^2
- +2\sum_{e<f}\left(\frac{\pi_{ef}}{\pi_e\pi_f}-1\right)
+J=\sum_e(1/\pi_e-1)\lVert M_e\rVert_F^2
+ +2\sum_{e\lt f}\left(\frac{\pi_{ef}}{\pi_e\pi_f}-1\right)
  \langle M_e,M_f\rangle.
 $$
 
@@ -167,7 +167,7 @@ Even within the Prüfer family, standard symbols need not minimize $J$. For weig
 For fixed nonzero matrix atoms, one-draw importance sampling proportional to their Frobenius norms minimizes the inverse-probability estimator's second moment. It does not enforce a tree topology. For a whole correlated tree law $p_T$ with normalized outcomes $Y_T$, choosing
 
 $$
-q_T\propto p_T\|Y_T\|_F,\qquad \widetilde Y_T=(p_T/q_T)Y_T
+q_T\propto p_T\lVert Y_T\rVert_F,\qquad \widetilde Y_T=(p_T/q_T)Y_T
 $$
 
 preserves the mean and minimizes the second moment within this resampling/scaling family. The resulting $q_T$ generally is not representable by iid Prüfer symbols and may be expensive to sample.
@@ -181,4 +181,4 @@ $$
 
 where $G_H$ is the Gram matrix of normalized edge directions. This is the model behind the included [tiny-star certificates](../reconciliation/optimality/comparison.json). Global claims require enumerating or otherwise certifying the declared support population. Strict positivity may yield only an infimum.
 
-An outcome-dependent correction must satisfy $\mathbb E[\delta_e\mid e\text{ included}]=0$ to preserve an edge mean. Conditional moments belong to the actual law: changing GKS parent probabilities, adding K2 correlations, or switching to Prüfer changes them. Reusing stale conditional means, sequentially changing the degrees used by a simultaneous correction, or repeating a pass can introduce bias. Input-dependent decisions are allowed when unbiasedness holds conditional on the current star/history. This local martingale property does not make the nonlinear factor, inverse or PCG iteration count globally unbiased.
+Writing $E$ for the sampled edge set, an outcome-dependent correction must satisfy $\mathbb E[\delta_e\mid e\in E]=0$ to preserve an edge mean. Conditional moments belong to the actual law: changing GKS parent probabilities, adding K2 correlations, or switching to Prüfer changes them. Reusing stale conditional means, sequentially changing the degrees used by a simultaneous correction, or repeating a pass can introduce bias. Input-dependent decisions are allowed when unbiasedness holds conditional on the current star/history. This local martingale property does not make the nonlinear factor, inverse or PCG iteration count globally unbiased.

@@ -16,7 +16,7 @@ t_i  = w_i (W-w_i) / D.
 ## What GKS fixes in every sample
 
 Order the weights increasingly. For source $r$, define
-$S_r=\sum_{j>r} w_j$. GKS independently chooses one parent $J_r>r$ with
+$S_r=\sum_{j\gt r} w_j$. GKS independently chooses one parent $J_r\gt r$ with
 probability $w_j/S_r$ and emits an edge of weight
 
 ```text
@@ -24,9 +24,9 @@ h_r = w_r S_r / D.
 ```
 
 The exact mass from source $r$ to its later neighbors is also
-$\sum_{j>r} c_{rj} = h_r$. GKS therefore preserves that source contribution in
+$\sum_{j\gt r} c_{rj} = h_r$. GKS therefore preserves that source contribution in
 every sample. The destination is random, and vertex $i$ also receives random
-edges from sources $r<i$; its total sampled clique degree is not fixed.
+edges from sources $r\lt i$; its total sampled clique degree is not fixed.
 
 Only incoming choices contribute to its variance:
 
@@ -34,7 +34,7 @@ Only incoming choices contribute to its variance:
 Var(t_hat_i) = sum_{r<i} h_r^2 (w_i/S_r) (1-w_i/S_r).
 ```
 
-Writing $Q_r=\sum_{j>r} w_j^2$, summing over vertices gives
+Writing $Q_r=\sum_{j\gt r} w_j^2$, summing over vertices gives
 
 ```text
 sum_i Var(t_hat_i) = (1/D^2) sum_r w_r^2 (S_r^2-Q_r).
@@ -52,7 +52,7 @@ Thus placing $x\le y$ first never increases the total degree variance.
 
 ## Prüfer p-trees
 
-Let $q_i>0$, $\sum_i q_i=1$, and draw the iid Prüfer symbols from $q$. Its edge
+Let $q_i\gt 0$, $\sum_i q_i=1$, and draw the iid Prüfer symbols from $q$. Its edge
 marginal and the corresponding unbiased edge weight are
 
 ```text
@@ -84,7 +84,7 @@ RMS degree error = sqrt(sum_i Var(t_hat_i) / sum_i t_i^2).
 Changing to $q_i\propto w_i^\alpha$ remains unbiased after division by
 $q_i+q_j$. It can nevertheless create large weights when a pair marginal is
 small; the largest multiplier relative to $c_{ij}$ is
-$1/\min_{i<j}(q_i+q_j)$.
+$1/\min_{i\lt j}(q_i+q_j)$.
 
 ## Normalized spectral metric
 
