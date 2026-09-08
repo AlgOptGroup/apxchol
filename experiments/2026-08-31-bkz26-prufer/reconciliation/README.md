@@ -4,11 +4,12 @@ This directory supports the self-contained [research account](../RECONCILIATION.
 
 ## Reproduce the reported tables from saved evidence
 
-Python3.11 or newer is sufficient; both commands use only the standard library:
+Python3.11 or newer is sufficient; all three commands use only the standard library:
 
 ```bash
 python3 reproduce.py
 python3 reproduce_optimality.py
+python3 reproduce_q_screen.py
 ```
 
 `reproduce.py` checks the manifest, eight factors,2,000 recorded solve rows,750 historical control-row identities, and392 captured triangle records. It enumerates784 ideal local laws/1,960 outcomes with exact rational arithmetic and prints the Spielman and four-input tables plus the star-k50 three-factor medians. This is saved-data verification: it cannot recompute residuals from vectors that are not included.
@@ -52,3 +53,5 @@ The archived execution used one GH200 CPU core. Historical bitwise identities ar
 | `SHA256SUMS`, `SOURCE.json`, `public-source.toml` | Byte-level bindings and source/protocol provenance; hashes do not replace mathematical or residual checks. |
 
 The recorded37-file execution inventory was fully collected with no exclusions. This public projection reorganizes its relevant evidence; it does not claim that its local filenames are the original inventory. The four-input and star-sentinel cohorts remain separate from the Spielman intervention denominator.
+
+`q-screen.json` and `reproduce_q_screen.py` add a separate30-factor/30-solve screen of pure q trees and cycle rules. The script recovers all42 metric controls and28 aggregate ratios from the projected raw summary/solve rows. Source receipt, binary and matrix hashes are retained, but the complete native q-screen packet is not included; these artifacts support arithmetic reproduction of the reported observations, not a bundled native rerun.
