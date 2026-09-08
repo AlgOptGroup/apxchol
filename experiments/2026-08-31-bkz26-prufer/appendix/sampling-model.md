@@ -1,6 +1,6 @@
 # Relative clique variance, trace and dependent tree laws
 
-This note supplies the mathematics behind the [experimental reconciliation](RECONCILIATION.md). It distinguishes optimization of one sampled edge, a structured cycle/tree family, and unrestricted distributions. Statements below use ideal arithmetic; native floating-point and RNG checks are separate implementation evidence.
+This note supplies the mathematics behind the [experimental reconciliation](reconciliation-details.md). It distinguishes optimization of one sampled edge, a structured cycle/tree family, and unrestricted distributions. Statements below use ideal arithmetic; native floating-point and RNG checks are separate implementation evidence.
 
 ## Relative normalization and the role of trace
 
@@ -179,6 +179,6 @@ For fixed support probabilities `p_H`, optimizing nonnegative outcome-dependent 
 \quad \sum_Hp_H=1,\quad\sum_Hz_{H,e}=c_e,
 \]
 
-where `G_H` is the Gram matrix of normalized edge directions. This is the model behind the included [tiny-star certificates](reconciliation/optimality/comparison.json). Global claims require enumerating or otherwise certifying the declared support population. Strict positivity may yield only an infimum.
+where `G_H` is the Gram matrix of normalized edge directions. This is the model behind the included [tiny-star certificates](../reconciliation/optimality/comparison.json). Global claims require enumerating or otherwise certifying the declared support population. Strict positivity may yield only an infimum.
 
 An outcome-dependent correction must satisfy `E[δ_e | e included]=0` to preserve an edge mean. Conditional moments belong to the actual law: changing GKS parent probabilities, adding K2 correlations, or switching to Prüfer changes them. Reusing stale conditional means, sequentially changing the degrees used by a simultaneous correction, or repeating a pass can introduce bias. Input-dependent decisions are allowed when unbiasedness holds conditional on the current star/history. This local martingale property does not make the nonlinear factor, inverse or PCG iteration count globally unbiased.

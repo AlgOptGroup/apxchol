@@ -18,4 +18,4 @@ The exact-tail intervention first reuses the same `d−1` edge pairs as a root s
 
 Native tests compare the default adapter with unchanged public GKS and its saved-order replay, check an independent direct factor application, verify exact weighted-Prüfer means, and check exact-tail solves against small dense operators. Weighted-cycle tests exercise degree-two arithmetic and random-stream matching. Floating-point implementation equality is tested separately from these real-arithmetic identities.
 
-This is a reconstruction using public Laplacians.jl, not the unavailable CAST authors' executable. The broader metric and experimental conclusions are in [the reconciliation](../RECONCILIATION.md).
+This is a reconstruction using public Laplacians.jl, not the unavailable CAST authors' executable. The broader metric and experimental conclusions are in [the reconciliation](../appendix/reconciliation-details.md).

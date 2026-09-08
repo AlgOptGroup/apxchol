@@ -1,10 +1,10 @@
-# Reconciliation evidence and reproduction
+# Evidence and reproduction
 
-This directory supports the self-contained [research account](../RECONCILIATION.md). It contains public-matrix observations, exact small-star certificates, and the numerical Julia code used for the bounded Spielman experiment. Cluster/account paths and scheduler wrappers are omitted.
+The [main findings](../README.md) link the experimental conclusions; this
+directory preserves their evidence without requiring private paths.
 
-## Reproduce the reported tables from saved evidence
-
-Python3.11 or newer is sufficient; all three commands use only the standard library:
+With Python3.11 or newer, reproduce the tables and exact checks using only
+the standard library:
 
 ```bash
 python3 reproduce.py
@@ -12,19 +12,21 @@ python3 reproduce_optimality.py
 python3 reproduce_q_screen.py
 ```
 
-`reproduce.py` checks the manifest, eight factors,2,000 recorded solve rows,750 historical control-row identities, and392 captured triangle records. It enumerates784 ideal local laws/1,960 outcomes with exact rational arithmetic and prints the Spielman and four-input tables plus the star-k50 three-factor medians. This is saved-data verification: it cannot recompute residuals from vectors that are not included.
+- `spielman.json`: eight factors, 2000 recorded solve rows and 392 captured
+  triangles. The first script checks historical identities and enumerates
+  local laws exactly. It does not recompute residuals from unbundled vectors.
+- `optimality/`: eight complete rational certificates, all 1072 supports,
+  their original verifier and named-law comparisons. No optimizer is run.
+- `q-screen.json`: 30 projected raw observations; its script reconstructs
+  six blocks, 42 controls and 28 ratios. The native packet is not bundled.
+- `four-inputs.json` and `star-k50.tsv`: explicitly summary-level evidence
+  for the crossed-order study and star sentinel; cohorts remain separate.
+- `SOURCE.json`, `public-source.toml` and `SHA256SUMS`: source and byte bindings.
 
-`reproduce_optimality.py` verifies all eight exact lower/upper certificates, covering1,072 connected simple supports, then independently enumerates GKS, weighted-Prüfer/CAST-1 and relative-trace cycle laws. It uses the original generic rational certificate verifier; it runs no optimizer, eigensolver or random sampler. The published tree and `d`-edge bounds remain separate. Full certificate bounds, support-dependent probabilities/weights and verification metadata are under `optimality/`.
-
-## Repeat the bounded native Spielman experiment
-
-Requirements: Julia **1.12.7**, the package versions in `Project.toml`, and the public matrix `spielman.k100.low0.25.up1.0e-6.i1.mm` from the [SDDM collection](https://rjkyng.github.io/SDDM2023/). Its SHA-256 is
-
-```text
-b9e30aaf5271329ae75738573afe27cdefdfc84dfc19da5f979779f6ec2db3b4
-```
-
-Install the Julia environment, then run the source/numerical gates and experiment, using a new output directory:
+To repeat the **Spielman native experiment**, use Julia1.12.7 and the
+[public SDDM collection](https://rjkyng.github.io/SDDM2023/) matrix
+`spielman.k100.low0.25.up1.0e-6.i1.mm`, SHA-256
+`b9e30aaf5271329ae75738573afe27cdefdfc84dfc19da5f979779f6ec2db3b4`:
 
 ```bash
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
@@ -35,23 +37,15 @@ OPENBLAS_NUM_THREADS=1 julia --startup-file=no --threads=1 --project=. run_case.
   /path/to/new-output-directory
 ```
 
-`public-source.toml` pins six relevant Laplacians.jl source files. `adapter.jl`, `reference_adapter.jl`, source checks, driver and native fixtures are byte-for-byte copies of the executed numerical payloads; their hashes are recorded in `SOURCE.json`. The two historical TOMLs retain only the five field groups used by the driver's equality checks. Their original receipt hashes are also recorded. The accompanying permissive upstream license applies to adapted public Laplacians code.
+The executed Julia numerical sources and upstream license are preserved.
+Historical fixtures retain the five fields used for identity checks; their
+original hashes are recorded. The driver checks eight retained factors and
+250 RHSs each, excluding five identity builds and eight warmups. Its
+exact-clique intervention aborts above degree16. The original run took3m08s
+on one GH200 CPU core; another environment may fail strict historical bitwise
+identities. Record that difference rather than replacing reference hashes.
 
-The driver retains eight factor/250-RHS arms, preceded by five actual-input identity builds and one excluded solve warmup per arm. The native gate separately includes nine dense exact-tail checks and nine degree-two factor/RNG-state checks. The exact-tail intervention refuses a pivot above degree16 rather than changing its semantics. No timing promotion is claimed; setup includes the observer and has no timing controls.
-
-The archived execution used one GH200 CPU core. Historical bitwise identities are deliberately strict: a different Julia/package source or floating-point execution environment may fail them even if mathematical behavior remains valid. Record that difference; do not silently replace the reference hashes. The original bounded execution finished in3m08s under a15-minute ceiling.
-
-## What each artifact establishes
-
-| Artifact | Evidence level |
-|---|---|
-| `spielman.json` | Full projected factor/census metadata and2,000 original/solver residuals, iterations, RHS hashes and solution hashes; original receipt hashes preserve provenance. No raw solution vectors. |
-| `four-inputs.json` | Summary-level projection of32 factors/8,000 recorded solves from the completed crossed-order study. It reproduces the displayed means and mirror-factor checks, but does not contain its8,000 raw vectors or journals. |
-| `star-k50.tsv` | The nine-row table from a committed prior reconstruction, with250 RHSs per row and recorded maximum true residuals. This is summary-level evidence. |
-| `optimality/*/certificate.json` | Complete rational positive-primal/lower-bound certificates for eight global tiny-star comparisons. |
-| `optimality/comparison.json` | Exact named-law objectives, intervals, matched-budget ratios and support descriptions derived from those certificates. |
-| `SHA256SUMS`, `SOURCE.json`, `public-source.toml` | Byte-level bindings and source/protocol provenance; hashes do not replace mathematical or residual checks. |
-
-The recorded37-file execution inventory was fully collected with no exclusions. This public projection reorganizes its relevant evidence; it does not claim that its local filenames are the original inventory. The four-input and star-sentinel cohorts remain separate from the Spielman intervention denominator.
-
-`q-screen.json` and `reproduce_q_screen.py` add a separate30-factor/30-solve screen of pure q trees and cycle rules. The script recovers all42 metric controls and28 aggregate ratios from the projected raw summary/solve rows. Source receipt, binary and matrix hashes are retained, but the complete native q-screen packet is not included; these artifacts support arithmetic reproduction of the reported observations, not a bundled native rerun.
+[Factor representation](MODEL.md) and the
+[detailed experimental appendix](../appendix/reconciliation-details.md)
+state interpretation and limitations. No timing promotion follows from
+these reproduction commands.

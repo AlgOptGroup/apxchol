@@ -1,10 +1,10 @@
 # Weighted Prüfer, CAST and GKS: what the follow-up explains
 
-The [original negative apxchol result](README.md#broad-matrix-evidence-bkz26-versus-gks) stands: replacing its GKS update with weighted Prüfer increased average iterations on the tested matrices. This does not contradict a CAST advantage on other inputs. A controlled follow-up found a concrete positive case, separated ordering and numerical details, and identified why its local sampled-tree errors behave differently.
+The [original negative apxchol result](historical-benchmarks.md#broad-matrix-evidence-bkz26-versus-gks) stands: replacing its GKS update with weighted Prüfer increased average iterations on the tested matrices. This does not contradict a CAST advantage on other inputs. A controlled follow-up found a concrete positive case, separated ordering and numerical details, and identified why its local sampled-tree errors behave differently.
 
 On Spielman `k100, step1`, fixed-order CAST uses **7.000 versus GKS's 7.892 mean PCG iterations**. Making all **49 nontrivial triangle updates exact** reduces every tested RHS to **one iteration**, with **unchanged stored factor fill**. A full census explains the local comparison: three nearly uniform triangles contribute **92.8%** of GKS's summed local variance, and CAST improves those three. A previous four-star sample missed all three.
 
-This document defines the methods and metrics, reports the controlled comparisons, and separates these empirical explanations from claims that remain unproved. The accompanying [evidence and executable source](reconciliation/README.md) require no private filesystem or conversation context.
+This document defines the methods and metrics, reports the controlled comparisons, and separates these empirical explanations from claims that remain unproved. The accompanying [evidence and executable source](../reconciliation/README.md) require no private filesystem or conversation context.
 
 ## 1. Names and the sampled update
 
@@ -66,7 +66,7 @@ The small star sentinel used to check the CAST-style protocol produced these med
 |---|---:|---:|---:|
 | Median mean iterations |50.612|38.528|24.548|
 
-All nine recorded factors' maximum original-system residuals are below `1e−8`. Sequential elimination, degree updates, tie handling, precision and grounding were relevant to matching this sentinel. It does not imply that ordinary apxchol's GKS baseline was broken, or that every matrix should show the same advantage. [Recorded table](reconciliation/star-k50.tsv).
+All nine recorded factors' maximum original-system residuals are below `1e−8`. Sequential elimination, degree updates, tie handling, precision and grounding were relevant to matching this sentinel. It does not imply that ordinary apxchol's GKS baseline was broken, or that every matrix should show the same advantage. [Recorded table](../reconciliation/star-k50.tsv).
 
 To separate sampler from ordering, let the first letter in `GG`, `CC`, `CG`, `GC` denote GKS or CAST-1 sampling, and the second denote the adaptive GKS or CAST pivot order. A crossed arm replays its source order exactly. On four public IPM inputs:
 
@@ -77,7 +77,7 @@ To separate sampler from ordering, let the first letter in `GG`, `CC`, `CG`, `GC
 | Spielman `k100, step1` |7.892|7.004|7.000|7.904|
 | Spielman `k100, step10` |5.000|5.000|5.000|5.000|
 
-These are mean iterations over 250 common RHSs, factor seed42. Each of the four arms has an identical mirrored repeat: **32 factors and 8,000 solves**, all passing original and solver residual checks at `1e−8`. Two Chimera setup timing controls failed their declared bounds, so this table makes **numerical-quality claims only**, not speed claims. [Source-bound summary](reconciliation/four-inputs.json).
+These are mean iterations over 250 common RHSs, factor seed42. Each of the four arms has an identical mirrored repeat: **32 factors and 8,000 solves**, all passing original and solver residual checks at `1e−8`. Two Chimera setup timing controls failed their declared bounds, so this table makes **numerical-quality claims only**, not speed claims. [Source-bound summary](../reconciliation/four-inputs.json).
 
 On Chimera, sampling and order interact. Under the GKS order CAST is worse, while under the CAST order it is better than GKS. Fixing pivot order does not fix subsequent stars: earlier sampled edges still alter their weights. On Spielman step1, the advantage survives either order; step10 has no iteration benefit. There is no uniform CAST improvement even across these four paper-corpus inputs.
 
@@ -102,7 +102,7 @@ The degree-two arithmetic substitution changes solution bits but preserves all 2
 
 The exact arm adds the third clique edge at every triangle. All **250/250** RHSs converge in one iteration, with maximum original residual `3.376e−11`. It still has the same 49 triangles and the same stored factor count: extra emitted residual edges need not translate into extra stored factor entries after later graph updates. This is a measured benefit on this input, not a general fill guarantee for cycles.
 
-The full denominator is **8 factors, 2,000 converged solves**, eight excluded warmups, five actual-input identity builds and separately run native correctness fixtures. All **37/37** result files were collected. The executable adapter and source bindings are included with the [complete projected evidence](reconciliation/spielman.json).
+The full denominator is **8 factors, 2,000 converged solves**, eight excluded warmups, five actual-input identity builds and separately run native correctness fixtures. All **37/37** result files were collected. The executable adapter and source bindings are included with the [complete projected evidence](../reconciliation/spielman.json).
 
 ## 5. Why the earlier small sample pointed the wrong way
 
@@ -147,7 +147,7 @@ CAST-1 beats GKS on the one-hub profile and loses on the other three, while rema
 
 The relative-trace rule in this table is a newer comparator, not the branch's original GKS default. It chooses a heavy suffix, samples a uniform cycle there, and independently attaches each lighter vertex to a later parent with probability `(a_i+a_j)/(m_i a_i+S_i)`. It selects the suffix by its exact relative-Frobenius score. The optimum certificates allow dependencies and outcome-dependent weights beyond this family. These are small-star model comparisons, not matrix timing results.
 
-The [sampling-model note](SAMPLING-MODEL.md) gives the full importance-sampling derivation, explains why weighted Prüfer already uses the same plus-weight edge marginals, and proves two additional statements: exact uniform weights make a cycle globally Frobenius-optimal under an at-most-`d`-edge budget; and weight ratio at most two is sufficient for the full cycle to win within the current suffix family. Neither statement establishes spectral or PCG optimality.
+The [sampling-model note](sampling-model.md) gives the full importance-sampling derivation, explains why weighted Prüfer already uses the same plus-weight edge marginals, and proves two additional statements: exact uniform weights make a cycle globally Frobenius-optimal under an at-most-`d`-edge budget; and weight ratio at most two is sufficient for the full cycle to win within the current suffix family. Neither statement establishes spectral or PCG optimality.
 
 ## 7. Quick screen: q alone versus q inside a cycle rule
 
@@ -196,8 +196,8 @@ All four arms share one executable and the frozen `40f6953e` core's graph
 storage, ordering policy, drop settings, input interpretation and RHS
 generation. The component-compatible RHS for `as-Skitter` is generated by
 the driver; it is not the invalid historical RHS excluded from the original
-broad campaign. [Thirty projected raw rows and source/input hashes](reconciliation/q-screen.json)
-plus a [standard-library reproducer](reconciliation/reproduce_q_screen.py)
+broad campaign. [Thirty projected raw rows and source/input hashes](../reconciliation/q-screen.json)
+plus a [standard-library reproducer](../reconciliation/reproduce_q_screen.py)
 recover all six blocks, 42 controls and 28 aggregate ratios. This is saved-data
 reproduction; the full native packet and matrix inputs are not bundled here,
 and no native rerun or new residual matvec is claimed.
