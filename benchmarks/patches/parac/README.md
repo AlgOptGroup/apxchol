@@ -55,14 +55,11 @@ producer work. Final MatrixMarket serialization has its own measured interval an
 is excluded from the algorithm charge. Automatic GC follows the interval where it
 occurs. This is fresh interval accounting, not subtraction from old measurements.
 
-The nine-field `graph-algorithm-preprocessing-v1` receipt retains complete,
-algorithm, input-read, audit, serialization, operator-permutation, producer-transform,
-producer-ordering and producer-cleanup seconds. Complete = algorithm + audit +
-serialization. This maintained entry has no original-system capture callback, so
-its separate audit and operator/RHS-permutation fields are zero; its real graph
-permutation remains in producer-ordering. The private original-system campaign
-additionally charges its required `A[p,p]` and `b[p]` computations. Zero here must
-not be copied into that route or interpreted as free operator preparation.
+The versioned receipt reconciles complete preparation as algorithm + audit +
+serialization; the runner defines and validates its fields. This entry performs
+no separate original-system audit or permutation. Graph permutation is charged
+inside ordering; adapters that also compute `A[p,p]` and `b[p]` must charge that
+work separately.
 
 Source/input/output identities and the accounting schema invalidate old Graph/AMD
 caches. Cached preparation reuses its measured algorithm charge at every T;
@@ -74,23 +71,13 @@ charges remain unchanged because their required computation and interchange have
 not been separated here. Native adapter, full factor and workspace setup remain
 charged. Eligibility, tolerance calibration and residual checks are unchanged.
 
-The corrected 21-point Daint study used private Graph/CPU adapters: six endpoints
-from job4623922 and fifteen intermediate points from job4624041, with three shared
-fresh preparation charges and unchanged native binary
-`94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1`
-(native source `280b7ee0087c47d1a5101787312dd7574acdfee0`). Its preparation, producer and campaign SHA-256 pins are
-respectively `83f419e3592304be9ff82ee8ad51cf04b2265f73af06887d9d361d98ef4869af`,
-`d56b45b23cbd2dee29d1c759f1633eb3edf2ef1232605de3fc5d56286c4d5d6c`, and
-`6dd946dd2e646b405de0d4f6ec26a778d54bb4496644535b727e744f0358b479`.
-Patch0006 ports the shared Graph entry and interval boundaries, not the private
-campaign wholesale. That study's original-A,b capsule/semantic gates and native
-binary are separate provenance; this maintained port has only source/metadata
-validation until it is exercised on the pinned Julia runtime. Upstream
-`remove_diagonal` dimension behavior remains unchanged (the private adapter had
-explicit dimensions), and the loaded common input remains live through the
-producer call; no runtime/RSS identity with that private route is claimed. Preserve the old
-campaign outcomes and per-phase control failures; this source change does not
-replace published cells or establish a new performance result.
+The maintained Graph/AMD path passed a pinned Daint Julia smoke covering producer
+semantics, preparation/cache accounting, calibration and original-system residuals
+with the unchanged portable CPU driver. This does not validate the stock MKL,
+Physics or GPU routes or establish a performance result. Published scaling cells
+retain their private adapter provenance; they are not measurements of this port.
+Upstream isolate-dimension behavior remains unchanged, and runtime/RSS identity
+with the private original-system adapter is not claimed.
 
 - **Graph:** `graph_produce(prefix,"amd")` rebuilds `L=D-A`; it is appropriate
   for graph adjacency or a pure Laplacian, not an arbitrary SDDM diagonal.
