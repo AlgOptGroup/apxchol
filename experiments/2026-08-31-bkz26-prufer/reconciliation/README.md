@@ -10,6 +10,8 @@ the standard library:
 python3 reproduce.py
 python3 reproduce_optimality.py
 python3 reproduce_q_screen.py
+python3 reproduce_cycle_screen.py
+python3 reproduce_k2_local.py
 ```
 
 - `spielman.json`: eight factors, 2000 recorded solve rows and 392 captured
@@ -19,6 +21,9 @@ python3 reproduce_q_screen.py
   their original verifier and named-law comparisons. No optimizer is run.
 - `q-screen.json`: 30 projected raw observations; its script reconstructs
   six blocks, 42 controls and 28 ratios. The native packet is not bundled.
+- `cycle-screen.json` and `k2-local/`: a separate30-solve common-cut screen
+  and12 synthetic laws/108 outcomes. Reproducers check35 aggregate ratios
+  and exact local moments; saved spectral values are reaggregated, not recomputed.
 - `four-inputs.json` and `star-k50.tsv`: explicitly summary-level evidence
   for the crossed-order study and star sentinel; cohorts remain separate.
 - `SOURCE.json`, `public-source.toml` and `SHA256SUMS`: source and byte bindings.

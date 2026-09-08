@@ -33,7 +33,8 @@ preserve these conductances in expectation.
   suffix and independently attach lighter vertices using
   $q(i,j)=(a_i+a_j)/\sum_{l\gt i}(a_l+a_i)$. Choose the suffix minimizing this
   construction's relative-Frobenius variance. It uses $d$ edges for $d\ge 3$
-  (one edge at $d=2$), with no K2 coordination; it remains research code.
+  (one edge at $d=2$). **Heavy-K2** instead uses GKS parent marginals and
+  coordinates choices at the two heaviest receivers; these remain research rules.
 
 ## What the measurements establish
 
@@ -58,12 +59,15 @@ explains that apparent discrepancy without claiming summed local variance
 determines PCG. Crossed-order tests on two Chimera and two Spielman inputs
 also show that sampler and adaptive ordering interact.
 
-A separate **30-solve** screen on three matrices, two seeds and 72 threads
-compared q directly with GKS. Pure q trees needed **2.0% more iterations**
-and are set aside. Cycle-q used **3.3% fewer iterations** than cycle-GKS,
-with **0.15% more stored fill**. Each cycle selected its own cutoff; this is
-not a fixed-core probability-only test. The small timing differences are
-not significance claims.
+Two separate **30-solve** screens (three matrices, two seeds, 72 threads)
+separated these effects. Pure q trees needed **2.0% more iterations** than
+GKS; cycle-q improved **3.3%** over cycle-GKS. A later common-cut comparison
+found heavy-cycle GKS improved **35.6%** over GKS, with K2 adding **4.4%**.
+A full cycle only when weight ratio is at most two, otherwise GKS, needed
+**37.3% more iterations** than heavy-cycle GKS. The q screen uses each
+rule's own relative-variance cutoff; the K2 screen uses one older
+degree-normalized cutoff. Their ratios must not be pooled. These are quick
+quality screens, not statistically significant timing or causal theorems.
 
 ## Distance from a specified optimum
 
@@ -75,12 +79,15 @@ probabilities and positive outcome-dependent weights. Each column uses its
 optima. Eight exact certificates cover all 1072 supports, with bound gaps
 below $5.1\times10^{-9}$.
 
-| Weights | GKS, $d-1$ edges | Prüfer, $d-1$ edges | Cycle-q, $d$ edges |
-|---|---:|---:|---:|
-| $1,2,3,4$ |+17.1%|+34.5%|+37.0%|
-| $1,2,3,4,5$ |+25.4%|+41.2%|+22.2%|
-| $1,1,1,1,8$ |+91.2%|+44.4%|+143.9%|
-| $1,1,1,8,8$ |+43.8%|+59.9%|+82.4%|
+| Weights | GKS, $d-1$ edges | Prüfer, $d-1$ edges | Heavy-K2, $d$ edges | Cycle-q, $d$ edges |
+|---|---:|---:|---:|---:|
+| $1,2,3,4$ |+17.1%|+34.5%|+39.4%|+37.0%|
+| $1,2,3,4,5$ |+25.4%|+41.2%|+23.6%|+22.2%|
+| $1,1,1,1,8$ |+91.2%|+44.4%|+196.0%|+143.9%|
+| $1,1,1,8,8$ |+43.8%|+59.9%|+111.8%|+82.4%|
+
+K2 and cycle-q use different cutoff criteria, but their core sizes coincide
+on these four synthetic profiles; this is not representative matrix evidence.
 
 The near-optimal one-hub $d$-edge law mostly uses a hub-star plus a chord,
 with some hub-as-leaf outcomes. The two-band law often puts only one heavy

@@ -1,0 +1,231 @@
+{
+  "scope": "Four synthetic profiles, three laws each, d-edge budgets; old common cutoff for independent/K2, own relative cutoff for q; these core sizes coincide on these four profiles.",
+  "source_result_sha256": "086ed0d1d9d8b0ed64aff794a1c44246a55b488d9c46df9a6f049e65cf49ab33",
+  "rows": [
+    {
+      "case": "d4-graded-m4",
+      "law": "independent_heavy_old_cut",
+      "core_size": 3,
+      "outcomes": 3,
+      "file": "d4-graded-m4--independent_heavy_old_cut.jsonl",
+      "sha256": "97effb4e99376fe4d1b7b64daf7b1bbd8c2f1fc7423e89f693a0f5b9ce0caa2a",
+      "J": "171/400",
+      "mean_rho": 0.491603981339253,
+      "weights": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "lower_bound": "239560859983185179959094888242309/781250000000000000000000000000000",
+      "upper_bound": "45995685193/150000000000"
+    },
+    {
+      "case": "d4-graded-m4",
+      "law": "heavy_K2_old_cut",
+      "core_size": 3,
+      "outcomes": 3,
+      "file": "d4-graded-m4--heavy_K2_old_cut.jsonl",
+      "sha256": "97effb4e99376fe4d1b7b64daf7b1bbd8c2f1fc7423e89f693a0f5b9ce0caa2a",
+      "J": "171/400",
+      "mean_rho": 0.491603981339253,
+      "weights": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "lower_bound": "239560859983185179959094888242309/781250000000000000000000000000000",
+      "upper_bound": "45995685193/150000000000"
+    },
+    {
+      "case": "d4-graded-m4",
+      "law": "relative_trace_own_optimal_cut",
+      "core_size": 3,
+      "outcomes": 3,
+      "file": "d4-graded-m4--relative_trace_own_optimal_cut.jsonl",
+      "sha256": "5dc44ca453babd7a8686e5aec5ce8236767fdaeec53ef293963c1f76bb044873",
+      "J": "21/50",
+      "mean_rho": 0.4947882174014743,
+      "weights": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "lower_bound": "239560859983185179959094888242309/781250000000000000000000000000000",
+      "upper_bound": "45995685193/150000000000"
+    },
+    {
+      "case": "d5-graded-m5",
+      "law": "independent_heavy_old_cut",
+      "core_size": 4,
+      "outcomes": 12,
+      "file": "d5-graded-m5--independent_heavy_old_cut.jsonl",
+      "sha256": "00382dcff130a38c1fdd3ffc72a741aa81c2ba835cd3d93155f142ba9fbd8101",
+      "J": "5369/6750",
+      "mean_rho": 0.6683422173474127,
+      "weights": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "lower_bound": "6492012262782656621960240131229009563/10084800000000000000000000000000000000",
+      "upper_bound": "89319243229/138750000000"
+    },
+    {
+      "case": "d5-graded-m5",
+      "law": "heavy_K2_old_cut",
+      "core_size": 4,
+      "outcomes": 12,
+      "file": "d5-graded-m5--heavy_K2_old_cut.jsonl",
+      "sha256": "00382dcff130a38c1fdd3ffc72a741aa81c2ba835cd3d93155f142ba9fbd8101",
+      "J": "5369/6750",
+      "mean_rho": 0.6683422173474127,
+      "weights": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "lower_bound": "6492012262782656621960240131229009563/10084800000000000000000000000000000000",
+      "upper_bound": "89319243229/138750000000"
+    },
+    {
+      "case": "d5-graded-m5",
+      "law": "relative_trace_own_optimal_cut",
+      "core_size": 4,
+      "outcomes": 12,
+      "file": "d5-graded-m5--relative_trace_own_optimal_cut.jsonl",
+      "sha256": "c0b2ea3439196ea39991c988fa4db455ec9d4f0b6458ed332a3d73ad14629323",
+      "J": "59/75",
+      "mean_rho": 0.6579999190547313,
+      "weights": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "lower_bound": "6492012262782656621960240131229009563/10084800000000000000000000000000000000",
+      "upper_bound": "89319243229/138750000000"
+    },
+    {
+      "case": "d5-one-hub-m5",
+      "law": "independent_heavy_old_cut",
+      "core_size": 3,
+      "outcomes": 12,
+      "file": "d5-one-hub-m5--independent_heavy_old_cut.jsonl",
+      "sha256": "6bcdbea75b03454c1b1af4ca2bde430a6895a02ed482a7ecc9104610f8327b84",
+      "J": "1237/1152",
+      "mean_rho": 0.7088898603184302,
+      "weights": [
+        "1",
+        "1",
+        "1",
+        "1",
+        "8"
+      ],
+      "lower_bound": "33887090033181732336243346200684161/96000000000000000000000000000000000",
+      "upper_bound": "78363895907/222000000000"
+    },
+    {
+      "case": "d5-one-hub-m5",
+      "law": "heavy_K2_old_cut",
+      "core_size": 3,
+      "outcomes": 6,
+      "file": "d5-one-hub-m5--heavy_K2_old_cut.jsonl",
+      "sha256": "7b824ecb3bf2887507b4aa8c35c03f938c61177bfc120c375d9f8e104db0f062",
+      "J": "2407/2304",
+      "mean_rho": 0.7329118131768335,
+      "weights": [
+        "1",
+        "1",
+        "1",
+        "1",
+        "8"
+      ],
+      "lower_bound": "33887090033181732336243346200684161/96000000000000000000000000000000000",
+      "upper_bound": "78363895907/222000000000"
+    },
+    {
+      "case": "d5-one-hub-m5",
+      "law": "relative_trace_own_optimal_cut",
+      "core_size": 3,
+      "outcomes": 12,
+      "file": "d5-one-hub-m5--relative_trace_own_optimal_cut.jsonl",
+      "sha256": "b9b1289d5d1fe3b9fd15d49f3c1ab2965b33ca25da562b867e48de1400e42afb",
+      "J": "31/36",
+      "mean_rho": 0.646007974747495,
+      "weights": [
+        "1",
+        "1",
+        "1",
+        "1",
+        "8"
+      ],
+      "lower_bound": "33887090033181732336243346200684161/96000000000000000000000000000000000",
+      "upper_bound": "78363895907/222000000000"
+    },
+    {
+      "case": "d5-two-bands-m5",
+      "law": "independent_heavy_old_cut",
+      "core_size": 3,
+      "outcomes": 12,
+      "file": "d5-two-bands-m5--independent_heavy_old_cut.jsonl",
+      "sha256": "0a24e200abac59f3bec0d454350b329ae6f5a7945a5b113aecdba612326f9ff2",
+      "J": "923/1444",
+      "mean_rho": 0.5455095652636724,
+      "weights": [
+        "1",
+        "1",
+        "1",
+        "8",
+        "8"
+      ],
+      "lower_bound": "44747103457598165896781471287471133669/151886000000000000000000000000000000000",
+      "upper_bound": "654033747443/2220000000000"
+    },
+    {
+      "case": "d5-two-bands-m5",
+      "law": "heavy_K2_old_cut",
+      "core_size": 3,
+      "outcomes": 9,
+      "file": "d5-two-bands-m5--heavy_K2_old_cut.jsonl",
+      "sha256": "e55dcf92d4bc5c12d189ace6770c9669f52379b1e52ac454398cc1b4b6727d58",
+      "J": "162223/259920",
+      "mean_rho": 0.5416070306631505,
+      "weights": [
+        "1",
+        "1",
+        "1",
+        "8",
+        "8"
+      ],
+      "lower_bound": "44747103457598165896781471287471133669/151886000000000000000000000000000000000",
+      "upper_bound": "654033747443/2220000000000"
+    },
+    {
+      "case": "d5-two-bands-m5",
+      "law": "relative_trace_own_optimal_cut",
+      "core_size": 3,
+      "outcomes": 12,
+      "file": "d5-two-bands-m5--relative_trace_own_optimal_cut.jsonl",
+      "sha256": "86481769dac3b6fa936fa905a4eb241f579079cba4c8be965dcde3dad69474b8",
+      "J": "194/361",
+      "mean_rho": 0.504731202255289,
+      "weights": [
+        "1",
+        "1",
+        "1",
+        "8",
+        "8"
+      ],
+      "lower_bound": "44747103457598165896781471287471133669/151886000000000000000000000000000000000",
+      "upper_bound": "654033747443/2220000000000"
+    }
+  ]
+}

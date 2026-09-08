@@ -202,7 +202,67 @@ recover all six blocks, 42 controls and 28 aggregate ratios. This is saved-data
 reproduction; the full native packet and matrix inputs are not bundled here,
 and no native rerun or new residual matvec is claimed.
 
-## 8. What is established, and what remains
+## 8. Common-cut cycle/K2 and simple-threshold screen
+
+A separate T72, two-seed, one-RHS screen used the same three matrices and
+GKS-before/after structure: **30/30 solves and42/42 controls pass**. Both
+heavy arms use the **same older degree-normalized independent-GKS cutoff**;
+this differs from the preceding q screen's separately optimized relative
+cutoffs. The threshold rule uses a full cycle when $d\ge3$ and
+$\max(a)/\min(a)\le2$, and GKS otherwise.
+
+| Matrix | Seed | GKS brackets | Threshold | Heavy GKS | Heavy K2 |
+|---|---:|---:|---:|---:|---:|
+| grid_2000 |42|57 / 57|45|36|33|
+| grid_2000 |314159|55 / 55|47|36|33|
+| iter0040 |42|58 / 58|58|36|35|
+| iter0040 |314159|60 / 60|60|36|34|
+| as-Skitter |42|24 / 24|22|16|15|
+| as-Skitter |314159|26 / 26|20|18|19|
+
+Heavy-GKS reduces iterations35.6% relative to GKS. K2 adds4.4% fewer
+iterations and0.63% more stored fill; its0.68% one-RHS total reduction is not
+a significance claim. K2 improves five cases and worsens one. The threshold
+rule needs37.3% more iterations and30.0% more solve time than heavy-GKS,
+but saves8.45% setup and5.57% stored fill; one-RHS total is3.10% slower.
+The threshold never fires in either iter0040 trajectory (0/524287 calls),
+so it misses useful heavy suffixes inside globally uneven neighborhoods.
+This does not refute the factor-two sufficient condition within the
+relative-q cutoff family: that theorem does not say GKS is good outside it.
+
+The [30 projected rows](../reconciliation/cycle-screen.json) and
+[arithmetic reproducer](../reconciliation/reproduce_cycle_screen.py) recover
+all42 controls and35 ratios. The full native packet is not bundled; no native
+rerun or independent residual matvec is claimed. The large cycle benefit
+includes topology, extra-edge budget and changed elimination trajectories,
+not a same-budget causal attribution.
+
+### K2 against the matched tiny-star optimum
+
+The existing spectral experiment supplies three matched laws on four
+synthetic profiles. Core sizes coincide (3,4,3,3), although q selects its own
+relative cutoff and the other arms use the older common cutoff. Every law
+has $d$ edges. The pairs below are $(J,\mathbb E\rho)$, with
+$\rho=\lVert R(X-C)R\rVert_2$.
+
+| Weights | Independent heavy | Heavy K2 | Cycle q | K2 above global $J$ infimum |
+|---|---:|---:|---:|---:|
+| $1,2,3,4$ |(.427500,.491604)|(.427500,.491604)|(.420000,.494788)|39.4%|
+| $1,2,3,4,5$ |(.795407,.668342)|(.795407,.668342)|(.786667,.658000)|23.6%|
+| $1,1,1,1,8$ |(1.073785,.708890)|(1.044705,.732912)|(.861111,.646008)|196.0%|
+| $1,1,1,8,8$ |(.639197,.545510)|(.624127,.541607)|(.537396,.504731)|111.8%|
+
+There is only one light source in the graded profiles, so coordination cannot
+change that law. K2 improves $J$ modestly for the hub and two-band profiles,
+but increases mean spectral error on the hub. A lower local variance does
+not universally improve every spectral metric, nor do four synthetic stars
+explain matrix PCG causally. The [12 original outcome files](../reconciliation/k2-local/index.json)
+contain108 outcomes; [exact arithmetic checks](../reconciliation/reproduce_k2_local.py)
+reconstruct means and $J$ and reaggregate saved eigenvalues. The existing
+$d$-edge global certificates supply the matched bounds. No new eigensolver
+or optimizer is run.
+
+## 9. What is established, and what remains
 
 Established: the original weighted-Prüfer losses reproduce in their apxchol setting; CAST-1 has the same ideal local law; sampler and adaptive ordering interact; the positive Spielman case survives numerical/RNG controls; its complete tail has lower aggregate CAST local variance; and exact triangle updates remove its approximation cost at unchanged stored fill.
 
