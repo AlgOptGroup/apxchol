@@ -47,7 +47,7 @@ COLORS = {"apxchol bg+tree": "#0b5394",
           "apxchol greedy+tree": "#073763",
           "apxchol bk+tree": "#3d85c6",
           "RCHOL": "#d62728", "pRCHOL": "#ff9896", "BoomerAMG": "#2ca02c",
-          "AMGCL": "#8c564b", "ParAC": "#ff8c00"}
+          "AMGCL": "#8c564b", "ParAC": "#ff8c00", "ParAC Graph": "#ff8c00"}
 
 # sh/git_sha/boost_state/parse_csv come from runner_common — the previous local
 # sh used the UNHARDENED subprocess.run (orphan-on-timeout bug); the common one
@@ -326,7 +326,7 @@ def validate_cells():
             raise RuntimeError(f"duplicate scaling cell {key}: {found[key]} and {filename}")
         found[key] = filename
         if record.get("status") not in (
-                "complete", "not_converged", "timeout", "failed", "oom", "n/a"):
+                "complete", "not_converged", "timeout", "failed", "oom", "n/a", "unattempted"):
             raise RuntimeError(f"non-terminal scaling cell {filename}: {record.get('status')}")
     missing = sorted(expected - set(found))
     extra = sorted(set(found) - expected)
@@ -361,7 +361,7 @@ def charts(out=f"{ROOT}/results/plots", compact=False):
     # RCHOL has a serial factorization, so its "speedup vs threads" is
     # meaningless; pRCHOL is the parallel series retained from that family.
     SERIAL = {"RCHOL"}
-    KEEP = ({lab for lab, *_ in CPP} | {"ParAC"}) - SERIAL
+    KEEP = ({lab for lab, *_ in CPP} | {"ParAC", "ParAC Graph"}) - SERIAL
     os.makedirs(f"{out}/figures", exist_ok=True)
 
     def fig_for(field, phase, kind, fname):
@@ -390,7 +390,8 @@ def charts(out=f"{ROOT}/results/plots", compact=False):
                 else:
                     sp = [references[t] / pts[t] if t in pts else math.nan for t in ts]
                     ys = sp if kind == "speedup" else [s / t for s, t in zip(sp, ts)]
-                ax.plot(ts, ys, marker="o", label=lab, color=COLORS.get(lab, "#888"))
+                display = "ParAC Graph (portable serial solve)" if lab == "ParAC Graph" else lab
+                ax.plot(ts, ys, marker="o", label=display, color=COLORS.get(lab, "#888"))
             has_reference = any(r["cell"]["matrix_id"] == mid
                                 and r.get("provenance", {}).get("scaling_baseline")
                                 for r in recs)
@@ -402,10 +403,10 @@ def charts(out=f"{ROOT}/results/plots", compact=False):
             if compact:
                 ax.set_yscale("log", base=10 if kind == "seconds" else 2)
                 if kind == "seconds":
-                    from matplotlib.ticker import FuncFormatter
+                    from matplotlib.ticker import FuncFormatter, NullFormatter
                     formatter = FuncFormatter(lambda value, _pos: f"{value:g}")
                     ax.yaxis.set_major_formatter(formatter)
-                    ax.yaxis.set_minor_formatter(formatter)
+                    ax.yaxis.set_minor_formatter(NullFormatter())
                 if kind == "speedup":
                     from matplotlib.ticker import ScalarFormatter
                     ax.yaxis.set_major_formatter(ScalarFormatter())
@@ -413,8 +414,8 @@ def charts(out=f"{ROOT}/results/plots", compact=False):
                 missing = sum(r["status"] != "complete" for r in recs
                               if r["cell"]["matrix_id"] == mid)
                 if missing:
-                    ax.text(.02, .98, f"{missing} non-complete cells; gaps retained",
-                            transform=ax.transAxes, va="top", fontsize=8)
+                    ax.text(.98, .02, f"{missing} non-complete cells; gaps retained",
+                            transform=ax.transAxes, ha="right", va="bottom", fontsize=8)
             ax.grid(True, alpha=0.3)
         # one global legend (union across panels) so no line is missing from it
         hl = {}
@@ -460,7 +461,9 @@ def export_csv(path):
               "solve_s", "total_s", "iters", "rel_res", "git_sha", "repeat",
               "compiler", "compiler_version", "openmp_runtime", "baseline_kind",
               "baseline_setup_s", "baseline_solve_s", "baseline_total_s",
-              "baseline_cell_sha256", "baseline_node_rank")
+              "baseline_cell_sha256", "baseline_node_rank", "source_cell_sha256",
+              "binary_sha256", "job_id", "preparation_s", "solve_backend",
+              "effective_solve_threads", "timeout_cap_s", "timeout_scope")
     rows = []
     records = _scaling_records()
     main_t1 = {(r["cell"]["matrix_id"], r["cell"]["label"]): r.get("metrics", {})
@@ -478,7 +481,15 @@ def export_csv(path):
             "label": cell["label"], "solver": cell.get("solver", ""),
             "config": cell.get("config", ""), "threads": cell["threads"], "device": cell.get("device", "cpu"),
             "status": record["status"],
-            "baseline_kind": reference.get("kind", "main T1"),
+            "baseline_kind": reference.get("kind", "main T1" if fallback else "unavailable T1"),
+            "source_cell_sha256": provenance.get("source_cell_sha256", ""),
+            "binary_sha256": provenance.get("binary_sha256", provenance.get("driver_sha256", "")),
+            "job_id": provenance.get("job_id", ""),
+            "preparation_s": provenance.get("preparation_charge_s", ""),
+            "solve_backend": provenance.get("solve_backend", ""),
+            "effective_solve_threads": provenance.get("effective_solve_threads", ""),
+            "timeout_cap_s": record.get("timeout_cap_s", ""),
+            "timeout_scope": record.get("matrix_meta", {}).get("timeout_scope", ""),
             "baseline_cell_sha256": reference.get("source_cell_sha256", ""),
             "baseline_node_rank": reference.get("rank", ""),
             **baseline,

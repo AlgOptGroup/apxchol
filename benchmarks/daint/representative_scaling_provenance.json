@@ -1,0 +1,532 @@
+{
+  "denominator": 84,
+  "ours": {
+    "job_id": "4619429",
+    "records": 21,
+    "source": "1a782c8d58fb8376909314e9e7e47c0afa7f0a0b"
+  },
+  "competitors": {
+    "job_id": "4619591",
+    "scheduler_verdict": "FAILED85",
+    "planned": 63,
+    "complete": 50,
+    "timeout": 2,
+    "unattempted": 11,
+    "audited_cells": 52,
+    "audit_sha256": "dd26d381a2f787397a16258869f23487c0fd65371e6c3e5cdd2dc4b752ed5f30",
+    "series_sha256": "e5395d9e15235f2ce5ede57a3d81ff7f7a20a527d6185ad8aa421ea7776ca676"
+  },
+  "cells": [
+    {
+      "matrix": "grid_2000",
+      "solver": "amgcl",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "2ae55fd9fda51c3c6eadff261eb75f3cae659fbfd5d9b6784a8213d0fd308364",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "amgcl",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "19f6303752112c300c1d556af68378e2a6f68cb0e2afdc6b86f082c65e8b6d67",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "amgcl",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "a14eadc1a964d55c78a1c00461c55e3900a325399d1f475ec45296c60c2d67e6",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "amgcl",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "e9fbc046283d971f3ad369c74353f24fdc5a8c73a2d529c6fcab3beb5875dd28",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "amgcl",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "8cde52c560cb628eaa863a4da6cd974aa6fba1dc1b6a690f98518067c4ac8445",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "amgcl",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "e6897e92c19351b51416fb9ec8fa257cfd324211afa603375f97b409ed94bb21",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "amgcl",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "e924321ef49639bafce0c6382ec3e2cc2c24995f69a5a228cbb50a600d83430d",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "hypre_boomeramg",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "3ce66079cb7a673244cab611b81a0147b42e4c950c4c754d98df8aff6ea61f09",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "hypre_boomeramg",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "f6ba956f6662e73b5e399851d8329c405740855561696e5e8ac1403dcf17f3ee",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "hypre_boomeramg",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "c8960b7efb6c2652aba63c0593be398a67783620ba6a485178f95b0267e16b40",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "hypre_boomeramg",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "14604e0bd7bdec7665f25be852329e669ed862739f9a0924619f3f52713322e1",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "hypre_boomeramg",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "777f501fe2d329ed0bc9e09e4a0dc33b4fafe3ba67f90a1f05e286c821801142",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "hypre_boomeramg",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "0779c7a112d695ddad03f7644f9c37c364796b7e04d83ca1c025704757adf43e",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "hypre_boomeramg",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "df96b366f01c2c22beeb0adf51179a0b0896480ad4573147e7aa4055f5b202c3",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "06f141b4a34041c936e79f8d5e400d65534f60483c94783db9ca7aedd4c531e9",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "1dfcf07196475df58ad024ed01c1970c176983bc71fa8a76cb3b676d1fda9c0a",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "2ed444c48bb3be9325b1035b62e695c22bc606006a67147be8b9f50ade49045b",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "f921642626179eff96b12595c21d8fca4f1f43cfa80add31f38aa6d0353bbb07",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "595b273f2cebf2e84207c2e0a17deb46e8756822681f64c0a86a0a62bc0769e0",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "34d22cb1df8231caa41084b9cdb6c3cdb4d096f80bf20998a8e1acd4ae7f4280",
+      "presentation_only": false
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "b46df5eff6bd364bccbdcd0b2a97add3302ea4c30c837c65066860da15d2e849",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "amgcl",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "f4ba4040795ddb473554db2cc11fd382c9f376c327d9be2f50e33dc9991168bc",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "amgcl",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "0fe793edb15baa6c5a70b24cf2116190ea77a2f9fcb7d44a8cddc1b42d4bb2cb",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "amgcl",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "9422f2cda2f9f2c161bf125243aacaa0700dbe9329084ec05ce20a9e771ac771",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "amgcl",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "6378a3ca30079426659997e3ed31be0f3f8970f3df6243b04f21af6e4dd82724",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "amgcl",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "b82c29ee0ec81e490f7c39d9781d5724c958b9ffc5632c466d552f2e07813b62",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "amgcl",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "53c318f8eb678315b0cd64172028e58ef41f17beb84fd64831a1dc4d4776858f",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "amgcl",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "f975692dce783525dc9b8103f42fa72a4387b59dc47e8da54cf049d72e6b60fc",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "hypre_boomeramg",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "cdf2d1017d2cb37e06302e85ffc89cd8124bb659671b51ca8e0e137646b01932",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "hypre_boomeramg",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "6ec34c32fb4853db0544658d94cecbeeae631c6e4ea4e54e71d195be025c9550",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "hypre_boomeramg",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "294b7b5497f9be6948bf9b8828e42ad7dbc663be40b6d09c254efba3c3e74339",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "hypre_boomeramg",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "b80dd4f82f24949866d1ee1000a2bcb134cbfc853977f391cd464b1d8e3ae890",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "hypre_boomeramg",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "086ec9aa63975406376cb38ada11c78b24718d5d0796683f403a8c0247c8eec0",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "hypre_boomeramg",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "15c35dbe99c727e104be84042fd12dde4c1b2596316e327da5786b4f28f4cd3c",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "hypre_boomeramg",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "e7ca1de93f5f87bd1481b042d0d45c6b154532991f532acdca2d826ab61c7041",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "8900e5bc26b23213fa17d998d36c22c96aa16aea7e051a5c304efe9fe21d1832",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "838e2ac527a9ba9c719e62c97dd69c00a0743a37f805c3cf53a0eb64a6762214",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "7ffe160aa6b226aaef8f16daed37a331b0612acea261e548f2df1ba79fc7d363",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "56e93e949f224e877a9e1a33033f2eb380d07ba6963668b7e89c0c8a258c2238",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "f6e8743e33429c57cdb07b6d90f1f38d42a8ddbcac45e5e88b664b9268ae84a2",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "3878246d3ce360dc740b6c525483a18f7a21e1d0a2985dd8dbeaf34587bdcacf",
+      "presentation_only": false
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "07671331f7ee5d24c0224ba95658e178cf4c95ce838ccbfff54b9317f418a958",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "amgcl",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "eeb12bd71408b609d099332095fc6537c19de281628e0b07a4a92be150fc31f9",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "amgcl",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "06a873d957ad156f3b6a8e1f94ca7fa8e2ce27b900cbcffeedc93ebc0856df6c",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "amgcl",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "58e9b187b8ed4bb5d3895ac87737b6a1342bec95a19d2dbdc4fc089014bfbbfe",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "amgcl",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "7756a2792b46bb10e569e6bcd64484c20a5c6234529c06ab9d84627d73ed63c3",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "amgcl",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "7236d751c5f73aa0e7d99a9eb8bca43011307375af47dfde9c1cc30a812b1360",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "amgcl",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "4b990bcd137b10ba77d12eab616d6e159a3b09c25b088e5b269e2344d6be99a2",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "amgcl",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "cf7259614128eacbb38f9e48a98cb772a3a0cd7ea2c0aada1738f7f0fd5ea021",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "hypre_boomeramg",
+      "threads": 1,
+      "status": "timeout",
+      "cell_sha256": "3c5ea568cbb84b2057902b9c8c80f912b5f48ce96dec3df089f652a719208869",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "hypre_boomeramg",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "4a89d9747ede3bba0fb5d9dabbfe34c3628d37575b11e6cd1ec2da828f8dc37c",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "hypre_boomeramg",
+      "threads": 4,
+      "status": "timeout",
+      "cell_sha256": "e7599f04f9c6dec198f25359f5bb66208021ecf44746b95f9ad0eb3ae918071d",
+      "presentation_only": false
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "hypre_boomeramg",
+      "threads": 8,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "hypre_boomeramg",
+      "threads": 16,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "hypre_boomeramg",
+      "threads": 36,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "hypre_boomeramg",
+      "threads": 72,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "parac",
+      "threads": 1,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "parac",
+      "threads": 2,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "parac",
+      "threads": 4,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "parac",
+      "threads": 8,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "parac",
+      "threads": 16,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "parac",
+      "threads": 36,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "parac",
+      "threads": 72,
+      "status": "unattempted",
+      "cell_sha256": "",
+      "presentation_only": true
+    }
+  ],
+  "notes": [
+    "No historical T72 endpoint is spliced into competitor curves.",
+    "Ours and competitors are separate campaigns; curves use per-solver same-campaign T1 references.",
+    "ParAC Graph uses portable-cpp serial solve; requested threads apply to native factorization; serial preparation is charged at every T.",
+    "Whole-cell timeouts are not per-solve lower bounds.",
+    "Unattempted placeholders contain no timing or binary receipt; their planned source is not evidence of execution."
+  ]
+}
