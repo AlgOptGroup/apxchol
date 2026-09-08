@@ -87,8 +87,13 @@ edge and requires a tree-budget comparison.
 For $d\ge3$ and exactly equal weights, a stronger result holds: a uniform cycle globally
 minimizes $J$ over unbiased nonnegative Laplacians with at most $d$ edges.
 Jensen on weighted degrees and Cauchy–Schwarz on edge weights give
-$J\ge(d-1)(d-3)/(2d)$, attained by equal-weight cycles. This does not extend
-to nonuniform inputs, tree budgets, or spectral optimality.
+$J\ge(d-1)(d-3)/(2d)$, attained by equal-weight cycles. Define the population
+variance matrix $V=\mathbb E[(Y-P)^2]$ and its norm $\nu=\lVert V\rVert_2$.
+Symmetry gives $V=(J/(d-1))P$ for the uniform cycle. Since every unbiased law
+satisfies $\nu\ge J/(d-1)$, this cycle also globally minimizes $\nu$, attaining
+$(d-3)/(2d)$ at the same $d$-edge budget. These claims do not extend to
+nonuniform inputs or tree budgets. They do not assert optimal per-draw error
+$\rho$, expected error $\mathbb E\rho$, conditioning, or PCG iterations.
 
 ## Dependence and optimum comparisons
 
