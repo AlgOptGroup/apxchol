@@ -3,7 +3,7 @@
 The [main findings](../README.md) link the experimental conclusions; this
 directory preserves their evidence without requiring private paths.
 
-With Python3.11 or newer, reproduce the tables and exact checks using only
+With Python 3.11 or newer, reproduce the tables and exact checks using only
 the standard library:
 
 ```bash
@@ -12,6 +12,8 @@ python3 reproduce_optimality.py
 python3 reproduce_q_screen.py
 python3 reproduce_cycle_screen.py
 python3 reproduce_k2_local.py
+python3 reproduce_real_star_scores.py
+python3 reproduce_tiny_spectra.py
 ```
 
 - `spielman.json`: eight factors, 2000 recorded solve rows and 392 captured
@@ -21,14 +23,18 @@ python3 reproduce_k2_local.py
   their original verifier and named-law comparisons. No optimizer is run.
 - `q-screen.json`: 30 projected raw observations; its script reconstructs
   six blocks, 42 controls and 28 ratios. The native packet is not bundled.
-- `cycle-screen.json` and `k2-local/`: a separate30-solve common-cut screen
-  and12 synthetic laws/108 outcomes. Reproducers check35 aggregate ratios
+- `cycle-screen.json` and `k2-local/`: a separate 30-solve common-cut screen
+  and 12 synthetic laws/108 outcomes. Reproducers check 35 aggregate ratios
   and exact local moments; saved spectral values are reaggregated, not recomputed.
 - `four-inputs.json` and `star-k50.tsv`: explicitly summary-level evidence
   for the crossed-order study and star sentinel; cohorts remain separate.
+- `real-star-scores.json`: 288 retained analytic-score rows, regrouped into
+  30 summaries. Stratified samples are not population error budgets.
+- `tiny-spectra.json`: 15 laws, 522 saved probability/eigenvalue rows;
+  reaggregation reproduces absolute variance, spectral error, and conditioning.
 - `SOURCE.json`, `public-source.toml` and `SHA256SUMS`: source and byte bindings.
 
-To repeat the **Spielman native experiment**, use Julia1.12.7 and the
+To repeat the **Spielman native experiment**, use Julia 1.12.7 and the
 [public SDDM collection](https://rjkyng.github.io/SDDM2023/) matrix
 `spielman.k100.low0.25.up1.0e-6.i1.mm`, SHA-256
 `b9e30aaf5271329ae75738573afe27cdefdfc84dfc19da5f979779f6ec2db3b4`:
@@ -46,7 +52,7 @@ The executed Julia numerical sources and upstream license are preserved.
 Historical fixtures retain the five fields used for identity checks; their
 original hashes are recorded. The driver checks eight retained factors and
 250 RHSs each, excluding five identity builds and eight warmups. Its
-exact-clique intervention aborts above degree16. The original run took3m08s
+exact-clique intervention aborts above degree 16. The original run took 3m08s
 on one GH200 CPU core; another environment may fail strict historical bitwise
 identities. Record that difference rather than replacing reference hashes.
 

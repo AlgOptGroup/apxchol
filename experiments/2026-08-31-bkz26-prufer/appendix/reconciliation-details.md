@@ -1,271 +1,116 @@
-# Weighted Prüfer, CAST and GKS: what the follow-up explains
+# Controlled comparisons
 
-The [original negative apxchol result](historical-benchmarks.md#broad-matrix-evidence-bkz26-versus-gks) stands: replacing its GKS update with weighted Prüfer increased average iterations on the tested matrices. This does not contradict a CAST advantage on other inputs. A controlled follow-up found a concrete positive case, separated ordering and numerical details, and identified why its local sampled-tree errors behave differently.
+The [main findings](../README.md) summarize the decision. All numbers here
+come from saved experiments; [reproducers and source bindings](../reconciliation/README.md)
+separate exact arithmetic, saved observations, and native reruns.
 
-On Spielman `k100, step1`, fixed-order CAST uses **7.000 versus GKS's 7.892 mean PCG iterations**. Making all **49 nontrivial triangle updates exact** reduces every tested RHS to **one iteration**, with **unchanged stored factor fill**. A full census explains the local comparison: three nearly uniform triangles contribute **92.8%** of GKS's summed local variance, and CAST improves those three. A previous four-star sample missed all three.
+## Same local law, different solver protocols
 
-This document defines the methods and metrics, reports the controlled comparisons, and separates these empirical explanations from claims that remain unproved. The accompanying [evidence and executable source](../reconciliation/README.md) require no private filesystem or conversation context.
+Weighted Prüfer/BKZ26 and CAST-1 implement the same ideal local distribution.
+Their inverse-CDF and alias implementations map seeds to trees differently.
+CAST means *Canonical Approximate Schur Tree*. VAC is the broader
+[volume-sampling elimination framework](https://rasmuskyng.com/papers/BKZ26.pdf);
+this branch substitutes its local rule into apxchol, not an entire VAC solver.
+CAST-2 samples one tree over two half-weight copies of each terminal, then
+contracts copies, discarding loops and merging parallel edges. Contraction can
+create a cycle: the copy-tree edges $A_1B_1,A_2C_1,B_2B_1,B_1C_1,C_1C_2$
+leave $AB,AC,BC$. It is neither two averaged trees nor AC2's persistent
+split/merge mechanism.
 
-## 1. Names and the sampled update
+The [original campaign](historical-benchmarks.md) held apxchol's surrounding
+algorithm fixed. The later Julia adapter used public Laplacians.jl 1.4.1,
+fp64 coefficients/PCG, common RHSs, and replayable pivot orders. These are
+separate comparisons; their timings must not be pooled. The supplied anonymous
+manuscript, *CAST: Canonical Approximate Schur Tree for Approximate Cholesky
+on Graphs*, uses the [SDDM2023 Chimera/Spielman collection](https://rjkyng.github.io/SDDM2023/Tutorial.html)
+in sections C.2/C.3. It is distinct from the linked VAC theory paper; no public
+CAST manuscript URL is verified here.
 
-CAST expands to *Canonical Approximate Schur Tree*. The CAST-1/CAST-2 labels below identify the one-copy and two-copy constructions; they do not identify a separate author executable.
+A CAST-style star-k50 sentinel gave GKS/CAST-1/CAST-2 median mean iterations
+50.612/38.528/24.548: nine factors, 250 RHSs each, all maximum original-system
+residuals below $10^{-8}$. CAST-2 mean stored fill was 31930 versus GKS's
+31901, about 0.09% more. Extra emitted edges therefore do not imply doubled
+stored fill. This is historical C++ evidence, not a matched Julia/AC2 study.
+[Sentinel data](../reconciliation/star-k50.tsv).
 
-An eliminated vertex has positive incident weights $a_1,\ldots,a_d$, total $W=\sum_i a_i$, and pivot diagonal $D$. Exact elimination adds a clique with conductances
+## Full-matrix crossed-order comparisons
 
-$$
-c_{ij}=\frac{a_i a_j}{D},\qquad i\ne j.
-$$
-
-A sampled update $X$ is the Laplacian of the emitted weighted graph. All methods here target $\mathbb E[X]=C$, the exact clique Laplacian. For a Laplacian pivot $D=W$; the factor $W/D$ extends the formulas to an SDDM pivot.
-
-| Name | Meaning in these experiments |
-|---|---|
-| **GKS** | Sort weights increasingly; source $i$ chooses one later parent $j$ with probability $a_j/S_i$, where $S_i=\sum_{j\gt i}a_j$, and emits conductance $a_i S_i/D$. Independent choices produce a connected $d-1$-edge tree. |
-| **Weighted Prüfer / BKZ26** | Draw $d-2$ independent Prüfer symbols with probabilities $a_i/W$, decode the tree, and give selected edge $ij$ conductance $(W/D)a_i a_j/(a_i+a_j)$. |
-| **CAST-1** | The same one-copy weighted-Prüfer ideal law. Our CAST implementation uses an alias sampler; the original BKZ26 implementation used inverse-CDF lookup. Their mappings from seed to tree differ, but their intended distributions agree. |
-| **CAST-2** | Split each neighbor into two copies of weight $a_i/2$, draw **one tree on all $2d$ copies**, then contract copies. Discard loops and combine repeated terminal pairs. It is not an average of two independent CAST-1 trees. |
-| **VAC** | The volume-sampling elimination framework of [Baumann, Kyng and Zöcklein](https://rasmuskyng.com/papers/BKZ26.pdf). This branch implements its weighted-Prüfer local rule inside apxchol's existing factorization; it is not a reproduction of an entire different solver. |
-
-The same expansion/contraction idea can be applied to GKS: linearity preserves unbiasedness. It does not automatically improve variance. For two equal original terminals, ordinary GKS is exact; a recorded exact duplicated-GKS example produces conductance $1/4$ with probability $1/3$ or $5/8$ with probability $2/3$, preserving mean $1/2$ but adding variance $1/32$. CAST-2 is also distinct from public AC2's persistent multiedge split/merge mechanism.
-
-Writing $E$ for the sampled edge set, Prüfer sampling has $\Pr(ij\in E)=(a_i+a_j)/W$, so the stated conductance is exactly $c_{ij}/\Pr(ij\in E)$. The distinction from GKS is dependence and how selected edges are weighted, not unbiasedness or connectivity. Either sampler can change subsequent degrees, pivot priorities and residual weights.
-
-## 2. What the local metric measures
-
-Define
-
-$$
-T=\frac WD\mathrm{diag}(a_i),\qquad R=T^{-1/2},\qquad
-J=\mathbb E\lVert R(X-C)R\rVert_F^2.
-$$
-
-This is the expected **relative Frobenius error of the entire sampled clique Laplacian**, including diagonal and off-diagonal errors. It is different from the degree-only RMS metric in the original README.
-
-Write $v_i=\sqrt{a_i/W}$. Then $RCR=I-vv^T$, the identity on the clique's non-null subspace. This normalization expresses errors relative to the exact local operator rather than favoring stars simply because their conductances are small. If $\delta w_{ij}$ is a sampled edge's conductance error and $\delta s_i=\sum_{j\ne i}\delta w_{ij}$, the objective expands to
-
-$$
-J=\mathbb E\left[
- \sum_i\frac{\delta s_i^2}{T_{ii}^2}
- +2\sum_{i\lt j}\frac{\delta w_{ij}^2}{T_{ii}T_{jj}}
-\right].
-$$
-
-A selected edge of conductance $w$ contributes $w(1/T_{ii}+1/T_{jj})$ to normalized trace. This is its endpoint-scaled matrix trace, not a vertex's raw incident weight or only its outgoing GKS contribution. Every CAST-1 edge contributes exactly one; every sampled tree therefore has normalized trace $d-1$.
-
-That property also explains the local minimax statement: among unbiased inverse-inclusion-probability one-tree estimators, the largest possible normalized edge contribution cannot be below one, and CAST-1 attains one on every edge. This optimizes a **worst single-edge contribution**, not $J$, spectral norm, or whole-matrix PCG iterations. Edge covariances and the accumulation of errors across elimination still matter.
-
-The relative Frobenius objective is useful because it includes dependence between incident edges and is exactly calculable on small stars. It is not a proved ordering of PCG performance. Later stars depend on earlier samples, and elimination transforms local errors before they affect the complete factor.
-
-## 3. Matching protocols changes the question
-
-The original broad apxchol campaign changes only its local sampler. The follow-up Julia reconstruction instead uses public [Laplacians.jl](https://github.com/danspielman/Laplacians.jl) `1.4.1`, fp64 factor coefficients and PCG, matched RHSs and explicit replayed pivot orders. These are different surrounding algorithms and must not have their timings pooled.
-
-The small star sentinel used to check the CAST-style protocol produced these medians of three per-factor means, each based on 250 RHSs:
-
-| Star `k50` | GKS | CAST-1 | CAST-2 |
-|---|---:|---:|---:|
-| Median mean iterations |50.612|38.528|24.548|
-
-All nine recorded factors' maximum original-system residuals are below $10^{-8}$. Sequential elimination, degree updates, tie handling, precision and grounding were relevant to matching this sentinel. It does not imply that ordinary apxchol's GKS baseline was broken, or that every matrix should show the same advantage. [Recorded table](../reconciliation/star-k50.tsv).
-
-To separate sampler from ordering, let the first letter in `GG`, `CC`, `CG`, `GC` denote GKS or CAST-1 sampling, and the second denote the adaptive GKS or CAST pivot order. A crossed arm replays its source order exactly. On four public IPM inputs:
+In the table, the first letter denotes GKS/CAST-1 sampling; the second denotes
+the source of the adaptive pivot order. Crossed arms replay that order.
 
 | Input | GG | CC | CG | GC |
 |---|---:|---:|---:|---:|
-| Chimera `i1, eps0.1, step1` |17.000|17.912|19.020|19.000|
-| Chimera `i1, eps0.1, step6` |17.188|16.980|19.088|19.116|
-| Spielman `k100, step1` |7.892|7.004|7.000|7.904|
-| Spielman `k100, step10` |5.000|5.000|5.000|5.000|
+| Chimera i1, step1 |17.000|17.912|19.020|19.000|
+| Chimera i1, step6 |17.188|16.980|19.088|19.116|
+| Spielman k100, step1 |7.892|7.004|7.000|7.904|
+| Spielman k100, step10 |5.000|5.000|5.000|5.000|
 
-These are mean iterations over 250 common RHSs, factor seed42. Each of the four arms has an identical mirrored repeat: **32 factors and 8,000 solves**, all passing original and solver residual checks at $10^{-8}$. Two Chimera setup timing controls failed their declared bounds, so this table makes **numerical-quality claims only**, not speed claims. [Source-bound summary](../reconciliation/four-inputs.json).
+These are means over 250 common RHSs, seed 42, with mirrored repeats:
+32 factors and 8,000 solves, all passing original and solver residual checks.
+Two Chimera setup controls failed, so the table supports quality only.
+Sampler and ordering interact on Chimera. Fixed order still permits different
+later star weights. [Four-input evidence](../reconciliation/four-inputs.json).
 
-On Chimera, sampling and order interact. Under the GKS order CAST is worse, while under the CAST order it is better than GKS. Fixing pivot order does not fix subsequent stars: earlier sampled edges still alter their weights. On Spielman step1, the advantage survives either order; step10 has no iteration benefit. There is no uniform CAST improvement even across these four paper-corpus inputs.
+## Larger real neighborhoods
 
-## 4. Spielman's complete nontrivial tail
+A *trajectory* means the sequence of pivot neighborhoods in one factorization,
+not a matrix family or sampler. The observer retained 288 neighborhoods from
+nine factorizations: 106 on Yves iter0010, 170 on Chimera step1, and twelve
+old Spielman triangles. The first two families include much larger stars. Here $J$ is the
+whole-clique relative variance defined in the [model](sampling-model.md):
 
-Every native trajectory on step1 contains **338351 degree-two pivots, 49 degree-three pivots and one degree-one pivot**. Degree two has one possible clique edge, so ideal support-sampling variance is zero. However, the GKS recurrence and CAST's direct weight formula round differently, and GKS consumes a random draw that CAST does not. The intervention below controls these effects.
+| Retained family | Degree range | CAST improves $J$ | Summed CAST/GKS $J$: GG / CC / CG |
+|---|---:|---:|---:|
+| Yves iter0010 |3–68|3/106|1.2213 / 1.2216 / 1.2012|
+| Chimera step1 |3–350|78/170|1.0012 / 1.0775 / 1.0804|
 
-All arms use the same saved GKS order, 250 normalized Gaussian RHSs, fp64 factor/application/PCG, tolerance $10^{-8}$ and true-residual grading. The native controls reproduce historical factor, RHS and solution hashes.
+These are analytically evaluated scores on identical saved stars, not noisy
+16-draw estimates. Strongly uneven Yves weights mostly favor GKS; Chimera's
+early and late neighborhoods behave differently. **The samples are stratified:
+these sums are not estimates of population frequency or total factor error.**
+[All scalar rows and source hashes](../reconciliation/real-star-scores.json)
+and the standard-library reproducer retain that distinction.
 
-| Intervention | Mean iterations | Stored factor entries |
-|---|---:|---:|
-| Original GKS |7.892|676850|
-| Original CAST-1 |7.000|676850|
-| CAST with GKS degree-two arithmetic |7.000|676850|
-| Previous arm plus GKS degree-two random-draw consumption |6.804|676850|
-| GKS with a separate stream at each nontrivial pivot |7.536|676850|
-| CAST with matched degree-two arithmetic and per-pivot streams |6.960|676850|
-| Exact clique updates at all nontrivial pivots |**1.000**|**676850**|
-| Original GKS repeat |7.892|676850|
+One diagnostic case explains the earlier Spielman discrepancy: its complete
+sequence has 49 nontrivial triangles. Three nearly uniform ones contribute
+92.8% of summed GKS variance and favor CAST; the earlier observer missed them.
+Fixed-order CAST averaged 7.000 versus GKS's 7.892 iterations, surviving
+arithmetic/RNG controls. Exact updates at the 49 triangles gave one iteration
+on all 250 RHSs at unchanged stored fill. This is a narrow diagnostic, not
+the main matrix evidence. [Eight factors / 2,000 solves](../reconciliation/spielman.json).
 
-The degree-two arithmetic substitution changes solution bits but preserves all 250 iteration counts. CAST's advantage also survives the tested stream alignments. These arms are sequential interventions, not independent factor-seed replicates, and common seeds do not make GKS and CAST select identical outcomes.
+## Quick cycle and parent-probability screens
 
-The exact arm adds the third clique edge at every triangle. All **250/250** RHSs converge in one iteration, with maximum original residual $3.376\times10^{-11}$. It still has the same 49 triangles and the same stored factor count: extra emitted residual edges need not translate into extra stored factor entries after later graph updates. This is a measured benefit on this input, not a general fill guarantee for cycles.
+Both screens used grid_2000, iter0040, and as-Skitter, T72, seeds 42/314159,
+one common RHS per matrix, and GKS-before/after controls. Each checked
+30/30 solves and 42/42 declared controls. Ratios are six-block geometric means.
 
-The full denominator is **8 factors, 2,000 converged solves**, eight excluded warmups, five actual-input identity builds and separately run native correctness fixtures. All **37/37** result files were collected. The executable adapter and source bindings are included with the [complete projected evidence](../reconciliation/spielman.json).
-
-## 5. Why the earlier small sample pointed the wrong way
-
-The complete observer retained all 49 triangles per trajectory. An earlier stratified observer had retained only four. Those four all lie late in the tail and have extremely unequal weights.
-
-For sorted triangle weights $a\le b\le c$, $A=a+b+c$, the exact ideal expectations are
-
-$$
-J_G=\frac{2a}{A}+\left(\frac aA\right)^2\frac{(c-b)^2}{bc},\qquad
-J_C=\frac{4abc}{(a+b)(a+c)(b+c)}.
-$$
-
-The accompanying reproducer independently enumerates GKS's two outcomes and CAST's three outcomes, verifies their expected edge weights and computes the full Laplacian errors using exact rational arithmetic from the saved binary64 weights.
-
-| Complete trajectory used as common input stars | Sum $J_G$ | Sum $J_C$ | CAST/GKS | Stars CAST improves |
-|---|---:|---:|---:|---:|
-| Native GKS |2.026269|1.740114|**0.858777**|3/49|
-| Native CAST, fixed GKS order |2.036292|1.757291|**0.862986**|3/49|
-
-The three improved triangles are the first three nontrivial pivots. Their weights are comparatively even; the first is essentially $(0.5,0.5,0.5)$, with CAST/GKS error ratio $3/4$. They account for **92.8%** of summed GKS local error. The last 39 contribute only **0.0252%**.
-
-The earlier four retained ordinals were `338335,338341,338385,338361`; they omitted all three dominant ordinals `338301,338303,338305`. On the retained skewed triangles, exact CAST expectation is about twice GKS's. A separate 16-draw replay had even understated that expectation because very rare weak-vertex Prüfer events were usually absent. Both statements are correct for those sampled triangles, but neither described the complete tail.
-
-With the full denominator, local variance favors CAST by about 14%, agreeing in direction with its observed 11.3% iteration reduction. This reconciles the apparent local-metric conflict for this input. It does not prove that summing normalized local variances predicts PCG in general.
-
-For the original application IPM inputs, the retained stars instead have strongly concentrated weights, and the evaluated local CAST expectation is typically worse. Chimera's stars show an early-to-late transition. Those observations support an input-dependent explanation, but their stratified samples are not complete trajectory error budgets like the Spielman census above.
-
-## 6. How far are the methods from an optimum?
-
-“Optimal” must specify the metric, edge budget and admissible distributions. Here the comparison uses the same $J$ and **all connected simple graphs with exactly $m$ edges**, allowing both probabilities and support-dependent positive edge weights to vary, subject only to $\mathbb E[X]=C$. The optimum is an infimum because the best limiting distribution may place zero weight on some edges; positive connected approximations provide an upper bound.
-
-The four tiny profiles below have exact rational lower/upper certificates with gaps below $5.1\times10^{-9}$. Tree budgets have $m=d-1$; the current relative-trace cycle rule has $m=d$ and needs a separate optimum. These are stronger comparisons than optimizing within the Prüfer family or over a fixed list of marginal probabilities.
-
-| Weights | GKS $J$, tree | CAST-1 $J$, tree | Global tree infimum | Relative-trace cycle $J$ | Global $d$-edge infimum |
+| Screen / comparison | Iterations | Stored fill | Setup | Solve | Total |
 |---|---:|---:|---:|---:|---:|
-| $1,2,3,4$ |0.790833|0.907937|0.675088|0.420000|0.306638|
-| $1,2,3,4,5$ |1.297852|1.460883|1.034674|0.786667|0.643742|
-| $1,1,1,1,8$ |1.255208|0.948045|0.656387|0.861111|0.352991|
-| $1,1,1,8,8$ |0.733380|0.815174|0.509902|0.537396|0.294610|
+| q tree / GKS |1.0201|1.0021|1.0199|1.0160|1.0164|
+| cycle-q / cycle-GKS |0.9668|1.0015|0.9969|0.9704|0.9905|
+| heavy-GKS / GKS, older cutoff |0.6436|—|—|—|—|
+| heavy-K2 / heavy-GKS |0.9560|1.0063|—|0.9558|0.9932|
+| threshold / heavy-GKS |1.3729|0.9443|0.9155|1.2997|1.0310|
 
-CAST-1 beats GKS on the one-hub profile and loses on the other three, while remaining **34–60% above the global tree infimum**. The relative-trace cycle rule remains **22–144% above its matched $d$-edge infimum**. Thus neither the CAST edge-minimax property nor the current cycle rule makes it globally optimal for Frobenius variance.
+The q screen uses each cycle rule's own relative-variance cutoff. The separate
+K2 screen uses one common older degree-normalized cutoff. Do not pool their
+ratios. Threshold means a full cycle if weight ratio is at most two, otherwise
+GKS; it never fired on either iter0040 trajectory, missing useful heavy
+suffixes. K2 improved five seed cases and worsened one.
 
-The relative-trace rule in this table is a newer comparator, not the branch's original GKS default. It chooses a heavy suffix, samples a uniform cycle there, and independently attaches each lighter vertex to a later parent with probability $(a_i+a_j)/(m_i a_i+S_i)$. It selects the suffix by its exact relative-Frobenius score. The optimum certificates allow dependencies and outcome-dependent weights beyond this family. These are small-star model comparisons, not matrix timing results.
+Set aside the pure q tree; retain cycle-q as a modestly preferred research
+candidate. The large cycle benefit already appears without q or K2, but
+includes topology, the extra edge, and changed later stars. These screens
+establish neither timing significance nor production readiness.
+[Q rows](../reconciliation/q-screen.json) and
+[cycle rows](../reconciliation/cycle-screen.json) preserve individual cases.
 
-The [sampling-model note](sampling-model.md) gives the full importance-sampling derivation, explains why weighted Prüfer already uses the same plus-weight edge marginals, and proves two additional statements: exact uniform weights make a cycle globally Frobenius-optimal under an at-most-$d$-edge budget; and weight ratio at most two is sufficient for the full cycle to win within the current suffix family. Neither statement establishes spectral or PCG optimality.
+## Limits
 
-## 7. Quick screen: q alone versus q inside a cycle rule
-
-A subsequent direct comparison separated the parent probability
-$q(i,j)=(a_i+a_j)/\sum_{l\gt i}(a_l+a_i)$ from the larger cycle construction.
-**No arm uses K2 coordination.** Ordinary GKS and the pure q tree each emit
-$d-1$ edges. The two cycle rules use a heavy-suffix cycle and independent
-light-parent choices, emitting $d$ edges for degree at least three. Each
-cycle rule selects its **own** cutoff using its exact relative-Frobenius
-objective; this compares complete rules, not probability changes at a fixed
-common core.
-
-The screen used `grid_2000`, `iter0040` and `as-Skitter`, 72 CPU threads,
-factor seeds `42` and `314159`, and one common RHS per matrix. Each of the six blocks
-ran GKS before, three candidates in rotated order, and GKS after. All
-**30/30 factors and solves** pass original-system residual tolerance $10^{-8}$;
-all **42/42** per-metric GKS bracket controls pass the declared 15% span limit.
-Ratios below are geometric means over all six blocks; the GKS reference is
-the geometric mean of its two brackets. Total means setup plus one solve.
-
-| Comparison | Iterations | Stored fill | Setup | Solve | Total |
-|---|---:|---:|---:|---:|---:|
-| Pure q tree / GKS |1.020083|1.002088|1.019891|1.016034|1.016443|
-| Cycle + independent GKS / GKS |0.637475|1.119867|1.134930|0.685687|0.947171|
-| Cycle + independent q / GKS |0.616340|1.121536|1.131368|0.665421|0.938216|
-| Cycle + q / cycle + independent GKS |0.966846|1.001491|0.996861|0.970444|0.990546|
-
-| Matrix | Seed | GKS brackets | Pure q tree | Cycle GKS | Cycle q |
-|---|---:|---:|---:|---:|---:|
-| grid_2000 |42|57 / 57|57|36|34|
-| grid_2000 |314159|55 / 55|57|36|35|
-| iter0040 |42|58 / 58|57|36|35|
-| iter0040 |314159|60 / 60|59|36|35|
-| as-Skitter |42|24 / 24|27|16|16|
-| as-Skitter |314159|26 / 26|26|17|16|
-
-The **pure q tree is set aside**: it adds about 2% iterations overall without
-a useful fill reduction. The **cycle-q rule remains the modestly preferred
-cycle candidate**: about 3.3% fewer iterations and 0.15% more stored fill than
-cycle-GKS. The larger gain over a GKS tree is already present with cycle-GKS;
-it cannot be attributed to q alone. This screen does not separate the cycle
-topology from its extra edge or retuned cutoff, establish statistical timing
-significance, or justify production promotion.
-
-All four arms share one executable and the frozen `40f6953e` core's graph
-storage, ordering policy, drop settings, input interpretation and RHS
-generation. The component-compatible RHS for `as-Skitter` is generated by
-the driver; it is not the invalid historical RHS excluded from the original
-broad campaign. [Thirty projected raw rows and source/input hashes](../reconciliation/q-screen.json)
-plus a [standard-library reproducer](../reconciliation/reproduce_q_screen.py)
-recover all six blocks, 42 controls and 28 aggregate ratios. This is saved-data
-reproduction; the full native packet and matrix inputs are not bundled here,
-and no native rerun or new residual matvec is claimed.
-
-## 8. Common-cut cycle/K2 and simple-threshold screen
-
-A separate T72, two-seed, one-RHS screen used the same three matrices and
-GKS-before/after structure: **30/30 solves and42/42 controls pass**. Both
-heavy arms use the **same older degree-normalized independent-GKS cutoff**;
-this differs from the preceding q screen's separately optimized relative
-cutoffs. The threshold rule uses a full cycle when $d\ge3$ and
-$\max(a)/\min(a)\le2$, and GKS otherwise.
-
-| Matrix | Seed | GKS brackets | Threshold | Heavy GKS | Heavy K2 |
-|---|---:|---:|---:|---:|---:|
-| grid_2000 |42|57 / 57|45|36|33|
-| grid_2000 |314159|55 / 55|47|36|33|
-| iter0040 |42|58 / 58|58|36|35|
-| iter0040 |314159|60 / 60|60|36|34|
-| as-Skitter |42|24 / 24|22|16|15|
-| as-Skitter |314159|26 / 26|20|18|19|
-
-Heavy-GKS reduces iterations35.6% relative to GKS. K2 adds4.4% fewer
-iterations and0.63% more stored fill; its0.68% one-RHS total reduction is not
-a significance claim. K2 improves five cases and worsens one. The threshold
-rule needs37.3% more iterations and30.0% more solve time than heavy-GKS,
-but saves8.45% setup and5.57% stored fill; one-RHS total is3.10% slower.
-The threshold never fires in either iter0040 trajectory (0/524287 calls),
-so it misses useful heavy suffixes inside globally uneven neighborhoods.
-This does not refute the factor-two sufficient condition within the
-relative-q cutoff family: that theorem does not say GKS is good outside it.
-
-The [30 projected rows](../reconciliation/cycle-screen.json) and
-[arithmetic reproducer](../reconciliation/reproduce_cycle_screen.py) recover
-all42 controls and35 ratios. The full native packet is not bundled; no native
-rerun or independent residual matvec is claimed. The large cycle benefit
-includes topology, extra-edge budget and changed elimination trajectories,
-not a same-budget causal attribution.
-
-### K2 against the matched tiny-star optimum
-
-The existing spectral experiment supplies three matched laws on four
-synthetic profiles. Core sizes coincide (3,4,3,3), although q selects its own
-relative cutoff and the other arms use the older common cutoff. Every law
-has $d$ edges. The pairs below are $(J,\mathbb E\rho)$, with
-$\rho=\lVert R(X-C)R\rVert_2$.
-
-| Weights | Independent heavy | Heavy K2 | Cycle q | K2 above global $J$ infimum |
-|---|---:|---:|---:|---:|
-| $1,2,3,4$ |(.427500,.491604)|(.427500,.491604)|(.420000,.494788)|39.4%|
-| $1,2,3,4,5$ |(.795407,.668342)|(.795407,.668342)|(.786667,.658000)|23.6%|
-| $1,1,1,1,8$ |(1.073785,.708890)|(1.044705,.732912)|(.861111,.646008)|196.0%|
-| $1,1,1,8,8$ |(.639197,.545510)|(.624127,.541607)|(.537396,.504731)|111.8%|
-
-There is only one light source in the graded profiles, so coordination cannot
-change that law. K2 improves $J$ modestly for the hub and two-band profiles,
-but increases mean spectral error on the hub. A lower local variance does
-not universally improve every spectral metric, nor do four synthetic stars
-explain matrix PCG causally. The [12 original outcome files](../reconciliation/k2-local/index.json)
-contain108 outcomes; [exact arithmetic checks](../reconciliation/reproduce_k2_local.py)
-reconstruct means and $J$ and reaggregate saved eigenvalues. The existing
-$d$-edge global certificates supply the matched bounds. No new eigensolver
-or optimizer is run.
-
-## 9. What is established, and what remains
-
-Established: the original weighted-Prüfer losses reproduce in their apxchol setting; CAST-1 has the same ideal local law; sampler and adaptive ordering interact; the positive Spielman case survives numerical/RNG controls; its complete tail has lower aggregate CAST local variance; and exact triangle updates remove its approximation cost at unchanged stored fill.
-
-Not established: a theorem or reliable general predictor mapping local $J$ to complete-factor PCG, uniform CAST superiority, a broad optimum sampler, or a matching implementation/timing reproduction of every CAST result. The reconstruction used known public factor and PCG code; the exact author implementation, all seeds, reduction/RHS details and timing policy were not available for identical-code comparison. A separate shallow-water study also found that augmented-system and original-system residual criteria can grade the same returned vector differently; their convergence criteria must be matched before comparing performance.
-
-The practical research direction is to use complete or appropriately weighted star data, preserve edge-budget distinctions, and evaluate candidate laws by both local mathematics and converged matrix solves. A negative solver campaign is evidence about a measured configuration, not a rejection of a paper or a reason to abandon its explanation.
+The [local-model comparison](sampling-model.md) reports absolute variance,
+spectral error, and budget-specific bounds. None is a general PCG predictor.
+A negative sampler campaign does not reject a paper. Remaining gaps include
+broader full-solve prediction from representative stars and matched CAST-2/AC2
+quality evidence. No exact author-executable or universal superiority claim
+follows from the public reconstruction.

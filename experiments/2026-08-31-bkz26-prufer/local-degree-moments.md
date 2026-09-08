@@ -1,148 +1,43 @@
-# Fixed-star degree and spectral metrics
+# Degree moments on a fixed star
 
-This note analyzes one fixed pivot star. It explains the diagnostics in the
-experiment README; it does **not** claim that a local degree or spectral metric
-determines global PCG convergence.
+This historical diagnostic measures degree error, distinct from the whole-clique
+relative variance in the [sampling model](appendix/sampling-model.md).
+Neither metric determines complete-factor PCG convergence.
 
-Let the neighbor weights be $w_i$, let $W=\sum_i w_i$, and let $D$ be the pivot
-diagonal. The exact Schur-clique edge and exact clique degree at neighbor $i$
-are
+For weights $w_i$, total $W$, and pivot $D$, exact clique edges and degrees are
+$c_{ij}=w_iw_j/D$ and $t_i=w_i(W-w_i)/D$. In increasing order, GKS source $r$
+chooses a later parent with probability $w_j/S_r$, where
+$S_r=\sum_{j\gt r}w_j$, and emits constant weight $h_r=w_rS_r/D$.
+Only incoming choices vary the degree of vertex $i$:
 
-```text
-c_ij = w_i w_j / D,
-t_i  = w_i (W-w_i) / D.
-```
+$$
+\mathrm{Var}(\widehat t_i)=\sum_{r\lt i}h_r^2(w_i/S_r)(1-w_i/S_r).
+$$
 
-## What GKS fixes in every sample
+With $Q_r=\sum_{j\gt r}w_j^2$, total variance is
+$D^{-2}\sum_r w_r^2(S_r^2-Q_r)$. Swapping adjacent $x,y$ before a suffix
+of weight $S$ changes it by $2xyS(x-y)/D^2$, so increasing order minimizes
+this degree objective within the independent later-parent family.
 
-Order the weights increasingly. For source $r$, define
-$S_r=\sum_{j\gt r} w_j$. GKS independently chooses one parent $J_r\gt r$ with
-probability $w_j/S_r$ and emits an edge of weight
+Prüfer symbol probabilities $q_i$ give edge inclusion $p_{ij}=q_i+q_j$,
+weight $h_{ij}=c_{ij}/p_{ij}$, and adjacent indicator covariance $-q_jq_k$.
+Therefore
 
-```text
-h_r = w_r S_r / D.
-```
+$$
+\mathrm{Var}(\widehat t_i)=\sum_{j\ne i}h_{ij}^2p_{ij}(1-p_{ij})
+-2\sum_{j\lt k;\ j,k\ne i}h_{ij}h_{ik}q_jq_k.
+$$
 
-The exact mass from source $r$ to its later neighbors is also
-$\sum_{j\gt r} c_{rj} = h_r$. GKS therefore preserves that source contribution in
-every sample. The destination is random, and vertex $i$ also receives random
-edges from sources $r\lt i$; its total sampled clique degree is not fixed.
+The diagnostic is $[\sum_i\mathrm{Var}(\widehat t_i)/\sum_i t_i^2]^{1/2}$.
+For four neighbors of weight $\epsilon$ and two of weight one, GKS error is
+$2\epsilon+O(\epsilon^2)$; ordinary weighted Prüfer gives
+$\sqrt{2\epsilon}+O(\epsilon)$. Prüfer sometimes omits the heavy-heavy edge,
+whereas GKS always includes it. This is a local skew-weight failure mode.
 
-Only incoming choices contribute to its variance:
-
-```text
-Var(t_hat_i) = sum_{r<i} h_r^2 (w_i/S_r) (1-w_i/S_r).
-```
-
-Writing $Q_r=\sum_{j\gt r} w_j^2$, summing over vertices gives
-
-```text
-sum_i Var(t_hat_i) = (1/D^2) sum_r w_r^2 (S_r^2-Q_r).
-```
-
-The increasing order minimizes this objective within the independent
-parent-to-suffix family. Swapping adjacent weights $x,y$ before a suffix of
-total weight $S$ changes it by
-
-```text
-V(x,y)-V(y,x) = 2 x y S (x-y) / D^2.
-```
-
-Thus placing $x\le y$ first never increases the total degree variance.
-
-## Prüfer p-trees
-
-Let $q_i\gt 0$, $\sum_i q_i=1$, and draw the iid Prüfer symbols from $q$. Its edge
-marginal and the corresponding unbiased edge weight are
-
-```text
-p_ij = P({i,j} in T) = q_i+q_j,
-h_ij = c_ij / p_ij.
-```
-
-BKZ26 uses $q_i=w_i/W$. For two distinct incident edges, the product-tree edge
-indicators satisfy
-
-```text
-Cov(I_ij,I_ik) = -q_j q_k.
-```
-
-Consequently,
-
-```text
-Var(t_hat_i)
-  = sum_{j!=i} h_ij^2 p_ij(1-p_ij)
-    - 2 sum_{j<k; j,k!=i} h_ij h_ik q_j q_k.
-```
-
-The degree metric used in the exact model is
-
-```text
-RMS degree error = sqrt(sum_i Var(t_hat_i) / sum_i t_i^2).
-```
-
-Changing to $q_i\propto w_i^\alpha$ remains unbiased after division by
-$q_i+q_j$. It can nevertheless create large weights when a pair marginal is
-small; the largest multiplier relative to $c_{ij}$ is
-$1/\min_{i\lt j}(q_i+q_j)$.
-
-## Normalized spectral metric
-
-Let $C$ be the exact clique Laplacian and $\widehat C$ one sampled weighted-tree
-Laplacian. [`tiny_star_spectral.py`](tiny_star_spectral.py) also computes
-
-```text
-E || C^{+1/2} (C_hat-C) C^{+1/2} ||_2,
-```
-
-where $C^{+1/2}$ is the square root of the Moore-Penrose pseudoinverse. This
-normalizes away the exact clique's scale and measures the largest relative
-quadratic-form error on its range. It is an expected one-pivot error, not a
-bound on the accumulated factorization.
-
-For each four-neighbor profile, the script enumerates all $4^(4-2)=16$ labeled
-trees. GKS and every p-tree point are exact finite sums. The “best-found
-all-tree” comparator parameterizes a probability for every tree and uses a
-fixed-seed, 15-start numerical search separately for each objective. Every
-selected edge is weighted by $c_{ij}/p_{ij}$, where $p_{ij}$ is that distribution's
-own marginal. The search is deterministic and checks that all marginals remain
-positive, but the nonconvex outer problem means the result is **not a
-certificate of the global optimum**.
-
-The resulting plot deliberately separates two facts:
-
-- On a uniform star, the BKZ product-tree law beats GKS on both displayed
-  metrics.
-- On the graded and two-scale stars, GKS beats BKZ. Tilting toward
-  $\alpha=1.75$ improves degree RMS, but it does not necessarily improve the
-  spectral metric.
-- The numerical all-tree comparator beats both named families in these tiny
-  cases, so neither family exhausts the available estimator designs.
-
-These are model results, separate from the matrix-level alpha sweep.
-
-## Why strong skew separates the degree variances
-
-Take four light neighbors of weight $\epsilon$ and two heavy neighbors of weight
-one. As $\epsilon$ tends to zero, exact calculation gives
-
-```text
-GKS                    = 2 epsilon + O(epsilon^2),
-BKZ, q proportional w  = sqrt(2 epsilon) + O(epsilon).
-```
-
-The BKZ heavy-heavy edge is omitted with probability about $2 \epsilon$, yet
-its conductance is order one, producing order-$\epsilon$ variance. GKS always
-includes the edge between the two heaviest neighbors; its remaining degree
-errors are only order $\epsilon$ in amplitude and order $\epsilon^2$ in variance.
-Exact enumeration illustrates the growing ratio:
-
-| epsilon | GKS RMS | BKZ RMS | BKZ / GKS |
-|---:|---:|---:|---:|
-| 1e-2 | .01951 | .13600 | 6.97 |
-| 1e-4 | .00019995 | .014136 | 70.70 |
-| 1e-6 | .000002000 | .0014142 | 707.11 |
-
-This explains a local failure mode. Across many changing pivot stars, errors
-also alter subsequent graph structure, and only the matrix experiments can
-measure the resulting PCG behavior.
+[small_star_error.py](small_star_error.py) enumerates six-vertex examples.
+[tiny_star_spectral.py](tiny_star_spectral.py) separately measures expected
+relative spectral error on four-vertex examples, normalizing by the clique
+pseudoinverse. Its fixed-seed multistart all-tree search is **not a global
+certificate**. Changing the symbol exponent can improve degree RMS while
+worsening spectral error. The later [exact-certificate comparison](reconciliation/optimality/comparison.json)
+uses a different, explicitly certified Frobenius objective.

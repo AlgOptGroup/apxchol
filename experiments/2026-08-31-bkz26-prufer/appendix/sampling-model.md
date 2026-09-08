@@ -1,184 +1,148 @@
-# Relative clique variance, trace and dependent tree laws
+# Local sampling model
 
-This note supplies the mathematics behind the [experimental reconciliation](reconciliation-details.md). It distinguishes optimization of one sampled edge, a structured cycle/tree family, and unrestricted distributions. Statements below use ideal arithmetic; native floating-point and RNG checks are separate implementation evidence.
-
-## Relative normalization and the role of trace
-
-Take $d\ge 2$; degree-zero/one pivots have trivial clique updates and are excluded from the trace decomposition. Let positive star weights be $a_1,\ldots,a_d$, $A=\sum_i a_i$, and eliminated pivot $D\gt 0$. The target clique is
+These are ideal-arithmetic statements about one star; implementation and
+matrix-solve checks are [separate evidence](reconciliation-details.md).
+Take $d\ge2$ positive neighbor weights $a_i$, total $A=\sum_i a_i$, and pivot
+$D\gt0$. The exact clique and normalization are
 
 $$
-C=\frac AD\mathrm{diag}(a)-\frac{aa^T}{D},\quad
-T=\frac AD\mathrm{diag}(a),\quad R=T^{-1/2}.
+C=(A/D)\mathrm{diag}(a)-aa^T/D,\qquad
+R=[(A/D)\mathrm{diag}(a)]^{-1/2}.
 $$
 
-For $D\gt A$, the full SDDM Schur update also retains diagonal terms; this model concerns its sampled clique contribution. With $u_i=\sqrt{a_i/A}$ and $P=I-uu^T$, we have $RCR=P$. Every sampled Laplacian $X$ gives $Y=RXR$ with $Yu=0$. Thus
+For $u_i=\sqrt{a_i/A}$, $P=I-uu^T=RCR$ is the identity on $u^\perp$.
+A sampled Laplacian $X$ gives $Y=RXR$ with $Yu=0$. We measure
 
 $$
 J=\mathbb E\lVert Y-P\rVert_F^2
- =\left(\frac DA\right)^2\mathbb E\sum_{i,j}\frac{(X-C)_{ij}^2}{a_i a_j}.
+=(D/A)^2\mathbb E\sum_{i,j}\frac{(X-C)_{ij}^2}{a_i a_j},\qquad
+\rho=\lVert Y-P\rVert_2.
 $$
 
-The exact local operator is the identity on $u^\perp$. The normalized size of the target edge atom $ij$ is
+This includes diagonal and off-diagonal error. Extra SDDM diagonal terms are
+outside the sampled-clique model. For an emitted edge of weight $w$, normalized
+trace is $w(D/A)(1/a_i+1/a_j)$, not raw vertex degree. Its exact edge atom has
+trace and Frobenius norm $t_{ij}=(a_i+a_j)/A$.
 
-$$
-t_{ij}=c_{ij}R_{ij}=\frac{a_i+a_j}{A},\qquad
-R_{ij}=\frac DA\left(\frac1{a_i}+\frac1{a_j}\right).
-$$
-
-Here $R_{ij}$ denotes a scalar endpoint factor, not an entry of the diagonal matrix $R$. An emitted edge of conductance $w$ contributes $w R_{ij}$ to $\mathrm{tr}(Y)$. For its positive rank-one matrix atom, trace, Frobenius norm and spectral norm coincide. A vertex's total raw incident conductance is a different quantity.
-
-Unbiasedness implies $\mathbb E\mathrm{tr}(Y)=r=d-1$. The exact orthogonal decomposition
+Unbiasedness requires $\mathbb EX=C$ and hence expected trace $r=d-1$.
+The decomposition
 
 $$
 \lVert Y-P\rVert_F^2
-=\left\lVert Y-\frac{\mathrm{tr}Y}{r}P\right\rVert_F^2
- +\frac{(\mathrm{tr}Y-r)^2}{r}
+=\lVert Y-(\mathrm{tr}(Y)/r)P\rVert_F^2
+ +(\mathrm{tr}(Y)-r)^2/r
 $$
 
-shows which scalar error term disappears when every outcome has trace $r$. Fixing trace can nevertheless constrain other improvements; it does not establish global optimality. Scaling a positive preconditioner changes its trace without changing its condition number. Also, $\rho=\lVert Y-P\rVert_2\lt 1$ gives the bound $\kappa(Y\vert_{u^\perp})\le(1+\rho)/(1-\rho)$, but ordering $\rho$ need not order actual condition numbers or PCG iterations.
+explains one advantage of fixed trace, not global optimality. Scaling a
+preconditioner changes trace but not condition number. When $\rho\lt1$, its
+condition number on $u^\perp$ is bounded by $(1+\rho)/(1-\rho)$; smaller error
+does not universally order actual conditioning or PCG iterations.
 
-## Why the later-parent probability uses a sum
+## Parent sampling and cycles
 
-Fix source $i$, let $m_i=d-i$, $S_i=\sum_{j\gt i}a_j$, and require exactly one later-parent edge. Define its exact normalized atom
-
-$$
-M_{ij}=c_{ij}R(e_i-e_j)(e_i-e_j)^TR.
-$$
-
-Choose $j$ with probability $q_{ij}\gt 0$ and emit $c_{ij}/q_{ij}$. Its expected contribution is fixed, while its variance is
-
-$$
-\sum_{j\gt i}\frac{\lVert M_{ij}\rVert_F^2}{q_{ij}}
- -\left\lVert \sum_{j\gt i}M_{ij}\right\rVert_F^2.
-$$
-
-Cauchy–Schwarz gives $\sum_j t_{ij}^2/q_{ij}\ge(\sum_j t_{ij})^2$, with unique equality at
+For increasing weights, source $i$ has $m_i=d-i$ later neighbors with sum
+$S_i=\sum_{j\gt i}a_j$. Selecting edge $ij$ with probability $q_{ij}$ and
+weight $c_{ij}/q_{ij}$ preserves its mean. Its variable second moment is
+$\sum_j t_{ij}^2/q_{ij}$, minimized by Cauchy–Schwarz at
 
 $$
-\boxed{q_{ij}=\frac{a_i+a_j}{\sum_{\ell\gt i}(a_\ell+a_i)}=\frac{a_i+a_j}{m_i a_i+S_i}}.
+q_{ij}=\frac{a_i+a_j}{\sum_{\ell\gt i}(a_i+a_\ell)}
+      =\frac{a_i+a_j}{m_i a_i+S_i}.
 $$
 
-This is optimal for this **one-parent component**. Independent centered components have additive variances, making the formula useful in a larger construction. It is not an optimum over arbitrary correlated trees. Its emitted edge has constant normalized trace $(m_i a_i+S_i)/A$ for that source, regardless of the parent chosen.
-
-The exact improvement over the ordinary GKS parent law is also calculable.
-Let $U_i=\sum_{j\gt i}1/a_j$. For the same source and later-neighbor set,
+Ordinary GKS instead uses $a_j/S_i$ and emits $a_iS_i/D$.
+Writing $U_i=\sum_{j\gt i}1/a_j$, the exact variance improvement is
 
 $$
-J_{\mathrm{GKS},i}-J_{q,i}
-=\frac{a_i^2}{A^2}\left(S_iU_i-m_i^2\right)\ge0.
+J_{G,i}-J_{q,i}=\frac{a_i^2}{A^2}(S_iU_i-m_i^2)\ge0.
 $$
 
-The inequality follows from Cauchy–Schwarz; equality holds exactly when all
-later weights are equal, including the trivial one-parent case. Independent
-source errors add, so using this rule for every source gives a tree whose
-ideal local $J$ is no larger than GKS's. This optimizes probabilities over all
-positive categorical parent laws, not only uniform draws.
+Independent source variances add. Thus tree-q has no larger local $J$ than
+GKS, despite its worse iterations in the matrix screen. This is a one-parent
+probability optimum, not an optimum over dependent tree laws.
 
-For every fixed cycle core, the same inequality applies to the light
-attachments. Optimizing each method's cutoff over the same heavy-suffix family
-preserves it: evaluate the q-rule at the GKS rule's best cutoff, then minimize.
-Thus both tree-q and cycle-q have local Frobenius guarantees against their
-respective independent-GKS comparators. This does not guarantee better
-conditioning, PCG iteration counts, finite-precision behavior or total time.
-
-## A heavy cycle and all possible suffix cuts
-
-For a sorted heavy suffix $H$ of size $h\ge 3$, draw a uniform Hamiltonian cycle. Every core edge has inclusion $2/(h-1)$ and receives conductance $(h-1)c_{ij}/2$. Attach every lighter vertex to one later parent using the probability above. The cycle is internally dependent; the light parent choices and cycle draw are mutually independent. Every realization is connected, has $d$ edges, and has normalized trace $d-1$.
-
-Writing $Q_H=\sum_{i\in H}a_i^2$, its actual relative-Frobenius objective is
+For heavy suffix $H$ of size $h\ge3$, a uniform Hamiltonian cycle includes
+each pair with probability $2/(h-1)$; emit $(h-1)c_{ij}/2$. Independently attach
+lighter sources using q. Outcomes have $d$ edges and trace $d-1$. With
+$Q_H=\sum_{i\in H}a_i^2$,
 
 $$
-J_H=\frac{
- \sum_{i\notin H}(m_i-1)a_i(2S_i+m_i a_i)
- +\frac{(h-3)(h-1)}2 Q_H}{A^2}.
+J_H=\frac{\sum_{i\notin H}(m_i-1)a_i(2S_i+m_i a_i)
+ +(h-3)(h-1)Q_H/2}{A^2}.
 $$
 
-Evaluating this expression for every heavy suffix selects the best cut **within this family**. Two suffix moments and one prefix accumulation make the scan linear after sorting. It is not a largest adjacent-ratio heuristic, nor a search over all graph distributions.
+Two suffix moments and one prefix accumulation evaluate every cutoff in
+linear time after sorting. The same parent improvement guarantees cycle-q's
+$J$ is no worse than independently attached cycle-GKS when both optimize
+this same family. K2 uses correlated attachments and is outside that guarantee.
 
-A useful sufficient condition is provable. Suppose a current core has $h\ge 4$ vertices, smallest weight $x$, and remaining weight sum/square-sum $S,Q$. Peeling $x$ into a parent attachment changes the objective by
+Weight ratio at most two is sufficient for a full cycle to minimize this
+family's objective: peeling smallest weight $x$ from an $h\ge4$ core with
+remaining moments $S,Q$ changes the numerator by
+$[4(h-2)xS+(h-1)^2x^2-(2h-5)Q]/2$, positive when $Q\le2xS$.
+This says nothing about choosing GKS outside that range. A uniform Hamiltonian
+path instead has edge inclusion $2/h$ and weight $hc_{ij}/2$; it saves one
+edge and requires a tree-budget comparison.
 
-$$
-\Delta J=\frac{4(h-2)xS+(h-1)^2x^2-(2h-5)Q}{2A^2}.
-$$
+For $d\ge3$ and exactly equal weights, a stronger result holds: a uniform cycle globally
+minimizes $J$ over unbiased nonnegative Laplacians with at most $d$ edges.
+Jensen on weighted degrees and Cauchy–Schwarz on edge weights give
+$J\ge(d-1)(d-3)/(2d)$, attained by equal-weight cycles. This does not extend
+to nonuniform inputs, tree budgets, or spectral optimality.
 
-If all current weights are at most $2x$, then $Q\le 2xS$, so the numerator is at least $2xS+(h-1)^2x^2\gt 0$. Every later suffix inherits this range bound. Therefore **$\max(a)/\min(a)\le 2$ guarantees that the full cycle minimizes this family's objective**. The condition is sufficient, not necessary; it is not a global spectral-optimality theorem or a fitted runtime threshold.
+## Dependence and optimum comparisons
 
-For a uniform Hamiltonian **path** on an $h$-vertex core, edge inclusion is $2/h$, so the inverse-probability conductance is $h c_{ij}/2$. Its core variance is
+Weighted Prüfer draws iid symbols $\theta_i=a_i/A$. Its tree probability is
+$\prod_i\theta_i^{\deg_T(i)-1}$, edge inclusion
+$\pi_{ij}=\theta_i+\theta_j$, and adjacent joint inclusion
+$\pi_{ij,ik}=\theta_i(\theta_i+\theta_j+\theta_k)$; disjoint edges have zero
+covariance. Its inverse-inclusion weights give every edge unit normalized
+trace. Thus plus-weight edge sizes already occur in Prüfer, but its joint
+law differs from q's independent later-parent choices.
 
-$$
-\frac{(h-2)\cdot[h(h-2)Q_H+S_H^2]}{2(h-1)A^2},
-$$
-
-which is zero at $h=2$. A path saves one edge relative to a cycle and therefore requires a different budget comparison.
-
-## Exact uniform weights: a global result with a precise scope
-
-For equal weights and $d\ge 3$, a uniform Hamiltonian cycle globally minimizes expected relative-Frobenius error among **all unbiased random nonnegative weighted Laplacians with at most $d$ distinct edges per outcome**. Probabilities and support-dependent weights may vary freely.
-
-In normalized coordinates $P=I-\mathbf1\mathbf1^T/d$, write the outcome edge weights as $z_e$ and weighted degrees as $\delta_i$. Unbiasedness gives $\mathbb E\delta_i=(d-1)/d$ and $\mathbb E\sum_e z_e=(d-1)/2$. Jensen and Cauchy–Schwarz imply
-
-$$
-\mathbb E\lVert Y\rVert_F^2
-=\mathbb E\sum_i\delta_i^2+2\mathbb E\sum_e z_e^2
-\ge\frac{(d-1)^2}{d}+\frac{(d-1)^2}{2d}.
-$$
-
-Since $\mathbb EY=P$, subtracting $\lVert P\rVert_F^2=d-1$ gives
-
-$$
-\boxed{J\ge\frac{(d-1)(d-3)}{2d}}.
-$$
-
-A uniform Hamiltonian cycle attains equality with every normalized selected edge weight $(d-1)/(2d)$. All degrees and total weight are then constant. This proves one optimum, not uniqueness. It does not cover nonuniform inputs, the $d-1$-edge tree budget, spectral norm or conditioning.
-
-## Weighted Prüfer already has the same plus-weight edge sizes
-
-For iid Prüfer symbol probabilities $\theta_i\gt 0$, $\sum_i\theta_i=1$, the tree law is
-
-$$
-\Pr(T)=\prod_i\theta_i^{\deg_T(i)-1}.
-$$
-
-Its edge marginals and adjacent joint marginals are
-
-$$
-\pi_{ij}=\theta_i+\theta_j,\qquad
-\pi_{ij,ik}=\theta_i(\theta_i+\theta_j+\theta_k),
-$$
-
-and disjoint edges have zero covariance. Standard weighted Prüfer uses $\theta_i=a_i/A$, hence $\pi_{ij}=t_{ij}$ and selected conductance $c_{ij}/\pi_{ij}=1/R_{ij}$. Every selected edge has unit normalized trace and every tree has trace $d-1$.
-
-Thus the **sum-of-endpoint-weights idea is already present in weighted Prüfer**. The later-parent rule normalizes those sizes within each source's eligible parents; weighted Prüfer couples all edges into a different joint tree distribution.
-
-For fixed inverse-marginal weights, full variance includes
+For normalized exact atoms $M_e$, variance depends on joint probabilities:
 
 $$
 J=\sum_e(1/\pi_e-1)\lVert M_e\rVert_F^2
- +2\sum_{e\lt f}\left(\frac{\pi_{ef}}{\pi_e\pi_f}-1\right)
- \langle M_e,M_f\rangle.
++2\sum_{e\lt f}(\pi_{ef}/(\pi_e\pi_f)-1)\langle M_e,M_f\rangle.
 $$
 
-Marginals alone do not optimize the second term. Disjoint-edge inner products vanish; incident edges $ij,ik$ have inner product $a_j a_k/A^2$. Their correlations matter.
+Incident-edge correlations matter; fixing marginals alone is not optimal.
+An unbiased conditional correction must use the actual law's conditional
+means. Reusing GKS corrections after changing q, K2, or Prüfer can introduce
+bias. Local conditional unbiasedness does not make a nonlinear inverse unbiased.
 
-Even within the Prüfer family, standard symbols need not minimize $J$. For weights $(1,1,8)$, standard $\theta=(1/10,1/10,4/5)$ gives $J=16/81$. Using $\theta=(2/21,2/21,17/21)$, still assigning $c_{ij}/(\theta_i+\theta_j)$, gives $J=7117/36100$, smaller by $1123/2924100$. All three outcomes remain positive, connected and unbiased. This exact counterexample establishes possible improvement; it does not establish that the alternative is optimal or useful in PCG.
+Global certificates optimize support probabilities and outcome-dependent
+positive weights over every connected simple support with a specified edge
+budget. Using $z_{H,e}=p_Hw_{H,e}$ gives a convex perspective objective
+$\sum_H z_H^TG_Hz_H/p_H-(d-1)$ under unit total probability and correct edge
+means. Strict positivity can leave only an infimum. Eight exact certificates
+cover 1072 supports; they certify $J$, not spectral error. Absolute comparisons
+and spectral observations below concern four synthetic stars, not
+representative matrix trajectories.
 
-## What can be optimized while preserving unbiasedness?
+Each cell below is $(J,\mathbb E\rho,\mathbb E\kappa)$; $\kappa$ is the
+condition number on the non-null subspace. Optimum columns bound $J$ only.
+Tree methods use $d-1$ edges; K2 and cycle-q use $d$. Compare absolute scores,
+not percentages measured from different-budget optima.
 
-For fixed nonzero matrix atoms, one-draw importance sampling proportional to their Frobenius norms minimizes the inverse-probability estimator's second moment. It does not enforce a tree topology. For a whole correlated tree law $p_T$ with normalized outcomes $Y_T$, choosing
+| Weights | GKS tree | Prüfer tree | Heavy-K2 | Cycle-q | $J^*_{d-1}$ / $J^*_d$ |
+|---|---:|---:|---:|---:|---:|
+| $1,2,3,4$ |(.790833,.685972,4.013829)|(.907937,—,—)|(.427500,.491604,2.493868)|(.420000,.494788,2.517766)|.675088 / .306638|
+| $1,2,3,4,5$ |(1.297852,.838285,6.073073)|(1.460883,.867922,8.000236)|(.795407,.668342,3.341955)|(.786667,.658000,3.346350)|1.034674 / .643742|
+| $1,1,1,1,8$ |(1.255208,.785266,4.607262)|(.948045,.648854,5.481470)|(1.044705,.732912,3.858142)|(.861111,.646008,4.405510)|.656387 / .352991|
+| $1,1,1,8,8$ |(.733380,.607821,3.225138)|(.815174,.617482,6.391297)|(.624127,.541607,2.822966)|(.537396,.504731,3.140868)|.509902 / .294610|
 
-$$
-q_T\propto p_T\lVert Y_T\rVert_F,\qquad \widetilde Y_T=(p_T/q_T)Y_T
-$$
+Missing Prüfer spectral entries were not saved in this evidence set. [Spectral scores](../reconciliation/tiny-spectra.json) reaggregate recorded
+eigenvalues; no spectral optimum is claimed.
+K2 and q core sizes coincide here (3/4/3/3), despite different cutoff criteria.
+For the one-hub star, q improves absolute $J$ over GKS (.861 versus 1.255),
+yet sits farther above its stronger extra-edge optimum. The near-optimal
+$d$-edge law mostly uses hub-star-plus-chord supports, sometimes placing the
+hub as a leaf; the two-band law often puts only one heavy vertex on its cycle.
+Their outcome-dependent weights suggest possibilities beyond a fixed heavy
+core. Lower $J$ or mean $\rho$ need not lower mean conditioning, as K2/q show.
 
-preserves the mean and minimizes the second moment within this resampling/scaling family. The resulting $q_T$ generally is not representable by iid Prüfer symbols and may be expensive to sample.
-
-For fixed support probabilities $p_H$, optimizing nonnegative outcome-dependent weights under $\sum_{H\ni e}p_H w_{H,e}=c_e$ is a convex quadratic problem. Freeing the probabilities and using $z_{H,e}=p_H w_{H,e}$ gives the convex perspective objective
-
-$$
-\sum_H\frac{z_H^T G_H z_H}{p_H}-(d-1),
-\quad \sum_Hp_H=1,\quad\sum_Hz_{H,e}=c_e,
-$$
-
-where $G_H$ is the Gram matrix of normalized edge directions. This is the model behind the included [tiny-star certificates](../reconciliation/optimality/comparison.json). Global claims require enumerating or otherwise certifying the declared support population. Strict positivity may yield only an infimum.
-
-Writing $E$ for the sampled edge set, an outcome-dependent correction must satisfy $\mathbb E[\delta_e\mid e\in E]=0$ to preserve an edge mean. Conditional moments belong to the actual law: changing GKS parent probabilities, adding K2 correlations, or switching to Prüfer changes them. Reusing stale conditional means, sequentially changing the degrees used by a simultaneous correction, or repeating a pass can introduce bias. Input-dependent decisions are allowed when unbiasedness holds conditional on the current star/history. This local martingale property does not make the nonlinear factor, inverse or PCG iteration count globally unbiased.
+[Certificates and exact-law reproducer](../reconciliation/optimality/comparison.json) ·
+[Saved heavy/K2 outcomes](../reconciliation/k2-local/index.json) ·
+[Reproduction instructions](../reconciliation/README.md)
