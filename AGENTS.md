@@ -178,6 +178,11 @@ sum; preserve ordering, per-column sums and both ±1e-9 thresholds. External
 checkouts require patching before rebuilding. Physics inputs with positive
 stored off-diagonals are unsupported for original-operator comparison,
 **before** preparation cache hits or fallbacks.
+Patch0006 shares the Graph producer with an in-memory entry. CPU Graph/AMD charges
+required transform, ordering/permutation and explicit final GC; common input read
+and measured final serialization are separate. Require finite reconciled intervals
+and source/schema-bound caches; keep inclusive diagnostics. Physics/GPU complete
+timing and native adapter/factor/workspace charges remain unchanged.
 
 Native CMG is opt-in via `APXCHOL_CMG_NATIVE_BIN` and `benchmarks/cmg/native`.
 Keep private generated sources untracked. Its generated core is serial;

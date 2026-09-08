@@ -29,12 +29,16 @@ selected measurements. Local `results/cells/` is not automatically the published
 
 Hypre/BoomerAMG and AMGCL have CPU/CUDA series; AC/AC2 are Julia references.
 RCHOL/pRCHOL retain upstream factors with labelled MKL or portable PCG.
-[ParAC Graph/Physics](patches/parac/) currently charges preparation that also
-includes avoidable interchange/audit work. Its published algorithm-performance
-comparison is provisional pending adapter repair and fresh measurement; do not
-subtract that overhead retrospectively. The bundled CPU build needs MKL;
-Daint’s separately labelled portable implementation has a serial solve. Positive stored Physics off-diagonals are unsupported. Failed/capped
-calibration must not launch fallback-tolerance retained runs.
+[ParAC Graph/Physics](patches/parac/) separates common input reading and final
+interchange from CPU Graph/AMD algorithm preparation, while retaining required
+transformations, ordering/permutation and native factor/workspace setup. Complete
+preparation stays diagnostic; source/schema-bound caches reject old accounting.
+Physics/GPU preparation keeps its explicit complete timing contract. The corrected
+private Daint study and this maintained source port have separate provenance;
+do not subtract old overhead retrospectively or relabel historical cells.
+The bundled CPU build needs MKL; Daint's separately labelled portable implementation
+has a serial solve. Positive stored Physics off-diagonals are unsupported.
+Failed/capped calibration must not launch fallback-tolerance retained runs.
 
 Canonical MATLAB CMG is unavailable on ARM64. The separate `cmg_packed` port is
 serial, uses private generated source, and is not canonical MATLAB CMG: even

@@ -69,7 +69,9 @@ estimate, and every retained repetition must independently pass TOL.
 CPU (`parac` / `parac_physics`, device=cpu):
   dump -> their write_graph.jl producer, method "amd" (cached with versioned
   timing/provenance sidecars) -> calibrate -> REPS runs of the driver. setup =
-  complete producer call + complete post-parse adapter interval + complete factor interval; one
+  charged producer + complete post-parse adapter + complete factor intervals.
+  Graph/AMD excludes disjoint serialization and audit intervals but records them;
+  Physics and fallback preparation retain explicit legacy-complete charges. One
   real median-total repetition supplies all reported fields. One logical-cell
   deadline covers every stage and component; peak host RSS via /usr/bin/time.
 
@@ -83,13 +85,13 @@ GPU (`parac_graph` / `parac_physics`, device=gpu):
   standard relative recurrence-residual test; one probe still calibrates recurrence
   residual to the independently printed true residual.
   setup = complete producer + complete post-parse adapter/factor/solver-setup intervals;
-  solve includes RHS work, PCG, and returning x to host; peak VRAM via the
-  nvidia-smi sidecar. Patch 0004 reports the once-per-process CUDA context
+  solve includes RHS work, PCG, and returning x to host. Peak VRAM diagnostics
+  must run separately; no nvidia-smi poller wraps timed calls. Patch 0004 reports the once-per-process CUDA context
   initialization separately as cuda_init_s, matching the shared C++ driver.
   The graph row is n/a on disconnected inputs: the upstream GPU driver has no
   component-wise RHS route, while one global zero-sum constraint is insufficient.
 
-The ParAC checkout itself is upstream 44ef39d plus the four benchmark-only
+The ParAC checkout itself is upstream 44ef39d plus the six benchmark
 patches under benchmarks/patches/parac/; CMake applies the stack automatically,
 and benchmarks/parac_build.sh verifies it for an external checkout.
 
@@ -99,7 +101,7 @@ a dump/reorder timeout no longer crashes the pass. Both axes emit terminal cells
 for the campaign audit; GPU keeps failed/timeout outside TERMINAL_GPU so a later
 resume still retries the transient preparation.
 """
-import math, os, re, subprocess, time
+import hashlib, json, math, os, re, subprocess, time
 
 from parac_contract import (CalibrationFailed, UnsupportedOperator,
                             calibrated_cpu_tolerance, require_original_physics)
@@ -405,12 +407,125 @@ def _component_info(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
 
 
 # ── ParAC's OWN preprocessing (their write_graph.jl) ────────────────────────────
-# Their native "amd time:" / "sort time:" covers only the ordering kernel. Our
-# dispatcher brackets the complete producer call after Julia/package loading so
-# setup also includes permutation materialization, augmentation and file output.
+# Graph/AMD charges algorithm preparation and separately records serialization.
+# Physics and nnz-sort keep their explicit legacy complete-producer boundary.
+# Neither route may substitute the narrow upstream AMD/sort-kernel print.
 _PREP_TOTAL_RE = re.compile(r"APX complete preprocessing time:\s*([0-9.eE+-]+)")
 _PREP_SUFFIX = {"amd": "-amd.mtx", "nnz-sort": "-nnz-sorted.mtx"}
 _PREP_TIMING_SCHEMA = "complete-producer-no-jit-v4-input-route"
+_PREP_GRAPH_SCHEMA = "graph-algorithm-preprocessing-v1"
+_PREP_GRAPH_FALLBACK_SCHEMA = "graph-fallback-complete-v1"
+_PREP_LABELS = {
+    "complete_s": "APX complete preprocessing time:",
+    "algorithm_s": "APX algorithm preprocessing time:",
+    "audit_s": "APX preprocessing audit time:",
+    "serialization_s": "APX preprocessing serialization time:",
+    "input_read_s": "APX preprocessing input read time:",
+    "operator_permutation_s": "APX preprocessing operator permutation time:",
+    "producer_transform_s": "APX preprocessing producer transform time:",
+    "producer_ordering_s": "APX preprocessing producer ordering time:",
+    "producer_cleanup_s": "APX preprocessing producer cleanup time:",
+}
+
+
+def _validate_prep_timing(timing):
+    if not isinstance(timing, dict) or set(timing) != set(_PREP_LABELS):
+        raise ValueError("missing/unexpected preprocessing timing fields")
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or
+           not math.isfinite(v) or v < 0 for v in timing.values()):
+        raise ValueError("invalid preprocessing timing")
+    if not math.isclose(timing["complete_s"], timing["algorithm_s"] +
+                        timing["audit_s"] + timing["serialization_s"], rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError("preprocessing intervals do not reconcile")
+    parts = ("operator_permutation_s", "producer_transform_s",
+             "producer_ordering_s", "producer_cleanup_s")
+    if sum(timing[k] for k in parts) > timing["algorithm_s"] + 1e-9:
+        raise ValueError("preprocessing components exceed algorithm interval")
+    return timing
+
+
+def _parse_prep_timing(text):
+    schema = re.findall(r"^APX preprocessing accounting schema: ([^\r\n]+)$", text, re.MULTILINE)
+    if schema != [_PREP_GRAPH_SCHEMA]:
+        raise ValueError("missing/duplicate/wrong Graph preprocessing schema")
+    timing = {}
+    for key, label in _PREP_LABELS.items():
+        values = re.findall(r"^" + re.escape(label) + r"([^\r\n]*)$", text, re.MULTILINE)
+        if len(values) != 1:
+            raise ValueError("missing/duplicate " + label)
+        timing[key] = float(values[0].strip())
+    return _validate_prep_timing(timing)
+
+
+def _content_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _prep_contract(src, fallback=False):
+    sources = {"dispatcher": PRODUCE_JL, "producer": _write_graph_jl()}
+    if fallback:
+        sources["fallback"] = REORDER_JL
+    return {"input_route": _file_identity(src), "input_sha256": _content_sha256(src),
+            "sources": {key: {"path": os.path.abspath(path) if path else "",
+                              "sha256": (None if fallback and not os.path.isfile(path)
+                                         else _content_sha256(path))}
+                        for key, path in sources.items()}}
+
+
+def _read_prep_accounting(path):
+    sidecar = path + ".accounting.json"
+    if not os.path.exists(sidecar):
+        return None
+    with open(sidecar) as handle:
+        record = json.load(handle)
+    if not isinstance(record, dict):
+        raise ValueError("invalid preprocessing accounting record")
+    schema = record.get("schema")
+    if schema == _PREP_GRAPH_SCHEMA:
+        timing = _validate_prep_timing(record.get("timing"))
+        if record.get("seconds") != timing["algorithm_s"]:
+            raise ValueError("cached charged timing differs")
+    elif schema != _PREP_GRAPH_FALLBACK_SCHEMA:
+        raise ValueError("unknown Graph accounting schema")
+    seconds = record.get("seconds")
+    if isinstance(seconds, bool) or not isinstance(seconds, (float, int)) or not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("invalid cached preprocessing charge")
+    return record
+
+
+def _write_prep_accounting(path, seconds, contract, timing=None):
+    record = {"schema": _PREP_GRAPH_SCHEMA if timing is not None else _PREP_GRAPH_FALLBACK_SCHEMA,
+              "seconds": seconds, "contract": contract, "output_sha256": _content_sha256(path)}
+    if timing is not None:
+        record["timing"] = _validate_prep_timing(timing)
+    with open(path + ".accounting.json", "w") as handle:
+        json.dump(record, handle, sort_keys=True)
+    return record
+
+
+def _cpu_accounting_metrics(preparations, setup, total):
+    """Preserve legacy charges; never invent excluded phases for an old route."""
+    charged = sum(seconds for seconds, _ in preparations)
+    corrected = [record for _, record in preparations if record and record["schema"] == _PREP_GRAPH_SCHEMA]
+    inclusive = sum(record["timing"]["complete_s"] if record and record["schema"] == _PREP_GRAPH_SCHEMA
+                    else seconds for seconds, record in preparations)
+    schemas = {r["schema"] if r is not None else _PREP_TIMING_SCHEMA for _, r in preparations}
+    schema = next(iter(schemas)) if len(schemas) == 1 else "mixed-preprocessing-accounting"
+    result = {"preprocessing_s": charged, "inclusive_preprocessing_s": inclusive,
+              "inclusive_setup_s": setup + inclusive - charged,
+              "inclusive_total_s": total + inclusive - charged,
+              "preprocessing_accounting": schema}
+    result["preprocessing_sources"] = [
+        {k: r[k] for k in ("schema", "contract", "output_sha256")}
+        for _, r in preparations if r is not None]
+    if corrected and len(corrected) == len(preparations):
+        result["preprocessing_timing"] = {k: sum(r["timing"][k] for r in corrected) for k in _PREP_LABELS}
+    return result
+
 # A cache entry written before the .prep sidecar existed came from our
 # reimplementation. Say so rather than claiming provenance we cannot check —
 # delete the cached *-amd.mtx to have their producer rebuild (and stamp) it.
@@ -421,13 +536,8 @@ _PREP_UNKNOWN = ("unrecorded: this cache entry predates the .prep sidecar, so it
                  "not checked; delete it to have their producer rebuild it")
 
 
-def _prep_cache_valid(path, src=None):
-    """True only for a cache whose time is the complete producer interval.
-
-    Historical ``.time`` files used the producer's narrow AMD/sort-kernel print.
-    The schema rejects that boundary; the optional input sidecar additionally
-    prevents a native-file result from aliasing a component-dump result.
-    """
+def _prep_cache_valid(path, src=None, algorithm=False):
+    """Require the selected timing schema; Graph also pins source/input/output bytes."""
     schema = path + ".timing-schema"
     required = [path, path + ".time", path + ".prep", schema]
     if src is not None:
@@ -435,14 +545,25 @@ def _prep_cache_valid(path, src=None):
     if not all(os.path.exists(item) for item in required):
         return False
     with open(schema) as handle:
-        valid = handle.read().strip() == _PREP_TIMING_SCHEMA
+        stamp = handle.read().strip()
+        valid = stamp == _PREP_TIMING_SCHEMA
+    if algorithm:
+        try:
+            record = _read_prep_accounting(path)
+            valid = (record is not None and stamp == record["schema"] and
+                     record["contract"] == _prep_contract(src, stamp == _PREP_GRAPH_FALLBACK_SCHEMA) and
+                     record["output_sha256"] == _content_sha256(path))
+            with open(path + ".time") as handle:
+                valid = valid and float(handle.read()) == record["seconds"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
     if valid and src is not None:
         with open(path + ".input") as handle:
             valid = handle.read() == _file_identity(src)
     return valid
 
 
-def _stamp_prep_cache(path, seconds, provenance, src=None):
+def _stamp_prep_cache(path, seconds, provenance, src=None, algorithm=False):
     with open(path + ".time", "w") as handle:
         handle.write(str(seconds))
     with open(path + ".prep", "w") as handle:
@@ -452,13 +573,13 @@ def _stamp_prep_cache(path, seconds, provenance, src=None):
             handle.write(_file_identity(src))
     # Commit marker last: a partial record is never accepted as a warm cache.
     with open(path + ".timing-schema", "w") as handle:
-        handle.write(_PREP_TIMING_SCHEMA)
+        handle.write(_read_prep_accounting(path)["schema"] if algorithm else _PREP_TIMING_SCHEMA)
 
 
 def _invalidate_prep_cache(path):
     """Remove one derived cache entry whose timing contract is obsolete."""
     for cached in (path, path + ".time", path + ".prep", path + ".timing-schema",
-                   path + ".input"):
+                   path + ".input", path + ".accounting.json"):
         try:
             os.remove(cached)
         except FileNotFoundError:
@@ -496,6 +617,8 @@ def _produce_upstream(prefix, src, mode, method, timeout, mem_cap_gb=None):
     if not wg or not os.path.exists(wg):
         return None, 0.0, (f"ParAC write_graph.jl not found at {wg or '<unset>'} "
                            f"(set $APXCHOL_PARAC_WRITE_GRAPH / paths_local.PARAC_WRITE_GRAPH)")
+    algorithm = mode == "graph" and method == "amd"
+    contract = _prep_contract(src) if algorithm else None
     out = prefix + _PREP_SUFFIX[method]
     link = prefix + ".mtx"
     log = f"/tmp/parac_produce_{os.path.basename(prefix)}_{method}.log"
@@ -518,6 +641,12 @@ def _produce_upstream(prefix, src, mode, method, timeout, mem_cap_gb=None):
     if cp.returncode != 0 or not os.path.exists(out):
         tail = " | ".join(l.strip() for l in text.strip().splitlines()[-4:]) or "no output"
         return None, 0.0, f"{mode}_produce(\"{method}\") rc={cp.returncode}: {tail}"
+    if algorithm:
+        timing = _parse_prep_timing(text)
+        if contract != _prep_contract(src):
+            raise ValueError("producer/input changed during preprocessing")
+        _write_prep_accounting(out, timing["algorithm_s"], contract, timing)
+        return out, timing["algorithm_s"], None
     m = _PREP_TOTAL_RE.search(text)
     if not m:
         return None, 0.0, (f"{mode}_produce(\"{method}\") omitted the complete "
@@ -552,7 +681,7 @@ def _reorder_amd(mid, src, tag, augment=False, deadline=None):
     prefix = f"{rc.PARAC_REORD}/{mid}-{tag}"
     amd = prefix + "-amd.mtx"
     tfile, pfile = amd + ".time", amd + ".prep"
-    if not _prep_cache_valid(amd, src):
+    if not _prep_cache_valid(amd, src, algorithm=not augment):
         # The matrix and its timing are one cache record. Keeping an old matrix
         # while replacing only its narrow timer would claim work we did not run;
         # drop the derived record and rebuild it as one schema-stamped record.
@@ -561,14 +690,16 @@ def _reorder_amd(mid, src, tag, augment=False, deadline=None):
         out, secs, err = _produce_upstream(
             prefix, src, mode, "amd", _cpu_cell_remaining(deadline), MEM_CAP_GB)
         if out:
-            prep = f"ParAC write_graph.jl {mode}_produce(path, \"amd\"), upstream and unmodified"
+            prep = f"ParAC write_graph.jl {mode}_produce(path, \"amd\"), pinned benchmark patches"
         else:
             print(f"   [parac] upstream {mode}_produce refused {mid}: {err}\n"
                   f"   [parac] falling back to benchmarks/parac_reorder_amd.jl", flush=True)
             secs = _reorder_amd_ours(mid, src, amd, tag, augment, deadline=deadline)
             prep = f"benchmarks/parac_reorder_amd.jl (FALLBACK — upstream refused: {err})"
+            if not augment and os.path.exists(amd):
+                _write_prep_accounting(amd, secs, _prep_contract(src, fallback=True))
         if os.path.exists(amd):
-            _stamp_prep_cache(amd, secs, prep, src)
+            _stamp_prep_cache(amd, secs, prep, src, algorithm=not augment)
     if os.path.exists(tfile):
         with open(tfile) as handle:
             secs = float(handle.read())
@@ -589,8 +720,10 @@ def _reorder_amd_ours(mid, src, amd, tag, augment, deadline=None):
     log = f"/tmp/parac_fair_reord_{mid}_{tag}.log"
     flag = " --augment" if augment else ""
     started = time.monotonic()
-    sh(f"julia {REORDER_JL} {src} {amd}{flag} > {log} 2>&1",
-       timeout=_cpu_cell_remaining(deadline), mem_cap_gb=MEM_CAP_GB)
+    cp = sh(f"julia {REORDER_JL} {src} {amd}{flag} > {log} 2>&1",
+            timeout=_cpu_cell_remaining(deadline), mem_cap_gb=MEM_CAP_GB)
+    if cp.returncode != 0:
+        raise ValueError(f"AMD fallback failed: rc={cp.returncode}")
     wall = time.monotonic() - started
     if os.path.exists(log):
         m = _PREP_TOTAL_RE.search(open(log).read())
@@ -729,6 +862,7 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None,
                "factor_kernel_s": round(factor, 6),
                "representative_repeat": rep_index + 1,
                "repeat_rel_res": [r["rr"] for r in runs]}
+    metrics.update(_cpu_accounting_metrics([(amds, _read_prep_accounting(amd))], setup, total))
     if rel_tol is not None:
         metrics["parac_rel_tol"] = rel_tol      # the calibrated value we passed
     rss = [float(r["rss_mb"]) for r in ok if r.get("rss_mb")]
@@ -822,6 +956,7 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
     dump_tot = amds_tot = 0.0
     nnz_tot = 0; rss_peak = 0.0
     n_solved = 0; n_comps_total = None; rank = 0; tol_used = None; preps = []
+    preparations = []
     try:
         native = _native_mtx(mid)
         direct_connected = False
@@ -872,6 +1007,7 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
                 return "FAILED"
             if prep_prov not in preps:
                 preps.append(prep_prov)
+            preparations.append((amds, _read_prep_accounting(amd)))
             rel_tol = _calibrate_rel_tol(amd, False, deadline=deadline)
             if rel_tol is not None:
                 tol_used = rel_tol if tol_used is None else max(tol_used, rel_tol)
@@ -906,6 +1042,10 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
                                  {"retained_attempts": n_solved * REPS,
                                   "component_retained_attempts": 0})
         return "FAILED(calibration)"
+    except (ValueError, OSError) as error:
+        rc.emit_cell(family, mid, "parac", "", "failed", {}, THREADS, "cpu", _cpu_provenance(),
+                     matrix_meta={"parac_mode": "graph", "parac_prep_failure": str(error)})
+        return "FAILED(preparation)"
     except subprocess.TimeoutExpired:
         rc.emit_cell(family, mid, "parac", "", "timeout", {}, THREADS, "cpu", _cpu_provenance(),
                      timeout_cap_s=TIMEOUT_CPU)
@@ -945,6 +1085,7 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
                "n_components_total": n_comps_total or n_solved,
                "repeat_rel_res": [str((rep["residual_sq"] / rep["rhs_sq"]) ** 0.5)
                                   if rep["rhs_sq"] > 0 else None for rep in reps]}
+    metrics.update(_cpu_accounting_metrics(preparations, setup, total))
     if tol_used is not None: metrics["parac_rel_tol"] = tol_used
     if rss_peak: metrics["max_rss_mb"] = round(rss_peak, 1)
     rc.emit_cell(family, mid, "parac", "", status, metrics, THREADS, "cpu", _cpu_provenance(),
@@ -1076,7 +1217,7 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
     timeout = (_gpu_cell_remaining(deadline) if deadline is not None else TIMEOUT_GPU)
     produced, secs, err = _produce_upstream(prefix, src, mode, "nnz-sort", timeout)
     if produced:
-        prep = f"ParAC write_graph.jl {mode}_produce(path, \"nnz-sort\"), upstream and unmodified"
+        prep = f"ParAC write_graph.jl {mode}_produce(path, \"nnz-sort\"), pinned benchmark patches"
     else:
         print(f"   [parac] upstream {mode}_produce refused {mid}: {err}\n"
               f"   [parac] falling back to benchmarks/parac_nnz_sort.jl", flush=True)

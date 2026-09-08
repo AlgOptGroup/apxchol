@@ -1,0 +1,57 @@
+--- a/cpu_implementation/write_graph.jl
++++ b/cpu_implementation/write_graph.jl
+@@ -28,6 +28,12 @@
+     
+     G = MatrixMarket.mmread(path * ".mtx")
+     G = SparseMatrixCSC{Float64, Int64}(G)
++    return graph_produce(path, G, method)
++end
++
++# Share the producer arithmetic with callers that already loaded their input.
++function graph_produce(path::String, G::SparseMatrixCSC{Float64,Int64}, method::String)
++    transform_start = time()
+     G = remove_diagonal(G)
+     if !issymmetric(G)
+         println("not symmetric, warning")
+@@ -36,12 +42,12 @@
+     #G.nzval[:] .= 1.0 # set all nonzeros to 1
+     G.nzval .= -abs.(G.nzval)
+     
+-    graph_share(path, G, method)
+-   
+-end
+-
+-function graph_share(path::String, G::SparseMatrixCSC, method::String)
+-
++    transform_s = time() - transform_start
++    return graph_share(path, G, method; input_transform_s=transform_s)
++end
++
++function graph_share(path::String, G::SparseMatrixCSC, method::String; input_transform_s=0.0)
++    ordering_start = time()
+     G = spdiagm(-sum(G, dims=1)[:]) + G
+     if method == "nnz-sort"
+         p = randperm(size(G, 1))
+@@ -77,6 +83,8 @@
+         throw("specified permutation not implemented")
+     end
+ 
++    ordering_s = time() - ordering_start
++    serialization_start = time()
+     if method == "nnz-sort"
+         MatrixMarket.mmwrite(path * "-nnz-sorted.mtx", G_new)
+     elseif method == "amd"
+@@ -90,8 +98,13 @@
+         throw("specified permutation not implemented")
+     end
+ 
++    serialization_s = time() - serialization_start
+     println(path * " finished")
++    cleanup_start = time()
+     GC.gc()
++    cleanup_s = time() - cleanup_start
++    return (transform_s=input_transform_s, ordering_s=ordering_s,
++            serialization_s=serialization_s, cleanup_s=cleanup_s)
+ end
+ 
+ 

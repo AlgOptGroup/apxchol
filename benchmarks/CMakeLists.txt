@@ -353,6 +353,8 @@ if (BUILD_GPU_RCHOL)
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0004-report-cuda-init-separately.patch
             COMMAND git apply
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0005-compensate-physics-global-sum.patch
+            COMMAND git apply
+                    ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0006-separate-graph-algorithm-preparation.patch
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git

@@ -3,8 +3,8 @@
 #
 # This lives HERE, not in the ParAC checkout: the machine-local MKL and
 # fast_matrix_market paths and the missing-transitive-include flags are ours, and
-# keeping them out of their tree lets that checkout stay at upstream plus the one
-# patch in benchmarks/patches/parac/.
+# keeping them out of their tree lets that checkout stay at upstream plus the recorded
+# patches in benchmarks/patches/parac/.
 #
 #   PARAC_CHECKOUT  ParAC working tree (default: $APXCHOL_PARAC_CHECKOUT, else ~/parac)
 #   MKLROOT         oneAPI MKL root      (default /opt/intel/oneapi/mkl/2026.0)
@@ -41,6 +41,10 @@ grep -Fq 'APX adapter preprocessing time:' "$PARAC_CHECKOUT/experiment/pre_proce
 }
 grep -Fq 'check_sum = apx_compensated_global_sum(G_new)' "$PARAC_CHECKOUT/cpu_implementation/write_graph.jl" || {
     echo "missing ParAC patch 0005 (stable Physics global reduction)" >&2; exit 1;
+}
+
+grep -Fq 'input_transform_s=transform_s' "$PARAC_CHECKOUT/cpu_implementation/write_graph.jl" || {
+    echo "missing ParAC patch 0006 (in-memory Graph producer/accounting intervals)" >&2; exit 1;
 }
 
 cd "$PARAC_CHECKOUT/experiment"

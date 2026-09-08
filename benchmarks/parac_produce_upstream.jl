@@ -1,37 +1,17 @@
-# Run ParAC's OWN preprocessing on a matrix we dumped — THEIR code, unmodified.
+# Dispatch to the pinned, patched ParAC producer; no graph/order arithmetic here.
+# julia --project=benchmarks/julia parac_produce_upstream.jl \
+#       <write_graph.jl> <prefix> <physics|graph> [amd|nnz-sort|random|nd]
 #
-# ParAC prepares every input it benchmarks with cpu_implementation/write_graph.jl:
-#   physics_produce(path, method)  permute, then APPEND the ground row/column that
-#                                  turns an SDDM operator into a Laplacian (the node
-#                                  driver_physics' remove_last_row_and_column trims).
-#   graph_produce(path, method)    strip the diagonal, force the off-diagonals
-#                                  negative, permute, then REBUILD the diagonal as
-#                                  -colsum, i.e. re-derive the pure Laplacian.
-# Our runner charges this preprocessing to ParAC's setup time, so it has to be
-# their implementation doing their work — not our reimplementation of it.
-#
-#   julia --project=benchmarks/julia benchmarks/parac_produce_upstream.jl \
-#         <write_graph.jl> <prefix> <physics|graph> [amd|nnz-sort|random|nd]
-#
-# `prefix` follows write_graph.jl's OWN convention: it reads `prefix.mtx` and
-# writes `prefix-amd.mtx` (or `-nnz-sorted.mtx`). The caller puts `prefix` inside
-# OUR cache directory and symlinks `prefix.mtx` at the dump, so nothing is ever
-# written into the ParAC checkout.
-#
-# This file only dispatches: every line of preprocessing runs inside their
-# write_graph.jl. Their "amd time:"/"sort time:" covers only the ordering kernel,
-# before permutation materialization, augmentation and Matrix Market output. The
-# complete interval below therefore brackets their whole producer call, after
-# Julia/package loading and first-call compilation, and is the setup time the
-# runner charges. The warm-up uses a distinct tiny matrix, so the real input and
-# output remain cold. nnz-sort's global RNG state is restored before the real
-# call, so warming cannot change the sampled permutation.
-#
-# Their `physics_produce` asserts on a globally diagonally-DEFICIENT input
-# (sum(G) < -1e-9). Julia's @assert aborts with no usable message, so translate
-# it into an explicit, greppable failure first — the check is theirs, verbatim;
-# only the way it is reported is ours. Matrices that fail it keep our own
-# parac_reorder_amd.jl (see benchmarks/patches/parac/README.md).
+# Graph/AMD uses patch0006's in-memory entry: load common input before timing,
+# charge the graph transform, ordering/permutation, explicit final GC and remaining
+# producer overhead, and report final MatrixMarket serialization separately.
+# No original-system capsule is made by this maintained entry; its audit and
+# separate operator/RHS-permutation intervals are explicitly zero. Graph G[p,p]
+# remains charged inside producer_ordering_s. The private original-A,b campaign
+# additionally charges its actual operator/RHS permutation; see patches/parac/.
+# Physics and other ordering methods retain their complete producer interval.
+# Reusable Julia/package/JIT startup is excluded using a distinct tiny warmup;
+# the RNG state is restored before the real input. Output stays in our cache.
 
 length(ARGS) >= 3 || error("usage: parac_produce_upstream.jl <write_graph.jl> <prefix> <physics|graph> [method]")
 write_graph_jl = ARGS[1]
@@ -56,7 +36,7 @@ if mode == "physics"
     GC.gc()
 end
 
-include(write_graph_jl)   # THEIR script, from THEIR checkout, byte-for-byte
+include(write_graph_jl)   # Pinned upstream plus the recorded benchmark patches.
 
 # ParAC ships preprocessing as Julia functions. Charging the first invocation
 # would charge several seconds of reusable JIT work to every independently
@@ -70,10 +50,15 @@ let saved_rng = copy(Random.default_rng())
             warm = spdiagm(-1 => [-1.0, -1.0, -1.0],
                             0 => [2.25, 2.25, 2.25, 2.25],
                             1 => [-1.0, -1.0, -1.0])
-            MatrixMarket.mmwrite(warm_prefix * ".mtx", warm)
-            if mode == "physics"
+            if mode == "graph" && method == "amd"
+                applicable(graph_produce, warm_prefix, warm, method) ||
+                    error("ParAC Graph/AMD requires patch0006 in-memory producer")
+                graph_produce(warm_prefix, warm, method)
+            elseif mode == "physics"
+                MatrixMarket.mmwrite(warm_prefix * ".mtx", warm)
                 physics_produce(warm_prefix, method)
             else
+                MatrixMarket.mmwrite(warm_prefix * ".mtx", warm)
                 graph_produce(warm_prefix, method)
             end
         end
@@ -82,14 +67,37 @@ let saved_rng = copy(Random.default_rng())
     end
 end
 
-prep_start = time()
-if mode == "physics"
-    physics_produce(prefix, method)
-elseif mode == "graph"
-    graph_produce(prefix, method)
+if mode == "graph" && method == "amd"
+    input_start = time()
+    G = SparseMatrixCSC{Float64,Int64}(MatrixMarket.mmread(prefix * ".mtx"))
+    input_read_s = time() - input_start
+    prep_start = time()
+    producer_times = graph_produce(prefix, G, method)
+    complete_s = time() - prep_start
+    serialization_s = producer_times.serialization_s
+    algorithm_s = complete_s - serialization_s
+    algorithm_s >= 0 || error("overlapping/invalid preparation intervals")
+    println("APX preprocessing accounting schema: graph-algorithm-preprocessing-v1")
+    println("APX complete preprocessing time: ", complete_s)
+    println("APX algorithm preprocessing time: ", algorithm_s)
+    println("APX preprocessing audit time: ", 0.0)
+    println("APX preprocessing serialization time: ", serialization_s)
+    println("APX preprocessing input read time: ", input_read_s)
+    println("APX preprocessing operator permutation time: ", 0.0)
+    println("APX preprocessing producer transform time: ", producer_times.transform_s)
+    println("APX preprocessing producer ordering time: ", producer_times.ordering_s)
+    println("APX preprocessing producer cleanup time: ", producer_times.cleanup_s)
+    # Explicit final GC is charged; automatic GC follows the interval it occurs in.
 else
-    error("mode must be 'physics' or 'graph', got $mode")
+    prep_start = time()
+    if mode == "physics"
+        physics_produce(prefix, method)
+    elseif mode == "graph"
+        graph_produce(prefix, method)
+    else
+        error("mode must be 'physics' or 'graph', got $mode")
+    end
+    println("APX complete preprocessing time: ", time() - prep_start)
 end
-println("APX complete preprocessing time: ", time() - prep_start)
 
 println("upstream ", mode, "_produce(", prefix, ", \"", method, "\") done")

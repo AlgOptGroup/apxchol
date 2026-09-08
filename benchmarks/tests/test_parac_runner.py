@@ -72,7 +72,7 @@ class ParacTimingContractTest(unittest.TestCase):
         self.assertEqual(metrics["iters"], 11)
         self.assertEqual(metrics["rel_res"], 8e-9)
 
-    def test_upstream_preprocessing_uses_complete_interval_not_kernel_print(self):
+    def test_physics_preprocessing_keeps_complete_interval(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             src = root / "input.mtx"; src.write_text("input")
@@ -86,7 +86,7 @@ class ParacTimingContractTest(unittest.TestCase):
                      mock.patch.object(parac, "sh", return_value=subprocess.CompletedProcess(
                          "julia", 0, "", "")):
                     out, seconds, error = parac._produce_upstream(
-                        str(prefix), str(src), "graph", "amd", 30)
+                        str(prefix), str(src), "physics", "amd", 30)
             finally:
                 log.unlink(missing_ok=True)
 
@@ -450,6 +450,117 @@ class ParacCpuFailureCellTest(unittest.TestCase):
         self.assertEqual(physics.args[4], "failed")
         self.assertIn("produced no matrix",
                       physics.kwargs["matrix_meta"]["parac_prep_failure"])
+
+
+
+class GraphAccountingTest(unittest.TestCase):
+    @staticmethod
+    def timing():
+        return dict(complete_s=10.0, algorithm_s=6.0, audit_s=1.0, serialization_s=3.0,
+                    input_read_s=2.0, operator_permutation_s=0.0, producer_transform_s=1.0,
+                    producer_ordering_s=2.0, producer_cleanup_s=1.0)
+
+    def text(self):
+        return ("APX preprocessing accounting schema: " + parac._PREP_GRAPH_SCHEMA + "\n" +
+                "\n".join(label + " " + str(self.timing()[key])
+                          for key, label in parac._PREP_LABELS.items()) + "\n")
+
+    def test_strict_timing_rejects_missing_duplicate_nonfinite_and_overlap(self):
+        self.assertEqual(parac._parse_prep_timing(self.text()), self.timing())
+        for text in [self.text().replace("APX preprocessing audit time: 1.0\n", ""),
+                     self.text()+"APX algorithm preprocessing time: 6\n",
+                     self.text().replace("time: 6.0", "time: nan"),
+                     self.text().replace("time: 6.0", "time: 7.0"),
+                     self.text().replace("graph-algorithm-preprocessing-v1", "legacy"),
+                     self.text().replace("cleanup time: 1.0", "cleanup time: 5.0")]:
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parac._parse_prep_timing(text)
+        for value in [-1.0, float("inf"), True]:
+            timing=self.timing();timing["input_read_s"]=value
+            with self.assertRaises(ValueError):parac._validate_prep_timing(timing)
+
+    def test_cache_pins_same_size_input_producer_dispatcher_and_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=pathlib.Path(tmp);src=root/"input";producer=root/"producer";dispatcher=root/"dispatcher";out=root/"out"
+            for path in (src,producer,dispatcher,out):path.write_text("one")
+            with mock.patch.object(parac,"_write_graph_jl",return_value=str(producer)), \
+                 mock.patch.object(parac,"PRODUCE_JL",str(dispatcher)):
+                parac._stamp_prep_cache(str(out),10.0,"old",str(src))
+                self.assertFalse(parac._prep_cache_valid(str(out),str(src),algorithm=True))
+                parac._write_prep_accounting(str(out),6.0,parac._prep_contract(str(src)),self.timing())
+                parac._stamp_prep_cache(str(out),6.0,"corrected",str(src),algorithm=True)
+                self.assertTrue(parac._prep_cache_valid(str(out),str(src),algorithm=True))
+                for path in (src,producer,dispatcher,out):
+                    old=path.read_bytes();stat=path.stat();path.write_text("two")
+                    import os
+                    os.utime(path,ns=(stat.st_atime_ns,stat.st_mtime_ns))
+                    self.assertFalse(parac._prep_cache_valid(str(out),str(src),algorithm=True))
+                    path.write_bytes(old);os.utime(path,ns=(stat.st_atime_ns,stat.st_mtime_ns))
+                side=pathlib.Path(str(out)+".accounting.json");saved=side.read_text();data=json.loads(saved);data["seconds"]=5;side.write_text(json.dumps(data))
+                self.assertFalse(parac._prep_cache_valid(str(out),str(src),algorithm=True))
+
+    def test_graph_producer_charges_algorithm_and_persists_inclusive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=pathlib.Path(tmp);src=root/"input";src.write_text("input");producer=root/"producer";producer.write_text("producer");prefix=root/"accounting-test";out=pathlib.Path(str(prefix)+"-amd.mtx");out.write_text("output")
+            log=pathlib.Path("/tmp/parac_produce_accounting-test_amd.log");log.write_text(self.text())
+            try:
+                with mock.patch.object(parac,"_write_graph_jl",return_value=str(producer)), \
+                     mock.patch.object(parac,"sh",return_value=subprocess.CompletedProcess("julia",0,"","")):
+                    result=parac._produce_upstream(str(prefix),str(src),"graph","amd",30)
+                self.assertEqual(result,(str(out),6.0,None))
+                accounting=parac._read_prep_accounting(str(out))
+                metrics=parac._cpu_accounting_metrics([(6.0,accounting)],8.0,9.0)
+                self.assertEqual(metrics["inclusive_setup_s"],12.0)
+                self.assertEqual(metrics["inclusive_total_s"],13.0)
+                self.assertEqual(metrics["preprocessing_timing"],self.timing())
+                log.write_text("APX complete preprocessing time: 10\n")
+                with mock.patch.object(parac,"_write_graph_jl",return_value=str(producer)), \
+                     mock.patch.object(parac,"sh",return_value=subprocess.CompletedProcess("julia",0,"","")), \
+                     self.assertRaises(ValueError):parac._produce_upstream(str(prefix),str(src),"graph","amd",30)
+            finally:log.unlink(missing_ok=True)
+
+    def test_graph_warm_cache_and_explicit_fallback_keep_contracts(self):
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback), tempfile.TemporaryDirectory() as tmp:
+                root=pathlib.Path(tmp);src=root/"input";src.write_text("input");producer=root/"producer";producer.write_text("producer")
+                def produce(prefix, source, mode, method, *args):
+                    if fallback:return None,0.0,"upstream refused"
+                    out=prefix+"-amd.mtx";pathlib.Path(out).write_text("prepared")
+                    parac._write_prep_accounting(out,6.0,parac._prep_contract(source),self.timing())
+                    return out,6.0,None
+                def legacy(mid,source,out,*args,**kwargs):
+                    pathlib.Path(out).write_text("fallback");return 10.0
+                with mock.patch.object(rc,"PARAC_REORD",str(root/"cache")), \
+                     mock.patch.object(parac,"_write_graph_jl",return_value=str(producer)), \
+                     mock.patch.object(parac,"_produce_upstream",side_effect=produce) as produce_call, \
+                     mock.patch.object(parac,"_reorder_amd_ours",side_effect=legacy):
+                    first=parac._reorder_amd("m",str(src),"graph")
+                    second=parac._reorder_amd("m",str(src),"graph")
+                    self.assertEqual(first,second);self.assertEqual(produce_call.call_count,1)
+                    self.assertEqual(first[1],10.0 if fallback else 6.0)
+                    self.assertEqual(parac._read_prep_accounting(first[0])["schema"],
+                                     parac._PREP_GRAPH_FALLBACK_SCHEMA if fallback else parac._PREP_GRAPH_SCHEMA)
+
+    def test_invalid_new_receipt_never_launches_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(rc,"PARAC_REORD",tmp), \
+             mock.patch.object(parac,"_produce_upstream",side_effect=ValueError("invalid timing")), \
+             mock.patch.object(parac,"_reorder_amd_ours") as fallback:
+            with self.assertRaisesRegex(ValueError,"invalid timing"):
+                parac._reorder_amd("m","input","graph")
+            fallback.assert_not_called()
+
+    def test_failed_amd_fallback_cannot_be_stamped(self):
+        with mock.patch.object(parac,"sh",return_value=subprocess.CompletedProcess("julia",9,"","")):
+            with self.assertRaisesRegex(ValueError,"rc=9"):
+                parac._reorder_amd_ours("m","input","output","tag",False)
+
+    def test_legacy_fallback_is_never_labelled_corrected(self):
+        fallback={"schema":parac._PREP_GRAPH_FALLBACK_SCHEMA,"seconds":10.0,"contract":{},"output_sha256":"fixture"}
+        metrics=parac._cpu_accounting_metrics([(10.0,fallback)],12.0,13.0)
+        self.assertEqual(metrics["inclusive_setup_s"],12.0)
+        self.assertEqual(metrics["preprocessing_accounting"],parac._PREP_GRAPH_FALLBACK_SCHEMA)
+        self.assertNotIn("preprocessing_timing",metrics)
 
 
 if __name__ == "__main__":
