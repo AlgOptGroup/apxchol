@@ -106,7 +106,7 @@ If all current weights are at most $2x$, then $Q\le 2xS$, so the numerator is at
 For a uniform Hamiltonian **path** on an $h$-vertex core, edge inclusion is $2/h$, so the inverse-probability conductance is $h c_{ij}/2$. Its core variance is
 
 $$
-\frac{(h-2)\,[h(h-2)Q_H+S_H^2]}{2(h-1)A^2},
+\frac{(h-2)\cdot[h(h-2)Q_H+S_H^2]}{2(h-1)A^2},
 $$
 
 which is zero at $h=2$. A path saves one edge relative to a cycle and therefore requires a different budget comparison.
