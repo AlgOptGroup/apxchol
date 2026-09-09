@@ -744,6 +744,15 @@ class SamplerProfileTest(unittest.TestCase):
                          {row for row in current if row[1] != "apxchol_v1"})
         self.assertNotIn(("gpu", "apxchol_v1", "bg+tree[vec_pool_aos]"), current)
         self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]"), current)
+        self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]"), current)
+        self.assertNotIn(("gpu", "apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"), current)
+        self.assertEqual(gpu.LABELS[("apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]")],
+                         "apxchol/GKS q=0.2 (GPU-owned)")
+        self.assertEqual(gpu.LABELS[("apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]")],
+                         "apxchol/GKS q=0.8 (GPU-owned)")
+        q08 = next(row for row in combined.SOLVERS if row[0] == "apxchol/GKS q=0.8")
+        self.assertIsNone(q08[2])
+        self.assertEqual(q08[3], "apxchol/GKS q=0.8 (GPU-owned)")
         self.assertIn(("cpu", "cmg", ""), current)
         self.assertNotIn(("cpu", "apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"), current)
         rc.require_injective_labels(cpu.LABELS, "CPU")
@@ -799,9 +808,9 @@ class SamplerProfileTest(unittest.TestCase):
             r = record(status, 2 if status == "complete" else None,
                        threads=72, solver="apxchol_v1")
             r["cell"].update(matrix_id=mats[index], device="gpu",
-                config="bg+trace_cycle/gpu-owned-q08[vec_pool_aos]")
+                config="bg+tree/gpu-owned-q02[vec_pool_aos]")
             r["provenance"] = dict(git_sha="TEST-ONLY-SOURCE", binary_sha256="TEST-ONLY-BINARY",
-                sampler="trace_cycle", setup_route="owned_gpu", degree_quantile=0.8,
+                sampler="gks", setup_route="owned_gpu_q02", degree_quantile=0.2,
                 source_manifest_sha256="TEST-ONLY-MANIFEST", timing_protocol="TEST-ONLY")
             if status == "complete":
                 r["metrics"].update(actual_device_factor_adopted=True, fp16=True,
@@ -831,8 +840,8 @@ class SamplerProfileTest(unittest.TestCase):
                          {"complete", "failed", "timeout", "not_converged", "oom", "n/a"})
         measured = next(row for row in rows if row["status"] == "complete")
         self.assertEqual(measured["actual_device_factor_adopted"], "True")
-        self.assertEqual(measured["setup_route"], "owned_gpu")
-        self.assertEqual(measured["sampler"], "trace_cycle")
+        self.assertEqual(measured["setup_route"], "owned_gpu_q02")
+        self.assertEqual(measured["sampler"], "gks")
         self.assertEqual(measured["source_manifest_sha256"], "TEST-ONLY-MANIFEST")
         self.assertEqual(json.loads(measured["phase_observations"]), {"setup_s": [1, 1.1, 1.2]})
         self.assertEqual(measured["timing_stability_warning"], "True")

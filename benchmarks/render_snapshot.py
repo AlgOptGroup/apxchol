@@ -135,8 +135,8 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         'and serial Julia reference solvers retain their own labels and timing boundaries.', '',
         'Status counts: '+', '.join(f'{key}: {value}' for key,value in sorted(counts.items()))+'.', '']
     if sampler_comparison:
-        lines += ['GKS and trace-cycle are separate CPU and GPU-owned rows. CPU setup uses '
-                  'degree quantile 0.2; GPU-owned setup uses 0.8. The CSV records the '
+        lines += ['CPU rows compare GKS and trace-cycle at degree quantile 0.2; GPU-owned '
+                  'rows compare GKS at quantiles 0.8 and 0.2. The CSV records the '
                   'requested route, actual device-factor adoption, storage and timing '
                   'provenance. Missing cells are not filled from older CPU-setup/GPU-solve '
                   'measurements or another sampler.', '']
