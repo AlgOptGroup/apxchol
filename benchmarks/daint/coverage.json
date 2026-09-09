@@ -7,10 +7,10 @@
   "expected_headline_cells": 513,
   "status_counts": {
     "complete": 480,
-    "failed": 14,
+    "failed": 12,
     "n/a": 6,
     "timeout": 6,
-    "not_converged": 7
+    "not_converged": 9
   },
   "series_profile": "sampler-comparison",
   "missing": [],

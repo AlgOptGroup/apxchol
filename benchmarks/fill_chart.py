@@ -44,6 +44,12 @@ SOLVERS = [
     ("parac_graph_gpu",   "ParAC graph (GPU)",   "#fdae6b"),
     ("parac_physics_gpu", "ParAC physics (GPU)", "#8c2d04"),
 ]
+CURRENT_SOLVERS = [
+    ("apxchol_cpu_gks", "apxchol CPU GKS", "#0b5394"),
+    ("apxchol_cpu_trace", "apxchol CPU trace-cycle", "#3d85c6"),
+    ("apxchol_gpu_q08", "apxchol GPU GKS q=0.8", "#6fa8dc"),
+    ("apxchol_gpu_q02", "apxchol GPU GKS q=0.2", "#9fc5e8"),
+] + SOLVERS[3:]
 
 
 def load(root):
@@ -88,10 +94,13 @@ def heatmap(rows, fam, out):
     if not mats:
         return False
     rowlabs, M = [], []
-    for key, lab, _ in SOLVERS:
+    current = any(key.startswith("apxchol_cpu_") or key.startswith("apxchol_gpu_")
+                  for values in rows.values() for key in values)
+    for key, lab, _ in (CURRENT_SOLVERS if current else SOLVERS):
         vals = [rows.get((fam, m), {}).get(key, np.nan) for m in mats]
         arr = np.array([v if v is not None else np.nan for v in vals], dtype=float)
-        if np.isfinite(arr).any():
+        # Current snapshots declare the full comparison set, including missing fill.
+        if current or np.isfinite(arr).any():
             rowlabs.append(lab); M.append(arr)
     if not rowlabs:
         return False
@@ -114,7 +123,8 @@ def main():
     for fam in FAMS:
         if heatmap(rows, fam, f"{a.out}/fill_heatmap_{fam}.png"):
             n += 1
-    print(f"fill_chart: {len(rows)} fill cells -> {n} figures in {a.out}")
+    print(f"fill_chart: {sum(len(v) for v in rows.values())} declared cells, "
+          f"{len(rows)} matrices -> {n} figures in {a.out}")
 
 
 if __name__ == "__main__":

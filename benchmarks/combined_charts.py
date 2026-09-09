@@ -22,7 +22,6 @@ for CPU (device=cpu cells), gpu_charts.load for GPU.
 import argparse, os
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from matplotlib.ticker import FuncFormatter
 from matplotlib.patches import Patch
 from matplotlib.legend_handler import HandlerTuple
@@ -446,9 +445,7 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     # LOG colour scale on the ratio (not a capped linear one) -- otherwise every
     # solver beyond ~4x best saturates to the same red and the slow tier is one
     # indistinguishable wall. Log spreads 1x..max across the full ramp.
-    finite = ratio[np.isfinite(ratio)]
-    vmax = min(float(finite.max()), 16.0) if finite.size else 4.0
-    norm = mcolors.LogNorm(vmin=1.0, vmax=max(vmax, 1.6))
+    norm, ticks = gpu._ratio_color_scale(ratio)
     fig, ax = plt.subplots(figsize=(max(8, 1.25 * len(mats) + 3.5), 0.55 * len(names) + 2))
     im = ax.imshow(np.ma.masked_invalid(ratio), cmap=cmap, aspect="auto", norm=norm)
     ax.set_xticks(range(len(mats))); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right", fontsize=8)
@@ -490,8 +487,9 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
                                            edgecolor="#b0b0b0", lw=0.6, hatch="//"))
                 ax.text(j, i, "n/a", ha="center", va="center", fontsize=5.8,
                         color="#555555")
-    cb = fig.colorbar(im, ax=ax, ticks=[1, 1.5, 2, 3, 4, 6, 8, 12, 16])
-    cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:g}×"))
+    cb = fig.colorbar(im, ax=ax, ticks=ticks)
+    cb.minorticks_off()
+    cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.3g}×"))
     cb.set_label("× best solver in column (log scale)")
     dev = {"cpu": "CPU", "gpu": "GPU", "combined": "CPU + GPU"}[mode]
     unit = "fewest iters" if is_iters else "least memory" if is_mem else "fastest"

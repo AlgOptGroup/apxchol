@@ -14,7 +14,6 @@ from collections import defaultdict
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from matplotlib.ticker import FuncFormatter
 import numpy as np
 import gpu_charts as gpu   # reuse the GPU CSV loader + colours/order for overlays
@@ -688,10 +687,8 @@ def _poster_heatmap(recs, rows, out, title):
     # LOG colour scale on the ratio (same as combined_charts.overview_heatmap), NOT a
     # capped linear one: on the social-giant columns the competitors are 100x+ best, so
     # a linear scale washes the whole right half to one indistinguishable red. Log
-    # spreads 1x..16x across the ramp so near-ties (e.g. coPapersDBLP) stay readable.
-    finite = ratio[np.isfinite(ratio)]
-    vmax = min(float(finite.max()), 16.0) if finite.size else 4.0
-    norm = mcolors.LogNorm(vmin=1.0, vmax=max(vmax, 1.6))
+    # spreads 1x..max across the ramp without clipping the slower solvers.
+    norm, ticks = gpu._ratio_color_scale(ratio)
     fig, ax = plt.subplots(figsize=(max(10.5, 1.25 * ncol + 3.0), 0.66 * n + 2.3))
     im = ax.imshow(np.ma.masked_invalid(ratio), cmap=cmap, aspect="auto", norm=norm)
     ax.set_xticks(range(ncol)); ax.set_xticklabels([d for *_r, d in POSTER_COLS],
@@ -712,8 +709,9 @@ def _poster_heatmap(recs, rows, out, title):
             if capped[i, j]:
                 ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
                                            edgecolor="black", lw=1.3))
-    cb = fig.colorbar(im, ax=ax, ticks=[1, 1.5, 2, 3, 4, 6, 8, 12, 16], fraction=0.022, pad=0.012)
-    cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:g}×"))
+    cb = fig.colorbar(im, ax=ax, ticks=ticks, fraction=0.022, pad=0.012)
+    cb.minorticks_off()
+    cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.3g}×"))
     cb.set_label("× best solver in column (log scale)")
     ax.set_title(title, fontsize=11.5)
     fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)

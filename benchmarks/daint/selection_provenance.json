@@ -2,14 +2,14 @@
   "expected_headline_cells": 513,
   "represented": 513,
   "canonical_matlab_cmg_missing": 0,
-  "preserved_competitor_cells": 405,
+  "preserved_competitor_cells": 377,
   "refreshed_apx_cells": 108,
   "status_counts": {
     "complete": 480,
-    "failed": 14,
+    "failed": 12,
     "timeout": 6,
-    "n/a": 6,
-    "not_converged": 7
+    "not_converged": 9,
+    "n/a": 6
   },
   "selected_cells": [
     {
@@ -174,14 +174,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "f4e568fac08937335cd222468c2cc31093325353eef52c22a510ca11834b0f15",
+      "selected_cell_sha256": "26ed4abf6a010b371737cb1145e90513cff2ebcb9639be2d9d95b16daa54420c",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "f4e568fac08937335cd222468c2cc31093325353eef52c22a510ca11834b0f15",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "f4e568fac08937335cd222468c2cc31093325353eef52c22a510ca11834b0f15",
+          "raw_native_results_sha256": "0d4469f365e1759b6e2a40408dd400729601d23d4c0e59ce94b60b331b696475",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 8.322268009185791,
+          "publication_preparation_charge_s": 2.7198517322540283,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634088,
+          "identity_job": 4634088,
+          "original_operand_hashes": {
+            "A.mtx": "5188bfe3af3cfd567b008bf5cd472e367d08771ba602050afae12df176dc1051",
+            "b-t72.mtx": "45130132ccfe84626f9cfe9ff3cd3eee6350f759dc09d9aa2927c449b90ea190"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "f1ea2b4881a95e63e20fa51814aaddf9c52bef6509b8b4dd3313c82a3ca6c954",
+            ".system": "fe03e8c25f06c611c4586f8487b458bba6743328c12752094e63bc6cbded8987",
+            ".permutation": "575b21b1b017c99c8f96e74338cddf35c5dd1b7951d5fad6912ceb0f8d6fb192"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 2197.3125,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 9.95098940918579,
+              "corrected": 4.348573132254026
+            },
+            "adapter_setup_s": {
+              "original": 8.76815200918579,
+              "corrected": 3.165735732254028
+            },
+            "total_s": {
+              "original": 10.98498940918579,
+              "corrected": 5.382573132254026
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "43f26144a5a9174465bbe1cd459d993a7a16400299eef4953ad0233fb701d31a"
+        }
+      }
     },
     {
       "identity": [
@@ -535,14 +586,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "884eb0f76f1c9f0662f010ebe605f2df6b07ad0c321978122acb2b5ff048b888",
+      "selected_cell_sha256": "5b79d0e71aef50cfd342bf6dca17916556d7b2b15c642cad236bfa6748ac6e74",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "884eb0f76f1c9f0662f010ebe605f2df6b07ad0c321978122acb2b5ff048b888",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "884eb0f76f1c9f0662f010ebe605f2df6b07ad0c321978122acb2b5ff048b888",
+          "raw_native_results_sha256": "d72a53a9b7823243b8c618af737ff205498f9657a9687c815e983915893d146e",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 27.801748991012573,
+          "publication_preparation_charge_s": 7.690394163131714,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634283,
+          "identity_job": 4634283,
+          "original_operand_hashes": {
+            "A.mtx": "c08334d2d3c0b67a079f782d0c8e9e473209bab08cad2af5475898e7853c8dd6",
+            "b-t72.mtx": "d2de112efa6ba0f1da6a3ab4d91f6a1564726ff46748b56ab1b778351bc23a9f"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "6e6afd0705f384ae4d3d7f05aee211aec3eeb562fc04de83f479555a2c01eae1",
+            ".system": "7d5e0ead369fdf53729067c839731ca558325e2187b56f177f6e3339045f516b",
+            ".permutation": "eaf7ea971b17e021cf527fefdd743543cfae0b2d192ee9d1c2667a56d07f9c7a"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 7502.0,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 33.41605699101257,
+              "corrected": 13.304702163131708
+            },
+            "adapter_setup_s": {
+              "original": 29.36991899101257,
+              "corrected": 9.258564163131712
+            },
+            "total_s": {
+              "original": 37.56105699101256,
+              "corrected": 17.449702163131708
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "a5443a0caf85c2cd8f9a5da1094a1a2e6a8419a8cc2c9de8ad4000874318db2f"
+        }
+      }
     },
     {
       "identity": [
@@ -896,14 +998,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "79be7a546bfd6ce7be3858c263fcc13535131269d5f5015f4c97515e287004ee",
+      "selected_cell_sha256": "289625baef02910c2738e6934b39d6062e856708f7bf24af61a6e296668fc6b1",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "79be7a546bfd6ce7be3858c263fcc13535131269d5f5015f4c97515e287004ee",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "79be7a546bfd6ce7be3858c263fcc13535131269d5f5015f4c97515e287004ee",
+          "raw_native_results_sha256": "7fe1b8cff51c63aa8a8a6fcda94337960076b479d433e3c839eddb4c10422db7",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 67.43222689628601,
+          "publication_preparation_charge_s": 17.245789766311646,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634176,
+          "identity_job": 4634176,
+          "original_operand_hashes": {
+            "A.mtx": "19dbc80bf8083d56c881f9d0c75c682e1177d2a762f92a0db00238f07da7dabb",
+            "b-t72.mtx": "0176d3a52ad9b095342ea5e1483c2ddb9940b0871076c26cfad3beaf5c7d50cd"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "12a0dbf12e4ccc375c0d850402b89f962b19e70e433636104ecafcc3d9cb24f5",
+            ".system": "72ac243360ec3bfc9711b4a1b9ac0d899049433200d68afa544e7f4df417afee",
+            ".permutation": "94bde8c6feaf393e0bdcc95db86140b0bb0967e937df2924eba29d59be68a994"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 17863.0625,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 81.93283289628602,
+              "corrected": 31.74639576631165
+            },
+            "adapter_setup_s": {
+              "original": 71.39055689628601,
+              "corrected": 21.20411976631165
+            },
+            "total_s": {
+              "original": 92.19883289628602,
+              "corrected": 42.01239576631165
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "5320c70d62bdbc4cdffc4508a61958fb14aba80eea40c787e0eca8edfd9b7506"
+        }
+      }
     },
     {
       "identity": [
@@ -1257,14 +1410,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "6d4de21b489242779a67fe35351678aeeecafcc17d581baeb6b604be21a62528",
+      "selected_cell_sha256": "6e519422e27cfc9ceeb3138856b47278db6e76077dd32e0d832dead989656d34",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "6d4de21b489242779a67fe35351678aeeecafcc17d581baeb6b604be21a62528",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "6d4de21b489242779a67fe35351678aeeecafcc17d581baeb6b604be21a62528",
+          "raw_native_results_sha256": "6645d92a8555bd80c469c14022980cec1f9eb02f55d44183ff6816f611a36701",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 132.4956591129303,
+          "publication_preparation_charge_s": 33.792335987091064,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634283,
+          "identity_job": 4634283,
+          "original_operand_hashes": {
+            "A.mtx": "4292c8de6fe591b424a9f104412862f9959a1ee2cc5481fdc437260f5c8aafdc",
+            "b-t72.mtx": "13b75985125e6f950cd63af21cc55d5a8a425fa2a6683e2b58a7b794291f477c"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "3c3bf66756ed6a5107cc23371f5188ad7555e1e452dedcd1638c120959117420",
+            ".system": "e235df1202b9f9c63cdc9b1ae1d43589443023e60202b4ce076c11112ff0c31e",
+            ".permutation": "d29cc8b07adb3cb53c99cfd9f83591ab0241ccbdf505b9dab2d28d7cc2c1b83b"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 35066.125,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 160.47652311293027,
+              "corrected": 61.77319998709103
+            },
+            "adapter_setup_s": {
+              "original": 140.1467691129303,
+              "corrected": 41.44344598709105
+            },
+            "total_s": {
+              "original": 182.47052311293027,
+              "corrected": 83.76719998709103
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "a5443a0caf85c2cd8f9a5da1094a1a2e6a8419a8cc2c9de8ad4000874318db2f"
+        }
+      }
     },
     {
       "identity": [
@@ -1618,14 +1822,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "e3893f8811cd15554192b180145d8f59719cb26e1753d7a9b8d727a7cd3ae201",
+      "selected_cell_sha256": "25be372580883420eb45e9e1b8848244f00c4eb4936edf949690e2b2e770b8c8",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "e3893f8811cd15554192b180145d8f59719cb26e1753d7a9b8d727a7cd3ae201",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "e3893f8811cd15554192b180145d8f59719cb26e1753d7a9b8d727a7cd3ae201",
+          "raw_native_results_sha256": "248a11f023bab7474bef530570d125f6cc528f97924ba3d02a39cbfca53c3ccf",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 6.489886045455933,
+          "publication_preparation_charge_s": 1.8256580829620361,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634176,
+          "identity_job": 4634176,
+          "original_operand_hashes": {
+            "A.mtx": "bf30d5d80c6a505b981201da63a1fe58816b01e6254983f7428a96d7c11da09f",
+            "b-t72.mtx": "e49f6e772ad6c9c0a001aac6c4d4a30181922cf9327467f27e53644262b45968"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "6c692abcb9ae80831aeaf6e4f53062330a533506f64c1a7a468dd892d12f46f1",
+            ".system": "dda0c8d93a644cf32e9a1379a9b79a60b535c9ab4324592794f8993c198cf282",
+            ".permutation": "ade22bceaeb955321806fe898daa3e738141340aba019cbc33f218008c9c1b3f"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 1613.625,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 7.368545145455933,
+              "corrected": 2.7043171829620363
+            },
+            "adapter_setup_s": {
+              "original": 6.795886045455933,
+              "corrected": 2.131658082962036
+            },
+            "total_s": {
+              "original": 8.211545145455933,
+              "corrected": 3.5473171829620362
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "5320c70d62bdbc4cdffc4508a61958fb14aba80eea40c787e0eca8edfd9b7506"
+        }
+      }
     },
     {
       "identity": [
@@ -1979,14 +2234,64 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "9a522bd62cf0393976e1f659d111762422010ceb9bee328753a279978d79e740",
+      "selected_cell_sha256": "48a8c6c801e70e2a7d38ef7f8461240a3ab9177f67b2ed6915d6677b527c419c",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "9a522bd62cf0393976e1f659d111762422010ceb9bee328753a279978d79e740",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "9a522bd62cf0393976e1f659d111762422010ceb9bee328753a279978d79e740",
+          "raw_native_results_sha256": "9b0593241c0ab9d4bb90901146594ac68cf29eb1afbf22af33ae1726e0097651",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 23.489452838897705,
+          "publication_preparation_charge_s": 4.726348876953125,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4623922,
+          "identity_job": 4634026,
+          "original_operand_hashes": {
+            "A.mtx": "cb219363c7f53621093e73c182691ec1e625520c7ca614eafeee025d26b6b3b6",
+            "b-t72.mtx": "48e488193f603aaaa76e1edf10fb0386bb3ba1ec00c8d90da98e73640e338c23"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "6517260f2da8f1bedce159e9871a266195814483305f5ae67d09ed5506fcd366",
+            ".system": "20a3c6dde097b121ab3ddf1f63ea114256d7c807c0d34821a5d346c090548608",
+            ".permutation": "56913ca2de378dbaf03edecd429e3ffcf9838f45bee96b96b4358a4b17f4969c"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 6415.75,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 26.870789838897707,
+              "corrected": 8.107685876953127
+            },
+            "adapter_setup_s": {
+              "original": 24.719442838897706,
+              "corrected": 5.956338876953126
+            },
+            "total_s": {
+              "original": 30.873789838897707,
+              "corrected": 12.110685876953127
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability."
+        }
+      }
     },
     {
       "identity": [
@@ -2340,14 +2645,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "4bb2584f65d006fbf0572adf285b578f00d2b4536a7114f2f78943aeccc65d71",
+      "selected_cell_sha256": "7955a511c27bd6a0b0b6f5b03f0cc7922965a32a9d225a12a3307357bcc431df",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "4bb2584f65d006fbf0572adf285b578f00d2b4536a7114f2f78943aeccc65d71",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "4bb2584f65d006fbf0572adf285b578f00d2b4536a7114f2f78943aeccc65d71",
+          "raw_native_results_sha256": "df194139c7c426cbc591e3f265e9f9ae117df31a1b667a75910e84f92ece7b1c",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 53.264374017715454,
+          "publication_preparation_charge_s": 9.808414936065674,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634176,
+          "identity_job": 4634176,
+          "original_operand_hashes": {
+            "A.mtx": "9126776052240060415fe8916999dac28f5894fd1ddbdddcd7f1565339d9e709",
+            "b-t72.mtx": "76abc0ecca9f86f7d2c6493036b66768811239381723f1770d6a04fe265caf42"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "afc9ffc3be0effde3c48a746f4d140117f66d01483973ffea3844ded7c33c457",
+            ".system": "f76c489c0d556485124a0a018dd3a0f8b98f5a6d5a9315284c1f049455787027",
+            ".permutation": "6471a700277dea64351984cab5f0c410b40b77fa2bb389900dddf83f5004978b"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 14457.875,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 61.063531017715455,
+              "corrected": 17.607571936065675
+            },
+            "adapter_setup_s": {
+              "original": 56.15252401771546,
+              "corrected": 12.696564936065677
+            },
+            "total_s": {
+              "original": 71.47453101771545,
+              "corrected": 28.018571936065676
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "5320c70d62bdbc4cdffc4508a61958fb14aba80eea40c787e0eca8edfd9b7506"
+        }
+      }
     },
     {
       "identity": [
@@ -2701,14 +3057,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "7e63b3753518c5955ca8ba0ec152bbc448971cb23a1a136a04a97ea2bbc9dee6",
+      "selected_cell_sha256": "be7bb7f49034c0ac59622413867b24440d713ab97d557e0168804f879cf068be",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "7e63b3753518c5955ca8ba0ec152bbc448971cb23a1a136a04a97ea2bbc9dee6",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "7e63b3753518c5955ca8ba0ec152bbc448971cb23a1a136a04a97ea2bbc9dee6",
+          "raw_native_results_sha256": "82059372c816f9f88cbf2df43ce29914e92501134422ff1286ef33bbbff85aa1",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 95.02274584770203,
+          "publication_preparation_charge_s": 17.139819860458374,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634283,
+          "identity_job": 4634283,
+          "original_operand_hashes": {
+            "A.mtx": "4fd653ff52a2ed577bf120583ec4a529e137cc5c8bcfd0946ffc397d62b3b11f",
+            "b-t72.mtx": "816b3d38523106a5ee5759a4c68de5008323521d24ab8baa7e9eab339baa32a0"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "64e4fbd3d8cc0f7c260c4c6e0aebd95e3231bde43ed120d02179cb0c11dd9775",
+            ".system": "9533d203a40973863bb7606fed0540a81ecd9bb57487d3c6178e728d23a9934c",
+            ".permutation": "70f9a3651d7d912a212757caca690aac61a6ebb4d4e61f42330c96f3b6edf4f9"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 25688.5,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 110.74108984770203,
+              "corrected": 32.858163860458376
+            },
+            "adapter_setup_s": {
+              "original": 100.20290584770203,
+              "corrected": 22.319979860458375
+            },
+            "total_s": {
+              "original": 129.24308984770204,
+              "corrected": 51.36016386045837
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "a5443a0caf85c2cd8f9a5da1094a1a2e6a8419a8cc2c9de8ad4000874318db2f"
+        }
+      }
     },
     {
       "identity": [
@@ -3062,14 +3469,64 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "dc9c6df26236be80065b7f66dee556fc8677a084443f215a5ff58c810f65be5e",
+      "selected_cell_sha256": "61e2fd05fb4a162363d1d4f40e368a5fd503e734f162f087ecd06e5591eaa498",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "dc9c6df26236be80065b7f66dee556fc8677a084443f215a5ff58c810f65be5e",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "dc9c6df26236be80065b7f66dee556fc8677a084443f215a5ff58c810f65be5e",
+          "raw_native_results_sha256": "04cc1aa6a4f282a11d3a39ebed256ac0ad419e0c5dfb96e6c573545488896740",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 2.222623109817505,
+          "publication_preparation_charge_s": 0.8242349624633789,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634026,
+          "identity_job": 4634026,
+          "original_operand_hashes": {
+            "A.mtx": "8318744b5803a655e074ecfc3696e0e7cd1214186119227022c33b4d47e680ce",
+            "b-t72.mtx": "8d93fab9940651621c4b6ea806e40bcc342ac3b0931f85dc4cb1894ca6fadb94"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "aba0aea5a780a1f3690b3f02b3ffa96606c92d9d24b985a809c01deb7278c492",
+            ".system": "18f3020535933db42d24c08c6dd698c1004f79eacecc7b1158d49f6e4f5b1d18",
+            ".permutation": "78cdacaebe61f61c7771359d82281e2952cdaed063edda843069b3d92a20fe3f"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 360.0,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 2.402637909817505,
+              "corrected": 1.0042497624633788
+            },
+            "adapter_setup_s": {
+              "original": 2.294710709817505,
+              "corrected": 0.896322562463379
+            },
+            "total_s": {
+              "original": 2.6086379098175048,
+              "corrected": 1.2102497624633788
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability."
+        }
+      }
     },
     {
       "identity": [
@@ -3423,14 +3880,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "06e10d68cefec1ab67daa750197241188a71afbd5b2aa32ac026a4f830491ef1",
+      "selected_cell_sha256": "1ce91e176c3a2575f303b7a8f1e26f2973629d52c2804d11b6bfeea48542a4ba",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "06e10d68cefec1ab67daa750197241188a71afbd5b2aa32ac026a4f830491ef1",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "06e10d68cefec1ab67daa750197241188a71afbd5b2aa32ac026a4f830491ef1",
+          "raw_native_results_sha256": "3db1bdcccc30062cfdb5d08571cb2dfbdb30b03affc568809d726e4b79d67a64",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 152.83665418624878,
+          "publication_preparation_charge_s": 26.417174816131592,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634176,
+          "identity_job": 4634176,
+          "original_operand_hashes": {
+            "A.mtx": "97574362261e2ac5d6b75a0b50a18af5afc534d491373796a9315fddef3b3d4e",
+            "b-t72.mtx": "8500411ff761ae1094beeb6a516c310451910cfe54b1c5ae0be2968c38fa6f5b"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "8a079959d496f000569069b7bf3fa304e5f0de84548b295ed95eace07b06c8a9",
+            ".system": "a90bcf475d1f4e6b7417cf8aa906116836a243aae54d07b74cc8d3fb6eaedc20",
+            ".permutation": "1929a57428d596f86617817c5895a2447ab8a4dbab5b1359ed5ba85429bd650a"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 40139.9375,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 177.2641081862488,
+              "corrected": 50.8446288161316
+            },
+            "adapter_setup_s": {
+              "original": 160.9069841862488,
+              "corrected": 34.487504816131604
+            },
+            "total_s": {
+              "original": 207.62010818624879,
+              "corrected": 81.2006288161316
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "5320c70d62bdbc4cdffc4508a61958fb14aba80eea40c787e0eca8edfd9b7506"
+        }
+      }
     },
     {
       "identity": [
@@ -3784,14 +4292,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "dd6d3eb75f5f756cf5619c41589c0bc656a9509175f8a4b7945e53e650ed34c6",
+      "selected_cell_sha256": "6d5ac74364641381c03ebc4e5bb33b803e8bd33df5aadbf785ba83c80f057ef4",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "dd6d3eb75f5f756cf5619c41589c0bc656a9509175f8a4b7945e53e650ed34c6",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "dd6d3eb75f5f756cf5619c41589c0bc656a9509175f8a4b7945e53e650ed34c6",
+          "raw_native_results_sha256": "f7044a5ee4c9904e62514e68bcfb128c295e5a1145469288c2a5dcac39e26ec4",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 10.448355913162231,
+          "publication_preparation_charge_s": 2.273893117904663,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634152,
+          "identity_job": 4634152,
+          "original_operand_hashes": {
+            "A.mtx": "76382211b56cd921298d636a5687a3e042af67bddda3ddb5ceb9192f31da071e",
+            "b-t72.mtx": "5d91c7431361a8fa53d9b90e3b71c78e07a78ad17e5387739a22567dd00fc813"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "1ab9d5bdb7fbf91ec5cc3b44d126e8516cd1d6cd99cbdd1e216610db7e25570f",
+            ".system": "620a05abfc46ab9cc908d8ef9b270a56aa42999e84a4cebf097df46a2e82612d",
+            ".permutation": "05300ea847c914cb0294b2dd0f53bc44ba97be1f38dfc972ee937282f53214e7"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 2357.0,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 11.969574413162231,
+              "corrected": 3.795111617904663
+            },
+            "adapter_setup_s": {
+              "original": 10.975414913162231,
+              "corrected": 2.8009521179046626
+            },
+            "total_s": {
+              "original": 12.696574413162232,
+              "corrected": 4.522111617904663
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "d26a58f90d231222485adfee3f00630b9eeb23a0da6d1e025b2963acfad7cc41"
+        }
+      }
     },
     {
       "identity": [
@@ -4145,14 +4704,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "2581f5a7a28bf510365363f285c4ceb9dec452406ac606783b9c3be0204d575c",
+      "selected_cell_sha256": "054b175674a43767dfcdd053aa74996a952132226ad52356a086c5c72238f135",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "2581f5a7a28bf510365363f285c4ceb9dec452406ac606783b9c3be0204d575c",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "2581f5a7a28bf510365363f285c4ceb9dec452406ac606783b9c3be0204d575c",
+          "raw_native_results_sha256": "08a2a4976cbc6efd9eda62e88cfff880fc1b4a7ff4e191d2175e2dba302efc4b",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 10.071866989135742,
+          "publication_preparation_charge_s": 2.2839608192443848,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634283,
+          "identity_job": 4634283,
+          "original_operand_hashes": {
+            "A.mtx": "b659f211129fadf460b8a996ac0edb2af168f666dbb4a72e1e680802279462d5",
+            "b-t72.mtx": "f39f3a5d2f0a6135d766bf5d7c348be432d57aa8062a4ae76cf1017bf3da9e34"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "405f001436dcb7495a1a3ec8bb1cb6e92f52268147e07f024844d0239fd4bbaa",
+            ".system": "01ba6937fb225f8dd56d208b5868fe04a9fe9d10e6263779c870a63add1c60b8",
+            ".permutation": "05300ea847c914cb0294b2dd0f53bc44ba97be1f38dfc972ee937282f53214e7"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 2371.125,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 11.653585089135742,
+              "corrected": 3.8656789192443846
+            },
+            "adapter_setup_s": {
+              "original": 10.596626989135743,
+              "corrected": 2.8087208192443853
+            },
+            "total_s": {
+              "original": 12.876585089135743,
+              "corrected": 5.088678919244384
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "a5443a0caf85c2cd8f9a5da1094a1a2e6a8419a8cc2c9de8ad4000874318db2f"
+        }
+      }
     },
     {
       "identity": [
@@ -4506,14 +5116,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "f5d0fac21eb98d3f89489b20584f6f4c67ebbae9de65df04a0300dcab9b36eb7",
+      "selected_cell_sha256": "9a06fa782b71c64870b4cd2c8b7e69f0ea164d28be6feaa0a286efbb5f7421b2",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "f5d0fac21eb98d3f89489b20584f6f4c67ebbae9de65df04a0300dcab9b36eb7",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "f5d0fac21eb98d3f89489b20584f6f4c67ebbae9de65df04a0300dcab9b36eb7",
+          "raw_native_results_sha256": "fec73d8bfadd849d5a3c0819212dd93c79d585b5eeb7d4c16b79eb01ffa0e20f",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 9.95533299446106,
+          "publication_preparation_charge_s": 2.434194326400757,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634176,
+          "identity_job": 4634176,
+          "original_operand_hashes": {
+            "A.mtx": "96b42b2f7a2e386c4cdc7219e6598fe9bd0273819f3acc0a87f2ef687193b8c9",
+            "b-t72.mtx": "cbb1b1181214e28e7b71b6c5204a906ef6604d66dde834731394cf1c98744965"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "eba2b71f3d0a3ce9312ac4ef4414462b0ac2555bf08c281e1bc7e415e6638b79",
+            ".system": "f76ad036652d004b2a43fb324f3a17394062724bba6bf8df28fd96b183d817ec",
+            ".permutation": "05300ea847c914cb0294b2dd0f53bc44ba97be1f38dfc972ee937282f53214e7"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 2371.1875,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 11.540835094461059,
+              "corrected": 4.019696426400756
+            },
+            "adapter_setup_s": {
+              "original": 10.47843399446106,
+              "corrected": 2.9572953264007573
+            },
+            "total_s": {
+              "original": 12.87583509446106,
+              "corrected": 5.354696426400756
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "5320c70d62bdbc4cdffc4508a61958fb14aba80eea40c787e0eca8edfd9b7506"
+        }
+      }
     },
     {
       "identity": [
@@ -4867,14 +5528,64 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "f83f4d2195fbb9ec32e2390b5a744be8b47a554af76168537a76092f9bd04bff",
+      "selected_cell_sha256": "5bb0d5e3424959fc12542c41f0b27289dd431b8c575a0037977780e1e9b18ca5",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "f83f4d2195fbb9ec32e2390b5a744be8b47a554af76168537a76092f9bd04bff",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "f83f4d2195fbb9ec32e2390b5a744be8b47a554af76168537a76092f9bd04bff",
+          "raw_native_results_sha256": "3f0239a624ec936a7336ff9b3db7a01e037152e561e946976ef600a632f11a5d",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 10.101887941360474,
+          "publication_preparation_charge_s": 2.2506957054138184,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4623922,
+          "identity_job": 4634026,
+          "original_operand_hashes": {
+            "A.mtx": "fae9a4b9ebf784bf6ae7cf52ada98df8ff4598ec5b8b16ea9ff088bca092fcb2",
+            "b-t72.mtx": "90373d80697398004afc154826ff3ff9f75753b12b81377d57d1bcabea2c28f8"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "9a111fba49a9ecfa28110c7c3f0199d84821bd59490cd42e023aad5d0476342a",
+            ".system": "2f0288b36f1dc23635c0e64b6025cfe3f05d1ba10d6b82df50a6198ecab38adf",
+            ".permutation": "05300ea847c914cb0294b2dd0f53bc44ba97be1f38dfc972ee937282f53214e7"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 2363.1875,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 11.693720841360475,
+              "corrected": 3.84252860541382
+            },
+            "adapter_setup_s": {
+              "original": 10.624088941360474,
+              "corrected": 2.772896705413819
+            },
+            "total_s": {
+              "original": 12.881720841360476,
+              "corrected": 5.03052860541382
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability."
+        }
+      }
     },
     {
       "identity": [
@@ -5227,15 +5938,65 @@
         "",
         72
       ],
-      "status": "failed",
-      "selected_cell_sha256": "caa384132439b42a6ed05a6405c8bb1fcb4201df31fbfdbab54ab58e63391b18",
+      "status": "not_converged",
+      "selected_cell_sha256": "c536b69d8915ecae6be7cf9c6e6f8cd9c5bde31997e2e399002ab5be9d410c03",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "caa384132439b42a6ed05a6405c8bb1fcb4201df31fbfdbab54ab58e63391b18",
+      "previous_status": "failed",
+      "parac_publication_correction": {
+        "classification": {
+          "reason": "Completed calibration solve hit its iteration limit and failed original-system residual grading; not an execution error.",
+          "stage": "calibration",
+          "original_status": "failed",
+          "original_cell_sha256": "caa384132439b42a6ed05a6405c8bb1fcb4201df31fbfdbab54ab58e63391b18",
+          "raw_record_sha256": "4715514313f878ccaccf4d3ea43f3cfcfbdc08948e56264f953b407d444b6a02",
+          "calibration_iterations": 2000,
+          "calibration_original_rel_res": 0.013108850648410882,
+          "retained_repetitions": 0,
+          "preparation_identity_audit": "not_reached"
+        },
+        "classification_overlay_sha256": "ac299a988d739d3e73746342005129e3c5cbf86931d868ff78a7a805f5fbe7e2",
+        "preparation_correction": {
+          "source_cell_sha256": "caa384132439b42a6ed05a6405c8bb1fcb4201df31fbfdbab54ab58e63391b18",
+          "raw_native_results_sha256": "4715514313f878ccaccf4d3ea43f3cfcfbdc08948e56264f953b407d444b6a02",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "failed",
+          "original_preprocessing_s": 11.107614994049072,
+          "publication_preparation_charge_s": 2.656226873397827,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634176,
+          "identity_job": 4634176,
+          "original_operand_hashes": {
+            "A.mtx": "c2547959e14d7b6e1f8c8d9342d6680e0a3fe0a85943592d8f3c97343fe1ad25",
+            "b-t72.mtx": "993bb664f46d2048c054d2b0ced6c14ee5e6577e72330b3140d76ff0dc221318"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "a803ce1299d08499909c13f8da5347788a4d7a7170ea8f6ecb5a39a70c2672be",
+            ".system": "71d5059c2e50ff757e63d5ef0eccff6f6af7c24d97bf9a797216a2f6c38396bf",
+            ".permutation": "af5d78908bb2b3ad403cfbf7bf8705f4e66bf512f49d9c599c6367d3e04c8167"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": false,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": null,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {},
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "5320c70d62bdbc4cdffc4508a61958fb14aba80eea40c787e0eca8edfd9b7506"
+        }
+      }
     },
     {
       "identity": [
@@ -5398,15 +6159,31 @@
         "",
         72
       ],
-      "status": "failed",
-      "selected_cell_sha256": "b12984f3828fc2882e04542ec8ec7f93b144215b973152dc28db3db464b4be15",
+      "status": "not_converged",
+      "selected_cell_sha256": "a83c5cc7aa908cb967f3168aba4a03cb67a3a5478e380bba924720d56b376542",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "cfbf0e9d60bf702941f83c8e3a2406a8ba0c36b47abf12e3f0d5fbb20006c804",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "b12984f3828fc2882e04542ec8ec7f93b144215b973152dc28db3db464b4be15",
+      "previous_status": "failed",
+      "parac_publication_correction": {
+        "classification": {
+          "reason": "Completed calibration solve hit its iteration limit and failed original-system residual grading; not an execution error.",
+          "stage": "calibration",
+          "original_status": "failed",
+          "original_cell_sha256": "b12984f3828fc2882e04542ec8ec7f93b144215b973152dc28db3db464b4be15",
+          "raw_record_sha256": "8a85c4e6c7f3d9f5792c81b50de3f3a322e4bfdff61e67969057e1996eeaf460",
+          "calibration_iterations": 300,
+          "calibration_original_rel_res": 0.20347252798891588,
+          "retained_repetitions": 0,
+          "preparation_identity_audit": "not_reached"
+        },
+        "classification_overlay_sha256": "a83c5cc7aa908cb967f3168aba4a03cb67a3a5478e380bba924720d56b376542"
+      }
     },
     {
       "identity": [
@@ -5589,14 +6366,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "9b621d5ccee538087d319a19d87d34792f707d2c93d98361d089afd6e0ee5207",
+      "selected_cell_sha256": "c66ecc8c9767dc4cf7e5ba0ab47ce4ec4eed2e146fb6833b3ca8deb47e9faa08",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "9b621d5ccee538087d319a19d87d34792f707d2c93d98361d089afd6e0ee5207",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "9b621d5ccee538087d319a19d87d34792f707d2c93d98361d089afd6e0ee5207",
+          "raw_native_results_sha256": "a80f39d1add5ea23d18d22daaa371b811aa775b4f9888ad280f661bffa57ce9f",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 6.4205310344696045,
+          "publication_preparation_charge_s": 1.7233741283416748,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634088,
+          "identity_job": 4634088,
+          "original_operand_hashes": {
+            "A.mtx": "589bced9dfac7c0179617870d8032af7d234e2d814f5db68386f6755d5ca23ba",
+            "b-t72.mtx": "f59ca96eed13152e2e505645102c90cca405cc5bee5e12c3ade58106ad999377"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "5c9b27f50a8ad06e514deef943f4bc21fde7a272d7e17ebe51acd2e27bb320fd",
+            ".system": "476c2bd1c914912dae20a6d05df00c3cdf9f574858496710eae815f146a7cf0f",
+            ".permutation": "5a8c71cefeab18bef3f942562fefaf2f710a226f50335a025d51a5d19fbc33d8"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 1494.125,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 7.3115294344696045,
+              "corrected": 2.6143725283416748
+            },
+            "adapter_setup_s": {
+              "original": 6.7220510344696045,
+              "corrected": 2.024894128341675
+            },
+            "total_s": {
+              "original": 8.055529434469605,
+              "corrected": 3.3583725283416745
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "43f26144a5a9174465bbe1cd459d993a7a16400299eef4953ad0233fb701d31a"
+        }
+      }
     },
     {
       "identity": [
@@ -5950,14 +6778,64 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "ba282da665dd81999e0a070937cf3dbac7cac094753e3ccabe89d218d0cf9132",
+      "selected_cell_sha256": "762df9de5fbf9c0d1ee7e2b7ba3c69d7e8adaa2267e8e281518b062fef92e631",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "ba282da665dd81999e0a070937cf3dbac7cac094753e3ccabe89d218d0cf9132",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "ba282da665dd81999e0a070937cf3dbac7cac094753e3ccabe89d218d0cf9132",
+          "raw_native_results_sha256": "d92b889c297744788887e65da0132ac2b3d97ec5cd9db934efa1cc559a56eced",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 57.86488103866577,
+          "publication_preparation_charge_s": 37.91466808319092,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4623922,
+          "identity_job": 4634026,
+          "original_operand_hashes": {
+            "A.mtx": "1571148437ef03dc2bfb5ce0f6efb5aabcddd00e6099f15453a9ca54c4da8cba",
+            "b-t72.mtx": "d0eb21f1489fa50768f3c5d212c7b6e4092f2caae8619c32ca9fa2f49c79a106"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "2f2bcc79e22279ae37aa025a05585c5b0103f558138d9529447eeedebc4f2347",
+            ".system": "8724c3bc9721ecdfc5089174c8a2624ae881b759d181b2386780237a3072360f",
+            ".permutation": "3f2e4da09f07b0e2d459eea9ff471815ee7f9407d219381d4d1f204330fc5e1f"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 6959.375,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 62.707771038665776,
+              "corrected": 42.75755808319092
+            },
+            "adapter_setup_s": {
+              "original": 59.84194103866577,
+              "corrected": 39.89172808319092
+            },
+            "total_s": {
+              "original": 64.25477103866578,
+              "corrected": 44.30455808319092
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability."
+        }
+      }
     },
     {
       "identity": [
@@ -6311,14 +7189,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "7b6c4e17031e07e16038f9f52b51bebb0fd6cf6aea3e2533c6fc1edd6a21ecd7",
+      "selected_cell_sha256": "d4e8d4085b860875b6d8f5398e204adf101ad5a8a8a31f59ceac40cf585c74cd",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "7b6c4e17031e07e16038f9f52b51bebb0fd6cf6aea3e2533c6fc1edd6a21ecd7",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "7b6c4e17031e07e16038f9f52b51bebb0fd6cf6aea3e2533c6fc1edd6a21ecd7",
+          "raw_native_results_sha256": "82eb442ef5bb0daad935b43137a77628baea69c686dc198c8e8a100cbca246b6",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 3.8284358978271484,
+          "publication_preparation_charge_s": 1.5952632427215576,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634176,
+          "identity_job": 4634176,
+          "original_operand_hashes": {
+            "A.mtx": "c1843a707c4c304448934a2923106759bc7298af300e1ac8104d72a4beb8cc1f",
+            "b-t72.mtx": "f3d43cefb2d4845f83571269cd379af39506680accd17051126b67120cfb14ee"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "33050a61c43da8c9536bc7572358ee4b6a56d78606a4a09ba055943d24f6b911",
+            ".system": "9630909fcba864758e46f5da1d76264bb8be82403e6962cefd54e0a598f50cea",
+            ".permutation": "1e06f1852e396fc4e77da3ff5b13a847ec94f54f2378f36693338dd20da41c48"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 709.1875,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 4.262455397827148,
+              "corrected": 2.0292827427215574
+            },
+            "adapter_setup_s": {
+              "original": 4.004054897827149,
+              "corrected": 1.7708822427215578
+            },
+            "total_s": {
+              "original": 4.496455397827148,
+              "corrected": 2.2632827427215574
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "5320c70d62bdbc4cdffc4508a61958fb14aba80eea40c787e0eca8edfd9b7506"
+        }
+      }
     },
     {
       "identity": [
@@ -6672,14 +7601,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "b907fbb50b63bad207255974a9bb14c1b403e1ba4da59c2c8b36b5c44ba75027",
+      "selected_cell_sha256": "0dd65a2493ade7e1d505040721b83f568be8aa5a1f158be1c39cf1bff61ffe81",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "b907fbb50b63bad207255974a9bb14c1b403e1ba4da59c2c8b36b5c44ba75027",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "b907fbb50b63bad207255974a9bb14c1b403e1ba4da59c2c8b36b5c44ba75027",
+          "raw_native_results_sha256": "0faf5536174ce04c06f325c2b43c4c1f553f8c7b07f6eb5d589044a8132dc43c",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 31.362884044647217,
+          "publication_preparation_charge_s": 7.101819276809692,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634152,
+          "identity_job": 4634152,
+          "original_operand_hashes": {
+            "A.mtx": "b07b5a6613a45e263d463d774b1df26b814359a94be3c99e1f4e1a020c301434",
+            "b-t72.mtx": "4052ba60058dba6ea820582e2a3c5cd291f88cc72292f4518a6bee10dccbd0ae"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "2e7aa65a5d6346f47d9f5161b9687c4182e9a4771c6985457e885f36a3097cf2",
+            ".system": "32fe328234f86755666f15248c8117794c21039b2b02c81355fd17c30f0580c6",
+            ".permutation": "9c83eb090cc6ba9de815184bd785d2b99497282405db35852b4c4bc20f4ef4ae"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 8840.375,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 38.15429904464722,
+              "corrected": 13.893234276809693
+            },
+            "adapter_setup_s": {
+              "original": 33.615004044647215,
+              "corrected": 9.35393927680969
+            },
+            "total_s": {
+              "original": 40.21829904464722,
+              "corrected": 15.957234276809693
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "d26a58f90d231222485adfee3f00630b9eeb23a0da6d1e025b2963acfad7cc41"
+        }
+      }
     },
     {
       "identity": [
@@ -7033,14 +8013,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "0c8624f8e28bd082a006f9d1fa0d253eef7608ccd711f93df7e2ed9794ad534a",
+      "selected_cell_sha256": "3bc4f62bb302208d8a10012c9386e5f174390f4d06af216b63f81d79a30a8ebf",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "0c8624f8e28bd082a006f9d1fa0d253eef7608ccd711f93df7e2ed9794ad534a",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "0c8624f8e28bd082a006f9d1fa0d253eef7608ccd711f93df7e2ed9794ad534a",
+          "raw_native_results_sha256": "1eba6959ee6d65330846e1083877a15e1b10660a6d32185008f76e13208cb051",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 3.978775978088379,
+          "publication_preparation_charge_s": 1.7464592456817627,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634283,
+          "identity_job": 4634283,
+          "original_operand_hashes": {
+            "A.mtx": "cf5f2eed5947da2625a2c2e05a7190d8a0d31b52eb93e491210ba41aa6cb4752",
+            "b-t72.mtx": "ff0317041d6a90e206f642da9597f7c3dae967aeb76791dbf5d06027d8a8f737"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "4d28992b1e59e03d96a41bd4a9b9e2289783647af7bfeecc30ab8f2853b50cc2",
+            ".system": "e88d26ce233fa72b45a87ad632a1549fe82eba059eba6ea35d08350d3bc83f8b",
+            ".permutation": "0e6e49da2e6fb8b92cec81452c85960b8642fecdea9340b2469f90c5c692a07d"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 648.0,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 4.354127578088379,
+              "corrected": 2.121810845681763
+            },
+            "adapter_setup_s": {
+              "original": 4.156872978088379,
+              "corrected": 1.9245562456817629
+            },
+            "total_s": {
+              "original": 4.627127578088379,
+              "corrected": 2.394810845681763
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "a5443a0caf85c2cd8f9a5da1094a1a2e6a8419a8cc2c9de8ad4000874318db2f"
+        }
+      }
     },
     {
       "identity": [
@@ -7394,14 +8425,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "c3aacd8e47651f6b3ec55ee4e00aab9378cf908709fff945d1462a5fac28584d",
+      "selected_cell_sha256": "774f964e66ec894101269bd0c1a11718e5e597a45b82b851abf4c779d9629d49",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "c3aacd8e47651f6b3ec55ee4e00aab9378cf908709fff945d1462a5fac28584d",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "c3aacd8e47651f6b3ec55ee4e00aab9378cf908709fff945d1462a5fac28584d",
+          "raw_native_results_sha256": "a61e338732d4be516ab1af9f2b9ebef436afa60301c8d9bd4e669b3ba6dadf72",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 519.2315111160278,
+          "publication_preparation_charge_s": 464.9579827785492,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634088,
+          "identity_job": 4634088,
+          "original_operand_hashes": {
+            "A.mtx": "531e1a278ed7dbd4efc7eeebf8a8cc8d3b1c769be36495c229b6fead7f35ea42",
+            "b-t72.mtx": "e327928c67e6fa17c0b65aac3978d037ad3a57a4bd1ef7902037923c6f80ad35"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "8a87487a103be0162d2ef13ab223e52798b2f16fb69f2756f4ce7956c64b228b",
+            ".system": "4ceba1ec7be01fa28056461d93c122484ea8b2e1985a990a591a2c5e56416454",
+            ".permutation": "5c522043fe798f86f446a0ae37126b267b9c0e620afca40ad83a600a07198803"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 23239.1875,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 555.4654621160279,
+              "corrected": 501.19193377854924
+            },
+            "adapter_setup_s": {
+              "original": 528.3875311160278,
+              "corrected": 474.1140027785492
+            },
+            "total_s": {
+              "original": 578.8164621160279,
+              "corrected": 524.5429337785492
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "43f26144a5a9174465bbe1cd459d993a7a16400299eef4953ad0233fb701d31a"
+        }
+      }
     },
     {
       "identity": [
@@ -7755,14 +8837,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "aadf374ebddbfd6c69b422eeefbc9ce3f954292576e1c2ffa32aa5d87bb3722e",
+      "selected_cell_sha256": "0bee34e1b149bc6ec425e1ce237754b563b1c90360e9277fb51350063a1fff37",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "aadf374ebddbfd6c69b422eeefbc9ce3f954292576e1c2ffa32aa5d87bb3722e",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "aadf374ebddbfd6c69b422eeefbc9ce3f954292576e1c2ffa32aa5d87bb3722e",
+          "raw_native_results_sha256": "62a73da73d47cd8d45e309511fb12e439253ba6522e34070869d3753fecb3eb0",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 2313.04882889267,
+          "publication_preparation_charge_s": 2107.202045016251,
+          "cached_amd_charge_s": 2027.21046,
+          "prep_source_job": 4634152,
+          "identity_job": 4634152,
+          "original_operand_hashes": {
+            "A.mtx": "542a701c2a0ea8e45543bb4e5107cafcb98843ee5f6f73da42674078fa542f91",
+            "b-t72.mtx": "58105eaf061579f188238908d7eb4b2c32c93dac39068d87a07d6f9512d6acbb"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "e95c976c9cc9ca29d98f2505dfcb0659efbfc8f3d209bb1c2743cd9ff4fe644e",
+            ".system": "415ddb4f63dcb60b7c803940d761da57e295b4677f3c47116299fcf34d428cd3",
+            ".permutation": "2ae11279e9d715e1cea13cf6d5ee20e5de1fb798baf1229a69f5bfb000dbb2be"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 74812.75,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 2455.48657889267,
+              "corrected": 2249.639795016251
+            },
+            "adapter_setup_s": {
+              "original": 2344.74062889267,
+              "corrected": 2138.893845016251
+            },
+            "total_s": {
+              "original": 2514.99057889267,
+              "corrected": 2309.143795016251
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "d26a58f90d231222485adfee3f00630b9eeb23a0da6d1e025b2963acfad7cc41"
+        }
+      }
     },
     {
       "identity": [
@@ -8116,14 +9249,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "9d940d0481775ee4aea82401edf7298bb72a337d23abb0bfa230cd4e41bf43de",
+      "selected_cell_sha256": "55a8e6b2ebb56103d42c82196136990dc2a13984ac37ce25c13c3bce3b83ea16",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "9d940d0481775ee4aea82401edf7298bb72a337d23abb0bfa230cd4e41bf43de",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "9d940d0481775ee4aea82401edf7298bb72a337d23abb0bfa230cd4e41bf43de",
+          "raw_native_results_sha256": "797edb4f01e0af54caa0638fcf759ae12322b2be3be8213370886a406f8ee31e",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 16.21789002418518,
+          "publication_preparation_charge_s": 10.039429903030396,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634283,
+          "identity_job": 4634283,
+          "original_operand_hashes": {
+            "A.mtx": "828116e51afc068460efce893f45110b1d9289aef09f98bb492046e63c804b54",
+            "b-t72.mtx": "60f1c66568ae046554e52b76de1c3ef52111f63cdbfe7f20a06603f8d1aeba5f"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "e7c638a142033f71b090be7733febd0f42ffe11a60683d831cf9ff5b3b12f642",
+            ".system": "91be4b83bb5598203f0bd1d44055f771dc495258d4e5aa7f8013091379f58996",
+            ".permutation": "b14dc106f75ccf80c934bcd40b9f8f65fde5848cc4e4026519b44fc868827576"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 2222.375,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 18.00421432418518,
+              "corrected": 11.825754203030396
+            },
+            "adapter_setup_s": {
+              "original": 16.90361002418518,
+              "corrected": 10.725149903030395
+            },
+            "total_s": {
+              "original": 18.77921432418518,
+              "corrected": 12.600754203030396
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "a5443a0caf85c2cd8f9a5da1094a1a2e6a8419a8cc2c9de8ad4000874318db2f"
+        }
+      }
     },
     {
       "identity": [
@@ -8477,14 +9661,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "17c35cf3d850ee65f1efed752a1e24a071733b325d7af55c70338c8ff226bd4c",
+      "selected_cell_sha256": "f89ee0875582340a101ee9a7514d15173ed2716dc1bdae858c730576a92195c4",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "17c35cf3d850ee65f1efed752a1e24a071733b325d7af55c70338c8ff226bd4c",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "17c35cf3d850ee65f1efed752a1e24a071733b325d7af55c70338c8ff226bd4c",
+          "raw_native_results_sha256": "64ff57b818a78cac6b2feaf26ce16a8fb035585089042c5bc42acb18e307f547",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 6.633411169052124,
+          "publication_preparation_charge_s": 1.8539178371429443,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634283,
+          "identity_job": 4634283,
+          "original_operand_hashes": {
+            "A.mtx": "c0cca1066069819c6e2b6325235cf3929406bb3d3e6e89332426a1c9dadbd960",
+            "b-t72.mtx": "202d0fac1bf9a42881db7d182842739144aadc42a9e4e4fb491040ad75d9211e"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "69eacc8d9b42cee0682703b529efc544939c633c43659170e29fb9e9790c23cd",
+            ".system": "f3e50fe1afafe8a8f585c4cf0dda40ed85dc3ba413f97591ee0f5e7549598b1d",
+            ".permutation": "ade22bceaeb955321806fe898daa3e738141340aba019cbc33f218008c9c1b3f"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 1583.5,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 7.443969369052124,
+              "corrected": 2.6644760371429443
+            },
+            "adapter_setup_s": {
+              "original": 6.934626169052124,
+              "corrected": 2.1551328371429443
+            },
+            "total_s": {
+              "original": 8.303969369052124,
+              "corrected": 3.524476037142944
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "a5443a0caf85c2cd8f9a5da1094a1a2e6a8419a8cc2c9de8ad4000874318db2f"
+        }
+      }
     },
     {
       "identity": [
@@ -8838,14 +10073,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "436d5b6f7bbe1f18a17c32ec086f0aabf48c9f22ee9d6c771bb46a2bd832afda",
+      "selected_cell_sha256": "61874706f7cd36eb9eff1348da50ca91fb000ed7471ac9b4a9678d853909b46e",
       "git_sha": "280b7ee0087c47d1a5101787312dd7574acdfee0",
       "binary_sha256": null,
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "436d5b6f7bbe1f18a17c32ec086f0aabf48c9f22ee9d6c771bb46a2bd832afda",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "436d5b6f7bbe1f18a17c32ec086f0aabf48c9f22ee9d6c771bb46a2bd832afda",
+          "raw_native_results_sha256": "7ee9c52f5d5b0d7c9151a674604587259ac8f14711e5efe122195c5f7bf39ff6",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 7.514163017272949,
+          "publication_preparation_charge_s": 2.934823989868164,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634152,
+          "identity_job": 4634152,
+          "original_operand_hashes": {
+            "A.mtx": "1a24d4e25e33bc0b29ac92d396b10a2ee7dae69642bfa099d315de2063cddb4a",
+            "b-t72.mtx": "8d8f37bbec18d32922c5105ff3b831c6f5dcd1ed28bf1fe8e3d21e1924476451"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "2f98c2989a6f8af3d7905ba47b6337c8552273d21a594cb8582a9da2a9eb6800",
+            ".system": "8a76b96935a890773b904ae65cf659dd1377b3a88b67e53b3460318243005be5",
+            ".permutation": "8b9b2c4f6609a46b0435cfd40e4166063ab7deba758e685d2fe1bfcafc6dab04"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": false,
+            ".system": false,
+            ".permutation": false
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 1374.6875,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 8.581888817272949,
+              "corrected": 4.002549789868164
+            },
+            "adapter_setup_s": {
+              "original": 7.924750017272949,
+              "corrected": 3.3454109898681637
+            },
+            "total_s": {
+              "original": 8.72188881727295,
+              "corrected": 4.142549789868164
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "d26a58f90d231222485adfee3f00630b9eeb23a0da6d1e025b2963acfad7cc41"
+        }
+      }
     },
     {
       "identity": [
@@ -9199,14 +10485,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "f061b9127a899b19dfb3d3a0ee388044d9aa31359088966610ffa1595824855b",
+      "selected_cell_sha256": "709c551df283b71feeca986c31352525b60893ec4c5f19f31b49dbc880fa9768",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "f061b9127a899b19dfb3d3a0ee388044d9aa31359088966610ffa1595824855b",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "f061b9127a899b19dfb3d3a0ee388044d9aa31359088966610ffa1595824855b",
+          "raw_native_results_sha256": "e1ec7b112afd420fa244cf13c85e322fcd7d3a7667d3386c64b915e414aeaa10",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 5.107292890548706,
+          "publication_preparation_charge_s": 1.7718770503997803,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634152,
+          "identity_job": 4634152,
+          "original_operand_hashes": {
+            "A.mtx": "b8b65574cba347d4ed12a7598495a7f703c1d92a70d4b44e2736bd41c1c051a9",
+            "b-t72.mtx": "c63835bd5965d29d669b2c74ca36792fd04a1b51235d1784ba56af9527ed2445"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "e75c95631f522b8ac986f71f3887b881c1424b9612711e67c7d92a8546a9a005",
+            ".system": "defff1bbfd645a484af681a6fcc35f666d62ce367717e4da07b1f7b72713c775",
+            ".permutation": "41808b547d6a89ee4c79446979dd0806e17a1059544af200f6a69b2dc52830a6"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 864.0,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 5.554184690548706,
+              "corrected": 2.21876885039978
+            },
+            "adapter_setup_s": {
+              "original": 5.269833890548706,
+              "corrected": 1.9344180503997803
+            },
+            "total_s": {
+              "original": 6.225184690548706,
+              "corrected": 2.88976885039978
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "d26a58f90d231222485adfee3f00630b9eeb23a0da6d1e025b2963acfad7cc41"
+        }
+      }
     },
     {
       "identity": [
@@ -9560,14 +10897,65 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "9d844beb9d962d4d74dc334bd35796af342e6d51d7ca0499a86dbf7478d0f49b",
+      "selected_cell_sha256": "d47b5697bb7bfe8e3527d9579417d54f8d5dd6891f8a824f25ee55e7b4c33c9a",
       "git_sha": "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
       "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
       "source_manifest_sha256": null,
       "campaign_job_id": null,
       "setup_route": null,
       "sampler": null,
-      "degree_quantile": null
+      "degree_quantile": null,
+      "previous_selected_cell_sha256": "9d844beb9d962d4d74dc334bd35796af342e6d51d7ca0499a86dbf7478d0f49b",
+      "previous_status": "complete",
+      "parac_publication_correction": {
+        "preparation_correction": {
+          "source_cell_sha256": "9d844beb9d962d4d74dc334bd35796af342e6d51d7ca0499a86dbf7478d0f49b",
+          "raw_native_results_sha256": "617cc317e45b979e9847447a1e8f8acab5059de74229a94b26840666cbb7a673",
+          "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+          "original_status": "complete",
+          "original_preprocessing_s": 12.403456926345825,
+          "publication_preparation_charge_s": 3.680241823196411,
+          "cached_amd_charge_s": 0.0,
+          "prep_source_job": 4634152,
+          "identity_job": 4634152,
+          "original_operand_hashes": {
+            "A.mtx": "b68474260c341b8a819c8435d71a184ab90deaf19f425f978bb4638866e54581",
+            "b-t72.mtx": "059cfd7fcbdd69980c814b288080f825a64160e8705f8665ea4727c3f4600193"
+          },
+          "prepared_output_hashes": {
+            "-amd.mtx": "131f0a8f6db0be45fb3c576aca11c533674baec1e8502daa8574b4b443c80e33",
+            ".system": "809b95146bbf4a60b748372b9941269cbb0d0d7fa4fc7dabd5f186aa82a7ad4d",
+            ".permutation": "ca433c136780734b977c91b761f41bc7e260cf8f42eac95f031bd410a9991eae"
+          },
+          "historical_output_digest_present": {
+            "-amd.mtx": true,
+            ".system": true,
+            ".permutation": true
+          },
+          "phase_variability": "single preparation; unmeasured",
+          "fresh_joint_timing": false,
+          "timing_applied": true,
+          "whole_corrected_pipeline_peak_memory": "unknown",
+          "original_scoped_peak_rss_mb": 2673.9375,
+          "original_memory_scope": "Previously reported observation from the original source cell; not the corrected whole pipeline.",
+          "changed_timing_fields": {
+            "setup_s": {
+              "original": 13.953295326345826,
+              "corrected": 5.230080223196412
+            },
+            "adapter_setup_s": {
+              "original": 12.988879926345826,
+              "corrected": 4.265664823196412
+            },
+            "total_s": {
+              "original": 19.189295326345825,
+              "corrected": 10.46608022319641
+            }
+          },
+          "qualification": "Composite setup: retained native/adapter timing minus old preprocessing plus separately measured required preparation. Original solve, iteration and residual records are reused after operand/output identity checks. No fresh joint benchmark or measured preparation variability.",
+          "preparation_result_sha256": "d26a58f90d231222485adfee3f00630b9eeb23a0da6d1e025b2963acfad7cc41"
+        }
+      }
     },
     {
       "identity": [
@@ -9764,7 +11152,7 @@
   "source_notes": {
     "cpu": "f17b98ec plus CPU sampler patch c2c544eccba4af26098005345e059c913992c4d57a0b13b6625063ae19a86e22; exact source snapshot683ba7cb recorded per cell. Clang22.1.8/libomp, library-default wait policy.",
     "gpu": "c94a94a1, same GCC14.3/PASSIVE consumer for quantiles0.8 and0.2; cached native acceptance and actual device-factor adoption required.",
-    "competitors": "405 numerical/status cells copied unchanged from preceding selected snapshot. Scaling and focused sampler detail have separately labelled sources.",
+    "competitors": "377 competitor cells remain byte-for-byte unchanged. 27 ParAC CPU preparation identities carry composite accounting; two G3 calibration outcomes are classified as nonconverged. No native solver rerun is implied.",
     "g3_repair": "Both G3 CPU cells use the matched eight-call followup4633974, built from native-validated source manifest7ecf0c62. Source base98b6a4cd plus input-only finite-pool fallback; integrated as ac761333. Other APX and competitor cells retain their published sources."
   },
   "excluded_historical_series": [
@@ -9814,5 +11202,26 @@
       "campaign_job_id": "4633974"
     }
   ],
-  "failure_history": "The earlier G3 CPU trace warmup failed before three retained calls could start. Its outcome and source hashes remain in targeted_replacements; the new cell is a separate successful run."
+  "failure_history": "The earlier G3 CPU trace warmup failed before three retained calls could start. Its outcome and source hashes remain in targeted_replacements; the new cell is a separate successful run.",
+  "corrected_parac_preparation_identities": 27,
+  "corrected_parac_cpu_timing_cells": 26,
+  "parac_preparation_pending": 0,
+  "classified_parac_cells": 2,
+  "parac_correction_history": {
+    "base_public_provenance_sha256": "ef5b9e5ba097e2d17c2738131310e6dae2e4068fc47a5e207416b2952b0b0a4f",
+    "charge_manifest_sha256": "b23deb86a7a044a759297acb94e083cc2c79aac92ff38b4bfdc0985752c2a736",
+    "classification_manifest_sha256": "534a636a18c5b8adaca1bb1dac4392bfac2c05f7f5dc3d54a79d8afbf95de1aa",
+    "base_status_counts": {
+      "complete": 480,
+      "failed": 14,
+      "timeout": 6,
+      "n/a": 6,
+      "not_converged": 7
+    },
+    "base_preserved_competitor_cells": 405,
+    "ready": 27,
+    "planned": 27,
+    "whole_corrected_pipeline_peak_memory": "unknown",
+    "fresh_joint_timing": false
+  }
 }

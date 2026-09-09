@@ -80,9 +80,12 @@ PYTHONPATH=benchmarks python3 benchmarks/render_snapshot.py \
   --cells STORE --out OUTPUT --threads 72 --platform Daint --sampler-comparison
 PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compact \
   --store SCALING_STORE --matrices grid_2000,iter0040,as-Skitter \
-  --series 'apxchol bg+tree,AMGCL,BoomerAMG,ParAC' \
+  --series 'apxchol bg+tree,apxchol trace-cycle,AMGCL,BoomerAMG,ParAC' \
   --thread-counts 1,2,4,8,16,36,72 --out results/plots
 ```
+
+Add `--fill-cells FILL_STORE` to include the explicit factor-fill observations.
+The timing heatmaps use an uncapped logarithmic colour scale.
 
 Compact plots show absolute times and log-log speedups; no complete T1 means no
 speedup. Full-study extracts remain separate. `stale_cells.py` checks semantic

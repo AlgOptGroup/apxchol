@@ -18,6 +18,12 @@ they are not measurements of every refreshed headline profile.
 
 Setup includes required preparation; CUDA initialization is separate. Unknown
 memory stays unknown. Whole-cell deadlines are not per-solve lower bounds.
-Competitor headline cells are preserved from the previous snapshot. In particular,
-ParAC headline preparation still includes older adapter interchange/audit costs;
-the corrected representative scaling study is labelled separately.
+ParAC Graph CPU preparation is reconciled for all 27 matrices. Its 26 successful
+cells combine separately measured required preparation with the original native
+setup/solve repetitions after operand/output identity checks. This is a composite
+accounting correction; preparation variability and corrected whole-pipeline
+peak memory are unknown. Orkut retains its measured 2,027.21-second AMD charge.
+G3 Graph CPU/GPU calibration failures are classified as nonconverged.
+
+Current GPU cells have no measured peak VRAM. Host RSS is separate and cannot
+substitute for it; GPU memory charts require a dedicated memory-only campaign.

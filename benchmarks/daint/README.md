@@ -4,9 +4,10 @@ GH200: 72-core Grace CPU + Hopper GPU. [Protocol](../README.md) ·
 [Values](results.csv) · [Coverage](coverage.json) ·
 [Source selection](selection_provenance.json) · [Platform exceptions](PLATFORM.md)
 
-**513/513 identities:** 480 complete, 14 failed, 7 nonconverged, 6 timeout and
+**513/513 identities:** 480 complete, 12 failed, 9 nonconverged, 6 timeout and
 6 recorded n/a. Packed serial CMG replaces MATLAB CMG in the current profile.
-All 108 APX identities were refreshed; the 405 competitor cells are unchanged.
+All 108 APX identities were refreshed. ParAC Graph CPU preparation was
+reconciled for all 27 matrices; 377 competitor cells remain unchanged.
 Both CPU samplers now pass `G3_circuit`; its earlier trace-cycle failure and
 the separate successful repair run remain in [source selection](selection_provenance.json).
 
@@ -22,44 +23,51 @@ initialization, common input/output and independent grading are outside API timi
 CPU uses Clang/libomp with library-default waiting; GPU uses GCC/PASSIVE.
 The fixed-profile campaigns are separate, not interleaved A/B controls.
 
+ParAC's 26 successful Graph CPU cells combine corrected preparation with their
+original native timing repetitions after input/output identity checks. Required
+transformation, ordering and cleanup remain charged; serialization is excluded.
+This is an accounting correction, with unmeasured preparation variability and
+unknown corrected whole-pipeline peak memory. G3 Graph CPU/GPU hit calibration
+iteration limits and are reported as nonconverged without retained timings.
+
 ## Total and solve time
 
-Each pair shows one-RHS total, then solve time. Trace-cycle improves CPU solve
+The tables separate setup, solve and one-RHS total. Trace-cycle improves CPU solve
 time on 26/27 matrices but improves total on only 8/27. GPU q=0.8 wins total on
 25/27 matrices; q=0.2 wins on LiveJournal and `kron_g500-logn16`. Both alternatives
 remain visible rather than selecting a different winner for each column.
 
-![Grid totals](figures/combined_overview_grids.png)
-
-![Grid solve times](figures/combined_solve_grids.png)
-
-![IPM totals](figures/combined_overview_ipm.png)
-
-![IPM solve times](figures/combined_solve_ipm.png)
-
-![SuiteSparse totals](figures/combined_overview_suitesparse.png)
-
-![SuiteSparse solve times](figures/combined_solve_suitesparse.png)
-
-Colours compare solvers within each matrix. Missing measurements, failures,
+Colours use an uncapped logarithmic scale within each matrix. CPU-only and
+GPU-only views compare against their own fastest solver; combined views use
+the fastest result across both devices. Missing measurements, failures,
 nonconvergence and timeouts stay distinct. Unknown memory is not plotted as zero.
 
 | Time | Devices | Grids | IPM | SuiteSparse |
 |---|---|---|---|---|
-| Setup | CPU | [Figure](figures/combined_setup_cpu_grids.png) | [Figure](figures/combined_setup_cpu_ipm.png) | [Figure](figures/combined_setup_cpu_suitesparse.png) |
-| Setup | GPU | [Figure](figures/combined_setup_gpu_grids.png) | [Figure](figures/combined_setup_gpu_ipm.png) | [Figure](figures/combined_setup_gpu_suitesparse.png) |
-| Setup | CPU + GPU | [Figure](figures/combined_setup_grids.png) | [Figure](figures/combined_setup_ipm.png) | [Figure](figures/combined_setup_suitesparse.png) |
-| Solve | CPU | [Figure](figures/combined_solve_cpu_grids.png) | [Figure](figures/combined_solve_cpu_ipm.png) | [Figure](figures/combined_solve_cpu_suitesparse.png) |
-| Solve | GPU | [Figure](figures/combined_solve_gpu_grids.png) | [Figure](figures/combined_solve_gpu_ipm.png) | [Figure](figures/combined_solve_gpu_suitesparse.png) |
-| Solve | CPU + GPU | [Figure](figures/combined_solve_grids.png) | [Figure](figures/combined_solve_ipm.png) | [Figure](figures/combined_solve_suitesparse.png) |
-| Total | CPU | [Figure](figures/combined_overview_cpu_grids.png) | [Figure](figures/combined_overview_cpu_ipm.png) | [Figure](figures/combined_overview_cpu_suitesparse.png) |
-| Total | GPU | [Figure](figures/combined_overview_gpu_grids.png) | [Figure](figures/combined_overview_gpu_ipm.png) | [Figure](figures/combined_overview_gpu_suitesparse.png) |
-| Total | CPU + GPU | [Figure](figures/combined_overview_grids.png) | [Figure](figures/combined_overview_ipm.png) | [Figure](figures/combined_overview_suitesparse.png) |
+| Setup | CPU | ![Figure](figures/combined_setup_cpu_grids.png) | ![Figure](figures/combined_setup_cpu_ipm.png) | ![Figure](figures/combined_setup_cpu_suitesparse.png) |
+| Setup | GPU | ![Figure](figures/combined_setup_gpu_grids.png) | ![Figure](figures/combined_setup_gpu_ipm.png) | ![Figure](figures/combined_setup_gpu_suitesparse.png) |
+| Setup | CPU + GPU | ![Figure](figures/combined_setup_grids.png) | ![Figure](figures/combined_setup_ipm.png) | ![Figure](figures/combined_setup_suitesparse.png) |
+| Solve | CPU | ![Figure](figures/combined_solve_cpu_grids.png) | ![Figure](figures/combined_solve_cpu_ipm.png) | ![Figure](figures/combined_solve_cpu_suitesparse.png) |
+| Solve | GPU | ![Figure](figures/combined_solve_gpu_grids.png) | ![Figure](figures/combined_solve_gpu_ipm.png) | ![Figure](figures/combined_solve_gpu_suitesparse.png) |
+| Solve | CPU + GPU | ![Figure](figures/combined_solve_grids.png) | ![Figure](figures/combined_solve_ipm.png) | ![Figure](figures/combined_solve_suitesparse.png) |
+| Total | CPU | ![Figure](figures/combined_overview_cpu_grids.png) | ![Figure](figures/combined_overview_cpu_ipm.png) | ![Figure](figures/combined_overview_cpu_suitesparse.png) |
+| Total | GPU | ![Figure](figures/combined_overview_gpu_grids.png) | ![Figure](figures/combined_overview_gpu_ipm.png) | ![Figure](figures/combined_overview_gpu_suitesparse.png) |
+| Total | CPU + GPU | ![Figure](figures/combined_overview_grids.png) | ![Figure](figures/combined_overview_ipm.png) | ![Figure](figures/combined_overview_suitesparse.png) |
 
 | Detail | Grids | IPM | SuiteSparse |
 |---|---|---|---|
-| Iterations | [Figure](figures/combined_iters_grids.png) | [Figure](figures/combined_iters_ipm.png) | [Figure](figures/combined_iters_suitesparse.png) |
-| Peak host memory | [Figure](figures/combined_rss_peak_grids.png) | [Figure](figures/combined_rss_peak_ipm.png) | [Figure](figures/combined_rss_peak_suitesparse.png) |
+| Iterations | ![Figure](figures/combined_iters_grids.png) | ![Figure](figures/combined_iters_ipm.png) | ![Figure](figures/combined_iters_suitesparse.png) |
+| Peak host memory | ![Figure](figures/combined_rss_peak_grids.png) | ![Figure](figures/combined_rss_peak_ipm.png) | ![Figure](figures/combined_rss_peak_suitesparse.png) |
+| Factor fill | ![Fill](figures/fill_heatmap_grids.png) | ![Fill](figures/fill_heatmap_ipm.png) | ![Fill](figures/fill_heatmap_suitesparse.png) |
+| GPU peak memory | Not measured | Not measured | Not measured |
+
+Fill is $2\,\mathrm{offdiag}(L)/\mathrm{offdiag}(A)$: 248/324 AC-family
+observations are available; missing entries remain blank. RCHOL ratios carry
+reported rounding uncertainty; solve status is retained alongside structural fill.
+[Fill values](fill.csv) · [Sources](fill_provenance.json).
+
+GPU peak VRAM is missing for all 189 current GPU identities. Host RSS is a
+separate measurement; archived laptop memory does not fill this gap.
 
 [Tables](summary.md) · [Six-matrix sampler tradeoffs](SAMPLERS.md)
 
@@ -89,15 +97,17 @@ deadlines, while successful T2/T72 points reuse the same binary with explicit
 mixed-campaign provenance. The earlier timeout/unattempted outcomes remain
 recorded. T72 gives 3.59× setup and 3.91× solve speedup over T1.
 
-![CPU setup speedup](figures/threads_cpu_representative_setup_speedup.png)
-
-![CPU solve speedup](figures/threads_cpu_representative_solve_speedup.png)
+| CPU scaling | Setup | Solve |
+|---|---|---|
+| Time | ![Setup time](figures/threads_cpu_representative_setup_seconds.png) | ![Solve time](figures/threads_cpu_representative_solve_seconds.png) |
+| Speedup | ![Setup speedup](figures/threads_cpu_representative_setup_speedup.png) | ![Solve speedup](figures/threads_cpu_representative_solve_speedup.png) |
 
 [Representative values](thread_scaling_cpu_representative.csv) ·
-[Sources and exceptions](representative_scaling_provenance.json) ·
-Absolute [setup](figures/threads_cpu_representative_setup_seconds.png)/[solve](figures/threads_cpu_representative_solve_seconds.png)
+[Sources and exceptions](representative_scaling_provenance.json)
 
-Full CPU [setup](figures/threads_setup_speedup.png)/[solve](figures/threads_solve_speedup.png)/[total](figures/threads_total_speedup.png),
-[values](thread_scaling.csv), [controls](cpu_scaling_provenance.json).
-Earlier GPU [setup](figures/threads_gpu_setup_speedup.png)/[solve](figures/threads_gpu_solve_speedup.png),
-[values](thread_scaling_gpu.csv). [Historical studies](HISTORICAL.md) retain their own revisions.
+| Earlier studies | Setup | Solve | Total | Data |
+|---|---|---|---|---|
+| Full CPU | [Figure](figures/threads_setup_speedup.png) | [Figure](figures/threads_solve_speedup.png) | [Figure](figures/threads_total_speedup.png) | [Values](thread_scaling.csv), [controls](cpu_scaling_provenance.json) |
+| GPU | [Figure](figures/threads_gpu_setup_speedup.png) | [Figure](figures/threads_gpu_solve_speedup.png) | [Figure](figures/threads_gpu_total_speedup.png) | [Values](thread_scaling_gpu.csv) |
+
+[Historical studies](HISTORICAL.md) retain their own revisions.

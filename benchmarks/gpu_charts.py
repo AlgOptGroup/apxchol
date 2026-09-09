@@ -15,7 +15,7 @@ from collections import defaultdict
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FuncFormatter, LogLocator
 import numpy as np
 import chart_cells
 # Matrix axis labels come from the registry, so a matrix we ASSEMBLED an operator
@@ -189,6 +189,17 @@ def present_labels(rows, fam, mats):
     have = {l for m in mats for l in rows[(fam, m)]}
     return [l for l in ORDER if l in have]
 
+def _ratio_color_scale(ratio):
+    """Share an uncapped log ramp and in-range ticks across ratio heatmaps."""
+    finite = ratio[np.isfinite(ratio)]
+    vmax = max(float(finite.max()) if finite.size else 4.0, 1.6)
+    norm = mcolors.LogNorm(vmin=1.0, vmax=vmax)
+    ticks = LogLocator(base=10, subs=(1, 2, 5), numticks=8).tick_values(1.0, vmax)
+    # Keep the measured maximum label apart from a nearby round-number tick.
+    ticks = np.unique(np.r_[1.0, ticks[(ticks >= 1.0) & (ticks < vmax / 1.2)], vmax])
+    return norm, ticks
+
+
 def value_heatmap(mats, row_labels, M, out, *, title, is_iters=False, cell_fmt=None,
                   cbar="× best in column (log scale)", status=None, device="cpu"):
     """Generic matrix × method heatmap (the house style, shared so the iteration and
@@ -208,9 +219,7 @@ def value_heatmap(mats, row_labels, M, out, *, title, is_iters=False, cell_fmt=N
         if pos.size:
             ratio[:, j] = col / pos.min()
     cmap = plt.cm.RdYlGn_r.copy(); cmap.set_bad("white")   # never-run -> white
-    finite = ratio[np.isfinite(ratio)]
-    vmax = min(float(finite.max()), 16.0) if finite.size else 4.0
-    norm = mcolors.LogNorm(vmin=1.0, vmax=max(vmax, 1.6))
+    norm, ticks = _ratio_color_scale(ratio)
     fig, ax = plt.subplots(figsize=(max(8, 1.25*len(mats)+3.5), 0.55*len(row_labels)+2))
     im = ax.imshow(np.ma.masked_invalid(ratio), cmap=cmap, aspect="auto", norm=norm)
     ax.set_xticks(range(len(mats))); ax.set_xticklabels(mat_labels(mats), rotation=30, ha="right", fontsize=8)
@@ -229,8 +238,9 @@ def value_heatmap(mats, row_labels, M, out, *, title, is_iters=False, cell_fmt=N
                        else "FAIL")
                 ax.text(j, i, txt, ha="center", va="center", fontsize=5.8,
                         color="black", fontweight="bold")
-    cb = fig.colorbar(im, ax=ax, ticks=[1, 1.5, 2, 3, 4, 6, 8, 12, 16])
-    cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:g}×"))
+    cb = fig.colorbar(im, ax=ax, ticks=ticks)
+    cb.minorticks_off()
+    cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.3g}×"))
     cb.set_label(cbar)
     ax.set_title(title, fontsize=9.5)
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)

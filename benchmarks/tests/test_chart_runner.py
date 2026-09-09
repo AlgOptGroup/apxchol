@@ -632,6 +632,32 @@ class DaintCampaignRendererTest(unittest.TestCase):
         write_summary.assert_called_once()
 
 
+class HeatmapColorScaleTest(unittest.TestCase):
+    def test_log_ramp_and_ticks_cover_small_and_large_observed_ratios(self):
+        from matplotlib.colors import LogNorm
+        from matplotlib.figure import Figure
+        captured = []
+        def capture(fig, filename, **kwargs):
+            image = fig.axes[0].images[0]
+            captured.append((image.norm, image.colorbar.get_ticks()))
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(Figure, "savefig", capture):
+            for largest in [1.0, 1.4, 1.6, 360.0]:
+                gpu.value_heatmap(["grid_500"], ["fast", "slow"], [[1], [largest]],
+                                  pathlib.Path(directory)/"test.png", title="TEST ONLY")
+        for largest, (norm, ticks) in zip([1.0, 1.4, 1.6, 360.0], captured):
+            self.assertIsInstance(norm, LogNorm)
+            self.assertEqual(norm.vmin, 1.0)
+            self.assertGreaterEqual(norm.vmax, largest)
+            self.assertTrue(all(norm.vmin <= tick <= norm.vmax for tick in ticks))
+            self.assertEqual(ticks[0], norm.vmin)
+            self.assertEqual(ticks[-1], norm.vmax)
+        norm = captured[-1][0]
+        self.assertEqual(norm.vmax, 360.0)
+        self.assertLess(norm(16.0), norm(100.0))
+        self.assertLess(norm(100.0), norm(360.0))
+
+
 class CompactScalingPlotTest(unittest.TestCase):
     def test_gap_and_measured_reference_survive_log_axes(self):
         import math
@@ -840,13 +866,19 @@ class SamplerProfileTest(unittest.TestCase):
                            for family in ("grids", "ipm", "suitesparse")
                            for metric in ("setup", "solve", "overview")
                            for device in ("_cpu", "_gpu", "")]
+            image_names += ["combined_iters_grids.png", "combined_rss_peak_ipm.png",
+                            "threads_cpu_representative_setup_speedup.png",
+                            "threads_gpu_solve_speedup.png"]
+            image_names += [f"fill_heatmap_{family}.png" for family in ("grids", "ipm", "suitesparse")]
             for name in image_names:
                 (out / "figures" / name).touch()
-            render_snapshot.render(out / "TEST-ONLY-CELLS", out, 72, "TEST ONLY", sampler_comparison=True)
+            render_snapshot.render(out / "TEST-ONLY-CELLS", out, 72, "TEST ONLY",
+                                   sampler_comparison=True, fill_cells=out / "TEST-ONLY-FILL")
             readme = (out / "README.md").read_text()
             for name in image_names:
                 self.assertIn(f"](figures/{name})", readme)
-            self.assertEqual(readme.count("!["), 6)
+            self.assertEqual(readme.count("!["), len(image_names))
+            self.assertTrue(all(line.startswith("|") for line in readme.splitlines() if "![" in line))
             coverage = json.loads((out / "coverage.json").read_text())
             with (out / "results.csv").open() as handle:
                 rows = list(csv.DictReader(handle))
@@ -863,8 +895,12 @@ class SamplerProfileTest(unittest.TestCase):
         self.assertEqual(measured["source_manifest_sha256"], "TEST-ONLY-MANIFEST")
         self.assertEqual(json.loads(measured["phase_observations"]), {"setup_s": [1, 1.1, 1.2]})
         self.assertEqual(measured["timing_stability_warning"], "True")
-        self.assertEqual(run.call_count, 3)
-        self.assertTrue(all("--sampler-comparison" in call.args[0] for call in run.call_args_list))
+        self.assertEqual(run.call_count, 4)
+        self.assertTrue(all("--sampler-comparison" in call.args[0] for call in run.call_args_list[:3]))
+        fill_command = run.call_args_list[3].args[0]
+        self.assertTrue(fill_command[1].endswith("fill_chart.py"))
+        self.assertEqual(fill_command[2:], ["--cells", str(out / "TEST-ONLY-FILL"),
+                                          "--out", str(out / "figures")])
 
 
 if __name__ == "__main__":

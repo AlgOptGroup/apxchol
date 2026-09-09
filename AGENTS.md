@@ -218,7 +218,9 @@ canonical exception in the benchmark README.
 
 Use `--warmup N`, `--repeat R` and existing thread-scaling scopes as needed.
 `--dump-rhs` exports the common RHS without solving. `render_snapshot.py`
-provides the common presentation path.
+provides the common presentation path. Its optional `--fill-cells` consumes an
+explicit derived store with common `2*offdiag(L)/offdiag(A)` fill; preserve missing
+counts, source solve status and reported rounding uncertainty.
 
 Timing campaigns record immutable source/binary/input identities, affinity,
 repetitions, raw outputs and the entire planned denominator. Balance arm order

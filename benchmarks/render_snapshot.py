@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 
 
 def render(cells, output, threads, platform, scaling_store=None, scaling_matrices=None,
-           scaling_threads=None, sampler_comparison=False):
+           scaling_threads=None, sampler_comparison=False, fill_cells=None):
     records, report = chart_cells.load_current_records(
         cells, include=lambda r: r.get('cell', {}).get('threads') == threads,
         stale_policy='reject', source=f'{platform} snapshot')
@@ -50,6 +50,9 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         subprocess.run([sys.executable, str(HERE/script), *flags,
                         '--threads', str(threads),
                         *(['--sampler-comparison'] if sampler_comparison else [])], check=True)
+    if fill_cells is not None:
+        subprocess.run([sys.executable, str(HERE/'fill_chart.py'),
+                        '--cells', str(fill_cells), '--out', str(output/'figures')], check=True)
     fields = ['family', 'matrix', 'device', 'solver', 'config', 'threads', 'effective_threads', 'status',
               'n', 'nnz', 'setup_s', 'solve_s', 'total_s', 'iters', 'rel_res',
               'max_repeat_rel_res', 'cuda_init_s', 'warmup_repeats',
@@ -103,15 +106,11 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         expected_headline_cells=len(rc.MATRICES)*len(series),status_counts=counts,
         series_profile="sampler-comparison" if sampler_comparison else "historical-default",
         missing=missing,series=series),indent=2)+'\n')
-    def links(pattern):
-        return ', '.join(f'[{p.stem.removeprefix("combined_")}]({p.relative_to(output).as_posix()})'
-                         for p in sorted((output/'figures').glob(pattern))) or 'Pending measurements'
-    def heatmaps(metric, device):
-        return ' · '.join(
-            f'[{label}](figures/combined_{metric}{device}_{family}.png)'
-            for family, label in [('grids', 'Grids'), ('ipm', 'IPM'), ('suitesparse', 'SuiteSparse')]
-            if (output/'figures'/f'combined_{metric}{device}_{family}.png').is_file()
-        ) or 'Pending measurements'
+    def previews(pattern):
+        return ' '.join(f'![{p.stem.removeprefix("combined_")}]({p.relative_to(output).as_posix()})'
+                        for p in sorted((output/'figures').glob(pattern))) or 'Pending measurements'
+    def heatmap(metric, device, family):
+        return previews(f'combined_{metric}{device}_{family}.png')
     lines = [f'# {platform} benchmark snapshot', '',
         f'This snapshot selects T={threads} before comparing outcomes. '
         f'It contains {len(records)} cells over {len(matrices)}/{len(rc.MATRICES)} registered matrices. '
@@ -125,15 +124,22 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         'Timeout scope and the raw deadline are separate from any valid per-solve lower bound.', '',
         '[Values and outcomes](results.csv) · [Coverage and missing cells](coverage.json) · '
         '[Common protocol](../README.md)', '',
-        '| Time | CPU | GPU | CPU + GPU |', '|---|---|---|---|',
-        *[f'| {label} | '+ ' | '.join(heatmaps(metric, device)
-                                   for device in ('_cpu', '_gpu', ''))+' |'
-          for metric, label in [('setup', 'Setup'), ('solve', 'Solve'), ('overview', 'Total')]], '',
+        '| Time | Devices | Grids | IPM | SuiteSparse |', '|---|---|---|---|---|',
+        *[f'| {label} | {device_label} | '+ ' | '.join(heatmap(metric, device, family)
+                                                  for family in ('grids', 'ipm', 'suitesparse'))+' |'
+          for metric, label in [('setup', 'Setup'), ('solve', 'Solve'), ('overview', 'Total')]
+          for device, device_label in [('_cpu', 'CPU'), ('_gpu', 'GPU'), ('', 'CPU + GPU')]], '',
+        '| Detail | Grids | IPM | SuiteSparse |', '|---|---|---|---|',
+        *[f'| {label} | '+ ' | '.join(heatmap(metric, '', family)
+                                    for family in ('grids', 'ipm', 'suitesparse'))+' |'
+          for metric, label in [('iters', 'Iterations'), ('rss_peak', 'Peak host memory')]],
+        '| Factor fill | '+ ' | '.join(previews(f'fill_heatmap_{family}.png')
+                                      for family in ('grids', 'ipm', 'suitesparse'))+' |', '',
         '| Other views | Figures |', '|---|---|',
-        '| CPU setup and solve | '+links('combined_breakdown_cpu_*.png')+' |',
-        '| GPU setup and solve | '+links('combined_breakdown_gpu_*.png')+' |',
-        '| Setup scaling | '+links('threads*setup_speedup.png')+' |',
-        '| Converged-solve scaling | '+links('threads*solve_speedup.png')+' |', '',
+        '| CPU setup and solve | '+previews('combined_breakdown_cpu_*.png')+' |',
+        '| GPU setup and solve | '+previews('combined_breakdown_gpu_*.png')+' |',
+        '| Setup scaling | '+previews('threads*setup_speedup.png')+' |',
+        '| Converged-solve scaling | '+previews('threads*solve_speedup.png')+' |', '',
         'Heatmap colours normalize within each matrix column; they do not compare absolute '
         'speed between machines. Timeout, numerical non-convergence, execution failure, '
         'unsupported input, and missing measurement remain distinct.', '',
@@ -151,22 +157,6 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
                   'measurements or another sampler.', '']
     if (output/'PLATFORM.md').is_file():
         lines += ['[Platform-specific availability and exceptions](PLATFORM.md)', '']
-    # Both snapshots show the same principal views directly in the README.
-    # Additional breakdowns remain linked above rather than duplicating them.
-    for title, name in (
-        ('Grid total times', 'combined_overview_grids.png'),
-        ('Grid solve times', 'combined_solve_grids.png'),
-        ('IPM total times', 'combined_overview_ipm.png'),
-        ('IPM solve times', 'combined_solve_ipm.png'),
-        ('SuiteSparse total times', 'combined_overview_suitesparse.png'),
-        ('SuiteSparse solve times', 'combined_solve_suitesparse.png'),
-        ('CPU setup scaling', 'threads_setup_speedup.png'),
-        ('CPU converged-solve scaling', 'threads_solve_speedup.png'),
-        ('GPU setup scaling', 'threads_gpu_setup_speedup.png'),
-        ('GPU converged-solve scaling', 'threads_gpu_solve_speedup.png'),
-    ):
-        if (output/'figures'/name).is_file():
-            lines += [f'## {title}', '', f'![{title}](figures/{name})', '']
     (output/'README.md').write_text('\n'.join(lines))
     print(f'{platform}: inspected {len(records)} records; '
           f'{len(missing)} missing of {len(rc.MATRICES)*len(series)} declared headline cells')
@@ -182,6 +172,7 @@ if __name__ == '__main__':
     p.add_argument('--scaling-matrices')
     p.add_argument('--scaling-threads')
     p.add_argument('--sampler-comparison', action='store_true')
+    p.add_argument('--fill-cells', type=Path, help='Explicit derived factor-fill cell store')
     a=p.parse_args()
     render(a.cells.resolve(),a.out.resolve(),a.threads,a.platform,a.scaling_store,
-           a.scaling_matrices,a.scaling_threads,a.sampler_comparison)
+           a.scaling_matrices,a.scaling_threads,a.sampler_comparison,a.fill_cells)
