@@ -77,7 +77,7 @@ Publication requires an explicitly selected, audited store:
 
 ```sh
 PYTHONPATH=benchmarks python3 benchmarks/render_snapshot.py \
-  --cells STORE --out OUTPUT --threads 72 --platform Daint
+  --cells STORE --out OUTPUT --threads 72 --platform Daint --sampler-comparison
 PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compact \
   --store SCALING_STORE --matrices grid_2000,iter0040,as-Skitter \
   --series 'apxchol bg+tree,AMGCL,BoomerAMG,ParAC' \

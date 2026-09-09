@@ -1,68 +1,65 @@
 # Daint benchmarks
 
 GH200: 72-core Grace CPU + Hopper GPU. [Protocol](../README.md) ·
-[Headline CSV](results.csv) · [Coverage](coverage.json) ·
+[Values](results.csv) · [Coverage](coverage.json) ·
 [Source selection](selection_provenance.json) · [Platform exceptions](PLATFORM.md)
 
-**Headline:** 459/486 identities: 426 complete, 14 failed, 7 nonconverged,
-6 timeout, 6 recorded n/a. The 27 absent numerical cells are canonical MATLAB
-CMG platform exceptions; packed serial CMG is a separate series. Required
-preparation is charged; CUDA initialization is separate. Every retained solve
-must satisfy original-system true residual ≤1e-8. Unknown memory remains unknown.
+**513/540 identities:** 479 complete, 15 failed, 7 nonconverged, 6 timeout and
+6 recorded n/a. The 27 absent cells are canonical MATLAB CMG platform exceptions.
+All 108 APX identities were refreshed; the 405 competitor cells are unchanged.
+CPU trace-cycle's failed `G3_circuit` warmup remains a failure, with its three
+retained repetitions unattempted.
 
-Totals: [grids](figures/combined_overview_grids.png) ·
-[IPM](figures/combined_overview_ipm.png) ·
-[SuiteSparse](figures/combined_overview_suitesparse.png) · [Tables](summary.md)
+The four APX rows compare CPU GKS/trace-cycle at degree quantile 0.2 and GPU-owned
+GKS at quantiles 0.8/0.2. Here the quantile controls vertex selection, not the
+sampler's edge probabilities. Required host preparation is included in GPU setup;
+these labels do not claim that every setup stage resides on the GPU.
 
-## CPU setup scaling
+Each refreshed cell has one warmup and three retained attempts, T72, seed 42,
+and original-system residual tolerance 1e-8. One coherent median-total repetition
+supplies setup/solve times; timing spread warnings remain in the CSV. CUDA
+initialization, common input/output and independent grading are outside API timing.
+CPU uses Clang/libomp with library-default waiting; GPU uses GCC/PASSIVE.
+The fixed-profile campaigns are separate, not interleaved A/B controls.
 
-Three representative matrices, T=1/2/4/8/16/36/72: **84 identities, 78 complete,
-2 whole-cell timeouts, 4 unattempted**. Sources: apxchol `1a782c8d` (4619429),
-AMGCL/Hypre `ea01e2ff` (4619591), corrected private ParAC adapter
-(6 endpoints from 4623922 + 15 continuation points from 4624041).
-Each curve uses its own campaign’s T1; comparisons between solvers are not
-interleaved A/B tests. Log axes emphasize ratios; dashed lines show ideal scaling.
+## Total time
 
-![Setup speedup](figures/threads_cpu_representative_setup_speedup.png)
+![Grid totals](figures/combined_overview_grids.png)
 
-## CPU converged-solve scaling
+![IPM totals](figures/combined_overview_ipm.png)
 
-![Solve speedup](figures/threads_cpu_representative_solve_speedup.png)
+![SuiteSparse totals](figures/combined_overview_suitesparse.png)
 
-T72 seconds, **setup / solve**:
+Colours compare solvers within each matrix. Missing measurements, failures,
+nonconvergence and timeouts stay distinct. Unknown memory is not plotted as zero.
 
-| Matrix | apxchol | AMGCL | Hypre | ParAC Graph |
-|---|---:|---:|---:|---:|
-| grid_2000 | 0.144 / 0.182 | 0.305 / 0.103 | 1.596 / 0.410 | 8.511 / 3.904 |
-| iter0040 | 0.211 / 0.120 | 7.826 / 0.213 | 0.425 / 0.208 | 3.803 / 1.200 |
-| as-Skitter | 0.514 / 0.247 | 1.842 / 4.907 | unattempted | 42.728 / 1.557 |
+| Detail | Grids | IPM | SuiteSparse |
+|---|---|---|---|
+| Setup | [Figure](figures/combined_setup_grids.png) | [Figure](figures/combined_setup_ipm.png) | [Figure](figures/combined_setup_suitesparse.png) |
+| Solve | [Figure](figures/combined_solve_grids.png) | [Figure](figures/combined_solve_ipm.png) | [Figure](figures/combined_solve_suitesparse.png) |
+| Iterations | [Figure](figures/combined_iters_grids.png) | [Figure](figures/combined_iters_ipm.png) | [Figure](figures/combined_iters_suitesparse.png) |
+| Peak host memory | [Figure](figures/combined_rss_peak_grids.png) | [Figure](figures/combined_rss_peak_ipm.png) | [Figure](figures/combined_rss_peak_suitesparse.png) |
 
-ParAC includes required preparation, native adapter, factorization and workspace;
-common input read, audit exports and final serialization are separate. Preparation
-alone costs 4.726/2.251/37.915s (grid/IPM/Skitter), explaining much of the weak
-setup scaling. Each matrix's preparation was measured once and reused across T;
-its variability is unknown. Portable PCG is serial.
+[Tables](summary.md) · [Six-matrix sampler tradeoffs](SAMPLERS.md)
 
-All 84 ParAC warmup/retained solves passed. Solve plots retain control-failure
-gaps at Skitter T2 and IPM T36; CSV retains observations and validity flags.
-These are measured **private-adapter** results. The maintained adapter passed a
-separate correctness smoke, but its performance equivalence is unmeasured.
+## Thread scaling
 
-Skitter Hypre T2 completed (218.208s setup/4.712s solve), but T1/T4 exhausted
-whole-cell budgets; no T1 speedup is fabricated. Higher T remain unattempted.
-Original 4619591 FAILED85 and the superseded 4622020 ParAC follow-up remain
-in provenance. Grid Hypre’s solve downturn T36→T72 (0.1495→0.4099s)
-is retained; separate-campaign endpoint variation is not a source-regression proof.
+These are earlier, separately labelled campaigns, not scaling measurements of
+all four refreshed profiles. The representative CPU study has **84 identities:
+78 complete, 2 whole-cell timeouts and 4 unattempted**. Each curve uses its own T1.
+Sources: APX `1a782c8d`, AMGCL/Hypre `ea01e2ff`, and the corrected private ParAC
+adapter. ParAC preparation is included; its repeated preparation variability is
+unknown. Skitter T2 and IPM T36 ParAC solve-control gaps remain visible.
 
-[84-row extract](thread_scaling_cpu_representative.csv) ·
-[Campaign provenance](representative_scaling_provenance.json) · Absolute
-[setup](figures/threads_cpu_representative_setup_seconds.png)/[solve](figures/threads_cpu_representative_solve_seconds.png)
+![CPU setup speedup](figures/threads_cpu_representative_setup_speedup.png)
 
-Full 12-matrix CPU: [setup](figures/threads_setup_speedup.png),
-[solve](figures/threads_solve_speedup.png), [total](figures/threads_total_speedup.png),
-[84 cells](thread_scaling.csv), [controls](cpu_scaling_provenance.json),
-[iteration diagnostics](cpu_scaling_diagnostics.csv). Orkut uses same-node T1
-references. Iterations vary with T; factor fill was not measured.
+![CPU solve speedup](figures/threads_cpu_representative_solve_speedup.png)
 
-[Historical studies](HISTORICAL.md), including unchanged source-ea01 GPU scaling,
-remain separate. These scaling refreshes did not rerun the headline table.
+[Representative values](thread_scaling_cpu_representative.csv) ·
+[Sources and exceptions](representative_scaling_provenance.json) ·
+Absolute [setup](figures/threads_cpu_representative_setup_seconds.png)/[solve](figures/threads_cpu_representative_solve_seconds.png)
+
+Full CPU [setup](figures/threads_setup_speedup.png)/[solve](figures/threads_solve_speedup.png)/[total](figures/threads_total_speedup.png),
+[values](thread_scaling.csv), [controls](cpu_scaling_provenance.json).
+Earlier GPU [setup](figures/threads_gpu_setup_speedup.png)/[solve](figures/threads_gpu_solve_speedup.png),
+[values](thread_scaling_gpu.csv). [Historical studies](HISTORICAL.md) retain their own revisions.

@@ -1,20 +1,23 @@
 # Platform boundary
 
-Daint GH200 is primary; [laptop](../archive/) data is historical.
+Daint GH200 is primary; [laptop data](../archive/) is historical.
 
-The headline denominator is **27 matrices×18 series=486**. Canonical Linux
-MATLAB CMG contributes 27 platform-unavailable numerical cells on ARM64.
-Packed native CMG is a separate serial series, not a substitute hidden in that row.
-[Coverage](coverage.json) and [CSV](results.csv) distinguish absent, unsupported,
-failed, nonconverged and timed-out cells.
+The headline declares **27 matrices × 20 series = 540 identities**. Canonical
+MATLAB CMG accounts for 27 unavailable ARM64 cells. Packed native CMG remains a
+separate serial series. [Coverage](coverage.json) and [values](results.csv)
+distinguish missing, unsupported, failed, nonconverged and timed-out outcomes.
 
-Requested T72 is a budget; record measured effective threads separately.
-CPU/GPU scaling each contain 84 converged points on separately labelled revisions;
-the older 189-record one-iteration diagnostic is unrelated. Neither scaling nor
-rendering claims pending research changes are integrated.
+The four APX profiles are CPU GKS/trace-cycle at degree quantile 0.2 and
+GPU-owned GKS at quantiles 0.8/0.2. GPU rows require actual device-factor adoption;
+requested flags alone do not qualify. CPU-setup/GPU-solve and other sampler
+variants remain in the [six-matrix comparison](SAMPLERS.md).
 
-Setup includes required preparation; CUDA initialization is separate. Whole-cell
-deadlines and unknown peak memory are not fabricated solve times or zero memory.
+T72 is the requested budget; effective thread counts are recorded separately.
+Scaling plots retain their own earlier source revisions and timing protocols;
+they are not measurements of every refreshed headline profile.
 
-ParAC’s recorded preparation includes avoidable adapter interchange/audit costs;
-algorithm-performance comparisons remain provisional pending corrected measurements.
+Setup includes required preparation; CUDA initialization is separate. Unknown
+memory stays unknown. Whole-cell deadlines are not per-solve lower bounds.
+Competitor headline cells are preserved from the previous snapshot. In particular,
+ParAC headline preparation still includes older adapter interchange/audit costs;
+the corrected representative scaling study is labelled separately.

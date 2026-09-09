@@ -181,7 +181,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 ## Benchmarks and experiments
 
 Daint is primary (`benchmarks/daint`); laptop data are historical. Preserve the
-shared 27-matrix/18-series denominator, unavailable canonical MATLAB CMG cells,
+27-matrix denominator: the historical profile has 18 series, while the explicit
+current comparison has 20 (CPU GKS/trace and GPU GKS at two degree cutoffs).
+Preserve unavailable canonical MATLAB CMG cells,
 effective versus requested threads, and source/binary/cell hashes.
 [benchmarks/README.md](benchmarks/README.md) defines runner/solver contracts;
 use the existing harness. Rendering runs no benchmarks.
