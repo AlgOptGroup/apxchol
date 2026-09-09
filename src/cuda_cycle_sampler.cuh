@@ -1,6 +1,11 @@
 // Included inside cuda_round_shadow.cu after its canonical-record/RNG helpers.
 // One independent thread owns each pivot's plan, shuffle and coordinated draws.
 // No parent-index jump-ahead: rejection sampling consumes a variable RNG count.
+// Materialize standard-library constants outside device functions for NVCC.
+constexpr double kCyclePoolMin = std::numeric_limits<pool_value_t>::min();
+constexpr double kCyclePoolMax = std::numeric_limits<pool_value_t>::max();
+constexpr double kCycleEpsilon = std::numeric_limits<double>::epsilon();
+constexpr double kCycleInfinity = std::numeric_limits<double>::infinity();
 __device__ std::uint32_t cycle_uniform_index(unsigned long long& state,
                                             std::uint32_t bound) {
     const auto b = static_cast<unsigned long long>(bound), threshold = -b % b;
@@ -9,15 +14,15 @@ __device__ std::uint32_t cycle_uniform_index(unsigned long long& state,
     return static_cast<std::uint32_t>(value % b);
 }
 __device__ bool cycle_pool_edge(double value) {
-    return isfinite(value) && value >= std::numeric_limits<pool_value_t>::min() &&
-           value <= std::numeric_limits<pool_value_t>::max();
+    return isfinite(value) && value >= kCyclePoolMin &&
+           value <= kCyclePoolMax;
 }
 __device__ double cycle_edge_weight(const work_record* a, double D,
         std::uint32_t h, std::uint32_t i, std::uint32_t j) {
     return a[i].value * a[j].value / D * (h - 1) * .5;
 }
 __device__ bool cycle_nonnegative(double value, double magnitude, double& out) {
-    const double tolerance = 512 * std::numeric_limits<double>::epsilon() * fmax(1., magnitude);
+    const double tolerance = 512 * kCycleEpsilon * fmax(1., magnitude);
     if (!isfinite(value) || value < -tolerance) return false;
     out = fmax(0., value); return true;
 }
@@ -34,7 +39,7 @@ __device__ std::uint32_t cycle_trace_cut(const work_record* a, std::uint32_t d,
         suffix[i] = sum; square[i] = sq;
     }
     if (!(sum > 0) || !isfinite(sum * sum)) return d;
-    double parents = 0, best = std::numeric_limits<double>::infinity();
+    double parents = 0, best = kCycleInfinity;
     std::uint32_t cut = 0;
     for (std::uint32_t i = 0; i + 2 < d; ++i) {
         const auto h = d - i;
@@ -72,7 +77,7 @@ __device__ std::uint32_t cycle_heavy_cut(const work_record* a, std::uint32_t d,
             tail[std::size_t(i)*8+k] = sum[k];
         }
     }
-    double parents=0, best=std::numeric_limits<double>::infinity();
+    double parents=0, best=kCycleInfinity;
     std::uint32_t cut=0;
     for (std::uint32_t i=0; i+2<d; ++i) {
         const auto h=d-i; const double* m=tail+std::size_t(i)*8;
