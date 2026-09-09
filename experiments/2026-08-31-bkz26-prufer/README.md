@@ -1,53 +1,48 @@
-# Weighted Prüfer, cycles, and GKS: current findings
+# Weighted Prüfer, cycles, and GKS
 
-**Weighted Prüfer did not improve apxchol's tested default.** Across eight
-matrices and five seeds, mean PCG iterations rose from 44.93 to 59.90 with
-only 1.3% more stored factor entries. All 120 bracketed solves converged;
-Prüfer lost every seed on six matrices. Unsynchronized timings support no
-close speed ranking. [Matrix-by-matrix evidence](appendix/historical-benchmarks.md).
+**The original eight-matrix benchmark favored GKS over weighted Prüfer.
+Cycle-based sampling reduces iterations, with extra fill and setup cost.** The current
+[CPU/GPU benchmarks](https://github.com/AlgOptGroup/apxchol/tree/main/benchmarks/daint)
+therefore retain alternatives rather than declaring one universal winner.
 
-For positive incident weights $a_i$ and eliminated diagonal $D$ (their sum
-for a Laplacian), exact elimination creates clique edges $a_i a_j/D$.
-The compared rules preserve those weights in expectation:
+Here $a_i$ denotes the weight from the eliminated vertex to neighbor $i$;
+the table assumes positive weights.
 
-- **GKS:** each increasingly ordered vertex independently chooses a later
-  parent proportional to its weight; the result is a tree.
-- **Weighted Prüfer / CAST-1:** iid weight-proportional Prüfer symbols define
-  a dependent tree; edges receive inverse-inclusion weights.
-- **CAST-2:** sample one tree on two half-weight copies per neighbor, then
-  contract. The result may contain cycles; it differs from averaging trees
-  and from AC2. Stored fill must be measured, not assumed doubled.
-- **Cycle-q:** cycle on an optimized heavy suffix, independent light-parent
-  probabilities proportional to $a_i+a_j$. **Heavy-K2** instead coordinates
-  GKS choices at two heaviest receivers. For $d\ge3$, the cycle constructions
-  use one extra edge; degree two uses its single exact edge. These remain research candidates.
+| Rule | Construction on a degree-$d$ elimination star |
+|---|---|
+| GKS | Order neighbors by weight; each independently chooses one later parent, proportional to that parent's weight. Emits $d-1$ edges. |
+| Weighted Prüfer / CAST-1 | Weight-proportional Prüfer symbols generate a dependent tree; inverse-inclusion edge weights preserve the exact clique in expectation. |
+| CAST-2 | Generate one tree on two half-weight copies of each neighbor, then contract the copies. Contraction can create cycles and merge parallel edges. This changes the law; it is neither averaging two trees nor AC(2). Compare measured fill as well as iterations. |
+| Trace-cycle (`trace_cycle`) | Choose a heavy suffix by an exact local Frobenius objective, sample a uniform cycle on it, and attach lighter vertices with probabilities proportional to $a_i+a_j$. |
+| Heavy-core K2 (`heavy_core_k2`) | Use a heavy-core cycle and coordinate attachments through two heavy receivers. Its dependence differs from trace-cycle's independent light attachments. |
 
-Larger real pivot neighborhoods support an input-dependent explanation.
-Among 106 retained original-IPM (Yves iter0010) stars (degrees 3–68), CAST improved local
-relative-Frobenius variance on only three. On 170 Chimera stars (degrees
-3–350), it improved 78. These stratified samples are not whole-factor error
-budgets. Crossed-order full solves also show sampling and ordering interact.
-Spielman supplies one narrow positive diagnostic, not a universal explanation.
-[Controlled comparisons and provenance](appendix/reconciliation-details.md).
+The cycle rules emit at most $d$ edges; degrees below three use GKS. Both are
+explicit options in current CPU and GPU-owned setup; GKS remains the default.
 
-Two separate T72 screens each checked 30 solves and 42 controls:
+The [actual-family comparison](RECONCILIATION.md) joins stored fill, iterations,
+and local variance from the **same 16 factors**, covering a grid, IPM, a social
+graph, and Chimera. Prüfer's lower summed Frobenius variance on the grid and
+social graph still accompanies more iterations. Common-star spectral estimates
+also favor Prüfer there: these local aggregates do not yet predict the solve.
 
-| Comparison | Iteration change |
-|---|---:|
-| q tree versus GKS |+2.0%|
-| cycle-q versus cycle-GKS, own relative cutoffs |−3.3%|
-| heavy-GKS versus GKS, older cutoff |−35.6%|
-| heavy-K2 versus heavy-GKS, same older cutoff |−4.4%|
-| full cycle only at weight ratio ≤2, versus heavy-GKS |+37.3%|
+In the six-matrix timing screen, CPU trace-cycle used 35% fewer iterations and
+27% less solve time than GKS, but 20% more setup time and 12% more stored entries;
+its one-RHS total was 4% slower. Heavy-core K2 was similar. The current GPU-owned
+cycle ports had a much larger setup penalty. See the
+[route-specific measurements and qualifications](https://github.com/AlgOptGroup/apxchol/blob/main/benchmarks/daint/SAMPLERS.md).
+These are measured tradeoffs, not an argument to replace every GKS row.
 
-The large cycle gain already exists without q or K2; it includes extra edges
-and changed later stars. These quick screens do not establish timing
-significance. Pure q trees are set aside; cycle-q remains promising.
+Why can CAST's positive examples and our negative results coexist? Sampling
+changes both the current clique error and later elimination stars; ordering and
+matrix family matter. The original eight-matrix/five-seed experiment raised
+mean iterations from 44.93 to 59.90 with Prüfer. The small Spielman construction
+was a useful positive diagnostic from the CAST study, dominated by degree-three
+eliminations; it does not represent the larger stars in IPM and social graphs.
+[Original campaign](appendix/historical-benchmarks.md) ·
+[Controlled CAST comparisons](appendix/reconciliation-details.md).
 
-[Local variance and spectral comparisons](appendix/sampling-model.md) distinguish
-absolute error from gaps to different-budget optima. Lower Frobenius variance
-can worsen population spectral variance even on one star; neither metric
-alone predicts matrix PCG.
-
-[Evidence and reproduction](reconciliation/README.md) ·
-[Original negative campaign](daint-broad/README.md)
+[The model and gaps to optimum](SAMPLING-MODEL.md) distinguish Frobenius variance,
+population spectral variance, and per-draw spectral error. Numerical degree-five
+optima show that better topology-dependent weights can substantially improve
+GKS, while closing the larger cycle-rule gaps requires changing its topology
+law. These local certificates do not establish a PCG-optimal sampler.
