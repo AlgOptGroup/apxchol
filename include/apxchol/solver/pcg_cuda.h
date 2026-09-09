@@ -285,15 +285,15 @@ public:
             pcg_cuda::update_p(0, n_, d_p_, d_z_, beta);
         }
 
-        // D2H x_perm, then un-permute and (for Laplacian) re-center.
-        Eigen::VectorXd x_perm(n_);
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(x_perm.data(), d_x_,
+        // The uploaded RHS is no longer needed. Reuse its touched host buffer
+        // for D2H, then un-permute and (for Laplacian) re-center.
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(b_perm.data(), d_x_,
                                           n_ * sizeof(double),
                                           cudaMemcpyDeviceToHost));
         x_host.resize(n_);
-        // x[orig_v] = x_perm[new_idx] where new_idx = h_perm_[orig_v].
+        // x[orig_v] = b_perm[new_idx] where new_idx = h_perm_[orig_v].
         for (int64_t v = 0; v < n_; ++v)
-            x_host[v] = x_perm[h_perm_[v]];
+            x_host[v] = b_perm[h_perm_[v]];
         if (laplacian)
             x_host.array() -= x_host.mean();
 
