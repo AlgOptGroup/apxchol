@@ -1486,6 +1486,7 @@ TEST(EliminationTeamSizing, DenseSmallRoundsUseFineSchedulingChunks) {
 }
 
 TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
+    const scoped_threads team(4);
     constexpr apxchol::node_index n = 80;
     apxchol::graph<apxchol::vec_pool_incidence> G(n);
     for (apxchol::node_index v = 0; v < n; ++v) {
@@ -1497,7 +1498,7 @@ TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
     std::iota(candidates.begin(), candidates.end(), apxchol::node_index{0});
     (void)apxchol::prune_and_degrees(G, candidates, degrees, 2000);
     apxchol::partition_context ctx{
-        .options = {}, .seed = 17, .omp_threshold = 2000, .cp = nullptr,
+        .options = {}, .seed = 17, .omp_threshold = 1, .cp = nullptr,
         .degrees = degrees,
     };
     auto select = [&](int passes) {
@@ -1524,6 +1525,56 @@ TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
         }
         EXPECT_TRUE(in_set[v] || has_selected_neighbor)
             << "uncovered vertex " << v;
+    }
+}
+
+TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
+    const scoped_threads team(4);
+#ifdef _OPENMP
+    int actual_threads = 1;
+#pragma omp parallel
+    {
+#pragma omp single
+        actual_threads = omp_get_num_threads();
+    }
+    ASSERT_GT(actual_threads, 1) << "shared-neighbor coverage requires a parallel team";
+#else
+    GTEST_SKIP() << "shared-neighbor coverage requires OpenMP";
+#endif
+    constexpr apxchol::node_index leaves = 128;
+    constexpr apxchol::node_index n = leaves + 2;
+    apxchol::graph<apxchol::vec_pool_incidence> G(n);
+    for (apxchol::node_index v = 0; v < leaves; ++v) {
+        G.add_edge(v, leaves, 1.0);
+        G.add_edge(v, leaves + 1, 1.0);
+    }
+    G.add_edge(0, leaves, 1.0); // Duplicate exclusion of a shared neighbor.
+    G.add_edge(0, 0, 1.0);      // A self incidence must not exclude its own pick.
+    std::vector<apxchol::node_index> candidates(n), degrees;
+    std::iota(candidates.begin(), candidates.end(), apxchol::node_index{0});
+    (void)apxchol::prune_and_degrees(G, candidates, degrees, 2000);
+    apxchol::partition_context ctx{
+        .options = {}, .seed = 17, .omp_threshold = 1, .cp = nullptr,
+        .degrees = degrees,
+    };
+    ctx.options.degree_tiebreak = true;
+    std::vector<apxchol::node_index> expected(candidates.begin(),
+                                             candidates.begin() + leaves);
+    apxchol::priority_greedy_partitioner p;
+    p.parallel_passes = 1;
+    apxchol::selection selected;
+    for (int repetition = 0; repetition < 8; ++repetition) {
+        // Every leaf wins in the same pass; all workers exclude the same hubs.
+        selected.reset(n);
+        p.find_partition(G, candidates, ctx, selected);
+        EXPECT_EQ(selected.finalize().data, expected);
+
+        // Reuse the same scratch with only the previously excluded hubs eligible.
+        selected.reset(n);
+        const auto hubs = std::span<const apxchol::node_index>(candidates).subspan(leaves);
+        p.find_partition(G, hubs, ctx, selected);
+        EXPECT_EQ(selected.finalize().data,
+                  (std::vector<apxchol::node_index>{leaves, leaves + 1}));
     }
 }
 

@@ -12,6 +12,7 @@
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/partition/priority_greedy_config.h"
 #include <algorithm>
+#include <atomic>
 
 namespace apxchol {
 
@@ -91,9 +92,10 @@ private:
                 }
                 pick_[v] = lmin ? 1 : 0;
             }
-            // Pass 2: commit picks. chosen candidates are mutually non-adjacent (the
-            // lower-priority endpoint of any edge wins), so writing status_ here is
-            // safe; neighbor exclusions all write the same value (2) -> benign.
+            // Pass 2: picks are mutually non-adjacent and cannot neighbor a pick
+            // from an earlier pass, which already excluded its neighbors. Only
+            // exclusions overlap: store them atomically without reading status_.
+            // The parallel-for barrier precedes all subsequent plain accesses.
             #pragma omp parallel for schedule(static) if(cand_.size() > ctx.omp_threshold)
             for (size_t i = 0; i < cand_.size(); ++i) {
                 auto v = cand_[i];
@@ -101,7 +103,8 @@ private:
                 status_[v] = 1;
                 for (auto idx : G.adj(v)) {
                     auto u = G.edge_target(idx, v);
-                    if (G.is_active(u) && status_[u] == 0) status_[u] = 2;
+                    if (u != v && G.is_active(u))
+                        std::atomic_ref<char>(status_[u]).store(2, std::memory_order_relaxed);
                 }
             }
             // Compact the working list to the still-undecided survivors.
