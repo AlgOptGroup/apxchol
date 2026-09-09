@@ -1,8 +1,10 @@
 #pragma once
 #include <cuda_runtime.h>
+#include <cstddef>
+#include <cstdint>
 
 // Sync-free ("dataflow") GPU sparse triangular solve with O(n) STATE -- the
-// third SpTRSV backend of cuda.h (env APXCHOL_GPU_SPTRSV=dataflow).
+// SpTRSV backend of cuda.h (env APXCHOL_GPU_SPTRSV=dataflow).
 //
 // WHY. This replaced BOTH of the alternatives it was measured against. Our
 // (now removed) level-set kernel paid one launch plus one stream sync per
@@ -206,5 +208,31 @@ void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
                          const int* batch_start, const int* batch_spec, const int4* spec, int n_batches,
                          unsigned long long* tag, unsigned epoch, int* ctrl, int grid,
                          const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);
+
+namespace detail {
+// Internal trusted-factor setup. The three returned CUDA allocations become
+// the caller's ownership; on failure the builder releases every allocation.
+// Only fixed-size statistics/counts cross to the host, never row pointers.
+// Plain batches close at fixed row-tile boundaries; the per-row arithmetic
+// and segmentation are unchanged from the global greedy host plan.
+struct dataflow_device_plan {
+    static constexpr int kBuckets = 12;
+    int* batch_start = nullptr;
+    int* batch_spec = nullptr;
+    int4* spec = nullptr;
+    int n_batches = 0, n_slots = 0, n_split = 0, max_len = 0;
+    std::uint64_t rows_ge[kBuckets]{};
+    std::uint64_t nnz_ge[kBuckets]{};
+    std::size_t bytes = 0, host_download_bytes = 0;
+};
+
+// split_min: -1 derives the existing threshold, 0 disables segmentation,
+// positive pins its existing threshold. The CSR is sorted triangular with a
+// diagonal at the proper end (the private finalizer's construction contract).
+// Optional fp16 metadata is validated on device during the same row pass.
+dataflow_device_plan build_dataflow_device_plan(
+    int m, bool reverse, int nnz, const int* rowptr, int split_min,
+    const float* diag = nullptr, const double* inv_scale2 = nullptr);
+} // namespace detail
 
 } // namespace apxchol

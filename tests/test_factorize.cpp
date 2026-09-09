@@ -1,14 +1,18 @@
 #include <gtest/gtest.h>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <span>
+#include <sstream>
 #include <string>
+#include <tuple>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/IterativeLinearSolvers>
@@ -26,6 +30,7 @@
 #include "apxchol/solver/solve.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/gpu_block_frontend.h"
+#include "apxchol/solver/elimination/gpu_round_shadow.h"
 #endif
 
 // ── Helpers ──────────────────────────────────────────
@@ -1716,35 +1721,104 @@ TEST(GpuBlockFrontend, TracksCandidatesAndDynamicUpdatesExactly) {
     }
 }
 
-TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
+enum class block_frontier_fixture { original, no_drop, cascade };
+
+static void check_block_selection_reference(apxchol::node_index n,
+                                            std::size_t requested_regions,
+                                            bool degree_tiebreak,
+                                            bool dense = false,
+                                            unsigned copies = 1,
+                                            bool reverse_input = false,
+                                            unsigned repair_degree = 0,
+                                            block_frontier_fixture fixture =
+                                                block_frontier_fixture::original) {
     using apxchol::detail::gpu_topology_edge;
-    constexpr apxchol::node_index n = 96;
+    const std::string region_text = std::to_string(requested_regions);
+    const scoped_environment region_setting("APXCHOL_GPU_BLOCKS",
+        requested_regions ? region_text.c_str() : nullptr);
+    SCOPED_TRACE("n=" + std::to_string(n) + " regions=" + region_text +
+                 " degree=" + std::to_string(degree_tiebreak) +
+                 " copies=" + std::to_string(copies) +
+                 " reverse=" + std::to_string(reverse_input) +
+                 " repair_degree=" + std::to_string(repair_degree) +
+                 " fixture=" + std::to_string(static_cast<unsigned>(fixture)));
     std::vector<gpu_topology_edge> initial;
     apxchol::graph<apxchol::vec_pool_incidence> graph(n);
-    for (apxchol::node_index v = 0; v < n; ++v) {
-        for (const apxchol::node_index delta : {1u, 7u, 23u}) {
-            const apxchol::node_index u = (v + delta) % n;
-            if (v < u) {
-                initial.push_back({v, u});
-                graph.add_edge(v, u, 1.0);
+    if (repair_degree) {
+        // With two regions, 0 removes a regional pick and frees its successor.
+        // Repeated incidences force complete scans at the short/long boundary.
+        // Larger cases put the repaired row at the end of a partial warp.
+        ASSERT_GE(n, 4u);
+        ASSERT_EQ(requested_regions, 2u);
+        if (fixture == block_frontier_fixture::cascade) {
+            // The dropped regional pick frees a three-vertex path of equal
+            // degrees D+1. Its two endpoints win in successive repair rounds
+            // under either strict priority, including across warp boundaries.
+            ASSERT_GE(n, 9u);
+            const apxchol::node_index p = n - 4;
+            initial.push_back({0, p});
+            for (unsigned copy = 0; copy < repair_degree; ++copy) {
+                initial.push_back({p, p + 1});
+                initial.push_back({p, p + 3});
+                if (copy + 1 < repair_degree)
+                    initial.push_back({p, p + 2});
+            }
+            initial.push_back({p + 1, p + 2});
+            initial.push_back({p + 2, p + 3});
+        } else {
+            const apxchol::node_index dropped = n == 16 ? 8 : n - 2;
+            initial.push_back({0, dropped});
+            for (unsigned copy = 0; copy < repair_degree; ++copy)
+                initial.push_back({dropped, dropped + 1});
+        }
+    } else for (apxchol::node_index v = 0; v < n; ++v) {
+        if (dense) {
+            for (apxchol::node_index u = v + 1; u < n; ++u)
+                for (unsigned copy = 0; copy < copies; ++copy)
+                    initial.push_back({v, u});
+        } else {
+            for (const apxchol::node_index delta : {1u, 7u, 23u}) {
+                const apxchol::node_index u = (v + delta) % n;
+                if (v < u)
+                    initial.push_back({v, u});
             }
         }
     }
+    if (reverse_input) std::reverse(initial.begin(), initial.end());
+    for (const auto edge : initial) graph.add_edge(edge.u, edge.v, 1.0);
     apxchol::detail::gpu_block_frontend gpu(n, initial);
     std::vector<apxchol::node_index> active(n);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     apxchol::partition_options options;
+    options.degree_tiebreak = degree_tiebreak;
+    if (repair_degree || fixture == block_frontier_fixture::no_drop) {
+        options.degree_quantile = 0.0;
+        options.degree_multiplier = n; // Total degree admits every vertex.
+    }
     (void)gpu.prepare(active, options);
+    if (fixture != block_frontier_fixture::original)
+        ASSERT_EQ(gpu.host_candidates().size(), n);
 
-    const char* old_blocks = std::getenv("APXCHOL_GPU_BLOCKS");
-    const bool had_blocks = old_blocks != nullptr;
-    const std::string saved_blocks = old_blocks ? old_blocks : "";
-    setenv("APXCHOL_GPU_BLOCKS", "8", 1);
     const auto first = gpu.select_block_greedy().data;
+    const auto first_work = gpu.selected_degree_work();
     const auto second = gpu.select_block_greedy().data;
-    if (had_blocks) setenv("APXCHOL_GPU_BLOCKS", saved_blocks.c_str(), 1);
-    else unsetenv("APXCHOL_GPU_BLOCKS");
     EXPECT_EQ(second, first);
+    EXPECT_EQ(gpu.selected_degree_work(), first_work);
+    // Exact cross-binary receipts; the remote gate compares the complete ids,
+    // not just the size/hash, and separately checks the default region capacity.
+    std::string receipt = std::to_string(gpu.resident_region_capacity()) + ":" +
+                          std::to_string(first_work);
+    for (const auto v : first) receipt += ":" + std::to_string(v);
+    std::string extra = repair_degree ? "_repair_" +
+        std::to_string(repair_degree) + "_" + std::to_string(reverse_input) :
+        dense ? "_dense_" + std::to_string(copies) + "_" +
+        std::to_string(reverse_input) : "";
+    if (fixture == block_frontier_fixture::no_drop)
+        extra += "_no_drop_" + std::to_string(reverse_input);
+    else if (fixture == block_frontier_fixture::cascade)
+        extra += "_cascade";
+    testing::Test::RecordProperty("selection_" + std::to_string(n) + "_" +
+        region_text + "_" + std::to_string(degree_tiebreak) + extra, receipt);
 
     // Independent CPU specification of the GPU algorithm: contiguous serial
     // greedy regions, snapshot cross-region conflict removal, then ordered
@@ -1752,7 +1826,8 @@ TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
     const auto candidate_view = gpu.host_candidates();
     const std::vector<apxchol::node_index> candidates(candidate_view.begin(),
                                                        candidate_view.end());
-    constexpr std::size_t regions = 8;
+    const std::size_t regions = std::min(candidates.size(), requested_regions
+        ? requested_regions : gpu.resident_region_capacity());
     std::vector<apxchol::node_index> degree(n), region(n);
     std::vector<unsigned char> candidate(n, 0), expected_selected(n, 0),
         dropped(n, 0), frontier(n, 0), pending(n, 0), winner(n, 0);
@@ -1805,18 +1880,30 @@ TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
             if (candidate[u]) frontier[u] = 1;
         }
     }
+    const auto drop_count = std::count(dropped.begin(), dropped.end(), 1);
+    const auto unselected_before_repair = candidates.size() -
+        std::count(expected_selected.begin(), expected_selected.end(), 1);
+    std::size_t repair_rounds = 0, first_pending_count = 0;
     for (;;) {
         bool any = false;
         std::fill(pending.begin(), pending.end(), 0);
         std::fill(winner.begin(), winner.end(), 0);
         for (const auto v : candidates) {
             if (!frontier[v]) continue;
+            // Committed picks are not pending competitors. Keep the original
+            // restricted frontier oracle, including this existing GPU rule.
+            if (expected_selected[v]) {
+                frontier[v] = 0;
+                continue;
+            }
             bool free = true;
             for (const auto edge : graph.adj(v))
                 free &= !expected_selected[graph.edge_target(edge, v)];
             if (free) pending[v] = 1;
             else frontier[v] = 0;
         }
+        if (repair_rounds == 0)
+            first_pending_count = std::count(pending.begin(), pending.end(), 1);
         for (const auto v : candidates) {
             if (!pending[v]) continue;
             bool wins = true;
@@ -1831,6 +1918,7 @@ TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
             any |= wins;
         }
         if (!any) break;
+        ++repair_rounds;
         for (const auto v : candidates) {
             if (winner[v]) {
                 expected_selected[v] = 1;
@@ -1842,6 +1930,28 @@ TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
     for (const auto v : candidates)
         if (expected_selected[v]) expected.push_back(v);
     EXPECT_EQ(first, expected);
+    if (fixture == block_frontier_fixture::no_drop) {
+        EXPECT_EQ(requested_regions, 1u);
+        EXPECT_EQ(drop_count, 0);
+        EXPECT_GT(unselected_before_repair, 0u);
+        EXPECT_EQ(first_pending_count, 0u);
+        EXPECT_EQ(repair_rounds, 0u);
+    } else if (fixture == block_frontier_fixture::cascade) {
+        EXPECT_EQ(drop_count, 1);
+        EXPECT_EQ(first_pending_count, 3u);
+        EXPECT_EQ(repair_rounds, 2u);
+        EXPECT_TRUE(std::binary_search(first.begin(), first.end(), n - 3));
+        EXPECT_TRUE(std::binary_search(first.begin(), first.end(), n - 1));
+        EXPECT_FALSE(std::binary_search(first.begin(), first.end(), n - 4));
+        EXPECT_FALSE(std::binary_search(first.begin(), first.end(), n - 2));
+    } else if (repair_degree) {
+        const apxchol::node_index dropped = n == 16 ? 8 : n - 2;
+        EXPECT_TRUE(std::binary_search(first.begin(), first.end(), dropped + 1));
+        EXPECT_FALSE(std::binary_search(first.begin(), first.end(), dropped));
+    }
+    std::size_t expected_work = 0;
+    for (const auto v : expected) expected_work += degree[v];
+    EXPECT_EQ(first_work, expected_work);
 
     std::vector<unsigned char> selected(n, 0);
     for (const auto v : first) selected[v] = 1;
@@ -1853,6 +1963,340 @@ TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
             covered |= selected[u] != 0;
         }
         EXPECT_TRUE(covered) << "uncovered candidate " << v;
+    }
+}
+
+TEST(GpuBlockFrontend, SelectionIsIndependentMaximalAndDeterministic) {
+    check_block_selection_reference(96, 8, true);
+}
+
+TEST(GpuBlockFrontend, CollectiveBoundariesPreserveExactSelectionAndWork) {
+    // Partial warps/blocks, full blocks, and a grid-stride repair scan. The
+    // existing independent CPU specification covers both priority policies.
+    for (const apxchol::node_index n : {1u, 31u, 32u, 255u, 256u, 257u, 1025u, 300001u})
+        for (const std::size_t regions : {std::size_t{0}, std::size_t{8}})
+            for (const bool degree_tiebreak : {false, true})
+                check_block_selection_reference(n, regions, degree_tiebreak);
+    // Exact adjacency lengths around warp chunks, with a partially populated
+    // candidate block. Reverse the incidence order; the CPU oracle is unchanged.
+    for (const apxchol::node_index degree : {31u, 32u, 33u, 63u, 64u, 65u})
+        for (const bool degree_tiebreak : {false, true})
+            for (const bool reverse : {false, true})
+                check_block_selection_reference(degree + 1, 8,
+                    degree_tiebreak, true, 1, reverse);
+    // Parallel incidences remain separate for degree priorities, while repair
+    // predicates and frontier union must tolerate repeated neighbors.
+    for (const unsigned copies : {2u, 3u})
+        for (const bool degree_tiebreak : {false, true})
+            for (const bool reverse : {false, true})
+                check_block_selection_reference(33, 8,
+                    degree_tiebreak, true, copies, reverse);
+    for (const unsigned degree : {31u, 32u, 33u, 63u, 64u, 65u})
+        for (const bool degree_tiebreak : {false, true})
+            for (const bool reverse : {false, true})
+                check_block_selection_reference(16, 2,
+                    degree_tiebreak, false, 1, reverse, degree);
+    // Mixed short/long owners at lanes31/0/1 and the final partial warp. The
+    // dropped row has degreeD+1 and its newly free successor degreeD, so D=32
+    // crosses the dispatch boundary during the same repair cascade.
+    for (const apxchol::node_index n : {33u, 34u, 65u, 66u})
+        for (const unsigned degree : {32u, 33u})
+            for (const bool degree_tiebreak : {false, true})
+                for (const bool reverse : {false, true})
+                    check_block_selection_reference(n, 2,
+                        degree_tiebreak, false, 1, reverse, degree);
+    // With one region every unselected candidate remains blocked. The folded
+    // first free scan must terminate without adding any pick, in both orders.
+    for (const apxchol::node_index n : {33u, 257u})
+        for (const bool degree_tiebreak : {false, true})
+            for (const bool reverse : {false, true})
+                check_block_selection_reference(n, 1, degree_tiebreak,
+                    false, 1, reverse, 0, block_frontier_fixture::no_drop);
+    // One dropped pick frees a path requiring two productive repair rounds.
+    // Duplicate edges set free-row lengths32/33 independently of vertex lanes.
+    for (const apxchol::node_index n : {33u, 34u, 65u, 66u})
+        for (const unsigned degree : {31u, 32u})
+            for (const bool degree_tiebreak : {false, true})
+                for (const bool reverse : {false, true})
+                    check_block_selection_reference(n, 2, degree_tiebreak,
+                        false, 1, reverse, degree, block_frontier_fixture::cascade);
+}
+
+
+namespace {
+using bounded_vertex = apxchol::node_index;
+using bounded_edge = apxchol::detail::gpu_topology_edge;
+
+class bounded_fixture_threads {
+public:
+    bounded_fixture_threads() {
+#ifdef _OPENMP
+        previous_ = omp_get_max_threads(); omp_set_num_threads(1);
+#endif
+    }
+    ~bounded_fixture_threads() {
+#ifdef _OPENMP
+        omp_set_num_threads(previous_);
+#endif
+    }
+private:
+    int previous_ = 1;
+};
+
+// Independent scalar specification: no production priority or selector helper.
+static std::uint64_t bounded_fixture_key(std::uint64_t seed,
+                                         std::uint64_t phase,
+                                         bounded_vertex vertex) {
+    std::uint64_t z = (seed ^ (phase * 0xD6E8FEB86659FD93ULL) ^ vertex)
+                      + 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+struct bounded_oracle_result {
+    std::vector<bounded_vertex> candidates, selected, degrees;
+    std::size_t work = 0, unfinished = 0;
+    unsigned passes = 0;
+};
+
+static bounded_oracle_result bounded_four_pass_oracle(
+        bounded_vertex n, const std::vector<bounded_edge>& edges,
+        const apxchol::partition_options& options,
+        std::uint64_t seed, std::uint64_t phase) {
+    std::vector<std::vector<bounded_vertex>> adjacent(n);
+    for (const auto e : edges) {
+        adjacent[e.u].push_back(e.v); adjacent[e.v].push_back(e.u);
+    }
+    bounded_oracle_result result;
+    std::size_t degree_sum = 0;
+    for (const auto& row : adjacent) {
+        result.degrees.push_back(static_cast<bounded_vertex>(row.size()));
+        degree_sum += row.size();
+    }
+    double threshold = options.degree_multiplier * double(degree_sum) / n;
+    if (options.degree_quantile > 0.0 && options.degree_quantile < 1.0) {
+        auto sorted = result.degrees;
+        std::sort(sorted.begin(), sorted.end());
+        const auto rank = static_cast<std::size_t>(
+            options.degree_quantile * static_cast<double>(n - 1));
+        threshold = sorted[rank];
+    }
+    // 0 undecided, 1 chosen, 2 excluded/blocked. Each decision reads a snapshot.
+    std::vector<unsigned char> state(n, 2);
+    for (bounded_vertex v = 0; v < n; ++v)
+        if (result.degrees[v] <= threshold) {
+            state[v] = 0; result.candidates.push_back(v);
+        }
+    auto precedes = [&](bounded_vertex a, bounded_vertex b) {
+        return std::tuple(options.degree_tiebreak ? result.degrees[a] : 0,
+                          bounded_fixture_key(seed, phase, a), a)
+             < std::tuple(options.degree_tiebreak ? result.degrees[b] : 0,
+                          bounded_fixture_key(seed, phase, b), b);
+    };
+    for (unsigned pass = 0; pass < 4; ++pass) {
+        std::vector<bounded_vertex> winners;
+        bool pending = false;
+        for (const auto v : result.candidates) if (state[v] == 0) {
+            pending = true;
+            if (std::none_of(adjacent[v].begin(), adjacent[v].end(),
+                    [&](auto u) { return state[u] == 0 && precedes(u, v); }))
+                winners.push_back(v);
+        }
+        if (!pending) break;
+        ++result.passes;
+        for (const auto v : winners) state[v] = 1;
+        for (const auto v : winners)
+            for (const auto u : adjacent[v]) if (state[u] == 0) state[u] = 2;
+    }
+    for (const auto v : result.candidates) {
+        if (state[v] == 1) {
+            result.selected.push_back(v); result.work += result.degrees[v];
+        }
+        result.unfinished += state[v] == 0;
+    }
+    return result;
+}
+
+static void check_owned_bounded_selection(
+        bounded_vertex n, const std::vector<bounded_edge>& edges,
+        const apxchol::partition_options& options, std::uint64_t seed,
+        std::uint64_t phase, const std::string& receipt_name,
+        bool require_unfinished = false) {
+    // A dedicated isolated pivot gives the real owned CSR route while keeping
+    // every original parallel incidence. A CSC triplet builder would coalesce it.
+    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n + 1);
+    for (const auto e : edges) graph.add_edge(e.u, e.v, 1.0);
+    apxchol::detail::gpu_round_shadow_session owner(true);
+    apxchol::detail::gpu_block_frontend gpu(n + 1, edges);
+    std::vector<bounded_vertex> active(n + 1);
+    std::iota(active.begin(), active.end(), bounded_vertex{0});
+    apxchol::partition_options only_dummy;
+    only_dummy.degree_quantile = 0.0; only_dummy.degree_multiplier = 0.0;
+    (void)gpu.prepare(active, only_dummy);
+    ASSERT_EQ(gpu.select_block_greedy().data, std::vector<bounded_vertex>{n});
+    (void)owner.run_owned_prefix_round(graph, std::vector<bounded_vertex>{n},
+                                       gpu.device_selection(), 42);
+    owner.advance_selector(gpu);
+    ASSERT_EQ(gpu.transfers().owned_residual_binds, 1u);
+    active.pop_back();
+    const auto expected = bounded_four_pass_oracle(n, edges, options, seed, phase);
+    ASSERT_FALSE(expected.candidates.empty()); ASSERT_FALSE(expected.selected.empty());
+    EXPECT_LE(expected.passes, 4u);
+    if (require_unfinished) {
+        ASSERT_EQ(expected.passes, 4u);
+        ASSERT_GT(expected.unfinished, 0u) << "fixture must distinguish bounded from maximal completion";
+    }
+    const auto prepared = gpu.prepare(active, options, seed, phase);
+    EXPECT_EQ(prepared.candidate_count, expected.candidates.size());
+    const auto candidates = gpu.host_candidates();
+    EXPECT_EQ(std::vector<bounded_vertex>(candidates.begin(), candidates.end()), expected.candidates);
+    const auto degrees = gpu.host_active_degrees();
+    EXPECT_EQ(std::vector<bounded_vertex>(degrees.begin(), degrees.end()), expected.degrees);
+    const auto first = gpu.select_block_greedy().data;
+    EXPECT_EQ(first, expected.selected); EXPECT_EQ(gpu.selected_degree_work(), expected.work);
+    EXPECT_EQ(gpu.select_block_greedy().data, first);
+    EXPECT_EQ(gpu.selected_degree_work(), expected.work);
+    if (seed == 42 && phase == 0) {
+        (void)gpu.prepare(active, options); // Default overload must mean42/0.
+        EXPECT_EQ(gpu.select_block_greedy().data, first);
+    }
+    std::vector<unsigned char> picked(n, 0);
+    for (const auto v : first) { ASSERT_LT(v, n); picked[v] = 1; }
+    for (const auto e : edges) EXPECT_FALSE(picked[e.u] && picked[e.v]);
+    std::string receipt = std::to_string(expected.passes) + ":" +
+        std::to_string(expected.unfinished) + ":" + std::to_string(expected.work);
+    for (const auto v : expected.candidates) receipt += ":c" + std::to_string(v);
+    for (const auto v : first) receipt += ":s" + std::to_string(v);
+    testing::Test::RecordProperty(receipt_name, receipt);
+}
+} // namespace
+
+TEST(GpuBoundedSelection, OwnedSnapshotsMatchIndependentFourPassOracle) {
+    const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    const bounded_fixture_threads serial;
+    const std::array<std::pair<std::uint64_t, std::uint64_t>, 4> keys = {{
+        {42, 0}, {0, 0}, {42, 7}, {UINT64_MAX, UINT64_MAX}}};
+    for (const bounded_vertex n : {2u, 4u, 31u, 32u, 33u, 255u, 256u, 257u})
+        for (unsigned profile = 0; profile < 2; ++profile) {
+            std::vector<bounded_edge> edges;
+            // Ring profile has exact degree ties; path profile has a cap boundary
+            // (n4,q=.5 admits only endpoints), raw duplicates and mixed degrees.
+            for (bounded_vertex v = 0; v + 1 < n; ++v) {
+                edges.push_back({v, v + 1});
+                if (profile) edges.push_back({v, v + 1});
+            }
+            if (!profile && n > 2) edges.push_back({0, n - 1});
+            if (profile && n > 4)
+                for (bounded_vertex v = 0; v + 5 < n; v += 7) edges.push_back({v, v + 5});
+            apxchol::partition_options options;
+            options.degree_tiebreak = true; options.degree_quantile = 0.5;
+            for (std::size_t k = 0; k < keys.size(); ++k) {
+                SCOPED_TRACE("n=" + std::to_string(n) + " profile=" +
+                             std::to_string(profile) + " key=" + std::to_string(k));
+                check_owned_bounded_selection(n, edges, options, keys[k].first,
+                    keys[k].second, "bounded_selection_" + std::to_string(n) +
+                    "_" + std::to_string(profile) + "_" + std::to_string(k));
+                if (testing::Test::HasFatalFailure()) return;
+            }
+        }
+}
+
+TEST(GpuBoundedSelection, FourPassCapLeavesAnUncoveredEligibleVertex) {
+    const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    const bounded_fixture_threads serial;
+    constexpr bounded_vertex n = 65;
+    std::vector<bounded_vertex> order(n);
+    std::iota(order.begin(), order.end(), bounded_vertex{0});
+    std::sort(order.begin(), order.end(), [](auto a, auto b) {
+        return std::pair(bounded_fixture_key(42, 0, a), a) <
+               std::pair(bounded_fixture_key(42, 0, b), b);
+    });
+    std::vector<bounded_edge> edges;
+    for (bounded_vertex i = 0; i + 1 < n; ++i) edges.push_back({order[i], order[i + 1]});
+    apxchol::partition_options options;
+    options.degree_tiebreak = true; options.degree_quantile = 0.0;
+    options.degree_multiplier = 100.0;
+    check_owned_bounded_selection(n, edges, options, 42, 0, "bounded_selection_cap65", true);
+}
+
+TEST(GpuBoundedSelection, OwnedZeroDegreeCandidatesMakeProgress) {
+    const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    const bounded_fixture_threads serial;
+    for (const bounded_vertex n : {1u, 33u}) {
+        SCOPED_TRACE(n);
+        Eigen::SparseMatrix<double> A(n, n);
+        std::vector<Eigen::Triplet<double>> diagonal;
+        for (bounded_vertex v = 0; v < n; ++v) diagonal.emplace_back(v, v, 0.0);
+        A.setFromTriplets(diagonal.begin(), diagonal.end());
+        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
+        apxchol::detail::gpu_round_shadow_session owner(true);
+        std::unique_ptr<apxchol::detail::gpu_block_frontend> gpu;
+        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), gpu);
+        std::vector<bounded_vertex> active(n);
+        std::iota(active.begin(), active.end(), bounded_vertex{0});
+        apxchol::partition_options options;
+        options.degree_quantile = 0.5;
+        const auto prepared = gpu->prepare(active, options, 42, 0);
+        EXPECT_EQ(prepared.candidate_count, n); EXPECT_EQ(prepared.average_degree, 0.0);
+        EXPECT_EQ(gpu->select_block_greedy().data, active);
+        EXPECT_EQ(gpu->selected_degree_work(), 0u);
+        EXPECT_EQ(gpu->select_block_greedy().data, active);
+        apxchol::graph<apxchol::directed_vec_pool_incidence> empty_graph(n);
+        (void)owner.run_owned_prefix_round(empty_graph, active, gpu->device_selection(), 42);
+        owner.advance_selector(*gpu);
+        active.clear();
+        EXPECT_EQ(gpu->prepare(active, options, 42, 1).candidate_count, 0u);
+        EXPECT_TRUE(gpu->select_block_greedy().data.empty());
+        EXPECT_EQ(gpu->selected_degree_work(), 0u);
+        RecordProperty("bounded_zero_degree_" + std::to_string(n), "all-selected:then-empty");
+    }
+}
+
+TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
+    const scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
+    const scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
+    const scoped_environment setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
+    const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    const scoped_environment fp32("APXCHOL_SPTRSV_FP16", "0");
+    const scoped_environment drop("APXCHOL_FACTOR_DROP", "0");
+    const bounded_fixture_threads serial;
+    const auto A = grid_laplacian(9, 7);
+    Eigen::VectorXd exact(A.rows());
+    for (Eigen::Index i = 0; i < exact.size(); ++i) exact[i] = std::sin(double(i) + 0.25);
+    const Eigen::VectorXd b = A * exact;
+    for (const unsigned seed : {0u, 42u}) {
+        apxchol::solve_options options;
+        options.tol = 1e-8; options.max_iter = 500; options.stagnation_window = 0;
+        options.factor_opts.seed = seed;
+        options.factor_opts.partition.degree_quantile = 0.5;
+        Eigen::VectorXd first_solution;
+        Eigen::Index first_iterations = 0;
+        for (unsigned repeat = 0; repeat < 2; ++repeat) {
+            const auto solved = apxchol::solve(A, b, options);
+            EXPECT_GT(solved.timings.total("setup.gpu_owned_factorization"), 0.0);
+            const double rr = (A * solved.x - b).norm() / b.norm();
+            EXPECT_TRUE(std::isfinite(rr)); EXPECT_LE(rr, 1e-8);
+            std::ostringstream receipt;
+            receipt.precision(std::numeric_limits<double>::max_digits10); receipt << rr;
+            RecordProperty("bounded_original_rr_" + std::to_string(seed) + "_" +
+                           std::to_string(repeat), receipt.str());
+            if (repeat == 0) {
+                first_solution = solved.x; first_iterations = solved.iterations;
+                std::string bytes = std::to_string(first_iterations);
+                for (Eigen::Index i = 0; i < first_solution.size(); ++i)
+                    bytes += ":" + std::to_string(std::bit_cast<std::uint64_t>(first_solution[i]));
+                RecordProperty("bounded_solution_" + std::to_string(seed), bytes);
+            } else {
+                EXPECT_EQ(solved.iterations, first_iterations);
+                ASSERT_EQ(solved.x.size(), first_solution.size());
+                for (Eigen::Index i = 0; i < solved.x.size(); ++i)
+                    EXPECT_EQ(std::bit_cast<std::uint64_t>(solved.x[i]),
+                              std::bit_cast<std::uint64_t>(first_solution[i]));
+            }
+        }
+        // The consuming solve exposes solution/iterations, not an exportable
+        // factor or fill count. This checks within-arm solution determinism only.
     }
 }
 
@@ -1889,6 +2333,16 @@ TEST(GpuBlockFrontend, IntegratedFactorizationIsDeterministic) {
     EXPECT_TRUE(std::equal(first.L.valuePtr(),
                            first.L.valuePtr() + first.L.nonZeros(),
                            second.L.valuePtr()));
+    std::string receipt;
+    for (const auto v : first.perm) receipt += std::to_string(v) + ":";
+    receipt += "|";
+    for (std::size_t i = 0; i < outer_count; ++i)
+        receipt += std::to_string(first.L.outerIndexPtr()[i]) + ":";
+    receipt += "|";
+    for (apxchol::edge_index i = 0; i < first.L.nonZeros(); ++i)
+        receipt += std::to_string(first.L.innerIndexPtr()[i]) + ":" +
+            std::to_string(std::bit_cast<std::uint32_t>(first.L.valuePtr()[i])) + ":";
+    RecordProperty("complete_factor_bytes", receipt);
 }
 
 #endif

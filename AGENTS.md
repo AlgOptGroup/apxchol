@@ -85,49 +85,58 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   factor storage (GPU default on, CPU default off); the old GPU-only alias is
   retired. GPU block setup is explicit opt-in
   through `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, independent of host threads.
-- Resident factor finalization is research-only. With
-  `APXCHOL_GPU_ROUND_SHADOW=force`, `APXCHOL_GPU_FACTOR_FINALIZE=force`,
-  `APXCHOL_SPTRSV_FP16=0`, `APXCHOL_FACTOR_DROP=0` and `vec_pool_aos`, the
-  device append log becomes fp32 CSR L/LT and is adopted by dataflow SpTRSV.
-  The audited prefix stays on device; the CPU tail and permutation upload.
-  The trusted finalizer downloads only O(n) row pointers for host plan packing;
-  external adoption capsules retain full structural validation. Unique internal
-  consuming solves omit host CSC row/value arrays; public factorization,
-  custom factors and `keep_factor=true` retain exportable arrays. Copied public
-  capsules use ordinary host setup. CPU authoritative elimination, CPU tail,
-  metadata and host plans remain; do not call this fully resident setup or a
-  measured speedup. Validate `GpuFactorFinalize.*`, `GpuRoundShadow*.*`,
-  `GpuSptrsvAdoption*.*`, `GpuDataflow.*` and `GpuHostPrep.*` on a CUDA device.
-- With the round shadow and GPU block selector both explicitly enabled, an
-  accepted, CPU-certified resident residual projects its paired incidences
-  directly into the same selector's device COO/CSR and active mask. The handoff
-  preserves multigraph multiplicity and binds the live producer, CUDA device
-  and consumed selection/topology generations before mutation. It replaces
-  CPU-produced endpoint/id uploads for that handoff only; independent CPU
-  snapshots, elimination, certification, order/excess refreshes, occupancy
-  handoff and tail remain. No new public option or performance claim is implied.
-- The internal consuming finalizer also omits duplicate CPU prefix factor
-  entries: workers stream the same fp32 entry hashes for the mandatory shadow
-  comparison. Vertex/diagonal/count metadata and all CPU graph/RNG operations
-  remain. CPU tail entries are still allocated for finalizer upload; public,
-  custom and `keep_factor=true` paths retain their payloads. The assembly trace
-  reports requested/written/omitted factor-entry bytes, excluding monotonic
-  allocator chunk slack and metadata; these are not peak-RSS measurements.
-- An internal consuming solve with all three existing GPU block, round-shadow
-  and factor-finalizer flags forced may execute an at-most-two-round GPU-owned
-  prefix, then download the full ordered residual and factor-column headers
-  once. It performs no CPU numerical replay or full snapshots between those
-  rounds. Direct slab handback preserves per-owner order, duplicate weights,
-  active/excess state and ever-added edge accounting. CPU continuation starts
-  with fresh caches and retained factor entries; device prefix entries remain
-  resident. Owned acceptance is separate from CPU certification. Public/custom/
-  keep-factor paths retain the audited route; ordinary defaults are unchanged.
-  This bounded ownership milestone is not full GPU residency or a speedup claim.
-- GPU PCG's host operator builder uses column ownership for compressed,
-  strictly sorted, unique, fully paired symmetric CSC input. Preserve canonical
-  lower values, lower-only fp32 exactness and sorting by permuted column ids.
-  Unsorted, duplicate, unpaired and uncompressed inputs retain the general
-  atomic builder. The CUDA-free helper is internal; no new runtime knob exists.
+- GPU-owned numerical setup uses the existing forced block frontend, round-shadow
+  and factor-finalizer activation for an internal consuming block-greedy/tree
+  solve on directed AoS. It can eliminate all supported rounds on device and
+  install the append log through dataflow SpTRSV. Public factorization, custom
+  strategies, exported factors and `keep_factor=true` retain their audited or
+  ordinary host path; copied capsules keep independent ownership validation.
+- An eligible compressed, sorted, unique, fully paired symmetric CSC operator
+  initializes the owned graph directly after operator validation. Its fresh,
+  unchanged operator view supplies the pairing proof only after strict layout
+  checks and when all stored off-diagonals are nonzero. Stored zeros, lumped
+  inputs and raw/test entry points retain full structural mate checks. Other
+  stored formats retain the host import fallback before device mutation. GPU PCG
+  constructs the permuted operator CSR on device only with all three existing
+  owned-setup flags enabled and its format checks satisfied. Ordinary calls and
+  unsupported formats keep host construction. Canonical lower values and
+  lossless-fp32 selection are unchanged.
+  Preserve original-system residual grading and full fallback validation.
+- The owned selector uses degree/hash/id priority, all ties at the degree
+  quantile, and at most four immutable decision/commit passes with stable
+  unresolved-candidate compaction. It guarantees independence and progress,
+  not maximality or the CPU regional selected set. Generic CSR selection keeps
+  its regional law. Seed and actual round index reach the owned priority rule.
+- Owned elimination packs rows of at most 128 physical slots into local batches;
+  oversized rows keep the global stable-sort fallback. Counts publish batch
+  descriptors and compact offsets; one warp emits each batch into its original
+  disjoint factor/fill slots. Preserve ordered duplicate sums, raw degree,
+  canonical weight/neighbor order, prefix/upper_bound sampling and random streams.
+  Compact-owned row counts and dead-fill excess scratch reuse retain provenance
+  and lifetime checks. Requested and retained scratch enter memory preflight.
+- The owned loop makes one CPU-style sparsification decision at its first
+  low-yield selection boundary. The existing residual switch/traffic gate
+  controls directed coalescing, one bucket/ordinal forest and conditional
+  Bernoulli/HT sampling; normalization keeps full-stream ordered 16384-item
+  chunks. Revoke and reprepare the preview without advancing the numerical
+  round. Rebuild degrees/fingerprints and the handback edge-accounting basis;
+  preserve active/excess and factor append state. Generic pre-import inputs
+  retain the CPU coalescer fallback. Validate `GpuOwnedSparsify.*` on device;
+  source integration requires fresh native and performance validation.
+- Device finalization supports the existing fp16/drop contracts and omits host
+  factor values only for a unique internal consuming owner. Host metadata and
+  plans remain. Optional GPU forest-tail thinning is not included; CPU residual
+  sparsification remains unchanged. Adopted factors and device-built operators
+  complete their queued setup work before returning. Ordinary host-built paths
+  retain their timing behavior; the common benchmark harness synchronizes every
+  measured API boundary. Optional receipts/events use existing verbose or setup/
+  frontend trace flags. Specific memory, nnz and SpTRSV statistics keep their
+  own controls. No private experiment compile definition is required.
+- Validate the owned path with `GpuBoundedSelection.*`, `GpuDirectCsc.*`,
+  `GpuOperatorCsr.*`, `GpuOwnedPrefix.*`, `GpuFactorFinalize.*`, the audited round
+  and adoption fixtures, and sanitizer/leak checks. Source integration is not
+  performance acceptance: compare against both current main and frozen 320a99
+  with original-system quality, setup, solve, one-RHS total, RSS and owner memory.
 - Keep substantial mechanisms: compensated factor dropping, GPU long-row
   segmentation, critical-tail solving, incremental degrees, and connectivity
   preserving residual sparsification. Standalone residual coalescing policy

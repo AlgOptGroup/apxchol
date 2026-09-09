@@ -825,9 +825,20 @@ solve_result solve(const Eigen::SparseMatrix<double>& L,
 
         const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
         if (use_cp) { res.timings.descend("setup"); res.timings.tick(); }
+        const auto operator_setup_begin = detail::gpu_setup_diagnostic_clock::now();
         cuda_pcg gpcg;
         gpcg.setup(L, precond.factor().perm);
         if (use_cp) { res.timings("gpu_pcg_setup"); res.timings.ascend(); }
+        if (detail::gpu_setup_diagnostics()) {
+            const double operator_setup_wall_s = std::chrono::duration<double>(
+                detail::gpu_setup_diagnostic_clock::now() - operator_setup_begin).count();
+            // Host API interval, disjoint from factorize/install. The device
+            // builder completes inside setup; host fallback retains its prior
+            // behavior. Common benchmark timing adds its own completion boundary.
+            std::fprintf(stderr,
+                "[gpu-operator-setup-receipt] diagnostics=%s operator_setup_wall_s=%.17g\n",
+                detail::gpu_setup_diagnostics() ? "enabled" : "disabled", operator_setup_wall_s);
+        }
 
         if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
         int iters = 0;

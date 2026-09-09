@@ -1,7 +1,11 @@
 #include "apxchol/solver/sptrsv/cuda_dataflow.h"
 #include <cuda_fp16.h>
+#include <cub/device/device_scan.cuh>
 #include <algorithm>
 #include <cstdlib>
+#include <climits>
+#include <stdexcept>
+#include <string>
 
 // Sync-free (dataflow) GPU triangular solve with EPOCH-TAGGED values. See
 // cuda_dataflow.h for the scheme, the deadlock-freedom argument, the state
@@ -527,3 +531,239 @@ void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
 }
 
 } // namespace apxchol
+
+namespace apxchol::detail {
+namespace {
+constexpr int kPlanChunk = 256;
+constexpr int kPlanBuckets = dataflow_device_plan::kBuckets;
+struct plan_row_stats {
+    unsigned long long rows[kPlanBuckets], nnz[kPlanBuckets];
+    int max_len, error;
+};
+
+__global__ void plan_row_statistics(int m, int nnz, const int* ptr,
+                                    const float* diag, const double* inv_scale2,
+                                    plan_row_stats* out) {
+    __shared__ plan_row_stats block;
+    if (threadIdx.x == 0) block = {};
+    __syncthreads();
+    const std::size_t position = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (blockIdx.x == 0 && threadIdx.x == 0 && (ptr[0] != 0 || ptr[m] != nnz))
+        atomicOr(&block.error, 1);
+    if (position < static_cast<std::size_t>(m)) {
+        const int row = static_cast<int>(position);
+        const int lo = ptr[row], hi = ptr[row + 1];
+        if (lo < 0 || hi <= lo || hi > nnz) atomicOr(&block.error, 1);
+        else {
+            const int len = hi - lo;
+            atomicMax(&block.max_len, len);
+            for (int k = 0; k < kPlanBuckets; ++k) {
+                if (static_cast<long long>(len) < (static_cast<long long>(32 * APXCHOL_DF_PRE) << k)) break;
+                atomicAdd(&block.rows[k], 1ULL);
+                atomicAdd(&block.nnz[k], static_cast<unsigned long long>(len));
+            }
+        }
+        if (diag && (!isfinite(diag[row]) || diag[row] == 0.0f || !isfinite(inv_scale2[row])))
+            atomicOr(&block.error, 2);
+    }
+    __syncthreads();
+    if (threadIdx.x < kPlanBuckets && block.rows[threadIdx.x]) {
+        atomicAdd(&out->rows[threadIdx.x], block.rows[threadIdx.x]);
+        atomicAdd(&out->nnz[threadIdx.x], block.nnz[threadIdx.x]);
+    }
+    if (threadIdx.x == 0) {
+        atomicMax(&out->max_len, block.max_len);
+        atomicOr(&out->error, block.error);
+    }
+}
+
+// Independent row tiles avoid a scan over 32 possible incoming lane cursors.
+// Each tile closes its last plain batch. Boundaries may add plain batches,
+// but never change a row's lane-group size, accumulation order,
+// segments, or topological ticket order. Only three integer counts are scanned.
+struct plan_counts {
+    unsigned long long batches = 0, slots = 0, splits = 0;
+};
+struct add_plan_counts {
+    __host__ __device__ plan_counts operator()(const plan_counts& a,
+                                               const plan_counts& b) const {
+        return {a.batches + b.batches, a.slots + b.slots, a.splits + b.splits};
+    }
+};
+
+template<bool Emit>
+__device__ plan_counts walk_plan_chunk(
+        int m, bool reverse, const int* ptr, int split_min, int chunk,
+        unsigned long long batch_base, unsigned long long slot_base,
+        unsigned long long spec_base, int* starts, int* selectors, int4* specs) {
+    plan_counts count{};
+    int cursor = 0;
+    const long long chunk_begin = static_cast<long long>(chunk) * kPlanChunk;
+    const int begin = static_cast<int>(min(static_cast<long long>(m), chunk_begin));
+    const int end = static_cast<int>(min(static_cast<long long>(m), chunk_begin + kPlanChunk));
+    for (int q = begin; q < end; ++q) {
+        const int row = reverse ? m - 1 - q : q;
+        const int lo = ptr[row], hi = ptr[row + 1], len = hi - lo;
+        if (split_min > 0 && len - 1 > split_min) {
+            if (cursor) {
+                if constexpr (Emit) {
+                    starts[batch_base + count.batches + 1] = q;
+                    selectors[batch_base + count.batches] = -1;
+                }
+                ++count.batches;
+            }
+            constexpr int C = 32 * APXCHOL_DF_PRE;
+            const int S = min(4096LL, (static_cast<long long>(len) + C - 1) / C);
+            const long long wanted = (static_cast<long long>(len) + S - 1) / S;
+            const int segment_len = static_cast<int>((wanted + C - 1) / C * C);
+            const int segments = static_cast<int>((static_cast<long long>(len) + segment_len - 1) / segment_len);
+            if constexpr (Emit) {
+                const int first_slot = static_cast<int>(slot_base + count.slots);
+                const int first_spec = static_cast<int>(spec_base + count.slots + count.splits);
+                for (int s = 0; s < segments; ++s) {
+                    const long long a = static_cast<long long>(lo) + static_cast<long long>(s) * segment_len;
+                    specs[first_spec + s] = make_int4(row, static_cast<int>(a),
+                        static_cast<int>(min(static_cast<long long>(hi), a + segment_len)), first_slot + s);
+                    starts[batch_base + count.batches + s + 1] = q;
+                    selectors[batch_base + count.batches + s] = first_spec + s;
+                }
+                specs[first_spec + segments] = make_int4(~row, first_slot, segments, reverse ? lo : hi - 1);
+                starts[batch_base + count.batches + segments + 1] = q + 1;
+                selectors[batch_base + count.batches + segments] = first_spec + segments;
+            }
+            count.batches += segments + 1;
+            count.slots += segments;
+            ++count.splits;
+            cursor = 0;
+            continue;
+        }
+        int G = 1;
+        while (G < 32 && G * APXCHOL_DF_PRE < len) G <<= 1;
+        int aligned = (cursor + G - 1) & ~(G - 1);
+        if (aligned + G > 32) {
+            if constexpr (Emit) {
+                starts[batch_base + count.batches + 1] = q;
+                selectors[batch_base + count.batches] = -1;
+            }
+            ++count.batches;
+            aligned = 0;
+        }
+        cursor = aligned + G;
+        if (cursor == 32) {
+            if constexpr (Emit) {
+                starts[batch_base + count.batches + 1] = q + 1;
+                selectors[batch_base + count.batches] = -1;
+            }
+            ++count.batches;
+            cursor = 0;
+        }
+    }
+    if (cursor) {
+        if constexpr (Emit) {
+            starts[batch_base + count.batches + 1] = end;
+            selectors[batch_base + count.batches] = -1;
+        }
+        ++count.batches;
+    }
+    return count;
+}
+
+__global__ void plan_count_chunks(int m, bool reverse, const int* ptr,
+                                   int split_min, int chunks, plan_counts* counts) {
+    const int chunk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (chunk > chunks) return; // trailing zero gives the full exclusive prefix
+    counts[chunk] = walk_plan_chunk<false>(m, reverse, ptr, split_min, chunk,
+        0, 0, 0, nullptr, nullptr, nullptr);
+}
+__global__ void plan_emit_chunks(int m, bool reverse, const int* ptr, int split_min,
+                                 int chunks, const plan_counts* prefix,
+                                 int* starts, int* selectors, int4* specs) {
+    const int chunk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (chunk >= chunks) return;
+    const auto& p = prefix[chunk];
+    walk_plan_chunk<true>(m, reverse, ptr, split_min, chunk,
+        p.batches, p.slots, p.slots + p.splits, starts, selectors, specs);
+    if (chunk == 0) starts[0] = 0;
+}
+void plan_cuda_check(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("GPU dataflow plan: ") + operation + ": " + cudaGetErrorString(status));
+}
+} // namespace
+
+dataflow_device_plan build_dataflow_device_plan(
+        int m, bool reverse, int nnz, const int* rowptr, int split_min,
+        const float* diag, const double* inv_scale2) {
+    if (m < 0 || m == INT_MAX || nnz < m || !rowptr || split_min < -1 ||
+        static_cast<bool>(diag) != static_cast<bool>(inv_scale2))
+        throw std::invalid_argument("GPU dataflow plan: invalid dimensions or metadata");
+    dataflow_device_plan result;
+    plan_row_stats* statistics = nullptr;
+    plan_counts *counts_by_chunk = nullptr, *prefix = nullptr;
+    void* scratch = nullptr;
+    auto cleanup = [&] {
+        cudaFree(statistics); cudaFree(counts_by_chunk); cudaFree(prefix);
+        cudaFree(scratch);
+    };
+    try {
+        plan_cuda_check(cudaMalloc(&statistics, sizeof(plan_row_stats)), "allocate statistics");
+        plan_cuda_check(cudaMemset(statistics, 0, sizeof(plan_row_stats)), "clear statistics");
+        plan_row_statistics<<<std::max(1, m / 256 + (m % 256 != 0)), 256>>>(
+            m, nnz, rowptr, diag, inv_scale2, statistics);
+        plan_cuda_check(cudaGetLastError(), "validate/statistics launch");
+        plan_row_stats host_stats{};
+        plan_cuda_check(cudaMemcpy(&host_stats, statistics, sizeof(host_stats), cudaMemcpyDeviceToHost), "download statistics");
+        result.host_download_bytes = sizeof(host_stats);
+        if (host_stats.error)
+            throw std::invalid_argument("GPU dataflow plan: invalid CSR row pointers or fp16 metadata (code " + std::to_string(host_stats.error) + ")");
+        result.max_len = host_stats.max_len;
+        for (int k = 0; k < kPlanBuckets; ++k) {
+            result.rows_ge[k] = host_stats.rows[k]; result.nnz_ge[k] = host_stats.nnz[k];
+        }
+        if (split_min == -1)
+            split_min = nnz && host_stats.nnz[0] * 4 >= static_cast<unsigned long long>(nnz)
+                ? 32 * APXCHOL_DF_PRE : 96 * APXCHOL_DF_PRE;
+        if (m == 0) {
+            plan_cuda_check(cudaMalloc(&result.batch_start, sizeof(int)), "allocate empty starts");
+            plan_cuda_check(cudaMemset(result.batch_start, 0, sizeof(int)), "initialize empty starts");
+            result.bytes = sizeof(int); cleanup(); return result;
+        }
+        const int chunks = m / kPlanChunk + (m % kPlanChunk != 0);
+        const std::size_t count_bytes = static_cast<std::size_t>(chunks + 1) * sizeof(plan_counts);
+        plan_cuda_check(cudaMalloc(&counts_by_chunk, count_bytes), "allocate tile counts");
+        plan_cuda_check(cudaMalloc(&prefix, count_bytes), "allocate tile prefixes");
+        plan_count_chunks<<<(chunks + 128) / 128, 128>>>(m, reverse, rowptr, split_min, chunks, counts_by_chunk);
+        plan_cuda_check(cudaGetLastError(), "tile count launch");
+        std::size_t scratch_bytes = 0;
+        plan_cuda_check(cub::DeviceScan::ExclusiveScan(nullptr, scratch_bytes, counts_by_chunk, prefix,
+            add_plan_counts{}, plan_counts{}, chunks + 1), "tile scan size");
+        plan_cuda_check(cudaMalloc(&scratch, scratch_bytes), "allocate tile scan scratch");
+        plan_cuda_check(cub::DeviceScan::ExclusiveScan(scratch, scratch_bytes, counts_by_chunk, prefix,
+            add_plan_counts{}, plan_counts{}, chunks + 1), "tile prefix scan");
+        plan_counts counts{};
+        plan_cuda_check(cudaMemcpy(&counts, prefix + chunks, sizeof(counts), cudaMemcpyDeviceToHost), "download final counts");
+        result.host_download_bytes += sizeof(counts);
+        if (counts.batches > INT_MAX || counts.slots + counts.splits > INT_MAX ||
+            counts.slots + static_cast<unsigned long long>(m) > INT_MAX)
+            throw std::overflow_error("GPU dataflow plan exceeds int32 batch or slot capacity");
+        result.n_batches = static_cast<int>(counts.batches);
+        result.n_slots = static_cast<int>(counts.slots);
+        result.n_split = static_cast<int>(counts.splits);
+        const std::size_t start_bytes = (static_cast<std::size_t>(result.n_batches) + 1) * sizeof(int);
+        const std::size_t selector_bytes = static_cast<std::size_t>(result.n_batches) * sizeof(int);
+        const std::size_t spec_bytes = static_cast<std::size_t>(counts.slots + counts.splits) * sizeof(int4);
+        plan_cuda_check(cudaMalloc(&result.batch_start, start_bytes), "allocate batch starts");
+        plan_cuda_check(cudaMalloc(&result.batch_spec, selector_bytes), "allocate batch selectors");
+        if (spec_bytes) plan_cuda_check(cudaMalloc(&result.spec, spec_bytes), "allocate segment specs");
+        plan_emit_chunks<<<(chunks + 127) / 128, 128>>>(m, reverse, rowptr, split_min,
+            chunks, prefix, result.batch_start, result.batch_spec, result.spec);
+        plan_cuda_check(cudaGetLastError(), "emit chunk plans");
+        plan_cuda_check(cudaDeviceSynchronize(), "finish device plan");
+        result.bytes = start_bytes + selector_bytes + spec_bytes;
+        cleanup(); return result;
+    } catch (...) {
+        cleanup(); cudaFree(result.batch_start); cudaFree(result.batch_spec); cudaFree(result.spec);
+        throw;
+    }
+}
+} // namespace apxchol::detail

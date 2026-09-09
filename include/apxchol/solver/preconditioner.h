@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/checkpoint.h"
+#include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/env_knobs.h"
 #include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/factorization.h"
@@ -191,10 +192,46 @@ public:
         // only buy the few microseconds of set_options/analyzePattern; starting
         // it in a constructor would also spin up a context for callers that
         // construct a solver and never factor.
+#if defined(APXCHOL_USE_CUDA)
+        const auto factorize_install_begin = detail::gpu_setup_diagnostic_clock::now();
+#endif
         cuda_ctx::prewarm();
         n_ = A.rows();
         F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, keep_factor_);
         install_factor();
+#if defined(APXCHOL_USE_CUDA)
+        // Device adoption queues dataflow-state initialization after the last
+        // plan transfer. Complete that owned work before returning, including
+        // quiet calls. Ordinary host-built factors retain their prior behavior;
+        // complete timing boundaries belong to the common benchmark harness.
+        if (trsv_.adopted_device_factor()) {
+            const auto setup_completion = cudaDeviceSynchronize();
+            if (setup_completion != cudaSuccess)
+                throw std::runtime_error(std::string("GPU setup completion: ") +
+                                         cudaGetErrorString(setup_completion));
+            if (cp_) { cp_->descend("setup"); (*cp_)("gpu_setup_complete"); cp_->ascend(); }
+        }
+        if (detail::gpu_setup_diagnostics()) {
+            // Host API duration; device-adopted setup additionally completed its work.
+            const double factorize_install_wall_s = std::chrono::duration<double>(
+                detail::gpu_setup_diagnostic_clock::now() - factorize_install_begin).count();
+            const auto& drop = trsv_.drop_stats();
+            std::fprintf(stderr,
+                "[gpu-setup-receipt] diagnostics=%s factorize_install_wall_s=%.17g "
+                "n=%lld rounds=%zu raw_factor_nnz=%zu stored_nnz=%llu adopted=%d "
+                "fp16=%d host_factor_array_bytes=%zu adoption_download_bytes=%zu "
+                "factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu\n",
+                detail::gpu_setup_diagnostics() ? "enabled" : "disabled",
+                factorize_install_wall_s, static_cast<long long>(n_), F_.rounds.size(),
+                static_cast<std::size_t>(F_.L.nonZeros()),
+                static_cast<unsigned long long>(trsv_.stored_nnz()),
+                trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
+                F_.L.inner_.size() * sizeof(node_index) + F_.L.vals_.size() * sizeof(factor_value_t),
+                trsv_.adoption_host_download_bytes(), drop.rel,
+                static_cast<unsigned long long>(drop.dropped_threshold),
+                static_cast<unsigned long long>(drop.dropped_flush));
+        }
+#endif
         return *this;
     }
 
@@ -278,7 +315,7 @@ private:
         // setup numbers -- the benchmark cells need regenerating.
         const double cuda_init_s = cuda_ctx::ensure_context();
         if (cp_) (*cp_)("cuda_init");
-        if (std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below
+        if (detail::gpu_setup_diagnostics() && std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below
             std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                          "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
         if (F_.research_device_factor &&

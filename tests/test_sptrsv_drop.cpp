@@ -1868,4 +1868,146 @@ TEST(GpuSptrsvAdoptionDevice, InvalidStructureRollsBackOwnershipAndDestination) 
     EXPECT_TRUE(destination.adopted_device_factor());
     EXPECT_TRUE(live_device_allocation(success_probe));
 }
+
+namespace {
+apxchol::cuda_host::dataflow_plan download_device_plan(
+        const apxchol::detail::dataflow_device_plan& device,
+        test_device_allocations& memory) {
+    memory.pointers.insert(memory.pointers.end(), {device.batch_start, device.batch_spec, device.spec});
+    apxchol::cuda_host::dataflow_plan host;
+    host.batch_start = dev_download(device.batch_start, std::size_t(device.n_batches) + 1);
+    if (device.n_batches) host.batch_spec = dev_download(device.batch_spec, device.n_batches);
+    host.n_slots = device.n_slots; host.n_split = device.n_split;
+    host.spec.resize(std::size_t(device.n_slots) + device.n_split);
+    if (!host.spec.empty())
+        apxchol::detail::check_cuda(cudaMemcpy(host.spec.data(), device.spec,
+            host.spec.size() * sizeof(int4), cudaMemcpyDeviceToHost), "download device plan specs");
+    return host;
+}
+}
+
+TEST(GpuDataflowDevicePlan, TileBoundariesPreserveCoverageAndEverySegment) {
+    const int pre = apxchol::dataflow_prefetch_depth();
+    const int choices[] = {1, 8, 9, 16, 17, 32, 33, 64, 65, 128, 129, 256, 257, 769, 2050};
+    for (int m : {0, 1, 31, 255, 256, 257, 513, 4097}) {
+        for (bool reverse : {false, true}) {
+            for (int pattern = 0; pattern < 3; ++pattern) {
+                std::vector<int> len(m), ptr(std::size_t(m) + 1, 0);
+                for (int q = 0; q < m; ++q) {
+                    const int requested = pattern == 0 ? 1 : pattern == 1
+                        ? choices[(q * 73) % std::size(choices)] : (q % 31 == 0 ? q + 1 : 9);
+                    len[reverse ? m - 1 - q : q] = std::min(q + 1, requested);
+                }
+                for (int row = 0; row < m; ++row) ptr[row + 1] = ptr[row] + len[row];
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, len.data(), pre);
+                for (int threshold : {-1, 0, 1, 256, 768}) {
+                    SCOPED_TRACE(::testing::Message() << "m=" << m << " reverse=" << reverse
+                        << " pattern=" << pattern << " threshold=" << threshold);
+                    test_device_allocations memory;
+                    auto* d_ptr = memory.upload(ptr.data(), ptr.size());
+                    const auto device = apxchol::detail::build_dataflow_device_plan(
+                        m, reverse, ptr.back(), d_ptr, threshold);
+                    const auto plan = download_device_plan(device, memory);
+                    ASSERT_EQ(apxchol::cuda_host::dataflow_plan_check(plan, m, reverse, len.data(), pre), "");
+                    EXPECT_EQ(device.max_len, stats.max_len);
+                    EXPECT_LE(device.host_download_bytes, 256u);
+                    for (int k = 0; k < apxchol::cuda_host::dataflow_len_stats::kBuckets; ++k) {
+                        EXPECT_EQ(device.rows_ge[k], stats.rows_ge[k]);
+                        EXPECT_EQ(device.nnz_ge[k], stats.nnz_ge[k]);
+                    }
+                    const apxchol::cuda_host::dataflow_seg_params params{
+                        threshold == 0 ? 0 : 32 * pre,
+                        threshold < 0 ? apxchol::cuda_host::dataflow_split_threshold(stats) : threshold,
+                        4096};
+                    const auto reference = apxchol::cuda_host::dataflow_build_plan(
+                        m, reverse, ptr.data(), nullptr, len.data(), pre, params, true);
+                    ASSERT_EQ(plan.spec.size(), reference.spec.size());
+                    EXPECT_EQ(plan.n_slots, reference.n_slots);
+                    EXPECT_EQ(plan.n_split, reference.n_split);
+                    if (!plan.spec.empty()) EXPECT_EQ(std::memcmp(plan.spec.data(), reference.spec.data(),
+                        plan.spec.size() * sizeof(apxchol::cuda_host::dataflow_spec)), 0);
+                    if (m <= 256 || pattern == 0) {
+                        EXPECT_EQ(plan.batch_start, reference.batch_start);
+                        EXPECT_EQ(plan.batch_spec, reference.batch_spec);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(GpuDataflowDevicePlan, RejectsInvalidPointersAndScalingMetadata) {
+    for (const auto& ptr : std::vector<std::vector<int>>{
+            {1, 2, 3, 4, 5}, {0, 1, 1, 3, 4}, {0, 3, 2, 3, 4}, {0, 1, 2, 3, 6}}) {
+        test_device_allocations memory;
+        auto* device = memory.upload(ptr.data(), ptr.size());
+        EXPECT_THROW(apxchol::detail::build_dataflow_device_plan(4, false, 4, device, -1), std::invalid_argument);
+    }
+    for (int mode = 0; mode < 4; ++mode) {
+        const int ptr[] = {0, 1, 2, 3, 4};
+        float diag[] = {1, 1, 1, 1};
+        double scales[] = {1, 1, 1, 1};
+        if (mode == 0) diag[2] = 0;
+        if (mode == 1) diag[2] = std::numeric_limits<float>::infinity();
+        if (mode == 2) scales[1] = std::numeric_limits<double>::quiet_NaN();
+        test_device_allocations memory;
+        auto* d_ptr = memory.upload(ptr, std::size(ptr));
+        auto* d_diag = memory.upload(diag, std::size(diag));
+        auto* d_scale = memory.upload(scales, std::size(scales));
+        EXPECT_THROW(apxchol::detail::build_dataflow_device_plan(
+            4, false, 4, d_ptr, -1, d_diag, mode == 3 ? nullptr : d_scale), std::invalid_argument);
+    }
+}
+
+TEST(GpuDataflowDevicePlan, TilePackingPreservesFp32AndFp16SweepsBitForBit) {
+    const node_index n = 8194, m = n - 1;
+    for (bool hub : {false, true}) {
+        const auto factor = hub ? make_hub_tail_lower(n) : make_dominant_lower(n);
+        const df_factor F(factor, m);
+        std::vector<float> input(m);
+        for (node_index row = 0; row < m; ++row) input[row] = std::sin(row + 0.123);
+        for (bool reverse : {false, true}) {
+            const auto& ptr = reverse ? F.LT.ptr : F.Lc.ptr;
+            const auto& len = reverse ? F.lenT : F.lenL;
+            for (int threshold : {-1, 0, 1, 256}) {
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, len.data(), apxchol::dataflow_prefetch_depth());
+                const apxchol::cuda_host::dataflow_seg_params params{
+                    threshold == 0 ? 0 : 32 * apxchol::dataflow_prefetch_depth(),
+                    threshold < 0 ? apxchol::cuda_host::dataflow_split_threshold(stats) : threshold,
+                    4096};
+                const auto reference = F.plan(reverse, params);
+                test_device_allocations memory;
+                const auto device = apxchol::detail::build_dataflow_device_plan(
+                    m, reverse, ptr.back(), reverse ? F.d_Tp : F.d_Lp, threshold,
+                    F.d_diag, F.d_is2);
+                const auto plan = download_device_plan(device, memory);
+                auto host_device = upload_plan(reference);
+                memory.pointers.insert(memory.pointers.end(), {host_device.bs, host_device.sel, host_device.spec});
+                const dev_plan tile_device{device.batch_start, device.batch_spec, device.spec,
+                    device.n_batches, device.n_slots};
+                const auto words = std::size_t(m) + std::max(plan.n_slots, reference.n_slots);
+                std::vector<unsigned long long> zero_tags(words, 0);
+                const int zero_ctrl[] = {0, 0};
+                auto* tags = memory.upload(zero_tags.data(), words);
+                auto* ctrl = memory.upload(zero_ctrl, 2);
+                auto* rhs = memory.upload(input.data(), input.size());
+                auto* answer = memory.upload(input.data(), input.size());
+                unsigned epoch = 0;
+                for (bool fp16 : {false, true}) {
+                    const int resident = apxchol::dataflow_grid_size(fp16);
+                    run_sweep(F, host_device, reverse, fp16, tags, ++epoch, ctrl, resident, rhs, answer);
+                    const auto expected = dev_download(answer, m);
+                    for (int grid : {1, 7, resident}) {
+                        SCOPED_TRACE(::testing::Message() << "hub=" << hub << " reverse=" << reverse
+                            << " threshold=" << threshold << " fp16=" << fp16 << " grid=" << grid);
+                        run_sweep(F, tile_device, reverse, fp16, tags, ++epoch, ctrl, grid, rhs, answer);
+                        const auto actual = dev_download(answer, m);
+                        ASSERT_EQ(std::memcmp(expected.data(), actual.data(), m * sizeof(float)), 0);
+                        for (float value : actual) ASSERT_TRUE(std::isfinite(value));
+                    }
+                }
+            }
+        }
+    }
+}
 #endif // APXCHOL_USE_CUDA

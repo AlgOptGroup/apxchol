@@ -277,13 +277,16 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
 
     // Move the throwaway make_graph result into factorize_with_strategy's
     // by-value graph parameter — no defensive deep-copy on the dispatch path.
+    // Only this fresh make_graph result carries paired-input provenance into
+    // the internal consuming GPU route. Generic graph entry points default to
+    // full validation; no caller-provided graph receives this marker.
     auto do_factorize = [&](auto&& G) {
         if (cp) { (*cp)("make_graph"); cp->ascend(); }
         factorization F = dispatch_partitioner<factorization>(opts.is_select,
             [&]<typename P>() -> factorization {
                 P partitioner;
                 return factorize_impl(make_tree_elim(opts), partitioner,
-                    std::move(G), opts, cp, retain_host_factor);
+                    std::move(G), opts, cp, retain_host_factor, true);
             });
         F.lumped_offdiag = op.lumped();
         return F;
@@ -304,6 +307,22 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
         return do_factorize(std::move(G));
     }
     case graph_storage::vec_pool_aos: {
+#if defined(APXCHOL_USE_CUDA)
+        if (!retain_host_factor && opts.is_select == "block_greedy" &&
+            opts.exact_clique_max_degree == 0 &&
+            detail::gpu_round_shadow_requested() && detail::gpu_factor_finalize_requested() &&
+            detail::gpu_block_frontend::configured_block_mode() != detail::gpu_block_frontend::mode::disabled) {
+            if (detail::gpu_owned_csc_supported(op)) {
+                if (cp) { (*cp)("gpu_csc_eligibility"); cp->ascend(); }
+                block_greedy_partitioner partitioner;
+                auto F = factorize_impl(make_tree_elim(opts), partitioner,
+                    graph<directed_vec_pool_incidence>{}, opts, cp, false, false, &A);
+                F.lumped_offdiag = op.lumped();
+                return F;
+            }
+            if (detail::gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-csc] fallback=unsupported_stored_format before_device_mutation=1\n");
+        }
+#endif
         auto G = make_graph<graph<directed_vec_pool_incidence>>(A);
         return do_factorize(std::move(G));
     }

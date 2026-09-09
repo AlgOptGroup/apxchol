@@ -262,8 +262,8 @@ inline csr_int<V> transpose_csr(const csr_int<V>& in) {
 /// boundary; the caller separately promises that corresponding value arrays
 /// are transposes of one another.
 ///
-/// The adoption path already has to download both structures to build the
-/// current host dataflow plans. Do the complete, collision-free structural
+/// The external-capsule adoption path downloads both structures to build its
+/// host dataflow plans. Private finalized capsules instead plan on device. Do the complete, collision-free structural
 /// check over those bytes before any pointer ownership is committed instead
 /// of relying on a digest. Returns an empty string on success and a precise
 /// rejection reason otherwise. CUDA-free so malformed-boundary tests run in

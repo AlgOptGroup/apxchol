@@ -1,16 +1,13 @@
 #pragma once
 /// GPU-resident residual topology for the block-region selector.
 ///
-/// This is deliberately a narrow setup front-end: numerical elimination and
-/// factor construction stay on the CPU.  The GPU owns an unweighted COO copy
-/// of the live residual topology, rebuilds CSR after each elimination round,
-/// applies the same degree cap as the CPU partitioners, and returns selected
-/// vertex ids in candidate order. Enable it explicitly with
-/// APXCHOL_GPU_BLOCK_FRONTEND=1|on|force (unset = disabled).
-///
-/// The implementation lives in src/cuda_block_frontend.cu. The default CPU
-/// setup has no topology capture or device-allocation overhead. An explicit
-/// GPU request rejects incompatible options or an unsuccessful runtime probe.
+/// For ordinary CPU elimination, the selector owns an unweighted COO copy and
+/// rebuilds CSR after each round. The consuming GPU path instead borrows the
+/// numerical owner's immutable current CSR through a private generation token.
+/// Both routes use the same degree cap and block-region selection policy.
+/// Enable explicitly with APXCHOL_GPU_BLOCK_FRONTEND=1|on|force (unset disables).
+/// The implementation lives in src/cuda_block_frontend.cu; the default CPU setup
+/// has no topology capture or device-allocation overhead.
 
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/factorize_workspace.h"
@@ -30,6 +27,9 @@ class gpu_round_shadow_device_state;
 /// The borrowed host spans and partition_result remain valid only until the
 /// next non-const producer operation or destruction. This explicit contract
 /// avoids locks that could not protect a borrow after its returning call.
+/// When paired with a numerical GPU owner, selector calls must not overlap the
+/// owner's mutation or destruction either; a private epoch rejects serial use
+/// after the borrowed numerical generation has been retired.
 class gpu_block_frontend {
 public:
     enum class mode { disabled, forced };
@@ -62,7 +62,9 @@ public:
     gpu_block_frontend &operator=(gpu_block_frontend &&) noexcept;
 
     prepare_result prepare(std::span<const node_index> active,
-                           const partition_options &options);
+                           const partition_options &options
+                           , std::uint64_t seed = 42, std::uint64_t phase = 0
+                           );
     /// Maximum number of candidate regions that the region-scan kernel can
     /// keep resident at once (one warp per region).
     std::size_t resident_region_capacity() const;
@@ -103,6 +105,7 @@ public:
     struct transfer_stats {
         std::size_t host_update_bytes = 0;
         std::size_t resident_advances = 0;
+        std::size_t owned_residual_binds = 0;
         // Conservative extra peak from any CUB scratch growth during projection.
         std::size_t projection_scratch_peak_extra_bytes = 0;
     };
@@ -110,13 +113,25 @@ public:
 
 private:
     friend class gpu_round_shadow_device_state;
-    // Only an accepted, CPU-certified resident producer may supply these views.
+    struct owned_initialization_tag {};
+    gpu_block_frontend(node_index n, std::size_t undirected_edges,
+                       owned_initialization_tag);
+    // Generic CPU-certified resident producers retain projection and auditing.
     // The caller binds its consumed selection identity/generations before entry;
     // synchronous completion keeps the borrowed weighted state immutable/alive.
     void advance_resident(const gpu_round_shadow_incidence* incidences,
                           std::size_t directed_count,
                           const std::uint8_t* active,
                           const gpu_device_selection_content& expected);
+    // Owning generations borrow the numerical CSR instead of projecting it.
+    // The private epoch is revoked before mutation, failure, or destruction.
+    void bind_owned_residual(const gpu_round_shadow_incidence* incidences,
+                             const std::uint32_t* offsets,
+                             const std::uint8_t* active,
+                             std::size_t directed_count,
+                             const gpu_device_selection_content& expected,
+                             std::weak_ptr<const void> epoch);
+    gpu_device_selection selection_for_residual_handoff() const;
     void reset() noexcept;
     struct impl;
     std::unique_ptr<impl> p_;

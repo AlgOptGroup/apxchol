@@ -1203,8 +1203,10 @@ factorization factorize_impl(const Eliminator& elim,
                              Partitioner& partitioner,
                              graph<Incidence> G,
                              const factor_options& opts_in,
-                             checkpoint* cp, bool retain_host_factor = true) {
-    const node_index n = G.n();
+                             checkpoint* cp, bool retain_host_factor = true,
+                             bool initial_graph_is_paired = false,
+                             const Eigen::SparseMatrix<double>* initial_csc = nullptr) {
+    const node_index n = initial_csc ? static_cast<node_index>(initial_csc->rows()) : G.n();
     if (n == 0)
         return {};
 
@@ -1239,7 +1241,7 @@ factorization factorize_impl(const Eliminator& elim,
     // is positive definite (not just semidefinite like a Laplacian).
     // Note: make_graph already filters out FP noise (excess < diag * 1e-12),
     // so any remaining positive excess is genuine.
-    for (node_index v = 0; v < n; ++v) {
+    if (!initial_csc) for (node_index v = 0; v < n; ++v) {
         if (work.excess(v) > 0.0) { result.sddm = true; break; }
     }
     if (cp) (*cp)("sddm_scan");
@@ -1258,7 +1260,7 @@ factorization factorize_impl(const Eliminator& elim,
         }
     }
     std::vector<detail::factor_col> factor_cols;
-    factor_cols.reserve(n);
+    bool owned_factor_metadata = false;
     auto verify_shadow_round = [&](std::size_t factor_base) {
         if (!gpu_round_shadow.active()) return;
         detail::gpu_round_shadow_digest streamed_entries;
@@ -1291,6 +1293,16 @@ factorization factorize_impl(const Eliminator& elim,
         is_vec_pool_incidence_v<Incidence> &&
         std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
     std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
+    if (initial_csc) {
+        if constexpr (gpu_block_frontend_eligible &&
+                      std::is_same_v<Incidence, directed_vec_pool_incidence>) {
+            if (!omit_shadow_factor_payload)
+                throw std::logic_error("direct CSC initialization requires consuming GPU setup");
+            result.sddm = gpu_round_shadow.initialize_owned_csc(
+                detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend);
+            if (cp) (*cp)("gpu_csc_initialize");
+        } else throw std::logic_error("direct CSC initialization has an unsupported strategy");
+    }
     const auto gpu_frontend_mode =
         detail::gpu_block_frontend::configured_block_mode();
     if constexpr (!gpu_block_frontend_eligible) {
@@ -1299,7 +1311,7 @@ factorization factorize_impl(const Eliminator& elim,
                 "the GPU setup front-end requires block_greedy, pooled "
                 "graph storage and the standard tree sampler");
     } else {
-        if (gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled) {
+        if (!initial_csc && gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled) {
             if (opts.exact_clique_max_degree != 0)
                 throw std::invalid_argument(
                     "the GPU setup front-end requires the default "
@@ -1332,30 +1344,95 @@ factorization factorize_impl(const Eliminator& elim,
 #if defined(APXCHOL_USE_CUDA)
     if constexpr (gpu_block_frontend_eligible &&
                   std::is_same_v<Incidence, directed_vec_pool_incidence>) {
-        // Bounded experimental ownership milestone: an internal consuming
-        // finalizer may run up to two device-owned rounds before one ordered
-        // handback. Public/exported factors retain their CPU-audited route.
-        // This is BEFORE every CPU degree/cache/selection structure below.
+        // A forced consuming factorization owns every numerical round on the
+        // device, including the under-occupied tail. CPU occupancy/yield exits
+        // are not applicable when the CPU graph is intentionally stale.
+        // Public/exported factors retain their ordinary CPU-audited route.
         if (omit_shadow_factor_payload && gpu_frontend) {
-            std::size_t owned_rounds = 0, previous_nnz = 0;
+            std::size_t previous_nnz = 0;
+            bool sparsification_attempted = false;
+            const char* sparse_value = std::getenv("APXCHOL_RESIDUAL_SPARSIFY");
+            const bool sparse_enabled = !sparse_value || !*sparse_value ||
+                std::strcmp(sparse_value, "0") != 0;
             result.peak_graph_bytes = std::max(result.peak_graph_bytes, work.memory_bytes());
-            for (; owned_rounds < 2 && active.size() > 2; ++owned_rounds) {
-                const auto prep = gpu_frontend->prepare(active, opts.partition);
-                if (prep.candidate_count <= gpu_frontend->resident_region_capacity()) break;
-                const auto part = gpu_frontend->select_block_greedy();
+            while (!active.empty()) {
+                const auto prep = gpu_frontend->prepare(active, opts.partition
+                    , opts.seed, ws.round_index
+                );
+                auto part = gpu_frontend->select_block_greedy();
+                if (part.data.empty())
+                    throw std::runtime_error("GPU-owned factorization selection made no progress");
                 const double min_yield = detail::adaptive_is_yield_fraction(
                     opts.min_is_fraction, active.size(), prep.average_degree, residual_thresh);
-                if (part.data.empty() || part.data.size() >= active.size() - 1 ||
+                if (sparse_enabled && !sparsification_attempted &&
                     detail::selection_should_handoff(part.num_regions(), part.num_vertices(),
-                        prep.candidate_count, active.size(), min_yield,
-                        residual_thresh, opts.omp_threshold)) break;
+                        prep.candidate_count, active.size(), min_yield, residual_thresh,
+                        opts.omp_threshold)) {
+                    // This is a preview, not an eliminated/countable round.
+                    // Capture its gate inputs before a possible frontend replacement.
+                    sparsification_attempted = true;
+                    const auto handoff = part.num_vertices();
+                    part.clear();
+                    double distinct_degree = 0.0;
+                    bool worthwhile = false;
+                    if (active.size() > residual_thresh && handoff) {
+                        distinct_degree = gpu_round_shadow.has_owned_residual()
+                            ? gpu_round_shadow.probe_owned_distinct_degree(active, *gpu_frontend)
+                            : detail::residual_coalescer<Incidence>::sample(work, active).avg_distinct_degree;
+                        worthwhile = detail::residual_sparsify_worthwhile(active.size(),
+                            residual_thresh, handoff, distinct_degree);
+                    }
+                    if (detail::gpu_setup_diagnostics())
+                        std::fprintf(stderr, "[gpu-owned-sparsify-gate] round=%zu active=%zu "
+                            "handoff=%zu avg_distinct_degree=%.17g attempted=1 worthwhile=%d\n",
+                            ws.round_index, active.size(), handoff, distinct_degree, int(worthwhile));
+                    if (worthwhile) {
+                        const auto sparse_seed = opts.seed ^ ws.round_index;
+                        if (gpu_round_shadow.has_owned_residual()) {
+                            const auto stats = gpu_round_shadow.sparsify_owned_residual(*gpu_frontend, sparse_seed);
+                            if (detail::gpu_setup_diagnostics())
+                                std::fprintf(stderr, "[gpu-owned-sparsify] implementation=device round=%zu "
+                                    "seed=%llu physical_before=%zu distinct_before=%zu kept=%zu backbone=%zu "
+                                    "expected=%.17g min_p=%.17g max_inv_p=%.17g "
+                                    "scalar_download_bytes=%zu peak_device_bytes=%zu\n",
+                                    ws.round_index, static_cast<unsigned long long>(sparse_seed),
+                                    stats.physical_before, stats.distinct_before, stats.kept_edges,
+                                    stats.backbone_edges, stats.expected_kept_edges,
+                                    stats.min_offtree_probability, stats.max_inverse_probability,
+                                    stats.scalar_download_bytes, stats.peak_device_bytes);
+                        } else {
+                            // Generic round zero still owns its host graph. Preserve
+                            // that fallback before any device numerical import.
+                            gpu_frontend.reset();
+                            const auto stats = detail::residual_coalescer<Incidence>::sparsify(
+                                work, active, detail::kResidualSparsifyKeepProbability, sparse_seed);
+                            std::vector<detail::gpu_topology_edge> topology;
+                            for (node_index v : active) for (auto idx : work.adj(v)) {
+                                const auto u = work.edge_target(idx, v);
+                                if (v < u) topology.push_back({v, u});
+                            }
+                            gpu_frontend = std::make_unique<detail::gpu_block_frontend>(n, topology);
+                            if (detail::gpu_setup_diagnostics())
+                                std::fprintf(stderr, "[gpu-owned-sparsify] implementation=host_initial round=%zu "
+                                    "seed=%llu physical_before=%zu distinct_before=%zu kept=%zu backbone=%zu\n",
+                                    ws.round_index, static_cast<unsigned long long>(sparse_seed),
+                                    stats.physical_before, stats.distinct_before, stats.kept_edges, stats.backbone_edges);
+                        }
+                        if (cp) (*cp)("gpu_owned_sparsify");
+                    }
+                    // Reprepare even when the one-shot traffic test says keep.
+                    // No RNG phase, append position or numerical generation advances.
+                    continue;
+                }
                 const auto report = gpu_round_shadow.run_owned_prefix_round(
-                    work, part.data, gpu_frontend->device_selection(), opts.seed);
+                    work, part.data, gpu_frontend->device_selection(), opts.seed, initial_graph_is_paired);
+                // The initial input is no longer needed after the first import.
+                // No later round, CPU fallback, or handback reads this graph.
+                if (ws.round_index == 0) work = graph<Incidence>();
                 const std::size_t nnz = report.factor_log_columns + report.factor_log_entries;
                 result.rounds.push_back({active.size(), part.num_regions(), prep.average_degree,
                     cp ? nnz - previous_nnz : 0, cp ? nnz : 0});
                 previous_nnz = nnz;
-                gpu_round_shadow.advance_selector(*gpu_frontend);
                 // The device selector returns natural active-id order. This
                 // is host metadata maintenance, not a read of the stale graph.
                 std::size_t selected = 0;
@@ -1367,20 +1444,22 @@ factorization factorize_impl(const Eliminator& elim,
                 });
                 if (selected != part.data.size())
                     throw std::logic_error("GPU-owned prefix selection lost natural active order");
+                if (report.active_count != active.size())
+                    throw std::logic_error("GPU-owned factorization active count diverged");
+                if (!active.empty()) gpu_round_shadow.advance_selector(*gpu_frontend);
                 ++ws.round_index;
             }
-            if (owned_rounds) {
-                gpu_round_shadow.materialize_owned_prefix(work, active, factor_cols);
-                // No stale occupancy fallback can touch work. Subsequent CPU
-                // rounds, sparsification and peel start from this materialized
-                // graph with freshly constructed caches and retained payloads.
-                gpu_frontend.reset();
-                for (auto& t : ws.threads) t.retain_factor_payload = true;
-                if (cp) (*cp)("gpu_owned_prefix_and_handback");
-            }
+            gpu_round_shadow.complete_owned_factorization(result.perm, result.L);
+            owned_factor_metadata = true;
+            gpu_frontend.reset();
+            if (cp) (*cp)("gpu_owned_factorization");
         }
     }
 #endif
+
+    // Complete device ownership has no CPU factor columns to materialize.
+    // Other routes retain the same reservation before their first elimination.
+    if (!active.empty()) factor_cols.reserve(n);
 
     // The partitioner's view of the run-constant services, the shared
     // selection structure, and the degree-prepass scratch (all owned here).
@@ -2068,7 +2147,7 @@ factorization factorize_impl(const Eliminator& elim,
     // off-diagonal count + one diagonal per column -- what assemble_csc builds).
     if (const char* e = std::getenv("APXCHOL_MEM_DUMP"); e && *e) {
         const double MB = 1.0 / (1024.0 * 1024.0);
-        size_t nnz = factor_cols.size();
+        size_t nnz = owned_factor_metadata ? result.L.nonZeros() : factor_cols.size();
         for (const auto& c : factor_cols) nnz += c.entry_count;
         double live_frac = -1.0;
         if constexpr (is_vec_pool_incidence_v<Incidence> ||
@@ -2136,29 +2215,35 @@ factorization factorize_impl(const Eliminator& elim,
 #else
     (void)retain_host_factor;
 #endif
-    detail::build_csc(result, factor_cols, n, cp, build_host_values);
+    if (!owned_factor_metadata)
+        detail::build_csc(result, factor_cols, n, cp, build_host_values);
 #if defined(APXCHOL_USE_CUDA)
     if (finalize_on_device) {
-        result.research_device_factor = gpu_round_shadow.finalize_fp32(
+        result.research_device_factor = gpu_round_shadow.finalize_device_factor(
             factor_cols, result.perm, result.sddm ? n : n - 1);
         if (cp) (*cp)("gpu_factor_finalize");
-        std::size_t payload_bytes = 0, omitted_payload_bytes = 0;
-        for (const auto& column : factor_cols) {
-            const std::size_t bytes = column.entry_count * sizeof(detail::factor_entry);
-            (column.entries ? payload_bytes : omitted_payload_bytes) += bytes;
+        if (detail::gpu_setup_diagnostics()) {
+            std::size_t payload_bytes = 0;
+            std::size_t omitted_payload_bytes = owned_factor_metadata
+                ? (static_cast<std::size_t>(result.L.nonZeros()) - n) * sizeof(detail::factor_entry)
+                : 0;
+            for (const auto& column : factor_cols) {
+                const std::size_t bytes = column.entry_count * sizeof(detail::factor_entry);
+                (column.entries ? payload_bytes : omitted_payload_bytes) += bytes;
+            }
+            std::fprintf(stderr,
+                "[gpu-factor-assembly] host_csc=%s host_csc_array_bytes=%zu "
+                "host_metadata_bytes=%zu raw_factor_nnz=%zu "
+                "host_factor_entry_alloc_bytes=%zu host_factor_entry_write_bytes=%zu "
+                "host_factor_entry_omitted_bytes=%zu\n",
+                build_host_values ? "retained" : "omitted",
+                result.L.inner_.capacity() * sizeof(node_index) +
+                    result.L.vals_.capacity() * sizeof(factor_value_t),
+                result.perm.size() * sizeof(node_index) +
+                    result.L.outer_.size() * sizeof(edge_index),
+                static_cast<std::size_t>(result.L.nonZeros()),
+                payload_bytes, payload_bytes, omitted_payload_bytes);
         }
-        std::fprintf(stderr,
-            "[gpu-factor-assembly] host_csc=%s host_csc_array_bytes=%zu "
-            "host_metadata_bytes=%zu raw_factor_nnz=%zu "
-            "host_factor_entry_alloc_bytes=%zu host_factor_entry_write_bytes=%zu "
-            "host_factor_entry_omitted_bytes=%zu\n",
-            build_host_values ? "retained" : "omitted",
-            result.L.inner_.capacity() * sizeof(node_index) +
-                result.L.vals_.capacity() * sizeof(factor_value_t),
-            result.perm.size() * sizeof(node_index) +
-                result.L.outer_.size() * sizeof(edge_index),
-            static_cast<std::size_t>(result.L.nonZeros()),
-            payload_bytes, payload_bytes, omitted_payload_bytes);
     }
 #endif
     // The per-column ranges and their monotonic resources are consumed: free

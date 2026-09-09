@@ -36,6 +36,26 @@
 // p.Ap partial is deterministic too.
 namespace apxchol::pcg_cuda {
 
+// Private experiment ABI. Input arrays are valid borrowed host arrays of
+// lengths n+1,nnz,nnz,n; permutation is the factor's validated bijection.
+// Accept only unique sorted fully paired CSC. Canonical LOWER values and
+// sorted permuted rows match the existing host constructor, including zeros.
+// precision: -1=AUTO exact-fp32,0=fp64,1=forced-fp32. Unsupported input returns
+// false without publishing output. CUDA/allocation errors throw after freeing
+// temporary allocations. Success transfers cudaFree ownership to the caller.
+struct operator_csr {
+    int* row_ptr = nullptr;
+    int* col_idx = nullptr;
+    double* values_f64 = nullptr;
+    float* values_f32 = nullptr;
+    int nnz = 0;
+    bool fp32 = false;
+};
+bool try_build_permuted_operator_csr(
+    int n, int nnz, const int* host_outer, const int* host_inner,
+    const double* host_values, const std::uint32_t* host_perm,
+    int precision, operator_csr& output);
+
 /// Threads per block of every kernel here, and the fixed upper bound on the
 /// grid (blocks loop grid-stride over the remaining work); the partials
 /// buffer the caller provides must hold kMaxBlocks doubles.
