@@ -73,9 +73,11 @@ public:
         destroy();
         n_ = static_cast<int64_t>(L.rows());
 
-        // Retain the existing RHS/solution permutation before taking ownership
-        // of any new device arrays (this host allocation can throw).
-        h_perm_.assign(perm.begin(), perm.begin() + n_);
+        // Keep host CSR storage alive through iterate/pinned-buffer allocation,
+        // as in ordinary setup. Empty owners allocate nothing on the device route.
+        std::vector<int> h_row_ptr;
+        std::unique_ptr<int[]> h_col_idx;
+        std::unique_ptr<double[]> h_vals;
         bool device_operator = false;
         if constexpr (sizeof(node_index) == sizeof(std::uint32_t)) {
             if (detail::gpu_round_shadow_requested() &&
@@ -90,6 +92,8 @@ public:
                     if (std::string(e) == "0") precision = 0;
                     else if (*e) precision = 1;
                 }
+                // Allocate the permutation before accepting device ownership.
+                h_perm_.assign(perm.begin(), perm.begin() + n_);
                 pcg_cuda::operator_csr prepared;
                 device_operator = pcg_cuda::try_build_permuted_operator_csr(
                     static_cast<int>(n_), static_cast<int>(L.nonZeros()),
@@ -105,14 +109,13 @@ public:
         if (!device_operator) {
             // Permute and build full-symmetric CSR in one go (host side, once).
             // A_perm[i,j] = L[iperm[i], iperm[j]] where iperm is perm.inverse().
-            std::vector<int> h_row_ptr;
             // col_idx / vals are allocated UNINITIALIZED by the builder (PASS 2
             // writes every slot exactly once) -- see the note there.
-            std::unique_ptr<int[]>    h_col_idx;
-            std::unique_ptr<double[]> h_vals;
             bool op_fp32_exact = false;   // set by the builder: A is exactly fp32-representable
             build_permuted_full_symmetric_csr(L, perm, h_row_ptr, h_col_idx, h_vals,
                                               nnz_, op_fp32_exact);
+            // Preserve ordinary setup's CSR-before-permutation allocation order.
+            h_perm_.assign(perm.begin(), perm.begin() + n_);
 
             // Upload matrix to device.
             if (std::getenv("APXCHOL_GPU_MEM_DEBUG")) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
