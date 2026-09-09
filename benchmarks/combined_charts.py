@@ -411,8 +411,7 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
                 vals, is_mem=is_mem, timeouts=tmo, oom=oomf, failed=failf,
                 nconv=nconvf, na=naf)
             if keep:
-                gpu_tag = ("GPU setup+solve" if gl and "(GPU-owned)" in gl else
-                           "GPU solve" if name.startswith("apxchol/") else "GPU")
+                gpu_tag = "GPU solve" if gl == "apxchol/bg (GPU)" else "GPU"
                 rows_data.append((f"{name} ({gpu_tag})" if mode == "combined" else name,
                                   vals, tmo, tcaps, oomf, failf, nconvf, naf, "gpu"))
     if not rows_data or not mats:
@@ -524,10 +523,11 @@ def select_sampler_comparison(enabled=True):
     ENC = _HISTORICAL_ENC
     if enabled:
         SOLVERS = [
-            ("apxchol/GKS q=0.2", "#0b5394", cpu.APX_DEFAULT, "apxchol/GKS q=0.2 (GPU-owned)"),
+            ("apxchol/GKS q=0.2", "#0b5394", cpu.APX_DEFAULT, "apxchol/GKS q=0.2 (GPU)"),
             ("apxchol/trace-cycle q=0.2", "#3d7ebf", "apxchol/trace-cycle", None),
-            ("apxchol/GKS q=0.8", "#073763", None, "apxchol/GKS q=0.8 (GPU-owned)"),
-        ] + [row for row in _HISTORICAL_SOLVERS if not row[0].startswith("apxchol/")]
+            ("apxchol/GKS q=0.8", "#073763", None, "apxchol/GKS q=0.8 (GPU)"),
+        ] + [row for row in _HISTORICAL_SOLVERS
+             if not row[0].startswith("apxchol/") and row[0] != "CMG (MATLAB)†"]
         ENC += "\napxchol GPU bars use GPU-owned GKS setup; q=0.2 and q=0.8 stay separate"
 
 

@@ -121,6 +121,7 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         '[Common protocol](../README.md)', '',
         '| View | Figures |', '|---|---|',
         '| Total time | '+links('combined_overview_grids*.png')+', '+links('combined_overview_ipm*.png')+', '+links('combined_overview_suitesparse*.png')+' |',
+        '| Solve time | '+links('combined_solve_grids*.png')+', '+links('combined_solve_ipm*.png')+', '+links('combined_solve_suitesparse*.png')+' |',
         '| CPU totals | '+links('combined_overview_cpu_*.png')+' |',
         '| GPU totals | '+links('combined_overview_gpu_*.png')+' |',
         '| CPU setup and solve | '+links('combined_breakdown_cpu_*.png')+' |',
@@ -131,8 +132,10 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         'speed between machines. Timeout, numerical non-convergence, execution failure, '
         'unsupported input, and missing measurement remain distinct.', '',
         'The 2D grids have a coefficient jump from 1 to 0.01. The 3D grids have unit weights. '
-        'Native CMG is labelled as a serial packed implementation; canonical MATLAB CMG '
-        'and serial Julia reference solvers retain their own labels and timing boundaries.', '',
+        'Native CMG is labelled as a serial packed implementation; serial Julia references '
+        'retain their own labels and timing boundaries. '
+        + ('Canonical MATLAB CMG is outside the current comparison.' if sampler_comparison
+           else 'Canonical MATLAB CMG retains its historical label.'), '',
         'Status counts: '+', '.join(f'{key}: {value}' for key,value in sorted(counts.items()))+'.', '']
     if sampler_comparison:
         lines += ['CPU rows compare GKS and trace-cycle at degree quantile 0.2; GPU-owned '
@@ -146,8 +149,11 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
     # Additional breakdowns remain linked above rather than duplicating them.
     for title, name in (
         ('Grid total times', 'combined_overview_grids.png'),
+        ('Grid solve times', 'combined_solve_grids.png'),
         ('IPM total times', 'combined_overview_ipm.png'),
+        ('IPM solve times', 'combined_solve_ipm.png'),
         ('SuiteSparse total times', 'combined_overview_suitesparse.png'),
+        ('SuiteSparse solve times', 'combined_solve_suitesparse.png'),
         ('CPU setup scaling', 'threads_setup_speedup.png'),
         ('CPU converged-solve scaling', 'threads_solve_speedup.png'),
         ('GPU setup scaling', 'threads_gpu_setup_speedup.png'),

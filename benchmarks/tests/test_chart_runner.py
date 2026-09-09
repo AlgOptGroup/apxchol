@@ -733,27 +733,31 @@ class SamplerProfileTest(unittest.TestCase):
                 for device, module in [("cpu", cpu), ("gpu", gpu)]
                 for (solver, config), label in module.LABELS.items() if label in module.ORDER}
 
-    def test_twenty_declared_rows_keep_all_sixteen_competitors(self):
+    def test_nineteen_declared_rows_keep_packed_cmg_and_fifteen_competitors(self):
         historical = self.series()
         self.assertEqual(len(historical), 18)
         combined.select_sampler_comparison()
         current = self.series()
-        self.assertEqual(len(current), 20)
+        self.assertEqual(len(current), 19)
         self.assertEqual(len(rc.MATRICES), 27)
-        self.assertEqual({row for row in historical if row[1] != "apxchol_v1"},
+        self.assertEqual({row for row in historical if row[1] not in {"apxchol_v1", "cmg"}},
                          {row for row in current if row[1] != "apxchol_v1"})
         self.assertNotIn(("gpu", "apxchol_v1", "bg+tree[vec_pool_aos]"), current)
         self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]"), current)
         self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]"), current)
         self.assertNotIn(("gpu", "apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"), current)
         self.assertEqual(gpu.LABELS[("apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]")],
-                         "apxchol/GKS q=0.2 (GPU-owned)")
+                         "apxchol/GKS q=0.2 (GPU)")
         self.assertEqual(gpu.LABELS[("apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]")],
-                         "apxchol/GKS q=0.8 (GPU-owned)")
+                         "apxchol/GKS q=0.8 (GPU)")
         q08 = next(row for row in combined.SOLVERS if row[0] == "apxchol/GKS q=0.8")
         self.assertIsNone(q08[2])
-        self.assertEqual(q08[3], "apxchol/GKS q=0.8 (GPU-owned)")
-        self.assertIn(("cpu", "cmg", ""), current)
+        self.assertEqual(q08[3], "apxchol/GKS q=0.8 (GPU)")
+        self.assertNotIn(("cpu", "cmg", ""), current)
+        self.assertIn(("cpu", "cmg_packed", "original-operator"), current)
+        self.assertIn(("cmg", ""), cpu.LABELS)
+        self.assertNotIn("CMG (MATLAB)†", cpu.POSTER_SOLVERS)
+        self.assertNotIn("CMG (MATLAB)†", {row[0] for row in combined.SOLVERS})
         self.assertNotIn(("cpu", "apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"), current)
         rc.require_injective_labels(cpu.LABELS, "CPU")
         rc.require_injective_labels(gpu.LABELS, "GPU")
@@ -773,7 +777,7 @@ class SamplerProfileTest(unittest.TestCase):
             current = json.loads((root / "samplers/coverage.json").read_text())
             restored = json.loads((root / "historical/coverage.json").read_text())
         self.assertEqual((current["series_profile"], current["expected_headline_cells"]),
-                         ("sampler-comparison", 540))
+                         ("sampler-comparison", 513))
         self.assertEqual((restored["series_profile"], restored["expected_headline_cells"]),
                          ("historical-default", 486))
         self.assertEqual(self.series(), historical)
@@ -799,7 +803,7 @@ class SamplerProfileTest(unittest.TestCase):
             r["metrics"] = {}
             gpu.validate_owned_route(r)
 
-    def test_snapshot_keeps_failures_metadata_and_missing_cmg_without_bridge_substitution(self):
+    def test_snapshot_keeps_failures_metadata_without_matlab_cmg_or_bridge_substitution(self):
         import csv
         import render_snapshot
         mats = list(rc.MATRICES)
@@ -824,18 +828,31 @@ class SamplerProfileTest(unittest.TestCase):
         bridge = record("complete", 0.001, threads=72, solver="apxchol_v1")
         bridge["cell"].update(matrix_id=mats[6], device="gpu", config="bg+tree[vec_pool_aos]")
         records.append(bridge)
+        matlab_cmg = record("complete", 0.001, threads=72, solver="cmg")
+        matlab_cmg["cell"].update(matrix_id=mats[0])
+        records.append(matlab_cmg)
         with tempfile.TemporaryDirectory() as path, \
              mock.patch.object(chart_cells, "load_current_records", return_value=(records, {})), \
              mock.patch.object(render_snapshot.subprocess, "run") as run:
             out = pathlib.Path(path)
+            (out / "figures").mkdir()
+            image_names = [f"combined_{metric}_{family}.png"
+                           for family in ("grids", "ipm", "suitesparse")
+                           for metric in ("overview", "solve")]
+            for name in image_names:
+                (out / "figures" / name).touch()
             render_snapshot.render(out / "TEST-ONLY-CELLS", out, 72, "TEST ONLY", sampler_comparison=True)
+            readme = (out / "README.md").read_text()
+            for name in image_names:
+                self.assertIn(f"](figures/{name})", readme)
+            self.assertEqual(readme.count("!["), 6)
             coverage = json.loads((out / "coverage.json").read_text())
             with (out / "results.csv").open() as handle:
                 rows = list(csv.DictReader(handle))
-        self.assertEqual(coverage["expected_headline_cells"], 540)
+        self.assertEqual(coverage["expected_headline_cells"], 513)
         self.assertEqual(coverage["present"], 6)
-        self.assertEqual(len(coverage["missing"]), 534)
-        self.assertEqual(sum(row["solver"] == "cmg" for row in coverage["missing"]), 27)
+        self.assertEqual(len(coverage["missing"]), 507)
+        self.assertEqual(sum(row["solver"] == "cmg" for row in coverage["missing"]), 0)
         self.assertEqual({row["status"] for row in rows},
                          {"complete", "failed", "timeout", "not_converged", "oom", "n/a"})
         measured = next(row for row in rows if row["status"] == "complete")

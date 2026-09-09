@@ -768,8 +768,9 @@ def _pick(recs, fam, mat, lab):
 
 def summary_md(recs, path):
     fams = sorted({r["cell"]["family"] for r in recs})
-    lines = [f"# Benchmark summary — t{CHART_THREADS}, tol 1e-8, original singular L (per-solver grounding; ParAC per-component-consistent RHS scored vs original L, CMG reg-rel)\n",
-             "`† CMG (MATLAB)` = canonical Koutis CMG (MEX, matlab-deps container). MATLAB-pcg wall-time isn't cross-language-comparable, so its **iteration count** is the comparable signal — see below.",
+    lines = [f"# Benchmark summary — t{CHART_THREADS}, tol 1e-8, original operator\n",
+             *(["`† CMG (MATLAB)` = canonical Koutis CMG (MEX, matlab-deps container). MATLAB-pcg wall-time isn't cross-language-comparable, so its **iteration count** is the comparable signal — see below."]
+               if "CMG (MATLAB)†" in ORDER else []),
              "Blank = not run; `X` = ran but did not reach 1e-8; `T` = timed out "
              "without a recoverable cap; `T≥seconds` = timed out at the exact cap "
              "persisted by the runner; `—` = solver doesn't support "
@@ -825,10 +826,10 @@ def select_sampler_comparison(enabled=True):
     APX_SERIES = ([APX_DEFAULT, "apxchol/trace-cycle"] if enabled
                   else list(_HISTORICAL_APX_SERIES))
     ORDER = (APX_SERIES + [label for label in _HISTORICAL_ORDER
-                          if not label.startswith("apxchol/")]
+                          if not label.startswith("apxchol/") and label != "CMG (MATLAB)†"]
              if enabled else list(_HISTORICAL_ORDER))
     POSTER_SOLVERS = (APX_SERIES + [label for label in _HISTORICAL_POSTER_SOLVERS
-                                  if not label.startswith("apxchol/")]
+                                  if not label.startswith("apxchol/") and label != "CMG (MATLAB)†"]
                       if enabled else list(_HISTORICAL_POSTER_SOLVERS))
 
 
