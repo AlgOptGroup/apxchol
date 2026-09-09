@@ -668,6 +668,45 @@ class CompactScalingPlotTest(unittest.TestCase):
             self.assertEqual(values[2], 3 if "speedup" in name else 4)
             self.assertEqual("ideal" in labels, "speedup" in name)
 
+    def test_phase_control_gap_preserves_raw_export_and_unflagged_phases(self):
+        import csv
+        import math
+        from matplotlib.figure import Figure
+        records = []
+        for threads, value in [(1, 10), (2, 8), (4, 5)]:
+            row = record("complete", 2 * value, threads=threads, solver="solver")
+            row["cell"]["label"] = "A"
+            row["metrics"].update(setup_s=value, solve_s=value)
+            row["provenance"] = {"git_sha": "fresh"}
+            if threads == 2:
+                row["provenance"]["valid_ratios"] = {"solve_s": {"valid": False}}
+            records.append((str(threads), row))
+        captured = {}
+        def capture(fig, filename, **kwargs):
+            captured[pathlib.Path(filename).name] = list(fig.axes[0].lines[0].get_ydata())
+        with tempfile.TemporaryDirectory() as out, \
+             mock.patch.object(thread_scaling, "_scaling_records", return_value=records), \
+             mock.patch.object(thread_scaling, "MATS", [("m", "audit", "", False, False)]), \
+             mock.patch.object(thread_scaling, "CPP", [("A", "solver", "")]), \
+             mock.patch.object(thread_scaling, "THREADS", [1, 2, 4]), \
+             mock.patch.object(Figure, "savefig", capture):
+            thread_scaling.charts(out, compact=True)
+            destination = pathlib.Path(out) / "raw.csv"
+            thread_scaling.export_csv(str(destination))
+            with destination.open() as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual(len(captured), 4)
+        for name, values in captured.items():
+            self.assertEqual(math.isnan(values[1]), "solve" in name)
+            self.assertEqual(values[0], 1 if "speedup" in name else 10)
+            self.assertEqual(values[2], 2 if "speedup" in name else 5)
+            if "setup" in name:
+                self.assertEqual(values[1], 1.25 if "speedup" in name else 8)
+        self.assertEqual(rows[1]["solve_s"], "8")
+        self.assertEqual(rows[1]["solve_ratio_valid"], "False")
+        self.assertEqual(rows[1]["setup_ratio_valid"], "")
+        self.assertEqual(records[1][1]["metrics"]["solve_s"], 8)
+
     def test_compact_rejects_more_than_three_panels(self):
         with mock.patch.object(thread_scaling, "_scaling_records", return_value=[]), \
              mock.patch.object(thread_scaling, "MATS", [(str(i),) for i in range(4)]):

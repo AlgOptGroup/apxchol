@@ -18,7 +18,8 @@ Totals: [grids](figures/combined_overview_grids.png) ·
 
 Three representative matrices, T=1/2/4/8/16/36/72: **84 identities, 78 complete,
 2 whole-cell timeouts, 4 unattempted**. Sources: apxchol `1a782c8d` (4619429),
-AMGCL/Hypre `ea01e2ff` (4619591), ParAC adapter `8827024f` (4619591/4622020).
+AMGCL/Hypre `ea01e2ff` (4619591), corrected private ParAC adapter
+(6 endpoints from 4623922 + 15 continuation points from 4624041).
 Each curve uses its own campaign’s T1; comparisons between solvers are not
 interleaved A/B tests. Log axes emphasize ratios; dashed lines show ideal scaling.
 
@@ -32,21 +33,25 @@ T72 seconds, **setup / solve**:
 
 | Matrix | apxchol | AMGCL | Hypre | ParAC Graph |
 |---|---:|---:|---:|---:|
-| grid_2000 | 0.144 / 0.182 | 0.305 / 0.103 | 1.596 / 0.410 | 28.613 / 3.905 |
-| iter0040 | 0.211 / 0.120 | 7.826 / 0.213 | 0.425 / 0.208 | 12.014 / 1.257 |
-| as-Skitter | 0.514 / 0.247 | 1.842 / 4.907 | unattempted | 62.893 / 1.580 |
+| grid_2000 | 0.144 / 0.182 | 0.305 / 0.103 | 1.596 / 0.410 | 8.511 / 3.904 |
+| iter0040 | 0.211 / 0.120 | 7.826 / 0.213 | 0.425 / 0.208 | 3.803 / 1.200 |
+| as-Skitter | 0.514 / 0.247 | 1.842 / 4.907 | unattempted | 42.728 / 1.557 |
 
-**ParAC comparisons are provisional pending adapter/accounting repair.** Charged
-preparation is 24.837/10.452/58.097s; logged AMD is only 0.721/0.356/32.363s.
-The remainder mixes necessary transformations with avoidable ASCII interchange
-and audit work; it is not an isolated I/O measurement. Published values remain
-unchanged, not retrospectively discounted. The portable-cpp solve is serial;
-requested factorization threads do not establish measured worker utilization.
+ParAC includes required preparation, native adapter, factorization and workspace;
+common input read, audit exports and final serialization are separate. Preparation
+alone costs 4.726/2.251/37.915s (grid/IPM/Skitter), explaining much of the weak
+setup scaling. Each matrix's preparation was measured once and reused across T;
+its variability is unknown. Portable PCG is serial.
+
+All 84 ParAC warmup/retained solves passed. Solve plots retain control-failure
+gaps at Skitter T2 and IPM T36; CSV retains observations and validity flags.
+These are measured **private-adapter** results. The maintained adapter passed a
+separate correctness smoke, but its performance equivalence is unmeasured.
 
 Skitter Hypre T2 completed (218.208s setup/4.712s solve), but T1/T4 exhausted
 whole-cell budgets; no T1 speedup is fabricated. Higher T remain unattempted.
-Original 4619591 FAILED85 remains recorded; 4622020 supplies only seven previously
-unattempted ParAC points. Grid Hypre’s solve downturn T36→T72 (0.1495→0.4099s)
+Original 4619591 FAILED85 and the superseded 4622020 ParAC follow-up remain
+in provenance. Grid Hypre’s solve downturn T36→T72 (0.1495→0.4099s)
 is retained; separate-campaign endpoint variation is not a source-regression proof.
 
 [84-row extract](thread_scaling_cpu_representative.csv) ·

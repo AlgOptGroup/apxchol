@@ -130,62 +130,6 @@
       "presentation_only": false
     },
     {
-      "matrix": "grid_2000",
-      "solver": "parac",
-      "threads": 1,
-      "status": "complete",
-      "cell_sha256": "06f141b4a34041c936e79f8d5e400d65534f60483c94783db9ca7aedd4c531e9",
-      "presentation_only": false
-    },
-    {
-      "matrix": "grid_2000",
-      "solver": "parac",
-      "threads": 2,
-      "status": "complete",
-      "cell_sha256": "1dfcf07196475df58ad024ed01c1970c176983bc71fa8a76cb3b676d1fda9c0a",
-      "presentation_only": false
-    },
-    {
-      "matrix": "grid_2000",
-      "solver": "parac",
-      "threads": 4,
-      "status": "complete",
-      "cell_sha256": "2ed444c48bb3be9325b1035b62e695c22bc606006a67147be8b9f50ade49045b",
-      "presentation_only": false
-    },
-    {
-      "matrix": "grid_2000",
-      "solver": "parac",
-      "threads": 8,
-      "status": "complete",
-      "cell_sha256": "f921642626179eff96b12595c21d8fca4f1f43cfa80add31f38aa6d0353bbb07",
-      "presentation_only": false
-    },
-    {
-      "matrix": "grid_2000",
-      "solver": "parac",
-      "threads": 16,
-      "status": "complete",
-      "cell_sha256": "595b273f2cebf2e84207c2e0a17deb46e8756822681f64c0a86a0a62bc0769e0",
-      "presentation_only": false
-    },
-    {
-      "matrix": "grid_2000",
-      "solver": "parac",
-      "threads": 36,
-      "status": "complete",
-      "cell_sha256": "34d22cb1df8231caa41084b9cdb6c3cdb4d096f80bf20998a8e1acd4ae7f4280",
-      "presentation_only": false
-    },
-    {
-      "matrix": "grid_2000",
-      "solver": "parac",
-      "threads": 72,
-      "status": "complete",
-      "cell_sha256": "b46df5eff6bd364bccbdcd0b2a97add3302ea4c30c837c65066860da15d2e849",
-      "presentation_only": false
-    },
-    {
       "matrix": "iter0040",
       "solver": "amgcl",
       "threads": 1,
@@ -295,62 +239,6 @@
       "threads": 72,
       "status": "complete",
       "cell_sha256": "e7ca1de93f5f87bd1481b042d0d45c6b154532991f532acdca2d826ab61c7041",
-      "presentation_only": false
-    },
-    {
-      "matrix": "iter0040",
-      "solver": "parac",
-      "threads": 1,
-      "status": "complete",
-      "cell_sha256": "8900e5bc26b23213fa17d998d36c22c96aa16aea7e051a5c304efe9fe21d1832",
-      "presentation_only": false
-    },
-    {
-      "matrix": "iter0040",
-      "solver": "parac",
-      "threads": 2,
-      "status": "complete",
-      "cell_sha256": "838e2ac527a9ba9c719e62c97dd69c00a0743a37f805c3cf53a0eb64a6762214",
-      "presentation_only": false
-    },
-    {
-      "matrix": "iter0040",
-      "solver": "parac",
-      "threads": 4,
-      "status": "complete",
-      "cell_sha256": "7ffe160aa6b226aaef8f16daed37a331b0612acea261e548f2df1ba79fc7d363",
-      "presentation_only": false
-    },
-    {
-      "matrix": "iter0040",
-      "solver": "parac",
-      "threads": 8,
-      "status": "complete",
-      "cell_sha256": "56e93e949f224e877a9e1a33033f2eb380d07ba6963668b7e89c0c8a258c2238",
-      "presentation_only": false
-    },
-    {
-      "matrix": "iter0040",
-      "solver": "parac",
-      "threads": 16,
-      "status": "complete",
-      "cell_sha256": "f6e8743e33429c57cdb07b6d90f1f38d42a8ddbcac45e5e88b664b9268ae84a2",
-      "presentation_only": false
-    },
-    {
-      "matrix": "iter0040",
-      "solver": "parac",
-      "threads": 36,
-      "status": "complete",
-      "cell_sha256": "3878246d3ce360dc740b6c525483a18f7a21e1d0a2985dd8dbeaf34587bdcacf",
-      "presentation_only": false
-    },
-    {
-      "matrix": "iter0040",
-      "solver": "parac",
-      "threads": 72,
-      "status": "complete",
-      "cell_sha256": "07671331f7ee5d24c0224ba95658e178cf4c95ce838ccbfff54b9317f418a958",
       "presentation_only": false
     },
     {
@@ -470,63 +358,2121 @@
       "solver": "parac",
       "threads": 1,
       "status": "complete",
-      "cell_sha256": "aac25bcd8fc65c8b46e1b96911bd8cf214230aa0a1e80fcee4ab928d1eca964e",
+      "cell_sha256": "e08808dfe3cd420f273a659f51c9d7203eb5f25c43081f27514b8aebd83fdb99",
       "presentation_only": false,
-      "job_id": "4622020"
+      "job_id": "4623922",
+      "source_cell_sha256": "ccd3e457fb432adcead4996a4e8bfe46708815e21f50c07f73b092aafef63f52",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        1.8033072083506528e-09,
+        1.8955355771172785e-09,
+        2.341562821107853e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 45.29260993003845,
+        "algorithm_s": 37.91466808319092,
+        "audit_s": 0.13054490089416504,
+        "serialization_s": 7.247396945953369,
+        "input_read_s": 6.120327949523926,
+        "operator_permutation_s": 1.159080982208252,
+        "producer_transform_s": 1.236928939819336,
+        "producer_ordering_s": 33.372828006744385,
+        "producer_cleanup_s": 0.1960921287536621
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 44.64383908319091,
+          "max": 44.72871808319092,
+          "max_over_min": 1.001901247781174,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.553,
+          "max": 1.557,
+          "max_over_min": 1.0025756600128783,
+          "passes": true
+        },
+        "total_s": {
+          "min": 46.19883908319091,
+          "max": 46.28571808319092,
+          "max_over_min": 1.0018805450899657,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.97087,
+          "max": 1.97974,
+          "max_over_min": 1.0045005505182991,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 4.63171,
+          "max": 4.70823,
+          "max_over_min": 1.016520896170097,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.125658,
+          "max": 0.126591,
+          "max_over_min": 1.0074249152461445,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6970.125,
+          "max": 6980.0625,
+          "max_over_min": 1.0014257276591165,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0
+        }
+      }
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 2,
       "status": "complete",
-      "cell_sha256": "899cd2b95919ea4610a503e638517ed08b3d338d6dad7bfe9086e03d2bdb1e9b",
+      "cell_sha256": "9f9be0541e976cb05cbb46dffbf61a1d50ce39ba8faf4020abf5739431d68218",
       "presentation_only": false,
-      "job_id": "4622020"
+      "job_id": "4624041",
+      "source_cell_sha256": "0ddcb22e6cf2e80f018eb0f5a76ee764f4f878e1d607c6796de1f6590992fcd8",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        1.1458564565732552e-09,
+        1.8459765613157036e-09,
+        2.535022102490063e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 45.29260993003845,
+        "algorithm_s": 37.91466808319092,
+        "audit_s": 0.13054490089416504,
+        "serialization_s": 7.247396945953369,
+        "input_read_s": 6.120327949523926,
+        "operator_permutation_s": 1.159080982208252,
+        "producer_transform_s": 1.236928939819336,
+        "producer_ordering_s": 33.372828006744385,
+        "producer_cleanup_s": 0.1960921287536621
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 43.830102083190916,
+          "max": 43.89758708319092,
+          "max_over_min": 1.0015396952503537,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.539,
+          "max": 1.774,
+          "max_over_min": 1.1526965562053282,
+          "passes": false
+        },
+        "total_s": {
+          "min": 45.370102083190915,
+          "max": 45.67158708319092,
+          "max_over_min": 1.0066450148039605,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 2.02748,
+          "max": 2.05436,
+          "max_over_min": 1.0132578373152878,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 3.75676,
+          "max": 3.80199,
+          "max_over_min": 1.0120396298938448,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.131158,
+          "max": 0.131709,
+          "max_over_min": 1.0042010399670627,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6956.5,
+          "max": 6972.875,
+          "max_over_min": 1.00235391360598,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0187911583994387
+        },
+        "solve_s": {
+          "valid": false,
+          "T1_over_T": null
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.018462645064815
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9726816091330773
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.2328806756461748
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9580658442489212
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0010307799867344
+        }
+      }
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 4,
       "status": "complete",
-      "cell_sha256": "359c219f6a8b5bd2fdf5dc71e56fe3fa01e2a9f4a642b918651fa3c6ff005c3f",
+      "cell_sha256": "5e0e8edf6598fc504c6d5a7da30149a58b92315bb2f92452df51aa2f3fa767c5",
       "presentation_only": false,
-      "job_id": "4622020"
+      "job_id": "4624041",
+      "source_cell_sha256": "c9457f9e5142ed89ed4109865a321aad08fc8a89c80dfb03587d5d66c4669a59",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        2.39168550005609e-09,
+        7.845557013780369e-10,
+        1.089453368630918e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 45.29260993003845,
+        "algorithm_s": 37.91466808319092,
+        "audit_s": 0.13054490089416504,
+        "serialization_s": 7.247396945953369,
+        "input_read_s": 6.120327949523926,
+        "operator_permutation_s": 1.159080982208252,
+        "producer_transform_s": 1.236928939819336,
+        "producer_ordering_s": 33.372828006744385,
+        "producer_cleanup_s": 0.1960921287536621
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 43.20328108319092,
+          "max": 43.27642208319092,
+          "max_over_min": 1.0016929501224494,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.613,
+          "max": 1.845,
+          "max_over_min": 1.143831370117793,
+          "passes": true
+        },
+        "total_s": {
+          "min": 44.81628108319092,
+          "max": 45.12142208319092,
+          "max_over_min": 1.0068087086350064,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 2.02883,
+          "max": 2.05643,
+          "max_over_min": 1.0136038997846049,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 3.12944,
+          "max": 3.17439,
+          "max_over_min": 1.0143635922081904,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.130343,
+          "max": 0.131538,
+          "max_over_min": 1.0091681179656753,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6934.125,
+          "max": 6974.125,
+          "max_over_min": 1.0057685720981377,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0338020447183855
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.9151443724219209
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.02932099845214
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9603638505078625
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.4935160108332006
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9552980887652237
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0066248445189552
+        }
+      }
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 8,
       "status": "complete",
-      "cell_sha256": "9bd2ad3680e84cc6be5d943ea619694478e469501ecb4bc71b0e3975cef24122",
+      "cell_sha256": "1bac56a3d178c7dcd91b707472a3e0d0ee0f9c9a2a701f8f2a785140bfe4ce0d",
       "presentation_only": false,
-      "job_id": "4622020"
+      "job_id": "4624041",
+      "source_cell_sha256": "b088d27318b44334a27ccc1ed144acb800e6b428e807e5610c6328b154466ef3",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        1.8388619362755107e-09,
+        3.7098540528809584e-09,
+        4.458643392578961e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 45.29260993003845,
+        "algorithm_s": 37.91466808319092,
+        "audit_s": 0.13054490089416504,
+        "serialization_s": 7.247396945953369,
+        "input_read_s": 6.120327949523926,
+        "operator_permutation_s": 1.159080982208252,
+        "producer_transform_s": 1.236928939819336,
+        "producer_ordering_s": 33.372828006744385,
+        "producer_cleanup_s": 0.1960921287536621
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 42.96824408319092,
+          "max": 43.04603208319092,
+          "max_over_min": 1.001810360224388,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.537,
+          "max": 1.54,
+          "max_over_min": 1.0019518542615486,
+          "passes": true
+        },
+        "total_s": {
+          "min": 44.50824408319092,
+          "max": 44.58303208319092,
+          "max_over_min": 1.0016803179172877,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 2.02985,
+          "max": 2.05669,
+          "max_over_min": 1.0132226519200926,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.89254,
+          "max": 2.94386,
+          "max_over_min": 1.0177421919835161,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.129896,
+          "max": 0.131186,
+          "max_over_min": 1.0099310217404691,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6916.5,
+          "max": 6943.4375,
+          "max_over_min": 1.0038946721607749,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0398087313993625
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.0084415584415585
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0387239376649104
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9708487084870847
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.6093800964790306
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9673738991192953
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0091899804814575
+        }
+      }
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 16,
       "status": "complete",
-      "cell_sha256": "bd6ed67c8d736ece0603a2f49c656ed3a2b845475a9b05895122074b5055e918",
+      "cell_sha256": "523dbc6f43cf1addda101775cdb514259a63cdd23374a5909f60a3982c52896b",
       "presentation_only": false,
-      "job_id": "4622020"
+      "job_id": "4624041",
+      "source_cell_sha256": "ff8142c892dcc56c84e29f8e041b3fc0f39a9079beea74bcf1c0841f492b2b54",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        2.227473451204534e-09,
+        1.3131559301372163e-09,
+        2.6190732543578347e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 45.29260993003845,
+        "algorithm_s": 37.91466808319092,
+        "audit_s": 0.13054490089416504,
+        "serialization_s": 7.247396945953369,
+        "input_read_s": 6.120327949523926,
+        "operator_permutation_s": 1.159080982208252,
+        "producer_transform_s": 1.236928939819336,
+        "producer_ordering_s": 33.372828006744385,
+        "producer_cleanup_s": 0.1960921287536621
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 42.895318083190915,
+          "max": 42.92931308319092,
+          "max_over_min": 1.0007925107335507,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.538,
+          "max": 1.544,
+          "max_over_min": 1.0039011703511054,
+          "passes": true
+        },
+        "total_s": {
+          "min": 44.437772083190914,
+          "max": 44.467313083190916,
+          "max_over_min": 1.0006647723010214,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 2.03311,
+          "max": 2.05122,
+          "max_over_min": 1.0089075357457293,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.79952,
+          "max": 2.85081,
+          "max_over_min": 1.0183209978853518,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.13066,
+          "max": 0.131364,
+          "max_over_min": 1.0053880300015308,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6910.625,
+          "max": 6916.5,
+          "max_over_min": 1.0008501401826897,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0420945240806496
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.0058290155440415
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0408345149806968
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9665876382588932
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.6689869789534026
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9617174345629879
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0092173394420798
+        }
+      }
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 36,
       "status": "complete",
-      "cell_sha256": "4de14f494490d6e52c7da97f87dd58af44d10e185c982ad54c72d8ca7a60bd45",
+      "cell_sha256": "fddfbe6daa7421edc83a177a97f21fb9986b2d985d2f0b98c6134c0243b574b6",
       "presentation_only": false,
-      "job_id": "4622020"
+      "job_id": "4624041",
+      "source_cell_sha256": "20aa9e774ab3830f80d4a2c3225e6e6fa1fb0bcc4ab675c1da25a0a375c00e7e",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        3.2612127834032416e-09,
+        2.488022208272113e-09,
+        1.5476459997437695e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 45.29260993003845,
+        "algorithm_s": 37.91466808319092,
+        "audit_s": 0.13054490089416504,
+        "serialization_s": 7.247396945953369,
+        "input_read_s": 6.120327949523926,
+        "operator_permutation_s": 1.159080982208252,
+        "producer_transform_s": 1.236928939819336,
+        "producer_ordering_s": 33.372828006744385,
+        "producer_cleanup_s": 0.1960921287536621
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 42.80524908319092,
+          "max": 42.92990508319092,
+          "max_over_min": 1.0029121662102172,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.461,
+          "max": 1.572,
+          "max_over_min": 1.0759753593429158,
+          "passes": true
+        },
+        "total_s": {
+          "min": 44.26624908319092,
+          "max": 44.50190508319092,
+          "max_over_min": 1.0053236044363534,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 2.00127,
+          "max": 2.05488,
+          "max_over_min": 1.026787989626587,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.75836,
+          "max": 2.82417,
+          "max_over_min": 1.0238583796168739,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.130951,
+          "max": 0.140527,
+          "max_over_min": 1.073126589334942,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6914.0,
+          "max": 6952.5,
+          "max_over_min": 1.0055684119178478,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.042874771938724
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.0629705681040382
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0435371627225993
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9602750525578136
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.697115837189263
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9541447413380714
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0039644012944984
+        }
+      }
     },
     {
       "matrix": "as-Skitter",
       "solver": "parac",
       "threads": 72,
       "status": "complete",
-      "cell_sha256": "886bc5618d4e4202c966e39742c3d013d098bafc1fc68b2645aa6457d59ab86f",
+      "cell_sha256": "3108603529c8bcf94d6e099f514fb124fe780e484c498f8dc63d063957804e57",
       "presentation_only": false,
-      "job_id": "4622020"
+      "job_id": "4623922",
+      "source_cell_sha256": "e37b37d63208f25d59c9855616ac36182e9f9c40bbfdde161d1072f3d862446a",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        1.6619524280355444e-09,
+        2.993296947202994e-09,
+        1.1349357217248988e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 45.29260993003845,
+        "algorithm_s": 37.91466808319092,
+        "audit_s": 0.13054490089416504,
+        "serialization_s": 7.247396945953369,
+        "input_read_s": 6.120327949523926,
+        "operator_permutation_s": 1.159080982208252,
+        "producer_transform_s": 1.236928939819336,
+        "producer_ordering_s": 33.372828006744385,
+        "producer_cleanup_s": 0.1960921287536621
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 42.690901083190916,
+          "max": 42.72761408319092,
+          "max_over_min": 1.0008599724781744,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.557,
+          "max": 1.629,
+          "max_over_min": 1.046242774566474,
+          "passes": true
+        },
+        "total_s": {
+          "min": 44.28053108319091,
+          "max": 44.31990108319091,
+          "max_over_min": 1.0008891040607901,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.95169,
+          "max": 1.96321,
+          "max_over_min": 1.0059025767411833,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.69898,
+          "max": 2.73302,
+          "max_over_min": 1.0126121720057206,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.125563,
+          "max": 0.126273,
+          "max_over_min": 1.0056545319879262,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6915.875,
+          "max": 6915.875,
+          "max_over_min": 1.0,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0461846991071828
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.9974309569685292
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.044470569311058
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 1.0099187765818607
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.7150990479396422
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9968426730976708
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0092811827859816
+        }
+      }
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "cd95202bd4ec4b02a8ba4a9b27525c0982b7b176084b2e1d987231f06ecdbb42",
+      "presentation_only": false,
+      "job_id": "4623922",
+      "source_cell_sha256": "98c1c66342af16ab92439e0ef0ad72a58c012873a45b118e07f1d227bfdb3f00",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.458038717696152e-09,
+        3.4965096714466375e-09,
+        4.319443846446925e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 11.784921169281006,
+        "algorithm_s": 4.726348876953125,
+        "audit_s": 0.09133124351501465,
+        "serialization_s": 6.967241048812866,
+        "input_read_s": 6.204075813293457,
+        "operator_permutation_s": 0.8185420036315918,
+        "producer_transform_s": 0.6605269908905029,
+        "producer_ordering_s": 1.7051420211791992,
+        "producer_cleanup_s": 0.1947038173675537
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 9.463931876953126,
+          "max": 9.484560876953125,
+          "max_over_min": 1.0021797494179174,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 3.879,
+          "max": 4.011,
+          "max_over_min": 1.034029389017788,
+          "passes": true
+        },
+        "total_s": {
+          "min": 13.363560876953125,
+          "max": 13.484024876953125,
+          "max_over_min": 1.009014363844277,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.24444,
+          "max": 1.24759,
+          "max_over_min": 1.002531259040211,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 3.34281,
+          "max": 3.36137,
+          "max_over_min": 1.0055522150526055,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.149116,
+          "max": 0.149383,
+          "max_over_min": 1.0017905523216823,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6406.1875,
+          "max": 6421.6875,
+          "max_over_min": 1.0024195358003494,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0
+        }
+      }
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "e9c338feff89201d4578a69e0c6fff3ed740fc357be9326d9b35e8a9835f58d3",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "e2508f1b90be616592e3c8b242bb010d6c84b889fdc644a9aff279790721d716",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.587023865125621e-09,
+        4.143561055035858e-09,
+        4.120772779515129e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 11.784921169281006,
+        "algorithm_s": 4.726348876953125,
+        "audit_s": 0.09133124351501465,
+        "serialization_s": 6.967241048812866,
+        "input_read_s": 6.204075813293457,
+        "operator_permutation_s": 0.8185420036315918,
+        "producer_transform_s": 0.6605269908905029,
+        "producer_ordering_s": 1.7051420211791992,
+        "producer_cleanup_s": 0.1947038173675537
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 9.178759876953125,
+          "max": 9.315975876953125,
+          "max_over_min": 1.0149492961837399,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 4.046,
+          "max": 4.467,
+          "max_over_min": 1.1040533860603063,
+          "passes": true
+        },
+        "total_s": {
+          "min": 13.224759876953126,
+          "max": 13.752692876953123,
+          "max_over_min": 1.0399200442890482,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.28334,
+          "max": 1.29786,
+          "max_over_min": 1.011314226939081,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.99814,
+          "max": 3.14526,
+          "max_over_min": 1.049070423662671,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.155267,
+          "max": 0.156411,
+          "max_over_min": 1.0073679532675972,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6374.125,
+          "max": 6413.4375,
+          "max_over_min": 1.0061675131880847,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.015881964697443
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.9417964071856287
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 0.992954994444667
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9660926227600652
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0628087980008012
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9621039886131632
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0029895366218236
+        }
+      }
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "d6a82bcd963c791fe80ffd22a7b76f4b16f92b9c73783ecb15620c4eeb955dd4",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "41cd5d6168c07771940d670b0ebe253a9c59071b8f9ca87af23814631debe4fb",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.26997998505684e-09,
+        3.7751616788885584e-09,
+        4.165318857325476e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 11.784921169281006,
+        "algorithm_s": 4.726348876953125,
+        "audit_s": 0.09133124351501465,
+        "serialization_s": 6.967241048812866,
+        "input_read_s": 6.204075813293457,
+        "operator_permutation_s": 0.8185420036315918,
+        "producer_transform_s": 0.6605269908905029,
+        "producer_ordering_s": 1.7051420211791992,
+        "producer_cleanup_s": 0.1947038173675537
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 8.569478876953125,
+          "max": 8.699818876953124,
+          "max_over_min": 1.015209793019099,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 3.972,
+          "max": 4.088,
+          "max_over_min": 1.0292044310171198,
+          "passes": true
+        },
+        "total_s": {
+          "min": 12.574478876953126,
+          "max": 12.671818876953123,
+          "max_over_min": 1.0077410762666599,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.28384,
+          "max": 1.30462,
+          "max_over_min": 1.0161858175473577,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.40199,
+          "max": 2.51325,
+          "max_over_min": 1.0463199263943648,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.15543,
+          "max": 0.157058,
+          "max_over_min": 1.0104741684359517,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6363.4375,
+          "max": 6397.125,
+          "max_over_min": 1.0052939154348572,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.102895507551867
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.961839530332681
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0573798842054551
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9612531742295016
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.391683562379527
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9511327025684778
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0083288317045622
+        }
+      }
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "02cf84d30115ae959db5443977566f536a85ef16acfa4079c5f03990c050476a",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "72f7a1ca408bf8b58e1d8931e0b861b152d337620f8bd59b5cee912d56b4d214",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        5.162892436705673e-09,
+        5.012301546904497e-09,
+        4.19202484225053e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 11.784921169281006,
+        "algorithm_s": 4.726348876953125,
+        "audit_s": 0.09133124351501465,
+        "serialization_s": 6.967241048812866,
+        "input_read_s": 6.204075813293457,
+        "operator_permutation_s": 0.8185420036315918,
+        "producer_transform_s": 0.6605269908905029,
+        "producer_ordering_s": 1.7051420211791992,
+        "producer_cleanup_s": 0.1947038173675537
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 8.339316876953124,
+          "max": 8.513688876953125,
+          "max_over_min": 1.0209096263606319,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 3.793,
+          "max": 4.108,
+          "max_over_min": 1.0830477194832584,
+          "passes": true
+        },
+        "total_s": {
+          "min": 12.306688876953125,
+          "max": 12.538956876953124,
+          "max_over_min": 1.0188733137176296,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.28176,
+          "max": 1.29645,
+          "max_over_min": 1.0114608038946449,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.1723,
+          "max": 2.35004,
+          "max_over_min": 1.0818211112645584,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.155388,
+          "max": 0.155698,
+          "max_over_min": 1.0019950060493732,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6378.0625,
+          "max": 6416.8125,
+          "max_over_min": 1.0060755127438779,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.1348569692930166
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.9571567672833496
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.076210400151089
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9691977244604932
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.5388344151360311
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.959440712147876
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0048646320693773
+        }
+      }
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "8dc7c1dba3fa393165d5507a2e52d7b81159802e3ce52c15887dcaa30a7063e1",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "7dd0d078e1c50bb91d2c09668403a0c8aae377d84987c72074394796b9bd21a5",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        5.124622404624828e-09,
+        4.37588622415008e-09,
+        4.36086984297103e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 11.784921169281006,
+        "algorithm_s": 4.726348876953125,
+        "audit_s": 0.09133124351501465,
+        "serialization_s": 6.967241048812866,
+        "input_read_s": 6.204075813293457,
+        "operator_permutation_s": 0.8185420036315918,
+        "producer_transform_s": 0.6605269908905029,
+        "producer_ordering_s": 1.7051420211791992,
+        "producer_cleanup_s": 0.1947038173675537
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 8.579206876953126,
+          "max": 8.679765876953127,
+          "max_over_min": 1.0117212466656025,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 4.008,
+          "max": 4.238,
+          "max_over_min": 1.0573852295409183,
+          "passes": true
+        },
+        "total_s": {
+          "min": 12.687765876953126,
+          "max": 12.817206876953126,
+          "max_over_min": 1.0102020325134722,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.28032,
+          "max": 1.28566,
+          "max_over_min": 1.0041708322919272,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.4112,
+          "max": 2.51271,
+          "max_over_min": 1.0420993696084937,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.155687,
+          "max": 0.155998,
+          "max_over_min": 1.001997597744192,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6350.125,
+          "max": 6404.6875,
+          "max_over_min": 1.0085923505442806,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0977189125805138
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.9397705544933078
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0461115280868143
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.972717758060485
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.3595069219632023
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9579272046375621
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0018345938033666
+        }
+      }
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "6d75f40bc8b68cfb0b792374b21b366a87b432ad42e26df1a12e04d265cd26f2",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "5d9410ac775664017ec1d257fc84273da854447b1b8027d78eb1ee23d1976c07",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.006578332831095e-09,
+        4.1343219615359246e-09,
+        3.885282018611977e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 11.784921169281006,
+        "algorithm_s": 4.726348876953125,
+        "audit_s": 0.09133124351501465,
+        "serialization_s": 6.967241048812866,
+        "input_read_s": 6.204075813293457,
+        "operator_permutation_s": 0.8185420036315918,
+        "producer_transform_s": 0.6605269908905029,
+        "producer_ordering_s": 1.7051420211791992,
+        "producer_cleanup_s": 0.1947038173675537
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 8.121730876953125,
+          "max": 8.575979876953125,
+          "max_over_min": 1.0559300728972705,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 4.006,
+          "max": 4.321,
+          "max_over_min": 1.0786320519221166,
+          "passes": true
+        },
+        "total_s": {
+          "min": 12.365730876953124,
+          "max": 12.896979876953125,
+          "max_over_min": 1.0429613910642457,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.284,
+          "max": 1.28922,
+          "max_over_min": 1.0040654205607478,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 1.95538,
+          "max": 2.40907,
+          "max_over_min": 1.2320213973754461,
+          "passes": false
+        },
+        "solver_setup_s": {
+          "min": 0.155291,
+          "max": 0.156002,
+          "max_over_min": 1.0045785010077852,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6378.875,
+          "max": 6405.9375,
+          "max_over_min": 1.0042425192530031,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.1065204281117844
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.9815277084373439
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0666505512277644
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9660026993065575
+        },
+        "factor_setup_s": {
+          "valid": false,
+          "T1_over_T": null
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9600634973682011
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.004943323087766
+        }
+      }
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "parac",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "dfab479a4bb7b7c9958c96a59ed946743c435ba0ff63ad363561b8a480f44895",
+      "presentation_only": false,
+      "job_id": "4623922",
+      "source_cell_sha256": "f9dbde6605917e668a04a51163b160264b82467dfb82d0c9072b4167cbeeda23",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.370179019091985e-09,
+        4.16654636842987e-09,
+        4.741029530973804e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 11.784921169281006,
+        "algorithm_s": 4.726348876953125,
+        "audit_s": 0.09133124351501465,
+        "serialization_s": 6.967241048812866,
+        "input_read_s": 6.204075813293457,
+        "operator_permutation_s": 0.8185420036315918,
+        "producer_transform_s": 0.6605269908905029,
+        "producer_ordering_s": 1.7051420211791992,
+        "producer_cleanup_s": 0.1947038173675537
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 8.168127876953125,
+          "max": 8.511142876953125,
+          "max_over_min": 1.0419943229546929,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 3.904,
+          "max": 4.15,
+          "max_over_min": 1.0630122950819674,
+          "passes": true
+        },
+        "total_s": {
+          "min": 12.318127876953126,
+          "max": 12.549493876953125,
+          "max_over_min": 1.0187825619534994,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 1.23839,
+          "max": 1.25026,
+          "max_over_min": 1.0095850257188768,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 2.04726,
+          "max": 2.39788,
+          "max_over_min": 1.1712630540331954,
+          "passes": false
+        },
+        "solver_setup_s": {
+          "min": 0.148524,
+          "max": 0.149205,
+          "max_over_min": 1.0045851175567586,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 6397.75,
+          "max": 6400.0,
+          "max_over_min": 1.0003516861396584,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.1119460704366753
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.007172131147541
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0789994130329899
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 1.0056525004239374
+        },
+        "factor_setup_s": {
+          "valid": false,
+          "T1_over_T": null
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0057835770649861
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0025781501772477
+        }
+      }
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 1,
+      "status": "complete",
+      "cell_sha256": "4d3bfe74fba7a5d706bcfa0df1b6e890db8dc972e4b713c46944da1f7971692c",
+      "presentation_only": false,
+      "job_id": "4623922",
+      "source_cell_sha256": "d8af070e00d24a8936490dcd305e9f9d8def3b96da5a23460db66eca900fae0a",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.982424013725605e-09,
+        4.7068593829121735e-09,
+        3.894277730833674e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 4.889600992202759,
+        "algorithm_s": 2.2506957054138184,
+        "audit_s": 0.027305126190185547,
+        "serialization_s": 2.611600160598755,
+        "input_read_s": 2.627331018447876,
+        "operator_permutation_s": 0.20061993598937988,
+        "producer_transform_s": 0.34929513931274414,
+        "producer_ordering_s": 0.7981269359588623,
+        "producer_cleanup_s": 0.19140911102294922
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 4.659300705413819,
+          "max": 4.675266405413818,
+          "max_over_min": 1.0034266300909593,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.248,
+          "max": 1.295,
+          "max_over_min": 1.0376602564102564,
+          "passes": true
+        },
+        "total_s": {
+          "min": 5.919300705413819,
+          "max": 5.955610805413818,
+          "max_over_min": 1.0061341874331187,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 0.515352,
+          "max": 0.517221,
+          "max_over_min": 1.0036266474176874,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 1.84553,
+          "max": 1.86286,
+          "max_over_min": 1.0093902564574946,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.0457467,
+          "max": 0.045854,
+          "max_over_min": 1.0023455243766217,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 2348.3125,
+          "max": 2365.625,
+          "max_over_min": 1.0073723152263594,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0
+        }
+      }
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 2,
+      "status": "complete",
+      "cell_sha256": "69e7d8b297a4ec899a3e1151d31e93a7c4f6702c2b645e5ed6400e43ee212517",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "e960d2a8afc2c8199ae8ee6f2927485625c8ce2a0e8102cbc5b13e762d74f38d",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        3.995508744016556e-09,
+        4.225746594015308e-09,
+        5.475987775171653e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 4.889600992202759,
+        "algorithm_s": 2.2506957054138184,
+        "audit_s": 0.027305126190185547,
+        "serialization_s": 2.611600160598755,
+        "input_read_s": 2.627331018447876,
+        "operator_permutation_s": 0.20061993598937988,
+        "producer_transform_s": 0.34929513931274414,
+        "producer_ordering_s": 0.7981269359588623,
+        "producer_cleanup_s": 0.19140911102294922
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 4.343588005413818,
+          "max": 4.403295405413818,
+          "max_over_min": 1.0137461011324234,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.226,
+          "max": 1.326,
+          "max_over_min": 1.0815660685154975,
+          "passes": true
+        },
+        "total_s": {
+          "min": 5.569588005413818,
+          "max": 5.7292954054138185,
+          "max_over_min": 1.0286749037531608,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 0.532079,
+          "max": 0.539596,
+          "max_over_min": 1.0141276013524307,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 1.50569,
+          "max": 1.57269,
+          "max_over_min": 1.044497871407793,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.0476063,
+          "max": 0.0478307,
+          "max_over_min": 1.0047136618472765,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 2351.1875,
+          "max": 2359.5625,
+          "max_over_min": 1.0035620298253543,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.0643435869694466
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.96
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.0405151124080225
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9562999729400121
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.1982581176349507
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9580219973529461
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0061405141019166
+        }
+      }
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 4,
+      "status": "complete",
+      "cell_sha256": "eff8c7ab7b707a30bdd1fa60efad8591bc613b7e7713207ef790fc2fed64b5fe",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "60e681497fabc20ac77637b2178e8c99065ab60bd95c95c231581a46525d8912",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.3647982445482204e-09,
+        4.147590928440163e-09,
+        3.833595807027569e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 4.889600992202759,
+        "algorithm_s": 2.2506957054138184,
+        "audit_s": 0.027305126190185547,
+        "serialization_s": 2.611600160598755,
+        "input_read_s": 2.627331018447876,
+        "operator_permutation_s": 0.20061993598937988,
+        "producer_transform_s": 0.34929513931274414,
+        "producer_ordering_s": 0.7981269359588623,
+        "producer_cleanup_s": 0.19140911102294922
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 4.039334605413819,
+          "max": 4.091833605413819,
+          "max_over_min": 1.012996942597832,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.224,
+          "max": 1.28,
+          "max_over_min": 1.0457516339869282,
+          "passes": true
+        },
+        "total_s": {
+          "min": 5.263334605413819,
+          "max": 5.371833605413819,
+          "max_over_min": 1.020614117880402,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 0.531277,
+          "max": 0.532959,
+          "max_over_min": 1.003165956741963,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 1.20869,
+          "max": 1.26034,
+          "max_over_min": 1.04273221421539,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.0476929,
+          "max": 0.0478389,
+          "max_over_min": 1.0030612523038018,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 2291.5625,
+          "max": 2321.0,
+          "max_over_min": 1.0128460384562934,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.1501452850081237
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.9896907216494846
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.1121551132928313
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9711769942986427
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.5082176919215637
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9565876527514073
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0218958395205053
+        }
+      }
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 8,
+      "status": "complete",
+      "cell_sha256": "b052bf7f09bebeec3b46de3a435b93c47482179dacdf198c4f5942da6ae91147",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "8c8e77b4be43b2970ac44563297663e7a65e449fa9164d7c67df6431892b0cce",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        5.212370033340752e-09,
+        4.241427173883929e-09,
+        3.8857456076517184e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 4.889600992202759,
+        "algorithm_s": 2.2506957054138184,
+        "audit_s": 0.027305126190185547,
+        "serialization_s": 2.611600160598755,
+        "input_read_s": 2.627331018447876,
+        "operator_permutation_s": 0.20061993598937988,
+        "producer_transform_s": 0.34929513931274414,
+        "producer_ordering_s": 0.7981269359588623,
+        "producer_cleanup_s": 0.19140911102294922
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 3.9113567054138185,
+          "max": 3.944145305413818,
+          "max_over_min": 1.008382922466421,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.208,
+          "max": 1.354,
+          "max_over_min": 1.120860927152318,
+          "passes": true
+        },
+        "total_s": {
+          "min": 5.119356705413819,
+          "max": 5.278983205413819,
+          "max_over_min": 1.0311809684664466,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 0.530431,
+          "max": 0.536093,
+          "max_over_min": 1.0106743384153642,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 1.07666,
+          "max": 1.11399,
+          "max_over_min": 1.0346720413129493,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.0477686,
+          "max": 0.047908,
+          "max_over_min": 1.0029182349911867,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 2324.125,
+          "max": 2344.9375,
+          "max_over_min": 1.0089549830581401,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.1853687030740088
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.0196078431372548
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.146110655830242
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9704207895187241
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.6722412229912296
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9576730320754638
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.010545988519557
+        }
+      }
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 16,
+      "status": "complete",
+      "cell_sha256": "a254211462a2d0a9436195a2913bdf19b2e6a0a29ddd91c5ed530593dfb3e905",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "5b305f36e2083f61726c9a2ef1360ffa3a79b0dbc74b478fb0a8b61f4872386b",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.732311821411695e-09,
+        4.1887832863699725e-09,
+        4.793966331138543e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 4.889600992202759,
+        "algorithm_s": 2.2506957054138184,
+        "audit_s": 0.027305126190185547,
+        "serialization_s": 2.611600160598755,
+        "input_read_s": 2.627331018447876,
+        "operator_permutation_s": 0.20061993598937988,
+        "producer_transform_s": 0.34929513931274414,
+        "producer_ordering_s": 0.7981269359588623,
+        "producer_cleanup_s": 0.19140911102294922
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 3.8713899054138188,
+          "max": 3.8768818054138183,
+          "max_over_min": 1.0014185861238931,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.252,
+          "max": 1.329,
+          "max_over_min": 1.0615015974440893,
+          "passes": true
+        },
+        "total_s": {
+          "min": 5.123868405413818,
+          "max": 5.200389905413819,
+          "max_over_min": 1.0149343218727376,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 0.530402,
+          "max": 0.531727,
+          "max_over_min": 1.0024981052107644,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 1.04151,
+          "max": 1.04809,
+          "max_over_min": 1.0063177501896285,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.0476941,
+          "max": 0.0483562,
+          "max_over_min": 1.0138822202326911,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 2310.3125,
+          "max": 2355.8125,
+          "max_over_min": 1.0196943054240497,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.2059347279778059
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 0.9719626168224299
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.1477237086112397
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9727791373335695
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.777385529868618
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.959168953811897
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0041652296182315
+        }
+      }
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 36,
+      "status": "complete",
+      "cell_sha256": "d8b1f84615adf2d822e45939004b619d99458ef204653c7b6c031fbad347d706",
+      "presentation_only": false,
+      "job_id": "4624041",
+      "source_cell_sha256": "a5292236f22f9a4c18923ecce9a1002ee930bdcbcc149a5392833f980ba204f3",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.326173764502897e-09,
+        4.930345791038767e-09,
+        4.841286622623059e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 4.889600992202759,
+        "algorithm_s": 2.2506957054138184,
+        "audit_s": 0.027305126190185547,
+        "serialization_s": 2.611600160598755,
+        "input_read_s": 2.627331018447876,
+        "operator_permutation_s": 0.20061993598937988,
+        "producer_transform_s": 0.34929513931274414,
+        "producer_ordering_s": 0.7981269359588623,
+        "producer_cleanup_s": 0.19140911102294922
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 3.8297079054138186,
+          "max": 3.8482767054138183,
+          "max_over_min": 1.0048486204323182,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.199,
+          "max": 1.408,
+          "max_over_min": 1.1743119266055044,
+          "passes": false
+        },
+        "total_s": {
+          "min": 5.0399372054138185,
+          "max": 5.256276705413818,
+          "max_over_min": 1.0429250387817552,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 0.529613,
+          "max": 0.531859,
+          "max_over_min": 1.0042408324569072,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 0.991596,
+          "max": 1.01764,
+          "max_over_min": 1.0262647287806728,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.0478685,
+          "max": 0.0573882,
+          "max_over_min": 1.1988719095020735,
+          "passes": false
+        },
+        "peak_rss_mb": {
+          "min": 2331.4375,
+          "max": 2347.375,
+          "max_over_min": 1.0068359113208052,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.2207892927825348
+        },
+        "solve_s": {
+          "valid": false,
+          "T1_over_T": null
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.1630877944358584
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 0.9734655527632501
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.8786481591293227
+        },
+        "solver_setup_s": {
+          "valid": false,
+          "T1_over_T": null
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0129800615549311
+        }
+      }
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "parac",
+      "threads": 72,
+      "status": "complete",
+      "cell_sha256": "33bfe4b145589589e426c095290baccaa3bcaea171965c1e417c0a14e7d386d3",
+      "presentation_only": false,
+      "job_id": "4623922",
+      "source_cell_sha256": "57d8152e7b92761de1a5e275ec6ec0e92623b9c4a86a98be154d5a8dbb14f090",
+      "binary_sha256": "94a4cc3e26ca031ffa01df5a4e26fe788d9e60a5b0bc0e4f2cdf58a9912b0bf1",
+      "retained_original_residuals": [
+        4.7892684010308245e-09,
+        4.983312367621982e-09,
+        3.792948662920495e-09
+      ],
+      "preparation_timing": {
+        "complete_s": 4.889600992202759,
+        "algorithm_s": 2.2506957054138184,
+        "audit_s": 0.027305126190185547,
+        "serialization_s": 2.611600160598755,
+        "input_read_s": 2.627331018447876,
+        "operator_permutation_s": 0.20061993598937988,
+        "producer_transform_s": 0.34929513931274414,
+        "producer_ordering_s": 0.7981269359588623,
+        "producer_cleanup_s": 0.19140911102294922
+      },
+      "timing_controls": {
+        "setup_s": {
+          "min": 3.8034063054138185,
+          "max": 3.8513466054138186,
+          "max_over_min": 1.012604569733126,
+          "passes": true
+        },
+        "solve_s": {
+          "min": 1.177,
+          "max": 1.2,
+          "max_over_min": 1.0195412064570943,
+          "passes": true
+        },
+        "total_s": {
+          "min": 5.001500105413818,
+          "max": 5.050346605413819,
+          "max_over_min": 1.0097663698831332,
+          "passes": true
+        },
+        "adapter_s": {
+          "min": 0.511725,
+          "max": 0.52695,
+          "max_over_min": 1.0297523083687528,
+          "passes": true
+        },
+        "factor_setup_s": {
+          "min": 0.995004,
+          "max": 1.02766,
+          "max_over_min": 1.0328199685629404,
+          "passes": true
+        },
+        "solver_setup_s": {
+          "min": 0.0459424,
+          "max": 0.0460409,
+          "max_over_min": 1.0021439889949153,
+          "passes": true
+        },
+        "peak_rss_mb": {
+          "min": 2331.1875,
+          "max": 2347.1875,
+          "max_over_min": 1.0068634547843105,
+          "passes": true
+        }
+      },
+      "valid_ratios": {
+        "setup_s": {
+          "valid": true,
+          "T1_over_T": 1.229231386286283
+        },
+        "solve_s": {
+          "valid": true,
+          "T1_over_T": 1.04
+        },
+        "total_s": {
+          "valid": true,
+          "T1_over_T": 1.1838467723488069
+        },
+        "adapter_s": {
+          "valid": true,
+          "T1_over_T": 1.0082837461527188
+        },
+        "factor_setup_s": {
+          "valid": true,
+          "T1_over_T": 1.8722135790408883
+        },
+        "solver_setup_s": {
+          "valid": true,
+          "T1_over_T": 0.9948914348348036
+        },
+        "peak_rss_mb": {
+          "valid": true,
+          "T1_over_T": 1.0095756314848896
+        }
+      }
     }
   ],
   "notes": [
@@ -535,7 +2481,8 @@
     "ParAC Graph uses portable-cpp serial solve; requested threads apply to native factorization; serial preparation is charged at every T.",
     "Whole-cell timeouts are not per-solve lower bounds.",
     "Unattempted placeholders contain no timing or binary receipt; their planned source is not evidence of execution.",
-    "The original 4619591 verdict and63-cell counts above are preserved. Current selection replaces only its seven unattempted Skitter ParAC placeholders with the matched4622020 follow-up curve."
+    "Original 4619591/4622020 dispositions remain below; the current selection replaces all 21 ParAC scaling points with corrected-accounting jobs 4623922/4624041.",
+    "The 21 corrected points measure content-pinned private adapter code. Maintained integration smoke 4627953 validates behavior, not performance equivalence. Headline cells are unchanged."
   ],
   "current_dispositions": {
     "complete": 78,
@@ -608,6 +2555,246 @@
       }
     ],
     "selected_cells": [
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 1,
+        "status": "complete",
+        "cell_sha256": "aac25bcd8fc65c8b46e1b96911bd8cf214230aa0a1e80fcee4ab928d1eca964e",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 2,
+        "status": "complete",
+        "cell_sha256": "899cd2b95919ea4610a503e638517ed08b3d338d6dad7bfe9086e03d2bdb1e9b",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 4,
+        "status": "complete",
+        "cell_sha256": "359c219f6a8b5bd2fdf5dc71e56fe3fa01e2a9f4a642b918651fa3c6ff005c3f",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 8,
+        "status": "complete",
+        "cell_sha256": "9bd2ad3680e84cc6be5d943ea619694478e469501ecb4bc71b0e3975cef24122",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 16,
+        "status": "complete",
+        "cell_sha256": "bd6ed67c8d736ece0603a2f49c656ed3a2b845475a9b05895122074b5055e918",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 36,
+        "status": "complete",
+        "cell_sha256": "4de14f494490d6e52c7da97f87dd58af44d10e185c982ad54c72d8ca7a60bd45",
+        "presentation_only": false,
+        "job_id": "4622020"
+      },
+      {
+        "matrix": "as-Skitter",
+        "solver": "parac",
+        "threads": 72,
+        "status": "complete",
+        "cell_sha256": "886bc5618d4e4202c966e39742c3d013d098bafc1fc68b2645aa6457d59ab86f",
+        "presentation_only": false,
+        "job_id": "4622020"
+      }
+    ]
+  },
+  "parac_accounting_refresh": {
+    "jobs": {
+      "4623922": 6,
+      "4624041": 15
+    },
+    "source_kind": "private corrected adapter; repository base does not contain measured adapter",
+    "repository_base": "1a526f25aec8829e8a9217b558ac2290a3840ae0",
+    "source_hashes": {
+      "reference/campaign.py": "6a0fa84359a06b11f95568f4fbcf838f01eb9e62105de1db8b3a4fe886a89743",
+      "reference/emit_cells.py": "1f1b095c39634d4be22ed1f099e3fe1e6442808ae17f5b28e6165bc2b65571fd",
+      "reference/prepare.jl": "d7a8499bf8fc30947abd8378b68fc19cf65cc869f3acdcadcd3a75b44789739b",
+      "reference/verify_solution.py": "f7d5b993a8921dfbf2e558a22e6bee4ddba906389c0465c301bfee9cf0cd1f19",
+      "reference/write_graph.jl": "fc503fc5d61f257e3ad5647def35e61c30762dbad844ab8cd4eb4b67aca76124",
+      "candidate/campaign.py": "6dd946dd2e646b405de0d4f6ec26a778d54bb4496644535b727e744f0358b479",
+      "candidate/emit_cells.py": "1f1b095c39634d4be22ed1f099e3fe1e6442808ae17f5b28e6165bc2b65571fd",
+      "candidate/prepare.jl": "83f419e3592304be9ff82ee8ad51cf04b2265f73af06887d9d361d98ef4869af",
+      "candidate/verify_solution.py": "f7d5b993a8921dfbf2e558a22e6bee4ddba906389c0465c301bfee9cf0cd1f19",
+      "candidate/write_graph.jl": "d56b45b23cbd2dee29d1c759f1633eb3edf2ef1232605de3fc5d56286c4d5d6c"
+    },
+    "native_source_commit": "280b7ee0087c47d1a5101787312dd7574acdfee0",
+    "audit_sha256": "b09cd7603accf527144925ae842b5e0c2ab6ea2522cd43573581615aa5220410",
+    "bindings_sha256": "a2d6f407367b4e26d184e68060583ee1ae73001ec672b16a44c710d940b83367",
+    "retained_repetitions_per_point": 3,
+    "warmups_per_point": 1,
+    "original_residual_tolerance": 1e-08,
+    "preparation_scope": "One fresh preparation per matrix in pilot; its measured required algorithm charge is included at every thread count. Preparation variance was not sampled.",
+    "charged_setup": "required preparation + native adapter + factorization + solver workspace",
+    "excluded_intervals": "common input read; disjoint validation exports and final serialization, recorded separately",
+    "phase_control_threshold": 1.15,
+    "failed_phase_controls": [
+      {
+        "matrix": "as-Skitter",
+        "threads": 2,
+        "metric": "solve_s",
+        "span": 1.1526965562053282
+      },
+      {
+        "matrix": "grid_2000",
+        "threads": 36,
+        "metric": "factor_setup_s",
+        "span": 1.2320213973754461
+      },
+      {
+        "matrix": "grid_2000",
+        "threads": 72,
+        "metric": "factor_setup_s",
+        "span": 1.1712630540331954
+      },
+      {
+        "matrix": "iter0040",
+        "threads": 36,
+        "metric": "solve_s",
+        "span": 1.1743119266055044
+      },
+      {
+        "matrix": "iter0040",
+        "threads": 36,
+        "metric": "solver_setup_s",
+        "span": 1.1988719095020735
+      }
+    ],
+    "plot_policy": "Withhold only control-invalid phases (including gaps at Skitter T2 and IPM T36 solve); preserve raw values in CSV.",
+    "previous_selected_parac": [
+      {
+        "matrix": "grid_2000",
+        "solver": "parac",
+        "threads": 1,
+        "status": "complete",
+        "cell_sha256": "06f141b4a34041c936e79f8d5e400d65534f60483c94783db9ca7aedd4c531e9",
+        "presentation_only": false
+      },
+      {
+        "matrix": "grid_2000",
+        "solver": "parac",
+        "threads": 2,
+        "status": "complete",
+        "cell_sha256": "1dfcf07196475df58ad024ed01c1970c176983bc71fa8a76cb3b676d1fda9c0a",
+        "presentation_only": false
+      },
+      {
+        "matrix": "grid_2000",
+        "solver": "parac",
+        "threads": 4,
+        "status": "complete",
+        "cell_sha256": "2ed444c48bb3be9325b1035b62e695c22bc606006a67147be8b9f50ade49045b",
+        "presentation_only": false
+      },
+      {
+        "matrix": "grid_2000",
+        "solver": "parac",
+        "threads": 8,
+        "status": "complete",
+        "cell_sha256": "f921642626179eff96b12595c21d8fca4f1f43cfa80add31f38aa6d0353bbb07",
+        "presentation_only": false
+      },
+      {
+        "matrix": "grid_2000",
+        "solver": "parac",
+        "threads": 16,
+        "status": "complete",
+        "cell_sha256": "595b273f2cebf2e84207c2e0a17deb46e8756822681f64c0a86a0a62bc0769e0",
+        "presentation_only": false
+      },
+      {
+        "matrix": "grid_2000",
+        "solver": "parac",
+        "threads": 36,
+        "status": "complete",
+        "cell_sha256": "34d22cb1df8231caa41084b9cdb6c3cdb4d096f80bf20998a8e1acd4ae7f4280",
+        "presentation_only": false
+      },
+      {
+        "matrix": "grid_2000",
+        "solver": "parac",
+        "threads": 72,
+        "status": "complete",
+        "cell_sha256": "b46df5eff6bd364bccbdcd0b2a97add3302ea4c30c837c65066860da15d2e849",
+        "presentation_only": false
+      },
+      {
+        "matrix": "iter0040",
+        "solver": "parac",
+        "threads": 1,
+        "status": "complete",
+        "cell_sha256": "8900e5bc26b23213fa17d998d36c22c96aa16aea7e051a5c304efe9fe21d1832",
+        "presentation_only": false
+      },
+      {
+        "matrix": "iter0040",
+        "solver": "parac",
+        "threads": 2,
+        "status": "complete",
+        "cell_sha256": "838e2ac527a9ba9c719e62c97dd69c00a0743a37f805c3cf53a0eb64a6762214",
+        "presentation_only": false
+      },
+      {
+        "matrix": "iter0040",
+        "solver": "parac",
+        "threads": 4,
+        "status": "complete",
+        "cell_sha256": "7ffe160aa6b226aaef8f16daed37a331b0612acea261e548f2df1ba79fc7d363",
+        "presentation_only": false
+      },
+      {
+        "matrix": "iter0040",
+        "solver": "parac",
+        "threads": 8,
+        "status": "complete",
+        "cell_sha256": "56e93e949f224e877a9e1a33033f2eb380d07ba6963668b7e89c0c8a258c2238",
+        "presentation_only": false
+      },
+      {
+        "matrix": "iter0040",
+        "solver": "parac",
+        "threads": 16,
+        "status": "complete",
+        "cell_sha256": "f6e8743e33429c57cdb07b6d90f1f38d42a8ddbcac45e5e88b664b9268ae84a2",
+        "presentation_only": false
+      },
+      {
+        "matrix": "iter0040",
+        "solver": "parac",
+        "threads": 36,
+        "status": "complete",
+        "cell_sha256": "3878246d3ce360dc740b6c525483a18f7a21e1d0a2985dd8dbeaf34587bdcacf",
+        "presentation_only": false
+      },
+      {
+        "matrix": "iter0040",
+        "solver": "parac",
+        "threads": 72,
+        "status": "complete",
+        "cell_sha256": "07671331f7ee5d24c0224ba95658e178cf4c95ce838ccbfff54b9317f418a958",
+        "presentation_only": false
+      },
       {
         "matrix": "as-Skitter",
         "solver": "parac",

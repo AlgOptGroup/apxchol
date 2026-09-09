@@ -378,7 +378,9 @@ def charts(out=f"{ROOT}/results/plots", compact=False):
                 pts = {r["cell"]["threads"]: r["metrics"].get(field)
                        for r in recs if r["cell"]["matrix_id"] == mid
                        and r["cell"]["label"] == lab and r["status"] == "complete"
-                       and r["metrics"].get(field)}
+                       and r["metrics"].get(field)
+                       and r.get("provenance", {}).get("valid_ratios", {}).get(
+                           field, {}).get("valid", True)}
                 if not pts or (kind != "seconds" and (1 not in pts or len(pts) < 2)): continue
                 ts = sorted(THREADS) if compact else sorted(pts)
                 t1 = pts.get(1)
@@ -425,6 +427,9 @@ def charts(out=f"{ROOT}/results/plots", compact=False):
         fig.legend(hl.values(), hl.keys(), loc="lower center", ncol=max(1, len(hl)), fontsize=8)
         revisions = sorted({r.get("provenance", {}).get("git_sha", "unknown") for r in recs})
         source_note = "source " + ", ".join(sha[:8] for sha in revisions)
+        if any(r.get("provenance", {}).get("source_kind", "").startswith("private")
+               for r in recs):
+            source_note += "; ParAC: corrected private adapter (content-pinned)"
         fig.suptitle(f"{DEVICE.upper()} {phase} {kind} vs threads (tol 1e-8)\n{source_note}")
         if any(r.get("provenance", {}).get("scaling_baseline") for r in recs):
             fig.text(0.5, 0.032, "* Uses a measured same-node T1 reference for each multi-thread point.",
@@ -463,7 +468,8 @@ def export_csv(path):
               "baseline_setup_s", "baseline_solve_s", "baseline_total_s",
               "baseline_cell_sha256", "baseline_node_rank", "source_cell_sha256",
               "binary_sha256", "job_id", "preparation_s", "solve_backend",
-              "effective_solve_threads", "timeout_cap_s", "timeout_scope")
+              "effective_solve_threads", "timeout_cap_s", "timeout_scope",
+              "source_kind", "setup_ratio_valid", "solve_ratio_valid", "total_ratio_valid")
     rows = []
     records = _scaling_records()
     main_t1 = {(r["cell"]["matrix_id"], r["cell"]["label"]): r.get("metrics", {})
@@ -490,6 +496,10 @@ def export_csv(path):
             "effective_solve_threads": provenance.get("effective_solve_threads", ""),
             "timeout_cap_s": record.get("timeout_cap_s", ""),
             "timeout_scope": record.get("matrix_meta", {}).get("timeout_scope", ""),
+            "source_kind": provenance.get("source_kind", ""),
+            **{phase + "_ratio_valid": provenance.get("valid_ratios", {}).get(
+                phase + "_s", {}).get("valid", "")
+               for phase in ("setup", "solve", "total")},
             "baseline_cell_sha256": reference.get("source_cell_sha256", ""),
             "baseline_node_rank": reference.get("rank", ""),
             **baseline,
