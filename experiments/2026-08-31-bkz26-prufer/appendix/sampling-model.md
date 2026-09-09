@@ -138,15 +138,29 @@ not percentages measured from different-budget optima.
 | $1,1,1,1,8$ |(1.255208,.785266,4.607262)|(.948045,.648854,5.481470)|(1.044705,.732912,3.858142)|(.861111,.646008,4.405510)|.656387 / .352991|
 | $1,1,1,8,8$ |(.733380,.607821,3.225138)|(.815174,.617482,6.391297)|(.624127,.541607,2.822966)|(.537396,.504731,3.140868)|.509902 / .294610|
 
-Missing Prüfer spectral entries were not saved in this evidence set. [Spectral scores](../reconciliation/tiny-spectra.json) reaggregate recorded
-eigenvalues; no spectral optimum is claimed.
-K2 and q core sizes coincide here (3/4/3/3), despite different cutoff criteria.
-For the one-hub star, q improves absolute $J$ over GKS (.861 versus 1.255),
-yet sits farther above its stronger extra-edge optimum. The near-optimal
-$d$-edge law mostly uses hub-star-plus-chord supports, sometimes placing the
-hub as a leaf; the two-band law often puts only one heavy vertex on its cycle.
-Their outcome-dependent weights suggest possibilities beyond a fixed heavy
-core. Lower $J$ or mean $\rho$ need not lower mean conditioning, as K2/q show.
+[Saved spectral scores](../reconciliation/tiny-spectra.json) concern per-draw
+error, not the population norm $\nu$; — denotes missing saved spectra.
+
+Further population-moment studies separate three issues:
+
+- **The objective matters locally.** Among 227 captured stars, minimizing $J$
+  over adjacent-parent couplings could worsen $\nu$: one degree-13 star reduced
+  $J$ by 2.19% but increased $\nu$ by 20.27%.
+- **Compare absolute errors before budget-relative gaps.** For
+  $a=(1,1,1,1,8)$, global $\nu$ intervals are
+  $[0.199607331,0.199607365]$ for four edges and
+  $[0.091786849,0.091786868]$ for five. GKS has $\nu\approx0.431506$
+  (2.162× its optimum); cycle-q has $\nu=0.250000$ (2.724×).
+  Prüfer has $\nu\approx0.246914$ (1.237× its tree optimum).
+  Cycle-q's larger relative gap accompanies lower absolute error.
+- **Weights must respond to topology.** The five-edge near-optimal witness mixes hub-spokes
+  plus a chord with four-cycle-plus-leaf outcomes. Keeping those topology
+  probabilities but replacing conditional weights with marginal inverse-inclusion
+  weights raises $\nu$ by at least 20.66%.
+
+These global bounds cover all connected supports and unbiased positive weights;
+no PCG prediction follows. New coupling/$\nu$ certificates are not bundled here;
+the linked reproducers cover the earlier $J$ and per-draw tables.
 
 [Certificates and exact-law reproducer](../reconciliation/optimality/comparison.json) ·
 [Saved heavy/K2 outcomes](../reconciliation/k2-local/index.json) ·

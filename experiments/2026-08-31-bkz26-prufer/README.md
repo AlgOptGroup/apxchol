@@ -44,11 +44,10 @@ The large cycle gain already exists without q or K2; it includes extra edges
 and changed later stars. These quick screens do not establish timing
 significance. Pure q trees are set aside; cycle-q remains promising.
 
-[Absolute tiny-star variance and spectral comparisons](appendix/sampling-model.md)
-show substantial room below all named rules, using separately certified tree
-and tree-plus-one budgets. Four synthetic profiles cannot predict matrix PCG.
-The mathematical model explains q's local variance guarantee and why it does
-not guarantee fewer iterations.
+[Local variance and spectral comparisons](appendix/sampling-model.md) distinguish
+absolute error from gaps to different-budget optima. Lower Frobenius variance
+can worsen population spectral variance even on one star; neither metric
+alone predicts matrix PCG.
 
 [Evidence and reproduction](reconciliation/README.md) ·
 [Original negative campaign](daint-broad/README.md)
