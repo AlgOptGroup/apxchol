@@ -85,12 +85,13 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   factor storage (GPU default on, CPU default off); the old GPU-only alias is
   retired. GPU block setup is explicit opt-in
   through `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, independent of host threads.
-- GPU-owned numerical setup uses the existing forced block frontend, round-shadow
-  and factor-finalizer activation for an internal consuming block-greedy/tree
-  solve on directed AoS. It can eliminate all supported rounds on device and
-  install the append log through dataflow SpTRSV. Public factorization, custom
-  strategies, exported factors and `keep_factor=true` retain their audited or
-  ordinary host path; copied capsules keep independent ownership validation.
+- GPU-owned numerical setup requires all three existing flags:
+  `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, `APXCHOL_GPU_ROUND_SHADOW=force`
+  and `APXCHOL_GPU_FACTOR_FINALIZE=force`. It applies to an internal consuming
+  block-greedy/tree solve on directed AoS. It can eliminate supported rounds on
+  device and install the append log through dataflow SpTRSV. Public factorization,
+  custom strategies, exported factors and `keep_factor=true` retain their audited
+  or ordinary host path; copied capsules keep independent ownership validation.
 - An eligible compressed, sorted, unique, fully paired symmetric CSC operator
   initializes the owned graph directly after operator validation. Its fresh,
   unchanged operator view supplies the pairing proof only after strict layout
@@ -124,19 +125,23 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   retain the CPU coalescer fallback. Validate `GpuOwnedSparsify.*` on device;
   source integration requires fresh native and performance validation.
 - Device finalization supports the existing fp16/drop contracts and omits host
-  factor values only for a unique internal consuming owner. Host metadata and
-  plans remain. Optional GPU forest-tail thinning is not included; CPU residual
-  sparsification remains unchanged. Adopted factors and device-built operators
-  complete their queued setup work before returning. Ordinary host-built paths
-  retain their timing behavior; the common benchmark harness synchronizes every
-  measured API boundary. Optional receipts/events use existing verbose or setup/
-  frontend trace flags. Specific memory, nnz and SpTRSV statistics keep their
-  own controls. No private experiment compile definition is required.
+  factor values only for a unique internal consuming owner. Private finalized
+  factors build dataflow plans on device; generic capsules retain host planning
+  and validation. Host factor metadata remains. Optional GPU forest-tail thinning
+  is not included; CPU residual sparsification remains unchanged. Adopted factors
+  and device-built operators complete their queued setup work before returning.
+  Host-built setup keeps its existing synchronization boundaries; the common
+  benchmark harness synchronizes every measured API boundary. Optional receipts/events use
+  existing verbose or setup/frontend trace flags. Memory, nnz and SpTRSV statistics
+  keep their own controls. No private experiment compile definition is required.
 - Validate the owned path with `GpuBoundedSelection.*`, `GpuDirectCsc.*`,
   `GpuOperatorCsr.*`, `GpuOwnedPrefix.*`, `GpuFactorFinalize.*`, the audited round
   and adoption fixtures, and sanitizer/leak checks. Source integration is not
-  performance acceptance: compare against both current main and frozen 320a99
-  with original-system quality, setup, solve, one-RHS total, RSS and owner memory.
+  performance acceptance: compare the default route against current main and
+  the owned route against its frozen research reference, with original-system
+  quality, setup, solve, one-RHS total, RSS and owner memory.
+- CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
+  only after its upload has completed and no further host RHS reads remain.
 - Keep substantial mechanisms: compensated factor dropping, GPU long-row
   segmentation, critical-tail solving, incremental degrees, and connectivity
   preserving residual sparsification. Standalone residual coalescing policy

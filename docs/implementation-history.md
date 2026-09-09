@@ -77,21 +77,26 @@ an explicit research choice, not universal GPU dominance. Batching transfers
 and reusing resident topology were useful; a tested 2D-copy alternative did
 not justify retention.
 
-**Residency milestones are not full residency.** Device factor finalization,
-resident topology handoffs, and bounded GPU-owned elimination prefixes remove
-specific transfers or duplicate work. CPU authoritative paths, tails, metadata,
-and export contracts remain relevant. Current flags, supported combinations,
-and limitations are in AGENTS.md. Neither implementation presence nor an
-isolated stage timing establishes that setup beats a full reference solver.
+**GPU-owned setup remains explicit research functionality.** The internal
+consuming path supports numerical rounds on device, direct CSC/operator
+preparation, bounded selection, local row batches and device factor/plan
+construction. Host metadata and validated public/export/fallback paths remain.
+The low-yield residual step preserves the CPU coalescing/one-forest/Bernoulli-HT
+law and ordered normalization; a different selector can reach a different
+sparsification boundary. Exact activation and contracts are in
+[AGENTS.md](../AGENTS.md#architecture-and-contracts).
 
-The 2026-09-09 owned-residual prototype ports the current directed CPU
-coalescing/one-forest/Bernoulli-HT law at a low-yield preview boundary. It keeps
-the full canonical stream's ordered 16384-item normalization chunks and the
-six finite scale updates. A bounded GPU selector can reach a different
-boundary from the CPU selector; subsequent GPU rounds also differ from BK.
-This replaces neither the CPU path nor its statistics with the retired
-unscaled ten-forest policy. Source presence is not device correctness,
-spectral-quality or performance acceptance.
+Ordinary setup preserves host allocation order and temporary lifetimes. PCG
+reuses the touched host RHS buffer for the returned solution after the upload
+has completed, avoiding a second full-sized staging allocation. GPU-owned
+adoption and operator construction complete their queued setup before returning;
+common benchmark boundaries synchronize every route.
+
+FP32 validation covers the complete CUDA suite, focused memory/synchronization
+checks, and 66 converged original-system solves across two default-route and four
+owned-route matrix comparisons. The owned measurements used degree quantile 0.8;
+the ordinary default remains 0.2. This evidence supports the bounded opt-in
+integration scope; FP64 acceptance and parity with Yves remain unestablished.
 
 ## CPU triangular solves and factor memory
 
@@ -259,20 +264,3 @@ planned denominators and original verdicts; label later subsets as
 retrospective. A repaired parser can reanalyze saved outputs without rerunning
 an unchanged numerical campaign. These lessons belong in the current concise
 protocol, not in a growing duplicate operational manual.
-
-## GPU-owned setup integration candidate (2026-09-09)
-
-The candidate incorporates the accepted 320a99d3 owned selector, direct CSC/operator
-preparation, normal/oversized elimination, residual merge, descriptor scheduling
-and scratch reuse through the existing forced CUDA/owned activation. Four private
-experiment definitions are removed; optional GPU forest-tail thinning is excluded.
-Public/export/custom paths retain their validation and fallback contracts. Quiet
-setup still completes queued work before solve timing, while existing trace flags
-control optional events and receipts. Current-main graph construction and blocked
-residual normalization remain unchanged.
-
-Frozen 320a99d3 was measured separately in Daint job 4627798. Those results do not
-measure this integration candidate, whose guard/diagnostic changes require fresh
-CUDA correctness and comparison against current main and the frozen reference,
-including host RSS. No integration promotion or performance claim follows from
-source review alone.

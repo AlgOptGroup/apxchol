@@ -62,8 +62,12 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 `cmake -LH build` lists build options. Algorithm defaults live in
 [factor_options.h](include/apxchol/solver/factor_options.h).
 `APXCHOL_SPTRSV_FP16=0|1` controls factor storage (GPU default on, CPU off).
-Setup remains CPU-based unless the experimental GPU block frontend is
-explicitly enabled with `APXCHOL_GPU_BLOCK_FRONTEND=on`.
+Factor construction defaults to CPU. `APXCHOL_GPU_BLOCK_FRONTEND=on` enables
+GPU selection; experimental GPU-owned numerical setup additionally requires
+`APXCHOL_GPU_ROUND_SHADOW=force` and `APXCHOL_GPU_FACTOR_FINALIZE=force`.
+This applies to one-shot block-greedy/tree solves with directed AoS storage;
+public/exported factors and unsupported stored formats retain validated fallback
+paths. See [the setup contracts](AGENTS.md#architecture-and-contracts).
 
 ## Further reading
 
