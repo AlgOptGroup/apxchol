@@ -4,11 +4,11 @@ GH200: 72-core Grace CPU + Hopper GPU. [Protocol](../README.md) ·
 [Values](results.csv) · [Coverage](coverage.json) ·
 [Source selection](selection_provenance.json) · [Platform exceptions](PLATFORM.md)
 
-**513/540 identities:** 479 complete, 15 failed, 7 nonconverged, 6 timeout and
-6 recorded n/a. The 27 absent cells are canonical MATLAB CMG platform exceptions.
+**513/513 identities:** 480 complete, 14 failed, 7 nonconverged, 6 timeout and
+6 recorded n/a. Packed serial CMG replaces MATLAB CMG in the current profile.
 All 108 APX identities were refreshed; the 405 competitor cells are unchanged.
-CPU trace-cycle's failed `G3_circuit` warmup remains a failure, with its three
-retained repetitions unattempted.
+Both CPU samplers now pass `G3_circuit`; its earlier trace-cycle failure and
+the separate successful repair run remain in [source selection](selection_provenance.json).
 
 The four APX rows compare CPU GKS/trace-cycle at degree quantile 0.2 and GPU-owned
 GKS at quantiles 0.8/0.2. Here the quantile controls vertex selection, not the
@@ -22,13 +22,24 @@ initialization, common input/output and independent grading are outside API timi
 CPU uses Clang/libomp with library-default waiting; GPU uses GCC/PASSIVE.
 The fixed-profile campaigns are separate, not interleaved A/B controls.
 
-## Total time
+## Total and solve time
+
+Each pair shows one-RHS total, then solve time. Trace-cycle improves CPU solve
+time on 26/27 matrices but improves total on only 8/27. GPU q=0.8 wins total on
+25/27 matrices; q=0.2 wins on LiveJournal and `kron_g500-logn16`. Both alternatives
+remain visible rather than selecting a different winner for each column.
 
 ![Grid totals](figures/combined_overview_grids.png)
 
+![Grid solve times](figures/combined_solve_grids.png)
+
 ![IPM totals](figures/combined_overview_ipm.png)
 
+![IPM solve times](figures/combined_solve_ipm.png)
+
 ![SuiteSparse totals](figures/combined_overview_suitesparse.png)
+
+![SuiteSparse solve times](figures/combined_solve_suitesparse.png)
 
 Colours compare solvers within each matrix. Missing measurements, failures,
 nonconvergence and timeouts stay distinct. Unknown memory is not plotted as zero.
@@ -50,6 +61,19 @@ all four refreshed profiles. The representative CPU study has **84 identities:
 Sources: APX `1a782c8d`, AMGCL/Hypre `ea01e2ff`, and the corrected private ParAC
 adapter. ParAC preparation is included; its repeated preparation variability is
 unknown. Skitter T2 and IPM T36 ParAC solve-control gaps remain visible.
+
+**ParAC uses parallel factorization and serial portable PCG on ARM.** Thread
+counts reach its factorizer; solve scaling is therefore not expected here.
+Required preparation limits setup scaling. At T72, AMD accounts for 75% of
+Skitter setup but only 8–9% on grid/IPM. The complete factor-setup interval scales
+1.87× on IPM and 1.72× on Skitter; the grid interval is too variable to quote a
+speedup. The upstream thread-0 timer excludes barrier waiting and is not that
+complete interval. Historical laptop figures charged this narrower timer plus
+AMD, so their setup speedups are not directly comparable.
+
+Hypre currently lacks a Skitter speedup baseline: T1 hit its whole-cell deadline
+after three converged calls; only T2 completed the original campaign. The missing
+points are being remeasured with a sufficient per-cell budget.
 
 ![CPU setup speedup](figures/threads_cpu_representative_setup_speedup.png)
 

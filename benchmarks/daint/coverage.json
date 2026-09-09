@@ -1,182 +1,19 @@
 {
-  "platform": "Daint GH200",
+  "platform": "Daint",
   "threads": 72,
   "registered_matrices": 27,
   "measured_matrices": 27,
   "present": 513,
-  "expected_headline_cells": 540,
+  "expected_headline_cells": 513,
   "status_counts": {
-    "complete": 479,
-    "failed": 15,
+    "complete": 480,
+    "failed": 14,
     "n/a": 6,
     "timeout": 6,
     "not_converged": 7
   },
   "series_profile": "sampler-comparison",
-  "missing": [
-    {
-      "matrix": "grid_500",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid_1000",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid_2000",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid_3000",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid3d_100",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid3d_150",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid3d_200",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid_4000",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid3d_250",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "grid_5000",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "parabolic_fem",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "apache2",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "ecology1",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "G3_circuit",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "thermal2",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "com-Amazon",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "coAuthorsDBLP",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "kron_g500-logn16",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "com-Youtube",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "coPapersDBLP",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "as-Skitter",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "com-LiveJournal",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "com-Orkut",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "iter0010",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "iter0020",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "iter0030",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    },
-    {
-      "matrix": "iter0040",
-      "device": "cpu",
-      "solver": "cmg",
-      "config": ""
-    }
-  ],
+  "missing": [],
   "series": [
     [
       "cpu",
@@ -202,11 +39,6 @@
       "cpu",
       "apxchol_v1",
       "bg+tree[vec_pool_aos]"
-    ],
-    [
-      "cpu",
-      "cmg",
-      ""
     ],
     [
       "cpu",

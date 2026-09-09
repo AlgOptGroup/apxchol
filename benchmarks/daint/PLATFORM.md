@@ -2,9 +2,9 @@
 
 Daint GH200 is primary; [laptop data](../archive/) is historical.
 
-The headline declares **27 matrices × 20 series = 540 identities**. Canonical
-MATLAB CMG accounts for 27 unavailable ARM64 cells. Packed native CMG remains a
-separate serial series. [Coverage](coverage.json) and [values](results.csv)
+The headline declares **27 matrices × 19 series = 513 identities**. Packed serial
+CMG replaces unavailable canonical MATLAB CMG in current charts; historical data
+remain archived. [Coverage](coverage.json) and [values](results.csv)
 distinguish missing, unsupported, failed, nonconverged and timed-out outcomes.
 
 The four APX profiles are CPU GKS/trace-cycle at degree quantile 0.2 and

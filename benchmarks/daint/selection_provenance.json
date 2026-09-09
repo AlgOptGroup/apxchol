@@ -1,12 +1,12 @@
 {
-  "expected_headline_cells": 540,
+  "expected_headline_cells": 513,
   "represented": 513,
-  "canonical_matlab_cmg_missing": 27,
+  "canonical_matlab_cmg_missing": 0,
   "preserved_competitor_cells": 405,
   "refreshed_apx_cells": 108,
   "status_counts": {
-    "complete": 479,
-    "failed": 15,
+    "complete": 480,
+    "failed": 14,
     "timeout": 6,
     "n/a": 6,
     "not_converged": 7
@@ -5132,15 +5132,15 @@
         "bg+trace_cycle[vec_pool_aos]",
         72
       ],
-      "status": "failed",
-      "selected_cell_sha256": "b0f50beb617582c9144d9b6cd12546721761f9447199b7053dbc6fe6a40c5cbd",
-      "git_sha": "f17b98eca1d46cde68ffe1555e5284f225745567",
-      "binary_sha256": "d7960e301d068b7d8a70ddeca2e0402da1025c43dac7599b16f02f4201d00067",
-      "source_manifest_sha256": "683ba7cb0bc7693fecd9a62a74082f2fc08e238426ad451a54af4166b4a31042",
-      "campaign_job_id": "4633325",
-      "setup_route": null,
-      "sampler": null,
-      "degree_quantile": null
+      "status": "complete",
+      "selected_cell_sha256": "b0810fc33c819a6b651c73edf72a5a276b928d9bcd15a97fbd198dacdda15aa0",
+      "git_sha": "98b6a4cda51bdaba2c58a6dbb560df43107cf071",
+      "binary_sha256": "ab34ea7daa4dcb1f40264c4019944e4590e4c62f32cb8724a8bc5571ad71d82b",
+      "source_manifest_sha256": "7ecf0c62fedbfdaf3c9b095ec678822d3537ff3c44d88b2324deef00d863c448",
+      "campaign_job_id": "4633974",
+      "setup_route": "cpu_cpu",
+      "sampler": "trace_cycle",
+      "degree_quantile": 0.2
     },
     {
       "identity": [
@@ -5152,11 +5152,11 @@
         72
       ],
       "status": "complete",
-      "selected_cell_sha256": "ebe78ba220cf6e635b4e077b95ff7004b9d455a93df4b960e1766a0d63012014",
-      "git_sha": "f17b98eca1d46cde68ffe1555e5284f225745567",
-      "binary_sha256": "d7960e301d068b7d8a70ddeca2e0402da1025c43dac7599b16f02f4201d00067",
-      "source_manifest_sha256": "683ba7cb0bc7693fecd9a62a74082f2fc08e238426ad451a54af4166b4a31042",
-      "campaign_job_id": "4633325",
+      "selected_cell_sha256": "119f0bdfc877268cb9038c96678e9909e2b3ad5f90039e2ceeee4294f323041e",
+      "git_sha": "98b6a4cda51bdaba2c58a6dbb560df43107cf071",
+      "binary_sha256": "ab34ea7daa4dcb1f40264c4019944e4590e4c62f32cb8724a8bc5571ad71d82b",
+      "source_manifest_sha256": "7ecf0c62fedbfdaf3c9b095ec678822d3537ff3c44d88b2324deef00d863c448",
+      "campaign_job_id": "4633974",
       "setup_route": "cpu_cpu",
       "sampler": "gks",
       "degree_quantile": 0.2
@@ -9764,9 +9764,13 @@
   "source_notes": {
     "cpu": "f17b98ec plus CPU sampler patch c2c544eccba4af26098005345e059c913992c4d57a0b13b6625063ae19a86e22; exact source snapshot683ba7cb recorded per cell. Clang22.1.8/libomp, library-default wait policy.",
     "gpu": "c94a94a1, same GCC14.3/PASSIVE consumer for quantiles0.8 and0.2; cached native acceptance and actual device-factor adoption required.",
-    "competitors": "405 numerical/status cells copied unchanged from preceding selected snapshot. Scaling and focused sampler detail have separately labelled sources."
+    "competitors": "405 numerical/status cells copied unchanged from preceding selected snapshot. Scaling and focused sampler detail have separately labelled sources.",
+    "g3_repair": "Both G3 CPU cells use the matched eight-call followup4633974, built from native-validated source manifest7ecf0c62. Source base98b6a4cd plus input-only finite-pool fallback; integrated as ac761333. Other APX and competitor cells retain their published sources."
   },
-  "publication_metadata_overlays": [
+  "excluded_historical_series": [
+    "Canonical MATLAB CMG; current charts use packed serial CMG"
+  ],
+  "superseded_publication_metadata_overlays": [
     {
       "raw_source_sha256": "b4f365b7dfd0494322d551728bc57e1923dc55b493a913da7f7187d420fee190",
       "selected_sha256": "b0f50beb617582c9144d9b6cd12546721761f9447199b7053dbc6fe6a40c5cbd",
@@ -9779,5 +9783,36 @@
       "bindings_sha256": "b63019f5d846936aff77c93a372344b0f44571c31b74eae2b9735b1adfe2c4d6",
       "reason": "Failed G3 trace cell omitted git_sha; restored from its recorded attempted binary/source identity. Status and metrics unchanged."
     }
-  ]
+  ],
+  "targeted_replacements": [
+    {
+      "identity": [
+        "suitesparse",
+        "G3_circuit",
+        "apxchol_v1",
+        "bg+tree[vec_pool_aos]",
+        72,
+        "cpu"
+      ],
+      "previous_status": "complete",
+      "previous_cell_sha256": "ebe78ba220cf6e635b4e077b95ff7004b9d455a93df4b960e1766a0d63012014",
+      "replacement_cell_sha256": "119f0bdfc877268cb9038c96678e9909e2b3ad5f90039e2ceeee4294f323041e",
+      "campaign_job_id": "4633974"
+    },
+    {
+      "identity": [
+        "suitesparse",
+        "G3_circuit",
+        "apxchol_v1",
+        "bg+trace_cycle[vec_pool_aos]",
+        72,
+        "cpu"
+      ],
+      "previous_status": "failed",
+      "previous_cell_sha256": "b0f50beb617582c9144d9b6cd12546721761f9447199b7053dbc6fe6a40c5cbd",
+      "replacement_cell_sha256": "b0810fc33c819a6b651c73edf72a5a276b928d9bcd15a97fbd198dacdda15aa0",
+      "campaign_job_id": "4633974"
+    }
+  ],
+  "failure_history": "The earlier G3 CPU trace warmup failed before three retained calls could start. Its outcome and source hashes remain in targeted_replacements; the new cell is a separate successful run."
 }
