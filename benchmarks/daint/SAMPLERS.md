@@ -15,6 +15,8 @@ Ratios below are geometric means against GKS within each matched six-matrix rout
 
 Trace-cycle and heavy-core K2 reduce iterations but store more entries. On CPU their one-RHS totals are close to GKS; the GPU-owned port has a large setup penalty and is therefore retained here as an experiment. In the CPU-setup/GPU-solve route, trace-cycle has a slower one-RHS total on all six matrices despite faster solves.
 
+A separate instrumented diagnostic (job 4633827; four large calls and two smokes, all residuals accepted) attributes 95.1% of the extra trace-cycle setup on LiveJournal and 90.9% on Skitter to the sampling stage. Its LiveJournal sampling time rises from 0.315 to 7.963 seconds; 7.004 seconds are in rounds containing only oversized rows. This stage includes sorting, emission, status transfer, compaction and excess propagation, so it does not isolate one kernel. Cooperative oversized-row sampling is the next optimization candidate; these single-call diagnostics do not replace the repeated timings above.
+
 CPU setup uses quantile 0.2; GPU-owned primary cells use 0.8. The extract also retains four owned trace/K2 quantile 0.2 social-graph cells; all four had slower totals than their corresponding 0.8 cells. CPU and hybrid runs use Clang/libomp with library-default waiting; owned runs use GCC with explicit PASSIVE waiting. These compiler/runtime differences are recorded, not treated as sampler effects across routes.
 
 Retained solve spread exceeds 1.15 for CPU trace-cycle on LiveJournal. Hybrid K2 on grid_2000 has setup and total spread warnings (1.375 and 1.324); its solve timing is stable. Raw observations remain in the extract. Reuse estimates of setup + R×first-solve time are extrapolations, not measurements on multiple right-hand sides.
