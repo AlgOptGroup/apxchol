@@ -55,12 +55,14 @@ nonconvergence and timeouts stay distinct. Unknown memory is not plotted as zero
 
 ## Thread scaling
 
-These are earlier, separately labelled campaigns, not scaling measurements of
-all four refreshed profiles. The representative CPU study has **84 identities:
-78 complete, 2 whole-cell timeouts and 4 unattempted**. Each curve uses its own T1.
-Sources: APX `1a782c8d`, AMGCL/Hypre `ea01e2ff`, and the corrected private ParAC
-adapter. ParAC preparation is included; its repeated preparation variability is
-unknown. Skitter T2 and IPM T36 ParAC solve-control gaps remain visible.
+The representative CPU study has **105/105 complete identities**: GKS,
+trace-cycle, AMGCL, BoomerAMG and ParAC on three matrices at 1–72 threads.
+The 42 APX points use the current CPU implementation and complete API timing;
+competitors retain their documented sources. Each curve uses its own T1.
+These are separate campaigns, and factors/iterations can change with thread count.
+One APX point (IPM trace-cycle T36) has 21.5% solve-time spread and remains
+visible with its warning in the source metadata. ParAC's Skitter T2/IPM T36
+solve-control gaps remain visible; preparation variability is unmeasured.
 
 **ParAC uses parallel factorization and serial portable PCG on ARM.** Thread
 counts reach its factorizer; solve scaling is therefore not expected here.
@@ -71,9 +73,10 @@ speedup. The upstream thread-0 timer excludes barrier waiting and is not that
 complete interval. Historical laptop figures charged this narrower timer plus
 AMD, so their setup speedups are not directly comparable.
 
-Hypre currently lacks a Skitter speedup baseline: T1 hit its whole-cell deadline
-after three converged calls; only T2 completed the original campaign. The missing
-points are being remeasured with a sufficient per-cell budget.
+Hypre's Skitter curve is complete: five new points repair insufficient campaign
+deadlines, while successful T2/T72 points reuse the same binary with explicit
+mixed-campaign provenance. The earlier timeout/unattempted outcomes remain
+recorded. T72 gives 3.59× setup and 3.91× solve speedup over T1.
 
 ![CPU setup speedup](figures/threads_cpu_representative_setup_speedup.png)
 

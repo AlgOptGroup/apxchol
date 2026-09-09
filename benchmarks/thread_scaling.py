@@ -38,12 +38,14 @@ MATS = [
 ]
 # cpp solvers: label -> (solver, config)
 CPP = [("apxchol bg+tree", "apxchol_v1", "bg+tree[vec_pool_aos]"),
+       ("apxchol trace-cycle", "apxchol_v1", "bg+trace_cycle[vec_pool_aos]"),
        ("apxchol greedy+tree", "apxchol_v1", "greedy+tree[vec_pool]"),
        ("apxchol bk+tree", "apxchol_v1", "bk+tree[vec_pool]"),
        ("RCHOL", "rchol", ""), ("pRCHOL", "rchol_par", ""),
        ("BoomerAMG", "hypre_boomeramg", ""),
        ("AMGCL", "amgcl", "")]   # OMP-parallel (builtin backend) — belongs on the scaling chart
 COLORS = {"apxchol bg+tree": "#0b5394",
+          "apxchol trace-cycle": "#3d7ebf",
           "apxchol greedy+tree": "#073763",
           "apxchol bk+tree": "#3d85c6",
           "RCHOL": "#d62728", "pRCHOL": "#ff9896", "BoomerAMG": "#2ca02c",
