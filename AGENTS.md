@@ -108,8 +108,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   star and retain GKS for degree below three. CPU setup and full GPU-owned
   setup support them; alternative samplers reject forced CPU-shadow/export
   combinations instead of silently substituting a backend. The owned device
-  sampler covers normal and oversized rows, retains per-session moment scratch,
-  and reports input-only heavy-core numerical fallbacks to device GKS in traces.
+  sampler covers normal and oversized rows and retains per-session moment scratch.
+  Both cycle families retain positive subnormals; finite zero neighbors or
+  unrepresentable numerical plans use input-only GKS fallback with the original
+  seed before sampling. Invalid inputs and overflow remain errors. Device traces
+  report these numerical fallbacks.
 - The owned selector uses degree/hash/id priority, all ties at the degree
   quantile, and at most four immutable decision/commit passes with stable
   unresolved-candidate compaction. It guarantees independence and progress,

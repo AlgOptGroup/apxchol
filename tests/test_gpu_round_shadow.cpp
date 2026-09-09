@@ -5337,18 +5337,23 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
     scoped_omp_threads serial(1);
     for (auto sampler : {apxchol::clique_sampler::trace_cycle,
                          apxchol::clique_sampler::heavy_core_k2}) {
-        for (unsigned profile = 0; profile < 3; ++profile) {
+        for (unsigned profile = 0; profile < 6; ++profile) {
             SCOPED_TRACE(std::to_string(static_cast<int>(sampler))+":"+std::to_string(profile));
             const std::vector<unsigned> degree = profile == 0 ?
                 std::vector<unsigned>{0,1,2,3,127,128,129} :
                 profile == 1 ? std::vector<unsigned>{3,4,5,31,129} :
-                               std::vector<unsigned>{32,64,65};
+                               profile == 2 ? std::vector<unsigned>{32,64,65} :
+                                              std::vector<unsigned>{3,7,129};
             const auto count = static_cast<node_index>(degree.size());
             node_index n=count;
             std::vector<undirected_edge> edges;
             std::vector<std::vector<apxchol::weighted_neighbor>> stars(count);
             for(node_index pivot=0;pivot<count;++pivot)for(unsigned j=0;j<degree[pivot];++j) {
-                const double weight=profile==0?1.:std::exp2(int(j%11)-5);
+                // Profiles 3/4/5 cover representable subnormals, zero inputs,
+                // and zero-rounding output, for normal and oversized rows.
+                const double weight = profile==0 ? 1. : profile==3 ? std::exp2(-70) :
+                    profile==4 ? (j==0 ? 0. : 1.) : profile==5 ? std::exp2(sizeof(apxchol::pool_value_t)==4?-90:-600) :
+                    std::exp2(int(j%11)-5);
                 stars[pivot].push_back({n,weight});
                 if(profile==2) {edges.push_back({pivot,n,.25*weight});edges.push_back({pivot,n,.75*weight});}
                 else edges.push_back({pivot,n,weight});
@@ -5358,7 +5363,7 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
             for(node_index pivot=0;pivot<count;++pivot) {
                 double D=.125;for(auto edge:stars[pivot])D+=edge.weight;
                 std::vector<apxchol::deferred_edge> fill;
-                apxchol::tree_elimination{.sampler=sampler}.sample_clique(stars[pivot],D,
+                apxchol::tree_elimination{.sampler=profile>=4?apxchol::clique_sampler::gks:sampler}.sample_clique(stars[pivot],D,
                     apxchol::detail::gpu_round_shadow_pivot_seed(17,pivot),apxchol::edge_emitter(fill));
                 for(auto edge:fill)expected.emplace_back(std::min(edge.u,edge.v),std::max(edge.u,edge.v),
                     static_cast<double>(static_cast<apxchol::pool_value_t>(edge.w)));
@@ -5383,19 +5388,23 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
                 ASSERT_TRUE(report.gpu_executed);
                 EXPECT_GT(report.normal_batch.normal_pivots,0u);
                 EXPECT_GT(report.normal_batch.oversized_pivots,0u);
-                EXPECT_EQ(report.sampler_numerical_fallbacks,0u);
+                EXPECT_EQ(report.sampler_numerical_fallbacks,profile>=4?count:0u);
                 EXPECT_EQ(report.raw_fill_edges,expected.size());
                 EXPECT_EQ(report.live_incidences,2*expected.size());
                 EXPECT_LE(report.live_incidences,2*edges.size());
-                if(profile==1)EXPECT_EQ(report.live_incidences,2*edges.size()); // f=d uses every slot.
+                if(profile==1 || profile==3)EXPECT_EQ(report.live_incidences,2*edges.size()); // f=d uses every slot.
                 std::vector<apxchol::detail::factor_col> columns;
                 session.materialize_owned_prefix(graph,active,columns);
                 std::vector<std::tuple<node_index,node_index,double>> got;
                 for(node_index v=count;v<n;++v)for(auto [u,w]:graph.neighbors(v)) {
-                    EXPECT_NE(u,v);EXPECT_GE(u,count);EXPECT_GT(w,0.0);EXPECT_TRUE(std::isfinite(w));
+                    EXPECT_NE(u,v);EXPECT_GE(u,count);EXPECT_TRUE(std::isfinite(w));
+                    if(profile>=4) {EXPECT_GE(w,0.0);} else {EXPECT_GT(w,0.0);}
                     if(v<u)got.emplace_back(v,u,static_cast<double>(w));
                 }
                 std::sort(got.begin(),got.end());ASSERT_EQ(got.size(),expected.size());
+                if (profile==3 && sizeof(apxchol::pool_value_t)==4)
+                    for (const auto& edge:got)
+                        EXPECT_EQ(std::fpclassify(static_cast<apxchol::pool_value_t>(std::get<2>(edge))),FP_SUBNORMAL);
                 for(std::size_t i=0;i<got.size();++i) {
                     EXPECT_EQ(std::get<0>(got[i]),std::get<0>(expected[i]));
                     EXPECT_EQ(std::get<1>(got[i]),std::get<1>(expected[i]));

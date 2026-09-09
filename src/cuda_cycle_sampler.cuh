@@ -2,7 +2,6 @@
 // One independent thread owns each pivot's plan, shuffle and coordinated draws.
 // No parent-index jump-ahead: rejection sampling consumes a variable RNG count.
 // Materialize standard-library constants outside device functions for NVCC.
-constexpr double kCyclePoolMin = std::numeric_limits<pool_value_t>::min();
 constexpr double kCyclePoolMax = std::numeric_limits<pool_value_t>::max();
 constexpr double kCycleEpsilon = std::numeric_limits<double>::epsilon();
 constexpr double kCycleInfinity = std::numeric_limits<double>::infinity();
@@ -14,8 +13,14 @@ __device__ std::uint32_t cycle_uniform_index(unsigned long long& state,
     return static_cast<std::uint32_t>(value % b);
 }
 __device__ bool cycle_pool_edge(double value) {
-    return isfinite(value) && value >= kCyclePoolMin &&
-           value <= kCyclePoolMax;
+    // Match pool insertion: positive subnormals survive; zero/overflow do not.
+    return value > 0 && value <= kCyclePoolMax &&
+           static_cast<pool_value_t>(value) > 0;
+}
+// 0: eligible, 1: input-only numerical fallback, 2: invalid/overflow.
+__device__ int cycle_pool_range(double value) {
+    if (!(value >= 0) || !(value <= kCyclePoolMax)) return 2;
+    return static_cast<pool_value_t>(value) > 0 ? 0 : 1;
 }
 __device__ double cycle_edge_weight(const work_record* a, double D,
         std::uint32_t h, std::uint32_t i, std::uint32_t j) {
@@ -112,7 +117,7 @@ __device__ double cycle_parent_weight(const work_record* a, std::uint32_t d,
     const double mass=suffix[i+1]+double(d-i-1)*ai;
     return (a[i].value*(scale/D))*(mass/(1+ai/aj));
 }
-// Input-only heavy-cut numerical fallback retains its established GKS law.
+// Input-only numerical fallback uses the established GKS law and original seed.
 __device__ std::uint32_t cycle_gks_row(const work_record* a, std::uint32_t d,
         double D, unsigned long long state, double* prefix,
         work_record* fill, std::uint8_t* flags) {
@@ -131,6 +136,22 @@ __device__ std::uint32_t cycle_gks_row(const work_record* a, std::uint32_t d,
         flags[i]=1;++emitted;
     }
     return emitted;
+}
+__device__ std::uint32_t cycle_gks_fallback_row(const work_record* a, std::uint32_t d,
+        double D, unsigned long long state, double* prefix,
+        work_record* fill, std::uint8_t* flags, std::uint32_t* status) {
+    double total=0,partial=0;
+    for(std::uint32_t i=0;i<d;++i) total+=a[i].value;
+    if(!isfinite(total)) {atomicOr(status,2u);return 0;}
+    for(std::uint32_t i=0;i+1<d;++i) {
+        partial+=a[i].value;
+        const double suffix=total-partial;
+        if(suffix>0 && cycle_pool_range(a[i].value*suffix/D)==2) {
+            atomicOr(status,2u);return 0;
+        }
+    }
+    atomicAdd(status+1,1u);
+    return cycle_gks_row(a,d,D,state,prefix,fill,flags);
 }
 __global__ void sample_cycle_rows(const work_record* canonical,
         const std::uint32_t* offsets, const device_pivot* pivots, std::size_t p,
@@ -152,19 +173,29 @@ __global__ void sample_cycle_rows(const work_record* canonical,
         if(counters)counters[ordinal].emitted_edges=emitted;
         return;
     }
+    int range = 0;
+    if (!(D > 0) || !isfinite(D)) {atomicOr(status,2u);return;}
+    for (std::uint32_t i=0;i<d;++i) {
+        if (!(a[i].value >= 0) || !isfinite(a[i].value)) {atomicOr(status,2u);return;}
+        if (!(a[i].value > 0)) range = 1;
+    }
+    if (!range && !(a[0].value/a[d-1].value > 0)) range=1;
+    if (range) {
+        const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
+        if(counters)counters[ordinal].emitted_edges=emitted;
+        return;
+    }
     const bool trace=sampler==clique_sampler::trace_cycle;
     const auto cut=trace?cycle_trace_cut(a,d,sums,workspace+begin)
                         :cycle_heavy_cut(a,d,workspace+std::size_t(begin)*8);
     if(cut==d) {
-        if(trace){atomicOr(status,1u);return;}
-        atomicAdd(status+1,1u);
-        const auto emitted=cycle_gks_row(a,d,D,state,sums,fill,flags);
+        const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
         if(counters)counters[ordinal].emitted_edges=emitted;
         return;
     }
     const auto h=d-cut;
-    if(!cycle_pool_edge(cycle_edge_weight(a,D,h,cut,cut+1)) ||
-       !cycle_pool_edge(cycle_edge_weight(a,D,h,d-2,d-1))){atomicOr(status,2u);return;}
+    range=max(cycle_pool_range(cycle_edge_weight(a,D,h,cut,cut+1)),
+              cycle_pool_range(cycle_edge_weight(a,D,h,d-2,d-1)));
     if(!trace) {
         sums[0]=a[0].value;
         for(std::uint32_t i=1;i<d;++i)sums[i]=sums[i-1]+a[i].value;
@@ -177,13 +208,20 @@ __global__ void sample_cycle_rows(const work_record* canonical,
         if(trace) {
             const double ai=a[i].value/a[d-1].value,m=d-i-1;
             const double probability=m*ai/(sums[i+1]+m*ai);
-            if(!(probability>0 && probability<=.5) ||
-               !cycle_pool_edge(cycle_parent_weight(a,d,D,sums,i,i+1)) ||
-               !cycle_pool_edge(cycle_parent_weight(a,d,D,sums,i,d-1))){atomicOr(status,2u);return;}
+            if(!(probability>=0 && probability<=.5) || !isfinite(probability)) {atomicOr(status,2u);return;}
+            if (!(probability>0)) range=max(range,1);
+            range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,i+1)));
+            range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,d-1)));
         } else {
             fill[i].value=sums[d-1]-sums[i];
-            if(!cycle_pool_edge(a[i].value*fill[i].value/D)){atomicOr(status,2u);return;}
+            range=max(range,cycle_pool_range(a[i].value*fill[i].value/D));
         }
+    }
+    if (range==2) {atomicOr(status,2u);return;}
+    if (range==1) {
+        const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
+        if(counters)counters[ordinal].emitted_edges=emitted;
+        return;
     }
     for(std::uint32_t k=0;k<h;++k)fill[cut+k].a=cut+k;
     for(std::uint32_t k=h;k>1;--k) {

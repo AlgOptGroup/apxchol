@@ -6,10 +6,43 @@
 #include <numeric>
 #include <stdexcept>
 namespace apxchol::detail {
+// Input-only cycle eligibility. GKS remains the established law when pool
+// rounding or normalized probabilities cannot retain a positive cycle update.
+inline bool cycle_pool_eligible(double value) {
+    if (!(value >= 0) || !(value <= std::numeric_limits<pool_value_t>::max()))
+        throw std::domain_error("cycle sampler: invalid or overflowing residual-pool edge");
+    return static_cast<pool_value_t>(value) > 0;
+}
 inline void require_pool_edge(double value) {
-    if (!(value >= std::numeric_limits<pool_value_t>::min()) ||
-        !(value <= std::numeric_limits<pool_value_t>::max()) || !std::isfinite(value))
-        throw std::domain_error("cycle sampler: edge outside normal residual-pool range");
+    if (!cycle_pool_eligible(value))
+        throw std::domain_error("cycle sampler: edge outside positive residual-pool range");
+}
+inline bool cycle_inputs_eligible(std::span<const weighted_neighbor> n, double pivot) {
+    if (!(pivot > 0) || !std::isfinite(pivot))
+        throw std::domain_error("cycle sampler: invalid pivot");
+    bool eligible = true;
+    for (const auto& edge : n) {
+        if (!(edge.weight >= 0) || !std::isfinite(edge.weight))
+            throw std::domain_error("cycle sampler: invalid neighbor weight");
+        eligible &= edge.weight > 0;
+    }
+    if (eligible) eligible = n.front().weight / n.back().weight > 0;
+    return eligible;
+}
+inline void sample_cycle_gks_fallback(std::span<weighted_neighbor> n, double pivot,
+                                       std::uint64_t seed, edge_emitter out) {
+    // GKS parent weights depend only on the input star, not the chosen parent.
+    // Allow its established zero rounding, but never hide an overflowing update.
+    double total=0,prefix=0;
+    for(const auto& edge:n) total+=edge.weight;
+    if(!std::isfinite(total))
+        throw std::domain_error("cycle sampler: overflowing GKS fallback sum");
+    for(std::size_t i=0;i+1<n.size();++i) {
+        prefix+=n[i].weight;
+        const double suffix=total-prefix;
+        if(suffix>0) (void)cycle_pool_eligible(n[i].weight*suffix/pivot);
+    }
+    tree_elimination{}.sample_clique(n, pivot, seed, out);
 }
 inline std::size_t uniform_index(random_stream& rng, std::size_t bound) {
     const auto b = static_cast<std::uint64_t>(bound), threshold = -b % b;
@@ -167,19 +200,30 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
     static thread_local std::vector<std::size_t> cycle;
     static thread_local std::vector<deferred_edge> staged;
     staged.clear(); staged.reserve(n.size());
-    workspace.prepare(n);
+    // Only plan construction may choose an input-only numerical fallback.
+    // Once random sampling starts, errors remain errors; never redraw.
+    try { workspace.prepare(n); }
+    catch (const std::domain_error&) {
+        sample_cycle_gks_fallback(n, pivot, seed, out);
+        return;
+    }
     const auto cut=workspace.cut,h=n.size()-cut,d=n.size();
     // Input-only all-outcome checks before any RNG or publication. Positive
     // operations make cycle weights and each source's HT weight monotone in
     // the receiver weight; endpoint checks cover every possible edge.
-    require_pool_edge(cycle_weight(n,pivot,h,cut,cut+1));
-    require_pool_edge(cycle_weight(n,pivot,h,d-2,d-1));
+    bool eligible = cycle_pool_eligible(cycle_weight(n,pivot,h,cut,cut+1));
+    eligible &= cycle_pool_eligible(cycle_weight(n,pivot,h,d-2,d-1));
     for(std::size_t i=0;i<cut;++i) {
         const double probability=workspace.uniform_probability(i);
-        if(!(probability>0 && probability<=.5) || !std::isfinite(probability))
-            throw std::domain_error("relative trace: unrepresentable mixture");
-        require_pool_edge(workspace.parent_weight(n,pivot,i,i+1));
-        require_pool_edge(workspace.parent_weight(n,pivot,i,d-1));
+        if(!(probability>=0 && probability<=.5) || !std::isfinite(probability))
+            throw std::domain_error("relative trace: invalid mixture");
+        eligible &= probability > 0;
+        eligible &= cycle_pool_eligible(workspace.parent_weight(n,pivot,i,i+1));
+        eligible &= cycle_pool_eligible(workspace.parent_weight(n,pivot,i,d-1));
+    }
+    if (!eligible) {
+        sample_cycle_gks_fallback(n, pivot, seed, out);
+        return;
     }
     random_stream rng{seed};cycle.resize(h);std::iota(cycle.begin(),cycle.end(),cut);
     for(std::size_t k=h;k>1;--k)
@@ -215,7 +259,7 @@ inline void sample_heavy_core_k2(std::span<weighted_neighbor> n, double pivot,
     std::size_t cut;
     try { cut = heavy_core_cut(n); }
     catch (const std::domain_error&) {
-        tree_elimination{}.sample_clique(n, pivot, seed, out);
+        sample_cycle_gks_fallback(n, pivot, seed, out);
         return;
     }
     const auto h = d - cut;
@@ -226,13 +270,18 @@ inline void sample_heavy_core_k2(std::span<weighted_neighbor> n, double pivot,
     prefix.resize(d + 1); prefix[0] = 0;
     for (std::size_t i = 0; i < d; ++i) prefix[i+1] = prefix[i] + n[i].weight;
     mass.resize(cut); remaining.resize(cut); partner.assign(cut, d);
+    bool eligible = true;
     for (std::size_t i = 0; i < cut; ++i) {
         remaining[i] = prefix[d] - prefix[i+1];
         mass[i] = n[i].weight * remaining[i] / pivot;
-        require_pool_edge(mass[i]);
+        eligible &= cycle_pool_eligible(mass[i]);
     }
-    require_pool_edge(cycle_weight(n, pivot, h, cut, cut+1));
-    require_pool_edge(cycle_weight(n, pivot, h, d-2, d-1));
+    eligible &= cycle_pool_eligible(cycle_weight(n, pivot, h, cut, cut+1));
+    eligible &= cycle_pool_eligible(cycle_weight(n, pivot, h, d-2, d-1));
+    if (!eligible) {
+        sample_cycle_gks_fallback(n, pivot, seed, out);
+        return;
+    }
     random_stream rng{seed}; cycle.resize(h); std::iota(cycle.begin(), cycle.end(), cut);
     for (std::size_t k = h; k > 1; --k)
         std::swap(cycle[k-1], cycle[uniform_index(rng, k)]);
@@ -271,11 +320,12 @@ inline void sample_heavy_core_k2(std::span<weighted_neighbor> n, double pivot,
 }
 inline void sample_cycle_clique(std::span<weighted_neighbor> n, double pivot,
                                std::uint64_t seed, edge_emitter out, clique_sampler sampler) {
-    if (!(pivot > 0) || !std::isfinite(pivot))
-        throw std::domain_error("cycle sampler: invalid pivot");
-    for (const auto& edge : n)
-        if (!(edge.weight > 0) || !std::isfinite(edge.weight))
-            throw std::domain_error("cycle sampler: invalid neighbor");
+    if (sampler != clique_sampler::trace_cycle && sampler != clique_sampler::heavy_core_k2)
+        throw std::invalid_argument("unknown clique sampler");
+    if (!cycle_inputs_eligible(n, pivot)) {
+        sample_cycle_gks_fallback(n, pivot, seed, out);
+        return;
+    }
     if (sampler == clique_sampler::trace_cycle) sample_trace_cycle(n, pivot, seed, out);
     else if (sampler == clique_sampler::heavy_core_k2) sample_heavy_core_k2(n, pivot, seed, out);
     else throw std::invalid_argument("unknown clique sampler");
