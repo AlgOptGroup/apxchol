@@ -714,5 +714,131 @@ class CompactScalingPlotTest(unittest.TestCase):
                 thread_scaling.charts(compact=True)
 
 
+class SamplerProfileTest(unittest.TestCase):
+    def setUp(self):
+        from contextlib import ExitStack
+        self.context = ExitStack()
+        self.addCleanup(self.context.close)
+        for module, names in [(cpu, ("ORDER", "APX_SERIES", "POSTER_SOLVERS", "COLORS")),
+                              (gpu, ("ORDER", "APX_SERIES", "APX_DEFAULT", "COLORS")),
+                              (combined, ("SOLVERS", "ENC"))]:
+            for name in names:
+                value = getattr(module, name)
+                self.context.enter_context(mock.patch.object(
+                    module, name, value.copy() if isinstance(value, (list, dict)) else value))
+
+    @staticmethod
+    def series():
+        return {(device, solver, config)
+                for device, module in [("cpu", cpu), ("gpu", gpu)]
+                for (solver, config), label in module.LABELS.items() if label in module.ORDER}
+
+    def test_twenty_declared_rows_keep_all_sixteen_competitors(self):
+        historical = self.series()
+        self.assertEqual(len(historical), 18)
+        combined.select_sampler_comparison()
+        current = self.series()
+        self.assertEqual(len(current), 20)
+        self.assertEqual(len(rc.MATRICES), 27)
+        self.assertEqual({row for row in historical if row[1] != "apxchol_v1"},
+                         {row for row in current if row[1] != "apxchol_v1"})
+        self.assertNotIn(("gpu", "apxchol_v1", "bg+tree[vec_pool_aos]"), current)
+        self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]"), current)
+        self.assertIn(("cpu", "cmg", ""), current)
+        self.assertNotIn(("cpu", "apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"), current)
+        rc.require_injective_labels(cpu.LABELS, "CPU")
+        rc.require_injective_labels(gpu.LABELS, "GPU")
+
+    def test_sequential_sampler_then_historical_render_restores_profile(self):
+        import render_snapshot
+        r = record("complete", 2, threads=72, solver="apxchol_v1")
+        r["cell"].update(matrix_id=next(iter(rc.MATRICES)), config="bg+tree[vec_pool_aos]")
+        historical = self.series()
+        old_solvers, old_encoding = list(combined.SOLVERS), combined.ENC
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(chart_cells, "load_current_records", return_value=([r], {})), \
+             mock.patch.object(render_snapshot.subprocess, "run"):
+            root = pathlib.Path(directory)
+            render_snapshot.render(root, root / "samplers", 72, "TEST ONLY", sampler_comparison=True)
+            render_snapshot.render(root, root / "historical", 72, "TEST ONLY", sampler_comparison=False)
+            current = json.loads((root / "samplers/coverage.json").read_text())
+            restored = json.loads((root / "historical/coverage.json").read_text())
+        self.assertEqual((current["series_profile"], current["expected_headline_cells"]),
+                         ("sampler-comparison", 540))
+        self.assertEqual((restored["series_profile"], restored["expected_headline_cells"]),
+                         ("historical-default", 486))
+        self.assertEqual(self.series(), historical)
+        self.assertEqual(gpu.APX_DEFAULT, "apxchol/bg (GPU)")
+        combined.select_sampler_comparison(True)
+        combined.select_sampler_comparison(True)
+        self.assertEqual(combined.ENC.count("apxchol GPU bars"), 1)
+        combined.select_sampler_comparison(False)
+        self.assertEqual(combined.SOLVERS, old_solvers)
+        self.assertEqual(combined.ENC, old_encoding)
+
+    def test_owned_label_requires_completed_adoption_evidence(self):
+        r = record("complete", 2, solver="apxchol_v1")
+        r["cell"].update(device="gpu", config="bg+trace_cycle/gpu-owned-q08[vec_pool_aos]")
+        for value in [None, False]:
+            r["metrics"]["actual_device_factor_adopted"] = value
+            with self.assertRaisesRegex(ValueError, "actual device-factor adoption"):
+                gpu.validate_owned_route(r)
+        r["metrics"]["actual_device_factor_adopted"] = True
+        gpu.validate_owned_route(r)
+        for status in ["failed", "oom", "timeout", "not_converged", "n/a"]:
+            r["status"] = status
+            r["metrics"] = {}
+            gpu.validate_owned_route(r)
+
+    def test_snapshot_keeps_failures_metadata_and_missing_cmg_without_bridge_substitution(self):
+        import csv
+        import render_snapshot
+        mats = list(rc.MATRICES)
+        records = []
+        for index, status in enumerate(["complete", "failed", "timeout", "not_converged", "oom", "n/a"]):
+            r = record(status, 2 if status == "complete" else None,
+                       threads=72, solver="apxchol_v1")
+            r["cell"].update(matrix_id=mats[index], device="gpu",
+                config="bg+trace_cycle/gpu-owned-q08[vec_pool_aos]")
+            r["provenance"] = dict(git_sha="TEST-ONLY-SOURCE", binary_sha256="TEST-ONLY-BINARY",
+                sampler="trace_cycle", setup_route="owned_gpu", degree_quantile=0.8,
+                source_manifest_sha256="TEST-ONLY-MANIFEST", timing_protocol="TEST-ONLY")
+            if status == "complete":
+                r["metrics"].update(actual_device_factor_adopted=True, fp16=True,
+                    factor_drop_rel=0.0001, stored_factor_nnz=12,
+                    phase_observations={"setup_s": [1, 1.1, 1.2]},
+                    timing_stability_warning=True)
+            if status == "timeout":
+                r["timeout_cap_s"] = 50
+                r["matrix_meta"] = {"timeout_scope": "logical_cell"}
+            records.append(r)
+        bridge = record("complete", 0.001, threads=72, solver="apxchol_v1")
+        bridge["cell"].update(matrix_id=mats[6], device="gpu", config="bg+tree[vec_pool_aos]")
+        records.append(bridge)
+        with tempfile.TemporaryDirectory() as path, \
+             mock.patch.object(chart_cells, "load_current_records", return_value=(records, {})), \
+             mock.patch.object(render_snapshot.subprocess, "run") as run:
+            out = pathlib.Path(path)
+            render_snapshot.render(out / "TEST-ONLY-CELLS", out, 72, "TEST ONLY", sampler_comparison=True)
+            coverage = json.loads((out / "coverage.json").read_text())
+            with (out / "results.csv").open() as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual(coverage["expected_headline_cells"], 540)
+        self.assertEqual(coverage["present"], 6)
+        self.assertEqual(len(coverage["missing"]), 534)
+        self.assertEqual(sum(row["solver"] == "cmg" for row in coverage["missing"]), 27)
+        self.assertEqual({row["status"] for row in rows},
+                         {"complete", "failed", "timeout", "not_converged", "oom", "n/a"})
+        measured = next(row for row in rows if row["status"] == "complete")
+        self.assertEqual(measured["actual_device_factor_adopted"], "True")
+        self.assertEqual(measured["setup_route"], "owned_gpu")
+        self.assertEqual(measured["sampler"], "trace_cycle")
+        self.assertEqual(measured["source_manifest_sha256"], "TEST-ONLY-MANIFEST")
+        self.assertEqual(json.loads(measured["phase_observations"]), {"setup_s": [1, 1.1, 1.2]})
+        self.assertEqual(measured["timing_stability_warning"], "True")
+        self.assertEqual(run.call_count, 3)
+        self.assertTrue(all("--sampler-comparison" in call.args[0] for call in run.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()

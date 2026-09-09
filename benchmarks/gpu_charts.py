@@ -41,12 +41,19 @@ APX_SERIES  = ["apxchol/bg (GPU)"]
 ORDER  = APX_SERIES + ["ParAC Graph (GPU)", "ParAC Physics (GPU)",
           "BoomerAMG (GPU)", "BoomerAMG/cut (GPU)", "AMGCL (GPU)"]
 COLORS = {"apxchol/bg (GPU)": "#0b5394",     # declared default = darkest blue
+          "apxchol/GKS (GPU-owned)": "#0b5394",
+          "apxchol/trace-cycle (GPU-owned)": "#3d7ebf",
           "ParAC Graph (GPU)": "#ff8c00", "ParAC Physics (GPU)": "#e6550d",
           "BoomerAMG (GPU)": "#2ca02c", "BoomerAMG/cut (GPU)": "#74c476",
           "AMGCL (GPU)": "#8c564b"}
 # (solver, config) -> chart label for GPU cells. MUST stay injective (asserted below).
 LABELS = {
     ("apxchol_v1", "bg+tree[vec_pool_aos]"): "apxchol/bg (GPU)",
+    ("apxchol_v1", "bg+trace_cycle[vec_pool_aos]"): "apxchol/trace-cycle (CPU setup, GPU solve)",
+    ("apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"): "apxchol/heavy-core-K2 (CPU setup, GPU solve)",
+    ("apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]"): "apxchol/GKS (GPU-owned)",
+    ("apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"): "apxchol/trace-cycle (GPU-owned)",
+    ("apxchol_v1", "bg+heavy_core_k2/gpu-owned-q08[vec_pool_aos]"): "apxchol/heavy-core-K2 (GPU-owned)",
     ("hypre_boomeramg_gpu", ""): "BoomerAMG (GPU)",
     ("hypre_boomeramg_gpu", "cut"): "BoomerAMG/cut (GPU)",
     ("amgcl_cuda", ""): "AMGCL (GPU)",
@@ -59,6 +66,17 @@ FAMS = ["grids", "ipm", "suitesparse"]
 # Social-giant set (match fair_charts.GIANT_MATS): grouped as _giants regardless of nnz.
 GIANT_MATS = {"as-Skitter", "coPapersDBLP", "com-LiveJournal", "com-Orkut", "com-Youtube"}
 TOL = 1e-8
+
+def validate_owned_route(record):
+    """Do not turn requested GPU flags or a host fallback into a GPU setup claim."""
+    cell = record.get("cell", {})
+    if (cell.get("solver") == "apxchol_v1" and cell.get("device") == "gpu"
+            and "/gpu-owned-" in cell.get("config", "")
+            and record.get("status") == "complete"
+            and record.get("metrics", {}).get("actual_device_factor_adopted") is not True):
+        raise ValueError("completed GPU-owned row lacks actual device-factor adoption: "
+                         + cell.get("matrix_id", "unknown"))
+
 
 def load(root, threads=None):
     """Load GPU cells (device=gpu) from the per-cell JSON store into
@@ -82,6 +100,7 @@ def load(root, threads=None):
         source="gpu_charts measurements",
     )
     for c in records:
+        validate_owned_route(c)
         cell = c["cell"]
         if cell.get("device") != "gpu":
             continue
@@ -130,6 +149,7 @@ def load_outcomes(root, threads=None):
         source="gpu_charts outcomes",
     )
     for c in records:
+        validate_owned_route(c)
         cell = c["cell"]
         if cell.get("device") != "gpu":
             continue
@@ -277,13 +297,30 @@ def accuracy(rows, fam, out):
     ax.legend(ncol=3, fontsize=8); ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
 
+_HISTORICAL_ORDER = tuple(ORDER)
+_HISTORICAL_APX_SERIES = tuple(APX_SERIES)
+_HISTORICAL_APX_DEFAULT = APX_DEFAULT
+
+
+def select_sampler_comparison(enabled=True):
+    global ORDER, APX_SERIES, APX_DEFAULT
+    APX_SERIES = (["apxchol/GKS (GPU-owned)", "apxchol/trace-cycle (GPU-owned)"]
+                  if enabled else list(_HISTORICAL_APX_SERIES))
+    APX_DEFAULT = APX_SERIES[0] if enabled else _HISTORICAL_APX_DEFAULT
+    ORDER = (APX_SERIES + [label for label in _HISTORICAL_ORDER
+                          if not label.startswith("apxchol/")]
+             if enabled else list(_HISTORICAL_ORDER))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="results/cells",
                     help="unified per-cell JSON store containing device=gpu cells")
     ap.add_argument("--out", default="results/plots/figures")
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--sampler-comparison", action="store_true")
     a = ap.parse_args()
+    select_sampler_comparison(a.sampler_comparison)
     os.makedirs(a.out, exist_ok=True)
     rows = load(a.root, a.threads)
     gstatus = load_status(a.root, a.threads)   # non-complete GPU cells (oom/timeout/failed) for marks

@@ -47,6 +47,8 @@ CHART_THREADS = 16
 # selector_*, poster_selectors_*), so nothing is hidden by declaring a default.
 LABELS = {
     ("apxchol_v1", "bg+tree[vec_pool_aos]"): "apxchol/bg",
+    ("apxchol_v1", "bg+trace_cycle[vec_pool_aos]"): "apxchol/trace-cycle",
+    ("apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"): "apxchol/heavy-core-K2",
     ("apxchol_v1", "greedy+tree[vec_pool]"): "apxchol/greedy",
     ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk",
     ("rchol", ""): "RCHOL",
@@ -81,6 +83,7 @@ ORDER = [APX_DEFAULT] + [
          "AC (Jl ref)†", "AC2 (Jl ref)†"]
 COLORS = {"apxchol/bg": "#0b5394",     # declared default = the darkest blue
           "apxchol/greedy": "#3d7ebf",
+          "apxchol/trace-cycle": "#3d7ebf",
           "apxchol/bk": "#a4c2f4",
           "RCHOL": "#d62728", "pRCHOL": "#ff9896",
           "BoomerAMG": "#2ca02c", "BoomerAMG/cut": "#74c476",  # cut = lighter green
@@ -773,9 +776,8 @@ def summary_md(recs, path):
              "that de-singularization cell.\n",
              "**Series rule (uniform).** Every column is exactly ONE (solver, configuration); "
              "no column is a per-cell minimum over configurations. Headline tables and "
-             f"charts use apxchol's declared default, `{APX_DEFAULT}`; the selector "
-             f"spread (`{'`, `'.join(APX_SERIES)}`) is confined to dedicated compact "
-             f"ablation figures. The chart thread count is selected a priori (t{CHART_THREADS}, with "
+             f"charts use the explicitly declared rows (`{'`, `'.join(label for label in ORDER if label.startswith('apxchol/'))}`). "
+             f"The chart thread count is selected a priori (t{CHART_THREADS}, with "
              "a t1 fallback); duplicate cells are rejected, so neither status nor time "
              "can select the representative.\n",
              "## Total solve time (s)\n"]
@@ -812,13 +814,34 @@ def summary_md(recs, path):
             lines.append(f"| {mat} | " + " | ".join(cells) + " |")
     open(path, "w").write("\n".join(lines) + "\n")
 
+_HISTORICAL_ORDER = tuple(ORDER)
+_HISTORICAL_APX_SERIES = tuple(APX_SERIES)
+_HISTORICAL_POSTER_SOLVERS = tuple(POSTER_SOLVERS)
+
+
+def select_sampler_comparison(enabled=True):
+    """Declare a repeatable profile; never select winners from matrix timings."""
+    global ORDER, APX_SERIES, POSTER_SOLVERS
+    APX_SERIES = ([APX_DEFAULT, "apxchol/trace-cycle"] if enabled
+                  else list(_HISTORICAL_APX_SERIES))
+    ORDER = (APX_SERIES + [label for label in _HISTORICAL_ORDER
+                          if not label.startswith("apxchol/")]
+             if enabled else list(_HISTORICAL_ORDER))
+    POSTER_SOLVERS = (APX_SERIES + [label for label in _HISTORICAL_POSTER_SOLVERS
+                                  if not label.startswith("apxchol/")]
+                      if enabled else list(_HISTORICAL_POSTER_SOLVERS))
+
+
 def main():
     global CHART_THREADS
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="results/cells")
     ap.add_argument("--out", default="results/plots")
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--sampler-comparison", action="store_true")
     a = ap.parse_args()
+    select_sampler_comparison(a.sampler_comparison)
+    gpu.select_sampler_comparison(a.sampler_comparison)
     CHART_THREADS = a.threads
     recs = load(a.root, a.threads)
     # GPU overlay for the grid scaling chart. Default: the SAME per-cell store the

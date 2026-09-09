@@ -411,7 +411,8 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
                 vals, is_mem=is_mem, timeouts=tmo, oom=oomf, failed=failf,
                 nconv=nconvf, na=naf)
             if keep:
-                gpu_tag = "GPU solve" if name.startswith("apxchol/") else "GPU"
+                gpu_tag = ("GPU setup+solve" if gl and "(GPU-owned)" in gl else
+                           "GPU solve" if name.startswith("apxchol/") else "GPU")
                 rows_data.append((f"{name} ({gpu_tag})" if mode == "combined" else name,
                                   vals, tmo, tcaps, oomf, failf, nconvf, naf, "gpu"))
     if not rows_data or not mats:
@@ -511,6 +512,24 @@ def overview_heatmap(recs, grows, fam, out, mode="combined", metric="total", mat
     fig.tight_layout(); fig.savefig(out, dpi=130); plt.close(fig)
 
 
+_HISTORICAL_SOLVERS = tuple(SOLVERS)
+_HISTORICAL_ENC = ENC
+
+
+def select_sampler_comparison(enabled=True):
+    global SOLVERS, ENC
+    cpu.select_sampler_comparison(enabled)
+    gpu.select_sampler_comparison(enabled)
+    SOLVERS = list(_HISTORICAL_SOLVERS)
+    ENC = _HISTORICAL_ENC
+    if enabled:
+        SOLVERS = [
+            ("apxchol/GKS", "#0b5394", cpu.APX_DEFAULT, "apxchol/GKS (GPU-owned)"),
+            ("apxchol/trace-cycle", "#3d7ebf", "apxchol/trace-cycle", "apxchol/trace-cycle (GPU-owned)"),
+        ] + [row for row in _HISTORICAL_SOLVERS if not row[0].startswith("apxchol/")]
+        ENC += "\napxchol GPU bars use GPU-owned setup; GKS and trace-cycle stay separate"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cells", default="results/cells")
@@ -518,7 +537,9 @@ def main():
                     help="unified per-cell store containing device=gpu cells")
     ap.add_argument("--out", default="results/plots/figures")
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--sampler-comparison", action="store_true")
     a = ap.parse_args()
+    select_sampler_comparison(a.sampler_comparison)
     cpu.CHART_THREADS = a.threads
     recs = cpu.load(a.cells, a.threads)          # device=cpu only (fair_charts filters)
     grows = gpu.load(a.gpu_root, a.threads)

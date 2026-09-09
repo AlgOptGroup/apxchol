@@ -17,10 +17,23 @@ HERE = Path(__file__).resolve().parent
 
 
 def render(cells, output, threads, platform, scaling_store=None, scaling_matrices=None,
-           scaling_threads=None):
+           scaling_threads=None, sampler_comparison=False):
     records, report = chart_cells.load_current_records(
         cells, include=lambda r: r.get('cell', {}).get('threads') == threads,
         stale_policy='reject', source=f'{platform} snapshot')
+    fair_charts.select_sampler_comparison(sampler_comparison)
+    gpu_charts.select_sampler_comparison(sampler_comparison)
+    # Declare the complete profile before selecting any observed outcomes.
+    series = sorted(
+        [('cpu', solver, config) for (solver, config), label in fair_charts.LABELS.items()
+         if label in fair_charts.ORDER]
+        + [('gpu', solver, config) for (solver, config), label in gpu_charts.LABELS.items()
+           if label in gpu_charts.ORDER])
+    if sampler_comparison:
+        records = [r for r in records if (r['cell'].get('device', 'cpu'),
+                   r['cell']['solver'], r['cell'].get('config', '')) in series]
+        for record in records:
+            gpu_charts.validate_owned_route(record)
     if not records:
         raise ValueError('no current cells at the declared thread count')
     keys = [(r['cell']['matrix_id'], r['cell']['solver'], r['cell'].get('config', ''),
@@ -35,13 +48,18 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
                                 '--out', str(output/'figures')]),
     ):
         subprocess.run([sys.executable, str(HERE/script), *flags,
-                        '--threads', str(threads)], check=True)
+                        '--threads', str(threads),
+                        *(['--sampler-comparison'] if sampler_comparison else [])], check=True)
     fields = ['family', 'matrix', 'device', 'solver', 'config', 'threads', 'effective_threads', 'status',
               'n', 'nnz', 'setup_s', 'solve_s', 'total_s', 'iters', 'rel_res',
               'max_repeat_rel_res', 'cuda_init_s', 'warmup_repeats',
               'retained_repeats', 'representative_repeat', 'max_rss_mb',
               'max_vram_mb', 'timeout_cap_s', 'timeout_scope',
-              'per_solve_timeout_lower_bound_s', 'git_sha', 'binary_sha256']
+              'per_solve_timeout_lower_bound_s', 'git_sha', 'binary_sha256',
+              'setup_route', 'sampler', 'degree_quantile', 'actual_device_factor_adopted',
+              'fp16', 'factor_drop_rel', 'stored_factor_nnz', 'fillin', 'compiler',
+              'openmp_wait_policy', 'source_manifest_sha256', 'timing_protocol',
+              'timing_stability_warning', 'phase_observations']
     rows = []
     for r in records:
         c, m, p = r['cell'], r.get('metrics', {}), r.get('provenance', {})
@@ -56,6 +74,11 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
                    warmup_repeats=m.get('warmup_repeats', meta.get('warmup_runs', p.get('warmup', ''))),
                    retained_repeats=m.get('retained_repeats', meta.get('retained_count', '')),
                    git_sha=p.get('git_sha', ''), binary_sha256=p.get('binary_sha256', p.get('driver_sha256', '')))
+        row.update({key: p.get(key, meta.get(key, '')) for key in (
+            'setup_route', 'sampler', 'degree_quantile', 'compiler',
+            'openmp_wait_policy', 'source_manifest_sha256', 'timing_protocol')})
+        if isinstance(row['phase_observations'], (list, dict)):
+            row['phase_observations'] = json.dumps(row['phase_observations'], sort_keys=True)
         rows.append(row)
     with (output/'results.csv').open('w', newline='') as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
@@ -71,13 +94,6 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
                 '--thread-counts', scaling_threads, '--out', str(output)], check=True)
     counts = collections.Counter(r['status'] for r in records)
     matrices = {r['cell']['matrix_id'] for r in records}
-    # Derive the denominator from the declared common headline rows, including
-    # series with no records at all on this platform.
-    series = sorted(
-        [('cpu', solver, config) for (solver, config), label in fair_charts.LABELS.items()
-         if label in fair_charts.ORDER]
-        + [('gpu', solver, config) for (solver, config), label in gpu_charts.LABELS.items()
-           if label in gpu_charts.ORDER])
     missing = [dict(matrix=mid, device=device, solver=solver, config=config)
                for mid in rc.MATRICES for device,solver,config in series
                if (mid,solver,config,device) not in set(keys)]
@@ -85,6 +101,7 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         platform=platform,threads=threads,registered_matrices=len(rc.MATRICES),
         measured_matrices=len(matrices),present=len(records),
         expected_headline_cells=len(rc.MATRICES)*len(series),status_counts=counts,
+        series_profile="sampler-comparison" if sampler_comparison else "historical-default",
         missing=missing,series=series),indent=2)+'\n')
     def links(pattern):
         return ', '.join(f'[{p.stem.removeprefix("combined_")}]({p.relative_to(output).as_posix()})'
@@ -117,6 +134,12 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         'Native CMG is labelled as a serial packed implementation; canonical MATLAB CMG '
         'and serial Julia reference solvers retain their own labels and timing boundaries.', '',
         'Status counts: '+', '.join(f'{key}: {value}' for key,value in sorted(counts.items()))+'.', '']
+    if sampler_comparison:
+        lines += ['GKS and trace-cycle are separate CPU and GPU-owned rows. CPU setup uses '
+                  'degree quantile 0.2; GPU-owned setup uses 0.8. The CSV records the '
+                  'requested route, actual device-factor adoption, storage and timing '
+                  'provenance. Missing cells are not filled from older CPU-setup/GPU-solve '
+                  'measurements or another sampler.', '']
     if (output/'PLATFORM.md').is_file():
         lines += ['[Platform-specific availability and exceptions](PLATFORM.md)', '']
     # Both snapshots show the same principal views directly in the README.
@@ -146,6 +169,7 @@ if __name__ == '__main__':
     p.add_argument('--scaling-store',type=Path)
     p.add_argument('--scaling-matrices')
     p.add_argument('--scaling-threads')
+    p.add_argument('--sampler-comparison', action='store_true')
     a=p.parse_args()
     render(a.cells.resolve(),a.out.resolve(),a.threads,a.platform,a.scaling_store,
-           a.scaling_matrices,a.scaling_threads)
+           a.scaling_matrices,a.scaling_threads,a.sampler_comparison)
