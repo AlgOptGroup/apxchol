@@ -836,9 +836,10 @@ class SamplerProfileTest(unittest.TestCase):
              mock.patch.object(render_snapshot.subprocess, "run") as run:
             out = pathlib.Path(path)
             (out / "figures").mkdir()
-            image_names = [f"combined_{metric}_{family}.png"
+            image_names = [f"combined_{metric}{device}_{family}.png"
                            for family in ("grids", "ipm", "suitesparse")
-                           for metric in ("overview", "solve")]
+                           for metric in ("setup", "solve", "overview")
+                           for device in ("_cpu", "_gpu", "")]
             for name in image_names:
                 (out / "figures" / name).touch()
             render_snapshot.render(out / "TEST-ONLY-CELLS", out, 72, "TEST ONLY", sampler_comparison=True)

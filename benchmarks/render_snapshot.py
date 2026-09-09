@@ -106,6 +106,12 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
     def links(pattern):
         return ', '.join(f'[{p.stem.removeprefix("combined_")}]({p.relative_to(output).as_posix()})'
                          for p in sorted((output/'figures').glob(pattern))) or 'Pending measurements'
+    def heatmaps(metric, device):
+        return ' · '.join(
+            f'[{label}](figures/combined_{metric}{device}_{family}.png)'
+            for family, label in [('grids', 'Grids'), ('ipm', 'IPM'), ('suitesparse', 'SuiteSparse')]
+            if (output/'figures'/f'combined_{metric}{device}_{family}.png').is_file()
+        ) or 'Pending measurements'
     lines = [f'# {platform} benchmark snapshot', '',
         f'This snapshot selects T={threads} before comparing outcomes. '
         f'It contains {len(records)} cells over {len(matrices)}/{len(rc.MATRICES)} registered matrices. '
@@ -119,11 +125,11 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         'Timeout scope and the raw deadline are separate from any valid per-solve lower bound.', '',
         '[Values and outcomes](results.csv) · [Coverage and missing cells](coverage.json) · '
         '[Common protocol](../README.md)', '',
-        '| View | Figures |', '|---|---|',
-        '| Total time | '+links('combined_overview_grids*.png')+', '+links('combined_overview_ipm*.png')+', '+links('combined_overview_suitesparse*.png')+' |',
-        '| Solve time | '+links('combined_solve_grids*.png')+', '+links('combined_solve_ipm*.png')+', '+links('combined_solve_suitesparse*.png')+' |',
-        '| CPU totals | '+links('combined_overview_cpu_*.png')+' |',
-        '| GPU totals | '+links('combined_overview_gpu_*.png')+' |',
+        '| Time | CPU | GPU | CPU + GPU |', '|---|---|---|---|',
+        *[f'| {label} | '+ ' | '.join(heatmaps(metric, device)
+                                   for device in ('_cpu', '_gpu', ''))+' |'
+          for metric, label in [('setup', 'Setup'), ('solve', 'Solve'), ('overview', 'Total')]], '',
+        '| Other views | Figures |', '|---|---|',
         '| CPU setup and solve | '+links('combined_breakdown_cpu_*.png')+' |',
         '| GPU setup and solve | '+links('combined_breakdown_gpu_*.png')+' |',
         '| Setup scaling | '+links('threads*setup_speedup.png')+' |',

@@ -44,10 +44,20 @@ remain visible rather than selecting a different winner for each column.
 Colours compare solvers within each matrix. Missing measurements, failures,
 nonconvergence and timeouts stay distinct. Unknown memory is not plotted as zero.
 
+| Time | Devices | Grids | IPM | SuiteSparse |
+|---|---|---|---|---|
+| Setup | CPU | [Figure](figures/combined_setup_cpu_grids.png) | [Figure](figures/combined_setup_cpu_ipm.png) | [Figure](figures/combined_setup_cpu_suitesparse.png) |
+| Setup | GPU | [Figure](figures/combined_setup_gpu_grids.png) | [Figure](figures/combined_setup_gpu_ipm.png) | [Figure](figures/combined_setup_gpu_suitesparse.png) |
+| Setup | CPU + GPU | [Figure](figures/combined_setup_grids.png) | [Figure](figures/combined_setup_ipm.png) | [Figure](figures/combined_setup_suitesparse.png) |
+| Solve | CPU | [Figure](figures/combined_solve_cpu_grids.png) | [Figure](figures/combined_solve_cpu_ipm.png) | [Figure](figures/combined_solve_cpu_suitesparse.png) |
+| Solve | GPU | [Figure](figures/combined_solve_gpu_grids.png) | [Figure](figures/combined_solve_gpu_ipm.png) | [Figure](figures/combined_solve_gpu_suitesparse.png) |
+| Solve | CPU + GPU | [Figure](figures/combined_solve_grids.png) | [Figure](figures/combined_solve_ipm.png) | [Figure](figures/combined_solve_suitesparse.png) |
+| Total | CPU | [Figure](figures/combined_overview_cpu_grids.png) | [Figure](figures/combined_overview_cpu_ipm.png) | [Figure](figures/combined_overview_cpu_suitesparse.png) |
+| Total | GPU | [Figure](figures/combined_overview_gpu_grids.png) | [Figure](figures/combined_overview_gpu_ipm.png) | [Figure](figures/combined_overview_gpu_suitesparse.png) |
+| Total | CPU + GPU | [Figure](figures/combined_overview_grids.png) | [Figure](figures/combined_overview_ipm.png) | [Figure](figures/combined_overview_suitesparse.png) |
+
 | Detail | Grids | IPM | SuiteSparse |
 |---|---|---|---|
-| Setup | [Figure](figures/combined_setup_grids.png) | [Figure](figures/combined_setup_ipm.png) | [Figure](figures/combined_setup_suitesparse.png) |
-| Solve | [Figure](figures/combined_solve_grids.png) | [Figure](figures/combined_solve_ipm.png) | [Figure](figures/combined_solve_suitesparse.png) |
 | Iterations | [Figure](figures/combined_iters_grids.png) | [Figure](figures/combined_iters_ipm.png) | [Figure](figures/combined_iters_suitesparse.png) |
 | Peak host memory | [Figure](figures/combined_rss_peak_grids.png) | [Figure](figures/combined_rss_peak_ipm.png) | [Figure](figures/combined_rss_peak_suitesparse.png) |
 
@@ -70,8 +80,9 @@ Required preparation limits setup scaling. At T72, AMD accounts for 75% of
 Skitter setup but only 8–9% on grid/IPM. The complete factor-setup interval scales
 1.87× on IPM and 1.72× on Skitter; the grid interval is too variable to quote a
 speedup. The upstream thread-0 timer excludes barrier waiting and is not that
-complete interval. Historical laptop figures charged this narrower timer plus
-AMD, so their setup speedups are not directly comparable.
+complete interval. Historical laptop scaling requested multithreaded MKL; this ARM port uses
+serial PCG. Laptop setup charged the narrower timer plus AMD, so those setup
+speedups are not directly comparable.
 
 Hypre's Skitter curve is complete: five new points repair insufficient campaign
 deadlines, while successful T2/T72 points reuse the same binary with explicit

@@ -3315,5 +3315,6 @@
     "ParAC has parallel factorization and serial portable solve; existing phase-control gaps retained.",
     "Hypre historical RHS bytes were not retained; input hashes and deterministic default-seed construction match.",
     "One warmup and three retained solves per complete measurement; one coherent median-total repetition supplies times."
-  ]
+  ],
+  "cpu_selection_sha256": "6b9274fb821c64562c8dac031582125b1ecbc02d17c9cf7cf829c2f6723f1b2a"
 }
