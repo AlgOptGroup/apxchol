@@ -224,9 +224,9 @@ void cuda_check(cudaError_t error, const char* what) {
     if (error != cudaSuccess) cuda_failure(error, what);
 }
 
-int blocks_for(std::size_t count) {
+int blocks_for(std::size_t count, unsigned block_size = kBlock) {
     if (count == 0) return 0;
-    const std::size_t blocks = (count + kBlock - 1) / kBlock;
+    const std::size_t blocks = (count + block_size - 1) / block_size;
     if (blocks > static_cast<std::size_t>(INT_MAX))
         throw std::overflow_error(
             "GPU round shadow: CUDA grid exceeds INT_MAX blocks");
@@ -3205,6 +3205,23 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                     fill_candidates.get(), flags.get(),
                     audit_payload ? pivot_counters.get() : nullptr, sampler, cycle_status.get());
                 cuda_check(cudaGetLastError(), "sample cycle-core fill on device");
+                if (sampler == clique_sampler::trace_cycle &&
+                    (!device_owned_prefix || report.normal_batch.oversized_pivots)) {
+                    // Late rounds can have only a few oversized pivots. Spread
+                    // their independent warps across SMs; mixed rounds retain
+                    // larger CTAs so skipped normal rows stay inexpensive.
+                    const bool all_oversized = device_owned_prefix &&
+                        report.normal_batch.normal_pivots == 0;
+                    const unsigned trace_block = all_oversized ? 32 : kBlock;
+                    const auto trace_blocks = blocks_for(gpu_round_shadow_checked_mul(
+                        p, 32, "cooperative trace row launch"), trace_block);
+                    sample_large_trace_rows<<<trace_blocks, trace_block>>>(
+                        unique.get(), pivot_offsets.get(), pivots.get(), p,
+                        total_degree.get(), prefix.get(), cycle_workspace.get(),
+                        fill_candidates.get(), flags.get(),
+                        audit_payload ? pivot_counters.get() : nullptr, cycle_status.get());
+                    cuda_check(cudaGetLastError(), "sample large trace rows cooperatively");
+                }
                 std::uint32_t status[2]{};
                 copy_to_host(status, cycle_status.get(), 2, "read cycle sampler status");
                 if (status[0])

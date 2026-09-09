@@ -5337,13 +5337,27 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
     scoped_omp_threads serial(1);
     for (auto sampler : {apxchol::clique_sampler::trace_cycle,
                          apxchol::clique_sampler::heavy_core_k2}) {
-        for (unsigned profile = 0; profile < 6; ++profile) {
+        for (unsigned profile = 0; profile < 9; ++profile) {
             SCOPED_TRACE(std::to_string(static_cast<int>(sampler))+":"+std::to_string(profile));
-            const std::vector<unsigned> degree = profile == 0 ?
+            std::vector<unsigned> degree = profile == 0 ?
                 std::vector<unsigned>{0,1,2,3,127,128,129} :
                 profile == 1 ? std::vector<unsigned>{3,4,5,31,129} :
                                profile == 2 ? std::vector<unsigned>{32,64,65} :
                                               std::vector<unsigned>{3,7,129};
+            // Large irregular rows and more than one CTA of rows exercise
+            // cooperative searches, partial warp chunks and in-place cycles.
+            if(profile==6)degree={3,129,255,256,257,1025,4097};
+            if(profile==7) {
+                degree.clear();
+                for(unsigned row=0;row<37;++row)degree.push_back(129+13*row);
+            }
+            if(profile==8)degree={129,3};
+            // Pivot zero's first SplitMix draw is zero, forcing rejection for
+            // the 129-way Fisher-Yates draw. Subsequent parent streams must
+            // retain that extra draw rather than assuming fixed consumption.
+            constexpr std::uint64_t increment=0x9E3779B97F4A7C15ULL;
+            const std::uint64_t run_seed=profile==8 ? (0-increment)^increment : 17;
+            const bool numerical_fallback=profile==4 || profile==5;
             const auto count = static_cast<node_index>(degree.size());
             node_index n=count;
             std::vector<undirected_edge> edges;
@@ -5351,8 +5365,9 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
             for(node_index pivot=0;pivot<count;++pivot)for(unsigned j=0;j<degree[pivot];++j) {
                 // Profiles 3/4/5 cover representable subnormals, zero inputs,
                 // and zero-rounding output, for normal and oversized rows.
-                const double weight = profile==0 ? 1. : profile==3 ? std::exp2(-70) :
+                const double weight = profile==0 || profile==8 ? 1. : profile==3 ? std::exp2(-70) :
                     profile==4 ? (j==0 ? 0. : 1.) : profile==5 ? std::exp2(sizeof(apxchol::pool_value_t)==4?-90:-600) :
+                    profile==7 ? 1.+double(j%17)/64. :
                     std::exp2(int(j%11)-5);
                 stars[pivot].push_back({n,weight});
                 if(profile==2) {edges.push_back({pivot,n,.25*weight});edges.push_back({pivot,n,.75*weight});}
@@ -5363,8 +5378,8 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
             for(node_index pivot=0;pivot<count;++pivot) {
                 double D=.125;for(auto edge:stars[pivot])D+=edge.weight;
                 std::vector<apxchol::deferred_edge> fill;
-                apxchol::tree_elimination{.sampler=profile>=4?apxchol::clique_sampler::gks:sampler}.sample_clique(stars[pivot],D,
-                    apxchol::detail::gpu_round_shadow_pivot_seed(17,pivot),apxchol::edge_emitter(fill));
+                apxchol::tree_elimination{.sampler=numerical_fallback?apxchol::clique_sampler::gks:sampler}.sample_clique(stars[pivot],D,
+                    apxchol::detail::gpu_round_shadow_pivot_seed(run_seed,pivot),apxchol::edge_emitter(fill));
                 for(auto edge:fill)expected.emplace_back(std::min(edge.u,edge.v),std::max(edge.u,edge.v),
                     static_cast<double>(static_cast<apxchol::pool_value_t>(edge.w)));
             }
@@ -5380,15 +5395,16 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
                 std::iota(active.begin(),active.end(),node_index{0});
                 std::iota(wanted.begin(),wanted.end(),node_index{0});
                 apxchol::partition_options options;
-                options.degree_quantile=0;options.degree_multiplier=2048;options.degree_tiebreak=false;
+                options.degree_quantile=0;options.degree_multiplier=16384;options.degree_tiebreak=false;
                 selector.prepare(active,options);
                 const auto selected=selector.select_block_greedy().data;
                 ASSERT_EQ(selected,wanted);
-                const auto report=session.run_owned_prefix_round(graph,selected,selector.device_selection(),17);
+                const auto report=session.run_owned_prefix_round(graph,selected,selector.device_selection(),run_seed);
                 ASSERT_TRUE(report.gpu_executed);
-                EXPECT_GT(report.normal_batch.normal_pivots,0u);
+                if(profile==7)EXPECT_EQ(report.normal_batch.normal_pivots,0u);
+                else EXPECT_GT(report.normal_batch.normal_pivots,0u);
                 EXPECT_GT(report.normal_batch.oversized_pivots,0u);
-                EXPECT_EQ(report.sampler_numerical_fallbacks,profile>=4?count:0u);
+                EXPECT_EQ(report.sampler_numerical_fallbacks,numerical_fallback?count:0u);
                 EXPECT_EQ(report.raw_fill_edges,expected.size());
                 EXPECT_EQ(report.live_incidences,2*expected.size());
                 EXPECT_LE(report.live_incidences,2*edges.size());
@@ -5398,7 +5414,7 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
                 std::vector<std::tuple<node_index,node_index,double>> got;
                 for(node_index v=count;v<n;++v)for(auto [u,w]:graph.neighbors(v)) {
                     EXPECT_NE(u,v);EXPECT_GE(u,count);EXPECT_TRUE(std::isfinite(w));
-                    if(profile>=4) {EXPECT_GE(w,0.0);} else {EXPECT_GT(w,0.0);}
+                    if(numerical_fallback) {EXPECT_GE(w,0.0);} else {EXPECT_GT(w,0.0);}
                     if(v<u)got.emplace_back(v,u,static_cast<double>(w));
                 }
                 std::sort(got.begin(),got.end());ASSERT_EQ(got.size(),expected.size());

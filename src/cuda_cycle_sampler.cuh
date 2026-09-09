@@ -1,10 +1,11 @@
 // Included inside cuda_round_shadow.cu after its canonical-record/RNG helpers.
-// One independent thread owns each pivot's plan, shuffle and coordinated draws.
+// One independent owner retains each pivot's plan, shuffle and coordinated draws.
 // No parent-index jump-ahead: rejection sampling consumes a variable RNG count.
 // Materialize standard-library constants outside device functions for NVCC.
 constexpr double kCyclePoolMax = std::numeric_limits<pool_value_t>::max();
 constexpr double kCycleEpsilon = std::numeric_limits<double>::epsilon();
 constexpr double kCycleInfinity = std::numeric_limits<double>::infinity();
+constexpr std::uint32_t kCycleCooperativeDegree = 128;
 __device__ std::uint32_t cycle_uniform_index(unsigned long long& state,
                                             std::uint32_t bound) {
     const auto b = static_cast<unsigned long long>(bound), threshold = -b % b;
@@ -162,6 +163,7 @@ __global__ void sample_cycle_rows(const work_record* canonical,
     const std::size_t ordinal=blockIdx.x*blockDim.x+threadIdx.x;
     if(ordinal>=p)return;
     const auto begin=offsets[ordinal],d=offsets[ordinal+1]-begin;
+    if(sampler==clique_sampler::trace_cycle && d>kCycleCooperativeDegree)return;
     if(!d){if(counters)counters[ordinal].emitted_edges=0;return;}
     const auto* a=canonical+begin;auto* fill=fills+begin;auto* flags=fill_flags+begin;
     auto* sums=prefix+begin;
@@ -277,4 +279,134 @@ __global__ void sample_cycle_rows(const work_record* canonical,
         fill[i]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),value};flags[i]=1;
     }
     if(counters)counters[ordinal].emitted_edges=d;
+}
+
+__device__ int cycle_warp_range(int range) {
+    for(int distance=16;distance;distance/=2)
+        range=max(range,__shfl_down_sync(0xffffffffu,range,distance));
+    return __shfl_sync(0xffffffffu,range,0);
+}
+
+// Large trace rows need more than one lane per pivot. Ordered moment folds and
+// Fisher-Yates stay on lane zero. It also assigns every random draw in the same
+// order, including rejection draws; lanes only perform independent searches and
+// edge arithmetic. Neither rounding order nor outcome-dependent sampling changes.
+__global__ void sample_large_trace_rows(const work_record* canonical,
+        const std::uint32_t* offsets, const device_pivot* pivots, std::size_t p,
+        const double* total_degree, double* prefix, double* workspace,
+        work_record* fills, std::uint8_t* fill_flags,
+        gpu_round_shadow_pivot_counter* counters, std::uint32_t* status) {
+    const unsigned lane=threadIdx.x%32;
+    const std::size_t ordinal=(blockIdx.x*blockDim.x+threadIdx.x)/32;
+    if(ordinal>=p)return;
+    const auto begin=offsets[ordinal],d=offsets[ordinal+1]-begin;
+    if(d<=kCycleCooperativeDegree)return;
+    const auto* a=canonical+begin;auto* fill=fills+begin;auto* flags=fill_flags+begin;
+    auto* sums=prefix+begin;
+    for(std::uint32_t i=lane;i<d;i+=32)flags[i]=0;
+    __syncwarp();
+    const double D=total_degree[ordinal];
+    unsigned long long state=pivots[ordinal].seed;
+    int range=(!(D>0)||!isfinite(D))?2:0;
+    for(std::uint32_t i=lane;i<d;i+=32) {
+        if(!(a[i].value>=0)||!isfinite(a[i].value))range=2;
+        else if(!(a[i].value>0))range=max(range,1);
+    }
+    if(!lane && !(a[0].value/a[d-1].value>0))range=max(range,1);
+    range=cycle_warp_range(range);
+    if(range==2) {if(!lane)atomicOr(status,2u);return;}
+    if(range==1) {
+        if(!lane) {
+            const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
+            if(counters)counters[ordinal].emitted_edges=emitted;
+        }
+        return;
+    }
+    std::uint32_t cut=0;
+    if(!lane)cut=cycle_trace_cut(a,d,sums,workspace+begin);
+    cut=__shfl_sync(0xffffffffu,cut,0);
+    __syncwarp(); // publish the owner's exact ordered suffix sums
+    if(cut==d) {
+        if(!lane) {
+            const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
+            if(counters)counters[ordinal].emitted_edges=emitted;
+        }
+        return;
+    }
+    const auto h=d-cut;
+    range=0;
+    if(!lane)range=max(cycle_pool_range(cycle_edge_weight(a,D,h,cut,cut+1)),
+                      cycle_pool_range(cycle_edge_weight(a,D,h,d-2,d-1)));
+    for(std::uint32_t i=lane;i<cut;i+=32) {
+        const double ai=a[i].value/a[d-1].value,m=d-i-1;
+        const double probability=m*ai/(sums[i+1]+m*ai);
+        if(!(probability>=0 && probability<=.5)||!isfinite(probability))range=2;
+        else if(!(probability>0))range=max(range,1);
+        range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,i+1)));
+        range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,d-1)));
+    }
+    range=cycle_warp_range(range);
+    if(range==2) {if(!lane)atomicOr(status,2u);return;}
+    if(range==1) {
+        if(!lane) {
+            const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
+            if(counters)counters[ordinal].emitted_edges=emitted;
+        }
+        return;
+    }
+    for(std::uint32_t k=lane;k<h;k+=32)fill[cut+k].a=cut+k;
+    __syncwarp();
+    if(!lane)for(std::uint32_t k=h;k>1;--k) {
+        const auto j=cycle_uniform_index(state,k),x=fill[cut+k-1].a;
+        fill[cut+k-1].a=fill[cut+j].a;fill[cut+j].a=x;
+    }
+    __syncwarp();
+    const auto first=fill[cut].a;
+    for(std::uint32_t base=0;base<h;base+=32) {
+        const auto k=base+lane;
+        std::uint32_t i=0,j=0;
+        if(k<h) {i=fill[cut+k].a;j=k+1<h?fill[cut+k+1].a:first;}
+        __syncwarp(); // all endpoint indices precede overwriting permutation slots
+        if(k<h) {
+            const double value=cycle_edge_weight(a,D,h,i,j);
+            if(!cycle_pool_edge(value))atomicOr(status,2u);
+            else {fill[cut+k]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),value};flags[cut+k]=1;}
+        }
+        __syncwarp();
+    }
+    for(std::uint32_t base=0;base<cut;base+=32) {
+        const auto i=base+lane,count=min(std::uint32_t{32},cut-base);
+        double probability=0,target=0;
+        std::uint32_t j=d;
+        if(lane<count) {
+            const double ai=a[i].value/a[d-1].value,m=d-i-1;
+            probability=m*ai/(sums[i+1]+m*ai);
+        }
+        // Only draw assignment is serial. Rejection sampling must advance the
+        // owner's stream before the next vertex, even in its rare retry case.
+        for(std::uint32_t owner=0;owner<count;++owner) {
+            const double prob=__shfl_sync(0xffffffffu,probability,owner);
+            std::uint32_t drawn=d;double unit=0;
+            if(!lane) {
+                if(next_unit(state)<prob)drawn=base+owner+1+cycle_uniform_index(state,d-base-owner-1);
+                else unit=next_unit(state);
+            }
+            drawn=__shfl_sync(0xffffffffu,drawn,0);
+            unit=__shfl_sync(0xffffffffu,unit,0);
+            if(lane==owner) {j=drawn;target=unit;}
+        }
+        if(lane<count) {
+            if(j==d) {
+                const double sum=sums[i+1];target*=sum;
+                if(target>=sum)target=nextafter(sum,0.);
+                std::uint32_t lo=i+1,hi=d;
+                while(lo+1<hi) {const auto mid=lo+(hi-lo)/2;if(target<sums[mid])lo=mid;else hi=mid;}
+                j=lo;
+            }
+            const double value=cycle_parent_weight(a,d,D,sums,i,j);
+            if(!cycle_pool_edge(value))atomicOr(status,2u);
+            else {fill[i]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),value};flags[i]=1;}
+        }
+    }
+    if(!lane && counters)counters[ordinal].emitted_edges=d;
 }

@@ -113,6 +113,10 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   unrepresentable numerical plans use input-only GKS fallback with the original
   seed before sampling. Invalid inputs and overflow remain errors. Device traces
   report these numerical fallbacks.
+- Trace-cycle rows with more than 128 canonical neighbors use a cooperative
+  warp for range checks, parent searches and edge emission. Lane zero retains
+  ordered moment folds, shuffle and rejection-aware RNG sequencing. Owned
+  oversized-only rounds use one warp per block; mixed rounds retain larger blocks.
 - The owned selector uses degree/hash/id priority, all ties at the degree
   quantile, and at most four immutable decision/commit passes with stable
   unresolved-candidate compaction. It guarantees independence and progress,

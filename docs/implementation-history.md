@@ -98,6 +98,13 @@ owned-route matrix comparisons. The owned measurements used degree quantile 0.8;
 the ordinary default remains 0.2. This evidence supports the bounded opt-in
 integration scope; FP64 acceptance and parity with Yves remain unestablished.
 
+**Large trace-cycle rows use cooperative warps.** A thread per whole star left
+late rounds with few large stars poorly parallelized. Independent range checks,
+parent searches and edge writes now share a warp; ordered moments and the
+variable-length RNG stream retain one owner. Oversized-only owned rounds use
+one warp per block to spread those few rows across the device. Mixed rounds
+keep larger blocks. The sampling law and numerical fallback policy are unchanged.
+
 ## CPU triangular solves and factor memory
 
 **Critical-tail scheduling addresses narrow late levels.** A persistent team
