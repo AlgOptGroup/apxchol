@@ -1228,7 +1228,8 @@ factorization factorize_impl(const Eliminator& elim,
     graph<Incidence> work(std::move(G));
     if (cp) (*cp)("graph_copy");
     auto gpu_round_shadow =
-        detail::make_gpu_round_shadow_session<Eliminator, Incidence>(elim);
+        detail::make_gpu_round_shadow_session<Eliminator, Incidence>(elim,
+            !retain_host_factor && std::is_same_v<Partitioner, block_greedy_partitioner>);
     const bool finalize_on_device = detail::gpu_factor_finalize_requested();
     const bool omit_shadow_factor_payload = !retain_host_factor &&
         gpu_round_shadow.active() && finalize_on_device;
@@ -1314,8 +1315,8 @@ factorization factorize_impl(const Eliminator& elim,
         if (!initial_csc && gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled) {
             if (opts.exact_clique_max_degree != 0)
                 throw std::invalid_argument(
-                    "the GPU setup front-end requires the default "
-                    "d-1-edge tree sampler (exact clique mode can grow topology)");
+                    "the GPU setup front-end requires a bounded built-in "
+                    "sampler (exact clique mode can grow topology)");
             const auto runtime = detail::gpu_block_frontend::probe_runtime(
                 n, static_cast<std::size_t>(work.m()));
             if (!runtime.cooperative_launch || !runtime.memory_fits)
@@ -2269,7 +2270,8 @@ factorization factorize_impl(const Eliminator& elim,
 // fixed-partitioner and runtime-dispatch paths stay in sync.
 inline detail::tree_elimination make_tree_elim(const factor_options& opts) {
     return detail::tree_elimination{
-        .exact_clique_max_degree = opts.exact_clique_max_degree};
+        .exact_clique_max_degree = opts.exact_clique_max_degree,
+        .sampler = opts.sampler};
 }
 
 // Default-construct-the-partitioner convenience layer.

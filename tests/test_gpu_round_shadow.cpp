@@ -28,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -5325,3 +5326,139 @@ TEST(GpuFactorFinalize, ConsumingPrefixOmissionRetainsTheCpuTailPayload) {
     EXPECT_EQ(actual, expected);
 }
 #endif
+
+TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
+    scoped_omp_threads serial(1);
+    for (auto sampler : {apxchol::clique_sampler::trace_cycle,
+                         apxchol::clique_sampler::heavy_core_k2}) {
+        for (unsigned profile = 0; profile < 3; ++profile) {
+            SCOPED_TRACE(std::to_string(static_cast<int>(sampler))+":"+std::to_string(profile));
+            const std::vector<unsigned> degree = profile == 0 ?
+                std::vector<unsigned>{0,1,2,3,127,128,129} :
+                profile == 1 ? std::vector<unsigned>{3,4,5,31,129} :
+                               std::vector<unsigned>{32,64,65};
+            const auto count = static_cast<node_index>(degree.size());
+            node_index n=count;
+            std::vector<undirected_edge> edges;
+            std::vector<std::vector<apxchol::weighted_neighbor>> stars(count);
+            for(node_index pivot=0;pivot<count;++pivot)for(unsigned j=0;j<degree[pivot];++j) {
+                const double weight=profile==0?1.:std::exp2(int(j%11)-5);
+                stars[pivot].push_back({n,weight});
+                if(profile==2) {edges.push_back({pivot,n,.25*weight});edges.push_back({pivot,n,.75*weight});}
+                else edges.push_back({pivot,n,weight});
+                ++n;
+            }
+            std::vector<std::tuple<node_index,node_index,double>> expected;
+            for(node_index pivot=0;pivot<count;++pivot) {
+                double D=.125;for(auto edge:stars[pivot])D+=edge.weight;
+                std::vector<apxchol::deferred_edge> fill;
+                apxchol::tree_elimination{.sampler=sampler}.sample_clique(stars[pivot],D,
+                    apxchol::detail::gpu_round_shadow_pivot_seed(17,pivot),apxchol::edge_emitter(fill));
+                for(auto edge:fill)expected.emplace_back(std::min(edge.u,edge.v),std::max(edge.u,edge.v),
+                    static_cast<double>(static_cast<apxchol::pool_value_t>(edge.w)));
+            }
+            std::sort(expected.begin(),expected.end());
+            std::vector<std::tuple<node_index,node_index,double>> previous;
+            for(unsigned repeat=0;repeat<2;++repeat) {
+                apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
+                for(auto edge:edges)graph.add_edge(edge.u,edge.v,edge.weight);
+                for(node_index v=0;v<n;++v)graph.excess(v)=.125;
+                apxchol::detail::gpu_round_shadow_session session(true,sampler);
+                apxchol::detail::gpu_block_frontend selector(n,owned_fixture_topology(graph));
+                std::vector<node_index> active(n),wanted(count);
+                std::iota(active.begin(),active.end(),node_index{0});
+                std::iota(wanted.begin(),wanted.end(),node_index{0});
+                apxchol::partition_options options;
+                options.degree_quantile=0;options.degree_multiplier=2048;options.degree_tiebreak=false;
+                selector.prepare(active,options);
+                const auto selected=selector.select_block_greedy().data;
+                ASSERT_EQ(selected,wanted);
+                const auto report=session.run_owned_prefix_round(graph,selected,selector.device_selection(),17);
+                ASSERT_TRUE(report.gpu_executed);
+                EXPECT_GT(report.normal_batch.normal_pivots,0u);
+                EXPECT_GT(report.normal_batch.oversized_pivots,0u);
+                EXPECT_EQ(report.sampler_numerical_fallbacks,0u);
+                EXPECT_EQ(report.raw_fill_edges,expected.size());
+                EXPECT_EQ(report.live_incidences,2*expected.size());
+                EXPECT_LE(report.live_incidences,2*edges.size());
+                if(profile==1)EXPECT_EQ(report.live_incidences,2*edges.size()); // f=d uses every slot.
+                std::vector<apxchol::detail::factor_col> columns;
+                session.materialize_owned_prefix(graph,active,columns);
+                std::vector<std::tuple<node_index,node_index,double>> got;
+                for(node_index v=count;v<n;++v)for(auto [u,w]:graph.neighbors(v)) {
+                    EXPECT_NE(u,v);EXPECT_GE(u,count);EXPECT_GT(w,0.0);EXPECT_TRUE(std::isfinite(w));
+                    if(v<u)got.emplace_back(v,u,static_cast<double>(w));
+                }
+                std::sort(got.begin(),got.end());ASSERT_EQ(got.size(),expected.size());
+                for(std::size_t i=0;i<got.size();++i) {
+                    EXPECT_EQ(std::get<0>(got[i]),std::get<0>(expected[i]));
+                    EXPECT_EQ(std::get<1>(got[i]),std::get<1>(expected[i]));
+                    EXPECT_NEAR(std::get<2>(got[i]),std::get<2>(expected[i]),
+                        8*std::numeric_limits<apxchol::pool_value_t>::epsilon()*std::get<2>(expected[i]));
+                }
+                if(repeat)EXPECT_EQ(got,previous);
+                previous=got;
+            }
+        }
+    }
+#endif
+}
+
+TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND","force");
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW","force");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
+    scoped_env verbose("APXCHOL_VERBOSE","1");
+    scoped_omp_threads serial(1);
+    for(auto sampler:{apxchol::clique_sampler::trace_cycle,apxchol::clique_sampler::heavy_core_k2})
+    for(double shift:{0.,1.}) {
+        SCOPED_TRACE(std::to_string(static_cast<int>(sampler))+":"+std::to_string(shift));
+        auto A=owned_solve_matrix(257,shift);
+        Eigen::VectorXd exact(A.rows());for(int i=0;i<exact.size();++i)exact[i]=std::sin(i+.25);
+        const Eigen::VectorXd b=A*exact;
+        apxchol::solve_options opts;opts.tol=1e-8;opts.max_iter=1000;
+        opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
+        testing::internal::CaptureStderr();
+        const auto result=apxchol::solve(A,b,opts);
+        const auto trace=testing::internal::GetCapturedStderr();
+        EXPECT_LE((A*result.x-b).norm()/b.norm(),1e-8);
+        EXPECT_NE(trace.find("[gpu-owned-factorization] complete rounds="),std::string::npos);
+        EXPECT_NE(trace.find(sampler==apxchol::clique_sampler::trace_cycle?
+            "[gpu-clique-sampler] sampler=trace_cycle":"[gpu-clique-sampler] sampler=heavy_core_k2"),std::string::npos);
+        EXPECT_NE(trace.find("device_sampling=1"),std::string::npos);
+        EXPECT_EQ(trace.find("[gpu-round-shadow] checked"),std::string::npos);
+    }
+#endif
+}
+
+TEST(GpuCycleSampler, AuditedExportRejectsUnsupportedSamplerClearly) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA build required";
+#else
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND","force");
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW","force");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
+    scoped_omp_threads serial(1);
+    auto A=owned_solve_matrix(65,1.);
+    for(auto sampler:{apxchol::clique_sampler::trace_cycle,apxchol::clique_sampler::heavy_core_k2}) {
+        apxchol::apx_cholesky preconditioner;preconditioner.set_keep_factor(true);
+        apxchol::factor_options opts;opts.sampler=sampler;
+        preconditioner.set_options(opts);
+        try {preconditioner.compute(A);FAIL()<<"audited export unexpectedly accepted";}
+        catch(const std::invalid_argument& e) {
+            EXPECT_NE(std::string(e.what()).find("GPU-owned consuming route"),std::string::npos);
+        }
+    }
+#endif
+}

@@ -172,3 +172,158 @@ TEST(TreeSampler, SuffixUpperBoundMatchesAllRandomizedSuffixes) {
         }
     }
 }
+
+TEST(CycleSampler, PreservesDegreeTwoAndDeclaredCapacity) {
+    for (auto kind : {clique_sampler::trace_cycle, clique_sampler::heavy_core_k2}) {
+        tree_elimination rule{.sampler = kind};
+        for (node_index d = 0; d <= 10; ++d) {
+            std::vector<weighted_neighbor> n;
+            for (node_index i = 0; i < d; ++i) n.push_back({i, double(i + 1)});
+            std::vector<deferred_edge> edges;
+            rule.sample_clique(n, 60., 42, edge_emitter(edges));
+            EXPECT_LE(edges.size(), rule.max_clique_edges(d));
+            EXPECT_EQ(edges.size(), d < 2 ? 0u : d == 2 ? 1u : size_t(d));
+            if (d == 2) EXPECT_DOUBLE_EQ(edges[0].w, 2. / 60.);
+            for (auto edge : edges) {
+                EXPECT_NE(edge.u, edge.v);
+                EXPECT_GT(edge.w, 0.);
+                EXPECT_TRUE(std::isfinite(edge.w));
+            }
+        }
+        rule.exact_clique_max_degree = 4;
+        EXPECT_EQ(rule.max_clique_edges(4), 6u);
+    }
+}
+
+TEST(CycleSampler, SeededReferenceLawsAndCanonicalTieOrdering) {
+    // Frozen research outputs: six profile/rule combinations, 16 seeds each.
+    // Separate private extraction validation compared 3,584 complete outputs.
+    const std::uint64_t expected[] = {
+        0xdc8bb4832f53e113ULL, 0x3cacb43c9631e69eULL, 0x9f0703307804cf80ULL,
+        0xdc8bb4832f53e113ULL, 0x5e91b067ce624f22ULL, 0xc36e0afa90b21ff4ULL};
+    size_t test = 0;
+    for (auto kind : {clique_sampler::trace_cycle, clique_sampler::heavy_core_k2}) {
+        for (int profile = 0; profile < 3; ++profile) {
+            std::uint64_t hash = 1469598103934665603ULL;
+            for (unsigned seed = 0; seed < 16; ++seed) {
+                std::vector<weighted_neighbor> n;
+                double pivot = 3.; // SDDM excess must not be replaced by sum(a).
+                for (int i = 0; i < 8; ++i) {
+                    const double a = profile == 0 ? 1. : profile == 1 ? double(i+1)
+                                                                             : (i < 5 ? .001 : 1.);
+                    n.push_back({node_index(7-i), a}); pivot += a;
+                }
+                auto reversed = n;
+                std::reverse(reversed.begin(), reversed.end());
+                std::vector<deferred_edge> edges, again;
+                tree_elimination rule{.sampler = kind};
+                rule.sample_clique(n, pivot, seed, edge_emitter(edges));
+                rule.sample_clique(reversed, pivot, seed, edge_emitter(again));
+                ASSERT_EQ(edges.size(), again.size());
+                for (size_t k = 0; k < edges.size(); ++k) {
+                    EXPECT_EQ(edges[k].u, again[k].u);
+                    EXPECT_EQ(edges[k].v, again[k].v);
+                    EXPECT_DOUBLE_EQ(edges[k].w, again[k].w);
+                    for (auto x : {std::uint64_t(edges[k].u), std::uint64_t(edges[k].v),
+                                   std::bit_cast<std::uint64_t>(edges[k].w)}) {
+                        hash ^= x; hash *= 1099511628211ULL;
+                    }
+                }
+            }
+            EXPECT_EQ(hash, expected[test++]);
+        }
+    }
+}
+
+namespace {
+// Independent tiny-star oracle. Enumerate every core permutation and parent
+// outcome, then form tr((C^+ X)^2) from edge bilinear forms. For zero-sum edge
+// vectors b,f, b^T C^+ f = sum_v b_v f_v/a_v when pivot=sum(a).
+long double enumerated_trace_cycle_error(const std::vector<double>& a, size_t cut) {
+    const size_t d = a.size(), h = d-cut;
+    const long double total = std::accumulate(a.begin(), a.end(), 0.L);
+    struct edge { size_t i,j; long double w; };
+    std::vector<size_t> cycle(h);
+    std::iota(cycle.begin(), cycle.end(), cut);
+    std::vector<edge> edges;
+    long double result = 0., permutations = 0.;
+    do {
+        edges.clear();
+        for (size_t k = 0; k < h; ++k) {
+            const auto i = cycle[k], j = cycle[(k+1)%h];
+            edges.push_back({i,j,a[i]*a[j]/total*(h-1)/2});
+        }
+        const auto parents = [&](auto&& self, size_t i, long double probability) -> void {
+            if (i == cut) {
+                long double second = 0.;
+                for (auto e : edges) for (auto f : edges) {
+                    long double inner = 0.;
+                    if (e.i == f.i) inner += 1.L/a[e.i];
+                    if (e.i == f.j) inner -= 1.L/a[e.i];
+                    if (e.j == f.i) inner -= 1.L/a[e.j];
+                    if (e.j == f.j) inner += 1.L/a[e.j];
+                    second += e.w*f.w*inner*inner;
+                }
+                result += probability*(second-(d-1));
+                return;
+            }
+            long double mass = 0.;
+            for (size_t j = i+1; j < d; ++j) mass += a[i]+a[j];
+            for (size_t j = i+1; j < d; ++j) {
+                const long double q = (a[i]+a[j])/mass;
+                edges.push_back({i,j,(a[i]*a[j]/total)/q});
+                self(self, i+1, probability*q);
+                edges.pop_back();
+            }
+        };
+        parents(parents, 0, 1.);
+        ++permutations;
+    } while (std::next_permutation(cycle.begin(), cycle.end()));
+    return result/permutations;
+}
+}
+
+TEST(CycleSampler, TraceObjectiveMatchesEveryOutcomeAndBestSuffix) {
+    for (const auto& weights : {std::vector<double>{1,1,1,1,1},
+                               std::vector<double>{.01,.1,1,2,3},
+                               std::vector<double>{1,1,1,1,100}}) {
+        std::vector<weighted_neighbor> n;
+        for (size_t i = 0; i < weights.size(); ++i) n.push_back({node_index(i),weights[i]});
+        detail::trace_cycle_plan plan;
+        plan.prepare(n);
+        long double best = std::numeric_limits<long double>::infinity();
+        double parents = 0.;
+        size_t best_cut = 0;
+        for (size_t cut = 0; cut+2 < n.size(); ++cut) {
+            const auto exact = enumerated_trace_cycle_error(weights, cut);
+            const double formula = (parents+plan.cycle_numerator(cut))/(plan.total*plan.total);
+            EXPECT_NEAR(double(exact), formula, 2e-12);
+            if (exact < best) { best = exact; best_cut = cut; }
+            parents += plan.parent_numerator(cut);
+            double qsum = 0.;
+            for (size_t j = cut+1; j < n.size(); ++j) {
+                const auto q = plan.probability(cut,j);
+                qsum += q;
+                // Arbitrary SDDM pivot scales the clique mean, not the law.
+                EXPECT_NEAR(q*plan.parent_weight(n,137.,cut,j),
+                            n[cut].weight*n[j].weight/137.,1e-14);
+            }
+            EXPECT_NEAR(qsum,1.,1e-14);
+        }
+        EXPECT_EQ(plan.cut,best_cut);
+        EXPECT_NEAR(plan.best_score,double(best),2e-12);
+    }
+}
+
+TEST(CycleSampler, RejectsUnrepresentableWeightsBeforePublishing) {
+    for (auto kind : {clique_sampler::trace_cycle, clique_sampler::heavy_core_k2}) {
+        const double tiny = std::sqrt(double(std::numeric_limits<pool_value_t>::min())) * .1;
+        std::vector<weighted_neighbor> n{{0,tiny},{1,tiny},{2,tiny}};
+        std::vector<deferred_edge> edges{{7,8,9.}};
+        tree_elimination rule{.sampler=kind};
+        EXPECT_THROW(rule.sample_clique(n,1.,0,edge_emitter(edges)),std::domain_error);
+        ASSERT_EQ(edges.size(),1u);
+        EXPECT_EQ(edges[0].u,7);
+        EXPECT_DOUBLE_EQ(edges[0].w,9.);
+    }
+}

@@ -364,6 +364,7 @@ struct gpu_round_shadow_report {
     std::uint64_t unique_neighbors = 0;
     std::uint64_t factor_entries = 0;
     std::uint64_t raw_fill_edges = 0;
+    std::uint64_t sampler_numerical_fallbacks = 0;
     std::uint64_t excess_updates = 0;
     std::uint64_t excess_targets = 0;
     std::uint64_t surviving_input_incidences = 0;
@@ -1372,7 +1373,7 @@ gpu_owned_sparsify_test_output gpu_sparsify_owned_residual_for_test(
 /// it never claims CPU certification for its GPU-owned generations.
 class gpu_round_shadow_device_state {
 public:
-    gpu_round_shadow_device_state();
+    explicit gpu_round_shadow_device_state(clique_sampler sampler = clique_sampler::gks);
     ~gpu_round_shadow_device_state();
     gpu_round_shadow_device_state(gpu_round_shadow_device_state&&) noexcept;
     gpu_round_shadow_device_state& operator=(
@@ -1562,11 +1563,12 @@ inline gpu_round_shadow_report run_verified_gpu_round_shadow(
 class gpu_round_shadow_session {
 public:
     gpu_round_shadow_session() = default;
-    explicit gpu_round_shadow_session(bool active) : active_(active) {
+    explicit gpu_round_shadow_session(bool active,
+            clique_sampler sampler = clique_sampler::gks) : active_(active), sampler_(sampler) {
 #if defined(APXCHOL_USE_CUDA)
         if (active_)
             device_state_ =
-                std::make_unique<gpu_round_shadow_device_state>();
+                std::make_unique<gpu_round_shadow_device_state>(sampler_);
 #endif
     }
 
@@ -1589,6 +1591,10 @@ public:
                      bool cpu_order_reproducible,
                      const gpu_device_selection* device_selection = nullptr) {
         if (!active()) return;
+        if (sampler_ != clique_sampler::gks)
+            throw std::invalid_argument(
+                "cycle CUDA samplers require the GPU-owned consuming route; "
+                "CPU-shadow auditing/export is unsupported (disable the GPU setup flags)");
 #if !defined(APXCHOL_USE_CUDA)
         (void)device_selection;
 #endif
@@ -2036,6 +2042,7 @@ public:
 
 private:
     bool active_ = false;
+    clique_sampler sampler_ = clique_sampler::gks;
     bool pending_ = false;
     std::size_t owned_rounds_ = 0;
     bool owned_materialized_ = false;
@@ -2077,12 +2084,12 @@ private:
 
 template<typename Eliminator, incidence_storage Incidence>
 gpu_round_shadow_session make_gpu_round_shadow_session(
-        const Eliminator& eliminator) {
+        const Eliminator& eliminator, bool consuming_block_route = false) {
     if (gpu_factor_finalize_requested() && !gpu_round_shadow_requested())
         throw std::invalid_argument("GPU finalizer requires APXCHOL_GPU_ROUND_SHADOW=force");
     if (!gpu_round_shadow_requested()) return {};
 #if !defined(APXCHOL_USE_CUDA)
-    (void)eliminator;
+    (void)eliminator; (void)consuming_block_route;
     throw std::runtime_error(
         "forced GPU round shadow requires an APXCHOL_USE_CUDA build");
 #else
@@ -2097,10 +2104,16 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
         throw std::invalid_argument(
             "forced GPU round shadow requires the built-in tree eliminator");
     } else {
+        if (eliminator.sampler != clique_sampler::gks &&
+            (!consuming_block_route || !gpu_factor_finalize_requested() ||
+             gpu_block_frontend::configured_block_mode() == gpu_block_frontend::mode::disabled))
+            throw std::invalid_argument(
+                "cycle CUDA samplers require the GPU-owned consuming route; "
+                "CPU-shadow auditing/export is unsupported (disable the GPU setup flags)");
         if (eliminator.exact_clique_max_degree != 0)
             throw std::invalid_argument(
-                "forced GPU round shadow requires the default GKS d-1 tree "
-                "sampler (exact-clique mode is unsupported)");
+                "forced GPU round shadow requires a bounded built-in sampler "
+                "(exact-clique mode is unsupported)");
         if (!gpu_round_shadow_runtime_available())
             throw std::runtime_error(
                 "forced GPU round shadow requires an available CUDA device");
@@ -2109,7 +2122,7 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
             "CPU-audited unless internal consuming prefix takes ownership; "
             "deterministic fields exact, colliding excess bounded; reimports "
             "explicitly counted\n");
-        return gpu_round_shadow_session(true);
+        return gpu_round_shadow_session(true, eliminator.sampler);
     }
 #endif
 }

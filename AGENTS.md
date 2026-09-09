@@ -103,6 +103,13 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   unsupported formats keep host construction. Canonical lower values and
   lossless-fp32 selection are unchanged.
   Preserve original-system residual grading and full fallback validation.
+- `factor_options.sampler` / `--sampler` selects `gks` (default), `trace_cycle`
+  or `heavy_core_k2`. Both cycle families emit at most d edges from a degree-d
+  star and retain GKS for degree below three. CPU setup and full GPU-owned
+  setup support them; alternative samplers reject forced CPU-shadow/export
+  combinations instead of silently substituting a backend. The owned device
+  sampler covers normal and oversized rows, retains per-session moment scratch,
+  and reports input-only heavy-core numerical fallbacks to device GKS in traces.
 - The owned selector uses degree/hash/id priority, all ties at the degree
   quantile, and at most four immutable decision/commit passes with stable
   unresolved-candidate compaction. It guarantees independence and progress,

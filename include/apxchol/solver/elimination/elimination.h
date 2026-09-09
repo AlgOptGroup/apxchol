@@ -168,6 +168,10 @@ inline std::size_t suffix_upper_bound(std::span<const double> values,
     return first;
 }
 
+// Input is canonically sorted and degree >= 3. Implemented below.
+inline void sample_cycle_clique(std::span<weighted_neighbor>, double,
+                               std::uint64_t, edge_emitter, clique_sampler);
+
 } // namespace detail
 
 /// Tree elimination: spanning tree of the clique (CliqueTreeSample).
@@ -201,6 +205,7 @@ struct tree_elimination {
     /// (all d(d-1)/2 edges, weight w_i·w_j/deg) instead of the d-1 sampled
     /// edges. Zero-variance where it is cheap (quadratic in d). 0 = off.
     size_t exact_clique_max_degree = 0;
+    clique_sampler sampler = clique_sampler::gks;
 
     /// Upper bound on the number of edges one sample_clique call emits, for a
     /// vertex of the given degree (used by tests / capacity reservations).
@@ -208,6 +213,7 @@ struct tree_elimination {
         const size_t d = static_cast<size_t>(deg);
         if (exact_clique_max_degree > 0 && d <= exact_clique_max_degree)
             return d * (d - 1) / 2;
+        if (sampler != clique_sampler::gks && d >= 3) return d;
         return d == 0 ? 0 : d - 1;
     }
 
@@ -238,6 +244,11 @@ struct tree_elimination {
                       return a.weight != b.weight ? a.weight < b.weight
                                                   : a.vertex < b.vertex;
                   });
+
+        if (sampler != clique_sampler::gks && d >= 3) {
+            detail::sample_cycle_clique(neighbors, deg, seed, out, sampler);
+            return;
+        }
 
         // Prefix sums of the sorted weights; per-thread reusable buffer.
         static thread_local std::vector<double> prefix;
@@ -274,3 +285,5 @@ using apxchol::tree_elimination;
 } // namespace detail
 
 } // namespace apxchol
+
+#include "apxchol/solver/elimination/cycle_sampler.h"

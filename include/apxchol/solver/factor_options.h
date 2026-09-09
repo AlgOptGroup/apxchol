@@ -6,6 +6,7 @@
 #include <string>
 
 #include "apxchol/types.h"
+#include "apxchol/solver/elimination/sampler.h"
 
 namespace apxchol {
 
@@ -151,6 +152,8 @@ struct factor_options {
     /// quality: most eliminated vertices are low-degree, so exact handling of
     /// them removes the bulk of the sampling variance at modest fill cost.
     size_t exact_clique_max_degree = 0;
+
+    clique_sampler sampler = clique_sampler::gks;
 
 
 };

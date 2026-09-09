@@ -1322,7 +1322,7 @@ struct gpu_block_frontend::impl {
         // The accepted residual has paired directed incidences. Selecting one
         // orientation retains EVERY multigraph edge; neither weights nor owner
         // encounter order in the resident allocation are modified. Its edge
-        // count cannot grow after independent tree elimination, so the existing
+        // count cannot grow after bounded independent elimination, so the existing
         // selector COO capacity suffices. No endpoint staging array is needed.
         const std::size_t count = directed_count ? std::size_t(select_if(
             thrust::make_transform_iterator(incidences, residual_endpoints{}), coo[next].get(),
@@ -1418,7 +1418,7 @@ struct gpu_block_frontend::impl {
             throw std::overflow_error(
                 "GPU block front-end live topology exceeds INT_MAX edges");
         // Eliminating an independent set removes sum(deg(v)) old edges and
-        // emits at most sum(deg(v)-1) sampled edges. Isolated vertices emit
+        // emits at most sum(deg(v)) sampled edges. Isolated vertices emit
         // nothing, so multiplicity-aware topology never grows. The old COO
         // capacity is therefore sufficient for compacted + appended edges.
         if (total > old_count)

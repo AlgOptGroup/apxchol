@@ -525,6 +525,8 @@ __device__ double next_unit(unsigned long long& state) {
     return double(next_random(state) >> 11) * 0x1.0p-53;
 }
 
+#include "cuda_cycle_sampler.cuh"
+
 __global__ void initialize_selected(
         const device_pivot* pivots, std::size_t pivot_count,
         std::uint64_t selection_epoch,
@@ -1143,7 +1145,7 @@ __global__ void scatter_oversized_unique(
 // batches independently, with the same neighbor reduction, factor entries before
 // local weight sort, and canonical/fill writes at the same common offsets.
 // Oversized pivots are skipped individually, never as a whole-round fallback.
-template<bool Emit>
+template<bool Emit, bool GksFill = true>
 __global__ void normal_batch_pass(
         const device_pivot* pivots, std::size_t p,
         normal_batch_descriptor* batches, std::size_t batch_count,
@@ -1315,6 +1317,7 @@ __global__ void normal_batch_pass(
                         const auto dest = begin + local - local_begin;
                         canonical[dest] = {record.pivot, record.neighbor, record.value};
                         fill_flags[dest] = 0;
+                        if constexpr (!GksFill) continue;
                         if (local + 1 == local_end) continue;
                         const double suffix = prefixes[warp][local_end - 1] - prefixes[warp][local];
                         if (suffix <= 0.0) continue;
@@ -2122,8 +2125,11 @@ struct gpu_round_shadow_device_state::impl {
         authoritative_host_rebuild,
     };
 
+    clique_sampler sampler = clique_sampler::gks;
     allocation_tracker tracker;
     round_common_scratch owned_common_scratch;
+    device_buffer<double> cycle_workspace;
+    device_buffer<std::uint32_t> cycle_status;
     device_buffer<gpu_round_shadow_incidence> residual_0;
     device_buffer<gpu_round_shadow_incidence> residual_1;
     device_buffer<std::uint32_t> owner_offsets_0;
@@ -2199,8 +2205,9 @@ struct gpu_round_shadow_device_state::impl {
     bool fail_after_cuda_operation_for_test = false;
 #endif
 
-    impl()
-        : owned_common_scratch(tracker), residual_0(tracker), residual_1(tracker),
+    explicit impl(clique_sampler kind = clique_sampler::gks)
+        : sampler(kind), owned_common_scratch(tracker), cycle_workspace(tracker),
+          cycle_status(tracker), residual_0(tracker), residual_1(tracker),
           owner_offsets_0(tracker), owner_offsets_1(tracker),
           active(tracker), excess(tracker), factor_columns(tracker),
           factor_entries(tracker), sort_keys_a(tracker), sort_keys_b(tracker),
@@ -2545,6 +2552,18 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     const std::size_t cub_bytes = query_cub_bytes(n, r, p, capacity_shape);
     std::size_t planned =
         planned_peak_bytes(n, r, p, capacity_shape, cub_bytes);
+    const std::size_t sampler_components = sampler == clique_sampler::heavy_core_k2 ? 8 :
+        sampler == clique_sampler::trace_cycle ? 1 : 0;
+    if (sampler_components) {
+        const auto required = gpu_round_shadow_checked_mul(
+            capacity_shape.unique_neighbors, sampler_components, "cycle sampler moments");
+        // Retained capacity overlaps every round phase, including growth.
+        planned = add_bytes(planned, cycle_workspace.count(), sizeof(double),
+                            "retained cycle sampler moments");
+        if (required > cycle_workspace.count())
+            planned = add_bytes(planned, required, sizeof(double), "grown cycle sampler moments");
+        planned = add_bytes(planned, 2, sizeof(std::uint32_t), "cycle sampler status");
+    }
     // Oversized uniques remain live beside the common canonical stream through
     // factor/sample. Retain a conservative full-g allowance in every phase.
     if (device_owned_prefix)
@@ -3125,6 +3144,13 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     prefix.allocate(u, "allocate GKS prefix sums");
     fill_candidates.allocate(u, "allocate raw fill candidates");
     flags.allocate(u, "allocate sample flags");
+    if (sampler_components) {
+        ensure_state_buffer(cycle_workspace, gpu_round_shadow_checked_mul(u, sampler_components,
+            "cycle sampler workspace"), "allocate cycle sampler moments", "grow cycle sampler moments");
+        ensure_state_buffer(cycle_status, 2, "allocate cycle sampler status", "grow cycle sampler status");
+        cuda_check(cudaMemset(cycle_status.get(), 0, 2 * sizeof(std::uint32_t)),
+                   "clear cycle sampler status");
+    }
     const std::size_t f_capacity = expected_shape
         ? static_cast<std::size_t>(expected_shape->raw_fill_edges)
         : u;
@@ -3160,7 +3186,37 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             cuda_check(cudaMemset(flags.get(), 0, u), "clear fill candidate flags");
         }
         if (p) {
-            if (audit_payload) {
+            if (sampler != clique_sampler::gks) {
+                if (device_owned_prefix && normal_batch_count) {
+                    const int emit_blocks = static_cast<int>(
+                        (normal_batch_count + kNormalWarps - 1) / kNormalWarps);
+                    normal_batch_pass<true, false><<<emit_blocks, kNormalBlock>>>(
+                        pivots.get(), p, batch_descriptors.get(), normal_batch_count,
+                        device_input.get(), active.get(),
+                        pivot_counts.get(), pivot_offsets.get(), nullptr,
+                        excess.get(), total_degree.get(), factor_columns.get(),
+                        factor_column_base, factor_entries.get(), factor_entry_base,
+                        unique.get(), fill_candidates.get(), flags.get());
+                    cuda_check(cudaGetLastError(), "emit normal cycle-sampler factor batches");
+                }
+                sample_cycle_rows<<<blocks_for(p), kBlock>>>(
+                    unique.get(), pivot_offsets.get(), pivots.get(), p,
+                    total_degree.get(), prefix.get(), cycle_workspace.get(),
+                    fill_candidates.get(), flags.get(),
+                    audit_payload ? pivot_counters.get() : nullptr, sampler, cycle_status.get());
+                cuda_check(cudaGetLastError(), "sample cycle-core fill on device");
+                std::uint32_t status[2]{};
+                copy_to_host(status, cycle_status.get(), 2, "read cycle sampler status");
+                if (status[0])
+                    throw std::domain_error("GPU cycle sampler: invalid plan or edge outside normal pool range");
+                report.sampler_numerical_fallbacks = status[1];
+                if (gpu_setup_diagnostics()) std::fprintf(stderr,
+                    "[gpu-clique-sampler] sampler=%s pivots=%zu normal_pivots=%llu "
+                    "oversized_pivots=%llu numerical_gks_fallbacks=%u device_sampling=1\n",
+                    sampler == clique_sampler::trace_cycle ? "trace_cycle" : "heavy_core_k2", p,
+                    static_cast<unsigned long long>(report.normal_batch.normal_pivots),
+                    static_cast<unsigned long long>(report.normal_batch.oversized_pivots), status[1]);
+            } else if (audit_payload) {
                 sample_gks_tree<<<blocks_for(p), kBlock>>>(
                     unique.get(), pivot_offsets.get(), pivots.get(), p,
                     total_degree.get(), prefix.get(), fill_candidates.get(),
@@ -3335,7 +3391,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         const std::size_t directed_fill = gpu_round_shadow_checked_mul(
             f, 2, "directed fill scratch");
         // Paired incidences + independent pivots remove at least twice the
-        // gathered degree; tree fill never exceeds that gathered degree.
+        // gathered degree; supported tree/cycle fill never exceeds that degree.
         if (s > input_count || directed_fill > input_count - s ||
             directed_fill > device_input.count())
             throw std::logic_error("GPU round shadow: fill exceeds retired input scratch");
@@ -3658,8 +3714,12 @@ invalidate_for_authoritative_host_rebuild(
     ++host_rebuild_invalidations;
 }
 
-gpu_round_shadow_device_state::gpu_round_shadow_device_state()
-    : impl_(std::make_unique<impl>()) {}
+gpu_round_shadow_device_state::gpu_round_shadow_device_state(clique_sampler sampler)
+    : impl_(std::make_unique<impl>(sampler)) {
+    if (sampler != clique_sampler::gks && sampler != clique_sampler::trace_cycle &&
+        sampler != clique_sampler::heavy_core_k2)
+        throw std::invalid_argument("unsupported GPU clique sampler");
+}
 
 void gpu_round_shadow_device_state::reset() noexcept {
     if (!impl_) return;
