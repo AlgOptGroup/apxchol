@@ -1,0 +1,17 @@
+{
+  "declared_gpu_identities": 216,
+  "targeted_identities": 54,
+  "accepted_memory_measurements": 54,
+  "other_identities_unmeasured": 162,
+  "collection_manifest_sha256": "99da97d6f20b0127bf0d442c0746a4c7b47be1047aa20abe666d09d8a1cab103",
+  "result_sha256": "a92487a4b1309e3db680a94e3f7788addd187ef4ccc1bb5eb539727d42660dff",
+  "campaign_sha256": "230356c9453fc464870fa9e442d0c6180504d9a2e05380a44368d879a3d7ce3b",
+  "source_manifest_sha256": "641aea90c0bfb826659a2b5b8699408b9a7b17a12065d7caac71b4a0b5d92bdc",
+  "measurement_job": 4642114,
+  "status_counts": {
+    "accepted": 54,
+    "unmeasured": 162
+  },
+  "definition": "Maximum nvidia-smi process used_memory observed while one solver runs on an exclusive node; lower bound on true whole-run process peak.",
+  "qualification": "Separate monitored calls; no timing values used. Unknown/missed/failed observations remain distinct. Ratios compare observed maxima only. Includes CUDA process context/allocator memory, not just factor storage."
+}

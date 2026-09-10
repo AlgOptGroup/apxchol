@@ -70,15 +70,17 @@ nonconvergence and timeouts stay distinct. Unknown memory is not plotted as zero
 | Iterations | ![Figure](figures/combined_iters_grids.png) | ![Figure](figures/combined_iters_ipm.png) | ![Figure](figures/combined_iters_suitesparse.png) |
 | Peak host memory | ![Figure](figures/combined_rss_peak_grids.png) | ![Figure](figures/combined_rss_peak_ipm.png) | ![Figure](figures/combined_rss_peak_suitesparse.png) |
 | Factor fill | ![Fill](figures/fill_heatmap_grids.png) | ![Fill](figures/fill_heatmap_ipm.png) | ![Fill](figures/fill_heatmap_suitesparse.png) |
-| GPU peak memory | Not measured | Not measured | Not measured |
+| Sampled GPU memory | ![Memory](figures/gpu_sampled_vram_grids.png) | ![Memory](figures/gpu_sampled_vram_ipm.png) | ![Memory](figures/gpu_sampled_vram_suitesparse.png) |
 
 Fill is $2\,\mathrm{offdiag}(L)/\mathrm{offdiag}(A)$: 275/351 AC-family
 observations are available; missing entries remain blank. RCHOL ratios carry
 reported rounding uncertainty; solve status is retained alongside structural fill.
 [Fill values](fill.csv) · [Sources](fill_provenance.json).
 
-GPU peak VRAM is missing for all 216 current GPU identities. Host RSS is a
-separate measurement; archived laptop memory does not fill this gap.
+Separate GPU memory runs cover **54/216 identities**: GKS and trace-cycle
+q=0.8 on all 27 matrices. Sampled process maxima are lower bounds on whole-run
+peaks; the other 162 identities remain unknown. Monitored timings are excluded.
+[Memory details and sampling limits](GPU-MEMORY.md) · [Values](sampled_gpu_vram.csv).
 
 [Tables](summary.md) · [Six-matrix sampler tradeoffs](SAMPLERS.md)
 
