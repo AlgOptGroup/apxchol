@@ -4,24 +4,29 @@ GH200: 72-core Grace CPU + Hopper GPU. [Protocol](../README.md) ·
 [Values](results.csv) · [Coverage](coverage.json) ·
 [Source selection](selection_provenance.json) · [Platform exceptions](PLATFORM.md)
 
-**513/513 identities:** 480 complete, 12 failed, 9 nonconverged, 6 timeout and
+**540/540 identities:** 507 complete, 12 failed, 9 nonconverged, 6 timeout and
 6 recorded n/a. Packed serial CMG replaces MATLAB CMG in the current profile.
-All 108 APX identities were refreshed. ParAC Graph CPU preparation was
-reconciled for all 27 matrices; 377 competitor cells remain unchanged.
+All 135 APX identities were measured, including GPU trace-cycle on all 27 matrices.
+ParAC Graph CPU preparation was reconciled for all 27 matrices;
+377 competitor cells retain their earlier measurements.
 Both CPU samplers now pass `G3_circuit`; its earlier trace-cycle failure and
 the separate successful repair run remain in [source selection](selection_provenance.json).
 
-The four APX rows compare CPU GKS/trace-cycle at degree quantile 0.2 and GPU-owned
-GKS at quantiles 0.8/0.2. Here the quantile controls vertex selection, not the
-sampler's edge probabilities. Required host preparation is included in GPU setup;
+The five APX rows compare CPU GKS/trace-cycle at degree quantile 0.2, GPU-owned
+GKS at quantiles 0.8/0.2 and GPU trace-cycle at 0.8. The quantile controls vertex
+selection, not the sampler's edge probabilities. Required host preparation is included in GPU setup;
 these labels do not claim that every setup stage resides on the GPU.
 
 Each refreshed cell has one warmup and three retained attempts, T72, seed 42,
 and original-system residual tolerance 1e-8. One coherent median-total repetition
 supplies setup/solve times; timing spread warnings remain in the CSV. CUDA
 initialization, common input/output and independent grading are outside API timing.
-CPU uses Clang/libomp with library-default waiting; GPU uses GCC/PASSIVE.
-The fixed-profile campaigns are separate, not interleaved A/B controls.
+APX CPU rows use Clang/libomp with library-default waiting. APX GPU GKS uses GCC;
+GPU trace uses a Clang/libomp driver with GCC as the CUDA host compiler. All
+APX GPU rows use PASSIVE waiting. The CSV records toolchains per series; these are
+separate campaigns/builds, not interleaved A/B controls.
+GPU trace retains two spread warnings: `parabolic_fem` solve (1.196×) and
+`grid_3000` setup/total (1.261×/1.203×), using the prescribed median-total repetitions.
 
 ParAC's 26 successful Graph CPU cells combine corrected preparation with their
 original native timing repetitions after input/output identity checks. Required
@@ -33,9 +38,15 @@ iteration limits and are reported as nonconverged without retained timings.
 ## Total and solve time
 
 The tables separate setup, solve and one-RHS total. Trace-cycle improves CPU solve
-time on 26/27 matrices but improves total on only 8/27. GPU q=0.8 wins total on
+time on 26/27 matrices but improves total on only 8/27. GPU GKS q=0.8 wins total on
 25/27 matrices; q=0.2 wins on LiveJournal and `kron_g500-logn16`. Both alternatives
 remain visible rather than selecting a different winner for each column.
+
+On GPU, trace-cycle has lower solve time on 25/27 matrices and lower one-RHS total
+on only 1/27 versus GKS q=0.8. Across all 27, its geometric-mean ratios are
+0.741× solve, 0.638× iterations, 1.252× setup and 1.169× total. These describe
+separate fixed-profile campaigns/builds. GKS remains the default; the solve view
+shows trace-cycle's benefit alongside its setup cost.
 
 Colours use an uncapped logarithmic scale within each matrix. CPU-only and
 GPU-only views compare against their own fastest solver; combined views use
@@ -61,12 +72,12 @@ nonconvergence and timeouts stay distinct. Unknown memory is not plotted as zero
 | Factor fill | ![Fill](figures/fill_heatmap_grids.png) | ![Fill](figures/fill_heatmap_ipm.png) | ![Fill](figures/fill_heatmap_suitesparse.png) |
 | GPU peak memory | Not measured | Not measured | Not measured |
 
-Fill is $2\,\mathrm{offdiag}(L)/\mathrm{offdiag}(A)$: 248/324 AC-family
+Fill is $2\,\mathrm{offdiag}(L)/\mathrm{offdiag}(A)$: 275/351 AC-family
 observations are available; missing entries remain blank. RCHOL ratios carry
 reported rounding uncertainty; solve status is retained alongside structural fill.
 [Fill values](fill.csv) · [Sources](fill_provenance.json).
 
-GPU peak VRAM is missing for all 189 current GPU identities. Host RSS is a
+GPU peak VRAM is missing for all 216 current GPU identities. Host RSS is a
 separate measurement; archived laptop memory does not fill this gap.
 
 [Tables](summary.md) · [Six-matrix sampler tradeoffs](SAMPLERS.md)

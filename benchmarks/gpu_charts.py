@@ -43,7 +43,7 @@ ORDER  = APX_SERIES + ["ParAC Graph (GPU)", "ParAC Physics (GPU)",
 COLORS = {"apxchol/bg (GPU)": "#0b5394",     # declared default = darkest blue
           "apxchol/GKS q=0.8 (GPU)": "#0b5394",
           "apxchol/GKS q=0.2 (GPU)": "#3d7ebf",
-          "apxchol/trace-cycle (GPU)": "#3d7ebf",
+          "apxchol/trace-cycle q=0.8 (GPU)": "#3d7ebf",
           "ParAC Graph (GPU)": "#ff8c00", "ParAC Physics (GPU)": "#e6550d",
           "BoomerAMG (GPU)": "#2ca02c", "BoomerAMG/cut (GPU)": "#74c476",
           "AMGCL (GPU)": "#8c564b"}
@@ -54,7 +54,7 @@ LABELS = {
     ("apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"): "apxchol/heavy-core-K2 (CPU setup, GPU solve)",
     ("apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]"): "apxchol/GKS q=0.8 (GPU)",
     ("apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]"): "apxchol/GKS q=0.2 (GPU)",
-    ("apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"): "apxchol/trace-cycle (GPU)",
+    ("apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"): "apxchol/trace-cycle q=0.8 (GPU)",
     ("apxchol_v1", "bg+heavy_core_k2/gpu-owned-q08[vec_pool_aos]"): "apxchol/heavy-core-K2 (GPU)",
     ("hypre_boomeramg_gpu", ""): "BoomerAMG (GPU)",
     ("hypre_boomeramg_gpu", "cut"): "BoomerAMG/cut (GPU)",
@@ -316,7 +316,8 @@ _HISTORICAL_APX_DEFAULT = APX_DEFAULT
 
 def select_sampler_comparison(enabled=True):
     global ORDER, APX_SERIES, APX_DEFAULT
-    APX_SERIES = (["apxchol/GKS q=0.8 (GPU)", "apxchol/GKS q=0.2 (GPU)"]
+    APX_SERIES = (["apxchol/GKS q=0.8 (GPU)", "apxchol/GKS q=0.2 (GPU)",
+                   "apxchol/trace-cycle q=0.8 (GPU)"]
                   if enabled else list(_HISTORICAL_APX_SERIES))
     APX_DEFAULT = APX_SERIES[0] if enabled else _HISTORICAL_APX_DEFAULT
     ORDER = (APX_SERIES + [label for label in _HISTORICAL_ORDER

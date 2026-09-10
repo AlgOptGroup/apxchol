@@ -189,7 +189,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 
 Daint is primary (`benchmarks/daint`); laptop data are historical. Preserve the
 27-matrix denominator: the historical profile has 18 series, while the explicit
-current comparison has 19 (CPU GKS/trace and GPU GKS at two degree cutoffs).
+current comparison has 20 (CPU GKS/trace, GPU GKS at two degree cutoffs and
+GPU trace-cycle at q=0.8).
 Canonical MATLAB CMG is excluded from current charts; packed serial CMG remains.
 Preserve historical outcomes, effective versus requested threads, and source/binary/cell hashes.
 [benchmarks/README.md](benchmarks/README.md) defines runner/solver contracts;

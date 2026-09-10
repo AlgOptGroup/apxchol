@@ -49,6 +49,7 @@ CURRENT_SOLVERS = [
     ("apxchol_cpu_trace", "apxchol CPU trace-cycle", "#3d85c6"),
     ("apxchol_gpu_q08", "apxchol GPU GKS q=0.8", "#6fa8dc"),
     ("apxchol_gpu_q02", "apxchol GPU GKS q=0.2", "#9fc5e8"),
+    ("apxchol_gpu_trace_q08", "apxchol GPU trace-cycle q=0.8", "#3d85c6"),
 ] + SOLVERS[3:]
 
 

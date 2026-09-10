@@ -524,9 +524,10 @@ def select_sampler_comparison(enabled=True):
             ("apxchol/GKS q=0.2", "#0b5394", cpu.APX_DEFAULT, "apxchol/GKS q=0.2 (GPU)"),
             ("apxchol/trace-cycle q=0.2", "#3d7ebf", "apxchol/trace-cycle", None),
             ("apxchol/GKS q=0.8", "#073763", None, "apxchol/GKS q=0.8 (GPU)"),
+            ("apxchol/trace-cycle q=0.8", "#3d7ebf", None, "apxchol/trace-cycle q=0.8 (GPU)"),
         ] + [row for row in _HISTORICAL_SOLVERS
              if not row[0].startswith("apxchol/") and row[0] != "CMG (MATLAB)†"]
-        ENC += "\napxchol GPU bars use GPU-owned GKS setup; q=0.2 and q=0.8 stay separate"
+        ENC += "\napxchol GPU bars use GPU-owned setup; GKS q=0.2/q=0.8 and trace-cycle q=0.8 stay separate"
 
 
 def main():

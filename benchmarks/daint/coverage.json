@@ -3,10 +3,10 @@
   "threads": 72,
   "registered_matrices": 27,
   "measured_matrices": 27,
-  "present": 513,
-  "expected_headline_cells": 513,
+  "present": 540,
+  "expected_headline_cells": 540,
   "status_counts": {
-    "complete": 480,
+    "complete": 507,
     "failed": 12,
     "n/a": 6,
     "timeout": 6,
@@ -79,6 +79,11 @@
       "gpu",
       "amgcl_cuda",
       ""
+    ],
+    [
+      "gpu",
+      "apxchol_v1",
+      "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"
     ],
     [
       "gpu",

@@ -151,7 +151,7 @@ def render(cells, output, threads, platform, scaling_store=None, scaling_matrice
         'Status counts: '+', '.join(f'{key}: {value}' for key,value in sorted(counts.items()))+'.', '']
     if sampler_comparison:
         lines += ['CPU rows compare GKS and trace-cycle at degree quantile 0.2; GPU-owned '
-                  'rows compare GKS at quantiles 0.8 and 0.2. The CSV records the '
+                  'rows compare GKS at quantiles 0.8 and 0.2, plus trace-cycle at 0.8. The CSV records the '
                   'requested route, actual device-factor adoption, storage and timing '
                   'provenance. Missing cells are not filled from older CPU-setup/GPU-solve '
                   'measurements or another sampler.', '']

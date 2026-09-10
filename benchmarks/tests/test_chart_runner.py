@@ -759,19 +759,19 @@ class SamplerProfileTest(unittest.TestCase):
                 for device, module in [("cpu", cpu), ("gpu", gpu)]
                 for (solver, config), label in module.LABELS.items() if label in module.ORDER}
 
-    def test_nineteen_declared_rows_keep_packed_cmg_and_fifteen_competitors(self):
+    def test_twenty_declared_rows_keep_packed_cmg_and_fifteen_competitors(self):
         historical = self.series()
         self.assertEqual(len(historical), 18)
         combined.select_sampler_comparison()
         current = self.series()
-        self.assertEqual(len(current), 19)
+        self.assertEqual(len(current), 20)
         self.assertEqual(len(rc.MATRICES), 27)
         self.assertEqual({row for row in historical if row[1] not in {"apxchol_v1", "cmg"}},
                          {row for row in current if row[1] != "apxchol_v1"})
         self.assertNotIn(("gpu", "apxchol_v1", "bg+tree[vec_pool_aos]"), current)
         self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]"), current)
         self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]"), current)
-        self.assertNotIn(("gpu", "apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"), current)
+        self.assertIn(("gpu", "apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"), current)
         self.assertEqual(gpu.LABELS[("apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]")],
                          "apxchol/GKS q=0.2 (GPU)")
         self.assertEqual(gpu.LABELS[("apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]")],
@@ -788,6 +788,18 @@ class SamplerProfileTest(unittest.TestCase):
         rc.require_injective_labels(cpu.LABELS, "CPU")
         rc.require_injective_labels(gpu.LABELS, "GPU")
 
+    def test_gpu_trace_fill_is_distinct_from_both_gks_quantiles(self):
+        rows = {("grids", "grid_500"): {"apxchol_gpu_q08": 2.0,
+                "apxchol_gpu_q02": 2.5, "apxchol_gpu_trace_q08": 3.0}}
+        with mock.patch.object(gpu, "value_heatmap") as plot:
+            self.assertTrue(fill_chart.heatmap(rows, "grids", "TEST-ONLY.png"))
+        labels, values = plot.call_args.args[1:3]
+        self.assertEqual(len(labels), 13)
+        for label, value in [("apxchol GPU GKS q=0.8", 2.0),
+                             ("apxchol GPU GKS q=0.2", 2.5),
+                             ("apxchol GPU trace-cycle q=0.8", 3.0)]:
+            self.assertEqual(values[labels.index(label), 0], value)
+
     def test_sequential_sampler_then_historical_render_restores_profile(self):
         import render_snapshot
         r = record("complete", 2, threads=72, solver="apxchol_v1")
@@ -803,7 +815,7 @@ class SamplerProfileTest(unittest.TestCase):
             current = json.loads((root / "samplers/coverage.json").read_text())
             restored = json.loads((root / "historical/coverage.json").read_text())
         self.assertEqual((current["series_profile"], current["expected_headline_cells"]),
-                         ("sampler-comparison", 513))
+                         ("sampler-comparison", 540))
         self.assertEqual((restored["series_profile"], restored["expected_headline_cells"]),
                          ("historical-default", 486))
         self.assertEqual(self.series(), historical)
@@ -882,9 +894,9 @@ class SamplerProfileTest(unittest.TestCase):
             coverage = json.loads((out / "coverage.json").read_text())
             with (out / "results.csv").open() as handle:
                 rows = list(csv.DictReader(handle))
-        self.assertEqual(coverage["expected_headline_cells"], 513)
+        self.assertEqual(coverage["expected_headline_cells"], 540)
         self.assertEqual(coverage["present"], 6)
-        self.assertEqual(len(coverage["missing"]), 507)
+        self.assertEqual(len(coverage["missing"]), 534)
         self.assertEqual(sum(row["solver"] == "cmg" for row in coverage["missing"]), 0)
         self.assertEqual({row["status"] for row in rows},
                          {"complete", "failed", "timeout", "not_converged", "oom", "n/a"})
