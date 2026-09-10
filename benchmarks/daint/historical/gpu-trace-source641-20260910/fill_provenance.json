@@ -3594,116 +3594,116 @@
       "sha256": "774f964e66ec894101269bd0c1a11718e5e597a45b82b851abf4c779d9629d49"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-bc16697bd0b8fc1813dd.json",
-      "sha256": "bc16697bd0b8fc1813dd47f5d3f88ab4ec6fad4e12a88fce45966464a7547322"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-8e94887f5fe18b77a760.json",
+      "sha256": "8e94887f5fe18b77a760528734bd8d0cd49791cbabdc8b7f8370c6c1f2d91cae"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-7296a33b6d5951598736.json",
-      "sha256": "7296a33b6d59515987360c0b7cb15bda5672c5687ff239552a153df65ae947bb"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-491d84963db37f6ca68c.json",
+      "sha256": "491d84963db37f6ca68cbcb2a14a87f392543fa577ae14fad17122d4909a748a"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-6cfc2eef4c8574835c40.json",
-      "sha256": "6cfc2eef4c8574835c4063ace76840735d95e69bacc65e4dac441c78a3a165bb"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-eeb11c350e3574758d71.json",
+      "sha256": "eeb11c350e3574758d710a5384e41c9781d5bb12fe74f3c2b4d817f9be9e0adf"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-016cfe696581dfbcbc1b.json",
-      "sha256": "016cfe696581dfbcbc1bf5dada3195dce5eb5decf1ffd2a64a9b0c217b33d0a4"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-cac279f3a8522afa6090.json",
+      "sha256": "cac279f3a8522afa60907ceed4607885584af0ffa044d12468eadd6935f850dc"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-9e64e4ec0d4949f67a73.json",
-      "sha256": "9e64e4ec0d4949f67a732cd99f9e8c0e1992b0dbf2aace9cb7809da726f7b12e"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-f418d3c2e6bdb03d374e.json",
+      "sha256": "f418d3c2e6bdb03d374ea84b228979e5e74875a4b5d6b82d451f1e450f02f8da"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-0b156e6cd6cb70461033.json",
-      "sha256": "0b156e6cd6cb7046103383dfcd3d983b54aff830cff0db916a91b8b2e7a018b4"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/ipm/gpu-trace-0f4887a67d8f622b24fb.json",
+      "sha256": "0f4887a67d8f622b24fb4a796bd7c0530376ce9facdd542205b83b76250701e3"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-a3f0932383fb5f888377.json",
-      "sha256": "a3f0932383fb5f8883774edae26d813941fadd9c239693a681430962628047b1"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/ipm/gpu-trace-e24b55bdbd25c89c8bab.json",
+      "sha256": "e24b55bdbd25c89c8babcf7cd7e5800849dcfbcc927b879e22a8dd6d3f42e3ef"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-28ecda3eeeab14b98312.json",
-      "sha256": "28ecda3eeeab14b983128bfe69c20b542664e91d0c4b0a4becd64b877fcec141"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-d3579a2cb02ba70ae6e3.json",
+      "sha256": "d3579a2cb02ba70ae6e3ec028e7c5c816722ed59cc74b18be387a1f476580969"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-24994658bc473d9bd0b5.json",
-      "sha256": "24994658bc473d9bd0b5d84ae18e7583bc5987820f6f374e971c7239d04a03cc"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-d1f4be62842d3f4da304.json",
+      "sha256": "d1f4be62842d3f4da304b902972191a6d3a209ecafcbc748b52c6716efb2b024"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-cad4dbbcb279415069f3.json",
-      "sha256": "cad4dbbcb279415069f3bfbcaed92079685cfeba0eaa420dfac33c7e46b3c494"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-a5631bcea22cf3b0d950.json",
+      "sha256": "a5631bcea22cf3b0d950f03bc7694f4a6891330742cd42d159bba806ed460e37"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-a9aaba884ab5660b6c61.json",
-      "sha256": "a9aaba884ab5660b6c61ef28dcbf51e62a5be545c4df6c7de1552bbb68d1aff1"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-5b3039f59c492355f156.json",
+      "sha256": "5b3039f59c492355f15671ac35763a9da9e392fde5fa06ad8ef5719ea58777d3"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-84c8a56daec41bbec1af.json",
-      "sha256": "84c8a56daec41bbec1af31ddb0ead8aec2b496e96934bb3e4418c6b3d4e20a3b"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-16b4232531dd5e6eb993.json",
+      "sha256": "16b4232531dd5e6eb9937481cfc555bfa13bac776ec393e5383b8407a87e3e6e"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/ipm/gpu-trace-2720990faa50abf39c69.json",
-      "sha256": "2720990faa50abf39c694b8472861c2ea588cec291cd60db080845475872507f"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-7af713fab3c90eb3e179.json",
+      "sha256": "7af713fab3c90eb3e17917b04cca3732151d30a37718844f63743f56405cabc4"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/ipm/gpu-trace-5bec665c8460b5cec001.json",
-      "sha256": "5bec665c8460b5cec00139a352741f3a2e7f5cdef119d4eb1c6b631d5c403bf2"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-fe445ea5e0bbe6b12c28.json",
+      "sha256": "fe445ea5e0bbe6b12c28bca1aeb4ff81aa35134d0eaa29860b737c0533eff215"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-a79c973bbe2b90a79a36.json",
-      "sha256": "a79c973bbe2b90a79a36dfd9b1ebe3320ab1479fb438a0363e9d8ca3a673f571"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-bf2cba4598e26dd0ebb6.json",
+      "sha256": "bf2cba4598e26dd0ebb698da02ec0b5e70b9cc222d1eb8359e907a93ad041e5c"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-a5921f6b8f3ee9c35af1.json",
-      "sha256": "a5921f6b8f3ee9c35af1eff62ce549a4545ce9d275f9a936e4dc46a40d0d9143"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-d243e98e168103ba55be.json",
+      "sha256": "d243e98e168103ba55befc1b3900ce3b01139e7c9f55d60812ead29584049c1d"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-98805622989dc2c72032.json",
-      "sha256": "98805622989dc2c72032495b351a36fcd2cfd4094034aee111c62b1308fb7206"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-3168101e6c6c8fb6a2a7.json",
+      "sha256": "3168101e6c6c8fb6a2a753d95520b9ab8a2091243f9116015840dca5b2985ec5"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-01a7c4362fc2b9868997.json",
-      "sha256": "01a7c4362fc2b986899738da3c4dbbc89e10c99f7545453162cca73ae9edd13f"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-566c46f628ce7e306a0e.json",
+      "sha256": "566c46f628ce7e306a0e0216af5ad04c58e49ed855b71bf8996e95190d1fce83"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/grids/gpu-trace-a2c7edc5f7c7559c35c7.json",
-      "sha256": "a2c7edc5f7c7559c35c7a36413db77027dc2760f325cd8e17d71f22a85965782"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/grids/gpu-trace-0c48c89089321bdec4ff.json",
+      "sha256": "0c48c89089321bdec4ff7ac762bd592c862f80e330492be37d8b8d1f7dd857a4"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-1c461f1f3e7022b6172a.json",
-      "sha256": "1c461f1f3e7022b6172aece41667bffead9aa25de6de41ccd76759aaf2fbb6fb"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/ipm/gpu-trace-0edb9fd86214da3e898c.json",
+      "sha256": "0edb9fd86214da3e898ca296df5ebe114718a8a8497790de7c059e99924373f7"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-6ba1ea92bde745e90722.json",
-      "sha256": "6ba1ea92bde745e90722b29beb1c722a9e6892385171751ed2b13cbc5c0f2783"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/ipm/gpu-trace-5a3651a3a273479423d6.json",
+      "sha256": "5a3651a3a273479423d655eddb99e6ccf50f540359d0a6be1502e92171ac9ca7"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-7a6e0c361f49d744e358.json",
-      "sha256": "7a6e0c361f49d744e358b6e48c364a61aa60993f2721c720cb3edb5de8788428"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-0d073287532c303dde61.json",
+      "sha256": "0d073287532c303dde61414084b84ea12c1777487f84e3c55d1e6a665212dad5"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-db03ba67e67c0cd81581.json",
-      "sha256": "db03ba67e67c0cd81581225d02e4d4020603185d0db1e32438a7d152a89d9435"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-2562f26010f582f3bc7f.json",
+      "sha256": "2562f26010f582f3bc7ffb4642e6cfc186c280cddc111beb3772538fd37001f5"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-8fffb5078ad742609ddf.json",
-      "sha256": "8fffb5078ad742609ddf5aabad4d63e2631605e53f089ec4a705c9633ce7776c"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-72ed58d3ed53a7977d1d.json",
+      "sha256": "72ed58d3ed53a7977d1df72b855e8e6d20be6321b392144de7b296e7f6a43f3e"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/suitesparse/gpu-trace-cae5e16b0f260f5041b8.json",
-      "sha256": "cae5e16b0f260f5041b81719d6f072830caaabf6e8f3083061a7c683712d4911"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-8eeccb1d573e00779ad5.json",
+      "sha256": "8eeccb1d573e00779ad5cccdd3ea5b80fdea4c0e3238192dcdb692d5003f5156"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/ipm/gpu-trace-3a845faea76bdd4087d1.json",
-      "sha256": "3a845faea76bdd4087d1fd769baab6da5864751cc40fdde621d136e911a19bd5"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-2d545fbb5d77f16b94a8.json",
+      "sha256": "2d545fbb5d77f16b94a846dc3e5135be003bbcd71270e15b60edb4d89244a14a"
     },
     {
-      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-warp-publication-20260910/selected-540-v2/cells/ipm/gpu-trace-542bc9b6d38f14787069.json",
-      "sha256": "542bc9b6d38f14787069c5fd8ff1f1a06622f14a05fe8fc915cba8d79afb2998"
+      "path": "/home/adamant/laplacian_solver/results/astra-review-20260905/gpu-trace-publication-20260910/selected-540/cells/suitesparse/gpu-trace-7763e4aca18fb9ae55de.json",
+      "sha256": "7763e4aca18fb9ae55def721eaf10fd60a83c002f032bfb7c88b9e3ca7483ed3"
     }
   ],
   "preserved_fill_cells": 324,
   "base_fill_provenance_sha256": "97e2107fe321daef2d759fecd19d52739b32818fdc3b08f90f27ce34e0ac995e",
   "added_series": "apxchol_gpu_trace_q08",
-  "collection_validation_sha256": "40683e8bbdd5ef2ad1d150ee771cc731046414292eb453e75ed836051841a5e5"
+  "collection_validation_sha256": "8ca4abb5bfba18bd311ac1e9b15dc49e561635fe1ad4daf6a0683e75b44928b2"
 }

@@ -3,11 +3,11 @@
   "targeted_identities": 54,
   "accepted_memory_measurements": 54,
   "other_identities_unmeasured": 162,
-  "collection_manifest_sha256": "cd786753ab5b78ffcd67234b1085b9efab48eda0f3ae65bbe574f547528a6de9",
-  "result_sha256": "bcb39cc031ba2a1f3eb0132b518a9e10c1ce0a142aed03e742cf92bc58b08a50",
-  "campaign_sha256": "fa9651536cea28221a85093d518d77216c59006e45b2e7a66bc8f495bd0d8b05",
-  "source_manifest_sha256": "230a65b6ced71ced09c1ea1f531b23e39d170ca8b2d07e812f1f3711df054a7e",
-  "measurement_job": 4642414,
+  "collection_manifest_sha256": "99da97d6f20b0127bf0d442c0746a4c7b47be1047aa20abe666d09d8a1cab103",
+  "result_sha256": "a92487a4b1309e3db680a94e3f7788addd187ef4ccc1bb5eb539727d42660dff",
+  "campaign_sha256": "230356c9453fc464870fa9e442d0c6180504d9a2e05380a44368d879a3d7ce3b",
+  "source_manifest_sha256": "641aea90c0bfb826659a2b5b8699408b9a7b17a12065d7caac71b4a0b5d92bdc",
+  "measurement_job": 4642114,
   "status_counts": {
     "accepted": 54,
     "unmeasured": 162

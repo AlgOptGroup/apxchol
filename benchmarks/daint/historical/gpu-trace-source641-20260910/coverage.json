@@ -1,5 +1,5 @@
 {
-  "platform": "Daint GH200",
+  "platform": "Daint",
   "threads": 72,
   "registered_matrices": 27,
   "measured_matrices": 27,

@@ -25,8 +25,11 @@ APX CPU rows use Clang/libomp with library-default waiting. APX GPU GKS uses GCC
 GPU trace uses a Clang/libomp driver with GCC as the CUDA host compiler. All
 APX GPU rows use PASSIVE waiting. The CSV records toolchains per series; these are
 separate campaigns/builds, not interleaved A/B controls.
-GPU trace retains two spread warnings: `parabolic_fem` solve (1.196×) and
-`grid_3000` setup/total (1.261×/1.203×), using the prescribed median-total repetitions.
+GPU trace retains two current spread warnings: `parabolic_fem` solve (1.195×)
+and `G3_circuit` setup/total (1.164×/1.151×), using the prescribed median-total
+repetitions. The [previous source641 snapshot](historical/gpu-trace-source641-20260910/)
+retains its own values and warnings. The current 27-matrix run follows a separate
+96-call optimization acceptance study; these are distinct measurement campaigns.
 
 ParAC's 26 successful Graph CPU cells combine corrected preparation with their
 original native timing repetitions after input/output identity checks. Required
@@ -42,9 +45,9 @@ time on 26/27 matrices but improves total on only 8/27. GPU GKS q=0.8 wins total
 25/27 matrices; q=0.2 wins on LiveJournal and `kron_g500-logn16`. Both alternatives
 remain visible rather than selecting a different winner for each column.
 
-On GPU, trace-cycle has lower solve time on 25/27 matrices and lower one-RHS total
+On GPU, trace-cycle has lower solve time on 26/27 matrices and lower one-RHS total
 on only 1/27 versus GKS q=0.8. Across all 27, its geometric-mean ratios are
-0.741× solve, 0.638× iterations, 1.252× setup and 1.169× total. These describe
+0.743× solve, 0.639× iterations, 1.221× setup and 1.143× total. These describe
 separate fixed-profile campaigns/builds. GKS remains the default; the solve view
 shows trace-cycle's benefit alongside its setup cost.
 
@@ -77,8 +80,8 @@ observations are available; missing entries remain blank. RCHOL ratios carry
 reported rounding uncertainty; solve status is retained alongside structural fill.
 [Fill values](fill.csv) · [Sources](fill_provenance.json).
 
-Separate GPU memory runs cover **54/216 identities**: GKS and trace-cycle
-q=0.8 on all 27 matrices. Sampled process maxima are lower bounds on whole-run
+A separate memory run of the refreshed GPU source covers **54/216 identities**:
+GKS and trace-cycle q=0.8 on all 27 matrices. Sampled process maxima are lower bounds on whole-run
 peaks; the other 162 identities remain unknown. Monitored timings are excluded.
 [Memory details and sampling limits](GPU-MEMORY.md) · [Values](sampled_gpu_vram.csv).
 
