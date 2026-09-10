@@ -99,11 +99,21 @@ the ordinary default remains 0.2. This evidence supports the bounded opt-in
 integration scope; FP64 acceptance and parity with Yves remain unestablished.
 
 **Large trace-cycle rows use cooperative warps.** A thread per whole star left
-late rounds with few large stars poorly parallelized. Independent range checks,
-parent searches and edge writes now share a warp; ordered moments and the
-variable-length RNG stream retain one owner. Oversized-only owned rounds use
-one warp per block to spread those few rows across the device. Mixed rounds
-keep larger blocks. The sampling law and numerical fallback policy are unchanged.
+late rounds with few large stars poorly parallelized. Range checks, suffix
+moments, cutoff evaluation, parent searches and edge writes share a warp.
+The shuffle keeps one owner; parent draws use the indexed stream after its
+actual rejection count. A monotone suffix repair preserves binary-search CDF
+ordering. Floating-point folds and seeded factors can change; the intended
+sampling law and input-only numerical fallback remain. Oversized-only rounds
+use one warp per block; mixed rounds keep larger blocks.
+
+The cumulative refinement passed the native/sanitizer checks and 96 paired
+calls on three matrices: trace-cycle geometric-mean one-RHS total fell 3.1%,
+primarily from
+LiveJournal gains of 9.5–10.1%; solve time rose 0.8% and iterations 1.8%.
+All 108 calls in the subsequent 27-matrix campaign passed original-system
+residual checks. This is a setup improvement, not a change to the default
+sampler or a universal one-RHS advantage over GKS.
 
 ## CPU triangular solves and factor memory
 

@@ -1,6 +1,6 @@
 // Included inside cuda_round_shadow.cu after its canonical-record/RNG helpers.
-// One independent owner retains each pivot's plan, shuffle and coordinated draws.
-// No parent-index jump-ahead: rejection sampling consumes a variable RNG count.
+// Each pivot owns its plan and shuffle, including actual rejection consumption.
+// Large trace parents use an indexed one-draw CDF; other rows retain their streams.
 // Materialize standard-library constants outside device functions for NVCC.
 constexpr double kCyclePoolMax = std::numeric_limits<pool_value_t>::max();
 constexpr double kCycleEpsilon = std::numeric_limits<double>::epsilon();
@@ -50,7 +50,9 @@ __device__ std::uint32_t cycle_trace_cut(const work_record* a, std::uint32_t d,
     for (std::uint32_t i = 0; i + 2 < d; ++i) {
         const auto h = d - i;
         const double cycle = h == 3 ? 0. : double(h - 3) * double(h - 1) * .5 * square[i];
-        const double score = (parents + cycle) / (sum * sum);
+        // The finite positive total^2 is common to every cutoff. Compare the
+        // numerators directly; no normalized objective escapes this routine.
+        const double score = parents + cycle;
         if (!(score >= 0) || !isfinite(score)) return d;
         if (score < best) { best = score; cut = i; }
         if (i + 3 < d) {
@@ -59,6 +61,81 @@ __device__ std::uint32_t cycle_trace_cut(const work_record* a, std::uint32_t d,
         }
     }
     return cut;
+}
+// Large-row planning keeps the same positive moment objective, but folds each
+// 32-item tile cooperatively. Floating-point sums/cutoff ties can differ from
+// the scalar path; the estimator, earliest exact tie, and input-only fallback
+// remain unchanged. Every call/return below is uniform across the full warp.
+__device__ std::uint32_t cycle_trace_cut_warp(const work_record* a, std::uint32_t d,
+        double* suffix, double* square) {
+    constexpr unsigned mask=0xffffffffu;
+    const unsigned lane=threadIdx.x%32;
+    const double scale=a[d-1].value;
+    if(!(scale>0)||!isfinite(scale))return d;
+    double carry=0,carry_square=0;
+    for(std::uint32_t end=d;end;) {
+        const auto begin=end>32?end-32:0;
+        const auto i=begin+lane;
+        double x=i<end?a[i].value/scale:0;
+        const bool invalid=i<end && (!(x>0)||!isfinite(x)||
+            (i && a[i].value<a[i-1].value));
+        if(__any_sync(mask,invalid))return d;
+        double sum=x,sq=x*x;
+        for(unsigned offset=1;offset<32;offset*=2) {
+            const double right=__shfl_down_sync(mask,sum,offset);
+            const double right_square=__shfl_down_sync(mask,sq,offset);
+            if(lane+offset<32) {sum+=right;sq+=right_square;}
+        }
+        sum+=carry;sq+=carry_square;
+        // Different positive folds can reverse adjacent suffixes by roundoff.
+        // The parent inverse CDF requires monotonicity, including tile seams.
+        sum=fmax(sum,carry);
+        for(unsigned offset=1;offset<32;offset*=2) {
+            const double right=__shfl_down_sync(mask,sum,offset);
+            if(lane+offset<32)sum=fmax(sum,right);
+        }
+        if(__any_sync(mask,!isfinite(sum)||!isfinite(sq)))return d;
+        if(i<end) {suffix[i]=sum;square[i]=sq;}
+        carry=__shfl_sync(mask,sum,0);
+        carry_square=__shfl_sync(mask,sq,0);
+        end=begin;
+    }
+    if(!(carry>0)||!isfinite(carry*carry))return d;
+    __syncwarp(); // all positive suffix moments precede score/parent reads
+    double parents=0,best=kCycleInfinity;
+    std::uint32_t cut=d;
+    for(std::uint32_t begin=0;begin<d-2;begin+=32) {
+        const auto i=begin+lane;
+        double increment=0;
+        if(i<d-3) {
+            const double x=a[i].value/scale,m=d-i-1;
+            increment=(m-1)*x*(2*suffix[i+1]+m*x);
+        }
+        double inclusive=increment;
+        for(unsigned offset=1;offset<32;offset*=2) {
+            const double left=__shfl_up_sync(mask,inclusive,offset);
+            if(lane>=offset)inclusive+=left;
+        }
+        const double previous=__shfl_up_sync(mask,inclusive,1);
+        const double before=parents+(lane?previous:0.);
+        double score=kCycleInfinity;
+        if(i<d-2) {
+            const auto h=d-i;
+            const double cycle=h==3?0.:double(h-3)*double(h-1)*.5*square[i];
+            score=before+cycle;
+        }
+        if(__any_sync(mask,i<d-2 && (!(score>=0)||!isfinite(score))))return d;
+        if(score<best || (score==best && i<cut)) {best=score;cut=i;}
+        parents+=__shfl_sync(mask,inclusive,31);
+    }
+    for(unsigned offset=16;offset;offset/=2) {
+        const double other=__shfl_down_sync(mask,best,offset);
+        const auto other_cut=__shfl_down_sync(mask,cut,offset);
+        if(lane+offset<32 && (other<best || (other==best && other_cut<cut))) {
+            best=other;cut=other_cut;
+        }
+    }
+    return __shfl_sync(mask,cut,0);
 }
 __device__ std::uint32_t cycle_heavy_cut(const work_record* a, std::uint32_t d,
                                         double* tail) {
@@ -287,10 +364,10 @@ __device__ int cycle_warp_range(int range) {
     return __shfl_sync(0xffffffffu,range,0);
 }
 
-// Large trace rows need more than one lane per pivot. Ordered moment folds and
-// Fisher-Yates stay on lane zero. It also assigns every random draw in the same
-// order, including rejection draws; lanes only perform independent searches and
-// edge arithmetic. Neither rounding order nor outcome-dependent sampling changes.
+// Large trace rows retain ordered moment folds and Fisher-Yates on lane zero.
+// Light parents use one indexed draw each after the shuffle's actual stream
+// consumption. Inverting q directly preserves its law without serial draw
+// assignment; seeded parents intentionally differ from the two-draw mixture.
 __global__ void sample_large_trace_rows(const work_record* canonical,
         const std::uint32_t* offsets, const device_pivot* pivots, std::size_t p,
         const double* total_degree, double* prefix, double* workspace,
@@ -322,10 +399,7 @@ __global__ void sample_large_trace_rows(const work_record* canonical,
         }
         return;
     }
-    std::uint32_t cut=0;
-    if(!lane)cut=cycle_trace_cut(a,d,sums,workspace+begin);
-    cut=__shfl_sync(0xffffffffu,cut,0);
-    __syncwarp(); // publish the owner's exact ordered suffix sums
+    const auto cut=cycle_trace_cut_warp(a,d,sums,workspace+begin);
     if(cut==d) {
         if(!lane) {
             const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
@@ -374,39 +448,24 @@ __global__ void sample_large_trace_rows(const work_record* canonical,
         }
         __syncwarp();
     }
-    for(std::uint32_t base=0;base<cut;base+=32) {
-        const auto i=base+lane,count=min(std::uint32_t{32},cut-base);
-        double probability=0,target=0;
-        std::uint32_t j=d;
-        if(lane<count) {
-            const double ai=a[i].value/a[d-1].value,m=d-i-1;
-            probability=m*ai/(sums[i+1]+m*ai);
+    const auto parent_state=__shfl_sync(0xffffffffu,state,0);
+    for(std::uint32_t i=lane;i<cut;i+=32) {
+        auto draw_state=parent_state+0x9E3779B97F4A7C15ULL*i;
+        const double ai=a[i].value/a[d-1].value;
+        const double mass=sums[i+1]+double(d-i-1)*ai;
+        double target=next_unit(draw_state)*mass;
+        if(target>=mass)target=nextafter(mass,0.);
+        // R_i(j)=sum_{l>=j}a_l+(d-j)*a_i is decreasing. Its adjacent
+        // interval has width a_i+a_j, hence probability q_ij=(a_i+a_j)/mass.
+        std::uint32_t lo=i+1,hi=d;
+        while(lo+1<hi) {
+            const auto mid=lo+(hi-lo)/2;
+            if(target<sums[mid]+double(d-mid)*ai)lo=mid;else hi=mid;
         }
-        // Only draw assignment is serial. Rejection sampling must advance the
-        // owner's stream before the next vertex, even in its rare retry case.
-        for(std::uint32_t owner=0;owner<count;++owner) {
-            const double prob=__shfl_sync(0xffffffffu,probability,owner);
-            std::uint32_t drawn=d;double unit=0;
-            if(!lane) {
-                if(next_unit(state)<prob)drawn=base+owner+1+cycle_uniform_index(state,d-base-owner-1);
-                else unit=next_unit(state);
-            }
-            drawn=__shfl_sync(0xffffffffu,drawn,0);
-            unit=__shfl_sync(0xffffffffu,unit,0);
-            if(lane==owner) {j=drawn;target=unit;}
-        }
-        if(lane<count) {
-            if(j==d) {
-                const double sum=sums[i+1];target*=sum;
-                if(target>=sum)target=nextafter(sum,0.);
-                std::uint32_t lo=i+1,hi=d;
-                while(lo+1<hi) {const auto mid=lo+(hi-lo)/2;if(target<sums[mid])lo=mid;else hi=mid;}
-                j=lo;
-            }
-            const double value=cycle_parent_weight(a,d,D,sums,i,j);
-            if(!cycle_pool_edge(value))atomicOr(status,2u);
-            else {fill[i]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),value};flags[i]=1;}
-        }
+        const auto j=lo;
+        const double value=cycle_parent_weight(a,d,D,sums,i,j);
+        if(!cycle_pool_edge(value))atomicOr(status,2u);
+        else {fill[i]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),value};flags[i]=1;}
     }
     if(!lane && counters)counters[ordinal].emitted_edges=d;
 }

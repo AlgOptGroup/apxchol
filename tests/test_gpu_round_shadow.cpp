@@ -5327,7 +5327,13 @@ TEST(GpuFactorFinalize, ConsumingPrefixOmissionRetainsTheCpuTailPayload) {
 }
 #endif
 
-TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
+TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
+    // A common normalization can round unequal cutoff numerators to a tie.
+    // Numerator comparison deliberately retains the one-ulp improvement.
+    const double earlier=0x1.f5bc1aec2f4a9p+6,later=0x1.f5bc1aec2f4a8p+6;
+    const double normalization=0x1.b732be6fd2141p+5;
+    EXPECT_LT(later,earlier);
+    EXPECT_EQ(later/normalization,earlier/normalization);
 #if !defined(APXCHOL_USE_CUDA)
     GTEST_SKIP() << "CUDA build required";
 #else
@@ -5337,7 +5343,7 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
     scoped_omp_threads serial(1);
     for (auto sampler : {apxchol::clique_sampler::trace_cycle,
                          apxchol::clique_sampler::heavy_core_k2}) {
-        for (unsigned profile = 0; profile < 9; ++profile) {
+        for (unsigned profile = 0; profile < 13; ++profile) {
             SCOPED_TRACE(std::to_string(static_cast<int>(sampler))+":"+std::to_string(profile));
             std::vector<unsigned> degree = profile == 0 ?
                 std::vector<unsigned>{0,1,2,3,127,128,129} :
@@ -5352,12 +5358,15 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
                 for(unsigned row=0;row<37;++row)degree.push_back(129+13*row);
             }
             if(profile==8)degree={129,3};
+            if(profile==11)degree={130,3};
+            if(profile==12)degree={3,129,160,257,1025,4097};
+            if(profile==9)degree={3,4,31,127,128,129,257};
             // Pivot zero's first SplitMix draw is zero, forcing rejection for
             // the 129-way Fisher-Yates draw. Subsequent parent streams must
             // retain that extra draw rather than assuming fixed consumption.
             constexpr std::uint64_t increment=0x9E3779B97F4A7C15ULL;
-            const std::uint64_t run_seed=profile==8 ? (0-increment)^increment : 17;
-            const bool numerical_fallback=profile==4 || profile==5;
+            const std::uint64_t run_seed=(profile==8 || profile==11) ? (0-increment)^increment : 17;
+            const bool numerical_fallback=profile==4 || profile==5 || profile==10;
             const auto count = static_cast<node_index>(degree.size());
             node_index n=count;
             std::vector<undirected_edge> edges;
@@ -5365,9 +5374,16 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
             for(node_index pivot=0;pivot<count;++pivot)for(unsigned j=0;j<degree[pivot];++j) {
                 // Profiles 3/4/5 cover representable subnormals, zero inputs,
                 // and zero-rounding output, for normal and oversized rows.
+                const auto boundary=profile==9 ? (pivot%3==0 ? apxchol::pool_value_t{2} :
+                    std::nextafter(apxchol::pool_value_t{2},pivot%3==1 ? apxchol::pool_value_t{0} :
+                        std::numeric_limits<apxchol::pool_value_t>::infinity())) : apxchol::pool_value_t{1};
                 const double weight = profile==0 || profile==8 ? 1. : profile==3 ? std::exp2(-70) :
                     profile==4 ? (j==0 ? 0. : 1.) : profile==5 ? std::exp2(sizeof(apxchol::pool_value_t)==4?-90:-600) :
                     profile==7 ? 1.+double(j%17)/64. :
+                    profile==9 ? (j==0 ? 1. : double(boundary)) :
+                    profile==11 ? (j==0 ? std::exp2(-10) : 1.) :
+                    profile==12 ? std::ldexp(1.+double((j*37)%127)/128.,-int((j*23)%61)) :
+                    profile==10 ? (j==0 ? std::numeric_limits<apxchol::pool_value_t>::denorm_min() : std::exp2(sizeof(apxchol::pool_value_t)==4?-70:-500)) :
                     std::exp2(int(j%11)-5);
                 stars[pivot].push_back({n,weight});
                 if(profile==2) {edges.push_back({pivot,n,.25*weight});edges.push_back({pivot,n,.75*weight});}
@@ -5421,11 +5437,93 @@ TEST(GpuCycleSampler, NormalOversizedAndFullDegreeFillMatchHostLaw) {
                 if (profile==3 && sizeof(apxchol::pool_value_t)==4)
                     for (const auto& edge:got)
                         EXPECT_EQ(std::fpclassify(static_cast<apxchol::pool_value_t>(std::get<2>(edge))),FP_SUBNORMAL);
+                std::vector<node_index> owner(n),rank(n);
+                for(node_index pivot=0;pivot<count;++pivot)
+                    for(node_index j=0;j<stars[pivot].size();++j) {
+                        owner[stars[pivot][j].vertex]=pivot;rank[stars[pivot][j].vertex]=j;
+                    }
                 for(std::size_t i=0;i<got.size();++i) {
+                    const auto pivot=owner[std::get<0>(got[i])];
+                    if(sampler==apxchol::clique_sampler::trace_cycle &&
+                       !numerical_fallback && stars[pivot].size()>128)continue;
                     EXPECT_EQ(std::get<0>(got[i]),std::get<0>(expected[i]));
                     EXPECT_EQ(std::get<1>(got[i]),std::get<1>(expected[i]));
                     EXPECT_NEAR(std::get<2>(got[i]),std::get<2>(expected[i]),
                         8*std::numeric_limits<apxchol::pool_value_t>::epsilon()*std::get<2>(expected[i]));
+                }
+                // Parallel positive folds need not reproduce the scalar cut.
+                // Infer the emitted core and check its high-precision objective,
+                // topology, HT weights, and rejection-aware cycle RNG separately.
+                if(sampler==apxchol::clique_sampler::trace_cycle && !numerical_fallback)
+                for(node_index pivot=0;pivot<count;++pivot) {
+                    const auto& star=stars[pivot];const auto d=star.size();
+                    if(d<=128)continue;
+                    std::vector<unsigned> later(d),core_degree(d);
+                    std::vector<std::size_t> parent_index(d,d);
+                    std::vector<std::tuple<std::size_t,std::size_t,double>> row;
+                    for(const auto& [u,v,w]:got)if(owner[u]==pivot) {
+                        ASSERT_EQ(owner[v],pivot);
+                        auto i=std::size_t(rank[u]),j=std::size_t(rank[v]);
+                        if(i>j)std::swap(i,j);
+                        ++later[i];parent_index[i]=j;row.emplace_back(i,j,w);
+                    }
+                    ASSERT_EQ(row.size(),d);
+                    std::size_t cut=0;while(cut<d && later[cut]==1)++cut;
+                    ASSERT_LE(cut,d-3);const auto h=d-cut;
+                    if(profile==11) {EXPECT_EQ(cut,1u);EXPECT_EQ(h,129u);}
+                    std::vector<long double> suffix(d+1),square(d+1);
+                    double D=.125;for(auto edge:star)D+=edge.weight;
+                    for(std::size_t i=d;i-->0;) {
+                        const long double x=static_cast<long double>(star[i].weight)/star.back().weight;
+                        suffix[i]=x+suffix[i+1];square[i]=x*x+square[i+1];
+                    }
+                    long double parents=0,best=std::numeric_limits<long double>::infinity(),chosen=0;
+                    for(std::size_t i=0;i+2<d;++i) {
+                        const auto size=d-i;
+                        const long double score=parents+(size==3?0.L:(size-3.L)*(size-1.L)*.5L*square[i]);
+                        best=std::min(best,score);if(i==cut)chosen=score;
+                        const long double x=static_cast<long double>(star[i].weight)/star.back().weight,m=d-i-1;
+                        parents+=(m-1)*x*(2*suffix[i+1]+m*x);
+                    }
+                    EXPECT_LE(chosen-best,128*std::numeric_limits<double>::epsilon()*(d+1)*std::max(1.L,best));
+                    std::vector<std::pair<std::size_t,std::size_t>> core;
+                    for(const auto& [i,j,w]:row) {
+                        const long double ai=star[i].weight,aj=star[j].weight;
+                        long double reference;
+                        if(i<cut) {
+                            EXPECT_EQ(later[i],1u);
+                            const long double mass=suffix[i+1]*star.back().weight+(d-i-1)*ai;
+                            reference=ai/D*mass/(1+ai/aj);
+                        } else {
+                            ++core_degree[i];++core_degree[j];core.emplace_back(i,j);
+                            reference=ai*aj/D*(h-1)*.5L;
+                        }
+                        const auto rounded=static_cast<apxchol::pool_value_t>(reference);
+                        const double tolerance=(8*std::numeric_limits<apxchol::pool_value_t>::epsilon()+
+                            128*std::numeric_limits<double>::epsilon()*(d+1))*std::abs(double(rounded))+
+                            2*double(std::numeric_limits<apxchol::pool_value_t>::denorm_min());
+                        EXPECT_NEAR(w,double(rounded),tolerance);
+                    }
+                    ASSERT_EQ(core.size(),h);
+                    for(std::size_t i=cut;i<d;++i)EXPECT_EQ(core_degree[i],2u);
+                    std::vector<std::size_t> permutation(h);std::iota(permutation.begin(),permutation.end(),cut);
+                    apxchol::random_stream rng{apxchol::detail::gpu_round_shadow_pivot_seed(run_seed,pivot)};
+                    for(auto k=h;k>1;--k)std::swap(permutation[k-1],permutation[apxchol::detail::uniform_index(rng,k)]);
+                    std::vector<std::pair<std::size_t,std::size_t>> expected_core;
+                    for(std::size_t k=0;k<h;++k)expected_core.emplace_back(
+                        std::min(permutation[k],permutation[(k+1)%h]),std::max(permutation[k],permutation[(k+1)%h]));
+                    std::sort(core.begin(),core.end());std::sort(expected_core.begin(),expected_core.end());
+                    EXPECT_EQ(core,expected_core);
+                    for(std::size_t i=0;i<cut;++i) {
+                        const auto j=parent_index[i];ASSERT_GT(j,i);ASSERT_LT(j,d);
+                        const long double ai=static_cast<long double>(star[i].weight)/star.back().weight;
+                        const long double mass=suffix[i+1]+(d-i-1)*ai;
+                        const long double target=rng.next_unit()*mass;
+                        const long double upper=suffix[j]+(d-j)*ai;
+                        const long double lower=suffix[j+1]+(d-j-1)*ai;
+                        const long double tolerance=128*std::numeric_limits<double>::epsilon()*(d+1)*mass;
+                        EXPECT_GE(target+tolerance,lower);EXPECT_LE(target-tolerance,upper);
+                    }
                 }
                 if(repeat)EXPECT_EQ(got,previous);
                 previous=got;
