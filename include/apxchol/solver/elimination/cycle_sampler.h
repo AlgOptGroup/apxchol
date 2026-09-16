@@ -137,11 +137,13 @@ inline double cycle_weight(std::span<const weighted_neighbor> n,double pivot,
     return n[i].weight*n[j].weight/pivot*(h-1)*.5;
 }
 inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
-                               std::uint64_t seed, edge_emitter out) {
+                               std::uint64_t seed, edge_emitter out,
+                               std::size_t exact_core_max_h = 0,
+                               std::size_t double_cycle_min_h = 0) {
     static thread_local trace_cycle_plan workspace;
     static thread_local std::vector<std::size_t> cycle;
     static thread_local std::vector<deferred_edge> staged;
-    staged.clear(); staged.reserve(n.size());
+    staged.clear(); staged.reserve(2 * n.size() + exact_core_max_h * exact_core_max_h);
     // Only plan construction may choose an input-only numerical fallback.
     // Once random sampling starts, errors remain errors; never redraw.
     try { workspace.prepare(n); }
@@ -167,14 +169,31 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
         sample_cycle_gks_fallback(n, pivot, seed, out);
         return;
     }
-    random_stream rng{seed};cycle.resize(h);std::iota(cycle.begin(),cycle.end(),cut);
-    for(std::size_t k=h;k>1;--k)
-        std::swap(cycle[k-1],cycle[uniform_index(rng,k)]);
-    for(std::size_t k=0;k<h;++k) {
-        const auto i=cycle[k],j=cycle[(k+1)%h];
-        const double weight=cycle_weight(n,pivot,h,i,j);
-        require_pool_edge(weight);
-        staged.push_back({n[i].vertex,n[j].vertex,weight});
+    random_stream rng{seed};
+    if (exact_core_max_h > 0 && h <= exact_core_max_h) {
+        // Exact core: every core pair with its clique weight. Zero core
+        // variance; light attachments below are unchanged.
+        for (std::size_t x = cut; x < d; ++x)
+            for (std::size_t y = x + 1; y < d; ++y) {
+                const double weight = n[x].weight * n[y].weight / pivot;
+                require_pool_edge(weight);
+                staged.push_back({n[x].vertex, n[y].vertex, weight});
+            }
+    } else {
+        // One uniform Hamiltonian cycle, or two independent ones with halved
+        // weights on a large core (random 4-regular core). Both unbiased.
+        const int cycles = (double_cycle_min_h > 0 && h >= double_cycle_min_h) ? 2 : 1;
+        for (int c = 0; c < cycles; ++c) {
+            cycle.resize(h);std::iota(cycle.begin(),cycle.end(),cut);
+            for(std::size_t k=h;k>1;--k)
+                std::swap(cycle[k-1],cycle[uniform_index(rng,k)]);
+            for(std::size_t k=0;k<h;++k) {
+                const auto i=cycle[k],j=cycle[(k+1)%h];
+                const double weight=cycle_weight(n,pivot,h,i,j)/cycles;
+                require_pool_edge(weight);
+                staged.push_back({n[i].vertex,n[j].vertex,weight});
+            }
+        }
     }
     for(std::size_t i=0;i<cut;++i) {
         // One component coin, then one fresh component draw. Uniform_index
@@ -194,13 +213,15 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
     out(std::span<const deferred_edge>(staged));
 }
 inline void sample_cycle_clique(std::span<weighted_neighbor> n, double pivot,
-                               std::uint64_t seed, edge_emitter out, clique_sampler sampler) {
+                               std::uint64_t seed, edge_emitter out, clique_sampler sampler,
+                               std::size_t exact_core_max_h,
+                               std::size_t double_cycle_min_h) {
     if (sampler != clique_sampler::trace_cycle)
         throw std::invalid_argument("unknown clique sampler");
     if (!cycle_inputs_eligible(n, pivot)) {
         sample_cycle_gks_fallback(n, pivot, seed, out);
         return;
     }
-    sample_trace_cycle(n, pivot, seed, out);
+    sample_trace_cycle(n, pivot, seed, out, exact_core_max_h, double_cycle_min_h);
 }
 } // namespace apxchol::detail

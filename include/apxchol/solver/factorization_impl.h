@@ -2351,6 +2351,8 @@ factorization factorize_impl(const Eliminator& elim,
 inline detail::tree_elimination make_tree_elim(const factor_options& opts) {
     return detail::tree_elimination{
         .exact_clique_max_degree = opts.exact_clique_max_degree,
+        .exact_core_max_h = opts.exact_core_max_h,
+        .double_cycle_min_h = opts.double_cycle_min_h,
         .sampler = opts.sampler};
 }
 

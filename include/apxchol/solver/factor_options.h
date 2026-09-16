@@ -181,6 +181,23 @@ struct factor_options {
     /// them removes the bulk of the sampling variance at modest fill cost.
     size_t exact_clique_max_degree = 0;
 
+    /// Trace-cycle heavy-core rules (both 0 = off; ignored by the other
+    /// samplers). The trace-cycle sampler splits a star into a heavy core of
+    /// h near-equal weights, which gets one uniform cycle, and lighter
+    /// neighbours, which each attach upward. A cycle is a poor stand-in for
+    /// the exact clique at both ends of the core-size scale:
+    /// * exact_core_max_h: when h <= this, emit the exact core clique
+    ///   (h(h-1)/2 edges instead of h). Measured 2026-09-18: at 5, IPM
+    ///   iterations -11..-20 % for +1..+7 % fill (real cores have median h=4).
+    /// * double_cycle_min_h: when h >= this, emit two independent uniform
+    ///   cycles with halved weights (a random 4-regular core; kappa stays ~10
+    ///   instead of ~h^2/20). Fires only on large near-uniform cores (hub and
+    ///   Sachdeva stars); at 32 it is free on star_k100 and inert elsewhere.
+    /// Both keep every pair's expected weight exact (unbiased). CPU path only:
+    /// the GPU-owned setup falls back to the CPU route when either is set.
+    size_t exact_core_max_h = 0;
+    size_t double_cycle_min_h = 0;
+
     clique_sampler sampler = clique_sampler::gks;
 
 

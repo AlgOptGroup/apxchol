@@ -170,7 +170,9 @@ inline std::size_t suffix_upper_bound(std::span<const double> values,
 
 // Input is canonically sorted and degree >= 3. Implemented below.
 inline void sample_cycle_clique(std::span<weighted_neighbor>, double,
-                               std::uint64_t, edge_emitter, clique_sampler);
+                               std::uint64_t, edge_emitter, clique_sampler,
+                         std::size_t exact_core_max_h = 0,
+                         std::size_t double_cycle_min_h = 0);
 
 } // namespace detail
 
@@ -205,6 +207,9 @@ struct tree_elimination {
     /// (all d(d-1)/2 edges, weight w_i·w_j/deg) instead of the d-1 sampled
     /// edges. Zero-variance where it is cheap (quadratic in d). 0 = off.
     size_t exact_clique_max_degree = 0;
+    /// Trace-cycle core rules; see factor_options for semantics. 0 = off.
+    size_t exact_core_max_h = 0;
+    size_t double_cycle_min_h = 0;
     clique_sampler sampler = clique_sampler::gks;
 
     /// Upper bound on the number of edges one sample_clique call emits, for a
@@ -213,7 +218,16 @@ struct tree_elimination {
         const size_t d = static_cast<size_t>(deg);
         if (exact_clique_max_degree > 0 && d <= exact_clique_max_degree)
             return d * (d - 1) / 2;
-        if (sampler != clique_sampler::gks && d >= 3) return d;
+        if (sampler != clique_sampler::gks && d >= 3) {
+            size_t bound = d;
+            if (sampler == clique_sampler::trace_cycle) {
+                // Exact core adds at most h(h-1)/2 - h edges with h <= exact_core_max_h;
+                // a second cycle adds at most h <= d edges. Upper bounds, never exact.
+                if (exact_core_max_h > 0) bound += exact_core_max_h * (exact_core_max_h - 1) / 2;
+                if (double_cycle_min_h > 0) bound += d;
+            }
+            return bound;
+        }
         return d == 0 ? 0 : d - 1;
     }
 
@@ -246,7 +260,8 @@ struct tree_elimination {
                   });
 
         if (sampler != clique_sampler::gks && d >= 3) {
-            detail::sample_cycle_clique(neighbors, deg, seed, out, sampler);
+            detail::sample_cycle_clique(neighbors, deg, seed, out, sampler,
+                                        exact_core_max_h, double_cycle_min_h);
             return;
         }
 
