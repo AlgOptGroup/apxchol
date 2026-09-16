@@ -70,17 +70,18 @@ struct checkpoint {
         struct line { int depth; std::string name; double subtotal; };
         std::vector<line> lines;
 
-        auto collect = [&](this auto const& collect, const node& n,
-                           int depth) -> double {
+        // Explicit self-parameter recursion instead of C++23 deducing-this so
+        // the header also builds with GCC 13 (cluster toolchains).
+        auto collect = [&](auto const& self, const node& n, int depth) -> double {
             double s = n.time;
             for (const auto& [name, c] : n.children) {
-                const double child_subtotal = collect(c, depth + 1);
+                const double child_subtotal = self(self, c, depth + 1);
                 lines.push_back({depth, name, child_subtotal});
                 s += child_subtotal;
             }
             return s;
         };
-        double grand = collect(root_, 0);
+        double grand = collect(collect, root_, 0);
 
         os << std::fixed;
         for (const auto& [depth, name, st] : lines | std::views::reverse) {
