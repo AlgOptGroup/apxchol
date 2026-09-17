@@ -22,7 +22,9 @@ selected measurements. Local `results/cells/` is not automatically the published
   a lower bound on one solve. Preserve failure, nonconvergence, timeout, unsupported,
   unattempted and missing statuses. Unknown memory is not zero.
 - Pin CPU affinity; record requested/effective threads, source/binary hashes,
-  compiler/runtime, warmups and retained receipts. Never poll `nvidia-smi` inside
+  compiler/runtime, warmups and retained receipts. Report the placement with the
+  thread count: on an EPYC 7742 socket the same 16 threads take 1.00 on one NUMA
+  domain and 0.86 on four ([threads and placement](../README.md#threads-and-placement)). Never poll `nvidia-smi` inside
   timed C++ or ParAC calls.
 
 ## Solvers

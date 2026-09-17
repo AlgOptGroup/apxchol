@@ -71,6 +71,24 @@ This applies to one-shot block-greedy/tree solves with directed AoS storage;
 public/exported factors and unsupported stored formats retain validated fallback
 paths. See [the setup contracts](AGENTS.md#architecture-and-contracts).
 
+### Threads and placement
+
+The CPU solver is limited by memory traffic rather than core count, so where the
+threads sit matters more than how many there are. One 64-core EPYC 7742 socket
+(four NUMA domains, two memory channels each), 8 matrices, both samplers,
+geometric mean of the one-RHS total (Euler, 2026-09-18):
+
+| Threads × NUMA domains | 16 × 1 | 16 × 4 | 32 × 4 | 64 × 4 |
+|---|---:|---:|---:|---:|
+| Relative time | 1.00 | 0.86 | **0.77** | 0.83 |
+
+Spread the threads over the memory domains of one socket and stop near eight per
+domain: all 64 cores were slower than 32, and slower than the compact 16 on
+social graphs; spreading 16 threads over both sockets was slower than one
+domain on three of four matrices. The library never changes affinity. Pin
+explicitly, one place per chosen core (`lscpu -p=CPU,CORE,NODE` lists them):
+`OMP_PROC_BIND=close OMP_PLACES="{0},{1},{16},{17},..."`.
+
 ## Further reading
 
 - [Daint results](benchmarks/daint/) and [benchmark protocol](benchmarks/README.md).
