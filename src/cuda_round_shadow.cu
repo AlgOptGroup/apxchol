@@ -2552,7 +2552,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     const std::size_t cub_bytes = query_cub_bytes(n, r, p, capacity_shape);
     std::size_t planned =
         planned_peak_bytes(n, r, p, capacity_shape, cub_bytes);
-    const std::size_t sampler_components = sampler == clique_sampler::heavy_core_k2 ? 8 :
+    const std::size_t sampler_components =
         sampler == clique_sampler::trace_cycle ? 1 : 0;
     if (sampler_components) {
         const auto required = gpu_round_shadow_checked_mul(
@@ -3228,9 +3228,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                     throw std::domain_error("GPU cycle sampler: invalid plan or edge outside normal pool range");
                 report.sampler_numerical_fallbacks = status[1];
                 if (gpu_setup_diagnostics()) std::fprintf(stderr,
-                    "[gpu-clique-sampler] sampler=%s pivots=%zu normal_pivots=%llu "
+                    "[gpu-clique-sampler] sampler=trace_cycle pivots=%zu normal_pivots=%llu "
                     "oversized_pivots=%llu numerical_gks_fallbacks=%u device_sampling=1\n",
-                    sampler == clique_sampler::trace_cycle ? "trace_cycle" : "heavy_core_k2", p,
+                    p,
                     static_cast<unsigned long long>(report.normal_batch.normal_pivots),
                     static_cast<unsigned long long>(report.normal_batch.oversized_pivots), status[1]);
             } else if (audit_payload) {
@@ -3733,8 +3733,7 @@ invalidate_for_authoritative_host_rebuild(
 
 gpu_round_shadow_device_state::gpu_round_shadow_device_state(clique_sampler sampler)
     : impl_(std::make_unique<impl>(sampler)) {
-    if (sampler != clique_sampler::gks && sampler != clique_sampler::trace_cycle &&
-        sampler != clique_sampler::heavy_core_k2)
+    if (sampler != clique_sampler::gks && sampler != clique_sampler::trace_cycle)
         throw std::invalid_argument("unsupported GPU clique sampler");
 }
 

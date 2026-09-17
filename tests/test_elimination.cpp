@@ -174,7 +174,7 @@ TEST(TreeSampler, SuffixUpperBoundMatchesAllRandomizedSuffixes) {
 }
 
 TEST(CycleSampler, PreservesDegreeTwoAndDeclaredCapacity) {
-    for (auto kind : {clique_sampler::trace_cycle, clique_sampler::heavy_core_k2}) {
+    for (auto kind : {clique_sampler::trace_cycle}) {
         tree_elimination rule{.sampler = kind};
         for (node_index d = 0; d <= 10; ++d) {
             std::vector<weighted_neighbor> n;
@@ -196,13 +196,11 @@ TEST(CycleSampler, PreservesDegreeTwoAndDeclaredCapacity) {
 }
 
 TEST(CycleSampler, SeededReferenceLawsAndCanonicalTieOrdering) {
-    // Frozen research outputs: six profile/rule combinations, 16 seeds each.
-    // Separate private extraction validation compared 3,584 complete outputs.
+    // Frozen research outputs: three weight profiles, 16 seeds each.
     const std::uint64_t expected[] = {
-        0xdc8bb4832f53e113ULL, 0x3cacb43c9631e69eULL, 0x9f0703307804cf80ULL,
-        0xdc8bb4832f53e113ULL, 0x5e91b067ce624f22ULL, 0xc36e0afa90b21ff4ULL};
+        0xdc8bb4832f53e113ULL, 0x3cacb43c9631e69eULL, 0x9f0703307804cf80ULL};
     size_t test = 0;
-    for (auto kind : {clique_sampler::trace_cycle, clique_sampler::heavy_core_k2}) {
+    for (auto kind : {clique_sampler::trace_cycle}) {
         for (int profile = 0; profile < 3; ++profile) {
             std::uint64_t hash = 1469598103934665603ULL;
             for (unsigned seed = 0; seed < 16; ++seed) {
@@ -316,7 +314,7 @@ TEST(CycleSampler, TraceObjectiveMatchesEveryOutcomeAndBestSuffix) {
 }
 
 TEST(CycleSampler, PreservesRepresentableSubnormalEdges) {
-    for (auto kind : {clique_sampler::trace_cycle, clique_sampler::heavy_core_k2}) {
+    for (auto kind : {clique_sampler::trace_cycle}) {
         const double tiny = std::sqrt(double(std::numeric_limits<pool_value_t>::min())) * .1;
         std::vector<weighted_neighbor> n{{0,tiny},{1,tiny},{2,tiny}};
         std::vector<deferred_edge> edges;
@@ -340,7 +338,7 @@ TEST(CycleSampler, InputOnlyFallbackMatchesGksAtEverySeed) {
         {{0,0.},{1,0.},{2,0.}},
         {{0,std::numeric_limits<double>::denorm_min()},{1,1.},{2,1e300}} // normalized ratio underflows
     };
-    for (auto kind : {clique_sampler::trace_cycle, clique_sampler::heavy_core_k2})
+    for (auto kind : {clique_sampler::trace_cycle})
         for (const auto& profile : profiles) for (std::uint64_t seed=0;seed<16;++seed) {
             auto n=profile,reference=profile;
             const double D=profile.back().weight>1e200?1e300:1.;
@@ -356,7 +354,7 @@ TEST(CycleSampler, InputOnlyFallbackMatchesGksAtEverySeed) {
 }
 
 TEST(CycleSampler, InvalidInputsNeverBecomeNumericalFallbacks) {
-    for (auto kind : {clique_sampler::trace_cycle,clique_sampler::heavy_core_k2}) {
+    for (auto kind : {clique_sampler::trace_cycle}) {
         for(double bad : {-1.,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
             std::vector<weighted_neighbor> n{{0,0.},{1,1.},{2,bad}};
             std::vector<deferred_edge> got{{7,8,9.}};

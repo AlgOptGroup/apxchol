@@ -2964,7 +2964,7 @@ int main(int argc, char** argv) {
             apxchol::graph_storage storage = apxchol::graph_storage::forward_star;
             size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
             double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
-            apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle | heavy_core_k2
+            apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
         };
         using gs = apxchol::graph_storage;
         static const V1Combo v1_combos[] = {
@@ -2992,12 +2992,10 @@ int main(int argc, char** argv) {
             // Directed AoS headline/default: same slab machinery, but each
             // endpoint stores {neighbor, weight} inline instead of an edge id.
             {.name="bg+tree[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos},
-            // Cycle-core samplers on the headline storage: same selector and
+            // Trace-cycle sampler on the headline storage: same selector and
             // storage as the row above, only factor_options::sampler differs.
             {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
              .sampler=apxchol::clique_sampler::trace_cycle},
-            {.name="bg+heavy_core_k2[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
-             .sampler=apxchol::clique_sampler::heavy_core_k2},
             // /hos: legacy heavy-oversample variant, kept so old --v1-configs strings still
             // resolve. It carries no extra knobs today (the oversampling levers were removed
             // from the library), so it behaves like bg+tree[vec_pool] -- which is the charted

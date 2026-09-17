@@ -122,16 +122,18 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   entries in the heaviest chunk. The bounds depend only on the pointer array and
   team size, so thread-ordered reductions stay bit-identical run to run. The
   level-scheduled SpTRSV deliberately does not (tried and removed 2026-08-18).
-- `factor_options.sampler` / `--sampler` selects `gks` (default), `trace_cycle`
-  or `heavy_core_k2`. Both cycle families emit at most d edges from a degree-d
-  star and retain GKS for degree below three. CPU setup and full GPU-owned
-  setup support them; alternative samplers reject forced CPU-shadow/export
-  combinations instead of silently substituting a backend. The owned device
-  sampler covers normal and oversized rows and retains per-session moment scratch.
-  Both cycle families retain positive subnormals; finite zero neighbors or
-  unrepresentable numerical plans use input-only GKS fallback with the original
-  seed before sampling. Invalid inputs and overflow remain errors. Device traces
-  report these numerical fallbacks.
+- `factor_options.sampler` / `--sampler` selects `gks` (default) or
+  `trace_cycle`. Trace-cycle emits at most d edges from a degree-d star and
+  retains GKS for degree below three. CPU setup and full GPU-owned setup support
+  it; it rejects forced CPU-shadow/export combinations instead of silently
+  substituting a backend. The owned device sampler covers normal and oversized
+  rows and retains per-session moment scratch. Trace-cycle retains positive
+  subnormals; finite zero neighbors or unrepresentable numerical plans use
+  input-only GKS fallback with the original seed before sampling. Invalid inputs
+  and overflow remain errors. Device traces report these numerical fallbacks.
+  (`heavy_core_k2` was removed 2026-09-17: same fill and iterations within one
+  of trace-cycle, setup +4.6%, one-RHS total +2.1%, 16-RHS total -1.8% on 22
+  matrices; `benchmarks/daint/SAMPLERS.md` keeps its published measurements.)
 - Trace-cycle rows with more than 128 canonical neighbors use cooperative warp
   moment/prefix scans, cutoff reduction, parent searches and edge emission.
   Suffix maxima repair floating CDF monotonicity. Lane zero retains the core

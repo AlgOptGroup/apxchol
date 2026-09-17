@@ -91,10 +91,9 @@ run_config parse_args(int argc, char* argv[]) {
                    "Write solution vector to MatrixMarket file");
 
     app.add_option("--sampler", cfg.solve_opts.factor_opts.sampler,
-                   "Clique sampler: gks, trace_cycle, or heavy_core_k2")
+                   "Clique sampler: gks or trace_cycle")
         ->transform(CLI::CheckedTransformer(std::map<std::string, clique_sampler>{
-            {"gks", clique_sampler::gks}, {"trace_cycle", clique_sampler::trace_cycle},
-            {"heavy_core_k2", clique_sampler::heavy_core_k2}}));
+            {"gks", clique_sampler::gks}, {"trace_cycle", clique_sampler::trace_cycle}}));
 
     // ── solver parameters ──
     app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")

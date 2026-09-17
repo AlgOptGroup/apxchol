@@ -47,7 +47,6 @@ CHART_THREADS = 16
 LABELS = {
     ("apxchol_v1", "bg+tree[vec_pool_aos]"): "apxchol/bg",
     ("apxchol_v1", "bg+trace_cycle[vec_pool_aos]"): "apxchol/trace-cycle",
-    ("apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"): "apxchol/heavy-core-K2",
     ("apxchol_v1", "greedy+tree[vec_pool]"): "apxchol/greedy",
     ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk",
     ("rchol", ""): "RCHOL",

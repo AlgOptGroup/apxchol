@@ -5341,8 +5341,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
-    for (auto sampler : {apxchol::clique_sampler::trace_cycle,
-                         apxchol::clique_sampler::heavy_core_k2}) {
+    for (auto sampler : {apxchol::clique_sampler::trace_cycle}) {
         for (unsigned profile = 0; profile < 13; ++profile) {
             SCOPED_TRACE(std::to_string(static_cast<int>(sampler))+":"+std::to_string(profile));
             std::vector<unsigned> degree = profile == 0 ?
@@ -5543,7 +5542,7 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
     scoped_env verbose("APXCHOL_VERBOSE","1");
     scoped_omp_threads serial(1);
-    for(auto sampler:{apxchol::clique_sampler::trace_cycle,apxchol::clique_sampler::heavy_core_k2})
+    for(auto sampler:{apxchol::clique_sampler::trace_cycle})
     for(double shift:{0.,1.}) {
         SCOPED_TRACE(std::to_string(static_cast<int>(sampler))+":"+std::to_string(shift));
         auto A=owned_solve_matrix(257,shift);
@@ -5556,8 +5555,7 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         const auto trace=testing::internal::GetCapturedStderr();
         EXPECT_LE((A*result.x-b).norm()/b.norm(),1e-8);
         EXPECT_NE(trace.find("[gpu-owned-factorization] complete rounds="),std::string::npos);
-        EXPECT_NE(trace.find(sampler==apxchol::clique_sampler::trace_cycle?
-            "[gpu-clique-sampler] sampler=trace_cycle":"[gpu-clique-sampler] sampler=heavy_core_k2"),std::string::npos);
+        EXPECT_NE(trace.find("[gpu-clique-sampler] sampler=trace_cycle"),std::string::npos);
         EXPECT_NE(trace.find("device_sampling=1"),std::string::npos);
         EXPECT_EQ(trace.find("[gpu-round-shadow] checked"),std::string::npos);
     }
@@ -5574,7 +5572,7 @@ TEST(GpuCycleSampler, AuditedExportRejectsUnsupportedSamplerClearly) {
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
     scoped_omp_threads serial(1);
     auto A=owned_solve_matrix(65,1.);
-    for(auto sampler:{apxchol::clique_sampler::trace_cycle,apxchol::clique_sampler::heavy_core_k2}) {
+    for(auto sampler:{apxchol::clique_sampler::trace_cycle}) {
         apxchol::apx_cholesky preconditioner;preconditioner.set_keep_factor(true);
         apxchol::factor_options opts;opts.sampler=sampler;
         preconditioner.set_options(opts);

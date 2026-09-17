@@ -137,58 +137,6 @@ __device__ std::uint32_t cycle_trace_cut_warp(const work_record* a, std::uint32_
     }
     return __shfl_sync(mask,cut,0);
 }
-__device__ std::uint32_t cycle_heavy_cut(const work_record* a, std::uint32_t d,
-                                        double* tail) {
-    if (d == 3) return 0;
-    const double scale = a[d - 1].value;
-    double D = 0, other = 0;
-    for (std::uint32_t i = 0; i < d; ++i) {
-        const double x = a[i].value / scale;
-        if (!(x > 0) || !isfinite(x)) return d;
-        D += x; if (i + 1 < d) other += x;
-    }
-    double sum[8] = {};
-    for (std::uint32_t i = d; i-- > 0;) {
-        const double x = a[i].value / scale;
-        const double q = x * (i + 1 == d ? other : D - x) / D;
-        if (!(q > 0)) return d;
-        const double x2 = x*x, q2 = q*q;
-        const double atom[8] = {x,x/q,x/q2,x2/q2,x2/q,x2,x2*x/q2,x2*x2/q2};
-        for (int k = 0; k < 8; ++k) {
-            sum[k] = sum[k] + atom[k];
-            if (!isfinite(sum[k])) return d;
-            tail[std::size_t(i)*8+k] = sum[k];
-        }
-    }
-    double parents=0, best=kCycleInfinity;
-    std::uint32_t cut=0;
-    for (std::uint32_t i=0; i+2<d; ++i) {
-        const auto h=d-i; const double* m=tail+std::size_t(i)*8;
-        double cycle=0;
-        if (h>3) {
-            const double N=h-1, first=m[5]*m[3]-m[7];
-            const double second=m[0]*m[0]*m[3]-2*m[0]*m[6]+m[7];
-            const double diagonal=N*(N-2)/(2*(N-1))*(first-second/N);
-            const double off=(h-3)*.5*(m[4]*m[4]-m[7]);
-            const double magnitude=double(h)*h*(fabs(m[5]*m[3])+fabs(m[7])+fabs(m[0]*m[0]*m[3])+fabs(2*m[0]*m[6]))+h*(fabs(m[4]*m[4])+fabs(m[7]));
-            double x,y;
-            if (!cycle_nonnegative(diagonal,magnitude,x) || !cycle_nonnegative(off,magnitude,y)) return d;
-            cycle=x+y;
-        }
-        const double value=(parents+cycle)/(D*D);
-        if (!isfinite(value)) return d;
-        if (value<best) { best=value;cut=i; }
-        const double* b=tail+std::size_t(i+1)*8;
-        const double a_i=a[i].value/scale, s_i=a_i*(D-a_i)/D;
-        const double diagonal=a_i*a_i*(b[0]*b[2]-b[3]);
-        const double off=2*a_i*a_i/s_i*(b[0]*b[1]-b[4]);
-        const double magnitude=a_i*a_i*(fabs(b[0]*b[2])+fabs(b[3]))+2*a_i*a_i/s_i*(fabs(b[0]*b[1])+fabs(b[4]));
-        double x,y;
-        if (!cycle_nonnegative(diagonal,magnitude,x) || !cycle_nonnegative(off,magnitude,y)) return d;
-        parents += x+y;
-    }
-    return cut;
-}
 __device__ double cycle_parent_weight(const work_record* a, std::uint32_t d,
         double D, const double* suffix, std::uint32_t i, std::uint32_t j) {
     const double scale=a[d-1].value, ai=a[i].value/scale, aj=a[j].value/scale;
@@ -264,9 +212,7 @@ __global__ void sample_cycle_rows(const work_record* canonical,
         if(counters)counters[ordinal].emitted_edges=emitted;
         return;
     }
-    const bool trace=sampler==clique_sampler::trace_cycle;
-    const auto cut=trace?cycle_trace_cut(a,d,sums,workspace+begin)
-                        :cycle_heavy_cut(a,d,workspace+std::size_t(begin)*8);
+    const auto cut=cycle_trace_cut(a,d,sums,workspace+begin);
     if(cut==d) {
         const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
         if(counters)counters[ordinal].emitted_edges=emitted;
@@ -275,26 +221,16 @@ __global__ void sample_cycle_rows(const work_record* canonical,
     const auto h=d-cut;
     range=max(cycle_pool_range(cycle_edge_weight(a,D,h,cut,cut+1)),
               cycle_pool_range(cycle_edge_weight(a,D,h,d-2,d-1)));
-    if(!trace) {
-        sums[0]=a[0].value;
-        for(std::uint32_t i=1;i<d;++i)sums[i]=sums[i-1]+a[i].value;
-    }
     // The final output slots double as temporary parent/permutation state.
     // Light and core ranges are disjoint; a cycle slot is overwritten only
     // after both endpoint indices are read, and its first endpoint is saved.
     for(std::uint32_t i=0;i<cut;++i) {
-        fill[i].a=d;
-        if(trace) {
-            const double ai=a[i].value/a[d-1].value,m=d-i-1;
-            const double probability=m*ai/(sums[i+1]+m*ai);
-            if(!(probability>=0 && probability<=.5) || !isfinite(probability)) {atomicOr(status,2u);return;}
-            if (!(probability>0)) range=max(range,1);
-            range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,i+1)));
-            range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,d-1)));
-        } else {
-            fill[i].value=sums[d-1]-sums[i];
-            range=max(range,cycle_pool_range(a[i].value*fill[i].value/D));
-        }
+        const double ai=a[i].value/a[d-1].value,m=d-i-1;
+        const double probability=m*ai/(sums[i+1]+m*ai);
+        if(!(probability>=0 && probability<=.5) || !isfinite(probability)) {atomicOr(status,2u);return;}
+        if (!(probability>0)) range=max(range,1);
+        range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,i+1)));
+        range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,d-1)));
     }
     if (range==2) {atomicOr(status,2u);return;}
     if (range==1) {
@@ -314,44 +250,18 @@ __global__ void sample_cycle_rows(const work_record* canonical,
         if(!cycle_pool_edge(value)){atomicOr(status,2u);return;}
         fill[cut+k]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),value};flags[cut+k]=1;
     }
-    if(!trace)for(std::uint32_t k=0;k<2;++k) {
-        const auto receiver=d-1-k;bool open=false;double cumulative=0;
-        const double phase=next_unit(state);
-        for(std::uint32_t i=0;i<cut;++i)if(fill[i].a==d) {
-            open=true;const double prob=fmin(1.,fmax(0.,a[receiver].value/fill[i].value));
-            if(prob>=1 || phase+ceil(cumulative-phase)<cumulative+prob)fill[i].a=receiver;
-            else fill[i].value-=a[receiver].value;
-            cumulative+=prob;
-        }
-        if(!open)break;
-    }
     for(std::uint32_t i=0;i<cut;++i) {
-        std::uint32_t j;double value;
-        if(trace) {
-            const double ai=a[i].value/a[d-1].value,m=d-i-1;
-            if(next_unit(state)<m*ai/(sums[i+1]+m*ai))j=i+1+cycle_uniform_index(state,d-i-1);
-            else {
-                const double sum=sums[i+1];double target=next_unit(state)*sum;
-                if(target>=sum)target=nextafter(sum,0.);
-                std::uint32_t lo=i+1,hi=d;
-                while(lo+1<hi){const auto mid=lo+(hi-lo)/2;if(target<sums[mid])lo=mid;else hi=mid;}
-                j=lo;
-            }
-            value=cycle_parent_weight(a,d,D,sums,i,j);
-        } else {
-            j=fill[i].a;
-            if(j==d) {
-                const auto last=d-3;
-                if(last<=i)j=d-2;
-                else {
-                    const double target=sums[i]+next_unit(state)*(sums[last]-sums[i]);
-                    std::uint32_t lo=i+1,hi=last+1;
-                    while(lo<hi){const auto mid=lo+(hi-lo)/2;if(sums[mid]<=target)lo=mid+1;else hi=mid;}
-                    j=lo<last?lo:last;
-                }
-            }
-            value=a[i].value*(sums[d-1]-sums[i])/D;
+        std::uint32_t j;
+        const double ai=a[i].value/a[d-1].value,m=d-i-1;
+        if(next_unit(state)<m*ai/(sums[i+1]+m*ai))j=i+1+cycle_uniform_index(state,d-i-1);
+        else {
+            const double sum=sums[i+1];double target=next_unit(state)*sum;
+            if(target>=sum)target=nextafter(sum,0.);
+            std::uint32_t lo=i+1,hi=d;
+            while(lo+1<hi){const auto mid=lo+(hi-lo)/2;if(target<sums[mid])lo=mid;else hi=mid;}
+            j=lo;
         }
+        const double value=cycle_parent_weight(a,d,D,sums,i,j);
         if(!cycle_pool_edge(value)){atomicOr(status,2u);return;}
         fill[i]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),value};flags[i]=1;
     }

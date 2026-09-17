@@ -51,11 +51,9 @@ COLORS = {"apxchol/bg (GPU)": "#0b5394",     # declared default = darkest blue
 LABELS = {
     ("apxchol_v1", "bg+tree[vec_pool_aos]"): "apxchol/bg (GPU)",
     ("apxchol_v1", "bg+trace_cycle[vec_pool_aos]"): "apxchol/trace-cycle (CPU setup, GPU solve)",
-    ("apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"): "apxchol/heavy-core-K2 (CPU setup, GPU solve)",
     ("apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]"): "apxchol/GKS q=0.8 (GPU)",
     ("apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]"): "apxchol/GKS q=0.2 (GPU)",
     ("apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"): "apxchol/trace-cycle q=0.8 (GPU)",
-    ("apxchol_v1", "bg+heavy_core_k2/gpu-owned-q08[vec_pool_aos]"): "apxchol/heavy-core-K2 (GPU)",
     ("hypre_boomeramg_gpu", ""): "BoomerAMG (GPU)",
     ("hypre_boomeramg_gpu", "cut"): "BoomerAMG/cut (GPU)",
     ("amgcl_cuda", ""): "AMGCL (GPU)",

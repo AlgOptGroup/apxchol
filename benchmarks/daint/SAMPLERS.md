@@ -1,6 +1,6 @@
 # Earlier six-matrix sampler comparison
 
-The [current headline](README.md) uses refreshed 27-matrix GPU measurements. This earlier screen retains its original sources and setup costs.
+The [current headline](README.md) uses refreshed 27-matrix GPU measurements. This earlier screen retains its original sources and setup costs. The Heavy-core K2 sampler measured here was removed from the library on 2026-09-17; its rows remain as a record of that source.
 
 Six matrices: grid_2000, grid3d_100, iter0010, iter0040, as-Skitter and com-LiveJournal. Each cell uses one warmup and three retained solves at T=72, seed 42 and original-system tolerance 1e-8. All 232 comparison calls and six smoke calls returned accepted solutions. The [58-cell extract](sampler_detail.csv) preserves setup route, compiler, source, fill and timing variability.
 
