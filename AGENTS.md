@@ -122,6 +122,21 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   entries in the heaviest chunk. The bounds depend only on the pointer array and
   team size, so thread-ordered reductions stay bit-identical run to run. The
   level-scheduled SpTRSV deliberately does not (tried and removed 2026-08-18).
+- Prune-walk skip (block-greedy on directed vec_pool): once AUTO has declined
+  the exact incremental-degree cache, skipping rounds report a vertex whose raw
+  adjacency count exceeds 4x the previous round's eligibility threshold at that
+  count instead of walking it (`prune_and_degrees(..., skip_above)`). Its degree
+  is then an upper bound and its dead entries wait for a later walk; that is
+  sound only because this path's selector and eliminator filter dead entries
+  themselves. A raw count only grows until the vertex is walked, so skipping
+  every round hides hubs whose neighbours died (com-Youtube under GKS: +14 %
+  iterations). Full walks therefore alternate with the skipping rounds and audit
+  the skip they replace; a clean audit doubles the skipping rounds before the
+  next one (1..8), a hidden eligible vertex resets them to 1. Do not remove the
+  audit. Never active while the cache is on or undecided, nor under
+  `APXCHOL_INCREMENTAL_DEGREE_SPARSE=0|1` (exact references).
+  `APXCHOL_PRUNE_SKIP=<factor>` overrides the factor, `0` disables the rule,
+  `APXCHOL_PRUNE_SKIP_TRACE=1` prints the audits.
 - `factor_options.sampler` / `--sampler` selects `gks` (default) or
   `trace_cycle`. Trace-cycle emits at most d edges from a degree-d star and
   retains GKS for degree below three. CPU setup and full GPU-owned setup support

@@ -632,6 +632,133 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
                        "incremental main selector followed by BK residual");
 }
 
+TEST(PruneAndDegrees, SkipAboveReportsTheRawCountAndLeavesTheVertexUnwalked) {
+    // Hub 0 with eight neighbours, three of them already eliminated.
+    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(10);
+    for (apxchol::node_index v = 1; v <= 8; ++v) graph.add_edge(0, v, 1.0);
+    graph.add_edge(8, 9, 1.0);
+    for (apxchol::node_index v : {1u, 2u, 3u}) graph.deactivate(v);
+    const std::vector<apxchol::node_index> active{0, 8, 9};
+    std::vector<apxchol::node_index> degrees;
+    constexpr std::size_t serial = std::size_t{1} << 20;
+
+    // Raw count 8 > 4: reported as is, dead entries left in place. The others
+    // are walked as usual.
+    const double skipped_average = apxchol::prune_and_degrees(
+        graph, std::span<const apxchol::node_index>(active), degrees, serial, 4);
+    ASSERT_EQ(degrees.size(), 3u);
+    EXPECT_EQ(degrees[0], 8u);
+    EXPECT_EQ(graph.adj_count(0), 8u);
+    EXPECT_EQ(degrees[1], 2u);
+    EXPECT_EQ(degrees[2], 1u);
+    EXPECT_DOUBLE_EQ(skipped_average, 11.0 / 3.0);
+
+    // A count AT the cutoff is walked; so is everything without a cutoff.
+    apxchol::prune_and_degrees(
+        graph, std::span<const apxchol::node_index>(active), degrees, serial, 8);
+    EXPECT_EQ(degrees[0], 5u);
+    EXPECT_EQ(graph.adj_count(0), 5u);
+    const double full_average = apxchol::prune_and_degrees(
+        graph, std::span<const apxchol::node_index>(active), degrees, serial);
+    EXPECT_EQ(degrees[0], 5u);
+    EXPECT_DOUBLE_EQ(full_average, 8.0 / 3.0);
+}
+
+TEST(PruneAndDegrees, AuditCountsTheEligibleVerticesASkipWouldHide) {
+    // Hub 0 has eight raw entries but only two live neighbours left: a skip
+    // at cutoff 4 would keep it away from a selector whose threshold is 3.
+    // Hub 9 has six raw entries, all live: above the cutoff, rightly skipped.
+    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(16);
+    for (apxchol::node_index v = 1; v <= 8; ++v) graph.add_edge(0, v, 1.0);
+    for (apxchol::node_index v = 10; v <= 15; ++v) graph.add_edge(9, v, 1.0);
+    for (apxchol::node_index v = 1; v <= 6; ++v) graph.deactivate(v);
+    const std::vector<apxchol::node_index> active{0, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    std::vector<apxchol::node_index> degrees;
+    constexpr std::size_t serial = std::size_t{1} << 20;
+    std::size_t hidden = 99;
+    apxchol::prune_and_degrees(
+        graph, std::span<const apxchol::node_index>(active), degrees, serial,
+        /*skip_above=*/0, /*audit_above=*/4, /*audit_eligible=*/3, &hidden);
+    EXPECT_EQ(hidden, 1u);
+    EXPECT_EQ(degrees[0], 2u);          // the audit is a full walk
+    EXPECT_EQ(graph.adj_count(0), 2u);
+    EXPECT_EQ(degrees[3], 6u);
+
+    // Walked once, nothing is hidden any more.
+    apxchol::prune_and_degrees(
+        graph, std::span<const apxchol::node_index>(active), degrees, serial,
+        0, 4, 3, &hidden);
+    EXPECT_EQ(hidden, 0u);
+}
+
+TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
+    // A grid declines the incremental-degree cache in its first round (walk
+    // traffic / update work is about 2), which is what arms the prune skip;
+    // the hubs are the vertices it then leaves unwalked. Factor 1 skips every
+    // vertex above the previous threshold, far more than the default 4: the
+    // selector and the eliminator must cope with adjacency nobody pruned.
+    const scoped_threads team(8);
+    constexpr int side = 48, n_grid = side * side, hubs = 6, n = n_grid + hubs;
+    std::mt19937_64 rng(20260917);
+    std::vector<Eigen::Triplet<double>> triplets;
+    std::vector<double> diagonal(n, 1e-3);
+    auto edge = [&](int u, int v, double w) {
+        triplets.emplace_back(u, v, -w); triplets.emplace_back(v, u, -w);
+        diagonal[u] += w; diagonal[v] += w;
+    };
+    for (int r = 0; r < side; ++r)
+        for (int c = 0; c < side; ++c) {
+            if (c + 1 < side) edge(r * side + c, r * side + c + 1, 1.0);
+            if (r + 1 < side) edge(r * side + c, (r + 1) * side + c, 1.0);
+        }
+    for (int h = 0; h < hubs; ++h)
+        for (int v = h; v < n_grid; v += 5 + h) edge(n_grid + h, v, 0.5);
+    for (int v = 0; v < n; ++v) triplets.emplace_back(v, v, diagonal[v]);
+    Eigen::SparseMatrix<double> A(n, n);
+    A.setFromTriplets(triplets.begin(), triplets.end());
+    A.makeCompressed();
+    Eigen::VectorXd b(n);
+    for (int v = 0; v < n; ++v) b[v] = std::sin(0.31 * v) + 0.25;
+
+    apxchol::solve_options opts;
+    opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 7;
+    opts.factor_opts.omp_threshold = 16;
+    auto run = [&](const char* factor) {
+        const scoped_environment gate("APXCHOL_PRUNE_SKIP", factor);
+        apxchol::cpu_solver solver(A, opts);
+        return solver.solve(b);
+    };
+    const auto off = run("0");
+    const auto standard = run(nullptr);
+    const auto aggressive = run("1");
+    for (const auto* result : {&off, &standard, &aggressive}) {
+        EXPECT_LT(result->residual, 1e-8);
+        EXPECT_LT((A * result->x - b).norm() / b.norm(), 1e-7);
+    }
+    EXPECT_LE(standard.iterations, off.iterations + 3);
+    EXPECT_LE(aggressive.iterations, 2 * off.iterations);
+
+    // The fixture must really arm the rule: an unwalked hub is reported at its
+    // raw count, dead entries included, so some round's average degree is
+    // larger than the exact one.
+    auto round_degrees = [&](const char* factor) {
+        const scoped_environment gate("APXCHOL_PRUNE_SKIP", factor);
+        const auto f = apxchol::factorize(
+            A, apxchol::graph_storage::vec_pool_aos, opts.factor_opts);
+        std::vector<double> avg;
+        for (const auto& round : f.rounds) avg.push_back(round.avg_deg);
+        return avg;
+    };
+    const auto exact = round_degrees("0");
+    const auto skipped = round_degrees(nullptr);
+    ASSERT_GE(exact.size(), 3u);
+    bool some_round_overestimates = false;
+    for (std::size_t r = 0; r < std::min(exact.size(), skipped.size()); ++r)
+        some_round_overestimates |= skipped[r] > exact[r];
+    EXPECT_TRUE(some_round_overestimates)
+        << "fixture never skipped a walk at the default factor";
+}
+
 TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
 #ifndef _OPENMP
     GTEST_SKIP() << "serial build: there is no parallel selection path";

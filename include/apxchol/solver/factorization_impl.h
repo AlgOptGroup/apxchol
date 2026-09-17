@@ -1495,6 +1495,36 @@ factorization factorize_impl(const Eliminator& elim,
     std::size_t incremental_dead_incidence = 0;
     constexpr double incremental_refresh_ratio = 0.10;
 
+    // Prune-walk skip. Only where AUTO has permanently DECLINED the exact
+    // incremental cache above (block-greedy on directed vec_pool): that path's
+    // selector and eliminator already filter dead adjacency entries, because
+    // an active cache never prunes, and from then on every round re-walks
+    // every active vertex. In a skipping round a vertex whose raw adjacency
+    // count exceeds prune_skip_factor x the previous round's eligibility
+    // threshold is reported at that count instead of being walked
+    // (prune_and_degrees). Never while the cache is active or undecided (its
+    // sample and its seed are these walks), and never under
+    // APXCHOL_INCREMENTAL_DEGREE_SPARSE=0|1, which stay exact references.
+    //
+    // A raw count only grows until the vertex is walked, so a hub whose
+    // neighbours die hides behind it and is eliminated late: skipping every
+    // round cost com-Youtube under GKS +14 % iterations on 12/12 seeds. Full
+    // walks therefore alternate with the skipping rounds and AUDIT the skip
+    // they replace: the number of eligible vertices it would have hidden. A
+    // clean audit doubles the skipping rounds before the next one (1..8), a
+    // hidden vertex resets them to 1. Iteration counts equal the rule-off run
+    // on 22/22 matrices for both samplers; IPM setup -3.5..-4.7 %, one-RHS
+    // total -2.6 % (Euler, 2026-09-18).
+    // APXCHOL_PRUNE_SKIP=<factor> overrides the factor, 0 disables the rule;
+    // APXCHOL_PRUNE_SKIP_TRACE=1 prints every audit.
+    double prune_skip_factor = 4.0;
+    if (const char* e = std::getenv("APXCHOL_PRUNE_SKIP"); e && *e)
+        prune_skip_factor = std::atof(e);
+    const bool prune_skip_trace =
+        std::getenv("APXCHOL_PRUNE_SKIP_TRACE") != nullptr;
+    unsigned prune_skip_gap = 1, prune_skip_streak = 0;
+    double previous_degree_threshold = 0.0;   // 0 = no previous round yet
+
     // Shared round front-end: prepass (when the partitioner's trait asks for
     // it) + find_partition + finalize, with uniform profiling labels.
     // last_avg_degree feeds the per-round stats; it is the prepass's exact
@@ -1590,8 +1620,42 @@ factorization factorize_impl(const Eliminator& elim,
                             static_cast<double>(incremental_dead_incidence) /
                             static_cast<double>(incremental_live_incidence),
                         incremental_refresh_ratio);
-                avg_deg =
-                    prune_and_degrees(g, act, pre_degrees, opts.omp_threshold);
+                node_index skip_above = 0, audit_above = 0;
+                if (incremental_degree_auto &&
+                    incremental_degree_auto_decided &&
+                    !incremental_degree_active &&
+                    prune_skip_factor > 0.0 &&
+                    previous_degree_threshold > 0.0) {
+                    const auto cutoff = static_cast<node_index>(std::min(
+                        prune_skip_factor * previous_degree_threshold,
+                        static_cast<double>(
+                            std::numeric_limits<node_index>::max())));
+                    if (prune_skip_streak < prune_skip_gap) {
+                        skip_above = cutoff;
+                        ++prune_skip_streak;
+                    } else {
+                        audit_above = cutoff;
+                    }
+                }
+                std::size_t hidden = 0;
+                avg_deg = prune_and_degrees(
+                    g, act, pre_degrees, opts.omp_threshold, skip_above,
+                    audit_above,
+                    static_cast<node_index>(std::min(
+                        previous_degree_threshold,
+                        static_cast<double>(
+                            std::numeric_limits<node_index>::max()))),
+                    &hidden);
+                if (audit_above > 0) {
+                    prune_skip_gap = hidden == 0
+                        ? std::min(2u * prune_skip_gap, 8u) : 1u;
+                    prune_skip_streak = 0;
+                    if (prune_skip_trace)
+                        std::fprintf(stderr,
+                            "[prune-skip] round=%llu active=%zu hidden=%zu next_gap=%u\n",
+                            static_cast<unsigned long long>(ws.round_index),
+                            act.size(), hidden, prune_skip_gap);
+                }
                 if (incremental_for_this_partitioner &&
                     incremental_degree_capable) {
                     incremental_live_incidence = static_cast<std::size_t>(
@@ -1606,6 +1670,7 @@ factorization factorize_impl(const Eliminator& elim,
                       pre_degrees, act.size(), q, pre_histograms))
                 : is_degree_threshold(pre_degrees, act.size(), avg_deg,
                                       opts.partition, pre_scratch);
+            previous_degree_threshold = thr;
             if (live_degrees.size() < static_cast<size_t>(g.n()))
                 live_degrees.resize(g.n());
             size_t eligible_count;

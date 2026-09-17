@@ -220,13 +220,34 @@ void parallel_stable_active_filter(std::vector<node_index>& active,
 /// Standard pre-pass: prune edges to eliminated vertices and fill
 /// degrees[i] for i in [0, active.size()) — indexed by *position in
 /// `active`*, not by vertex id.  Returns the average degree.
+///
+/// `skip_above` > 0 (storages with adj_count() only): a vertex whose RAW
+/// adjacency count exceeds it is not walked. Its degree is reported as that
+/// raw count, an upper bound of the live degree, and its dead entries stay
+/// in place for a later walk. The caller passes a multiple of the previous
+/// round's eligibility threshold: such a vertex is far from eligible, and
+/// walking a hub's adjacency every round only to learn that again is the
+/// bulk of the prune traffic on IPM normal equations. Only sound where every
+/// consumer of the adjacency filters dead entries itself and treats the
+/// degree as an upper bound (see the call site).
+///
+/// `audit_above` > 0 on a full walk: *audit_hidden counts the vertices that a
+/// skip at that cutoff WOULD have left unwalked although their live degree is
+/// at most `audit_eligible`, i.e. vertices such a skip keeps hiding from the
+/// selector. A hidden vertex stays hidden until it is walked, so a periodic
+/// audit cannot miss one.
 template<incidence_storage Incidence>
 double prune_and_degrees(graph<Incidence>& G,
                          std::span<const node_index> active,
                          std::vector<node_index>& degrees,
-                         std::size_t omp_threshold) {
+                         std::size_t omp_threshold,
+                         node_index skip_above = 0,
+                         node_index audit_above = 0,
+                         node_index audit_eligible = 0,
+                         std::size_t* audit_hidden = nullptr) {
     degrees.resize(active.size());
     double total_degree = 0;
+    std::size_t hidden = 0;
 
     if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
         if (G.adj_filter_append_enabled()
@@ -235,12 +256,29 @@ double prune_and_degrees(graph<Incidence>& G,
         }
     }
 
-    #pragma omp parallel for reduction(+:total_degree) schedule(dynamic, 256) \
+    #pragma omp parallel for reduction(+:total_degree,hidden) schedule(dynamic, 256) \
         if(active.size() > omp_threshold)
     for (size_t i = 0; i < active.size(); ++i) {
+        if constexpr (requires { G.adj_count(active[i]); }) {
+            if (skip_above > 0 || audit_above > 0) {
+                const node_index raw = G.adj_count(active[i]);
+                if (skip_above > 0 && raw > skip_above) {
+                    degrees[i] = raw;
+                    total_degree += raw;
+                    continue;
+                }
+                if (audit_above > 0 && raw > audit_above) {
+                    degrees[i] = G.prune_and_degree(active[i]);
+                    total_degree += degrees[i];
+                    hidden += degrees[i] <= audit_eligible;
+                    continue;
+                }
+            }
+        }
         degrees[i] = G.prune_and_degree(active[i]);
         total_degree += degrees[i];
     }
+    if (audit_hidden) *audit_hidden = hidden;
 
     if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
         if (G.adj_filter_append_enabled()
