@@ -293,17 +293,25 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     };
 
     const Eigen::SparseMatrix<double>& A = op.matrix();
+    // The scan's bit-identical-triangles proof is about the caller's matrix. It
+    // transfers to A only when nothing was lumped, i.e. when A IS that matrix;
+    // make_graph then skips its per-entry transpose-partner search.
+    const bool triangles_bit_identical =
+        &A == &L && op.scan().triangles_bit_identical;
     switch (storage) {
     case graph_storage::forward_star: {
-        auto G = make_graph<graph<forward_star_incidence>>(A);
+        auto G = detail::make_graph_from_operator<graph<forward_star_incidence>>(
+            A, triangles_bit_identical);
         return do_factorize(std::move(G));
     }
     case graph_storage::bstr: {
-        auto G = make_graph<graph<bstr_incidence>>(A);
+        auto G = detail::make_graph_from_operator<graph<bstr_incidence>>(
+            A, triangles_bit_identical);
         return do_factorize(std::move(G));
     }
     case graph_storage::vec_pool: {
-        auto G = make_graph<graph<vec_pool_incidence>>(A);
+        auto G = detail::make_graph_from_operator<graph<vec_pool_incidence>>(
+            A, triangles_bit_identical);
         return do_factorize(std::move(G));
     }
     case graph_storage::vec_pool_aos: {
@@ -323,11 +331,13 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
             if (detail::gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-csc] fallback=unsupported_stored_format before_device_mutation=1\n");
         }
 #endif
-        auto G = make_graph<graph<directed_vec_pool_incidence>>(A);
+        auto G = detail::make_graph_from_operator<graph<directed_vec_pool_incidence>>(
+            A, triangles_bit_identical);
         return do_factorize(std::move(G));
     }
     default: {
-        auto G = make_graph<graph<vec_incidence>>(A);
+        auto G = detail::make_graph_from_operator<graph<vec_incidence>>(
+            A, triangles_bit_identical);
         return do_factorize(std::move(G));
     }
     }

@@ -103,6 +103,25 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   unsupported formats keep host construction. Canonical lower values and
   lossless-fp32 selection are unchanged.
   Preserve original-system residual grading and full fallback validation.
+- `operator_scan::triangles_bit_identical` is the proof that lets consumers of
+  the caller's operator skip the per-entry transpose-partner search (about
+  log2(column length) cache misses per entry, in the hub columns of power-law
+  and IPM operators). The scan sets it only for strictly index-sorted columns
+  with no explicit-zero or non-finite off-diagonal and equal per-triangle entry
+  fingerprints (`detail::symmetric_entry_hash`, `csc_work.h`); it then also
+  skips its own partner search, which otherwise runs unchanged as a second pass
+  with the same count and witness. `detail::make_graph_from_operator` takes the
+  proof only from `factorize_for_solver` and only when nothing was lumped;
+  public `make_graph` never assumes it. The owned SpMV copy proves it for itself
+  while copying (fingerprint includes the position in a duplicate run) and falls
+  back to the pairing loop on any difference. Results are bit-identical with and
+  without the proof; keep it that way.
+- Loops over the rows or columns of the caller's operator (SpMV, owned copy,
+  graph builder) split work with `detail::work_balanced_range`, not by index
+  count: equal-count chunks carry 2x (IPM) to 4x (as-Skitter) the mean stored
+  entries in the heaviest chunk. The bounds depend only on the pointer array and
+  team size, so thread-ordered reductions stay bit-identical run to run. The
+  level-scheduled SpTRSV deliberately does not (tried and removed 2026-08-18).
 - `factor_options.sampler` / `--sampler` selects `gks` (default), `trace_cycle`
   or `heavy_core_k2`. Both cycle families emit at most d edges from a degree-d
   star and retain GKS for degree below three. CPU setup and full GPU-owned

@@ -1,9 +1,11 @@
 #include "apxchol/operator_class.h"
 
+#include "apxchol/csc_work.h"
 #include "apxchol/env_knobs.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -107,12 +109,29 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     Eigen::Index nonempty = 0, diagpos = 0, baddiag = 0;
     Eigen::Index asym = 0, deficient = 0, excess = 0;
     Eigen::Index upper = 0, lower = 0;
+    // Symmetry is decided in two stages. This pass streams an order-independent
+    // fingerprint of every nonzero off-diagonal entry into one sum per triangle
+    // (detail::symmetric_entry_hash) and records whether each column is strictly
+    // index-sorted. Equal sums and counts on a sorted, duplicate-free matrix mean
+    // the two triangles are bit-identical, which passes the relative-tolerance
+    // test trivially: `asymmetric` is 0 and there is no witness to report. Only
+    // otherwise does the second pass below search the transpose partner of every
+    // lower entry, exactly as this scan always did. That search costs about
+    // log2(column length) cache misses per entry and lands in the hub columns of
+    // power-law and IPM operators (9.2 ns per stored entry on as-Skitter against
+    // 0.7 on a grid), so it is worth paying only when something is actually
+    // asymmetric.
+    std::uint64_t hash_lower = 0, hash_upper = 0;
+    Eigen::Index offdiag_zero = 0;
+    bool ordered = true;
 
     // schedule(static), not dynamic: it fixes which columns a thread owns, so
     // the per-thread mass sums merged below are reproducible.
     #pragma omp parallel for schedule(static) \
         reduction(+ : stored, nonfinite, offdiag, offpos, nonempty, diagpos, \
-                      baddiag, asym, deficient, excess, upper, lower)
+                      baddiag, deficient, excess, upper, lower, offdiag_zero, \
+                      hash_lower, hash_upper) \
+        reduction(&& : ordered)
     for (Eigen::Index k = 0; k < s.cols; ++k) {
         int tid = 0;
 #ifdef _OPENMP
@@ -125,33 +144,24 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
         for (Eigen::Index p = c.begin; p < c.end; ++p) {
             const Eigen::Index i = c.inner[p];
             const double v = c.value[p];
+            if (p > c.begin && c.inner[p - 1] >= c.inner[p]) ordered = false;
             ++stored;
             if (!std::isfinite(v)) { ++nonfinite; continue; }
             colsum += v;
             if (v != 0.0) any_nonzero = true;
             if (i == k) { diag = v; continue; }
-            if (v == 0.0) continue;         // explicit zero: no edge, no sign
+            if (v == 0.0) { ++offdiag_zero; continue; }   // explicit zero: no edge, no sign
             ++offdiag;
             w.abs_mass += std::abs(v);
             if (v > 0.0) { ++offpos; w.pos_mass += v; }
-            if (i > k) ++lower; else ++upper;
-            // Symmetry: check the LOWER triangle against its transpose partner.
-            // Distinct lower entries map to distinct upper positions, so once
-            // the two counts are known equal, a match on every lower entry
-            // means every upper entry is matched too.
             if (i > k) {
-                const double t = lookup(A, k, i);
-                const double scale = std::max(std::abs(v), std::abs(t));
-                const double d = std::abs(v - t);
-                if (d > kSymmetryRelTol * scale) {
-                    ++asym;
-                    const double rel = scale > 0.0 ? d / scale : d;
-                    if (rel > w.asym_rel ||
-                        (rel == w.asym_rel && i < w.asym_row)) {
-                        w.asym_rel = rel;
-                        w.asym_row = i; w.asym_col = k; w.asym_a = v; w.asym_b = t;
-                    }
-                }
+                ++lower;
+                hash_lower += detail::symmetric_entry_hash(
+                    static_cast<std::uint64_t>(k), static_cast<std::uint64_t>(i), 0, v);
+            } else {
+                ++upper;
+                hash_upper += detail::symmetric_entry_hash(
+                    static_cast<std::uint64_t>(i), static_cast<std::uint64_t>(k), 0, v);
             }
         }
         if (any_nonzero) {
@@ -175,6 +185,44 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
             }
         } else if (colsum > slack) {
             ++excess;
+        }
+    }
+
+    const bool triangles_match =
+        ordered && lower == upper && hash_lower == hash_upper;
+    s.triangles_bit_identical =
+        triangles_match && offdiag_zero == 0 && nonfinite == 0;
+    if (!triangles_match) {
+        // Symmetry: check the LOWER triangle against its transpose partner.
+        // Distinct lower entries map to distinct upper positions, so once the
+        // two counts are known equal, a match on every lower entry means every
+        // upper entry is matched too. Same columns per thread as the pass
+        // above, and the witness tie-break does not depend on the schedule.
+        #pragma omp parallel for schedule(static) reduction(+ : asym)
+        for (Eigen::Index k = 0; k < s.cols; ++k) {
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            witness& w = wit[static_cast<std::size_t>(tid)];
+            const col_range c = column(A, k);
+            for (Eigen::Index p = c.begin; p < c.end; ++p) {
+                const Eigen::Index i = c.inner[p];
+                const double v = c.value[p];
+                if (i <= k || v == 0.0 || !std::isfinite(v)) continue;
+                const double t = lookup(A, k, i);
+                const double scale = std::max(std::abs(v), std::abs(t));
+                const double d = std::abs(v - t);
+                if (d > kSymmetryRelTol * scale) {
+                    ++asym;
+                    const double rel = scale > 0.0 ? d / scale : d;
+                    if (rel > w.asym_rel ||
+                        (rel == w.asym_rel && i < w.asym_row)) {
+                        w.asym_rel = rel;
+                        w.asym_row = i; w.asym_col = k; w.asym_a = v; w.asym_b = t;
+                    }
+                }
+            }
         }
     }
 

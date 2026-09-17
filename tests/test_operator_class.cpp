@@ -14,6 +14,10 @@
 //     passed, or the residual it reports is for a different system.
 #include <gtest/gtest.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -472,6 +476,90 @@ TEST(OperatorContract, MassNotCountIsWhatTheCeilingMeasures) {
     EXPECT_NO_THROW((void)require_operator(A));
 }
 
+// ── bit-identical triangles: the proof that lets consumers skip partner searches ──
+
+TEST(OperatorScan, BitIdenticalTrianglesAreRecognised) {
+    const operator_scan grid = scan_operator(grid_laplacian(7, 5));
+    EXPECT_EQ(grid.asymmetric, 0);
+    EXPECT_TRUE(grid.triangles_bit_identical);
+
+    const operator_scan sddm = scan_operator(spmv_probe_sddm());
+    EXPECT_EQ(sddm.asymmetric, 0);
+    EXPECT_TRUE(sddm.triangles_bit_identical);
+}
+
+TEST(OperatorScan, ToleratedAsymmetryIsSymmetricButNotBitIdentical) {
+    // Below kSymmetryRelTol: still accepted as symmetric, exactly as before,
+    // but the two triangles differ in one value bit pattern, so no consumer
+    // may substitute an upper entry for its lower partner.
+    const Sparse A = spmv_probe_sddm(5e-11);
+    ASSERT_NE(A.coeff(0, 1), A.coeff(1, 0));
+    const operator_scan s = scan_operator(A);
+    EXPECT_EQ(s.asymmetric, 0);
+    EXPECT_FALSE(s.triangles_bit_identical);
+    EXPECT_NO_THROW((void)require_operator(A));
+}
+
+TEST(OperatorScan, ValueAsymmetryKeepsItsCountAndWitness) {
+    // The per-entry partner search now runs only after the fingerprints
+    // disagree; it must report what the single-pass scan always reported.
+    Sparse A = grid_laplacian(6, 6);
+    A.coeffRef(3, 9) *= 1.5;          // upper entry of the (3, 9) pair
+    A.coeffRef(20, 14) *= 3.0;        // lower entry of the (14, 20) pair: the worst one
+    A.makeCompressed();
+    const operator_scan s = scan_operator(A);
+    EXPECT_EQ(s.asymmetric, 2);
+    EXPECT_FALSE(s.triangles_bit_identical);
+    EXPECT_EQ(s.worst_asym_row, 20);
+    EXPECT_EQ(s.worst_asym_col, 14);
+    EXPECT_DOUBLE_EQ(s.worst_asym_a, -3.0);
+    EXPECT_DOUBLE_EQ(s.worst_asym_b, -1.0);
+    EXPECT_NEAR(s.worst_asym_rel, 2.0 / 3.0, 1e-15);
+}
+
+TEST(OperatorScan, SwappedValuesBetweenTwoPairsAreNotBitIdentical) {
+    // Same multiset of VALUES in both triangles, same counts -- only the
+    // coordinates disagree. The fingerprint is keyed by coordinates, so this
+    // must not pass as bit-identical, and the partner search must flag both.
+    std::vector<Trip> t{
+        {0, 0, 9.0}, {1, 1, 9.0}, {2, 2, 9.0},
+        {1, 0, -1.0}, {0, 1, -2.0},
+        {2, 0, -2.0}, {0, 2, -1.0},
+    };
+    Sparse A(3, 3);
+    A.setFromTriplets(t.begin(), t.end());
+    A.makeCompressed();
+    const operator_scan s = scan_operator(A);
+    EXPECT_FALSE(s.triangles_bit_identical);
+    EXPECT_EQ(s.asymmetric, 2);
+}
+
+TEST(OperatorScan, ExplicitZerosDuplicatesAndUnsortedColumnsWithholdTheProof) {
+    // Each of these is still a valid symmetric operator. None may carry the
+    // proof: the graph builder gives stored zeros, duplicate coordinates and
+    // unsorted columns their full structural checks.
+    {   // explicit zero off-diagonal pair
+        Sparse A = spmv_probe_sddm();
+        A.coeffRef(2, 0) = 0.0;
+        A.coeffRef(0, 2) = 0.0;
+        ASSERT_EQ(A.nonZeros(), 9);
+        const operator_scan s = scan_operator(A);
+        EXPECT_EQ(s.asymmetric, 0);
+        EXPECT_FALSE(s.triangles_bit_identical);
+    }
+    {   // duplicate coordinates, balanced between the triangles
+        const Sparse A = spmv_balanced_duplicate_multiplicity_sddm();
+        EXPECT_FALSE(scan_operator(A).triangles_bit_identical);
+    }
+    {   // signed zero against zero is a value-bit difference the scan ignores
+        // for symmetry (explicit zeros carry no edge) but must not certify
+        Sparse A = spmv_probe_sddm();
+        A.coeffRef(2, 0) = -0.0;
+        A.coeffRef(0, 2) = 0.0;
+        EXPECT_FALSE(scan_operator(A).triangles_bit_identical);
+    }
+}
+
 // ── the operator PCG applies is untouched ───────────────────────────────────
 
 TEST(SpmvLrmBuild, AcceptedNearSymmetryStillUsesCanonicalLowerValues) {
@@ -488,6 +576,50 @@ TEST(SpmvLrmBuild, AcceptedNearSymmetryStillUsesCanonicalLowerValues) {
     const auto res = slv.solve(b, 1e-15, 0, &x0);
     EXPECT_EQ(res.iterations, 0);
     EXPECT_EQ(res.residual, 0.0);
+}
+
+TEST(SpmvLrmBuild, BitIdenticalFastPathAndWorkSplitApplyTheExactOperator) {
+    // Hub-heavy SDDM with bit-identical triangles: the owned copy takes the
+    // direct (no partner search) path and the SpMV splits its rows by stored
+    // entries. Dyadic weights and integer vectors keep every product and sum
+    // exact, so the residual at the true solution is exactly zero in any
+    // summation order -- at every team size, if and only if the operator that
+    // PCG applies is the caller's operator entry for entry.
+    const int n = 3000;   // above the fused kernels' parallel threshold
+    std::vector<Trip> t;
+    std::vector<double> degree(n, 0.0);
+    auto edge = [&](int a, int b, double w) {
+        t.emplace_back(a, b, -w); t.emplace_back(b, a, -w);
+        degree[a] += w; degree[b] += w;
+    };
+    for (int v = 1; v < n; ++v) edge(v, 0, 0.125 * (1 + v % 7));          // hub row 0
+    for (int v = 2; v < n; v += 2) edge(v, 1, 0.25 * (1 + v % 3));        // hub row 1
+    for (int v = 2; v + 1 < n; ++v) edge(v + 1, v, 0.5);                  // a path
+    for (int v = 0; v < n; ++v) t.emplace_back(v, v, degree[v] + 1.0);
+    Sparse A(n, n);
+    A.setFromTriplets(t.begin(), t.end());
+    A.makeCompressed();
+    ASSERT_TRUE(scan_operator(A).triangles_bit_identical);
+
+    Eigen::VectorXd x0(n);
+    for (int v = 0; v < n; ++v) x0[v] = static_cast<double>((v * 37) % 17 - 8);
+    const Eigen::VectorXd b = A.selfadjointView<Eigen::Lower>() * x0;
+
+#ifdef _OPENMP
+    const int prior = omp_get_max_threads();
+    for (int threads : {1, 3, 16}) {
+        omp_set_num_threads(threads);
+        SCOPED_TRACE(threads);
+        const apxchol::cpu_solver slv(A);
+        const auto res = slv.solve(b, 1e-15, 0, &x0);
+        EXPECT_EQ(res.iterations, 0);
+        EXPECT_EQ(res.residual, 0.0);
+    }
+    omp_set_num_threads(prior);
+#else
+    const apxchol::cpu_solver slv(A);
+    EXPECT_EQ(slv.solve(b, 1e-15, 0, &x0).residual, 0.0);
+#endif
 }
 
 TEST(SpmvLrmBuild, OwnedFp32CopySurvivesCallerMutationAndDestruction) {

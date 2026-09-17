@@ -106,6 +106,14 @@ struct operator_scan {
     /// Off-diagonal entries whose transpose partner differs by more than
     /// `kSymmetryRelTol` relatively (a missing partner counts as 0).
     Eigen::Index asymmetric   = 0;
+    /// The strictly lower and strictly upper triangles hold the same entries
+    /// bit for bit: every column is strictly index-sorted (so no duplicate
+    /// coordinates), no off-diagonal entry is an explicit zero or non-finite,
+    /// and the two triangles' entry fingerprints agree. Stronger than
+    /// `asymmetric == 0`, which tolerates `kSymmetryRelTol`. A consumer that
+    /// needs the canonical LOWER value of an upper entry may then read the
+    /// entry itself instead of searching for its transpose partner.
+    bool         triangles_bit_identical = false;
     double       worst_asym_rel = 0.0;
     Eigen::Index worst_asym_row = -1, worst_asym_col = -1;
     double       worst_asym_a = 0.0, worst_asym_b = 0.0;

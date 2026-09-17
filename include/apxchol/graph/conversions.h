@@ -4,6 +4,7 @@
 ///   laplacian(g)     — graph → Eigen Laplacian
 ///   make_graph<G>(L) — Eigen Laplacian → G
 
+#include "apxchol/csc_work.h"
 #include "apxchol/env_knobs.h"
 #include "apxchol/graph/graph.h"
 #include <Eigen/Sparse>
@@ -38,13 +39,20 @@ Eigen::SparseMatrix<double> laplacian(const G& g) {
     return L;
 }
 
-/// Build a graph from a Laplacian or SDDM matrix.
-///
-/// Off-diagonal entries become weighted edges (negated).
-/// Any excess diagonal (row sum > 0, i.e. SDDM) is stored
-/// per-vertex in graph::excess() for use during factorization.
-template<typename G = graph<>>
-G make_graph(const Eigen::SparseMatrix<double>& L) {
+namespace detail {
+
+/// make_graph with the caller's proof about the operator. `triangles_bit_identical`
+/// must come from a fresh `operator_scan` of this very matrix
+/// (`operator_scan::triangles_bit_identical`): the strictly lower and upper
+/// triangles then hold the same entries bit for bit, so the full-column builder
+/// below may take an upper entry's own value as the canonical LOWER value
+/// instead of binary-searching its transpose partner -- about log2(column
+/// length) cache misses per entry, landing in the hub columns of power-law and
+/// IPM operators. Pass false whenever that proof is not at hand; the result is
+/// identical either way, only the work differs.
+template<typename G>
+G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
+                           bool triangles_bit_identical) {
     using Incidence = typename G::incidence_type;
     const auto n = static_cast<node_index>(L.rows());
     const auto outer = static_cast<node_index>(L.outerSize());
@@ -66,8 +74,15 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
             const double* val = L.valuePtr();
             std::vector<node_index> incoming(static_cast<size_t>(n), 0);
             bool unique_sorted = true;
-            #pragma omp parallel for schedule(static) reduction(&& : unique_sorted)
-            for (node_index col = 0; col < n; ++col) {
+            // Columns are split by stored entries, not by count: with hub
+            // columns the equal-count chunks are far from equal work (see
+            // detail::work_balanced_range). Both loops reduce integers and
+            // booleans only, so the split cannot change the result.
+            #pragma omp parallel reduction(&& : unique_sorted)
+            {
+            const auto [col_lo, col_hi] = detail::work_balanced_range(
+                ptr, n, omp_get_thread_num(), omp_get_num_threads());
+            for (node_index col = col_lo; col < col_hi; ++col) {
                 node_index count = 0;
                 for (int p = ptr[col]; p < ptr[col + 1]; ++p) {
                     if (p > ptr[col] && idx[p - 1] >= idx[p])
@@ -77,6 +92,7 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
                 }
                 incoming[col] = count;
             }
+            }
             if (unique_sorted) {
                 // Reserve in the same vertex order as the general builder.
                 // iota avoids another materialized O(n) touched-vertex list.
@@ -85,15 +101,21 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
                     vertices.begin(), vertices.end(), incoming);
                 edge_index lower = 0, upper = 0;
                 bool paired = true;
-                #pragma omp parallel for schedule(static) \
-                    reduction(+ : lower, upper) reduction(&& : paired)
-                for (node_index col = 0; col < n; ++col) {
+                #pragma omp parallel reduction(+ : lower, upper) reduction(&& : paired)
+                {
+                const auto [col_lo, col_hi] = detail::work_balanced_range(
+                    ptr, n, omp_get_thread_num(), omp_get_num_threads());
+                for (node_index col = col_lo; col < col_hi; ++col) {
                     node_index offset = 0;
                     for (int p = ptr[col]; p < ptr[col + 1]; ++p) {
                         const int row = idx[p];
                         if (row == static_cast<int>(col)) continue;
                         double weight = -val[p];
-                        if (row < static_cast<int>(col)) {
+                        if (row < static_cast<int>(col) && triangles_bit_identical) {
+                            // Proven bit-identical triangles: val[p] IS the
+                            // canonical lower value, and its partner exists.
+                            ++upper;
+                        } else if (row < static_cast<int>(col)) {
                             ++upper;
                             const int* mate = std::lower_bound(
                                 idx + ptr[row], idx + ptr[row + 1],
@@ -114,6 +136,7 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
                             col, offset++, static_cast<node_index>(row), weight);
                     }
                     g.adj_commit_reserved_directed(col, offset);
+                }
                 }
                 if (paired && upper == lower) {
                     g.record_edges_added(lower);
@@ -302,6 +325,18 @@ G make_graph(const Eigen::SparseMatrix<double>& L) {
         g.excess(k) = excess;
     }
     return g;
+}
+
+} // namespace detail
+
+/// Build a graph from a Laplacian or SDDM matrix.
+///
+/// Off-diagonal entries become weighted edges (negated).
+/// Any excess diagonal (row sum > 0, i.e. SDDM) is stored
+/// per-vertex in graph::excess() for use during factorization.
+template<typename G = graph<>>
+G make_graph(const Eigen::SparseMatrix<double>& L) {
+    return detail::make_graph_from_operator<G>(L, /*triangles_bit_identical=*/false);
 }
 
 } // namespace apxchol

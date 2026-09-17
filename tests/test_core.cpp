@@ -16,6 +16,7 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
+#include "apxchol/csc_work.h"
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
 
@@ -593,6 +594,111 @@ TEST(DirectedCscGraph, FullColumnsKeepCanonicalWeightsZerosAndIsolatedVertices) 
 #else
     expect_directed_csc_matches_general(L);
 #endif
+}
+
+TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
+    // A hub-heavy SDDM with bit-identical triangles: the proof-taking builder
+    // skips every transpose-partner search and must still produce exactly the
+    // graph the searching builder produces, at every team size.
+    const int n = 400;
+    std::mt19937_64 rng(20260917);
+    std::uniform_real_distribution<double> weight(1e-6, 4.0);
+    std::map<std::pair<int,int>, double> lower;
+    for (int v = 1; v < n; ++v) lower[{v, 0}] = weight(rng);            // hub column 0
+    for (int v = 2; v < n; v += 3) lower[{v, 1}] = weight(rng);         // second hub
+    for (int k = 0; k < 3 * n; ++k) {
+        int a = static_cast<int>(rng() % n), b = static_cast<int>(rng() % n);
+        if (a == b) continue;
+        lower[{std::max(a, b), std::min(a, b)}] = weight(rng);
+    }
+    std::vector<double> degree(n, 0.0);
+    std::vector<Eigen::Triplet<double>> entries;
+    for (const auto& [rc, w] : lower) {
+        entries.emplace_back(rc.first, rc.second, -w);
+        entries.emplace_back(rc.second, rc.first, -w);
+        degree[rc.first] += w; degree[rc.second] += w;
+    }
+    for (int v = 0; v < n; ++v)
+        entries.emplace_back(v, v, degree[v] + (v % 5 == 0 ? 0.5 : 0.0));
+    Eigen::SparseMatrix<double> L(n, n);
+    L.setFromTriplets(entries.begin(), entries.end());
+    L.makeCompressed();
+
+    using G = apxchol::graph<apxchol::directed_vec_pool_incidence>;
+    auto same_graph = [&] {
+        const G searched = apxchol::make_graph<G>(L);
+        const G proven = apxchol::detail::make_graph_from_operator<G>(L, true);
+        ASSERT_EQ(searched.n(), proven.n());
+        ASSERT_EQ(searched.m(), proven.m());
+        for (apxchol::node_index v = 0; v < searched.n(); ++v) {
+            SCOPED_TRACE(v);
+            std::vector<std::pair<apxchol::node_index, std::uint64_t>> a, b;
+            for (auto e : searched.neighbors(v))
+                a.emplace_back(e.to, std::bit_cast<std::uint64_t>(static_cast<double>(e.w)));
+            for (auto e : proven.neighbors(v))
+                b.emplace_back(e.to, std::bit_cast<std::uint64_t>(static_cast<double>(e.w)));
+            EXPECT_EQ(a, b);
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(searched.excess(v)),
+                      std::bit_cast<std::uint64_t>(proven.excess(v)));
+        }
+    };
+#ifdef _OPENMP
+    const int prior = omp_get_max_threads();
+    for (int t : {1, 3, 16}) {
+        omp_set_num_threads(t);
+        same_graph();
+    }
+    omp_set_num_threads(prior);
+#else
+    same_graph();
+#endif
+}
+
+TEST(CscWork, WorkBalancedRangesPartitionTheRowsAndBoundEveryChunk) {
+    auto check = [](const std::vector<int>& lengths) {
+        std::vector<int> ptr(lengths.size() + 1, 0);
+        for (std::size_t i = 0; i < lengths.size(); ++i) ptr[i + 1] = ptr[i] + lengths[i];
+        const long n = static_cast<long>(lengths.size());
+        const long longest = lengths.empty() ? 0 : *std::max_element(lengths.begin(), lengths.end());
+        for (int nt : {1, 2, 3, 7, 16, 64}) {
+            SCOPED_TRACE(nt);
+            const long work = ptr[n] + n;
+            long expected_lo = 0;
+            for (int tid = 0; tid < nt; ++tid) {
+                const auto [lo, hi] = apxchol::detail::work_balanced_range(ptr.data(), n, tid, nt);
+                EXPECT_EQ(lo, expected_lo);          // contiguous, in thread order
+                EXPECT_LE(lo, hi);
+                const long chunk = (ptr[hi] - ptr[lo]) + (hi - lo);
+                // No chunk exceeds its fair share by more than one row's work.
+                EXPECT_LE(chunk, work / nt + longest + 2);
+                expected_lo = hi;
+            }
+            EXPECT_EQ(expected_lo, n);               // covers every row exactly once
+        }
+    };
+    check({});                                        // empty matrix
+    check(std::vector<int>(1000, 0));                 // only empty rows
+    check(std::vector<int>(1000, 5));                 // uniform mesh-like rows
+    std::vector<int> hubs(5000, 3);                   // hub rows clustered at the front,
+    for (int i = 0; i < 40; ++i) hubs[i] = 4000;      // like a crawl-ordered social graph
+    check(hubs);
+    std::vector<int> one_giant(257, 1);
+    one_giant[128] = 1000000;                         // one row heavier than a fair share
+    check(one_giant);
+}
+
+TEST(CscWork, UniformRowsReproduceTheEqualCountSplit) {
+    // On a mesh the work split must not move the chunk boundaries by more than
+    // a row: this is what keeps uniform inputs exactly as fast as before.
+    const long n = 100003;
+    std::vector<int> ptr(n + 1);
+    for (long i = 0; i <= n; ++i) ptr[i] = static_cast<int>(5 * i);
+    const int nt = 16;
+    for (int tid = 0; tid < nt; ++tid) {
+        const auto [lo, hi] = apxchol::detail::work_balanced_range(ptr.data(), n, tid, nt);
+        EXPECT_NEAR(static_cast<double>(lo), static_cast<double>(n) * tid / nt, 1.0);
+        EXPECT_NEAR(static_cast<double>(hi), static_cast<double>(n) * (tid + 1) / nt, 1.0);
+    }
 }
 
 TEST(DirectedCscGraph, OneTriangleAndBalancedUnpairedPatternUseGeneralPath) {
