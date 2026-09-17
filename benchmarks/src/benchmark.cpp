@@ -691,7 +691,8 @@ static BenchResult run_apxchol_v1(
     double tol, int maxiter,
     bool dump_profile = false,
     size_t exact_clique_max_degree = 0,
-    double degree_multiplier_override = 0.0)
+    double degree_multiplier_override = 0.0,
+    apxchol::clique_sampler sampler = apxchol::clique_sampler::gks)
 {
     BenchResult r;
     if (std::getenv("APXCHOL_PROFILE")) dump_profile = true;  // checkpoint breakdown
@@ -701,6 +702,7 @@ static BenchResult run_apxchol_v1(
     r.nnz = static_cast<int>(L.nonZeros());
 
     apxchol::factor_options fopts{.seed = 42, .is_select = is};
+    fopts.sampler = sampler;
     if (exact_clique_max_degree > 0)
         fopts.exact_clique_max_degree = exact_clique_max_degree;
     if (degree_multiplier_override > 0.0)
@@ -2962,6 +2964,7 @@ int main(int argc, char** argv) {
             apxchol::graph_storage storage = apxchol::graph_storage::forward_star;
             size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
             double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
+            apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle | heavy_core_k2
         };
         using gs = apxchol::graph_storage;
         static const V1Combo v1_combos[] = {
@@ -2989,6 +2992,12 @@ int main(int argc, char** argv) {
             // Directed AoS headline/default: same slab machinery, but each
             // endpoint stores {neighbor, weight} inline instead of an edge id.
             {.name="bg+tree[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos},
+            // Cycle-core samplers on the headline storage: same selector and
+            // storage as the row above, only factor_options::sampler differs.
+            {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+             .sampler=apxchol::clique_sampler::trace_cycle},
+            {.name="bg+heavy_core_k2[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+             .sampler=apxchol::clique_sampler::heavy_core_k2},
             // /hos: legacy heavy-oversample variant, kept so old --v1-configs strings still
             // resolve. It carries no extra knobs today (the oversampling levers were removed
             // from the library), so it behaves like bg+tree[vec_pool] -- which is the charted
@@ -3041,7 +3050,8 @@ int main(int argc, char** argv) {
                                               const Eigen::VectorXd& b_, const std::string& nm,
                                               double tl, int mi, ground_mode) {
                 return run_apxchol_v1(L_, b_, nm, label, combo.is, combo.storage, tl, mi,
-                                      false, combo.exact_clique_max_degree, combo.degree_mult);
+                                      false, combo.exact_clique_max_degree, combo.degree_mult,
+                                      combo.sampler);
             };
             print(median_run([&]() {
                 return run_desing("apxchol", label, apx_single);
