@@ -17,6 +17,18 @@ GKS at quantiles 0.8/0.2 and GPU trace-cycle at 0.8. The quantile controls verte
 selection, not the sampler's edge probabilities. Required host preparation is included in GPU setup;
 these labels do not claim that every setup stage resides on the GPU.
 
+**The GPU rows understate the device route, and cannot be corrected here.** They
+ran at quantile 0.8. A later paired sweep -- 264 runs on each of two GPU
+generations, all caps adjacent in time with a reverse-order second pass --
+measured 0.8 and 0.5 as a tie on the mean, with 0.8 carrying the bad tail: it is
+2.1-2.5x worse than 0.5 on `kron_g500-logn16` on both machines, while nothing
+costs more than 1.53x at 0.5. The library default now resolves to 0.5 on the
+GPU-owned route for that reason (`degree_quantile_by_route`). These cells were
+measured before that change and **we no longer have access to Daint**, so they
+stay as they are: read them as a floor for the GPU route on the matrices where
+0.8 loses, not as its current performance. The evidence is in
+`results/astra-review-20260905/claude-independent-review-20260916/contextual-sampling/quantile/CAP-VERDICT-20260918.md`.
+
 Each refreshed cell has one warmup and three retained attempts, T72, seed 42,
 and original-system residual tolerance 1e-8. One coherent median-total repetition
 supplies setup/solve times; timing spread warnings remain in the CSV. CUDA

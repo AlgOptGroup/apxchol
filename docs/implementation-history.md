@@ -94,8 +94,10 @@ common benchmark boundaries synchronize every route.
 
 FP32 validation covers the complete CUDA suite, focused memory/synchronization
 checks, and 66 converged original-system solves across two default-route and four
-owned-route matrix comparisons. The owned measurements used degree quantile 0.8;
-the ordinary default remains 0.2. This evidence supports the bounded opt-in
+owned-route matrix comparisons. The owned measurements used degree quantile 0.8,
+which was the default for both routes at the time; the cap is now chosen by route
+(0.2 host, 0.5 GPU-owned) because a later two-machine sweep found 0.8 ties 0.5 on
+the mean while costing 2.1-2.5x on kron_g500-logn16. This evidence supports the bounded opt-in
 integration scope; FP64 acceptance and parity with Yves remain unestablished.
 
 **Large trace-cycle rows use cooperative warps.** A thread per whole star left
