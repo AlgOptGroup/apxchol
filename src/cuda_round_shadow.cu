@@ -1875,6 +1875,67 @@ __global__ void csc_initial_incidences(
     if (out != offsets[v + 1]) atomicOr(status, 4u);
 }
 
+/// Warp-per-vertex form of the above. One thread per vertex means one thread
+/// walks a whole CSC column doing a binary partner search per entry, and on a
+/// power-law graph a hub column is thousands of entries while its warp
+/// neighbours have a handful: nsys measured this kernel at 15.6 ms in a SINGLE
+/// launch, 6.2% of kron's GPU time. Each entry's output is independent, so the
+/// warp splits the column and recovers its slot with a ballot prefix count.
+/// Every written value is computed exactly as before, so the result is
+/// bit-identical -- only the order the slots are filled in differs, and slots
+/// are disjoint. The malformed-input paths (status 1/2/4) already abort the
+/// run, so their slot accounting need not match the serial form.
+__global__ void csc_initial_incidences_warp(
+        int n, const int* ptr, const int* idx, const double* values,
+        const std::uint32_t* offsets, gpu_round_shadow_incidence* output,
+        std::uint32_t* status) {
+    const unsigned lane = threadIdx.x & 31u;
+    const std::size_t v =
+        (blockIdx.x * std::size_t(blockDim.x) + threadIdx.x) >> 5;
+    if (v >= static_cast<std::size_t>(n)) return;
+    const int begin = ptr[v], end = ptr[v + 1];
+    const std::uint32_t slot_begin = offsets[v], slot_end = offsets[v + 1];
+    std::uint32_t written = 0;
+    for (int base = begin; base < end; base += 32) {
+        const int k = base + static_cast<int>(lane);
+        const bool live = k < end;
+        const int u = live ? idx[k] : -1;
+        const bool kept = live && u != static_cast<int>(v);
+        const unsigned mask = __ballot_sync(0xffffffffu, kept);
+        const std::uint32_t rank = __popc(mask & ((1u << lane) - 1u));
+        if (kept) {
+            int canonical = k;
+            bool ok = true;
+            if (u < static_cast<int>(v)) {
+                int lo = ptr[u], hi = ptr[u + 1];
+                while (lo < hi) {
+                    const int mid = lo + (hi - lo) / 2;
+                    if (idx[mid] < static_cast<int>(v)) lo = mid + 1; else hi = mid;
+                }
+                if (lo == ptr[u + 1] || idx[lo] != static_cast<int>(v)) {
+                    atomicOr(status, 2u); ok = false;
+                } else canonical = lo;
+            }
+            if (ok) {
+                const double original = -values[canonical];
+#ifdef APXCHOL_POOL_FP32
+                const double weight =
+                    static_cast<double>(__double2float_rn(original));
+#else
+                const double weight = original;
+#endif
+                if (!isfinite(weight) || weight < 0.0) atomicOr(status, 1u);
+                const std::uint32_t out = slot_begin + written + rank;
+                if (out >= slot_end) atomicOr(status, 4u);
+                else output[out] = {static_cast<node_index>(v),
+                                    static_cast<node_index>(u), weight};
+            }
+        }
+        written += __popc(mask);
+    }
+    if (!lane && slot_begin + written != slot_end) atomicOr(status, 4u);
+}
+
 template<class T>
 void copy_to_device(T* destination, const T* source, std::size_t count,
                     const char* what) {
@@ -3979,7 +4040,9 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     impl_->ensure_state_buffer(impl_->residual_0, std::max<std::size_t>(directed, 1),
         "allocate initial CSC residual", "grow initial CSC residual");
     const float fill_ms = timer.measure_ms([&] {
-        csc_initial_incidences<<<blocks_for(n), kBlock>>>(static_cast<int>(n), ptr.get(), idx.get(),
+        csc_initial_incidences_warp<<<blocks_for(
+                gpu_round_shadow_checked_mul(n, 32, "csc initial warp launch")),
+            kBlock>>>(static_cast<int>(n), ptr.get(), idx.get(),
             values.get(), impl_->owner_offsets_0.get(), impl_->residual_0.get(), status.get());
         cuda_check(cudaGetLastError(), "materialize exact CSC incidences");
         if (directed) {
