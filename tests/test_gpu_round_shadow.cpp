@@ -5514,6 +5514,18 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     }
                     ASSERT_EQ(core.size(),h);
                     for(std::size_t i=cut;i<d;++i)EXPECT_EQ(core_degree[i],2u);
+                    // Rows above the cooperative degree shuffle their core with a
+                    // warp-parallel rank sort instead of the host's serial
+                    // Fisher-Yates. Both draw a uniform random Hamiltonian cycle and
+                    // both are reproducible from the seed, but they pick DIFFERENT
+                    // cycles, so the exact permutation and the rng stream position
+                    // after it are no longer shared with the host. What still holds
+                    // for every row -- the core is a cycle (checked just above), the
+                    // weights follow the law (checked above), and repeats are
+                    // identical (checked by the caller) -- is what the solver
+                    // actually promises. Replay the host realization only where the
+                    // device still reproduces it.
+                    if(d<=128) {
                     std::vector<std::size_t> permutation(h);std::iota(permutation.begin(),permutation.end(),cut);
                     apxchol::random_stream rng{apxchol::detail::gpu_round_shadow_pivot_seed(run_seed,pivot)};
                     for(auto k=h;k>1;--k)std::swap(permutation[k-1],permutation[apxchol::detail::uniform_index(rng,k)]);
@@ -5531,6 +5543,19 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                         const long double lower=suffix[j+1]+(d-j-1)*ai;
                         const long double tolerance=128*std::numeric_limits<double>::epsilon()*(d+1)*mass;
                         EXPECT_GE(target+tolerance,lower);EXPECT_LE(target-tolerance,upper);
+                    }
+                    } else {
+                        // The permutation must still be a permutation of the core,
+                        // and every light vertex must still attach to a strictly
+                        // later neighbour.
+                        std::vector<std::size_t> seen;
+                        for(const auto& [x,y]:core){seen.push_back(x);seen.push_back(y);}
+                        std::sort(seen.begin(),seen.end());
+                        seen.erase(std::unique(seen.begin(),seen.end()),seen.end());
+                        EXPECT_EQ(seen.size(),h);
+                        for(std::size_t i=0;i<cut;++i) {
+                            const auto j=parent_index[i];ASSERT_GT(j,i);ASSERT_LT(j,d);
+                        }
                     }
                 }
                 if(repeat)EXPECT_EQ(got,previous);

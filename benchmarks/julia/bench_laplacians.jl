@@ -51,6 +51,7 @@ function parse_args(args)
         "maxiter" => 500,
         "csv"     => false,
         "seed"    => 42,
+        "order"   => "deg",   # ApproxChol ordering: deg (adaptive min-degree, default) | wdeg (static weighted degree)
     )
     i = 1
     while i <= length(args)
@@ -81,6 +82,8 @@ function parse_args(args)
             i += 1; opts["tol"] = parse(Float64, args[i])
         elseif a == "--maxiter" && i < length(args)
             i += 1; opts["maxiter"] = parse(Int, args[i])
+        elseif a == "--order" && i < length(args)
+            i += 1; opts["order"] = args[i]
         elseif a == "--seed" && i < length(args)
             i += 1; opts["seed"] = parse(Int, args[i])
         end
@@ -278,7 +281,7 @@ function run_approxchol_operator(A, b, graph_name, tol, maxiter, is_lap; variant
     n = size(A, 1)
     nnz_A = nnz(A)
     sname = variant == :ac2 ? "AC2 [Kyng16;Jl]" : "AC [Kyng16;Jl]"
-    params = variant == :ac2 ? ApproxCholParams(:deg, 5, 2, 2) : ApproxCholParams(:deg)
+    params = variant == :ac2 ? ApproxCholParams(:deg, 5, 2, 2) : ApproxCholParams(Symbol(get(ENV, "APXCHOL_JL_ORDER", "deg")))
 
     # `is_lap` is the caller's DECLARED --class (asserted against the scan in
     # main_operator); only the positive-off-diagonal facts come from the scan.
@@ -426,7 +429,7 @@ function run_approxchol(adj, L, b, graph_name, tol, maxiter; variant=:ac)
         params = ApproxCholParams(:deg, 5, 2, 2)
         sname = "AC2 [Kyng16;Jl]"
     else
-        params = ApproxCholParams(:deg)
+        params = ApproxCholParams(Symbol(get(ENV, "APXCHOL_JL_ORDER", "deg")))
         sname = "AC [Kyng16;Jl]"
     end
 
