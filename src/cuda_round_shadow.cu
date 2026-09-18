@@ -2566,8 +2566,19 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         if (required > cycle_workspace.count())
             planned = add_bytes(planned, required, sizeof(double), "grown cycle sampler moments");
         planned = add_bytes(planned, 2, sizeof(std::uint32_t), "cycle sampler status");
-        planned = add_bytes(planned, p ? p : 1, sizeof(std::uint32_t), "trace plan cutoffs");
-        planned = add_bytes(planned, p ? p : 1, sizeof(unsigned long long), "trace plan streams");
+        // Both plan buffers are retained across rounds, so an earlier round with
+        // more pivots leaves them larger than this round asks for. Budget the
+        // retained capacity, and the growth allocation on top when this round is
+        // the one that grows them, exactly as the moments buffer above does.
+        const std::size_t plan_rows = p ? p : 1;
+        planned = add_bytes(planned, cycle_plan_cut.count(), sizeof(std::uint32_t),
+                            "retained trace plan cutoffs");
+        if (plan_rows > cycle_plan_cut.count())
+            planned = add_bytes(planned, plan_rows, sizeof(std::uint32_t), "grown trace plan cutoffs");
+        planned = add_bytes(planned, cycle_plan_state.count(), sizeof(unsigned long long),
+                            "retained trace plan streams");
+        if (plan_rows > cycle_plan_state.count())
+            planned = add_bytes(planned, plan_rows, sizeof(unsigned long long), "grown trace plan streams");
     }
     // Oversized uniques remain live beside the common canonical stream through
     // factor/sample. Retain a conservative full-g allowance in every phase.
