@@ -6,21 +6,6 @@ constexpr double kCyclePoolMax = std::numeric_limits<pool_value_t>::max();
 constexpr double kCycleEpsilon = std::numeric_limits<double>::epsilon();
 constexpr double kCycleInfinity = std::numeric_limits<double>::infinity();
 constexpr std::uint32_t kCycleCooperativeDegree = 128;
-
-/// Heavy-core sizes up to this take the warp-parallel rank shuffle; larger ones
-/// keep the serial Fisher-Yates, whose h steps beat ranking's h*ceil(h/32).
-constexpr std::uint32_t kCycleRankShuffleMax = 64;
-
-/// One decoupled draw per core slot, so ranking needs no shared RNG stream and
-/// no lane waits on another's. Pure in (state, k): the same seed reproduces the
-/// same permutation on every run, which is the reproducibility we owe.
-__device__ inline std::uint64_t cycle_shuffle_key(std::uint64_t state,
-                                                  std::uint32_t k) {
-    std::uint64_t z = state + 0x9E3779B97F4A7C15ULL * (k + 1);
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-    return z ^ (z >> 31);
-}
 __device__ std::uint32_t cycle_uniform_index(unsigned long long& state,
                                             std::uint32_t bound) {
     const auto b = static_cast<unsigned long long>(bound), threshold = -b % b;
@@ -508,36 +493,7 @@ __global__ void sample_large_trace_rows(const work_record* canonical,
     }
     for(std::uint32_t k=lane;k<h;k+=32)fill[cut+k].a=cut+k;
     __syncwarp();
-    // Fisher-Yates is a serial chain: every draw depends on the state the last
-    // one left, so one lane does h steps while 31 idle -- and h is 11 on
-    // com-Amazon and 36 on as-Skitter against cut/32 ~ 4-6 steps for everything
-    // parallel beside it. Sorting i.i.d. keys is also a uniform permutation, and
-    // rank-by-counting computes it branch-free across the warp: element k lands
-    // at the number of keys preceding it, ties broken by index so the result is
-    // always a permutation. Cost is h*ceil(h/32) compare steps against h serial
-    // ones, so it wins while h is small and the serial chain is kept past that.
-    //
-    // This deliberately picks a DIFFERENT permutation than the host would for
-    // the same seed. Quality is unchanged (both are uniform random Hamiltonian
-    // cycles) and the permutation is still reproducible from the seed alone;
-    // only device/host realization identity is given up, which is not a
-    // property the solver promises.
-    if(h<=kCycleRankShuffleMax) {
-        std::uint64_t key[kCycleRankShuffleMax/32+1];
-        for(std::uint32_t k=lane,slot=0;k<h;k+=32,++slot)
-            key[slot]=cycle_shuffle_key(state,k);
-        for(std::uint32_t k=lane,slot=0;k<h;k+=32,++slot) {
-            std::uint32_t rank=0;
-            for(std::uint32_t o=0;o<h;++o) {
-                const auto other=cycle_shuffle_key(state,o);
-                rank+=(other<key[slot])||(other==key[slot]&&o<k);
-            }
-            fill[cut+rank].a=cut+k;
-        }
-        // Advance past the slots the shuffle consumed so the parent draws below
-        // start from a state no core draw used.
-        state+=0x9E3779B97F4A7C15ULL*(h+1);
-    } else if(!lane) for(std::uint32_t k=h;k>1;--k) {
+    if(!lane)for(std::uint32_t k=h;k>1;--k) {
         const auto j=cycle_uniform_index(state,k),x=fill[cut+k-1].a;
         fill[cut+k-1].a=fill[cut+j].a;fill[cut+j].a=x;
     }
