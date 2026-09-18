@@ -105,7 +105,8 @@ run_config parse_args(int argc, char* argv[]) {
         ->capture_default_str();
     app.add_option("--degree-quantile", cfg.solve_opts.factor_opts.partition.degree_quantile,
                    "IS degree cap as a quantile of current degrees in (0,1); "
-                   "0 = use --degree-multiplier")
+                   "0 = use --degree-multiplier; negative = pick by route "
+                   "(0.2 host, 0.5 GPU-owned setup)")
         ->capture_default_str();
     app.add_option("--degree-multiplier", cfg.solve_opts.factor_opts.partition.degree_multiplier,
                    "IS degree threshold = multiplier × avg_degree "

@@ -19,6 +19,24 @@ enum class residual_peel_strategy {
     bk_serial    // sample √|active| vertices and peel the min-degree one
 };
 
+/// `degree_quantile` sentinel: resolve the cap from the elimination route at
+/// factorization time rather than pinning one number for both routes.
+inline constexpr double degree_quantile_by_route = -1.0;
+
+/// The host-route cap, and the value the sentinel falls back to for callers
+/// that read `partition_options` directly instead of going through
+/// `factorize()` (a partitioner invoked on its own cannot know the route).
+inline constexpr double degree_quantile_host_default = 0.2;
+
+/// The cap the GPU-owned setup route resolves to. See `degree_quantile`.
+inline constexpr double degree_quantile_device_default = 0.5;
+
+/// Concrete cap for a possibly-unresolved `degree_quantile`. Non-negative
+/// values pass through untouched so an explicit 0.2 stays 0.2 on the device.
+inline constexpr double degree_quantile_or_host_default(double q) noexcept {
+    return q < 0.0 ? degree_quantile_host_default : q;
+}
+
 /// Selection knobs consulted by the built-in partitioners — the only part of
 /// the options a partitioner should normally read (as opts.partition).
 struct partition_options {
@@ -37,7 +55,17 @@ struct partition_options {
     /// 58→35, coAuthors 81→25, kron 27→15) while staying parallel. Lower q (0.1)
     /// trims a touch more on uniform grids but adds rounds (worse total); higher
     /// q (0.3) helps com-Amazon slightly but is worse on the grid/FEM/IPM bulk.
-    double degree_quantile = 0.2;
+    ///
+    /// DEFAULT `degree_quantile_by_route`: negative means "resolve from the
+    /// elimination route" — 0.2 on the host, 0.5 when the GPU owns the rounds.
+    /// The device wants a wider cap because it pays a fixed per-round cost that
+    /// the host does not, so fewer, fatter rounds win there. Measured on two
+    /// GPU generations (Turing 36-62 C, Ada 68-84 C), 264 paired runs each,
+    /// all caps adjacent in time: against the best cap per matrix, 0.2 costs
+    /// 1.20-1.32 while 0.5 costs 1.02-1.11. 0.8 ties 0.5 on the mean but is
+    /// 2.1-2.5x worse on kron_g500-logn16, so 0.5 is the bounded-risk choice.
+    /// Any explicit value is honoured as given, including 0 (= disabled).
+    double degree_quantile = degree_quantile_by_route;
 
     /// Fallback IS degree cap when degree_quantile == 0:
     /// threshold = degree_multiplier × avg_degree.

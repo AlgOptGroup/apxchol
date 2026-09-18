@@ -98,6 +98,21 @@ inline bool gpu_round_shadow_requested() {
         "APXCHOL_GPU_ROUND_SHADOW must be unset, 0, off, or force");
 }
 
+/// True when the environment selects the GPU-owned setup route: device rounds,
+/// a device finalizer, and a block frontend to select on. A CPU build can never
+/// take that route, and `gpu_block_frontend` is not even a complete type there.
+/// Callers still have to check the route's template preconditions (vec_pool_aos
+/// storage, block_greedy, a consuming solve) themselves.
+inline bool gpu_owned_setup_configured() {
+#if defined(APXCHOL_USE_CUDA)
+    return gpu_round_shadow_requested() && gpu_factor_finalize_requested() &&
+           gpu_block_frontend::configured_block_mode() !=
+               gpu_block_frontend::mode::disabled;
+#else
+    return false;
+#endif
+}
+
 /// Small-degree trace rows are planned per pivot and then emitted one thread
 /// per neighbour slot (the GKS item split). `0`/`off` restores the single
 /// thread-per-pivot kernel for A/B measurement.

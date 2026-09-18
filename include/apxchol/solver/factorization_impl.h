@@ -1210,6 +1210,16 @@ factorization factorize_impl(const Eliminator& elim,
     if (n == 0)
         return {};
 
+    // The GPU-owned setup route pays a fixed cost per round that the host does
+    // not, so it wants a wider candidate cap. This is the one place that knows
+    // the route before the partitioner runs: the env flags below plus the
+    // template conditions make_gpu_round_shadow_session would otherwise reject.
+    const bool gpu_owned_setup_route =
+        std::is_same_v<Partitioner, block_greedy_partitioner> &&
+        std::is_same_v<Incidence, directed_vec_pool_incidence> &&
+        !retain_host_factor &&
+        detail::gpu_owned_setup_configured();
+
     // APXCHOL_OMP_THRESHOLD (experiment knob, see env_knobs.h) overrides
     // factor_options::omp_threshold for this factorization -- it flows from
     // here into the partitioner context, the degree prepass and the per-round
@@ -1218,6 +1228,10 @@ factorization factorize_impl(const Eliminator& elim,
         factor_options o = opts_in;
         const long ov = detail::env_knobs::get().omp_threshold;
         if (ov >= 0) o.omp_threshold = static_cast<size_t>(ov);
+        if (o.partition.degree_quantile < 0.0)
+            o.partition.degree_quantile = gpu_owned_setup_route
+                                              ? degree_quantile_device_default
+                                              : degree_quantile_host_default;
         return o;
     }();
 
@@ -1663,7 +1677,8 @@ factorization factorize_impl(const Eliminator& elim,
                     incremental_dead_incidence = 0;
                 }
             }
-            const double q = opts.partition.degree_quantile;
+            const double q = degree_quantile_or_host_default(
+                opts.partition.degree_quantile);
             const double thr = q > 0.0 && q < 1.0
                                    && act.size() > opts.omp_threshold
                 ? static_cast<double>(parallel_degree_quantile(

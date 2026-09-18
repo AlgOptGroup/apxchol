@@ -1047,7 +1047,7 @@ struct gpu_block_frontend::impl {
                                  static_cast<double>(active.size());
 
         double threshold = options.degree_multiplier * average;
-        const double q = options.degree_quantile;
+        const double q = degree_quantile_or_host_default(options.degree_quantile);
         if (q > 0.0 && q < 1.0 && !active.empty()) {
             std::size_t quantile_count = active.size();
             if (owns_residual_view) --quantile_count; // Yves' floor(q*(active-1))

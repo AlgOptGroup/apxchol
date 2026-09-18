@@ -85,7 +85,10 @@ struct baumann_kyng_partitioner {
         nt = omp_get_max_threads();
         #endif
 
-        const bool use_q    = ctx.options.degree_quantile > 0.0 && ctx.options.degree_quantile < 1.0;
+        // Resolve the by-route sentinel here too: this partitioner can be driven
+        // directly, without factorize() having normalised the options first.
+        const double q_cap  = degree_quantile_or_host_default(ctx.options.degree_quantile);
+        const bool use_q    = q_cap > 0.0 && q_cap < 1.0;
         const bool tiebreak = ctx.options.degree_tiebreak;
         if ((use_q || tiebreak) && deg_by_vertex_.size() < static_cast<size_t>(G.n()))
             deg_by_vertex_.resize(G.n());
@@ -154,7 +157,7 @@ struct baumann_kyng_partitioner {
                 deg_merge_.clear();
                 for (auto v : sampled_all_) deg_merge_.push_back(deg_by_vertex_[v]);
                 size_t k = std::min(deg_merge_.size() - 1,
-                    static_cast<size_t>(ctx.options.degree_quantile * deg_merge_.size()));
+                    static_cast<size_t>(q_cap * deg_merge_.size()));
                 std::nth_element(deg_merge_.begin(), deg_merge_.begin() + k, deg_merge_.end());
                 degree_threshold = static_cast<double>(deg_merge_[k]);
             }

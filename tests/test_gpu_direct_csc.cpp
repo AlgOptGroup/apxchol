@@ -463,10 +463,14 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
         std::vector<node_index> degrees(graph.n()), candidates, expected_selected;
         std::size_t degree_sum = 0;
         for (auto v : active) { degrees[v] = graph.adj_count(v); degree_sum += degrees[v]; }
+        // The oracle must resolve the by-route sentinel exactly as the library
+        // does, or it grades the selector against a cap nobody asked for.
+        const double q_cap = apxchol::degree_quantile_or_host_default(
+            options.degree_quantile);
         double threshold = options.degree_multiplier * double(degree_sum) / graph.n();
-        if (options.degree_quantile > 0.0 && options.degree_quantile < 1.0) {
+        if (q_cap > 0.0 && q_cap < 1.0) {
             auto sorted = degrees; std::sort(sorted.begin(), sorted.end());
-            threshold = sorted[static_cast<std::size_t>(options.degree_quantile * (sorted.size() - 1))];
+            threshold = sorted[static_cast<std::size_t>(q_cap * (sorted.size() - 1))];
         }
         constexpr std::uint64_t seed = 42, phase = 0;
         auto key = [](node_index v) {
