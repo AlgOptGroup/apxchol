@@ -268,6 +268,159 @@ __global__ void sample_cycle_rows(const work_record* canonical,
     if(counters)counters[ordinal].emitted_edges=d;
 }
 
+// PERF: the plan kernel's validity scan, suffix moments and cutoff search are
+// three passes over the same star in the original row kernel. This variant
+// folds the validity scan into the moment pass and reports the reason, so the
+// caller keeps the established semantics (invalid input is an error, a zero or
+// degenerate ratio is a GKS fallback) at one pass instead of two.
+// reason: 0 eligible, 1 numerical fallback, 2 invalid input.
+__device__ std::uint32_t cycle_trace_cut_checked(const work_record* a, std::uint32_t d,
+        double D, double* suffix, double* square, int& reason) {
+    reason = 0;
+    if (!(D > 0) || !isfinite(D)) { reason = 2; return d; }
+    const double scale = a[d - 1].value;
+    double sum = 0, sq = 0;
+    for (std::uint32_t i = d; i-- > 0;) {
+        const double w = a[i].value;
+        if (!(w >= 0) || !isfinite(w)) { reason = 2; return d; }
+        if (!(w > 0)) { reason = 1; return d; }
+        if (i && w < a[i - 1].value) { reason = 1; return d; }
+        const double x = w / scale;
+        if (!(x > 0) || !isfinite(x)) { reason = 1; return d; }
+        sum = x + sum; sq = x * x + sq;
+        if (!isfinite(sum) || !isfinite(sq)) { reason = 1; return d; }
+        suffix[i] = sum; square[i] = sq;
+    }
+    if (!(sum > 0) || !isfinite(sum * sum)) { reason = 1; return d; }
+    if (!(a[0].value / scale > 0)) { reason = 1; return d; }
+    double parents = 0, best = kCycleInfinity;
+    std::uint32_t cut = 0;
+    for (std::uint32_t i = 0; i + 2 < d; ++i) {
+        const auto h = d - i;
+        const double cycle = h == 3 ? 0. : double(h - 3) * double(h - 1) * .5 * square[i];
+        const double score = parents + cycle;
+        if (!(score >= 0) || !isfinite(score)) { reason = 1; return d; }
+        if (score < best) { best = score; cut = i; }
+        if (i + 3 < d) {
+            const double x = a[i].value / scale, m = d - i - 1;
+            parents += (m - 1) * x * (2 * suffix[i + 1] + m * x);
+        }
+    }
+    return cut;
+}
+
+// PERF: two-kernel small-degree trace path, mirroring the GKS
+// prepare_gks_prefix / sample_gks_items split. The plan kernel keeps one
+// thread per pivot for the inherently serial work (suffix moments, cutoff,
+// input-only range checks, Fisher-Yates); the item kernel then emits one
+// edge per neighbour slot in parallel. Light parents use the same decoupled
+// SplitMix draw and inverted CDF that sample_large_trace_rows already uses,
+// so the law is unchanged while the serial per-pivot emission disappears.
+// cut_out[ordinal] >= d marks a row the plan kernel completed by itself
+// (empty, degree < 3, numerical fallback) or left to the cooperative kernel.
+__global__ void prepare_trace_plan(const work_record* canonical,
+        const std::uint32_t* offsets, const device_pivot* pivots, std::size_t p,
+        const double* total_degree, double* prefix, double* workspace,
+        work_record* fills, std::uint8_t* fill_flags,
+        gpu_round_shadow_pivot_counter* counters,
+        std::uint32_t* cut_out, unsigned long long* state_out,
+        std::uint32_t* status) {
+    const std::size_t ordinal=blockIdx.x*blockDim.x+threadIdx.x;
+    if(ordinal>=p)return;
+    const auto begin=offsets[ordinal],d=offsets[ordinal+1]-begin;
+    cut_out[ordinal]=d;   // default: nothing left for the item kernel
+    if(d>kCycleCooperativeDegree)return;            // cooperative kernel owns this row
+    if(!d){if(counters)counters[ordinal].emitted_edges=0;return;}
+    const auto* a=canonical+begin;auto* fill=fills+begin;auto* flags=fill_flags+begin;
+    auto* sums=prefix+begin;
+    const double D=total_degree[ordinal];
+    unsigned long long state=pivots[ordinal].seed;
+    // Every trace slot is written by the item kernel, so only the fallback
+    // paths below need the zeroed flags the row kernel used to clear up front.
+    auto fallback=[&](bool gks_law)->void{
+        for(std::uint32_t i=0;i<d;++i)flags[i]=0;
+        const auto emitted=gks_law?cycle_gks_row(a,d,D,state,sums,fill,flags)
+                                  :cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
+        if(counters)counters[ordinal].emitted_edges=emitted;
+    };
+    if(d<3){fallback(true);return;}
+    int reason=0;
+    const auto cut=cycle_trace_cut_checked(a,d,D,sums,workspace+begin,reason);
+    if(reason==2){for(std::uint32_t i=0;i<d;++i)flags[i]=0;atomicOr(status,2u);return;}
+    if(cut==d){fallback(false);return;}
+    const auto h=d-cut;
+    const double inv_scale=1./a[d-1].value;
+    int range=max(cycle_pool_range(cycle_edge_weight(a,D,h,cut,cut+1)),
+                  cycle_pool_range(cycle_edge_weight(a,D,h,d-2,d-1)));
+    for(std::uint32_t i=0;i<cut;++i){
+        const double ai=a[i].value*inv_scale,m=d-i-1;
+        const double probability=m*ai/(sums[i+1]+m*ai);
+        if(!(probability>=0 && probability<=.5) || !isfinite(probability)){
+            for(std::uint32_t k=0;k<d;++k)flags[k]=0;atomicOr(status,2u);return;}
+        if(!(probability>0))range=max(range,1);
+        range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,i+1)));
+        range=max(range,cycle_pool_range(cycle_parent_weight(a,d,D,sums,i,d-1)));
+    }
+    if(range==2){for(std::uint32_t i=0;i<d;++i)flags[i]=0;atomicOr(status,2u);return;}
+    if(range==1){fallback(false);return;}
+    // The squared moments are dead once the cutoff is known; reuse that scratch
+    // for the core permutation so the item kernel never overwrites an index it
+    // or a sibling still has to read.
+    double* perm=workspace+begin;
+    for(std::uint32_t k=0;k<h;++k)perm[cut+k]=cut+k;
+    for(std::uint32_t k=h;k>1;--k){
+        const auto j=cycle_uniform_index(state,k);
+        const double x=perm[cut+k-1];perm[cut+k-1]=perm[cut+j];perm[cut+j]=x;
+    }
+    state_out[ordinal]=state;   // post-shuffle stream: the parents draw beyond it
+    cut_out[ordinal]=cut;
+    if(counters)counters[ordinal].emitted_edges=d;
+}
+
+__global__ void sample_trace_items(const work_record* canonical, std::size_t count,
+        const std::uint32_t* offsets, const double* total_degree,
+        const double* prefix, const double* workspace,
+        const std::uint32_t* cut_in, const unsigned long long* state_in,
+        work_record* fills, std::uint8_t* fill_flags, std::uint32_t* status) {
+    const std::size_t item=blockIdx.x*blockDim.x+threadIdx.x;
+    if(item>=count)return;
+    const auto i=static_cast<std::uint32_t>(item);
+    const std::uint32_t ordinal=canonical[i].a;
+    const auto begin=offsets[ordinal],d=offsets[ordinal+1]-begin;
+    const std::uint32_t cut=cut_in[ordinal];
+    if(cut>=d)return;                       // completed by the plan or cooperative kernel
+    const auto* a=canonical+begin;
+    const auto* sums=prefix+begin;
+    const double D=total_degree[ordinal];
+    const std::uint32_t k=i-begin;
+    if(k>=cut) {
+        const auto h=d-cut;
+        const auto* perm=workspace+begin;
+        const std::uint32_t slot=k-cut;
+        const auto x=static_cast<std::uint32_t>(perm[cut+slot]);
+        const auto y=static_cast<std::uint32_t>(perm[cut+(slot+1==h?0u:slot+1)]);
+        const double value=cycle_edge_weight(a,D,h,x,y);
+        if(!cycle_pool_edge(value)){atomicOr(status,2u);return;}
+        fills[i]={min(a[x].b,a[y].b),max(a[x].b,a[y].b),value};
+        fill_flags[i]=1;
+        return;
+    }
+    auto draw_state=state_in[ordinal]+0x9E3779B97F4A7C15ULL*k;
+    const double ai=a[k].value/a[d-1].value;
+    const double mass=sums[k+1]+double(d-k-1)*ai;
+    double target=next_unit(draw_state)*mass;
+    if(target>=mass)target=nextafter(mass,0.);
+    // R_k(j)=sum_{l>=j}a_l+(d-j)*a_k is decreasing; its adjacent interval has
+    // width a_k+a_j, so the selected j keeps q_kj=(a_k+a_j)/mass.
+    std::uint32_t lo=k+1,hi=d;
+    while(lo+1<hi){const auto mid=lo+(hi-lo)/2;if(target<sums[mid]+double(d-mid)*ai)lo=mid;else hi=mid;}
+    const auto j=lo;
+    const double value=cycle_parent_weight(a,d,D,sums,k,j);
+    if(!cycle_pool_edge(value)){atomicOr(status,2u);return;}
+    fills[i]={min(a[k].b,a[j].b),max(a[k].b,a[j].b),value};
+    fill_flags[i]=1;
+}
+
 __device__ int cycle_warp_range(int range) {
     for(int distance=16;distance;distance/=2)
         range=max(range,__shfl_down_sync(0xffffffffu,range,distance));

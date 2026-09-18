@@ -5443,20 +5443,29 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     }
                 for(std::size_t i=0;i<got.size();++i) {
                     const auto pivot=owner[std::get<0>(got[i])];
+                    // Trace rows of degree >= 3 are sampled per item on device: the plan is
+                    // serial per pivot, the emission is one thread per neighbour slot, and the
+                    // parents invert q directly instead of replaying the host's two-draw
+                    // mixture. The realization therefore differs from the scalar host law
+                    // while the law itself does not; the block below checks the law for every
+                    // such row. Degrees below three keep the established GKS emission and stay
+                    // bit-faithful here.
                     if(sampler==apxchol::clique_sampler::trace_cycle &&
-                       !numerical_fallback && stars[pivot].size()>128)continue;
+                       !numerical_fallback && stars[pivot].size()>=3)continue;
                     EXPECT_EQ(std::get<0>(got[i]),std::get<0>(expected[i]));
                     EXPECT_EQ(std::get<1>(got[i]),std::get<1>(expected[i]));
                     EXPECT_NEAR(std::get<2>(got[i]),std::get<2>(expected[i]),
                         8*std::numeric_limits<apxchol::pool_value_t>::epsilon()*std::get<2>(expected[i]));
                 }
-                // Parallel positive folds need not reproduce the scalar cut.
-                // Infer the emitted core and check its high-precision objective,
-                // topology, HT weights, and rejection-aware cycle RNG separately.
+                // The device emission is item-parallel and its folds need not reproduce the
+                // scalar cut, so verify the law rather than the realization for every sampled
+                // trace row: the cutoff against its high-precision objective, the core
+                // topology and its seeded rejection-aware permutation, the Horvitz-Thompson
+                // weights, and each light parent's inverted interval against the same stream.
                 if(sampler==apxchol::clique_sampler::trace_cycle && !numerical_fallback)
                 for(node_index pivot=0;pivot<count;++pivot) {
                     const auto& star=stars[pivot];const auto d=star.size();
-                    if(d<=128)continue;
+                    if(d<3)continue;
                     std::vector<unsigned> later(d),core_degree(d);
                     std::vector<std::size_t> parent_index(d,d);
                     std::vector<std::tuple<std::size_t,std::size_t,double>> row;
@@ -5469,7 +5478,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     ASSERT_EQ(row.size(),d);
                     std::size_t cut=0;while(cut<d && later[cut]==1)++cut;
                     ASSERT_LE(cut,d-3);const auto h=d-cut;
-                    if(profile==11) {EXPECT_EQ(cut,1u);EXPECT_EQ(h,129u);}
+                    if(profile==11 && d>128) {EXPECT_EQ(cut,1u);EXPECT_EQ(h,129u);}
                     std::vector<long double> suffix(d+1),square(d+1);
                     double D=.125;for(auto edge:star)D+=edge.weight;
                     for(std::size_t i=d;i-->0;) {

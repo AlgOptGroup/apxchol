@@ -2129,6 +2129,8 @@ struct gpu_round_shadow_device_state::impl {
     allocation_tracker tracker;
     round_common_scratch owned_common_scratch;
     device_buffer<double> cycle_workspace;
+    device_buffer<std::uint32_t> cycle_plan_cut;
+    device_buffer<unsigned long long> cycle_plan_state;
     device_buffer<std::uint32_t> cycle_status;
     device_buffer<gpu_round_shadow_incidence> residual_0;
     device_buffer<gpu_round_shadow_incidence> residual_1;
@@ -2207,6 +2209,7 @@ struct gpu_round_shadow_device_state::impl {
 
     explicit impl(clique_sampler kind = clique_sampler::gks)
         : sampler(kind), owned_common_scratch(tracker), cycle_workspace(tracker),
+          cycle_plan_cut(tracker), cycle_plan_state(tracker),
           cycle_status(tracker), residual_0(tracker), residual_1(tracker),
           owner_offsets_0(tracker), owner_offsets_1(tracker),
           active(tracker), excess(tracker), factor_columns(tracker),
@@ -2563,6 +2566,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         if (required > cycle_workspace.count())
             planned = add_bytes(planned, required, sizeof(double), "grown cycle sampler moments");
         planned = add_bytes(planned, 2, sizeof(std::uint32_t), "cycle sampler status");
+        planned = add_bytes(planned, p ? p : 1, sizeof(std::uint32_t), "trace plan cutoffs");
+        planned = add_bytes(planned, p ? p : 1, sizeof(unsigned long long), "trace plan streams");
     }
     // Oversized uniques remain live beside the common canonical stream through
     // factor/sample. Retain a conservative full-g allowance in every phase.
@@ -3147,6 +3152,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     if (sampler_components) {
         ensure_state_buffer(cycle_workspace, gpu_round_shadow_checked_mul(u, sampler_components,
             "cycle sampler workspace"), "allocate cycle sampler moments", "grow cycle sampler moments");
+        ensure_state_buffer(cycle_plan_cut, p ? p : 1, "allocate trace plan cutoffs", "grow trace plan cutoffs");
+        ensure_state_buffer(cycle_plan_state, p ? p : 1, "allocate trace plan streams", "grow trace plan streams");
         ensure_state_buffer(cycle_status, 2, "allocate cycle sampler status", "grow cycle sampler status");
         cuda_check(cudaMemset(cycle_status.get(), 0, 2 * sizeof(std::uint32_t)),
                    "clear cycle sampler status");
@@ -3199,12 +3206,30 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                         unique.get(), fill_candidates.get(), flags.get());
                     cuda_check(cudaGetLastError(), "emit normal cycle-sampler factor batches");
                 }
-                sample_cycle_rows<<<blocks_for(p), kBlock>>>(
-                    unique.get(), pivot_offsets.get(), pivots.get(), p,
-                    total_degree.get(), prefix.get(), cycle_workspace.get(),
-                    fill_candidates.get(), flags.get(),
-                    audit_payload ? pivot_counters.get() : nullptr, sampler, cycle_status.get());
-                cuda_check(cudaGetLastError(), "sample cycle-core fill on device");
+                if (gpu_trace_item_kernel_enabled()) {
+                    // Serial plan per pivot, then one thread per neighbour slot.
+                    prepare_trace_plan<<<blocks_for(p), kBlock>>>(
+                        unique.get(), pivot_offsets.get(), pivots.get(), p,
+                        total_degree.get(), prefix.get(), cycle_workspace.get(),
+                        fill_candidates.get(), flags.get(),
+                        audit_payload ? pivot_counters.get() : nullptr,
+                        cycle_plan_cut.get(), cycle_plan_state.get(), cycle_status.get());
+                    cuda_check(cudaGetLastError(), "plan cycle-core rows on device");
+                    if (u)
+                        sample_trace_items<<<blocks_for(u), kBlock>>>(
+                            unique.get(), u, pivot_offsets.get(),
+                            total_degree.get(), prefix.get(), cycle_workspace.get(),
+                            cycle_plan_cut.get(), cycle_plan_state.get(),
+                            fill_candidates.get(), flags.get(), cycle_status.get());
+                    cuda_check(cudaGetLastError(), "sample cycle-core items on device");
+                } else {
+                    sample_cycle_rows<<<blocks_for(p), kBlock>>>(
+                        unique.get(), pivot_offsets.get(), pivots.get(), p,
+                        total_degree.get(), prefix.get(), cycle_workspace.get(),
+                        fill_candidates.get(), flags.get(),
+                        audit_payload ? pivot_counters.get() : nullptr, sampler, cycle_status.get());
+                    cuda_check(cudaGetLastError(), "sample cycle-core fill on device");
+                }
                 if (sampler == clique_sampler::trace_cycle &&
                     (!device_owned_prefix || report.normal_batch.oversized_pivots)) {
                     // Late rounds can have only a few oversized pivots. Spread
