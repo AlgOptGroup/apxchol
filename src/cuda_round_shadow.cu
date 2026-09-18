@@ -23,6 +23,11 @@ namespace {
 
 constexpr int kBlock = 256;
 
+/// Incidence runs longer than this have their degree summed by the whole warp
+/// instead of one thread. Below it the ballot and shuffles cost more than the
+/// serial walk they replace.
+constexpr std::uint32_t kFactorWarpDegreeMin = 64;
+
 // Residual keys contain only a validated owner < fixed vertex_count. Keep one
 // bit for empty/single-vertex domains so no zero-bit copy convention is needed.
 constexpr int owner_sort_end_bit(std::size_t vertex_count) {
@@ -801,19 +806,61 @@ __global__ void prepare_factor(
     device_digest digest{};
     std::uint32_t begin = 0, end = 0;
     double root = 0.0;
-    if (ordinal < pivot_count && (!OversizedOnly ||
-        pivots[ordinal].incidence_end - pivots[ordinal].incidence_begin > 128u)) {
+    // A hub row's degree sum is thousands of serial uncoalesced reads on one
+    // thread: measured 194 us for a SINGLE pivot of 3106 incidences, against
+    // 25.6 us for a round of 38325 short-row pivots. Cost tracked the longest
+    // row, not the pivot count. Long rows now go through the warp.
+    std::uint32_t degree_begin = 0, degree_end = 0;
+    double degree = 0.0;
+    const bool mine = ordinal < pivot_count && (!OversizedOnly ||
+        pivots[ordinal].incidence_end - pivots[ordinal].incidence_begin > 128u);
+    std::uint32_t vertex = 0;
+    if (mine) {
         begin = offsets[ordinal];
         end = offsets[ordinal + 1];
-        const std::uint32_t vertex = pivots[ordinal].vertex;
-        double degree = 0.0;
+        vertex = pivots[ordinal].vertex;
+        degree_begin = pivots[ordinal].incidence_begin;
+        degree_end = pivots[ordinal].incidence_end;
         // Match process_vertex(): total degree is the raw live slab sum in slab
-        // encounter order, not a second sum over deduplicated neighbors.
-        for (std::uint32_t i = pivots[ordinal].incidence_begin;
-             i < pivots[ordinal].incidence_end; ++i) {
+        // encounter order, not a second sum over deduplicated neighbors. Audited
+        // rounds keep that exact order because they are graded against the CPU
+        // reference bit for bit; production rounds hand long rows to the warp
+        // below, which sums the same values in a different but fixed order.
+        if (Audit || degree_end - degree_begin <= kFactorWarpDegreeMin)
+        for (std::uint32_t i = degree_begin; i < degree_end; ++i) {
             const auto edge = incidences[i];
             if (active[edge.neighbor]) degree += edge.weight;
         }
+    }
+    // Long rows: the whole warp walks one pivot's incidences at a time, so the
+    // reads coalesce and the work splits 32 ways. Every lane must reach this,
+    // including lanes whose own pivot is out of range, so it sits outside the
+    // block above. The tree reduction is deterministic for a fixed lane count,
+    // so the same seed still gives the same factor -- it is only the SUMMATION
+    // ORDER that differs from the CPU's slab order, and audited rounds (which
+    // are graded against that order bit for bit) never take this path.
+    if constexpr (!Audit) {
+        const unsigned lane = threadIdx.x & 31u;
+        unsigned pending = __ballot_sync(0xffffffffu,
+            mine && degree_end - degree_begin > kFactorWarpDegreeMin);
+        while (pending) {
+            const int owner = __ffs(pending) - 1;
+            const auto walk_begin = __shfl_sync(0xffffffffu, degree_begin, owner);
+            const auto walk_end = __shfl_sync(0xffffffffu, degree_end, owner);
+            double partial = 0.0;
+            for (std::size_t i = std::size_t(walk_begin) + lane; i < walk_end;
+                 i += 32u) {
+                const auto edge = incidences[i];
+                if (active[edge.neighbor]) partial += edge.weight;
+            }
+            for (int offset = 16; offset; offset >>= 1)
+                partial += __shfl_down_sync(0xffffffffu, partial, offset);
+            partial = __shfl_sync(0xffffffffu, partial, 0);   // total lands on lane 0
+            if (lane == static_cast<unsigned>(owner)) degree = partial;
+            pending &= pending - 1;
+        }
+    }
+    if (mine) {
         const double ev = excess[vertex];
         if (begin == end)
             degree = ev > 0.0 ? ev : 1.0;
