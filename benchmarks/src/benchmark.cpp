@@ -693,7 +693,7 @@ static BenchResult run_apxchol_v1(
     size_t exact_clique_max_degree = 0,
     double degree_multiplier_override = 0.0,
     apxchol::clique_sampler sampler = apxchol::clique_sampler::gks,
-    size_t exact_core_max_h = 0,
+    size_t exact_core_max_h = apxchol::exact_core_by_route,
     size_t double_cycle_min_h = 0)
 {
     BenchResult r;
@@ -2975,7 +2975,7 @@ int main(int argc, char** argv) {
             size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
             double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
             apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
-            size_t exact_core_max_h = 0;        // trace_cycle: exact clique on heavy cores with h <= this
+            size_t exact_core_max_h = apxchol::exact_core_by_route;  // trace_cycle: exact clique on heavy cores with h <= this (sentinel = library default)
             size_t double_cycle_min_h = 0;      // trace_cycle: two cycles on heavy cores with h >= this
         };
         using gs = apxchol::graph_storage;

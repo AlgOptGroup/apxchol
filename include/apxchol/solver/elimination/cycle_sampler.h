@@ -170,7 +170,11 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
         return;
     }
     random_stream rng{seed};
-    if (exact_core_max_h > 0 && h <= exact_core_max_h) {
+    // Reject the by-route sentinel defensively: it is SIZE_MAX, so an
+    // unresolved value would make `h <= exact_core_max_h` true for every core
+    // and switch the exact clique on everywhere.
+    if (exact_core_max_h > 0 && exact_core_max_h != exact_core_by_route &&
+        h <= exact_core_max_h) {
         // Exact core: every core pair with its clique weight. Zero core
         // variance; light attachments below are unchanged.
         for (std::size_t x = cut; x < d; ++x)

@@ -240,8 +240,9 @@ TEST(CycleSampler, ExactCoreAndDoubleCycleStayUnbiasedWithinBudget) {
     EXPECT_EQ(ec.max_clique_edges(12), 12u + 10u);
     tree_elimination dc{.double_cycle_min_h = 8, .sampler = clique_sampler::trace_cycle};
     EXPECT_EQ(dc.max_clique_edges(12), 24u);
-    tree_elimination k2{.exact_core_max_h = 5, .double_cycle_min_h = 8, .sampler = clique_sampler::heavy_core_k2};
-    EXPECT_EQ(k2.max_clique_edges(12), 12u);  // rules are trace-cycle only
+    // The core rules are trace-cycle only: GKS ignores them entirely.
+    tree_elimination gks{.exact_core_max_h = 5, .double_cycle_min_h = 8, .sampler = clique_sampler::gks};
+    EXPECT_EQ(gks.max_clique_edges(12), 11u);   // GKS stars emit d-1, rules ignored
 }
 
 TEST(CycleSampler, SeededReferenceLawsAndCanonicalTieOrdering) {

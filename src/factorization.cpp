@@ -318,7 +318,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
 #if defined(APXCHOL_USE_CUDA)
         if (!retain_host_factor && opts.is_select == "block_greedy" &&
             opts.exact_clique_max_degree == 0 &&
-            opts.exact_core_max_h == 0 && opts.double_cycle_min_h == 0 &&
+            exact_core_or_off(opts.exact_core_max_h) == 0 && opts.double_cycle_min_h == 0 &&
             detail::gpu_round_shadow_requested() && detail::gpu_factor_finalize_requested() &&
             detail::gpu_block_frontend::configured_block_mode() != detail::gpu_block_frontend::mode::disabled) {
             if (detail::gpu_owned_csc_supported(op)) {
