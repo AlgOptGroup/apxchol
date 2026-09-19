@@ -95,6 +95,15 @@ run_config parse_args(int argc, char* argv[]) {
         ->transform(CLI::CheckedTransformer(std::map<std::string, clique_sampler>{
             {"gks", clique_sampler::gks}, {"trace_cycle", clique_sampler::trace_cycle}}));
 
+    app.add_option("--exact-core-max-h", cfg.solve_opts.factor_opts.exact_core_max_h,
+                   "trace_cycle only: emit the exact clique on heavy cores of at most this "
+                   "many vertices (0 = off; 5 is the measured sweet spot)")
+        ->capture_default_str();
+    app.add_option("--double-cycle-min-h", cfg.solve_opts.factor_opts.double_cycle_min_h,
+                   "trace_cycle only: emit two independent cycles on heavy cores of at least "
+                   "this many vertices (0 = off; 20-32 targets hub-like stars)")
+        ->capture_default_str();
+
     // ── solver parameters ──
     app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")
         ->capture_default_str();

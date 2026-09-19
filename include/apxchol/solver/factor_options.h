@@ -19,6 +19,14 @@ enum class residual_peel_strategy {
     bk_serial    // sample √|active| vertices and peel the min-degree one
 };
 
+/// `exact_core_max_h` sentinel: resolve from the elimination route, because the
+/// GPU-owned setup rejects the core rules outright rather than ignoring them.
+inline constexpr std::size_t exact_core_by_route =
+    std::numeric_limits<std::size_t>::max();
+
+/// The host-route exact-core cap the sentinel resolves to. See the knob below.
+inline constexpr std::size_t exact_core_host_default = 4;
+
 /// `degree_quantile` sentinel: resolve the cap from the elimination route at
 /// factorization time rather than pinning one number for both routes.
 inline constexpr double degree_quantile_by_route = -1.0;
@@ -30,6 +38,15 @@ inline constexpr double degree_quantile_host_default = 0.2;
 
 /// The cap the GPU-owned setup route resolves to. See `degree_quantile`.
 inline constexpr double degree_quantile_device_default = 0.5;
+
+/// Concrete exact-core cap for a possibly-unresolved `exact_core_max_h`, for
+/// the readers that see the options before factorization resolves them. The
+/// device gate in factorization.cpp is one: it tests the knob against 0 to
+/// decide whether the GPU may own the CSC, and an unresolved sentinel would
+/// silently drop every run onto the host import path.
+inline constexpr std::size_t exact_core_or_off(std::size_t h) noexcept {
+    return h == exact_core_by_route ? 0u : h;
+}
 
 /// Concrete cap for a possibly-unresolved `degree_quantile`. Non-negative
 /// values pass through untouched so an explicit 0.2 stays 0.2 on the device.
@@ -180,6 +197,37 @@ struct factor_options {
     /// quality: most eliminated vertices are low-degree, so exact handling of
     /// them removes the bulk of the sampling variance at modest fill cost.
     size_t exact_clique_max_degree = 0;
+
+    /// Trace-cycle heavy-core rules (both 0 = off; ignored by the other
+    /// samplers). The trace-cycle sampler splits a star into a heavy core of
+    /// h near-equal weights, which gets one uniform cycle, and lighter
+    /// neighbours, which each attach upward. A cycle is a poor stand-in for
+    /// the exact clique at both ends of the core-size scale:
+    /// * exact_core_max_h: when h <= this, emit the exact core clique
+    ///   (h(h-1)/2 edges instead of h). Measured 2026-09-18: at 5, IPM
+    ///   iterations -11..-20 % for +1..+7 % fill (real cores have median h=4).
+    /// * double_cycle_min_h: when h >= this, emit two independent uniform
+    ///   cycles with halved weights (a random 4-regular core; kappa stays ~10
+    ///   instead of ~h^2/20). Fires only on large near-uniform cores (hub and
+    ///   Sachdeva stars); at 32 it is free on star_k100 and inert elsewhere.
+    /// Both keep every pair's expected weight exact (unbiased).
+    ///
+    /// HOST PATH ONLY. The GPU-owned setup REJECTS either knob outright (see
+    /// make_gpu_round_shadow_session), so `exact_core_max_h` defaults to the
+    /// by-route sentinel below: 4 on the host, 0 when the device owns the
+    /// rounds. A blanket default would turn every GPU-owned run into an
+    /// invalid_argument.
+    ///
+    /// Why 4 and not the 5 first tried: the cap trades fill for iterations and
+    /// 5 sits past the one-RHS optimum. Swept 2026-09-19 over 21 matrices,
+    /// against no exact core: h=4 gives iterations 0.942, fill 1.038, setup
+    /// 1.052, solve 0.947, one RHS 1.009, where h=5 gives one RHS 1.051. So 4
+    /// is a wash on a single solve and repays after roughly one more, which is
+    /// why it ships on rather than off. An exact clique emits h(h-1)/2 core
+    /// edges against a cycle's h, so the cost is fill, not arithmetic; h=3
+    /// would be a no-op because on three vertices the cycle IS the clique.
+    size_t exact_core_max_h = exact_core_by_route;
+    size_t double_cycle_min_h = 0;
 
     clique_sampler sampler = clique_sampler::gks;
 

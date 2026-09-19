@@ -692,7 +692,9 @@ static BenchResult run_apxchol_v1(
     bool dump_profile = false,
     size_t exact_clique_max_degree = 0,
     double degree_multiplier_override = 0.0,
-    apxchol::clique_sampler sampler = apxchol::clique_sampler::gks)
+    apxchol::clique_sampler sampler = apxchol::clique_sampler::gks,
+    size_t exact_core_max_h = apxchol::exact_core_by_route,
+    size_t double_cycle_min_h = 0)
 {
     BenchResult r;
     if (std::getenv("APXCHOL_PROFILE")) dump_profile = true;  // checkpoint breakdown
@@ -703,6 +705,8 @@ static BenchResult run_apxchol_v1(
 
     apxchol::factor_options fopts{.seed = 42, .is_select = is};
     fopts.sampler = sampler;
+    fopts.exact_core_max_h = exact_core_max_h;
+    fopts.double_cycle_min_h = double_cycle_min_h;
     if (exact_clique_max_degree > 0)
         fopts.exact_clique_max_degree = exact_clique_max_degree;
     if (degree_multiplier_override > 0.0)
@@ -722,6 +726,12 @@ static BenchResult run_apxchol_v1(
     // Exact Schur clique up to a degree cap (zero sampling variance).
     if (const char* e = std::getenv("APXCHOL_EXACT_CLIQUE"))
         fopts.exact_clique_max_degree = static_cast<size_t>(std::atol(e));
+    // Trace-cycle heavy-core rules (see factor_options): exact small cores,
+    // doubled cycle on large cores.
+    if (const char* e = std::getenv("APXCHOL_EXACT_CORE_MAX_H"))
+        fopts.exact_core_max_h = static_cast<size_t>(std::atol(e));
+    if (const char* e = std::getenv("APXCHOL_DOUBLE_CYCLE_MIN_H"))
+        fopts.double_cycle_min_h = static_cast<size_t>(std::atol(e));
     if (const char* e = std::getenv("APXCHOL_DEGREE_MULT"))
         fopts.partition.degree_multiplier = std::atof(e);
     if (const char* e = std::getenv("APXCHOL_DEGREE_QUANTILE"))
@@ -2965,6 +2975,8 @@ int main(int argc, char** argv) {
             size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
             double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
             apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
+            size_t exact_core_max_h = apxchol::exact_core_by_route;  // trace_cycle: exact clique on heavy cores with h <= this (sentinel = library default)
+            size_t double_cycle_min_h = 0;      // trace_cycle: two cycles on heavy cores with h >= this
         };
         using gs = apxchol::graph_storage;
         static const V1Combo v1_combos[] = {
@@ -2992,10 +3004,17 @@ int main(int argc, char** argv) {
             // Directed AoS headline/default: same slab machinery, but each
             // endpoint stores {neighbor, weight} inline instead of an edge id.
             {.name="bg+tree[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos},
-            // Trace-cycle sampler on the headline storage: same selector and
-            // storage as the row above, only factor_options::sampler differs.
+            // Cycle-core samplers on the headline storage (2026-09-18). /ec5 = exact
+            // clique on heavy cores of <= 5 vertices; /dc32 = two cycles on cores of
+            // >= 32 vertices; /ec5dc32 = both. See factor_options for the rationale.
             {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
              .sampler=apxchol::clique_sampler::trace_cycle},
+            {.name="bg+trace_cycle/ec5[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+             .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5},
+            {.name="bg+trace_cycle/dc32[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+             .sampler=apxchol::clique_sampler::trace_cycle, .double_cycle_min_h=32},
+            {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+             .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5, .double_cycle_min_h=32},
             // /hos: legacy heavy-oversample variant, kept so old --v1-configs strings still
             // resolve. It carries no extra knobs today (the oversampling levers were removed
             // from the library), so it behaves like bg+tree[vec_pool] -- which is the charted
@@ -3049,7 +3068,7 @@ int main(int argc, char** argv) {
                                               double tl, int mi, ground_mode) {
                 return run_apxchol_v1(L_, b_, nm, label, combo.is, combo.storage, tl, mi,
                                       false, combo.exact_clique_max_degree, combo.degree_mult,
-                                      combo.sampler);
+                                      combo.sampler, combo.exact_core_max_h, combo.double_cycle_min_h);
             };
             print(median_run([&]() {
                 return run_desing("apxchol", label, apx_single);

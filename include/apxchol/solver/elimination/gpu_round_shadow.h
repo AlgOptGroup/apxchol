@@ -2137,10 +2137,11 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
             throw std::invalid_argument(
                 "cycle CUDA samplers require the GPU-owned consuming route; "
                 "CPU-shadow auditing/export is unsupported (disable the GPU setup flags)");
-        if (eliminator.exact_clique_max_degree != 0)
+        if (eliminator.exact_clique_max_degree != 0 || eliminator.exact_core_max_h != 0 ||
+            eliminator.double_cycle_min_h != 0)
             throw std::invalid_argument(
                 "forced GPU round shadow requires a bounded built-in sampler "
-                "(exact-clique mode is unsupported)");
+                "(exact-clique and trace-cycle core rules are unsupported on the GPU route)");
         if (!gpu_round_shadow_runtime_available())
             throw std::runtime_error(
                 "forced GPU round shadow requires an available CUDA device");

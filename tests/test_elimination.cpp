@@ -1,3 +1,4 @@
+#include <numeric>
 #include <gtest/gtest.h>
 #include "apxchol/solver/elimination/elimination.h"
 
@@ -193,6 +194,55 @@ TEST(CycleSampler, PreservesDegreeTwoAndDeclaredCapacity) {
         rule.exact_clique_max_degree = 4;
         EXPECT_EQ(rule.max_clique_edges(4), 6u);
     }
+}
+
+TEST(CycleSampler, ExactCoreAndDoubleCycleStayUnbiasedWithinBudget) {
+    // Trace-cycle core rules: the exact core (h <= exact_core_max_h) and the
+    // doubled cycle (h >= double_cycle_min_h) must keep every pair's expected
+    // weight equal to the exact clique w_i w_j / deg and respect the declared
+    // edge bound. Averaged over many seeds on a skewed and a uniform star.
+    struct profile { std::vector<double> w; size_t exact_h, double_h; };
+    for (const auto& pr : {profile{{1, 1, 1, 2, 3, 40, 60, 80}, 5, 0},      // skewed: small core -> exact
+                           profile{std::vector<double>(24, 1.0), 0, 8},   // uniform: big core -> two cycles
+                           profile{{0.5, 0.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}, 5, 8}}) {
+        tree_elimination rule{.exact_core_max_h = pr.exact_h, .double_cycle_min_h = pr.double_h,
+                              .sampler = clique_sampler::trace_cycle};
+        const auto d = static_cast<node_index>(pr.w.size());
+        const double deg = std::accumulate(pr.w.begin(), pr.w.end(), 0.0);
+        std::vector<std::vector<double>> sum(d, std::vector<double>(d, 0.0)), sumsq = sum, draw = sum;
+        const int draws = 20000;
+        for (int s = 0; s < draws; ++s) {
+            std::vector<weighted_neighbor> n;
+            for (node_index i = 0; i < d; ++i) n.push_back({i, pr.w[i]});
+            std::vector<deferred_edge> edges;
+            rule.sample_clique(n, deg, 1000 + s, edge_emitter(edges));
+            EXPECT_LE(edges.size(), rule.max_clique_edges(d));
+            for (auto& row : draw) std::fill(row.begin(), row.end(), 0.0);
+            for (auto e : edges) {
+                ASSERT_NE(e.u, e.v); ASSERT_GT(e.w, 0.); ASSERT_TRUE(std::isfinite(e.w));
+                draw[e.u][e.v] += e.w; draw[e.v][e.u] += e.w;   // parallel edges add up
+            }
+            for (node_index i = 0; i < d; ++i)
+                for (node_index j = i + 1; j < d; ++j) { sum[i][j] += draw[i][j]; sumsq[i][j] += draw[i][j] * draw[i][j]; }
+        }
+        // Each pair's sampled weight is an unbiased estimator of the clique weight; test the mean
+        // against 5 standard errors (rare light-light pairs have large relative variance).
+        for (node_index i = 0; i < d; ++i)
+            for (node_index j = i + 1; j < d; ++j) {
+                const double exact = pr.w[i] * pr.w[j] / deg, mean = sum[i][j] / draws;
+                const double var = std::max(0.0, sumsq[i][j] / draws - mean * mean);
+                EXPECT_NEAR(mean, exact, 5.0 * std::sqrt(var / draws) + 1e-12 * exact)
+                    << "pair " << i << "," << j << " d=" << d;
+            }
+    }
+    // Declared bounds: exact core adds at most h(h-1)/2 with h <= max_h; doubled cycle at most d.
+    tree_elimination ec{.exact_core_max_h = 5, .sampler = clique_sampler::trace_cycle};
+    EXPECT_EQ(ec.max_clique_edges(12), 12u + 10u);
+    tree_elimination dc{.double_cycle_min_h = 8, .sampler = clique_sampler::trace_cycle};
+    EXPECT_EQ(dc.max_clique_edges(12), 24u);
+    // The core rules are trace-cycle only: GKS ignores them entirely.
+    tree_elimination gks{.exact_core_max_h = 5, .double_cycle_min_h = 8, .sampler = clique_sampler::gks};
+    EXPECT_EQ(gks.max_clique_edges(12), 11u);   // GKS stars emit d-1, rules ignored
 }
 
 TEST(CycleSampler, SeededReferenceLawsAndCanonicalTieOrdering) {

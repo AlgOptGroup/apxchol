@@ -1232,6 +1232,14 @@ factorization factorize_impl(const Eliminator& elim,
             o.partition.degree_quantile = gpu_owned_setup_route
                                               ? degree_quantile_device_default
                                               : degree_quantile_host_default;
+        // The device rejects the trace-cycle core rules rather than ignoring
+        // them, so the sentinel resolves to off for ANY requested GPU round
+        // shadow -- not just the full consuming route. The auditing and export
+        // paths force a shadow without meeting the consuming route's other
+        // conditions, and they throw on these knobs just the same.
+        if (o.exact_core_max_h == exact_core_by_route)
+            o.exact_core_max_h = detail::gpu_round_shadow_requested()
+                                     ? 0u : exact_core_host_default;
         return o;
     }();
 
@@ -2347,10 +2355,23 @@ factorization factorize_impl(const Eliminator& elim,
 }
 
 // Build the tree eliminator from options. Single source of truth so the
-// fixed-partitioner and runtime-dispatch paths stay in sync.
+// fixed-partitioner and runtime-dispatch paths stay in sync -- and therefore
+// the place the by-route exact-core sentinel has to be resolved, since the
+// eliminator is built here, before factorize_impl sees the options, and the
+// GPU round shadow inspects the ELIMINATOR's copy of the knob.
+//
+// The condition must match the one that rejects the knob: any requested round
+// shadow throws on it, including the auditing and export paths that never meet
+// the consuming route's other requirements.
 inline detail::tree_elimination make_tree_elim(const factor_options& opts) {
+    const std::size_t exact_core =
+        opts.exact_core_max_h == exact_core_by_route
+            ? (detail::gpu_round_shadow_requested() ? 0u : exact_core_host_default)
+            : opts.exact_core_max_h;
     return detail::tree_elimination{
         .exact_clique_max_degree = opts.exact_clique_max_degree,
+        .exact_core_max_h = exact_core,
+        .double_cycle_min_h = opts.double_cycle_min_h,
         .sampler = opts.sampler};
 }
 
