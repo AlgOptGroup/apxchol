@@ -121,20 +121,34 @@ __global__ void owned_sparsify_importance(const gpu_round_shadow_incidence* edge
     if (i < count) importance[i] = __dsqrt_rn(edges[i].weight);
 }
 
+/// One BLOCK per 16384-item chunk, mirroring owned_sparsify_statistics_partials
+/// below. This used to be one THREAD per chunk, which put 2.4M kron edges on 147
+/// threads whose reads sat 16384 apart -- no parallelism and no coalescing, and
+/// nsys measured it at 2.67 ms a call, 7-9% of GPU time on both samplers. The
+/// chunking and therefore the `partials` layout and the fold are unchanged; only
+/// each chunk's internal summation order moves from serial to a fixed shared
+/// tree, which stays deterministic for a fixed block size.
 __global__ void owned_sparsify_partials(std::size_t count,
         const unsigned* backbone, const double* importance,
         const owned_sparsify_scale* scale, double* partials, bool initial) {
-    const auto block = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    const auto begin = block * 16384;
+    __shared__ double sums[kBlock];
+    const auto begin = std::size_t(blockIdx.x) * 16384;
     if (begin >= count || (!initial && !scale->advance)) return;
     const auto end = begin + ((count - begin < 16384) ? count - begin : 16384);
+    const auto lane = threadIdx.x;
     double sum = 0.0;
-    for (auto i = begin; i < end; ++i) {
+    for (auto i = begin + lane; i < end; i += kBlock) {
         if (backbone[i]) continue; // Literal skip; never compact off-tree items.
         const double term = initial ? importance[i] : fmin(1.0, __dmul_rn(scale->value, importance[i]));
         sum = __dadd_rn(sum, term);
     }
-    partials[block] = sum;
+    sums[lane] = sum;
+    __syncthreads();
+    for (unsigned stride = kBlock / 2; stride; stride /= 2) {
+        if (lane < stride) sums[lane] = __dadd_rn(sums[lane], sums[lane + stride]);
+        __syncthreads();
+    }
+    if (!lane) partials[blockIdx.x] = sums[0];
 }
 
 __global__ void owned_sparsify_fold(std::size_t blocks, const double* partials,
@@ -369,10 +383,11 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
     owned_sparsify_scale host_scale{}; host_scale.target = keep_probability * double(distinct - result.backbone_edges);
     copy_to_device(scale.get(), &host_scale, 1, "initialize sparsification scale");
     owned_sparsify_importance<<<blocks_for(distinct), kBlock>>>(canonical.get(), distinct, importance.get());
-    owned_sparsify_partials<<<blocks_for(result.normalization_blocks), kBlock>>>(distinct, backbone.get(), importance.get(), scale.get(), partials.get(), true);
+    // One block per chunk now, not one thread: the grid is the chunk count.
+    owned_sparsify_partials<<<result.normalization_blocks, kBlock>>>(distinct, backbone.get(), importance.get(), scale.get(), partials.get(), true);
     owned_sparsify_fold<<<1, 1>>>(result.normalization_blocks, partials.get(), scale.get(), true);
     for (unsigned i = 0; i < 6; ++i) {
-        owned_sparsify_partials<<<blocks_for(result.normalization_blocks), kBlock>>>(distinct, backbone.get(), importance.get(), scale.get(), partials.get(), false);
+        owned_sparsify_partials<<<result.normalization_blocks, kBlock>>>(distinct, backbone.get(), importance.get(), scale.get(), partials.get(), false);
         owned_sparsify_fold<<<1, 1>>>(result.normalization_blocks, partials.get(), scale.get(), false);
     }
     cuda_check(cudaGetLastError(), "normalize sparsification importance in CPU order");
