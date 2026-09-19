@@ -1,6 +1,7 @@
 #pragma once
 // CUDA-free preparation for the GPU PCG operator. Internal only: the caller
 // supplies the same valid original->permuted bijection used by the factor.
+#include "apxchol/csc_work.h"
 #include "apxchol/types.h"
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -9,6 +10,10 @@
 #include <memory>
 #include <utility>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace apxchol::detail {
 
@@ -41,8 +46,21 @@ inline bool try_build_permuted_symmetric_csr(
     row_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
     bool eligible = true, exact = true;
     std::int64_t lower = 0, upper = 0;
-    #pragma omp parallel for schedule(static) reduction(&& : eligible, exact) reduction(+ : lower, upper)
-    for (int col = 0; col < n; ++col) {
+    // Columns are split by stored entries, not by count: the work of a column
+    // is its length, and with the natural labelling the heaviest equal-count
+    // chunk carries 2.0x the mean on the IPM normal equations and 4.0x on
+    // as-Skitter (see detail::work_balanced_range). Both loops here write
+    // per-column disjoint output and reduce only integers and booleans, so the
+    // split cannot change a single stored byte.
+    #pragma omp parallel reduction(&& : eligible, exact) reduction(+ : lower, upper)
+    {
+#ifdef _OPENMP
+    const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
+#else
+    const int tid = 0, nt = 1;
+#endif
+    const auto [c_lo, c_hi] = work_balanced_range(outer, n, tid, nt);
+    for (int col = c_lo; col < c_hi; ++col) {
         row_ptr[perm[col] + 1] = outer[col + 1] - outer[col];
         for (int p = outer[col]; p < outer[col + 1]; ++p) {
             const int row = inner[p];
@@ -56,6 +74,7 @@ inline bool try_build_permuted_symmetric_csr(
             }
         }
     }
+    }
     if (!eligible || lower != upper) return false;
     for (int row = 0; row < n; ++row) row_ptr[row + 1] += row_ptr[row];
     const int count = row_ptr[n];
@@ -68,8 +87,13 @@ inline bool try_build_permuted_symmetric_csr(
     #pragma omp parallel reduction(&& : paired)
     {
         std::vector<std::pair<int, double>> entries;
-        #pragma omp for schedule(static)
-        for (int col = 0; col < n; ++col) {
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
+#else
+        const int tid = 0, nt = 1;
+#endif
+        const auto [c_lo, c_hi] = work_balanced_range(outer, n, tid, nt);
+        for (int col = c_lo; col < c_hi; ++col) {
             entries.clear();
             entries.reserve(static_cast<std::size_t>(outer[col + 1] - outer[col]));
             for (int p = outer[col]; p < outer[col + 1]; ++p) {
