@@ -330,7 +330,7 @@ def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
     CPU axis only — CUDA reserves large host VM, so the GPU axis passes None."""
     tag = _dump_tag(mid)
     os.makedirs(dump_dir, exist_ok=True)
-    p = f"{dump_dir}/{mid}-{tag}.mtx"
+    p = f"{dump_dir}/{rc.matrix_cache_key(mid)}-{tag}.mtx"
     if _dump_cache_valid(p):
         return p, tag, _dump_cache_seconds(p)
     _invalidate_dump_cache(p)
@@ -371,7 +371,7 @@ def _component_info(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
     consume a file directly or whether the CPU route must split it.
     """
     os.makedirs(dump_dir, exist_ok=True)
-    base = f"{dump_dir}/{mid}.components"
+    base = f"{dump_dir}/{rc.matrix_cache_key(mid)}.components"
     meta, schema, input_id = base + ".meta", base + ".schema", base + ".input"
     expected_input = _file_identity(_native_mtx(mid))
     if os.path.exists(meta) and os.path.exists(schema) and os.path.exists(input_id):
@@ -678,7 +678,7 @@ def _reorder_amd(mid, src, tag, augment=False, deadline=None):
     os.makedirs(rc.PARAC_REORD, exist_ok=True)
     if augment:
         tag = f"{tag}-aug"
-    prefix = f"{rc.PARAC_REORD}/{mid}-{tag}"
+    prefix = f"{rc.PARAC_REORD}/{rc.matrix_cache_key(mid)}-{tag}"
     amd = prefix + "-amd.mtx"
     tfile, pfile = amd + ".time", amd + ".prep"
     if not _prep_cache_valid(amd, src, algorithm=not augment):
@@ -903,7 +903,7 @@ def _dump_component(mid, rank, deadline=None, timeout_cap=TIMEOUT_CPU,
     full pure L."""
     target_dir = dump_dir or DUMP_CPU
     os.makedirs(target_dir, exist_ok=True)
-    src = f"{target_dir}/{mid}-comp{rank}.mtx"
+    src = f"{target_dir}/{rc.matrix_cache_key(mid)}-comp{rank}.mtx"
     meta = src + ".meta"
     if _dump_cache_valid(src, require_meta=True):
         with open(meta) as handle:
@@ -1200,7 +1200,7 @@ def _nnz_sort(mid, src, tag, augment=False, deadline=None):
     os.makedirs(rc.PARAC_SORTED, exist_ok=True)
     if augment:
         tag = f"{tag}-aug"
-    prefix = f"{rc.PARAC_SORTED}/{mid}-{tag}"
+    prefix = f"{rc.PARAC_SORTED}/{rc.matrix_cache_key(mid)}-{tag}"
     out = prefix + "-nnz-sorted.mtx"
     tfile, pfile = out + ".time", out + ".prep"
     if _prep_cache_valid(out, src):
@@ -1423,7 +1423,7 @@ def run_gpu(mid, tol=TOL):
             require_original_physics(src)
         input_tag = f"native-{tag}" if native_source else tag
         cache_tag = f"{input_tag}-aug" if aug else input_tag
-        sorted_cached = f"{rc.PARAC_SORTED}/{mid}-{cache_tag}-nnz-sorted.mtx"
+        sorted_cached = f"{rc.PARAC_SORTED}/{rc.matrix_cache_key(mid)}-{cache_tag}-nnz-sorted.mtx"
         if _prep_cache_valid(sorted_cached, src):
             sorted_mtx = sorted_cached
             with open(sorted_cached + ".time") as handle:

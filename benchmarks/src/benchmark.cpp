@@ -1150,8 +1150,9 @@ static Args parse_args(int argc, char** argv) {
 #endif
 #endif
     };
+    const bool input_only = !a.dump_mtx.empty() || !a.dump_rhs.empty() || a.component_info;
     for (const auto& solver : a.solvers) {
-        if (!available.count(solver)) {
+        if (!available.count(solver) && !(solver == "none" && input_only)) {
             std::cerr << "Solver '" << solver
                       << "' is unknown or unavailable in this build.\n";
             std::exit(2);

@@ -72,6 +72,44 @@ Machine-local paths belong in ignored `paths_local.py`/`paths_local.cmake`;
 [runner_common.py](runner_common.py) defines defaults. `--dump-mtx` and
 `--dump-rhs` export the shared operator/RHS in separate driver invocations.
 
+## Weighted and additional inputs
+
+Generate four matched reweightings of an input's undirected off-diagonal
+support (requires NumPy and SciPy):
+
+```sh
+python3 benchmarks/weighted_inputs.py data/matrices/com-Amazon.mtx \
+  data/weighted/amazon-s42 --name amazon --seed 42
+python3 benchmarks/sweep_fair.py \
+  --matrix-manifest data/weighted/amazon-s42/manifest.json --families weighted \
+  --threads 16 --store results/weighted-cells
+```
+
+The output directory must be new. The variants are unit weights, log-uniform
+weights in `[0.1,10]`, log-uniform weights in `[0.001,1000]`, and a backbone
+variant with the narrow range on a deterministic BFS spanning forest and the
+wide range elsewhere. Every connected component gets a tree; isolated vertices
+are preserved. The narrow and wide models share random variates from NumPy
+PCG64. These are explicitly **log-uniform**, not uniform in value. The input's
+original weights and diagonal are discarded; generated files declare graph
+adjacency so the existing harness constructs their Laplacians.
+
+The manifest binds each file's SHA-256, model, seed, support source hash, component
+count and forest size to its matrix ID. The sweep verifies hashes before
+registration and retains that identity in every cell. Changed input or manifest
+identities prevent reuse of old cells. Existing matrix IDs cannot be replaced.
+The standard sweep's solver set and measurement contract still apply; generating
+inputs is not a performance result.
+
+The same manifest format accepts additional supplied matrices, including PageRank
+inputs, without altering their values. Use `schema_version: 1` and a `matrices`
+list with `id`, `family`, `path` (relative to the manifest), positive integer `n`,
+`sha256`, and `kind`. An assembled operator requires `kind: "operator"` and an
+explicit `class: "laplacian"` or `"sddm"`; graph adjacency uses `kind: "graph"`
+without a class. Select its family with `--families`. The supplier must establish
+that a proposed PageRank formulation meets the solver's symmetric operator
+contract; an arbitrary directed PageRank matrix must not be relabelled as SDDM.
+
 ## Render selected results
 
 Rendering does not run solvers. Defaults write ignored `results/plots` previews.

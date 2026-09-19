@@ -399,6 +399,11 @@ Preserve historical outcomes, effective versus requested threads, and source/bin
 use the existing harness. Rendering runs no benchmarks.
 An explicit `--solver` must name a solver compiled into that benchmark binary;
 unknown or unavailable solvers exit 2 before matrix loading, without a CSV row.
+`--solver none` is accepted only for input exports and component inspection.
+`benchmarks/weighted_inputs.py` generates four explicit weighted graph variants;
+`sweep_fair.py --matrix-manifest` loads additional hash-bound input records.
+Each graph component receives a backbone tree. Weight distributions and seeds
+are recorded in cell metadata, and changed input identities invalidate resume.
 
 Grade **every retained original-system residual** against the common tolerance.
 Calibration failures/caps must not trigger fallback retained runs. A median

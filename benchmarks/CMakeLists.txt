@@ -677,7 +677,11 @@ function(test_solver_rejection name solver)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_solver_rejection.cmake)
 endfunction()
 test_solver_rejection(contract_rejects_unknown_solver unknown_solver)
+test_solver_rejection(contract_rejects_no_solver none)
 test_solver_rejection(contract_all_rejects_unknown_solver "all,unknown_solver")
+add_test(NAME contract_none_allows_input_exports
+    COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_input_exports.cmake)
 if (NOT Boost_FOUND)
     test_solver_rejection(contract_rejects_unavailable_amgcl amgcl)
 endif()

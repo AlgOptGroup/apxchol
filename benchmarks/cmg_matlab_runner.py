@@ -28,7 +28,7 @@ also be driven on its own:
   python3 benchmarks/cmg_matlab_runner.py            # all chart matrices (grids/ipm/ss)
   python3 benchmarks/cmg_matlab_runner.py G3_circuit grid_2000   # a subset
 """
-import os, re, subprocess, sys, time
+import os, re, shlex, subprocess, sys, time
 
 import runner_common as rc
 from runner_common import ROOT, sh
@@ -84,9 +84,9 @@ TERMINAL = frozenset({"complete", "not_converged", "failed", "timeout", "n/a"})
 
 def _dump(mid):
     os.makedirs(DUMP_DIR, exist_ok=True)
-    p = f"{DUMP_DIR}/{mid}.mtx"
+    p = f"{DUMP_DIR}/{rc.matrix_cache_key(mid)}.mtx"
     if not os.path.exists(p):
-        sh(f"{rc.BIN['cpu']} {rc.margs_for(mid)} --dump-mtx {p} --solver none",
+        sh(f"{shlex.quote(rc.BIN['cpu'])} {rc.margs_for(mid)} --dump-mtx {shlex.quote(p)} --solver none",
            timeout=TIMEOUT, env=rc.benchmark_openmp_env(THREADS))
     return p if os.path.exists(p) else None
 

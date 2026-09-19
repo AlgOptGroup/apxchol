@@ -436,9 +436,10 @@ def dump_mtx(mid):
     them. Returns None when the dump failed.
     """
     os.makedirs(DUMP, exist_ok=True)
-    p = f"{DUMP}/{mid}.mtx"
+    p = f"{DUMP}/{rc.matrix_cache_key(mid)}.mtx"
     if not os.path.exists(p):
-        sh(f"{BIN[DEVICE]} {rc.margs_for(mid)} --dump-mtx {p} --solver none", timeout=TIMEOUT)
+        sh(f"{shlex.quote(BIN[DEVICE])} {rc.margs_for(mid)} --dump-mtx {shlex.quote(p)} --solver none",
+           timeout=TIMEOUT, env=rc.benchmark_openmp_env(THREADS))
     return p if os.path.exists(p) else None
 
 # --- CPU axis solver sets ---
@@ -547,6 +548,15 @@ def _stored_cell(family, mid, solver, config, threads, device):
     }
     if any(cell["cell"].get(key) != value for key, value in expected.items()):
         return None
+    matrix = rc.MATRICES.get(mid, {})
+    if "input_sha256" in matrix:
+        expected_meta = rc.matrix_meta_for(mid)
+        actual_meta = cell.get("matrix_meta") or {}
+        if not isinstance(actual_meta, dict):
+            return None
+        for key in ("input_sha256", "input_manifest_sha256", "kind", "class"):
+            if actual_meta.get(key) != expected_meta.get(key):
+                return None
     return cell
 
 
@@ -732,9 +742,10 @@ def main():
                          "fill, 489 iters / non-convergent) on the large social graphs, so "
                          "on those ParAC is the Cholesky-family competitor we keep.")
     ap.add_argument("--families", default="grids,suitesparse,ipm",
-                    help="comma-separated subset of {grids,suitesparse,ipm} to run")
+                    help="comma-separated families to run (including manifest families)")
+    ap.add_argument("--matrix-manifest", help="hash-verified additional matrix registry JSON")
     ap.add_argument("--only", default="",
-                    help="comma-separated matrix ids to run (subset of GRIDS/SS/IPM); "
+                    help="comma-separated registered matrix ids to run; "
                          "empty = all. Use to refresh smaller matrices first.")
     ap.add_argument("--no-julia", action="store_true",
                     help="skip the Julia AC/AC2 references (slow; unaffected "
@@ -755,6 +766,8 @@ def main():
                          "an honest uncapped wall time. NOCAP_TIMEOUT_S (default 4h) is the "
                          "only outer ceiling. Pair with --only/--families to target matrices.")
     a = ap.parse_args()
+    if a.matrix_manifest:
+        rc.load_matrix_manifest(a.matrix_manifest)
     global RUN_PARAC, PARAC_ONLY, NO_CAP, RUN_CMG
     DEVICE = a.device
     if a.threads < 1 or a.repeat < 1:

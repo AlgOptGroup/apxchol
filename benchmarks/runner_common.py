@@ -22,7 +22,7 @@ level_stats.py:
 All runners (sweep_fair, thread_scaling, fill_pass, level_stats,
 selector_levels) import these helpers rather than carrying their own copies.
 """
-import json, math, os, re, signal, subprocess, threading
+import hashlib, json, math, os, re, shlex, signal, subprocess, threading
 from pathlib import Path
 
 try:
@@ -370,10 +370,10 @@ def matrix_args(source, spec, kind="graph", cls=None):
         raise ValueError(f"matrix_args: kind must be one of {KINDS}, got {kind!r}")
     if kind != "operator":
         # L = D - A is singular by construction; the binary rejects --class here.
-        return f"--mtx {spec} --kind {kind}"
+        return f"--mtx {shlex.quote(str(spec))} --kind {kind}"
     if cls not in CLASSES:
         raise ValueError(f"matrix_args: kind=operator needs cls in {CLASSES}, got {cls!r}")
-    return f"--mtx {spec} --kind {kind} --class {cls}"
+    return f"--mtx {shlex.quote(str(spec))} --kind {kind} --class {cls}"
 
 # id -> {family, source, kind, cls, spec(absolute for mtx), is2d, n}
 MATRICES = {}
@@ -386,6 +386,74 @@ for mid, path, n, kind, cls in SS:
 for mid, path, n, kind, cls in IPM:
     MATRICES[mid] = dict(family="ipm", source="mtx", kind=kind, cls=cls,
                          spec=f"{ROOT}/{path}", is2d=False, n=n)
+
+def load_matrix_manifest(path):
+    """Add explicitly declared, hash-verified file inputs without replacing IDs.
+
+    Paths are relative to the manifest. Registration is atomic: a bad last
+    record must not leave the earlier records installed in the registry.
+    """
+    path = Path(path).resolve()
+    blob = path.read_bytes()
+    document = json.loads(blob)
+    if not isinstance(document, dict) or document.get("schema_version") != 1 or not isinstance(document.get("matrices"), list):
+        raise ValueError("expected matrix manifest schema_version=1 and matrices list")
+    if not document["matrices"]:
+        raise ValueError("matrix manifest is empty")
+    pending = {}
+    for row in document["matrices"]:
+        mid, family = row["id"], row["family"]
+        if any(not isinstance(x, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", x)
+               for x in (mid, family)):
+            raise ValueError("invalid matrix ID or family")
+        if mid in MATRICES or mid in pending:
+            raise ValueError(f"duplicate matrix ID: {mid}")
+        kind, cls = row["kind"], row.get("class")
+        if kind not in KINDS or (kind == "operator" and cls not in CLASSES) or (kind == "graph" and cls is not None):
+            raise ValueError(f"invalid kind/class declaration: {mid}")
+        if type(row["n"]) is not int or row["n"] <= 0:
+            raise ValueError(f"invalid matrix dimension: {mid}")
+        digest = row["sha256"]
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"invalid input hash: {mid}")
+        matrix_path = (path.parent / row["path"]).resolve()
+        h = hashlib.sha256()
+        with matrix_path.open("rb") as handle:
+            header = handle.readline()
+            h.update(header)
+            fields = header.lower().split()
+            if len(fields) != 5 or fields[:2] != [b"%%matrixmarket", b"matrix"] or fields[2] not in (b"coordinate", b"array"):
+                raise ValueError(f"invalid Matrix Market header: {mid}")
+            dimensions = b""
+            while not dimensions:
+                line = handle.readline()
+                if not line:
+                    raise ValueError(f"missing matrix dimensions: {mid}")
+                h.update(line)
+                if line.strip() and not line.lstrip().startswith(b"%"):
+                    dimensions = line
+            shape = dimensions.split()
+            if len(shape) != (3 if fields[2] == b"coordinate" else 2) or [int(x) for x in shape[:2]] != [row["n"], row["n"]]:
+                raise ValueError(f"matrix dimension mismatch: {mid}")
+            for block in iter(lambda: handle.read(8 << 20), b""):
+                h.update(block)
+        if h.hexdigest() != digest:
+            raise ValueError(f"input hash mismatch: {mid}")
+        pending[mid] = dict(family=family, source="mtx", kind=kind, cls=cls,
+                           spec=str(matrix_path), is2d=False, n=row["n"],
+                           input_sha256=digest,
+                           input_manifest_sha256=hashlib.sha256(blob).hexdigest())
+        if "weight_model" in row:
+            pending[mid]["weight_model"] = row["weight_model"]
+    MATRICES.update(pending)
+    return list(pending)
+
+
+def matrix_cache_key(mid):
+    """Keep derived inputs from distinct manifests in distinct cache entries."""
+    digest = MATRICES.get(mid, {}).get("input_manifest_sha256")
+    return f"{mid}--{digest}" if digest else mid
+
 
 def kind_of(mid):
     """The declared kind of `mid`. Raises rather than guessing — an undeclared
@@ -456,6 +524,9 @@ def matrix_meta_for(mid):
             "class_declared": kind == "operator"}
     if m["source"] == "mtx":
         meta["path"] = os.path.relpath(m["spec"], ROOT)
+        for key in ("input_sha256", "input_manifest_sha256", "weight_model"):
+            if key in m:
+                meta[key] = m[key]
     else:
         meta["generator"] = f"{m['source']}(n={m['spec']})"
         # A generated graph has no file, so the file-reading half of the graph
