@@ -27,6 +27,7 @@
 // node_index, factor_value_t) arrays and the GPU backend on its int32 dataflow
 // arrays -- the same code, so the two backends' compacted factors are
 // identical (tests/test_sptrsv_drop.cpp states that).
+#include "apxchol/csc_work.h"
 #include "apxchol/types.h"
 #include <algorithm>
 #include <cassert>
@@ -35,6 +36,10 @@
 #include <cstdlib>
 #include <memory>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace apxchol {
 
@@ -142,8 +147,20 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
 
     std::vector<Off> drop_outer(static_cast<std::size_t>(m) + 1);
     std::uint64_t n_thr = 0, n_fmt = 0;
-    #pragma omp parallel for schedule(static) reduction(+ : n_thr, n_fmt)
-    for (Idx j = 0; j < m; ++j) {
+    // Split by stored entries, not by column count: the body is proportional to
+    // the column's length, and the equal-count split leaves one thread with up
+    // to 4x the mean on a hub factor (detail::work_balanced_range). Every
+    // column writes its own slot and the reductions are integer counts, so the
+    // split cannot change a result.
+    #pragma omp parallel reduction(+ : n_thr, n_fmt)
+    {
+#ifdef _OPENMP
+    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
+#else
+    const int bal_tid = 0, bal_nt = 1;
+#endif
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(outer, m, bal_tid, bal_nt);
+    for (Idx j = bal_lo; j < bal_hi; ++j) {
         const float s = col_scale[j];
         Off kept = 0;
         for (Off p = outer[j]; p < outer[j + 1]; ++p) {
@@ -156,6 +173,7 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
             else ++n_fmt;
         }
         drop_outer[static_cast<std::size_t>(j) + 1] = kept;
+    }
     }
     drop_outer[0] = 0;
     for (Idx j = 0; j < m; ++j)
@@ -170,8 +188,15 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
 
     std::unique_ptr<Idx[]> drop_inner(new Idx[static_cast<std::size_t>(nnz_kept)]);
     std::unique_ptr<Val[]> drop_vals(new Val[static_cast<std::size_t>(nnz_kept)]);
-    #pragma omp parallel for schedule(static)
-    for (Idx j = 0; j < m; ++j) {
+    #pragma omp parallel
+    {
+#ifdef _OPENMP
+    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
+#else
+    const int bal_tid = 0, bal_nt = 1;
+#endif
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(outer, m, bal_tid, bal_nt);
+    for (Idx j = bal_lo; j < bal_hi; ++j) {
         const float s = col_scale[j];
         const Off first = drop_outer[j];
         Off out = first;
@@ -203,6 +228,7 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
                 drop_vals[q] = static_cast<Val>(v + per_abs * std::fabs(v));
             }
         }
+    }
     }
     out_outer.swap(drop_outer);
     out_inner = std::move(drop_inner);

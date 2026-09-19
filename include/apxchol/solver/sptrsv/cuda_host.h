@@ -45,6 +45,11 @@
 #include <string>
 #include <vector>
 
+#include "apxchol/csc_work.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace apxchol::cuda_host {
 
 /// An owning m x m CSR (or CSC -- the same three arrays) with int32 offsets
@@ -92,19 +97,34 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
     } else {
         const node_index drop = static_cast<node_index>(n - 1);
         std::vector<int> kept(static_cast<std::size_t>(m));
-        #pragma omp parallel for schedule(static)
-        for (std::int64_t j = 0; j < m; ++j) {
+        #pragma omp parallel
+        {
+#ifdef _OPENMP
+    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
+#else
+    const int bal_tid = 0, bal_nt = 1;
+#endif
+        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m, bal_tid, bal_nt);
+        for (std::int64_t j = bal_lo; j < bal_hi; ++j) {
             int k = 0;
             for (edge_index p = Lo[j]; p < Lo[j + 1]; ++p)
                 if (Li[p] != drop) ++k;
             kept[j] = k;
         }
+        }
         for (std::int64_t j = 0; j < m; ++j) out.ptr[j + 1] = out.ptr[j] + kept[j];
         out.nnz  = out.ptr[static_cast<std::size_t>(m)];
         out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(out.nnz));
         out.vals = std::make_unique_for_overwrite<Val[]>(static_cast<std::size_t>(out.nnz));
-        #pragma omp parallel for schedule(static)
-        for (std::int64_t j = 0; j < m; ++j) {
+        #pragma omp parallel
+        {
+#ifdef _OPENMP
+    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
+#else
+    const int bal_tid = 0, bal_nt = 1;
+#endif
+        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m, bal_tid, bal_nt);
+        for (std::int64_t j = bal_lo; j < bal_hi; ++j) {
             int o = out.ptr[j];
             for (edge_index p = Lo[j]; p < Lo[j + 1]; ++p) {
                 if (Li[p] == drop) continue;
@@ -112,6 +132,7 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
                 out.vals[o] = static_cast<Val>(Lv[p]);
                 ++o;
             }
+        }
         }
     }
     return out;
@@ -143,9 +164,17 @@ inline bool keep_offdiag(Val v, float s, double rel, bool fp16_storage) {
 template <class Val>
 inline std::vector<float> column_scales(const csr_int<Val>& A) {
     std::vector<float> s(static_cast<std::size_t>(A.m));
-    #pragma omp parallel for schedule(static)
-    for (int j = 0; j < A.m; ++j)
+    #pragma omp parallel
+    {
+#ifdef _OPENMP
+    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
+#else
+    const int bal_tid = 0, bal_nt = 1;
+#endif
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(A.ptr.data(), A.m, bal_tid, bal_nt);
+    for (int j = bal_lo; j < bal_hi; ++j)
         s[j] = factor_column_scale(A.vals.get(), A.ptr[j], A.ptr[j + 1]);
+    }
     return s;
 }
 
@@ -207,8 +236,15 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     out.diag.resize(static_cast<std::size_t>(L11.m));
     out.inv_scale.resize(static_cast<std::size_t>(L11.m));
     std::uint64_t n_flush = 0, n_sub = 0;
-    #pragma omp parallel for schedule(static) reduction(+ : n_flush, n_sub)
-    for (int j = 0; j < L11.m; ++j) {
+    #pragma omp parallel reduction(+ : n_flush, n_sub)
+    {
+#ifdef _OPENMP
+    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
+#else
+    const int bal_tid = 0, bal_nt = 1;
+#endif
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(L11.ptr.data(), L11.m, bal_tid, bal_nt);
+    for (int j = bal_lo; j < bal_hi; ++j) {
         const float s = col_scale[j];
         out.inv_scale[j] = 1.0f / s;
         assert(L11.idx[L11.ptr[j]] == j && "factor column must start with its diagonal");
@@ -226,6 +262,7 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
         }
         d = static_cast<float>(static_cast<double>(d) + resid);
         out.diag[j] = d;
+    }
     }
     out.flushed = n_flush; out.subnormal = n_sub;
     return out;
