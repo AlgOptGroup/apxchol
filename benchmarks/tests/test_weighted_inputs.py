@@ -22,6 +22,10 @@ from types import SimpleNamespace
 
 class WeightedInputsTest(unittest.TestCase):
     def setUp(self):
+        for module in (sweep_fair, cmg_matlab_runner, parac_runner):
+            threads = mock.patch.object(module, "THREADS", 1)
+            threads.start()
+            self.addCleanup(threads.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

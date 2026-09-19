@@ -14,6 +14,14 @@ import parac_runner as parac  # noqa: E402
 import runner_common as rc  # noqa: E402
 
 
+def setUpModule():
+    # Solver subprocesses are mocked; their campaign topology must not depend
+    # on how many CPUs the machine running these unit tests was allocated.
+    topology = mock.patch.object(rc.os, "sched_getaffinity", return_value=set(range(72)))
+    topology.start()
+    unittest.addModuleCleanup(topology.stop)
+
+
 class ParacRoutingTest(unittest.TestCase):
     def test_route_is_by_operator_class_not_file_kind(self):
         # ecology1 is a published operator file, but the operator is an exact

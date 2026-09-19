@@ -12,6 +12,13 @@ import parac_runner as parac
 import runner_common as rc
 
 
+def setUpModule():
+    # All solver calls are mocked; provide their declared campaign topology.
+    topology = mock.patch.object(rc.os, "sched_getaffinity", return_value=set(range(72)))
+    topology.start()
+    unittest.addModuleCleanup(topology.stop)
+
+
 def matrix(path, weight):
     path.write_text('%%MatrixMarket matrix coordinate real symmetric\n'
                     f'% fixture\n2 2 3\n1 1 2\n2 2 2\n2 1 {weight}\n')
