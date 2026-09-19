@@ -1,4 +1,5 @@
 #pragma once
+#include "apxchol/csc_work.h"
 #include "apxchol/graph/incidence_list.h"
 #include "apxchol/graph/residual_normalization.h"
 #include <algorithm>
@@ -1126,13 +1127,36 @@ private:
         unsigned long long before_incidence = 0;
         unsigned long long after_incidence = 0;
         const std::size_t bytes_before = memory_bytes();
-        #pragma omp parallel for reduction(+:before_incidence,after_incidence) schedule(static)
+        // coalesce_slab sorts the vertex's slab in place, so a vertex costs
+        // d*log2(d) and the equal-count split is nowhere near equal work on a
+        // hub residual: this loop scaled only 3.0x on 16 threads (as-Skitter
+        // handoff, T=1 555 ms -> T=16 183 ms). The slab is contiguous, so the
+        // body is compute-bound on cached data -- the regime where balancing
+        // pays. Bounds are a pure function of (degrees, nt), so a fixed thread
+        // count keeps one fixed partition exactly as schedule(static) did, and
+        // each slab is coalesced independently with integer-only reductions,
+        // so no split can change a stored byte.
+        std::vector<std::uint64_t> work_prefix(active.size() + 1, 0);
         for (std::size_t k = 0; k < active.size(); ++k) {
+            const std::uint64_t d = adj_[active[k]].size();
+            work_prefix[k + 1] = work_prefix[k] +
+                d * static_cast<std::uint64_t>(std::bit_width(d + 1));
+        }
+        #pragma omp parallel reduction(+:before_incidence,after_incidence)
+        {
+        int bal_tid = 0, bal_nt = 1;
+#ifdef _OPENMP
+        bal_tid = omp_get_thread_num(); bal_nt = omp_get_num_threads();
+#endif
+        const auto [k_lo, k_hi] = detail::work_balanced_range(
+            work_prefix.data(), active.size(), bal_tid, bal_nt);
+        for (std::size_t k = k_lo; k < k_hi; ++k) {
             const node_index u = active[k];
             const auto [before, after] = adj_.coalesce_slab(
                 u, [&](node_index v) { return is_active(v); });
             before_incidence += before;
             after_incidence += after;
+        }
         }
         adj_.compact();
         coalesce_stats stats;
