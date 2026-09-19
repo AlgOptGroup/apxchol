@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # setup_all.sh — One-shot setup: build core, benchmarks, fetch matrices
-set -uo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -12,12 +12,10 @@ echo ""
 
 # ── Core library + tests ──────────────────────────
 echo "[1/4] Building core library + tests..."
-cd "$PROJECT_DIR"
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -5
-make -j"$(nproc)" 2>&1 | tail -5
+cmake -S "$PROJECT_DIR" -B "$PROJECT_DIR/build" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$PROJECT_DIR/build" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-6}"
 echo "  Running tests..."
-ctest --output-on-failure 2>&1 | tail -5
+ctest --test-dir "$PROJECT_DIR/build" --output-on-failure
 
 # ── Julia packages ─────────────────────────────────
 echo ""
@@ -25,8 +23,7 @@ echo "[2/4] Setting up Julia environment..."
 if command -v julia &>/dev/null; then
     julia --project="$PROJECT_DIR/benchmarks/julia" -e '
         using Pkg
-        Pkg.add(["Laplacians", "SparseArrays", "LinearAlgebra", "Statistics",
-                  "MatrixMarket", "Printf", "Random", "DelimitedFiles"])
+        Pkg.instantiate()
         Pkg.precompile()
         println("[ok] Julia packages installed and precompiled")
     '
@@ -37,10 +34,8 @@ fi
 # ── Benchmarks ─────────────────────────────────────
 echo ""
 echo "[3/4] Building benchmark suite (FetchContent will download deps)..."
-cd "$PROJECT_DIR"
-mkdir -p benchmarks/build && cd benchmarks/build
-cmake .. -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -10
-make -j"$(nproc)" benchmark 2>&1 | tail -5
+cmake -S "$PROJECT_DIR/benchmarks" -B "$PROJECT_DIR/benchmarks/build" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$PROJECT_DIR/benchmarks/build" --target benchmark --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-6}"
 
 # ── Test matrices ──────────────────────────────────
 echo ""

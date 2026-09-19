@@ -76,15 +76,14 @@ run_config parse_args(int argc, char* argv[]) {
     rhs_group->require_option(1);
 
     // ── how to read the input matrix ──
-    std::string input_kind_str = "auto";
-    app.add_option("--input-kind", input_kind_str,
+    app.add_option("--input-kind", cfg.input,
                    "How to read the input file: 'laplacian' = an already-assembled "
                    "Laplacian/SDDM operator, solved as given; 'adjacency' = a graph "
                    "adjacency/pattern matrix, from which L = D - A is assembled "
                    "(edge weight |value|, self-loops dropped); 'auto' = decide from "
                    "the off-diagonal signs and the diagonal, and refuse if ambiguous")
-        ->capture_default_str()
-        ->check(CLI::IsMember({"auto", "laplacian", "adjacency"}));
+        ->default_str("auto")
+        ->transform(CLI::IsMember(input_kind_map) & CLI::Transformer(input_kind_map));
 
     // ── output ──
     app.add_option("-o,--output", output_str,
@@ -97,8 +96,8 @@ run_config parse_args(int argc, char* argv[]) {
 
     app.add_option("--exact-core-max-h", cfg.solve_opts.factor_opts.exact_core_max_h,
                    "trace_cycle only: emit the exact clique on heavy cores of at most this "
-                   "many vertices (0 = off; 5 is the measured sweet spot)")
-        ->capture_default_str();
+                   "many vertices (0 = off; default: 4 on host, 0 for GPU-owned setup)")
+        ->default_str("by route");
     app.add_option("--double-cycle-min-h", cfg.solve_opts.factor_opts.double_cycle_min_h,
                    "trace_cycle only: emit two independent cycles on heavy cores of at least "
                    "this many vertices (0 = off; 20-32 targets hub-like stars)")
@@ -128,11 +127,10 @@ run_config parse_args(int argc, char* argv[]) {
                    "Check convergence every N iters, stop if <50% improvement (0=disable)")
         ->capture_default_str();
 
-    std::string graph_storage_str = "vec_pool_aos";
-    app.add_option("--graph-storage", graph_storage_str,
+    app.add_option("--graph-storage", cfg.solve_opts.storage,
                    "Graph storage backend (vec_pool, vec_pool_aos, forward_star, vec, bstr)")
-        ->capture_default_str()
-        ->check(CLI::IsMember({"vec_pool", "vec_pool_aos", "forward_star", "vec", "bstr"}));
+        ->default_str("vec_pool_aos")
+        ->transform(CLI::IsMember(graph_storage_map) & CLI::Transformer(graph_storage_map));
 
     app.add_option("--is", cfg.solve_opts.factor_opts.is_select,
                    "Independent set strategy (block_greedy, priority_greedy, baumann_kyng)")
@@ -162,8 +160,6 @@ run_config parse_args(int argc, char* argv[]) {
 
     if (!rhs_str.empty())    cfg.rhs_path     = rhs_str;
     if (!output_str.empty()) cfg.output_path  = output_str;
-    cfg.input = input_kind_map.at(input_kind_str);
-    cfg.solve_opts.storage = graph_storage_map.at(graph_storage_str);
     setup_logging(quiet, verbose);
     return cfg;
 }

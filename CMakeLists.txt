@@ -167,8 +167,7 @@ add_library(apxchol_core
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_cast.cu>
     # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow), same reason.
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_dataflow.cu>
-    # GPU-resident residual topology for the block-region AUTO setup front-end,
-    # which defaults to GPU only through the measured T=8 crossover.
+    # GPU-resident residual topology for the opt-in block-region frontend.
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_block_frontend.cu>
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_round_shadow.cu>
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
@@ -230,4 +229,16 @@ endif()
 if (APXCHOL_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# Developer tools are independent of GoogleTest and APXCHOL_BUILD_TESTS.
+# Preserve their existing build/tests/ paths for scripts and users.
+if (APXCHOL_BUILD_TOOLS)
+    add_executable(bench_setup tests/bench_setup.cpp)
+    target_link_libraries(bench_setup PRIVATE apxchol_core)
+    add_executable(analyze_factor tests/analyze_factor.cpp)
+    target_link_libraries(analyze_factor PRIVATE apxchol_core apxchol_mtx_input
+                          fast_matrix_market::fast_matrix_market)
+    set_target_properties(bench_setup analyze_factor PROPERTIES
+                          RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
 endif()

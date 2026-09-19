@@ -18,6 +18,9 @@ on:
       - 'tests/**'
       - 'examples/**'
       - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'benchmarks/**/*.py'
+      - 'benchmarks/requirements.txt'
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
@@ -28,6 +31,9 @@ on:
       - 'tests/**'
       - 'examples/**'
       - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'benchmarks/**/*.py'
+      - 'benchmarks/requirements.txt'
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
@@ -41,6 +47,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  benchmark-harness:
+    name: benchmark harness (unit tests, no solver campaigns)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install harness dependencies
+        run: python -m pip install -r benchmarks/requirements.txt
+      - name: Test harness
+        run: python -B -m unittest discover -s benchmarks/tests -p 'test_*.py'
+
   library:
     name: library (${{ matrix.name }}, build + ctest)
     runs-on: ubuntu-latest
