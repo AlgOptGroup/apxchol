@@ -397,6 +397,8 @@ Canonical MATLAB CMG is excluded from current charts; packed serial CMG remains.
 Preserve historical outcomes, effective versus requested threads, and source/binary/cell hashes.
 [benchmarks/README.md](benchmarks/README.md) defines runner/solver contracts;
 use the existing harness. Rendering runs no benchmarks.
+An explicit `--solver` must name a solver compiled into that benchmark binary;
+unknown or unavailable solvers exit 2 before matrix loading, without a CSV row.
 
 Grade **every retained original-system residual** against the common tolerance.
 Calibration failures/caps must not trigger fallback retained runs. A median

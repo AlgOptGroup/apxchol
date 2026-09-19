@@ -670,6 +670,21 @@ endif()
 # the guards get tests even though nothing else here does.
 enable_testing()
 
+function(test_solver_rejection name solver)
+    add_test(NAME ${name}
+        COMMAND ${CMAKE_COMMAND}
+            -DBENCHMARK=$<TARGET_FILE:benchmark> -DSOLVER=${solver}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_solver_rejection.cmake)
+endfunction()
+test_solver_rejection(contract_rejects_unknown_solver unknown_solver)
+test_solver_rejection(contract_all_rejects_unknown_solver "all,unknown_solver")
+if (NOT Boost_FOUND)
+    test_solver_rejection(contract_rejects_unavailable_amgcl amgcl)
+endif()
+if (NOT APXCHOL_USE_CUDA)
+    test_solver_rejection(contract_rejects_unavailable_cuda amgcl_cuda)
+endif()
+
 add_test(NAME contract_requires_class
          COMMAND benchmark --mtx ${CMAKE_CURRENT_SOURCE_DIR}/../data/matrices/ecology1.mtx
                            --kind operator --solver apxchol_v1 --maxiter 1)

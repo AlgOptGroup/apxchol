@@ -1122,6 +1122,41 @@ static Args parse_args(int argc, char** argv) {
             std::exit(1);
         }
     }
+    // An explicitly requested, compiled-out solver must not produce a successful
+    // header-only CSV. Validate before loading a matrix or initializing runtimes.
+    const std::set<std::string> available{"all", "apxchol", "cg", "icc", "ldlt"
+#ifdef HAVE_APXCHOL_V1
+        , "apxchol_v1"
+#endif
+#ifdef HAVE_RCHOL
+        , "rchol"
+#ifdef HAVE_METIS
+        , "rchol_par"
+#endif
+#endif
+#ifdef HAVE_CHOLMOD
+        , "cholmod"
+#endif
+#ifdef HAVE_AMGCL
+        , "amgcl"
+#ifdef APXCHOL_USE_CUDA
+        , "amgcl_cuda"
+#endif
+#endif
+#ifdef HAVE_HYPRE
+        , "hypre_boomeramg"
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_BENCH_HYPRE_CUDA)
+        , "hypre_boomeramg_gpu"
+#endif
+#endif
+    };
+    for (const auto& solver : a.solvers) {
+        if (!available.count(solver)) {
+            std::cerr << "Solver '" << solver
+                      << "' is unknown or unavailable in this build.\n";
+            std::exit(2);
+        }
+    }
     if (a.solvers.empty() || a.solvers.count("all"))
         a.solvers = {"apxchol", "cg", "ldlt"
 #ifdef HAVE_APXCHOL_V1
@@ -2436,15 +2471,6 @@ int main(int argc, char** argv) {
         args.solvers.count("hypre_boomeramg") != 0 ||
         args.solvers.count("hypre_boomeramg_gpu") != 0;
     bool hypre_initialized = false;
-#endif
-
-#if defined(APXCHOL_USE_CUDA) && !defined(APXCHOL_BENCH_HYPRE_CUDA)
-    if (args.solvers.count("hypre_boomeramg_gpu")) {
-        std::cerr << "hypre_boomeramg_gpu was requested, but this binary links a "
-                     "CPU-only Hypre build. Reconfigure with "
-                     "-DAPXCHOL_USE_CUDA=ON -DBENCH_HYPRE_USE_CUDA=ON.\n";
-        return 2;
-    }
 #endif
 
     // Thread setup must run for ALL solvers, not just apxchol_v1 (which had
