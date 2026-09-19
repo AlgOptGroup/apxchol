@@ -27,6 +27,22 @@ CLI input requires `--rhs file.mtx` or `--random-rhs`. Input kind is detected
 and reported; `--input-kind` overrides it. Random RHS is projected separately
 on each Laplacian component. An explicitly supplied RHS is never altered.
 
+## Benchmark original-system stopping
+
+The `original-v1` benchmark contract checks the defining operator/RHS at native
+solve exits, reuses setup for bounded retries, and keeps one total iteration
+budget (per component for split solves). Exhaustion is nonconvergence, never a
+relaxed acceptance mark. Required stopping checks and retries are included in
+Solve; `stop_check_s` is an included diagnostic, not a subtraction. At most eight
+attempts/checks prevent zero-iteration loops; no short-plateau rejection rule.
+Do not add per-iteration host checks or GPU transfers. Keep native kernels and
+first-pass requests intact except documented tolerance-basis conversions.
+The internal `detail/gpu_solve_session.h` shares the one-shot GPU setup lifetime
+with benchmark retries; it is not a new public solver API. Packed CMG exposes no
+reusable hierarchy and must charge/report each setup. ParAC patch 0007 replaces
+untimed calibration with measured original checks. Current runners reject old
+stopping receipts/caches; preserve historical results without relabelling them.
+
 ## Daint / Slurm campaign gate
 
 Do not use a production Slurm allocation as the first integration test. Every

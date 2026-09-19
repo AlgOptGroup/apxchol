@@ -26,4 +26,6 @@ struct BenchResult {
     int retained_repeats = 1;
     int representative_repeat = 1;
     double max_repeat_rel_residual = -1;
+    int solve_passes = 0;
+    double stop_check_seconds = 0; // included in solve_time, never subtracted
 };

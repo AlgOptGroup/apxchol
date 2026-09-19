@@ -26,7 +26,7 @@ class NativeCmgOutput(unittest.TestCase):
             np.testing.assert_array_equal(prepared[1], [3.0, 4.0])
 
     def good(self):
-        return cmg.parse_driver('CMG n=1024 nnz=4992 hierarchy_valid=1 levels=2 setup_flag=0 pcg_flag=0 iter=22 reported_relres=1e-9 true_relres=1e-9 adaptation_s=0.01 setup_s=0.2 solve_s=0.3 total_s=0.5 setup_calls=1 converged=1', 'CMGRSS 10240')
+        return cmg.parse_driver('CMG n=1024 nnz=4992 hierarchy_valid=1 levels=2 setup_flag=0 pcg_flag=0 iter=22 reported_relres=1e-9 true_relres=1e-9 adaptation_s=0.01 setup_s=0.2 solve_s=0.3 total_s=0.5 setup_calls=1 converged=1 stop_contract=original-v1 solve_passes=1 stop_check_s=0.01', 'CMGRSS 10240')
 
     def test_true_residual_wins_over_success_flag(self):
         values = self.good()
@@ -46,7 +46,7 @@ class NativeCmgOutput(unittest.TestCase):
 
     def test_inconsistent_timer_is_rejected(self):
         with self.assertRaises(ValueError):
-            cmg.parse_driver('CMG n=1024 nnz=4992 hierarchy_valid=1 levels=2 setup_flag=0 pcg_flag=0 iter=22 true_relres=1e-9 adaptation_s=0.01 setup_s=0.2 solve_s=0.3 total_s=0.8 setup_calls=1 converged=1', '')
+            cmg.parse_driver('CMG n=1024 nnz=4992 hierarchy_valid=1 levels=2 setup_flag=0 pcg_flag=0 iter=22 true_relres=1e-9 adaptation_s=0.01 setup_s=0.2 solve_s=0.3 total_s=0.8 setup_calls=1 converged=1 stop_contract=original-v1 solve_passes=1 stop_check_s=0.01', '')
 
     def test_logical_cell_deadline_is_not_single_solve_lower_bound(self):
         self.assertIsNone(cmg.rc.timeout_cap({'timeout_cap_s': 210,

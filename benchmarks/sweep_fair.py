@@ -289,6 +289,9 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             return "timeout", diag
         BUILD.update(rc.parse_build_meta(p.stderr))   # what built the binary that just ran
         st,m = classify(rc.parse_csv(p.stdout))
+        if st in {"complete", "not_converged"} and m.get("stop_contract") != "original-v1":
+            st = "failed"
+            m["stopping_failure"] = "binary lacks original-v1 stopping/timing contract"
         if m is None:
             # No CSV row = crash. Distinguish allocation failures across all
             # solvers, including third-party CUDA libraries, from other errors.
@@ -365,6 +368,9 @@ def run_julia(mtx, solver, cls, timeout=TIMEOUT):
                 "na_reason": f"the {REPS}-repetition cell exceeded its {timeout}s wall cap"
             }
         st, metrics = classify(rc.parse_csv(cp.stdout))
+        if st in {"complete", "not_converged"} and metrics.get("stop_contract") != "original-v1":
+            st = "failed"
+            metrics["stopping_failure"] = "Julia driver lacks original-v1 stopping/timing contract"
         meta = {}
         if st == "n/a":
             hit = re.search(r"^\[n/a\][^:]*:\s*(.+)$", cp.stderr or "", re.M)

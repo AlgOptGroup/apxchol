@@ -170,6 +170,9 @@ def run_one(mid):
                      _prov(as_operator), matrix_meta=meta, timeout_cap_s=TIMEOUT)
         return "TIMEOUT"
     status, metrics = rc.classify(rc.parse_csv(out), TOL)
+    if status in {"complete", "not_converged"} and metrics.get("stop_contract") != "original-v1":
+        status = "failed"
+        metrics["stopping_failure"] = "MATLAB driver lacks original-v1 contract"
     if status == "n/a":
         # bench_cmg.m tags its refusals '[n/a] cmg on <name>: <reason>' on stderr.
         hit = re.search(r"^\[n/a\] cmg[^:]*:\s*(.+)$", err, re.M)

@@ -79,6 +79,7 @@ function bench_cmg(mtx_path, tol, maxiter, seed, reg_rel, as_operator)
     % solver-specific pin/slice/regularization that produces that input; loading
     % the common MatrixMarket operator and constructing the common RHS stay out.
     tic;
+    free = 1:n; components = {};
     if as_operator
         % Published full-rank operator: solve it as it stands. No pin (there is
         % no null space to remove) and no eps*I (it is already strictly SDDM),
@@ -95,11 +96,16 @@ function bench_cmg(mtx_path, tol, maxiter, seed, reg_rel, as_operator)
         bsub = b;
         Lshift = Lsub;   % already strictly SDDM; CMG preconditions the same operator
     else
-        % Pin last vertex: solve the (n-1)×(n-1) sub-system (legacy singular path).
-        m = n - 1;
-        Lsub = L(1:m, 1:m);
-        bsub = b(1:m);
-        bsub = bsub - mean(bsub);
+        % One principal-submatrix pin per component; do not alter the free RHS.
+        [order, ~, blocks, ~] = dmperm(spones(L) + speye(n));
+        components = cell(1, length(blocks)-1);
+        for c = 1:length(components)
+            components{c} = order(blocks(c):blocks(c+1)-1);
+        end
+        pins = order(blocks(1:end-1));
+        free = setdiff(1:n, pins);
+        m = length(free);
+        Lsub = L(free,free); bsub = b(free);
         Lshift = Lsub + 1e-12 * speye(m);
     end
 
@@ -125,38 +131,53 @@ function bench_cmg(mtx_path, tol, maxiter, seed, reg_rel, as_operator)
         return;
     end
 
-    % Solve
-    tic;
-    [x_sub, ~, ~, iters] = pcg(Lsub, bsub, tol, maxiter, pfun);
-    solve_s = toc;
-    total_s = setup_s + solve_s;
-
-    % True residual.
-    if full_system
-        % SDDM: full system, no centering — same metric as every other solver.
-        res = bsub - Lsub * x_sub;
-        bnorm = norm(bsub);
-    else
-        % Singular Laplacian: reconstruct full x and mean-center.
-        x = zeros(n, 1);
-        x(1:m) = x_sub;
-        x = x - mean(x);
-        res = b - L * x;
-        res = res - mean(res);
-        bnorm = norm(b);
+    % Native warm retries share one hierarchy and one TOTAL iteration budget.
+    % Stopping checks are inside Solve; there is no every-iteration callback.
+    solve_clock = tic;
+    x_sub = zeros(m,1); iters = 0; passes = 0; stop_check_s = 0;
+    request = tol; relres_true = Inf;
+    if full_system, score_A = Lsub; score_b = bsub; else, score_A = L; score_b = b; end
+    bnorm = norm(score_b); if bnorm == 0, bnorm = 1; end
+    while true
+        if iters < maxiter
+            [x_sub, ~, ~, used] = pcg(Lsub, bsub, request, maxiter-iters, pfun, [], x_sub);
+            if used < 0 || used > maxiter-iters, error('native iteration budget violated'); end
+            iters = iters + used; passes = passes + 1;
+        end
+        check_clock = tic;
+        relres_true = original_residual(score_A, score_b, x_sub, bnorm, full_system, free, components);
+        stop_check_s = stop_check_s + toc(check_clock);
+        if ~isfinite(relres_true) || relres_true <= tol || iters >= maxiter || passes >= 8, break; end
+        next = max(2.220446049250313e-16, request*0.1);
+        if next >= request, break; end
+        request = next;
     end
-    if bnorm > 0
-        relres_true = norm(res) / bnorm;
-    else
-        relres_true = 1.0;
-    end
+    solve_s = toc(solve_clock); total_s = setup_s + solve_s;
+    % Independent final grading is outside Solve; required checks stay charged.
+    relres_true = original_residual(score_A, score_b, x_sub, bnorm, full_system, free, components);
 
     us_per_nnz = total_s / nnz_L * 1e6;
 
     backend = octave_or_matlab();
-    fprintf('CMG+PCG [Koutis10;%s],%s,%d,%d,%e,%e,%e,%d,%e,%e,%e\n', ...
+    fprintf('CMG+PCG [Koutis10;%s],%s,%d,%d,%e,%e,%e,%d,%.17e,%e,%e,original-v1,%d,%e\n', ...
         backend, graph_name, n, nnz_L, ...
-        setup_s, solve_s, total_s, iters, relres_true, 0.0, us_per_nnz);
+        setup_s, solve_s, total_s, iters, relres_true, 0.0, us_per_nnz, passes, stop_check_s);
+end
+
+function rr = original_residual(A, b, x_sub, bnorm, full_system, free, components)
+    if full_system
+        x = x_sub;
+    else
+        x = zeros(size(A,1),1); x(free) = x_sub;
+        for c = 1:length(components)
+            ids = components{c}; x(ids) = x(ids)-mean(x(ids));
+        end
+    end
+    residual = b-A*x;
+    for c = 1:length(components)
+        ids = components{c}; residual(ids) = residual(ids)-mean(residual(ids));
+    end
+    rr = norm(residual)/bnorm;
 end
 
 % ---------------------------------------------------------------------------

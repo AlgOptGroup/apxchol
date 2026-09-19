@@ -61,6 +61,7 @@
 
 #ifdef APXCHOL_USE_CUDA
 #include <cuda_runtime.h>   // cudaMemGetInfo for read_vram_mb().
+#include "apxchol/solver/detail/gpu_solve_session.h"
 #endif
 
 #include <Eigen/Core>
@@ -477,6 +478,33 @@ namespace Eigen { namespace internal {
 
 // ──────────────────── benchmark result ────────────────────
 #include "bench_result.h"
+#include "original_stop.h"
+
+// Same original-operator check for every in-process adapter. Preserve the native
+// iterate (notably its pinned gauge) for warm starts; grade a centered copy.
+template<class Pass>
+static Eigen::VectorXd solve_checked(BenchResult& r,
+        const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
+        double tol, int maxiter, Pass&& pass) {
+    Eigen::VectorXd x;
+    if (maxiter == 0) x = Eigen::VectorXd::Zero(b.size());
+    const double norm_b = b.norm();
+    const double bn = norm_b > 0 ? norm_b : 1.0;
+    auto stop = bench_stop::run(tol, maxiter,
+        [&](double t, int remaining, bool warm) { return pass(t, remaining, warm, x); },
+        [&] {
+            Eigen::VectorXd xc = x;
+            center_if_laplacian(xc);
+            Eigen::VectorXd residual = b - A * xc;
+            center_if_laplacian(residual);
+            return residual.norm() / bn;
+        });
+    r.iterations = stop.iterations;
+    r.solve_passes = stop.passes;
+    r.stop_check_seconds = stop.check_seconds;
+    return x;
+}
+
 
 // AMGCL CUDA adapter (compiled separately as amgcl_cuda.cu with nvcc).
 #if defined(HAVE_AMGCL) && defined(APXCHOL_USE_CUDA)
@@ -491,7 +519,8 @@ extern "C" void run_amgcl_cuda_impl(
     double*               solution,
     double                tol,
     int                   maxiter,
-    int                   relax_coarse);
+    int                   relax_coarse,
+    double (*check_original)(void*, const double*), void* check_context);
 #endif
 
 static void print_header_pretty() {
@@ -558,7 +587,7 @@ static void print_result_pretty(const BenchResult& r) {
 }
 
 static void print_csv_header() {
-    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res\n";
+    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s\n";
 }
 
 static void print_result_csv(const BenchResult& r) {
@@ -570,14 +599,15 @@ static void print_result_csv(const BenchResult& r) {
               << r.solve_time << ","
               << r.total_time << ","
               << r.iterations << ","
-              << r.rel_residual << ","
+              << std::setprecision(17) << r.rel_residual << ","
               << std::fixed << std::setprecision(4) << r.fillin << ","
               << r.us_per_nnz << ","
               << std::setprecision(1) << r.solve_rss_mb << ","
               << std::setprecision(1) << r.solve_vram_mb << ","
               << r.retained_repeats << "," << r.representative_repeat << ","
-              << std::scientific << std::setprecision(9)
-              << r.max_repeat_rel_residual << "\n";
+              << std::scientific << std::setprecision(17)
+              << r.max_repeat_rel_residual << "," << bench_stop::contract << ","
+              << r.solve_passes << "," << r.stop_check_seconds << "\n";
 }
 
 // ──────────────────── generate RHS ────────────────────
@@ -615,6 +645,9 @@ static BenchResult median_run(Fn&& fn, int repeats) {
                   << " setup_s=" << std::setprecision(17) << result.setup_time
                   << " solve_s=" << result.solve_time << " total_s=" << result.total_time
                   << " iters=" << result.iterations << " rel_res=" << result.rel_residual
+                  << " stop_contract=" << bench_stop::contract
+                  << " solve_passes=" << result.solve_passes
+                  << " stop_check_s=" << result.stop_check_seconds
                   << " solver=" << std::quoted(result.solver_name) << '\n';
         if (i < 0) continue;
         result.representative_repeat = i + 1;
@@ -663,12 +696,17 @@ static BenchResult run_apxchol(
 
     t.start();
     cg.compute(L);
-    Eigen::VectorXd x = cg.solve(b);
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
+            cg.setTolerance(request); cg.setMaxIterations(remaining);
+            if (warm) current = cg.solveWithGuess(b, current).eval();
+            else current = cg.solve(b);
+            return b.isZero(0.0) ? 0 : std::min(remaining, static_cast<int>(cg.iterations()) + 1);
+        });
     r.solve_time = t.elapsed();
 
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-    r.iterations = static_cast<int>(cg.iterations()) + 1;  // unify w/ apxchol convention
 
     center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
@@ -740,10 +778,36 @@ static BenchResult run_apxchol_v1(
         fopts.partition.degree_tiebreak = std::atoi(e) != 0;
 
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
-    auto res = apxchol::solve(L, b,
-        {.tol = tol, .max_iter = maxiter,
-         .storage = storage,
-         .factor_opts = fopts});
+    apxchol::solve_result res;
+#if defined(APXCHOL_USE_CUDA)
+    {
+        Eigen::initParallel();
+        apxchol::detail::gpu_solve_session solver(L, {.tol = tol, .max_iter = maxiter,
+            .storage = storage, .factor_opts = fopts}, res);
+        Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+            [&](double request, int remaining, bool, Eigen::VectorXd& current) {
+                solver.solve(b, res, request, remaining);
+                current = std::move(res.x);
+                return static_cast<int>(res.iterations);
+            });
+        res.x = std::move(x);
+        res.iterations = r.iterations;
+    }
+#else
+    {
+        apxchol::cpu_solver solver(L, {.tol = tol, .max_iter = maxiter,
+            .storage = storage, .factor_opts = fopts},
+            std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings);
+        Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+            [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
+                solver.solve(b, res, request, remaining, warm ? &current : nullptr);
+                current = std::move(res.x);
+                return static_cast<int>(res.iterations);
+            });
+        res.x = std::move(x);
+        res.iterations = r.iterations;
+    }
+#endif
     const auto t_wall_end = std::chrono::high_resolution_clock::now();
     const double wall_total =
         std::chrono::duration<double>(t_wall_end - t_wall_start).count();
@@ -861,7 +925,13 @@ static BenchResult run_cg_no_precond(
     r.setup_time = t.elapsed();
 
     t.start();
-    Eigen::VectorXd x = cg.solve(b);
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
+            cg.setTolerance(request); cg.setMaxIterations(remaining);
+            if (warm) current = cg.solveWithGuess(b, current).eval();
+            else current = cg.solve(b);
+            return b.isZero(0.0) ? 0 : std::min(remaining, static_cast<int>(cg.iterations()) + 1);
+        });
     r.solve_time = t.elapsed();
 
     r.total_time = r.setup_time + r.solve_time;
@@ -869,7 +939,6 @@ static BenchResult run_cg_no_precond(
     // Eigen's CG returns the loop-counter i (incremented after the convergence
     // check), so a 1-iter convergence reports 0. apxchol_v1 / cuda_pcg / AMGCL /
     // Hypre all report "iters completed" (1 for that case). Add 1 to unify.
-    r.iterations = static_cast<int>(cg.iterations()) + 1;
 
     center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
@@ -913,12 +982,22 @@ static BenchResult run_cg_icc(
     r.setup_time = t.elapsed();
 
     t.start();
-    Eigen::VectorXd x = cg.solve(b);
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
+            cg.setTolerance(request); cg.setMaxIterations(remaining);
+            if (warm) {
+                // Ls is a regularized solve operator. Refining its original
+                // residual corrects the shift; solving Ls*x=b again cannot.
+                Eigen::VectorXd residual = b - L * current;
+                center_if_laplacian(residual);
+                current += cg.solve(residual).eval();
+            } else current = cg.solve(b);
+            return b.isZero(0.0) ? 0 : std::min(remaining, static_cast<int>(cg.iterations()) + 1);
+        });
     r.solve_time = t.elapsed();
 
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-    r.iterations = static_cast<int>(cg.iterations()) + 1;  // unify w/ apxchol convention
 
     center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
@@ -933,7 +1012,7 @@ static BenchResult run_cg_icc(
 static BenchResult run_ldlt(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
-    const std::string& graph_name)
+    const std::string& graph_name, double tol, int maxiter)
 {
     BenchResult r;
     r.solver_name = "LDLT [Eigen]";
@@ -967,19 +1046,21 @@ static BenchResult run_ldlt(
     }
 
     t.start();
-    Eigen::VectorXd x = ldlt.solve(b);
-    // Iterative refinement on the original L
-    for (int refine = 0; refine < 3; ++refine) {
-        Eigen::VectorXd res = b - L * x;
-        center_if_laplacian(res);
-        x += ldlt.solve(res);
-    }
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double, int, bool warm, Eigen::VectorXd& current) {
+            if (!warm) current = ldlt.solve(b);
+            else {
+                Eigen::VectorXd residual = b - L * current;
+                center_if_laplacian(residual);
+                current += ldlt.solve(residual);
+            }
+            return 1; // one direct solve/refinement consumes one budget unit
+        });
     center_if_laplacian(x);
     r.solve_time = t.elapsed();
 
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-    r.iterations = 1;
 
     Eigen::VectorXd res = b - L * x;
     center_if_laplacian(res);
@@ -1370,11 +1451,15 @@ static BenchResult run_rchol(
     std::vector<double> xv;          // empty on purpose: iteration() only resize()s it
     double relres = 0.0; int itr = 0;
     t.start();
-    run_rchol_pcg_backend(Apcg, bpv, tol, maxiter, G, xv, relres, itr);
-    r.iterations = itr;
-    Eigen::Map<Eigen::VectorXd> x_perm(xv.data(), N);
-    // Returning to the caller's ordering is mandatory per-RHS adapter work.
-    x_orig = rchol_amd ? Eigen::VectorXd(perm.transpose() * x_perm) : x_perm;
+    x_orig = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool, Eigen::VectorXd& current) {
+            // Upstream accepts no initial guess: cold restart, retained factor.
+            xv.clear(); itr = 0;
+            run_rchol_pcg_backend(Apcg, bpv, request, remaining, G, xv, relres, itr);
+            Eigen::Map<Eigen::VectorXd> xp(xv.data(), N);
+            current = rchol_amd ? Eigen::VectorXd(perm.transpose() * xp) : xp;
+            return itr;
+        });
     r.solve_time = t.elapsed();
 #else
     // Defensive factor-only path for a build that disabled every solve backend.
@@ -1481,9 +1566,14 @@ static BenchResult run_rchol_parallel(
     std::vector<double> xv;          // empty on purpose: iteration() only resize()s it
     double relres = 0.0; int itr = 0;
     t.start();
-    run_rchol_pcg_backend(Aperm, bperm, tol, maxiter, G, xv, relres, itr);
-    r.iterations = itr;
-    for (int i = 0; i < N; ++i) x[static_cast<int>(perm[i])] = xv[i];   // unpermute
+    x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool, Eigen::VectorXd& current) {
+            xv.clear(); itr = 0;
+            run_rchol_pcg_backend(Aperm, bperm, request, remaining, G, xv, relres, itr);
+            current.resize(N);
+            for (int i = 0; i < N; ++i) current[static_cast<int>(perm[i])] = xv[i];
+            return itr;
+        });
     r.solve_time = t.elapsed();
 #else
     // Defensive factor-only path for a build that disabled every solve backend.
@@ -1520,7 +1610,7 @@ static BenchResult run_rchol_parallel(
 static BenchResult run_cholmod(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
-    const std::string& graph_name)
+    const std::string& graph_name, double tol, int maxiter)
 {
     BenchResult r;
     r.solver_name = "CHOLMOD [SuiteSparse]";
@@ -1582,31 +1672,26 @@ static BenchResult run_cholmod(
     b_chol.dtype = CHOLMOD_DOUBLE;
 
     t.start();
-    cholmod_dense* x_chol = cholmod_solve(CHOLMOD_A, factor, &b_chol, &c);
-    Eigen::VectorXd x = Eigen::Map<Eigen::VectorXd>(
-        static_cast<double*>(x_chol->x), n);
-    cholmod_free_dense(&x_chol, &c);
-
-    // Iterative refinement on original L
-    for (int refine = 0; refine < 3; ++refine) {
-        Eigen::VectorXd res = b - L * x;
-        center_if_laplacian(res);
-
-        cholmod_dense r_chol;
-        r_chol.nrow = n; r_chol.ncol = 1; r_chol.nzmax = n; r_chol.d = n;
-        r_chol.x = res.data(); r_chol.z = nullptr;
-        r_chol.xtype = CHOLMOD_REAL; r_chol.dtype = CHOLMOD_DOUBLE;
-
-        cholmod_dense* dx_chol = cholmod_solve(CHOLMOD_A, factor, &r_chol, &c);
-        x += Eigen::Map<Eigen::VectorXd>(
-            static_cast<double*>(dx_chol->x), n);
-        cholmod_free_dense(&dx_chol, &c);
-    }
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double, int, bool warm, Eigen::VectorXd& current) {
+            Eigen::VectorXd residual;
+            cholmod_dense rhs = b_chol;
+            if (warm) {
+                residual = b - L * current;
+                center_if_laplacian(residual);
+                rhs.x = residual.data();
+            }
+            cholmod_dense* solution = cholmod_solve(CHOLMOD_A, factor, &rhs, &c);
+            if (!solution) throw std::runtime_error("CHOLMOD solve failed");
+            Eigen::Map<Eigen::VectorXd> update(static_cast<double*>(solution->x), n);
+            if (warm) current += update; else current = update;
+            cholmod_free_dense(&solution, &c);
+            return 1;
+        });
     center_if_laplacian(x);
     r.solve_time = t.elapsed();
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-    r.iterations = 1;
 
     Eigen::VectorXd res = b - L * x;
     center_if_laplacian(res);
@@ -1670,28 +1755,25 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
 // Symmetric Dirichlet pin grounding the FULL null space: one node per CONNECTED
 // COMPONENT. For each grounded node p: zero row p's off-diagonals, set L(p,p)=1,
 // zero column p. Keeps L SYMMETRIC, full n x n, and SPD without perturbing the
-// operator we SCORE against -- and unlike dropping a row/col + mean-centering the
-// RHS it controls the residual at EVERY row, so the true residual (b - L_orig*x)
-// reaches 1e-8 instead of flooring at ~1e-6. A connected Laplacian has one null
-// vector (the all-ones), so this pins a single node (the last one); a graph with
-// isolated nodes / multiple components (e.g. as-Skitter) has one null vector PER
-// component and each must be grounded, else the residual block stays singular
-// (zero diagonal on isolated nodes -> AMGCL NaN / BoomerAMG floors at ~1e-5). The
-// grounded node ids are returned in `pinned` (their RHS entry is set to 0). It is
-// exactly the multi-component generalization of a single stencil-diagonal pin.
+// operator we SCORE against. This replaces one original equation per component;
+// a pinned-system stopping tolerance does not guarantee the same original-system
+// tolerance. In exact arithmetic, with compatible RHS and x[p] = 0, the omitted
+// row's residual is minus the sum of the other residuals in that component. Its
+// contribution can therefore amplify their norm by up to sqrt(component size).
+// Always check the residual against the original operator after solving.
+// A connected Laplacian has one constant null vector; a disconnected one has
+// one per component, including isolated vertices. The grounded node ids are
+// returned in `pinned` so callers can zero their RHS entries.
 static Eigen::SparseMatrix<double> dirichlet_pin(const Eigen::SparseMatrix<double>& L,
                                                  std::vector<int>& pinned) {
     pinned.clear();
     const int n = static_cast<int>(L.rows());
-    // One PROVABLY-SAFE pin per connected component, found by a single STACK-based DFS
-    // (iterative -- the giant component has >1.6M nodes, so recursion would overflow).
-    // The FIRST node finished in each component (popped with no unvisited neighbor) is a
-    // DFS-tree LEAF, which is never an articulation point -- so zeroing its row+column
-    // can never split its component into an ungrounded piece. Grounding a cut-vertex
-    // would: it disconnects the component into blocks that no longer contain a pin,
-    // leaving Lsub singular there and flooring the residual. This replaces the old
-    // min-degree heuristic, which only guaranteed safety for degree-1 leaves (a min-
-    // degree vertex of degree >=2 can be a cut-vertex, e.g. a barbell's degree-2 bridge).
+    // Preserve the existing deterministic choice: the first DFS-finished vertex
+    // in each component. Use an iterative traversal to avoid recursion on large
+    // graphs. Any vertex is a valid pin for a connected positive-weight Laplacian,
+    // including an articulation point: retained diagonals still include edges to
+    // the pinned vertex, so the remaining principal submatrix stays SPD. Pin
+    // selection can affect conditioning, but is not needed to establish rank.
     const auto* outer = L.outerIndexPtr();
     const auto* inner = L.innerIndexPtr();
     std::vector<char> is_pin(n, 0);
@@ -1814,6 +1896,8 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         split_prep += prep.elapsed();
         BenchResult rc = per_solver(subL, subb, name, tol, maxiter);
         setup += rc.setup_time; solve += rc.solve_time; it=std::max(it,rc.iterations);
+        r.solve_passes = std::max(r.solve_passes, rc.solve_passes);
+        r.stop_check_seconds += rc.stop_check_seconds;
         if (rc.solve_rss_mb > rss) rss = rc.solve_rss_mb;       // peak over components
         if (rc.solve_vram_mb > vram) vram = rc.solve_vram_mb;
         const double sbn=subb.norm(); const double rnc = rc.rel_residual*sbn;
@@ -1918,12 +2002,18 @@ static BenchResult run_amgcl(
     // as the CUDA adapter does for its device vectors.
     std::vector<double> rhs(rhs_v.data(), rhs_v.data() + n);
     std::vector<double> sol(n, 0.0);
-    auto [iters, error] = solve(rhs, sol); (void)error;
+    auto& native = const_cast<amgcl::solver::cg<Backend>&>(solve.solver());
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool, Eigen::VectorXd& current) {
+            native.prm.tol = request; native.prm.maxiter = remaining;
+            auto [iterations, error] = solve(rhs, sol); (void)error;
+            current = Eigen::Map<Eigen::VectorXd>(sol.data(), n);
+            return static_cast<int>(iterations);
+        });
     r.solve_time = t.elapsed();
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-    r.iterations = static_cast<int>(iters);
-    Eigen::VectorXd x = Eigen::Map<Eigen::VectorXd>(sol.data(), n);
+    center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
     center_if_laplacian(res);
     const double bnorm = b.norm() > 0 ? b.norm() : 1.0;
@@ -1989,15 +2079,29 @@ static BenchResult run_amgcl_cuda(
         col[p] = Asolve.innerIndexPtr()[p];
     Eigen::VectorXd x = Eigen::VectorXd::Zero(n);
 
+    struct check_context_t {
+        const Eigen::SparseMatrix<double>& matrix;
+        const Eigen::VectorXd& rhs;
+        double bnorm;
+    } check_context{L, b, b.norm() > 0 ? b.norm() : 1.0};
     const double host_prep_seconds = setup_prep.elapsed();
     run_amgcl_cuda_impl(
         &r, host_prep_seconds, m,
         row.data(), col.data(), Asolve.valuePtr(), rhs_v.data(), x.data(),
-        tol, maxiter, relax_coarse);
+        tol, maxiter, relax_coarse,
+        [](void* opaque, const double* values) {
+            auto& ctx = *static_cast<check_context_t*>(opaque);
+            Eigen::VectorXd xc = Eigen::Map<const Eigen::VectorXd>(values, ctx.rhs.size());
+            center_if_laplacian(xc);
+            Eigen::VectorXd residual = ctx.rhs - ctx.matrix * xc;
+            center_if_laplacian(residual);
+            return residual.norm() / ctx.bnorm;
+        }, &check_context);
 
     // Validation is deliberately outside both timers and uses the common Eigen
     // operator, just like every in-process solver.  The CUDA adapter returns x;
     // it no longer needs a benchmark-only duplicate of L.
+    center_if_laplacian(x);
     Eigen::VectorXd res = b - L * x;
     center_if_laplacian(res);
     const double bnorm = b.norm() > 0 ? b.norm() : 1.0;
@@ -2172,7 +2276,7 @@ static BenchResult run_hypre_boomeramg(
     Timer t;
     t.start();
     // Symmetric Dirichlet pin (one node per connected component) for a singular
-    // Laplacian (full n x n, SPD), so the true residual vs the ORIGINAL L reaches 1e-8.
+    // Laplacian (full n x n, SPD); the stopping wrapper checks ORIGINAL L.
     // SDDM/regularized L solves the full operator unchanged. (Under --desing split this
     // wrapper is called per connected component, so dirichlet_pin grounds a single node.)
     const int m = n;
@@ -2252,27 +2356,25 @@ static BenchResult run_hypre_boomeramg(
     r.setup_time = t.elapsed();
 
     t.start();
-    HYPRE_ParCSRPCGSolve(pcg, parA, parB, parX);
-    HYPRE_Int iters_out;
-    double final_res;
-    HYPRE_PCGGetNumIterations(pcg, &iters_out);
-    HYPRE_PCGGetFinalRelativeResidualNorm(pcg, &final_res);
-    // HYPRE owns the result vector.  Retrieving the caller-visible solution is
-    // mandatory per-RHS work (and a device-to-host transfer on the GPU build),
-    // so it belongs to solve rather than benchmark-only validation.
-    std::vector<double> xvals(m);
-    HYPRE_IJVectorGetValues(xij, m, idx.data(), xvals.data());
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool, Eigen::VectorXd& current) {
+            HYPRE_PCGSetTol(pcg, request);
+            HYPRE_PCGSetMaxIter(pcg, remaining);
+            HYPRE_ParCSRPCGSolve(pcg, parA, parB, parX);
+            HYPRE_Int used = 0;
+            HYPRE_PCGGetNumIterations(pcg, &used);
+            current.resize(m);
+            HYPRE_IJVectorGetValues(xij, m, idx.data(), current.data());
+            return static_cast<int>(used);
+        });
     r.solve_time = t.elapsed();
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
 
-    r.iterations = static_cast<int>(iters_out);
     r.fillin = 0;
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
 
     // Extract solution; compute true residual against the original full system.
-    Eigen::VectorXd x(n);
-    x.head(m) = Eigen::Map<Eigen::VectorXd>(xvals.data(), m);
     if (is_laplacian)
         center_if_laplacian(x);  // sol[pinned]=0 already from the solve; no x(n-1) hack
     Eigen::VectorXd res = b - L * x;
@@ -2315,7 +2417,7 @@ static BenchResult run_hypre_boomeramg_gpu(
     Timer t;
     t.start();
     // Symmetric Dirichlet pin (one node per connected component) for a singular
-    // Laplacian (full n x n, SPD); the true residual vs the ORIGINAL L reaches 1e-8.
+    // Laplacian (full n x n, SPD); the stopping wrapper checks ORIGINAL L.
     // SDDM/regularized L solves the full operator unchanged. (Under --decompose split
     // this wrapper sees one connected component, so dirichlet_pin grounds a single node.)
     const int m = n;
@@ -2386,25 +2488,26 @@ static BenchResult run_hypre_boomeramg_gpu(
     r.setup_time = t.elapsed();
 
     t.start();
-    HYPRE_ParCSRPCGSolve(pcg, parA, parB, parX);
-    HYPRE_Int iters_out;
-    double final_res;
-    HYPRE_PCGGetNumIterations(pcg, &iters_out);
-    HYPRE_PCGGetFinalRelativeResidualNorm(pcg, &final_res);
-    std::vector<double> xvals(m);
-    HYPRE_IJVectorGetValues(xij, m, idx.data(), xvals.data());
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool, Eigen::VectorXd& current) {
+            HYPRE_PCGSetTol(pcg, request);
+            HYPRE_PCGSetMaxIter(pcg, remaining);
+            HYPRE_ParCSRPCGSolve(pcg, parA, parB, parX);
+            HYPRE_Int used = 0;
+            HYPRE_PCGGetNumIterations(pcg, &used);
+            current.resize(m);
+            HYPRE_IJVectorGetValues(xij, m, idx.data(), current.data());
+            return static_cast<int>(used);
+        });
     r.solve_time = t.elapsed();
     r.total_time = r.setup_time + r.solve_time;
     r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
 
-    r.iterations = static_cast<int>(iters_out);
     r.fillin = 0;
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     r.solve_vram_mb = read_vram_mb();   // device VRAM held at solve end (GPU AMG hierarchy
                                         // + ParCSR operator + PCG vectors), before destroy.
 
-    Eigen::VectorXd x(n);
-    x.head(m) = Eigen::Map<Eigen::VectorXd>(xvals.data(), m);
     if (is_laplacian)
         center_if_laplacian(x);  // sol[pinned]=0 already from the solve; no x(n-1) hack
     Eigen::VectorXd res = b - L * x;
@@ -3102,7 +3205,7 @@ int main(int argc, char** argv) {
         print(median_run([&]() { return run_cg_icc(L, b, graph_name, args.tol, args.maxiter); }, R));
 
     if (args.solvers.count("ldlt"))
-        print(median_run([&]() { return run_ldlt(L, b, graph_name); }, R));
+        print(median_run([&]() { return run_ldlt(L, b, graph_name, args.tol, args.maxiter); }, R));
 
 #ifdef HAVE_RCHOL
     if (args.solvers.count("rchol"))
@@ -3120,7 +3223,7 @@ int main(int argc, char** argv) {
 
 #ifdef HAVE_CHOLMOD
     if (args.solvers.count("cholmod"))
-        print(median_run([&]() { return run_cholmod(L, b, graph_name); }, R));
+        print(median_run([&]() { return run_cholmod(L, b, graph_name, args.tol, args.maxiter); }, R));
 #endif
 
     // Black-box AMG solvers route through run_desing(--desing). auto = AMGCL split,

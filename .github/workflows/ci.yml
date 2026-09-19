@@ -21,6 +21,8 @@ on:
       - 'cmake/**'
       - 'benchmarks/**/*.py'
       - 'benchmarks/requirements.txt'
+      - 'benchmarks/src/original_stop.h'
+      - 'benchmarks/tests/test_original_stop.cpp'
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
@@ -34,6 +36,8 @@ on:
       - 'cmake/**'
       - 'benchmarks/**/*.py'
       - 'benchmarks/requirements.txt'
+      - 'benchmarks/src/original_stop.h'
+      - 'benchmarks/tests/test_original_stop.cpp'
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
@@ -62,6 +66,10 @@ jobs:
         run: python -m pip install -r benchmarks/requirements.txt
       - name: Test harness
         run: python -B -m unittest discover -s benchmarks/tests -p 'test_*.py'
+      - name: Test native stopping policy without competitor dependencies
+        run: |
+          g++ -std=c++17 -O2 benchmarks/tests/test_original_stop.cpp -o "$RUNNER_TEMP/original_stop_tests"
+          "$RUNNER_TEMP/original_stop_tests"
 
   library:
     name: library (${{ matrix.name }}, build + ctest)

@@ -10,6 +10,24 @@ selected measurements. Local `results/cells/` is not automatically the published
   or SDDM class. Preserve the original operator/RHS and component-wise nullspace.
 - Accept only when **every retained true residual** `||b-Ax||/||b|| ≤ 1e-8`.
   A recurrence residual is insufficient. Keep shifted CMG series separately labelled.
+- `original-v1` stopping checks that residual at native solver exits and continues
+  when needed, within one total iteration budget and at most eight attempts.
+  Disconnected split solves apply the budget per component. Direct solvers count
+  a solve/refinement as one work unit. Exhaustion remains `not_converged`.
+- Solve includes required stopping checks and retries. `stop_check_s` reports
+  residual-evaluation time **within** Solve; do not subtract it for comparisons.
+  `solve_passes` (or ParAC's `stop_checks`) explains additional work. No new
+  host check/transfer is inserted into every GPU iteration. Independent final
+  grading remains outside timing. Factors/hierarchies are retained; the packed
+  CMG API is the exception and reports/charges every repeated setup explicitly.
+- CPU apxchol, Eigen CG, AMGCL and Hypre warm-start native retries. GPU apxchol
+  and RCHOL reuse setup with cold native restarts. Julia AC/AC2 reuse their native
+  solver closures; Julia CG, regularized ICC and direct methods can use residual
+  corrections. These are adapter stopping policies, not vendor kernel rewrites.
+- New rows must carry `stop_contract=original-v1`. Old timings remain historical
+  evidence, but cannot resume or enter current comparisons as if their cheaper
+  stopping rule were the same measurement. Re-run affected comparisons; never
+  retroactively add/subtract a modeled checking cost.
 - Select one coherent median-total repetition after explicit warmups; never select
   timing fields independently or minimize across configurations.
 - Setup includes required conversion, grounding, ordering, uploads, factor/hierarchy
@@ -40,7 +58,10 @@ private Daint study and this maintained source port have separate provenance;
 do not subtract old overhead retrospectively or relabel historical cells.
 The bundled CPU build needs MKL; Daint's separately labelled portable implementation
 has a serial solve. Positive stored Physics off-diagonals are unsupported.
-Failed/capped calibration must not launch fallback-tolerance retained runs.
+ParAC patch 0007 checks original accuracy inside each measured solve. There is
+no untimed, matrix-specific tolerance calibration before retained runs. Julia
+uses fixed tiny connected/disconnected/SDDM fixtures to warm its native closure
+types before timing; these fixtures do not depend on the measured matrix.
 
 Canonical MATLAB CMG is unavailable on ARM64. The separate `cmg_packed` port is
 serial, uses private generated source, and is not canonical MATLAB CMG: even

@@ -29,7 +29,7 @@ def record(status="complete", *, sha="old", cap=None,
             "device": device,
         },
         "matrix_meta": {"kind": "graph"},
-        "metrics": {"total_s": 1.0},
+        "metrics": {"total_s": 1.0, "stop_contract": "original-v1"},
         "provenance": {"git_sha": sha},
         "status": status,
     }
@@ -208,6 +208,24 @@ class ImportBoundaryTest(unittest.TestCase):
                 self.assertEqual(completed.stdout, "")
                 self.assertEqual(completed.stderr, "")
 
+
+
+
+class StoppingContractResumeTest(unittest.TestCase):
+    def test_same_commit_cannot_reuse_older_stopping_costs(self):
+        current = record(sha="current")
+        old = json.loads(json.dumps(current))
+        old["metrics"].pop("stop_contract")
+        with mock.patch.object(stale_cells,"sha_contains",return_value=True):
+            self.assertFalse(stale_cells.cell_is_stale(current))
+            self.assertTrue(stale_cells.cell_is_stale(old))
+
+    def test_standalone_runners_reject_older_completed_cache(self):
+        with tempfile.TemporaryDirectory() as store, mock.patch.object(rc,"CELLS",store):
+            rc.emit_cell("audit","m","amgcl","","complete",{"total_s":1},1,"cpu",{})
+            self.assertFalse(rc.cell_done("audit","m","amgcl","",1,"cpu"))
+            rc.emit_cell("audit","m","amgcl","","complete",{"total_s":1,"stop_contract":"original-v1"},1,"cpu",{})
+            self.assertTrue(rc.cell_done("audit","m","amgcl","",1,"cpu"))
 
 if __name__ == "__main__":
     unittest.main()

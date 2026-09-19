@@ -1,6 +1,6 @@
 #include "cmg_setup_packed.h"
 #include <chrono>
-// The standalone driver is single-call, serial; no global instrumentation API.
+// The standalone serial driver accumulates every setup across bounded retries.
 double cmg_setup_seconds = 0.0;
 int cmg_setup_calls = 0;
 bool cmg_hierarchy_valid = false;

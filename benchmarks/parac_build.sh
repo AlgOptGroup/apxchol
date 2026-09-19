@@ -47,6 +47,10 @@ grep -Fq 'input_transform_s=transform_s' "$PARAC_CHECKOUT/cpu_implementation/wri
     echo "missing ParAC patch 0006 (in-memory Graph producer/accounting intervals)" >&2; exit 1;
 }
 
+grep -Fq 'APX stop contract: original-v1' "$PARAC_CHECKOUT/experiment/custom_cg.hpp" || {
+    echo "missing ParAC patch 0007 (original-system stopping)" >&2; exit 1;
+}
+
 cd "$PARAC_CHECKOUT/experiment"
 g++ -std=c++20 -O3 \
     -include climits -include cstdint \
@@ -59,4 +63,4 @@ g++ -std=c++20 -O3 \
 
 echo "built: $PWD/driver"
 echo "run:   LD_LIBRARY_PATH=$MKLROOT/lib:$IOMPDIR MKL_NUM_THREADS=1 \\"
-echo "       PARAC_REL_TOL=<calibrated> taskset -c 0-15 ./driver <matrix-amd.mtx> 16 \"\" [1]"
+echo "       PARAC_TARGET_TOL=1e-8 taskset -c 0-15 ./driver <matrix-amd.mtx> 16 \"\" [1]"

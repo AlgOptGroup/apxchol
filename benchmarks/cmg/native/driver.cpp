@@ -1,4 +1,5 @@
 #include "cmg_pcg_packed.h"
+#include "../../src/original_stop.h"
 #include "cmg_setup_packed_initialize.h"
 #include "cmg_setup_packed_terminate.h"
 #include "sparse1.h"
@@ -76,25 +77,41 @@ int main(int argc, char **argv) try {
     int flag = -99, iter = -1, setup_flag = -99;
     double relres = std::numeric_limits<double>::infinity();
     const auto begin = std::chrono::steady_clock::now();
-    cmg_pcg_packed(&generated_A, rhs, tol, static_cast<double>(maxit),
-                   generated_x, &flag, &relres, &iter, &setup_flag);
-    const double total_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
-    if (cmg_setup_calls != 1) throw std::runtime_error("expected exactly one instrumented setup call");
-    if (generated_x.size(0) != A.rows()) throw std::runtime_error("unexpected solution length");
-    Eigen::VectorXd x(A.rows());
-    for (int k = 0; k < generated_x.size(0); ++k) x[k] = generated_x[k];
+    Eigen::VectorXd x = Eigen::VectorXd::Zero(A.rows());
     const double bnorm = b.stableNorm();
-    const double rnorm = (A*x-b).stableNorm();
-    const double true_relres = bnorm == 0.0 ? rnorm : rnorm/bnorm;
-    const bool converged = cmg_hierarchy_valid && flag == 0 && x.allFinite() &&
+    auto stop = bench_stop::run(tol, maxit,
+        [&](double request, int remaining, bool) {
+            // Generated API owns its hierarchy and exposes no reusable handle.
+            // Every rebuild is retained in cmg_setup_seconds/setup_calls.
+            const int previous_setups = cmg_setup_calls;
+            cmg_pcg_packed(&generated_A, rhs, request, static_cast<double>(remaining),
+                           generated_x, &flag, &relres, &iter, &setup_flag);
+            if (cmg_setup_calls != previous_setups + 1)
+                throw std::runtime_error("expected one setup per generated solve");
+            if (generated_x.size(0) != A.rows()) throw std::runtime_error("unexpected solution length");
+            for (int k = 0; k < generated_x.size(0); ++k) x[k] = generated_x[k];
+            return cmg_hierarchy_valid ? iter : 0;
+        }, [&] {
+            if (!cmg_hierarchy_valid || !x.allFinite())
+                return std::numeric_limits<double>::infinity();
+            const double rn = (A*x-b).stableNorm();
+            return bnorm == 0.0 ? rn : rn/bnorm;
+        });
+    const double total_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    // Independent final grading remains outside the measured solve interval.
+    const double final_rnorm = (A*x-b).stableNorm();
+    const double true_relres = bnorm == 0.0 ? final_rnorm : final_rnorm/bnorm;
+    const bool converged = cmg_hierarchy_valid && x.allFinite() &&
                            std::isfinite(true_relres) && true_relres <= tol;
     std::cout << std::setprecision(17) << "CMG n=" << A.rows() << " nnz=" << A.nonZeros()
               << " hierarchy_valid=" << cmg_hierarchy_valid << " levels=" << cmg_levels
-              << " setup_flag=" << setup_flag << " pcg_flag=" << flag << " iter=" << iter
+              << " setup_flag=" << setup_flag << " pcg_flag=" << flag << " iter=" << stop.iterations
               << " reported_relres=" << relres << " true_relres=" << true_relres
               << " adaptation_s=" << adaptation_s
               << " setup_s=" << cmg_setup_seconds+adaptation_s << " solve_s=" << total_s-cmg_setup_seconds
               << " total_s=" << total_s+adaptation_s << " setup_calls=" << cmg_setup_calls
+              << " stop_contract=" << bench_stop::contract
+              << " solve_passes=" << stop.passes << " stop_check_s=" << stop.check_seconds
               << " converged=" << converged << '\n';
     if (argc == 6) {
         std::ofstream out(argv[5]);

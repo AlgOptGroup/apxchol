@@ -1,4 +1,4 @@
-"""Input and calibration checks shared by the two ParAC benchmark runners."""
+"""Input eligibility checks shared by the two ParAC benchmark runners."""
 import math
 
 
@@ -44,30 +44,3 @@ def require_original_physics(path):
             raise UnsupportedOperator(
                 f"unsupported original physics operator: {positive} positive stored "
                 "off-diagonal entries; ParAC would replace them with -abs(weight)")
-
-
-class CalibrationFailed(ValueError):
-    def __init__(self, reason, probe):
-        super().__init__(reason)
-        self.probe = dict(probe)
-
-
-def calibrated_cpu_tolerance(probe, tau, max_iter):
-    """Keep ParAC's existing rescaling, only after a successful finite probe."""
-    try:
-        iterations = int(probe["iters"])
-        recurrence, residual = float(probe["recur"]), float(probe["rr"])
-        if probe.get("returncode", 0) != 0:
-            raise ValueError("driver failed")
-        if not 0 <= iterations < max_iter:
-            raise ValueError("iteration limit reached")
-        if probe.get("recurrence_reached") not in (None, True, 1, "1"):
-            raise ValueError("recurrence tolerance was not reached")
-        if not all(math.isfinite(x) and x > 0 for x in (recurrence, residual, tau)):
-            raise ValueError("invalid residual statistics")
-        tolerance = (tau * recurrence / residual) ** 2
-        if not math.isfinite(tolerance) or tolerance <= 0:
-            raise ValueError("invalid derived tolerance")
-        return tolerance
-    except (KeyError, TypeError, ValueError, OverflowError) as error:
-        raise CalibrationFailed(f"ParAC calibration failed: {error}", probe) from error

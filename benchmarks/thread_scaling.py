@@ -101,6 +101,8 @@ def done(mid, solver, config, t):
            ("git_sha", "repeat", "warmup", "timing_protocol")):
         return False
     status = record.get("status")
+    if status in {"complete", "not_converged"} and (record.get("metrics") or {}).get("stop_contract") != "original-v1":
+        return False
     if status == "timeout" and not record.get("timeout_cap_s"):
         return False
     return status not in RERUN_STATUSES and status in (
@@ -165,6 +167,8 @@ def run_cpp(margs, solver, config, reg, t, mid="matrix"):
         return "failed", {**m, "returncode": p.returncode, "stderr_tail": p.stderr[-4000:]}
     # THE GRADING RULE (benchmarks/README.md): true relative residual <= exactly
     # tol, same for every solver, no grace factor. Kept in sync with rc.classify.
+    if m.get("stop_contract") != "original-v1":
+        return "failed", {**m, "stopping_failure": "binary lacks original-v1 contract"}
     return rc.classify(m, TOL)
 
 def _prepare_parac(mid, deadline=None):
@@ -242,10 +246,8 @@ def run_parac(mid, t):
                 for _ in range(REPS)]
         nnz = 0
         for amd, physics in operands:
-            rel_tol = parac._calibrate_rel_tol(
-                amd, physics, tau=float(TOL), deadline=deadline)
             runs = [parac._run_once_cpu(
-                        amd, physics, rel_tol=rel_tol, deadline=deadline)
+                        amd, physics, deadline=deadline)
                     for _ in range(REPS)]
             ok = [run for run in runs
                   if run["factor_setup"] and run["adapter"] and run["solve"]
@@ -257,6 +259,8 @@ def run_parac(mid, t):
                                  run.get("returncode", 0) == 0)
                 rhs_norm = float(run["rhs_norm"])
                 abs_residual = float(run["rr"]) * rhs_norm
+                rep["stop_check_s"] = rep.get("stop_check_s", 0.0) + float(run["stop_check_s"])
+                rep["stop_checks"] = max(rep.get("stop_checks", 0), int(run["stop_checks"]))
                 rep["adapter"] += float(run["adapter"])
                 rep["factor_setup"] += float(run["factor_setup"])
                 rep["solve"] += float(run["solve"]) / 1000.0
@@ -277,15 +281,14 @@ def run_parac(mid, t):
                        parac._residual_pass((rep["residual_sq"] / rep["rhs_sq"]) ** 0.5,
                                             float(TOL)) for rep in reps)
         return ("complete" if accepted else "not_converged"), dict(
+            stop_contract="original-v1", stop_check_s=chosen["stop_check_s"],
+            stop_checks=chosen["stop_checks"],
             n=int(rc.MATRICES[mid]["n"]), nnz=nnz, total_s=total,
             setup_s=setup, solve_s=solve, iters=chosen["iters"],
             rel_res=rel_res, representative_repeat=rep_index + 1,
             rhs_norm=chosen["rhs_sq"] ** 0.5)
     except parac.UnsupportedOperator as error:
         return "n/a", {"total_s": None, "parac_failure_reason": str(error)}
-    except parac.CalibrationFailed as error:
-        return "failed", {"total_s": None, "parac_failure_reason": str(error),
-                          "parac_calibration_probe": error.probe}
     except (ValueError, OSError) as error:
         return "failed", {"total_s": None, "parac_failure_reason": str(error)}
     except subprocess.TimeoutExpired:

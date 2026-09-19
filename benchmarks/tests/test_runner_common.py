@@ -180,5 +180,32 @@ class MatrixExportTest(unittest.TestCase):
                 self.assertEqual(list(Path(directory).iterdir()), [])
 
 
+
+
+class OriginalStoppingReceiptTest(unittest.TestCase):
+    def test_cpp_and_external_csv_trailers(self):
+        core = "AMGCL,m,10,20,1,2,3,4,5e-9,0,1"
+        for extras in ("", ",8,-1,1,1,5e-9"):
+            row = rc.parse_csv(core + extras + ",original-v1,2,0.25\n")
+            self.assertEqual(row["stop_contract"], "original-v1")
+            self.assertEqual(row["solve_passes"], 2)
+            self.assertEqual(row["stop_check_s"], 0.25)
+            self.assertEqual(row["solve_s"], 2)
+
+    def test_checks_cannot_be_outside_the_solve_interval(self):
+        for cost in ("-1", "3", "nan"):
+            self.assertIsNone(rc.parse_csv("AMGCL,m,10,20,1,2,3,4,5e-9,0,1,original-v1,1,"+cost+"\n"))
+
+    def test_old_rows_remain_readable_without_becoming_new_measurements(self):
+        row = rc.parse_csv("AMGCL,m,10,20,1,2,3,4,5e-9,0,1\n")
+        self.assertNotIn("stop_contract",row)
+
+    def test_roundtrip_precision_keeps_a_one_ulp_rejection(self):
+        import math
+        over = math.nextafter(1e-8, math.inf)
+        row = rc.parse_csv(f"AMGCL,m,10,20,1,2,3,4,9e-9,0,1,0,-1,3,1,{over:.17e},original-v1,1,0.25\n")
+        status, _ = rc.classify(row, 1e-8)
+        self.assertEqual(status, "not_converged")
+
 if __name__ == "__main__":
     unittest.main()

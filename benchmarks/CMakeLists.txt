@@ -355,6 +355,8 @@ if (BUILD_GPU_RCHOL)
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0005-compensate-physics-global-sum.patch
             COMMAND git apply
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0006-separate-graph-algorithm-preparation.patch
+            COMMAND git apply
+                    ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0007-original-residual-stopping.patch
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
@@ -391,6 +393,8 @@ if (BUILD_GPU_RCHOL)
     _parac_require_marker(_parac_cpu_prep "APX adapter preprocessing time:" "patch 0002")
     _parac_require_marker(_parac_gpu_driver "APX GPU factor setup time:" "patch 0003")
     _parac_require_marker(_parac_gpu_solver "APX GPU solve phase time:" "patch 0003")
+    _parac_require_marker(_parac_cpu_solver "APX stop contract: original-v1" "patch 0007")
+    _parac_require_marker(_parac_gpu_solver "APX stop contract: original-v1" "patch 0007")
     _parac_require_marker(_parac_gpu_driver "APX CUDA init time:" "patch 0004")
 
     # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
@@ -702,3 +706,6 @@ set_tests_properties(contract_rejects_wrong_class PROPERTIES WILL_FAIL TRUE)
 add_test(NAME contract_rejects_class_on_graph
          COMMAND benchmark --graph grid --n 32 --class sddm --solver apxchol_v1 --maxiter 1)
 set_tests_properties(contract_rejects_class_on_graph PROPERTIES WILL_FAIL TRUE)
+
+add_executable(original_stop_tests tests/test_original_stop.cpp)
+add_test(NAME contract_original_stopping COMMAND original_stop_tests)

@@ -735,11 +735,19 @@ def parse_csv(out):
     rows = [l for l in out.splitlines() if l and not l.startswith("solver,") and "," in l]
     if not rows: return None
     f = rows[-1].split(",")
+    stopping = f[-3:] if len(f) >= 14 and f[-3].startswith("original-v") else None
+    if stopping: f = f[:-3]
     if len(f) < 11: return None
     try:
         d = dict(n=int(f[2]), nnz=int(f[3]), setup_s=float(f[4]), solve_s=float(f[5]),
                  total_s=float(f[6]), iters=int(f[7]), rel_res=float(f[8]),
                  fillin=float(f[9]), us_per_nnz=float(f[10]))
+        if stopping:
+            d.update(stop_contract=stopping[0], solve_passes=int(stopping[1]),
+                     stop_check_s=float(stopping[2]))
+            if (not 0 <= d["solve_passes"] <= 8 or not math.isfinite(d["stop_check_s"])
+                    or not 0 <= d["stop_check_s"] <= d["solve_s"] * 1.00001 + 1e-12):
+                return None
         # Upstream parallel RCHOL requires a power-of-two worker count.  Its
         # adapter therefore reports the actual choice in the solver label
         # (for example requested T=72 -> ``t=64``).  Preserve that fact in the
@@ -779,10 +787,9 @@ def classify(m, tol):
 
     A solver whose OWN stopping test is optimistic (preconditioned-residual
     ratio, absolute test, recurrence estimate) is not accommodated by relaxing
-    the grade. The fix is to calibrate the tolerance handed to its loop
-    (ParAC-CPU/GPU, AC-sddm), or to patch its convergence test to the true
-    residual (gpu_rchol, benchmarks/patches/), or — failing both — to record
-    the cell `not_converged` with its true residual. That is an honest result.
+    the grade. Current adapters check the original residual inside Solve and
+    continue under tighter native thresholds within one total iteration budget.
+    Failure to reach the target remains `not_converged` with the true residual.
 
     n/a = the C++ side's unsupported-combo sentinel (iters/rel_res = -1),
     distinct from not_converged (ran, missed tol) and failed (no CSV row)."""
@@ -860,7 +867,13 @@ def cell_status(family, mid, solver, config, threads, device):
     except (json.JSONDecodeError, OSError): return None
 
 def cell_done(family, mid, solver, config, threads, device, terminal=DEFAULT_TERMINAL):
-    return cell_status(family, mid, solver, config, threads, device) in terminal
+    path = cell_path(family, mid, solver, config, threads, device)
+    try:
+        with open(path) as handle: cell = json.load(handle)
+    except (OSError, json.JSONDecodeError): return False
+    if cell.get("status") in {"complete", "not_converged"}:
+        if (cell.get("metrics") or {}).get("stop_contract") != "original-v1": return False
+    return cell.get("status") in terminal
 
 
 # ── peak-VRAM sidecar (GPU axis) ────────────────────────────────────────────────

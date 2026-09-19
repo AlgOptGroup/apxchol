@@ -272,6 +272,69 @@ function na_result(sname, graph_name, n, nnz_A, reason)
                        0.0, 0.0, 0.0, -1, -1.0, 0.0, 0.0)
 end
 
+# The same bounded native-retry policy as src/original_stop.h. Component
+# discovery belongs to setup; checks and retries form one contiguous solve timer.
+function operator_components(A)
+    n = size(A, 1)
+    seen = falses(n); components = Vector{Vector{Int}}()
+    for root in 1:n
+        seen[root] && continue
+        stack = [root]; seen[root] = true; nodes = Int[]
+        while !isempty(stack)
+            u = pop!(stack); push!(nodes, u)
+            for k in nzrange(A, u)
+                v = rowvals(A)[k]
+                if v != u && nonzeros(A)[k] != 0 && !seen[v]
+                    seen[v] = true; push!(stack, v)
+                end
+            end
+        end
+        push!(components, nodes)
+    end
+    components
+end
+
+function project_components!(x, components)
+    for nodes in components
+        mu = sum(x[i] for i in nodes) / length(nodes)
+        for i in nodes; x[i] -= mu; end
+    end
+    x
+end
+
+function original_relative_residual(A, b, x, bn, components)
+    xc = project_components!(copy(x), components)
+    residual = project_components!(b - A * xc, components)
+    norm(residual) / bn
+end
+
+function checked_solve(pass, A, b, tol, maxiter, components)
+    begin_ns = time_ns()
+    x = zeros(length(b)); bn = norm(b); bn = bn > 0 ? bn : 1.0
+    iterations = 0; passes = 0; check_s = 0.0; request = tol; relres = Inf
+    while true
+        if iterations < maxiter
+            x, used = pass(request, maxiter - iterations, passes > 0, x)
+            0 <= used <= maxiter - iterations || error("native iteration budget violated")
+            iterations += used; passes += 1
+        end
+        check_ns = time_ns()
+        relres = original_relative_residual(A, b, x, bn, components)
+        check_s += (time_ns() - check_ns) * 1e-9
+        if !isfinite(relres) || relres <= tol || iterations >= maxiter || passes >= 8
+            break
+        end
+        next = max(eps(Float64), request * 0.1)
+        next < request || break
+        request = next
+    end
+    seconds = (time_ns()-begin_ns)*1e-9
+    # Recompute final grading outside Solve; the stopping checks above stay charged.
+    final_residual = original_relative_residual(A, b, x, bn, components)
+    (x=x, iterations=iterations, passes=passes, residual=final_residual,
+     check_s=check_s, seconds=seconds)
+end
+
 function run_approxchol_operator(A, b, graph_name, tol, maxiter, is_lap; variant=:ac)
     # Solve A x = b with the AC preconditioner, on the operator EXACTLY as it
     # was handed to us, and score the residual against that same A.
@@ -307,14 +370,21 @@ function run_approxchol_operator(A, b, graph_name, tol, maxiter, is_lap; variant
         return na_result(sname, graph_name, n, nnz_A, reason)
     end
 
+    if iszero(norm(b))
+        return BenchResult(sname, graph_name, n, nnz_A, 0.0, 0.0, 0.0,
+                           0, 0.0, 0.0, 0.0, 0, 0.0)
+    end
     pcg_its = [0]
     t_setup = 0.0
+    components = Vector{Vector{Int}}()
+    tolerance_scale = 1.0
     solver = nothing
     if is_lap
         # Singular Laplacian: recover the adjacency it is the Laplacian OF
         # (A_adj = Diag(diag(A)) - A, exact, no reinterpretation) and use
         # approxchol_lap, which is Laplacian-native.
         t_setup = @elapsed begin
+            components = operator_components(A)
             # This operator-to-adjacency conversion is required by Laplacians.jl's
             # public approxchol_lap entry point, so it belongs to adapter setup.
             adj = sparse(Diagonal(diag(A))) - A
@@ -345,33 +415,24 @@ function run_approxchol_operator(A, b, graph_name, tol, maxiter, is_lap; variant
         # nonnegatively-weighted graph that approxChol assumes.
         bn = norm(b)
         baug = sqrt(bn^2 + sum(b)^2)
-        tol_eff = baug > 0 ? tol * bn / baug : tol
+        tolerance_scale = baug > 0 ? bn / baug : 1.0
+        tol_eff = tol * tolerance_scale
         @printf(stderr, "[ac] SDDM wrapper: |b|=%.3g, |[b;-sum b]|=%.3g -> requesting tol %.3g so the TRUE residual meets %.3g\n", bn, baug, tol_eff, tol)
         t_setup = @elapsed begin
             solver = approxchol_sddm(A; tol=tol_eff, maxits=maxiter, params=params, pcgIts=pcg_its)
         end
     end
 
-    t_solve = @elapsed begin
-        x = solver(b)
+    stop = checked_solve(A, b, tol, maxiter, components) do request, remaining, warm, x
+        pcg_its[1] = 0
+        solution = solver(b; tol=request*tolerance_scale, maxits=remaining, pcgIts=pcg_its)
+        solution, pcg_its[1]  # native closure has no warm-start argument
     end
-
-    iters = isempty(pcg_its) ? 0 : pcg_its[end]
-    # Only a singular Laplacian's solution and residual are defined modulo the
-    # constant vector; a full-rank operator's are not, and centring them would
-    # corrupt a unique solution.
-    if is_lap
-        x .-= mean(x)
-    end
-    r = b - A * x
-    if is_lap
-        r .-= mean(r)
-    end
-    rel_res = norm(r) / max(norm(b), 1e-16)
-
     return BenchResult(sname, graph_name, n, nnz_A,
-        t_setup, t_solve, t_setup + t_solve,
-        iters, rel_res, 0.0, (t_setup + t_solve) / nnz_A * 1e6)
+        t_setup, stop.seconds, t_setup + stop.seconds,
+        stop.iterations, stop.residual, 0.0, (t_setup + stop.seconds) / nnz_A * 1e6,
+        stop.passes, stop.check_s)
+
 end
 
 # ── Benchmark result ──────────────────────────────────
@@ -388,17 +449,20 @@ struct BenchResult
     rel_residual::Float64
     fillin::Float64
     us_per_nnz::Float64
+    solve_passes::Int
+    stop_check_seconds::Float64
 end
+BenchResult(s,g,n,nz,a,b,c,i,r,f,u) = BenchResult(s,g,n,nz,a,b,c,i,r,f,u,0,0.0)
 
 function print_header_csv()
-    println("solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz")
+    println("solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,stop_contract,solve_passes,stop_check_s")
 end
 
 function print_result_csv(r::BenchResult)
-    @printf("%s,%s,%d,%d,%.6e,%.6e,%.6e,%d,%.6e,%.4f,%.4f\n",
+    @printf("%s,%s,%d,%d,%.6e,%.6e,%.6e,%d,%.17e,%.4f,%.4f,original-v1,%d,%.9e\n",
         r.solver_name, r.graph_name, r.n, r.nnz,
         r.setup_time, r.solve_time, r.total_time,
-        r.iterations, r.rel_residual, r.fillin, r.us_per_nnz)
+        r.iterations, r.rel_residual, r.fillin, r.us_per_nnz, r.solve_passes, r.stop_check_seconds)
 end
 
 function print_header_pretty()
@@ -418,92 +482,74 @@ end
 # ── Solver runners ────────────────────────────────────
 
 function run_approxchol(adj, L, b, graph_name, tol, maxiter; variant=:ac)
-    n = size(L, 1)
-    nnz_L = nnz(L)
-
-    # Build preconditioner
-    if variant == :ac2
-        params = ApproxCholParams(:deg, 5, 2, 2)
-        sname = "AC2 [Kyng16;Jl]"
-    else
-        params = ApproxCholParams(:deg)
-        sname = "AC [Kyng16;Jl]"
-    end
-
-    # Laplacians.jl records the PCG iteration count via pcgIts[1] = its, which it
-    # SKIPS when the array is empty -- so pre-size to [0] (not Int[]) or iters stays 0.
-    pcg_its = [0]
-
-    t_setup = @elapsed begin
-        solver = approxchol_lap(adj; tol=tol, maxits=maxiter, params=params, pcgIts=pcg_its)
-    end
-
-    t_solve = @elapsed begin
-        x = solver(b)
-    end
-
-    iters = isempty(pcg_its) ? 0 : pcg_its[end]
-    x .-= mean(x)
-
-    r = b - L * x
-    r .-= mean(r)
-    rel_res = norm(r) / max(norm(b), 1e-16)
-
-    return BenchResult(sname, graph_name, n, nnz_L,
-        t_setup, t_solve, t_setup + t_solve,
-        iters, rel_res, 0.0, (t_setup + t_solve) / nnz_L * 1e6)
+    run_approxchol_operator(L, b, graph_name, tol, maxiter, true; variant=variant)
 end
 
-function run_cg_julia(L, b, graph_name, tol, maxiter)
-    n = size(L, 1)
-    nnz_L = nnz(L)
-
-    # Pin one vertex by removing last row/col
-    m = n - 1
-    Lsub = L[1:m, 1:m]
-    bsub = b[1:m]
-    bsub = bsub .- mean(bsub)
-
-    pcg_its = Int[]
-
-    t = @elapsed begin
-        x_sub = Laplacians.cg(Lsub, bsub; tol=tol, maxits=maxiter, pcgIts=pcg_its)
+function run_grounded_julia(L, b, graph_name, tol, maxiter, direct)
+    components = Vector{Vector{Int}}(); free = Int[]; sub = spzeros(0,0); factor = nothing
+    setup_s = @elapsed begin
+        components = operator_components(L)
+        pinned = Set(maximum(nodes) for nodes in components)
+        free = [i for i in axes(L,1) if !(i in pinned)]
+        sub = L[free,free]
+        if direct && !isempty(free); factor = cholesky(sub); end
     end
-
-    x = vcat(x_sub, 0.0)
-    x .-= mean(x)
-    iters = isempty(pcg_its) ? 0 : pcg_its[end]
-
-    r = b - L * x
-    r .-= mean(r)
-    rel_res = norm(r) / max(norm(b), 1e-16)
-
-    return BenchResult("CG [Julia]", graph_name, n, nnz_L,
-        0.0, t, t, iters, rel_res, 0.0, t / nnz_L * 1e6)
+    its = [0]
+    stop = checked_solve(L, b, tol, maxiter, components) do request, remaining, warm, x
+        isempty(free) && return (zeros(length(b)), 0)
+        if direct
+            rhs = warm ? b - L*x : b
+            update = factor \ rhs[free]
+            if warm; x[free] += update; else x[free] = update; end
+            x, 1
+        else
+            its[1] = 0
+            if warm
+                # Native CG has an absolute small-rho guard. Normalize the
+                # correction RHS, then undo that scaling on the returned step.
+                residual = (b-L*x)[free]
+                scale = norm(residual)
+                if scale > 0
+                    x[free] += scale * Laplacians.cg(sub, residual/scale;
+                        tol=request, maxits=remaining, pcgIts=its)
+                end
+            else
+                x[free] = Laplacians.cg(sub, b[free]; tol=request, maxits=remaining, pcgIts=its)
+            end
+            x, its[1]
+        end
+    end
+    name = direct ? "Chol [Julia]" : "CG [Julia]"
+    BenchResult(name, graph_name, size(L,1), nnz(L), setup_s, stop.seconds,
+        setup_s+stop.seconds, stop.iterations, stop.residual, 0.0,
+        (setup_s+stop.seconds)/nnz(L)*1e6, stop.passes, stop.check_s)
 end
+run_cg_julia(L,b,name,tol,maxiter) = run_grounded_julia(L,b,name,tol,maxiter,false)
+run_cholesky_julia(L,b,name,tol,maxiter) = run_grounded_julia(L,b,name,tol,maxiter,true)
 
-function run_cholesky_julia(L, b, graph_name)
-    n = size(L, 1)
-    nnz_L = nnz(L)
-
-    m = n - 1
-    Lsub = L[1:m, 1:m]
-    bsub = b[1:m]
-    bsub = bsub .- mean(bsub)
-
-    t_setup = @elapsed F = cholesky(Lsub)
-    t_solve = @elapsed x_sub = F \ bsub
-
-    x = vcat(x_sub, 0.0)
-    x .-= mean(x)
-
-    r = b - L * x
-    r .-= mean(r)
-    rel_res = norm(r) / max(norm(b), 1e-16)
-
-    return BenchResult("Chol [Julia]", graph_name, n, nnz_L,
-        t_setup, t_solve, t_setup + t_solve,
-        1, rel_res, 0.0, (t_setup + t_solve) / nnz_L * 1e6)
+# Warm native closure types for connected, disconnected and augmented solves.
+# These fixed tiny fixtures are independent of the measured matrix/tolerance:
+# no data-dependent accuracy calibration is hidden outside Solve.
+function warm_solver_paths(solvers)
+    L = lap(grid_graph_adj(8,8))
+    disconnected = blockdiag(L, sparse([1.0 -1.0; -1.0 1.0]), spzeros(1,1))
+    fixtures = [(L,true), (disconnected,true), (L + 0.1I,false)]
+    calls = 0
+    for name in solvers
+        if name == "ac" || name == "ac2"
+            for (A, is_lap) in fixtures
+                rhs = A * randn(MersenneTwister(0),size(A,1))
+                run_approxchol_operator(A,rhs,"warmup",1e-8,100,is_lap;
+                                       variant=name == "ac2" ? :ac2 : :ac)
+                calls += 1
+            end
+        elseif name == "cg" || name == "chol"
+            rhs = L * randn(MersenneTwister(0),size(L,1))
+            run_grounded_julia(L,rhs,"warmup",1e-8,100,name == "chol")
+            calls += 1
+        end
+    end
+    @printf(stderr,"JIT_WARMUP fixed_fixture_calls=%d\n",calls)
 end
 
 # ── Main ──────────────────────────────────────────────
@@ -556,17 +602,7 @@ function main_operator(opts)
     opts["csv"] ? print_header_csv() : print_header_pretty()
     pf = opts["csv"] ? print_result_csv : print_result_pretty
 
-    # JIT warmup on a tiny operator, so compilation stays out of the timings.
-    warmup_L = lap(grid_graph_adj(5, 5))
-    warmup_b = warmup_L * randn(MersenneTwister(0), size(warmup_L, 1))
-    warmup_b .-= mean(warmup_b)
-    for s in solvers_to_run
-        try
-            (s == "ac" || s == "ac2") &&
-                run_approxchol_operator(warmup_L, warmup_b, "warmup", 1e-6, 100, true;
-                                        variant = (s == "ac2" ? :ac2 : :ac))
-        catch; end
-    end
+    warm_solver_paths(solvers_to_run)
 
     for s in solvers_to_run
         try
@@ -649,26 +685,7 @@ function main()
 
     pf = opts["csv"] ? print_result_csv : print_result_pretty
 
-    # JIT warmup: run each solver once on a tiny graph so the timed run
-    # doesn't include compilation overhead
-    warmup_adj = grid_graph_adj(5, 5)
-    warmup_L = lap(warmup_adj)
-    warmup_b = randn(MersenneTwister(0), size(warmup_L, 1))
-    warmup_b = warmup_L * warmup_b
-    warmup_b .-= mean(warmup_b)
-    for s in solvers_to_run
-        try
-            if s == "ac"
-                run_approxchol(warmup_adj, warmup_L, warmup_b, "warmup", 1e-6, 100; variant=:ac)
-            elseif s == "ac2"
-                run_approxchol(warmup_adj, warmup_L, warmup_b, "warmup", 1e-6, 100; variant=:ac2)
-            elseif s == "cg"
-                run_cg_julia(warmup_L, warmup_b, "warmup", 1e-6, 100)
-            elseif s == "chol"
-                run_cholesky_julia(warmup_L, warmup_b, "warmup")
-            end
-        catch; end
-    end
+    warm_solver_paths(solvers_to_run)
 
     for s in solvers_to_run
         try
@@ -679,7 +696,7 @@ function main()
             elseif s == "cg"
                 run_cg_julia(L, b, graph_name, opts["tol"], opts["maxiter"])
             elseif s == "chol"
-                run_cholesky_julia(L, b, graph_name)
+                run_cholesky_julia(L, b, graph_name, opts["tol"], opts["maxiter"])
             else
                 @warn "Unknown solver: $s"
                 continue
@@ -691,4 +708,4 @@ function main()
     end
 end
 
-main()
+abspath(PROGRAM_FILE) == abspath(@__FILE__) && main()

@@ -38,16 +38,21 @@ def parse_driver(stdout, stderr):
     if len(lines) != 1:
         return None
     raw = dict(item.split("=", 1) for item in lines[0].split()[1:])
-    ints = {"n", "nnz", "hierarchy_valid", "levels", "setup_flag", "pcg_flag", "iter", "converged", "setup_calls"}
-    values = {key: int(value) if key in ints else float(value) for key, value in raw.items()}
-    required = {"n", "nnz", "hierarchy_valid", "pcg_flag", "iter", "converged", "setup_flag", "setup_calls", "setup_s", "solve_s", "total_s", "true_relres", "adaptation_s"}
+    ints = {"n", "nnz", "hierarchy_valid", "levels", "setup_flag", "pcg_flag", "iter", "converged", "setup_calls", "solve_passes"}
+    values = {key: value if key == "stop_contract" else int(value) if key in ints else float(value) for key, value in raw.items()}
+    required = {"n", "nnz", "hierarchy_valid", "pcg_flag", "iter", "converged", "setup_flag", "setup_calls", "setup_s", "solve_s", "total_s", "true_relres", "adaptation_s", "stop_contract", "solve_passes", "stop_check_s"}
     if not required.issubset(values):
         raise ValueError("incomplete native CMG output")
-    for key in ("setup_s", "solve_s", "total_s", "adaptation_s"):
+    if (values["stop_contract"] != "original-v1" or not 1 <= values["solve_passes"] <= 8
+            or values["setup_calls"] != values["solve_passes"]):
+        raise ValueError("invalid native CMG stopping contract")
+    for key in ("setup_s", "solve_s", "total_s", "adaptation_s", "stop_check_s"):
         if not math.isfinite(values[key]) or values[key] < 0:
             raise ValueError("invalid native CMG timing")
     if abs(values["total_s"] - values["setup_s"] - values["solve_s"]) > 1e-9 * max(1, values["total_s"]):
         raise ValueError("inconsistent setup/solve boundary")
+    if values["stop_check_s"] > values["solve_s"] * 1.00001 + 1e-12:
+        raise ValueError("CMG stopping checks omitted from Solve")
     rss = re.search(r"CMGRSS\s+(\d+)", stderr)
     values["max_rss_mb"] = int(rss.group(1))/1024 if rss else None
     values["iters"] = values.pop("iter")
@@ -64,7 +69,7 @@ def classify(values, returncode, independent_residual=None):
     if independent_residual is not None:
         residuals.append(independent_residual)
     if (returncode == 0 and values["converged"] == 1 and values["hierarchy_valid"] == 1
-            and values["pcg_flag"] == 0 and values["setup_calls"] == 1
+            and values["setup_calls"] == values.get("solve_passes", 1)
             and all(math.isfinite(r) and 0 <= r <= TOL for r in residuals)):
         return "complete"
     return "not_converged" if values["hierarchy_valid"] else "failed"

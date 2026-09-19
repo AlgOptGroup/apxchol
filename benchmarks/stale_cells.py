@@ -189,6 +189,9 @@ def stale_reasons(cell, *, sha_contains_fn=None, kinds=None):
     if not isinstance(identity, dict):
         return tuple(reasons)
     solver = identity.get("solver", "")
+    if (cell.get("status") in {"complete", "not_converged"} and
+            (cell.get("metrics") or {}).get("stop_contract") != "original-v1"):
+        reasons.append(("original-v1", "Solve now includes original-residual stopping checks and any retries"))
     matrix_id = identity.get("matrix_id", "")
     device = identity.get("device", "")
     matrix_meta = cell.get("matrix_meta")

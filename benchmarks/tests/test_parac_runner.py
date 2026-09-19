@@ -52,7 +52,7 @@ class ParacTimingContractTest(unittest.TestCase):
 
     def test_cpu_cell_uses_one_real_repetition_not_fieldwise_medians(self):
         def sample(adapter, factor_setup, solve_ms, iters, rr):
-            return {"factor": "0.25", "factor_setup": str(factor_setup),
+            return {"stop_check_s": "0.01", "stop_checks": "1", "stop_contract": "original-v1", "factor": "0.25", "factor_setup": str(factor_setup),
                     "adapter": str(adapter), "solve": str(solve_ms),
                     "etree": "0.1", "ftree": "0.1", "summary": "0.1",
                     "iters": str(iters), "rr": str(rr), "recur": "1e-9",
@@ -66,7 +66,7 @@ class ParacTimingContractTest(unittest.TestCase):
                 sample(0.5, 0.5, 1000, 22, 7e-9),
                 sample(1.0, 1.0, 4000, 33, 6e-9)]
         with mock.patch.object(rc, "cell_done", return_value=False), \
-             mock.patch.object(parac, "_calibrate_rel_tol", return_value=1e-16), \
+             mock.patch.object(parac, "_obsolete_probe", create=True, side_effect=AssertionError("uncharged probe")), \
              mock.patch.object(parac, "_run_once_cpu", side_effect=runs), \
              mock.patch.object(rc, "emit_cell") as emit:
             parac._measure_cpu("synthetic", "grid_500", "input.mtx", 5.0,
@@ -149,16 +149,16 @@ class ParacTimingContractTest(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 parac._cpu_cell_remaining(20.0)
 
-    def test_gpu_calibration_tightens_but_never_relaxes_common_tolerance(self):
-        with mock.patch.object(parac, "_run_once_gpu", return_value={"rr": "5e-8", "iters": "20"}):
-            self.assertAlmostEqual(parac._calibrate_tol_gpu("driver", "matrix", 1e-8),
-                                   2e-9)
-        with mock.patch.object(parac, "_run_once_gpu", return_value={"rr": "5e-9", "iters": "20"}):
-            self.assertEqual(parac._calibrate_tol_gpu("driver", "matrix", 1e-8),
-                             1e-8)
+    def test_stopping_receipt_rejects_missing_or_out_of_interval_checks(self):
+        with self.assertRaises(ValueError):
+            parac._stopping_receipt("", 1.0)
+        for checks, seconds in [(0, 0.1), (9, 0.1), (1, 2.0), (1, -0.1)]:
+            with self.subTest(checks=checks, seconds=seconds), self.assertRaises(ValueError):
+                parac._stopping_receipt(f"APX stop contract: original-v1\nAPX stop checks: {checks}\nAPX stop check seconds: {seconds}\n", 1.0)
 
     def test_cpu_setup_uses_complete_nonoverlapping_intervals(self):
         sample = {
+            "stop_check_s": "0.01", "stop_checks": "1", "stop_contract": "original-v1",
             "factor": "1.0", "factor_setup": "2.0", "adapter": "3.0",
             "solve": "4000", "etree": "0.2", "ftree": "0.3",
             "summary": "0.4", "iters": "10", "rr": "1e-9",
@@ -166,7 +166,7 @@ class ParacTimingContractTest(unittest.TestCase):
             "n": 100, "nnz": 500, "rss_mb": 12.0,
         }
         with mock.patch.object(rc, "cell_done", return_value=False), \
-             mock.patch.object(parac, "_calibrate_rel_tol", return_value=1e-16), \
+             mock.patch.object(parac, "_obsolete_probe", create=True, side_effect=AssertionError("uncharged probe")), \
              mock.patch.object(parac, "_run_once_cpu", return_value=sample), \
              mock.patch.object(rc, "emit_cell") as emit:
             parac._measure_cpu("synthetic", "grid_500", "input.mtx", 5.0,
@@ -183,7 +183,7 @@ class ParacTimingContractTest(unittest.TestCase):
 
     def test_cpu_graph_route_solves_a_two_vertex_component(self):
         def sample(total, rr, rhs_norm, nnz):
-            return {"factor": "0.25", "factor_setup": "0.1",
+            return {"stop_check_s": "0.01", "stop_checks": "1", "stop_contract": "original-v1", "factor": "0.25", "factor_setup": "0.1",
                     "adapter": str(total - 0.2), "solve": "100",
                     "etree": "0.1", "ftree": "0.1", "summary": "0.1",
                     "iters": "10", "rr": str(rr), "rhs_norm": str(rhs_norm),
@@ -202,7 +202,7 @@ class ParacTimingContractTest(unittest.TestCase):
              mock.patch.object(parac, "_reorder_amd",
                                side_effect=[("large-amd.mtx", 0.1, "upstream"),
                                             ("pair-amd.mtx", 0.1, "upstream")]) as reorder, \
-             mock.patch.object(parac, "_calibrate_rel_tol", return_value=1e-16), \
+             mock.patch.object(parac, "_obsolete_probe", create=True, side_effect=AssertionError("uncharged probe")), \
              mock.patch.object(parac, "_run_once_cpu", side_effect=runs), \
              mock.patch.object(rc, "emit_cell") as emit:
             parac._measure_cpu_graph_split("grids", "grid_500")
@@ -221,6 +221,7 @@ class ParacTimingContractTest(unittest.TestCase):
 
     def test_gpu_setup_and_solve_use_complete_intervals(self):
         sample = {
+            "stop_check_s": "0.01", "stop_checks": "1", "stop_contract": "original-v1",
             "cuda_init": "0.75", "adapter": "3.0", "factor_setup": "2.0",
             "solver_setup": "1.0",
             "solve_total": "4.0", "factor": "500", "conv": "250",
@@ -236,7 +237,7 @@ class ParacTimingContractTest(unittest.TestCase):
              mock.patch.object(rc, "PARAC_GPU_DRIVER", f"{drivers}/graph"), \
              mock.patch.object(rc, "PARAC_GPU_DRIVER_PHYS", f"{drivers}/physics"), \
              mock.patch.object(rc, "binary_toolchain", return_value={}), \
-             mock.patch.object(parac, "_calibrate_tol_gpu", return_value=1e-8), \
+             mock.patch.object(parac, "_obsolete_probe", create=True, side_effect=AssertionError("uncharged probe")), \
              mock.patch.object(parac, "_run_once_gpu", return_value=sample):
             pathlib.Path(drivers, "graph").touch()
             pathlib.Path(drivers, "physics").touch()

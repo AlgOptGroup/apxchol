@@ -72,7 +72,7 @@ class GpuTimingIsolationTest(unittest.TestCase):
     def test_cpp_timing_does_not_start_memory_poller(self):
         output = (
             "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz\n"
-            "AMGCL,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750\n"
+            "AMGCL,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001\n"
         )
         with mock.patch.object(sweep_fair, "DEVICE", "gpu"), \
              mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
@@ -89,7 +89,7 @@ class GpuTimingIsolationTest(unittest.TestCase):
         import parac_runner
         with mock.patch.object(rc, "VramSampler", side_effect=AssertionError("timing polluted")), \
              mock.patch.object(parac_runner, "sh", return_value=subprocess.CompletedProcess(
-                 "gpu_rchol", 0, "APX GPU solve phase time: 0.02\n", "")):
+                 "gpu_rchol", 0, "APX GPU solve phase time: 0.02\nAPX stop contract: original-v1\nAPX stop checks: 1\nAPX stop check seconds: 0.001\n", "")):
             metrics = parac_runner._run_once_gpu("gpu_rchol", "matrix.mtx", 1e-8)
         self.assertEqual(metrics["solve_total"], "0.02")
         self.assertIs(metrics["gpu_memory_polling"], False)
@@ -101,7 +101,7 @@ class JuliaDriverPathTest(unittest.TestCase):
     def test_julia_driver_and_project_are_root_derived(self):
         output = (
             "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz\n"
-            "AC [Kyng16;Jl],m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750\n"
+            "AC [Kyng16;Jl],m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001\n"
         )
         with mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
              mock.patch.object(sweep_fair.time, "monotonic",
@@ -458,8 +458,8 @@ class CapReferenceTest(unittest.TestCase):
             base = dict(family="audit", mid="m", solver="apxchol_v1", status="complete",
                         threads=16, device="gpu", prov={"git_sha": rc.git_sha()})
             rc.emit_cell(config=sweep_fair.APX_DEFAULT_CONFIG,
-                         metrics={"total_s": 10.0}, **base)
-            rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0}, **base)
+                         metrics={"total_s": 10.0, "stop_contract": "original-v1"}, **base)
+            rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0, "stop_contract": "original-v1"}, **base)
             self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 10.0)
 
     def test_gpu_cap_reference_uses_campaign_thread_count(self):
@@ -468,7 +468,7 @@ class CapReferenceTest(unittest.TestCase):
              mock.patch.object(sweep_fair, "THREADS", 72):
             rc.emit_cell("audit", "m", "apxchol_v1",
                          sweep_fair.APX_DEFAULT_CONFIG, "complete",
-                         {"total_s": 7.2}, 72, "gpu", {"git_sha": rc.git_sha()})
+                         {"total_s": 7.2, "stop_contract": "original-v1"}, 72, "gpu", {"git_sha": rc.git_sha()})
             self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 7.2)
 
 

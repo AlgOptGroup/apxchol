@@ -5,6 +5,7 @@
 // invoke it without itself being compiled by nvcc.
 
 #include "bench_result.h"
+#include "original_stop.h"
 
 #include <cuda_runtime.h>
 #include <cusparse.h>
@@ -55,7 +56,8 @@ extern "C" void run_amgcl_cuda_impl(
     double*               solution,  // size m
     double                tol,
     int                   maxiter,
-    int                   relax_coarse)
+    int                   relax_coarse,
+    double (*check_original)(void*, const double*), void* check_context)
 {
     using Backend = amgcl::backend::cuda<double>;
 
@@ -104,11 +106,21 @@ extern "C" void run_amgcl_cuda_impl(
     thrust::device_vector<double> d_b(bsub, bsub + m);
     thrust::device_vector<double> d_x(m, 0.0);
 
-    auto [iters, error] = solve(d_b, d_x);
-    thrust::copy(d_x.begin(), d_x.end(), solution);
+    auto& native = const_cast<amgcl::solver::cg<Backend>&>(solve.solver());
+    auto stop = bench_stop::run(tol, maxiter,
+        [&](double request, int remaining, bool) {
+            native.prm.tol = request; native.prm.maxiter = remaining;
+            auto [iterations, error] = solve(d_b, d_x); (void)error;
+            // Native d_x is retained as the next pass's warm start. Transfer only
+            // at native exits, never on every PCG iteration.
+            thrust::copy(d_x.begin(), d_x.end(), solution);
+            return static_cast<int>(iterations);
+        }, [&] { return check_original(check_context, solution); });
     r->solve_time = now_s() - t0;
     r->total_time = r->setup_time + r->solve_time;
-    r->iterations = static_cast<int>(iters);
+    r->iterations = stop.iterations;
+    r->solve_passes = stop.passes;
+    r->stop_check_seconds = stop.check_seconds;
 
     // Device VRAM held at solve end (AMG hierarchy + CSR operator + PCG vectors
     // still resident), total-free via cudaMemGetInfo — the device analog of
