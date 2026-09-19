@@ -36,6 +36,7 @@
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include "apxchol/solver/sptrsv/transpose.h"
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -439,6 +440,9 @@ inline std::vector<int> dataflow_batches(int m, bool reverse, const int* len, in
 /// 1.5 ms for this function).
 inline std::vector<int> csr_row_lengths(int m, const int* rowptr) {
     std::vector<int> len(static_cast<std::size_t>(m));
+    // O(m) and called four times per setup (both directions, lengths + stats);
+    // one element each, so an equal-count split is the right one here.
+    #pragma omp parallel for schedule(static) if(m > 16384)
     for (int i = 0; i < m; ++i) len[i] = rowptr[i + 1] - rowptr[i];
     return len;
 }
@@ -472,15 +476,28 @@ inline dataflow_len_stats dataflow_row_stats(int m, const int* len, int pre) {
     dataflow_len_stats s;
     s.m = m;
     s.base = 32 * pre;
+    // Integer sums and a max, so the reduction order cannot change a result.
+    std::int64_t nnz = 0; int max_len = s.max_len;
+    std::int64_t rows_ge[dataflow_len_stats::kBuckets]{};
+    std::int64_t nnz_ge[dataflow_len_stats::kBuckets]{};
+    #pragma omp parallel for schedule(static) if(m > 16384) \
+        reduction(+ : nnz) reduction(max : max_len) \
+        reduction(+ : rows_ge[:dataflow_len_stats::kBuckets]) \
+        reduction(+ : nnz_ge[:dataflow_len_stats::kBuckets])
     for (int i = 0; i < m; ++i) {
         const int l = len[i];
-        s.nnz += l;
-        if (l > s.max_len) s.max_len = l;
+        nnz += l;
+        if (l > max_len) max_len = l;
         for (int k = 0; k < dataflow_len_stats::kBuckets; ++k) {
             if (l < (static_cast<std::int64_t>(s.base) << k)) break;
-            ++s.rows_ge[k];
-            s.nnz_ge[k] += l;
+            ++rows_ge[k];
+            nnz_ge[k] += l;
         }
+    }
+    s.nnz = nnz; s.max_len = max_len;
+    for (int k = 0; k < dataflow_len_stats::kBuckets; ++k) {
+        s.rows_ge[k] += rows_ge[k];
+        s.nnz_ge[k] += nnz_ge[k];
     }
     s.mean_len = m > 0 ? static_cast<double>(s.nnz) / static_cast<double>(m) : 0.0;
     return s;
