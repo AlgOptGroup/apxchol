@@ -1124,42 +1124,7 @@ static Args parse_args(int argc, char** argv) {
     }
     // An explicitly requested, compiled-out solver must not produce a successful
     // header-only CSV. Validate before loading a matrix or initializing runtimes.
-    const std::set<std::string> available{"all", "apxchol", "cg", "icc", "ldlt"
-#ifdef HAVE_APXCHOL_V1
-        , "apxchol_v1"
-#endif
-#ifdef HAVE_RCHOL
-        , "rchol"
-#ifdef HAVE_METIS
-        , "rchol_par"
-#endif
-#endif
-#ifdef HAVE_CHOLMOD
-        , "cholmod"
-#endif
-#ifdef HAVE_AMGCL
-        , "amgcl"
-#ifdef APXCHOL_USE_CUDA
-        , "amgcl_cuda"
-#endif
-#endif
-#ifdef HAVE_HYPRE
-        , "hypre_boomeramg"
-#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_BENCH_HYPRE_CUDA)
-        , "hypre_boomeramg_gpu"
-#endif
-#endif
-    };
-    const bool input_only = !a.dump_mtx.empty() || !a.dump_rhs.empty() || a.component_info;
-    for (const auto& solver : a.solvers) {
-        if (!available.count(solver) && !(solver == "none" && input_only)) {
-            std::cerr << "Solver '" << solver
-                      << "' is unknown or unavailable in this build.\n";
-            std::exit(2);
-        }
-    }
-    if (a.solvers.empty() || a.solvers.count("all"))
-        a.solvers = {"apxchol", "cg", "ldlt"
+    const std::set<std::string> default_solvers = {"apxchol", "cg", "ldlt"
 #ifdef HAVE_APXCHOL_V1
             , "apxchol_v1"
 #endif
@@ -1173,6 +1138,32 @@ static Args parse_args(int argc, char** argv) {
             , "cholmod"
 #endif
         };
+    auto available = default_solvers;
+    // The costly multigrid/ICC comparisons remain explicit opt-ins.
+    available.insert({"all", "icc"
+#ifdef HAVE_AMGCL
+        , "amgcl"
+#ifdef APXCHOL_USE_CUDA
+        , "amgcl_cuda"
+#endif
+#endif
+#ifdef HAVE_HYPRE
+        , "hypre_boomeramg"
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_BENCH_HYPRE_CUDA)
+        , "hypre_boomeramg_gpu"
+#endif
+#endif
+    });
+    const bool input_only = !a.dump_mtx.empty() || !a.dump_rhs.empty() || a.component_info;
+    for (const auto& solver : a.solvers) {
+        if (!available.count(solver) && !(solver == "none" && input_only)) {
+            std::cerr << "Solver '" << solver
+                      << "' is unknown or unavailable in this build.\n";
+            std::exit(2);
+        }
+    }
+    if (a.solvers.empty() || a.solvers.count("all"))
+        a.solvers = default_solvers;
     return a;
 }
 

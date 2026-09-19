@@ -147,14 +147,15 @@ class WeightedInputsTest(unittest.TestCase):
         def dump(command, **kwargs):
             args = shlex.split(command)
             path = Path(args[args.index("--dump-mtx") + 1])
-            path.write_text("new operator")
+            path.write_text("%%MatrixMarket matrix coordinate real symmetric\n1 1 1\n1 1 1\n")
             return SimpleNamespace(returncode=0, stdout="", stderr="APX dump setup time: 0.01")
 
         for module, field in [(sweep_fair, "DUMP"), (cmg_matlab_runner, "DUMP_DIR"),
                               (parac_runner, "DUMP_CPU")]:
             directory = self.root / module.__name__
             with mock.patch.object(module, field, str(directory)), \
-                 mock.patch.object(module, "sh", side_effect=dump) as run:
+                 mock.patch.object(parac_runner if module is parac_runner else rc,
+                                   "sh", side_effect=dump) as run:
                 def call():
                     if module is sweep_fair:
                         return module.dump_mtx(mid)
@@ -170,6 +171,20 @@ class WeightedInputsTest(unittest.TestCase):
                 self.assertEqual(run.call_count, 2)
                 self.assertTrue(Path(first).exists())
                 self.assertTrue(Path(second).exists())
+
+    def test_parac_rejects_failed_export_even_with_timing_and_partial_file(self):
+        def fail(command, **kwargs):
+            args = shlex.split(command)
+            self.assertEqual(args[0], "/path with spaces/benchmark")
+            Path(args[args.index("--dump-mtx") + 1]).write_text("partial")
+            return SimpleNamespace(returncode=2, stdout="",
+                                   stderr="APX dump setup time: 0.01")
+
+        with mock.patch.object(parac_runner, "sh", side_effect=fail):
+            result = parac_runner._dump("grid_500", str(self.root / "dump with spaces"),
+                                       "/path with spaces/benchmark", 10)
+        self.assertIsNone(result[0])
+        self.assertEqual(list((self.root / "dump with spaces").iterdir()), [])
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ level_stats.py:
 All runners (sweep_fair, thread_scaling, fill_pass, level_stats,
 selector_levels) import these helpers rather than carrying their own copies.
 """
-import hashlib, json, math, os, re, shlex, signal, subprocess, threading
+import hashlib, json, math, os, re, shlex, signal, subprocess, tempfile, threading
 from pathlib import Path
 
 try:
@@ -401,6 +401,7 @@ def load_matrix_manifest(path):
     if not document["matrices"]:
         raise ValueError("matrix manifest is empty")
     pending = {}
+    manifest_digest = hashlib.sha256(blob).hexdigest()
     for row in document["matrices"]:
         mid, family = row["id"], row["family"]
         if any(not isinstance(x, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", x)
@@ -442,7 +443,7 @@ def load_matrix_manifest(path):
         pending[mid] = dict(family=family, source="mtx", kind=kind, cls=cls,
                            spec=str(matrix_path), is2d=False, n=row["n"],
                            input_sha256=digest,
-                           input_manifest_sha256=hashlib.sha256(blob).hexdigest())
+                           input_manifest_sha256=manifest_digest)
         if "weight_model" in row:
             pending[mid]["weight_model"] = row["weight_model"]
     MATRICES.update(pending)
@@ -453,6 +454,33 @@ def matrix_cache_key(mid):
     """Keep derived inputs from distinct manifests in distinct cache entries."""
     digest = MATRICES.get(mid, {}).get("input_manifest_sha256")
     return f"{mid}--{digest}" if digest else mid
+
+
+def dump_matrix(mid, directory, binary, threads, timeout):
+    """Cache a successful operator export for Julia/CMG, preserving input identity.
+
+    Export to private scratch first: a failed or interrupted process must not
+    leave a truncated file that a later call mistakes for a completed cache.
+    ParAC retains its separate cache because it also charges adapter timings.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / (matrix_cache_key(mid) + ".mtx")
+    if target.is_file():
+        return str(target)
+    with tempfile.TemporaryDirectory(prefix=".export-", dir=directory) as scratch:
+        staged = Path(scratch) / "operator.mtx"
+        result = sh(
+            f"{shlex.quote(str(binary))} {margs_for(mid)} --solver none "
+            f"--dump-mtx {shlex.quote(str(staged))}",
+            timeout=timeout, env=benchmark_openmp_env(threads))
+        if result.returncode != 0 or not staged.is_file():
+            return None
+        with staged.open("rb") as handle:
+            if not handle.readline().startswith(b"%%MatrixMarket matrix "):
+                return None
+        staged.replace(target)
+    return str(target)
 
 
 def kind_of(mid):

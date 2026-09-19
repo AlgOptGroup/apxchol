@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -130,6 +134,50 @@ class CsvMetricTest(unittest.TestCase):
             "AMGCL,grid,10,20,1,2,3,4,5e-9,6,7,8,-1\n"
         )
         self.assertNotIn("effective_threads", rc.parse_csv(output))
+
+
+
+
+class MatrixExportTest(unittest.TestCase):
+    def test_failed_and_interrupted_exports_are_not_cached(self):
+        with tempfile.TemporaryDirectory(prefix="export test ") as directory:
+            calls = []
+            def run(command, **kwargs):
+                args = shlex.split(command)
+                self.assertEqual(args[0], "/binary with spaces/benchmark")
+                output = Path(args[args.index("--dump-mtx") + 1])
+                output.write_text("%%MatrixMarket matrix coordinate real symmetric\n1 1 1\n1 1 1\n")
+                calls.append(output)
+                if len(calls) == 1:
+                    return SimpleNamespace(returncode=2)
+                if len(calls) == 2:
+                    raise subprocess.TimeoutExpired(command, 1)
+                return SimpleNamespace(returncode=0)
+            with mock.patch.object(rc, "sh", side_effect=run):
+                def export():
+                    return rc.dump_matrix("grid_500", directory,
+                                          "/binary with spaces/benchmark", 1, 10)
+                self.assertIsNone(export())
+                self.assertEqual(list(Path(directory).iterdir()), [])
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    export()
+                self.assertEqual(list(Path(directory).iterdir()), [])
+                path = export()
+                self.assertTrue(Path(path).is_file())
+                self.assertEqual(export(), path)
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(list(Path(directory).iterdir()), [Path(path)])
+
+    def test_missing_or_malformed_export_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def malformed(command, **kwargs):
+                args = shlex.split(command)
+                Path(args[args.index("--dump-mtx") + 1]).write_text("partial data")
+                return SimpleNamespace(returncode=0)
+            for run in (lambda *a, **k: SimpleNamespace(returncode=0), malformed):
+                with mock.patch.object(rc, "sh", side_effect=run):
+                    self.assertIsNone(rc.dump_matrix("grid_500", directory, "benchmark", 1, 10))
+                self.assertEqual(list(Path(directory).iterdir()), [])
 
 
 if __name__ == "__main__":

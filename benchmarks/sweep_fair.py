@@ -435,12 +435,7 @@ def dump_mtx(mid):
     a tmpfs — set APXCHOL_BENCH_DUMP_DIR to a disk-backed path before sweeping
     them. Returns None when the dump failed.
     """
-    os.makedirs(DUMP, exist_ok=True)
-    p = f"{DUMP}/{rc.matrix_cache_key(mid)}.mtx"
-    if not os.path.exists(p):
-        sh(f"{shlex.quote(BIN[DEVICE])} {rc.margs_for(mid)} --dump-mtx {shlex.quote(p)} --solver none",
-           timeout=TIMEOUT, env=rc.benchmark_openmp_env(THREADS))
-    return p if os.path.exists(p) else None
+    return rc.dump_matrix(mid, DUMP, BIN[DEVICE], THREADS, TIMEOUT)
 
 # --- CPU axis solver sets ---
 # Solver set: (solver, config)

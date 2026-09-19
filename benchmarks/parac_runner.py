@@ -101,7 +101,7 @@ a dump/reorder timeout no longer crashes the pass. Both axes emit terminal cells
 for the campaign audit; GPU keeps failed/timeout outside TERMINAL_GPU so a later
 resume still retries the transient preparation.
 """
-import hashlib, json, math, os, re, subprocess, time
+import hashlib, json, math, os, re, shlex, subprocess, time
 
 from parac_contract import (CalibrationFailed, UnsupportedOperator,
                             calibrated_cpu_tolerance, require_original_physics)
@@ -334,11 +334,11 @@ def _dump(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
     if _dump_cache_valid(p):
         return p, tag, _dump_cache_seconds(p)
     _invalidate_dump_cache(p)
-    cp = sh(f"{bin_path} {rc.margs_for(mid)} --dump-mtx {p} --solver none",
+    cp = sh(f"{shlex.quote(bin_path)} {rc.margs_for(mid)} --dump-mtx {shlex.quote(p)} --solver none",
             timeout=timeout, env=rc.benchmark_openmp_env(THREADS),
             mem_cap_gb=mem_cap_gb)
     match = _DUMP_TIME_RE.search(cp.stderr or "")
-    if not (os.path.exists(p) and match):
+    if cp.returncode != 0 or not (os.path.exists(p) and match):
         _invalidate_dump_cache(p)
         return None, tag, 0.0
     seconds = float(match.group(1))
