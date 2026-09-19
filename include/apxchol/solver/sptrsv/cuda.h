@@ -468,6 +468,7 @@ public:
             // CSR(L^T) narrowed on the host, fp32 diag / inv_scale^2 alongside,
             // then the transpose (carrying the same 16-bit patterns) for CSR(L).
             cuda_host::fp16_scaled_arrays h16 = cuda_host::narrow_fp16_scaled(LT, col_scale);
+            mark("  fp16_narrow");
             fp16_flushed_ = h16.flushed; fp16_subnormal_ = h16.subnormal;
             // r_j^2 in DOUBLE (exact; the kernels multiply rhs * r_j^2 in
             // double and narrow once -- pre-squaring into fp32 overflows for
@@ -499,8 +500,9 @@ public:
             LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
             LT16.idx  = std::move(LT.idx);
             LT16.vals = std::move(h16.vals);
+            mark("  fp16_diag+uploads");
             cuda_host::csr_int<std::uint16_t> L16 = cuda_host::transpose_csr(LT16);
-            mark("fp16_narrow+transpose");
+            mark("  fp16_transpose");
             dev_alloc(reinterpret_cast<void**>(&d_L_rowptr_), (m_ + 1) * sizeof(int));
             dev_alloc(reinterpret_cast<void**>(&d_L_colidx_), nnz_ * sizeof(int));
             dev_alloc(reinterpret_cast<void**>(&d_L_vals16_), nnz_ * sizeof(std::uint16_t));
