@@ -1,6 +1,7 @@
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 #include "apxchol/solver/gpu_block_frontend.h"
+#include "apxchol/solver/detail/cuda_device_scope.h"
 
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
@@ -3883,15 +3884,8 @@ gpu_round_shadow_device_state::gpu_round_shadow_device_state(clique_sampler samp
 
 void gpu_round_shadow_device_state::reset() noexcept {
     if (!impl_) return;
-    int original_device = -1;
-    bool switched_device = false;
-    if (impl_->cuda_device >= 0 &&
-        cudaGetDevice(&original_device) == cudaSuccess &&
-        original_device != impl_->cuda_device &&
-        cudaSetDevice(impl_->cuda_device) == cudaSuccess)
-        switched_device = true;
+    const cuda_device_scope device(impl_->cuda_device, impl_->cuda_device >= 0);
     impl_.reset();
-    if (switched_device) (void)cudaSetDevice(original_device);
 }
 
 gpu_round_shadow_device_state::~gpu_round_shadow_device_state() { reset(); }

@@ -1,5 +1,6 @@
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
+#include "apxchol/solver/detail/cuda_device_scope.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 
 #include <cooperative_groups.h>
@@ -1627,14 +1628,8 @@ void gpu_block_frontend::reset() noexcept {
     p_->retire_selection_producer();
     // Destruction is nonconcurrent by contract. If the caller left another
     // device current, free on the producer's device and restore it best-effort.
-    int original_device = -1;
-    bool switched_device = false;
-    if (cudaGetDevice(&original_device) == cudaSuccess &&
-        original_device != p_->selection_producer->cuda_device() &&
-        cudaSetDevice(p_->selection_producer->cuda_device()) == cudaSuccess)
-        switched_device = true;
+    const cuda_device_scope device(p_->selection_producer->cuda_device());
     p_.reset();
-    if (switched_device) (void)cudaSetDevice(original_device);
 }
 
 gpu_block_frontend::~gpu_block_frontend() { reset(); }

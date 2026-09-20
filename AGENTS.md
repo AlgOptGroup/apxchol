@@ -371,6 +371,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   quality, setup, solve, one-RHS total, RSS and owner memory.
 - CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
   only after its upload has completed and no further host RHS reads remain.
+- GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`
+  best-effort device switch/restore guard. Preserve each caller's enable condition
+  and early no-op: disabled or pristine lifetimes must not initialize CUDA.
 - Keep substantial mechanisms: compensated factor dropping, GPU long-row
   segmentation, critical-tail solving, incremental degrees, and connectivity
   preserving residual sparsification. Standalone residual coalescing policy

@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/solver/detail/gpu_diagnostics.h"
+#include "apxchol/solver/detail/cuda_device_scope.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/cuda_cast.h"
 #include "apxchol/solver/sptrsv/cuda_dataflow.h"
@@ -256,12 +257,7 @@ private:
 
     void reset() noexcept {
         if (empty()) return;
-        int saved_device = -1;
-        bool restore = false;
-        if (cudaGetDevice(&saved_device) == cudaSuccess &&
-            saved_device != cuda_device_ &&
-            cudaSetDevice(cuda_device_) == cudaSuccess)
-            restore = true;
+        const detail::cuda_device_scope device(cuda_device_);
         for (void* p : {static_cast<void*>(L_row_ptr_),
                         static_cast<void*>(L_col_idx_), L_values_,
                         static_cast<void*>(LT_row_ptr_),
@@ -270,7 +266,6 @@ private:
                         static_cast<void*>(inv_scale2_)})
             if (p) (void)cudaFree(p);
         clear();
-        if (restore) (void)cudaSetDevice(saved_device);
     }
 
     int cuda_device_ = -1;
@@ -1073,13 +1068,8 @@ private:
         // only no-op into cudaFree(nullptr): it would be eligible to create the
         // lazy CUDA context inside the timed production setup boundary.
         if (!cleanup_needed_) return;
-        int saved_device = -1;
-        bool restore_device = false;
-        if (adopted_device_factor_ && adopted_cuda_device_ >= 0 &&
-            cudaGetDevice(&saved_device) == cudaSuccess &&
-            saved_device != adopted_cuda_device_ &&
-            cudaSetDevice(adopted_cuda_device_) == cudaSuccess)
-            restore_device = true;
+        const detail::cuda_device_scope device(
+            adopted_cuda_device_, adopted_device_factor_ && adopted_cuda_device_ >= 0);
 
         // Free by pointer presence, not by ready_: setup/adoption exceptions can
         // leave a valid partial allocation graph before the final ready commit.
@@ -1118,7 +1108,6 @@ private:
         adoption_host_download_bytes_ = 0;
         m_ = nnz_ = 0;
         cleanup_needed_ = false;
-        if (restore_device) (void)cudaSetDevice(saved_device);
     }
 
     int64_t m_ = 0;
