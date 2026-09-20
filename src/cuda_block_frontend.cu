@@ -60,9 +60,12 @@ public:
         cuda_check(
             cudaMalloc(reinterpret_cast<void **>(&next), count * sizeof(T)),
             "cudaMalloc");
+        // Keep the replacement owned if releasing the previous allocation
+        // reports an error. Publish it only after the release succeeds.
+        std::unique_ptr<T, decltype(&cudaFree)> next_owner(next, &cudaFree);
         if (ptr_)
             cuda_check(cudaFree(ptr_), "cudaFree during growth");
-        ptr_ = next;
+        ptr_ = next_owner.release();
         capacity_ = count;
     }
 
