@@ -237,6 +237,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - `graph/` provides adjacency layouts. Directed `vec_pool_aos` is the
   high-level default; indexed `vec_pool` remains supported. Changing storage
   must not silently choose a different selector.
+  Incremental-degree radix histograms and decrement slices use the actual
+  OpenMP team, never unused rows from the requested team size.
   The general pooled graph builder counts and writes logical column ranges
   through OpenMP worksharing; every range must execute even if a nested region
   or thread limit supplies fewer workers than requested. A fresh graph's initial

@@ -744,18 +744,22 @@ void eliminate_partition_singleton(const Eliminator& elim,
 
                 if (live_degrees) {
                     auto& decrements = ws.degree_decrements;
+                    // Radix histogram rows belong to workers that actually
+                    // joined this region. Unused requested-worker rows can
+                    // contain offsets from an earlier round.
+                    const int degree_workers = omp_get_num_threads();
                     const std::size_t begin = decrements.size() *
                         static_cast<std::size_t>(tid) /
-                        static_cast<std::size_t>(num_threads);
+                        static_cast<std::size_t>(degree_workers);
                     const std::size_t end = decrements.size() *
                         static_cast<std::size_t>(tid + 1) /
-                        static_cast<std::size_t>(num_threads);
+                        static_cast<std::size_t>(degree_workers);
 #ifdef _OPENMP
                     const double decrement_start = omp_get_wtime();
 #endif
                     parallel_radix_sort_node_indices(
                         decrements, ws.degree_decrement_scratch,
-                        ws.degree_decrement_histograms, tid, num_threads);
+                        ws.degree_decrement_histograms, tid, degree_workers);
                     std::size_t unique = 0;
                     std::size_t i = begin;
                     if (i > 0 && i < end) {

@@ -52,6 +52,15 @@ include(GoogleTest)
 # properties if a specific test needs more.
 gtest_discover_tests(unit_tests PROPERTIES TIMEOUT 120
         ENVIRONMENT "OMP_NUM_THREADS=4")
+if (OpenMP_CXX_FOUND)
+    # This test requests eight workers. A three-worker runtime limit exercises
+    # actual-team slicing and rejects stale requested-worker radix histograms.
+    add_test(NAME factorize_reduced_team_incremental_degrees
+        COMMAND unit_tests
+        --gtest_filter=VecPoolAos.AutoIncrementalDegreesPreserveTheFactorByteForByte)
+    set_tests_properties(factorize_reduced_team_incremental_degrees PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=8;OMP_THREAD_LIMIT=3;OMP_DYNAMIC=FALSE")
+endif()
 if (APXCHOL_USE_CUDA)
     # Device-wide free-memory accounting also sees other GPU applications.
     # Check this process's repeated finalizer allocations with the CUDA tool.
