@@ -596,6 +596,56 @@ TEST(DirectedCscGraph, FullColumnsKeepCanonicalWeightsZerosAndIsolatedVertices) 
 #endif
 }
 
+TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
+#ifndef _OPENMP
+    GTEST_SKIP() << "requires OpenMP team reduction";
+#else
+    const int prior_levels = omp_get_max_active_levels();
+    omp_set_max_active_levels(1);
+    auto L = apxchol::laplacian(make_grid_vec(20, 20));
+    for (int v = 0; v < L.rows(); ++v) L.coeffRef(v,v) += 0.125;
+    const auto reference = apxchol::make_graph<apxchol::graph<>>(L);
+    int observed_outer = 0, observed_inner = 0;
+    #pragma omp parallel num_threads(2)
+    {
+        #pragma omp single
+        {
+            observed_outer = omp_get_num_threads();
+            omp_set_num_threads(16);
+            #pragma omp parallel
+            {
+                #pragma omp single
+                observed_inner = omp_get_num_threads();
+            }
+            const auto check = [&]<class Incidence>() {
+                const auto candidate = apxchol::make_graph<apxchol::graph<Incidence>>(L);
+                ASSERT_EQ(candidate.n(), reference.n());
+                ASSERT_EQ(candidate.m(), reference.m());
+                for (apxchol::node_index v = 0; v < reference.n(); ++v) {
+                    std::vector<std::pair<apxchol::node_index, double>> expected, actual;
+                    for (auto e : reference.neighbors(v)) expected.emplace_back(e.to,e.w);
+                    for (auto e : candidate.neighbors(v)) actual.emplace_back(e.to,e.w);
+                    std::sort(expected.begin(),expected.end());
+                    std::sort(actual.begin(),actual.end());
+                    ASSERT_EQ(actual,expected) << v;
+                    ASSERT_EQ(candidate.excess(v),reference.excess(v)) << v;
+                }
+            };
+            // Indexed always takes the general path; uncompressed directed
+            // storage forces that path instead of the full-column shortcut.
+            check.template operator()<apxchol::vec_pool_incidence>();
+            check.template operator()<apxchol::directed_vec_pool_incidence>();
+            L.uncompress();
+            check.template operator()<apxchol::vec_pool_incidence>();
+            check.template operator()<apxchol::directed_vec_pool_incidence>();
+        }
+    }
+    omp_set_max_active_levels(prior_levels);
+    ASSERT_EQ(observed_inner,1);
+    if (observed_outer != 2) GTEST_SKIP() << "outer team unavailable";
+#endif
+}
+
 TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
     // A hub-heavy SDDM with bit-identical triangles: the proof-taking builder
     // skips every transpose-partner search and must still produce exactly the

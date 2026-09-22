@@ -237,6 +237,10 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - `graph/` provides adjacency layouts. Directed `vec_pool_aos` is the
   high-level default; indexed `vec_pool` remains supported. Changing storage
   must not silently choose a different selector.
+  The general pooled graph builder counts and writes logical column ranges
+  through OpenMP worksharing; every range must execute even if a nested region
+  or thread limit supplies fewer workers than requested. A fresh graph's initial
+  reserve must not join an unrelated caller team's collective or barrier.
 - `solver/elimination/` owns clique sampling and the public eliminator seam.
   Canonical neighbors use comparison sort by weight and vertex; sampling uses
   exact cumulative weights and `upper_bound`. Preserve estimator semantics,

@@ -61,6 +61,16 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     std::vector<double> diag(n, 0.0);
 
 #ifdef _OPENMP
+    // This builder owns a fresh graph. A caller may already be in an unrelated
+    // OpenMP team; do not join that team's collective reserve or its barrier.
+    const auto reserve_initial = [&](auto begin, auto end, const auto& incoming) {
+        if (omp_in_parallel()) {
+            for (auto it = begin; it != end; ++it)
+                g.adj_reserve_for(*it, incoming[*it]);
+        } else {
+            g.adj_bulk_reserve_parallel(begin, end, incoming);
+        }
+    };
     // A full symmetric CSC already lists every incidence of a vertex in its
     // column. Give that column one writer instead of atomically counting and
     // appending both endpoints of each lower-triangle entry, then sorting.
@@ -97,7 +107,7 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                 // Reserve in the same vertex order as the general builder.
                 // iota avoids another materialized O(n) touched-vertex list.
                 const auto vertices = std::views::iota(node_index{0}, n);
-                g.adj_bulk_reserve_parallel(
+                reserve_initial(
                     vertices.begin(), vertices.end(), incoming);
                 edge_index lower = 0, upper = 0;
                 bool paired = true;
@@ -195,9 +205,10 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         edge_index total_inc = 0;   // sum of incoming = 2 * #edges (edge-scale)
         {
             std::vector<std::vector<node_index>> tt(nt);
-            #pragma omp parallel num_threads(nt) reduction(+:total_inc)
-            {
-                const int t = omp_get_thread_num();
+            // These are logical ranges, not runtime worker IDs. OpenMP may
+            // provide fewer workers (thread limits or a nested region).
+            #pragma omp parallel for num_threads(nt) schedule(static) reduction(+:total_inc)
+            for (int t = 0; t < nt; ++t) {
                 const node_index vb = static_cast<node_index>(int64_t(n) * t / nt);
                 const node_index ve = static_cast<node_index>(int64_t(n) * (t + 1) / nt);
                 auto& mine = tt[t];
@@ -215,7 +226,7 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         const edge_index off_diag_nnz = total_inc / 2;  // each edge counted twice
 
         if (off_diag_nnz > 0) {
-            g.adj_bulk_reserve_parallel(touched.begin(), touched.end(), incoming);
+            reserve_initial(touched.begin(), touched.end(), incoming);
             // incoming[] (n counts) is consumed by the reserve; the edge pass
             // below reads only the matrix. Free it here, not at return.
             std::vector<node_index>().swap(incoming);
@@ -238,10 +249,9 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
             for (int t = 0; t < nt; ++t)
                 per_thread_edges[t + 1] += per_thread_edges[t];
 
-            // PASS 2: each thread writes to its own contiguous edge_index range.
-            #pragma omp parallel num_threads(nt)
-            {
-                const int t = omp_get_thread_num();
+            // PASS 2: consume every pre-counted range, even on a reduced team.
+            #pragma omp parallel for num_threads(nt) schedule(static)
+            for (int t = 0; t < nt; ++t) {
                 edge_index local_slot = per_thread_edges[t];
                 for (node_index k = col_bs[t]; k < col_bs[t + 1]; ++k)
                     for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
