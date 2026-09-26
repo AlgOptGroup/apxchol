@@ -43,150 +43,54 @@ reusable hierarchy and must charge/report each setup. ParAC patch 0007 replaces
 untimed calibration with measured original checks. Current runners reject old
 stopping receipts/caches; preserve historical results without relabelling them.
 
-## Daint / Slurm campaign gate
+## Remote campaign gate
 
-Do not use a production Slurm allocation as the first integration test. Every
-new or materially changed campaign must pass these gates, in order, against
-the exact immutable source/package bytes that the production job will use:
+Platform/account/access details and job histories belong in private campaign
+plans, not this repository's user documentation. Historical benchmark pages do
+not establish current cluster availability. Follow the user's authorized host,
+connection and resource limits; do not invent an alternate authentication route.
 
-1. State the complete planned-record denominator, resource ceiling,
-   cancellation command, and whether a nonzero exit means infrastructure
-   failure or a deliberate scientific rejection.
-2. Run a package-owned login-node preflight. It must call the same prologue
-   implementation as the batch job (not a second look-alike validator) and
-   check the exact source commit/bundle and package hashes, clean source,
-   matrix/dependency/toolchain identities, all required environment variables,
-   and a fresh writable result namespace. Exercise missing, empty, and zero
-   forms of optional Slurm variables used by the prologue. Validate a compiler
-   by compiling and linking a tiny program with the campaign's exact compiler
-   and flags; do not infer that from the presence of a support toolchain's
-   `gcc`/`g++` driver binaries (for example, Clang may use that installation
-   only for GNU headers and runtime libraries). Check resolved CMake cache
-   values without assuming whether an explicitly supplied entry is typed as
-   `STRING` or `FILEPATH`. Execute package tests with the same absolute Python
-   interpreter used in batch; parsing the files with a newer Python is not a
-   compatibility test. Disable or redirect bytecode so validation cannot dirty
-   the immutable source checkout. For CUDA campaigns, record and validate
-   `CMAKE_CUDA_COMPILER` and `CMAKE_CUDA_HOST_COMPILER` separately; neither is
-   evidence for the C or C++ compiler identity.
-   The known-working Daint CUDA baseline is LLVM 22.1.8 `clang`/`clang++` for
-   C, C++, and nvcc's host compiler, with
-   `CMAKE_CUDA_FLAGS=--allow-unsupported-compiler` recorded explicitly. It
-   configured, built, and executed the GPU/dataflow backend on a GH200 on
-   2026-08-31. Do not silently replace it with GNU merely because GNU appears
-   in NVIDIA's supported-version table; any compiler change needs its own
-   compute-node smoke and numerical receipt before production.
-   Dependency Git identities must be canonical full object IDs (40 hexadecimal
-   characters for SHA-1 repositories), resolved and compared rather than
-   copied by eye. Reject ignored as well as untracked Python bytecode/cache
-   before importing package-local modules; a late scan cannot make an earlier
-   stale import trustworthy. Execute every package entry point with the exact
-   target Python before submission; a syntax-only parse under another version
-   is not runtime compatibility evidence.
-3. Keep `SLURM_SUBMIT_DIR`, stdout, stderr, builds, and results outside the
-   source checkout. Submit through a package-owned wrapper with explicit
-   absolute `--chdir`, `--output`, and `--error` paths. The wrapper must run
-   `sbatch --test-only` using the final account/resource arguments.
-4. Run a small compute-node smoke allocation that builds the exact target(s)
-   and exercises the relevant CPU/GPU runtime, affinity, and one tiny solver
-   path. Persist a receipt binding source/package hashes, compiler/runtime,
-   build outputs, and smoke results. Receipt verification must require the
-   exact named artifact set (no missing, duplicate, or extra entries), and the
-   production build must either reuse those immutable tested artifacts or
-   prove that its rebuilt binaries, caches, compile commands, build IDs, and
-   toolchain contract match the receipt. Every timing-producing entry point,
-   not only the advertised wrapper, must require the validated receipt. The
-   production job must verify it before starting; any source/package change
-   invalidates it. Receipt fields such as test counts, completion state, job
-   identity, and allocated resources must be derived from hashed smoke output
-   and scheduler evidence, never emitted as unconditional PASS constants.
-5. Only then submit the full campaign. Size wall time and per-process guards
-   from observed upper bounds with margin; a censored timeout is a lower bound,
-   not a runtime estimate. Preserve failed-run evidence in a separate result
-   namespace and never reuse a partial run root. Timing jobs must persist the
-   process mask and observed OpenMP-worker affinity; do not combine Slurm
-   binding with `KMP_AFFINITY=norespect` unless the resulting confinement is
-   explicitly verified. Concurrent ranks in one route-homogeneous phase are a
-   single blocked timing observation, not independent seed replicates; either
-   synchronize the measured stage and balance arms within each wave, or model
-   the whole phase as the experimental unit. Bootstrap or other resampling
-   must keep every measurement belonging to one declared independent cluster
-   together. Resource ceilings must include CPUs, memory, and every GRES that
-   Slurm grants implicitly (notably the GPUs granted by bare `--exclusive` on
-   Daint). If a claim requires byte-identical factors, persist and compare a
-   digest over factor structure and values; equal fill, iterations, and
-   residuals do not establish factor identity.
+Every new or materially changed campaign follows these gates in order:
 
-Login nodes are for bounded validation, hashing, parsing, configuration probes,
-and `sbatch --test-only`, not compilation-heavy or solver timing work. A
-complete denominator that intentionally exits nonzero on a failed scientific
-quality gate is evidence; a launch/build/parser/provenance failure is not.
+1. Freeze immutable source/package bytes and the complete planned denominator.
+   State the hypothesis, CPU/GPU/memory/walltime ceiling, cancellation command,
+   stopping rule, and infrastructure versus scientific-rejection exit policy.
+2. Run bounded login preflight through the same prologue used by batch. Check
+   canonical source/dependency/input hashes, clean tracked/untracked/ignored
+   state, fresh external namespaces, exact target interpreters and all entry
+   points. Reject generated caches before imports. Exercise missing, empty and
+   zero Slurm variables. Compile/link tiny probes with the exact C/C++/CUDA/host
+   compilers and flags, verify CMake cache values and runtime linkage, and test
+   analyzers against success/failure fixtures. No heavy builds or timing here.
+3. Authenticate the trust root and helpers before executing package Python.
+   Test tampering with each and with a mutually consistent replacement. Hash
+   one captured byte string rather than hashing then reopening a mutable path.
+   Use one finite independent package review, plus a repair-delta review only
+   if blocked. A failed smoke becomes an allocation-free regression first.
+4. Submit through a package-owned wrapper using absolute external chdir,
+   stdout/stderr and source paths; spool paths are not source paths. Pin tools
+   and interpreters for their execution environment. Run sbatch --test-only
+   with final arguments; distinguish its number from the submitted job ID.
+5. Compute smoke builds and runs the exact targets, tiny solver paths, resource
+   and observed worker-affinity checks. Bind every named artifact, cache,
+   command and runtime identity in receipts derived from hashed output and
+   scheduler evidence. Every timing entry point requires the receipt before
+   execution. Login OS libraries are not compute-runtime equality evidence.
+6. Only after all gates pass may authorized production run. Budget from fresh
+   smoke with margin (planned work <= 0.67 of walltime, watchdog >= 3 times a
+   measured upper bound); a timeout is not a runtime estimate. Include implicit
+   resources, nested steps and actual confinement. Keep source/packages fixed
+   after submission. Never duplicate submission or reuse partial namespaces.
+7. Collect and hash the full denominator, recheck inputs/source at the end,
+   and preserve failed evidence. Reject late provenance/runtime failures before
+   publishing aggregates. Keep valid scientific rejections distinct from
+   infrastructure failure; do not kill unrelated observations or silently retry.
 
-### Submit rules learned from 92 non-completed jobs (2026-08-30..09-02)
-
-- Batch scripts execute from `/var/spool/slurmd/`: never derive paths from `BASH_SOURCE`/`$0`/cwd; require `--export=APXCHOL_SOURCE=<abs>` and verify `git -C "$APXCHOL_SOURCE" rev-parse --is-inside-work-tree` before anything else (linked worktrees have a `.git` file). <!-- e.g. job 4560009, 4559543, 4558607 -->
-- Pin every interpreter and tool by absolute path (`/usr/bin/python3.11` or `/user-environment/env/default/bin/python3`, `$LLVM/bin/clang++`); bare `python3` changes with the uenv/view boundary and is never a contract. Never pass `env PATH=...` expanded by the batch shell into an `srun --view` step. <!-- e.g. job 4559960, 4559443, 4560221 -->
-- `srun` launches only a shell driver (`daint_build.sh`, `run_rank.sh`), never `cmake`/`python3` directly; every CMake line passes absolute `CMAKE_C_COMPILER`/`CMAKE_CXX_COMPILER` (+`CMAKE_CUDA_HOST_COMPILER`, `--allow-unsupported-compiler`) and asserts the identification lines. <!-- e.g. job 4559617, 4559632, 4560294, 4560272 -->
-- Clang-built binaries carry `-DCMAKE_BUILD_RPATH=$LLVM/lib/aarch64-unknown-linux-gnu` (and `-Wl,--build-id` if provenance needs it); the driver fails on any `ldd | grep 'not found'` before the first rank starts. <!-- e.g. job 4560227, 4560228, 4576826 -->
-- Every guard prints WHY to stderr before exiting (no bare `test ...` under `set -e`), and the batch stdout/stderr must carry each step's tail; a 0-byte log is a package defect. <!-- e.g. job 4568522, 4560313, 4582447 -->
-- Run every audit/summary/verify script on the login node against a fixture that mirrors the submitted topology (zeros in timing fields, 4 ranks, real traces) before sbatch; after a complete denominator the audit writes its verdict and exits 0 - it never fails the batch. <!-- e.g. job 4571850, 4568596, 4559544, 4559443 -->
-- `ctest` runs only tests whose executables the driver built (`--target apxchol analyze_factor unit_tests`, or `-R`); verify with `ctest -N` on the login node. <!-- e.g. job 4569010, 4576963, 4558309 -->
-- Slurm `--output/--error` and build/run roots live outside any tree the script asserts clean; use `git diff --quiet HEAD` not `status --short`. <!-- e.g. job 4569006, 4584187 -->
-- Never edit a script or lower `--time` after `sbatch`; `scancel` and resubmit, recording `sha256sum` of the script in the submit log. <!-- e.g. job 4559617, 4559638, 4559857 -->
-- Budget before submit: `records_per_rank * measured_s + startup <= 0.67 * walltime`, per-record watchdog >= 3x a measured single record, per-rank memory from a measured smoke; a TIMEOUT is not a measurement. <!-- e.g. job 4560318, 4568082, 4567831, 4558610 -->
-- An `--exclusive` Daint `normal` job grants the whole node (cpu=288, gpu=4): assert `SLURM_CPUS_ON_NODE=288`, never describe that allocation as a sub-node shape. <!-- e.g. job 4568522, 4576312 -->
-- A per-rank gate writes its verdict and exits 0; do not combine a nonzero gate with `--kill-on-bad-exit=1` (it destroys the other ranks' records). <!-- e.g. job 4571918, 4582001, 4577006 -->
-- CMake cache assertions use the type the script itself passes (`-DX:BOOL=ON` ⇔ `grep 'X:BOOL=ON'`) and are executed once against a login-node configure; `bash -n` + readonly-collision lint on every shell driver. <!-- e.g. job 4567920, 4575779, 4567992 -->
-- One package, one login preflight, one debug-partition smoke, then production; never fix one defect per allocation. <!-- e.g. jobs 4559617..4560243 (6 tries), 4575916..4582372 (8 tries) -->
-- A content-addressed capability is the trust root, not package-owned Python:
-  the submit wrapper and spooled shell must authenticate the package manifest
-  and every helper needed to interpret capability fields *before* importing or
-  executing that helper.  A helper cannot establish its own identity, and a
-  mutually consistent replacement of helper plus manifest must be a negative
-  package test.  Hash and decode one captured byte string rather than hashing a
-  path and reopening it. <!-- caught before allocation by R2b review, 2026-09-04 -->
-- Exercise each path at the stage that consumes it: login-owned paths outside
-  the view, and `/user-environment` paths inside the exact `uenv` view.  A
-  login-only existence check cannot validate a later batch-view dereference.
-  Re-hash long-lived matrix/dependency inputs at campaign end before accepting
-  timing evidence. <!-- jobs 4600418, 4600521, 4600726 -->
-- Smoke fixtures must exercise zero/absent child metrics and finalization after
-  child exit.  Do not copy an expected matrix/RSS value into a record without
-  measuring the object the child actually used.  A late infrastructure
-  downgrade must scrub performance summaries and reseal a terminal failure;
-  changing only the Slurm exit code is insufficient. <!-- jobs 4600229, 4600606 -->
-- Independent review is one finite gate: implementer validation, one package
-  audit, and—only if blocked—one delta audit of the repair.  Never submit while
-  that audit is running, and do not restart a full review after it is clean.
-  A failed smoke must first become an allocation-free regression test before a
-  second smoke is submitted. <!-- job 4601725 -->
-
-Taxonomy of those 92 jobs (157 total since 2026-08-30): harness/parser bug 21, unknown (empty or redirected logs) 21, walltime underestimate 11, bad path/missing file 10, user cancellation 8, CMake configure 5, Python-version syntax 4, compile/link 4, OOM 2, scientific gate rejection 2, Slurm resource shape 2, dependency identity 1, gcc-vs-clang 1. Only 2 of 92 were deliberate scientific rejections; 8.65 of 14.85 node-hours (58%) were infrastructure failures, 3.66 h of them TIMEOUTs. The recurring pattern was one defect fixed per allocation (block-sptrsv 6 tries, saturation-cut 6, r1b-correctness 8). Evidence: the sacct/log classification of 2026-09-02 (session scratch `final/daint_taxonomy.json`).
-
-### Login-node preflight checklist (run in this order; no allocation)
-
-- Identity: `git -C $APXCHOL_SOURCE rev-parse HEAD` == pinned commit; `git -C $APXCHOL_SOURCE diff --quiet HEAD --`; both `git -C $APXCHOL_SOURCE ls-files --others --exclude-standard` and the package's ignored-generated-state scan are empty; `git -C "$APXCHOL_SOURCE" rev-parse --is-inside-work-tree`; write `sha256sum *.sbatch *.sh *.py` to a fresh external preflight/submit directory, never back into the asserted-clean source (spool-copy rule, 4560009).
-- Static lint: `grep -nE 'BASH_SOURCE|\$\{?0\}?' *.sbatch` empty; `grep -nE '^\s*srun .*\b(cmake|python3?)\b' *.sh *.sbatch` empty; `grep -nE 'env PATH=' *.sh` reviewed; `bash -n` on every shell file; `grep -n readonly` vs later assignments (4559543, 4559617, 4567992).
-- Interpreter: every Python reference is an absolute path chosen for that stage. Parse every entry file with that exact interpreter, then execute every entry point with `-I -B` and its package-owned `--self-test`/`--help`; keep any generated state in external preflight scratch and verify the source remains clean. Repeat inside `uenv run ... --view=default` for view-owned stages (4559443, 4559960).
-- Tools on the step PATH: `uenv run prgenv-gnu/26.3:v1 --view=default -- sh -c 'command -v clang++ nvcc cmake ninja git; c++ --version'` and assert clang++ is $LLVM/bin/clang++, not /usr/bin/c++ (4560221, 4559632).
-- Configure only (no build): `uenv run ... --view=default -- cmake -S $SRC -B $S/pf-build <exact -D flags>` under `timeout 120`; require '-- Configuring done' and the compiler identification lines; then run every `grep ... CMakeCache.txt` assertion from the driver verbatim; `cmake --build $S/pf-build -- -n` plus `ctest --test-dir $S/pf-build -N` to confirm target/test consistency (4559617, 4575779, 4569010).
-- Runtime linkage of any pre-existing binary: `ldd <bin> | grep -c 'not found'` == 0 and `readelf -d <bin> | grep -E 'RPATH|RUNPATH'` contains the LLVM runtime dir (4560227).
-- Dependencies/inputs: `test -d` every offline dependency dir and matrix; FetchContent source set equals the anchor; dependency SHAs are 40 hex (4568503, 4576779).
-- Audit/summary scripts against a fixture: `python summarize.py $S/fixture` with zero timing fields and 4-rank status records; `python audit.py --run-root $S/fixture` must print VALID; `verify_source.py` over the real `_deps` tree (4571850, 4568596, 4573575).
-- Trust-bootstrap negatives: replace the capability, package helper, and
-  manifest independently and as a mutually consistent set; every case must be
-  rejected before helper import.  Require an exact package-test denominator,
-  not merely an `OK` substring (zero tests also print `OK`).
-- Lifecycle negatives: mutate a matrix after its initial manifest, tamper with
-  a manifest-excluded receipt reference, make terminal-manifest verification
-  fail, and force a late infrastructure downgrade after a ratio-bearing
-  summary; every case must end as sealed infrastructure failure with no public
-  performance aggregate.
-- Output namespace: `mkdir -p` the parent of every --output/--error/run root and `test -w`; confirm they are outside $APXCHOL_SOURCE; `test ! -e <run root>` (4582964, 4569006).
-- Slurm shape: `#SBATCH --time` matches the budget line in README; `--ntasks-per-node=4 --cpus-per-task=72` (full node) and script assertions use 288 CPUs / 4 GPUs; the agent runs `sbatch --test-only <script>` after the immutable package passes login preflight (4568522, 4576312).
-- Budget arithmetic printed: planned records, measured seconds per record (from previous run logs), startup, walltime, watchdog, per-rank memory; abort if `plan > 0.67 * walltime` (4560318, 4568082).
-- Only then: 5-minute `-p debug` smoke of build driver + one tiny record per rank; then production.
-
+Keep every measurement in its declared experimental unit when comparing or
+resampling. Concurrent ranks are not independent replications. Factor identity
+requires structure/value digests; equal fill, residuals or seed are insufficient.
+Required original-system checks and retries remain inside Solve. Publish neither
+private runbooks nor unaccepted performance conclusions.
 
 ## Build options
 
@@ -395,7 +299,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   conditional Bernoulli/HT law and connectivity backbone remain unchanged.
   `ResidualBlockedNormalization.*` and `ResidualBlockedGraph/*.*` check the new
   contract. No runtime knob is added. The implementation was validated on
-  Daint before integration; see [CPU-RESIDUAL-BLOCKED.md](CPU-RESIDUAL-BLOCKED.md)
+  the recorded platform before integration; see [the normalization history](docs/implementation-history.md#blocked-normalization)
   for the bounded setup improvement and the separate limits of the timing study.
 - Full symmetric CSC inputs with unique sorted indices construct directed pool
   incidences by column ownership; upper incidences use canonical lower weights.
@@ -414,11 +318,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 
 ## Benchmarks and experiments
 
-Daint is primary (`benchmarks/daint`); laptop data are historical. Preserve the
-27-matrix denominator: the historical profile has 18 series, while the explicit
-current comparison has 20 (CPU GKS/trace, GPU GKS at two degree cutoffs and
-GPU trace-cycle at q=0.8).
-Canonical MATLAB CMG is excluded from current charts; packed serial CMG remains.
+Committed Daint and laptop results are historical snapshots tied to their
+recorded sources, inputs and protocols. Preserve each snapshot's denominator;
+do not describe it as current-library performance or silently relabel profiles.
 Preserve historical outcomes, effective versus requested threads, and source/binary/cell hashes.
 [benchmarks/README.md](benchmarks/README.md) defines runner/solver contracts;
 use the existing harness. Rendering runs no benchmarks.
@@ -472,31 +374,6 @@ original verdicts and valid observations when a subset fails; label later
 subset analysis retrospective. A faster solve with slower one-RHS total is a
 tradeoff. Never multiply isolated ratios into a cumulative speedup claim.
 
-Before a Daint submission:
-
-1. State the hypothesis, planned records, CPU/GPU/memory/walltime ceiling,
-   cancellation command, and whether the laptop may be shut down.
-2. Perform bounded login-node checks of the exact package, target interpreters,
-   paths, compiler/link configuration, allocation arguments, and analyzer on
-   representative success/failure fixtures. Use `sbatch --test-only`. Keep
-   heavy builds and solver runs off login nodes.
-3. Use a compute smoke when new compiler/runtime/resource behavior needs it
-   or debug materially shortens turnaround. Reuse valid evidence for an
-   unchanged binary; a parser-only repair does not require another numerical
-   campaign. Respect the user's explicit smoke and resource instructions.
-4. Use absolute external output/build/run paths and a fresh result namespace.
-   A linked worktree has a `.git` file: use `git rev-parse`, not a directory
-   assertion. Keep source immutable after submission. Redirect `srun` stdin
-   when it runs inside a loop reading a phase plan.
-5. Size watchdogs and walltime from measured or censored record bounds with
-   margin. Include implicitly allocated GPUs in exclusive-node budgets and
-   keep nested steps within the allocation. Record actual affinity. Verify
-   the returned job ID; distinguish submitted, pending, running, and complete.
-6. Collect the result and diagnose the first cause of failure before retrying.
-   Preserve raw evidence. Make recoverable harness failures local regressions;
-   use one independent review and review only its repair delta if necessary.
-   A scientific rejection must not abort unrelated ranks or erase their data.
-
 ## Workspace and handoff
 
 Check the active branch and dirty state before editing. The current checkout
@@ -510,9 +387,10 @@ result path, exact remote job ID/status, and next action in one durable local
 ledger. Confirm the checkpoint exists. An agent's assignment is not evidence
 that implementation or a cluster job started.
 
-`data/`, `results/` and `benchmarks/results/` are ignored. Daint is the current
-performance source: committed extracts, coverage and source/protocol metadata
-live in `benchmarks/daint/`; audited campaign cell stores remain private.
+`data/`, `results/` and `benchmarks/results/` are ignored. Committed historical
+extracts, coverage and source/protocol metadata live in `benchmarks/daint/`;
+private campaign stores, operational runbooks and coordination ledgers stay
+outside tracked source. Public results require explicit publication approval.
 `results/cells/` is a generated local store, not automatically the source of
 published Daint data. Renderers default to ignored `results/plots/` previews;
 publication requires an explicitly selected store and output.

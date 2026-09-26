@@ -1,8 +1,10 @@
 # Benchmarks
 
-[Daint results](daint/) are the current performance reference. [Laptop results](archive/)
-are retired. Raw campaign stores are private; committed CSVs and provenance identify
-selected measurements. Local `results/cells/` is not automatically the published source.
+[Daint results](daint/) and [retired laptop results](archive/) are historical
+snapshots, bound to their recorded source revisions and measurement protocols.
+They are not measurements of the current checkout. The contract below governs
+new comparisons; it must not be applied retroactively to old timings.
+Committed CSVs carry selected results and provenance.
 
 ## Measurement contract
 

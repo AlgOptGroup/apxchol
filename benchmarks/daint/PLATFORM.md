@@ -1,6 +1,8 @@
 # Platform boundary
 
-Daint GH200 is primary; [laptop data](../archive/) is historical.
+This page describes the recorded Daint GH200 snapshot. It is not a statement
+of current platform access or current-library performance. [Laptop data](../archive/)
+is a separate historical snapshot.
 
 The headline declares **27 matrices × 20 series = 540 identities**. Packed serial
 CMG replaces unavailable canonical MATLAB CMG in current charts; historical data

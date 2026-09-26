@@ -37,38 +37,18 @@ FP16 factor is not an FP16 outer solve. CPU and GPU-host preparation share the
 narrowing/flush rules in `lowprec.h`; device finalization has its own CUDA
 implementation and is checked by the GPU finalization tests.
 
-## What has and has not been established
+## Accuracy and configuration choice
 
-Scaled FP16 factor storage is already implemented and tested. The temporary
-assembled factor is still FP32; the large installed CSR/CSC arrays are the
-ones narrowed. Keeping that temporary factor or its diagonal in FP16 would
-be a different change, with different construction, export and compensation
-requirements.
+FP16 applies to the installed triangular-solve arrays, not the mutable graph
+or assembled/exported factor. Graph weights use FP32 by default; FP64 pool
+storage is an optional reference. Scaled FP16 graph storage is not supported.
 
-There is no scaled FP16 mutable graph representation in the current source.
-A graph column changes as fill edges arrive, duplicates coalesce and vertices
-are eliminated. Per-column compression would need a stable scale/update rule,
-consistent weights at both endpoints, and tests for small weights and excess
-mass. Factor-storage results do not establish graph-storage accuracy or speed.
-Such a format is a numerical experiment, not a cleanup substitution.
+Low-precision preconditioning can retain final solution accuracy while changing
+iteration count. Select precision using original-system residuals, total solve
+cost and memory on the intended inputs; smaller storage alone is not a speed
+guarantee. Bitwise factor repeatability is a separate property from convergence.
 
-Historical tests rejected BF16/FP24 storage alternatives, FP16 diagonals,
-uncompensated dropping/rounding, and packed FP16 arithmetic for their measured
-quality/performance tradeoffs. Those alternatives are already absent; see
-[implementation history](implementation-history.md). These historical findings
-are not universal precision guarantees or fresh measurements.
-
-## Acceptance policy
-
-Numerical validity means meeting the requested original-system residual;
-bitwise repeatability is a separate debugging or experimental contract.
-Neither equal iteration counts nor a fixed random seed proves factor identity.
-Lower precision may change iterations even when the final accuracy is retained.
-
-Remove a runtime alternative when matched evidence shows it is dominated on
-its intended tested inputs, considering Setup, Solve, Total, convergence and
-memory. Retain necessary portability/fallback behavior and independent numerical
-references for a stated reason. Use all observed inputs and slow runs; do not
-correct ordinary timings using traces. Prefer lower Solve at roughly flat Total.
-A source-only cleanup can instead establish unchanged execution by comparing
-complete baseline/candidate binaries under the same build configuration.
+Historical rejected precision variants and their limits are recorded in
+[implementation history](implementation-history.md). They are not universal
+precision guarantees. The [benchmark protocol](../benchmarks/README.md) describes
+how to compare supported configurations without changing timing boundaries.

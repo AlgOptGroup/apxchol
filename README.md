@@ -71,7 +71,8 @@ GPU selection; experimental GPU-owned numerical setup additionally requires
 `APXCHOL_GPU_ROUND_SHADOW=force` and `APXCHOL_GPU_FACTOR_FINALIZE=force`.
 This applies to one-shot block-greedy/tree solves with directed AoS storage;
 public/exported factors and unsupported stored formats retain validated fallback
-paths. See [the setup contracts](AGENTS.md#architecture-and-contracts).
+paths. These controls are research interfaces; see the [extension guide](docs/extending.md)
+for supported custom-factor and graph interfaces.
 
 ### Threads and placement
 
@@ -93,7 +94,7 @@ explicitly, one place per chosen core (`lscpu -p=CPU,CORE,NODE` lists them):
 
 ## Further reading
 
-- [Daint results](benchmarks/daint/) and [benchmark protocol](benchmarks/README.md).
+- [Historical Daint results](benchmarks/daint/) and [benchmark protocol](benchmarks/README.md).
   Laptop measurements are [historical](benchmarks/archive/).
 - [Examples](examples/), [extending the algorithm](docs/extending.md),
   [contributing](CONTRIBUTING.md), [implementation history](docs/implementation-history.md).

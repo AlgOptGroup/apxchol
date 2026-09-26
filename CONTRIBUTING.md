@@ -38,7 +38,8 @@ another mode or public tuning option.
 ## Performance
 
 The [benchmark suite](benchmarks/README.md) is a separate CMake project.
-Daint is the primary performance platform; laptop measurements are diagnostic.
+Use a controlled, recorded machine; committed platform results are historical
+snapshots. Interactive laptop measurements are diagnostic.
 Use matched, interleaved repetitions with pinned source, binaries, inputs,
 affinity and timing boundaries. Report setup and solve separately, together
 with residuals, fill, memory and control spread. Do not combine isolated

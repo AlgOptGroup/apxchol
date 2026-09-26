@@ -10,8 +10,8 @@ and [the extension guide](extending.md).
 The [complete earlier record](https://github.com/AlgOptGroup/apxchol/blob/1a526f25aec8829e8a9217b558ac2290a3840ae0/docs/implementation-history.md) preserves campaign details,
 obsolete configuration examples, raw-result locations, and longer rationale.
 Those historical instructions must not override current source or benchmark
-protocols. Daint is the primary performance snapshot; laptop timings are
-historical diagnostics.
+protocols. Both the committed Daint snapshots and laptop timings describe
+historical revisions; neither establishes current integrated performance.
 
 ## GPU solve and storage
 
@@ -195,6 +195,8 @@ probability reduced quality margin; an exact maximum-weight forest cost too
 much extra setup. A separate coalescing policy was retired, while coalescing
 remains part of this rebuild. See the
 [residual-sparsification report](../experiments/2026-08-26-residual-sparsify/README.md).
+
+### Blocked normalization
 
 **Blocked normalization fixes a serial residual stage.** Ordered 16,384-item
 partial sums and an ordered fold use one persistent team for normalization
