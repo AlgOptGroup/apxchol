@@ -13,6 +13,21 @@ Those historical instructions must not override current source or benchmark
 protocols. Both the committed Daint snapshots and laptop timings describe
 historical revisions; neither establishes current integrated performance.
 
+## Serial residual ordering
+
+The optional `min_degree` peel is a historical lazy degree-heap heuristic.
+It revalidates the popped vertex but does not update every neighbor after
+elimination. A decreased degree can remain hidden under a stale larger heap
+key, so the selected pivot need not have the current minimum degree. Older
+comments claiming exact lowest-degree selection, guaranteed best fill, or an
+unconditional O(n log n) total bound were too strong. Historical measurements
+must retain the behavior of the implementation that produced them.
+
+Natural ordering remains the default; `bk_serial` samples candidates and selects
+the smallest live degree it observes. Neither alternative is established as
+universally dominated. Changing the heap policy changes pivot order, factor
+quality and cost, and requires its own correctness and performance validation.
+
 ## GPU solve and storage
 
 **Dataflow triangular solves replaced level launches and proprietary analysis.**

@@ -14,8 +14,8 @@ namespace apxchol {
 /// IS-finding loop bails out.  All strategies are serial; they differ only
 /// in pivot order.
 enum class residual_peel_strategy {
-    natural,     // peel in original active-list order (cheapest, current default)
-    min_degree,  // pick min current-degree vertex each step (best fill-in)
+    natural,     // peel in original active-list order (default)
+    min_degree,  // lazy degree-heap heuristic; not exact current minimum degree
     bk_serial    // sample √|active| vertices and peel the min-degree one
 };
 
@@ -160,11 +160,13 @@ struct factor_options {
     size_t parallel_residual_threshold = std::numeric_limits<size_t>::max();
 
     // Pivot ordering strategy for the serial residual peel (eliminate_remaining).
-    // - natural    (default): O(|active|) per step, no extra work.
-    // - min_degree: O(|active| log |active|) total, picks lowest-degree pivot
-    //   each step.  Tends to reduce final nnz(L) on dense residuals.
-    // - bk_serial: sample √|active| vertices, pivot on the lowest-degree
-    //   sample.  Cheap heuristic that approximates min_degree.
+    // - natural (default): visits the supplied order without ordering scans.
+    // - min_degree: lazy degree heap; revalidates only the popped vertex.
+    //   Decreased degrees can remain hidden under stale larger keys, so this
+    //   does not guarantee the current minimum degree or minimum fill.
+    //   Cost includes degree recounts and repeated heap updates.
+    // - bk_serial: sample √|active| vertices with replacement and pivot on
+    //   the lowest live degree observed in that sample.
     residual_peel_strategy residual_peel = residual_peel_strategy::natural;
     // forward_star adjacency-pool compaction trigger.  After every round,
     // if the live fraction of nodes_ falls below this threshold, rebuild

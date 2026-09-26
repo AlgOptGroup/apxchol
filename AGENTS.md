@@ -152,6 +152,10 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   Canonical neighbors use comparison sort by weight and vertex; sampling uses
   exact cumulative weights and `upper_bound`. Preserve estimator semantics,
   tie ordering, and per-elimination random streams.
+- Serial residual `min_degree` currently uses a lazy degree heap, not exact
+  current-minimum-degree selection. Historical measurements retain that meaning.
+  Refreshing degree decreases changes ordering and needs fresh validation;
+  neither this heuristic nor exact minimum degree guarantees minimum fill.
 - `solver/partition/` contains block-greedy, priority-greedy, and Baumann-Kyng.
   `factor_options.h` is authoritative for defaults and their rationale.
   Preserve deterministic conflict resolution and thread-team fallback rules.

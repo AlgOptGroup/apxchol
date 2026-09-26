@@ -1128,13 +1128,11 @@ void eliminate_remaining(const Eliminator& elim,
     };
 
     if (opts.residual_peel == residual_peel_strategy::min_degree) {
-        // Greedy min-degree using a binary heap with lazy revalidation.
-        // Initial pass: compute degree for every active vertex once.
-        // Each pop revalidates by recomputing degree via prune_and_degree;
-        // if the stored degree no longer matches the live degree (a neighbour
-        // was eliminated or a clique edge raised it), re-push with the fresh
-        // value and continue popping.  Amortised cost: O((|active| + Δ) log)
-        // where Δ is the total degree growth caused by clique fill-in.
+        // Historical lazy degree-heap heuristic, retained under min_degree.
+        // Revalidate the popped key, but leave other keys unchanged. Degree
+        // decreases can therefore hide a better pivot under a stale larger
+        // key: this is not exact current-minimum-degree selection. Changing
+        // the update policy changes pivot order, factor quality and cost.
         using entry = std::pair<node_index, node_index>;  // (degree, vertex)
         std::vector<entry> heap;
         heap.reserve(active.size());
