@@ -61,7 +61,9 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 
 `cmake -LH build` lists build options. Algorithm defaults live in
 [factor_options.h](include/apxchol/solver/factor_options.h).
-`APXCHOL_SPTRSV_FP16=0|1` controls factor storage (GPU default on, CPU off).
+`APXCHOL_SPTRSV_FP16=0|1` controls triangular-solve factor storage (GPU default
+on, CPU off). It narrows scaled off-diagonals, retaining FP32 diagonals; it
+does not change the outer PCG to FP16. See [precision and storage](docs/precision.md).
 `--sampler gks|trace_cycle` selects the clique sampler; GKS remains
 its default. Trace-cycle supports CPU setup and full GPU-owned setup.
 Factor construction defaults to CPU. `APXCHOL_GPU_BLOCK_FRONTEND=on` enables

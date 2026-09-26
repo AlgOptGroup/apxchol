@@ -192,218 +192,27 @@ private:
 /// cross-processor dependencies, while leaving the parallel fat prefix alone.
 /// APXCHOL_LEVEL_DUMP=1 prints both the level census and the resolved tail plan.
 
-// STORAGE (RUNTIME, per setup): the SpTRSV's CSR/CSC value arrays -- the two
-// largest copies of the factor -- hold either fp32 (`float`, the default) or
-// the fp16 per-column-scaled form (`fp16_t`, lowprec.h). Which one is a
-// RUNTIME choice, read from the unified env APXCHOL_SPTRSV_FP16=0|1 -- the
-// same variable the GPU backend reads, sptrsv_fp16_env_tristate() in
-// lowprec.h being the one reader -- at every setup; unset means OFF on the
-// CPU and ON on the GPU. It is NOT a build option (the CMake variable
-// APXCHOL_SPTRSV_LOWPREC that used to select it was removed 2026-08-20): the
-// CPU kernel is INSTANTIATED for both storage types and setup picks one, so a
-// single binary can do either and the choice needs no rebuild.
+// Storage contract (derivation and historical decisions: docs/precision.md):
 //
-// Narrowing to fp16 halves the value stream (the 8 B/nnz idx+val stream drops
-// to 6 B/nnz) on a bandwidth-bound solve; compute is unchanged, since every
-// read of a stored value in the kernels below goes through widen(): the
-// arithmetic is ALWAYS done in double, whatever the storage width, and the
-// outer PCG stays fp64. It is a preconditioner-QUALITY knob (PCG iteration
-// count), never a residual-floor one.
-//
-// DISTRIBUTION GUARD: the fp16 storage is only compiled, and only offered,
-// where the target has F16C (__F16C__ -- any x86 since Ivy Bridge / Zen; the
-// -march=native default has it). Without F16C the fp16 -> fp32 widen is a
-// libgcc __extendhfdf2 CALL in the SpTRSV inner loop (measured 3x slower
-// solve), so a PORTABLE build (APXCHOL_NATIVE_ARCH=OFF, i.e. the PyPI wheels'
-// baseline x86-64) compiles the fp32 storage ONLY; the env then falls back to
-// fp32 with a one-shot stderr note. fp16_supported() is the compile-time
-// predicate, and every fp16 instantiation sits behind `if constexpr` on it.
-//
-// DIAGONAL under fp16: the fp32 storage reads L(i,i) inline from the factor
-// (last entry of CSR row i / first entry of CSC column j) at the same
-// precision as the off-diagonals. The fp16 storage does NOT: a narrow
-// diagonal was measured to be the dominant iteration-count damage (iter0040
-// T=1, the removed all-bf16 variant: diag-only bf16 314 PCG iters,
-// off-diag-only 185, both 348, fp32 65), so it keeps a separate fp32
-// `diag_[m]`, filled at setup from the factor (factor_value_t == float, i.e.
-// BEFORE any narrowing) -- the SCALED diagonal L_jj / s_j (one fp32 division,
-// stored_diag()), see below -- and both solves divide by diag_[i]. The narrow
-// diagonal slot stays in csr_vals16_/csc_vals16_ (written like every other
-// entry through narrow_value, i.e. fp16(L_jj / s_j), which may even overflow
-// fp16 to inf) but is never read: keeping it leaves the CSR/CSC layout, the
-// transpose, and every "diagonal is entry X" invariant untouched.
-// diag<Dir, V>() below is the single switch. (Reading the fp16 slot instead
-// was a real, measured option -- env APXCHOL_FP16_DIAG -- and lost: iter0040
-// 44 -> 50 PCG iterations, +14%; see "Retired knobs" in AGENTS.md.)
-//
-// PER-COLUMN SCALE under fp16 -- FOLDED INTO THE VECTORS:
-// scale_[j] = s_j = max |L_ij| over the off-diagonals of column j (1.0f if
-// there is none), fp32, computed at setup from the factor (column_scale()).
-// What is stored is the COLUMN-SCALED factor L~ = L D^-1, D = diag(s_j):
-// off-diagonals narrow(L_ij / s_j) and diag_[j] = fp32(L_jj / s_j). The
-// kernels never multiply a scale back -- they run on L~ as stored, so every
-// kernel path (forward / back x thin / fat) is ONE source for both storage
-// types, the only per-type difference being the widen() overload:
-//   forward:  L y = x  <=>  L~ (D y) = x.  forward_solve runs the plain forward
-//             kernel on L~ and returns y' = D y (y'_j = s_j y_j), NOT y.
-//   back:     L^T z = y  <=>  D L~^T z = y  <=>  L~^T z = D^-1 y = D^-2 y'.
-//             transpose_solve takes y' (the forward's output, THE pair
-//             contract) and runs the plain back kernel on L~^T with the input
-//             read x_in[j] scaled once per column: z_j = (x_in[j] * r_j^2 -
-//             sum_k h_kj z_k) / diag_[j], r_j = fp32(1 / s_j) (inv_scale_[j],
-//             set at setup; r_j^2 is exact in double). One per-COLUMN load
-//             and multiply, nothing per entry, no pass between the sweeps.
-// The pair therefore applies z = L~^-T R L~^-1 x with R = diag(r_j^2) =
-// D^-2 (1 + O(2^-23)): symmetric positive definite, and with exact r_j
-// exactly (L_s L_s^T)^-1 for the STORED factor L_s = L~ D (effective diagonal
-// fp32(L_jj / s_j) * s_j, effective off-diagonals widen(h_ij) * s_j) -- the
-// unit tests state this pair contract (y' = D y, then z) against a serial
-// double reference on L_s. On the fp32 storage D = I: forward_solve returns y
-// and transpose_solve solves L^T z = x_in, the scaled-only pieces
-// (inv_scale_, the x_in scaling) compile out of THAT instantiation, and its
-// inner loops are instruction-identical to the pre-fold ones (objdump of the
-// outlined `omp` bodies: same FP instruction stream -- thin: vcvtss2sd +
-// vfmadd231sd x4, fat: vcvtss2sd / vmulsd / vaddsd, epilogue vsubsd /
-// vcvtss2sd / vdivsd).
-//
-// DEGENERATE SCALES (fp16 storage; the same contract the GPU backend states
-// in cuda.h): a column whose scale cannot be represented -- fp32 1/s_j
-// overflows (s_j < ~3e-39) or the scaled diagonal fp32(L_jj)/s_j overflows
-// (off-diagonals >= ~1e38x below the diagonal) -- FALLS BACK to s_j = 1 (the
-// "no off-diagonals" convention). Its off-diagonals are below anything even
-// an fp32 sweep could see next to that diagonal, and the drop/flush removes
-// them. The fallback is applied BEFORE the drop so the threshold and the
-// storage agree on the scale, and it is counted
-// (lowprec_stats().scale_fallback). setup() then VERIFIES that every diag_[j]
-// is finite and nonzero and every r_j^2 finite, and THROWS otherwise: a
-// factor the fp16 storage cannot represent must fail loudly, never dissolve
-// into NaN.
-//
-// SIMD CONVERT (fat levels, the `omp for` paths; fp16 storage only; needs
-// AVX2 + F16C + FMA, the -march=native default on any x86 since Haswell /
-// Zen): 8 stored values per vector convert (widen8(): F16C _mm256_cvtph_ps --
-// overloads for float / double exist so flipping the fp32 kernel over is one
-// constant, simd_dot_v, but it is deliberately NOT flipped: the fp32 kernel
-// stays as measured) -> two 4-double lanes, through an 8-double stack buffer
-// (which the compiler turns into register lane extracts) into a 4-way scalar
-// FMA chain over scalar y gathers. A 4-wide step and a scalar tail finish the
-// row / column. Thin levels (the `omp single` paths) keep the 4-way scalar
-// kernel; the fp32 fat-level loop is the plain scalar loop it always was.
-// Different summation orders (2 lanes vs 4-way vs 1): same accuracy, not
-// bit-identical. (The vector-gather flavour -- _mm256_i32gather_pd feeding
-// _mm256_fmadd_pd instead of the stack buffer -- was an env A/B,
-// APXCHOL_FP16_GATHER=simd, and LOST: vgatherdpd's latency sits on the
-// critical path of the short grid rows, ~10-15% slower solve on grid_2000
-// T=1, equal on iter0040. See "Retired knobs" in AGENTS.md.)
-//
-// ROUNDING: RNE (the bf16 variants' opt-in stochastic rounding went with
-// them; a Laplacian factor's systematically signed RNE errors are what the
-// column-sum compensation below absorbs instead).
-//
-// FP16 SUBNORMALS: a stored fp16 subnormal (|L_ij / s_j| in [2^-25, 2^-14))
-// carries between 1 and 10 significant bits and, per the drop measurement
-// below, that magnitude range is dead weight for the preconditioner.
-// narrow_value therefore ALWAYS flushes fp16 subnormals to (signed) zero at
-// storage time. (Keeping them was an env A/B, APXCHOL_FP16_KEEP_SUBNORMAL=1,
-// and bought nothing: iter0040 64 iterations either way -- see "Retired
-// knobs".) The flushed count below includes them.
-//
-// COMPACTING DROP (both storages; APXCHOL_FACTOR_DROP=<rel>, default
-// kFactorDropRelDefault = 1e-4, read at every setup; <= 0 = off): setup()
-// REMOVES -- not zeroes -- factor off-diagonals BEFORE the CSR/CSC are built:
-// entry (i, j), i != j, is KEPT iff
-//   |L_ij| >= rel * s_j   (s_j = column j's max |off-diagonal|, column_scale(),
-//                          computed from the factor BEFORE the drop)
-//   AND the storage format does not map it to zero anyway (format_flushes():
-//   an exact zero on the fp32 storage; on fp16 also everything fp16 flushes --
-//   |L_ij / s_j| < 2^-14 with the subnormal flush above -- since a stored zero
-//   is still a stored entry; at the default rel = 1e-4 > 2^-14 this second
-//   clause adds nothing).
-// keep_offdiag() is the pure predicate. The diagonal is always kept, so every
-// column keeps its first entry (the diagonal-first CSC / diagonal-last CSR
-// invariants the solves rely on hold) and s_j is unchanged by the drop (the
-// column max itself is never below rel * s_j for rel <= 1). Exact zeros
-// always go (|0| < rel * s_j for any rel > 0). The drop is O(nnz) parallel
-// work with no atomics -- per-column kept count -> serial prefix over m+1 ->
-// parallel compacted copy into uninitialized buffers -- and the compacted
-// arrays REPLACE L11_{outer,inner,vals} / nnz for everything downstream: the
-// CSR transpose, the CSC copy and the level sets (the topological scan reads
-// the compacted CSR/CSC; round-as-level bounds are per column and unaffected)
-// are all drop-agnostic. Result: nnz(L stored) -- the
-// CSR/CSC bytes and the per-sweep work -- shrink. The drop happens at the
-// FACTOR's precision (factor_value_t), before narrow_value(): dropped entries
-// never reach the storage format. Deterministic: the kept set is a per-entry
-// predicate on the factor, the output order is the input order, and the
-// compensation below sums each column in a fixed order (the factor itself is
-// deterministic at T=1; at T>1 only fp merge-order ulps differ, as before).
-// When nothing is below the threshold (grids) the arrays are left untouched
-// -- no copy is made.
-//
-// COLUMN-SUM COMPENSATION (UNCONDITIONAL; the APXCHOL_FACTOR_DROP_COMPENSATE=0
-// A/B switch was removed 2026-08-20 -- the numbers below are why): every
-// column of the factor of
-// a Laplacian sums to zero -- L(j,j) = sqrt(deg_j), L(i,j) = -w_ij/sqrt(deg_j)
-// -- which is exactly why L L^T again has zero row sums (a Laplacian in the
-// generalized sense: A + a zero-row-sum sampling error) and why grounding the
-// last vertex costs nothing: (L L^T)_11 = L11 L11^T is the reduced form of
-// that approximation, with the same total grounding mass as the true A_11.
-// Plain removal of an entry L(i,j) breaks the column sum: to first order it
-// deletes the tiny edge (i,j) from the approximate Laplacian AND leaves its
-// weight behind as a self-loop at both endpoints -- in the grounded
-// (Laplacian, m = n-1) view, an extra edge to ground. Modes that are only
-// weakly grounded in A_11 (regions far from the hub in conductance) then see
-// a preconditioner that grounds them much more strongly, and PCG pays:
-// measured on main's iter0040 (Laplacian path) plain removal at rel=1e-4
-// costs 45 -> 67 iterations, while on the SDDM path (APXCHOL_GROUND=reg,
-// where residuals stay orthogonal to the one near-null direction) it costs
-// nothing (48 -> 48; the branch that introduced the drop measured 44 -> 44
-// on that path). The compensation folds each column's dropped mass back into
-// its kept off-diagonals in proportion to |v| (for the M-matrix factors we
-// produce -- all off-diagonals <= 0 -- that is a uniform rescale of the kept
-// off-diagonals by 1 + |dropped| / |kept|; the |v| weighting only keeps it
-// bounded on a mixed-sign column). Column sums -- hence the zero row sums of
-// L~ L~^T and the total grounding mass of L~11 L~11^T (= sum of squared column
-// sums of L~11 = the hub row's) -- are preserved exactly (up to fp32
-// rounding); the perturbation is a bounded relative change of the kept edges
-// instead of an unbounded relative change of the grounding. Measured on
-// iter0040 (main): 45 -> 45 iterations at rel = 1e-4, 1e-3 and 3e-3 (52 / 65
-// / 67% of the off-diagonals dropped). This is the same idea as MILU's
-// row-sum preservation. Measurement behind the default: see
-// kFactorDropRelDefault. Under fp16 the compensation runs on the un-scaled
-// fp32 factor column and only THEN is the column narrowed (L_ij / s_j); s_j
-// is the pre-drop column max, which the drop never removes.
-//
-// COLUMN-SUM COMPENSATION OF THE ROUNDING (fp16 storage; UNCONDITIONAL): the
-// per-entry storage rounding delta_ij of a narrow off-diagonal is exactly the
-// kind of perturbation the paragraph above is about -- it breaks the zero
-// column sums of a Laplacian factor, i.e. it grounds every vertex a little
-// (~2^-11 relative under fp16) at both endpoints of every edge -- and on the
-// Laplacian (m = n-1, center-k) path PCG pays for it exactly as it pays for
-// plain removal: MEASURED iter0040 (T=1, tol 1e-8, bg+tree[vec_pool], drop
-// on) fp32 45 -> fp16 64 WITHOUT it (67 with the drop off), while on the SDDM
-// path (APXCHOL_GROUND=reg) both take 48. Since the diagonal lives in a
-// separate fp32 diag_[], the residual is absorbed there: diag_[j] =
-// fp32(x_jj + sum_i (x_ij - widen(h_ij))) with x = the value store() narrows
-// (L_ij / s_j), computed in the CSC pass -- the stored column then sums to
-// what the fp32 column sums to (up to fp32), and the diagonal moves by at
-// most 2^-11 relative (|sum_i L_ij| = L_jj for our factors). The GPU backend
-// applies the same compensation, always (cuda_host::narrow_fp16_scaled).
-//
-// STATISTICS (lowprec_stats() == drop_stats(), printed under APXCHOL_VERBOSE:
-// one "sptrsv storage" line per setup, plus a "factor drop" line when the drop
-// is on): the threshold in effect (rel; 0 = off) and whether the compensation
-// the factor's nnz before / after the drop
-// (nnz_factor, nnz_stored -- the latter is what the CSR and the CSC each
-// hold), how many off-diagonals the drop removed and why (dropped =
-// dropped_threshold + dropped_flush), and over the STORED off-diagonals: how
-// many stored values flushed to zero (v != 0, stored == 0), how many are
-// subnormal in the storage format, plus the SUBNORMAL CENSUS
-// factor_subnormal = number of factor entries (diagonal included,
-// factor_value_t = fp32) that are fp32 subnormals -- on the fp32 storage
-// these ARE the stored values, so this is exactly "how many stored fp32
-// factor values are subnormal". Measured 0 of 4.6M (iter0040) and 0 of 21.9M
-// (grid_2000) -- which is why the MXCSR FTZ+DAZ knob that used to ask the
-// same question at PCG entry is gone (see "Retired knobs" in AGENTS.md).
+// * FP32 arrays by default; APXCHOL_SPTRSV_FP16=1 selects scaled FP16
+//   off-diagonals on F16C targets. Portable builds retain FP32. Arithmetic
+//   remains FP64 in both cases; only the stored preconditioner changes.
+// * Scale s_j is the pre-drop maximum absolute off-diagonal of column j, or
+//   one for an empty column. Compacting drop preserves the diagonal and
+//   compensates dropped mass in the retained off-diagonals before narrowing.
+// * FP16 storage uses RNE(L_ij / s_j), flushing subnormals to signed zero.
+//   The FP32 diagonal absorbs the off-diagonal rounding residual. Kernels
+//   never read the narrow diagonal slot, which may overflow independently.
+// * With stored factor L D^-1, forward_solve returns D y. The backward
+//   sweep scales its input by r_j^2, where r_j = FP32(1 / s_j). FP32 storage
+//   has D = I; its scaling operations compile out. Keep the paired contract.
+// * Degenerate scales fall back to one before dropping; setup rejects invalid
+//   final diagonals or reciprocal scales rather than propagating NaNs.
+// * Thin levels use scalar accumulation. FP16 fat levels use F16C conversion
+//   with scalar gathers on AVX2/FMA targets; FP32 uses the scalar kernel.
+//   Their different accumulation orders need not produce identical bits.
+// * drop_stats()/lowprec_stats() retain the counts and memory diagnostics.
+//   Reporting does not change these numerical/storage rules.
 
 class omp_sptrsv {
 public:
@@ -413,7 +222,7 @@ public:
     /// Whether THIS BUILD can do the fp16 factor storage at all: the target
     /// must have F16C (the one-instruction fp16 -> fp32 widen). A portable
     /// baseline-x86-64 build (the distributed wheels) compiles the fp32
-    /// storage only -- see the file header, "DISTRIBUTION GUARD".
+    /// storage only; see docs/precision.md.
     static constexpr bool fp16_supported() {
 #if defined(__F16C__)
         return true;
@@ -461,13 +270,7 @@ public:
     template <class V = sptrsv_value_t>
     static V narrow_value(factor_value_t v, float s) {
         if constexpr (std::is_same_v<V, fp16_t>) {
-            const float x = static_cast<float>(v) / s;   // |x| <= 1 for the off-diagonals as factorized (s is
-                                                         // their max; the drop's compensation may lift kept
-                                                         // entries a little above -- fp16 has range to spare)
-            const fp16_t h(x);                           // RNE, subnormals / flush per IEEE
-            if (fp16_t::is_subnormal(h.bits))
-                return fp16_t::from_bits(static_cast<std::uint16_t>(h.bits & 0x8000u));   // signed zero
-            return h;
+            return detail::narrow_scaled_fp16(static_cast<float>(v), s);
         } else {
             (void)s;
             return static_cast<V>(v);
@@ -482,8 +285,7 @@ public:
     template <class V = sptrsv_value_t>
     static bool format_flushes(factor_value_t v, float s) {
         if constexpr (std::is_same_v<V, fp16_t>) {
-            const fp16_t h(static_cast<float>(v) / s);
-            return fp16_t::is_zero(h.bits) || fp16_t::is_subnormal(h.bits);
+            return detail::fp16_flushes(static_cast<float>(v) / s);
         } else {
             (void)s;
             return v == 0;
@@ -515,7 +317,7 @@ public:
     // a column whose factor diagonal is L_jj and whose scale is s (1.0f on the
     // fp32 storage). The fp16 storage keeps the scaled diagonal
     // fp32(L_jj / s) -- one fp32 division -- in diag_[j] (see the file header,
-    // "FOLDED INTO THE VECTORS"), plus the column's rounding residual; the
+    // storage contract), plus the column's rounding residual; the
     // fp32 storage reads the factor value inline (== L_jj).
     template <class V = sptrsv_value_t>
     static double stored_diag(factor_value_t L_jj, float s) {
@@ -734,7 +536,7 @@ private:
             }
             stats_.scale_fallback = fallback;
             // r_j = fp32(1 / s_j): the back solve's per-column input scale (see
-            // the file header, "FOLDED INTO THE VECTORS"; inv_scale() is the
+            // the file header, storage contract; inv_scale() is the
             // contract).
             inv_scale_.resize(m_);
             #pragma omp parallel for schedule(static)
@@ -845,8 +647,7 @@ private:
         // by column so store() knows the entry's column; this pass also
         // gathers the off-diagonal storage statistics (each entry once) and,
         // under fp16, folds each column's storage-rounding residual into
-        // diag_[j] (the file header, "COLUMN-SUM COMPENSATION OF THE
-        // ROUNDING"; unconditional).
+        // diag_[j] unconditionally (docs/precision.md, scaled FP16 contract).
         csc_col_ptr_.resize(static_cast<size_t>(m_) + 1);
         csc_row_idx_.resize(nnz);
         csc_vals.resize(nnz);
@@ -1292,7 +1093,7 @@ public:
     /// Under the fp16 storage the kernel runs on the stored L~ = L D^-1
     /// and writes y' = D y (y'_j = s_j * y_j) -- the value transpose_solve
     /// expects as its input; the pair (forward_solve, transpose_solve) applies
-    /// (L L^T)^-1 either way. See the file header, "FOLDED INTO THE VECTORS".
+    /// (L L^T)^-1 either way. See the file header, storage contract.
     /// Valid in place (x_in == y_out).
     void forward_solve(const double* x_in, double* y_out) const {
         solve_dispatch<fwd_dir>(x_in, y_out);
@@ -1680,7 +1481,7 @@ private:
     // diag(s_j). Used at setup (narrowing, the drop threshold, diag_) and by
     // col_scales(); the kernels never read it. inv_scale_[j] = fp32(1 / s_j)
     // is what the back solve reads (once per column) to fold D^-2 into its
-    // input -- see the file header, "FOLDED INTO THE VECTORS".
+    // input -- see the file header, storage contract.
     big_vec<float> scale_;
     big_vec<float> inv_scale_;
     lowprec_statistics stats_;
@@ -1759,11 +1560,8 @@ private:
             return widen(Dir::template vals<V>(*this)[Dir::diag_slot(Dir::ptr(*this).data(), v)]);
     }
 
-    // Fat-level SIMD kernel availability: AVX2 + F16C + FMA target AND 16-bit
-    // storage (fp16_t). widen8()/widen4() overloads exist for float
-    // and double too, so enabling the SIMD path for the fp32 storage is
-    // this one constant -- deliberately not done: that kernel stays the
-    // scalar loop it was measured as.
+    // SIMD conversion is retained only for FP16 storage on AVX2/F16C/FMA.
+    // FP32 keeps the measured scalar kernel.
     static constexpr bool kSimdIsa =
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
         true;
@@ -1792,10 +1590,7 @@ private:
     }
 
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-    // Vector widen: 8 (or 4) consecutive stored values -> two (one) lanes of 4
-    // doubles. One overload per storage type. (The `double` pair went with the
-    // fp64 storage on 2026-08-20; the `float` pair is unused by design -- see
-    // simd_dot_v below.)
+    // Widen FP16 values to FP64 lanes for the fat-level kernel.
     static inline void widen8(const fp16_t* v, __m256d& lo, __m256d& hi) {
         const __m256 f = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v)));   // F16C
         lo = _mm256_cvtps_pd(_mm256_castps256_ps128(f));
@@ -1804,11 +1599,6 @@ private:
     static inline __m256d widen4(const fp16_t* v) {
         return _mm256_cvtps_pd(_mm_cvtph_ps(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(v))));
     }
-    static inline void widen8(const float* v, __m256d& lo, __m256d& hi) {
-        lo = _mm256_cvtps_pd(_mm_loadu_ps(v));
-        hi = _mm256_cvtps_pd(_mm_loadu_ps(v + 4));
-    }
-    static inline __m256d widen4(const float* v) { return _mm256_cvtps_pd(_mm_loadu_ps(v)); }
     // The same sum as dot_thin, fat-level SIMD flavour (16-bit storage): 8
     // stored values per widen8, through an 8-double stack buffer (which the
     // compiler turns into register lane extracts) feeding a 4-way scalar FMA

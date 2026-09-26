@@ -35,10 +35,12 @@ accuracy checks, while mixed hub precision and packed-load alternatives added
 register, memory, or integer-instruction costs without a useful overall win.
 
 **GPU PCG owns its arithmetic and reductions.** Fused operator application and
-fixed reduction structure avoid proprietary solver dependencies. GPU state is
-fp32; the tagged dataflow representation does not provide an fp64 path.
-The former untested fp64-factor build choice was removed rather than advertised
-as supported.
+fixed reduction structure avoid proprietary solver dependencies. Outer PCG
+vectors and reductions are FP64. The triangular-solve dataflow state is FP32;
+its tagged representation does not provide an FP64 triangular-solve path.
+The former untested FP64-factor-storage build choice was removed rather than
+advertised as supported. These are separate choices; see [precision and
+storage](precision.md).
 
 **Low-precision storage retains numerical compensation.** CPU and GPU share
 column scaling, a separate fp32 diagonal, subnormal flushing, and compensation

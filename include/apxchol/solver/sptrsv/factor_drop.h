@@ -2,8 +2,8 @@
 // The COMPACTING FACTOR DROP -- the ONE host implementation shared by every
 // SpTRSV backend (omp_sptrsv::setup on the CPU, cuda_sptrsv::setup before the
 // upload on the GPU, through cuda_host.h). What it does, why, and the
-// measurements behind the default are documented at length in the omp.h file
-// header ("COMPACTING DROP" / "COLUMN-SUM COMPENSATION"); in one paragraph:
+// storage contract is documented in docs/precision.md; historical measurements
+// are in docs/implementation-history.md. In one paragraph:
 //
 //   Off-diagonal (i, j) of the factor is KEPT iff |L_ij| >= rel * s_j, s_j =
 //   column j's max |off-diagonal| (column_scale(), computed BEFORE the drop --
@@ -68,8 +68,7 @@ namespace apxchol {
 // this number)
 // the same 1e-4 costs iter0040 45 -> 67 iterations on main's Laplacian path
 // (48 -> 48 with APXCHOL_GROUND=reg, i.e. on the SDDM path the branch
-// measured on, where it costs nothing either way); see the omp.h header
-// comment for why. With the compensation iter0040 stays at 45 up to rel=3e-3
+// measured on, where it costs nothing either way); see docs/precision.md. With the compensation iter0040 stays at 45 up to rel=3e-3
 // (67% dropped), so 1e-4 is a conservative default, kept as the value the
 // branch measured; raising it needs the IPM ladder, not one matrix.
 inline constexpr double kFactorDropRelDefault = 1e-4;
@@ -215,7 +214,7 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
             ++out;
         }
         assert(out == drop_outer[static_cast<std::size_t>(j) + 1]);
-        // Column-sum compensation (see the omp.h file header): spread the
+        // Column-sum compensation (see docs/precision.md): spread the
         // dropped mass over the kept off-diagonals in proportion to |v|, so
         // the column sum -- hence L~ L~^T's row sums, the Laplacian structure
         // and the grounding mass -- is what it was. Same fixed order in every

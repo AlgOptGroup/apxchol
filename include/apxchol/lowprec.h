@@ -20,10 +20,10 @@
 //     iteration-count damage of the first all-bf16 variant: the scaled
 //     L_jj / s_j (omp_sptrsv::stored_diag) plus the column's rounding residual.
 //   * The factor itself (sparse_csc::vals_, factor_value_t) is fp32; the
-//     narrowing happens once, at SpTRSV setup, through
-//     omp_sptrsv::narrow_value<fp16_t> (a pure function of the entry, so the
-//     CSR transpose and the CSC copy agree bit-for-bit) / the GPU's
-//     cuda_host::narrow_fp16_scaled_value.
+//     narrowing happens once at SpTRSV setup. CPU and GPU-host preparation
+//     share detail::narrow_scaled_fp16, a pure per-entry conversion, so
+//     the CSR transpose and CSC copy use the same bits. Device finalization
+//     implements this contract separately in CUDA.
 //   * Every read in the solve kernels widens to fp64 (CPU) / fp32 (GPU) in
 //     registers via widen(); the arithmetic is unchanged and the kernels are
 //     one source for every storage type (the CPU's fat-level kernels of the
@@ -41,7 +41,7 @@
 //   the subnormal and reports them under APXCHOL_VERBOSE. The scale is NOT
 //   multiplied back by the kernels: it is folded into the vectors
 //   (forward_solve returns D y, transpose_solve takes it and scales its input
-//   by D^-2 -- omp.h "FOLDED INTO THE VECTORS").
+//   by D^-2; see docs/precision.md).
 //
 // (The bf16 / bf16-scaled / fp24 siblings that were measured against it --
 // 8-bit mantissa 3-6x the PCG iterations on IPM, fp24 marginal -- were removed
@@ -173,6 +173,24 @@ struct fp16_t {
 };
 static_assert(sizeof(fp16_t) == 2, "fp16_t must be exactly 16 bits");
 static_assert(std::is_trivially_copyable_v<fp16_t>);
+
+namespace detail {
+
+// Shared CPU/GPU-host storage rule: scale in FP32, round to FP16, then
+// flush subnormals to signed zero. The diagonal is handled separately.
+inline fp16_t narrow_scaled_fp16(float value, float scale) {
+    const fp16_t h(value / scale);
+    if (fp16_t::is_subnormal(h.bits))
+        return fp16_t::from_bits(static_cast<std::uint16_t>(h.bits & 0x8000u));
+    return h;
+}
+
+inline bool fp16_flushes(float value) {
+    const fp16_t h(value);
+    return fp16_t::is_zero(h.bits) || fp16_t::is_subnormal(h.bits);
+}
+
+} // namespace detail
 
 /// widen(): read a stored factor value into a double for compute. Identity
 /// (modulo the promotion the arithmetic would do anyway) for the fp32/fp64

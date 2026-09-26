@@ -209,7 +209,8 @@ choices, retired knobs, and measurements belong in
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
   competitors independently require cuSPARSE/cuBLAS; distinguish their driver
   linkage from our library linkage.
-- `APXCHOL_POOL_FP32=OFF`: fp64 residual-pool baseline. Factor values remain
+- `APXCHOL_POOL_FP32=ON` (default): fp32 residual-pool weights; OFF selects
+  the fp64 residual-pool baseline. Factor values remain
   fp32; fp16 storage is a runtime choice, not another build configuration.
 - `APXCHOL_64BIT_EDGE_INDICES=ON`: wide cumulative edge offsets.
   `APXCHOL_64BIT_NODE_INDICES=ON` additionally widens vertices and implies
@@ -264,7 +265,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   any read. Preserve their early release after compaction or their last use.
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
   is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
-  factor storage (GPU default on, CPU default off); the old GPU-only alias is
+  factor storage (GPU default on, CPU default off); scales and diagonals stay
+  fp32, while outer CPU/GPU PCG vectors and reductions stay fp64. See
+  [precision and storage](docs/precision.md). The old GPU-only alias is
   retired. GPU block setup is explicit opt-in
   through `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, independent of host threads.
 - GPU-owned numerical setup requires all three existing flags:

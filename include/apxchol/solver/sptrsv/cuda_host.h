@@ -139,14 +139,6 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
     return out;
 }
 
-/// The fp16 storage's flush clause: true iff fp16(x) is zero or a subnormal
-/// -- the entries the format stores as (signed) zero (subnormals are always
-/// flushed; see lowprec.h). Pure.
-inline bool fp16_flushes(float x) {
-    const fp16_t h(x);
-    return fp16_t::is_zero(h.bits) || fp16_t::is_subnormal(h.bits);
-}
-
 /// THE GPU backend's compacting-drop predicate (omp_sptrsv::keep_offdiag
 /// restated for its two storage formats): the off-diagonal v of a column with
 /// scale s survives APXCHOL_FACTOR_DROP=rel iff |v| >= rel * s and the storage
@@ -156,7 +148,7 @@ inline bool fp16_flushes(float x) {
 template <class Val>
 inline bool keep_offdiag(Val v, float s, double rel, bool fp16_storage) {
     if (!(std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s))) return false;
-    if (fp16_storage) return !fp16_flushes(static_cast<float>(v) / s);
+    if (fp16_storage) return !detail::fp16_flushes(static_cast<float>(v) / s);
     return v != Val(0);
 }
 
@@ -220,14 +212,6 @@ struct fp16_scaled_arrays {
     std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0: they are always flushed)
 };
 
-/// The narrowing itself: what THIS entry stores. Pure (both stored copies --
-/// CSR of L and CSR of L^T -- carry the same bits for the same entry).
-inline std::uint16_t narrow_fp16_scaled_value(float v, float s) {
-    const fp16_t h(v / s);                                    // RNE
-    if (fp16_t::is_subnormal(h.bits))
-        return static_cast<std::uint16_t>(h.bits & 0x8000u);  // signed zero
-    return h.bits;
-}
 inline float widen_fp16(std::uint16_t bits) { return fp16_t::from_bits(bits).to_float(); }
 
 template <class Val>
@@ -253,7 +237,7 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
         double resid = 0.0;                                            // sum over the off-diagonals of (x - widen(stored))
         for (int p = L11.ptr[j]; p < L11.ptr[j + 1]; ++p) {
             const float v = static_cast<float>(L11.vals[p]);
-            const std::uint16_t h = narrow_fp16_scaled_value(v, s);
+            const std::uint16_t h = detail::narrow_scaled_fp16(v, s).bits;
             out.vals[p] = h;
             if (L11.idx[p] == j) continue;   // the diagonal SLOT: written, never read (see the file header)
             const float w = widen_fp16(h);
