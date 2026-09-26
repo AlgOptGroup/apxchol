@@ -317,6 +317,59 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
         expected, excess_bounds, graph, columns);
 }
 
+// Independent host replay of the production owned path. Oversized rows use
+// the documented fixed warp degree fold, while normal batches fold raw slots
+// serially. The audited device path has its separate serial CPU oracle above.
+// Preserve exact comparisons: CPU/GPU summation order is part of this oracle.
+apxchol::detail::gpu_round_shadow_factor_log run_owned_host_oracle(
+        apxchol::graph<apxchol::directed_vec_pool_incidence>& graph,
+        const gpu_round_shadow_input& input) {
+    std::vector<std::vector<apxchol::detail::factor_entry>> entries(input.pivots.size());
+    std::vector<apxchol::detail::factor_col> columns;
+    std::vector<apxchol::detail::deferred_edge> fill;
+    for (std::size_t k = 0; k < input.pivots.size(); ++k) {
+        const auto v = input.pivots[k];
+        const auto begin = input.owner_offsets[v], end = input.owner_offsets[v+1];
+        std::vector<apxchol::weighted_neighbor> neighbors;
+        double degree = 0.0;
+        for (std::size_t i = begin; i < end; ++i) {
+            const auto& e = input.incidences[i];
+            if (!input.active[e.neighbor]) continue;
+            degree += e.weight;
+            auto found = std::find_if(neighbors.begin(),neighbors.end(),
+                [&](const auto& n) { return n.vertex == e.neighbor; });
+            if (found == neighbors.end()) neighbors.push_back({e.neighbor,e.weight});
+            else found->weight += e.weight;
+        }
+        if (end-begin > 128) {
+            std::array<double,32> lanes{};
+            for (std::size_t lane = 0; lane < 32; ++lane)
+                for (std::size_t i = begin+lane; i < end; i += 32)
+                    if (input.active[input.incidences[i].neighbor])
+                        lanes[lane] += input.incidences[i].weight;
+            for (unsigned stride = 16; stride; stride /= 2)
+                for (unsigned lane = 0; lane+stride < 32; ++lane)
+                    lanes[lane] += lanes[lane+stride];
+            degree = lanes[0];
+        }
+        const double excess = input.excess[v];
+        degree += excess;
+        if (degree <= 0.0) degree = 1.0;
+        const double root = std::sqrt(degree);
+        for (const auto& n : neighbors) {
+            entries[k].push_back({n.vertex,static_cast<apxchol::factor_value_t>(n.weight/root)});
+            if (excess > 0.0) graph.excess(n.vertex) += n.weight*excess/degree;
+        }
+        columns.push_back({v,static_cast<apxchol::factor_value_t>(root),entries[k].data(),
+                           static_cast<node_index>(entries[k].size())});
+        apxchol::detail::tree_elimination{}.sample_clique(
+            neighbors,degree,input.seeds[k],apxchol::edge_emitter(fill));
+    }
+    for (auto e : fill) graph.add_edge(e.u,e.v,e.w);
+    for (auto v : input.pivots) graph.deactivate(v);
+    return materialize_factor_log(columns);
+}
+
 struct parallel_cpu_round_result {
     apxchol::detail::gpu_round_shadow_cpu_comparison comparison;
     std::uint32_t worker_mask = 0;
@@ -3580,8 +3633,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             // Independent numerical oracle starts after GPU-owned execution.
             std::vector<gpu_round_shadow_excess_bound> bounds;
             const auto reference = apxchol::detail::reference_gpu_round_shadow(input, &bounds);
-            apxchol::detail::gpu_round_shadow_factor_log expected_log;
-            (void)run_serial_cpu_round(oracle, input, reference, bounds, &expected_log);
+            const auto expected_log = run_owned_host_oracle(oracle, input);
             const auto expected = compact_live_snapshot(apxchol::detail::make_gpu_round_shadow_input(
                 oracle, std::span<const node_index>{}, seed));
             ASSERT_EQ(actual.owner_offsets, expected.owner_offsets);
