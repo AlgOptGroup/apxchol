@@ -121,7 +121,6 @@ __global__ void finalizer_unpack(
     }
 }
 
-
 __device__ std::uint16_t finalizer_half(float value) {
     const auto bits = __half_as_ushort(__float2half_rn(value));
     return (bits & 0x7c00u) == 0 ? std::uint16_t(bits & 0x8000u) : bits;
@@ -219,7 +218,6 @@ __global__ void finalizer_narrow_columns(
     if (!isfinite(d) || d == 0.0f || !isfinite(inv_scale2[j])) atomicExch(status, 5);
     if (count) atomicAdd(flushed, count);
 }
-
 
 [[noreturn]] void cuda_failure(cudaError_t error, const char* what) {
     throw std::runtime_error(std::string("GPU round shadow: ") + what +
@@ -2068,7 +2066,6 @@ void owned_probe_check_fit(std::size_t extra) {
         throw std::runtime_error("GPU sparsification scratch does not fit with device margin");
 }
 
-
 void require_count(int actual, std::uint64_t expected, const char* stage) {
     if (actual < 0 || static_cast<std::uint64_t>(actual) != expected)
         throw std::runtime_error(
@@ -2158,7 +2155,6 @@ gpu_owned_sparsify_test_output gpu_sparsify_owned_residual_for_test(
     return result;
 }
 #endif
-
 
 // These buffers are live throughout compute(). Owning sessions may retain
 // their capacity between rounds; every used element is rewritten before read.
@@ -2450,7 +2446,6 @@ struct gpu_round_shadow_device_state::impl {
         }
     }
 };
-
 
 gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         const gpu_round_shadow_input& input,
@@ -3326,30 +3321,23 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                         unique.get(), fill_candidates.get(), flags.get());
                     cuda_check(cudaGetLastError(), "emit normal cycle-sampler factor batches");
                 }
-                if (gpu_trace_item_kernel_enabled()) {
-                    // Serial plan per pivot, then one thread per neighbour slot.
-                    prepare_trace_plan<<<blocks_for(p), kBlock>>>(
-                        unique.get(), pivot_offsets.get(), pivots.get(), p,
+
+                // Serial plan per pivot, then one thread per neighbour slot.
+                prepare_trace_plan<<<blocks_for(p), kBlock>>>(
+                    unique.get(), pivot_offsets.get(), pivots.get(), p,
+                    total_degree.get(), prefix.get(), cycle_workspace.get(),
+                    fill_candidates.get(), flags.get(),
+                    audit_payload ? pivot_counters.get() : nullptr,
+                    cycle_plan_cut.get(), cycle_plan_state.get(), cycle_status.get());
+                cuda_check(cudaGetLastError(), "plan cycle-core rows on device");
+                if (u)
+                    sample_trace_items<<<blocks_for(u), kBlock>>>(
+                        unique.get(), u, pivot_offsets.get(),
                         total_degree.get(), prefix.get(), cycle_workspace.get(),
-                        fill_candidates.get(), flags.get(),
-                        audit_payload ? pivot_counters.get() : nullptr,
-                        cycle_plan_cut.get(), cycle_plan_state.get(), cycle_status.get());
-                    cuda_check(cudaGetLastError(), "plan cycle-core rows on device");
-                    if (u)
-                        sample_trace_items<<<blocks_for(u), kBlock>>>(
-                            unique.get(), u, pivot_offsets.get(),
-                            total_degree.get(), prefix.get(), cycle_workspace.get(),
-                            cycle_plan_cut.get(), cycle_plan_state.get(),
-                            fill_candidates.get(), flags.get(), cycle_status.get());
-                    cuda_check(cudaGetLastError(), "sample cycle-core items on device");
-                } else {
-                    sample_cycle_rows<<<blocks_for(p), kBlock>>>(
-                        unique.get(), pivot_offsets.get(), pivots.get(), p,
-                        total_degree.get(), prefix.get(), cycle_workspace.get(),
-                        fill_candidates.get(), flags.get(),
-                        audit_payload ? pivot_counters.get() : nullptr, sampler, cycle_status.get());
-                    cuda_check(cudaGetLastError(), "sample cycle-core fill on device");
-                }
+                        cycle_plan_cut.get(), cycle_plan_state.get(),
+                        fill_candidates.get(), flags.get(), cycle_status.get());
+                cuda_check(cudaGetLastError(), "sample cycle-core items on device");
+
                 if (sampler == clique_sampler::trace_cycle &&
                     (!device_owned_prefix || report.normal_batch.oversized_pivots)) {
                     // Late rounds can have only a few oversized pivots. Spread

@@ -113,18 +113,6 @@ inline bool gpu_owned_setup_configured() {
 #endif
 }
 
-/// Small-degree trace rows are planned per pivot and then emitted one thread
-/// per neighbour slot (the GKS item split). `0`/`off` restores the single
-/// thread-per-pivot kernel for A/B measurement.
-inline bool gpu_trace_item_kernel_enabled() {
-    const char* value = std::getenv("APXCHOL_GPU_TRACE_ITEMS");
-    if (!value || !*value) return true;
-    if (std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0) return false;
-    if (std::strcmp(value, "1") == 0 || std::strcmp(value, "on") == 0) return true;
-    throw std::invalid_argument(
-        "APXCHOL_GPU_TRACE_ITEMS must be unset, 0, off, 1 or on");
-}
-
 /// The producer capability certifies selection independence against its
 /// content-bound topology. Production resident rounds therefore need only the
 /// mandatory O(p) range/active/duplicate validator. This knob additionally
@@ -1322,7 +1310,6 @@ struct gpu_owned_prefix_handback {
     std::vector<gpu_round_shadow_factor_column> columns;
     std::size_t download_bytes = 0;
 };
-
 
 // Validate handback layout before a fingerprint traversal or graph publication.
 // The general audit validator traverses owners as it checks their offsets;

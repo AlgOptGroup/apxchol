@@ -247,6 +247,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   (`heavy_core_k2` was removed 2026-09-17: same fill and iterations within one
   of trace-cycle, setup +4.6%, one-RHS total +2.1%, 16-RHS total -1.8% on 22
   matrices; `benchmarks/daint/SAMPLERS.md` keeps its published measurements.)
+- GPU trace-cycle uses item-based emission for small rows; the superseded
+  per-pivot sampler and `APXCHOL_GPU_TRACE_ITEMS` opt-out are retired.
 - Trace-cycle rows with more than 128 canonical neighbors use cooperative warp
   moment/prefix scans, cutoff reduction, parent searches and edge emission.
   Suffix maxima repair floating CDF monotonicity. Lane zero retains the core

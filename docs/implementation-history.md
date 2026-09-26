@@ -133,6 +133,12 @@ which was the default for both routes at the time; the cap is now chosen by rout
 the mean while costing 2.1-2.5x on kron_g500-logn16. This evidence supports the bounded opt-in
 integration scope; FP64 acceptance and parity with Yves remain unestablished.
 
+**The old per-pivot GPU trace sampler is retired.** Small rows retain the
+item-based emission path and large rows retain the cooperative path. The old
+`APXCHOL_GPU_TRACE_ITEMS` opt-out no longer selects an alternative. Storage
+backends, solver object layouts and numerical controls are unchanged by this
+focused removal; it is separate from the held broader storage cleanup.
+
 **Large trace-cycle rows use cooperative warps.** A thread per whole star left
 late rounds with few large stars poorly parallelized. Range checks, suffix
 moments, cutoff evaluation, parent searches and edge writes share a warp.
