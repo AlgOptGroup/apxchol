@@ -103,6 +103,11 @@ choices, retired knobs, and measurements belong in
   `build/tests/bench_setup` and `build/tests/analyze_factor`, including when tests
   are disabled. `analyze_factor MATRIX --solve [--seed N]` reports setup, solve,
   iterations and the original-system residual for a component-compatible RHS.
+- CMake usage requirements on `apxchol_core` and `apxchol_mtx_input` must export
+  C++23 and any native architecture flag actually used by the library. Parent
+  projects do not inherit directory compile options; mismatched Eigen alignment
+  across the library boundary can corrupt allocation ownership. Validate with
+  the external parent fixture in `tests/cmake_consumer`.
 - `APXCHOL_NATIVE_ARCH`: ON for local builds. Root, benchmark, and local Python
   builds share the architecture-specific compiler probe; portable Python wheels
   omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency

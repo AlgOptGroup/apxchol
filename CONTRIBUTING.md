@@ -12,6 +12,19 @@ ctest --test-dir build --output-on-failure
 ./build/tests/unit_tests --gtest_filter='FactorizeTest/*.PermutationIsValid'
 ```
 
+CMake consumers should link `apxchol_core` rather than copy its compiler flags:
+
+```cmake
+add_subdirectory(path/to/apxchol)
+target_link_libraries(my_program PRIVATE apxchol_core)
+```
+
+The target supplies C++23 and the native architecture flag used by the library.
+Matching architecture settings matter because Eigen objects cross the library
+boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds. The CI library
+build uses `tests/cmake_consumer` as an outer project to test these requirements
+alongside the ordinary suite.
+
 Use focused regressions for changed behavior, then the relevant suite. CUDA
 changes require a CUDA build and device. Python and Octave compile the core
 sources independently; check affected binding interfaces too:
