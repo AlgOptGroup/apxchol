@@ -85,7 +85,7 @@ esac
 # Read current Tctl in degrees C (integer). Returns 0 if sensors unavailable.
 read_tctl() {
     local raw
-    raw=$(sensors 2>/dev/null | awk '/Tctl/ {gsub(/[+°C]/,"",$2); print $2; exit}')
+    raw=$(sensors 2>/dev/null | awk '/Tctl/ {gsub(/[+°C]/,"",$2); print $2; exit}') || raw=''
     if [[ -z "$raw" ]]; then
         echo 0
         return

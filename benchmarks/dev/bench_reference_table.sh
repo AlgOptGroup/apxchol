@@ -33,7 +33,7 @@ wait_cool() {
     local target=$1
     local t deadline=$((SECONDS+90))
     while true; do
-        t=$(sensors 2>/dev/null | awk '/Tctl/ {gsub(/[+°C]/,"",$2); print $2; exit}')
+        t=$(sensors 2>/dev/null | awk '/Tctl/ {gsub(/[+°C]/,"",$2); print $2; exit}') || t=''
         [[ -z "$t" ]] && return 0
         local ti=${t%.*}
         (( ti <= target )) && return 0
