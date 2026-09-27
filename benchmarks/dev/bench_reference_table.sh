@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Reproduce the reference comparison table (apxchol + AMGCL + BoomerAMG
 # at 16T, 3-rep median, on iter0010..iter0040 + grid_2000) with cooldown gating
-# between reps to mitigate thermal-throttling variance at boost-on. Works for
-# either boost-on (turbo) or locked (benchmarks/dev/bench_stable_setup.sh) state
-# — the cooldown gate makes early-rep boost behavior approximately consistent
-# across reps.
+# between reps. This preserves the historical indexed-storage configuration.
+# Cooldown does not prove stable clocks or comparable independent measurements.
+# Setup, Solve, Total and iterations use separate medians here; this is not a
+# coherent representative execution or the current performance-acceptance path.
 #
 # Usage:
 #   bash benchmarks/dev/bench_reference_table.sh [output_file]

@@ -5,9 +5,9 @@
 /// runtime pays LAZILY, inside whichever CUDA call happens to come first. In
 /// this solver that call used to land in the middle of the timed setup (the GPU
 /// SpTRSV's first allocation), so the cost was both ON the critical path and
-/// CHARGED to `sptrsv_setup`. It is constant in n, in the thread count and in
-/// the factor size: measured ~100-135 ms on an RTX 4090 Laptop and ~715 ms on a
-/// GH200 (Grace) -- there, 55% of the whole reported setup.
+/// CHARGED to `sptrsv_setup`. Historical measurements reported ~100-135 ms on
+/// an RTX 4090 Laptop and ~715 ms on a GH200 (Grace), where it accounted for
+/// 55% of that reported setup. These are not current platform cost guarantees.
 ///
 /// `prewarm()` starts a helper thread that forces the context into existence
 /// while the host-side elimination (~0.5 s) runs; `ensure_context()` blocks
@@ -17,19 +17,19 @@
 ///
 /// WHAT THE OVERLAP IS WORTH. Context creation is CPU work, not a sleep, so it
 /// competes with the OpenMP elimination and the net saving is bounded by
-/// min(host setup time, context time). Measured on an RTX 4090 Laptop, T=16,
+/// min(host setup time, context time). Historically, on an RTX 4090 Laptop, T=16,
 /// `bg+tree[vec_pool]`, first setup of the process, library prewarm only (no
 /// harness warmup), medians of 3: iter0040 901 -> 803 ms, grid_2000 1266 ->
 /// 1188 ms, but grid_500 154 -> 156 ms -- a WASH, because grid_500's whole host
 /// setup (~55 ms) is shorter than the ~90 ms context creation, so the cost just
 /// moves into make_graph / find_partition / eliminate as contention instead of
-/// disappearing. It is never a loss, and it is largest exactly where setup time
-/// matters. On a GH200 (context ~715 ms, host setup ~570 ms) the overlap hides
-/// the host-setup share and leaves the rest.
+/// disappearing. Those observations do not establish that prewarming is never
+/// slower. The historical GH200 result (context ~715 ms, host setup ~570 ms)
+/// reported overlap with host work; benefit depends on the route and workload.
 ///
-/// ORDERING GUARANTEE: every CUDA call the solver makes is preceded, on the
-/// same thread, by an `ensure_context()`; the context therefore always exists
-/// before the first real call. Correctness does not depend on the prewarm at
+/// `ensure_context()` joins this helper before returning to its caller. This
+/// helper does not intercept other CUDA calls or impose a global solver-wide
+/// initialization order. Correctness does not depend on the prewarm at
 /// all -- the primary context is reference-counted and its creation is
 /// serialized inside the driver, so a helper thread racing the main thread's
 /// first CUDA call is well defined (whichever arrives first creates it, the

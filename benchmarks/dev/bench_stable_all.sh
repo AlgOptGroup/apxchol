@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Run bench_stable.sh across the standard workload set (the LP-IPM ladder +
-# grid_2000) on both CPU and CUDA builds. Emits a compact comparison table.
+# grid_2000) on both CPU and CUDA builds. Emits descriptive legacy summaries.
 #
 # Assumes bench_stable_setup.sh has been run (boost off, perf governor).
 #
 # Usage:
 #   bash benchmarks/dev/bench_stable_all.sh                   # default WARMUP=2 REPS=8
-#   WARMUP=3 REPS=15 bash benchmarks/dev/bench_stable_all.sh  # tighter IQR
+#   WARMUP=3 REPS=15 bash benchmarks/dev/bench_stable_all.sh  # more samples
 #
 # Each (workload, build) measurement takes WARMUP+REPS bench invocations
 # plus cooldown gating between reps. With defaults: ~10 reps × ~5 s × 10
@@ -32,10 +32,10 @@ collect() {
 
 fmt_cell() {
     # Parse "setup_med setup_p25 setup_p75 setup_iqr" 4-tuple and emit
-    # "median±IQR% (P25..P75)". Expects 4 space-separated floats.
+    # "median (IQR/median %)"; not an error bar. Expects 4 space-separated floats.
     local m p25 p75 iqr
     read -r m p25 p75 iqr <<<"$1"
-    printf "%.2fs ±%.0f%%" "$m" "$iqr"
+    printf "%.2fs (IQR %.0f%%)" "$m" "$iqr"
 }
 
 echo "================================================================"
@@ -61,6 +61,6 @@ done
 
 echo ""
 echo "Notes:"
-echo "  - All measurements at the fixed base clock (boost disabled by setup)."
-echo "  - Cell format: median ±IQR%. IQR% < 10% means trustworthy."
-echo "  - Compare future runs against THIS table; do not compare to boost-on numbers."
+echo "  - Boost/governor settings are reported above; clocks are not measured."
+echo "  - Cell format: median (IQR/median %); descriptive spread, not an error bar."
+echo "  - Separate stage medians and historical tables do not establish an A/B effect."

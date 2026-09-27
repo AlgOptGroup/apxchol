@@ -13,6 +13,22 @@ Those historical instructions must not override current source or benchmark
 protocols. Both the committed Daint snapshots and laptop timings describe
 historical revisions; neither establishes current integrated performance.
 
+## Historical thermal measurement helpers
+
+The scripts in `benchmarks/dev/bench_stable*.sh` and
+`bench_reference_table.sh` retain their historical configuration and separate
+per-stage summaries. Cooldown, affinity, boost and governor settings do not
+prove stable clocks or comparable independent measurements. IQR/median is
+observed spread, not an error bar, confidence interval or acceptance threshold.
+A small IQR does not establish a causal A/B difference or absence of carry-over.
+Current performance decisions require the complete denominator, coherent timing
+records and provenance specified in [AGENTS.md](../AGENTS.md).
+
+The indexed `bg+tree[vec_pool]` labels in those helpers and the CUDA context
+prewarm measurements describe the configurations originally used. Do not
+relabel historical measurements as AoS. Current high-level default storage is
+`vec_pool_aos`; that default does not retroactively change old observations.
+
 ## Serial residual ordering
 
 The optional `min_degree` peel is a historical lazy degree-heap heuristic.

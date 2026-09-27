@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Thermal-stable benchmark harness for apxchol.
+# Historical thermal-cooldown measurement helper for apxchol.
 #
-# Why this exists: on a thermally constrained machine (a laptop-class CPU, say)
-# session-level variance can reach 25-30%, so any perf change <20% gets lost in
-# the noise. Naive 3-rep or 5-rep medians can't distinguish a 5% win from random
-# jitter, and same-session A/B pairings only catch local differences (not
-# cumulative session-vs-baseline regressions).
+# Cooldown and affinity control some sources of timing variation; they do not
+# establish stable clocks, independent samples, or a causal performance change.
+# This legacy helper reports separate per-stage summaries, not one coherent
+# representative execution. Keep its original indexed-storage configuration
+# labels; use the current benchmark contract for performance acceptance.
 #
 # Methodology:
 #   * Wait for thermal cooldown to a defined ceiling before each measurement
 #   * Pin to specific cores via taskset (default: all 16 cores both CCDs)
 #   * N warmup runs (results discarded — primes caches, page tables, OMP teams)
 #   * M measured runs collected sorted; median, P25, P75 (IQR) reported
-#   * IQR/median ratio flags whether the signal is reliable (<5% = good)
+#   * IQR/median reports observed spread; it is not an acceptance threshold
 #
 # Usage:
 #   bash benchmarks/dev/bench_stable.sh <workload> [binary] [threads]
@@ -40,8 +40,8 @@
 #   QUIET       if set, suppress per-rep progress lines
 #
 # Output columns (per stage):  median  P25  P75  IQR%
-#   IQR% = (P75-P25)/median × 100. Below 5% means the measurement is stable
-#   and any A/B delta larger than IQR% is likely real.
+#   IQR% = (P75-P25)/median × 100, a descriptive measure of sample spread.
+#   A small IQR does not prove no bias, no carry-over, or a real A/B difference.
 
 set -euo pipefail
 
@@ -172,8 +172,8 @@ if [[ -z "$QUIET" ]]; then
         echo ""
         echo "WARNING: CPU boost is ENABLED. Core frequencies will swing between"
         echo "         base and turbo depending on thermal + power + sibling-core"
-        echo "         state. Expect 20-30% variance even with cooldown gating."
-        echo "         To stabilize:"
+        echo "         state. Cooldown alone does not establish stable timing."
+        echo "         For manual boost/governor controls, see:"
         echo "             sudo bash benchmarks/dev/bench_stable_setup.sh"
         echo ""
     fi

@@ -50,7 +50,7 @@ struct mex_error : std::runtime_error {
 class Solver {
 public:
     explicit Solver(Eigen::SparseMatrix<double> A) : slv_(A) {}
-        // default solve_options: vec_pool storage + block_greedy (the library defaults)
+        // default solve_options: vec_pool_aos storage + block_greedy (the library defaults)
 
     Eigen::Index rows() const { return slv_.rows(); }
 
