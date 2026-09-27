@@ -2,11 +2,12 @@
 # path-filtered so it only runs when C++/build/package files change, not on
 # doc/chart commits.
 #
-# Three jobs, each builds AND runs its test suite:
-#   library  — root CMake project under GCC and Clang, full gtest suite (ctest)
+# Four job definitions; the library compiler matrix expands to two jobs:
+#   benchmark-harness — harness unit tests and the native stopping-policy test
+#   library  — parent CMake consumer under GCC and Clang, full suite (ctest)
 #   python   — manylinux wheel build + pytest (also the PORTABILITY check: the
 #              old-glibc environment the release wheels are built in)
-#   octave   — mkoctfile MEX + the 6-case Octave test suite
+#   octave   — mkoctfile MEX + the Octave test suite
 name: ci
 
 on:
@@ -91,7 +92,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          # The core uses C++23 explicit object parameters. Test both supported
+          # Public headers require C++23. Test both supported
           # compiler families; the Python/Octave jobs below retain their own
           # distribution-portability toolchains.
           sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build
