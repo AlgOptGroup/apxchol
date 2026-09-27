@@ -1503,10 +1503,6 @@ private:
         static const big_output_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csr(std::type_identity<V>{}); }
         static const std::vector<std::vector<node_index>>& materialized_levels(
                 const omp_sptrsv& s) { return s.fwd_levels_; }
-        static node_index serial_vertex(node_index k, node_index,
-                                        node_index first_row) {
-            return first_row + k;
-        }
         // Off-diagonal slots of row i: [ptr[i], ptr[i+1] - 1); diagonal at ptr[i+1] - 1.
         static edge_index first(const edge_index* ptr, node_index i) { return ptr[i]; }
         static edge_index last (const edge_index* ptr, node_index i) { return ptr[i + 1] - 1; }
@@ -1524,10 +1520,6 @@ private:
         static const big_output_vec<V>& vals(const omp_sptrsv& s) { return s.vals_csc(std::type_identity<V>{}); }
         static const std::vector<std::vector<node_index>>& materialized_levels(
                 const omp_sptrsv& s) { return s.bck_levels_; }
-        static node_index serial_vertex(node_index k, node_index m,
-                                        node_index) {
-            return m - 1 - k;
-        }
         // Off-diagonal slots of column j: [ptr[j] + 1, ptr[j+1]); diagonal at ptr[j].
         static edge_index first(const edge_index* ptr, node_index j) { return ptr[j] + 1; }
         static edge_index last (const edge_index* ptr, node_index j) { return ptr[j + 1]; }
