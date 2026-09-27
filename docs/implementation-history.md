@@ -271,10 +271,13 @@ and conflict repair cannot read concurrently changing mask entries. Stable
 snapshots, full tie-breaking orders, and ordered application fix this. A tiny
 fixture that never entered the parallel path once concealed the defect.
 Randomized priority and root-set variants did not deliver sufficient setup
-benefit to replace the accepted selector. Same seed and thread count are the
-reproducibility scope; differing parallel edge-sum orders can change final
-ulps across thread counts. Equal fill or iterations do not establish equal
-factors—compare structure and value digests.
+benefit to replace the accepted selector. Selection must repeat for the same graph, context and team size. This is
+not a factor-identity guarantee: pooled adjacency arrival order can change
+floating-point sums even at a fixed seed and thread count, particularly with
+FP64 pool values. Such differences can propagate into sampled structure, not
+only final ulps. Equal fill or iterations do not establish equal factors—compare
+structure and value digests. Ownership-path comparisons must reuse one factor
+or make an owning copy rather than independently factorizing twice.
 
 **Removed knobs do not constitute supported alternatives.** Retirements include
 compile-time low-precision storage, GPU-only fp16 aliases, fp16 diagonal and
