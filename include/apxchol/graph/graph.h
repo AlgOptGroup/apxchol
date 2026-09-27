@@ -49,7 +49,7 @@ struct residual_coalescer;
 /// The traditional implementations contain edge indices (vec_incidence,
 /// forward_star_incidence and bstr_incidence); directed_vec_pool_incidence
 /// contains the inline records themselves.
-template<incidence_storage Incidence = vec_pool_incidence>
+template<incidence_storage Incidence = directed_vec_pool_incidence>
 class graph {
 public:
     /// Expose the incidence backend for callers that want to specialize
@@ -115,7 +115,6 @@ public:
         } else {
             auto idx = static_cast<edge_index>(edges_.size());
             edges_.push_back({u ^ v, static_cast<pool_value_t>(w)});
-            if (!multiplicity_.empty()) multiplicity_.push_back(1);
             adj_.push(u, idx);
             adj_.push(v, idx);
         }
@@ -148,7 +147,6 @@ public:
                       "directed incidences must be inserted directly");
         const edge_index start = static_cast<edge_index>(edges_.size());
         edges_.resize(start + N);
-        if (!multiplicity_.empty()) multiplicity_.resize(start + N, 1);
         m_ += N;  // bookkeeping; queried via m()
         return start;
     }
@@ -195,8 +193,6 @@ public:
         edges_pool_base_  = static_cast<edge_index>(edges_.size());
         edges_pool_count_ = 0;
         edges_.resize(edges_pool_base_ + N);
-        if (!multiplicity_.empty())
-            multiplicity_.resize(edges_pool_base_ + N, 1);
     }
 
     /// Atomic-claim a single slot from the pre-reserved range.
@@ -214,8 +210,6 @@ public:
     void finalize_edge_pool() {
         const edge_index claimed = edges_pool_count_;
         edges_.resize(edges_pool_base_ + claimed);
-        if (!multiplicity_.empty())
-            multiplicity_.resize(edges_pool_base_ + claimed);
         m_ += claimed;
     }
 
@@ -253,7 +247,6 @@ public:
     /// to call concurrently from different threads on different slots.
     void write_edge_at(edge_index slot, node_index u, node_index v, double w) {
         edges_[slot] = {u ^ v, static_cast<pool_value_t>(w)};
-        if (!multiplicity_.empty()) multiplicity_[slot] = 1;
     }
 
     /// Atomically prepend `e_slot` to vertex v's adjacency chain at
@@ -459,16 +452,7 @@ public:
             return edges_[static_cast<edge_index>(idx)].w;
     }
     template<typename Entry>
-    node_index edge_multiplicity(const Entry& idx) const {
-        if constexpr (std::same_as<std::remove_cvref_t<Entry>,
-                                   directed_pool_edge>)
-            return 1;
-        else {
-            const edge_index edge_id = static_cast<edge_index>(idx);
-            return multiplicity_.empty() ? node_index{1}
-                                         : multiplicity_[edge_id];
-        }
-    }
+    node_index edge_multiplicity(const Entry&) const { return 1; }
 
     /// Per-vertex excess diagonal (for SDDM matrices).
     /// For a pure Laplacian this is zero everywhere.
@@ -479,7 +463,6 @@ public:
     /// Approximate heap memory usage in bytes.
     std::size_t memory_bytes() const {
         return edges_.capacity() * sizeof(edge)
-             + multiplicity_.capacity() * sizeof(node_index)
              + adj_.memory_bytes()
              + active_.capacity() * sizeof(active_word)
              + excess_.capacity() * sizeof(double);
@@ -578,109 +561,10 @@ private:
         return result;
     }
 
-    /// Coalesce endpoint pairs before sparsification. The sidecar preserves
-    /// their represented multigraph degree while numerical weights are summed.
-    template<typename I = Incidence>
-        requires std::same_as<I, vec_pool_incidence>
-    coalesce_stats coalesce_active(std::span<const node_index> active) {
-        struct pending_edge {
-            node_index u, v;
-            double weight;
-            node_index multiplicity;
-        };
-        struct local_neighbor {
-            node_index v;
-            double weight;
-            node_index multiplicity;
-        };
-
-        int num_threads = 1;
-#ifdef _OPENMP
-        num_threads = omp_get_max_threads();
-#endif
-        std::vector<std::vector<pending_edge>> pending(
-            static_cast<std::size_t>(num_threads));
-
-        #pragma omp parallel num_threads(num_threads)
-        {
-            int tid = 0;
-#ifdef _OPENMP
-            tid = omp_get_thread_num();
-#endif
-            auto& out = pending[static_cast<std::size_t>(tid)];
-            std::vector<local_neighbor> neighbors;
-            #pragma omp for schedule(static)
-            for (std::size_t k = 0; k < active.size(); ++k) {
-                const node_index u = active[k];
-                neighbors.clear();
-                for (const edge_index idx : adj_[u]) {
-                    const node_index v = edges_[idx].traverse(u);
-                    if (!is_active(v) || v <= u) continue;
-                    neighbors.push_back({v, static_cast<double>(edges_[idx].w),
-                                         edge_multiplicity(idx)});
-                }
-                std::ranges::sort(neighbors, {}, &local_neighbor::v);
-                for (std::size_t i = 0; i < neighbors.size();) {
-                    const node_index v = neighbors[i].v;
-                    double weight = 0.0;
-                    node_index multiplicity = 0;
-                    do {
-                        weight += neighbors[i].weight;
-                        multiplicity += neighbors[i].multiplicity;
-                        ++i;
-                    } while (i < neighbors.size() && neighbors[i].v == v);
-                    out.push_back({u, v, weight, multiplicity});
-                }
-            }
-        }
-
-        coalesce_stats stats;
-        stats.bytes_before = memory_bytes();
-        for (const auto& list : pending) {
-            stats.distinct_edges += list.size();
-            for (const auto& edge : list)
-                stats.multi_edges += edge.multiplicity;
-        }
-
-        graph rebuilt(n_);
-        rebuilt.active_ = active_;
-        rebuilt.num_active_ = num_active_;
-        rebuilt.excess_ = excess_;
-        rebuilt.edges_.reserve(stats.distinct_edges);
-        rebuilt.multiplicity_.reserve(stats.distinct_edges);
-
-        std::vector<node_index> physical_degree(static_cast<std::size_t>(n_), 0);
-        for (const auto& list : pending) {
-            for (const auto& edge : list) {
-                ++physical_degree[edge.u];
-                ++physical_degree[edge.v];
-            }
-        }
-        for (const node_index v : active)
-            rebuilt.adj_.reserve_for(v, physical_degree[v]);
-
-        for (const auto& list : pending) {
-            for (const auto& edge : list) {
-                const edge_index idx = static_cast<edge_index>(rebuilt.edges_.size());
-                rebuilt.edges_.push_back(
-                    {edge.u ^ edge.v, static_cast<pool_value_t>(edge.weight)});
-                rebuilt.multiplicity_.push_back(edge.multiplicity);
-                rebuilt.adj_.push(edge.u, idx);
-                rebuilt.adj_.push(edge.v, idx);
-                ++rebuilt.m_;
-            }
-        }
-        stats.bytes_after = rebuilt.memory_bytes();
-        *this = std::move(rebuilt);
-        return stats;
-    }
-
-    /// Connectivity-safe late-residual sparsification for both pooled
-    /// adjacency layouts. Parallel edges are combined first and a spanning
-    /// forest is retained exactly. Off-tree numerical weights use independent
-    /// Bernoulli/Horvitz--Thompson estimates. The indexed pool applies the same
-    /// estimator to its multiplicity sidecar with deterministic stochastic
-    /// rounding; the directed-AoS pool keeps its distinct-neighbour degree.
+    /// Connectivity-safe late-residual sparsification for directed AoS.
+    /// Parallel edges are combined first and a spanning forest is retained
+    /// exactly. Off-tree weights use Bernoulli/Horvitz--Thompson estimates;
+    /// degrees count distinct neighbours.
     template<typename I = Incidence>
         requires is_vec_pool_incidence_v<I>
     sparsify_stats sparsify_active(std::span<const node_index> active,
@@ -1039,10 +923,6 @@ private:
             }
             rebuild_threads = actual_threads;
         }
-        if constexpr (!stores_directed_incidence) {
-            rebuilt.edges_.reserve(kept);
-            rebuilt.multiplicity_.reserve(kept);
-        }
         if constexpr (stores_directed_incidence) {
             if (parallel_directed_rebuild) {
                 if (kept > std::numeric_limits<edge_index>::max())
@@ -1062,38 +942,6 @@ private:
                         edge.v, {edge.u, static_cast<pool_value_t>(weight)});
                     ++rebuilt.m_;
                 }
-            }
-        } else {
-            for (node_index v : active)
-                rebuilt.adj_.reserve_for(v, physical_degree[v]);
-            for (std::size_t i = 0; i < items.size(); ++i) {
-                const item& edge = items[i];
-                if (!edge.kept) continue;
-                const double inv_p = 1.0 / probability(i);
-                const double weight = edge.weight * inv_p;
-                const edge_index idx =
-                    static_cast<edge_index>(rebuilt.edges_.size());
-                rebuilt.edges_.push_back(
-                    {edge.u ^ edge.v, static_cast<pool_value_t>(weight)});
-                const long double represented =
-                    static_cast<long double>(edge.multiplicity) * inv_p;
-                const long double maximum =
-                    std::numeric_limits<node_index>::max();
-                node_index rounded;
-                if (represented >= maximum) {
-                    rounded = std::numeric_limits<node_index>::max();
-                } else {
-                    const long double lower = std::floor(represented);
-                    const long double fraction = represented - lower;
-                    rounded = static_cast<node_index>(lower) +
-                        (draw(edge.u, edge.v, 0xD1B54A32D192ED03ULL) <
-                                 fraction
-                             ? 1u : 0u);
-                }
-                rebuilt.multiplicity_.push_back(std::max(node_index{1}, rounded));
-                rebuilt.adj_.push(edge.u, idx);
-                rebuilt.adj_.push(edge.v, idx);
-                ++rebuilt.m_;
             }
         }
         sparsify_stats stats;
@@ -1194,9 +1042,6 @@ private:
     edge_index m_ = 0;          // edge count (can exceed 2^31)
     node_index num_active_ = 0; // active vertex count
     std::vector<edge> edges_;
-    // Empty until an exact coalesced-residual rebuild. Thereafter one count per
-    // physical edge; residual sparsification stores its HT-reweighted count.
-    std::vector<node_index> multiplicity_;
     Incidence adj_;
     // Active status is probed randomly in nearly every residual-edge scan, so
     // keep one bit per vertex rather than one byte.  Parallel elimination can

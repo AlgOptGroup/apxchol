@@ -204,7 +204,6 @@ static constexpr const char* storage_name();
 template<> constexpr const char* storage_name<apxchol::vec_incidence>()            { return "vec"; }
 template<> constexpr const char* storage_name<apxchol::forward_star_incidence>()   { return "fwd_star"; }
 template<> constexpr const char* storage_name<apxchol::bstr_incidence>()           { return "bstr"; }
-template<> constexpr const char* storage_name<apxchol::vec_pool_incidence>()       { return "vec_pool"; }
 template<> constexpr const char* storage_name<apxchol::directed_vec_pool_incidence>() { return "vec_pool_aos"; }
 
 enum class output_mode { table, csv, profile, report };
@@ -236,7 +235,6 @@ static void run_all_storages(const char* graph_name, Builder&& build_fn,
     run_and_print.template operator()<apxchol::vec_incidence>("vec");
     run_and_print.template operator()<apxchol::forward_star_incidence>("fwd_star");
     run_and_print.template operator()<apxchol::bstr_incidence>("bstr");
-    run_and_print.template operator()<apxchol::vec_pool_incidence>("vec_pool");
     run_and_print.template operator()<apxchol::directed_vec_pool_incidence>(
         "vec_pool_aos");
     if (mode == output_mode::table || mode == output_mode::profile) std::printf("\n");

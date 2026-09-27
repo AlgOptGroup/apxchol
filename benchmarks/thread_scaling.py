@@ -39,8 +39,8 @@ MATS = [
 # cpp solvers: label -> (solver, config)
 CPP = [("apxchol bg+tree", "apxchol_v1", "bg+tree[vec_pool_aos]"),
        ("apxchol trace-cycle", "apxchol_v1", "bg+trace_cycle[vec_pool_aos]"),
-       ("apxchol greedy+tree", "apxchol_v1", "greedy+tree[vec_pool]"),
-       ("apxchol bk+tree", "apxchol_v1", "bk+tree[vec_pool]"),
+       ("apxchol greedy+tree", "apxchol_v1", "greedy+tree[vec_pool_aos]"),
+       ("apxchol bk+tree", "apxchol_v1", "bk+tree[vec_pool_aos]"),
        ("RCHOL", "rchol", ""), ("pRCHOL", "rchol_par", ""),
        ("BoomerAMG", "hypre_boomeramg", ""),
        ("AMGCL", "amgcl", "")]   # OMP-parallel (builtin backend) — belongs on the scaling chart

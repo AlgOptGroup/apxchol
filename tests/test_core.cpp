@@ -30,7 +30,6 @@ using AllStorages = ::testing::Types<
     apxchol::vec_incidence,
     apxchol::forward_star_incidence,
     apxchol::bstr_incidence,
-    apxchol::vec_pool_incidence,
     apxchol::directed_vec_pool_incidence
 >;
 
@@ -104,7 +103,7 @@ struct assignment_counted_slot {
 
 TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
     using Incidence = apxchol::basic_vec_pool_incidence<assignment_counted_slot,
-                                                        apxchol::graph_storage::vec_pool>;
+                                                        apxchol::graph_storage::vec_pool_aos>;
     Incidence adj;
     adj.init(1);
     for (int value : {1, 2, 3, 4})
@@ -215,86 +214,11 @@ TYPED_TEST(GraphTest, WeightedDegree) {
     EXPECT_DOUBLE_EQ(wdeg(1), 2.0);
 }
 
-TEST(VecPoolGraph, CoalescePreservesWeightsMultiplicityAndActiveState) {
-    using Graph = apxchol::graph<apxchol::vec_pool_incidence>;
-    Graph G(6);
-    G.add_edge(0, 1, 1.0);
-    G.add_edge(0, 1, 2.0);
-    G.add_edge(0, 2, 4.0);
-    G.add_edge(1, 2, 3.0);
-    G.add_edge(1, 2, 5.0);
-    G.add_edge(1, 2, 7.0);
-    G.add_edge(2, 3, 1.0);
-    G.add_edge(3, 4, 9.0);  // dropped: vertex 4 is inactive
-    G.add_edge(0, 5, 8.0);  // dropped: vertex 5 is inactive
-    G.excess(0) = 0.25;
-    G.excess(2) = 0.75;
-    G.deactivate(4);
-    G.deactivate(5);
 
-    const std::vector<apxchol::node_index> active = {0, 1, 2, 3};
-    EXPECT_EQ(G.prune_and_degree(0), 3u);
-    EXPECT_EQ(G.prune_and_degree(1), 5u);
-    EXPECT_EQ(G.prune_and_degree(2), 5u);
-    EXPECT_EQ(G.prune_and_degree(3), 1u);
-    EXPECT_DOUBLE_EQ(
-        apxchol::detail::residual_coalescer<apxchol::vec_pool_incidence>::
-            sample(G, active, active.size()).duplicate_ratio,
-        14.0 / 8.0);
-
-    const auto stats =
-        apxchol::detail::residual_coalescer<apxchol::vec_pool_incidence>::
-            rebuild(G, active);
-    EXPECT_EQ(stats.multi_edges, 7u);
-    EXPECT_EQ(stats.distinct_edges, 4u);
-    EXPECT_EQ(G.m(), 4u);
-    EXPECT_EQ(G.num_active(), 4u);
-    EXPECT_FALSE(G.is_active(4));
-    EXPECT_FALSE(G.is_active(5));
-    EXPECT_DOUBLE_EQ(G.excess(0), 0.25);
-    EXPECT_DOUBLE_EQ(G.excess(2), 0.75);
-
-    // Physical adjacency is simple, but the partitioner's degree remains the
-    // old multigraph degree through the multiplicity sidecar.
-    EXPECT_EQ(G.adj(0).size(), 2u);
-    EXPECT_EQ(G.adj(1).size(), 2u);
-    EXPECT_EQ(G.prune_and_degree(0), 3u);
-    EXPECT_EQ(G.prune_and_degree(1), 5u);
-    EXPECT_EQ(G.prune_and_degree(2), 5u);
-    EXPECT_EQ(G.prune_and_degree(3), 1u);
-
-    auto find_edge = [&](apxchol::node_index u, apxchol::node_index v) {
-        for (const auto idx : G.adj(u)) {
-            if (G.edge_target(idx, u) == v)
-                return std::pair{G.edge_weight(idx),
-                                 G.edge_multiplicity(idx)};
-        }
-        return std::pair{0.0, apxchol::node_index{0}};
-    };
-    EXPECT_EQ(find_edge(0, 1), (std::pair{3.0, apxchol::node_index{2}}));
-    EXPECT_EQ(find_edge(1, 2), (std::pair{15.0, apxchol::node_index{3}}));
-    EXPECT_DOUBLE_EQ(
-        apxchol::detail::residual_coalescer<apxchol::vec_pool_incidence>::
-            sample(G, active, active.size()).duplicate_ratio,
-        14.0 / 8.0);
-
-    // Future sampled edges append with multiplicity one; the sidecar remains
-    // aligned with the edge pool after reserve/write and adjacency insertion.
-    G.adj_reserve_for(0, G.adj_count(0) + 1);
-    G.adj_reserve_for(3, G.adj_count(3) + 1);
-    const auto slot = G.reserve_edge_pool(1);
-    G.write_edge_at(slot, 0, 3, 6.0);
-    G.adj_atomic_push_reserved(0, slot);
-    G.adj_atomic_push_reserved(3, slot);
-    EXPECT_EQ(G.edge_multiplicity(slot), 1u);
-    EXPECT_EQ(G.prune_and_degree(0), 4u);
-    EXPECT_EQ(G.prune_and_degree(3), 2u);
-}
 
 namespace {
 
 using SparsifyStorages = ::testing::Types<
-    apxchol::vec_pool_incidence,
     apxchol::directed_vec_pool_incidence>;
 
 template<typename Incidence>
@@ -446,7 +370,6 @@ TYPED_TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
     constexpr int trials = 4096;
     constexpr double keep_probability = 0.30;
     double weight_sum = 0.0;
-    double multiplicity_sum = 0.0;
     int retained = 0;
     for (int seed = 0; seed < trials; ++seed) {
         apxchol::graph<Incidence> G(3);
@@ -466,12 +389,7 @@ TYPED_TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
             const double weight = G.edge_weight(idx);
             weight_sum += weight;
             EXPECT_NEAR(weight, 1.0 / keep_probability, 1e-6);
-            if constexpr (std::same_as<Incidence,
-                                       apxchol::vec_pool_incidence>) {
-                multiplicity_sum += G.edge_multiplicity(idx);
-                EXPECT_TRUE(G.edge_multiplicity(idx) == 6u ||
-                            G.edge_multiplicity(idx) == 7u);
-            }
+
         }
         EXPECT_TRUE(reachable_within(G, 0, 2));
     }
@@ -479,8 +397,6 @@ TYPED_TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
     EXPECT_NEAR(static_cast<double>(retained) / trials,
                 keep_probability, 0.02);
     EXPECT_NEAR(weight_sum / trials, 1.0, 0.07);
-    if constexpr (std::same_as<Incidence, apxchol::vec_pool_incidence>)
-        EXPECT_NEAR(multiplicity_sum / trials, 2.0, 0.14);
 }
 
 // ── Laplacian tests (storage-independent) ────────────
@@ -544,7 +460,7 @@ namespace {
 template<class Incidence = apxchol::directed_vec_pool_incidence>
 void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
     const auto reference = apxchol::make_graph<
-        apxchol::graph<apxchol::vec_pool_incidence>>(L);
+        apxchol::graph<apxchol::vec_incidence>>(L);
     const auto candidate = apxchol::make_graph<apxchol::graph<Incidence>>(L);
     ASSERT_EQ(reference.n(), candidate.n());
     ASSERT_EQ(reference.m(), candidate.m());
@@ -631,12 +547,12 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
                     ASSERT_EQ(candidate.excess(v),reference.excess(v)) << v;
                 }
             };
-            // Indexed always takes the general path; uncompressed directed
+            // Vector storage always takes the general path; uncompressed directed
             // storage forces that path instead of the full-column shortcut.
-            check.template operator()<apxchol::vec_pool_incidence>();
+            check.template operator()<apxchol::vec_incidence>();
             check.template operator()<apxchol::directed_vec_pool_incidence>();
             L.uncompress();
-            check.template operator()<apxchol::vec_pool_incidence>();
+            check.template operator()<apxchol::vec_incidence>();
             check.template operator()<apxchol::directed_vec_pool_incidence>();
         }
     }

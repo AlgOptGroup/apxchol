@@ -112,3 +112,5 @@ apxchol_cli_test(cli_numeric_input_kind_is_rejected path5_pattern 105 "not in"
     --input-kind 0)
 apxchol_cli_test(cli_numeric_storage_is_rejected path5_pattern 105 "not in"
     --graph-storage 0)
+apxchol_cli_test(cli_retired_indexed_storage_is_rejected path5_pattern 105 "not in"
+    --graph-storage vec_pool)

@@ -55,7 +55,7 @@ struct cli_options {
 [[noreturn]] void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s <matrix.mtx> "
-                 "[--graph-storage vec|forward_star|bstr|vec_pool|vec_pool_aos]"
+                 "[--graph-storage vec|forward_star|bstr|vec_pool_aos]"
                  " [--is block_greedy|priority_greedy|baumann_kyng]"
                  " [--seed N]"
                  " [--min-is-frac FRACTION] [--parallel-residual-threshold N]"
@@ -68,7 +68,6 @@ graph_storage parse_storage(const std::string& s) {
     if (s == "vec") return graph_storage::vec;
     if (s == "forward_star") return graph_storage::forward_star;
     if (s == "bstr") return graph_storage::bstr;
-    if (s == "vec_pool") return graph_storage::vec_pool;
     if (s == "vec_pool_aos") return graph_storage::vec_pool_aos;
     throw std::invalid_argument("unknown graph storage: " + s);
 }
@@ -310,7 +309,6 @@ const char* storage_name(graph_storage s) {
     case graph_storage::vec: return "vec";
     case graph_storage::forward_star: return "forward_star";
     case graph_storage::bstr: return "bstr";
-    case graph_storage::vec_pool: return "vec_pool";
     case graph_storage::vec_pool_aos: return "vec_pool_aos";
     }
     return "unknown";

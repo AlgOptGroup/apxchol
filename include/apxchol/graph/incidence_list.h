@@ -765,14 +765,11 @@ private:
     std::vector<std::vector<Grow>> bulk_thread_grows_;
 };
 
-using vec_pool_incidence =
-    basic_vec_pool_incidence<edge_index, graph_storage::vec_pool>;
 using directed_vec_pool_incidence =
     basic_vec_pool_incidence<directed_pool_edge, graph_storage::vec_pool_aos>;
 
 template <typename T>
 inline constexpr bool is_vec_pool_incidence_v =
-    std::same_as<T, vec_pool_incidence> ||
     std::same_as<T, directed_vec_pool_incidence>;
 
 } // namespace apxchol

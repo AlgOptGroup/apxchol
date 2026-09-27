@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Reproduce the reference comparison table (apxchol + AMGCL + BoomerAMG
+# Produce a comparison table (apxchol + AMGCL + BoomerAMG
 # at 16T, 3-rep median, on iter0010..iter0040 + grid_2000) with cooldown gating
-# between reps. This preserves the historical indexed-storage configuration.
+# between reps. New runs use directed AoS; historical indexed results keep
+# their original labels and are not relabelled as measurements of this setup.
 # Cooldown does not prove stable clocks or comparable independent measurements.
 # Setup, Solve, Total and iterations use separate medians here; this is not a
 # coherent representative execution or the current performance-acceptance path.
@@ -50,7 +51,7 @@ median_run() {
     else args="--mtx data/ipm/${wl}/matrix.mtx --kind operator --class sddm"
     fi
     local v1cfg=""
-    [[ "$solver" == "apxchol_v1" ]] && v1cfg="--v1-configs bg+tree[vec_pool]"
+    [[ "$solver" == "apxchol_v1" ]] && v1cfg="--v1-configs bg+tree[vec_pool_aos]"
     # Warmup.
     wait_cool "$COOLDOWN_C"
     env $envk taskset -c "$TASKSET" $bin $args --solver $solver $v1cfg --repeat 1 >/dev/null 2>&1
@@ -102,7 +103,7 @@ WORKLOADS=(iter0010 iter0020 iter0030 iter0040 grid_2000)
 # CPU table.
 echo "## CPU" | tee -a "$OUTPUT"
 echo "" | tee -a "$OUTPUT"
-echo "| Workload  | apxchol bg+tree[vec_pool] | AMGCL | BoomerAMG [Hypre] |" | tee -a "$OUTPUT"
+echo "| Workload  | apxchol bg+tree[vec_pool_aos] | AMGCL | BoomerAMG [Hypre] |" | tee -a "$OUTPUT"
 echo "|-----------|---------------------------|-------|-------------------|" | tee -a "$OUTPUT"
 for wl in "${WORKLOADS[@]}"; do
     nnz=${NNZ[$wl]}

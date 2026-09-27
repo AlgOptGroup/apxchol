@@ -254,14 +254,14 @@ class CurrentChartCellTest(unittest.TestCase):
              mock.patch.object(fill_pass, "OUT", store), \
              mock.patch.object(fill_pass, "git_sha", return_value="fresh"), \
              mock.patch.object(fill_pass.rc, "kind_of", return_value="graph"):
-            fill_pass.emit("m", "audit", "apxchol_bg", 4, 8, 6)
+            fill_pass.emit("m", "audit", "apxchol_bg_aos", 4, 8, 6)
             record = json.loads(
-                (pathlib.Path(store) / "m__apxchol_bg.json").read_text())
+                (pathlib.Path(store) / "m__apxchol_bg_aos.json").read_text())
         self.assertEqual(record["schema"], fill_pass.FILL_SCHEMA)
         self.assertEqual(record["cell"]["solver"], "apxchol_v1")
-        self.assertEqual(record["cell"]["config"], "bg+tree[vec_pool]")
+        self.assertEqual(record["cell"]["config"], "bg+tree[vec_pool_aos]")
         self.assertEqual(record["provenance"]["git_sha"], "fresh")
-        self.assertEqual(record["series"], "apxchol_bg")
+        self.assertEqual(record["series"], "apxchol_bg_aos")
 
     def test_selector_level_plot_only_rejects_legacy_csv_row(self):
         legacy = {"matrix_id": "grid_2000", "family": "g", "selector": "bg",
@@ -273,10 +273,41 @@ class CurrentChartCellTest(unittest.TestCase):
     def test_selector_level_current_row_passes_stale_gate(self):
         row = {"schema": selector_levels.LEVEL_SCHEMA,
                "matrix_id": "grid_2000", "family": "g", "selector": "bg",
-               "config": "bg+tree[vec_pool]", "device": "cpu",
+               "config": "bg+tree[vec_pool_aos]", "device": "cpu",
                "git_sha": "fresh", "fwd_lvls": "10", "bck_lvls": "10"}
         with mock.patch.object(chart_cells, "_sha_contains", return_value=True):
             selector_levels.validate_rows([row])
+
+    def test_fill_resume_distinguishes_storage_and_preserves_historical_file(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(fill_pass, "OUT", store), \
+             mock.patch.object(fill_pass, "git_sha", return_value="fresh"), \
+             mock.patch.object(fill_pass.rc, "kind_of", return_value="graph"), \
+             mock.patch.object(chart_cells, "stale_reasons", return_value=[]):
+            old = pathlib.Path(store) / "m__apxchol_bg.json"
+            old.write_text("historical bytes")
+            self.assertFalse(fill_pass.done("m", "apxchol_bg_aos"))
+            fill_pass.emit("m", "audit", "apxchol_bg_aos", 4, 8, 6)
+            self.assertEqual(old.read_text(), "historical bytes")
+            self.assertTrue(fill_pass.done("m", "apxchol_bg_aos"))
+            current = pathlib.Path(store) / "m__apxchol_bg_aos.json"
+            row = json.loads(current.read_text())
+            row["cell"]["config"] = "bg+tree[vec_pool]"
+            current.write_text(json.dumps(row))
+            self.assertFalse(fill_pass.done("m", "apxchol_bg_aos"))
+
+    def test_selector_levels_rejects_historical_storage_under_current_title(self):
+        row = {"schema": selector_levels.LEVEL_SCHEMA, "matrix_id": "grid_2000",
+               "family": "g", "selector": "bg", "config": "bg+tree[vec_pool]",
+               "device": "cpu", "git_sha": "fresh", "fwd_lvls": 10, "bck_lvls": 10}
+        with mock.patch.object(chart_cells, "stale_reasons", return_value=[]):
+            with self.assertRaisesRegex(chart_cells.CellStoreError, "matching CPU AoS"):
+                selector_levels.validate_rows([row])
+
+    def test_fill_chart_keeps_indexed_and_aos_series_distinct(self):
+        labels = dict((key, label) for key, label, _ in fill_chart.SOLVERS)
+        self.assertIn("historical indexed", labels["apxchol_bg"])
+        self.assertIn("AoS", labels["apxchol_bg_aos"])
 
 
 class ThreadScalingStoreTest(unittest.TestCase):
@@ -473,24 +504,26 @@ class CapReferenceTest(unittest.TestCase):
 
 
 class FairSweepSelectionTest(unittest.TestCase):
-    def test_full_fair_plan_denominator_includes_indexed_gpu_bg_ablation(self):
+    def test_full_fair_plan_denominator_excludes_retired_indexed_storage(self):
         selected = list(sweep_fair.selected_matrices(
             {"grids", "suitesparse", "ipm"}))
         self.assertEqual(sweep_fair.APX_GPU[0],
                          ("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG))
-        self.assertIn(("apxchol_v1", "bg+tree[vec_pool]"), sweep_fair.APX_GPU[1:])
-        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 615)
-        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 243)
+        self.assertEqual(len(sweep_fair.APX_GPU), len(set(sweep_fair.APX_GPU)))
+        self.assertTrue(all("[vec_pool]" not in config
+                            for _, config in sweep_fair.APX + sweep_fair.APX_GPU))
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 588)
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 216)
         self.assertEqual(
             sweep_fair.planned_cell_count(selected, "cpu")
             + sweep_fair.planned_cell_count(selected, "gpu"),
-            858,
+            804,
         )
 
     def test_orkut_size_gate_always_keeps_declared_default(self):
         configs = [
             ("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG),
-            ("apxchol_v1", "bg+tree[vec_pool]"),
+            ("apxchol_v1", "greedy+tree[vec_pool_aos]"),
             ("apxchol_v1", "bg+tree[vec]"),
             ("apxchol_v1", "bg+tree[bstr]"),
         ]

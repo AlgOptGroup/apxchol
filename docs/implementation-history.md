@@ -327,3 +327,17 @@ planned denominators and original verdicts; label later subsets as
 retrospective. A repaired parser can reanalyze saved outputs without rerunning
 an unchanged numerical campaign. These lessons belong in the current concise
 protocol, not in a growing duplicate operational manual.
+
+## Indexed pooled storage retirement
+
+The indexed `vec_pool` backend and its CLI/Python selection spelling are
+retired. Use `vec_pool_aos`; the low-level `graph<>` default now also uses
+directed AoS. This removes the separate indexed coalescer and multiplicity
+sidecar. Vector, string and forward-star backends remain available; custom
+incidence/partitioner templates remain supported. Historical benchmark records
+keep their original storage labels and are not relabelled as AoS.
+
+This retirement is separate from removing the storage-selection API or
+forward-star options: those option fields remain.
+Remaining enum values retain their prior numeric values; the removed value
+is rejected rather than silently selecting another backend.

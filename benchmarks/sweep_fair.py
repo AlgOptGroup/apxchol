@@ -139,7 +139,7 @@ def cpu_apx_configs_for(mid):
 
     com-Orkut is the one matrix where the exhaustive storage ablation is too
     expensive.  Keep the declared default even when its storage spelling is new,
-    plus the indexed ``vec_pool`` and dense ``vec`` ablations.  Testing the
+    plus the AoS selector and dense ``vec`` ablations.  Testing the
     default by equality avoids silently dropping a future headline storage when
     this size gate is updated less often than the public default.
     """
@@ -147,7 +147,7 @@ def cpu_apx_configs_for(mid):
         return APX
     return [(solver, config) for solver, config in APX
             if config == APX_DEFAULT_CONFIG
-            or "[vec_pool]" in config
+            or "[vec_pool_aos]" in config
             or "[vec]" in config]
 
 # What the BINARY reported about the operator it assembled for each matrix
@@ -447,23 +447,18 @@ def dump_mtx(mid):
 # Solver set: (solver, config)
 APX_DEFAULT_CONFIG = rc.APXCHOL_DEFAULT_CONFIG
 APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
-       ("apxchol_v1","bg+tree[vec_pool]"),         # indexed-storage ablation
-       ("apxchol_v1","bk+tree[vec_pool]"),         # Baumann-Kyng IS (ablation only)
-       ("apxchol_v1","greedy+tree[vec_pool]"),     # priority-greedy IS (ablation only)
+       ("apxchol_v1","bk+tree[vec_pool_aos]"),         # Baumann-Kyng IS (ablation only)
+       ("apxchol_v1","greedy+tree[vec_pool_aos]"),     # priority-greedy IS (ablation only)
        # vec<vec> storage variants (ablation only) -- the dense-array incidence
-       # backend vs the indexed vec_pool. Swept on every family in the SAME run as
+       # backend vs directed AoS. Swept on every family in the SAME run as
        # the headline AoS backend so the storage ablation is an honest same-session A/B (the old
        # [vec] cells were sha aeac9836 "capped first pass", cross-run-incomparable).
        ("apxchol_v1","bg+tree[vec]"),
        ("apxchol_v1","bk+tree[vec]"),
        ("apxchol_v1","greedy+tree[vec]"),
        # Full selector x storage grid for the ablation heatmap: {bg,greedy,bk} x
-       # {fwd_star, bstr}. (vec / vec_pool already covered above for all three
-       # selectors -> the legacy 4-storage axis fwd_star/vec/bstr/vec_pool.) Shows the
-       # backend progression forward_star (old linked-list default) -> vec
-       # (SBO) -> bstr (bit-string) -> vec_pool (drops fwd_star's per-edge
-       # pointer chase). forward_star uses the bare-named base combo; bstr has
-       # dedicated combos in benchmark.cpp (one per selector).
+       # {fwd_star, bstr}; vec and directed AoS are covered above.
+       # Historical indexed-pool cells remain separate records.
        ("apxchol_v1","bg+tree[fwd_star]"),
        ("apxchol_v1","greedy+tree[fwd_star]"),
        ("apxchol_v1","bk+tree[fwd_star]"),
@@ -500,11 +495,10 @@ NOCAP_TIMEOUT = int(os.environ.get("NOCAP_TIMEOUT_S", str(4 * 3600)))
 # AMG setup is now OpenMP-parallel (CMakeLists -Xcompiler=-fopenmp fix).
 APX_GPU = [("apxchol_v1", APX_DEFAULT_CONFIG),
            # Storage-matched selector ablation.  The AoS default above remains
-           # the sole headline/cap reference; this indexed bg cell only closes
-           # the {bg,greedy,bk} x vec_pool GPU comparison.
-           ("apxchol_v1","bg+tree[vec_pool]"),
-           ("apxchol_v1","greedy+tree[vec_pool]"), # priority-greedy is shallow and deterministic
-           ("apxchol_v1","bk+tree[vec_pool]")]      # bg's variable depth; bk is the deep worst case
+           # the sole headline/cap reference; the other selectors complete
+           # the {bg,greedy,bk} x AoS GPU comparison.
+           ("apxchol_v1","greedy+tree[vec_pool_aos]"), # priority-greedy is shallow and deterministic
+           ("apxchol_v1","bk+tree[vec_pool_aos]")]      # bg's variable depth; bk is the deep worst case
 COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda"]
 
 
@@ -678,9 +672,9 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
         return  # no Julia on the GPU axis
     t_apx = None
     # com-Orkut is huge (~237M input nnz, billion-scale factor offsets); the non-vec storage
-    # backends (fwd_star/bstr) are almost never better than either pooled layout yet
+    # backends (fwd_star/bstr) are retain no default role but
     # cost a lot of wall-time here, so keep the declared default plus [vec] and
-    # indexed [vec_pool].  cpu_apx_configs_for owns the exact spelling-sensitive gate.
+    # directed [vec_pool_aos].  cpu_apx_configs_for owns the exact spelling-sensitive gate.
     apx_list = cpu_apx_configs_for(mid)
     for solver,config in apx_list:
         _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
@@ -794,8 +788,8 @@ def main():
     if a.no_cmg or DEVICE == "gpu": RUN_CMG = False
     if a.headline_only:
         APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
-               ("apxchol_v1","greedy+tree[vec_pool]"),
-               ("apxchol_v1","bk+tree[vec_pool]")]
+               ("apxchol_v1","greedy+tree[vec_pool_aos]"),
+               ("apxchol_v1","bk+tree[vec_pool_aos]")]
         # NOTE: --headline-only restricts the apxchol CONFIG list only. It no longer
         # disables AC/AC2: leaving their cells empty silently understates coverage.
         # Use --no-julia explicitly when you want the speed (they are slow, and hit

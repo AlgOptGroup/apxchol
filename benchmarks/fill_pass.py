@@ -12,7 +12,8 @@ intentionally absent from the fill chart.
   - ParAC  : the GPU graph driver prints "factorization nnz", "laplacian nnz", "num cols"
   - RCHOL/pRCHOL: back-computed from the existing per-cell store (fillin, nnz, n)
 
-Writes results/fill_cells/<mid>__<solver>.json. No PCG-solve timing is used, so
+Writes results/fill_cells/<mid>__<solver>.json; AoS apxchol series have an
+_aos suffix, preserving historical indexed series. No PCG-solve timing is used, so
 this is safe to run alongside other (timing) work. Run from repo root:
   python3 benchmarks/fill_pass.py
 """
@@ -44,9 +45,9 @@ FILL_SCHEMA = 2
 # stale_cells.py.  ``series`` remains the fill-chart row key; solver/config/device
 # describe the implementation that produced it.
 FILL_SOURCE = {
-    "apxchol_bg": ("apxchol_v1", "bg+tree[vec_pool]", "cpu"),
-    "apxchol_greedy": ("apxchol_v1", "greedy+tree[vec_pool]", "cpu"),
-    "apxchol_bk": ("apxchol_v1", "bk+tree[vec_pool]", "cpu"),
+    "apxchol_bg_aos": ("apxchol_v1", "bg+tree[vec_pool_aos]", "cpu"),
+    "apxchol_greedy_aos": ("apxchol_v1", "greedy+tree[vec_pool_aos]", "cpu"),
+    "apxchol_bk_aos": ("apxchol_v1", "bk+tree[vec_pool_aos]", "cpu"),
     "ac": ("ac", "", "cpu"),
     "ac2": ("ac2", "", "cpu"),
     "rchol": ("rchol", "", "cpu"),
@@ -95,6 +96,9 @@ def done(mid, solver):
     except (OSError, json.JSONDecodeError):
         return False
     return (record.get("schema") == FILL_SCHEMA
+            and record.get("series") == solver
+            and record.get("cell", {}).get("matrix_id") == mid
+            and tuple(record.get("cell", {}).get(k) for k in ("solver", "config", "device")) == FILL_SOURCE[solver]
             and not chart_cells.stale_reasons(record))
 
 
@@ -163,9 +167,9 @@ def ac_fill(mid, family, args, reg):
 
 # apxchol fill per IS-selector (bg/greedy/bk): the elimination order differs, so the
 # factor density does too -- charted as separate series next to the AC reference.
-APX_SELECTORS = [("apxchol_bg", "bg+tree[vec_pool]"),
-                 ("apxchol_greedy", "greedy+tree[vec_pool]"),
-                 ("apxchol_bk", "bk+tree[vec_pool]")]
+APX_SELECTORS = [("apxchol_bg_aos", "bg+tree[vec_pool_aos]"),
+                 ("apxchol_greedy_aos", "greedy+tree[vec_pool_aos]"),
+                 ("apxchol_bk_aos", "bk+tree[vec_pool_aos]")]
 
 def apxchol_fill(mid, family, args, reg):
     regflag = f"--reg-rel {REG}" if reg else ""

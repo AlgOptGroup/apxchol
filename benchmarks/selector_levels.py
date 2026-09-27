@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect SpTRSV level counts per (IS selector, matrix) at vec_pool, then plot a
+"""Collect SpTRSV level counts per (IS selector, matrix) at vec_pool_aos, then plot a
 selector x matrix heatmap of the back-solve level count. The level count is the
 direct explainer for the selector x graph timing: a deep elimination tree (many
 SpTRSV levels) makes the triangular solve slow, so a selector's depth blow-up on
@@ -7,7 +7,7 @@ dense social graphs shows up here as a high level count. Runs the bench with
 APXCHOL_LEVEL_DUMP=1
 maxiter=1 (factorize + dump only, no PCG) for each selector. CPU-heavy on the
 giants; run from the repository top-level directory. Writes
-results/selector_levels.csv + the heatmap.
+results/selector_levels_aos.csv + the heatmap.
 """
 import csv, os, re, subprocess, sys
 from pathlib import Path
@@ -22,7 +22,7 @@ from runner_common import (benchmark_openmp_env, git_sha, margs_for, sh,
 
 ROOT = str(Path(__file__).resolve().parents[1])   # repo root
 BIN = f"{ROOT}/benchmarks/build/benchmark"
-OUT_CSV = f"{ROOT}/results/selector_levels.csv"
+OUT_CSV = f"{ROOT}/results/selector_levels_aos.csv"
 SELS = ["bg", "greedy", "bk"]
 PAT = re.compile(r"fwd_lvls=(\d+) \(max=(\d+)\) bck_lvls=(\d+)")
 LEVEL_SCHEMA = 2
@@ -58,7 +58,7 @@ def collect():
             env = benchmark_openmp_env(
                 16, dict(os.environ, APXCHOL_LEVEL_DUMP="1"))
             cmd = (f"{taskset_prefix(16)} {BIN} {args} {regf} --solver apxchol_v1 "
-                   f"--v1-configs '{sel}+tree[vec_pool]' --threads 16 --tol 1e-8 "
+                   f"--v1-configs '{sel}+tree[vec_pool_aos]' --threads 16 --tol 1e-8 "
                    f"--maxiter 1 --repeat 1 --csv")
             try:
                 o = sh(cmd, env=env, timeout=900).stderr
@@ -69,7 +69,7 @@ def collect():
                 print(f"  {mid:16} {sel:5} no level line", flush=True); continue
             fwd, bck = int(m.group(1)), int(m.group(3))
             rows.append(dict(schema=LEVEL_SCHEMA, matrix_id=mid, family=fam,
-                             selector=sel, config=f"{sel}+tree[vec_pool]",
+                             selector=sel, config=f"{sel}+tree[vec_pool_aos]",
                              device="cpu", git_sha=source_sha,
                              fwd_lvls=fwd, bck_lvls=bck))
             print(f"  {mid:16} {sel:5} fwd={fwd:5} bck={bck:5}", flush=True)
@@ -91,6 +91,12 @@ def validate_rows(rows):
             raise chart_cells.CellStoreError(
                 "selector-level CSV lacks current schema/provenance; rerun "
                 "selector_levels.py before plotting")
+        if (row.get("selector") not in SELS
+                or row.get("config") != f"{row['selector']}+tree[vec_pool_aos]"
+                or row.get("device") != "cpu"):
+            raise chart_cells.CellStoreError(
+                "selector-level AoS plot requires matching CPU AoS rows; "
+                "preserve historical indexed CSVs separately")
         matrix_id = row["matrix_id"]
         record = {
             "cell": {"family": row["family"], "matrix_id": matrix_id,
@@ -112,7 +118,7 @@ def validate_rows(rows):
         raise chart_cells.StaleCellError(
             f"selector_levels plot input contains {len(stale)} stale rows: {examples}")
 
-def plot(rows, out=f"{ROOT}/results/plots/figures/selector_levels.png"):
+def plot(rows, out=f"{ROOT}/results/plots/figures/selector_levels_aos.png"):
     validate_rows(rows)
     mats = [m for m, *_ in MATS if any(r["matrix_id"] == m for r in rows)]
     by = {(r["selector"], r["matrix_id"]): r["bck_lvls"] for r in rows}
@@ -138,7 +144,7 @@ def plot(rows, out=f"{ROOT}/results/plots/figures/selector_levels.png"):
                 best = np.nanmin(M[:, j])
                 ax.text(j, i, f"{int(v)}", ha="center", va="center", fontsize=7.5,
                         fontweight="bold" if v == best else "normal")
-    ax.set_title("apxchol  IS-selector × graph  —  SpTRSV back-solve LEVEL COUNT (vec_pool, t16)\n"
+    ax.set_title("apxchol  IS-selector × graph  —  SpTRSV back-solve LEVEL COUNT (vec_pool_aos, t16)\n"
                  "fewer levels = shallower factor = faster triangular solve;  colour = ×fewest per column",
                  fontsize=10.5)
     fig.tight_layout(); fig.savefig(out, dpi=140); plt.close(fig)

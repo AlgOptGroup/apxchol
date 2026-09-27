@@ -1180,7 +1180,14 @@ static Args parse_args(int argc, char** argv) {
             std::string s = next();
             std::istringstream ss(s);
             std::string tok;
-            while (std::getline(ss, tok, ',')) a.v1_configs.insert(tok);
+            while (std::getline(ss, tok, ',')) {
+                if (tok.find("[vec_pool]") != std::string::npos) {
+                    std::cerr << "Storage 'vec_pool' is retired; choose a supported "
+                              << "--v1-configs entry explicitly.\n";
+                    std::exit(2);
+                }
+                a.v1_configs.insert(tok);
+            }
         }
         else if (arg == "--decompose") {
             a.decompose = next();
@@ -3112,19 +3119,17 @@ int main(int argc, char** argv) {
             {"greedy+tree", "priority_greedy", gs::vec},
             // bstr (bit-string): remaining storage backend across
             // All selectors -- completes the selector x storage grid
-            // (fwd_star / vec / bstr / vec_pool x bg / bk / greedy) for
+            // (fwd_star / vec / bstr / vec_pool_aos x bg / bk / greedy) for
             // the ablation heatmap. fwd_star + vec are the bare-named combos above;
-            // vec_pool below. Name carries the tag so --v1-configs selects it directly.
+            // AoS below. Name carries the tag so --v1-configs selects it directly.
             {.name="bg+tree[bstr]",   .is="block_greedy", .storage=gs::bstr},
             {.name="bk+tree[bstr]",   .is="baumann_kyng", .storage=gs::bstr},
             {.name="greedy+tree[bstr]", .is="priority_greedy", .storage=gs::bstr},
-            // Indexed vec_pool (selector and storage ablations).
-            {.name="bg+tree[vec_pool]",   .is="block_greedy", .storage=gs::vec_pool},
-            {.name="bk+tree[vec_pool]",   .is="baumann_kyng", .storage=gs::vec_pool},
-            {.name="greedy+tree[vec_pool]", .is="priority_greedy", .storage=gs::vec_pool},
             // Directed AoS headline/default: same slab machinery, but each
             // endpoint stores {neighbor, weight} inline instead of an edge id.
             {.name="bg+tree[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos},
+            {.name="bk+tree[vec_pool_aos]", .is="baumann_kyng", .storage=gs::vec_pool_aos},
+            {.name="greedy+tree[vec_pool_aos]", .is="priority_greedy", .storage=gs::vec_pool_aos},
             // Cycle-core samplers on the headline storage (2026-09-18). /ec5 = exact
             // clique on heavy cores of <= 5 vertices; /dc32 = two cycles on cores of
             // >= 32 vertices; /ec5dc32 = both. See factor_options for the rationale.
@@ -3136,16 +3141,11 @@ int main(int argc, char** argv) {
              .sampler=apxchol::clique_sampler::trace_cycle, .double_cycle_min_h=32},
             {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
              .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5, .double_cycle_min_h=32},
-            // /hos: legacy heavy-oversample variant, kept so old --v1-configs strings still
-            // resolve. It carries no extra knobs today (the oversampling levers were removed
-            // from the library), so it behaves like bg+tree[vec_pool] -- which is the charted
-            // headline config; /hos itself is not charted.
-            {.name="bg+tree/hos[vec_pool]", .is="block_greedy", .storage=gs::vec_pool},
             // Quality levers: exact full clique at low degree (xcN), relaxed IS degree cap (capN).
-            {.name="bg+tree/xc4[vec_pool]",  .is="block_greedy", .storage=gs::vec_pool, .exact_clique_max_degree=4},
-            {.name="bg+tree/xc8[vec_pool]",  .is="block_greedy", .storage=gs::vec_pool, .exact_clique_max_degree=8},
-            {.name="bg+tree/xc16[vec_pool]", .is="block_greedy", .storage=gs::vec_pool, .exact_clique_max_degree=16},
-            {.name="bg+tree/cap4[vec_pool]", .is="block_greedy", .storage=gs::vec_pool, .degree_mult=4.0},
+            {.name="bg+tree/xc4[vec_pool_aos]",  .is="block_greedy", .storage=gs::vec_pool_aos, .exact_clique_max_degree=4},
+            {.name="bg+tree/xc8[vec_pool_aos]",  .is="block_greedy", .storage=gs::vec_pool_aos, .exact_clique_max_degree=8},
+            {.name="bg+tree/xc16[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos, .exact_clique_max_degree=16},
+            {.name="bg+tree/cap4[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos, .degree_mult=4.0},
         };
         // Thread count: if --threads is set, use that; otherwise current OMP setting.
         int tc = args.threads;
@@ -3164,7 +3164,6 @@ int main(int argc, char** argv) {
                 case apxchol::graph_storage::vec:          return "[vec]";
                 case apxchol::graph_storage::forward_star: return "[fwd_star]";
                 case apxchol::graph_storage::bstr:         return "[bstr]";
-                case apxchol::graph_storage::vec_pool:     return "[vec_pool]";
                 case apxchol::graph_storage::vec_pool_aos: return "[vec_pool_aos]";
             }
             return "[?]";

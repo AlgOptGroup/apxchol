@@ -47,8 +47,10 @@ CHART_THREADS = 16
 LABELS = {
     ("apxchol_v1", "bg+tree[vec_pool_aos]"): "apxchol/bg",
     ("apxchol_v1", "bg+trace_cycle[vec_pool_aos]"): "apxchol/trace-cycle",
-    ("apxchol_v1", "greedy+tree[vec_pool]"): "apxchol/greedy",
-    ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk",
+    ("apxchol_v1", "greedy+tree[vec_pool_aos]"): "apxchol/greedy",
+    ("apxchol_v1", "greedy+tree[vec_pool]"): "apxchol/greedy (historical indexed)",
+    ("apxchol_v1", "bk+tree[vec_pool_aos]"): "apxchol/bk",
+    ("apxchol_v1", "bk+tree[vec_pool]"): "apxchol/bk (historical indexed)",
     ("rchol", ""): "RCHOL",
     ("rchol_par", ""): "pRCHOL",
     ("hypre_boomeramg", ""): "BoomerAMG",

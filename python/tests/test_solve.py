@@ -49,6 +49,20 @@ def random_sddm(n, seed=0):
     return L.tocsr()
 
 
+@pytest.mark.parametrize("storage", ["vec_pool_aos", "forward_star", "vec", "bstr"])
+def test_remaining_storage_options_solve_original_system(storage):
+    L = grid2d_sddm(5)
+    b = np.linspace(-1.0, 1.0, L.shape[0])
+    result = apxchol.solve(L, b, storage=storage, tol=1e-8, maxiter=200)
+    assert result.converged
+    assert np.linalg.norm(L @ result.x - b) / np.linalg.norm(b) <= 1e-7
+
+
+def test_retired_indexed_storage_is_rejected():
+    with pytest.raises(ValueError, match="unknown storage 'vec_pool'"):
+        apxchol.factorize(grid2d_sddm(3), storage="vec_pool")
+
+
 def test_laplacian_solve_converges():
     L = grid2d_laplacian(50)
     rng = np.random.default_rng(1)

@@ -18,7 +18,6 @@ static const std::map<std::string, graph_storage> graph_storage_map = {
     {"vec",          graph_storage::vec},
     {"forward_star", graph_storage::forward_star},
     {"bstr",         graph_storage::bstr},
-    {"vec_pool",     graph_storage::vec_pool},
     {"vec_pool_aos", graph_storage::vec_pool_aos},
 };
 
@@ -128,7 +127,7 @@ run_config parse_args(int argc, char* argv[]) {
         ->capture_default_str();
 
     app.add_option("--graph-storage", cfg.solve_opts.storage,
-                   "Graph storage backend (vec_pool, vec_pool_aos, forward_star, vec, bstr)")
+                   "Graph storage backend (vec_pool_aos, forward_star, vec, bstr)")
         ->default_str("vec_pool_aos")
         ->transform(CLI::IsMember(graph_storage_map) & CLI::Transformer(graph_storage_map));
 

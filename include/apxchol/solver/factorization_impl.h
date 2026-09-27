@@ -3,7 +3,7 @@
 ///
 /// Included from factorization.h so that third-party code can use custom
 /// incidence_storage backends without modifying our explicit-instantiation list.
-/// The four built-in backends (vec, forward_star, bstr, vec_pool) are
+/// The built-in backends (vec, forward_star, bstr, directed AoS) are
 /// pre-instantiated in factorization.cpp; any other backend will be
 /// instantiated on demand when the user includes <apxchol/solver/factorization.h>.
 
@@ -2018,8 +2018,7 @@ factorization factorize_impl(const Eliminator& elim,
         !residual_sparsify_enabled_value ||
         !*residual_sparsify_enabled_value ||
         std::strcmp(residual_sparsify_enabled_value, "0") != 0;
-    if constexpr (std::same_as<Incidence, vec_pool_incidence> ||
-                  std::same_as<Incidence, directed_vec_pool_incidence>) {
+    if constexpr (std::same_as<Incidence, directed_vec_pool_incidence>) {
         if (residual_sparsify_enabled && active.size() > residual_thresh &&
             handoff_vertices != 0) {
             const auto sample =

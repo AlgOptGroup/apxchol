@@ -36,8 +36,22 @@
 // ── Helpers ──────────────────────────────────────────
 
 TEST(DefaultOptions, HighLevelSolveUsesDirectedAosStorage) {
+    static_assert(std::same_as<apxchol::graph<>::incidence_type,
+                               apxchol::directed_vec_pool_incidence>);
     const apxchol::solve_options opts;
     EXPECT_EQ(opts.storage, apxchol::graph_storage::vec_pool_aos);
+}
+
+TEST(StorageSelection, RetiredIndexedValueIsRejected) {
+    Eigen::SparseMatrix<double> matrix(2, 2);
+    matrix.insert(0, 0) = 2.0;
+    matrix.insert(1, 1) = 2.0;
+    matrix.insert(0, 1) = -1.0;
+    matrix.insert(1, 0) = -1.0;
+    matrix.makeCompressed();
+    EXPECT_THROW(apxchol::factorize(matrix,
+                     static_cast<apxchol::graph_storage>(3)),
+                 std::invalid_argument);
 }
 
 TEST(SetupDiagnostics, WorkDistributionExposesConcentrationAndIdleWorkers) {
@@ -259,7 +273,6 @@ using AllStorages = ::testing::Types<
     apxchol::vec_incidence,
     apxchol::forward_star_incidence,
     apxchol::bstr_incidence,
-    apxchol::vec_pool_incidence,
     apxchol::directed_vec_pool_incidence>;
 
 // ── Factorization structure tests ────────────────────
@@ -493,31 +506,7 @@ TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
 #endif
 }
 
-TEST(VecPoolAos, SerialFactorMatchesIndexedVecPoolByteForByte) {
-    // At one thread both representations consume every multiedge in the same
-    // order. This guards the AoS backend's defining claim: it changes where
-    // {target, weight} lives, not selection, sampling, or factor arithmetic.
-    const scoped_threads team(1);
-    const auto L = weighted_grid_laplacian(24, 25, 7.25, 0.03125);
-    apxchol::factor_options opts;
-    opts.seed = 19;
 
-    const auto indexed = apxchol::factorize(
-        L, apxchol::graph_storage::vec_pool, opts);
-    const auto aos = apxchol::factorize(
-        L, apxchol::graph_storage::vec_pool_aos, opts);
-    expect_same_factor(indexed, aos, "vec_pool vs vec_pool_aos at T=1");
-
-    ASSERT_EQ(indexed.rounds.size(), aos.rounds.size());
-    for (std::size_t r = 0; r < indexed.rounds.size(); ++r) {
-        SCOPED_TRACE("round " + std::to_string(r));
-        EXPECT_EQ(indexed.rounds[r].active, aos.rounds[r].active);
-        EXPECT_EQ(indexed.rounds[r].is_size, aos.rounds[r].is_size);
-        EXPECT_DOUBLE_EQ(indexed.rounds[r].avg_deg, aos.rounds[r].avg_deg);
-        EXPECT_EQ(indexed.rounds[r].nnz_added, aos.rounds[r].nnz_added);
-        EXPECT_EQ(indexed.rounds[r].nnz_total, aos.rounds[r].nnz_total);
-    }
-}
 
 TEST(VecPoolAos, PreassignedOffsetsAreReproducibleInParallel) {
 #ifndef _OPENMP
@@ -778,10 +767,10 @@ TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
         opts.seed = 3;
         opts.omp_threshold = 256;
         opts.is_select = sel;
-        const auto ref = apxchol::factorize(L, apxchol::graph_storage::vec_pool, opts);
+        const auto ref = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
         ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
         for (int rep = 1; rep <= 3; ++rep) {
-            const auto F = apxchol::factorize(L, apxchol::graph_storage::vec_pool, opts);
+            const auto F = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
             expect_same_factor(ref, F, std::string(sel) + " rep " + std::to_string(rep));
             if (::testing::Test::HasFatalFailure()) return;
         }
@@ -796,8 +785,8 @@ TEST(FactorizeDeterminism, SingleThreadedFactorizationIsByteIdentical) {
     const auto L = grid_laplacian(60, 60);
     apxchol::factor_options opts;
     opts.seed = 11;
-    const auto a = apxchol::factorize(L, apxchol::graph_storage::vec_pool, opts);
-    const auto b = apxchol::factorize(L, apxchol::graph_storage::vec_pool, opts);
+    const auto a = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
+    const auto b = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
     expect_same_factor(a, b, "T=1");
 }
 
@@ -1419,7 +1408,7 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
     const scoped_threads team(4);
     const scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
     constexpr apxchol::node_index n = 96;
-    apxchol::graph<apxchol::vec_pool_incidence> graph(n);
+    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
     for (apxchol::node_index u = 0; u < n; ++u)
         for (apxchol::node_index v = u + 1; v < n; ++v)
             for (int duplicate = 0; duplicate < 4; ++duplicate)
@@ -1513,7 +1502,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         with_loop.seed = seed;                      // then the peel takes the
         with_loop.parallel_residual_threshold = thresh;   // rest.
         const auto c = apxchol::factorize(
-            L, apxchol::graph_storage::vec_pool, with_loop);
+            L, apxchol::graph_storage::vec_pool_aos, with_loop);
         ASSERT_FALSE(c.rounds.empty());
         EXPECT_EQ(c.rounds.front().active, static_cast<size_t>(n))
             << "the clique should hand the full residual to BK";
@@ -1528,7 +1517,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
 
         // Same (input, seed, thread count) => same factor, bit for bit.
         const auto c2 = apxchol::factorize(
-            L, apxchol::graph_storage::vec_pool, with_loop);
+            L, apxchol::graph_storage::vec_pool_aos, with_loop);
         expect_same_factor(c, c2, "BK residual loop, seed " +
                                   std::to_string(seed));
         if (::testing::Test::HasFatalFailure()) return;
@@ -1536,7 +1525,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         // And it is still a usable preconditioner.
         const auto res = apxchol::solve(L, b,
             {.tol = 1e-8, .max_iter = 200,
-             .storage = apxchol::graph_storage::vec_pool,
+             .storage = apxchol::graph_storage::vec_pool_aos,
              .factor_opts = with_loop});
         EXPECT_LT(res.residual, 1e-8) << "seed " << seed;
     }
@@ -1561,7 +1550,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
 
     auto is_size = [&](double seed) {
         auto G = apxchol::make_graph<
-            apxchol::graph<apxchol::vec_pool_incidence>>(L);
+            apxchol::graph<apxchol::directed_vec_pool_incidence>>(L);
         apxchol::baumann_kyng_partitioner bk;
         bk.est_avg_degree = seed;                   // 0 = "work it out yourself"
         apxchol::selection sel;
@@ -1584,7 +1573,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
 TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     const auto L = grid_laplacian(30, 30);
     auto G = apxchol::make_graph<
-        apxchol::graph<apxchol::vec_pool_incidence>>(L);
+        apxchol::graph<apxchol::directed_vec_pool_incidence>>(L);
     std::vector<apxchol::node_index> active(900);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     apxchol::partition_context ctx{
@@ -1620,7 +1609,7 @@ TEST(EliminationTeamSizing, DenseSmallRoundsUseFineSchedulingChunks) {
 TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
     const scoped_threads team(4);
     constexpr apxchol::node_index n = 80;
-    apxchol::graph<apxchol::vec_pool_incidence> G(n);
+    apxchol::graph<apxchol::directed_vec_pool_incidence> G(n);
     for (apxchol::node_index v = 0; v < n; ++v) {
         G.add_edge(v, (v + 1) % n, 1.0);
         G.add_edge(v, (v + 7) % n, 1.0);
@@ -1675,7 +1664,7 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
 #endif
     constexpr apxchol::node_index leaves = 128;
     constexpr apxchol::node_index n = leaves + 2;
-    apxchol::graph<apxchol::vec_pool_incidence> G(n);
+    apxchol::graph<apxchol::directed_vec_pool_incidence> G(n);
     for (apxchol::node_index v = 0; v < leaves; ++v) {
         G.add_edge(v, leaves, 1.0);
         G.add_edge(v, leaves + 1, 1.0);
@@ -1763,11 +1752,11 @@ TEST(GpuBlockFrontend, RejectsIncompatibleFactorizationBeforeDeviceProbe) {
     EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec, options),
                  std::invalid_argument);
     options.is_select = "priority_greedy";
-    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool, options),
+    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, options),
                  std::invalid_argument);
     options.is_select = "block_greedy";
     options.exact_clique_max_degree = 8;
-    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool, options),
+    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, options),
                  std::invalid_argument);
 }
 
@@ -1781,7 +1770,7 @@ TEST(GpuBlockFrontend, TracksCandidatesAndDynamicUpdatesExactly) {
         {0,2}, {2,4}, {4,6}, {6,8}, {8,10}, {10,0},
     };
 
-    apxchol::graph<apxchol::vec_pool_incidence> cpu_graph(n);
+    apxchol::graph<apxchol::directed_vec_pool_incidence> cpu_graph(n);
     for (const auto e : initial) cpu_graph.add_edge(e.u, e.v, 1.0);
     apxchol::detail::gpu_block_frontend gpu(n, initial);
 
@@ -1870,7 +1859,7 @@ static void check_block_selection_reference(apxchol::node_index n,
                  " repair_degree=" + std::to_string(repair_degree) +
                  " fixture=" + std::to_string(static_cast<unsigned>(fixture)));
     std::vector<gpu_topology_edge> initial;
-    apxchol::graph<apxchol::vec_pool_incidence> graph(n);
+    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
     if (repair_degree) {
         // With two regions, 0 removes a regional pick and frees its successor.
         // Repeated incidences force complete scans at the short/long boundary.
@@ -2440,9 +2429,9 @@ TEST(GpuBlockFrontend, IntegratedFactorizationIsDeterministic) {
 
     setenv("APXCHOL_GPU_BLOCK_FRONTEND", "force", 1);
     const auto first = apxchol::factorize(
-        L, apxchol::graph_storage::vec_pool, opts);
+        L, apxchol::graph_storage::vec_pool_aos, opts);
     const auto second = apxchol::factorize(
-        L, apxchol::graph_storage::vec_pool, opts);
+        L, apxchol::graph_storage::vec_pool_aos, opts);
 
     if (had_old) setenv("APXCHOL_GPU_BLOCK_FRONTEND", saved.c_str(), 1);
     else unsetenv("APXCHOL_GPU_BLOCK_FRONTEND");

@@ -246,8 +246,6 @@ template factorization factorize_with_strategy<forward_star_incidence>(
     graph<forward_star_incidence>, const factor_options&, checkpoint*);
 template factorization factorize_with_strategy<bstr_incidence>(
     graph<bstr_incidence>, const factor_options&, checkpoint*);
-template factorization factorize_with_strategy<vec_pool_incidence>(
-    graph<vec_pool_incidence>, const factor_options&, checkpoint*);
 template factorization factorize_with_strategy<directed_vec_pool_incidence>(
     graph<directed_vec_pool_incidence>, const factor_options&, checkpoint*);
 
@@ -309,11 +307,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
             A, triangles_bit_identical);
         return do_factorize(std::move(G));
     }
-    case graph_storage::vec_pool: {
-        auto G = detail::make_graph_from_operator<graph<vec_pool_incidence>>(
-            A, triangles_bit_identical);
-        return do_factorize(std::move(G));
-    }
+
     case graph_storage::vec_pool_aos: {
 #if defined(APXCHOL_USE_CUDA)
         if (!retain_host_factor && opts.is_select == "block_greedy" &&
@@ -336,11 +330,13 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
             A, triangles_bit_identical);
         return do_factorize(std::move(G));
     }
-    default: {
+    case graph_storage::vec: {
         auto G = detail::make_graph_from_operator<graph<vec_incidence>>(
             A, triangles_bit_identical);
         return do_factorize(std::move(G));
     }
+    default:
+        throw std::invalid_argument("unsupported graph storage");
     }
 }
 

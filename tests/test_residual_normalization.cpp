@@ -183,8 +183,7 @@ TEST(ResidualBlockedNormalization, PersistentTeamZeroAndNonfiniteGuardsAreUnifor
 namespace {
 template<class Incidence>
 class ResidualBlockedGraph : public ::testing::Test {};
-using block_storages = ::testing::Types<apxchol::vec_pool_incidence,
-                                       apxchol::directed_vec_pool_incidence>;
+using block_storages = ::testing::Types<apxchol::directed_vec_pool_incidence>;
 TYPED_TEST_SUITE(ResidualBlockedGraph, block_storages);
 }
 

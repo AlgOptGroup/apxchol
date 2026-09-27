@@ -246,7 +246,7 @@ inline constexpr size_t partitioner_residual_handoff_v = [] {
 template<typename T>
 concept partitioner =
     requires { { T::name } -> std::convertible_to<std::string_view>; } &&
-    requires(T t, graph<vec_pool_incidence>& G,
+    requires(T t, graph<directed_vec_pool_incidence>& G,
              std::span<const node_index> candidates,
              const partition_context& ctx, selection& out) {
         t.find_partition(G, candidates, ctx, out);

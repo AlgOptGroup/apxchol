@@ -32,9 +32,12 @@ FAMS = ["grids", "ipm", "suitesparse"]
 #     random-nnz-sort) implementations factor differently, so their fill genuinely
 #     differs and each is its own series (oranges).
 SOLVERS = [
-    ("apxchol_bg",   "apxchol bg",   "#0b5394"),
-    ("apxchol_greedy", "apxchol priority-greedy", "#3d85c6"),
-    ("apxchol_bk",   "apxchol bk",   "#9fc5e8"),
+    ("apxchol_bg_aos", "apxchol bg AoS", "#0b5394"),
+    ("apxchol_greedy_aos", "apxchol priority-greedy AoS", "#3d85c6"),
+    ("apxchol_bk_aos", "apxchol bk AoS", "#9fc5e8"),
+    ("apxchol_bg",   "apxchol bg (historical indexed)",   "#0b5394"),
+    ("apxchol_greedy", "apxchol priority-greedy (historical indexed)", "#3d85c6"),
+    ("apxchol_bk",   "apxchol bk (historical indexed)",   "#9fc5e8"),
     ("ac",  "AC [Kyng16]",  "#2ca02c"),
     ("ac2", "AC2 [Kyng16]", "#9467bd"),
     ("rchol",     "RCHOL",  "#d62728"),
@@ -50,7 +53,7 @@ CURRENT_SOLVERS = [
     ("apxchol_gpu_q08", "apxchol GPU GKS q=0.8", "#6fa8dc"),
     ("apxchol_gpu_q02", "apxchol GPU GKS q=0.2", "#9fc5e8"),
     ("apxchol_gpu_trace_q08", "apxchol GPU trace-cycle q=0.8", "#3d85c6"),
-] + SOLVERS[3:]
+] + SOLVERS[6:]
 
 
 def load(root):

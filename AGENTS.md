@@ -145,7 +145,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   adjacency versus an assembled operator. Bindings must use the operator
   contract, not CLI guesses.
 - `graph/` provides adjacency layouts. Directed `vec_pool_aos` is the
-  high-level default; indexed `vec_pool` remains supported. Changing storage
+  default for both high-level solves and `graph<>`; indexed `vec_pool` is retired. Changing storage
   must not silently choose a different selector.
   Incremental-degree radix histograms and decrement slices use the actual
   OpenMP team, never unused rows from the requested team size.

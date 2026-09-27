@@ -4,8 +4,9 @@
 # Cooldown and affinity control some sources of timing variation; they do not
 # establish stable clocks, independent samples, or a causal performance change.
 # This legacy helper reports separate per-stage summaries, not one coherent
-# representative execution. Keep its original indexed-storage configuration
-# labels; use the current benchmark contract for performance acceptance.
+# representative execution. New runs default to directed AoS; preserve the
+# original storage labels on historical results. Use the current benchmark
+# contract for performance acceptance.
 #
 # Methodology:
 #   * Wait for thermal cooldown to a defined ceiling before each measurement
@@ -35,7 +36,7 @@
 #               For competitors: "apxchol", "amgcl", "hypre_boomeramg",
 #               "hypre_boomeramg_gpu",
 #               "cg" (no precond Eigen CG), "ldlt", "cholmod", "rchol*".
-#   CONFIG      v1-config name (default "bg+tree[vec_pool]", only used
+#   CONFIG      v1-config name (default "bg+tree[vec_pool_aos]", only used
 #               when SOLVER=apxchol_v1)
 #   QUIET       if set, suppress per-rep progress lines
 #
@@ -54,7 +55,7 @@ COOLDOWN_C=${COOLDOWN_C:-70}
 POLL_SECS=${POLL_SECS:-5}
 TASKSET=${TASKSET:-0-15}
 SOLVER=${SOLVER:-apxchol_v1}
-CONFIG=${CONFIG:-bg+tree[vec_pool]}
+CONFIG=${CONFIG:-bg+tree[vec_pool_aos]}
 QUIET=${QUIET:-}
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

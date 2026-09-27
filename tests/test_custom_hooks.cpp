@@ -97,7 +97,7 @@ private:
 };
 static_assert(apxchol::partitioner<priority_partitioner>);
 
-using vp_graph = apxchol::graph<apxchol::vec_pool_incidence>;
+using vp_graph = apxchol::graph<apxchol::directed_vec_pool_incidence>;
 
 TEST(CustomEliminator, ExactCliqueConverges) {
     auto L = grid_laplacian(20, 20);
