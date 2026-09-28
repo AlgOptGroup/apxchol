@@ -37,8 +37,8 @@ struct residual_coalescer;
 // active endpoint pair would require a concurrent dynamic pair map, while
 // physically merging only the pivot's adjacency was measured slower than the
 // current transient fp64 aggregation in process_vertex(). A governed one-shot
-// rebuild may coalesce the late residual; it stores multiplicity separately so
-// the partitioner's degree heuristic remains the same.
+// rebuild may coalesce the late residual; the degree heuristic then counts
+// distinct neighbors rather than retaining duplicate-edge multiplicity.
 /// Mutable incidence-list graph.
 ///
 /// The traditional backends store each undirected edge {u,v,w} once in a flat
@@ -312,8 +312,8 @@ public:
         adj_.atomic_push_reserved(v, e_slot);
     }
 
-    /// Sort vertex v's adjacency slab — by edge index for the indexed backend,
-    /// or by (target, weight) for the directed-inline backend — to restore
+    /// Sort vertex v's adjacency slab by the incidence layout's ordering;
+    /// directed AoS orders records by (target, weight). This restores
     /// deterministic ordering after a parallel atomic-push phase.
     template<typename I = Incidence>
         requires is_vec_pool_incidence_v<I>

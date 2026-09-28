@@ -372,8 +372,8 @@ void apply_deferred_edges(graph<Incidence>& G,
             if (incoming[v] > 0)
                 G.adj_reserve_for(v, G.adj_count(v) + incoming[v]);
 
-        // Step 3: reserve the indexed edge pool when present, then
-        // atomic-claim endpoint-incidence slots in parallel.
+        // Step 3: account for directed edges (or reserve generic edge slots),
+        // then atomic-claim endpoint-incidence slots in parallel.
         edge_index e_start = 0;
         if constexpr (graph<Incidence>::stores_directed_incidence)
             G.record_edges_added(static_cast<edge_index>(N_edges));
