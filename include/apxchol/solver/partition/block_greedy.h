@@ -169,10 +169,10 @@ private:
                 // lose to a cross-block neighbor (reads only), then a barrier,
                 // then the removals land. Every read therefore sees the SAME
                 // post-greedy snapshot of chosen[] in every thread, whatever the
-                // scheduling — which is what makes the round's selection, hence
-                // the elimination order, hence the factor's STRUCTURE,
-                // reproducible run to run at a fixed thread count (see the
-                // determinism contract in the class comment below).
+                // scheduling. Selection is reproducible for the same graph,
+                // candidates, selector state and actual thread team. This does
+                // not imply identical independently rebuilt factors (see
+                // docs/precision.md and the class contract below).
                 //
                 // Resolving against the snapshot always takes the over-drop of a
                 // chain (a beats b beats c across three blocks: b loses to a and

@@ -2,8 +2,8 @@
 /// Incidence list storage backends for graph.
 ///
 /// Each backend manages per-vertex lists of one value type. Most backends store
-/// edge_index values into graph's flat undirected-edge pool. The experimental
-/// directed vec_pool stores {neighbor, weight} records inline instead.
+/// edge_index values into graph's flat undirected-edge pool. The default
+/// directed AoS stores {neighbor, weight} records inline instead.
 ///
 /// Required interface:
 ///   init(n)                   — set up n empty vertex lists

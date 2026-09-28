@@ -628,8 +628,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
             // atomic push + deactivate all in ONE parallel region. Saves
             // the fork-join overhead of the legacy 2-region pattern
             // (~10us × num_threads per round). The omp single section does
-            // the vec_pool-specific work: prefix-sum of thread edge counts,
-            // edge-pool reservation, per-vertex incoming count, and
+            // the pooled-adjacency work: prefix-sum of thread edge counts,
+            // edge accounting, per-vertex incoming count, and
             // serial reserve_for grow (reserve_for is NOT thread-safe).
             // The actual atomic_push_reserved phase is parallel and lock-free.
             const int num_threads = team_threads;
@@ -751,8 +751,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 }
                 #pragma omp barrier  // incoming[] complete before reserve_for
 
-                // Single: prefix-sum thread edge offsets, reserve the indexed
-                // edge pool when present, and concatenate touched buffers for
+                // Single: prefix-sum thread edge offsets, account for the
+                // appended edges, and concatenate touched buffers for
                 // the adjacency bulk reserve below.
                 #pragma omp single
                 {
@@ -795,8 +795,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         incoming);
                 }
 
-                // Apply phase: directed AoS uses the slots claimed by the
-                // histogram; indexed storage still claims reserved slots here.
+                // Apply phase: directed AoS uses histogram-assigned slots;
+                // other incidences claim their reserved slots here.
                 {
                     const size_t base = e_offsets[tid];
                     const auto& ebuf = ws.threads[tid].edge_buffer;

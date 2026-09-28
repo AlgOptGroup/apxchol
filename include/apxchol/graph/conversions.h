@@ -163,15 +163,15 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     if constexpr (is_vec_pool_incidence_v<Incidence>) {
         // ── Parallel build for vec_pool — O(n + nt) memory ────────
         // incoming[] is one shared array of size n (atomic increments in
-        // PASS 1 to count per-vertex degree). Slot assignment in PASS 2 is
-        // per-thread DETERMINISTIC: thread t processes a fixed column range
-        // [col_bs[t], col_bs[t+1]). The indexed backend claims a contiguous
-        // block of edge_index values [per_thread_edges[t],
-        // per_thread_edges[t+1]); the directed-inline backend writes its two
-        // endpoint records directly. The per-thread offset array is O(nt)
-        // ints, not O(nt × n). Determinism is preserved by construction:
-        // col_bs and counts are deterministic, then every touched slab is
-        // sorted after the parallel writes.
+        // PASS 1 to count per-vertex degree). PASS 2 consumes fixed logical
+        // column ranges [col_bs[t], col_bs[t+1]), including on reduced teams.
+        // Directed AoS writes both endpoint records into adjacency slabs
+        // using atomic claims, then sorts each touched slab after the writes.
+        // Generic incidences use per-thread offsets for flat edge slots.
+        // The offset array is O(nt) integers rather than O(nt × n).
+        // Column boundaries and counts are deterministic. Final slab sorting
+        // restores neighbor order regardless of the arrival order of writes;
+        // it does not require a particular runtime assignment of the ranges.
         const int nt = std::max(1,
 #ifdef _OPENMP
             omp_get_max_threads()
