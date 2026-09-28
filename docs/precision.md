@@ -48,6 +48,19 @@ iteration count. Select precision using original-system residuals, total solve
 cost and memory on the intended inputs; smaller storage alone is not a speed
 guarantee. Bitwise factor repeatability is a separate property from convergence.
 
+A fixed factor seed determines the per-vertex random streams, but does not
+promise byte-identical independently rebuilt parallel factors. Thread arrival
+order can change floating-point sums, which can change sampled edges as well as
+factor values. FP32 rounding may hide some differences that FP64 retains; neither
+precision makes floating-point addition independent of order. FP16 factor storage
+is applied later and does not make factor construction deterministic.
+
+For the same graph, candidates, selector state and actual thread team, selection
+must preserve its selected set and insertion order. Tests also retain exact
+single-thread factor and same-owned-factor repeated-solve checks. Parallel FP64
+rebuilds are checked for valid structure and the requested original-system
+residual, rather than equal factor bytes or iteration counts between builds.
+
 Historical rejected precision variants and their limits are recorded in
 [implementation history](implementation-history.md). They are not universal
 precision guarantees. The [benchmark protocol](../benchmarks/README.md) describes

@@ -28,11 +28,11 @@
 ///       //       preconditioner, E[sum of emitted edges] should equal the
 ///       //       exact Schur-complement clique (weight w_i*w_j/deg per pair).
 ///       // `seed` is this elimination's random seed — a pure function of
-///       //  (factor seed, vertex), so the seed/draw sequence is identical
-///       //  across runs, thread counts, and schedules. The resulting factor
-///       //  is bit-identical at a fixed thread count; at T>1 merged
-///       //  parallel-edge weights can differ in the final ulps (fp
-///       //  accumulation order). Deterministic rules simply ignore it;
+///       //  (factor seed, vertex). The same seed initializes the same random
+///       //  stream, but changed neighbor inputs can change draw consumption
+///       //  and sampled output. Parallel accumulation can change merged
+///       //  weights and subsequent factor structure even at a fixed thread
+///       //  count. Deterministic rules simply ignore the seed;
 ///       //  randomized rules derive their draws from it (the random_stream
 ///       //  helper below, or seed any generator you like). ONE eliminator
 ///       //  instance is shared by ALL threads (passed by const&), so it must

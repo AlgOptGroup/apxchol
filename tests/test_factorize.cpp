@@ -437,6 +437,97 @@ void expect_same_factor(const apxchol::factorization& a,
                           nz * sizeof(apxchol::factor_value_t)), 0)
         << what << ": factor values differ";
 }
+
+#if !defined(APXCHOL_POOL_FP32) && !defined(APXCHOL_USE_CUDA)
+// Parallel FP64 graph updates may change later sampling, including structure.
+// Check the actual rebuilt factor and solve the original system with that
+// factor; comparing two independent rebuilds is not a numerical accuracy test.
+void expect_valid_rebuilt_laplacian_factor(
+        const Eigen::SparseMatrix<double>& A,
+        const apxchol::factorization& F) {
+    const auto n = static_cast<apxchol::node_index>(A.rows());
+    ASSERT_GT(n, 1u);
+    ASSERT_FALSE(F.sddm);
+    ASSERT_EQ(F.L.rows(), n);
+    ASSERT_EQ(F.perm.size(), n);
+    ASSERT_EQ(F.L.outer_.size(), static_cast<std::size_t>(n) + 1);
+    ASSERT_EQ(F.L.outer_.front(), 0u);
+    ASSERT_EQ(F.L.inner_.size(), F.L.nonZeros());
+    ASSERT_EQ(F.L.vals_.size(), F.L.nonZeros());
+    std::vector<bool> seen(n, false);
+    for (const auto v : F.perm) {
+        ASSERT_LT(v, n);
+        ASSERT_FALSE(seen[v]);
+        seen[v] = true;
+    }
+    for (apxchol::node_index col = 0; col < n; ++col) {
+        const auto begin = F.L.outer_[col], end = F.L.outer_[col + 1];
+        ASSERT_LE(begin, end);
+        ASSERT_LE(end, F.L.nonZeros());
+        if (col + 1 < n) {
+            ASSERT_LT(begin, end);
+            EXPECT_EQ(F.L.inner_[begin], col);
+            EXPECT_GT(F.L.vals_[begin], 0.0f);
+        }
+        for (auto p = begin; p < end; ++p) {
+            EXPECT_GE(F.L.inner_[p], col);
+            EXPECT_LT(F.L.inner_[p], n);
+            EXPECT_TRUE(std::isfinite(F.L.vals_[p]));
+        }
+    }
+    if (::testing::Test::HasFailure()) return;
+    const auto b = apxchol::generate_test_rhs(n);
+    apxchol::cpu_solver solver(A, F, {.tol = 1e-8, .max_iter = 500});
+    const auto first = solver.solve(b);
+    const auto repeated = solver.solve(b);
+    ASSERT_TRUE(first.x.allFinite());
+    EXPECT_LE(first.iterations, 500);
+    EXPECT_LT(first.residual, 1e-8);
+    EXPECT_LT((A * first.x - b).norm() / b.norm(), 1e-8);
+    // Same owned factor and RHS retain the exact solve-repeatability contract.
+    EXPECT_EQ(first.iterations, repeated.iterations);
+    EXPECT_EQ(first.residual, repeated.residual);
+    EXPECT_TRUE((first.x.array() == repeated.x.array()).all());
+}
+#endif
+
+template<class Partitioner>
+void expect_same_graph_selection(
+        const apxchol::graph<apxchol::directed_vec_pool_incidence>& snapshot,
+        const std::vector<apxchol::node_index>& candidates,
+        const apxchol::partition_context& context,
+        const Partitioner& initial) {
+    SCOPED_TRACE(Partitioner::name);
+    std::vector<apxchol::node_index> reference;
+    for (int repeat = 0; repeat < 4; ++repeat) {
+        // Copy graph AND selector state: pruning and BK's round/degree estimate
+        // must not make the inputs of the repeated calls differ.
+        auto graph = snapshot;
+        auto partitioner = initial;
+        apxchol::selection selected;
+        selected.reset(graph.n());
+        partitioner.find_partition(graph, candidates, context, selected);
+        const auto result = selected.finalize().data;
+        ASSERT_FALSE(result.empty());
+        if (repeat == 0) reference = result;
+        else EXPECT_EQ(result, reference); // Exact insertion order, never sorted.
+        std::vector<bool> eligible(graph.n(), false), in_set(graph.n(), false);
+        for (const auto v : candidates) eligible[v] = true;
+        for (const auto v : result) {
+            ASSERT_LT(v, graph.n());
+            EXPECT_TRUE(eligible[v]);
+            EXPECT_TRUE(graph.is_active(v));
+            EXPECT_FALSE(in_set[v]);
+            in_set[v] = true;
+        }
+        for (const auto v : result) {
+            for (const auto edge : graph.adj(v)) {
+                const auto u = graph.edge_target(edge, v);
+                if (graph.is_active(u) && u != v) EXPECT_FALSE(in_set[u]);
+            }
+        }
+    }
+}
 } // namespace
 
 TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
@@ -508,7 +599,7 @@ TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
 
 
 
-TEST(VecPoolAos, PreassignedOffsetsAreReproducibleInParallel) {
+TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
 #ifndef _OPENMP
     GTEST_SKIP() << "serial build: there is no parallel apply path";
 #else
@@ -522,8 +613,15 @@ TEST(VecPoolAos, PreassignedOffsetsAreReproducibleInParallel) {
         L, apxchol::graph_storage::vec_pool_aos, opts);
     const auto repeated = apxchol::factorize(
         L, apxchol::graph_storage::vec_pool_aos, opts);
+#if !defined(APXCHOL_POOL_FP32) && !defined(APXCHOL_USE_CUDA)
+    ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, baseline));
+    ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, repeated));
+#else
     expect_same_factor(baseline, repeated,
                        "AoS preassigned endpoint offsets at T=16");
+#endif
+    // Exact production slot/scatter coverage lives in
+    // GpuRoundShadowReference.ParallelProductionApplyMatchesTheCanonicalReference.
 #endif
 }
 
@@ -748,7 +846,58 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
         << "fixture never skipped a walk at the default factor";
 }
 
-TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
+TEST(FactorizeDeterminism, SameGraphParallelSelectionIsExact) {
+#ifndef _OPENMP
+    GTEST_SKIP() << "serial build: there is no parallel selection path";
+#else
+    const scoped_threads team(16);
+    int actual_threads = 0;
+    #pragma omp parallel
+    #pragma omp single
+    actual_threads = omp_get_num_threads();
+    ASSERT_EQ(actual_threads, 16);
+    constexpr apxchol::node_index n = 1024, block = n / 16;
+    apxchol::graph<apxchol::directed_vec_pool_incidence> initial(n);
+    for (apxchol::node_index v = 0; v < n; ++v) {
+        initial.add_edge(v, (v + 1) % n, 1.0);
+        // Chains cross every worker's block, exercising snapshot-based
+        // conflict resolution rather than only independent local picks.
+        if (v + block < n) initial.add_edge(v, v + block, 1.0);
+    }
+    for (const bool leave_dead_neighbors : {false, true}) {
+        SCOPED_TRACE(leave_dead_neighbors);
+        auto snapshot = initial;
+        if (leave_dead_neighbors) {
+            for (apxchol::node_index v = 0; v < n; v += 17)
+                snapshot.deactivate(v);
+        }
+        std::vector<apxchol::node_index> candidates, compact_degrees;
+        for (apxchol::node_index v = 0; v < n; ++v)
+            if (snapshot.is_active(v)) candidates.push_back(v);
+        auto degree_graph = snapshot;
+        (void)apxchol::prune_and_degrees(
+            degree_graph, candidates, compact_degrees, 256);
+        std::vector<apxchol::node_index> degrees(n, 0);
+        for (std::size_t i = 0; i < candidates.size(); ++i)
+            degrees[candidates[i]] = compact_degrees[i];
+        apxchol::partition_context context{
+            .options = {.degree_quantile = 0.0, .degree_multiplier = 100.0},
+            .seed = 3, .omp_threshold = 256, .cp = nullptr, .degrees = degrees,
+        };
+        expect_same_graph_selection(snapshot, candidates, context,
+                                    apxchol::block_greedy_partitioner{});
+        apxchol::priority_greedy_partitioner priority;
+        priority.round = 3;
+        expect_same_graph_selection(snapshot, candidates, context, priority);
+        apxchol::baumann_kyng_partitioner bk;
+        bk.round = 3;
+        bk.est_avg_degree = 4.0;
+        expect_same_graph_selection(snapshot, candidates, context, bk);
+    }
+#endif
+}
+
+TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
 #ifndef _OPENMP
     GTEST_SKIP() << "serial build: there is no parallel selection path";
 #else
@@ -769,9 +918,17 @@ TEST(FactorizeDeterminism, ParallelSelectionIsReproducibleAtAFixedThreadCount) {
         opts.is_select = sel;
         const auto ref = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
         ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
+#if !defined(APXCHOL_POOL_FP32) && !defined(APXCHOL_USE_CUDA)
+        ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, ref));
+#endif
         for (int rep = 1; rep <= 3; ++rep) {
             const auto F = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
+#if !defined(APXCHOL_POOL_FP32) && !defined(APXCHOL_USE_CUDA)
+            SCOPED_TRACE(std::string(sel) + " rep " + std::to_string(rep));
+            ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, F));
+#else
             expect_same_factor(ref, F, std::string(sel) + " rep " + std::to_string(rep));
+#endif
             if (::testing::Test::HasFatalFailure()) return;
         }
     }

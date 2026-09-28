@@ -6,6 +6,9 @@ Keep this file current when builds, APIs, defaults or architecture change.
 Deliver the requested scope; prefer removing redundancy to adding modes or knobs.
 Verify claims with current-session evidence; label historical results and hypotheses.
 Factor identity requires structure/value digests, not equal fill or residuals.
+The [precision contract](docs/precision.md) separates parallel factor rebuilds
+from exact same-graph selector and same-owned-factor solve checks. Do not infer
+whole-factor bit identity from a fixed seed or lower storage precision.
 Audits report the complete denominator, checked/total and exclusions.
 Consult [implementation history](docs/implementation-history.md) before changing
 an established algorithm/default; historical examples are not current verification.
