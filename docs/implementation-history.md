@@ -333,11 +333,25 @@ protocol, not in a growing duplicate operational manual.
 The indexed `vec_pool` backend and its CLI/Python selection spelling are
 retired. Use `vec_pool_aos`; the low-level `graph<>` default now also uses
 directed AoS. This removes the separate indexed coalescer and multiplicity
-sidecar. Vector, string and forward-star backends remain available; custom
+sidecar. At that retirement, vector, string and forward-star remained available; custom
 incidence/partitioner templates remain supported. Historical benchmark records
 keep their original storage labels and are not relabelled as AoS.
 
-This retirement is separate from removing the storage-selection API or
-forward-star options: those option fields remain.
+That retirement preserved the storage-selection API and forward-star options.
 Remaining enum values retain their prior numeric values; the removed value
 is rejected rather than silently selecting another backend.
+
+
+## Forward-star storage retirement
+
+The linked-node `forward_star` backend, its `fs_compact_threshold` and
+`fs_filter_append` fields, and their CLI controls are retired. Runtime value 1
+and the old `forward_star` / `fwd_star` selections are rejected. The surviving
+vec, bstr and directed-AoS enum values remain 0, 2 and 4; custom incidence
+templates and storage-independent selector choices remain supported.
+
+The setup-analysis tools now use AoS in place of their former forward-star
+default or fixed-storage sweeps and label new output accordingly. Historical
+forward-star measurements and their chart labels remain unchanged. This
+retirement does not establish that the surviving layouts are universally
+dominated, and it does not change the default solver or its numerical controls.

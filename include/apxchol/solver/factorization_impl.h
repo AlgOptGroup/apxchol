@@ -3,7 +3,7 @@
 ///
 /// Included from factorization.h so that third-party code can use custom
 /// incidence_storage backends without modifying our explicit-instantiation list.
-/// The built-in backends (vec, forward_star, bstr, directed AoS) are
+/// The built-in backends (vec, bstr, directed AoS) are
 /// pre-instantiated in factorization.cpp; any other backend will be
 /// instantiated on demand when the user includes <apxchol/solver/factorization.h>.
 
@@ -369,8 +369,7 @@ void trace_candidate_regions(graph<Incidence>& G,
 // regions, every vertex is its own region — same constraint as the old IS).
 // The computation phase (gather neighbors, build factor column, sample
 // clique edges) runs in parallel with per-thread RNGs; graph mutation
-// (add_edge, deactivate) is deferred and applied sequentially because
-// the forward_star node pool is shared.
+// is deferred, then applied through the backend's bulk-insertion path.
 
 // Deferred clique edge type is defined in elimination.h.
 
@@ -624,81 +623,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
         const int compute_chunk =
             elimination_compute_chunk(n_verts, opts.omp_threshold);
         // The fused paths use exactly the work-sized team selected above.
-        if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
-            // Mega-fused parallel region: compute + deactivate + apply all under
-            // one fork-join.  On BG/BK with ~1k+ rounds this saves ~2 extra
-            // fork-joins/round vs the post-38ffdbc split.
-            // process_vertex does inline dedup + dead-edge filter so we
-            // skip the explicit merge_parallel_edges pass.
-            const int num_threads = team_threads;
-            std::vector<size_t> e_offsets(num_threads + 1, 0);
-            edge_index e_start = 0;
-            edge_index a_start = 0;   // adj-pool base offset
-
-            #pragma omp parallel num_threads(num_threads)
-            {
-                int tid = omp_get_thread_num();
-
-                // Clear per-thread buffers for this round.
-                ws.threads[tid].edge_buffer.clear();
-                ws.threads[tid].excess_buffer.clear();
-
-                #pragma omp for schedule(dynamic, compute_chunk)
-                for (size_t k = 0; k < n_verts; ++k)
-                    process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
-                                   ws.threads[tid],
-                                   /*dedup_inline=*/true,
-                                   {});
-                // implicit barrier — edge_buffers populated before prefix-sum
-
-                // Single thread does prefix-sum + pool reservation.
-                #pragma omp single
-                {
-                    for (int t = 0; t < num_threads; ++t)
-                        e_offsets[t + 1] = e_offsets[t] + ws.threads[t].edge_buffer.size();
-                    const size_t N_edges = e_offsets[num_threads];
-                    if (N_edges > 0) {
-                        e_start = G.reserve_edge_pool(static_cast<edge_index>(N_edges));
-                        a_start = G.reserve_adj_pool(static_cast<edge_index>(2 * N_edges));
-                    }
-                }
-                // implicit barrier after single — offsets/pools visible
-
-                // Apply phase: each thread writes to its slot range and
-                // pushes onto adj chains via CAS.
-                {
-                    const size_t base = e_offsets[tid];
-                    const auto& ebuf = ws.threads[tid].edge_buffer;
-                    for (size_t i = 0; i < ebuf.size(); ++i) {
-                        auto [u, v, w] = ebuf[i];
-                        const edge_index es = e_start + static_cast<edge_index>(base + i);
-                        const edge_index as_u = a_start + static_cast<edge_index>(2 * (base + i));
-                        const edge_index as_v = as_u + 1;
-                        G.write_edge_at(es, u, v, w);
-                        G.adj_push_atomic(u, as_u, es);
-                        G.adj_push_atomic(v, as_v, es);
-                    }
-                    ws.threads[tid].edge_buffer.clear();
-                    // Apply excess atomically (each thread owns its own buffer).
-                    for (auto [u, delta] : ws.threads[tid].excess_buffer)
-                        G.atomic_add_excess(u, delta);
-                    ws.threads[tid].excess_buffer.clear();
-                }
-
-                // Deactivate partition vertices in parallel (disjoint vertices,
-                // distinct head_[] entries from those touched by atomic pushes).
-                #pragma omp for schedule(static) nowait
-                for (size_t k = 0; k < n_verts; ++k)
-                    G.set_inactive_unchecked(part.data[k]);
-            }
-            G.bulk_decrement_active(static_cast<node_index>(n_verts));
-
-            // NOTE: the mega-fused parallel region runs compute + apply + apply_excess
-            // back-to-back inside one fork-join, so we cannot attribute these
-            // sub-phases separately without breaking the fusion. Emit one honest
-            // label that reflects what was actually measured.
-            if (cp) (*cp)("compute+apply_fused");
-        } else if constexpr (is_vec_pool_incidence_v<Incidence>) {
+        if constexpr (is_vec_pool_incidence_v<Incidence>) {
             // Mega-fused for vec_pool: compute + apply pre-pass + parallel
             // atomic push + deactivate all in ONE parallel region. Saves
             // the fork-join overhead of the legacy 2-region pattern
@@ -1257,10 +1182,6 @@ factorization factorize_impl(const Eliminator& elim,
     const bool finalize_on_device = detail::gpu_factor_finalize_requested();
     const bool omit_shadow_factor_payload = !retain_host_factor &&
         gpu_round_shadow.active() && finalize_on_device;
-
-    if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
-        if (opts.fs_filter_append) work.set_adj_filter_append(true);
-    }
 
     // Detect SDDM: any vertex with positive excess means the matrix
     // is positive definite (not just semidefinite like a Laplacian).
@@ -1984,25 +1905,6 @@ factorization factorize_impl(const Eliminator& elim,
 
         ++ws.round_index;
 
-        // Auto-compact forward_star adjacency pool when fragmentation
-        // crosses the configured threshold.  Avoids unbounded pointer-
-        // chase as filter() leaves orphan nodes in nodes_.
-        //
-        // Default is off (fs_compact_threshold == 0): on sparse graphs
-        // (uniform / weighted grids) compaction is pure overhead and
-        // adds 70-100% to setup time.  It pays off only on dense fill
-        // workloads (LP-IPM Schur complements, ~30% setup gain at
-        // thresh=0.75) but even there the [vec] storage backend is
-        // ~2x faster than [fwd_star]+compact, so the right answer for
-        // dense matrices is to switch storage rather than turn this on.
-        // Pass --fs-compact 0.75 explicitly if you do want it.
-        if constexpr (std::is_same_v<Incidence, forward_star_incidence>) {
-            if (opts.fs_compact_threshold > 0.0 &&
-                work.adj_live_fraction() < opts.fs_compact_threshold) {
-                work.compact_adj();
-                if (cp) (*cp)("compact_adj");
-            }
-        }
         // vec_pool: pool defrag happens inside vec_pool's bulk_reserve_parallel
         // (built in, always on). Here we only sample the worst fragmentation
         // seen, for the APXCHOL_MEM_DUMP diagnostic.
@@ -2240,8 +2142,7 @@ factorization factorize_impl(const Eliminator& elim,
         size_t nnz = owned_factor_metadata ? result.L.nonZeros() : factor_cols.size();
         for (const auto& c : factor_cols) nnz += c.entry_count;
         double live_frac = -1.0;
-        if constexpr (is_vec_pool_incidence_v<Incidence> ||
-                      std::is_same_v<Incidence, forward_star_incidence>)
+        if constexpr (is_vec_pool_incidence_v<Incidence>)
             live_frac = work.adj_live_fraction();
         std::fprintf(stderr,
             "[mem] peak_graph=%.0f MB  factor_nnz=%zu (inner=%.0f MB)  "

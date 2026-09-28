@@ -75,12 +75,11 @@ std::string join(const char* const* items, std::size_t count) {
 
 apxchol::graph_storage parse_storage(const std::string& name) {
     if (name == "vec_pool_aos") return apxchol::graph_storage::vec_pool_aos;
-    if (name == "forward_star") return apxchol::graph_storage::forward_star;
     if (name == "vec")          return apxchol::graph_storage::vec;
     if (name == "bstr")         return apxchol::graph_storage::bstr;
     throw std::invalid_argument(
         "unknown storage '" + name +
-        "'; valid: vec_pool_aos, forward_star, vec, bstr");
+        "'; valid: vec_pool_aos, vec, bstr");
 }
 
 apxchol::residual_peel_strategy parse_peel(const std::string& name) {

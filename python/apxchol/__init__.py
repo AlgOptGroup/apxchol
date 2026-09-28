@@ -305,7 +305,7 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
         factorization time.
     storage : str
         Graph backend: "vec_pool_aos" (default),
-        "forward_star", "vec", or "bstr".
+        "vec" or "bstr".
     keep_factor : bool
         Keep the factor's row/value arrays alive so `chol()`/`L`/`D` can be
         exported. Costs one extra factor-sized copy in memory (~8 bytes per

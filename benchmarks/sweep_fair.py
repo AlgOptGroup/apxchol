@@ -457,11 +457,8 @@ APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
        ("apxchol_v1","bk+tree[vec]"),
        ("apxchol_v1","greedy+tree[vec]"),
        # Full selector x storage grid for the ablation heatmap: {bg,greedy,bk} x
-       # {fwd_star, bstr}; vec and directed AoS are covered above.
-       # Historical indexed-pool cells remain separate records.
-       ("apxchol_v1","bg+tree[fwd_star]"),
-       ("apxchol_v1","greedy+tree[fwd_star]"),
-       ("apxchol_v1","bk+tree[fwd_star]"),
+       # bstr; vec and directed AoS are covered above.
+       # Historical retired-storage cells remain separate records.
        ("apxchol_v1","bg+tree[bstr]"),
        ("apxchol_v1","greedy+tree[bstr]"),
        ("apxchol_v1","bk+tree[bstr]")]
@@ -671,9 +668,9 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
             run_parac(mid)
         return  # no Julia on the GPU axis
     t_apx = None
-    # com-Orkut is huge (~237M input nnz, billion-scale factor offsets); the non-vec storage
-    # backends (fwd_star/bstr) are retain no default role but
-    # cost a lot of wall-time here, so keep the declared default plus [vec] and
+    # com-Orkut is huge (~237M input nnz, billion-scale factor offsets);
+    # bstr has no default role but
+    # costs a lot of wall-time here, so keep the declared default plus [vec] and
     # directed [vec_pool_aos].  cpu_apx_configs_for owns the exact spelling-sensitive gate.
     apx_list = cpu_apx_configs_for(mid)
     for solver,config in apx_list:
@@ -730,7 +727,7 @@ def main():
     ap.add_argument("--headline-only", action="store_true",
                     help="run only the headline AoS config and indexed IS-selector "
                          "ablations; skip the "
-                         "vec/fwd_star/bstr storage-ablation configs. Use for new large "
+                         "vec/bstr storage-ablation configs. Use for new large "
                          "matrices that only feed the comparison charts, not the ablation.")
     ap.add_argument("--no-rchol", action="store_true",
                     help="drop RCHOL / pRCHOL from the competitor set. They blow up (high "

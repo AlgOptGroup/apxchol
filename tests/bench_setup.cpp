@@ -202,7 +202,6 @@ static void print_csv(const bench_result& r) {
 template<typename Incidence>
 static constexpr const char* storage_name();
 template<> constexpr const char* storage_name<apxchol::vec_incidence>()            { return "vec"; }
-template<> constexpr const char* storage_name<apxchol::forward_star_incidence>()   { return "fwd_star"; }
 template<> constexpr const char* storage_name<apxchol::bstr_incidence>()           { return "bstr"; }
 template<> constexpr const char* storage_name<apxchol::directed_vec_pool_incidence>() { return "vec_pool_aos"; }
 
@@ -233,7 +232,6 @@ static void run_all_storages(const char* graph_name, Builder&& build_fn,
         }
     };
     run_and_print.template operator()<apxchol::vec_incidence>("vec");
-    run_and_print.template operator()<apxchol::forward_star_incidence>("fwd_star");
     run_and_print.template operator()<apxchol::bstr_incidence>("bstr");
     run_and_print.template operator()<apxchol::directed_vec_pool_incidence>(
         "vec_pool_aos");
@@ -269,6 +267,15 @@ int main(int argc, char* argv[]) {
             min_is_frac_str = argv[++i];
     }
 
+    // A retired selection must not produce an empty, apparently successful run.
+    if (storage_filter && (std::strcmp(storage_filter, "fwd_star") == 0 ||
+                           std::strcmp(storage_filter, "forward_star") == 0 ||
+                           std::strcmp(storage_filter, "vec_pool") == 0)) {
+        std::fprintf(stderr, "Storage '%s' is retired; choose vec_pool_aos, vec or bstr.\n",
+                     storage_filter);
+        return 2;
+    }
+
     // Parse IS strategy from --is flag.
     apxchol::factor_options base_opts;
     if (is_filter)
@@ -284,16 +291,17 @@ int main(int argc, char* argv[]) {
         return !storage_filter || std::strstr(name, storage_filter);
     };
 
-    // ── OMP threshold sweep: grid2000 × fwd_star only ──
+    // ── OMP threshold sweep: grid2000 × vec_pool_aos only ──
     if (sweep_omp) {
+        std::printf("storage = vec_pool_aos\n");
         std::printf("%-12s %8s %10s %10s %10s %10s\n",
                     "omp_thresh", "n", "find_is", "elim", "fact(ms)", "nnz(L)");
         std::printf("%s\n", std::string(64, '-').c_str());
         for (size_t thresh : {500UL, 1000UL, 2000UL, 5000UL, 10000UL, 50000UL}) {
             auto opts = base_opts;
             opts.omp_threshold = thresh;
-            auto r = run_one<apxchol::forward_star_incidence>(
-                "fwd_star", "grid2000",
+            auto r = run_one<apxchol::directed_vec_pool_incidence>(
+                "vec_pool_aos", "grid2000",
                 []<typename Incidence>() { return make_grid<Incidence>(2000, 2000); },
                 opts);
             std::printf("%-12zu %8d %10.2f %10.2f %10.2f %10lld\n",
@@ -303,17 +311,18 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // ── degree_multiplier sweep: multiple graphs × fwd_star, with IS profiles ──
+    // ── degree_multiplier sweep: multiple graphs × vec_pool_aos, with IS profiles ──
     if (sweep_deg) {
+        std::printf("storage = vec_pool_aos\n");
         struct graph_spec {
             const char* name;
-            std::function<apxchol::graph<apxchol::forward_star_incidence>()> builder;
+            std::function<apxchol::graph<apxchol::directed_vec_pool_incidence>()> builder;
         };
         std::vector<graph_spec> graphs = {
-            {"grid1000", [] { return make_grid<apxchol::forward_star_incidence>(1000, 1000); }},
-            {"path2M",   [] { return make_path<apxchol::forward_star_incidence>(2000000); }},
-            {"rgg10k",   [] { return make_rgg<apxchol::forward_star_incidence>(10000, 0.012); }},
-            {"star1M",   [] { return make_star<apxchol::forward_star_incidence>(1000000); }},
+            {"grid1000", [] { return make_grid<apxchol::directed_vec_pool_incidence>(1000, 1000); }},
+            {"path2M",   [] { return make_path<apxchol::directed_vec_pool_incidence>(2000000); }},
+            {"rgg10k",   [] { return make_rgg<apxchol::directed_vec_pool_incidence>(10000, 0.012); }},
+            {"star1M",   [] { return make_star<apxchol::directed_vec_pool_incidence>(1000000); }},
         };
 
         for (auto& [gname, builder] : graphs) {
@@ -384,8 +393,8 @@ int main(int argc, char* argv[]) {
         };
         std::printf("grid side = %d, n = %d\n", grid_side, grid_side * grid_side);
         run_sweep("vec",      [=] { return make_grid<apxchol::vec_incidence>(grid_side, grid_side); });
-        run_sweep("fwd_star", [=] { return make_grid<apxchol::forward_star_incidence>(grid_side, grid_side); });
         run_sweep("bstr",     [=] { return make_grid<apxchol::bstr_incidence>(grid_side, grid_side); });
+        run_sweep("vec_pool_aos", [=] { return make_grid<apxchol::directed_vec_pool_incidence>(grid_side, grid_side); });
         return 0;
     }
 

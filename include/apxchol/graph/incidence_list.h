@@ -17,7 +17,6 @@
 
 #include "apxchol/types.h"
 #include "apxchol/trivial_char_traits.h"
-#include "apxchol/graph/forward_star.h"
 #include "apxchol/big_alloc.h"
 #include <algorithm>
 #include <atomic>
@@ -132,10 +131,6 @@ using vec_incidence = contiguous_incidence<std::vector<edge_index>, graph_storag
 using bstr_incidence = contiguous_incidence<
     std::basic_string<edge_index>, graph_storage::bstr>;
 
-// ── forward_star<edge_index> satisfies incidence_storage directly ──
-
-using forward_star_incidence = forward_star<edge_index>;
-
 // ── vec_pool storage ──
 //
 // One logically contiguous, physically segmented arena of Value slots, with
@@ -148,10 +143,6 @@ using forward_star_incidence = forward_star<edge_index>;
 // iteration, but no per-vertex std::vector wrapper (saves 3 words
 // of header per vertex). Growth maps only the segment it first touches; unused
 // claimed pages remain lazy.
-//
-// Compared to forward_star_incidence: no linked-list pointer chase
-// during iteration — adjacency reads are sequential.  Cost: doubling
-// reallocates by copy (linked-list just appends a node).
 //
 // Parallel push API:
 //   reserve_for(v, need)         — grow v's slab so cap_[v] >= need (serial)

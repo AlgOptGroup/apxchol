@@ -504,20 +504,21 @@ class CapReferenceTest(unittest.TestCase):
 
 
 class FairSweepSelectionTest(unittest.TestCase):
-    def test_full_fair_plan_denominator_excludes_retired_indexed_storage(self):
+    def test_full_fair_plan_denominator_excludes_retired_storage(self):
         selected = list(sweep_fair.selected_matrices(
             {"grids", "suitesparse", "ipm"}))
         self.assertEqual(sweep_fair.APX_GPU[0],
                          ("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG))
         self.assertEqual(len(sweep_fair.APX_GPU), len(set(sweep_fair.APX_GPU)))
-        self.assertTrue(all("[vec_pool]" not in config
-                            for _, config in sweep_fair.APX + sweep_fair.APX_GPU))
-        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 588)
+        self.assertTrue(all(retired not in config
+                            for _, config in sweep_fair.APX + sweep_fair.APX_GPU
+                            for retired in ("[vec_pool]", "[fwd_star]", "[forward_star]")))
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 510)
         self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 216)
         self.assertEqual(
             sweep_fair.planned_cell_count(selected, "cpu")
             + sweep_fair.planned_cell_count(selected, "gpu"),
-            804,
+            726,
         )
 
     def test_orkut_size_gate_always_keeps_declared_default(self):

@@ -49,7 +49,7 @@ def random_sddm(n, seed=0):
     return L.tocsr()
 
 
-@pytest.mark.parametrize("storage", ["vec_pool_aos", "forward_star", "vec", "bstr"])
+@pytest.mark.parametrize("storage", ["vec_pool_aos", "vec", "bstr"])
 def test_remaining_storage_options_solve_original_system(storage):
     L = grid2d_sddm(5)
     b = np.linspace(-1.0, 1.0, L.shape[0])
@@ -58,9 +58,10 @@ def test_remaining_storage_options_solve_original_system(storage):
     assert np.linalg.norm(L @ result.x - b) / np.linalg.norm(b) <= 1e-7
 
 
-def test_retired_indexed_storage_is_rejected():
-    with pytest.raises(ValueError, match="unknown storage 'vec_pool'"):
-        apxchol.factorize(grid2d_sddm(3), storage="vec_pool")
+@pytest.mark.parametrize("storage", ["vec_pool", "forward_star", "fwd_star"])
+def test_retired_storage_is_rejected(storage):
+    with pytest.raises(ValueError, match=f"unknown storage '{storage}'"):
+        apxchol.factorize(grid2d_sddm(3), storage=storage)
 
 
 def test_laplacian_solve_converges():

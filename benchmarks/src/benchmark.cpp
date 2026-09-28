@@ -1112,7 +1112,7 @@ struct Args {
     // Optional subset filter for --solver apxchol_v1.
     // If non-empty, only configs whose label is in this set are run.
     // Match accepts either the bare combo name ("bg+tree") to run all
-    // storage variants, or fully-qualified "bg+tree[vec]" / "bg+tree[fwd_star]".
+    // storage variants, or fully-qualified "bg+tree[vec]" / "bg+tree[bstr]".
     std::set<std::string> v1_configs;
     // De-singularization is two orthogonal axes (see resolve_desing). decompose:
     // auto|whole|split (auto = split iff disconnected). ground: auto|pin|coarse|native
@@ -1181,10 +1181,14 @@ static Args parse_args(int argc, char** argv) {
             std::istringstream ss(s);
             std::string tok;
             while (std::getline(ss, tok, ',')) {
-                if (tok.find("[vec_pool]") != std::string::npos) {
-                    std::cerr << "Storage 'vec_pool' is retired; choose a supported "
-                              << "--v1-configs entry explicitly.\n";
-                    std::exit(2);
+                for (const char* retired : {"vec_pool", "fwd_star", "forward_star"}) {
+                    if (tok == retired ||
+                        tok.find("[" + std::string(retired) + "]") != std::string::npos) {
+                        std::cerr << "Storage '" << retired
+                                  << "' is retired; choose a supported "
+                                  << "--v1-configs entry explicitly.\n";
+                        std::exit(2);
+                    }
                 }
                 a.v1_configs.insert(tok);
             }
@@ -3099,7 +3103,7 @@ int main(int argc, char** argv) {
         struct V1Combo {
             const char* name;
             std::string is;
-            apxchol::graph_storage storage = apxchol::graph_storage::forward_star;
+            apxchol::graph_storage storage;
             size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
             double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
             apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
@@ -3109,18 +3113,14 @@ int main(int argc, char** argv) {
         using gs = apxchol::graph_storage;
         static const V1Combo v1_combos[] = {
             // IS-selector x storage on the random-tree sampler (the only elim left).
-            // forward_star (base)
-            {"bg+tree",   "block_greedy"},
-            {"bk+tree",   "baumann_kyng"},
-            {"greedy+tree", "priority_greedy"},
             // vec
             {"bg+tree",   "block_greedy", gs::vec},
             {"bk+tree",   "baumann_kyng", gs::vec},
             {"greedy+tree", "priority_greedy", gs::vec},
             // bstr (bit-string): remaining storage backend across
             // All selectors -- completes the selector x storage grid
-            // (fwd_star / vec / bstr / vec_pool_aos x bg / bk / greedy) for
-            // the ablation heatmap. fwd_star + vec are the bare-named combos above;
+            // (vec / bstr / vec_pool_aos x bg / bk / greedy) for
+            // the ablation heatmap. Vec uses the bare-named combos above;
             // AoS below. Name carries the tag so --v1-configs selects it directly.
             {.name="bg+tree[bstr]",   .is="block_greedy", .storage=gs::bstr},
             {.name="bk+tree[bstr]",   .is="baumann_kyng", .storage=gs::bstr},
@@ -3162,7 +3162,6 @@ int main(int argc, char** argv) {
         auto storage_tag = [](apxchol::graph_storage s) {
             switch (s) {
                 case apxchol::graph_storage::vec:          return "[vec]";
-                case apxchol::graph_storage::forward_star: return "[fwd_star]";
                 case apxchol::graph_storage::bstr:         return "[bstr]";
                 case apxchol::graph_storage::vec_pool_aos: return "[vec_pool_aos]";
             }

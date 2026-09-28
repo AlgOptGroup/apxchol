@@ -42,16 +42,21 @@ TEST(DefaultOptions, HighLevelSolveUsesDirectedAosStorage) {
     EXPECT_EQ(opts.storage, apxchol::graph_storage::vec_pool_aos);
 }
 
-TEST(StorageSelection, RetiredIndexedValueIsRejected) {
+TEST(StorageSelection, RetiredValuesAreRejected) {
     Eigen::SparseMatrix<double> matrix(2, 2);
     matrix.insert(0, 0) = 2.0;
     matrix.insert(1, 1) = 2.0;
     matrix.insert(0, 1) = -1.0;
     matrix.insert(1, 0) = -1.0;
     matrix.makeCompressed();
-    EXPECT_THROW(apxchol::factorize(matrix,
-                     static_cast<apxchol::graph_storage>(3)),
-                 std::invalid_argument);
+    static_assert(static_cast<int>(apxchol::graph_storage::vec) == 0);
+    static_assert(static_cast<int>(apxchol::graph_storage::bstr) == 2);
+    static_assert(static_cast<int>(apxchol::graph_storage::vec_pool_aos) == 4);
+    for (int retired : {1, 3}) {
+        EXPECT_THROW(apxchol::factorize(matrix,
+                         static_cast<apxchol::graph_storage>(retired)),
+                     std::invalid_argument);
+    }
 }
 
 TEST(SetupDiagnostics, WorkDistributionExposesConcentrationAndIdleWorkers) {
@@ -271,7 +276,6 @@ TEST(PartitionerHelpers, ParallelActiveFilterIsStable) {
 
 using AllStorages = ::testing::Types<
     apxchol::vec_incidence,
-    apxchol::forward_star_incidence,
     apxchol::bstr_incidence,
     apxchol::directed_vec_pool_incidence>;
 
@@ -1304,7 +1308,7 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto b = apxchol::generate_test_rhs(225);
     auto res = apxchol::solve(L, b,
         {.tol = 1e-6, .max_iter = 1000,
-         .storage = apxchol::graph_storage::forward_star,
+         .storage = apxchol::graph_storage::vec_pool_aos,
          .factor_opts = {.seed = 42, .is_select = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
@@ -1317,7 +1321,7 @@ TEST_P(StrategyConvergenceTest, SDDMConverges) {
     Eigen::VectorXd b = Eigen::VectorXd::Random(100);
     auto res = apxchol::solve(M, b,
         {.tol = 1e-6, .max_iter = 1000,
-         .storage = apxchol::graph_storage::forward_star,
+         .storage = apxchol::graph_storage::vec_pool_aos,
          .factor_opts = {.seed = 42, .is_select = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
@@ -1330,8 +1334,9 @@ INSTANTIATE_TEST_SUITE_P(AllStrategies, StrategyConvergenceTest,
 
 // ─── F1: factorization quality regression tests ──────────────────────
 //
-// Bounds calibrated empirically: max residual observed across all
+// Historical bounds from forward-star: max residual observed across all
 // partitioners × thread counts {1, 8, 16}, multiplied by 1.5 for headroom.
+// Keep these thresholds unchanged when migrating this check to directed AoS.
 //
 // Update bounds only when a deliberate algorithmic change shifts the
 // achievable residual.  A regression in unbiasedness shows up as
@@ -1359,7 +1364,7 @@ static double factor_residual(const apxchol::factorization& F,
 static apxchol::factorization factorize_tree(
         const Eigen::SparseMatrix<double>& A, unsigned seed = 42) {
     apxchol::factor_options opts{.seed = seed};
-    return apxchol::factorize(A, apxchol::graph_storage::forward_star, opts);
+    return apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos, opts);
 }
 
 TEST(FactorQualityTest, Grid20Tree) {
@@ -1377,7 +1382,7 @@ TEST(FactorQualityTest, SddmGrid20Tree) {
 // ── AtomicEdgePool tests ──────────────────────────────
 
 TEST(AtomicEdgePool, ReserveClaimFinalize) {
-    apxchol::graph<apxchol::forward_star_incidence> G(10);
+    apxchol::graph<apxchol::vec_incidence> G(10);
     const apxchol::edge_index pre_size = static_cast<apxchol::edge_index>(G.m());
     constexpr int N = 200;
     G.reserve_edge_pool_atomic(N);
@@ -1396,7 +1401,7 @@ TEST(AtomicEdgePool, ReserveClaimFinalize) {
 }
 
 TEST(AtomicEdgePool, UnderClaimTrims) {
-    apxchol::graph<apxchol::forward_star_incidence> G(5);
+    apxchol::graph<apxchol::vec_incidence> G(5);
     const apxchol::edge_index pre = static_cast<apxchol::edge_index>(G.m());
     G.reserve_edge_pool_atomic(100);
     apxchol::edge_index s1 = G.claim_edge_slot();
@@ -1408,29 +1413,6 @@ TEST(AtomicEdgePool, UnderClaimTrims) {
 }
 
 // ── AtomicAdjPool tests ───────────────────────────────
-
-TEST(AtomicAdjPool, ForwardStarInlinePushParallel) {
-    apxchol::graph<apxchol::forward_star_incidence> G(6);
-    G.reserve_edge_pool_atomic(20);
-    G.reserve_adj_pool_atomic(40);   // 2 pushes per edge
-
-    constexpr int N = 20;
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < N; ++i) {
-        apxchol::edge_index slot = G.claim_edge_slot();
-        apxchol::node_index a = i % 6;
-        apxchol::node_index b = (i + 1) % 6;
-        G.write_edge_at(slot, a, b, 1.0);
-        G.adj_push_inline(a, slot);
-        G.adj_push_inline(b, slot);
-    }
-    G.finalize_edge_pool();
-
-    size_t total = 0;
-    for (apxchol::node_index v = 0; v < 6; ++v)
-        for ([[maybe_unused]] auto e : G.neighbors(v)) ++total;
-    EXPECT_EQ(total, size_t(2 * N));
-}
 
 TEST(AtomicAdjPool, VecInlinePushSerial) {
     apxchol::graph<apxchol::vec_incidence> G(4);

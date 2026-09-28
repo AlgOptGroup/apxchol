@@ -16,7 +16,6 @@ static const std::map<std::string, input_kind> input_kind_map = {
 
 static const std::map<std::string, graph_storage> graph_storage_map = {
     {"vec",          graph_storage::vec},
-    {"forward_star", graph_storage::forward_star},
     {"bstr",         graph_storage::bstr},
     {"vec_pool_aos", graph_storage::vec_pool_aos},
 };
@@ -127,7 +126,7 @@ run_config parse_args(int argc, char* argv[]) {
         ->capture_default_str();
 
     app.add_option("--graph-storage", cfg.solve_opts.storage,
-                   "Graph storage backend (vec_pool_aos, forward_star, vec, bstr)")
+                   "Graph storage backend (vec_pool_aos, vec, bstr)")
         ->default_str("vec_pool_aos")
         ->transform(CLI::IsMember(graph_storage_map) & CLI::Transformer(graph_storage_map));
 
@@ -136,14 +135,6 @@ run_config parse_args(int argc, char* argv[]) {
         ->capture_default_str()
         ->check(CLI::IsMember(
             {"block_greedy", "priority_greedy", "baumann_kyng"}));
-
-    app.add_option("--fs-compact", cfg.solve_opts.factor_opts.fs_compact_threshold,
-                   "forward_star auto-compact threshold (live_fraction; 0=off)")
-        ->capture_default_str();
-
-    app.add_flag("--fs-filter-append,!--no-fs-filter-append",
-                 cfg.solve_opts.factor_opts.fs_filter_append,
-                 "forward_star: append survivors at pool end on filter (off by default)");
 
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");

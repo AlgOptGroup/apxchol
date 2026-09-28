@@ -39,7 +39,7 @@ solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
 ```
 
 Partitioners: `block_greedy`, `priority_greedy`, `baumann_kyng`.
-Storage: `vec_pool_aos`, `forward_star`, `vec`, `bstr`.
+Storage: `vec_pool_aos`, `vec`, `bstr`.
 `keep_factor=True` is the reusable API default and retains an extra factor
 copy (~8 bytes/nonzero in default builds). `False` disables factor export,
 but preserves `P`, `factor_nnz`, `fill_ratio`; one-shot `solve` uses `False`.

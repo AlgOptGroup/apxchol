@@ -168,28 +168,6 @@ struct factor_options {
     // - bk_serial: sample √|active| vertices with replacement and pivot on
     //   the lowest live degree observed in that sample.
     residual_peel_strategy residual_peel = residual_peel_strategy::natural;
-    // forward_star adjacency-pool compaction trigger.  After every round,
-    // if the live fraction of nodes_ falls below this threshold, rebuild
-    // the pool with each chain laid out contiguously.  Eliminates the
-    // pointer-chase fragmentation that accumulates over many filter() calls.
-    //
-    // 0.0 (default) disables compaction entirely.
-    //
-    // Empirical findings on grid + IPM Laplacians (16T, see fs-compact sweep):
-    //   * grid_2000:  every threshold > 0 makes setup slower by 30-100% vs off,
-    //                 and total time is also worse.
-    //   * LP-IPM Schur complements: helped the now-retired rootset path
-    //                 (~25% total), was neutral on bg+tree, and hurt bk+tree.
-    // So we ship it OFF by default and let callers opt in per matrix class.
-    // forward_star storage only; other backends ignore this option.
-    double fs_compact_threshold = 0.0;
-
-    // forward_star: when true, filter() writes survivors contiguously at the
-    // end of the node pool instead of doing in-place re-link.  Trades pool
-    // growth (reclaimed by compact_adj()) for per-chain locality without
-    // waiting for a global compact pass.  forward_star only.
-    bool fs_filter_append = false;
-
     /// Exact-clique-at-low-degree: when the eliminated vertex's degree is at
     /// most this value, emit the FULL exact Schur-complement clique
     /// (all d(d-1)/2 edges, weight w_i·w_j/deg) instead of the d-1 sampled

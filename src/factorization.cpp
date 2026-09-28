@@ -242,8 +242,6 @@ void build_csc(factorization& result,
 // other (including user-provided) backends.
 template factorization factorize_with_strategy<vec_incidence>(
     graph<vec_incidence>, const factor_options&, checkpoint*);
-template factorization factorize_with_strategy<forward_star_incidence>(
-    graph<forward_star_incidence>, const factor_options&, checkpoint*);
 template factorization factorize_with_strategy<bstr_incidence>(
     graph<bstr_incidence>, const factor_options&, checkpoint*);
 template factorization factorize_with_strategy<directed_vec_pool_incidence>(
@@ -297,11 +295,6 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     const bool triangles_bit_identical =
         &A == &L && op.scan().triangles_bit_identical;
     switch (storage) {
-    case graph_storage::forward_star: {
-        auto G = detail::make_graph_from_operator<graph<forward_star_incidence>>(
-            A, triangles_bit_identical);
-        return do_factorize(std::move(G));
-    }
     case graph_storage::bstr: {
         auto G = detail::make_graph_from_operator<graph<bstr_incidence>>(
             A, triangles_bit_identical);

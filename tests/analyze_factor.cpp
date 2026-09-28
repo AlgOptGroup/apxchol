@@ -38,7 +38,7 @@ using apxchol::node_index;
 
 struct cli_options {
     std::string input_path;
-    graph_storage storage = graph_storage::forward_star;
+    graph_storage storage = graph_storage::vec_pool_aos;
     std::string is_select = "block_greedy";
     unsigned seed = 42;
     bool sweep_threads = false;
@@ -48,14 +48,12 @@ struct cli_options {
     double min_is_frac = 0.05;
     long long parallel_residual_threshold = -1;  // <0 = leave default (disabled)
     apxchol::residual_peel_strategy residual_peel = apxchol::residual_peel_strategy::natural;
-    double fs_compact_threshold = -1.0;  // <0 = leave default
-    int fs_filter_append = -1;  // <0 = leave default; 0 off; 1 on
 };
 
 [[noreturn]] void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s <matrix.mtx> "
-                 "[--graph-storage vec|forward_star|bstr|vec_pool_aos]"
+                 "[--graph-storage vec|bstr|vec_pool_aos]"
                  " [--is block_greedy|priority_greedy|baumann_kyng]"
                  " [--seed N]"
                  " [--min-is-frac FRACTION] [--parallel-residual-threshold N]"
@@ -66,7 +64,6 @@ struct cli_options {
 
 graph_storage parse_storage(const std::string& s) {
     if (s == "vec") return graph_storage::vec;
-    if (s == "forward_star") return graph_storage::forward_star;
     if (s == "bstr") return graph_storage::bstr;
     if (s == "vec_pool_aos") return graph_storage::vec_pool_aos;
     throw std::invalid_argument("unknown graph storage: " + s);
@@ -129,10 +126,6 @@ cli_options parse_args(int argc, char* argv[]) {
             else if (s == "min_degree") opts.residual_peel = apxchol::residual_peel_strategy::min_degree;
             else if (s == "bk_serial")  opts.residual_peel = apxchol::residual_peel_strategy::bk_serial;
             else { std::fprintf(stderr, "unknown --residual-peel: %s\n", s.c_str()); usage(argv[0]); }
-        } else if (arg == "--fs-compact" && i + 1 < argc) {
-            opts.fs_compact_threshold = std::atof(argv[++i]);
-        } else if (arg == "--fs-filter-append" && i + 1 < argc) {
-            opts.fs_filter_append = std::atoi(argv[++i]) ? 1 : 0;
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
         } else {
@@ -307,7 +300,6 @@ void print_level_summary(const char* label, const level_stats& stats, node_index
 const char* storage_name(graph_storage s) {
     switch (s) {
     case graph_storage::vec: return "vec";
-    case graph_storage::forward_star: return "forward_star";
     case graph_storage::bstr: return "bstr";
     case graph_storage::vec_pool_aos: return "vec_pool_aos";
     }
@@ -361,10 +353,6 @@ int main(int argc, char* argv[]) {
         if (cli.parallel_residual_threshold >= 0)
             opts.parallel_residual_threshold = static_cast<size_t>(cli.parallel_residual_threshold);
         opts.residual_peel = cli.residual_peel;
-        if (cli.fs_compact_threshold >= 0.0)
-            opts.fs_compact_threshold = cli.fs_compact_threshold;
-        if (cli.fs_filter_append >= 0)
-            opts.fs_filter_append = (cli.fs_filter_append != 0);
 
 #if defined(APXCHOL_USE_CUDA)
         // Analysis-only fairness: this CUDA build installs and benchmarks the

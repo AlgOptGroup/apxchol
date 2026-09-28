@@ -46,8 +46,8 @@ struct residual_coalescer;
 /// directed_vec_pool_incidence instead duplicates {neighbor, weight} inline at
 /// both endpoints, avoiding the indexed pool read during adjacency scans.
 /// The Incidence template parameter controls how per-vertex lists are stored.
-/// The traditional implementations contain edge indices (vec_incidence,
-/// forward_star_incidence and bstr_incidence); directed_vec_pool_incidence
+/// The traditional implementations contain edge indices (vec_incidence
+/// and bstr_incidence); directed_vec_pool_incidence
 /// contains the inline records themselves.
 template<incidence_storage Incidence = directed_vec_pool_incidence>
 class graph {
@@ -127,21 +127,7 @@ public:
         adj_.clear(v);
     }
 
-    // ── Bulk parallel apply (forward_star fast path) ─────────────
-    //
-    // Used by eliminate_set to atomically commit per-thread deferred
-    // edge buffers, excess updates, and IS-vertex deactivations
-    // without serializing on graph mutation.  Only enabled for the
-    // forward_star backend, where the underlying linked list supports
-    // lock-free CAS prepending.
-    //
-    // Pre: IS vertices are pairwise non-adjacent and disjoint from
-    //      neighbors written via excess/edges → no head_[] conflict
-    //      between deactivations and atomic pushes.
-
-    /// Reserve `N` slots in the edge pool; returns starting `edge_index`.
-    /// Caller fills slots in parallel.  Used together with `reserve_adj_pool`
-    /// and `link_edge_atomic` for lock-free bulk insertion.
+    /// Reserve edge slots for parallel writes to disjoint slots.
     edge_index reserve_edge_pool(edge_index N) {
         static_assert(!stores_directed_incidence,
                       "directed incidences must be inserted directly");
@@ -213,34 +199,9 @@ public:
         m_ += claimed;
     }
 
-    /// Reserve `extra` adjacency-list slots (forward_star only).
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    edge_index reserve_adj_pool(edge_index extra) {
-        return adj_.reserve_pool(extra);
-    }
-
-    /// forward_star only: pre-reserve N adj-pool slots and arm an
-    /// atomic counter that adj_push_inline draws from.
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    void reserve_adj_pool_atomic(edge_index N) {
-        adj_.reserve_pool_atomic(N);
-    }
-
-    /// Push edge slot e_slot onto v's adjacency. Backend-dispatched:
-    ///   forward_star: atomic adj-pool slot claim + push_atomic on head_[v].
-    ///                 Tolerates concurrent inter-thread pushes to same v.
-    ///                 Caller MUST have called reserve_adj_pool_atomic.
-    ///   vec/bstr: adj_[v].push_back(e_slot). Caller's contract:
-    ///                  no other thread writes to adj_[v] (UB if violated).
+    /// Append an indexed incidence. The caller must exclusively own vertex v.
     void adj_push_inline(node_index v, edge_index e_slot) {
-        if constexpr (std::same_as<Incidence, forward_star_incidence>) {
-            const edge_index a_slot = adj_.claim_pool_slot();
-            adj_.push_atomic(v, a_slot, e_slot);
-        } else {
-            adj_.push(v, e_slot);
-        }
+        adj_.push(v, e_slot);
     }
 
     /// Write edge data at a pre-allocated pool slot.  Lock-free; safe
@@ -248,22 +209,6 @@ public:
     void write_edge_at(edge_index slot, node_index u, node_index v, double w) {
         edges_[slot] = {u ^ v, static_cast<pool_value_t>(w)};
     }
-
-    /// Atomically prepend `e_slot` to vertex v's adjacency chain at
-    /// pre-allocated adjacency slot `a_slot` (forward_star only).
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    void adj_push_atomic(node_index v, edge_index a_slot, edge_index e_slot) {
-        adj_.push_atomic(v, a_slot, e_slot);
-    }
-
-    /// Compact adjacency pool (forward_star only).  Walks each chain,
-    /// re-emits survivors into a fresh contiguous buffer.  Restores
-    /// cache-friendly traversal after long sequences of filter() calls
-    /// have fragmented the chains.
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    void compact_adj() { adj_.compact(); }
 
     /// vec_pool only: pre-reserve cap_[v] >= need before a parallel
     /// adj_atomic_push_reserved phase.  NOT thread-safe.
@@ -346,38 +291,6 @@ public:
         requires is_vec_pool_incidence_v<I>
     void adj_note_live_fraction() { adj_.note_live_fraction(); }
 
-    /// Pool occupancy ratio (forward_star only).  Used as auto-compact trigger.
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    double adj_live_fraction() const { return adj_.live_fraction(); }
-
-    /// Switch forward_star adjacency to append-on-filter mode.  When on,
-    /// every filter() call writes survivors contiguously at the end of the
-    /// pool (instead of in-place re-link).  Pool grows; reclaim with
-    /// compact_adj() periodically.  Forward_star only.
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    void set_adj_filter_append(bool on) { adj_.set_filter_append(on); }
-
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    bool adj_filter_append_enabled() const { return adj_.filter_append(); }
-
-    /// Pre-size the adjacency pool for a parallel-append phase.  Every
-    /// filter() call inside the parallel region will CAS-reserve its
-    /// survivor slot via __atomic_fetch_add, avoiding push_back races.
-    /// Must be paired with end_parallel_append_adj() after the region.
-    /// Forward_star + filter_append mode only.
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    void begin_parallel_append_adj() {
-        adj_.begin_parallel_append(adj_.live_count());
-    }
-
-    template<typename I = Incidence>
-        requires std::same_as<I, forward_star_incidence>
-    void end_parallel_append_adj() { adj_.end_parallel_append(); }
-
     /// Atomically add `delta` to excess[v]; safe under data races on v.
     void atomic_add_excess(node_index v, double delta) {
         #pragma omp atomic
@@ -386,7 +299,7 @@ public:
 
     /// Mark vertex inactive without decrementing num_active_; the
     /// caller must invoke `bulk_decrement_active(k)` once after the
-    /// parallel batch.  Adjacency chain is cleared (head reset to npos).
+    /// parallel batch. The vertex's adjacency list is cleared.
     void set_inactive_unchecked(node_index v) {
         const bool was_active = clear_active_bit(v);
         assert(was_active);

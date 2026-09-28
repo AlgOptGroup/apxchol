@@ -1,17 +1,19 @@
-# Reject retired indexed labels, including a mixed request, before IO.
-foreach(config IN ITEMS "bg+tree[vec_pool]" "bk+tree[vec_pool]"
-                        "greedy+tree[vec_pool]"
-                        "bg+tree[vec_pool_aos],bg+tree[vec_pool]")
-    execute_process(
-        COMMAND "${BENCHMARK}" --solver apxchol_v1 --v1-configs "${config}"
-            --mtx missing-storage-test.mtx --csv
-        RESULT_VARIABLE status OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
-    if (NOT status STREQUAL "2" OR NOT stderr MATCHES "Storage 'vec_pool' is retired")
-        message(FATAL_ERROR "Expected indexed storage rejection for ${config}, got ${status}: ${stderr}")
-    endif()
-    if (stdout MATCHES "solver,graph,n,nnz")
-        message(FATAL_ERROR "Retired storage emitted a misleading CSV header")
-    endif()
+# Reject retired storage labels, including a mixed request, before IO.
+foreach(storage IN ITEMS vec_pool fwd_star forward_star)
+    foreach(config IN ITEMS "${storage}" "bg+tree[${storage}]" "bk+tree[${storage}]"
+                            "greedy+tree[${storage}]"
+                            "bg+tree[vec_pool_aos],bg+tree[${storage}]")
+        execute_process(
+            COMMAND "${BENCHMARK}" --solver apxchol_v1 --v1-configs "${config}"
+                --mtx missing-storage-test.mtx --csv
+            RESULT_VARIABLE status OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+        if (NOT status STREQUAL "2" OR NOT stderr MATCHES "Storage '${storage}' is retired")
+            message(FATAL_ERROR "Expected storage rejection for ${config}, got ${status}: ${stderr}")
+        endif()
+        if (stdout MATCHES "solver,graph,n,nnz")
+            message(FATAL_ERROR "Retired storage emitted a misleading CSV header")
+        endif()
+    endforeach()
 endforeach()
 
 # Surviving tags must pass selection and reach the expected input error.
