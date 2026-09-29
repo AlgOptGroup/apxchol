@@ -442,10 +442,12 @@ void expect_same_factor(const apxchol::factorization& a,
         << what << ": factor values differ";
 }
 
-#if !defined(APXCHOL_POOL_FP32) && !defined(APXCHOL_USE_CUDA)
+#if !defined(APXCHOL_POOL_FP32)
 // Parallel FP64 graph updates may change later sampling, including structure.
 // Check the actual rebuilt factor and solve the original system with that
 // factor; comparing two independent rebuilds is not a numerical accuracy test.
+// Exportable factorization uses these host updates in CUDA builds too; the
+// adopting solver installs this actual factor through the normal solve path.
 void expect_valid_rebuilt_laplacian_factor(
         const Eigen::SparseMatrix<double>& A,
         const apxchol::factorization& F) {
@@ -617,7 +619,7 @@ TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
         L, apxchol::graph_storage::vec_pool_aos, opts);
     const auto repeated = apxchol::factorize(
         L, apxchol::graph_storage::vec_pool_aos, opts);
-#if !defined(APXCHOL_POOL_FP32) && !defined(APXCHOL_USE_CUDA)
+#if !defined(APXCHOL_POOL_FP32)
     ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, baseline));
     ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, repeated));
 #else
@@ -922,12 +924,12 @@ TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
         opts.is_select = sel;
         const auto ref = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
         ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
-#if !defined(APXCHOL_POOL_FP32) && !defined(APXCHOL_USE_CUDA)
+#if !defined(APXCHOL_POOL_FP32)
         ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, ref));
 #endif
         for (int rep = 1; rep <= 3; ++rep) {
             const auto F = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
-#if !defined(APXCHOL_POOL_FP32) && !defined(APXCHOL_USE_CUDA)
+#if !defined(APXCHOL_POOL_FP32)
             SCOPED_TRACE(std::string(sel) + " rep " + std::to_string(rep));
             ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, F));
 #else
