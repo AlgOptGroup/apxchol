@@ -1,9 +1,9 @@
-# Build + TEST CI for the library and the CPU bindings. Kept lean and
+# Build + TEST CI for the library, CPU bindings and native benchmark. Kept lean and
 # path-filtered so it only runs when C++/build/package files change, not on
 # doc/chart commits.
 #
 # Four job definitions; the library compiler matrix expands to two jobs:
-#   benchmark-harness — harness unit tests and the native stopping-policy test
+#   benchmark-harness — harness unit tests, CPU build and native CLI/stopping contracts
 #   library  — parent CMake consumer under GCC and Clang, full suite (ctest)
 #   python   — manylinux wheel build + pytest (also the PORTABILITY check: the
 #              old-glibc environment the release wheels are built in)
@@ -22,8 +22,10 @@ on:
       - 'cmake/**'
       - 'benchmarks/**/*.py'
       - 'benchmarks/requirements.txt'
-      - 'benchmarks/src/original_stop.h'
-      - 'benchmarks/tests/test_original_stop.cpp'
+      - 'benchmarks/CMakeLists.txt'
+      - 'benchmarks/src/**'
+      - 'benchmarks/tests/**'
+      - 'benchmarks/patches/**'
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
@@ -37,8 +39,10 @@ on:
       - 'cmake/**'
       - 'benchmarks/**/*.py'
       - 'benchmarks/requirements.txt'
-      - 'benchmarks/src/original_stop.h'
-      - 'benchmarks/tests/test_original_stop.cpp'
+      - 'benchmarks/CMakeLists.txt'
+      - 'benchmarks/src/**'
+      - 'benchmarks/tests/**'
+      - 'benchmarks/patches/**'
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
@@ -53,8 +57,12 @@ concurrency:
 
 jobs:
   benchmark-harness:
-    name: benchmark harness (unit tests, no solver campaigns)
+    name: benchmark harness (unit tests + native contracts)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OMP_NUM_THREADS: '2'
+      OMP_DYNAMIC: 'FALSE'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,10 +75,21 @@ jobs:
         run: python -m pip install -r benchmarks/requirements.txt
       - name: Test harness
         run: python -B -m unittest discover -s benchmarks/tests -p 'test_*.py'
-      - name: Test native stopping policy without competitor dependencies
+      - name: Install native benchmark dependencies
         run: |
-          g++ -std=c++17 -O2 benchmarks/tests/test_original_stop.cpp -o "$RUNNER_TEMP/original_stop_tests"
-          "$RUNNER_TEMP/original_stop_tests"
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-14 libeigen3-dev ninja-build
+      - name: Configure + build native benchmark
+        run: |
+          cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_C_COMPILER=gcc-14 \
+                -DAPXCHOL_NATIVE_ARCH=OFF -DAPXCHOL_USE_CUDA=OFF \
+                -DBENCH_HYPRE_USE_CUDA=OFF -DBUILD_GPU_RCHOL=OFF \
+                -DAPXCHOL_RCHOL_PORTABLE_PCG=ON -DAPXCHOL_BENCH_FETCH_METIS=OFF \
+                -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
+          cmake --build build-benchmark --target benchmark original_stop_tests -j2
+      - name: Run native benchmark contracts
+        run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
 
   library:
     name: library (${{ matrix.name }}, build + ctest)

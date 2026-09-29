@@ -17,6 +17,9 @@ an established algorithm/default; historical examples are not current verificati
 
 The root project builds the library, CLI, and unit tests. The separate
 `benchmarks/` project fetches competitor implementations.
+CI builds its CPU-only native benchmark and runs the CLI/stopping CTest
+contracts alongside the Python harness tests; these checks are not performance
+campaigns. Native benchmark sources, CMake files, tests and patches trigger CI.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

@@ -698,19 +698,13 @@ if (NOT APXCHOL_USE_CUDA)
     test_solver_rejection(contract_rejects_unavailable_cuda amgcl_cuda)
 endif()
 
-add_test(NAME contract_requires_class
-         COMMAND benchmark --mtx ${CMAKE_CURRENT_SOURCE_DIR}/../data/matrices/ecology1.mtx
-                           --kind operator --solver apxchol_v1 --maxiter 1)
-set_tests_properties(contract_requires_class PROPERTIES WILL_FAIL TRUE)
-
-add_test(NAME contract_rejects_wrong_class
-         COMMAND benchmark --mtx ${CMAKE_CURRENT_SOURCE_DIR}/../data/matrices/ecology1.mtx
-                           --kind operator --class sddm --solver apxchol_v1 --maxiter 1)
-set_tests_properties(contract_rejects_wrong_class PROPERTIES WILL_FAIL TRUE)
-
-add_test(NAME contract_rejects_class_on_graph
-         COMMAND benchmark --graph grid --n 32 --class sddm --solver apxchol_v1 --maxiter 1)
-set_tests_properties(contract_rejects_class_on_graph PROPERTIES WILL_FAIL TRUE)
+foreach(case requires_class rejects_wrong_class rejects_class_on_graph)
+    add_test(NAME contract_${case}
+        COMMAND ${CMAKE_COMMAND}
+            -DBENCHMARK=$<TARGET_FILE:benchmark> -DCASE=${case}
+            -DMATRIX=${CMAKE_CURRENT_SOURCE_DIR}/../tests/fixtures/path5_laplacian.mtx
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_class_rejection.cmake)
+endforeach()
 
 add_executable(original_stop_tests tests/test_original_stop.cpp)
 add_test(NAME contract_original_stopping COMMAND original_stop_tests)

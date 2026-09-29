@@ -1,0 +1,26 @@
+# A missing input or unrelated failure must not satisfy a class-contract test.
+if (NOT EXISTS "${MATRIX}")
+    message(FATAL_ERROR "Missing committed class-contract fixture: ${MATRIX}")
+endif()
+if (CASE STREQUAL "requires_class")
+    set(args --mtx "${MATRIX}" --kind operator)
+    set(expected "needs an explicit --class")
+elseif (CASE STREQUAL "rejects_wrong_class")
+    set(args --mtx "${MATRIX}" --kind operator --class sddm)
+    set(expected "--class sddm CONTRADICTS the structure")
+elseif (CASE STREQUAL "rejects_class_on_graph")
+    set(args --graph grid --n 4 --class sddm)
+    set(expected "--class is only meaningful with --kind operator")
+else()
+    message(FATAL_ERROR "Unknown class-contract case: ${CASE}")
+endif()
+execute_process(
+    COMMAND "${BENCHMARK}" ${args} --solver apxchol_v1 --maxiter 1 --csv
+    TIMEOUT 30
+    RESULT_VARIABLE status OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+if (NOT status STREQUAL "1" OR NOT stderr MATCHES "${expected}")
+    message(FATAL_ERROR "Expected ${CASE} rejection, got ${status}: ${stderr}")
+endif()
+if (stdout MATCHES "solver,graph,n,nnz")
+    message(FATAL_ERROR "Class rejection emitted a misleading CSV header")
+endif()
