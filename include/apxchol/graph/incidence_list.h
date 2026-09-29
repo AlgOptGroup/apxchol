@@ -35,6 +35,10 @@
 #include <type_traits>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace apxchol {
 
 namespace detail {
