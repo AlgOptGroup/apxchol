@@ -708,3 +708,8 @@ endforeach()
 
 add_executable(original_stop_tests tests/test_original_stop.cpp)
 add_test(NAME contract_original_stopping COMMAND original_stop_tests)
+
+add_executable(split_components_tests tests/test_split_components.cpp)
+target_compile_features(split_components_tests PRIVATE cxx_std_23)
+target_link_libraries(split_components_tests PRIVATE laplacian_core apxchol_v1 ${CMAKE_DL_LIBS})
+add_test(NAME contract_split_components COMMAND split_components_tests)

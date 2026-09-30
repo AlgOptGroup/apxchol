@@ -87,7 +87,7 @@ jobs:
                 -DBENCH_HYPRE_USE_CUDA=OFF -DBUILD_GPU_RCHOL=OFF \
                 -DAPXCHOL_RCHOL_PORTABLE_PCG=ON -DAPXCHOL_BENCH_FETCH_METIS=OFF \
                 -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
-          cmake --build build-benchmark --target benchmark original_stop_tests -j2
+          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests -j2
       - name: Run native benchmark contracts
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
 

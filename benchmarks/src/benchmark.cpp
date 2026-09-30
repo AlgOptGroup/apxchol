@@ -1787,6 +1787,7 @@ static Eigen::SparseMatrix<double> dirichlet_pin(const Eigen::SparseMatrix<doubl
     // selection can affect conditioning, but is not needed to establish rank.
     const auto* outer = L.outerIndexPtr();
     const auto* inner = L.innerIndexPtr();
+    const auto* values = L.valuePtr();
     std::vector<char> is_pin(n, 0);
     std::vector<char> seen(n, 0);
     std::vector<int>  stk; stk.reserve(256);
@@ -1799,8 +1800,9 @@ static Eigen::SparseMatrix<double> dirichlet_pin(const Eigen::SparseMatrix<doubl
             const int u = stk.back();
             int w = -1;
             while (cur[u] < outer[u + 1]) {
-                const int v = inner[cur[u]++];
-                if (v != u && !seen[v]) { w = v; break; }
+                const int edge = cur[u]++;
+                const int v = inner[edge];
+                if (v != u && values[edge] != 0.0 && !seen[v]) { w = v; break; }
             }
             if (w != -1) { seen[w] = 1; cur[w] = outer[w]; stk.push_back(w); }
             else { stk.pop_back(); if (leaf == -1) leaf = u; }  // first finished = DFS leaf
@@ -1833,23 +1835,24 @@ static Eigen::SparseMatrix<double> dirichlet_pin(const Eigen::SparseMatrix<doubl
     return P;
 }
 
-// Connected components of L via union-find over the off-diagonal structure.
+// Connected components of L via union-find over nonzero off-diagonals. Stored
+// zeros do not couple blocks or remove a Laplacian null direction.
 static std::vector<std::vector<int>> connected_components(const Eigen::SparseMatrix<double>& L) {
     const int n = static_cast<int>(L.rows());
     std::vector<int> parent(n); std::iota(parent.begin(), parent.end(), 0);
     auto find=[&](int x){ while(parent[x]!=x){parent[x]=parent[parent[x]];x=parent[x];} return x; };
     for (int k=0;k<L.outerSize();++k)
         for (Eigen::SparseMatrix<double>::InnerIterator it(L,k);it;++it)
-            if (it.row()!=it.col()){int a=find((int)it.row()),b=find((int)it.col()); if(a!=b)parent[a]=b;}
+            if (it.row()!=it.col() && it.value()!=0.0){int a=find((int)it.row()),b=find((int)it.col()); if(a!=b)parent[a]=b;}
     std::vector<int> cid(n,-1); std::vector<std::vector<int>> comps;
     for (int v=0;v<n;++v){int r=find(v); if(cid[r]<0){cid[r]=(int)comps.size();comps.emplace_back();} comps[cid[r]].push_back(v);}
     return comps;
 }
 
 // Connected-component SPLIT (the `decompose = split` axis): decompose L into its
-// connected components and solve each as an INDEPENDENT connected Laplacian (with the
-// chosen `ground`), then recombine. Each sub-solve is connected (k=1), so the per-
-// component null space is one constant -- no multi-vector near-null-space B (which
+// connected components and solve each as an INDEPENDENT operator (with the chosen
+// `ground` for Laplacians), then recombine. Each Laplacian sub-solve is connected
+// (k=1), so its null space is one constant -- no multi-vector near-null-space B (which
 // would blow SA up into a k-coarse-DOF-per-aggregate explosion at many components).
 // Combined metrics: setup/solve SUM over components, iters = MAX over components
 // (the bottleneck block; summing would let 100s of trivial specks swamp the count),
@@ -1873,15 +1876,19 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     Timer prep;
     BenchResult r; r.graph_name=name; r.n=(int)L.rows(); r.nnz=(int)L.nonZeros(); r.fillin=0;
     double setup=0, solve=0, res2=0; int it=0; const double bn=b.norm();
+    bool unavailable = false;
     double rss=0, vram=-1;   // combined solve-held RSS/VRAM = MAX over components (peak
                              // resident during the largest sub-solve); else the combined
                              // cell loses these and shows blank on the memory heatmaps.
     const bool dbg = std::getenv("SPLIT_DEBUG") != nullptr;
-    // (size, rel_c, ||res_c||, iters) per non-singleton component, for SPLIT_DEBUG.
+    // (size, rel_c, ||res_c||, iters) per solved component, for SPLIT_DEBUG.
     std::vector<std::tuple<int,double,double,int>> dbg_rows;
     for (auto& nodes : comps) {
         const int sn=(int)nodes.size();
-        if (sn==1) continue;  // singleton component: trivially x=0 (b~0), no solve
+        // Only a zero row with an exactly zero RHS is a trivial isolate. A
+        // positive-diagonal SDDM singleton must use the same checked adapter and
+        // iteration budget as every other block.
+        if (sn==1 && L.coeff(nodes[0], nodes[0])==0.0 && b[nodes[0]]==0.0) continue;
         prep.start();
         std::vector<int> g2l(L.rows(),-1);
         for (int i=0;i<sn;++i) g2l[nodes[i]]=i;
@@ -1911,8 +1918,12 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         r.stop_check_seconds += rc.stop_check_seconds;
         if (rc.solve_rss_mb > rss) rss = rc.solve_rss_mb;       // peak over components
         if (rc.solve_vram_mb > vram) vram = rc.solve_vram_mb;
-        const double sbn=subb.norm(); const double rnc = rc.rel_residual*sbn;
+        // Adapters normalize by one when the component RHS is zero. Undo that
+        // same normalization; multiplying by zero would hide a failed solve.
+        const double sbn=subb.norm(); const double rnc = rc.rel_residual*(sbn>0?sbn:1.0);
         res2 += rnc*rnc;
+        // Squaring an adapter's n/a sentinel must not turn it into a result.
+        unavailable = unavailable || rc.iterations < 0 || rc.rel_residual < 0.0;
         r.solver_name = rc.solver_name;
         if (dbg) dbg_rows.emplace_back(sn, rc.rel_residual, rnc, rc.iterations);
     }
@@ -1923,7 +1934,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
                   [](auto&a,auto&b){ return std::get<2>(a) > std::get<2>(b); });
         int over=0; for (auto&t:dbg_rows) if (std::get<1>(t) > tol) over++;
         std::fprintf(stderr,
-            "[split-debug] %s  comps=%zu (non-singleton=%zu)  combined_rel=%.3e  "
+            "[split-debug] %s  comps=%zu (solved=%zu)  combined_rel=%.3e  "
             "comps_over_tol=%d\n", name.c_str(), comps.size(), dbg_rows.size(),
             std::sqrt(res2)/(bn>0?bn:1.0), over);
         std::fprintf(stderr, "[split-debug]   top-%d by ||res_c||:  (size, rel_c, ||res_c||, iters)\n",
@@ -1943,7 +1954,8 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
             "(of setup %.3fs incl per-comp builds %.3fs; solve %.3fs)\n",
             name.c_str(), split_prep, setup+split_prep, setup, solve);
     r.setup_time=setup+split_prep; r.solve_time=solve; r.total_time=r.setup_time+solve;
-    r.iterations=it; r.rel_residual = std::sqrt(res2)/(bn>0?bn:1.0);
+    r.iterations=unavailable?-1:it;
+    r.rel_residual = unavailable?-1.0:std::sqrt(res2)/(bn>0?bn:1.0);
     r.us_per_nnz = r.total_time/std::max(1,r.nnz)*1e6;
     r.solve_rss_mb = rss; r.solve_vram_mb = vram;   // carry peak over components
     return r;
