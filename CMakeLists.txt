@@ -119,7 +119,7 @@ option(APXCHOL_USE_CUDA "GPU build: our sync-free dataflow CUDA SpTRSV kernel + 
 option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
 option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
 option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
-option(APXCHOL_POOL_FP32 "fp32 residual-pool edge weights (reads promote to fp64; convergence unchanged); OFF gives an fp64 baseline" ON)
+option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to FP64. OFF selects the FP64 reference." ON)
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 option(APXCHOL_BUILD_TOOLS "Build the developer analysis tools (bench_setup, analyze_factor)" OFF)

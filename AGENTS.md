@@ -227,7 +227,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   entries in the heaviest chunk. The bounds depend only on the pointer array and
   team size, so thread-ordered reductions stay bit-identical run to run. The
   level-scheduled SpTRSV deliberately does not (tried and removed 2026-08-18).
-- Prune-walk skip (block-greedy on directed vec_pool): once AUTO has declined
+- Prune-walk skip (block-greedy on the directed AoS pool): once AUTO has declined
   the exact incremental-degree cache, skipping rounds report a vertex whose raw
   adjacency count exceeds 4x the previous round's eligibility threshold at that
   count instead of walking it (`prune_and_degrees(..., skip_above)`). Its degree
