@@ -1,3 +1,4 @@
+#include "apxchol/types.h"
 #include <cmath>
 #include <initializer_list>
 #include <iostream>
