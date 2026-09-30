@@ -701,7 +701,12 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     double bnorm, rr, rs;
     if (x0 != nullptr && !x0->isZero(0.0)) {
         bnorm = b.norm();
-        if (bnorm == 0.0) { x.setZero(); return; }
+        if (bnorm == 0.0) {
+            x.setZero();
+            res.iterations = 0;
+            res.residual = 0.0;
+            return;
+        }
         x = *x0;
         // r = b - L*x0: SpMV into Ap (scratch here), then one pass forms r
         // and its reductions. The SpMV's fused x·Ax0 is not needed.
@@ -719,7 +724,12 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
         // and Σ b.
         init_residual(r.data(), b.data(), nullptr, n, part, rr, rs);
         bnorm = std::sqrt(rr);
-        if (bnorm == 0.0) { x.setZero(); return; }
+        if (bnorm == 0.0) {
+            x.setZero();
+            res.iterations = 0;
+            res.residual = 0.0;
+            return;
+        }
         x.setZero();
         // Honest pre-loop state: the relative residual of x = 0 is exactly 1.
         // Without this, an exit before the first PCG update (max_iter = 0, or

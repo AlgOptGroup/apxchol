@@ -19,6 +19,7 @@
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/pcg_cuda.h"
+#include "apxchol/solver/detail/gpu_solve_session.h"
 #include <cuda_runtime.h>
 namespace {
 using apxchol::pcg_cuda::operator_csr;
@@ -374,6 +375,77 @@ TEST(GpuOperatorCsr, OptInAndHostFallbackKeepOriginalSystemSolve) {
         ASSERT_EQ(result.size(),n);
         EXPECT_LE((A*result-b).norm()/b.norm(),1e-8);
         EXPECT_TRUE(std::isfinite(reported));
+    }
+#endif
+}
+
+TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA solve required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    scoped_threads serial;
+    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", nullptr);
+    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", nullptr);
+    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", nullptr);
+    constexpr int n = 5;
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        entries.emplace_back(i, i, 4.0);
+        if (i + 1 < n) {
+            entries.emplace_back(i, i + 1, -1.0);
+            entries.emplace_back(i + 1, i, -1.0);
+        }
+    }
+    Eigen::SparseMatrix<double> A(n, n);
+    A.setFromTriplets(entries.begin(), entries.end());
+    for (double scale : {1e-12, 1.0, 1e6}) {
+        SCOPED_TRACE(scale);
+        const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, scale);
+        const auto result = apxchol::solve(A, b, {.tol = 1e-8, .max_iter = 0});
+        ASSERT_EQ(result.x.size(), n);
+        EXPECT_TRUE(result.x.isZero(0.0));
+        EXPECT_EQ(result.iterations, 0);
+        EXPECT_EQ(result.residual, 1.0);
+        EXPECT_DOUBLE_EQ((A * result.x - b).norm() / b.norm(), result.residual);
+    }
+#endif
+}
+
+TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA solve required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    scoped_threads serial;
+    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", nullptr);
+    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", nullptr);
+    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", nullptr);
+    constexpr int n = 5;
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        entries.emplace_back(i, i, 4.0);
+        if (i + 1 < n) {
+            entries.emplace_back(i, i + 1, -1.0);
+            entries.emplace_back(i + 1, i, -1.0);
+        }
+    }
+    Eigen::SparseMatrix<double> A(n, n);
+    A.setFromTriplets(entries.begin(), entries.end());
+    apxchol::solve_result result;
+    apxchol::detail::gpu_solve_session solver(A, {}, result);
+    for (double scale : {1e-12, 0.0, 1e6}) {
+        SCOPED_TRACE(scale);
+        const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, scale);
+        result.iterations = 7;
+        result.residual = std::numeric_limits<double>::quiet_NaN();
+        solver.solve(b, result, 1e-8, 0);
+        ASSERT_EQ(result.x.size(), n);
+        EXPECT_TRUE(result.x.isZero(0.0));
+        EXPECT_EQ(result.iterations, 0);
+        EXPECT_EQ(result.residual, scale == 0.0 ? 0.0 : 1.0);
+        const double denominator = b.norm() > 0.0 ? b.norm() : 1.0;
+        EXPECT_DOUBLE_EQ((A * result.x - b).norm() / denominator, result.residual);
     }
 #endif
 }

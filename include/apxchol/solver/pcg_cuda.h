@@ -246,7 +246,9 @@ public:
         pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
         double rz = reduce(vec_blocks_);
 
-        double rnorm = bnorm;
+        // x starts at zero, so its relative residual is 1 even if no PCG
+        // update runs (zero iteration budget or an immediate breakdown).
+        double rnorm = 1.0;
         int it;
         for (it = 0; it < max_iter; ++it) {
             // Ap = A * p with pAp = p·Ap folded into the row loop (fp32-operator:
