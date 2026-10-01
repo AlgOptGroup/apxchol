@@ -140,7 +140,7 @@ choices, retired knobs, and measurements belong in
   libomp).
 
 - `APXCHOL_USE_METAL=ON` (Apple only; exclusive with CUDA): the explicit
-  `apxchol::metal_solver` block PCG.
+  `apxchol::metal_solver` block PCG and the C API's `APXCHOL_BACKEND_METAL`.
   `src/metal_device.mm` is the only Objective-C++ source (no Eigen, no OpenMP);
   it compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
   links Metal, Foundation and CoreGraphics publicly. `solve()`, `cpu_solver`
@@ -359,9 +359,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   are in flight. No env knobs (`APXCHOL_SPTRSV_FP16` and
   center-k do not apply). Keep the MSL kernels, `level_schedule::emulate_sweep`
   and `metal_host.h` operation-for-operation identical. Validate with
-  `LevelSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*`
-  (device tests skip without a usable device),
-  `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 unit_tests --gtest_filter='MetalDevice*'`,
+  `LevelSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*` and
+  `CApi.MetalBackendRoundTrip` (device tests skip without a usable device),
+  `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 unit_tests --gtest_filter='MetalDevice*:CApi*'`,
   `tests/cmake_consumer` configured with `-DAPXCHOL_USE_METAL=ON`, and
   `analyze_factor MATRIX --solve --backend metal --columns 64` (with
   `APXCHOL_BUILD_TOOLS=ON`). Correctness only: no performance claim has been

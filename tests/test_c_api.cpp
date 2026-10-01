@@ -5,6 +5,9 @@
 #include "apxchol/c_api.h"
 #include "apxchol/env_knobs.h"
 #include "apxchol/solver/solve.h"
+#if defined(APXCHOL_USE_METAL)
+#include "apxchol/solver/metal_solver.h"
+#endif
 
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -563,6 +566,9 @@ TEST(CApi, BackendAndEnumValidation) {
         EXPECT_EQ(create(c, &o, h, 0, &message), APXCHOL_STATUS_UNSUPPORTED);
         EXPECT_NE(message.find("Metal"), std::string::npos);
     }
+#else
+    EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_METAL),
+              apxchol::metal_solver::available() ? 1 : 0);
 #endif
     auto check = [&](auto mutate) {
         auto o = defaults();
@@ -602,6 +608,114 @@ TEST(CApi, BackendAndEnumValidation) {
                           APXCHOL_STATUS_SUCCESS);
             }
 }
+
+#if defined(APXCHOL_USE_METAL)
+TEST(CApi, MetalBackendRoundTrip) {
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_METAL), 1);
+    const Sparse A = grid_laplacian(14, 13);
+    const csc64 c = to_csc64(A, 1);
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_METAL;
+    o.keep_factor_values = 1;
+    o.tol = 1e-10;
+    handle h;
+    std::string message;
+    ASSERT_EQ(create(c, &o, h, 1, &message), APXCHOL_STATUS_SUCCESS) << message;
+
+    apxchol_stats stats{};
+    stats.struct_size = sizeof stats;
+    ASSERT_EQ(apxchol_solver_stats(h.s, &stats), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(stats.backend, APXCHOL_BACKEND_METAL);
+    EXPECT_EQ(stats.n, c.n);
+    EXPECT_EQ(stats.sddm, 0);
+
+    // One right-hand side: the reported residual is the original system's.
+    const Eigen::VectorXd b = compatible_rhs(c.n, 2);
+    Eigen::VectorXd x(c.n);
+    auto info = info_struct();
+    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(info.converged, 1);
+    EXPECT_GT(info.iterations, 0);
+    const double res = (b - A * x).norm() / b.norm();
+    EXPECT_LT(res, 1e-10);
+    EXPECT_NEAR(info.relative_residual, res, 1e-3 * res);
+    EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());
+
+    // Lockstep block: every column equals its single solve, bit for bit.
+    const std::int64_t k = 3;
+    Eigen::MatrixXd B(c.n, k), X(c.n, k);
+    B.col(0) = compatible_rhs(c.n, 1);
+    B.col(1).setZero();
+    B.col(2) = compatible_rhs(c.n, 5);
+    std::array<std::int64_t, 3> iters{};
+    std::array<double, 3> resid{};
+    std::array<std::int32_t, 3> conv{};
+    ASSERT_EQ(apxchol_solver_solve_block(h.s, k, B.data(), nullptr, X.data(), -1.0, -1, iters.data(),
+                                         resid.data(), conv.data(), nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    for (std::int64_t col = 0; col < k; ++col) {
+        Eigen::VectorXd xc(c.n);
+        const Eigen::VectorXd bc = B.col(col);
+        auto ic = info_struct();
+        ASSERT_EQ(apxchol_solver_solve(h.s, bc.data(), nullptr, xc.data(), -1.0, -1, &ic, nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_TRUE(same_bytes(xc.data(), X.col(col).data(), xc.size())) << col;
+        EXPECT_EQ(iters[col], ic.iterations);
+        EXPECT_EQ(resid[col], ic.relative_residual);
+        EXPECT_EQ(conv[col], 1);
+    }
+    EXPECT_EQ(iters[1], 0);
+    EXPECT_EQ(X.col(1).norm(), 0.0);
+    // In place: x aliases b.
+    Eigen::MatrixXd BX = B;
+    ASSERT_EQ(apxchol_solver_solve_block(h.s, k, BX.data(), nullptr, BX.data(), -1.0, -1, nullptr,
+                                         nullptr, nullptr, nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_TRUE(same_bytes(BX.data(), X.data(), static_cast<std::size_t>(X.size())));
+    // Exhaustion is NOT_CONVERGED with the truthful residual of x = 0.
+    auto none = info_struct();
+    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, 0, &none, nullptr, 0),
+              APXCHOL_STATUS_NOT_CONVERGED);
+    EXPECT_EQ(none.relative_residual, 1.0);
+
+    // A preconditioner application and the retained factor.
+    Eigen::VectorXd z(c.n);
+    ASSERT_EQ(apxchol_solver_apply(h.s, b.data(), z.data(), nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_TRUE(z.allFinite());
+    EXPECT_GT(z.dot(b), 0.0);
+    std::vector<std::int64_t> colptr(c.n + 1), rowval(stats.factor_nnz), perm(c.n);
+    std::vector<double> nzval(stats.factor_nnz);
+    ASSERT_EQ(apxchol_solver_export_factor(h.s, 0, colptr.data(), rowval.data(), nzval.data(),
+                                           perm.data(), nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(colptr.back(), stats.factor_nnz);
+    std::vector<std::int64_t> sorted = perm;
+    std::sort(sorted.begin(), sorted.end());
+    for (std::int64_t v = 0; v < c.n; ++v) EXPECT_EQ(sorted[v], v);
+
+    // keep_factor_values = 0 releases the values after setup, as on the CPU.
+    o.keep_factor_values = 0;
+    handle released;
+    ASSERT_EQ(create(c, &o, released, 1), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(apxchol_solver_export_factor(released.s, 0, colptr.data(), rowval.data(), nzval.data(),
+                                           nullptr, nullptr, 0),
+              APXCHOL_STATUS_NO_FACTOR_VALUES);
+    EXPECT_EQ(apxchol_solver_export_factor(released.s, 0, nullptr, nullptr, nullptr, perm.data(),
+                                           nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+
+    // Non-finite right-hand sides are argument errors.
+    Eigen::VectorXd bad = b;
+    bad[2] = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_EQ(apxchol_solver_solve(h.s, bad.data(), nullptr, x.data(), -1.0, -1, nullptr, nullptr, 0),
+              APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(apxchol_solver_solve_block(h.s, 1, bad.data(), nullptr, x.data(), -1.0, -1, nullptr,
+                                         nullptr, nullptr, nullptr, 0),
+              APXCHOL_STATUS_INVALID_ARGUMENT);
+}
+#endif
 
 TEST(CApi, VersionAbiAndOpenMp) {
     EXPECT_EQ(apxchol_c_abi_version(), APXCHOL_C_ABI_VERSION);

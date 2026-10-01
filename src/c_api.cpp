@@ -1,9 +1,13 @@
-// C ABI over apxchol::cpu_solver. See include/apxchol/c_api.h for the
-// contract: statuses, struct versioning, aliasing and the abort paths.
+// C ABI over apxchol::cpu_solver and, in APXCHOL_USE_METAL builds,
+// apxchol::metal_solver. See include/apxchol/c_api.h for the contract:
+// statuses, struct versioning, aliasing and the abort paths.
 #include "apxchol/c_api.h"
 
 #include "apxchol/solver/solve.h"
 #include "apxchol/version.h"
+#if defined(APXCHOL_USE_METAL)
+#include "apxchol/solver/metal_solver.h"
+#endif
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -268,12 +272,20 @@ void load_vector(const double* source, Eigen::Index n, Eigen::VectorXd& target,
 struct apxchol_solver {
     apxchol_options options{};
     std::unique_ptr<apxchol::cpu_solver> cpu;
+#if defined(APXCHOL_USE_METAL)
+    std::unique_ptr<apxchol::metal_solver> metal;  // exactly one of cpu / metal is set
+#endif
     Eigen::VectorXd b_buffer, x0_buffer;
     Eigen::Index n = 0;
     double setup_seconds = 0.0;
     std::int32_t setup_max_threads = 1;
 
-    const apxchol::factorization& factor() const { return cpu->preconditioner().factor(); }
+    const apxchol::factorization& factor() const {
+#if defined(APXCHOL_USE_METAL)
+        if (metal) return metal->factor();
+#endif
+        return cpu->preconditioner().factor();
+    }
     double tol_for(double tol) const { return tol < 0.0 ? options.tol : tol; }
     int max_iter_for(std::int32_t max_iter) const {
         return max_iter < 0 ? options.max_iter : max_iter;
@@ -285,7 +297,23 @@ struct apxchol_solver {
         load_vector(b, n, b_buffer, "b");
         if (x0 != nullptr) load_vector(x0, n, x0_buffer, "x0");
         Eigen::Map<Eigen::VectorXd> out(x, n);
+#if defined(APXCHOL_USE_METAL)
+        if (metal) {
+            apxchol::solve_result r =
+                metal->solve(b_buffer, tol, max_iter, x0 != nullptr ? &x0_buffer : nullptr);
+            out = r.x;
+            r.x.resize(0);
+            return r;
+        }
+#endif
         return cpu->solve(b_buffer, out, tol, max_iter, x0 != nullptr ? &x0_buffer : nullptr);
+    }
+
+    Eigen::VectorXd apply(const Eigen::VectorXd& r) const {
+#if defined(APXCHOL_USE_METAL)
+        if (metal) return metal->apply(r);
+#endif
+        return cpu->apply(r);
     }
 };
 
@@ -316,7 +344,11 @@ int32_t apxchol_openmp_enabled(void) {
 int32_t apxchol_get_max_threads(void) { return max_threads(); }
 
 int32_t apxchol_backend_available(apxchol_backend backend) {
-    return backend == APXCHOL_BACKEND_CPU ? 1 : 0;
+    if (backend == APXCHOL_BACKEND_CPU) return 1;
+#if defined(APXCHOL_USE_METAL)
+    if (backend == APXCHOL_BACKEND_METAL) return apxchol::metal_solver::available() ? 1 : 0;
+#endif
+    return 0;
 }
 
 apxchol_status apxchol_options_default(apxchol_options* options, size_t struct_size) {
@@ -341,9 +373,14 @@ apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int
         require(out_solver != nullptr, "out_solver is NULL");
         const apxchol_options opt = options != nullptr ? *options : default_options();
         const apxchol::solve_options so = to_solve_options(opt);
+#if defined(APXCHOL_USE_METAL)
+        if (opt.backend == APXCHOL_BACKEND_METAL && !apxchol::metal_solver::available())
+            fail(APXCHOL_STATUS_UNSUPPORTED, "no usable Metal device for APXCHOL_BACKEND_METAL");
+#else
         if (opt.backend != APXCHOL_BACKEND_CPU)
             fail(APXCHOL_STATUS_UNSUPPORTED,
                  "this apxchol build has no Metal backend (configure with -DAPXCHOL_USE_METAL=ON)");
+#endif
         const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
 
         auto solver = std::make_unique<apxchol_solver>();
@@ -352,7 +389,12 @@ apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int
         const thread_scope scope(opt.threads);
         solver->setup_max_threads = max_threads();
         const auto start = clock_type::now();
-        solver->cpu = std::make_unique<apxchol::cpu_solver>(A, so);
+#if defined(APXCHOL_USE_METAL)
+        if (opt.backend == APXCHOL_BACKEND_METAL)
+            solver->metal = std::make_unique<apxchol::metal_solver>(A, so);
+        else
+#endif
+            solver->cpu = std::make_unique<apxchol::cpu_solver>(A, so);
         solver->setup_seconds = seconds_since(start);
         *out_solver = solver.release();
         return APXCHOL_STATUS_SUCCESS;
@@ -411,6 +453,39 @@ apxchol_status apxchol_solver_solve_block(apxchol_solver* solver, int64_t k, con
         const double t = solver->tol_for(tol);
         const int mi = solver->max_iter_for(max_iter);
         const thread_scope scope(solver->options.threads);
+#if defined(APXCHOL_USE_METAL)
+        if (solver->metal) {
+            // Lockstep device batches; every column is bit-identical to its
+            // single-RHS solve. B and X0 are copied (and checked) first, so
+            // aliasing with X is safe.
+            const Eigen::Index n = solver->n;
+            const Eigen::Map<const Eigen::MatrixXd> Bm(b, n, k);
+            const Eigen::MatrixXd Bc = Bm;
+            if (!Bc.allFinite()) fail(APXCHOL_STATUS_INVALID_ARGUMENT, "b contains a non-finite value");
+            Eigen::MatrixXd X0c;
+            if (x0 != nullptr) {
+                X0c = Eigen::Map<const Eigen::MatrixXd>(x0, n, k);
+                if (!X0c.allFinite()) fail(APXCHOL_STATUS_INVALID_ARGUMENT, "x0 contains a non-finite value");
+            }
+            const apxchol::metal_solver::block_cref X0r(X0c);
+            Eigen::Map<Eigen::MatrixXd> Xm(x, n, k);
+            const apxchol::metal_block_result r = solver->metal->solve(
+                apxchol::metal_solver::block_cref(Bc), Xm, t, mi, x0 != nullptr ? &X0r : nullptr);
+            bool all = true;
+            for (int64_t c = 0; c < k; ++c) {
+                const apxchol::metal_column_result& col = r.columns[static_cast<std::size_t>(c)];
+                const bool ok = col.residual < t;
+                all = all && ok;
+                if (iterations != nullptr) iterations[c] = static_cast<int64_t>(col.iterations);
+                if (relative_residuals != nullptr) relative_residuals[c] = col.residual;
+                if (converged != nullptr) converged[c] = ok ? 1 : 0;
+            }
+            if (all) return APXCHOL_STATUS_SUCCESS;
+            write_message(error_message, error_capacity,
+                          "did not converge: some column's relative residual is not below tol");
+            return APXCHOL_STATUS_NOT_CONVERGED;
+        }
+#endif
         bool all = true;
         for (int64_t c = 0; c < k; ++c) {
             const int64_t off = c * solver->n;
@@ -435,7 +510,7 @@ apxchol_status apxchol_solver_apply(apxchol_solver* solver, const double* r, dou
         require(solver != nullptr && r != nullptr && z != nullptr, "solver, r or z is NULL");
         const thread_scope scope(solver->options.threads);
         load_vector(r, solver->n, solver->b_buffer, "r");
-        Eigen::Map<Eigen::VectorXd>(z, solver->n) = solver->cpu->apply(solver->b_buffer);
+        Eigen::Map<Eigen::VectorXd>(z, solver->n) = solver->apply(solver->b_buffer);
         return APXCHOL_STATUS_SUCCESS;
     });
 }
