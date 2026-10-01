@@ -23,6 +23,10 @@ Positive off-diagonal pairs are lumped onto the diagonal for preconditioning;
 PCG and residual checks still use the original operator. `solver.lumped`
 counts stored positive off-diagonal entries (two per symmetric pair). Laplacian nullspaces are handled componentwise.
 
+Operators, right-hand sides, initial guesses, and preconditioner inputs must
+be real. Complex dtypes raise `ValueError`, even when their imaginary parts
+are zero.
+
 ## Options and reuse
 
 `factorize` (alias `solver`) builds once; subsequent solves reuse the factor

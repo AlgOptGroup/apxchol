@@ -1,4 +1,5 @@
 import inspect
+import warnings
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import cg, norm as spnorm, spsolve_triangular
@@ -131,6 +132,74 @@ def test_b_length_mismatch_raises():
     solver = apxchol.solver(L)
     with pytest.raises(ValueError):
         solver.solve(np.ones(L.shape[0] + 1))
+
+
+@pytest.mark.parametrize("entry", ["Solver", "factorize", "solver", "solve"])
+@pytest.mark.parametrize("imaginary", [0.0, 0.5])
+def test_complex_operator_is_rejected_before_cast(entry, imaginary):
+    # For nonzero imaginary parts, discarding them changes this Hermitian system.
+    A = sp.csr_matrix([[2.0, -1.0 + imaginary * 1j],
+                       [-1.0 - imaginary * 1j, 2.0]])
+    call = getattr(apxchol, entry)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(ValueError, match="A must be real"):
+            if entry == "solve":
+                call(A, np.array([1.0, 2.0]))
+            else:
+                call(A)
+
+
+@pytest.mark.parametrize("route, argument", [
+    ("one_shot", "b"), ("reusable", "b"), ("reusable", "x0"),
+])
+@pytest.mark.parametrize("imaginary", [0.0, 0.5])
+def test_complex_solve_input_is_rejected_before_cast(route, argument, imaginary):
+    A = sp.csr_matrix([[2.0, -1.0], [-1.0, 2.0]])
+    vector = np.array([1.0 + imaginary * 1j, 2.0 - imaginary * 1j])
+    b = vector if argument == "b" else A @ vector.real
+    kwargs = {"x0": vector} if argument == "x0" else {}
+    slv = apxchol.factorize(A) if route == "reusable" else None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(ValueError, match=f"{argument} must be real"):
+            if route == "one_shot":
+                apxchol.solve(A, b)
+            else:
+                # With x0, stripping its imaginary part would yield an exact guess.
+                slv.solve(b, **kwargs)
+
+
+@pytest.mark.parametrize("entry", ["apply", "aslinearoperator", "aspreconditioner"])
+@pytest.mark.parametrize("imaginary", [0.0, 0.5])
+def test_complex_apply_input_is_rejected_before_cast(entry, imaginary):
+    slv = apxchol.factorize(sp.csr_matrix([[2.0, -1.0], [-1.0, 2.0]]))
+    r = np.array([1.0 + imaginary * 1j, 2.0 - imaginary * 1j])
+    apply = slv.apply if entry == "apply" else getattr(slv, entry)().matvec
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(ValueError, match="r must be real"):
+            apply(r)
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.float32, np.float64])
+def test_supported_real_dtypes_preserve_solve_and_apply(dtype):
+    A = sp.csr_matrix([[4, -1], [-1, 3]], dtype=dtype)
+    b = np.array([1, 2], dtype=dtype)
+    x0 = np.array([0, 1], dtype=dtype)
+    slv = apxchol.factorize(A)
+    for result in (slv.solve(b, x0=x0, rtol=1e-10),
+                   apxchol.solve(A, b, rtol=1e-10)):
+        assert result.converged
+        assert result.x.dtype == np.float64
+        assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) <= 1e-9
+
+    expected = slv.apply(b.astype(np.float64))
+    for result in (slv.apply(b), slv.aslinearoperator() @ b,
+                   slv.aspreconditioner() @ b):
+        assert result.dtype == np.float64
+        assert np.all(np.isfinite(result))
+        np.testing.assert_allclose(result, expected, rtol=1e-12, atol=0.0)
 
 
 # ── operator contract: the class is asserted, not sniffed at ─────────────────

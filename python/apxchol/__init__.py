@@ -99,6 +99,8 @@ def _to_csc(A):
     if A.shape[0] != A.shape[1]:
         raise ValueError(f"A must be square, got shape {A.shape}")
     A = sp.csc_matrix(A)
+    if np.iscomplexobj(A.data):
+        raise ValueError("A must be real; apxchol solves real symmetric systems")
     if not A.has_canonical_format:
         # csc_matrix() shares the arrays of an already-CSC input, so
         # canonicalize a copy — the caller's matrix must not be mutated.
@@ -171,10 +173,14 @@ class Solver:
         length n: the solution is written into it (no per-solve allocation)
         and returned as `SolveResult.x`.
         """
+        if np.iscomplexobj(b):
+            raise ValueError("b must be real; apxchol solves real symmetric systems")
         b = np.ascontiguousarray(b, dtype=np.float64).ravel()
         if b.shape[0] != self._n:
             raise ValueError(f"b has length {b.shape[0]}, expected {self._n}")
         if x0 is not None:
+            if np.iscomplexobj(x0):
+                raise ValueError("x0 must be real; apxchol solves real symmetric systems")
             x0 = np.ascontiguousarray(x0, dtype=np.float64).ravel()
             if x0.shape[0] != self._n:
                 raise ValueError(f"x0 has length {x0.shape[0]}, expected {self._n}")
@@ -187,6 +193,8 @@ class Solver:
         )
 
     def apply(self, r) -> np.ndarray:
+        if np.iscomplexobj(r):
+            raise ValueError("r must be real; apxchol solves real symmetric systems")
         r = np.ascontiguousarray(r, dtype=np.float64).ravel()
         if r.shape[0] != self._n:
             raise ValueError(f"r has length {r.shape[0]}, expected {self._n}")
