@@ -1,12 +1,13 @@
 /* A pure C11 consumer of apxchol/c_api.h: the header must compile as C, the
- * struct layout is part of the ABI, and one Laplacian solve runs through it. */
+ * struct layout is part of the ABI, and one Laplacian solve runs through it,
+ * once factorizing and once adopting a factor handle. */
 #include "apxchol/c_api.h"
 
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 
-_Static_assert(sizeof(apxchol_options) == 64, "apxchol_options layout");
+_Static_assert(sizeof(apxchol_options) == 72, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, backend) == 4, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, tol) == 8, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, max_iter) == 16, "apxchol_options layout");
@@ -19,6 +20,7 @@ _Static_assert(offsetof(apxchol_options, storage) == 40, "apxchol_options layout
 _Static_assert(offsetof(apxchol_options, keep_factor_values) == 44, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, degree_quantile) == 48, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, exact_clique_max_degree) == 56, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, omp_threshold) == 64, "apxchol_options layout");
 
 _Static_assert(sizeof(apxchol_solve_info) == 32, "apxchol_solve_info layout");
 _Static_assert(offsetof(apxchol_solve_info, converged) == 4, "apxchol_solve_info layout");
@@ -37,13 +39,32 @@ _Static_assert(offsetof(apxchol_stats, setup_seconds) == 48, "apxchol_stats layo
 _Static_assert(offsetof(apxchol_stats, sddm) == 56, "apxchol_stats layout");
 _Static_assert(offsetof(apxchol_stats, setup_max_threads) == 60, "apxchol_stats layout");
 
+/* Solves the path Laplacian with solver and checks x = (1, 0, -1). */
+static int solve_path(apxchol_solver* solver, const char* what) {
+    const double b[] = {1.0, 0.0, -1.0};
+    double x[3] = {0.0, 0.0, 0.0};
+    char error[256];
+    apxchol_solve_info info;
+    info.struct_size = sizeof info;
+    const apxchol_status status =
+        apxchol_solver_solve(solver, b, NULL, x, -1.0, -1, &info, error, sizeof error);
+    if (status != APXCHOL_STATUS_SUCCESS || info.converged != 1) {
+        fprintf(stderr, "%s solve: %d %s\n", what, (int)status, error);
+        return 1;
+    }
+    /* L x = b with mean(x) = 0: x = (1, 0, -1). */
+    if (fabs(x[0] - 1.0) > 1e-8 || fabs(x[1]) > 1e-8 || fabs(x[2] + 1.0) > 1e-8) {
+        fprintf(stderr, "%s solution %g %g %g\n", what, x[0], x[1], x[2]);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
     /* Path Laplacian on 3 vertices, 1-based CSC. */
     const int64_t colptr[] = {1, 3, 6, 8};
     const int64_t rowval[] = {1, 2, 1, 2, 3, 2, 3};
     const double nzval[] = {1.0, -1.0, -1.0, 2.0, -1.0, -1.0, 1.0};
-    const double b[] = {1.0, 0.0, -1.0};
-    double x[3] = {0.0, 0.0, 0.0};
     char error[256];
 
     apxchol_options options;
@@ -57,20 +78,51 @@ int main(void) {
         fprintf(stderr, "create: %s\n", error);
         return 1;
     }
-    apxchol_solve_info info;
-    info.struct_size = sizeof info;
-    const apxchol_status status =
-        apxchol_solver_solve(solver, b, NULL, x, -1.0, -1, &info, error, sizeof error);
+    const int solved = solve_path(solver, "create");
     apxchol_solver_destroy(solver);
-    if (status != APXCHOL_STATUS_SUCCESS || info.converged != 1) {
-        fprintf(stderr, "solve: %d %s\n", (int)status, error);
+    if (solved != 0) return 1;
+
+    /* A factor handle: its stats size the export, and a solver adopts it. */
+    apxchol_factor* factor = NULL;
+    if (apxchol_factor_create(3, colptr, rowval, nzval, 1, &options, &factor, error,
+                              sizeof error) != APXCHOL_STATUS_SUCCESS) {
+        fprintf(stderr, "factor_create: %s\n", error);
         return 1;
     }
-    /* L x = b with mean(x) = 0: x = (1, 0, -1). */
-    if (fabs(x[0] - 1.0) > 1e-8 || fabs(x[1]) > 1e-8 || fabs(x[2] + 1.0) > 1e-8) {
-        fprintf(stderr, "solution %g %g %g\n", x[0], x[1], x[2]);
+    apxchol_stats stats;
+    stats.struct_size = sizeof stats;
+    int64_t lcolptr[4], lrowval[16], perm[3];
+    double lnzval[16];
+    if (apxchol_factor_stats(factor, &stats) != APXCHOL_STATUS_SUCCESS || stats.n != 3 ||
+        stats.sddm != 0 || stats.factor_nnz < 3 || stats.factor_nnz > 16 ||
+        apxchol_factor_export(factor, 0, lcolptr, lrowval, lnzval, perm, error,
+                              sizeof error) != APXCHOL_STATUS_SUCCESS ||
+        lcolptr[3] != stats.factor_nnz) {
+        fprintf(stderr, "factor stats/export: %s\n", error);
+        apxchol_factor_destroy(factor);
         return 1;
     }
+    solver = NULL;
+    options.keep_factor_values = 1;
+    const apxchol_status adopted = apxchol_solver_create_from_factor(
+        3, colptr, rowval, nzval, 1, factor, &options, &solver, error, sizeof error);
+    apxchol_factor_destroy(factor); /* the solver holds its own copy */
+    if (adopted != APXCHOL_STATUS_SUCCESS) {
+        fprintf(stderr, "create_from_factor: %s\n", error);
+        return 1;
+    }
+    int failed = solve_path(solver, "create_from_factor");
+    /* The solver's retained factor, copied back out into a new handle. */
+    factor = NULL;
+    if (apxchol_solver_copy_factor(solver, &factor, error, sizeof error) !=
+            APXCHOL_STATUS_SUCCESS ||
+        apxchol_factor_stats(factor, &stats) != APXCHOL_STATUS_SUCCESS || stats.n != 3) {
+        fprintf(stderr, "copy_factor: %s\n", error);
+        failed = 1;
+    }
+    apxchol_factor_destroy(factor);
+    apxchol_solver_destroy(solver);
+    if (failed != 0) return 1;
     printf("apxchol %s, C ABI %d: ok\n", apxchol_version(), (int)apxchol_c_abi_version());
     return 0;
 }

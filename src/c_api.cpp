@@ -1,8 +1,11 @@
 // C ABI over apxchol::cpu_solver and, in APXCHOL_USE_METAL builds,
-// apxchol::metal_solver. See include/apxchol/c_api.h for the contract:
-// statuses, struct versioning, aliasing and the abort paths.
+// apxchol::metal_solver, with factor handles their adopting constructors take.
+// See include/apxchol/c_api.h for the contract: statuses, struct versioning,
+// aliasing and the abort paths.
 #include "apxchol/c_api.h"
 
+#include "apxchol/operator_class.h"
+#include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/version.h"
 #if defined(APXCHOL_USE_METAL)
@@ -163,7 +166,16 @@ apxchol_options default_options() {
     o.keep_factor_values = so.keep_factor_values ? 1 : 0;
     o.degree_quantile = so.factor_opts.partition.degree_quantile;
     o.exact_clique_max_degree = so.factor_opts.exact_clique_max_degree;
+    o.omp_threshold = so.factor_opts.omp_threshold;
     return o;
+}
+
+/// The caller's options (struct_size checked before anything else is read, so
+/// an older, smaller struct is never read past its end), or the defaults.
+apxchol_options read_options(const apxchol_options* options) {
+    if (options == nullptr) return default_options();
+    require_struct_size(options->struct_size, sizeof(apxchol_options), "options");
+    return *options;
 }
 
 /// Validates every option before any work, so a later std::invalid_argument
@@ -187,9 +199,12 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
             "options.keep_factor_values must be 0 or 1");
     require(std::isfinite(o.degree_quantile) && o.degree_quantile <= 1.0,
             "options.degree_quantile must be finite and at most 1");
-    if constexpr (sizeof(std::size_t) < sizeof(std::uint64_t))
+    if constexpr (sizeof(std::size_t) < sizeof(std::uint64_t)) {
         require(o.exact_clique_max_degree <= std::numeric_limits<std::size_t>::max(),
                 "options.exact_clique_max_degree exceeds size_t");
+        require(o.omp_threshold <= std::numeric_limits<std::size_t>::max(),
+                "options.omp_threshold exceeds size_t");
+    }
 
     apxchol::solve_options so;
     so.tol = o.tol;
@@ -204,7 +219,20 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
     so.factor_opts.partition.degree_quantile = o.degree_quantile;
     so.factor_opts.exact_clique_max_degree =
         static_cast<std::size_t>(o.exact_clique_max_degree);
+    so.factor_opts.omp_threshold = static_cast<std::size_t>(o.omp_threshold);
     return so;
+}
+
+/// UNSUPPORTED unless this build has the backend and (for METAL) a device.
+void require_backend(apxchol_backend backend) {
+#if defined(APXCHOL_USE_METAL)
+    if (backend == APXCHOL_BACKEND_METAL && !apxchol::metal_solver::available())
+        fail(APXCHOL_STATUS_UNSUPPORTED, "no usable Metal device for APXCHOL_BACKEND_METAL");
+#else
+    if (backend != APXCHOL_BACKEND_CPU)
+        fail(APXCHOL_STATUS_UNSUPPORTED,
+             "this apxchol build has no Metal backend (configure with -DAPXCHOL_USE_METAL=ON)");
+#endif
 }
 
 /// CSC import with overflow-safe validation. Columns with strictly increasing
@@ -271,7 +299,108 @@ void load_vector(const double* source, Eigen::Index n, Eigen::VectorXd& target,
     }
 }
 
+/// The factorization's own SDDM test (make_graph in graph/conversions.h): a
+/// column whose diagonal exceeds its off-diagonal weight by more than 1e-12
+/// of the diagonal, summed in the same order.
+bool has_positive_excess(const Eigen::SparseMatrix<double>& A) {
+    for (Eigen::Index k = 0; k < A.outerSize(); ++k) {
+        double diag = 0.0, wdeg = 0.0;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it) {
+            if (it.row() != it.col()) wdeg -= it.value();
+            else diag = it.value();
+        }
+        const double excess = diag - wdeg;
+        if (excess > diag * 1e-12) return true;
+    }
+    return false;
+}
+
+/// Asserts the operator contract on an adopting solver's operator and that
+/// the factor can precondition it. A Laplacian factor is rank n-1 and every
+/// solve centres x, so it cannot serve an SDDM operator; the test runs on the
+/// matrix the factorization would see (lumped if needed), so a factor never
+/// refuses its own operator.
+void check_adoptable(const apxchol::factorization& F, const Eigen::SparseMatrix<double>& A) {
+    if (F.sddm) {
+        apxchol::require_operator(A);
+        return;
+    }
+    const apxchol::operator_view op(A);
+    if (has_positive_excess(op.matrix()))
+        fail(APXCHOL_STATUS_INVALID_ARGUMENT,
+             "a Laplacian factor (rank n-1, centred solutions) cannot precondition an SDDM "
+             "operator");
+}
+
+bool has_values(const apxchol::factorization& F) {
+    const auto nnz = static_cast<std::size_t>(F.L.nonZeros());
+    return F.L.inner_.size() == nnz && F.L.vals_.size() == nnz;
+}
+
+constexpr const char* kReleasedValues =
+    "the factor values were released after setup; create the solver with "
+    "keep_factor_values = 1";
+
+/// L (CSC, permuted space) and perm with index_base applied; see the header.
+void export_arrays(const apxchol::factorization& F, std::size_t n, std::int32_t index_base,
+                   std::int64_t* colptr, std::int64_t* rowval, double* nzval,
+                   std::int64_t* perm) {
+    require(index_base == 0 || index_base == 1, "index_base must be 0 or 1");
+    const bool any_l = colptr != nullptr || rowval != nullptr || nzval != nullptr;
+    const bool all_l = colptr != nullptr && rowval != nullptr && nzval != nullptr;
+    require(!any_l || all_l, "colptr, rowval and nzval must all be NULL or all non-NULL");
+    require(any_l || perm != nullptr, "nothing to export: every output is NULL");
+    if (F.perm.size() != n || static_cast<std::size_t>(F.L.rows()) != n)
+        fail(APXCHOL_STATUS_INTERNAL_ERROR, "factor dimension differs from the operator");
+    if (all_l && !has_values(F)) fail(APXCHOL_STATUS_NO_FACTOR_VALUES, kReleasedValues);
+    if (all_l) {
+        const auto nnz = static_cast<std::size_t>(F.L.nonZeros());
+        for (std::size_t j = 0; j <= n; ++j)
+            colptr[j] = static_cast<std::int64_t>(F.L.outer_[j]) + index_base;
+        for (std::size_t p = 0; p < nnz; ++p) {
+            rowval[p] = static_cast<std::int64_t>(F.L.inner_[p]) + index_base;
+            nzval[p] = static_cast<double>(F.L.vals_[p]);
+        }
+    }
+    if (perm != nullptr)
+        for (std::size_t v = 0; v < n; ++v)
+            perm[v] = static_cast<std::int64_t>(F.perm[v]) + index_base;
+}
+
+/// The stats calls' prologue: a mismatched struct_size leaves *stats untouched
+/// and is the status; a matching one is zeroed (struct_size kept) before
+/// anything else can fail.
+apxchol_status begin_stats(apxchol_stats* stats) noexcept {
+    if (stats == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
+    const apxchol_status s = check_struct_size(stats->struct_size, sizeof(apxchol_stats));
+    if (s != APXCHOL_STATUS_SUCCESS) return s;
+    *stats = apxchol_stats{};
+    stats->struct_size = sizeof(apxchol_stats);
+    return APXCHOL_STATUS_SUCCESS;
+}
+
+/// Shared by the solver and factor stats (after begin_stats).
+void write_stats(const apxchol::factorization& F, apxchol_backend backend, Eigen::Index n,
+                 double setup_seconds, std::int32_t setup_max_threads, apxchol_stats* stats) {
+    stats->backend = backend;
+    stats->n = static_cast<int64_t>(n);
+    stats->factor_nnz = static_cast<int64_t>(F.L.nonZeros());
+    stats->lumped_offdiag = static_cast<int64_t>(F.lumped_offdiag);
+    stats->rounds = static_cast<int64_t>(F.rounds.size());
+    stats->peak_graph_bytes = static_cast<int64_t>(F.peak_graph_bytes);
+    stats->setup_seconds = setup_seconds;
+    stats->sddm = F.sddm ? 1 : 0;
+    stats->setup_max_threads = setup_max_threads;
+}
+
 }  // namespace
+
+/// Immutable after creation: every call on it only reads.
+struct apxchol_factor {
+    apxchol::factorization F;  // values always retained
+    double setup_seconds = 0.0;
+    std::int32_t setup_max_threads = 1;
+};
 
 struct apxchol_solver {
     apxchol_options options{};
@@ -329,6 +458,58 @@ void check_call_tolerances(double tol, std::int32_t max_iter) {
             "tol must be finite and positive (or negative for the handle's value)");
 }
 
+/// apxchol_solver_create (factor NULL: factorize A) and
+/// apxchol_solver_create_from_factor (adopt a copy of *factor).
+apxchol_status create_solver(int64_t n, const int64_t* colptr, const int64_t* rowval,
+                             const double* nzval, int32_t index_base,
+                             const apxchol_factor* factor, bool adopt,
+                             const apxchol_options* options, apxchol_solver** out_solver,
+                             char* error_message, size_t error_capacity) {
+    if (out_solver != nullptr) *out_solver = nullptr;
+    return guarded(error_message, error_capacity, true, [&]() -> apxchol_status {
+        require(out_solver != nullptr, "out_solver is NULL");
+        require(!adopt || factor != nullptr, "factor is NULL");
+        const apxchol_options opt = read_options(options);
+        const apxchol::solve_options so = to_solve_options(opt);
+        require_backend(opt.backend);
+        const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
+        if (adopt)
+            require(static_cast<std::size_t>(A.rows()) == factor->F.perm.size(),
+                    "the factor's dimension differs from the operator's");
+
+        auto solver = std::make_unique<apxchol_solver>();
+        solver->options = opt;
+        solver->n = A.rows();
+        const thread_scope scope(opt.threads);
+        solver->setup_max_threads = max_threads();
+        const auto start = clock_type::now();
+        // Adopting: the operator contract (create asserts it inside the
+        // factorization), then the cpu_solver / metal_solver adopting
+        // constructors on a copy, which leaves *factor untouched.
+        if (adopt) check_adoptable(factor->F, A);
+#if defined(APXCHOL_USE_METAL)
+        if (opt.backend == APXCHOL_BACKEND_METAL) {
+            // A valid operator this backend cannot represent (fp32 magnitudes,
+            // 32-bit device indices) is unsupported here, not an internal error:
+            // the CPU backend still solves it.
+            try {
+                solver->metal = adopt ? std::make_unique<apxchol::metal_solver>(A, factor->F, so)
+                                      : std::make_unique<apxchol::metal_solver>(A, so);
+            } catch (const std::domain_error& e) {
+                fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+            } catch (const std::length_error& e) {
+                fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+            }
+        } else
+#endif
+            solver->cpu = adopt ? std::make_unique<apxchol::cpu_solver>(A, factor->F, so)
+                                : std::make_unique<apxchol::cpu_solver>(A, so);
+        solver->setup_seconds = seconds_since(start);
+        *out_solver = solver.release();
+        return APXCHOL_STATUS_SUCCESS;
+    });
+}
+
 }  // namespace
 
 extern "C" {
@@ -372,48 +553,18 @@ apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int
                                      const apxchol_options* options,
                                      apxchol_solver** out_solver, char* error_message,
                                      size_t error_capacity) {
-    if (out_solver != nullptr) *out_solver = nullptr;
-    return guarded(error_message, error_capacity, true, [&]() -> apxchol_status {
-        require(out_solver != nullptr, "out_solver is NULL");
-        // struct_size first: a caller's older, smaller struct is never read past its end.
-        if (options != nullptr) require_struct_size(options->struct_size, sizeof(apxchol_options), "options");
-        const apxchol_options opt = options != nullptr ? *options : default_options();
-        const apxchol::solve_options so = to_solve_options(opt);
-#if defined(APXCHOL_USE_METAL)
-        if (opt.backend == APXCHOL_BACKEND_METAL && !apxchol::metal_solver::available())
-            fail(APXCHOL_STATUS_UNSUPPORTED, "no usable Metal device for APXCHOL_BACKEND_METAL");
-#else
-        if (opt.backend != APXCHOL_BACKEND_CPU)
-            fail(APXCHOL_STATUS_UNSUPPORTED,
-                 "this apxchol build has no Metal backend (configure with -DAPXCHOL_USE_METAL=ON)");
-#endif
-        const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
+    return create_solver(n, colptr, rowval, nzval, index_base, nullptr, false, options,
+                         out_solver, error_message, error_capacity);
+}
 
-        auto solver = std::make_unique<apxchol_solver>();
-        solver->options = opt;
-        solver->n = A.rows();
-        const thread_scope scope(opt.threads);
-        solver->setup_max_threads = max_threads();
-        const auto start = clock_type::now();
-#if defined(APXCHOL_USE_METAL)
-        if (opt.backend == APXCHOL_BACKEND_METAL) {
-            // A valid operator this backend cannot represent (fp32 magnitudes,
-            // 32-bit device indices) is unsupported here, not an internal error:
-            // the CPU backend still solves it.
-            try {
-                solver->metal = std::make_unique<apxchol::metal_solver>(A, so);
-            } catch (const std::domain_error& e) {
-                fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
-            } catch (const std::length_error& e) {
-                fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
-            }
-        } else
-#endif
-            solver->cpu = std::make_unique<apxchol::cpu_solver>(A, so);
-        solver->setup_seconds = seconds_since(start);
-        *out_solver = solver.release();
-        return APXCHOL_STATUS_SUCCESS;
-    });
+apxchol_status apxchol_solver_create_from_factor(int64_t n, const int64_t* colptr,
+                                                 const int64_t* rowval, const double* nzval,
+                                                 int32_t index_base, const apxchol_factor* factor,
+                                                 const apxchol_options* options,
+                                                 apxchol_solver** out_solver,
+                                                 char* error_message, size_t error_capacity) {
+    return create_solver(n, colptr, rowval, nzval, index_base, factor, true, options,
+                         out_solver, error_message, error_capacity);
 }
 
 void apxchol_solver_destroy(apxchol_solver* solver) { delete solver; }
@@ -531,21 +682,11 @@ apxchol_status apxchol_solver_apply(apxchol_solver* solver, const double* r, dou
 }
 
 apxchol_status apxchol_solver_stats(const apxchol_solver* solver, apxchol_stats* stats) {
-    if (solver == nullptr || stats == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
-    const apxchol_status s = check_struct_size(stats->struct_size, sizeof(apxchol_stats));
+    const apxchol_status s = begin_stats(stats);
     if (s != APXCHOL_STATUS_SUCCESS) return s;
-    const apxchol::factorization& F = solver->factor();
-    *stats = apxchol_stats{};
-    stats->struct_size = sizeof(apxchol_stats);
-    stats->backend = solver->options.backend;
-    stats->n = static_cast<int64_t>(solver->n);
-    stats->factor_nnz = static_cast<int64_t>(F.L.nonZeros());
-    stats->lumped_offdiag = static_cast<int64_t>(F.lumped_offdiag);
-    stats->rounds = static_cast<int64_t>(F.rounds.size());
-    stats->peak_graph_bytes = static_cast<int64_t>(F.peak_graph_bytes);
-    stats->setup_seconds = solver->setup_seconds;
-    stats->sddm = F.sddm ? 1 : 0;
-    stats->setup_max_threads = solver->setup_max_threads;
+    if (solver == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
+    write_stats(solver->factor(), solver->options.backend, solver->n, solver->setup_seconds,
+                solver->setup_max_threads, stats);
     return APXCHOL_STATUS_SUCCESS;
 }
 
@@ -555,32 +696,72 @@ apxchol_status apxchol_solver_export_factor(const apxchol_solver* solver, int32_
                                             size_t error_capacity) {
     return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
         require(solver != nullptr, "solver is NULL");
-        require(index_base == 0 || index_base == 1, "index_base must be 0 or 1");
-        const bool any_l = colptr != nullptr || rowval != nullptr || nzval != nullptr;
-        const bool all_l = colptr != nullptr && rowval != nullptr && nzval != nullptr;
-        require(!any_l || all_l, "colptr, rowval and nzval must all be NULL or all non-NULL");
-        require(any_l || perm != nullptr, "nothing to export: every output is NULL");
+        export_arrays(solver->factor(), static_cast<std::size_t>(solver->n), index_base, colptr,
+                      rowval, nzval, perm);
+        return APXCHOL_STATUS_SUCCESS;
+    });
+}
 
+apxchol_status apxchol_solver_copy_factor(const apxchol_solver* solver,
+                                          apxchol_factor** out_factor, char* error_message,
+                                          size_t error_capacity) {
+    if (out_factor != nullptr) *out_factor = nullptr;
+    return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
+        require(solver != nullptr && out_factor != nullptr, "solver or out_factor is NULL");
         const apxchol::factorization& F = solver->factor();
-        const auto n = static_cast<std::size_t>(solver->n);
-        if (F.perm.size() != n || static_cast<std::size_t>(F.L.rows()) != n)
-            fail(APXCHOL_STATUS_INTERNAL_ERROR, "factor dimension differs from the operator");
-        const auto nnz = static_cast<std::size_t>(F.L.nonZeros());
-        if (all_l && (F.L.inner_.size() != nnz || F.L.vals_.size() != nnz))
-            fail(APXCHOL_STATUS_NO_FACTOR_VALUES,
-                 "the factor values were released after setup; create the solver with "
-                 "keep_factor_values = 1");
-        if (all_l) {
-            for (std::size_t j = 0; j <= n; ++j)
-                colptr[j] = static_cast<int64_t>(F.L.outer_[j]) + index_base;
-            for (std::size_t p = 0; p < nnz; ++p) {
-                rowval[p] = static_cast<int64_t>(F.L.inner_[p]) + index_base;
-                nzval[p] = static_cast<double>(F.L.vals_[p]);
-            }
-        }
-        if (perm != nullptr)
-            for (std::size_t v = 0; v < n; ++v)
-                perm[v] = static_cast<int64_t>(F.perm[v]) + index_base;
+        if (!has_values(F)) fail(APXCHOL_STATUS_NO_FACTOR_VALUES, kReleasedValues);
+        auto factor = std::make_unique<apxchol_factor>();
+        factor->F = F;
+        factor->setup_seconds = solver->setup_seconds;
+        factor->setup_max_threads = solver->setup_max_threads;
+        *out_factor = factor.release();
+        return APXCHOL_STATUS_SUCCESS;
+    });
+}
+
+apxchol_status apxchol_factor_create(int64_t n, const int64_t* colptr, const int64_t* rowval,
+                                     const double* nzval, int32_t index_base,
+                                     const apxchol_options* options,
+                                     apxchol_factor** out_factor, char* error_message,
+                                     size_t error_capacity) {
+    if (out_factor != nullptr) *out_factor = nullptr;
+    return guarded(error_message, error_capacity, true, [&]() -> apxchol_status {
+        require(out_factor != nullptr, "out_factor is NULL");
+        const apxchol_options opt = read_options(options);
+        const apxchol::solve_options so = to_solve_options(opt);
+        const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
+        auto factor = std::make_unique<apxchol_factor>();
+        const thread_scope scope(opt.threads);
+        factor->setup_max_threads = max_threads();
+        const auto start = clock_type::now();
+        // detail::factorize_for_solver retaining the values: outside CUDA
+        // builds (which have no C ABI) the factor cpu_solver and metal_solver
+        // compute themselves.
+        factor->F = apxchol::factorize(A, so.storage, so.factor_opts);
+        factor->setup_seconds = seconds_since(start);
+        *out_factor = factor.release();
+        return APXCHOL_STATUS_SUCCESS;
+    });
+}
+
+void apxchol_factor_destroy(apxchol_factor* factor) { delete factor; }
+
+apxchol_status apxchol_factor_stats(const apxchol_factor* factor, apxchol_stats* stats) {
+    const apxchol_status s = begin_stats(stats);
+    if (s != APXCHOL_STATUS_SUCCESS) return s;
+    if (factor == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
+    write_stats(factor->F, APXCHOL_BACKEND_CPU, static_cast<Eigen::Index>(factor->F.perm.size()),
+                factor->setup_seconds, factor->setup_max_threads, stats);
+    return APXCHOL_STATUS_SUCCESS;
+}
+
+apxchol_status apxchol_factor_export(const apxchol_factor* factor, int32_t index_base,
+                                     int64_t* colptr, int64_t* rowval, double* nzval,
+                                     int64_t* perm, char* error_message,
+                                     size_t error_capacity) {
+    return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
+        require(factor != nullptr, "factor is NULL");
+        export_arrays(factor->F, factor->F.perm.size(), index_base, colptr, rowval, nzval, perm);
         return APXCHOL_STATUS_SUCCESS;
     });
 }

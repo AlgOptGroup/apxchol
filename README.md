@@ -45,7 +45,8 @@ Laplacians use their compatible subspace; SDDM operators retain a full factor.
 The `apxchol_c` target provides an exception-safe C ABI
 ([`c_api.h`](include/apxchol/c_api.h)) over `cpu_solver` for other languages:
 opaque solver handles with create/solve/solve-block/apply/stats/factor export,
-versioned option structs and explicit statuses.
+factor handles that solvers adopt (one factor reused for a nearby operator of
+the same size), versioned option structs and explicit statuses.
 
 ```c
 apxchol_options opt;

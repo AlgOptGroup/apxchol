@@ -177,8 +177,14 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   `solve_options{}`; NOT_CONVERGED writes outputs and is never an acceptance;
   `converged` is `residual < tol` as in the PCG loop. `threads` scopes the
   calling thread's OpenMP limit per call. n and nnz are limited to 2^31-1;
-  edge-index overflow still aborts. Keep `tests/test_c_header.c` layout asserts
-  in step with the header and bump `APXCHOL_C_ABI_VERSION` on layout changes.
+  edge-index overflow still aborts. A factor handle (`apxchol_factor_*`) is
+  an immutable host factorization that always keeps its values; solvers adopt
+  a copy (`apxchol_solver_create_from_factor`, CPU or METAL) for any validated
+  operator of its dimension, except that a Laplacian factor refuses an SDDM
+  operator by the factorization's own excess test. `apxchol_solver_copy_factor`
+  needs `keep_factor_values`. Keep `tests/test_c_header.c` layout asserts in
+  step with the header. `APXCHOL_C_ABI_VERSION` stays 1 until the ABI's first
+  release, then bumps on every layout change.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
   M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
   adjacency versus an assembled operator. Bindings must use the operator
