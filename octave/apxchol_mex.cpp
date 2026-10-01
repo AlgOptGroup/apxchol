@@ -15,6 +15,7 @@
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -44,6 +45,31 @@ struct mex_error : std::runtime_error {
     throw mex_error(id, msg);
 }
 
+double scalar_option(const mxArray* value, const char* name) {
+    // Keep numeric classes, logical scalars, and sparse scalars accepted by
+    // mxGetScalar; reject shapes/types before asking it to convert anything.
+    const std::string message = std::string(name) +
+        " must be a finite real numeric or logical scalar";
+    if ((!mxIsNumeric(value) && !mxIsLogical(value)) || mxIsComplex(value) ||
+        mxGetNumberOfElements(value) != 1)
+        fail("apxchol:badInput", message);
+    const double result = mxGetScalar(value);
+    if (!std::isfinite(result))
+        fail("apxchol:badInput", message);
+    return result;
+}
+
+int iteration_option(const mxArray* value) {
+    const double result = scalar_option(value, "maxiter");
+    if (std::trunc(result) != result ||
+        result < std::numeric_limits<int>::min() ||
+        result > std::numeric_limits<int>::max())
+        fail("apxchol:badInput", "maxiter must be an integer in [" +
+             std::to_string(std::numeric_limits<int>::min()) + ", " +
+             std::to_string(std::numeric_limits<int>::max()) + "]");
+    return static_cast<int>(result);
+}
+
 // ── reusable solver: thin shell over apxchol::cpu_solver (mirrors the Python
 // binding) — the library's factor-once/solve-many class with the SAME
 // parallel-SpMV PCG the benchmark's one-shot solve() runs.
@@ -62,10 +88,12 @@ public:
     void solve(const Eigen::VectorXd& b, double tol, int maxiter,
                Eigen::VectorXd& x, int& iters, double& rnorm, bool& converged) const {
         if (b.size() != slv_.rows()) throw std::invalid_argument("solve: b length mismatch");
+        // This binding constructs cpu_solver with default solve_options.
+        // Resolve its negative tolerance sentinel for both PCG and the flag.
+        if (tol < 0.0) tol = apxchol::default_tol;
         const apxchol::solve_result res = slv_.solve(b, tol, maxiter);
         x = res.x; iters = static_cast<int>(res.iterations); rnorm = res.residual;
-        // residual < tol iff the PCG converged (b == 0 leaves residual 0 with
-        // the exact x = 0); all other exits leave it >= tol.
+        // Preserve the strict test, including false for residual == tol == 0.
         converged = res.residual < tol;
     }
 
@@ -170,8 +198,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                      "usage: [x,iters,resid,conv] = apxchol_mex('solve', h, b, tol, maxiter)");
             Solver& s = get_solver(prhs[1]);
             const Eigen::VectorXd b = mx_to_vec(prhs[2], "b");
-            const double tol = mxGetScalar(prhs[3]);
-            const int maxiter = (int)mxGetScalar(prhs[4]);
+            const double tol = scalar_option(prhs[3], "tol");
+            const int maxiter = iteration_option(prhs[4]);
             Eigen::VectorXd x; int iters; double rnorm; bool conv;
             s.solve(b, tol, maxiter, x, iters, rnorm, conv);
             plhs[0] = vec_to_mx(x);

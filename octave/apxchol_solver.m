@@ -9,6 +9,12 @@ classdef apxchol_solver < handle
   % Laplacian vs SDDM is auto-detected (singular Laplacians get a rank-(n-1)
   % factor with null-space centering). The factor is built once in the
   % constructor and freed automatically when the object is cleared.
+  %
+  % tol and maxiter must be finite real numeric or logical scalars (sparse
+  % scalars are accepted). maxiter must be an integer in [-2^31, 2^31-1].
+  % Omitted/empty options use tol = 1e-8 and maxiter = 500. Explicit negative
+  % values use the CPU solver defaults, currently 1e-8 and 200 respectively.
+  % Zero values are retained; converged uses residual < effective tolerance.
 
   properties (Access = private)
     h = uint64(0)

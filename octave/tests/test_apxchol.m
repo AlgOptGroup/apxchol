@@ -22,6 +22,22 @@ function test_apxchol()
     L = spdiags(sum(A, 2), 0, n, n) - A;
   end
 
+  function expect_bad_option(invoke, option, label)
+    caught = false; id = ''; msg = '';
+    try, unused = invoke(); catch e, caught = true; id = e.identifier; msg = e.message; end
+    assert(caught, '%s: option must be rejected', label);
+    assert(strcmp(id, 'apxchol:badInput'), '%s: wrong identifier %s', label, id);
+    assert(~isempty(strfind(msg, option)), '%s: error does not name %s', label, option);
+  end
+
+  function assert_same_solve(actual, expected, label)
+    assert(actual.iters == expected.iters && actual.converged == expected.converged, ...
+           '%s: solve status differs', label);
+    assert(norm(actual.x - expected.x) <= 1e-14 && ...
+           abs(actual.residual - expected.residual) <= 1e-14, ...
+           '%s: solve result differs', label);
+  end
+
   % ── 1. Laplacian solve converges ──
   L = grid2d_laplacian(50);
   rng_b = randn(size(L, 1), 1);  b = rng_b - mean(rng_b);   % consistent RHS
@@ -147,6 +163,156 @@ function test_apxchol()
   try, apxchol_laplacian(sparse(ones(3, 4))); catch, err = true; end
   assert(err, 'laplacian: non-square must error');
   ok = ok + 1; fprintf('ok %d  apxchol_laplacian assembles L = D - A\n', ok);
+
+  % ── 10. malformed options reject before scalar/integer conversion ──
+  % 32 common rejections + 9 maxiter rejections + 6 raw-empty rejections
+  % + 1 successful solve reusing the same object after all rejected calls.
+  Aopts = sparse([2 -1; -1 2]); bopts = [1; -1]; zopts = zeros(2, 1);
+  sopts = apxchol_solver(Aopts);
+  bad_scalar = {
+    'NaN', NaN;
+    'positive infinity', Inf;
+    'negative infinity', -Inf;
+    'complex', 1 + 1i;
+    'row', [1 2];
+    'column', [1; 2];
+    'matrix', ones(2);
+    'N-D array', ones(1, 1, 2);
+    'character', '1';
+    'cell', {1};
+    'cell containing empty', {[]};
+    'struct', struct('value', 1);
+    'function', @sin;
+    'sparse row', sparse([1 2]);
+    'logical row', [true false];
+    'sparse NaN', sparse(NaN)
+  };
+  rejected = 0;
+  for k = 1:size(bad_scalar, 1)
+    value = bad_scalar{k, 2}; label = bad_scalar{k, 1};
+    expect_bad_option(@() sopts.solve(bopts, value, 20), 'tol', label);
+    expect_bad_option(@() sopts.solve(bopts, 1e-8, value), 'maxiter', label);
+    rejected = rejected + 2;
+  end
+  bad_maxiter = {
+    'positive fraction', 0.5;
+    'negative fraction', -0.5;
+    'upper double overflow', double(intmax('int32')) + 1;
+    'lower double overflow', double(intmin('int32')) - 1;
+    'upper integer overflow', int64(intmax('int32')) + int64(1);
+    'lower integer overflow', int64(intmin('int32')) - int64(1);
+    'wide unsigned overflow', intmax('uint64');
+    'huge finite value', realmax;
+    'single rounds above INT_MAX', single(intmax('int32'))
+  };
+  for k = 1:size(bad_maxiter, 1)
+    value = bad_maxiter{k, 2};
+    expect_bad_option(@() sopts.solve(bopts, 1e-8, value), 'maxiter', bad_maxiter{k, 1});
+    rejected = rejected + 1;
+  end
+  % Wrappers intentionally replace empties with defaults; test gateway rejection
+  % separately so mxGetScalar never receives an empty raw option.
+  raw_handle = apxchol_mex('factorize', Aopts);
+  raw_cleanup = onCleanup(@() apxchol_mex('free', raw_handle));
+  raw_empty = {[], {}, ''};
+  for k = 1:numel(raw_empty)
+    value = raw_empty{k};
+    expect_bad_option(@() apxchol_mex('solve', raw_handle, bopts, value, 20), ...
+                      'tol', 'raw empty');
+    expect_bad_option(@() apxchol_mex('solve', raw_handle, bopts, 1e-8, value), ...
+                      'maxiter', 'raw empty');
+    rejected = rejected + 2;
+  end
+  clear raw_cleanup;
+  assert(rejected == 47, 'malformed option case denominator changed');
+  reused = sopts.solve(bopts);
+  assert(reused.converged && norm(Aopts * reused.x - bopts) / norm(bopts) < 1e-8, ...
+         'solver did not remain usable after rejected options');
+  ok = ok + 1; fprintf('ok %d  malformed scalar options (48 cases)\n', ok);
+
+  % ── 11. accepted scalar representations and int boundaries ──
+  % Zero RHS makes even INT_MAX bounded. Logical and sparse scalar options
+  % deliberately retain mxGetScalar compatibility, including unstored zeros.
+  valid_options = {
+    'double', 1e-8, 10, true;
+    'single', single(1e-8), single(10), true;
+    'int8', int8(1), int8(1), true;
+    'uint8', uint8(1), uint8(1), true;
+    'int16', int16(1), int16(1), true;
+    'uint16', uint16(1), uint16(1), true;
+    'int32', int32(1), int32(1), true;
+    'uint32', uint32(1), uint32(1), true;
+    'int64', int64(1), int64(1), true;
+    'uint64', uint64(1), uint64(1), true;
+    'logical true', true, true, true;
+    'logical false', false, false, false;
+    'sparse double', sparse(1e-8), sparse(10), true;
+    'sparse logical true', sparse(true), sparse(true), true;
+    'sparse logical false', sparse(false), sparse(false), false;
+    'largest positive tolerance', realmax, 0, true;
+    'largest negative tolerance', -realmax, 0, true;
+    'INT_MAX double', 1e-8, double(intmax('int32')), true;
+    'INT_MIN double', 1e-8, double(intmin('int32')), true;
+    'INT_MAX integer', 1e-8, intmax('int32'), true;
+    'INT_MIN integer', 1e-8, intmin('int32'), true;
+    'single below INT_MAX', 1e-8, single(2147483520), true;
+    'unsigned INT_MAX', 1e-8, uint32(intmax('int32')), true;
+    'negative fractional tolerance', -0.5, -7, true
+  };
+  assert(size(valid_options, 1) == 24, 'accepted option case denominator changed');
+  for k = 1:size(valid_options, 1)
+    r = sopts.solve(zopts, valid_options{k, 2}, valid_options{k, 3});
+    assert(r.iters == 0 && r.residual == 0 && all(r.x == 0) && ...
+           r.converged == valid_options{k, 4}, '%s: wrong zero-RHS result', valid_options{k, 1});
+  end
+  ok = ok + 1; fprintf('ok %d  accepted scalar options (24 cases)\n', ok);
+
+  % ── 12. wrapper defaults, core sentinels and strict convergence ──
+  % Tiny solves establish routing/equivalence; they do not measure whether the
+  % iteration cap is 200 or 500. Those distinct caps remain in the source.
+  wrapper_default = sopts.solve(bopts, 1e-8, 500);
+  default_calls = {
+    @() sopts.solve(bopts),
+    @() sopts.solve(bopts, 1e-8),
+    @() sopts.solve(bopts, [], []),
+    @() sopts.solve(bopts, [], 500),
+    @() sopts.solve(bopts, 1e-8, [])
+  };
+  default_cases = 0;
+  for k = 1:numel(default_calls)
+    invoke = default_calls{k};
+    assert_same_solve(invoke(), wrapper_default, 'omitted/empty defaults');
+    default_cases = default_cases + 1;
+  end
+  other_empty = {'', {}, zeros(0, 2), false(0, 2), sparse([], [], [], 0, 2), single([])};
+  for k = 1:numel(other_empty)
+    value = other_empty{k};
+    assert_same_solve(sopts.solve(bopts, value, value), wrapper_default, 'empty type defaults');
+    default_cases = default_cases + 1;
+  end
+  core_default = sopts.solve(bopts, 1e-8, 200);
+  negative_options = {-1, -1; -0.5, -7; -realmax, intmin('int32')};
+  for k = 1:size(negative_options, 1)
+    assert_same_solve(sopts.solve(bopts, negative_options{k, 1}, negative_options{k, 2}), ...
+                      core_default, 'negative core defaults');
+    default_cases = default_cases + 1;
+  end
+  strict_options = {zopts, 0, false, 0; zopts, -1, true, 0; ...
+                    bopts, 1, false, 1; bopts, 2, true, 1};
+  for k = 1:size(strict_options, 1)
+    r = sopts.solve(strict_options{k, 1}, strict_options{k, 2}, 0);
+    assert(r.iters == 0 && r.residual == strict_options{k, 4} && all(r.x == 0) && ...
+           r.converged == strict_options{k, 3}, 'strict tolerance/zero-iteration behavior changed');
+    default_cases = default_cases + 1;
+  end
+  one_shot = apxchol_solve(Aopts, zopts);
+  one_shot_empty = apxchol_solve(Aopts, zopts, [], []);
+  assert(one_shot.converged && one_shot.iters == 0 && one_shot.residual == 0 && ...
+         all(one_shot.x == 0), 'one-shot defaults failed');
+  assert_same_solve(one_shot_empty, one_shot, 'one-shot empty defaults');
+  default_cases = default_cases + 2;
+  assert(default_cases == 20, 'default option case denominator changed');
+  ok = ok + 1; fprintf('ok %d  scalar defaults and convergence (20 cases)\n', ok);
 
   fprintf('ALL %d TESTS PASSED\n', ok);
 end
