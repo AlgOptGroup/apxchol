@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 jobs:
-  wheels:
+  wheels-linux:
     name: manylinux wheels
     runs-on: ubuntu-latest
     steps:
@@ -35,13 +35,33 @@ jobs:
           package-dir: python
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-linux-x86_64
+          path: wheelhouse/*.whl
+
+  wheels-macos:
+    name: macOS arm64 wheels
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # Configuration (bundled libomp, 14.0 deployment target, runtime check)
+      # lives in python/pyproject.toml [tool.cibuildwheel.macos].
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.2
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+        with:
+          package-dir: python
+      - name: Inspect wheels
+        run: python3 python/tools/check_macos_wheel.py wheelhouse/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-arm64
           path: wheelhouse/*.whl
 
   publish:
     name: upload to PyPI (wheels only)
-    needs: wheels
-    # workflow_dispatch only dry-runs the wheels job; uploads happen on a release.
+    needs: [wheels-linux, wheels-macos]
+    # workflow_dispatch only dry-runs the wheel jobs; uploads happen on a release.
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: pypi
@@ -50,6 +70,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: wheels
+          pattern: wheels-*
+          merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1

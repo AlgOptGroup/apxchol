@@ -2,15 +2,19 @@
 # path-filtered so it only runs when C++/build/package files change, not on
 # doc/chart commits.
 #
-# Four job definitions; the library compiler matrix expands to two jobs:
+# Six job definitions; the library compiler matrix expands to two jobs:
 #   benchmark-harness — harness unit tests, CPU build and native CLI/stopping contracts
 #   library  — parent CMake consumer under GCC and Clang, full suite (ctest)
+#   macos    — parent CMake consumer under Apple Clang + Homebrew libomp, full suite
 #   python   — manylinux wheel build + pytest (also the PORTABILITY check: the
 #              old-glibc environment the release wheels are built in)
+#   python-macos — macOS arm64 wheel + pytest + bundled-runtime inspection
 #   octave   — mkoctfile MEX + the Octave test suite
 name: ci
 
 on:
+  # Manual runs, e.g. of a branch on a fork before it is proposed.
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -124,6 +128,34 @@ jobs:
       - name: Run unit tests
         run: ctest --test-dir build --output-on-failure
 
+  macos:
+    name: macOS (${{ matrix.name }}, build + ctest)
+    # macos-15 carries the oldest Apple Clang (Xcode 16) this branch supports.
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Clang + libomp
+            cmake_args: ''
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        # CMake and Ninja are preinstalled. No Homebrew Eigen: it is 5.x, which
+        # the root's find_package(Eigen3 3.3) ignores in favour of the fetch.
+        run: brew install libomp
+      - name: Toolchain
+        run: xcrun clang++ --version && cmake --version
+      - name: Configure + build (Release)
+        run: |
+          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                ${{ matrix.cmake_args }}
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+      - name: Check OpenMP linkage
+        run: otool -L build/apxchol/tests/unit_tests | grep -q libomp
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure
+
   python:
     name: python (manylinux wheel + pytest)
     runs-on: ubuntu-latest
@@ -141,6 +173,22 @@ jobs:
           CIBW_TEST_COMMAND: pytest {project}/python/tests -v
         with:
           package-dir: python
+
+  python-macos:
+    name: python (macOS arm64 wheel + pytest)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # python/pyproject.toml [tool.cibuildwheel.macos] builds libomp for the
+      # 14.0 deployment target, bundles it, and checks the loaded runtime.
+      - name: Build wheel + run pytest
+        uses: pypa/cibuildwheel@v3.2
+        env:
+          CIBW_BUILD: "cp312-macosx_arm64"
+        with:
+          package-dir: python
+      - name: Inspect wheel
+        run: python3 python/tools/check_macos_wheel.py wheelhouse/*.whl
 
   octave:
     name: octave (mkoctfile + tests)
