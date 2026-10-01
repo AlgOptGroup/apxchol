@@ -112,7 +112,7 @@ unset(_APXCHOL_SAVED_BUILD_TESTING_VALUE)
 unset(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE)
 
 # ── OpenMP (optional) ────────────────────────────────
-find_package(OpenMP)
+include(cmake/apxchol_openmp.cmake)
 
 # ── Build options ───────────────────────────────────
 option(APXCHOL_USE_CUDA "GPU build: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG with our own SpMV / vector kernels; links cudart only" OFF)
