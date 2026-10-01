@@ -2,7 +2,7 @@
 
 Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
 and SDDM systems. CPU setup and solve use OpenMP; CUDA provides an optional
-GPU-resident solve and Metal an optional Apple-GPU block solve. C++, Python
+GPU-resident solve and Metal an optional Apple-GPU block solve. C++, C, Python
 and Octave/MATLAB interfaces are included.
 
 ## Build and run
@@ -42,10 +42,24 @@ Eigen::VectorXd z = solver.apply(r);
 `apxchol::apx_cholesky` provides Eigen's preconditioner interface. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
+The `apxchol_c` target provides an exception-safe C ABI
+([`c_api.h`](include/apxchol/c_api.h)) over `cpu_solver` for other languages:
+opaque solver handles with create/solve/solve-block/apply/stats/factor export,
+versioned option structs and explicit statuses.
+
+```c
+apxchol_options opt;
+apxchol_options_default(&opt, sizeof opt);
+apxchol_solver* s;
+apxchol_solver_create(n, colptr, rowval, nzval, /*index_base=*/0, &opt, &s, err, sizeof err);
+apxchol_solver_solve(s, b, NULL, x, -1.0, -1, &info, err, sizeof err);
+apxchol_solver_destroy(s);
+```
+
 With `-DAPXCHOL_USE_METAL=ON` (macOS), `apxchol::metal_solver` solves up to 64
 right-hand sides in lockstep on the Apple GPU, with double-float recurrences
-and the CPU's factor. Default solves are unchanged. See
-[precision and storage](docs/precision.md).
+and the CPU's factor; it is also the C ABI's `APXCHOL_BACKEND_METAL`. Default
+solves are unchanged. See [precision and storage](docs/precision.md).
 
 ```cpp
 apxchol::metal_solver gpu(L);              // host factorization, GPU solves
