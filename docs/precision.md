@@ -11,7 +11,9 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
 | GPU triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
-| Outer CPU/GPU PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
+| Outer CPU/CUDA PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
+| Metal triangular solves | The CPU's FP32 stored factor; FP32 reciprocal diagonals and arithmetic | Apple GPUs have no FP64; same applied preconditioner as the CPU |
+| Metal block PCG | Double-float x, r, A p and inexact operator; FP32 p and z; double-float fixed-tree reductions; host FP64 exit residual | About 48-bit recurrences reach original-system tolerances without FP64 hardware |
 
 `APXCHOL_SPTRSV_FP16=0|1` selects triangular-solve storage at setup. CPU FP16
 is available only on targets with F16C; it is not promised by portable wheels.
@@ -36,6 +38,51 @@ arithmetic widens to FP64, GPU triangular-solve arithmetic to FP32. A stored
 FP16 factor is not an FP16 outer solve. CPU and GPU-host preparation share the
 narrowing/flush rules in `lowprec.h`; device finalization has its own CUDA
 implementation and is checked by the GPU finalization tests.
+
+## Apple Metal block PCG
+
+`apxchol::metal_solver` (`APXCHOL_USE_METAL=ON`, macOS) is an explicit opt-in;
+`solve()` and `cpu_solver` are unchanged.
+
+- **Preconditioner.** The same L11, compacting drop (`APXCHOL_FACTOR_DROP`) and
+  FP32 values as the CPU's FP32 storage; the schedule arrays are byte-identical
+  to `omp_sptrsv`'s CSR/CSC. Diagonals are applied as `fp32(1 / fp64(L_ii))`.
+  Arithmetic is FP32 fused multiply-add in dependency order; a row with more
+  than 32 dependencies accumulates them in 32 fixed virtual lanes folded in
+  order. `APXCHOL_SPTRSV_FP16` is ignored: the device always stores FP32.
+- **Recurrences.** x, r and A p are double-float (hi + lo FP32, about 48
+  significant bits). The operator is FP32 when every value is FP32-exact and
+  double-float otherwise (the CPU/CUDA exactness rule, without an override).
+  p and z are FP32; alpha and beta are FP32. Every reduction (p.Ap, r.r, sum r,
+  r.z, sum z) is double-float on one fixed tree that depends only on n.
+- **Scaling and stopping.** Each right-hand side (or b - A x0) is scaled by an
+  exact power of two so that its largest entry lies in [1, 2). The threshold
+  (tol ||b|| s)^2 is formed on the host in FP64 and compared as a double-float
+  with strict `<`. Breakdown (p.Ap <= 0 or non-finite) is not convergence and
+  its iteration is not counted.
+- **Reported residual.** ||b - A x|| / ||b|| is recomputed on the host in FP64
+  against the caller's operator (canonical lower values, as the CPU operator)
+  on the returned x; `converged` means it is below tol. The device's recursive
+  residual is reported separately and is not the acceptance criterion. With
+  about 48 bits in the recurrences and operator, the attainable original-system
+  residual is limited to roughly 2^-48 || |A| |x| || / ||b||; within that margin
+  of tol a column can stop on its recursive residual and still report
+  `converged = false`.
+- **Laplacians.** Every preconditioner application is centred (input and
+  output means in double-float); the CPU's `APXCHOL_CENTER_K` schedule does
+  not apply. The returned x is centred once more on the host in FP64.
+- **Reproducibility.** For one factor, a column's solution and iteration count
+  are bit-identical run to run and independent of the batch width, the other
+  columns, the column's position and the host OpenMP team (host folds use
+  fixed 4096-entry blocks). Not promised across devices, OS or Metal compiler
+  versions, nor equal to CPU or CUDA results. Independent parallel
+  factorizations remain a separate question, as above.
+- **Compilation and range.** Kernels are compiled at run time with
+  `MTLMathModeSafe`, precise math functions and `#pragma METAL fp contract(off)`
+  when accepted; `metal_solver::available()` also requires a device self-test
+  of the double-float operations to match the host bit for bit. Nonzero
+  operator and factor magnitudes must lie in [2^-100, 2^100]
+  (`std::domain_error` otherwise).
 
 ## Accuracy and configuration choice
 

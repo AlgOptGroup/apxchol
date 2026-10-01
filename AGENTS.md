@@ -107,8 +107,12 @@ choices, retired knobs, and measurements belong in
 - `APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS`: ON by default. Only tests
   require GoogleTest. `APXCHOL_BUILD_TOOLS`: OFF by default, independently builds
   `build/tests/bench_setup` and `build/tests/analyze_factor`, including when tests
-  are disabled. `analyze_factor MATRIX --solve [--seed N]` reports setup, solve,
+  are disabled. `analyze_factor MATRIX --solve [--seed N] [--tol T]` reports setup, solve,
   iterations and the original-system residual for a component-compatible RHS.
+  `--backend cpu|metal --columns K` solves K such columns (each projected per
+  component) and reports the iteration range, converged/K, the maximum FP64
+  original-system residual, and factor and solution digests; `--factor-threads N`
+  builds that factor on its own team so runs can share one factor.
 - CMake usage requirements on `apxchol_core` and `apxchol_mtx_input` must export
   C++23 and any native architecture flag actually used by the library. Parent
   projects do not inherit directory compile options; mismatched Eigen alignment
@@ -131,6 +135,12 @@ choices, retired knobs, and measurements belong in
   from source for 14.0 (`python/tools/build_libomp_macos.sh`); keep
   `check_macos_wheel.py` and `check_macos_runtime.py` passing.
 
+- `APXCHOL_USE_METAL=ON` (Apple only; exclusive with CUDA): the explicit
+  `apxchol::metal_solver` block PCG.
+  `src/metal_device.mm` is the only Objective-C++ source (no Eigen, no OpenMP);
+  it compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
+  links Metal, Foundation and CoreGraphics publicly. `solve()`, `cpu_solver`
+  and every default are unchanged; without the option no Metal source builds.
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
   competitors independently require cuSPARSE/cuBLAS; distinguish their driver
@@ -197,7 +207,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
   is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
   factor storage (GPU default on, CPU default off); scales and diagonals stay
-  fp32, while outer CPU/GPU PCG vectors and reductions stay fp64. See
+  fp32, while outer CPU/CUDA PCG vectors and reductions stay fp64; the Metal
+  block PCG uses double-float instead. See
   [precision and storage](docs/precision.md). The old GPU-only alias is
   retired. GPU block setup is explicit opt-in
   through `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, independent of host threads.
@@ -311,6 +322,26 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   performance acceptance: compare the default route against current main and
   the owned route against its frozen research reference, with original-system
   quality, setup, solve, one-RHS total, RSS and owner memory.
+- Metal block PCG (`metal_solver.h`, `src/metal_solver.cpp`, `src/metal_device.mm`):
+  host factorization as `cpu_solver`; the applied factor is the CPU's dropped
+  fp32 storage (`level_schedule.h` builds topological schedules from the shared
+  `cuda_host.h` preparation); the permuted operator shares
+  `detail::build_permuted_full_symmetric_csr` with CUDA. Up to 64 node-major
+  columns per lockstep batch, wider blocks in sequential batches. Double-float
+  x, r, A p (and an inexact operator), fp32 p, z and factor; every reduction on
+  one tree fixed by n and heavy rows on 32 virtual lanes, so a column's bits do
+  not depend on batch width, composition, position or host threads. The
+  reported residual is the host fp64 original-system residual (strict `<`);
+  breakdown is neither convergence nor a counted iteration; stagnation, x0 and
+  early exits mirror `cpu_solver`. No env knobs (`APXCHOL_SPTRSV_FP16` and
+  center-k do not apply). Keep the MSL kernels, `level_schedule::emulate_sweep`
+  and `metal_host.h` operation-for-operation identical. Validate with
+  `LevelSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*`
+  (device tests skip without a usable device),
+  `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 unit_tests --gtest_filter='MetalDevice*'`,
+  `tests/cmake_consumer` configured with `-DAPXCHOL_USE_METAL=ON`, and
+  `analyze_factor --solve --backend metal --columns 64`. Correctness only: no
+  performance claim has been established.
 - CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
   only after its upload has completed and no further host RHS reads remain.
 - GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`
