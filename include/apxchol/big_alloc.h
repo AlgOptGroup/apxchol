@@ -12,6 +12,8 @@
 ///     capacity should not become resident. ValueInitialize=false additionally
 ///     skips scalar value initialization and is valid only for trivial output
 ///     buffers that are overwritten in full before their first read.
+///   - both advice calls are Linux-only: other systems (macOS) keep the mmap
+///     path without the advice, since they define neither constant.
 ///
 /// Effect: removes the per-page minor faults that std::vector value-init
 /// triggers during first touch. For 128 MB allocations with 4 KB pages this
@@ -29,8 +31,9 @@
 // Linux 5.14 uapi constant; absent from older glibc headers (e.g. the
 // manylinux_2_28 wheel-build image, glibc 2.28). Define the raw value and let
 // pre-5.14 kernels return EINVAL — the madvise calls below are best-effort
-// advice and their return values are deliberately ignored.
-#ifndef MADV_POPULATE_WRITE
+// advice and their return values are deliberately ignored. The raw value is
+// Linux's; other kernels never receive it.
+#if defined(__linux__) && !defined(MADV_POPULATE_WRITE)
 #define MADV_POPULATE_WRITE 23
 #endif
 
@@ -89,9 +92,13 @@ public:
                              PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             if (raw == MAP_FAILED) throw std::bad_alloc{};
+#ifdef MADV_HUGEPAGE
             madvise(raw, padded, MADV_HUGEPAGE);
+#endif
+#ifdef MADV_POPULATE_WRITE
             if constexpr (Populate)
                 madvise(raw, padded, MADV_POPULATE_WRITE);
+#endif
             return static_cast<T*>(raw);
         }
         return static_cast<T*>(::operator new(padded, std::align_val_t(align)));
