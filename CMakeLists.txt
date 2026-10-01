@@ -289,6 +289,15 @@ endforeach()
 unset(_apxchol_target)
 unset(_apxchol_native_arch_option)
 
+# ── C ABI ────────────────────────────────────────────
+# Exception-safe C interface over cpu_solver (include/apxchol/c_api.h) for
+# non-C++ consumers. Not built with CUDA: there cpu_solver's triangular solves
+# run on the device, so its CPU backend would be mislabelled.
+if (NOT APXCHOL_USE_CUDA)
+    add_library(apxchol_c src/c_api.cpp)
+    target_link_libraries(apxchol_c PUBLIC apxchol_core)
+endif()
+
 # ── CLI solver ───────────────────────────────────────
 add_executable(apxchol src/main.cpp src/config.cpp)
 target_link_libraries(apxchol PRIVATE apxchol_core apxchol_mtx_input CLI11::CLI11
@@ -301,6 +310,8 @@ endif()
 
 # ── Tests ────────────────────────────────────────────
 if (APXCHOL_BUILD_TESTS)
+    # Only the C consumer of the C ABI needs a C compiler.
+    enable_language(C)
     enable_testing()
     add_subdirectory(tests)
 endif()

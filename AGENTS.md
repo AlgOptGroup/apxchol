@@ -171,6 +171,14 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
   convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
   `src/solve.cpp` provide the CPU compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
+- `include/apxchol/c_api.h` / `src/c_api.cpp` (target `apxchol_c`, not built
+  with CUDA) are the exception-safe C ABI over `cpu_solver` for Julia/Rust and
+  other non-C++ consumers. Structs carry `struct_size`; defaults come from
+  `solve_options{}`; NOT_CONVERGED writes outputs and is never an acceptance;
+  `converged` is `residual < tol` as in the PCG loop. `threads` scopes the
+  calling thread's OpenMP limit per call. n and nnz are limited to 2^31-1;
+  edge-index overflow still aborts. Keep `tests/test_c_header.c` layout asserts
+  in step with the header and bump `APXCHOL_C_ABI_VERSION` on layout changes.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
   M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
   adjacency versus an assembled operator. Bindings must use the operator
