@@ -609,7 +609,8 @@ TEST(LowPrec, FactorDropEdgeCases) {
 //   * a column whose scale cannot be represented falls back to s_j = 1 and
 //     the setup still produces finite, nonzero diagonals (it THROWS
 //     otherwise -- see omp.h "DEGENERATE SCALES");
-//   * the env is the only switch, and the retired GPU-only name is an alias.
+//   * APXCHOL_SPTRSV_FP16 is the only storage switch; the retired GPU-only
+//     name has no effect.
 namespace {
 bool fp16_available() { return apxchol::omp_sptrsv::fp16_supported(); }
 }  // namespace
