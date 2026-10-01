@@ -10,7 +10,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace apxchol::detail::metal {
@@ -69,6 +71,17 @@ inline constexpr std::uint32_t kStopTolerance = 1;
 inline constexpr std::uint32_t kStopBreakdown = 2;
 inline constexpr std::uint32_t kStopStagnation = 3;
 inline constexpr std::uint32_t kStopNonfinite = 4;
+
+/// The device cannot hold a buffer. A std::bad_alloc, so callers that map
+/// out-of-memory report it as one; what() names the buffer.
+class device_memory_error : public std::bad_alloc {
+public:
+    explicit device_memory_error(std::string what) : what_(std::move(what)) {}
+    const char* what() const noexcept override { return what_.c_str(); }
+
+private:
+    std::string what_;
+};
 
 // One step of a triangular solve (level_schedule::level_step, flattened):
 // kind 0 = light rows [first, last), 1 = heavy rows [first, last),
@@ -137,6 +150,8 @@ public:
     /// stride. Valid until the next reserve(); only touched between calls.
     df32* r() noexcept;
     df32* x() noexcept;
+    /// A p: dead once solve() returns, so the host may reuse it as scratch.
+    df32* ap() noexcept;
     float* p() noexcept;
     float* z() noexcept;
     column_state* columns() noexcept;

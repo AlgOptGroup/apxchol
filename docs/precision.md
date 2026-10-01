@@ -82,7 +82,8 @@ implementation and is checked by the GPU finalization tests.
   when accepted; `metal_solver::available()` also requires a device self-test
   of the double-float operations to match the host bit for bit. Nonzero
   operator and factor magnitudes must lie in [2^-100, 2^100]
-  (`std::domain_error` otherwise).
+  (`std::domain_error` otherwise) and n and the stored counts must fit the
+  device's 32-bit indices (`std::length_error`).
 
 ## Accuracy and configuration choice
 

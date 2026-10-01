@@ -82,7 +82,10 @@ public:
     /// device. Throws std::runtime_error if available() is false (before
     /// factorizing), std::invalid_argument on an operator-contract violation,
     /// std::domain_error on operator or factor magnitudes outside
-    /// [2^-100, 2^100] (or a zero factor diagonal).
+    /// [2^-100, 2^100] (or a zero factor diagonal), std::length_error when n
+    /// or a stored count exceeds the device's 32-bit indices, and a
+    /// std::bad_alloc (what() names the buffer) when the device cannot hold
+    /// the system.
     explicit metal_solver(const Eigen::SparseMatrix<double>& A,
                           const solve_options& opts = {}, checkpoint* cp = nullptr);
     /// Adopts an externally computed factorization of A (values retained).

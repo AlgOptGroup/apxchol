@@ -4,6 +4,7 @@
 // here; the device side (src/metal_device.mm) sees only plain arrays.
 #include "apxchol/solver/metal_solver.h"
 
+#include "apxchol/csc_work.h"
 #include "apxchol/solver/detail/metal_host.h"
 #include "apxchol/solver/pcg_cuda_host.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
@@ -180,6 +181,9 @@ struct metal_solver::impl {
     std::unique_ptr<int[]> op_col;
     std::unique_ptr<double[]> op_val;
     std::int64_t op_nnz = 0;
+    // op_ptr at the metal_host::kFoldBlock row boundaries: the exit check's
+    // fold blocks are split across threads by stored entries.
+    std::vector<int> fold_block_ptr;
     // Level structure only (plan_steps reads level_ptr / heavy_ptr).
     ls::level_solve fwd_levels, bwd_levels;
     std::unique_ptr<dm::engine> device;
@@ -203,16 +207,26 @@ struct metal_solver::impl {
         return plans.emplace(kc, std::make_pair(flatten(fwd_levels), flatten(bwd_levels))).first->second;
     }
 
-    // y = A' x in fp64, rows in parallel, each row summed in storage order.
+    // y = A' x in fp64, each row summed in storage order; rows are split across
+    // threads by stored entries (detail::work_balanced_range).
     void spmv(const double* x, double* y) const {
         const int* ptr = op_ptr.data();
         const int* col = op_col.get();
         const double* val = op_val.get();
-        #pragma omp parallel for schedule(static)
-        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
-            double acc = 0.0;
-            for (int p = ptr[i]; p < ptr[i + 1]; ++p) acc += val[p] * x[col[p]];
-            y[i] = acc;
+        const std::ptrdiff_t rows = static_cast<std::ptrdiff_t>(n);
+        #pragma omp parallel
+        {
+            int tid = 0, nt = 1;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+            nt = omp_get_num_threads();
+#endif
+            const auto [lo, hi] = detail::work_balanced_range(ptr, rows, tid, nt);
+            for (std::ptrdiff_t i = lo; i < hi; ++i) {
+                double acc = 0.0;
+                for (int p = ptr[i]; p < ptr[i + 1]; ++p) acc += val[p] * x[col[p]];
+                y[i] = acc;
+            }
         }
     }
 
@@ -245,7 +259,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::invalid_argument(
             "metal_solver: factorization values were released; pass a freshly computed factorization");
     if (n >= (std::size_t{1} << 32))
-        throw std::runtime_error("metal_solver: n exceeds the device's 32-bit indices");
+        throw std::length_error("metal_solver: n exceeds the device's 32-bit indices");
     laplacian = !F.sddm;
     m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
 
@@ -263,10 +277,13 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         src = &compressed;
     }
     if (src->nonZeros() > std::numeric_limits<int>::max())
-        throw std::runtime_error("metal_solver: operator exceeds 32-bit offsets");
+        throw std::length_error("metal_solver: operator exceeds 32-bit offsets");
     bool exact = true;
     detail::build_permuted_full_symmetric_csr(*src, F.perm, op_ptr, op_col, op_val, op_nnz, exact);
     const std::size_t nnz = static_cast<std::size_t>(op_nnz);
+    fold_block_ptr.resize((n + mh::kFoldBlock - 1) / mh::kFoldBlock + 1);
+    for (std::size_t b = 0; b < fold_block_ptr.size(); ++b)
+        fold_block_ptr[b] = op_ptr[std::min(n, b * mh::kFoldBlock)];
     std::vector<float> hi(nnz), lo(exact ? 0 : nnz);
     bool in_range = true;
     #pragma omp parallel for schedule(static) reduction(&& : in_range)
@@ -295,7 +312,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     limits.row_threads = std::min(st.row_threads, st.heavy_threads);
     block_columns = mh::choose_block_columns(n, limits);
     if (block_columns == 0)
-        throw std::runtime_error("metal_solver: the system does not fit the Metal device (n = " +
+        throw dm::device_memory_error("metal_solver: the system does not fit the Metal device (n = " +
                                  std::to_string(n) + ", operator nnz = " + std::to_string(nnz) + ")");
 
     static_assert(sizeof(int) == sizeof(std::uint32_t));
@@ -419,41 +436,80 @@ metal_block_result metal_solver::solve(block_cref B, Eigen::Ref<Eigen::MatrixXd>
     cp.tick();
 
     const node_index* perm = s.F.perm.data();
-    std::vector<double> work, column(s.n);
+    const std::size_t nn = s.n;
 
-    // A column resolved on the host from its permuted x (centred for a
-    // Laplacian), with the fp64 residual on the original operator.
-    auto finish = [&](Eigen::Index c, std::vector<double>& xp, const std::vector<double>& bp,
-                      double bnorm, Eigen::Index iterations, double recursive, metal_stop stop) {
+    // ||b|| (the fixed fold blocks, in the caller's order) and max |b|: one
+    // pass per column, one column per thread.
+    std::vector<double> bnorm(static_cast<std::size_t>(k)), bmax(static_cast<std::size_t>(k));
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (Eigen::Index c = 0; c < k; ++c) {
+        const double* b = B.col(c).data();
+        bnorm[static_cast<std::size_t>(c)] =
+            std::sqrt(mh::fold_sum_serial(nn, [b](std::size_t i) { return b[i] * b[i]; }));
+        bmax[static_cast<std::size_t>(c)] = mh::fold_max_abs(b, nn);
+    }
+
+    // A warm-started column resolved on the host from its permuted x (centred
+    // for a Laplacian), with the fp64 residual on the original operator.
+    std::vector<double> work, column;
+    auto finish_host = [&](Eigen::Index c, std::vector<double>& xp, const std::vector<double>& bp,
+                           Eigen::Index iterations, double recursive, metal_stop stop) {
+        column.resize(nn);
         if (s.laplacian) s.centre(xp.data());
         metal_column_result& out = result.columns[static_cast<std::size_t>(c)];
         out.iterations = iterations;
-        out.residual = s.residual_norm(bp.data(), xp.data(), work) / bnorm;
+        out.residual = s.residual_norm(bp.data(), xp.data(), work) / bnorm[static_cast<std::size_t>(c)];
         out.recursive_residual = recursive;
         out.converged = out.residual < tol;
         out.stop = stop;
-        mh::gather(xp.data(), perm, s.n, column.data());
+        mh::gather(xp.data(), perm, nn, column.data());
         X.col(c) = Eigen::Map<const Eigen::VectorXd>(column.data(), n);
     };
 
     struct job {
         Eigen::Index c;
-        std::vector<double> bp, x0p, w;
-        double bnorm, scale, initial;
+        double scale, initial;
+        std::vector<double> x0p, w;  // warm start only: permuted x0 and b - A x0
     };
     std::vector<job> batch;
+    const std::size_t blocks = s.fold_block_ptr.size() - 1;
+    std::vector<double> part;
 
+    // Packs a batch node-major, runs it on the device and checks every column
+    // on the host. The block passes below touch each node's kc entries
+    // contiguously; per column they perform the same fp64 operations, in the
+    // same order, as the one-column definitions (pack_column, unpack_column,
+    // centre, residual_norm, gather), so a column's bits do not depend on kc.
     auto run_batch = [&] {
         if (batch.empty()) return;
         const std::uint32_t kc = static_cast<std::uint32_t>(batch.size());
         s.device->reserve(kc);
+        std::vector<const double*> bcol(kc), wcol(kc), x0col(kc);
+        std::vector<double*> xcol(kc);
+        std::vector<double> scale(kc);
+        for (std::uint32_t j = 0; j < kc; ++j) {
+            const job& jb = batch[j];
+            bcol[j] = B.col(jb.c).data();
+            xcol[j] = X.col(jb.c).data();
+            wcol[j] = jb.w.empty() ? nullptr : jb.w.data();
+            x0col[j] = jb.x0p.empty() ? nullptr : jb.x0p.data();
+            scale[j] = jb.scale;
+        }
+        // r = 2^e (b - A x0), node-major (cold columns read b directly).
         mh::df* r = as_df(s.device->r());
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(nn); ++v) {
+            const std::size_t i = static_cast<std::size_t>(perm[v]);
+            mh::df* row = r + i * kc;
+            for (std::uint32_t j = 0; j < kc; ++j)
+                row[j] = mh::split(scale[j] * (wcol[j] != nullptr ? wcol[j][i] : bcol[j][v]));
+        }
         dm::column_state* cs = s.device->columns();
         for (std::uint32_t j = 0; j < kc; ++j) {
             job& jb = batch[j];
-            mh::pack_column(jb.w.data(), s.n, jb.scale, kc, j, r);
-            const double thr = tol * jb.bnorm * jb.scale;
-            const double ref = jb.bnorm * jb.scale;
+            const double bn = bnorm[static_cast<std::size_t>(jb.c)];
+            const double thr = tol * bn * jb.scale;
+            const double ref = bn * jb.scale;
             cs[j] = dm::column_state{};
             cs[j].thr = to_device(mh::split_saturated(thr * thr));
             cs[j].prev = to_device(mh::split_saturated(ref * ref));
@@ -465,51 +521,142 @@ metal_block_result metal_solver::solve(block_cref B, Eigen::Ref<Eigen::MatrixXd>
         s.device->solve(kc, plans.first, plans.second, static_cast<std::uint32_t>(max_iter), window,
                         s.check_every);
         cp("device");
-        const mh::df* x = as_df(s.device->x());
-        for (std::uint32_t j = 0; j < kc; ++j) {
-            job& jb = batch[j];
-            const dm::column_state st = cs[j];
-            std::vector<double> xp(s.n);
-            mh::unpack_column(x, s.n, jb.scale, kc, j, xp.data());
-            if (!jb.x0p.empty()) {
-                #pragma omp parallel for schedule(static)
-                for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(s.n); ++q) xp[q] += jb.x0p[q];
+
+        // x in fp64 (+ x0), node-major, into the dead A p buffer; b permuted
+        // node-major into the dead r buffer.
+        const mh::df* xs = as_df(s.device->x());
+        double* xd = reinterpret_cast<double*>(s.device->ap());
+        double* bd = reinterpret_cast<double*>(s.device->r());
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(nn); ++q) {
+            const std::size_t i = static_cast<std::size_t>(q);
+            for (std::uint32_t j = 0; j < kc; ++j) {
+                double t = mh::join(xs[i * kc + j]) / scale[j];
+                if (x0col[j] != nullptr) t += x0col[j][i];
+                xd[i * kc + j] = t;
             }
-            const double recursive = st.iters > 0
-                ? std::sqrt(std::max(0.0, mh::join({st.rr.hi, st.rr.lo}))) / (jb.bnorm * jb.scale)
+        }
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(nn); ++v) {
+            double* row = bd + static_cast<std::size_t>(perm[v]) * kc;
+            for (std::uint32_t j = 0; j < kc; ++j) row[j] = bcol[j][v];
+        }
+        // Per-block column sums of fp64 terms, folded as metal_host::fold_sum.
+        part.assign(blocks * kc, 0.0);
+        auto fold_columns = [&](std::vector<double>& sums) {
+            sums.assign(kc, 0.0);
+            for (std::size_t b = 0; b < blocks; ++b)
+                for (std::uint32_t j = 0; j < kc; ++j) sums[j] += part[b * kc + j];
+        };
+        std::vector<double> sums;
+        if (s.laplacian) {  // centre: x -= mean(x)
+            #pragma omp parallel for schedule(static)
+            for (std::ptrdiff_t b = 0; b < static_cast<std::ptrdiff_t>(blocks); ++b) {
+                double* pb = part.data() + static_cast<std::size_t>(b) * kc;
+                const std::size_t lo = static_cast<std::size_t>(b) * mh::kFoldBlock;
+                const std::size_t hi = std::min(nn, lo + mh::kFoldBlock);
+                for (std::size_t i = lo; i < hi; ++i)
+                    for (std::uint32_t j = 0; j < kc; ++j) pb[j] += xd[i * kc + j];
+            }
+            fold_columns(sums);
+            for (std::uint32_t j = 0; j < kc; ++j) sums[j] /= static_cast<double>(nn);
+            #pragma omp parallel for schedule(static)
+            for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(nn); ++q)
+                for (std::uint32_t j = 0; j < kc; ++j) xd[static_cast<std::size_t>(q) * kc + j] -= sums[j];
+            part.assign(blocks * kc, 0.0);
+        }
+        // ||b - A' x||^2 per column: one pass over the operator for the block,
+        // fold blocks split across threads by stored entries.
+        {
+            const int* ptr = s.op_ptr.data();
+            const int* col = s.op_col.get();
+            const double* val = s.op_val.get();
+            #pragma omp parallel
+            {
+                int tid = 0, nt = 1;
+#ifdef _OPENMP
+                tid = omp_get_thread_num();
+                nt = omp_get_num_threads();
+#endif
+                const auto [blo, bhi] = detail::work_balanced_range(
+                    s.fold_block_ptr.data(), static_cast<std::ptrdiff_t>(blocks), tid, nt);
+                double acc[mh::kMaxBlockColumns];
+                for (std::ptrdiff_t b = blo; b < bhi; ++b) {
+                    double* pb = part.data() + static_cast<std::size_t>(b) * kc;
+                    const std::size_t lo = static_cast<std::size_t>(b) * mh::kFoldBlock;
+                    const std::size_t hi = std::min(nn, lo + mh::kFoldBlock);
+                    for (std::size_t i = lo; i < hi; ++i) {
+                        for (std::uint32_t j = 0; j < kc; ++j) acc[j] = 0.0;
+                        for (int p = ptr[i]; p < ptr[i + 1]; ++p) {
+                            const double a = val[p];
+                            const double* xr = xd + static_cast<std::size_t>(col[p]) * kc;
+                            for (std::uint32_t j = 0; j < kc; ++j) acc[j] += a * xr[j];
+                        }
+                        const double* br = bd + i * kc;
+                        for (std::uint32_t j = 0; j < kc; ++j) {
+                            const double d = br[j] - acc[j];
+                            const double sq = d * d;
+                            pb[j] += sq;
+                        }
+                    }
+                }
+            }
+            fold_columns(sums);
+        }
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(nn); ++v) {
+            const double* row = xd + static_cast<std::size_t>(perm[v]) * kc;
+            for (std::uint32_t j = 0; j < kc; ++j) xcol[j][v] = row[j];
+        }
+        for (std::uint32_t j = 0; j < kc; ++j) {
+            const job& jb = batch[j];
+            const dm::column_state st = cs[j];
+            const double bn = bnorm[static_cast<std::size_t>(jb.c)];
+            metal_column_result& out = result.columns[static_cast<std::size_t>(jb.c)];
+            out.iterations = st.iters;
+            out.residual = std::sqrt(sums[j]) / bn;
+            out.recursive_residual = st.iters > 0
+                ? std::sqrt(std::max(0.0, mh::join({st.rr.hi, st.rr.lo}))) / (bn * jb.scale)
                 : jb.initial;
-            finish(jb.c, xp, jb.bp, jb.bnorm, st.iters, recursive, stop_of(st.stop));
+            out.converged = out.residual < tol;
+            out.stop = stop_of(st.stop);
         }
         cp("exit_check");
         batch.clear();
     };
 
     for (Eigen::Index c = 0; c < k; ++c) {
-        job jb;
-        jb.c = c;
-        jb.bp.resize(s.n);
-        mh::scatter(B.col(c).data(), perm, s.n, jb.bp.data());
-        jb.bnorm = std::sqrt(mh::fold_sum_squares(jb.bp.data(), s.n));
         metal_column_result& out = result.columns[static_cast<std::size_t>(c)];
-        if (jb.bnorm == 0.0) {
+        const double bn = bnorm[static_cast<std::size_t>(c)];
+        if (bn == 0.0) {
             X.col(c).setZero();
             out.converged = 0.0 < tol;
             out.stop = metal_stop::zero_rhs;
             continue;
         }
+        job jb;
+        jb.c = c;
+        double max_abs = bmax[static_cast<std::size_t>(c)];
         const bool warm = X0 != nullptr && !X0->col(c).isZero(0.0);
         if (warm) {
+            std::vector<double> bp(s.n);
+            mh::scatter(B.col(c).data(), perm, s.n, bp.data());
             jb.x0p.resize(s.n);
             mh::scatter(X0->col(c).data(), perm, s.n, jb.x0p.data());
             jb.w.resize(s.n);
             s.spmv(jb.x0p.data(), jb.w.data());
             #pragma omp parallel for schedule(static)
             for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(s.n); ++q)
-                jb.w[q] = jb.bp[q] - jb.w[q];
-            jb.initial = std::sqrt(mh::fold_sum_squares(jb.w.data(), s.n)) / jb.bnorm;
+                jb.w[q] = bp[q] - jb.w[q];
+            jb.initial = std::sqrt(mh::fold_sum_squares(jb.w.data(), s.n)) / bn;
             if (jb.initial < tol || max_iter == 0) {
-                finish(c, jb.x0p, jb.bp, jb.bnorm, 0, jb.initial,
-                       jb.initial < tol ? metal_stop::initial_guess : metal_stop::max_iterations);
+                finish_host(c, jb.x0p, bp, 0, jb.initial,
+                            jb.initial < tol ? metal_stop::initial_guess : metal_stop::max_iterations);
+                continue;
+            }
+            max_abs = mh::fold_max_abs(jb.w.data(), s.n);
+            if (max_abs == 0.0) {  // b - A x0 vanished in fp64: x0 is exact
+                finish_host(c, jb.x0p, bp, 0, 0.0, metal_stop::initial_guess);
                 continue;
             }
         } else {
@@ -523,12 +670,6 @@ metal_block_result metal_solver::solve(block_cref B, Eigen::Ref<Eigen::MatrixXd>
                 out.stop = metal_stop::max_iterations;
                 continue;
             }
-            jb.w = jb.bp;
-        }
-        const double max_abs = mh::fold_max_abs(jb.w.data(), s.n);
-        if (max_abs == 0.0) {  // b - A x0 vanished in fp64: x0 is exact
-            finish(c, jb.x0p, jb.bp, jb.bnorm, 0, 0.0, metal_stop::initial_guess);
-            continue;
         }
         jb.scale = mh::pow2_scale(max_abs);
         batch.push_back(std::move(jb));

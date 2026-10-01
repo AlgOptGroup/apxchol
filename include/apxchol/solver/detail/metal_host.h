@@ -162,6 +162,20 @@ double fold_sum(std::size_t n, Term&& term) {
     return s;
 }
 
+/// fold_sum on the calling thread alone (the same blocks, so the same bits), for
+/// callers that already run one column per OpenMP thread.
+template <class Term>
+double fold_sum_serial(std::size_t n, Term&& term) {
+    double total = 0.0;
+    for (std::size_t lo = 0; lo < n; lo += kFoldBlock) {
+        const std::size_t hi = std::min(n, lo + kFoldBlock);
+        double s = 0.0;
+        for (std::size_t i = lo; i < hi; ++i) s += term(i);
+        total += s;
+    }
+    return total;
+}
+
 inline double fold_sum_squares(const double* v, std::size_t n) {
     return fold_sum(n, [v](std::size_t i) { return v[i] * v[i]; });
 }

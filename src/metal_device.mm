@@ -179,13 +179,18 @@ id<MTLBuffer> upload(id<MTLDevice> device, const void* data, std::size_t bytes) 
     return b;
 }
 
-// Waits for `cb` and returns its error text ("" on success).
-std::string finish(id<MTLCommandBuffer> cb) {
-    [cb commit];
+// Waits for a committed `cb` and returns its error text ("" on success).
+std::string wait(id<MTLCommandBuffer> cb) {
     [cb waitUntilCompleted];
     if ([cb status] != MTLCommandBufferStatusCompleted || [cb error] != nil)
         return "Metal command buffer failed: " + describe([cb error]);
     return {};
+}
+
+// Commits `cb`, waits for it and returns its error text ("" on success).
+std::string finish(id<MTLCommandBuffer> cb) {
+    [cb commit];
+    return wait(cb);
 }
 
 }  // namespace
@@ -387,9 +392,11 @@ struct engine::impl {
     }
 
     bool any_active(std::uint32_t kc) const {
+        // Read while a speculative command buffer may still be running: the
+        // flags only ever fall from 1 to 0, so a stale 1 costs one more batch.
         const auto* cs = static_cast<const column_state*>([cols contents]);
         for (std::uint32_t c = 0; c < kc; ++c)
-            if (cs[c].active != 0) return true;
+            if (__atomic_load_n(&cs[c].active, __ATOMIC_RELAXED) != 0) return true;
         return false;
     }
 
@@ -439,7 +446,7 @@ engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_array
         ok = load(s.fwd, fwd) && ok;
         ok = load(s.bwd, bwd) && ok;
     }
-    if (!ok) throw std::runtime_error("Metal buffer allocation failed for the operator or factor");
+    if (!ok) throw device_memory_error("Metal buffer allocation failed for the operator or factor");
 }
 
 engine::~engine() {
@@ -468,7 +475,7 @@ void engine::reserve(std::uint32_t kc) {
     }
     if (!ok) {
         s.cap = 0;
-        throw std::runtime_error("Metal buffer allocation failed for the block vectors");
+        throw device_memory_error("Metal buffer allocation failed for the block vectors");
     }
     s.cap = kc;
 }
@@ -476,6 +483,7 @@ void engine::reserve(std::uint32_t kc) {
 std::uint32_t engine::capacity() const noexcept { return impl_->cap; }
 df32* engine::r() noexcept { return static_cast<df32*>([impl_->r contents]); }
 df32* engine::x() noexcept { return static_cast<df32*>([impl_->x contents]); }
+df32* engine::ap() noexcept { return static_cast<df32*>([impl_->ap contents]); }
 float* engine::p() noexcept { return static_cast<float*>([impl_->p contents]); }
 float* engine::z() noexcept { return static_cast<float*>([impl_->z contents]); }
 column_state* engine::columns() noexcept { return static_cast<column_state*>([impl_->cols contents]); }
@@ -486,33 +494,57 @@ void engine::solve(std::uint32_t kc, const std::vector<tri_step>& fwd_plan,
     impl& s = *impl_;
     if (kc == 0 || kc > s.cap) throw std::logic_error("metal engine: batch exceeds the reserved block");
     s.zero_grounded_row(kc);
+    // Two command buffers in flight: the next batch is encoded and committed
+    // before the host waits for the previous one, so encoding overlaps the GPU.
+    // A batch committed after the last column froze runs as a no-op (every
+    // kernel skips inactive columns) and never exceeds max_iter.
     std::string error;
     std::uint32_t it = 0;
-    bool first = true;
-    while (error.empty() && (first || (it < max_iter && s.any_active(kc)))) {
-        const std::uint32_t batch = std::min(std::max<std::uint32_t>(check_every, 1), max_iter - it);
-        @autoreleasepool {
-            id<MTLCommandBuffer> cb = [s.queue commandBuffer];
-            if (first) {
-                id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-                [blit fillBuffer:s.x range:NSMakeRange(0, static_cast<NSUInteger>(s.n) * kc * sizeof(df32)) value:0];
-                [blit endEncoding];
+    id<MTLCommandBuffer> pending = nil;
+    for (bool first = true;; first = false) {
+        id<MTLCommandBuffer> next = nil;
+        if (first || it < max_iter) {
+            const std::uint32_t batch =
+                std::min(std::max<std::uint32_t>(check_every, 1), max_iter - it);
+            @autoreleasepool {
+                next = [s.queue commandBuffer];
+                if (first) {
+                    id<MTLBlitCommandEncoder> blit = [next blitCommandEncoder];
+                    [blit fillBuffer:s.x range:NSMakeRange(0, static_cast<NSUInteger>(s.n) * kc * sizeof(df32)) value:0];
+                    [blit endEncoding];
+                }
+                id<MTLComputeCommandEncoder> enc = [next computeCommandEncoder];
+                if (first) {
+                    s.encode_initial_mu(enc, kc);
+                    s.encode_precond(enc, kc, fwd_plan, bwd_plan);
+                    s.encode_reduce(enc, kc, kReduceRz);
+                    s.encode_finalize(enc, kc, kFinalizeRzInit, 0, window);
+                    s.encode_p_update(enc, kc);
+                }
+                for (std::uint32_t b = 0; b < batch; ++b)
+                    s.encode_iteration(enc, kc, it + b + 1, window, fwd_plan, bwd_plan);
+                [enc endEncoding];
+                [next commit];
             }
-            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-            if (first) {
-                s.encode_initial_mu(enc, kc);
-                s.encode_precond(enc, kc, fwd_plan, bwd_plan);
-                s.encode_reduce(enc, kc, kReduceRz);
-                s.encode_finalize(enc, kc, kFinalizeRzInit, 0, window);
-                s.encode_p_update(enc, kc);
-            }
-            for (std::uint32_t b = 0; b < batch; ++b)
-                s.encode_iteration(enc, kc, it + b + 1, window, fwd_plan, bwd_plan);
-            [enc endEncoding];
-            error = finish(cb);
+            it += batch;
         }
-        it += batch;
-        first = false;
+        if (pending != nil) {
+            @autoreleasepool {
+                error = wait(pending);
+            }
+            pending = nil;
+        }
+        const bool more = error.empty() && next != nil && it < max_iter && s.any_active(kc);
+        if (!more) {
+            if (next != nil) {
+                @autoreleasepool {
+                    const std::string e = wait(next);
+                    if (error.empty()) error = e;
+                }
+            }
+            break;
+        }
+        pending = next;
     }
     if (!error.empty()) throw std::runtime_error(error);
 }

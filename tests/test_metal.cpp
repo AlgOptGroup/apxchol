@@ -529,6 +529,48 @@ TEST(MetalDevice, HostThreadCountDoesNotChangeBits) {
 #endif
 }
 
+TEST(MetalDevice, WarmBlockColumnsKeepBitsAcrossThreads) {
+    REQUIRE_METAL();
+#ifndef _OPENMP
+    GTEST_SKIP() << "serial build";
+#else
+    // Above the 4096-row fold blocks, so the block exit check splits across
+    // threads; two columns start from a nonzero x0 and still iterate.
+    const Sparse A = grid(90, 80);
+    apxchol::factorization F = apxchol::factorize(A);
+    const Eigen::Index n = A.rows(), k = 7;
+    Eigen::MatrixXd B(n, k), X0 = Eigen::MatrixXd::Zero(n, k);
+    for (Eigen::Index c = 0; c < k; ++c) B.col(c) = rhs(n, static_cast<unsigned>(c + 11), true);
+    X0.col(2) = rhs(n, 31, false);
+    X0.col(5) = rhs(n, 32, false);
+    const apxchol::metal_solver::block_cref X0r(X0);
+    const int saved = omp_get_max_threads();
+    std::vector<Eigen::MatrixXd> runs;
+    for (const int threads : {1, 6}) {
+        omp_set_num_threads(threads);
+        const apxchol::metal_solver slv(A, apxchol::factorization(F));
+        const apxchol::metal_block_result res = slv.solve(B, 1e-10, 500, &X0r);
+        for (Eigen::Index c = 0; c < k; ++c) {
+            SCOPED_TRACE(c);
+            const auto& col = res.columns[static_cast<std::size_t>(c)];
+            EXPECT_TRUE(col.converged);
+            EXPECT_GT(col.iterations, 0);
+            const Eigen::VectorXd bc = B.col(c), x0c = X0.col(c);
+            const apxchol::solve_result one =
+                slv.solve(bc, 1e-10, 500, x0c.isZero(0.0) ? nullptr : &x0c);
+            EXPECT_TRUE(same_bytes(res.X.col(c), one.x));
+            EXPECT_EQ(col.iterations, one.iterations);
+            EXPECT_EQ(col.residual, one.residual);
+            EXPECT_LT(true_residual(A, bc, one.x), 1e-10);
+        }
+        runs.push_back(res.X);
+    }
+    omp_set_num_threads(saved);
+    EXPECT_EQ(0, std::memcmp(runs[0].data(), runs[1].data(),
+                             static_cast<std::size_t>(runs[0].size()) * sizeof(double)));
+#endif
+}
+
 TEST(MetalDevice, LaplacianX0ConstantIrrelevant) {
     REQUIRE_METAL();
     const Sparse A = grid(26, 26);

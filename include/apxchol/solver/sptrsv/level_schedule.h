@@ -116,7 +116,7 @@ inline level_solve build(const cuda_host::csr_int<float>& A, bool forward) {
     std::size_t deps = 0;
     for (std::uint32_t i = 0; i < m; ++i) deps += static_cast<std::size_t>(dep_end(i) - dep_begin(i));
     if (deps > std::numeric_limits<std::uint32_t>::max())
-        throw std::runtime_error("apxchol level_schedule: factor exceeds 32-bit offsets");
+        throw std::length_error("apxchol level_schedule: factor exceeds 32-bit offsets");
     s.ptr.reserve(static_cast<std::size_t>(m) + 1);
     s.ptr.push_back(0);
     s.col.reserve(deps);

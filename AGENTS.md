@@ -333,7 +333,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   not depend on batch width, composition, position or host threads. The
   reported residual is the host fp64 original-system residual (strict `<`);
   breakdown is neither convergence nor a counted iteration; stagnation, x0 and
-  early exits mirror `cpu_solver`. No env knobs (`APXCHOL_SPTRSV_FP16` and
+  early exits mirror `cpu_solver`. Host passes are block-wide (node-major pack,
+  unpack, centring, and one work-balanced fp64 pass over the operator for the
+  batch's exit residuals, staged in the dead r and A p buffers) and perform
+  each column's one-column operations in the same order; two command buffers
+  are in flight. No env knobs (`APXCHOL_SPTRSV_FP16` and
   center-k do not apply). Keep the MSL kernels, `level_schedule::emulate_sweep`
   and `metal_host.h` operation-for-operation identical. Validate with
   `LevelSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*`
