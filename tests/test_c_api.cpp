@@ -21,6 +21,11 @@
 #include <thread>
 #include <vector>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -543,6 +548,29 @@ TEST(CApi, FactorExportStructureAndRetention) {
     }
 }
 
+#if defined(__unix__) || defined(__APPLE__)
+TEST(CApi, OlderSmallerOptionsStructIsNotReadPastItsEnd) {
+    // A 16-byte options struct from a hypothetical older header, ending at a
+    // PROT_NONE page: create must reject it from struct_size alone.
+    const long page = sysconf(_SC_PAGESIZE);
+    void* mem = mmap(nullptr, static_cast<std::size_t>(2 * page), PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON, -1, 0);
+    ASSERT_NE(mem, MAP_FAILED);
+    char* base = static_cast<char*>(mem);
+    ASSERT_EQ(mprotect(base + page, static_cast<std::size_t>(page), PROT_NONE), 0);
+    auto* small = reinterpret_cast<std::uint32_t*>(base + page - 16);
+    std::memset(small, 0, 16);
+    small[0] = 16;  // struct_size
+    const csc64 c = to_csc64(grid_laplacian(4, 4));
+    handle h;
+    std::string message;
+    EXPECT_EQ(create(c, reinterpret_cast<const apxchol_options*>(small), h, 0, &message),
+              APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_NE(message.find("struct_size"), std::string::npos) << message;
+    munmap(mem, static_cast<std::size_t>(2 * page));
+}
+#endif
+
 TEST(CApi, AdjacencyIsAnOperatorError) {
     const csc64 c{3, {0, 1, 3, 4}, {1, 0, 2, 1}, {1.0, 1.0, 1.0, 1.0}};
     handle h;
@@ -714,6 +742,25 @@ TEST(CApi, MetalBackendRoundTrip) {
     EXPECT_EQ(apxchol_solver_solve_block(h.s, 1, bad.data(), nullptr, x.data(), -1.0, -1, nullptr,
                                          nullptr, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(CApi, MetalUnrepresentableOperatorIsUnsupported) {
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    // A valid SDDM operator with one off-diagonal below the device's 2^-100
+    // floor: the Metal backend cannot represent it, the CPU backend solves it.
+    Sparse A = grid_laplacian(6, 6, 0.5);
+    A.coeffRef(1, 0) = -1e-35;
+    A.coeffRef(0, 1) = -1e-35;
+    const csc64 c = to_csc64(A);
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_METAL;
+    handle h;
+    std::string message;
+    EXPECT_EQ(create(c, &o, h, 0, &message), APXCHOL_STATUS_UNSUPPORTED);
+    EXPECT_NE(message.find("2^-100"), std::string::npos) << message;
+    o.backend = APXCHOL_BACKEND_CPU;
+    handle cpu;
+    EXPECT_EQ(create(c, &o, cpu), APXCHOL_STATUS_SUCCESS);
 }
 #endif
 

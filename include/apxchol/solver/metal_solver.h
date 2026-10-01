@@ -85,7 +85,9 @@ public:
     /// [2^-100, 2^100] (or a zero factor diagonal), std::length_error when the
     /// factor or the operator (above 2^30 stored entries) exceeds the device's
     /// 32-bit offsets, and a std::bad_alloc (what() names the buffer) when the
-    /// device cannot hold the system.
+    /// device cannot hold the system. The C API reports the std::domain_error
+    /// and std::length_error cases as APXCHOL_STATUS_UNSUPPORTED and the
+    /// std::bad_alloc as APXCHOL_STATUS_OUT_OF_MEMORY.
     explicit metal_solver(const Eigen::SparseMatrix<double>& A,
                           const solve_options& opts = {}, checkpoint* cp = nullptr);
     /// Adopts an externally computed factorization of A (values retained).

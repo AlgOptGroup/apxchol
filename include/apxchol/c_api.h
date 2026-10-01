@@ -57,8 +57,9 @@ enum {
     APXCHOL_STATUS_INVALID_ARGUMENT = 2, /* pointers, sizes, CSC, option values */
     APXCHOL_STATUS_INVALID_OPERATOR = 3, /* the operator contract rejected A */
     APXCHOL_STATUS_NO_FACTOR_VALUES = 4, /* factor export without keep_factor_values */
-    APXCHOL_STATUS_UNSUPPORTED = 5,      /* backend not built/available; newer struct */
-    APXCHOL_STATUS_OUT_OF_MEMORY = 6,
+    APXCHOL_STATUS_UNSUPPORTED = 5,      /* backend not built/available; newer struct; an
+                                            operator the backend cannot represent */
+    APXCHOL_STATUS_OUT_OF_MEMORY = 6,    /* host or device memory */
     APXCHOL_STATUS_INTERNAL_ERROR = 7
 };
 

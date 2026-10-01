@@ -21,6 +21,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <typeinfo>
 #include <vector>
 
 #ifdef _OPENMP
@@ -70,8 +71,11 @@ apxchol_status guarded(char* message, std::size_t capacity, bool creating,
     } catch (const c_api_error& e) {
         write_message(message, capacity, e.what());
         return e.status;
-    } catch (const std::bad_alloc&) {
-        write_message(message, capacity, "out of memory");
+    } catch (const std::bad_alloc& e) {
+        // A plain std::bad_alloc only says "std::bad_alloc"; the Metal
+        // device's names the buffer. Neither path allocates.
+        write_message(message, capacity,
+                      typeid(e) == typeid(std::bad_alloc) ? "out of memory" : e.what());
         return APXCHOL_STATUS_OUT_OF_MEMORY;
     } catch (const std::invalid_argument& e) {
         write_message(message, capacity, e.what());
@@ -371,6 +375,8 @@ apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int
     if (out_solver != nullptr) *out_solver = nullptr;
     return guarded(error_message, error_capacity, true, [&]() -> apxchol_status {
         require(out_solver != nullptr, "out_solver is NULL");
+        // struct_size first: a caller's older, smaller struct is never read past its end.
+        if (options != nullptr) require_struct_size(options->struct_size, sizeof(apxchol_options), "options");
         const apxchol_options opt = options != nullptr ? *options : default_options();
         const apxchol::solve_options so = to_solve_options(opt);
 #if defined(APXCHOL_USE_METAL)
@@ -390,9 +396,18 @@ apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int
         solver->setup_max_threads = max_threads();
         const auto start = clock_type::now();
 #if defined(APXCHOL_USE_METAL)
-        if (opt.backend == APXCHOL_BACKEND_METAL)
-            solver->metal = std::make_unique<apxchol::metal_solver>(A, so);
-        else
+        if (opt.backend == APXCHOL_BACKEND_METAL) {
+            // A valid operator this backend cannot represent (fp32 magnitudes,
+            // 32-bit device indices) is unsupported here, not an internal error:
+            // the CPU backend still solves it.
+            try {
+                solver->metal = std::make_unique<apxchol::metal_solver>(A, so);
+            } catch (const std::domain_error& e) {
+                fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+            } catch (const std::length_error& e) {
+                fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+            }
+        } else
 #endif
             solver->cpu = std::make_unique<apxchol::cpu_solver>(A, so);
         solver->setup_seconds = seconds_since(start);

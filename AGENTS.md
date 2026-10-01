@@ -356,7 +356,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   unpack, centring, and one work-balanced fp64 pass over the operator for the
   batch's exit residuals, staged in the dead r and A p buffers) and perform
   each column's one-column operations in the same order; two command buffers
-  are in flight. No env knobs (`APXCHOL_SPTRSV_FP16` and
+  are in flight. The C API reports a valid operator the device cannot
+  represent (`std::domain_error`, `std::length_error`) as UNSUPPORTED and a
+  device allocation failure as OUT_OF_MEMORY. No env knobs (`APXCHOL_SPTRSV_FP16` and
   center-k do not apply). Keep the MSL kernels, `level_schedule::emulate_sweep`
   and `metal_host.h` operation-for-operation identical. Validate with
   `LevelSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*` and

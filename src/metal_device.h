@@ -73,7 +73,7 @@ inline constexpr std::uint32_t kStopStagnation = 3;
 inline constexpr std::uint32_t kStopNonfinite = 4;
 
 /// The device cannot hold a buffer. A std::bad_alloc, so callers that map
-/// out-of-memory report it as one; what() names the buffer.
+/// out-of-memory (the C API) report it as one; what() names the buffer.
 class device_memory_error : public std::bad_alloc {
 public:
     explicit device_memory_error(std::string what) : what_(std::move(what)) {}
