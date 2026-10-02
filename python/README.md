@@ -80,6 +80,7 @@ pytest python/tests -v
 ```
 
 The extension directly compiles `factorization.cpp`, `operator_class.cpp`
-and `solve.cpp`. Local builds use `-O3 -march=native`; distributed wheels
-are portable. Without build isolation, install `pybind11 scikit-build-core`
-first. [License](../LICENSE).
+and `solve.cpp`. Local builds tune for the build machine; distributed wheels
+are portable. On macOS, `brew install libomp` (found automatically) or pass
+`CMAKE_ARGS=-DOpenMP_ROOT=<prefix>`; without a runtime the extension is serial.
+Without build isolation, install `pybind11 scikit-build-core` first. [License](../LICENSE).

@@ -128,6 +128,8 @@ choices, retired knobs, and measurements belong in
   missing runtime warns.
 - macOS: Linux-only `madvise` advice (THP, populate) is compiled out; the
   mmap paths remain. libc++ `std::pmr` requires a macOS 14 deployment target.
+  CI runs the parent-consumer suite on macos-15 (Apple Clang + Homebrew
+  libomp).
 
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark

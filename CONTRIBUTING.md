@@ -25,6 +25,9 @@ boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds. The CI library
 build uses `tests/cmake_consumer` as an outer project to test these requirements
 alongside the ordinary suite.
 
+On macOS, `brew install libomp` first; CI builds the same consumer with Apple
+Clang on macos-15.
+
 Use focused regressions for changed behavior, then the relevant suite. CUDA
 changes require a CUDA build and device. Python and Octave compile the core
 sources independently; check affected binding interfaces too:
