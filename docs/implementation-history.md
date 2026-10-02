@@ -378,7 +378,9 @@ blocks; rows with more than 32 dependencies are heavy; runs of narrow levels
 1024 threads; one command buffer per iteration above 200,000 rows and per four
 iterations below. None is an environment knob. The port does the host packing,
 centring and FP64 exit check in block-wide node-major passes (the prototype
-made one strided pass per column).
+made one strided pass per column) and keeps two command buffers in flight (the
+prototype waited for each one); the inherited iterations per command buffer
+are unchanged.
 
 **Fixed while porting.** Breakdown reported as convergence (a skipped update
 left a zero r.r behind); `<=` stopping (now strict `<`); FP32 underflow of

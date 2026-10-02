@@ -179,13 +179,18 @@ id<MTLBuffer> upload(id<MTLDevice> device, const void* data, std::size_t bytes) 
     return b;
 }
 
-// Waits for `cb` and returns its error text ("" on success).
-std::string finish(id<MTLCommandBuffer> cb) {
-    [cb commit];
+// Waits for a committed `cb` and returns its error text ("" on success).
+std::string wait(id<MTLCommandBuffer> cb) {
     [cb waitUntilCompleted];
     if ([cb status] != MTLCommandBufferStatusCompleted || [cb error] != nil)
         return "Metal command buffer failed: " + describe([cb error]);
     return {};
+}
+
+// Commits `cb`, waits for it and returns its error text ("" on success).
+std::string finish(id<MTLCommandBuffer> cb) {
+    [cb commit];
+    return wait(cb);
 }
 
 }  // namespace
@@ -391,9 +396,11 @@ struct engine::impl {
     }
 
     bool any_active(std::uint32_t kc) const {
+        // Read while a speculative command buffer may still be running: the
+        // flags only ever fall from 1 to 0, so a stale 1 costs one more batch.
         const auto* cs = static_cast<const column_state*>([cols contents]);
         for (std::uint32_t c = 0; c < kc; ++c)
-            if (cs[c].active != 0) return true;
+            if (__atomic_load_n(&cs[c].active, __ATOMIC_RELAXED) != 0) return true;
         return false;
     }
 
@@ -492,11 +499,20 @@ void engine::solve(std::uint32_t kc, const std::vector<tri_step>& fwd_plan,
     impl& s = *impl_;
     if (kc == 0 || kc > s.cap) throw std::logic_error("metal engine: batch exceeds the reserved block");
     s.zero_grounded_row(kc);
+    // Two command buffers in flight: the next batch is encoded and committed
+    // before the host waits for the previous one, so encoding overlaps the GPU.
+    // A batch committed after the last column froze runs as a no-op (every
+    // kernel skips inactive columns) and never exceeds max_iter.
     std::string error;
     std::uint32_t it = 0;
-    bool first = true;
-    while (error.empty() && (first || (it < max_iter && s.any_active(kc)))) {
+    id<MTLCommandBuffer> pending = nil;
+    for (bool first = true;; first = false) {
+        // Encode and commit the next batch (the loop continues only while
+        // it < max_iter), then wait for the previous one. The earliest error
+        // wins, and no command buffer is left in flight on any exit.
         const std::uint32_t batch = std::min(std::max<std::uint32_t>(check_every, 1), max_iter - it);
+        id<MTLCommandBuffer> next = nil;
+        std::string encode_error;
         @autoreleasepool {
             id<MTLCommandBuffer> cb = [s.queue commandBuffer];
             id<MTLBlitCommandEncoder> blit = first ? [cb blitCommandEncoder] : nil;
@@ -506,7 +522,7 @@ void engine::solve(std::uint32_t kc, const std::vector<tri_step>& fwd_plan,
             }
             id<MTLComputeCommandEncoder> enc = cb != nil && (!first || blit != nil) ? [cb computeCommandEncoder] : nil;
             if (enc == nil) {
-                error = "Metal command buffer or encoder creation failed";
+                encode_error = "Metal command buffer or encoder creation failed";
             } else {
                 if (first) {
                     s.encode_initial_mu(enc, kc);
@@ -518,11 +534,28 @@ void engine::solve(std::uint32_t kc, const std::vector<tri_step>& fwd_plan,
                 for (std::uint32_t b = 0; b < batch; ++b)
                     s.encode_iteration(enc, kc, it + b + 1, window, fwd_plan, bwd_plan);
                 [enc endEncoding];
-                error = finish(cb);
+                [cb commit];
+                next = cb;
             }
         }
         it += batch;
-        first = false;
+        if (pending != nil) {
+            @autoreleasepool {
+                error = wait(pending);
+            }
+            pending = nil;
+        }
+        if (error.empty()) error = encode_error;
+        if (!error.empty() || it >= max_iter || !s.any_active(kc)) {
+            if (next != nil) {
+                @autoreleasepool {
+                    const std::string e = wait(next);
+                    if (error.empty()) error = e;
+                }
+            }
+            break;
+        }
+        pending = next;
     }
     if (!error.empty()) throw std::runtime_error(error);
 }
