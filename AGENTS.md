@@ -118,21 +118,16 @@ choices, retired knobs, and measurements belong in
   builds share the architecture-specific compiler probe; portable Python wheels
   omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
-- OpenMP: root and Python builds use standard `find_package(OpenMP)`.
-  Select the compiler with `CC`/`CXX` (or CMake's compiler inputs), and use
-  `CMAKE_PREFIX_PATH` for a non-system toolchain. Explicit serial builds use
-  `CMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON`; OpenMP has no project discovery wrapper.
-- macOS: use LLVM Clang/libc++ 23 or newer, with Homebrew's Apple availability
-  configuration and the system C++ runtime. Keep `std::ranges::iota`; its
-  presence depends on libc++, not just the compiler's C++23 language mode.
-  `cmake/apxchol_macos_compiler.cmake` selects Homebrew LLVM before `project()`
-  for standalone C++, Python and the consumer fixture. It leaves explicit
-  compiler/toolchain inputs and an initialized parent compiler unchanged.
-  README needs only dependency installation and the common build commands.
-  Linux-only `madvise` advice is compiled out; mmap remains. CI's `linux` and
-  `macos` jobs share the parent-consumer build/test steps through YAML anchors.
-- spdlog: require 1.17 or newer and fetch 1.17.0 if absent. The older bundled
-  fmt headers in 1.15.2 fail to compile with libc++ 23 (malloc/free declarations).
+- OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
+  adds Homebrew libomp as a last-resort search prefix for Apple Clang while
+  respecting explicit FindOpenMP inputs. Missing OpenMP warns about a serial
+  build; request one explicitly with `CMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON`.
+- macOS: retain normal CMake compiler selection. Install Command Line Tools,
+  CMake and libomp, then use the common build commands. Linux-only `madvise`
+  advice is compiled out; mmap remains. CI's `linux` and `macos` jobs share
+  parent-consumer build/test steps through YAML anchors. Keep `std::iota` for
+  the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
+
 
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark

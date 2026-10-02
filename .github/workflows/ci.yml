@@ -118,14 +118,14 @@ jobs:
         run: ctest --test-dir build --no-tests=error --output-on-failure
 
   macos:
-    name: macOS (LLVM + libc++, build + ctest)
+    name: macOS (Apple Clang, build + ctest)
     runs-on: macos-15
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: brew install llvm ninja
+        run: brew install libomp ninja
       - *configure-build
       - name: Check OpenMP linkage
         run: otool -L build/apxchol/tests/unit_tests | grep -q libomp

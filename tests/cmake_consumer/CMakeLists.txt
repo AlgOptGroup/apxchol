@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.20)
-include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/apxchol_macos_compiler.cmake)
 project(apxchol_consumer_regression LANGUAGES CXX)
 
 # Deliberately older than the public headers: the linked target must upgrade it.

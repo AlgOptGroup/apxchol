@@ -25,14 +25,10 @@ boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds. The CI library
 build uses `tests/cmake_consumer` as an outer project to test these requirements
 alongside the ordinary suite.
 
-On macOS, follow the [LLVM/libc++ 23 setup in the README](README.md#build-and-run).
+On macOS, follow the [build dependencies in the README](README.md#build-and-run).
 The `linux` and `macos` CI jobs share their parent-consumer configure/build and
-CTest steps through YAML anchors. On macOS, the same automatic compiler selection is used by standalone builds,
-Python builds and the consumer fixture; explicit compiler/toolchain inputs and
-a parent project's compiler are preserved. Only package installation and the
-macOS OpenMP-linkage check are platform-specific.
-Keep C++23 library features in the source and select a compatible standard
-library instead of substituting older APIs for an SDK's missing features.
+CTest steps through YAML anchors. The macOS job uses the runner's default Apple
+Clang and Homebrew libomp, and checks OpenMP linkage.
 
 Use focused regressions for changed behavior, then the relevant suite. CUDA
 changes require a CUDA build and device. Python and Octave compile the core

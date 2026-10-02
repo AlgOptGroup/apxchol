@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.16)
-include(${CMAKE_CURRENT_LIST_DIR}/../cmake/apxchol_macos_compiler.cmake)
 project(apxchol_ext LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -20,7 +19,7 @@ if (NOT Eigen3_FOUND)
     FetchContent_MakeAvailable(eigen)
 endif()
 
-find_package(OpenMP)
+include(${APX_ROOT}/cmake/apxchol_openmp.cmake)
 find_package(pybind11 CONFIG REQUIRED)
 # The core TUs depend only on Eigen + OpenMP (no fast_matrix_market, no
 # generated version.h, no CLI11/spdlog), so we compile them straight into the

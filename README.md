@@ -18,10 +18,8 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-On macOS, install LLVM Clang/libc++ 23+ and CMake (`brew install llvm cmake`),
-plus Xcode Command Line Tools for the SDK. Then use the same build commands
-above; CMake selects Homebrew LLVM automatically unless a compiler or toolchain
-is specified explicitly.
+On macOS, install Xcode Command Line Tools and `brew install cmake libomp`,
+then use the same build commands above.
 
 The CLI requires an explicit RHS or `--random-rhs`. It reports whether input
 is an assembled operator or adjacency matrix, forming `L = D - A` for the
