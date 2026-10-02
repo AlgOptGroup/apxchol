@@ -135,10 +135,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both entries also build the developer tools (analyze_factor with and
+          # without its Metal backend).
           - name: Apple Clang + libomp
-            cmake_args: ''
+            cmake_args: '-DAPXCHOL_BUILD_TOOLS=ON'
           - name: Apple Clang + libomp + Metal
-            cmake_args: '-DAPXCHOL_USE_METAL=ON'
+            cmake_args: '-DAPXCHOL_USE_METAL=ON -DAPXCHOL_BUILD_TOOLS=ON'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies

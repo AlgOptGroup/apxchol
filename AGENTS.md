@@ -107,8 +107,16 @@ choices, retired knobs, and measurements belong in
 - `APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS`: ON by default. Only tests
   require GoogleTest. `APXCHOL_BUILD_TOOLS`: OFF by default, independently builds
   `build/tests/bench_setup` and `build/tests/analyze_factor`, including when tests
-  are disabled. `analyze_factor MATRIX --solve [--seed N]` reports setup, solve,
+  are disabled. `analyze_factor MATRIX --solve [--seed N] [--tol T]` reports setup, solve,
   iterations and the original-system residual for a component-compatible RHS.
+  `--backend cpu|metal --columns K` solves K such columns (each projected per
+  component) and reports the iteration range, converged/K, the maximum FP64
+  original-system residual, and digests of the factor, the solution and the
+  solver's per-column report; `--factor-threads N` builds that factor on its
+  own team so runs can share one factor. `--repeat R` solves the block R times
+  on one solver and reports the warm solves' times and whether every repeat
+  reproduced the solution and report bit for bit. These options are rejected
+  in CUDA builds.
 - CMake usage requirements on `apxchol_core` and `apxchol_mtx_input` must export
   C++23 and any native architecture flag actually used by the library. Parent
   projects do not inherit directory compile options; mismatched Eigen alignment
@@ -341,9 +349,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   and `metal_host.h` operation-for-operation identical. Validate with
   `LevelSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*`
   (device tests skip without a usable device),
-  `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 unit_tests --gtest_filter='MetalDevice*'`
-  and `tests/cmake_consumer` configured with `-DAPXCHOL_USE_METAL=ON`.
-  Correctness only: no performance claim has been established.
+  `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 unit_tests --gtest_filter='MetalDevice*'`,
+  `tests/cmake_consumer` configured with `-DAPXCHOL_USE_METAL=ON`, and
+  `analyze_factor MATRIX --solve --backend metal --columns 64` (with
+  `APXCHOL_BUILD_TOOLS=ON`). Correctness only: no performance claim has been
+  established.
 - CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
   only after its upload has completed and no further host RHS reads remain.
 - GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`
