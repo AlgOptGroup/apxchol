@@ -19,7 +19,7 @@ if (NOT Eigen3_FOUND)
     FetchContent_MakeAvailable(eigen)
 endif()
 
-include(${APX_ROOT}/cmake/apxchol_openmp.cmake)
+find_package(OpenMP)
 find_package(pybind11 CONFIG REQUIRED)
 # The core TUs depend only on Eigen + OpenMP (no fast_matrix_market, no
 # generated version.h, no CLI11/spdlog), so we compile them straight into the

@@ -74,12 +74,12 @@ FetchContent_Declare(cli11
 FetchContent_MakeAvailable(cli11)
 
 # ── spdlog ───────────────────────────────────────────
-find_package(spdlog 1.14 CONFIG QUIET)
+find_package(spdlog 1.17 CONFIG QUIET)
 if (NOT spdlog_FOUND)
     set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(spdlog
         GIT_REPOSITORY https://github.com/gabime/spdlog.git
-        GIT_TAG        v1.15.2
+        GIT_TAG        v1.17.0
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(spdlog)
@@ -112,7 +112,7 @@ unset(_APXCHOL_SAVED_BUILD_TESTING_VALUE)
 unset(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE)
 
 # ── OpenMP (optional) ────────────────────────────────
-include(cmake/apxchol_openmp.cmake)
+find_package(OpenMP)
 
 # ── Build options ───────────────────────────────────
 option(APXCHOL_USE_CUDA "GPU build: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG with our own SpMV / vector kernels; links cudart only" OFF)

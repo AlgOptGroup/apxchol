@@ -18,9 +18,27 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-On macOS, install the OpenMP runtime first (`brew install libomp`); Apple
-Clang finds the Homebrew keg automatically, or pass `-DOpenMP_ROOT=<prefix>`.
-Without a runtime the build is serial and CMake warns.
+On macOS, use LLVM Clang and libc++ 23 or newer; `std::ranges::iota` needs
+libc++ 23. The compiler version alone does not establish standard-library
+support. Homebrew's LLVM supplies the compiler, headers and OpenMP runtime:
+
+```bash
+brew install llvm cmake ninja
+llvm_prefix="$(brew --prefix llvm)"
+export CC="$llvm_prefix/bin/clang" CXX="$llvm_prefix/bin/clang++"
+export CMAKE_PREFIX_PATH="$llvm_prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+export SDKROOT="$(xcrun --show-sdk-path)"
+cmake -S . -B build-macos -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-macos -j6
+ctest --test-dir build-macos --no-tests=error --output-on-failure
+```
+
+Use a fresh build directory when changing compilers. An Xcode/Command Line
+Tools installation supplies the macOS SDK; it does not select the Homebrew
+compiler. Keep Homebrew's default libc++ availability configuration and the
+system C++ runtime. Do not add `_LIBCPP_DISABLE_AVAILABILITY` or replace the
+system runtime for this build. CMake uses standard `find_package(OpenMP)`;
+`-DCMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON` explicitly requests a serial build.
 
 The CLI requires an explicit RHS or `--random-rhs`. It reports whether input
 is an assembled operator or adjacency matrix, forming `L = D - A` for the

@@ -118,18 +118,18 @@ choices, retired knobs, and measurements belong in
   builds share the architecture-specific compiler probe; portable Python wheels
   omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
-- OpenMP: `cmake/apxchol_openmp.cmake` (root and Python) uses only standard
-  FindOpenMP inputs; there is no apxchol OpenMP option. When Apple Clang is
-  given neither `OpenMP_ROOT` nor `OpenMP_CXX_FLAGS`, the keg-only Homebrew
-  libomp is the last system prefix searched. Select an Apple Clang runtime
-  with `OpenMP_ROOT`, pin one exactly for any compiler with
-  `OpenMP_CXX_FLAGS`, `OpenMP_CXX_LIB_NAMES` and `OpenMP_<lib>_LIBRARY`, or
-  request a serial build with `CMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON`. A
-  missing runtime warns.
-- macOS: Linux-only `madvise` advice (THP, populate) is compiled out; the
-  mmap paths remain. libc++ `std::pmr` requires a macOS 14 deployment target.
-  CI runs the parent-consumer suite on macos-15 (Apple Clang + Homebrew
-  libomp).
+- OpenMP: root and Python builds use standard `find_package(OpenMP)`.
+  Select the compiler with `CC`/`CXX` (or CMake's compiler inputs), and use
+  `CMAKE_PREFIX_PATH` for a non-system toolchain. Explicit serial builds use
+  `CMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON`; there is no project discovery wrapper.
+- macOS: use LLVM Clang/libc++ 23 or newer, with Homebrew's Apple availability
+  configuration and the system C++ runtime. Keep `std::ranges::iota`; its
+  presence depends on libc++, not just the compiler's C++23 language mode.
+  README documents the compiler/prefix/SDK environment for C++ and Python.
+  Linux-only `madvise` advice is compiled out; mmap remains. CI's `linux` and
+  `macos` jobs share the parent-consumer build/test steps through YAML anchors.
+- spdlog: require 1.17 or newer and fetch 1.17.0 if absent. The older bundled
+  fmt headers in 1.15.2 fail to compile with libc++ 23 (malloc/free declarations).
 
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark

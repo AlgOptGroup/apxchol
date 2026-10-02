@@ -2,10 +2,10 @@
 # path-filtered so it only runs when C++/build/package files change, not on
 # doc/chart commits.
 #
-# Five job definitions; the library compiler matrix expands to two jobs:
+# Five job definitions; the Linux compiler matrix expands to two jobs:
 #   benchmark-harness — harness unit tests, CPU build and native CLI/stopping contracts
-#   library  — parent CMake consumer under GCC and Clang, full suite (ctest)
-#   macos    — parent CMake consumer under Apple Clang + Homebrew libomp, full suite
+#   linux    — parent CMake consumer under GCC and Clang, full suite (ctest)
+#   macos    — same consumer under LLVM/libc++ 23 or newer, full suite
 #   python   — manylinux wheel build + pytest (also the PORTABILITY check: the
 #              old-glibc environment the release wheels are built in)
 #   octave   — mkoctfile MEX + the Octave test suite
@@ -94,8 +94,8 @@ jobs:
       - name: Run native benchmark contracts
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
 
-  library:
-    name: library (${{ matrix.name }}, build + ctest)
+  linux:
+    name: Linux (${{ matrix.name }}, build + ctest)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -109,51 +109,48 @@ jobs:
             cc: clang-18
             cxx: clang++-18
             packages: clang-18 libomp-18-dev
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          # Public headers require C++23. Test both supported
-          # compiler families; the Python/Octave jobs below retain their own
-          # distribution-portability toolchains.
           sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build
-      - name: Configure + build (Release)
+      - &configure-build
+        name: Configure + build (Release)
         run: |
+          "$CXX" --version
           cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
-                -DCMAKE_C_COMPILER=${{ matrix.cc }}
-          cmake --build build -j"$(nproc)"
-      - name: Run unit tests
-        run: ctest --test-dir build --output-on-failure
+                -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_C_COMPILER="$CC"
+          cmake --build build --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
+      - &ctest
+        name: Run unit tests
+        run: ctest --test-dir build --no-tests=error --output-on-failure
 
   macos:
-    name: macOS (${{ matrix.name }}, build + ctest)
-    # macos-15 carries the oldest Apple Clang (Xcode 16) the library supports.
+    name: macOS (LLVM + libc++, build + ctest)
     runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Apple Clang + libomp
-            cmake_args: ''
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        # CMake and Ninja are preinstalled. No Homebrew Eigen: it is 5.x, which
-        # the root's find_package(Eigen3 3.3) ignores in favour of the fetch.
-        run: brew install libomp
-      - name: Toolchain
-        run: xcrun clang++ --version && cmake --version
-      - name: Configure + build (Release)
         run: |
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                ${{ matrix.cmake_args }}
-          cmake --build build -j"$(sysctl -n hw.ncpu)"
+          brew install llvm ninja
+          llvm_prefix="$(brew --prefix llvm)"
+          cat >> "$GITHUB_ENV" <<EOF
+          CC=$llvm_prefix/bin/clang
+          CXX=$llvm_prefix/bin/clang++
+          CMAKE_PREFIX_PATH=$llvm_prefix
+          SDKROOT=$(xcrun --show-sdk-path)
+          EOF
+      - *configure-build
       - name: Check OpenMP linkage
         run: otool -L build/apxchol/tests/unit_tests | grep -q libomp
-      - name: Run unit tests
-        run: ctest --test-dir build --output-on-failure
+      - *ctest
 
   python:
     name: python (manylinux wheel + pytest)
