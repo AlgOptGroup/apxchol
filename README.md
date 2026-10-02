@@ -18,9 +18,8 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-On macOS, use LLVM Clang and libc++ 23 or newer; `std::ranges::iota` needs
-libc++ 23. The compiler version alone does not establish standard-library
-support. Homebrew's LLVM supplies the compiler, headers and OpenMP runtime:
+On macOS, requires LLVM Clang 23+, libc++ 23+, and the macOS SDK from
+Xcode Command Line Tools. Build with Homebrew:
 
 ```bash
 brew install llvm cmake ninja
@@ -33,12 +32,7 @@ cmake --build build-macos -j6
 ctest --test-dir build-macos --no-tests=error --output-on-failure
 ```
 
-Use a fresh build directory when changing compilers. An Xcode/Command Line
-Tools installation supplies the macOS SDK; it does not select the Homebrew
-compiler. Keep Homebrew's default libc++ availability configuration and the
-system C++ runtime. Do not add `_LIBCPP_DISABLE_AVAILABILITY` or replace the
-system runtime for this build. CMake uses standard `find_package(OpenMP)`;
-`-DCMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON` explicitly requests a serial build.
+Use a fresh build directory when changing compilers.
 
 The CLI requires an explicit RHS or `--random-rhs`. It reports whether input
 is an assembled operator or adjacency matrix, forming `L = D - A` for the
