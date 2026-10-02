@@ -137,6 +137,8 @@ jobs:
         include:
           - name: Apple Clang + libomp
             cmake_args: ''
+          - name: Apple Clang + libomp + Metal
+            cmake_args: '-DAPXCHOL_USE_METAL=ON'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies

@@ -31,7 +31,11 @@ add_executable(unit_tests
         test_pcg_cuda_host.cpp
         test_cuda_device_scope.cpp
         test_level_schedule.cpp
+        test_metal_host.cpp
 )
+if (APXCHOL_USE_METAL)
+    target_sources(unit_tests PRIVATE test_metal.cpp)
+endif()
 
 target_link_libraries(unit_tests PRIVATE
         apxchol_core

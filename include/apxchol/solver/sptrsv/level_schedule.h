@@ -1,9 +1,9 @@
 #pragma once
 // Level schedules of the two triangular solves of a dropped apxchol factor in
-// the layout the Metal block kernels read, plus an fp32 host emulation of
-// exactly the arithmetic those kernels perform. Portable: no Metal, so the
-// schedule and its emulation are tested on every platform
-// (tests/test_level_schedule.cpp).
+// the layout the Metal block kernels (src/metal_kernels.inc) read, plus an
+// fp32 host emulation of exactly the arithmetic those kernels perform.
+// Portable: no Metal, so the schedule and its emulation are tested on every
+// platform (tests/test_level_schedule.cpp).
 //
 // The factor is prepared by the CUDA-free host code the GPU backends share
 // (cuda_host.h: L11 extraction, the compacting drop of factor_drop.h with the
