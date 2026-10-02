@@ -119,9 +119,9 @@ choices, retired knobs, and measurements belong in
   omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
 - OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
-  adds Homebrew libomp as a last-resort search prefix for Apple Clang while
-  respecting explicit FindOpenMP inputs. Missing OpenMP warns about a serial
-  build; request one explicitly with `CMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON`.
+  queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
+  while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
+  OpenMP fails configuration instead of producing a serial build.
 - macOS: retain normal CMake compiler selection. Install Command Line Tools,
   CMake and libomp, then use the common build commands. Linux-only `madvise`
   advice is compiled out; mmap remains. CI's `linux` and `macos` jobs share

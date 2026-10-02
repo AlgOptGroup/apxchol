@@ -6,7 +6,7 @@ GPU-resident solve. C++, Python and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
-Requires CMake, a C++23 compiler, and Eigen (fetched if absent).
+Requires CMake, a C++23 compiler with OpenMP, and Eigen (fetched if absent).
 
 ```bash
 git clone https://github.com/AlgOptGroup/apxchol
