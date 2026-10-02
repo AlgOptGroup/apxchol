@@ -129,7 +129,9 @@ choices, retired knobs, and measurements belong in
 - macOS: Linux-only `madvise` advice (THP, populate) is compiled out; the
   mmap paths remain. libc++ `std::pmr` requires a macOS 14 deployment target.
   CI runs the parent-consumer suite on macos-15 (Apple Clang + Homebrew
-  libomp).
+  libomp) and builds an arm64 wheel. macOS wheels bundle LLVM libomp built
+  from source for 14.0 (`python/tools/build_libomp_macos.sh`); keep
+  `check_macos_wheel.py` and `check_macos_runtime.py` passing.
 
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
