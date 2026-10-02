@@ -60,8 +60,9 @@ must preserve its selected set and insertion order. Tests also retain exact
 single-thread factor and same-owned-factor repeated-solve checks. Parallel FP64
 rebuilds are checked for valid structure and the requested original-system
 residual, rather than equal factor bytes or iteration counts between builds.
-This also applies to host factor construction in CUDA-enabled builds; installing
-the resulting factor on the GPU does not make its earlier construction repeatable.
+This also applies to explicit host factor construction in CUDA-enabled builds.
+Low-level import of that factor onto the GPU does not make its earlier
+construction repeatable; public CPU solvers keep the factor and solves on CPU.
 
 Historical rejected precision variants and their limits are recorded in
 [implementation history](implementation-history.md). They are not universal

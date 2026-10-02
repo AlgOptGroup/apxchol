@@ -735,6 +735,11 @@ def parse_csv(out):
     rows = [l for l in out.splitlines() if l and not l.startswith("solver,") and "," in l]
     if not rows: return None
     f = rows[-1].split(",")
+    route = None
+    if len(f) >= 15 and f[-4].startswith("original-v"):
+        route = f.pop()
+        if route not in ("", "cpu", "gpu"):
+            return None
     stopping = f[-3:] if len(f) >= 14 and f[-3].startswith("original-v") else None
     if stopping: f = f[:-3]
     if len(f) < 11: return None
@@ -742,6 +747,10 @@ def parse_csv(out):
         d = dict(n=int(f[2]), nnz=int(f[3]), setup_s=float(f[4]), solve_s=float(f[5]),
                  total_s=float(f[6]), iters=int(f[7]), rel_res=float(f[8]),
                  fillin=float(f[9]), us_per_nnz=float(f[10]))
+        if not math.isfinite(d["fillin"]):
+            d["fillin"] = None
+        if route:
+            d["execution_route"] = route
         if stopping:
             d.update(stop_contract=stopping[0], solve_passes=int(stopping[1]),
                      stop_check_s=float(stopping[2]))
@@ -774,6 +783,27 @@ def parse_csv(out):
         return d
     except (ValueError, IndexError):
         return None
+
+def v1_route_error(metrics, stderr, device, repeats, warmups):
+    """Require the fixed route in the selected CSV row and every repetition."""
+    if not metrics or metrics.get("execution_route") != device:
+        return f"expected complete {device} route receipt"
+    expected = {(phase, str(index))
+                for phase, count in (("warmup", warmups), ("retained", repeats))
+                for index in range(1, count + 1)}
+    observed = set()
+    for line in stderr.splitlines():
+        if not line.startswith("BENCH_REPEAT "):
+            continue
+        fields = dict(re.findall(r"\b(phase|index|execution_route)=(\S+)", line))
+        key = (fields.get("phase"), fields.get("index"))
+        if key not in expected or key in observed or fields.get("execution_route") != device:
+            return "missing, duplicate, or mismatched v1 repetition route receipt"
+        observed.add(key)
+    if observed != expected:
+        return "incomplete v1 repetition route receipts"
+    return None
+
 
 def classify(m, tol):
     """(status, metrics) under THE GRADING RULE — see benchmarks/README.md.
@@ -873,6 +903,8 @@ def cell_done(family, mid, solver, config, threads, device, terminal=DEFAULT_TER
     except (OSError, json.JSONDecodeError): return False
     if cell.get("status") in {"complete", "not_converged"}:
         if (cell.get("metrics") or {}).get("stop_contract") != "original-v1": return False
+        if solver == "apxchol_v1" and (cell.get("metrics") or {}).get("execution_route") != device:
+            return False
     return cell.get("status") in terminal
 
 

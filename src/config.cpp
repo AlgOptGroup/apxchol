@@ -101,6 +101,13 @@ run_config parse_args(int argc, char* argv[]) {
                    "this many vertices (0 = off; 20-32 targets hub-like stars)")
         ->capture_default_str();
 
+    app.add_option("--backend", cfg.solve_opts.backend,
+                   "Complete setup/solve route: auto, cpu or gpu (no runtime fallback)")
+        ->default_str("auto")
+        ->transform(CLI::CheckedTransformer(std::map<std::string, solve_backend>{
+            {"auto", solve_backend::automatic}, {"cpu", solve_backend::cpu},
+            {"gpu", solve_backend::gpu}}));
+
     // ── solver parameters ──
     app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")
         ->capture_default_str();

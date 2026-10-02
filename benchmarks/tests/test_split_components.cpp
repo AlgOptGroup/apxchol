@@ -248,6 +248,35 @@ void unavailable_sentinel_propagates() {
     }
 }
 
+void complete_route_and_fill_propagate() {
+    const auto matrix = make_matrix(4, {{0, 0, 2}, {1, 1, 2}, {0, 1, -1}, {1, 0, -1},
+                                        {2, 2, 2}, {3, 3, 2}, {2, 3, -1}, {3, 2, -1}});
+    for (const char* route : {"cpu", "gpu"}) {
+        const auto result = split(matrix, Eigen::Vector4d::Ones(),
+            [&](const Matrix&, const Eigen::VectorXd&) {
+                BenchResult part;
+                part.execution_route = route;
+                part.factor_offdiag = 3;
+                return part;
+            });
+        require_contract(result.execution_route == route, "split lost the complete route");
+        require_contract(result.factor_offdiag == 6, "split lost measured factor entries");
+        require_close(result.fillin, 3.0, "split normalized fill is not from all components");
+    }
+    int calls = 0;
+    bool caught = false;
+    try {
+        split(matrix, Eigen::Vector4d::Ones(), [&](const Matrix&, const Eigen::VectorXd&) {
+            BenchResult part;
+            part.execution_route = calls++ == 0 ? "cpu" : "gpu";
+            return part;
+        });
+    } catch (const std::runtime_error& error) {
+        caught = std::string(error.what()).find("changed execution route") != std::string::npos;
+    }
+    require_contract(caught, "split accepted a mixed CPU/GPU result");
+}
+
 void callback_error_propagates() {
     const auto matrix = make_matrix(1, {{0, 0, 2}});
     int calls = 0;
@@ -277,6 +306,7 @@ int main() {
         {"finite_zero_rhs_residual", finite_zero_rhs_residual},
         {"nan_residual_propagates", nan_residual_propagates},
         {"callback_error_propagates", callback_error_propagates},
+        {"complete_route_and_fill_propagate", complete_route_and_fill_propagate},
         {"unavailable_sentinel_propagates", unavailable_sentinel_propagates},
     };
     int passed = 0;

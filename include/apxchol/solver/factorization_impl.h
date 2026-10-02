@@ -1132,20 +1132,21 @@ factorization factorize_impl(const Eliminator& elim,
                              const factor_options& opts_in,
                              checkpoint* cp, bool retain_host_factor = true,
                              bool initial_graph_is_paired = false,
-                             const Eigen::SparseMatrix<double>* initial_csc = nullptr) {
+                             const Eigen::SparseMatrix<double>* initial_csc = nullptr,
+                             detail::setup_route route = detail::setup_route::diagnostic) {
     const node_index n = initial_csc ? static_cast<node_index>(initial_csc->rows()) : G.n();
     if (n == 0)
         return {};
 
     // The GPU-owned setup route pays a fixed cost per round that the host does
     // not, so it wants a wider candidate cap. This is the one place that knows
-    // the route before the partitioner runs: the env flags below plus the
+    // the route before the partitioner runs: the explicit policy below plus the
     // template conditions make_gpu_round_shadow_session would otherwise reject.
     const bool gpu_owned_setup_route =
         std::is_same_v<Partitioner, block_greedy_partitioner> &&
         std::is_same_v<Incidence, directed_vec_pool_incidence> &&
         !retain_host_factor &&
-        detail::gpu_owned_setup_configured();
+        detail::gpu_owned_setup_configured(route);
 
     // APXCHOL_OMP_THRESHOLD (experiment knob, see env_knobs.h) overrides
     // factor_options::omp_threshold for this factorization -- it flows from
@@ -1165,7 +1166,7 @@ factorization factorize_impl(const Eliminator& elim,
         // paths force a shadow without meeting the consuming route's other
         // conditions, and they throw on these knobs just the same.
         if (o.exact_core_max_h == exact_core_by_route)
-            o.exact_core_max_h = detail::gpu_round_shadow_requested()
+            o.exact_core_max_h = detail::gpu_round_shadow_requested(route)
                                      ? 0u : exact_core_host_default;
         return o;
     }();
@@ -1178,8 +1179,8 @@ factorization factorize_impl(const Eliminator& elim,
     if (cp) (*cp)("graph_copy");
     auto gpu_round_shadow =
         detail::make_gpu_round_shadow_session<Eliminator, Incidence>(elim,
-            !retain_host_factor && std::is_same_v<Partitioner, block_greedy_partitioner>);
-    const bool finalize_on_device = detail::gpu_factor_finalize_requested();
+            !retain_host_factor && std::is_same_v<Partitioner, block_greedy_partitioner>, route);
+    const bool finalize_on_device = detail::gpu_factor_finalize_requested(route);
     const bool omit_shadow_factor_payload = !retain_host_factor &&
         gpu_round_shadow.active() && finalize_on_device;
 
@@ -1250,7 +1251,7 @@ factorization factorize_impl(const Eliminator& elim,
         } else throw std::logic_error("direct CSC initialization has an unsupported strategy");
     }
     const auto gpu_frontend_mode =
-        detail::gpu_block_frontend::configured_block_mode();
+        detail::gpu_block_frontend::configured_block_mode(route);
     if constexpr (!gpu_block_frontend_eligible) {
         if (gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled)
             throw std::invalid_argument(
@@ -2265,10 +2266,11 @@ factorization factorize_impl(const Eliminator& elim,
 // The condition must match the one that rejects the knob: any requested round
 // shadow throws on it, including the auditing and export paths that never meet
 // the consuming route's other requirements.
-inline detail::tree_elimination make_tree_elim(const factor_options& opts) {
+inline detail::tree_elimination make_tree_elim(const factor_options& opts,
+        detail::setup_route route = detail::setup_route::diagnostic) {
     const std::size_t exact_core =
         opts.exact_core_max_h == exact_core_by_route
-            ? (detail::gpu_round_shadow_requested() ? 0u : exact_core_host_default)
+            ? (detail::gpu_round_shadow_requested(route) ? 0u : exact_core_host_default)
             : opts.exact_core_max_h;
     return detail::tree_elimination{
         .exact_clique_max_degree = opts.exact_clique_max_degree,

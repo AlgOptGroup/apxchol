@@ -67,6 +67,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include "apxchol/solver/detail/setup_route.h"
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -76,7 +77,9 @@ namespace apxchol { class cuda_sptrsv_device_factor; }
 
 namespace apxchol::detail {
 
-inline bool gpu_factor_finalize_requested() {
+inline bool gpu_factor_finalize_requested(setup_route route = setup_route::diagnostic) {
+    if (route != setup_route::diagnostic)
+        return route == setup_route::gpu;
     const char* value = std::getenv("APXCHOL_GPU_FACTOR_FINALIZE");
     if (!value || !*value || std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0) return false;
     if (std::strcmp(value, "force") == 0) return true;
@@ -88,7 +91,9 @@ inline constexpr std::string_view kGpuRoundShadowEnv =
 inline constexpr std::string_view kGpuRoundSelectionAuditEnv =
     "APXCHOL_GPU_ROUND_SELECTION_AUDIT";
 
-inline bool gpu_round_shadow_requested() {
+inline bool gpu_round_shadow_requested(setup_route route = setup_route::diagnostic) {
+    if (route != setup_route::diagnostic)
+        return route == setup_route::gpu;
     const char* value = std::getenv(kGpuRoundShadowEnv.data());
     if (!value || !*value || std::strcmp(value, "0") == 0 ||
         std::strcmp(value, "off") == 0)
@@ -98,15 +103,15 @@ inline bool gpu_round_shadow_requested() {
         "APXCHOL_GPU_ROUND_SHADOW must be unset, 0, off, or force");
 }
 
-/// True when the environment selects the GPU-owned setup route: device rounds,
+/// True when the explicit route (or diagnostic environment) selects device rounds,
 /// a device finalizer, and a block frontend to select on. A CPU build can never
 /// take that route, and `gpu_block_frontend` is not even a complete type there.
 /// Callers still have to check the route's template preconditions (vec_pool_aos
 /// storage, block_greedy, a consuming solve) themselves.
-inline bool gpu_owned_setup_configured() {
+inline bool gpu_owned_setup_configured([[maybe_unused]] setup_route route = setup_route::diagnostic) {
 #if defined(APXCHOL_USE_CUDA)
-    return gpu_round_shadow_requested() && gpu_factor_finalize_requested() &&
-           gpu_block_frontend::configured_block_mode() !=
+    return gpu_round_shadow_requested(route) && gpu_factor_finalize_requested(route) &&
+           gpu_block_frontend::configured_block_mode(route) !=
                gpu_block_frontend::mode::disabled;
 #else
     return false;
@@ -1578,7 +1583,9 @@ class gpu_round_shadow_session {
 public:
     gpu_round_shadow_session() = default;
     explicit gpu_round_shadow_session(bool active,
-            clique_sampler sampler = clique_sampler::gks) : active_(active), sampler_(sampler) {
+            clique_sampler sampler = clique_sampler::gks,
+            setup_route route = setup_route::diagnostic)
+        : active_(active), route_(route), sampler_(sampler) {
 #if defined(APXCHOL_USE_CUDA)
         if (active_)
             device_state_ =
@@ -1784,7 +1791,7 @@ public:
     bool initialize_owned_csc(const gpu_owned_csc_buffers& input,
                               std::unique_ptr<gpu_block_frontend>& frontend) {
         if (!active_ || pending_ || checked_rounds_ || owned_rounds_ || frontend ||
-            !gpu_factor_finalize_requested())
+            !gpu_factor_finalize_requested(route_))
             throw std::logic_error("GPU CSC initialization is outside a fresh owning session");
         const auto& knobs = env_knobs::get();
         const double reg = knobs.ground == grounding_kind::reg ? knobs.reg_eps : 0.0;
@@ -1826,7 +1833,7 @@ public:
             bool initial_graph_is_paired = false) {
         static_assert(std::is_same_v<Incidence, directed_vec_pool_incidence>);
         if (!active_ || pending_ || checked_rounds_ || owned_materialized_ ||
-            !gpu_factor_finalize_requested())
+            !gpu_factor_finalize_requested(route_))
             throw std::logic_error("GPU-owned prefix is outside its consuming session boundary");
         gpu_round_shadow_input initial;
         gpu_device_selection_content paired_content;
@@ -2056,6 +2063,7 @@ public:
 
 private:
     bool active_ = false;
+    [[maybe_unused]] setup_route route_ = setup_route::diagnostic;
     clique_sampler sampler_ = clique_sampler::gks;
     bool pending_ = false;
     std::size_t owned_rounds_ = 0;
@@ -2098,10 +2106,11 @@ private:
 
 template<typename Eliminator, incidence_storage Incidence>
 gpu_round_shadow_session make_gpu_round_shadow_session(
-        const Eliminator& eliminator, bool consuming_block_route = false) {
-    if (gpu_factor_finalize_requested() && !gpu_round_shadow_requested())
+        const Eliminator& eliminator, bool consuming_block_route = false,
+        setup_route route = setup_route::diagnostic) {
+    if (gpu_factor_finalize_requested(route) && !gpu_round_shadow_requested(route))
         throw std::invalid_argument("GPU finalizer requires APXCHOL_GPU_ROUND_SHADOW=force");
-    if (!gpu_round_shadow_requested()) return {};
+    if (!gpu_round_shadow_requested(route)) return {};
 #if !defined(APXCHOL_USE_CUDA)
     (void)eliminator; (void)consuming_block_route;
     throw std::runtime_error(
@@ -2119,8 +2128,8 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
             "forced GPU round shadow requires the built-in tree eliminator");
     } else {
         if (eliminator.sampler != clique_sampler::gks &&
-            (!consuming_block_route || !gpu_factor_finalize_requested() ||
-             gpu_block_frontend::configured_block_mode() == gpu_block_frontend::mode::disabled))
+            (!consuming_block_route || !gpu_factor_finalize_requested(route) ||
+             gpu_block_frontend::configured_block_mode(route) == gpu_block_frontend::mode::disabled))
             throw std::invalid_argument(
                 "cycle CUDA samplers require the GPU-owned consuming route; "
                 "CPU-shadow auditing/export is unsupported (disable the GPU setup flags)");
@@ -2137,7 +2146,7 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
             "CPU-audited unless internal consuming prefix takes ownership; "
             "deterministic fields exact, colliding excess bounded; reimports "
             "explicitly counted\n");
-        return gpu_round_shadow_session(true, eliminator.sampler);
+        return gpu_round_shadow_session(true, eliminator.sampler, route);
     }
 #endif
 }

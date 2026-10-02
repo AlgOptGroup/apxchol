@@ -251,7 +251,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                           graph_storage storage,
                                           const factor_options& opts_in,
                                           checkpoint* cp,
-                                          bool retain_host_factor) {
+                                          bool retain_host_factor, setup_route route) {
     // Assert the operator contract and lump positive off-diagonals if the
     // matrix needs it. Same `operator_view` the header's factorize() overloads
     // use — one implementation, so the CLI, the C++ API and both bindings
@@ -281,8 +281,8 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
         factorization F = dispatch_partitioner<factorization>(opts.is_select,
             [&]<typename P>() -> factorization {
                 P partitioner;
-                return factorize_impl(make_tree_elim(opts), partitioner,
-                    std::move(G), opts, cp, retain_host_factor, true);
+                return factorize_impl(make_tree_elim(opts, route), partitioner,
+                    std::move(G), opts, cp, retain_host_factor, true, nullptr, route);
             });
         F.lumped_offdiag = op.lumped();
         return F;
@@ -306,16 +306,19 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
         if (!retain_host_factor && opts.is_select == "block_greedy" &&
             opts.exact_clique_max_degree == 0 &&
             exact_core_or_off(opts.exact_core_max_h) == 0 && opts.double_cycle_min_h == 0 &&
-            detail::gpu_round_shadow_requested() && detail::gpu_factor_finalize_requested() &&
-            detail::gpu_block_frontend::configured_block_mode() != detail::gpu_block_frontend::mode::disabled) {
+            detail::gpu_round_shadow_requested(route) && detail::gpu_factor_finalize_requested(route) &&
+            detail::gpu_block_frontend::configured_block_mode(route) != detail::gpu_block_frontend::mode::disabled) {
             if (detail::gpu_owned_csc_supported(op)) {
                 if (cp) { (*cp)("gpu_csc_eligibility"); cp->ascend(); }
                 block_greedy_partitioner partitioner;
-                auto F = factorize_impl(make_tree_elim(opts), partitioner,
-                    graph<directed_vec_pool_incidence>{}, opts, cp, false, false, &A);
+                auto F = factorize_impl(make_tree_elim(opts, route), partitioner,
+                    graph<directed_vec_pool_incidence>{}, opts, cp, false, false, &A, route);
                 F.lumped_offdiag = op.lumped();
                 return F;
             }
+            if (route == setup_route::gpu)
+                throw std::invalid_argument("GPU route requires a supported compressed, sorted, "
+                    "paired CSC operator; request CPU explicitly");
             if (detail::gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-csc] fallback=unsupported_stored_format before_device_mutation=1\n");
         }
 #endif

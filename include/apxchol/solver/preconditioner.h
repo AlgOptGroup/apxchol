@@ -4,6 +4,9 @@
 #include "apxchol/env_knobs.h"
 #include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/factorization.h"
+#include "apxchol/solver/detail/setup_route.h"
+#include "apxchol/solver/sptrsv/omp.h"
+#include <type_traits>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -16,8 +19,6 @@
 
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/sptrsv/cuda.h"
-#else
-#include "apxchol/solver/sptrsv/omp.h"
 #endif
 
 #ifdef _OPENMP
@@ -135,11 +136,15 @@ inline double det_sum(const double* v, Eigen::Index n, double* part) {
 ///   cg.compute(L);   // triggers apx_cholesky::compute(L) internally
 ///   x = cg.solve(b);
 ///
-/// Triangular solve backend selected at compile time:
-///   - Default: OpenMP level-set parallel SpTRSV (CPU)
-///   - APXCHOL_USE_CUDA: our persistent dataflow SpTRSV
-class apx_cholesky : public Eigen::SparseSolverBase<apx_cholesky> {
-    using Base = Eigen::SparseSolverBase<apx_cholesky>;
+namespace detail {
+template<class Trsv, setup_route Route>
+class basic_apx_cholesky : public Eigen::SparseSolverBase<basic_apx_cholesky<Trsv, Route>> {
+    using Base = Eigen::SparseSolverBase<basic_apx_cholesky<Trsv, Route>>;
+#if defined(APXCHOL_USE_CUDA)
+    static constexpr bool on_gpu = std::is_same_v<Trsv, cuda_sptrsv>;
+#else
+    static constexpr bool on_gpu = false;
+#endif
 
 protected:
     using Base::m_isInitialized;
@@ -156,7 +161,7 @@ public:
         MaxColsAtCompileTime = Eigen::Dynamic
     };
 
-    apx_cholesky() = default;
+    basic_apx_cholesky() = default;
 
     const factorization& factor() const { return F_; }
     const factor_options& options() const { return opts_; }
@@ -171,7 +176,7 @@ public:
     void set_keep_factor(bool keep) { keep_factor_ = keep; }
 
     /// No-op: approximate Cholesky has no separate symbolic analysis phase.
-    apx_cholesky& analyzePattern(const auto&) {
+    basic_apx_cholesky& analyzePattern(const auto&) {
         m_analysisIsOk = true;
         m_isInitialized = true;
         m_info = Eigen::Success;
@@ -179,57 +184,51 @@ public:
     }
 
     /// Compute the approximate Cholesky factorization of A.
-    apx_cholesky& factorize(const auto& A) {
+    basic_apx_cholesky& factorize(const auto& A) {
         eigen_assert(m_analysisIsOk && "analyzePattern() should be called first");
-        // Kick CUDA device init onto a helper thread so it runs concurrently
-        // with the elimination below (cuda_context.h; a no-op without CUDA).
-        // HERE and not in a solver constructor: this is the earliest point that
-        // is common to every path which then does host work before touching the
-        // GPU -- cpu_solver's ctor, Eigen's cg.compute(), the Python/Octave
-        // bindings -- and the whole factorization (make_graph, find_partition,
-        // eliminate, assembly: ~0.5 s on the suite's big matrices) sits between
-        // it and install_factor()'s first CUDA call. Starting it earlier could
-        // only buy the few microseconds of set_options/analyzePattern; starting
-        // it in a constructor would also spin up a context for callers that
-        // construct a solver and never factor.
+        // Only the internal device specialization may initialize CUDA. CPU
+        // factorization and Eigen/CPU callers never touch its context, even in
+        // a CUDA-enabled build. Preserve the device setup's existing prewarm.
 #if defined(APXCHOL_USE_CUDA)
-        const auto factorize_install_begin = detail::gpu_setup_diagnostic_clock::now();
+        [[maybe_unused]] const auto factorize_install_begin = detail::gpu_setup_diagnostic_clock::now();
 #endif
-        cuda_ctx::prewarm();
+        if constexpr (on_gpu) cuda_ctx::prewarm();
         n_ = A.rows();
-        F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, keep_factor_);
+        F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, keep_factor_, Route);
         install_factor();
 #if defined(APXCHOL_USE_CUDA)
-        // Device adoption queues dataflow-state initialization after the last
-        // plan transfer. Complete that owned work before returning, including
-        // quiet calls. Ordinary host-built factors retain their prior behavior;
-        // complete timing boundaries belong to the common benchmark harness.
-        if (trsv_.adopted_device_factor()) {
-            const auto setup_completion = cudaDeviceSynchronize();
-            if (setup_completion != cudaSuccess)
-                throw std::runtime_error(std::string("GPU setup completion: ") +
-                                         cudaGetErrorString(setup_completion));
-            if (cp_) { cp_->descend("setup"); (*cp_)("gpu_setup_complete"); cp_->ascend(); }
-        }
-        if (detail::gpu_setup_diagnostics()) {
-            // Host API duration; device-adopted setup additionally completed its work.
-            const double factorize_install_wall_s = std::chrono::duration<double>(
-                detail::gpu_setup_diagnostic_clock::now() - factorize_install_begin).count();
-            const auto& drop = trsv_.drop_stats();
-            std::fprintf(stderr,
-                "[gpu-setup-receipt] diagnostics=%s factorize_install_wall_s=%.17g "
-                "n=%lld rounds=%zu raw_factor_nnz=%zu stored_nnz=%llu adopted=%d "
-                "fp16=%d host_factor_array_bytes=%zu adoption_download_bytes=%zu "
-                "factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu\n",
-                detail::gpu_setup_diagnostics() ? "enabled" : "disabled",
-                factorize_install_wall_s, static_cast<long long>(n_), F_.rounds.size(),
-                static_cast<std::size_t>(F_.L.nonZeros()),
-                static_cast<unsigned long long>(trsv_.stored_nnz()),
-                trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
-                F_.L.inner_.size() * sizeof(node_index) + F_.L.vals_.size() * sizeof(factor_value_t),
-                trsv_.adoption_host_download_bytes(), drop.rel,
-                static_cast<unsigned long long>(drop.dropped_threshold),
-                static_cast<unsigned long long>(drop.dropped_flush));
+        if constexpr (on_gpu) {
+            // Device adoption queues dataflow-state initialization after the last
+            // plan transfer. Complete that owned work before returning, including
+            // quiet calls. Ordinary host-built factors retain their prior behavior;
+            // complete timing boundaries belong to the common benchmark harness.
+            if (trsv_.adopted_device_factor()) {
+                const auto setup_completion = cudaDeviceSynchronize();
+                if (setup_completion != cudaSuccess)
+                    throw std::runtime_error(std::string("GPU setup completion: ") +
+                                             cudaGetErrorString(setup_completion));
+                if (cp_) { cp_->descend("setup"); (*cp_)("gpu_setup_complete"); cp_->ascend(); }
+            }
+            if (detail::gpu_setup_diagnostics()) {
+                // Host API duration; device-adopted setup additionally completed its work.
+                const double factorize_install_wall_s = std::chrono::duration<double>(
+                    detail::gpu_setup_diagnostic_clock::now() - factorize_install_begin).count();
+                const auto& drop = trsv_.drop_stats();
+                std::fprintf(stderr,
+                    "[gpu-setup-receipt] diagnostics=%s factorize_install_wall_s=%.17g "
+                    "n=%lld rounds=%zu raw_factor_nnz=%zu stored_nnz=%llu adopted=%d "
+                    "fp16=%d host_factor_array_bytes=%zu adoption_download_bytes=%zu "
+                    "factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu\n",
+                    detail::gpu_setup_diagnostics() ? "enabled" : "disabled",
+                    factorize_install_wall_s, static_cast<long long>(n_), F_.rounds.size(),
+                    static_cast<std::size_t>(F_.L.nonZeros()),
+                    static_cast<unsigned long long>(trsv_.stored_nnz()),
+                    trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
+                    F_.L.inner_.size() * sizeof(node_index) + F_.L.vals_.size() * sizeof(factor_value_t),
+                    trsv_.adoption_host_download_bytes(), drop.rel,
+                    static_cast<unsigned long long>(drop.dropped_threshold),
+                    static_cast<unsigned long long>(drop.dropped_flush));
+            }
         }
 #endif
         return *this;
@@ -241,7 +240,7 @@ public:
     /// The factorization must still own its row/value arrays — a factor read
     /// back from a default-configured solver has had them released (see
     /// set_keep_factor); pass a freshly computed factorization instead.
-    apx_cholesky& set_factor(factorization F) {
+    basic_apx_cholesky& set_factor(factorization F) {
         if (F.L.nonZeros() > 0 && F.L.vals_.empty())
             throw std::invalid_argument(
                 "apx_cholesky::set_factor: factorization values were released; "
@@ -257,14 +256,26 @@ public:
 private:
     /// Shared tail of factorize()/set_factor(): SpTRSV setup from F_.
     void install_factor() {
-        scratch_.resize(n_);
-#if !defined(APXCHOL_USE_CUDA)
-        // Second scratch buffer (CPU path only, +8n bytes RSS): receives the
-        // transpose-solve output so the final unpermute gathers straight from
-        // it, eliminating the serial full-n `scratch_ = x` staging copy that
-        // _solve_impl used to pay per PCG iteration.
-        scratch2_.resize(n_);
+#if defined(APXCHOL_USE_CUDA)
+        if constexpr (Route == setup_route::gpu) {
+            // Reject inadmissible factors before installation can initialize
+            // CUDA or upload host arrays. Only diagnostic specializations
+            // retain the explicit host-import path below.
+            if (!F_.research_device_factor ||
+                F_.research_device_factor.use_count() != 1 ||
+                F_.research_device_factor->empty())
+                throw std::invalid_argument(
+                    "GPU route requires a unique nonempty device-owned factor");
+        }
 #endif
+        scratch_.resize(n_);
+        if constexpr (!on_gpu) {
+            // Second scratch buffer (CPU path only, +8n bytes RSS): receives the
+            // transpose-solve output so the final unpermute gathers straight from
+            // it, eliminating the serial full-n `scratch_ = x` staging copy that
+            // _solve_impl used to pay per PCG iteration.
+            scratch2_.resize(n_);
+        }
 
         // For Laplacians (rank n-1) the last row/col is unused.
         // For SDDM (full rank) we use the complete n×n factor.
@@ -273,63 +284,67 @@ private:
         // cost on IPM-scale matrices. Track it as part of "setup" so the
         // bench's setup_time / solve_time split is honest.
         if (cp_) { cp_->descend("setup"); cp_->tick(); }
-#if !defined(APXCHOL_USE_CUDA)
-        // Round-as-level: hand the SpTRSV the per-round IS-column boundaries so it
-        // builds level sets straight off the elimination rounds (same-round IS
-        // columns are mutually independent -> one level) instead of two O(nnz)
-        // topological depth scans. Each region is one factor column placed in round
-        // order; trailing residual-peel columns get sequential levels inside the
-        // SpTRSV. The backend uses these by default (round-as-level is a -6..-18%
-        // solve win); APXCHOL_ROUND_LEVELS=0 forces the topological scan instead.
-        if (!F_.rounds.empty()) {
-            std::vector<node_index> bounds;
-            bounds.reserve(F_.rounds.size() + 1);
-            bounds.push_back(0);
-            node_index acc = 0;
-            for (const auto& r : F_.rounds) {
-                acc += static_cast<node_index>(r.is_size);
-                if (acc > factor_dim) acc = static_cast<node_index>(factor_dim);
-                bounds.push_back(acc);
+        if constexpr (!on_gpu) {
+            // Round-as-level: hand the SpTRSV the per-round IS-column boundaries so it
+            // builds level sets straight off the elimination rounds (same-round IS
+            // columns are mutually independent -> one level) instead of two O(nnz)
+            // topological depth scans. Each region is one factor column placed in round
+            // order; trailing residual-peel columns get sequential levels inside the
+            // SpTRSV. The backend uses these by default (round-as-level is a -6..-18%
+            // solve win); APXCHOL_ROUND_LEVELS=0 forces the topological scan instead.
+            if (!F_.rounds.empty()) {
+                std::vector<node_index> bounds;
+                bounds.reserve(F_.rounds.size() + 1);
+                bounds.push_back(0);
+                node_index acc = 0;
+                for (const auto& r : F_.rounds) {
+                    acc += static_cast<node_index>(r.is_size);
+                    if (acc > factor_dim) acc = static_cast<node_index>(factor_dim);
+                    bounds.push_back(acc);
+                }
+                trsv_.set_round_bounds(std::move(bounds));
             }
-            trsv_.set_round_bounds(std::move(bounds));
+            // Hand the factor over unless the caller wants to read it afterwards:
+            // the CPU SpTRSV then releases F_.L's row/value arrays at the first
+            // point it no longer reads them (Laplacian path: right after its L11
+            // copy), so its setup transient does not sit on a dead copy of the
+            // factor. The release below then finds nothing left to free.
+            if (keep_factor_) trsv_.setup(F_.L, factor_dim);
+            else              trsv_.setup_consuming(F_.L, factor_dim);
         }
-#endif
-#if !defined(APXCHOL_USE_CUDA)
-        // Hand the factor over unless the caller wants to read it afterwards:
-        // the CPU SpTRSV then releases F_.L's row/value arrays at the first
-        // point it no longer reads them (Laplacian path: right after its L11
-        // copy), so its setup transient does not sit on a dead copy of the
-        // factor. The release below then finds nothing left to free.
-        if (keep_factor_) trsv_.setup(F_.L, factor_dim);
-        else              trsv_.setup_consuming(F_.L, factor_dim);
-#else
-        // Device init, on its OWN checkpoint label. CUDA creates the primary
-        // context lazily inside the first CUDA call, which is trsv_.setup()
-        // below: until 2026-08-20 that fixed per-process cost (~100-135 ms on
-        // an RTX 4090 Laptop, ~715 ms on a GH200) was silently counted as
-        // sptrsv_setup, inflating every published GPU setup number -- worst at
-        // small n, where it was the majority of the reported time. Now
-        // factorize() prewarms it on a helper thread and we pay only the
-        // REMAINING wait here, under "cuda_init"; sptrsv_setup below reports
-        // its own work only. NOTE: this changes the meaning of published GPU
-        // setup numbers -- the benchmark cells need regenerating.
-        const double cuda_init_s = cuda_ctx::ensure_context();
-        if (cp_) (*cp_)("cuda_init");
-        if (detail::gpu_setup_diagnostics() && std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below
-            std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
-                         "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
-        if (F_.research_device_factor &&
-            F_.research_device_factor.use_count() == 1 &&
-            !F_.research_device_factor->empty()) {
-            trsv_.setup_adopting_device_factor_for_research(
-                std::move(*F_.research_device_factor));
-            F_.research_device_factor.reset();
-        } else {
-            // Independent copies must not race to move the shared capsule.
-            // Only a unique owner may adopt; copied public factors keep their
-            // ordinary host-array installation path without mutating the capsule.
-            F_.research_device_factor.reset();
-            trsv_.setup(F_.L, factor_dim);
+#if defined(APXCHOL_USE_CUDA)
+        else {
+            // Device init, on its OWN checkpoint label. CUDA creates the primary
+            // context lazily inside the first CUDA call, which is trsv_.setup()
+            // below: until 2026-08-20 that fixed per-process cost (~100-135 ms on
+            // an RTX 4090 Laptop, ~715 ms on a GH200) was silently counted as
+            // sptrsv_setup, inflating every published GPU setup number -- worst at
+            // small n, where it was the majority of the reported time. Now
+            // factorize() prewarms it on a helper thread and we pay only the
+            // REMAINING wait here, under "cuda_init"; sptrsv_setup below reports
+            // its own work only. NOTE: this changes the meaning of published GPU
+            // setup numbers -- the benchmark cells need regenerating.
+            const double cuda_init_s = cuda_ctx::ensure_context();
+            if (cp_) (*cp_)("cuda_init");
+            if (detail::gpu_setup_diagnostics() && std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below
+                std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
+                             "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
+            if constexpr (Route == setup_route::gpu) {
+                trsv_.setup_adopting_device_factor_for_research(
+                    std::move(*F_.research_device_factor));
+                F_.research_device_factor.reset();
+            } else if (F_.research_device_factor &&
+                       F_.research_device_factor.use_count() == 1 &&
+                       !F_.research_device_factor->empty()) {
+                trsv_.setup_adopting_device_factor_for_research(
+                    std::move(*F_.research_device_factor));
+                F_.research_device_factor.reset();
+            } else {
+                // Diagnostic copies must not race to move a shared capsule. Their
+                // explicit host-import path leaves the independent copy untouched.
+                F_.research_device_factor.reset();
+                trsv_.setup(F_.L, factor_dim);
+            }
         }
 #endif
         if (cp_) { (*cp_)("sptrsv_setup"); cp_->ascend(); }
@@ -351,7 +366,7 @@ private:
 public:
 
     /// Shortcut for analyzePattern() + factorize().
-    apx_cholesky& compute(const auto& A) {
+    basic_apx_cholesky& compute(const auto& A) {
         analyzePattern(A);
         factorize(A);
         return *this;
@@ -369,14 +384,8 @@ public:
     Eigen::Index cols() const { return n_; }
     Eigen::ComputationInfo info() const { return m_info; }
 
-#if defined(APXCHOL_USE_CUDA)
-    /// Device-resident SpTRSV state (cuda_pcg uses solve_LLt_dev directly).
-    cuda_sptrsv& trsv() { return trsv_; }
-    const cuda_sptrsv& trsv() const { return trsv_; }
-#else
-    omp_sptrsv& trsv() { return trsv_; }
-    const omp_sptrsv& trsv() const { return trsv_; }
-#endif
+    Trsv& trsv() { return trsv_; }
+    const Trsv& trsv() const { return trsv_; }
 
     /// Apply M^{-1} to rhs via approximate Cholesky (Eigen entry point; also
     /// what apply()/Eigen::ConjugateGradient hit).
@@ -503,22 +512,26 @@ private:
             for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
             if (cp_) (*cp_)("permute");
 
+            const double* out;
 #if defined(APXCHOL_USE_CUDA)
-            // solve_LLt reads z[0..n) and writes scratch_[0..n); the gather
-            // below reads scratch_ straight (the old x = scratch_; scratch_ = x
-            // round trip was a no-op pair of serial copies).
-            trsv_.solve_LLt(z, scratch_.data());
-            if (cp_) (*cp_)("back");
-            const double* out = scratch_.data();
-#else
-            trsv_.forward_solve(z, scratch_.data());
-            if (cp_) (*cp_)("forward");
-            // The transpose solve writes scratch2_ (not z) so the unpermute
-            // below can gather straight from it — no serial staging copy.
-            trsv_.transpose_solve(scratch_.data(), scratch2_.data());
-            if (cp_) (*cp_)("back");
-            const double* out = scratch2_.data();
+            if constexpr (on_gpu) {
+                // solve_LLt reads z[0..n) and writes scratch_[0..n); the gather
+                // below reads scratch_ straight (the old x = scratch_; scratch_ = x
+                // round trip was a no-op pair of serial copies).
+                trsv_.solve_LLt(z, scratch_.data());
+                if (cp_) (*cp_)("back");
+                out = scratch_.data();
+            } else
 #endif
+            {
+                trsv_.forward_solve(z, scratch_.data());
+                if (cp_) (*cp_)("forward");
+                // The transpose solve writes scratch2_ (not z) so the unpermute
+                // below can gather straight from it — no serial staging copy.
+                trsv_.transpose_solve(scratch_.data(), scratch2_.data());
+                if (cp_) (*cp_)("back");
+                out = scratch2_.data();
+            }
             gather_out(out, 0.0);
             if (cp_) (*cp_)(unpermute_label);
         } else {
@@ -547,21 +560,25 @@ private:
             }
             if (cp_) (*cp_)("permute");
 
+            const double* out;
 #if defined(APXCHOL_USE_CUDA)
-            // solve_LLt reads z[0..m) and writes scratch_[0..m); entry m (the
-            // grounded vertex) is 0.
-            trsv_.solve_LLt(z, scratch_.data());
-            if (cp_) (*cp_)("back");
-            scratch_(m) = 0.0;
-            const double* out = scratch_.data();
-#else
-            trsv_.forward_solve(z, scratch_.data());
-            if (cp_) (*cp_)("forward");
-            trsv_.transpose_solve(scratch_.data(), scratch2_.data());
-            if (cp_) (*cp_)("back");
-            scratch2_(m) = 0.0;
-            const double* out = scratch2_.data();
+            if constexpr (on_gpu) {
+                // solve_LLt reads z[0..m) and writes scratch_[0..m); entry m (the
+                // grounded vertex) is 0.
+                trsv_.solve_LLt(z, scratch_.data());
+                if (cp_) (*cp_)("back");
+                scratch_(m) = 0.0;
+                out = scratch_.data();
+            } else
 #endif
+            {
+                trsv_.forward_solve(z, scratch_.data());
+                if (cp_) (*cp_)("forward");
+                trsv_.transpose_solve(scratch_.data(), scratch2_.data());
+                if (cp_) (*cp_)("back");
+                scratch2_(m) = 0.0;
+                out = scratch2_.data();
+            }
             // Output re-centering (centring applications only): the
             // permutation preserves the multiset, so mean(z) == mean(out) --
             // one deterministic reduction over the permuted solve output,
@@ -591,21 +608,24 @@ private:
     // (sized to the max team on first use; reusable, so solves stay
     // allocation-free after the first call).
     mutable std::vector<double> part_;
-#if !defined(APXCHOL_USE_CUDA)
     // Transpose-solve output staging for the CPU _solve_impl (see
-    // install_factor); unused (never resized) under CUDA.
+    // install_factor); unused (never resized) by the device specialization.
     mutable Eigen::VectorXd scratch2_;
-#endif
     Eigen::Index n_ = 0;
     Eigen::ComputationInfo m_info = Eigen::Success;
     bool m_analysisIsOk = false;
     bool m_factorizationIsOk = false;
 
-#if defined(APXCHOL_USE_CUDA)
-    mutable cuda_sptrsv trsv_;
-#else
-    omp_sptrsv trsv_;
-#endif
+    mutable Trsv trsv_;
 };
+
+#if defined(APXCHOL_USE_CUDA)
+using gpu_preconditioner = basic_apx_cholesky<cuda_sptrsv, setup_route::gpu>;
+#endif
+} // namespace detail
+
+// Eigen and cpu_solver always execute a complete CPU route, including in a
+// CUDA-enabled build. GPU PCG owns its internal device preconditioner separately.
+using apx_cholesky = detail::basic_apx_cholesky<omp_sptrsv, detail::setup_route::cpu>;
 
 } // namespace apxchol

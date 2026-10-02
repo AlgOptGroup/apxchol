@@ -555,7 +555,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         Eigen::VectorXd exact(n);
         for (int v = 0; v < n; ++v) exact[v] = std::sin(v + 0.25);
         const Eigen::VectorXd b = A * exact;
-        apxchol::apx_cholesky preconditioner;
+        apxchol::detail::gpu_preconditioner preconditioner;
         testing::internal::CaptureStderr();
         try { preconditioner.compute(A); }
         catch (...) { const auto trace=testing::internal::GetCapturedStderr(); ADD_FAILURE()<<trace; throw; }

@@ -2,7 +2,7 @@
 
 Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
 and SDDM systems. CPU setup and solve use OpenMP; CUDA provides an optional
-GPU-resident solve. C++, Python and Octave/MATLAB interfaces are included.
+device-owned setup and GPU-resident solve. C++, Python and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
@@ -34,7 +34,8 @@ auto r2 = solver.solve(b2, 1e-10, 1000);
 Eigen::VectorXd z = solver.apply(r);
 ```
 
-`apxchol::apx_cholesky` provides Eigen's preconditioner interface. Singular
+`cpu_solver` and Eigen's `apxchol::apx_cholesky` always use CPU setup and
+CPU solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
 ```bash
@@ -54,7 +55,7 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 
 | CMake option | Purpose |
 |---|---|
-| `APXCHOL_USE_CUDA=ON` | Dataflow triangular solve and GPU PCG; core links only `cudart` |
+| `APXCHOL_USE_CUDA=ON` | Device-owned setup, dataflow triangular solves and GPU PCG; core links only `cudart` |
 | `APXCHOL_POOL_FP32=OFF` | fp64 residual-pool weights instead of default fp32 |
 | `APXCHOL_64BIT_EDGE_INDICES=ON` | Wide factor/pool offsets |
 | `APXCHOL_64BIT_NODE_INDICES=ON` | Wide vertices and offsets |
@@ -66,13 +67,22 @@ on, CPU off). It narrows scaled off-diagonals, retaining FP32 diagonals; it
 does not change the outer PCG to FP16. See [precision and storage](docs/precision.md).
 `--sampler gks|trace_cycle` selects the clique sampler; GKS remains
 its default. Trace-cycle supports CPU setup and full GPU-owned setup.
-Factor construction defaults to CPU. `APXCHOL_GPU_BLOCK_FRONTEND=on` enables
-GPU selection; experimental GPU-owned numerical setup additionally requires
-`APXCHOL_GPU_ROUND_SHADOW=force` and `APXCHOL_GPU_FACTOR_FINALIZE=force`.
-This applies to one-shot block-greedy/tree solves with directed AoS storage;
-public/exported factors and unsupported stored formats retain validated fallback
-paths. These controls are research interfaces; see the [extension guide](docs/extending.md)
-for supported custom-factor and graph interfaces.
+`solve_options.backend` (`solve_backend::automatic`, `cpu`, or `gpu`) and CLI
+`--backend auto|cpu|gpu` select a complete setup/solve route. The default `auto`
+selects GPU in a CUDA build for supported block-greedy/AoS options with 32-bit
+nodes and no factor export; other configurations select CPU. This is an option
+compatibility policy, not a speed predictor or device-availability probe.
+`solve_result.backend` and the CLI report the actual route.
+
+The GPU route requires device-owned factor and operator construction. Unsupported
+stored formats, unavailable devices, allocation failures and execution errors are
+reported without retrying on CPU. Use `--backend cpu` (or `solve_backend::cpu`)
+for CPU execution in a CUDA build, including lower-only or otherwise unsupported
+CSC layouts. GPU operator input must be compressed, sorted, unique and fully
+paired. Ordinary GPU solves no longer need the three per-stage environment flags;
+those flags remain low-level diagnostic controls. Public factorization, custom
+strategies and factor export stay available on CPU. See the
+[extension guide](docs/extending.md) for explicit factor handoff.
 
 ### Threads and placement
 

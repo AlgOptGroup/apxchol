@@ -1,4 +1,8 @@
 #include <gtest/gtest.h>
+#include "gpu_preconditioner_fixture.h"
+#if defined(APXCHOL_USE_CUDA)
+#include "apxchol/solver/pcg_cuda.h"
+#endif
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/solve.h"
 #include <algorithm>
@@ -431,12 +435,33 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneAttemptForBothImports)
         if (!compressed) matrix.uncompress(); // Do this after the copy: Eigen may recompress copies.
         ASSERT_EQ(matrix.isCompressed(), compressed);
         ASSERT_EQ(apxchol::detail::gpu_owned_csc_supported(matrix), compressed);
-        // operator_view borrows this M-matrix unchanged; uncompressed storage
-        // reaches the existing generic make_graph path, not a test override.
+        // The public GPU route requires compatible stored CSC. Generic host
+        // import remains an explicit diagnostic here, with its device operator
+        // constructed separately from the canonical original CSC.
         apxchol::solve_result solved;
         testing::internal::CaptureStderr();
-        try { solved = apxchol::solve(matrix,rhs,options); }
-        catch (...) { const auto failure = testing::internal::GetCapturedStderr();ADD_FAILURE() << failure;throw; }
+        try {
+            if (compressed) {
+                solved = apxchol::solve(matrix, rhs, options);
+                EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
+            } else {
+                apxchol::test::diagnostic_gpu_preconditioner preconditioner;
+                preconditioner.set_options(options.factor_opts);
+                preconditioner.compute(matrix);
+                if (!preconditioner.trsv().adopted_device_factor())
+                    throw std::runtime_error("diagnostic factor did not adopt device storage");
+                apxchol::cuda_pcg pcg;
+                pcg.setup(original, preconditioner.factor().perm);
+                int iterations = 0;
+                pcg.solve(preconditioner, rhs, solved.x, options.tol, options.max_iter,
+                          iterations, solved.residual, false);
+                solved.iterations = iterations;
+            }
+        } catch (...) {
+            const auto failure = testing::internal::GetCapturedStderr();
+            ADD_FAILURE() << failure;
+            throw;
+        }
         const auto trace = testing::internal::GetCapturedStderr();
         EXPECT_EQ(occurrences(trace,"[gpu-owned-sparsify-gate]"),1u) << trace;
         EXPECT_EQ(occurrences(trace,"[gpu-owned-sparsify]"),1u) << trace;

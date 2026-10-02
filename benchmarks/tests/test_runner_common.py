@@ -138,6 +138,38 @@ class CsvMetricTest(unittest.TestCase):
 
 
 
+class CompleteRouteReceiptTest(unittest.TestCase):
+    def test_route_and_stop_receipts_parse_together(self):
+        for route in ("cpu", "gpu"):
+            row = rc.parse_csv("v1,m,4,12,1,2,3,7,1e-9,1,2,3,-1,3,2,9e-9,original-v1,2,0.25," + route + "\n")
+            self.assertEqual(row["execution_route"], route)
+            self.assertEqual(row["stop_contract"], "original-v1")
+            self.assertEqual(row["retained_repeats"], 3)
+            self.assertEqual(row["stop_check_s"], 0.25)
+
+    def test_old_rows_do_not_invent_route_and_unknown_routes_fail(self):
+        old = "v1,m,4,12,1,2,3,7,1e-9,1,2,original-v1,2,0.25"
+        self.assertNotIn("execution_route", rc.parse_csv(old + "\n"))
+        self.assertIsNone(rc.parse_csv(old + ",hybrid\n"))
+        self.assertNotIn("execution_route", rc.parse_csv(old + ",\n"))
+
+    def test_fill_with_no_denominator_is_unavailable(self):
+        row = rc.parse_csv("v1,m,1,1,1,2,3,1,0,nan,3,original-v1,1,0.25,cpu\n")
+        self.assertIsNone(row["fillin"])
+
+    def test_every_warmup_and_retained_route_is_checked(self):
+        lines = ["BENCH_REPEAT phase=warmup index=1 execution_route=gpu",
+                 "BENCH_REPEAT phase=retained index=1 execution_route=gpu",
+                 "BENCH_REPEAT phase=retained index=2 execution_route=gpu"]
+        metrics = {"execution_route": "gpu"}
+        self.assertIsNone(rc.v1_route_error(metrics, "\n".join(lines), "gpu", 2, 1))
+        for bad in (lines[:-1], lines + [lines[-1]],
+                    [line.replace("route=gpu", "route=cpu") for line in lines],
+                    [line.replace(" execution_route=gpu", "") for line in lines]):
+            self.assertIsNotNone(rc.v1_route_error(metrics, "\n".join(bad), "gpu", 2, 1))
+        self.assertIsNotNone(rc.v1_route_error({}, "\n".join(lines), "gpu", 2, 1))
+
+
 class MatrixExportTest(unittest.TestCase):
     def test_failed_and_interrupted_exports_are_not_cached(self):
         with tempfile.TemporaryDirectory(prefix="export test ") as directory:
