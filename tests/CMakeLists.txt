@@ -30,6 +30,7 @@ add_executable(unit_tests
         test_operator_class.cpp
         test_pcg_cuda_host.cpp
         test_cuda_device_scope.cpp
+        test_level_schedule.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE
