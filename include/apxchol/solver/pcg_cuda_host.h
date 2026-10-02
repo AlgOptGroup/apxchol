@@ -5,6 +5,7 @@
 #include "apxchol/types.h"
 #include <Eigen/Sparse>
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -144,7 +145,8 @@ inline bool try_build_permuted_symmetric_csr(
 // Fully paired, unique sorted CSC uses column ownership: source column k
 // owns output row perm[k], retaining the sort by permuted column indices.
 // The general fallback below counts and scatters through atomic row
-// counters, then sorts each row. Both preserve canonical lower values.
+// counters, then sorts each row by column (duplicate coordinates by value
+// bits). Both preserve canonical lower values.
 // fp32_exact (out) := every operator value round-trips fp32 (v == double(float(v))),
 // so storing A in fp32 is LOSSLESS. Computed FOR FREE as an OMP reduction in PASS 2's
 // existing value loop -- no separate scan. (A is symmetric; PASS 2 visits the upper
@@ -205,7 +207,7 @@ inline void build_permuted_full_symmetric_csr(
     vals    = std::make_unique_for_overwrite<double[]>(static_cast<std::size_t>(total));
 
     // PASS 2 (parallel): atomic-claim slot, scatter. Non-deterministic
-    // per-row order across threads; restored by per-row sort below. The fp32
+    // per-row order across threads; the per-row sort below restores one order. The fp32
     // exactness reduction rides along for free (every value v is read here anyway).
     std::vector<int> pos(row_ptr.begin(), row_ptr.begin() + n);
     bool exact = true;
@@ -233,8 +235,11 @@ inline void build_permuted_full_symmetric_csr(
     fp32_exact = exact;
 
     // Sort each row's (col, val) ascending: sorted CSR gives the SpMV its
-    // best locality on the x gathers. Per-thread kv buffer reused across
-    // rows (avoids n tiny mallocs).
+    // best locality on the x gathers. Duplicate coordinates, which the
+    // operator contract accepts, are ordered by value bits, so the stored
+    // order (and every SpMV's summation order) does not depend on which
+    // thread claimed which slot. Per-thread kv buffer reused across rows
+    // (avoids n tiny mallocs).
     #pragma omp parallel
     {
         std::vector<std::pair<int, double>> kv;
@@ -246,8 +251,10 @@ inline void build_permuted_full_symmetric_csr(
             kv.reserve(re - rs);
             for (int p = rs; p < re; ++p)
                 kv.emplace_back(col_idx[p], vals[p]);
-            std::sort(kv.begin(), kv.end(),
-                      [](const auto& a, const auto& b){ return a.first < b.first; });
+            std::sort(kv.begin(), kv.end(), [](const auto& a, const auto& b) {
+                if (a.first != b.first) return a.first < b.first;
+                return std::bit_cast<std::uint64_t>(a.second) < std::bit_cast<std::uint64_t>(b.second);
+            });
             for (int p = rs; p < re; ++p) {
                 col_idx[p] = kv[p - rs].first;
                 vals[p]    = kv[p - rs].second;
