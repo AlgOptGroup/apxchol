@@ -572,6 +572,33 @@ static double read_vmrss_mb() {
     return -1.0;
 }
 
+// Diagnostic only: stored diagonals are optional for zero rows. Subtracting the
+// row count from nnz therefore undercounts adjacency entries when isolates omit
+// their diagonal. Call this after the measured intervals, not inside Solve.
+static long long stored_offdiagonal_entries(const Eigen::SparseMatrix<double>& A) {
+    long long count = 0;
+    for (Eigen::Index col = 0; col < A.outerSize(); ++col)
+        for (Eigen::SparseMatrix<double>::InnerIterator entry(A, col); entry; ++entry)
+            if (entry.row() != entry.col()) ++count;
+    return count;
+}
+
+#ifdef APXCHOL_USE_CUDA
+// Shared process initialization is reported once and excluded from each solver's
+// measured setup. A CPU route must never call this, including auto-selected CPU.
+static void warm_up_cuda_once() {
+    static bool initialized = false;
+    if (initialized) return;
+    const auto begin = std::chrono::high_resolution_clock::now();
+    cudaFree(nullptr);
+    const double init_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - begin).count();
+    std::cerr << "[bench] cuda_init (once, before any timed solver): "
+              << std::fixed << std::setprecision(1) << init_ms << " ms\n";
+    initialized = true;
+}
+#endif
+
 static void print_result_pretty(const BenchResult& r) {
     std::cout << std::left
               << std::setw(16) << r.solver_name
@@ -786,6 +813,9 @@ static BenchResult run_apxchol_v1(
     opts.backend = backend;
     const auto route = apxchol::detail::select_solve_backend(opts);
     opts.backend = route; // resolve once; retries reuse the same concrete owner
+#if defined(APXCHOL_USE_CUDA)
+    if (route == apxchol::solve_backend::gpu) warm_up_cuda_once();
+#endif
     r.execution_route = route == apxchol::solve_backend::gpu ? "gpu" : "cpu";
     const bool report_fill = std::getenv("APXCHOL_REPORT_FILL") != nullptr;
     long long factor_nnz = 0, factor_rows = 0;
@@ -877,7 +907,7 @@ static BenchResult run_apxchol_v1(
     }
     const long long offdiag = factor_nnz - factor_rows;
     r.factor_offdiag = offdiag;
-    const long long adj_nnz = static_cast<long long>(L.nonZeros()) - L.rows();
+    const long long adj_nnz = stored_offdiagonal_entries(L);
     r.fillin = adj_nnz > 0 ? 2.0 * offdiag / adj_nnz
                            : std::numeric_limits<double>::quiet_NaN();
     if (report_fill) {
@@ -1976,7 +2006,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     r.solve_rss_mb = rss; r.solve_vram_mb = vram;   // carry peak over components
     if (!r.execution_route.empty()) {
         r.factor_offdiag = measured_fill ? measured_offdiag : -1;
-        const long long adj_nnz = static_cast<long long>(L.nonZeros()) - L.rows();
+        const long long adj_nnz = stored_offdiagonal_entries(L);
         r.fillin = measured_fill && adj_nnz > 0 ? 2.0 * measured_offdiag / adj_nnz
                                               : std::numeric_limits<double>::quiet_NaN();
     }
@@ -2647,15 +2677,10 @@ int main(int argc, char** argv) {
     // footing — and keeps them there now that apxchol's own library-side
     // prewarm (apxchol/solver/cuda_context.h) hides its share of the cost.
     // Printed rather than hidden. Nothing else about the timing logic changes.
-    if ((args.solvers.count("apxchol_v1") && args.v1_backend != "cpu") ||
-        args.solvers.count("amgcl_cuda") || args.solvers.count("hypre_boomeramg_gpu")) {
-        const auto t_cuda_init = std::chrono::high_resolution_clock::now();
-        cudaFree(nullptr);
-        const double init_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::high_resolution_clock::now() - t_cuda_init).count();
-        std::cerr << "[bench] cuda_init (once, before any timed solver): "
-                  << std::fixed << std::setprecision(1) << init_ms << " ms\n";
-    }
+    // v1 resolves each configuration first and calls the same helper only for
+    // its GPU route. Competitor GPU initialization stays at this process point.
+    if (args.solvers.count("amgcl_cuda") || args.solvers.count("hypre_boomeramg_gpu"))
+        warm_up_cuda_once();
 #endif
 
 #ifdef HAVE_HYPRE

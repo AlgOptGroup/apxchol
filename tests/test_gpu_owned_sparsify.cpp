@@ -401,6 +401,9 @@ TEST(GpuOwnedSparsify, PreviewReplacementInvalidatesAndResetsHandbackCounts) {
     RecordProperty("owned_sparsify_preview_handback", "pass");
 }
 TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneAttemptForBothImports) {
+#if defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "end-to-end GPU operator construction requires 32-bit node indices";
+#else
     REQUIRE_OWNED_SPARSIFY_DEVICE();
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -484,5 +487,6 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneAttemptForBothImports)
         EXPECT_LE((original*solved.x-rhs).norm()/rhs.norm(),1e-8);
         RecordProperty(compressed ? "owned_sparsify_controller_csc" : "owned_sparsify_controller_generic",line);
     }
+#endif
 }
 #endif

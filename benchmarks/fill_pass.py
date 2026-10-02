@@ -2,8 +2,10 @@
 """One-time FILL measurement pass for the Cholesky-family solvers.
 
 Records each solver's fill ratio on a CONSISTENT definition — fill =
-2*offdiag(L) / offdiag(A) = 2*(factor_nnz - n) / (matrix_nnz - n) — so apxchol,
-ParAC and RCHOL are comparable (RCHOL's stored `fillin` uses 2*Lnnz/Annz incl.
+2*offdiag(L) / offdiag(A). The measured apxchol owner counts stored off-diagonal
+input entries directly: matrix_nnz - n is invalid when zero isolates omit their
+diagonal entries. ParAC and RCHOL use their reported stored counts
+(RCHOL's stored `fillin` uses 2*Lnnz/Annz incl.
 the diagonal, which is recomputed here from the off-diagonal counts). AMG solvers
 (BoomerAMG/AMGCL) have NO triangular factor, so no comparable number — they are
 intentionally absent from the fill chart.

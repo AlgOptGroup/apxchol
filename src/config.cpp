@@ -14,6 +14,12 @@ static const std::map<std::string, input_kind> input_kind_map = {
     {"adjacency", input_kind::adjacency},
 };
 
+static const std::map<std::string, solve_backend> solve_backend_map = {
+    {"auto", solve_backend::automatic},
+    {"cpu", solve_backend::cpu},
+    {"gpu", solve_backend::gpu},
+};
+
 static const std::map<std::string, graph_storage> graph_storage_map = {
     {"vec",          graph_storage::vec},
     {"bstr",         graph_storage::bstr},
@@ -104,9 +110,7 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--backend", cfg.solve_opts.backend,
                    "Complete setup/solve route: auto, cpu or gpu (no runtime fallback)")
         ->default_str("auto")
-        ->transform(CLI::CheckedTransformer(std::map<std::string, solve_backend>{
-            {"auto", solve_backend::automatic}, {"cpu", solve_backend::cpu},
-            {"gpu", solve_backend::gpu}}));
+        ->transform(CLI::IsMember(solve_backend_map) & CLI::Transformer(solve_backend_map));
 
     // ── solver parameters ──
     app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")

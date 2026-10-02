@@ -141,10 +141,19 @@ void compatible_zero_isolates() {
         ++calls;
         require_contract(block.rows() == 2 && b.size() == 2, "compatible zero isolate was solved");
         require_close(b.sum(), 0, "compatible Laplacian RHS changed");
-        return BenchResult{};
+        BenchResult part;
+        part.execution_route = "cpu";
+        part.factor_offdiag = 1;
+        return part;
     });
     require_contract(calls == 1, "Laplacian block was skipped or zero isolates were solved");
     require_close(result.rel_residual, 0, "zero isolates changed the aggregate residual");
+    require_contract(matrix.nonZeros() == matrix.rows(), "zero-isolate fixture no longer exposes nnz-minus-n error");
+    require_contract(stored_offdiagonal_entries(matrix) == 2, "missing diagonals changed adjacency count");
+    require_close(result.fillin, 1, "missing isolate diagonals corrupted aggregate fill");
+    // Whole v1 and split metrics use this same post-timing diagnostic count.
+    const double whole_formula = 2.0 * result.factor_offdiag / stored_offdiagonal_entries(matrix);
+    require_close(result.fillin, whole_formula, "whole/split fill denominators disagree");
 }
 
 void incompatible_zero_scalar() {

@@ -36,7 +36,9 @@ Committed CSVs carry selected results and provenance.
 - `APXCHOL_REPORT_FILL` reads the actual held factor and its SpTRSV drop statistics.
   It never constructs another factor or uploads a host diagnostic factor. Raw
   factor off-diagonals and stored L11 entries are distinct counts; CSR and CSC each
-  hold the latter. A zero off-diagonal input denominator makes the ratio unavailable.
+  hold the latter. The input denominator counts stored off-diagonal entries after
+  timing, rather than subtracting the row count: zero isolates may omit diagonal
+  storage. A zero off-diagonal input denominator makes the ratio unavailable.
 - New rows must carry `stop_contract=original-v1`. Old timings remain historical
   evidence, but cannot resume or enter current comparisons as if their cheaper
   stopping rule were the same measurement. Re-run affected comparisons; never

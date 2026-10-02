@@ -690,6 +690,7 @@ add_test(NAME contract_rejects_retired_storage
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_storage_rejection.cmake)
 add_test(NAME contract_v1_complete_cpu_route
     COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
+        -DUSE_CUDA=${APXCHOL_USE_CUDA} -DWIDE_NODES=${APXCHOL_64BIT_NODE_INDICES}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_v1_complete_route.cmake)
 add_test(NAME contract_none_allows_input_exports
     COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
