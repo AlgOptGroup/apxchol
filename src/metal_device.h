@@ -150,6 +150,8 @@ public:
     /// stride. Valid until the next reserve(); only touched between calls.
     df32* r() noexcept;
     df32* x() noexcept;
+    /// A p: dead once solve() returns, so the host may reuse it as scratch.
+    df32* ap() noexcept;
     float* p() noexcept;
     float* z() noexcept;
     column_state* columns() noexcept;

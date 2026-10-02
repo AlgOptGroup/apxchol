@@ -376,7 +376,9 @@ restarts at close to FP64 iteration counts; it is the only mode retained.
 blocks; rows with more than 32 dependencies are heavy; runs of narrow levels
 (light rows only, at most 2048 row-column items) share one threadgroup of up to
 1024 threads; one command buffer per iteration above 200,000 rows and per four
-iterations below. None is an environment knob.
+iterations below. None is an environment knob. The port does the host packing,
+centring and FP64 exit check in block-wide node-major passes (the prototype
+made one strided pass per column).
 
 **Fixed while porting.** Breakdown reported as convergence (a skipped update
 left a zero r.r behind); `<=` stopping (now strict `<`); FP32 underflow of

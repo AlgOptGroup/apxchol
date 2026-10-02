@@ -571,6 +571,34 @@ TEST(MetalDevice, WarmBlockColumnsKeepBitsAcrossThreads) {
 #endif
 }
 
+// The block exit check (node-major, one pass over the operator per batch)
+// and the one-column check of a warm start (max_iter = 0 checks x0 on the
+// host as it is) must report the same residual bits. SDDM, so x0 is not
+// re-centred; more than one 4096-row fold block.
+TEST(MetalDevice, BlockExitCheckMatchesTheOneColumnCheck) {
+    REQUIRE_METAL();
+    const Sparse A = grid(90, 80, 0.125, true);
+    const apxchol::metal_solver slv(A);
+    const Eigen::Index n = A.rows(), k = 5;
+    Eigen::MatrixXd B(n, k);
+    for (Eigen::Index c = 0; c < k; ++c) B.col(c) = rhs(n, static_cast<unsigned>(c + 41), false);
+    const apxchol::metal_block_result first = slv.solve(B, 1e-10, 500);
+    const apxchol::metal_solver::block_cref X0(first.X);
+    const apxchol::metal_block_result check = slv.solve(B, 1e-10, 0, &X0);
+    for (Eigen::Index c = 0; c < k; ++c) {
+        SCOPED_TRACE(c);
+        const auto& a = first.columns[static_cast<std::size_t>(c)];
+        const auto& b = check.columns[static_cast<std::size_t>(c)];
+        EXPECT_TRUE(a.converged);
+        EXPECT_GT(a.iterations, 0);
+        EXPECT_EQ(b.stop, apxchol::metal_stop::initial_guess);
+        EXPECT_EQ(b.iterations, 0);
+        EXPECT_EQ(std::memcmp(&a.residual, &b.residual, sizeof(double)), 0)
+            << a.residual << " vs " << b.residual;
+        EXPECT_TRUE(same_bytes(first.X.col(c), check.X.col(c)));
+    }
+}
+
 TEST(MetalDevice, LaplacianX0ConstantIrrelevant) {
     REQUIRE_METAL();
     const Sparse A = grid(26, 26);

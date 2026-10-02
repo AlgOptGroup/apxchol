@@ -481,6 +481,7 @@ void engine::reserve(std::uint32_t kc) {
 std::uint32_t engine::capacity() const noexcept { return impl_->cap; }
 df32* engine::r() noexcept { return static_cast<df32*>([impl_->r contents]); }
 df32* engine::x() noexcept { return static_cast<df32*>([impl_->x contents]); }
+df32* engine::ap() noexcept { return static_cast<df32*>([impl_->ap contents]); }
 float* engine::p() noexcept { return static_cast<float*>([impl_->p contents]); }
 float* engine::z() noexcept { return static_cast<float*>([impl_->z contents]); }
 column_state* engine::columns() noexcept { return static_cast<column_state*>([impl_->cols contents]); }
