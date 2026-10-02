@@ -152,7 +152,10 @@ jobs:
           sudo apt-get update -qq
           # g++-14 for the C++23 core (mkoctfile honors the CXX env var below).
           # octave-dev (not liboctave-dev) provides mkoctfile on Ubuntu 24.04.
-          sudo apt-get install -y g++-14 octave octave-dev libeigen3-dev
+          # Skip optional Java, plotting and documentation packages. Keep the
+          # pthread BLAS/LAPACK runtime selected by the full Octave install.
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 octave octave-dev libeigen3-dev libopenblas0-pthread
       - name: Build MEX + run tests
         env:
           CXX: g++-14
