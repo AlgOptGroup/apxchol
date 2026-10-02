@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
+include(${CMAKE_CURRENT_LIST_DIR}/../cmake/apxchol_macos_compiler.cmake)
 project(apxchol_ext LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)

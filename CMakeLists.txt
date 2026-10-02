@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
+include(cmake/apxchol_macos_compiler.cmake)
 project(apxchol VERSION 0.2.2 LANGUAGES CXX)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

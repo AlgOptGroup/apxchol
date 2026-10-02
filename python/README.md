@@ -81,8 +81,7 @@ pytest python/tests -v
 
 The extension directly compiles `factorization.cpp`, `operator_class.cpp`
 and `solve.cpp`. Local builds tune for the build machine; distributed wheels
-are portable. On macOS, first export `CC`, `CXX`, `CMAKE_PREFIX_PATH` and
-`SDKROOT` using the [LLVM/libc++ 23 setup](../README.md#build-and-run), then run
-the pip command above. These variables also select the compiler in an isolated
-Python build. OpenMP discovery uses CMake's standard `find_package(OpenMP)`.
+are portable. On macOS, install the [build dependencies](../README.md#build-and-run)
+first, then use the same pip command above; CMake selects Homebrew LLVM
+when no compiler or toolchain is specified explicitly.
 Without build isolation, install `pybind11 scikit-build-core` first. [License](../LICENSE).

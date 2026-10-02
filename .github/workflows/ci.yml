@@ -1,14 +1,3 @@
-# Build + TEST CI for the library, CPU bindings and native benchmark. Kept lean and
-# path-filtered so it only runs when C++/build/package files change, not on
-# doc/chart commits.
-#
-# Five job definitions; the Linux compiler matrix expands to two jobs:
-#   benchmark-harness — harness unit tests, CPU build and native CLI/stopping contracts
-#   linux    — parent CMake consumer under GCC and Clang, full suite (ctest)
-#   macos    — same consumer under LLVM/libc++ 23 or newer, full suite
-#   python   — manylinux wheel build + pytest (also the PORTABILITY check: the
-#              old-glibc environment the release wheels are built in)
-#   octave   — mkoctfile MEX + the Octave test suite
 name: ci
 
 on:
@@ -122,9 +111,7 @@ jobs:
       - &configure-build
         name: Configure + build (Release)
         run: |
-          "$CXX" --version
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_C_COMPILER="$CC"
+          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
       - &ctest
         name: Run unit tests
@@ -138,15 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: |
-          brew install llvm ninja
-          llvm_prefix="$(brew --prefix llvm)"
-          cat >> "$GITHUB_ENV" <<EOF
-          CC=$llvm_prefix/bin/clang
-          CXX=$llvm_prefix/bin/clang++
-          CMAKE_PREFIX_PATH=$llvm_prefix
-          SDKROOT=$(xcrun --show-sdk-path)
-          EOF
+        run: brew install llvm ninja
       - *configure-build
       - name: Check OpenMP linkage
         run: otool -L build/apxchol/tests/unit_tests | grep -q libomp

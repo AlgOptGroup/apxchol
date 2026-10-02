@@ -18,21 +18,10 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-On macOS, requires LLVM Clang 23+, libc++ 23+, and the macOS SDK from
-Xcode Command Line Tools. Build with Homebrew:
-
-```bash
-brew install llvm cmake ninja
-llvm_prefix="$(brew --prefix llvm)"
-export CC="$llvm_prefix/bin/clang" CXX="$llvm_prefix/bin/clang++"
-export CMAKE_PREFIX_PATH="$llvm_prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
-export SDKROOT="$(xcrun --show-sdk-path)"
-cmake -S . -B build-macos -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-macos -j6
-ctest --test-dir build-macos --no-tests=error --output-on-failure
-```
-
-Use a fresh build directory when changing compilers.
+On macOS, install LLVM Clang/libc++ 23+ and CMake (`brew install llvm cmake`),
+plus Xcode Command Line Tools for the SDK. Then use the same build commands
+above; CMake selects Homebrew LLVM automatically unless a compiler or toolchain
+is specified explicitly.
 
 The CLI requires an explicit RHS or `--random-rhs`. It reports whether input
 is an assembled operator or adjacency matrix, forming `L = D - A` for the

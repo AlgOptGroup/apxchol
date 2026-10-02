@@ -27,8 +27,10 @@ alongside the ordinary suite.
 
 On macOS, follow the [LLVM/libc++ 23 setup in the README](README.md#build-and-run).
 The `linux` and `macos` CI jobs share their parent-consumer configure/build and
-CTest steps through YAML anchors. Compiler selection uses `CC`/`CXX`; only
-package installation and the macOS OpenMP-linkage check are platform-specific.
+CTest steps through YAML anchors. On macOS, the same automatic compiler selection is used by standalone builds,
+Python builds and the consumer fixture; explicit compiler/toolchain inputs and
+a parent project's compiler are preserved. Only package installation and the
+macOS OpenMP-linkage check are platform-specific.
 Keep C++23 library features in the source and select a compatible standard
 library instead of substituting older APIs for an SDK's missing features.
 

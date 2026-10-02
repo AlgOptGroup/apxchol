@@ -121,11 +121,14 @@ choices, retired knobs, and measurements belong in
 - OpenMP: root and Python builds use standard `find_package(OpenMP)`.
   Select the compiler with `CC`/`CXX` (or CMake's compiler inputs), and use
   `CMAKE_PREFIX_PATH` for a non-system toolchain. Explicit serial builds use
-  `CMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON`; there is no project discovery wrapper.
+  `CMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON`; OpenMP has no project discovery wrapper.
 - macOS: use LLVM Clang/libc++ 23 or newer, with Homebrew's Apple availability
   configuration and the system C++ runtime. Keep `std::ranges::iota`; its
   presence depends on libc++, not just the compiler's C++23 language mode.
-  README documents the compiler/prefix/SDK environment for C++ and Python.
+  `cmake/apxchol_macos_compiler.cmake` selects Homebrew LLVM before `project()`
+  for standalone C++, Python and the consumer fixture. It leaves explicit
+  compiler/toolchain inputs and an initialized parent compiler unchanged.
+  README needs only dependency installation and the common build commands.
   Linux-only `madvise` advice is compiled out; mmap remains. CI's `linux` and
   `macos` jobs share the parent-consumer build/test steps through YAML anchors.
 - spdlog: require 1.17 or newer and fetch 1.17.0 if absent. The older bundled
