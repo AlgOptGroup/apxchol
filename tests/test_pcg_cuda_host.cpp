@@ -52,6 +52,17 @@ void check(const Matrix& L, const std::vector<node_index>& perm) {
         EXPECT_EQ(0, std::memcmp(vals.get(), ref.vals.data(), nnz * sizeof(double)));
     }
 }
+Csr general(const Matrix& L, const std::vector<node_index>& perm) {
+    Csr out;
+    std::unique_ptr<int[]> idx;
+    std::unique_ptr<double[]> vals;
+    std::int64_t nnz = -1;
+    out.exact = false;
+    apxchol::detail::build_permuted_full_symmetric_csr(L, perm, out.ptr, idx, vals, nnz, out.exact);
+    out.idx.assign(idx.get(), idx.get() + nnz);
+    out.vals.assign(vals.get(), vals.get() + nnz);
+    return out;
+}
 Matrix from_entries(int n, std::initializer_list<Eigen::Triplet<double>> entries) {
     Matrix L(n, n); L.setFromTriplets(entries.begin(), entries.end()); return L;
 }
@@ -141,4 +152,51 @@ TEST(GpuPcgHost, RejectsDuplicatesUnsortedAndUncompressedStorage) {
     Matrix uncompressed = from_entries(2, {{0, 0, 2.}, {1, 1, 2.}});
     uncompressed.uncompress();
     EXPECT_FALSE(accepted(uncompressed));
+}
+
+TEST(GpuPcgHost, GeneralFallbackMatchesIndependentLowerTriangleReference) {
+    // Lower-triangle-only storage is unpaired, so the column-ownership path
+    // declines it and the atomic count, scatter and per-row sort build the
+    // CSR. Fully stored inputs take the column-ownership path. Both must equal
+    // the serial reference byte for byte at every team size. No input has
+    // duplicate coordinates (the per-row sort compares columns only).
+    std::mt19937 rng(20261002);
+#ifdef _OPENMP
+    const int saved = omp_get_max_threads();
+#endif
+    for (int team : {1, 2, 4}) {
+#ifdef _OPENMP
+        omp_set_num_threads(team);
+#endif
+        for (int trial = 0; trial < 40; ++trial) {
+            const int n = 2 + trial * 17 % 97;
+            const bool lower_only = trial % 2 == 0;
+            std::vector<Eigen::Triplet<double>> entries;
+            for (int col = 0; col < n; ++col) {
+                entries.emplace_back(col, col, trial % 3 ? 4.0 : 4.1);
+                for (int row = col + 1; row < n; ++row) {
+                    if (!(row == 1 && col == 0) && rng() % 7) continue;
+                    const double value = (trial % 4 ? -0.25 : -0.1) * (1 + rng() % 8);
+                    entries.emplace_back(row, col, value);
+                    if (!lower_only) entries.emplace_back(col, row, value);
+                }
+            }
+            Matrix L(n, n); L.setFromTriplets(entries.begin(), entries.end());
+            std::vector<node_index> perm(n); std::iota(perm.begin(), perm.end(), 0);
+            std::shuffle(perm.begin(), perm.end(), rng);
+            SCOPED_TRACE("team=" + std::to_string(team) + " trial=" + std::to_string(trial));
+            EXPECT_EQ(accepted(L), !lower_only);
+            const Csr ref = serial_reference(L, perm);
+            const Csr got = general(L, perm);
+            EXPECT_EQ(got.ptr, ref.ptr);
+            EXPECT_EQ(got.idx, ref.idx);
+            EXPECT_EQ(got.vals.size(), ref.vals.size());
+            if (got.vals.size() == ref.vals.size())
+                EXPECT_EQ(0, std::memcmp(got.vals.data(), ref.vals.data(), ref.vals.size() * sizeof(double)));
+            EXPECT_EQ(got.exact, ref.exact);
+        }
+    }
+#ifdef _OPENMP
+    omp_set_num_threads(saved);
+#endif
 }
