@@ -1230,7 +1230,9 @@ factorization factorize_impl(const Eliminator& elim,
 
     // Active vertex list (natural index order) — filtered in-place each round.
     std::vector<node_index> active(n);
-    std::ranges::iota(active, node_index{0});
+    // TODO: use ranges::iota once we stop supporting macos-15 CI
+    // with its default Xcode 16.4 toolchain, whose libc++ lacks it.
+    std::iota(active.begin(), active.end(), node_index{0});
     std::vector<node_index> active_scratch;
 
 #if defined(APXCHOL_USE_CUDA)

@@ -353,8 +353,11 @@ private:
             throw std::bad_alloc{};
         // Explicit NOHUGEPAGE also protects lazy capacity under THP=always.
         // Fully sized factor buffers retain their separate allocator policy.
+        // THP advice is Linux-only; other systems keep plain lazy pages.
+#ifdef __linux__
         madvise(raw, bytes,
                 detail::lazy_pool_uses_thp() ? MADV_HUGEPAGE : MADV_NOHUGEPAGE);
+#endif
         T* candidate = static_cast<T*>(raw);
         T* expected = nullptr;
         if (!segments_[i].compare_exchange_strong(expected, candidate, std::memory_order_release,
