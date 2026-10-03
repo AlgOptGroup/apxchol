@@ -31,8 +31,10 @@ CTest steps through YAML anchors. The macOS job uses the runner's default Apple
 Clang and Homebrew libomp, and checks OpenMP linkage.
 
 Use focused regressions for changed behavior, then the relevant suite. CUDA
-changes require a CUDA build and device. Python and Octave compile the core
-sources independently; check affected binding interfaces too:
+changes require a CUDA build and device. Metal changes require an
+`-DAPXCHOL_USE_METAL=ON` build on an Apple-silicon Mac; also run the device
+tests under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`. Python and Octave
+compile the core sources independently; check affected binding interfaces too:
 
 ```bash
 pip install -e python
