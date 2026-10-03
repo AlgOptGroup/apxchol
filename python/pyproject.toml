@@ -52,12 +52,20 @@ test-command = "python -m pytest {package}/tests -q"
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
-before-all = "dnf install -y clang libomp-devel"
+before-all = '''
+set -eu
+dnf install -y libomp-devel
+# Make the distro header visible to the separately installed Clang toolchain.
+ln -s "$(rpm -ql libomp-devel | grep '/omp.h$')" /usr/local/include/omp.h
+manylinux-install-clang -v v22.1.8.1
+'''
+# Includes PyPA's pinned Clang installer; keep the glibc 2.28 compatibility floor.
+manylinux-x86_64-image = "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b"
 
 [tool.cibuildwheel.linux.environment]
 APXCHOL_PORTABLE_BUILD = "1"
-CC = "/usr/bin/clang"
-CXX = "/usr/bin/clang++"
+CC = "/opt/clang/bin/clang"
+CXX = "/opt/clang/bin/clang++"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
