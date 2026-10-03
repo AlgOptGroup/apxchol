@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -1582,53 +1583,39 @@ private:
     }
 
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-    // Widen FP16 values to FP64 lanes for the fat-level kernel.
-    static inline void widen8(const fp16_t* v, __m256d& lo, __m256d& hi) {
-        const __m256 f = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v)));   // F16C
-        lo = _mm256_cvtps_pd(_mm256_castps256_ps128(f));
-        hi = _mm256_cvtps_pd(_mm256_extractf128_ps(f, 1));
+    // AVX2 has 32-byte vectors; derive the matching storage width from the
+    // number of double accumulators. No alignment or row padding is required.
+    using dot_vector [[gnu::vector_size(32)]] = double;
+    static constexpr std::size_t dot_lanes = sizeof(dot_vector) / sizeof(double);
+    using half_vector [[gnu::vector_size(dot_lanes * sizeof(fp16_t))]] = fp16_t;
+
+    static inline dot_vector widen_vector(half_vector h) {
+#if defined(__GNUC__) && !defined(__clang__)
+        // GCC PR121688: __builtin_convertvector scalarizes F16C conversion.
+        auto bits = _mm_cvtsi64_si128(std::bit_cast<std::int64_t>(h));
+        return dot_vector(_mm256_cvtps_pd(_mm_cvtph_ps(bits)));
+#else
+        return __builtin_convertvector(h, dot_vector);
+#endif
     }
-    static inline __m256d widen4(const fp16_t* v) {
-        return _mm256_cvtps_pd(_mm_cvtph_ps(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(v))));
-    }
-    // The same sum as dot_thin, fat-level SIMD flavour (16-bit storage): 8
-    // stored values per widen8, through an 8-double stack buffer (which the
-    // compiler turns into register lane extracts) feeding a 4-way scalar FMA
-    // chain over scalar y gathers. Then a 4-wide step and a scalar tail.
-    // Different summation order from dot_thin: same accuracy, not
-    // bit-identical. A template on the value type so it is only instantiated
-    // where simd_dot_v selects it.
-    template <class V>
-    static double dot_fat_simd(const V* __restrict vals, const node_index* __restrict idx,
-                               edge_index p, edge_index end, const double* __restrict y) {
-        alignas(32) double hb[8];
-        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
-        for (; p + 8 <= end; p += 8) {
-            __m256d h0, h1;
-            widen8(vals + p, h0, h1);
-            _mm256_store_pd(hb,     h0);
-            _mm256_store_pd(hb + 4, h1);
-            s0 += hb[0] * y[idx[p + 0]];
-            s1 += hb[1] * y[idx[p + 1]];
-            s2 += hb[2] * y[idx[p + 2]];
-            s3 += hb[3] * y[idx[p + 3]];
-            s0 += hb[4] * y[idx[p + 4]];
-            s1 += hb[5] * y[idx[p + 5]];
-            s2 += hb[6] * y[idx[p + 6]];
-            s3 += hb[7] * y[idx[p + 7]];
+
+    static double dot_fat_simd(const fp16_t* vals, const node_index* idx,
+                               edge_index p, edge_index end, const double* y) {
+        dot_vector sum = {};
+        for (; end - p >= dot_lanes; p += dot_lanes) {
+            half_vector values;
+            std::memcpy(&values, vals + p, sizeof(values));
+            dot_vector rhs;
+            for (std::size_t lane = 0; lane < dot_lanes; ++lane) {
+                rhs[lane] = y[idx[p + lane]];
+            }
+            sum += widen_vector(values) * rhs;
         }
-        if (p + 4 <= end) {
-            _mm256_store_pd(hb, widen4(vals + p));
-            s0 += hb[0] * y[idx[p + 0]];
-            s1 += hb[1] * y[idx[p + 1]];
-            s2 += hb[2] * y[idx[p + 2]];
-            s3 += hb[3] * y[idx[p + 3]];
-            p += 4;
+        double result = (sum[0] + sum[1]) + (sum[2] + sum[3]);
+        for (; p < end; ++p) {
+            result = std::fma(widen(vals[p]), y[idx[p]], result);
         }
-        double sum = (s0 + s1) + (s2 + s3);
-        for (; p < end; ++p)
-            sum += widen(vals[p]) * y[idx[p]];
-        return sum;
+        return result;
     }
 #endif
 
@@ -1647,7 +1634,7 @@ private:
         double sum;
         if constexpr (Fat && simd_dot_v<V>) {
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-            sum = dot_fat_simd<V>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+            sum = dot_fat_simd(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
 #endif
         } else if constexpr (Fat) {
             const V* vals = Dir::template vals<V>(*this).data();

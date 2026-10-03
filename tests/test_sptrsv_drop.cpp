@@ -662,7 +662,7 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                     const float v = static_cast<float>(LT.vals[k]);
                     const bool thr = std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(scales[j]);
                     const apxchol::fp16_t h(v / scales[j]);
-                    const bool fmt = !(apxchol::fp16_t::is_zero(h.bits) || apxchol::fp16_t::is_subnormal(h.bits));
+                    const bool fmt = h != 0 && !apxchol::is_stored_subnormal(h);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], rel, true) != (thr && fmt);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], 1e-30, true) != (v != 0.0f && fmt);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], 1e-30, false) != (v != 0.0f);
@@ -689,12 +689,12 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 for (int k = LT.ptr[j]; k < LT.ptr[j + 1]; ++k) {
                     const float v = static_cast<float>(LT.vals[k]);
                     apxchol::fp16_t h(v / s);                                    // RNE
-                    if (apxchol::fp16_t::is_subnormal(h.bits))
-                        h = apxchol::fp16_t::from_bits(static_cast<std::uint16_t>(h.bits & 0x8000u));
-                    bits_mismatch += h16.vals[k] != h.bits;
+                    if (apxchol::is_stored_subnormal(h))
+                        h = std::copysign(0.0f, float(h));
+                    bits_mismatch += h16.vals[k] != std::bit_cast<std::uint16_t>(h);
                     if (k == LT.ptr[j]) continue;                                // diagonal slot
-                    sub += apxchol::fp16_t::is_subnormal(h16.vals[k]);
-                    const double w = static_cast<double>(apxchol::fp16_t::from_bits(h16.vals[k]).to_float());
+                    sub += apxchol::detail::fp16_is_subnormal(h16.vals[k]);
+                    const double w = static_cast<double>(float(std::bit_cast<apxchol::fp16_t>(h16.vals[k])));
                     resid      += static_cast<double>(LT.vals[k]) / static_cast<double>(s) - w;
                     col_x      += static_cast<double>(LT.vals[k]) / static_cast<double>(s);
                     col_stored += w;
@@ -1194,7 +1194,7 @@ std::vector<float> host_reference_sweep(int m, bool reverse,
         double sum = 0.0, d = 0.0;
         for (int p = rowptr[i]; p < rowptr[i + 1]; ++p) {
             const int j = colidx[p];
-            const double v = vals16 ? apxchol::widen(apxchol::fp16_t::from_bits(vals16[p]))
+            const double v = vals16 ? apxchol::widen(std::bit_cast<apxchol::fp16_t>(vals16[p]))
                                     : static_cast<double>(vals[p]);
             if (j == i) { d = vals16 ? static_cast<double>(diag[i]) : v; continue; }
             sum += v * out[j];

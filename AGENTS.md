@@ -123,7 +123,7 @@ choices, retired knobs, and measurements belong in
   queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
   while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
   OpenMP fails configuration instead of producing a serial build. Both targets
-  use the shared link probe for the long-double reduction atomic runtime.
+  link OpenMP directly; there is no long-double reduction/libatomic probe.
 - macOS: retain normal CMake compiler selection. Install Command Line Tools,
   CMake and libomp, then use the common build commands. libc++ `std::pmr`
   requires a macOS 14 deployment target. Linux-only `madvise`
@@ -136,7 +136,9 @@ choices, retired knobs, and measurements belong in
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel repairs the wheels and runs the Python tests.
   Linux installs the distro's Clang and uses its C++ runtime libraries.
-  Linux wheels require x86-64-v2; the Python binding is compiled for baseline
+  Untuned x86-64 builds share the x86-64-v2 minimum, including Debug and
+  benchmarks. Native Release builds retain host tuning. The portable Linux
+  Python binding is compiled for baseline
   x86-64 to report an import error on unsupported CPUs before entering the core.
   macOS arm64 retains Apple Clang's default target.
   CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
@@ -198,6 +200,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   AUTO uses the structural critical-tail schedule when metadata permits;
   `levels` is the reference. Share row arithmetic across schedules and storage.
   Research schedules on other branches are not production modes.
+- CPU FP16 storage uses the native `_Float16` alias `fp16_t`; setup retains
+  fixed round-to-nearest-even and signed subnormal flushing. Its AVX2 fat-row
+  kernel uses packed double arithmetic with a four-lane accumulator; GCC's
+  packed conversion and scalar widening workarounds stay local to conversion.
+  Runtime CPU dispatch is not yet enabled in portable wheels.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
   `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
   writer threads perform the first touch. Pointer, diagonal, scale, and other

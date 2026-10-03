@@ -2,7 +2,7 @@
 //   * fp16_t: IEEE binary16 round-trip bound (2^-11 relative, normal range),
 //     the documented subnormal / flush-to-zero / overflow behaviour, RNE ties,
 //     and an exhaustive cross-check of the bit-level converters against the
-//     compiler's _Float16 where available;
+//     compiler's _Float16;
 //   * the storage CONTRACT of omp_sptrsv::setup for whatever storage this
 //     build compiled: every stored CSR/CSC value == narrow_value(v, s_j),
 //     the per-column scales, the off-diagonal flush/subnormal statistics, the
@@ -36,6 +36,23 @@ namespace {
 std::uint32_t f2u(float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return u; }
 float         u2f(std::uint32_t u) { float f; std::memcpy(&f, &u, 4); return f; }
 
+float widen_bits_reference(std::uint16_t h) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
+    const std::uint32_t e    = (h >> 10) & 0x1fu;
+    const std::uint32_t m    = h & 0x3ffu;
+    if (e == 0) {
+        if (m == 0) return std::bit_cast<float>(sign);                    // +-0
+        const float f = static_cast<float>(m) * 0x1p-24f;                 // subnormal: exact
+        return std::bit_cast<float>(sign | std::bit_cast<std::uint32_t>(f));
+    }
+    if (e == 31) return std::bit_cast<float>(sign | 0x7f800000u | (m << 13)); // inf / NaN
+    return std::bit_cast<float>(sign | ((e + 112u) << 23) | (m << 13));
+}
+
+std::uint16_t half_bits(fp16_t h) { return std::bit_cast<std::uint16_t>(h); }
+bool half_is_zero(std::uint16_t h) { return (h & 0x7fffu) == 0; }
+bool half_is_special(std::uint16_t h) { return (h & 0x7c00u) == 0x7c00u; }
+
 double rel_err(double y, double x) { return std::fabs(y - x) / std::fabs(x); }
 
 // RAII env override for tests that state a STORAGE contract on the un-dropped
@@ -59,7 +76,7 @@ struct scoped_drop_off : scoped_env {
 // ── fp16_t ──────────────────────────────────────────────────────────────
 
 // Normal range [2^-14, 65504]: |fp16(x) - x| <= 2^-11 |x| (11 significant
-// bits, RNE), the bit-level widen agrees with to_float(), sign is kept.
+// bits, RNE), native widening agrees with the independent reference, sign is kept.
 TEST(FP16, RoundTripWithin2PowMinus11RelativeInNormalRange) {
     std::mt19937_64 rng(1601);
     std::uniform_real_distribution<double> uexp(-14.0, 15.0);
@@ -72,10 +89,10 @@ TEST(FP16, RoundTripWithin2PowMinus11RelativeInNormalRange) {
         if (xd > 65504.0) xd = 65504.0;
         const float x = static_cast<float>((sign(rng) ? -1.0 : 1.0) * xd);
         const fp16_t h = x;
-        const float  y = h.to_float();
-        ASSERT_EQ(f2u(fp16_t::widen_bits(h.bits)), f2u(y)) << "widen_bits vs to_float, x=" << x;
-        ASSERT_FALSE(fp16_t::is_subnormal(h.bits)) << "x=" << x;
-        ASSERT_FALSE(fp16_t::is_zero(h.bits)) << "x=" << x;
+        const float  y = float(h);
+        ASSERT_EQ(f2u(widen_bits_reference(half_bits(h))), f2u(y)) << "reference vs native widening, x=" << x;
+        ASSERT_FALSE(apxchol::detail::fp16_is_subnormal(half_bits(h))) << "x=" << x;
+        ASSERT_FALSE(half_is_zero(half_bits(h))) << "x=" << x;
         const double rel = rel_err(y, x);
         worst = std::max(worst, rel);
         ASSERT_LE(rel, bound) << "x=" << x << " y=" << y;
@@ -87,23 +104,19 @@ TEST(FP16, RoundTripWithin2PowMinus11RelativeInNormalRange) {
 
 // Every one of the 65536 fp16 bit patterns that is not a NaN widens exactly
 // and narrows back to itself (zeros, subnormals, normals, infinities): the
-// narrowing is exact on representable values. Where the compiler has
-// _Float16, the bit-level widen must agree with it bit-for-bit.
+// narrowing is exact on representable values. Native widening must agree
+// with the independent bit-level reference, including the sign of zero.
 TEST(FP16, AllBitPatternsRoundTripAndMatchCompilerWiden) {
     for (std::uint32_t hb = 0; hb < 0x10000u; ++hb) {
         const std::uint16_t h = static_cast<std::uint16_t>(hb);
-        if (fp16_t::is_inf_or_nan(h) && (h & 0x03ffu) != 0) continue;   // NaN payloads: skip
-        const float f = fp16_t::widen_bits(h);
-        ASSERT_EQ(fp16_t(f).bits, h) << "pattern " << std::hex << hb;
-        ASSERT_EQ(f2u(fp16_t::from_bits(h).to_float()), f2u(f)) << "pattern " << std::hex << hb;
-#if defined(__FLT16_MANT_DIG__)
-        _Float16 c; std::memcpy(&c, &h, 2);
-        ASSERT_EQ(f2u(static_cast<float>(c)), f2u(f)) << "pattern " << std::hex << hb;
-#endif
+        if (half_is_special(h) && (h & 0x03ffu) != 0) continue;   // NaN payloads: skip
+        const float f = widen_bits_reference(h);
+        ASSERT_EQ(half_bits(fp16_t(f)), h) << "pattern " << std::hex << hb;
+        ASSERT_EQ(std::bit_cast<std::uint64_t>(apxchol::widen(std::bit_cast<fp16_t>(h))),
+                  std::bit_cast<std::uint64_t>(double(f))) << "pattern " << std::hex << hb;
     }
 }
 
-#if defined(__FLT16_MANT_DIG__)
 // The bit-level fp32 -> fp16 RNE agrees with the compiler's conversion on
 // random full-range fp32 patterns (normals, subnormal-range, overflow, both
 // signs; NaNs excluded).
@@ -125,10 +138,9 @@ TEST(FP16, NarrowingMatchesCompilerConversion) {
         }
         const _Float16 c = static_cast<_Float16>(x);
         std::uint16_t cb; std::memcpy(&cb, &c, 2);
-        ASSERT_EQ(fp16_t(x).bits, cb) << "x=" << x << " (" << std::hex << f2u(x) << ")";
+        ASSERT_EQ(apxchol::detail::round_fp16_bits(f2u(x)), cb) << "x=" << x << " (" << std::hex << f2u(x) << ")";
     }
 }
-#endif
 
 // The documented flush / subnormal / overflow / tie behaviour.
 TEST(FP16, DocumentedSubnormalFlushOverflowAndTies) {
@@ -136,50 +148,50 @@ TEST(FP16, DocumentedSubnormalFlushOverflowAndTies) {
     const float two_m24 = std::ldexp(1.0f, -24);   // smallest subnormal
     const float two_m25 = std::ldexp(1.0f, -25);   // half of it: the flush threshold
     // Boundaries.
-    EXPECT_EQ(fp16_t(two_m14).bits, 0x0400u);
-    EXPECT_EQ(fp16_t(two_m24).bits, 0x0001u);
-    EXPECT_EQ(fp16_t(two_m25).bits, 0x0000u);                       // exact tie -> even (zero)
-    EXPECT_EQ(fp16_t(-two_m25).bits, 0x8000u);                      // sign kept on the flush
-    EXPECT_EQ(fp16_t(std::nextafter(two_m25, 1.0f)).bits, 0x0001u); // just above the tie -> 2^-24
-    EXPECT_EQ(fp16_t(std::nextafter(two_m25, 0.0f)).bits, 0x0000u);
-    EXPECT_EQ(fp16_t(1e-9f).bits, 0x0000u);                         // deep below: flush
-    EXPECT_TRUE(fp16_t::is_zero(fp16_t(1e-9f).bits));
+    EXPECT_EQ(half_bits(fp16_t(two_m14)), 0x0400u);
+    EXPECT_EQ(half_bits(fp16_t(two_m24)), 0x0001u);
+    EXPECT_EQ(half_bits(fp16_t(two_m25)), 0x0000u);                       // exact tie -> even (zero)
+    EXPECT_EQ(half_bits(fp16_t(-two_m25)), 0x8000u);                      // sign kept on the flush
+    EXPECT_EQ(half_bits(fp16_t(std::nextafter(two_m25, 1.0f))), 0x0001u); // just above the tie -> 2^-24
+    EXPECT_EQ(half_bits(fp16_t(std::nextafter(two_m25, 0.0f))), 0x0000u);
+    EXPECT_EQ(half_bits(fp16_t(1e-9f)), 0x0000u);                         // deep below: flush
+    EXPECT_TRUE(half_is_zero(half_bits(fp16_t(1e-9f))));
     // Subnormals: absolute error <= 2^-25 (half the subnormal spacing).
     std::mt19937_64 rng(1603);
     std::uniform_real_distribution<float> usub(two_m24, two_m14);
     for (int t = 0; t < 200'000; ++t) {
         const float x = usub(rng);
         const fp16_t h = x;
-        ASSERT_TRUE(fp16_t::is_subnormal(h.bits) || h.bits == 0x0400u) << "x=" << x;
-        ASSERT_LE(std::fabs(static_cast<double>(h.to_float()) - x), std::ldexp(1.0, -25)) << "x=" << x;
-        ASSERT_TRUE(apxchol::is_stored_subnormal(h) || h.bits == 0x0400u);
+        ASSERT_TRUE(apxchol::detail::fp16_is_subnormal(half_bits(h)) || half_bits(h) == 0x0400u) << "x=" << x;
+        ASSERT_LE(std::fabs(static_cast<double>(float(h)) - x), std::ldexp(1.0, -25)) << "x=" << x;
+        ASSERT_TRUE(apxchol::is_stored_subnormal(h) || half_bits(h) == 0x0400u);
     }
     // 1e-6 (~2^-20) is subnormal, 1e-3 is normal.
-    EXPECT_TRUE(fp16_t::is_subnormal(fp16_t(1e-6f).bits));
-    EXPECT_FALSE(fp16_t::is_subnormal(fp16_t(1e-3f).bits));
+    EXPECT_TRUE(apxchol::detail::fp16_is_subnormal(half_bits(fp16_t(1e-6f))));
+    EXPECT_FALSE(apxchol::detail::fp16_is_subnormal(half_bits(fp16_t(1e-3f))));
     // Overflow.
-    EXPECT_EQ(fp16_t(65504.0f).bits, 0x7bffu);                      // largest finite, exact
-    EXPECT_EQ(fp16_t(65519.0f).bits, 0x7bffu);                      // below the midpoint: rounds down
-    EXPECT_EQ(fp16_t(65520.0f).bits, 0x7c00u);                      // midpoint: ties to even == inf
-    EXPECT_EQ(fp16_t(1e6f).bits, 0x7c00u);
-    EXPECT_EQ(fp16_t(-1e6f).bits, 0xfc00u);
-    EXPECT_TRUE(std::isinf(fp16_t(std::numeric_limits<float>::infinity()).to_float()));
-    EXPECT_TRUE(std::isnan(fp16_t(std::numeric_limits<float>::quiet_NaN()).to_float()));
+    EXPECT_EQ(half_bits(fp16_t(65504.0f)), 0x7bffu);                      // largest finite, exact
+    EXPECT_EQ(half_bits(fp16_t(65519.0f)), 0x7bffu);                      // below the midpoint: rounds down
+    EXPECT_EQ(half_bits(fp16_t(65520.0f)), 0x7c00u);                      // midpoint: ties to even == inf
+    EXPECT_EQ(half_bits(fp16_t(1e6f)), 0x7c00u);
+    EXPECT_EQ(half_bits(fp16_t(-1e6f)), 0xfc00u);
+    EXPECT_TRUE(std::isinf(float(fp16_t(std::numeric_limits<float>::infinity()))));
+    EXPECT_TRUE(std::isnan(float(fp16_t(std::numeric_limits<float>::quiet_NaN()))));
     // RNE ties in the normal range: 1 + 2^-11 is halfway between 1 (even) and
     // 1 + 2^-10 (odd) -> 1; 1 + 3*2^-11 is halfway between 1 + 2^-10 (odd)
     // and 1 + 2^-9 (even) -> 1 + 2^-9.
-    EXPECT_EQ(fp16_t(1.0f + std::ldexp(1.0f, -11)).to_float(), 1.0f);
-    EXPECT_EQ(fp16_t(1.0f + 3.0f * std::ldexp(1.0f, -11)).to_float(), 1.0f + std::ldexp(1.0f, -9));
+    EXPECT_EQ(float(fp16_t(1.0f + std::ldexp(1.0f, -11))), 1.0f);
+    EXPECT_EQ(float(fp16_t(1.0f + 3.0f * std::ldexp(1.0f, -11))), 1.0f + std::ldexp(1.0f, -9));
     // Carry out of the mantissa into the exponent: the largest fp32 below 2
     // rounds up to 2.0.
-    EXPECT_EQ(fp16_t(u2f(0x3fffffffu)).bits, 0x4000u);
+    EXPECT_EQ(half_bits(fp16_t(u2f(0x3fffffffu))), 0x4000u);
     // Exact values, and the "max ratio is exactly 1" property the *_SCALED
     // variants rely on (v / v == 1.0f -> representable).
     for (float x : {0.0f, -0.0f, 1.0f, -1.0f, 0.5f, 1.5f, 255.0f, 0.75f, -3.25f, 2048.0f})
-        EXPECT_EQ(f2u(fp16_t(x).to_float()), f2u(x)) << x;
+        EXPECT_EQ(f2u(float(fp16_t(x))), f2u(x)) << x;
     // Assignment from double / int narrows through the same path.
-    EXPECT_EQ(fp16_t(0.75).bits, fp16_t(0.75f).bits);
-    EXPECT_EQ(fp16_t(7).to_float(), 7.0f);
+    EXPECT_EQ(half_bits(fp16_t(0.75)), half_bits(fp16_t(0.75f)));
+    EXPECT_EQ(float(fp16_t(7)), 7.0f);
     EXPECT_EQ(sizeof(fp16_t), 2u);
 }
 
@@ -557,7 +569,7 @@ TEST(LowPrec, FactorDropEdgeCases) {
         for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
             ++offdiag;
             const fp16_t h(static_cast<float>(L.vals_[p]) / s[j]);
-            fp16_zero += fp16_t::is_zero(h.bits) || fp16_t::is_subnormal(h.bits);
+            fp16_zero += half_is_zero(half_bits(h)) || apxchol::detail::fp16_is_subnormal(half_bits(h));
         }
     ASSERT_GT(fp16_zero, 100u);
     for (const char* rel : {"0", "-1", "abc"}) {
@@ -641,13 +653,13 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
             double x_sum = 0.0, stored_sum = 0.0, resid = 0.0;
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
                 const fp16_t expect = apxchol::omp_sptrsv::narrow_value<fp16_t>(L.vals_[p], s[j]);
-                ASSERT_TRUE(trsv.csc_vals16()[p] == expect) << "csc p=" << p;
-                EXPECT_FALSE(fp16_t::is_subnormal(trsv.csc_vals16()[p].bits));   // always flushed
+                ASSERT_EQ(half_bits(trsv.csc_vals16()[p]), half_bits(expect)) << "csc p=" << p;
+                EXPECT_FALSE(apxchol::detail::fp16_is_subnormal(half_bits(trsv.csc_vals16()[p])));   // always flushed
                 const node_index i = L.inner_[p];
                 bool found = false;
                 for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q)
                     if (trsv.csr_col_idx()[q] == j) {
-                        ASSERT_TRUE(trsv.csr_vals16()[q] == expect) << "csr q=" << q;
+                        ASSERT_EQ(half_bits(trsv.csr_vals16()[q]), half_bits(expect)) << "csr q=" << q;
                         found = true;
                         break;
                     }

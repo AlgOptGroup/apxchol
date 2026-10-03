@@ -27,7 +27,7 @@
 //   * Every read in the solve kernels widens to fp64 (CPU) / fp32 (GPU) in
 //     registers via widen(); the arithmetic is unchanged and the kernels are
 //     one source for every storage type (the CPU's fat-level kernels of the
-//     16-bit storage are SIMD: _mm256_cvtph_ps + a 4-way FMA chain). This is a
+//     16-bit storage are SIMD: packed widening and FP64 arithmetic). This is a
 //     preconditioner-QUALITY knob (PCG iteration count), never a
 //     residual-floor one.
 //
@@ -55,9 +55,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <type_traits>
-#if defined(__F16C__)
-#include <immintrin.h>   // _cvtsh_ss: the one-instruction fp16 -> fp32 widen (vcvtph2ps)
-#endif
 
 namespace apxchol {
 
@@ -70,140 +67,77 @@ inline int sptrsv_fp16_env_tristate() {
     return -1;
 }
 
-// ── fp16_t: IEEE-754 binary16 storage ───────────────────────────────────
-// 1 sign, 5 exponent (bias 15), 10 explicit mantissa bits (11 significant ->
-// RNE relative error <= 2^-11 in the normal range [2^-14, 65504]). Values
-// below 2^-14 are SUBNORMAL (m * 2^-24, m = 1..1023: absolute error <= 2^-25,
-// relative precision degrades towards 1 bit at 2^-24); |x| < 2^-25 rounds to
-// (signed) ZERO under RNE, |x| == 2^-25 exactly ties to even -> zero; |x| >=
-// 65520 (the midpoint above 65504) rounds to +-inf; NaN stays NaN.
-//
-// Storage type only: the converting constructor narrows fp32 -> fp16 with a
-// bit-level RNE (round_bits: same result as the compiler's _Float16 cast, which
-// a unit test cross-checks exhaustively where _Float16 exists), and to_float()
-// widens exactly -- via the F16C intrinsic _cvtsh_ss (one vcvtph2ps) where the
-// target has it (-march=native on any x86 since Ivy Bridge / Zen), else the
-// compiler-native _Float16, else the bit-level widen_bits(). The intrinsic is
-// used deliberately instead of `(float)(_Float16)`: GCC folds the subsequent
-// float -> double promotion into a direct half -> double conversion, which has
-// no hardware instruction and becomes a libgcc __extendhfdf2 CALL in the SpTRSV
-// inner loop (measured 3x solve slowdown before the switch). Widening is
-// EXPLICIT so no read can silently do fp16 arithmetic; the SpTRSV kernels
-// route through widen().
-struct fp16_t {
-    std::uint16_t bits;
-
-    // No default member initializer, deliberately: fp16_t stays trivially
-    // default-constructible like float, so `new fp16_t[n]` is uninitialized
-    // (the transpose's transient bucket relies on that) while
-    // std::vector::resize still value-initializes to zero bits (== 0.0f).
-    fp16_t() = default;
-
-    template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
-    constexpr fp16_t(T v) : bits(round_bits(std::bit_cast<std::uint32_t>(static_cast<float>(v)))) {}
-
-    float to_float() const {
-#if defined(__F16C__)
-        return _cvtsh_ss(bits);
-#elif defined(__FLT16_MANT_DIG__)
-        return static_cast<float>(std::bit_cast<_Float16>(bits));
-#else
-        return widen_bits(bits);
-#endif
-    }
-    explicit operator float()  const { return to_float(); }
-    explicit operator double() const { return static_cast<double>(to_float()); }
-
-    static constexpr fp16_t from_bits(std::uint16_t b) { fp16_t r; r.bits = b; return r; }
-
-    // Classification on the bit pattern (what setup()'s flush statistics use).
-    static constexpr bool is_zero(std::uint16_t h)      { return (h & 0x7fffu) == 0; }
-    static constexpr bool is_subnormal(std::uint16_t h) { return (h & 0x7c00u) == 0 && (h & 0x03ffu) != 0; }
-    static constexpr bool is_inf_or_nan(std::uint16_t h){ return (h & 0x7c00u) == 0x7c00u; }
-
-    // fp32 bit pattern -> fp16 bit pattern, round-to-nearest-even, IEEE
-    // semantics for subnormals / overflow / NaN. Pure integer arithmetic,
-    // constexpr.
-    static constexpr std::uint16_t round_bits(std::uint32_t u) {
-        const std::uint32_t sign = (u >> 16) & 0x8000u;
-        const std::uint32_t a    = u & 0x7fffffffu;            // |x| pattern
-        if (a >= 0x7f800000u)                                  // inf or NaN
-            return static_cast<std::uint16_t>(sign | 0x7c00u | (a > 0x7f800000u ? 0x0200u : 0u));
-        if (a >= 0x477ff000u)                                  // >= 65520: RNE overflows to inf
-            return static_cast<std::uint16_t>(sign | 0x7c00u);
-        if (a >= 0x38800000u) {                                // normal fp16 range: |x| >= 2^-14
-            // Rebias the exponent (127 -> 15 == subtract 112 << 23), then drop
-            // the low 13 mantissa bits with the half-way-tie-to-even bias; a
-            // mantissa carry propagates into the exponent by plain addition.
-            const std::uint32_t m   = a - (112u << 23);
-            const std::uint32_t lsb = (m >> 13) & 1u;
-            return static_cast<std::uint16_t>(sign | ((m + 0xfffu + lsb) >> 13));
-        }
-        if (a >= 0x33000000u) {                                // subnormal fp16 range: 2^-25 <= |x| < 2^-14
-            // fp16 subnormal value = r * 2^-24. With the hidden bit restored the
-            // fp32 significand M (24 bits) represents M * 2^(e-150) (e = biased
-            // exponent), so r = round(M * 2^(e-126)) = RNE(M >> (126 - e)),
-            // shift in [14, 24]. r may round up to 0x400 == the smallest normal,
-            // which is the correct encoding.
-            const std::uint32_t M     = (a & 0x7fffffu) | 0x800000u;
-            const int           shift = 126 - static_cast<int>(a >> 23);
-            const std::uint32_t half  = 1u << (shift - 1);
-            const std::uint32_t lsb   = (M >> shift) & 1u;
-            return static_cast<std::uint16_t>(sign | ((M + half - 1u + lsb) >> shift));
-        }
-        return static_cast<std::uint16_t>(sign);               // |x| < 2^-25: flush to signed zero
-    }
-
-    // fp16 bit pattern -> fp32 (exact), bit-level reference implementation.
-    static constexpr float widen_bits(std::uint16_t h) {
-        const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
-        const std::uint32_t e    = (h >> 10) & 0x1fu;
-        const std::uint32_t m    = h & 0x3ffu;
-        if (e == 0) {
-            if (m == 0) return std::bit_cast<float>(sign);                    // +-0
-            const float f = static_cast<float>(m) * 0x1p-24f;                 // subnormal: exact
-            return std::bit_cast<float>(sign | std::bit_cast<std::uint32_t>(f));
-        }
-        if (e == 31) return std::bit_cast<float>(sign | 0x7f800000u | (m << 13)); // inf / NaN
-        return std::bit_cast<float>(sign | ((e + 112u) << 23) | (m << 13));
-    }
-
-    friend constexpr bool operator==(fp16_t a, fp16_t b) { return a.bits == b.bits; }
-    friend constexpr bool operator!=(fp16_t a, fp16_t b) { return a.bits != b.bits; }
-};
-static_assert(sizeof(fp16_t) == 2, "fp16_t must be exactly 16 bits");
+// Native IEEE binary16 storage; arithmetic in the solver still uses double.
+using fp16_t = _Float16;
+static_assert(sizeof(fp16_t) == 2);
 static_assert(std::is_trivially_copyable_v<fp16_t>);
 
 namespace detail {
 
-// Shared CPU/GPU-host storage rule: scale in FP32, round to FP16, then
-// flush subnormals to signed zero. The diagonal is handled separately.
+inline constexpr bool fp16_is_subnormal(std::uint16_t bits) {
+    return (bits & 0x7c00u) == 0 && (bits & 0x03ffu) != 0;
+}
+
+// Keep setup's fixed round-to-nearest-even contract even if the caller changes
+// the floating-point rounding mode. Solve-time widening uses native casts.
+inline constexpr std::uint16_t round_fp16_bits(std::uint32_t u) {
+    const std::uint32_t sign = (u >> 16) & 0x8000u;
+    const std::uint32_t a    = u & 0x7fffffffu;            // |x| pattern
+    if (a >= 0x7f800000u)                                  // inf or NaN
+        return static_cast<std::uint16_t>(sign | 0x7c00u | (a > 0x7f800000u ? 0x0200u : 0u));
+    if (a >= 0x477ff000u)                                  // >= 65520: RNE overflows to inf
+        return static_cast<std::uint16_t>(sign | 0x7c00u);
+    if (a >= 0x38800000u) {                                // normal fp16 range: |x| >= 2^-14
+        // Rebias the exponent (127 -> 15 == subtract 112 << 23), then drop
+        // the low 13 mantissa bits with the half-way-tie-to-even bias; a
+        // mantissa carry propagates into the exponent by plain addition.
+        const std::uint32_t m   = a - (112u << 23);
+        const std::uint32_t lsb = (m >> 13) & 1u;
+        return static_cast<std::uint16_t>(sign | ((m + 0xfffu + lsb) >> 13));
+    }
+    if (a >= 0x33000000u) {                                // subnormal fp16 range: 2^-25 <= |x| < 2^-14
+        // fp16 subnormal value = r * 2^-24. With the hidden bit restored the
+        // fp32 significand M (24 bits) represents M * 2^(e-150) (e = biased
+        // exponent), so r = round(M * 2^(e-126)) = RNE(M >> (126 - e)),
+        // shift in [14, 24]. r may round up to 0x400 == the smallest normal,
+        // which is the correct encoding.
+        const std::uint32_t M     = (a & 0x7fffffu) | 0x800000u;
+        const int           shift = 126 - static_cast<int>(a >> 23);
+        const std::uint32_t half  = 1u << (shift - 1);
+        const std::uint32_t lsb   = (M >> shift) & 1u;
+        return static_cast<std::uint16_t>(sign | ((M + half - 1u + lsb) >> shift));
+    }
+    return static_cast<std::uint16_t>(sign);               // |x| < 2^-25: flush to signed zero
+}
+
 inline fp16_t narrow_scaled_fp16(float value, float scale) {
-    const fp16_t h(value / scale);
-    if (fp16_t::is_subnormal(h.bits))
-        return fp16_t::from_bits(static_cast<std::uint16_t>(h.bits & 0x8000u));
-    return h;
+    auto bits = round_fp16_bits(std::bit_cast<std::uint32_t>(value / scale));
+    if (fp16_is_subnormal(bits)) bits &= 0x8000u;
+    return std::bit_cast<fp16_t>(bits);
 }
 
 inline bool fp16_flushes(float value) {
-    const fp16_t h(value);
-    return fp16_t::is_zero(h.bits) || fp16_t::is_subnormal(h.bits);
+    return (round_fp16_bits(std::bit_cast<std::uint32_t>(value)) & 0x7c00u) == 0;
 }
 
 } // namespace detail
 
-/// widen(): read a stored factor value into a double for compute. Identity
-/// (modulo the promotion the arithmetic would do anyway) for the fp32/fp64
-/// storage, fp16 -> fp32 -> double for the fp16 one. The SpTRSV kernels route
-/// every factor read through this.
 inline constexpr double widen(double v) { return v; }
-inline constexpr double widen(float v)  { return static_cast<double>(v); }
-inline double           widen(fp16_t v) { return static_cast<double>(v.to_float()); }
+inline constexpr double widen(float v) { return static_cast<double>(v); }
+inline double widen(fp16_t v) {
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__)
+    // GCC PR127720 folds the exact float intermediate into __extendhfdf2,
+    // even with F16C enabled. Keep both hardware widening steps available.
+    return double(__builtin_assoc_barrier(float(v)));
+#else
+    return double(v);
+#endif
+}
 
-/// Subnormal-ness of a STORED value, per storage type (setup()'s flush
-/// statistics; only fp16 can realistically be subnormal for a factor entry).
-inline bool is_stored_subnormal(float v)  { return std::fpclassify(v) == FP_SUBNORMAL; }
+inline bool is_stored_subnormal(float v) { return std::fpclassify(v) == FP_SUBNORMAL; }
 inline bool is_stored_subnormal(double v) { return std::fpclassify(v) == FP_SUBNORMAL; }
-inline constexpr bool is_stored_subnormal(fp16_t v) { return fp16_t::is_subnormal(v.bits); }
+inline constexpr bool is_stored_subnormal(fp16_t v) {
+    return detail::fp16_is_subnormal(std::bit_cast<std::uint16_t>(v));
+}
 
 } // namespace apxchol

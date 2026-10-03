@@ -212,7 +212,7 @@ struct fp16_scaled_arrays {
     std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0: they are always flushed)
 };
 
-inline float widen_fp16(std::uint16_t bits) { return fp16_t::from_bits(bits).to_float(); }
+inline float widen_fp16(std::uint16_t bits) { return float(std::bit_cast<fp16_t>(bits)); }
 
 template <class Val>
 inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std::vector<float>& col_scale) {
@@ -237,12 +237,12 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
         double resid = 0.0;                                            // sum over the off-diagonals of (x - widen(stored))
         for (int p = L11.ptr[j]; p < L11.ptr[j + 1]; ++p) {
             const float v = static_cast<float>(L11.vals[p]);
-            const std::uint16_t h = detail::narrow_scaled_fp16(v, s).bits;
+            const std::uint16_t h = std::bit_cast<std::uint16_t>(detail::narrow_scaled_fp16(v, s));
             out.vals[p] = h;
             if (L11.idx[p] == j) continue;   // the diagonal SLOT: written, never read (see the file header)
             const float w = widen_fp16(h);
             if (v != 0.0f && w == 0.0f) ++n_flush;
-            else if (fp16_t::is_subnormal(h)) ++n_sub;
+            else if (detail::fp16_is_subnormal(h)) ++n_sub;
             resid += static_cast<double>(L11.vals[p]) / static_cast<double>(s) - static_cast<double>(w);
         }
         d = static_cast<float>(static_cast<double>(d) + resid);

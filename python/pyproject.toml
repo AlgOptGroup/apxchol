@@ -68,8 +68,3 @@ before-all = "brew install libomp"
 MACOSX_DEPLOYMENT_TARGET = "15.0"
 # scikit-build-core prefers this over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
 _PYTHON_HOST_PLATFORM = "macosx-15.0-arm64"
-
-[[tool.cibuildwheel.overrides]]
-select = "*-manylinux_x86_64"
-inherit.config-settings = "append"
-config-settings = { "cmake.define.APXCHOL_REQUIRE_X86_64_V2" = "ON" }

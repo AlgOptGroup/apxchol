@@ -13,20 +13,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Native tuning is the default for local builds; turn OFF for portable
 # binaries (distributed wheels/packages would SIGILL on older CPUs).
 # The flag itself is ISA-dependent (-march=native on x86, -mcpu=native on ARM)
-# and is probed in cmake/apxchol_native_arch.cmake.
+# and is probed in cmake/apxchol_native_arch.cmake. Untuned x86-64 builds
+# use the x86-64-v2 baseline, including Debug builds.
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
 
-set(_apxchol_native_arch_option "")
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/apxchol_arch.cmake)
 if (NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic)
-    if (APXCHOL_NATIVE_ARCH AND
-        (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
-        include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/apxchol_native_arch.cmake)
-        if (APXCHOL_NATIVE_ARCH_FLAG)
-            add_compile_options(${APXCHOL_NATIVE_ARCH_FLAG})
-            set(_apxchol_native_arch_option "${APXCHOL_NATIVE_ARCH_FLAG}")
-        endif()
-    endif()
+    add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
 endif()
 
 include(FetchContent)
@@ -178,8 +171,7 @@ add_library(apxchol_core
 )
 # The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
 # solely for the CLI and analyze_factor, and is linked on those targets.
-target_link_libraries(apxchol_core PUBLIC Eigen3::Eigen)
-_apxchol_link_openmp(apxchol_core PUBLIC)
+target_link_libraries(apxchol_core PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
 
 target_include_directories(apxchol_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -217,16 +209,16 @@ target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/
 
 # Directory settings do not reach targets in a parent add_subdirectory caller.
 # Public Eigen objects must use the same alignment/ISA configuration on both
-# sides of the library boundary. Export only tuning actually used by this build.
+# sides of the library boundary. Export the architecture flag used by this build.
 foreach (_apxchol_target IN ITEMS apxchol_core apxchol_mtx_input)
     target_compile_features(${_apxchol_target} PUBLIC cxx_std_23)
-    if (_apxchol_native_arch_option)
+    if (APXCHOL_ARCH_FLAG)
         target_compile_options(${_apxchol_target} INTERFACE
-            "$<$<COMPILE_LANGUAGE:CXX>:${_apxchol_native_arch_option}>")
+            "$<$<COMPILE_LANGUAGE:CXX>:${APXCHOL_ARCH_FLAG}>")
     endif()
 endforeach()
 unset(_apxchol_target)
-unset(_apxchol_native_arch_option)
+unset(APXCHOL_ARCH_FLAG)
 
 # ── CLI solver ───────────────────────────────────────
 add_executable(apxchol src/main.cpp src/config.cpp)
