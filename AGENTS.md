@@ -123,7 +123,8 @@ choices, retired knobs, and measurements belong in
   while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
   OpenMP fails configuration instead of producing a serial build.
 - macOS: retain normal CMake compiler selection. Install Command Line Tools,
-  CMake and libomp, then use the common build commands. Linux-only `madvise`
+  CMake and libomp, then use the common build commands. libc++ `std::pmr`
+  requires a macOS 14 deployment target. Linux-only `madvise`
   advice is compiled out; mmap remains. CI's `linux` and `macos` jobs share
   parent-consumer build/test steps through YAML anchors. Keep `std::iota` for
   the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
