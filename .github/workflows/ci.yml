@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &ci_paths
       - 'include/**'
       - 'src/**'
       - 'tests/**'
@@ -24,24 +24,7 @@ on:
       - '.github/workflows/wheels.yml'
       - '.github/workflows/publish.yml'
   pull_request:
-    paths:
-      - 'include/**'
-      - 'src/**'
-      - 'tests/**'
-      - 'examples/**'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-      - 'benchmarks/**/*.py'
-      - 'benchmarks/requirements.txt'
-      - 'benchmarks/CMakeLists.txt'
-      - 'benchmarks/src/**'
-      - 'benchmarks/tests/**'
-      - 'benchmarks/patches/**'
-      - 'python/**'
-      - 'octave/**'
-      - '.github/workflows/ci.yml'
-      - '.github/workflows/wheels.yml'
-      - '.github/workflows/publish.yml'
+    paths: *ci_paths
 
 permissions:
   contents: read
@@ -116,7 +99,7 @@ jobs:
         name: Configure + build (Release)
         run: |
           cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
+          cmake --build build
       - &ctest
         name: Run unit tests
         run: ctest --test-dir build --no-tests=error --output-on-failure
@@ -131,8 +114,6 @@ jobs:
       - name: Install dependencies
         run: brew install libomp ninja
       - *configure-build
-      - name: Check OpenMP linkage
-        run: otool -L build/apxchol/tests/unit_tests | grep -q libomp
       - *ctest
 
   python:

@@ -115,8 +115,9 @@ choices, retired knobs, and measurements belong in
   across the library boundary can corrupt allocation ownership. Validate with
   the external parent fixture in `tests/cmake_consumer`.
 - `APXCHOL_NATIVE_ARCH`: ON for local builds. Root, benchmark, and local Python
-  builds share the architecture-specific compiler probe; portable Python wheels
-  omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
+  builds share the architecture-specific compiler probe. cibuildwheel sets this
+  option OFF for portable wheels; Python optimization follows the CMake build
+  type. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
 - OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
   queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang

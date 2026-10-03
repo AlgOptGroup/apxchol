@@ -49,6 +49,7 @@ build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_*"
 test-requires = ["pytest"]
 test-command = "python -m pytest {package}/tests -q"
+config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF" }
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
@@ -56,7 +57,6 @@ before-all = "dnf install -y clang libomp-devel"
 manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.linux.environment]
-APXCHOL_PORTABLE_BUILD = "1"
 CC = "clang"
 CXX = "clang++"
 
@@ -65,7 +65,6 @@ archs = ["arm64"]
 before-all = "brew install libomp"
 
 [tool.cibuildwheel.macos.environment]
-APXCHOL_PORTABLE_BUILD = "1"
 MACOSX_DEPLOYMENT_TARGET = "15.0"
 # scikit-build-core prefers this over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
 _PYTHON_HOST_PLATFORM = "macosx-15.0-arm64"
