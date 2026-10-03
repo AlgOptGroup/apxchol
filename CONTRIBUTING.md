@@ -25,9 +25,11 @@ boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds. The CI library
 build uses `tests/cmake_consumer` as an outer project to test these requirements
 alongside the ordinary suite.
 
-On macOS, `brew install libomp` first; CI builds the same consumer with Apple
-Clang on macos-15. `tests/test_c_header.c` is a C11 consumer of the C ABI:
-keep its layout assertions in step with `c_api.h`.
+On macOS, follow the [build dependencies in the README](README.md#build-and-run).
+The `linux` and `macos` CI jobs share their parent-consumer configure/build and
+CTest steps through YAML anchors. The macOS job uses the runner's default Apple
+Clang and Homebrew libomp, and checks OpenMP linkage. `tests/test_c_header.c`
+is a C11 consumer of the C ABI: keep its layout assertions in step with `c_api.h`.
 
 Use focused regressions for changed behavior, then the relevant suite. CUDA
 changes require a CUDA build and device. Metal changes require an
