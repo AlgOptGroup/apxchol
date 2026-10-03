@@ -193,6 +193,14 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
+- `solver/sptrsv/level_schedule.h` (portable, no device) builds topological
+  level schedules of the factor `omp_sptrsv` stores on fp32 storage, from the
+  shared `cuda_host.h` preparation, plus an fp32 emulation of the block
+  kernels that apply them; `LevelSchedule.*` runs in every build. The
+  CUDA-free permuted-operator builder
+  `detail::build_permuted_full_symmetric_csr` lives in `pcg_cuda_host.h`; its
+  general fallback orders duplicate coordinates by value bits, so its output
+  does not depend on the thread team.
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
   is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
   factor storage (GPU default on, CPU default off); scales and diagonals stay
