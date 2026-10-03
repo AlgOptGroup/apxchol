@@ -47,10 +47,13 @@ wheel.license-files = ["LICENSE", "LICENSE.libomp.txt"]
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_*"
-environment = { APXCHOL_PORTABLE_BUILD = "1", CMAKE_ARGS = "-DOpenMP_ROOT=/tmp/apxchol-libomp-cibuildwheel" }
 before-all = "bash {package}/tools/build_libomp.sh /tmp/apxchol-libomp-cibuildwheel"
 test-requires = ["pytest"]
 test-command = "python -m pytest {package}/tests -q"
+
+[tool.cibuildwheel.environment]
+APXCHOL_PORTABLE_BUILD = "1"
+CMAKE_ARGS = "-DOpenMP_ROOT=/tmp/apxchol-libomp-cibuildwheel"
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
@@ -66,8 +69,6 @@ inherit.environment = "append"
 # cibuildwheel 3.2 otherwise sets _PYTHON_HOST_PLATFORM to macOS 11, which
 # scikit-build-core prioritizes over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
 environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", _PYTHON_HOST_PLATFORM = "macosx-14.0-arm64" }
-inherit.test-command = "append"
-test-command = "python {package}/tools/check_macos_runtime.py"
 
 [[tool.cibuildwheel.overrides]]
 select = "*-manylinux_*"

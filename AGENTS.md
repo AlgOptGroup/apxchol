@@ -133,8 +133,7 @@ choices, retired knobs, and measurements belong in
 
 - Linux and macOS wheels use Clang and bundle LLVM libomp built from the
   same pinned source (`python/tools/build_libomp.sh`), targeting macOS 14.0
-  on Apple. cibuildwheel repairs the wheels and runs the Python tests;
-  `check_macos_runtime.py` verifies runtime loading on macOS. CI and
+  on Apple. cibuildwheel repairs the wheels and runs the Python tests. CI and
   publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
   `python/pyproject.toml`.

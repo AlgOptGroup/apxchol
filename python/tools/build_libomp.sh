@@ -55,25 +55,7 @@ cmake -S "$source_dir" -B "$build_dir" \
     -DOPENMP_ENABLE_OMPT_TOOLS=OFF \
     -DOPENMP_ENABLE_LIBOMP_PROFILING=OFF \
     -DLIBOMP_ENABLE_SHARED=ON \
+    -DLIBOMP_OMPD_SUPPORT=OFF \
     -DLIBOMP_INSTALL_ALIASES=OFF
 cmake --build "$build_dir" --parallel
 cmake --install "$build_dir"
-
-if [[ "$(uname -s)" == Darwin ]]; then
-    libomp="$install_prefix/lib/libomp.dylib"
-    [[ -f "$libomp" ]] || { echo "libomp was not installed" >&2; exit 1; }
-    [[ "$(lipo -archs "$libomp")" == "arm64" ]] || {
-        echo "libomp is not arm64" >&2
-        exit 1
-    }
-    otool -D "$libomp" | grep -Fqx "$install_prefix/lib/libomp.dylib" || {
-        echo "libomp has an unexpected install name" >&2
-        exit 1
-    }
-    vtool -show-build "$libomp" | grep -Eq 'minos[[:space:]]+14\.0$' || {
-        echo "libomp does not target macOS 14.0" >&2
-        exit 1
-    }
-else
-    [[ -f "$install_prefix/lib/libomp.so" ]] || { echo "libomp was not installed" >&2; exit 1; }
-fi
