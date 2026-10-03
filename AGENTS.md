@@ -131,10 +131,10 @@ choices, retired knobs, and measurements belong in
   the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
 
 
-- Linux and macOS wheels use Clang and bundle LLVM libomp built from the
-  same pinned source (`python/tools/build_libomp.sh`), targeting macOS 14.0
-  on Apple. cibuildwheel repairs the wheels and runs the Python tests. CI and
-  publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
+- Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
+  manylinux distribution package on Linux and the R-project binary on macOS,
+  targeting macOS 14.0. cibuildwheel repairs the wheels and runs the Python tests.
+  CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
   `python/pyproject.toml`.
 
