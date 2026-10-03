@@ -8,8 +8,7 @@ from pathlib import Path
 def check(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
-        macos = "-macosx_" in wheel.name
-        runtime = "libomp" if macos else "libgomp"
+        runtime = "libomp"
         if not any(Path(name).name.startswith(runtime) for name in names):
             raise SystemExit(f"{wheel.name}: bundled {runtime} is missing")
         for license_name in ("LICENSE", f"LICENSE.{runtime}.txt"):

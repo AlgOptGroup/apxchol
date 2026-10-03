@@ -121,7 +121,8 @@ choices, retired knobs, and measurements belong in
 - OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
   queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
   while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
-  OpenMP fails configuration instead of producing a serial build.
+  OpenMP fails configuration instead of producing a serial build. Both targets
+  use the shared link probe for the long-double reduction atomic runtime.
 - macOS: retain normal CMake compiler selection. Install Command Line Tools,
   CMake and libomp, then use the common build commands. libc++ `std::pmr`
   requires a macOS 14 deployment target. Linux-only `madvise`
@@ -130,10 +131,10 @@ choices, retired knobs, and measurements belong in
   the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
 
 
-- macOS wheels bundle LLVM libomp built from source for macOS 14.0
-  (`python/tools/build_libomp_macos.sh`); keep `check_macos_wheel.py` and
-  `check_macos_runtime.py` passing. Linux wheels bundle GNU libgomp and its
-  license/exception; `check_wheel_licenses.py` checks both platforms. CI and
+- Linux and macOS wheels use Clang and bundle LLVM libomp built from the
+  same pinned source (`python/tools/build_libomp.sh`), targeting macOS 14.0
+  on Apple. Keep `check_macos_wheel.py` and `check_macos_runtime.py` passing;
+  `check_wheel_licenses.py` checks the common runtime license. CI and
   publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
   `python/pyproject.toml`.
