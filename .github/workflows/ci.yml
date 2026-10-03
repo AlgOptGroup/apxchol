@@ -111,16 +111,25 @@ jobs:
       - &configure-build
         name: Configure + build (Release)
         run: |
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS:-}
           cmake --build build --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
       - &ctest
         name: Run unit tests
         run: ctest --test-dir build --no-tests=error --output-on-failure
 
   macos:
-    name: macOS (Apple Clang, build + ctest)
+    name: macOS (${{ matrix.name }}, build + ctest)
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Clang
+            cmake_args: '-DAPXCHOL_BUILD_TOOLS=ON'
+          - name: Apple Clang + Metal
+            cmake_args: '-DAPXCHOL_USE_METAL=ON -DAPXCHOL_BUILD_TOOLS=ON'
     env:
+      CMAKE_ARGS: ${{ matrix.cmake_args }}
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4

@@ -123,10 +123,23 @@ option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to 
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 option(APXCHOL_BUILD_TOOLS "Build the developer analysis tools (bench_setup, analyze_factor)" OFF)
+option(APXCHOL_USE_METAL "Apple GPU block PCG (explicit apxchol::metal_solver; defaults unchanged)" OFF)
 
 if (APXCHOL_64BIT_INDICES)
     message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
     set(APXCHOL_64BIT_EDGE_INDICES ON)
+endif()
+
+if (APXCHOL_USE_METAL)
+    if (NOT APPLE)
+        message(FATAL_ERROR "APXCHOL_USE_METAL requires an Apple platform")
+    endif()
+    if (APXCHOL_USE_CUDA)
+        message(FATAL_ERROR "APXCHOL_USE_METAL and APXCHOL_USE_CUDA are mutually exclusive")
+    endif()
+    # Only src/metal_device.mm is Objective-C++; OpenMP host work stays in the
+    # C++ sources (FindOpenMP's flags apply to CXX only).
+    enable_language(OBJCXX)
 endif()
 
 if (APXCHOL_USE_CUDA)
@@ -175,6 +188,10 @@ add_library(apxchol_core
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
     # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>
+    # Apple GPU block PCG (metal_solver.h): C++ host side and the Objective-C++
+    # device side that compiles src/metal_kernels.inc at run time.
+    $<$<BOOL:${APXCHOL_USE_METAL}>:src/metal_solver.cpp>
+    $<$<BOOL:${APXCHOL_USE_METAL}>:src/metal_device.mm>
 )
 # The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
 # solely for the CLI and analyze_factor, and is linked on those targets.
@@ -226,6 +243,17 @@ if (APXCHOL_USE_CUDA)
     set_target_properties(apxchol_core PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
 endif()
 
+if (APXCHOL_USE_METAL)
+    target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_METAL)
+    set_source_files_properties(src/metal_device.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    set_target_properties(apxchol_core PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)
+    # PUBLIC: the static library hands the framework dependencies to its
+    # consumers. CoreGraphics lets MTLCreateSystemDefaultDevice find the GPU
+    # from command-line tools.
+    target_link_libraries(apxchol_core PUBLIC "-framework Metal" "-framework Foundation"
+                          "-framework CoreGraphics")
+endif()
+
 if (APXCHOL_64BIT_EDGE_INDICES)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_64BIT_EDGE_INDICES)
 endif()
@@ -257,6 +285,15 @@ endforeach()
 unset(_apxchol_target)
 unset(_apxchol_native_arch_option)
 
+# ── C ABI ────────────────────────────────────────────
+# Exception-safe C interface over cpu_solver (include/apxchol/c_api.h) for
+# non-C++ consumers. Not built with CUDA: there cpu_solver's triangular solves
+# run on the device, so its CPU backend would be mislabelled.
+if (NOT APXCHOL_USE_CUDA)
+    add_library(apxchol_c src/c_api.cpp)
+    target_link_libraries(apxchol_c PUBLIC apxchol_core)
+endif()
+
 # ── CLI solver ───────────────────────────────────────
 add_executable(apxchol src/main.cpp src/config.cpp)
 target_link_libraries(apxchol PRIVATE apxchol_core apxchol_mtx_input CLI11::CLI11
@@ -269,6 +306,8 @@ endif()
 
 # ── Tests ────────────────────────────────────────────
 if (APXCHOL_BUILD_TESTS)
+    # Only the C consumer of the C ABI needs a C compiler.
+    enable_language(C)
     enable_testing()
     add_subdirectory(tests)
 endif()
