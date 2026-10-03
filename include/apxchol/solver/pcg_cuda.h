@@ -112,8 +112,8 @@ public:
             // col_idx / vals are allocated UNINITIALIZED by the builder (PASS 2
             // writes every slot exactly once) -- see the note there.
             bool op_fp32_exact = false;   // set by the builder: A is exactly fp32-representable
-            build_permuted_full_symmetric_csr(L, perm, h_row_ptr, h_col_idx, h_vals,
-                                              nnz_, op_fp32_exact);
+            detail::build_permuted_full_symmetric_csr(L, perm, h_row_ptr, h_col_idx, h_vals,
+                                                      nnz_, op_fp32_exact);
             // Preserve ordinary setup's CSR-before-permutation allocation order.
             h_perm_.assign(perm.begin(), perm.begin() + n_);
 
@@ -320,132 +320,6 @@ private:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(h_scalar_, d_scalar_, sizeof(double), cudaMemcpyDeviceToHost, 0));
         APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(0));
         return *h_scalar_;
-    }
-
-    // Build full-symmetric CSR of A_perm = P L P^T from a (lower-half-stored)
-    // symmetric matrix L and its permutation P. The factor F_.L was built on
-    // A_perm, so running PCG in permuted space matches what trsv_.solve_LLt_dev
-    // expects per iter.
-    //
-    // perm.indices()[orig_v] = new_idx ⇒  A_perm[i,j] = L[iperm(i), iperm(j)]
-    // where iperm = P^{-1}. The permutation acts on BOTH row and col of L.
-    // Output: row_ptr/col_idx/vals = CSR of A_perm (full symmetric, sorted),
-    // nnz = row_ptr[n] (col_idx/vals hold exactly that many entries; they are
-    // plain arrays, not vectors — see the allocation note below).
-    //
-    // Fully paired, unique sorted CSC uses column ownership: source column k
-    // owns output row perm[k], retaining the sort by permuted column indices.
-    // The general fallback below counts and scatters through atomic row
-    // counters, then sorts each row. Both preserve canonical lower values.
-    // fp32_exact (out) := every operator value round-trips fp32 (v == double(float(v))),
-    // so storing A in fp32 is LOSSLESS. Computed FOR FREE as an OMP reduction in PASS 2's
-    // existing value loop -- no separate scan. (A is symmetric; PASS 2 visits the upper
-    // triangle incl. diagonal = every distinct value.) This is the "detect at input"
-    // gate that lets exact matrices use the half-size fp32 operator while Krylov compute
-    // stays fp64 (so the 1e-8 residual floor is preserved).
-    static void build_permuted_full_symmetric_csr(
-        const Eigen::SparseMatrix<double>& L,
-        const std::vector<node_index>& perm,
-        std::vector<int>& row_ptr,
-        std::unique_ptr<int[]>& col_idx,
-        std::unique_ptr<double[]>& vals,
-        int64_t& nnz,
-        bool& fp32_exact)
-    {
-        if (detail::try_build_permuted_symmetric_csr(
-                L, perm, row_ptr, col_idx, vals, nnz, fp32_exact))
-            return;
-        const int n = static_cast<int>(L.rows());
-        const int* L_outer = L.outerIndexPtr();
-        const int* L_inner = L.innerIndexPtr();
-        const double* L_vals = L.valuePtr();
-        // perm_[v] = new_idx for original vertex v.
-        const node_index* p_idx = perm.data();
-
-        // PASS 1 (parallel): atomic count per-row of A_perm.
-        row_ptr.assign(n + 1, 0);
-        #pragma omp parallel for schedule(static)
-        for (int k = 0; k < n; ++k) {
-            const int pk = p_idx[k];
-            for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-                const int row = L_inner[p];
-                if (row < k) continue;
-                const int pr = p_idx[row];
-                __atomic_fetch_add(&row_ptr[pr + 1], 1, __ATOMIC_RELAXED);
-                if (row != k)
-                    __atomic_fetch_add(&row_ptr[pk + 1], 1, __ATOMIC_RELAXED);
-            }
-        }
-        // Prefix sum (serial, m+1 entries — sub-ms even for n=4M).
-        for (int i = 0; i < n; ++i)
-            row_ptr[i + 1] += row_ptr[i];
-        const int total = row_ptr[n];
-        nnz = total;
-        // UNINITIALIZED, deliberately: PASS 2 below writes every one of the
-        // `total` slots exactly once (its scatter is the same walk PASS 1 just
-        // counted), so a zero fill is pure waste -- and a SERIAL one, 80 MB of
-        // int + 160 MB of double on grid_2000, memset on one thread and then
-        // immediately overwritten. Same idiom (and same reason) as the fp32
-        // operator cast in setup(). The prefix sum above stays serial: it is
-        // n+1 entries, sub-ms even at n = 4M.
-        // Worth less than it looks: the page faults just move from the memset
-        // into PASS 2's (parallel) first touch, so the measured `gpu_pcg_setup`
-        // win is only grid_2000 79.9 -> 77.7 ms, iter0040 64.3 -> 63.3 (medians
-        // of 48, RTX 4090 Laptop, T=16, warm context). Kept because it is
-        // strictly less work and strictly less peak-transient traffic.
-        col_idx = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(total));
-        vals    = std::make_unique_for_overwrite<double[]>(static_cast<std::size_t>(total));
-
-        // PASS 2 (parallel): atomic-claim slot, scatter. Non-deterministic
-        // per-row order across threads; restored by per-row sort below. The fp32
-        // exactness reduction rides along for free (every value v is read here anyway).
-        std::vector<int> pos(row_ptr.begin(), row_ptr.begin() + n);
-        bool exact = true;
-        #pragma omp parallel for schedule(static) reduction(&&:exact)
-        for (int k = 0; k < n; ++k) {
-            const int pk = p_idx[k];
-            for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-                const int row = L_inner[p];
-                if (row < k) continue;
-                const double v = L_vals[p];
-                if (static_cast<double>(static_cast<float>(v)) != v) exact = false;  // lossless-fp32 check
-                const int pr = p_idx[row];
-                // A_perm[pr, pk] = v
-                const int slot_pr = __atomic_fetch_add(&pos[pr], 1, __ATOMIC_RELAXED);
-                col_idx[slot_pr] = pk;
-                vals[slot_pr]    = v;
-                if (row != k) {
-                    // A_perm[pk, pr] = v
-                    const int slot_pk = __atomic_fetch_add(&pos[pk], 1, __ATOMIC_RELAXED);
-                    col_idx[slot_pk] = pr;
-                    vals[slot_pk]    = v;
-                }
-            }
-        }
-        fp32_exact = exact;
-
-        // Sort each row's (col, val) ascending: sorted CSR gives the SpMV its
-        // best locality on the x gathers. Per-thread kv buffer reused across
-        // rows (avoids n tiny mallocs).
-        #pragma omp parallel
-        {
-            std::vector<std::pair<int, double>> kv;
-            #pragma omp for schedule(static)
-            for (int i = 0; i < n; ++i) {
-                const int rs = row_ptr[i], re = row_ptr[i + 1];
-                if (re - rs < 2) continue;
-                kv.clear();
-                kv.reserve(re - rs);
-                for (int p = rs; p < re; ++p)
-                    kv.emplace_back(col_idx[p], vals[p]);
-                std::sort(kv.begin(), kv.end(),
-                          [](const auto& a, const auto& b){ return a.first < b.first; });
-                for (int p = rs; p < re; ++p) {
-                    col_idx[p] = kv[p - rs].first;
-                    vals[p]    = kv[p - rs].second;
-                }
-            }
-        }
     }
 
     void destroy() {

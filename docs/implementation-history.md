@@ -355,3 +355,44 @@ default or fixed-storage sweeps and label new output accordingly. Historical
 forward-star measurements and their chart labels remain unchanged. This
 retirement does not establish that the surviving layouts are universally
 dominated, and it does not change the default solver or its numerical controls.
+
+## Apple Metal backend
+
+`metal_solver` ports a private downstream feasibility prototype (a Rust host
+with MSL kernels, run on exported apxchol factors). Its measurements belong to
+that project and are not reproduced here; the findings below are historical
+and qualitative, not a validation of this integration.
+
+**Precision variants.** An all-FP32 solve reached its recursive tolerance while
+the true original-system residual stalled far above 1e-8. FP64 iterative
+refinement on the CPU around restarted FP32 solves converged but cost several
+times the FP64 iteration count at 1e-10. FP32 PCG with reliable updates (FP64 on
+the CPU, or double-float on the GPU) kept the search directions but diverged at
+1e-10 on the largest case. The FP32 preconditioner with double-float Krylov
+recurrences (x, r, A p and the operator) reached 1e-10 true residuals without
+restarts at close to FP64 iteration counts; it is the only mode retained.
+
+**Inherited constants.** At most 64 right-hand sides per batch, node-major
+blocks; rows with more than 32 dependencies are heavy; runs of narrow levels
+(light rows only, at most 2048 row-column items) share one threadgroup of up to
+1024 threads; one command buffer per iteration above 200,000 rows and per four
+iterations below. None is an environment knob. The port does the host packing,
+centring and FP64 exit check in block-wide node-major passes (the prototype
+made one strided pass per column) and keeps two command buffers in flight (the
+prototype waited for each one); the inherited iterations per command buffer
+are unchanged.
+
+**Fixed while porting.** Breakdown reported as convergence (a skipped update
+left a zero r.r behind); `<=` stopping (now strict `<`); FP32 underflow of
+tol^2 ||b||^2 (now exact power-of-two scaling and a host double-float
+threshold); reductions whose order depended on the batch width (now one tree
+fixed by n, and 32 virtual lanes for heavy rows); 32-bit overflow of block
+indices (n kc < 2^32 is enforced); unchecked command-buffer errors; heavy-row
+lanes taken from another pipeline's thread limit; double-float exactness left
+to the compiler's defaults (now safe math mode, contraction off and a device
+self-test); device lookup without CoreGraphics linked. The prototype also
+applied the undropped factor; the port applies the CPU's dropped FP32 factor.
+Its other modes and their environment controls were not ported.
+
+No timing study accompanies this integration; performance relative to the CPU
+or CUDA solves is not established.
