@@ -34,10 +34,7 @@ pybind11_add_module(_apxchol
     ${APX_ROOT}/src/solve.cpp
 )
 target_include_directories(_apxchol PRIVATE ${APX_ROOT}/include ${APX_ROOT}/src)
-target_link_libraries(_apxchol PRIVATE Eigen3::Eigen)
-if (OpenMP_CXX_FOUND)
-    target_link_libraries(_apxchol PRIVATE OpenMP::OpenMP_CXX)
-endif()
+target_link_libraries(_apxchol PRIVATE Eigen3::Eigen OpenMP::OpenMP_CXX)
 
 # Match the root library default (ON there). The SpTRSV's fp32 factor storage
 # needs no macro any more, and its fp16 variant is a runtime env knob

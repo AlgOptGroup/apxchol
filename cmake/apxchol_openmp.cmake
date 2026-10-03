@@ -1,43 +1,25 @@
-# Locate OpenMP for the root project and the Python extension.
-#
-# Only the standard FindOpenMP inputs select the runtime; apxchol adds no
-# OpenMP option of its own:
-#   -DOpenMP_ROOT=<prefix>                    runtime prefix for Apple Clang
-#                                             (Homebrew keg, Julia artifact,
-#                                             a wheel's libomp)
-#   -DOpenMP_CXX_FLAGS=... -DOpenMP_CXX_LIB_NAMES=...
-#   -DOpenMP_<lib>_LIBRARY=<path>             an exact runtime, any compiler
-#   -DCMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON    an explicitly serial build
-#
-# Apple Clang ships no OpenMP runtime and Homebrew's libomp is keg-only, so
-# FindOpenMP misses it unless told where to look. When the caller names no
-# runtime (no OpenMP_ROOT, no OpenMP_CXX_FLAGS), append the keg as the last
-# system prefix: every other search location (CMAKE_PREFIX_PATH, environment
-# prefixes, PATH-derived prefixes, the system prefixes) still wins. Other
-# compilers see the plain find_package(OpenMP) call unchanged.
-#
-# Sets the usual OpenMP_CXX_FOUND / OpenMP::OpenMP_CXX in the caller's scope.
-
+# Add Homebrew's keg-only libomp after other search prefixes on Apple Clang.
+# Explicit FindOpenMP inputs take precedence; compiler selection is unchanged.
 set(_apxchol_saved_system_prefix_path "${CMAKE_SYSTEM_PREFIX_PATH}")
 if (APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"
     AND NOT DEFINED OpenMP_ROOT AND NOT DEFINED ENV{OpenMP_ROOT}
     AND NOT DEFINED OPENMP_ROOT AND NOT DEFINED ENV{OPENMP_ROOT}
     AND NOT DEFINED OpenMP_CXX_FLAGS)
-    foreach (_apxchol_keg IN ITEMS /opt/homebrew/opt/libomp /usr/local/opt/libomp)
-        if (EXISTS "${_apxchol_keg}/include/omp.h")
-            list(APPEND CMAKE_SYSTEM_PREFIX_PATH "${_apxchol_keg}")
+    find_program(_apxchol_brew brew)
+    if (_apxchol_brew)
+        execute_process(COMMAND "${_apxchol_brew}" --prefix libomp
+            RESULT_VARIABLE _apxchol_brew_result
+            OUTPUT_VARIABLE _apxchol_libomp OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if (_apxchol_brew_result EQUAL 0 AND EXISTS "${_apxchol_libomp}/include/omp.h")
+            list(APPEND CMAKE_SYSTEM_PREFIX_PATH "${_apxchol_libomp}")
         endif()
-    endforeach()
-    unset(_apxchol_keg)
+    endif()
+    unset(_apxchol_brew CACHE)
+    unset(_apxchol_brew)
+    unset(_apxchol_brew_result)
+    unset(_apxchol_libomp)
 endif()
-find_package(OpenMP)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 set(CMAKE_SYSTEM_PREFIX_PATH "${_apxchol_saved_system_prefix_path}")
 unset(_apxchol_saved_system_prefix_path)
-
-if (NOT OpenMP_CXX_FOUND AND NOT CMAKE_DISABLE_FIND_PACKAGE_OpenMP)
-    message(WARNING
-        "apxchol: no OpenMP runtime found; building a SERIAL library. "
-        "Apple Clang: `brew install libomp` or pass -DOpenMP_ROOT=<prefix>. "
-        "Pass -DCMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON to request a serial "
-        "build explicitly.")
-endif()

@@ -7,7 +7,7 @@ and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
-Requires CMake, a C++23 compiler, and Eigen (fetched if absent).
+Requires CMake, a C++23 compiler with OpenMP, and Eigen (fetched if absent).
 
 ```bash
 git clone https://github.com/AlgOptGroup/apxchol
@@ -19,9 +19,8 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-On macOS, install the OpenMP runtime first (`brew install libomp`); Apple
-Clang finds the Homebrew keg automatically, or pass `-DOpenMP_ROOT=<prefix>`.
-Without a runtime the build is serial and CMake warns.
+On macOS, install Xcode Command Line Tools and `brew install cmake libomp`,
+then use the same build commands above.
 
 The CLI requires an explicit RHS or `--random-rhs`. It reports whether input
 is an assembled operator or adjacency matrix, forming `L = D - A` for the
