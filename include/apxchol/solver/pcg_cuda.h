@@ -2,12 +2,9 @@
 /// GPU-resident PCG loop -- our own kernels only (pcg_cuda_kernels.h): no
 /// cuSPARSE, no cuBLAS. The CUDA library build links cudart alone.
 ///
-/// Why this exists: the existing CPU PCG path in src/solve.cpp issues
-/// `precond.solve(r)` per iter, which on the CUDA build copies r → device,
-/// runs the GPU SpTRSV, copies result → host. ~10 ms/iter is spent on
-/// CPU↔GPU transfers alone. The SpMV `y = A*x` runs on the CPU even in
-/// the CUDA build, paying further bandwidth cost and missing GPU SpMV
-/// throughput (~10× the CPU rate on this hardware).
+/// Operator construction and all iteration arithmetic use the device. CPU
+/// solves have their own complete host route; there is no host-operator
+/// construction fallback in this owner.
 ///
 /// `cuda_pcg` keeps the input matrix A as a full-symmetric CSR on the
 /// device once, allocates all 5 PCG vectors (x, r, p, z, Ap) on device,
@@ -33,12 +30,11 @@
 
 #include <Eigen/Sparse>
 #include <Eigen/Core>
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cuda_runtime.h>
-#include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -46,8 +42,7 @@
 // check_cuda lives in apxchol/solver/sptrsv/cuda.h (already included
 // transitively via preconditioner.h).
 #include "apxchol/solver/pcg_cuda_kernels.h"
-#include "apxchol/solver/elimination/gpu_round_shadow.h"
-#include "apxchol/solver/pcg_cuda_host.h"
+#include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol {
@@ -73,93 +68,36 @@ public:
         destroy();
         n_ = static_cast<int64_t>(L.rows());
 
-        // Keep host CSR storage alive through iterate/pinned-buffer allocation,
-        // as in ordinary setup. Empty owners allocate nothing on the device route.
-        std::vector<int> h_row_ptr;
-        std::unique_ptr<int[]> h_col_idx;
-        std::unique_ptr<double[]> h_vals;
-        bool device_operator = false;
-        if constexpr (sizeof(node_index) == sizeof(std::uint32_t)) {
-            if (detail::gpu_round_shadow_requested() &&
-                detail::gpu_factor_finalize_requested() &&
-                detail::gpu_block_frontend::configured_block_mode() !=
-                    detail::gpu_block_frontend::mode::disabled &&
-                L.isCompressed() && L.rows() == L.cols() &&
-                L.rows() <= std::numeric_limits<int>::max() &&
-                L.nonZeros() <= std::numeric_limits<int>::max()) {
-                int precision = -1;
-                if (const char* e = std::getenv("APXCHOL_GPU_FP32_OPERATOR")) {
-                    if (std::string(e) == "0") precision = 0;
-                    else if (*e) precision = 1;
-                }
-                // Allocate the permutation before accepting device ownership.
-                h_perm_.assign(perm.begin(), perm.begin() + n_);
-                pcg_cuda::operator_csr prepared;
-                device_operator = pcg_cuda::try_build_permuted_operator_csr(
-                    static_cast<int>(n_), static_cast<int>(L.nonZeros()),
-                    L.outerIndexPtr(), L.innerIndexPtr(), L.valuePtr(),
-                    reinterpret_cast<const std::uint32_t*>(perm.data()), precision, prepared);
-                if (device_operator) {
-                    d_row_ptr_ = prepared.row_ptr; d_col_idx_ = prepared.col_idx;
-                    d_vals_ = prepared.values_f64; d_vals_f32_ = prepared.values_f32;
-                    nnz_ = prepared.nnz; fp32_op_ = prepared.fp32;
-                }
-            }
-        }
-        if (!device_operator) {
-            // Permute and build full-symmetric CSR in one go (host side, once).
-            // A_perm[i,j] = L[iperm[i], iperm[j]] where iperm is perm.inverse().
-            // col_idx / vals are allocated UNINITIALIZED by the builder (PASS 2
-            // writes every slot exactly once) -- see the note there.
-            bool op_fp32_exact = false;   // set by the builder: A is exactly fp32-representable
-            build_permuted_full_symmetric_csr(L, perm, h_row_ptr, h_col_idx, h_vals,
-                                              nnz_, op_fp32_exact);
-            // Preserve ordinary setup's CSR-before-permutation allocation order.
-            h_perm_.assign(perm.begin(), perm.begin() + n_);
+        // This owner has one operator-construction route. Unsupported stored
+        // formats fail before PCG state is allocated; no host CSR is built.
+        if constexpr (sizeof(node_index) != sizeof(std::uint32_t))
+            throw std::invalid_argument("GPU PCG requires 32-bit node indices; request CPU explicitly");
+        if (!L.isCompressed() || L.rows() != L.cols() ||
+            L.rows() > std::numeric_limits<int>::max() ||
+            L.nonZeros() > std::numeric_limits<int>::max() ||
+            perm.size() < static_cast<std::size_t>(n_))
+            throw std::invalid_argument("GPU PCG requires a compressed square int32-sized operator and a complete permutation");
 
-            // Upload matrix to device.
-            if (std::getenv("APXCHOL_GPU_MEM_DEBUG")) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
-              fprintf(stderr,"[mem] PCG operator A_perm: nnz=%lld colidx=%.2fGB vals(fp64)=%.2fGB rowptr=%.2fGB"
-                      " | GPU free=%.2f / total=%.2f GB BEFORE operator alloc\n",
-                      (long long)nnz_, nnz_*4.0/1e9, nnz_*8.0/1e9, (n_+1)*4.0/1e9, mf/1e9, mt/1e9); }
-            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_row_ptr_, (n_ + 1) * sizeof(int)));
-            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_col_idx_, nnz_ * sizeof(int)));
-            APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_row_ptr_, h_row_ptr.data(),
-                                              (n_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
-            APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_col_idx_, h_col_idx.get(),
-                                              nnz_ * sizeof(int), cudaMemcpyHostToDevice));
-            // Operator A_perm storage precision. fp32 is LOSSLESS only when every value
-            // round-trips fp32 (op_fp32_exact, detected for free during the build above);
-            // then it halves the operator footprint -- the lever that lets the giant social
-            // factors (com-Orkut) fit 16GB -- at fp64-accurate compute (the SpMV promotes
-            // each value to fp64; Krylov vectors stay fp64, so the 1e-8 floor is preserved).
-            // Default = AUTO: fp32 iff exact. APXCHOL_GPU_FP32_OPERATOR overrides -- "0"
-            // forces fp64; any other value forces fp32 (testing; floors if A is inexact).
-            // Same rule as the CPU's op_fp32_ (src/solve.cpp).
-            { const char* e = std::getenv("APXCHOL_GPU_FP32_OPERATOR");
-              if (e && std::string(e) == "0")   fp32_op_ = false;
-              else if (e && *e != '\0')         fp32_op_ = true;
-              else                              fp32_op_ = op_fp32_exact; }
-            if (fp32_op_) {
-                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_vals_f32_, nnz_ * sizeof(float)));
-                // Parallel, no-init cast (make_unique_for_overwrite avoids the O(nnz) zero
-                // fill); then drop the fp64 host copy so the peak host footprint is fp32-only.
-                auto h_vals_f = std::make_unique_for_overwrite<float[]>(static_cast<size_t>(nnz_));
-                #pragma omp parallel for schedule(static)
-                for (int64_t k = 0; k < nnz_; ++k) h_vals_f[k] = static_cast<float>(h_vals[k]);
-                APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_vals_f32_, h_vals_f.get(),
-                                                  nnz_ * sizeof(float), cudaMemcpyHostToDevice));
-                h_vals.reset();
-            } else {
-                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_vals_, nnz_ * sizeof(double)));
-                APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_vals_, h_vals.get(),
-                                                  nnz_ * sizeof(double), cudaMemcpyHostToDevice));
-            }
-            if (std::getenv("APXCHOL_GPU_MEM_DEBUG"))
-                fprintf(stderr, "[fp32op] operator stored %s (fp32-exact=%d)\n",
-                        fp32_op_ ? "fp32" : "fp64", static_cast<int>(op_fp32_exact));
-
+        int precision = -1;
+        if (const char* e = std::getenv("APXCHOL_GPU_FP32_OPERATOR")) {
+            if (std::string(e) == "0") precision = 0;
+            else if (*e) precision = 1;
         }
+        // Allocate the permutation before accepting device ownership. The
+        // factor supplied this validated bijection; the builder checks the CSC.
+        h_perm_.assign(perm.begin(), perm.begin() + n_);
+        pcg_cuda::operator_csr prepared;
+        if (!pcg_cuda::try_build_permuted_operator_csr(
+                static_cast<int>(n_), static_cast<int>(L.nonZeros()),
+                L.outerIndexPtr(), L.innerIndexPtr(), L.valuePtr(),
+                reinterpret_cast<const std::uint32_t*>(perm.data()), precision, prepared))
+            throw std::invalid_argument("GPU PCG requires sorted, unique, fully paired CSC storage; request CPU explicitly");
+        d_row_ptr_ = prepared.row_ptr;
+        d_col_idx_ = prepared.col_idx;
+        d_vals_ = prepared.values_f64;
+        d_vals_f32_ = prepared.values_f32;
+        nnz_ = prepared.nnz;
+        fp32_op_ = prepared.fp32;
 
         // SpMV row mapping: threads per row from the average nnz/row
         // (pcg_cuda::spmv_lanes_for), env APXCHOL_GPU_SPMV_LANES overrides.
@@ -181,18 +119,15 @@ public:
         APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_scalar_, sizeof(double)));
         APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&h_scalar_), sizeof(double), cudaHostAllocDefault));
 
-        // The opt-in device construction owns its completion boundary, including
-        // direct cuda_pcg users. Ordinary host construction retains its previous
-        // asynchronous API behavior; benchmark harnesses synchronize timed calls.
-        if (device_operator)
-            APXCHOL_PCG_CUDA_CHECK(cudaDeviceSynchronize());
+        // Complete owned setup before returning, including direct cuda_pcg
+        // callers. The input CSC storage may end immediately after this call.
+        APXCHOL_PCG_CUDA_CHECK(cudaDeviceSynchronize());
         if (detail::gpu_setup_diagnostics())
-            std::fprintf(stderr, "[gpu-operator-builder] route=%s completion_wait=%d\n",
-                         device_operator ? "device" : "host", device_operator ? 1 : 0);
+            std::fprintf(stderr, "[gpu-operator-builder] route=device completion_wait=1\n");
         ready_ = true;
     }
 
-    /// Solve A*x = b via PCG using the host-side preconditioner. The
+    /// Solve A*x = b via PCG using a device-capable preconditioner. The
     /// preconditioner's `solve_LLt_dev(d_in, d_out)` device entry point is
     /// invoked per iter. Returns iteration count and final relative residual.
     template<class Precond>
@@ -320,132 +255,6 @@ private:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(h_scalar_, d_scalar_, sizeof(double), cudaMemcpyDeviceToHost, 0));
         APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(0));
         return *h_scalar_;
-    }
-
-    // Build full-symmetric CSR of A_perm = P L P^T from a (lower-half-stored)
-    // symmetric matrix L and its permutation P. The factor F_.L was built on
-    // A_perm, so running PCG in permuted space matches what trsv_.solve_LLt_dev
-    // expects per iter.
-    //
-    // perm.indices()[orig_v] = new_idx ⇒  A_perm[i,j] = L[iperm(i), iperm(j)]
-    // where iperm = P^{-1}. The permutation acts on BOTH row and col of L.
-    // Output: row_ptr/col_idx/vals = CSR of A_perm (full symmetric, sorted),
-    // nnz = row_ptr[n] (col_idx/vals hold exactly that many entries; they are
-    // plain arrays, not vectors — see the allocation note below).
-    //
-    // Fully paired, unique sorted CSC uses column ownership: source column k
-    // owns output row perm[k], retaining the sort by permuted column indices.
-    // The general fallback below counts and scatters through atomic row
-    // counters, then sorts each row. Both preserve canonical lower values.
-    // fp32_exact (out) := every operator value round-trips fp32 (v == double(float(v))),
-    // so storing A in fp32 is LOSSLESS. Computed FOR FREE as an OMP reduction in PASS 2's
-    // existing value loop -- no separate scan. (A is symmetric; PASS 2 visits the upper
-    // triangle incl. diagonal = every distinct value.) This is the "detect at input"
-    // gate that lets exact matrices use the half-size fp32 operator while Krylov compute
-    // stays fp64 (so the 1e-8 residual floor is preserved).
-    static void build_permuted_full_symmetric_csr(
-        const Eigen::SparseMatrix<double>& L,
-        const std::vector<node_index>& perm,
-        std::vector<int>& row_ptr,
-        std::unique_ptr<int[]>& col_idx,
-        std::unique_ptr<double[]>& vals,
-        int64_t& nnz,
-        bool& fp32_exact)
-    {
-        if (detail::try_build_permuted_symmetric_csr(
-                L, perm, row_ptr, col_idx, vals, nnz, fp32_exact))
-            return;
-        const int n = static_cast<int>(L.rows());
-        const int* L_outer = L.outerIndexPtr();
-        const int* L_inner = L.innerIndexPtr();
-        const double* L_vals = L.valuePtr();
-        // perm_[v] = new_idx for original vertex v.
-        const node_index* p_idx = perm.data();
-
-        // PASS 1 (parallel): atomic count per-row of A_perm.
-        row_ptr.assign(n + 1, 0);
-        #pragma omp parallel for schedule(static)
-        for (int k = 0; k < n; ++k) {
-            const int pk = p_idx[k];
-            for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-                const int row = L_inner[p];
-                if (row < k) continue;
-                const int pr = p_idx[row];
-                __atomic_fetch_add(&row_ptr[pr + 1], 1, __ATOMIC_RELAXED);
-                if (row != k)
-                    __atomic_fetch_add(&row_ptr[pk + 1], 1, __ATOMIC_RELAXED);
-            }
-        }
-        // Prefix sum (serial, m+1 entries — sub-ms even for n=4M).
-        for (int i = 0; i < n; ++i)
-            row_ptr[i + 1] += row_ptr[i];
-        const int total = row_ptr[n];
-        nnz = total;
-        // UNINITIALIZED, deliberately: PASS 2 below writes every one of the
-        // `total` slots exactly once (its scatter is the same walk PASS 1 just
-        // counted), so a zero fill is pure waste -- and a SERIAL one, 80 MB of
-        // int + 160 MB of double on grid_2000, memset on one thread and then
-        // immediately overwritten. Same idiom (and same reason) as the fp32
-        // operator cast in setup(). The prefix sum above stays serial: it is
-        // n+1 entries, sub-ms even at n = 4M.
-        // Worth less than it looks: the page faults just move from the memset
-        // into PASS 2's (parallel) first touch, so the measured `gpu_pcg_setup`
-        // win is only grid_2000 79.9 -> 77.7 ms, iter0040 64.3 -> 63.3 (medians
-        // of 48, RTX 4090 Laptop, T=16, warm context). Kept because it is
-        // strictly less work and strictly less peak-transient traffic.
-        col_idx = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(total));
-        vals    = std::make_unique_for_overwrite<double[]>(static_cast<std::size_t>(total));
-
-        // PASS 2 (parallel): atomic-claim slot, scatter. Non-deterministic
-        // per-row order across threads; restored by per-row sort below. The fp32
-        // exactness reduction rides along for free (every value v is read here anyway).
-        std::vector<int> pos(row_ptr.begin(), row_ptr.begin() + n);
-        bool exact = true;
-        #pragma omp parallel for schedule(static) reduction(&&:exact)
-        for (int k = 0; k < n; ++k) {
-            const int pk = p_idx[k];
-            for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-                const int row = L_inner[p];
-                if (row < k) continue;
-                const double v = L_vals[p];
-                if (static_cast<double>(static_cast<float>(v)) != v) exact = false;  // lossless-fp32 check
-                const int pr = p_idx[row];
-                // A_perm[pr, pk] = v
-                const int slot_pr = __atomic_fetch_add(&pos[pr], 1, __ATOMIC_RELAXED);
-                col_idx[slot_pr] = pk;
-                vals[slot_pr]    = v;
-                if (row != k) {
-                    // A_perm[pk, pr] = v
-                    const int slot_pk = __atomic_fetch_add(&pos[pk], 1, __ATOMIC_RELAXED);
-                    col_idx[slot_pk] = pr;
-                    vals[slot_pk]    = v;
-                }
-            }
-        }
-        fp32_exact = exact;
-
-        // Sort each row's (col, val) ascending: sorted CSR gives the SpMV its
-        // best locality on the x gathers. Per-thread kv buffer reused across
-        // rows (avoids n tiny mallocs).
-        #pragma omp parallel
-        {
-            std::vector<std::pair<int, double>> kv;
-            #pragma omp for schedule(static)
-            for (int i = 0; i < n; ++i) {
-                const int rs = row_ptr[i], re = row_ptr[i + 1];
-                if (re - rs < 2) continue;
-                kv.clear();
-                kv.reserve(re - rs);
-                for (int p = rs; p < re; ++p)
-                    kv.emplace_back(col_idx[p], vals[p]);
-                std::sort(kv.begin(), kv.end(),
-                          [](const auto& a, const auto& b){ return a.first < b.first; });
-                for (int p = rs; p < re; ++p) {
-                    col_idx[p] = kv[p - rs].first;
-                    vals[p]    = kv[p - rs].second;
-                }
-            }
-        }
     }
 
     void destroy() {

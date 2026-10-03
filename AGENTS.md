@@ -198,26 +198,36 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   factor storage (GPU default on, CPU default off); scales and diagonals stay
   fp32, while outer CPU/GPU PCG vectors and reductions stay fp64. See
   [precision and storage](docs/precision.md). The old GPU-only alias is
-  retired. GPU block setup is explicit opt-in
-  through `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, independent of host threads.
-- GPU-owned numerical setup requires all three existing flags:
-  `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, `APXCHOL_GPU_ROUND_SHADOW=force`
-  and `APXCHOL_GPU_FACTOR_FINALIZE=force`. It applies to an internal consuming
-  block-greedy/tree solve on directed AoS. It can eliminate supported rounds on
-  device and install the append log through dataflow SpTRSV. Public factorization,
-  custom strategies, exported factors and `keep_factor=true` retain their audited
-  or ordinary host path; copied capsules keep independent ownership validation.
+  retired.
+- Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
+  OpenMP SpTRSV and host PCG, even in CUDA builds. They must not initialize a
+  CUDA context or consume GPU stage flags. Explicit factor adoption remains CPU.
+- One-shot `solve` selects a complete route with `solve_options.backend`
+  (`automatic`, `cpu`, `gpu`); CLI uses `--backend auto|cpu|gpu`. Report the
+  selected route in `solve_result.backend` and CLI output. Auto is configuration
+  compatibility only: a CUDA build with 32-bit nodes, block-greedy/AoS, supported
+  sampler options and no export selects GPU; other options select CPU before
+  setup. It is not a performance predictor or a device-availability fallback.
+- GPU solves require device-owned factorization, finalization, dataflow plans,
+  operator preparation and PCG. Reject missing/nonunique device factor ownership
+  before a host-factor upload. Unsupported stored formats, missing device,
+  insufficient memory and runtime errors never trigger a CPU retry. The operator
+  must have supported compressed, sorted, unique and fully paired CSC storage;
+  callers can explicitly select CPU for other valid host layouts.
+- An explicit `detail::setup_route` threads through setup; production CPU/GPU
+  preconditioner specializations fix it at compile time. Legacy stage flags and
+  audited mixed-stage mechanisms remain low-level diagnostics, not end-to-end
+  solve modes. Explicit `cuda_sptrsv` host-factor import and copied capsule
+  validation remain independent facilities. No serialized factor API is added.
+- The internal GPU session shares one setup lifetime with benchmark native
+  retries. It is not a new public owner API. GPU PCG builds its permuted operator
+  on device; no host construction/upload fallback remains. Preserve canonical
+  lower values, lossless-fp32 selection and original-system residual grading.
 - An eligible compressed, sorted, unique, fully paired symmetric CSC operator
-  initializes the owned graph directly after operator validation. Its fresh,
-  unchanged operator view supplies the pairing proof only after strict layout
-  checks and when all stored off-diagonals are nonzero. Stored zeros, lumped
-  inputs and raw/test entry points retain full structural mate checks. Other
-  stored formats retain the host import fallback before device mutation. GPU PCG
-  constructs the permuted operator CSR on device only with all three existing
-  owned-setup flags enabled and its format checks satisfied. Ordinary calls and
-  unsupported formats keep host construction. Canonical lower values and
-  lossless-fp32 selection are unchanged.
-  Preserve original-system residual grading and full fallback validation.
+  initializes the owned graph directly after operator validation. Its unchanged
+  view supplies pairing proof only after strict layout checks and when stored
+  off-diagonals are nonzero. Stored zeros, lumped inputs and raw/test entry points
+  retain full structural mate checks. Diagnostic graph imports remain separate.
 - `operator_scan::triangles_bit_identical` is the proof that lets consumers of
   the caller's operator skip the per-entry transpose-partner search (about
   log2(column length) cache misses per entry, in the hub columns of power-law

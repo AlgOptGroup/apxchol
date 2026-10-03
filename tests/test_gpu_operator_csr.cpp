@@ -203,6 +203,35 @@ TEST(GpuOperatorCsr, BoundariesAndPermutationsMatchIndependentLowerReference) {
 #endif
 }
 
+TEST(GpuOperatorCsr, RandomPairedCscMatchesIndependentLowerReference) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA operator CSR required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    std::mt19937 rng(418932);
+    for (int trial = 0; trial < 80; ++trial) {
+        SCOPED_TRACE(trial);
+        const int n = trial * 13 % 131;
+        std::vector<Entry> entries;
+        for (int col = 0; col < n; ++col) {
+            if (trial % 3) entries.push_back({col, col, 4.0});
+            for (int row = col + 1; row < n; ++row) {
+                if ((trial % 2 && row / 8 != col / 8) || rng() % 13) continue;
+                const double value = trial % 5 ? -0.25 * (rng() % 8) : -0.1;
+                entries.push_back({row, col, value});
+                // Canonical LOWER values determine precision and both entries.
+                entries.push_back({col, row, value + 1e-10});
+            }
+        }
+        const auto input = from_entries(n, entries);
+        std::vector<std::uint32_t> perm(n);
+        std::iota(perm.begin(), perm.end(), 0u);
+        std::shuffle(perm.begin(), perm.end(), rng);
+        compare(input, perm, -1);
+    }
+#endif
+}
+
 TEST(GpuOperatorCsr, CanonicalLowerControlsPrecisionAndPreservesEveryValueBit) {
 #if !defined(APXCHOL_USE_CUDA)
     GTEST_SKIP()<<"CUDA operator CSR required";
@@ -263,6 +292,35 @@ TEST(GpuOperatorCsr, UnsupportedLayoutsLeaveOutputUnpublished) {
 #endif
 }
 
+TEST(GpuOperatorCsr, NonemptyOutputOwnerIsRejectedWithoutModification) {
+#if !defined(APXCHOL_USE_CUDA)
+    GTEST_SKIP() << "CUDA operator CSR required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    const auto valid = geometry(5);
+    const auto perm = permutations(valid.n)[2];
+    DeviceOwner owner;
+    ASSERT_TRUE(try_build_permuted_operator_csr(valid.n,
+        static_cast<int>(valid.values.size()), valid.outer.data(), valid.inner.data(),
+        valid.values.data(), perm.data(), -1, owner.output));
+    const auto before = owner.output;
+    // Balanced triangle counts still lack coordinate pairing.
+    const auto bad = from_entries(5, {{1, 0, -1.0}, {0, 2, -1.0}});
+    // The device builder's output is an ownership transfer, not a replace
+    // operation: it rejects a live owner before validating incoming storage.
+    EXPECT_THROW(try_build_permuted_operator_csr(bad.n,
+        static_cast<int>(bad.values.size()), bad.outer.data(), bad.inner.data(),
+        bad.values.data(), perm.data(), -1, owner.output), std::invalid_argument);
+    EXPECT_EQ(owner.output.row_ptr, before.row_ptr);
+    EXPECT_EQ(owner.output.col_idx, before.col_idx);
+    EXPECT_EQ(owner.output.values_f64, before.values_f64);
+    EXPECT_EQ(owner.output.values_f32, before.values_f32);
+    EXPECT_EQ(owner.output.nnz, before.nnz);
+    EXPECT_EQ(owner.output.fp32, before.fp32);
+    expect_output(owner.output, reference(valid, perm), -1);
+#endif
+}
+
 TEST(GpuOperatorCsr, HostInputStorageMayEndAtSuccessfulReturn) {
 #if !defined(APXCHOL_USE_CUDA)
     GTEST_SKIP()<<"CUDA operator CSR required";
@@ -284,7 +342,7 @@ TEST(GpuOperatorCsr, HostInputStorageMayEndAtSuccessfulReturn) {
 }
 
 TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
-#if !defined(APXCHOL_USE_CUDA)
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP()<<"CUDA operator CSR required";
 #else
     if (!runtime_available()) GTEST_SKIP()<<"CUDA unavailable";
@@ -309,7 +367,7 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
         Eigen::SparseMatrix<double> A(n,n);A.setFromTriplets(entries.begin(),entries.end());
         Eigen::VectorXd exact(n);for(int u=0;u<n;++u)exact[u]=std::sin(u+0.375);
         const Eigen::VectorXd b=A*exact;
-        apxchol::apx_cholesky preconditioner;
+        apxchol::detail::gpu_preconditioner preconditioner;
         preconditioner.compute(A);
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         EXPECT_TRUE(preconditioner.trsv().fp16());
@@ -330,57 +388,71 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
 #endif
 }
 
-TEST(GpuOperatorCsr, OptInAndHostFallbackKeepOriginalSystemSolve) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP()<<"CUDA operator CSR required";
+TEST(GpuOperatorCsr, DeviceSetupIgnoresLegacyFlagsAndRejectsUnsupportedStorage) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA operator CSR required";
 #else
-    if (!runtime_available()) GTEST_SKIP()<<"CUDA unavailable";
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_threads serial;
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND",nullptr);
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW",nullptr);
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE",nullptr);
-    constexpr int n=9;
+    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
+    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "off");
+    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "off");
+    constexpr int n = 9;
     std::vector<Eigen::Triplet<double>> entries;
-    for (int i=0;i<n;++i) {
-        entries.emplace_back(i,i,4.0);
-        if(i+1<n) { entries.emplace_back(i,i+1,-1.0);entries.emplace_back(i+1,i,-1.0); }
+    for (int i = 0; i < n; ++i) {
+        entries.emplace_back(i, i, 4.0);
+        if (i + 1 < n) {
+            entries.emplace_back(i, i + 1, -1.0);
+            entries.emplace_back(i + 1, i, -1.0);
+        }
     }
-    Eigen::SparseMatrix<double> A(n,n);A.setFromTriplets(entries.begin(),entries.end());
-    Eigen::SparseMatrix<double> lower=A.triangularView<Eigen::Lower>();
-    Eigen::VectorXd exact(n);for(int i=0;i<n;++i)exact[i]=std::sin(i+0.25);
-    const Eigen::VectorXd b=A*exact;
-    apxchol::apx_cholesky preconditioner;
+    Eigen::SparseMatrix<double> A(n, n);
+    A.setFromTriplets(entries.begin(), entries.end());
+    apxchol::detail::gpu_preconditioner preconditioner;
     preconditioner.compute(A);
-    ASSERT_FALSE(preconditioner.trsv().adopted_device_factor());
-    // Full CSC exercises default-off, incomplete opt-in, and explicit opt-in.
-    // Lower-only storage fails the paired-format proof and must fall back even
-    // with all three flags enabled. Each uses the same original-system factor.
-    for (int route=0;route<4;++route) {
-        SCOPED_TRACE(route);
-        scoped_environment block("APXCHOL_GPU_BLOCK_FRONTEND",route>=2?"force":nullptr);
-        scoped_environment round("APXCHOL_GPU_ROUND_SHADOW",route>=1?"force":nullptr);
-        scoped_environment factor("APXCHOL_GPU_FACTOR_FINALIZE",route>=1?"force":nullptr);
-        apxchol::cuda_pcg solver;
-        scoped_environment trace("APXCHOL_VERBOSE","1");
-        testing::internal::CaptureStderr();
-        solver.setup(route==3?lower:A,preconditioner.factor().perm);
-        const auto diagnostic=testing::internal::GetCapturedStderr();
-        const bool device=route==2 && sizeof(apxchol::node_index)==sizeof(std::uint32_t);
-        EXPECT_NE(diagnostic.find(device ? "[gpu-operator-builder] route=device completion_wait=1"
-                                         : "[gpu-operator-builder] route=host completion_wait=0"),
-                  std::string::npos);
-        if(device) EXPECT_EQ(cudaStreamQuery(nullptr),cudaSuccess);
-        Eigen::VectorXd result;int iterations=0;double reported=0;
-        solver.solve(preconditioner,b,result,1e-8,100,iterations,reported,false);
-        ASSERT_EQ(result.size(),n);
-        EXPECT_LE((A*result-b).norm()/b.norm(),1e-8);
-        EXPECT_TRUE(std::isfinite(reported));
+    ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
+    apxchol::cuda_pcg solver;
+    scoped_environment trace("APXCHOL_VERBOSE", "1");
+    testing::internal::CaptureStderr();
+    solver.setup(A, preconditioner.factor().perm);
+    const auto diagnostic = testing::internal::GetCapturedStderr();
+    EXPECT_NE(diagnostic.find("[gpu-operator-builder] route=device completion_wait=1"),
+              std::string::npos);
+    EXPECT_EQ(cudaStreamQuery(nullptr), cudaSuccess);
+    Eigen::VectorXd exact(n);
+    for (int i = 0; i < n; ++i) exact[i] = std::sin(i + 0.25);
+    const Eigen::VectorXd b = A * exact;
+    Eigen::VectorXd result;
+    int iterations = 0;
+    double reported = 0;
+    solver.solve(preconditioner, b, result, 1e-8, 100, iterations, reported, false);
+    ASSERT_EQ(result.size(), n);
+    EXPECT_LE((A * result - b).norm() / b.norm(), 1e-8);
+    EXPECT_TRUE(std::isfinite(reported));
+
+    // Paired CSC, compression, square shape and a complete permutation are
+    // mandatory. None of these failures may invoke the retired host builder.
+    Eigen::SparseMatrix<double> lower = A.triangularView<Eigen::Lower>();
+    Eigen::SparseMatrix<double> upper = A.triangularView<Eigen::Upper>();
+    auto uncompressed = A;
+    uncompressed.uncompress();
+    for (const auto* bad : {&lower, &upper, &uncompressed}) {
+        apxchol::cuda_pcg rejected;
+        EXPECT_THROW(rejected.setup(*bad, preconditioner.factor().perm),
+                     std::invalid_argument);
     }
+    Eigen::SparseMatrix<double> nonsquare(n, n + 1);
+    apxchol::cuda_pcg rejected;
+    EXPECT_THROW(rejected.setup(nonsquare, preconditioner.factor().perm),
+                 std::invalid_argument);
+    auto short_perm = preconditioner.factor().perm;
+    short_perm.pop_back();
+    EXPECT_THROW(rejected.setup(A, short_perm), std::invalid_argument);
 #endif
 }
 
 TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
-#if !defined(APXCHOL_USE_CUDA)
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "CUDA solve required";
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
@@ -413,7 +485,7 @@ TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
 }
 
 TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
-#if !defined(APXCHOL_USE_CUDA)
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "CUDA solve required";
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
@@ -434,12 +506,16 @@ TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
     A.setFromTriplets(entries.begin(), entries.end());
     apxchol::solve_result result;
     apxchol::detail::gpu_solve_session solver(A, {}, result);
+    ASSERT_TRUE(solver.preconditioner().trsv().adopted_device_factor());
+    EXPECT_THROW(solver.solve(Eigen::VectorXd::Zero(n - 1), result, 1e-8, 0),
+                 std::invalid_argument);
     for (double scale : {1e-12, 0.0, 1e6}) {
         SCOPED_TRACE(scale);
         const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, scale);
         result.iterations = 7;
         result.residual = std::numeric_limits<double>::quiet_NaN();
         solver.solve(b, result, 1e-8, 0);
+        EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
         ASSERT_EQ(result.x.size(), n);
         EXPECT_TRUE(result.x.isZero(0.0));
         EXPECT_EQ(result.iterations, 0);

@@ -1,3 +1,4 @@
+#include "apxchol/solver/detail/setup_route.h"
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/detail/cuda_device_scope.h"
@@ -1527,7 +1528,9 @@ struct gpu_block_frontend::impl {
     double last_advance = 0.0;
 };
 
-gpu_block_frontend::mode gpu_block_frontend::configured_block_mode() {
+gpu_block_frontend::mode gpu_block_frontend::configured_block_mode(setup_route route) {
+    if (route != setup_route::diagnostic)
+        return route == setup_route::gpu ? mode::forced : mode::disabled;
     const char *e = std::getenv("APXCHOL_GPU_BLOCK_FRONTEND");
     if (!e || !*e) return mode::disabled;
     if (std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||

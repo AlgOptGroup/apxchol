@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "apxchol/solver/solve.h"
+#include "gpu_preconditioner_fixture.h"
 
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
@@ -625,7 +626,7 @@ void expect_digest_equal(
 
 #if defined(APXCHOL_USE_CUDA)
 void expect_setup_api_receipt(const std::string& trace,
-                              const apxchol::apx_cholesky& solver) {
+                              const apxchol::test::diagnostic_gpu_preconditioner& solver) {
     const auto begin = trace.find("[gpu-setup-receipt] ");
     if (apxchol::detail::gpu_setup_diagnostics()) {
         ASSERT_NE(begin, std::string::npos) << trace;
@@ -4001,7 +4002,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     for (double shift : {0.0, 1.0}) {
         SCOPED_TRACE(shift);
         auto A = owned_solve_matrix(n, shift);
-        apxchol::apx_cholesky preconditioner;
+        apxchol::test::diagnostic_gpu_preconditioner preconditioner;
         apxchol::checkpoint owned_cp;
         preconditioner.set_checkpoint(&owned_cp);
         preconditioner.set_options(factor_options);
@@ -4074,7 +4075,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     Eigen::SparseMatrix<double> tiny(2, 2);
     std::vector<Eigen::Triplet<double>> entries{{0,0,2},{1,1,2},{0,1,-1},{1,0,-1}};
     tiny.setFromTriplets(entries.begin(), entries.end());
-    apxchol::apx_cholesky small;
+    apxchol::test::diagnostic_gpu_preconditioner small;
     testing::internal::CaptureStderr(); small.compute(tiny);
     const auto zero_trace = testing::internal::GetCapturedStderr();
     if (apxchol::detail::gpu_setup_diagnostics()) {
@@ -4088,7 +4089,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     expect_setup_api_receipt(zero_trace, small);
     EXPECT_EQ(small.factor().perm.size(), 2u);
     auto A = owned_solve_matrix(64, 1.0);
-    apxchol::apx_cholesky kept;
+    apxchol::test::diagnostic_gpu_preconditioner kept;
     kept.set_keep_factor(true);
     testing::internal::CaptureStderr(); kept.compute(A);
     const auto kept_trace = testing::internal::GetCapturedStderr();
@@ -4105,11 +4106,12 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     const auto exported_trace = testing::internal::GetCapturedStderr();
     EXPECT_EQ(exported_trace.find("[gpu-owned-prefix]"), std::string::npos);
     EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
-    // Ordinary unforced defaults remain on their existing setup route.
+    // The test-only diagnostic route still permits ordinary host import.
+    // The public preconditioner no longer chooses CUDA from these flags.
     scoped_env shadow_off("APXCHOL_GPU_ROUND_SHADOW", "off");
     scoped_env finalize_off("APXCHOL_GPU_FACTOR_FINALIZE", "off");
     scoped_env frontend_off("APXCHOL_GPU_BLOCK_FRONTEND", "off");
-    apxchol::apx_cholesky ordinary;
+    apxchol::test::diagnostic_gpu_preconditioner ordinary;
     testing::internal::CaptureStderr(); ordinary.compute(A);
     const auto ordinary_trace = testing::internal::GetCapturedStderr();
     EXPECT_EQ(ordinary_trace.find("[gpu-owned-prefix]"), std::string::npos);
@@ -5177,7 +5179,7 @@ TEST(GpuFactorFinalize, NormalPreconditionerInstallsAndReplacesResidentFactors) 
     ASSERT_EQ(apxchol::detail::gpu_block_frontend::configured_block_mode(),
               apxchol::detail::gpu_block_frontend::mode::disabled);
     scoped_omp_threads serial(1);
-    apxchol::apx_cholesky preconditioner;
+    apxchol::test::diagnostic_gpu_preconditioner preconditioner;
     preconditioner.set_keep_factor(true);
     constexpr int n = 64;
     Eigen::SparseMatrix<double> A(n, n);
@@ -5236,23 +5238,28 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         auto reference = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
         ASSERT_EQ(reference.L.vals_.size(), reference.L.nonZeros());
         ASSERT_EQ(reference.L.inner_.size(), reference.L.nonZeros());
-        apxchol::apx_cholesky exported;
+        ASSERT_TRUE(reference.research_device_factor);
+        // Production GPU ownership cannot silently import a copied capsule;
+        // explicit diagnostic copies below keep their host-validation contract.
+        apxchol::detail::gpu_preconditioner strict_owner;
+        EXPECT_THROW(strict_owner.set_factor(reference), std::invalid_argument);
+        apxchol::test::diagnostic_gpu_preconditioner exported;
         exported.set_keep_factor(true);
         exported.set_factor(reference);
         ASSERT_EQ(exported.factor().L.vals_.size(), reference.L.nonZeros());
         ASSERT_FALSE(exported.trsv().adopted_device_factor());
         // Copied public factors do not mutate their shared capsule. A uniquely
         // moved factor retains the fast adoption path.
-        apxchol::apx_cholesky exported_again;
+        apxchol::test::diagnostic_gpu_preconditioner exported_again;
         exported_again.set_factor(reference);
         EXPECT_FALSE(exported_again.trsv().adopted_device_factor());
         auto moved_factor = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
-        apxchol::apx_cholesky moved_export;
+        apxchol::test::diagnostic_gpu_preconditioner moved_export;
         moved_export.set_factor(std::move(moved_factor));
         ASSERT_TRUE(moved_export.trsv().adopted_device_factor());
 
         apxchol::checkpoint cp;
-        apxchol::apx_cholesky consuming;
+        apxchol::test::diagnostic_gpu_preconditioner consuming;
         consuming.set_checkpoint(&cp);
         testing::internal::CaptureStderr();
         consuming.compute(A);
@@ -5287,7 +5294,7 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         const Eigen::VectorXd moved_result = moved_export.solve(b);
         EXPECT_EQ(std::memcmp(expected.data(), moved_result.data(), n * sizeof(double)), 0);
         auto install_copy = [reference, b]() mutable {
-            apxchol::apx_cholesky solver;
+            apxchol::test::diagnostic_gpu_preconditioner solver;
             solver.set_factor(std::move(reference));
             const bool adopted = solver.trsv().adopted_device_factor();
             Eigen::VectorXd result = solver.solve(b);
@@ -5305,7 +5312,7 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         // a consuming solver; changing the internal call route must not alter it.
         scoped_env ordinary_mode("APXCHOL_GPU_FACTOR_FINALIZE", "off");
         apxchol::checkpoint ordinary_cp;
-        apxchol::apx_cholesky ordinary;
+        apxchol::test::diagnostic_gpu_preconditioner ordinary;
         ordinary.set_checkpoint(&ordinary_cp);
         ordinary.compute(A);
         EXPECT_FALSE(ordinary.trsv().adopted_device_factor());
@@ -5634,7 +5641,7 @@ TEST(GpuCycleSampler, AuditedExportRejectsUnsupportedSamplerClearly) {
     scoped_omp_threads serial(1);
     auto A=owned_solve_matrix(65,1.);
     for(auto sampler:{apxchol::clique_sampler::trace_cycle}) {
-        apxchol::apx_cholesky preconditioner;preconditioner.set_keep_factor(true);
+        apxchol::test::diagnostic_gpu_preconditioner preconditioner;preconditioner.set_keep_factor(true);
         apxchol::factor_options opts;opts.sampler=sampler;
         preconditioner.set_options(opts);
         try {preconditioner.compute(A);FAIL()<<"audited export unexpectedly accepted";}

@@ -1085,11 +1085,12 @@ TEST(Solve, TimingsReported) {
     // the precond.solve() triangular-solve subtree nests as pcg.solve, while
     // the GPU-resident PCG records one pcg.gpu_pcg_loop leaf instead.
     EXPECT_GT(res.timings.total("pcg"), 0.0);
-#ifdef APXCHOL_USE_CUDA
-    EXPECT_GT(res.timings.total("pcg.gpu_pcg_loop"), 0.0);
-#else
-    EXPECT_GT(res.timings.total("pcg.solve"), 0.0);
-#endif
+    if (res.backend == apxchol::solve_backend::gpu) {
+        EXPECT_GT(res.timings.total("pcg.gpu_pcg_loop"), 0.0);
+    } else {
+        EXPECT_EQ(res.backend, apxchol::solve_backend::cpu);
+        EXPECT_GT(res.timings.total("pcg.solve"), 0.0);
+    }
 }
 
 // ── SDDM support tests ────────────────────────────────

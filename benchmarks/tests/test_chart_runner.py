@@ -68,6 +68,40 @@ class ShellHarnessTest(unittest.TestCase):
         )
 
 
+class CompleteRouteRunnerTest(unittest.TestCase):
+    def test_current_runner_forces_device_and_rejects_other_route(self):
+        for device in ("cpu", "gpu"):
+            output = "v1,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001," + device + "\n"
+            repeats = "\n".join(f"BENCH_REPEAT phase=retained index={i} execution_route={device}"
+                                for i in range(1, 4))
+            for actual in (device, "gpu" if device == "cpu" else "cpu"):
+                with mock.patch.object(sweep_fair, "DEVICE", device), \
+                     mock.patch.object(sweep_fair, "REPS", 3), \
+                     mock.patch.object(sweep_fair, "WARMUP", 0), \
+                     mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
+                     mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
+                     mock.patch.object(sweep_fair, "sh", return_value=subprocess.CompletedProcess(
+                         "benchmark", 0, output, repeats.replace("=" + device, "=" + actual))) as run:
+                    status, metrics = sweep_fair.run_cpp("", "apxchol_v1", rc.APXCHOL_DEFAULT_CONFIG, False)
+                self.assertIn("--v1-backend " + device, run.call_args.args[0])
+                self.assertEqual(status, "complete" if actual == device else "failed")
+                self.assertEqual("route_failure" in metrics, actual != device)
+
+    def test_fill_consumer_sums_all_actual_component_owners(self):
+        stdout = "v1,m,4,8,1,2,3,2,1e-9,3,1,original-v1,1,0.1,cpu\n"
+        receipt = "BENCH_REPEAT phase=retained index=1 execution_route=cpu\n"
+        first = "FILL v1 Lnnz=5 offdiag=3 adj_nnz=2 stored_nnz=4 execution_route=cpu source=measured_owner\n"
+        second = "FILL v1 Lnnz=9 offdiag=7 adj_nnz=4 stored_nnz=8 execution_route=cpu source=measured_owner\n"
+        self.assertEqual(fill_pass.parse_apxchol_fill(stdout, first + second + receipt), (4, 6, 10))
+        for bad in (first.replace("source=measured_owner", "source=refactorized") + receipt,
+                    first + receipt.replace("route=cpu", "route=gpu"), receipt):
+            with self.assertRaises(ValueError):
+                fill_pass.parse_apxchol_fill(stdout, bad)
+
+    def test_gpu_plan_contains_no_host_selector_ablations(self):
+        self.assertEqual(sweep_fair.APX_GPU, [("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG)])
+
+
 class GpuTimingIsolationTest(unittest.TestCase):
     def test_cpp_timing_does_not_start_memory_poller(self):
         output = (
@@ -489,8 +523,8 @@ class CapReferenceTest(unittest.TestCase):
             base = dict(family="audit", mid="m", solver="apxchol_v1", status="complete",
                         threads=16, device="gpu", prov={"git_sha": rc.git_sha()})
             rc.emit_cell(config=sweep_fair.APX_DEFAULT_CONFIG,
-                         metrics={"total_s": 10.0, "stop_contract": "original-v1"}, **base)
-            rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0, "stop_contract": "original-v1"}, **base)
+                         metrics={"total_s": 10.0, "stop_contract": "original-v1", "execution_route": "gpu"}, **base)
+            rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0, "stop_contract": "original-v1", "execution_route": "gpu"}, **base)
             self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 10.0)
 
     def test_gpu_cap_reference_uses_campaign_thread_count(self):
@@ -499,7 +533,7 @@ class CapReferenceTest(unittest.TestCase):
              mock.patch.object(sweep_fair, "THREADS", 72):
             rc.emit_cell("audit", "m", "apxchol_v1",
                          sweep_fair.APX_DEFAULT_CONFIG, "complete",
-                         {"total_s": 7.2, "stop_contract": "original-v1"}, 72, "gpu", {"git_sha": rc.git_sha()})
+                         {"total_s": 7.2, "stop_contract": "original-v1", "execution_route": "gpu"}, 72, "gpu", {"git_sha": rc.git_sha()})
             self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 7.2)
 
 
@@ -514,11 +548,11 @@ class FairSweepSelectionTest(unittest.TestCase):
                             for _, config in sweep_fair.APX + sweep_fair.APX_GPU
                             for retired in ("[vec_pool]", "[fwd_star]", "[forward_star]")))
         self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 510)
-        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 216)
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 162)
         self.assertEqual(
             sweep_fair.planned_cell_count(selected, "cpu")
             + sweep_fair.planned_cell_count(selected, "gpu"),
-            726,
+            672,
         )
 
     def test_orkut_size_gate_always_keeps_declared_default(self):
