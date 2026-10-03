@@ -15,52 +15,12 @@ permissions:
   contents: read
 
 jobs:
-  wheels-linux:
-    name: manylinux wheels
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v3.2
-        env:
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
-          CIBW_SKIP: "*-musllinux_*"
-          CIBW_ARCHS_LINUX: x86_64
-          # Portable codegen — distributed wheels must not be -march=native
-          # (SIGILL on older CPUs); python/CMakeLists.txt keys off this env var.
-          CIBW_ENVIRONMENT: APXCHOL_PORTABLE_BUILD=1
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest {project}/python/tests -q
-        with:
-          package-dir: python
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-x86_64
-          path: wheelhouse/*.whl
-
-  wheels-macos:
-    name: macOS arm64 wheels
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      # Configuration (bundled libomp, 14.0 deployment target, runtime check)
-      # lives in python/pyproject.toml [tool.cibuildwheel.macos].
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v3.2
-        env:
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
-        with:
-          package-dir: python
-      - name: Inspect wheels
-        run: python3 python/tools/check_macos_wheel.py wheelhouse/*.whl
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-macos-arm64
-          path: wheelhouse/*.whl
+  wheels:
+    uses: ./.github/workflows/wheels.yml
 
   publish:
     name: upload to PyPI (wheels only)
-    needs: [wheels-linux, wheels-macos]
+    needs: wheels
     # workflow_dispatch only dry-runs the wheel jobs; uploads happen on a release.
     if: github.event_name == 'release'
     runs-on: ubuntu-latest

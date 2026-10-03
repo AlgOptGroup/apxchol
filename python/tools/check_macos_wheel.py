@@ -41,20 +41,10 @@ def check_wheel(wheel: Path) -> None:
             if name.startswith("apxchol/_apxchol") and name.endswith(".so")
         ]
         runtimes = [name for name in names if Path(name).name == "libomp.dylib"]
-        project_licenses = [
-            name for name in names if name.endswith(".dist-info/licenses/LICENSE")
-        ]
-        runtime_licenses = [
-            name
-            for name in names
-            if name.endswith(".dist-info/licenses/LICENSE.libomp.txt")
-        ]
         if len(extensions) != 1:
             raise SystemExit(f"{wheel.name}: expected one extension, found {extensions}")
         if runtimes != ["apxchol/.dylibs/libomp.dylib"]:
             raise SystemExit(f"{wheel.name}: unexpected libomp entries: {runtimes}")
-        if len(project_licenses) != 1 or len(runtime_licenses) != 1:
-            raise SystemExit(f"{wheel.name}: required license files are missing")
 
         with tempfile.TemporaryDirectory(prefix="apxchol-wheel-check-") as directory:
             archive.extractall(directory)

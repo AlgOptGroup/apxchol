@@ -21,6 +21,8 @@ on:
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/wheels.yml'
+      - '.github/workflows/publish.yml'
   pull_request:
     paths:
       - 'include/**'
@@ -38,6 +40,8 @@ on:
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/wheels.yml'
+      - '.github/workflows/publish.yml'
 
 permissions:
   contents: read
@@ -132,38 +136,7 @@ jobs:
       - *ctest
 
   python:
-    name: python (manylinux wheel + pytest)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # One Python only (cp312) — same manylinux path as the release wheels, so
-      # it catches the old-environment portability breaks ubuntu-latest can't,
-      # and runs the package test suite inside the built wheel.
-      - name: Build wheel + run pytest
-        uses: pypa/cibuildwheel@v3.2
-        env:
-          CIBW_BUILD: "cp312-manylinux_x86_64"
-          CIBW_ENVIRONMENT: APXCHOL_PORTABLE_BUILD=1
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest {project}/python/tests -v
-        with:
-          package-dir: python
-
-  python-macos:
-    name: python (macOS arm64 wheel + pytest)
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      # python/pyproject.toml [tool.cibuildwheel.macos] builds libomp for the
-      # 14.0 deployment target, bundles it, and checks the loaded runtime.
-      - name: Build wheel + run pytest
-        uses: pypa/cibuildwheel@v3.2
-        env:
-          CIBW_BUILD: "cp312-macosx_arm64"
-        with:
-          package-dir: python
-      - name: Inspect wheel
-        run: python3 python/tools/check_macos_wheel.py wheelhouse/*.whl
+    uses: ./.github/workflows/wheels.yml
 
   octave:
     name: octave (mkoctfile + tests)

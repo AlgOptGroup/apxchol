@@ -132,7 +132,11 @@ choices, retired knobs, and measurements belong in
 
 - macOS wheels bundle LLVM libomp built from source for macOS 14.0
   (`python/tools/build_libomp_macos.sh`); keep `check_macos_wheel.py` and
-  `check_macos_runtime.py` passing. CI builds and tests an arm64 wheel.
+  `check_macos_runtime.py` passing. Linux wheels bundle GNU libgomp and its
+  license/exception; `check_wheel_licenses.py` checks both platforms. CI and
+  publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
+  Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
+  `python/pyproject.toml`.
 
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark

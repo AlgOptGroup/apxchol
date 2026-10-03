@@ -9,7 +9,8 @@ pip install apxchol
 
 Wheels: Linux x86_64 (manylinux) and macOS arm64 (macOS 14 or newer),
 CPython 3.10–3.14. The macOS wheels bundle LLVM's OpenMP runtime (license in
-`LICENSE.libomp.txt`); Homebrew is not needed. Other macOS wheels that bundle
+`LICENSE.libomp.txt`); Homebrew is not needed. Linux wheels bundle GNU libgomp
+with its license and runtime exception in `LICENSE.libgomp.txt`. Other macOS wheels that bundle
 their own libomp (for example PyTorch or scikit-learn) load a second copy in
 the same process, which libomp rejects with "OMP: Error #15"; its documented,
 unsupported override is `KMP_DUPLICATE_LIB_OK=TRUE`.

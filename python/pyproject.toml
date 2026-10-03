@@ -42,23 +42,35 @@ test = ["pytest>=7"]
 cmake.version = ">=3.16"
 wheel.packages = ["apxchol"]
 build-dir = "build/{wheel_tag}"
-# Explicit: the default LICEN[CS]E* glob would also pick up LICENSE.libomp.txt.
 wheel.license-files = ["LICENSE"]
 
-# macOS wheels bundle LLVM's OpenMP runtime; ship its license with them only.
 [[tool.scikit-build.overrides]]
 if.platform-system = "darwin"
 wheel.license-files = ["LICENSE", "LICENSE.libomp.txt"]
 
-# macOS arm64 wheels. libomp is built from LLVM source for the wheel's
-# deployment target (Homebrew bottles target the runner's OS); 14.0 is the
-# first macOS whose libc++ ships std::pmr. The Linux wheels keep their
-# workflow-level CIBW_* settings.
+[[tool.scikit-build.overrides]]
+if.platform-system = "linux"
+wheel.license-files = ["LICENSE", "LICENSE.libgomp.txt"]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_*"
+environment = { APXCHOL_PORTABLE_BUILD = "1" }
+test-requires = ["pytest"]
+test-command = "python -m pytest {package}/tests -q"
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
 before-all = "bash {package}/tools/build_libomp_macos.sh /tmp/apxchol-libomp-cibuildwheel"
-# _PYTHON_HOST_PLATFORM: scikit-build-core tags the wheel from it, ahead of
-# MACOSX_DEPLOYMENT_TARGET (cibuildwheel's default would say 11.0).
-environment = { APXCHOL_PORTABLE_BUILD = "1", MACOSX_DEPLOYMENT_TARGET = "14.0", _PYTHON_HOST_PLATFORM = "macosx-14.0-arm64", CMAKE_ARGS = "-DOpenMP_ROOT=/tmp/apxchol-libomp-cibuildwheel" }
-test-requires = ["pytest"]
-test-command = "pytest {package}/tests -q && python {package}/tools/check_macos_runtime.py"
+
+[[tool.cibuildwheel.overrides]]
+select = "*-macosx_*"
+inherit.environment = "append"
+# cibuildwheel 3.2 otherwise sets _PYTHON_HOST_PLATFORM to macOS 11, which
+# scikit-build-core prioritizes over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", _PYTHON_HOST_PLATFORM = "macosx-14.0-arm64", CMAKE_ARGS = "-DOpenMP_ROOT=/tmp/apxchol-libomp-cibuildwheel" }
+inherit.test-command = "append"
+test-command = "python {package}/tools/check_macos_runtime.py"
