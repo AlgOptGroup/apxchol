@@ -132,8 +132,8 @@ choices, retired knobs, and measurements belong in
 
 
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
-  manylinux distribution package on Linux and the R-project binary on macOS,
-  targeting macOS 14.0. cibuildwheel repairs the wheels and runs the Python tests.
+  manylinux distribution package on Linux and Homebrew on macOS, targeting
+  macOS 15.0. cibuildwheel repairs the wheels and runs the Python tests.
   CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
   `python/pyproject.toml`.
