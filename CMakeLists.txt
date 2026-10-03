@@ -111,7 +111,7 @@ unset(_APXCHOL_SAVED_BUILD_TESTING_TYPE)
 unset(_APXCHOL_SAVED_BUILD_TESTING_VALUE)
 unset(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE)
 
-# ── OpenMP (optional) ────────────────────────────────
+# ── OpenMP ────────────────────────────────
 include(cmake/apxchol_openmp.cmake)
 
 # ── Build options ───────────────────────────────────
@@ -176,44 +176,40 @@ add_library(apxchol_core
     # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>
 )
-# Eigen is the only dependency of the core TUs/headers.  fast_matrix_market
-# is file I/O used solely by the CLI and analyze_factor — linked on those
-# targets, not here.
-target_link_libraries(apxchol_core PUBLIC Eigen3::Eigen)
-if (OpenMP_CXX_FOUND)
-    target_link_libraries(apxchol_core PUBLIC OpenMP::OpenMP_CXX)
+# The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
+# solely for the CLI and analyze_factor, and is linked on those targets.
+target_link_libraries(apxchol_core PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
 
-    # Some compilers lower long-double OpenMP reductions to libatomic calls
-    # in unoptimized or untuned builds. Detect the runtime rather than making
-    # consumers supply a platform-specific linker flag themselves.
-    include(CheckCXXSourceCompiles)
-    include(CMakePushCheckState)
-    cmake_push_check_state(RESET)
-    set(CMAKE_REQUIRED_LIBRARIES OpenMP::OpenMP_CXX)
-    if (MSVC)
-        set(CMAKE_REQUIRED_FLAGS "/Od")
-    else()
-        set(CMAKE_REQUIRED_FLAGS "-O0")
-    endif()
-    set(_apxchol_atomic_probe "
-        int main(int argc, char**) {
-            long double sum = 0.0L;
-            #pragma omp parallel for reduction(+:sum)
-            for (int i = 0; i < argc; ++i) sum += i;
-            return sum < 0.0L;
-        }")
-    check_cxx_source_compiles("${_apxchol_atomic_probe}" APXCHOL_OPENMP_REDUCTION_LINKS)
-    if (NOT APXCHOL_OPENMP_REDUCTION_LINKS)
-        list(APPEND CMAKE_REQUIRED_LIBRARIES atomic)
-        check_cxx_source_compiles("${_apxchol_atomic_probe}" APXCHOL_OPENMP_REDUCTION_WITH_ATOMIC)
-        if (NOT APXCHOL_OPENMP_REDUCTION_WITH_ATOMIC)
-            message(FATAL_ERROR "The OpenMP long-double reduction needs an unavailable atomic runtime")
-        endif()
-        target_link_libraries(apxchol_core PUBLIC atomic)
-    endif()
-    unset(_apxchol_atomic_probe)
-    cmake_pop_check_state()
+# Some compilers lower long-double OpenMP reductions to libatomic calls
+# in unoptimized or untuned builds. Detect the runtime rather than making
+# consumers supply a platform-specific linker flag themselves.
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES OpenMP::OpenMP_CXX)
+if (MSVC)
+    set(CMAKE_REQUIRED_FLAGS "/Od")
+else()
+    set(CMAKE_REQUIRED_FLAGS "-O0")
 endif()
+set(_apxchol_atomic_probe "
+    int main(int argc, char**) {
+        long double sum = 0.0L;
+        #pragma omp parallel for reduction(+:sum)
+        for (int i = 0; i < argc; ++i) sum += i;
+        return sum < 0.0L;
+    }")
+check_cxx_source_compiles("${_apxchol_atomic_probe}" APXCHOL_OPENMP_REDUCTION_LINKS)
+if (NOT APXCHOL_OPENMP_REDUCTION_LINKS)
+    list(APPEND CMAKE_REQUIRED_LIBRARIES atomic)
+    check_cxx_source_compiles("${_apxchol_atomic_probe}" APXCHOL_OPENMP_REDUCTION_WITH_ATOMIC)
+    if (NOT APXCHOL_OPENMP_REDUCTION_WITH_ATOMIC)
+        message(FATAL_ERROR "The OpenMP long-double reduction needs an unavailable atomic runtime")
+    endif()
+    target_link_libraries(apxchol_core PUBLIC atomic)
+endif()
+unset(_apxchol_atomic_probe)
+cmake_pop_check_state()
 target_include_directories(apxchol_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_BINARY_DIR}/include
