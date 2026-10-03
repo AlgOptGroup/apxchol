@@ -6,6 +6,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
+option(APXCHOL_REQUIRE_X86_64_V2 "Require x86-64-v2 in the Linux Python wheel" OFF)
+if (APXCHOL_REQUIRE_X86_64_V2)
+    if (APXCHOL_NATIVE_ARCH OR NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+        NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+        message(FATAL_ERROR "The x86-64-v2 wheel baseline requires Linux x86_64 and APXCHOL_NATIVE_ARCH=OFF")
+    endif()
+    # The OpenMP link check must use the same ISA as the compiled core.
+    string(APPEND CMAKE_CXX_FLAGS " -march=x86-64-v2")
+    # Keep module initialization runnable on older CPUs so it can report the
+    # requirement before calling the core. Both baselines use 16-byte Eigen alignment.
+    set_source_files_properties(src/apxchol_ext.cpp PROPERTIES
+        COMPILE_OPTIONS "-march=x86-64"
+        COMPILE_DEFINITIONS APXCHOL_REQUIRE_X86_64_V2)
+endif()
 
 # Repo root (this CMakeLists lives in python/).
 set(APX_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)

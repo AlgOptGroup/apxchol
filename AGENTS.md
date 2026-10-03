@@ -136,6 +136,9 @@ choices, retired knobs, and measurements belong in
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel repairs the wheels and runs the Python tests.
   Linux installs the distro's Clang and uses its C++ runtime libraries.
+  Linux wheels require x86-64-v2; the Python binding is compiled for baseline
+  x86-64 to report an import error on unsupported CPUs before entering the core.
+  macOS arm64 retains Apple Clang's default target.
   CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
   `python/pyproject.toml`.

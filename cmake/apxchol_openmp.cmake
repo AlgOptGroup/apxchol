@@ -27,8 +27,8 @@ unset(_apxchol_saved_system_prefix_path)
 # Root and Python targets need the same compiler-dependent runtime linkage.
 function(_apxchol_link_openmp target visibility)
     target_link_libraries(${target} ${visibility} OpenMP::OpenMP_CXX)
-    # Some compilers lower long-double OpenMP reductions to libatomic calls
-    # in unoptimized or untuned builds. Detect the runtime rather than making
+    # Some compiler/target combinations lower long-double OpenMP reductions
+    # to libatomic calls. Detect the runtime rather than making
     # consumers supply a platform-specific linker flag themselves.
     include(CheckCXXSourceCompiles)
     include(CMakePushCheckState)

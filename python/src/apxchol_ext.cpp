@@ -252,6 +252,12 @@ private:
 }  // namespace
 
 PYBIND11_MODULE(_apxchol, m) {
+#ifdef APXCHOL_REQUIRE_X86_64_V2
+    if (!__builtin_cpu_supports("x86-64-v2")) {
+        throw py::import_error("This apxchol wheel requires an x86-64-v2 CPU; "
+                               "install from source on older hardware.");
+    }
+#endif
     m.doc() = "apxchol CPU approximate-Cholesky preconditioner (pybind11 binding)";
     py::class_<Solver>(m, "Solver")
         .def(py::init<py::array, py::array, py::array, Eigen::Index, const py::dict&>(),
