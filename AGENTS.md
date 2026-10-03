@@ -118,6 +118,16 @@ choices, retired knobs, and measurements belong in
   builds share the architecture-specific compiler probe; portable Python wheels
   omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
+- OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
+  queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
+  while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
+  OpenMP fails configuration instead of producing a serial build.
+- macOS: retain normal CMake compiler selection. Install Command Line Tools,
+  CMake and libomp, then use the common build commands. libc++ `std::pmr`
+  requires a macOS 14 deployment target. Linux-only `madvise`
+  advice is compiled out; mmap remains. CI's `linux` and `macos` jobs share
+  parent-consumer build/test steps through YAML anchors. Keep `std::iota` for
+  the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
 
 
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
