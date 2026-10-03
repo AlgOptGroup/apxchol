@@ -115,13 +115,15 @@ choices, retired knobs, and measurements belong in
   across the library boundary can corrupt allocation ownership. Validate with
   the external parent fixture in `tests/cmake_consumer`.
 - `APXCHOL_NATIVE_ARCH`: ON for local builds. Root, benchmark, and local Python
-  builds share the architecture-specific compiler probe; portable Python wheels
-  omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
+  builds share the architecture-specific compiler probe. cibuildwheel sets this
+  option OFF for portable wheels; Python optimization follows the CMake build
+  type. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
 - OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
   queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
   while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
-  OpenMP fails configuration instead of producing a serial build.
+  OpenMP fails configuration instead of producing a serial build. Both targets
+  use the shared link probe for the long-double reduction atomic runtime.
 - macOS: retain normal CMake compiler selection. Install Command Line Tools,
   CMake and libomp, then use the common build commands. libc++ `std::pmr`
   requires a macOS 14 deployment target. Linux-only `madvise`
@@ -129,6 +131,14 @@ choices, retired knobs, and measurements belong in
   parent-consumer build/test steps through YAML anchors. Keep `std::iota` for
   the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
 
+
+- Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
+  manylinux distribution package on Linux and Homebrew on macOS, targeting
+  macOS 15.0. cibuildwheel repairs the wheels and runs the Python tests.
+  Linux installs the distro's Clang and uses its C++ runtime libraries.
+  CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
+  Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
+  `python/pyproject.toml`.
 
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark

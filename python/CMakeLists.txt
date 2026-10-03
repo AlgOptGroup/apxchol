@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
+
 # Repo root (this CMakeLists lives in python/).
 set(APX_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
@@ -34,7 +36,8 @@ pybind11_add_module(_apxchol
     ${APX_ROOT}/src/solve.cpp
 )
 target_include_directories(_apxchol PRIVATE ${APX_ROOT}/include ${APX_ROOT}/src)
-target_link_libraries(_apxchol PRIVATE Eigen3::Eigen OpenMP::OpenMP_CXX)
+target_link_libraries(_apxchol PRIVATE Eigen3::Eigen)
+_apxchol_link_openmp(_apxchol PRIVATE)
 
 # Match the root library default (ON there). The SpTRSV's fp32 factor storage
 # needs no macro any more, and its fp16 variant is a runtime env knob
@@ -42,15 +45,10 @@ target_link_libraries(_apxchol PRIVATE Eigen3::Eigen OpenMP::OpenMP_CXX)
 # without -march=native there is no __F16C__, so omp_sptrsv compiles the fp32
 # storage only and the env falls back with a note. See include/apxchol/lowprec.h.
 target_compile_definitions(_apxchol PRIVATE APXCHOL_POOL_FP32)
-if (NOT MSVC)
-    # Distributable wheels (cibuildwheel sets APXCHOL_PORTABLE_BUILD=1) must not
-    # use -march=native — it would SIGILL on older CPUs. Local source builds keep it.
-    if (DEFINED ENV{APXCHOL_PORTABLE_BUILD})
-        target_compile_options(_apxchol PRIVATE -O3)
-    else()
-        include(${APX_ROOT}/cmake/apxchol_native_arch.cmake)
-        target_compile_options(_apxchol PRIVATE -O3 ${APXCHOL_NATIVE_ARCH_FLAG})
-    endif()
+if (APXCHOL_NATIVE_ARCH AND NOT MSVC AND
+    (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
+    include(${APX_ROOT}/cmake/apxchol_native_arch.cmake)
+    target_compile_options(_apxchol PRIVATE ${APXCHOL_NATIVE_ARCH_FLAG})
 endif()
 
 install(TARGETS _apxchol LIBRARY DESTINATION apxchol)

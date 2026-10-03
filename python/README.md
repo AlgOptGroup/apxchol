@@ -7,6 +7,12 @@ operators.
 pip install apxchol
 ```
 
+Wheels: Linux x86_64 (manylinux) and macOS arm64 (macOS 15 or newer),
+CPython 3.10–3.14. Both platforms use Clang and bundle LLVM's OpenMP runtime
+(license in `LICENSE.libomp.txt`); Homebrew is not needed to use the macOS
+wheels. Importing packages that bundle another OpenMP runtime in the same
+process can cause runtime conflicts.
+
 ```python
 import apxchol
 solver = apxchol.factorize(A)           # assembled scipy sparse operator
