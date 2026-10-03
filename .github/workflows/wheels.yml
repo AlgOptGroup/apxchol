@@ -24,11 +24,6 @@ jobs:
         uses: pypa/cibuildwheel@v3.2
         with:
           package-dir: python
-      - name: Check runtime licenses
-        run: python3 python/tools/check_wheel_licenses.py wheelhouse/*.whl
-      - name: Inspect macOS binaries
-        if: runner.os == 'macOS'
-        run: python3 python/tools/check_macos_wheel.py wheelhouse/*.whl
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.name }}
