@@ -50,20 +50,14 @@ skip = "*-musllinux_*"
 test-requires = ["pytest"]
 test-command = "python -m pytest {package}/tests -q"
 
-[tool.cibuildwheel.environment]
-APXCHOL_PORTABLE_BUILD = "1"
-
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
-before-all = '''
-set -eu
-dnf install -y libomp-devel
-# Make the distro header visible to the separately installed Clang toolchain.
-ln -s "$(rpm -ql libomp-devel | grep '/omp.h$')" /usr/local/include/omp.h
-manylinux-install-clang -v v22.1.8.1
-'''
-# Includes PyPA's pinned Clang installer; keep the glibc 2.28 compatibility floor.
-manylinux-x86_64-image = "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b"
+before-all = "dnf install -y clang libomp-devel"
+
+[tool.cibuildwheel.linux.environment]
+APXCHOL_PORTABLE_BUILD = "1"
+CC = "/usr/bin/clang"
+CXX = "/usr/bin/clang++"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
@@ -77,16 +71,10 @@ tar -xzf /tmp/apxchol-libomp.tar.gz -C /tmp/apxchol-libomp --strip-components=2
 install_name_tool -id /tmp/apxchol-libomp/lib/libomp.dylib /tmp/apxchol-libomp/lib/libomp.dylib
 '''
 
-[[tool.cibuildwheel.overrides]]
-select = "*-macosx_*"
-inherit.environment = "append"
+[tool.cibuildwheel.macos.environment]
+APXCHOL_PORTABLE_BUILD = "1"
+MACOSX_DEPLOYMENT_TARGET = "14.0"
 # cibuildwheel 3.2 otherwise sets _PYTHON_HOST_PLATFORM to macOS 11, which
 # scikit-build-core prioritizes over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
-environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", _PYTHON_HOST_PLATFORM = "macosx-14.0-arm64", CMAKE_ARGS = "-DOpenMP_ROOT=/tmp/apxchol-libomp" }
-
-[[tool.cibuildwheel.overrides]]
-select = "*-manylinux_*"
-inherit.environment = "append"
-[tool.cibuildwheel.overrides.environment]
-CC = "/opt/clang/bin/clang"
-CXX = "/opt/clang/bin/clang++"
+_PYTHON_HOST_PLATFORM = "macosx-14.0-arm64"
+CMAKE_ARGS = "-DOpenMP_ROOT=/tmp/apxchol-libomp"
