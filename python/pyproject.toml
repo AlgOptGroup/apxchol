@@ -52,20 +52,13 @@ test-command = "python -m pytest {package}/tests -q"
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
-before-all = '''
-set -eu
-dnf install -y libomp-devel
-# Make the distro header visible to the separately installed Clang toolchain.
-ln -s "$(rpm -ql libomp-devel | grep '/omp.h$')" /usr/local/include/omp.h
-manylinux-install-clang -v v22.1.8.1
-'''
-# Includes PyPA's pinned Clang installer; keep the glibc 2.28 compatibility floor.
-manylinux-x86_64-image = "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b"
+before-all = "dnf install -y clang libomp-devel"
+manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.linux.environment]
 APXCHOL_PORTABLE_BUILD = "1"
-CC = "/opt/clang/bin/clang"
-CXX = "/opt/clang/bin/clang++"
+CC = "clang"
+CXX = "clang++"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
@@ -74,6 +67,5 @@ before-all = "brew install libomp"
 [tool.cibuildwheel.macos.environment]
 APXCHOL_PORTABLE_BUILD = "1"
 MACOSX_DEPLOYMENT_TARGET = "15.0"
-# cibuildwheel 3.2 otherwise sets _PYTHON_HOST_PLATFORM to macOS 11, which
-# scikit-build-core prioritizes over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
+# scikit-build-core prefers this over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
 _PYTHON_HOST_PLATFORM = "macosx-15.0-arm64"
