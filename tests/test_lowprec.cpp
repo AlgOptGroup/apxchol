@@ -5,8 +5,7 @@
 //   * the storage CONTRACT of omp_sptrsv::setup for whatever storage this
 //     build compiled: every stored CSR/CSC value == narrow_value(v, s_j),
 //     the per-column scales, the off-diagonal flush/subnormal statistics, the
-//     fp16 subnormal flush (FP16_SCALED default; APXCHOL_FP16_KEEP_SUBNORMAL=1
-//     restores IEEE), and the compacting drop APXCHOL_FACTOR_DROP=<rel>
+//     fp16 subnormal flush, and the compacting drop APXCHOL_FACTOR_DROP=<rel>
 //     (every build): stored nnz == kept entries, and the compacted SpTRSV
 //     solves like the zeroed-but-not-removed reference.
 #include <gtest/gtest.h>

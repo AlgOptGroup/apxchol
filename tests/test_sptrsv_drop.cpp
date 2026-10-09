@@ -633,7 +633,7 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
 // The fp16 per-column-scaled storage the dataflow backend uploads under
 // APXCHOL_SPTRSV_FP16=1 (cuda_host.h file header): each slot is
 // binary16(fp32(v) / s_j) RNE with fp16 subnormals flushed to signed zero
-// (restated here through lowprec.h's _Float16 on the bit level), diag[j] =
+// (restated here with native _Float16 conversions), diag[j] =
 // fp32(L_jj) / s_j, inv_scale[j] = fp32(1 / s_j); with diag_comp the column's
 // rounding residual is folded into diag[j] so the STORED column (diag +
 // widened off-diagonals) sums to the fp32 column / s_j; the drop's fp16 keep

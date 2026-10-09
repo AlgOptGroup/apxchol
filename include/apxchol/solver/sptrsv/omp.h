@@ -6,7 +6,6 @@
 #include "apxchol/solver/sptrsv/factor_drop.h"   // the compacting drop (shared with the CUDA backend)
 #include "apxchol/solver/sptrsv/transpose.h"     // the CSC -> CSR transpose (shared with the CUDA backend)
 #include <algorithm>
-#include <bit>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -1528,7 +1527,7 @@ private:
         static edge_index diag_slot(const edge_index* ptr, node_index j) { return ptr[j]; }
         // Input transform: x_in[j] * r_j^2 (r_j = fp32(1/s_j), r_j^2 exact in
         // double) under the fp16 storage -- D^-2 folded into the input read,
-        // see the file header -- x_in[j] itself on fp32.
+        // see the file header -- x_in[j] itself is FP64.
         template <class V>
         static double rhs(const omp_sptrsv& s, node_index j, const double* x_in) {
             if constexpr (std::is_same_v<V, _Float16>) {
@@ -1595,13 +1594,14 @@ private:
     using half_vector [[gnu::vector_size(dot_lanes * sizeof(_Float16))]] = _Float16;
 
     static inline dot_vector widen_vector(half_vector h) {
-#if defined(__GNUC__) && !defined(__clang__)
+#ifdef __clang__
+        return __builtin_convertvector(h, dot_vector);
+#else
         // Use __builtin_convertvector once GCC supports packed F16C conversion:
         // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=121688
-        auto bits = _mm_cvtsi64_si128(std::bit_cast<std::int64_t>(h));
-        return __builtin_convertvector(_mm_cvtph_ps(bits), dot_vector);
-#else
-        return __builtin_convertvector(h, dot_vector);
+        __m128i packed{};
+        std::memcpy(&packed, &h, sizeof(h));
+        return __builtin_convertvector(_mm_cvtph_ps(packed), dot_vector);
 #endif
     }
 
@@ -1619,7 +1619,7 @@ private:
         }
         double result = (sum[0] + sum[1]) + (sum[2] + sum[3]);
         for (; p < end; ++p) {
-            result = std::fma(widen(vals[p]), y[idx[p]], result);
+            result += widen(vals[p]) * y[idx[p]];
         }
         return result;
     }

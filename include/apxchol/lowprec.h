@@ -83,8 +83,7 @@ inline _Float16 narrow_scaled_fp16(float value, float scale) {
 inline constexpr double widen(double v) { return v; }
 inline constexpr double widen(float v) { return static_cast<double>(v); }
 inline double widen(_Float16 v) {
-#if defined(__GNUC__) && !defined(__clang__) && !defined(__CUDACC__) \
-    && defined(__x86_64__) && __GNUC__ < 17
+#if defined(__x86_64__) && __GNUC__ < 17 && !defined(__clang__) && !defined(__CUDACC__)
     // Avoid software half-to-double conversion until GCC 17 is our minimum.
     // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=127720
     return double(__builtin_assoc_barrier(float(v)));
@@ -93,10 +92,10 @@ inline double widen(_Float16 v) {
 #endif
 }
 
-inline bool is_stored_subnormal(float v) { return std::fpclassify(v) == FP_SUBNORMAL; }
-inline bool is_stored_subnormal(double v) { return std::fpclassify(v) == FP_SUBNORMAL; }
-inline bool is_stored_subnormal(_Float16 v) {
-    return v != 0 && detail::fp16_flushes(v);
+// Clang and NVCC do not provide std::fpclassify(_Float16) yet.
+template<class T>
+inline bool is_stored_subnormal(T v) {
+    return __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, v) == FP_SUBNORMAL;
 }
 
 } // namespace apxchol

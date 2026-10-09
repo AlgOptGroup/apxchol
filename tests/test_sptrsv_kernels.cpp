@@ -90,8 +90,8 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
 // back (L^T z = y) solves through omp_sptrsv, and check the residuals against
 // the values the SpTRSV STORES row by row with a componentwise bound. Because
 // the kernels accumulate in double, the residual is at roundoff level even
-// when the storage is 16-bit -- if any read did fp16/fp32 arithmetic this
-// would blow up to ~2^-11. Under the FP16_SCALED build the stored values
+// when the storage is 16-bit -- fp16/fp32 arithmetic would produce larger
+// rounding error. Under the FP16_SCALED build the stored values
 // are: off-diagonals narrowed by omp_sptrsv::narrow_value (RNE of L_ij / s_j,
 // s_j the per-column scale) and the DIAGONAL fp32 (omp_sptrsv::stored_diag:
 // L_jj / s_j) -- so this test also pins (a) that the kernels divide by that
@@ -196,8 +196,7 @@ void check_kernel_residual(const sparse_csc& L, const std::vector<double>& b,
     double worst = 0.0;
     for (node_index i = 0; i < m; ++i)
         worst = std::max(worst, std::fabs(r[i]) / (scale[i] + 1e-300));
-    // Double accumulation over <= ~70 terms: roundoff ~1e-14; 2^-11 would be
-    // the signature of any narrow-precision arithmetic.
+    // Double accumulation over <= ~70 terms has roundoff around 1e-14.
     EXPECT_LT(worst, 1e-11) << (transpose ? "back" : "forward") << " kernel residual";
 }
 
