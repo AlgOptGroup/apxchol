@@ -7,23 +7,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # The machine-tuning flags actually put on the command line below. Recorded into
 # the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
-# cell says whether its numbers came from a tuned build. Empty = untuned.
+# cell records the native tuning or portable baseline used by that build.
 set(APXCHOL_BENCH_ARCH_FLAGS "")
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
 
-if (NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic)
-    if (APXCHOL_NATIVE_ARCH AND
-        (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
-        # This is a SEPARATE cmake project (not an add_subdirectory of the root),
-        # so the shared native-tuning module is included by relative path.
-        include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_native_arch.cmake)
-        if (APXCHOL_NATIVE_ARCH_FLAG)
-            add_compile_options(${APXCHOL_NATIVE_ARCH_FLAG})
-            set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_NATIVE_ARCH_FLAG}")
-        endif()
-    endif()
-endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_arch.cmake)
+add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
+set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_ARCH_FLAG}")
 
 include(FetchContent)
 

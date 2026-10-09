@@ -32,6 +32,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #ifdef _OPENMP
@@ -632,7 +633,7 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
 // The fp16 per-column-scaled storage the dataflow backend uploads under
 // APXCHOL_SPTRSV_FP16=1 (cuda_host.h file header): each slot is
 // binary16(fp32(v) / s_j) RNE with fp16 subnormals flushed to signed zero
-// (restated here through lowprec.h's fp16_t on the bit level), diag[j] =
+// (restated here with native _Float16 conversions), diag[j] =
 // fp32(L_jj) / s_j, inv_scale[j] = fp32(1 / s_j); with diag_comp the column's
 // rounding residual is folded into diag[j] so the STORED column (diag +
 // widened off-diagonals) sums to the fp32 column / s_j; the drop's fp16 keep
@@ -661,8 +662,8 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 for (int k = LT.ptr[j] + 1; k < LT.ptr[j + 1]; ++k) {
                     const float v = static_cast<float>(LT.vals[k]);
                     const bool thr = std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(scales[j]);
-                    const apxchol::fp16_t h(v / scales[j]);
-                    const bool fmt = !(apxchol::fp16_t::is_zero(h.bits) || apxchol::fp16_t::is_subnormal(h.bits));
+                    const auto h = _Float16(v / scales[j]);
+                    const bool fmt = h != 0 && !apxchol::is_stored_subnormal(h);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], rel, true) != (thr && fmt);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], 1e-30, true) != (v != 0.0f && fmt);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], 1e-30, false) != (v != 0.0f);
@@ -678,7 +679,7 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
             const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales);
             ASSERT_EQ(h16.diag.size(), static_cast<size_t>(m));
             ASSERT_EQ(h16.inv_scale.size(), static_cast<size_t>(m));
-            std::uint64_t bits_mismatch = 0, sub = 0;
+            std::uint64_t value_mismatch = 0, sub = 0;
             double worst_cs = 0.0;
             for (node_index j = 0; j < m; ++j) {
                 const float s = scales[j];
@@ -688,13 +689,13 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 double resid = 0.0, col_x = 0.0, col_stored = 0.0;
                 for (int k = LT.ptr[j]; k < LT.ptr[j + 1]; ++k) {
                     const float v = static_cast<float>(LT.vals[k]);
-                    apxchol::fp16_t h(v / s);                                    // RNE
-                    if (apxchol::fp16_t::is_subnormal(h.bits))
-                        h = apxchol::fp16_t::from_bits(static_cast<std::uint16_t>(h.bits & 0x8000u));
-                    bits_mismatch += h16.vals[k] != h.bits;
+                    auto h = _Float16(v / s);
+                    if (apxchol::is_stored_subnormal(h))
+                        h = _Float16(std::copysign(0.0f, float(h)));
+                    value_mismatch += h16.vals[k] != h || std::signbit(float(h16.vals[k])) != std::signbit(float(h));
                     if (k == LT.ptr[j]) continue;                                // diagonal slot
-                    sub += apxchol::fp16_t::is_subnormal(h16.vals[k]);
-                    const double w = static_cast<double>(apxchol::fp16_t::from_bits(h16.vals[k]).to_float());
+                    sub += apxchol::is_stored_subnormal(h16.vals[k]);
+                    const double w = static_cast<double>(float(h16.vals[k]));
                     resid      += static_cast<double>(LT.vals[k]) / static_cast<double>(s) - w;
                     col_x      += static_cast<double>(LT.vals[k]) / static_cast<double>(s);
                     col_stored += w;
@@ -708,7 +709,7 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 const double abs_scale  = std::fabs(static_cast<double>(d0)) + std::fabs(col_x) + 1e-300;
                 worst_cs = std::max(worst_cs, std::fabs(stored_sum - x_sum) / abs_scale);
             }
-            EXPECT_EQ(bits_mismatch, 0u);
+            EXPECT_EQ(value_mismatch, 0u);
             EXPECT_EQ(sub, 0u);                      // subnormals flushed
             EXPECT_EQ(h16.subnormal, 0u);
             EXPECT_LT(worst_cs, 4e-7);               // one fp32 rounding of the diagonal
@@ -1153,8 +1154,11 @@ TEST(GpuSptrsvAdoptionHost, CsrPairIsExactlyTheExistingUploadPair) {
 #include <cuda_runtime.h>
 
 namespace {
-template <class T> T* dev_upload(const T* h, std::size_t count) {
-    T* d = nullptr;
+template <class T>
+using device_value_t = std::conditional_t<std::is_same_v<T, _Float16>, __half, T>;
+
+template <class T> device_value_t<T>* dev_upload(const T* h, std::size_t count) {
+    device_value_t<T>* d = nullptr;
     EXPECT_EQ(cudaMalloc(&d, count * sizeof(T)), cudaSuccess);
     EXPECT_EQ(cudaMemcpy(d, h, count * sizeof(T), cudaMemcpyHostToDevice), cudaSuccess);
     return d;
@@ -1185,7 +1189,7 @@ std::pair<double, std::size_t> rel_diff(const std::vector<float>& a, const std::
 //   out[i] = (rhs[i] * (in_scale ? in_scale[i] : 1) - sum_{j != i} T[i,j] out[j]) / T[i,i]
 std::vector<float> host_reference_sweep(int m, bool reverse,
                                         const int* rowptr, const int* colidx,
-                                        const float* vals, const std::uint16_t* vals16,
+                                        const float* vals, const _Float16* vals16,
                                         const float* diag, const double* in_scale,
                                         const std::vector<float>& rhs) {
     std::vector<double> out(static_cast<std::size_t>(m), 0.0);
@@ -1194,7 +1198,7 @@ std::vector<float> host_reference_sweep(int m, bool reverse,
         double sum = 0.0, d = 0.0;
         for (int p = rowptr[i]; p < rowptr[i + 1]; ++p) {
             const int j = colidx[p];
-            const double v = vals16 ? apxchol::widen(apxchol::fp16_t::from_bits(vals16[p]))
+            const double v = vals16 ? apxchol::widen(vals16[p])
                                     : static_cast<double>(vals[p]);
             if (j == i) { d = vals16 ? static_cast<double>(diag[i]) : v; continue; }
             sum += v * out[j];
@@ -1314,13 +1318,13 @@ void free_plan(dev_plan& d) { cudaFree(d.bs); cudaFree(d.sel); cudaFree(d.spec);
 struct df_factor {
     int m = 0;
     apxchol::cuda_host::csr_int<float>         LT, Lc;
-    apxchol::cuda_host::csr_int<std::uint16_t> LT16, L16;
+    apxchol::cuda_host::csr_int<_Float16> LT16, L16;
     apxchol::cuda_host::fp16_scaled_arrays     h16;
     std::vector<double> inv_scale2;
     std::vector<int>    lenL, lenT;
     int *d_Lp = nullptr, *d_Li = nullptr, *d_Tp = nullptr, *d_Ti = nullptr;
     float *d_Lv = nullptr, *d_Tv = nullptr, *d_diag = nullptr;
-    std::uint16_t *d_Lv16 = nullptr, *d_Tv16 = nullptr;
+    __half *d_Lv16 = nullptr, *d_Tv16 = nullptr;
     double* d_is2 = nullptr;
 
     df_factor(const sparse_csc& L, node_index mm) {
@@ -1333,7 +1337,7 @@ struct df_factor {
         LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
         LT16.idx = std::make_unique_for_overwrite<int[]>(static_cast<size_t>(LT.nnz));
         std::copy_n(LT.idx.get(), LT.nnz, LT16.idx.get());
-        LT16.vals = std::make_unique_for_overwrite<std::uint16_t[]>(static_cast<size_t>(LT.nnz));
+        LT16.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<size_t>(LT.nnz));
         std::copy_n(h16.vals.get(), LT.nnz, LT16.vals.get());
         L16 = apxchol::cuda_host::transpose_csr(LT16);
         inv_scale2.resize(static_cast<size_t>(m));
@@ -1396,9 +1400,9 @@ struct test_device_allocations {
     }
 
     template<class T>
-    T* upload(const T* host, std::size_t count) {
+    device_value_t<T>* upload(const T* host, std::size_t count) {
         pointers.push_back(nullptr);
-        T* device = nullptr;
+        device_value_t<T>* device = nullptr;
         apxchol::detail::check_cuda(
             cudaMalloc(&device, count * sizeof(T)), "test adoption cudaMalloc");
         pointers.back() = device;
@@ -1479,7 +1483,7 @@ prepared_adoption prepare_adoption(
         const double inv = narrowed.inv_scale[static_cast<std::size_t>(j)];
         inv_scale2[static_cast<std::size_t>(j)] = inv * inv;
     }
-    apxchol::cuda_host::csr_int<std::uint16_t> LT16;
+    apxchol::cuda_host::csr_int<_Float16> LT16;
     LT16.m = LT.m;
     LT16.nnz = LT.nnz;
     LT16.ptr = LT.ptr;
@@ -1512,10 +1516,10 @@ prepared_adoption prepare_adoption(
         current_device, static_cast<std::int64_t>(m), LT16.nnz,
         {{d_L_ptr, (static_cast<std::size_t>(m) + 1) * sizeof(int)},
          {d_L_idx, static_cast<std::size_t>(L16.nnz) * sizeof(int)},
-         {d_L_val, static_cast<std::size_t>(L16.nnz) * sizeof(std::uint16_t)}},
+         {d_L_val, static_cast<std::size_t>(L16.nnz) * sizeof(__half)}},
         {{d_LT_ptr, (static_cast<std::size_t>(m) + 1) * sizeof(int)},
          {d_LT_idx, static_cast<std::size_t>(LT16.nnz) * sizeof(int)},
-         {d_LT_val, static_cast<std::size_t>(LT16.nnz) * sizeof(std::uint16_t)}},
+         {d_LT_val, static_cast<std::size_t>(LT16.nnz) * sizeof(__half)}},
         {d_diag, static_cast<std::size_t>(m) * sizeof(float)},
         {d_inv_scale2, static_cast<std::size_t>(m) * sizeof(double)},
         stats,

@@ -105,7 +105,7 @@ __device__ __forceinline__ bool group_all(bool pred, int G) {
 // of the off-diagonal neighbours are polled until every one carries the
 // current epoch. `pending` = the entries still missing; y[t] the values.
 //
-// fp16 values are kept as RAW BITS until accumulate(): widening at load time
+// fp16 values stay narrow until accumulate(): widening at load time
 // put an HADD2 (half -> float) right after every 2-byte load, and under the
 // fp16 kernel's register pressure ptxas recycled one address/destination
 // register pair for the whole 8-entry load loop -- each load had to retire
@@ -117,7 +117,7 @@ __device__ __forceinline__ bool group_all(bool pred, int G) {
 // half2float is exact, so accumulate() computes bit-identical values.
 struct chunk {
     int jj[kPre]; VAL y[kPre];
-    union { VAL f32[kPre]; unsigned short f16[kPre]; } vv;   // fp32 value, or raw binary16 bits
+    union { VAL f32[kPre]; __half f16[kPre]; } vv;
     unsigned pending;
     template <bool FP16>
     __device__ __forceinline__ void load(bool have, int i, int p0, int G, int end,
@@ -129,12 +129,12 @@ struct chunk {
             const bool ok = have && p < end;
             jj[t] = ok ? colidx[p] : -1;
             if constexpr (FP16) {
-                // Raw bits; the DIAGONAL slot's bits are dropped here (its value
+                // The DIAGONAL slot is zeroed here (its value
                 // comes from diag[]; the slot can be fp16 Inf when L_jj/s_j >
                 // 65504 -- narrow_fp16_scaled's diag_bad -- and accumulate() is
                 // branchless, so an Inf would turn its zero product into NaN).
-                const unsigned short bits = ok ? static_cast<const unsigned short*>(vals_raw)[p] : static_cast<unsigned short>(0);
-                vv.f16[t] = jj[t] != i ? bits : static_cast<unsigned short>(0);
+                const __half value = ok ? static_cast<const __half*>(vals_raw)[p] : __float2half_rn(0.0f);
+                vv.f16[t] = jj[t] != i ? value : __float2half_rn(0.0f);
             }
             else vv.f32[t] = ok ? static_cast<const VAL*>(vals_raw)[p] : VAL(0);
             y[t]  = VAL(0);
@@ -166,9 +166,7 @@ struct chunk {
             VAL s0 = VAL(0), s1 = VAL(0);
             #pragma unroll
             for (int t = 0; t < kPre; t += 2) {
-                // One packed half2 -> float2 widen per PAIR (the bits sit
-                // adjacent in the union, 4-byte aligned at even t).
-                const float2 f = __half22float2(*reinterpret_cast<const __half2*>(&vv.f16[t]));
+                const float2 f = __half22float2(__halves2half2(vv.f16[t], vv.f16[t + 1]));
                 s0 += f.x * y[t];
                 s1 += f.y * y[t + 1];
             }
@@ -518,7 +516,7 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse,
 }
 
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
-                         const int* rowptr, const int* colidx, const unsigned short* vals16,
+                         const int* rowptr, const int* colidx, const __half* vals16,
                          const float* diag, const double* in_scale,
                          const int* batch_start, const int* batch_spec, const int4* spec, int n_batches,
                          unsigned long long* tag, unsigned epoch, int* ctrl, int grid,

@@ -29,6 +29,8 @@ namespace detail { class gpu_round_shadow_device_state; }
 // PCG-facing interface stays fp64 and casts at the boundary.
 using cuda_value_t = sptrsv_value_t;
 static_assert(sizeof(cuda_value_t) == 4, "the GPU SpTRSV runs in fp32");
+// Host _Float16 and device __half buffers share the binary16 representation.
+static_assert(sizeof(_Float16) == sizeof(__half));
 
 /// Non-owning allocation descriptions used to spell the ownership handoff
 /// below. `bytes` is the complete cudaMalloc allocation capacity, not only its
@@ -52,7 +54,7 @@ struct cuda_sptrsv_device_csr_fp32 {
 struct cuda_sptrsv_device_csr_fp16 {
     cuda_sptrsv_device_allocation<int> row_ptr;
     cuda_sptrsv_device_allocation<int> col_idx;
-    cuda_sptrsv_device_allocation<std::uint16_t> values;
+    cuda_sptrsv_device_allocation<__half> values;
 };
 
 /// Move-only ownership capsule for the research-only direct CUDA SpTRSV
@@ -138,10 +140,10 @@ public:
         validate_metadata(cuda_device, m, nnz, stats,
                           {{L.row_ptr.data, L.row_ptr.bytes, (rows + 1) * sizeof(int)},
                            {L.col_idx.data, L.col_idx.bytes, entries * sizeof(int)},
-                           {L.values.data, L.values.bytes, entries * sizeof(std::uint16_t)},
+                           {L.values.data, L.values.bytes, entries * sizeof(__half)},
                            {LT.row_ptr.data, LT.row_ptr.bytes, (rows + 1) * sizeof(int)},
                            {LT.col_idx.data, LT.col_idx.bytes, entries * sizeof(int)},
-                           {LT.values.data, LT.values.bytes, entries * sizeof(std::uint16_t)},
+                           {LT.values.data, LT.values.bytes, entries * sizeof(__half)},
                            {diag.data, diag.bytes, rows * sizeof(float)},
                            {inv_scale2.data, inv_scale2.bytes, rows * sizeof(double)}});
         cuda_sptrsv_device_factor out;
@@ -483,27 +485,27 @@ public:
                         "apxchol cuda_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                         " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(inv_scale2[j]) +
                         "); set APXCHOL_SPTRSV_FP16=0");
-            dev_alloc(reinterpret_cast<void**>(&d_vals16_),     nnz_ * sizeof(std::uint16_t));
+            dev_alloc(reinterpret_cast<void**>(&d_vals16_),     nnz_ * sizeof(__half));
             dev_alloc(reinterpret_cast<void**>(&d_diag_),       m_ * sizeof(float));
             dev_alloc(reinterpret_cast<void**>(&d_inv_scale2_), m_ * sizeof(double));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_vals16_, h16.vals.get(), nnz_ * sizeof(std::uint16_t), cudaMemcpyHostToDevice));
+            APXCHOL_CUDA_CHECK(cudaMemcpy(d_vals16_, h16.vals.get(), nnz_ * sizeof(__half), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_diag_, h16.diag.data(), m_ * sizeof(float), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_inv_scale2_, inv_scale2.data(), m_ * sizeof(double), cudaMemcpyHostToDevice));
             // CSR of L for the forward solve: transpose of (structure of LT,
             // fp16 values).
-            cuda_host::csr_int<std::uint16_t> LT16;
+            cuda_host::csr_int<_Float16> LT16;
             LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
             LT16.idx  = std::move(LT.idx);
             LT16.vals = std::move(h16.vals);
             mark("  fp16_diag+uploads");
-            cuda_host::csr_int<std::uint16_t> L16 = cuda_host::transpose_csr(LT16);
+            cuda_host::csr_int<_Float16> L16 = cuda_host::transpose_csr(LT16);
             mark("  fp16_transpose");
             dev_alloc(reinterpret_cast<void**>(&d_L_rowptr_), (m_ + 1) * sizeof(int));
             dev_alloc(reinterpret_cast<void**>(&d_L_colidx_), nnz_ * sizeof(int));
-            dev_alloc(reinterpret_cast<void**>(&d_L_vals16_), nnz_ * sizeof(std::uint16_t));
+            dev_alloc(reinterpret_cast<void**>(&d_L_vals16_), nnz_ * sizeof(__half));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_rowptr_, L16.ptr.data(), (m_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
             APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, L16.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals16_, L16.vals.get(), nnz_ * sizeof(std::uint16_t), cudaMemcpyHostToDevice));
+            APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals16_, L16.vals.get(), nnz_ * sizeof(__half), cudaMemcpyHostToDevice));
             mark("upload_L");
             setup_kernel_backend(LT16.ptr, L16.ptr, LT16.idx.get(), L16.idx.get());
             mark("kernel_backend_tables");
@@ -611,7 +613,7 @@ public:
         const std::size_t ptr_bytes = (rows + 1) * sizeof(int);
         const std::size_t idx_bytes = nnz * sizeof(int);
         const std::size_t val_bytes = nnz * (factor_fp16
-            ? sizeof(std::uint16_t) : sizeof(cuda_value_t));
+            ? sizeof(__half) : sizeof(cuda_value_t));
 
         std::size_t adopted_bytes = 0;
         std::size_t allocation_index = 0;
@@ -732,8 +734,8 @@ public:
             d_rowPtr_ = factor.LT_row_ptr_;
             d_colIdx_ = factor.LT_col_idx_;
             if (fp16_) {
-                d_L_vals16_ = static_cast<std::uint16_t*>(factor.L_values_);
-                d_vals16_ = static_cast<std::uint16_t*>(factor.LT_values_);
+                d_L_vals16_ = static_cast<__half*>(factor.L_values_);
+                d_vals16_ = static_cast<__half*>(factor.LT_values_);
                 d_diag_ = factor.diag_;
                 d_inv_scale2_ = factor.inv_scale2_;
             } else {
@@ -1161,8 +1163,8 @@ private:
     // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
     // exact; fp32 overflows for tiny scales, see the class comment).
     bool          fp16_           = false;
-    std::uint16_t* d_vals16_      = nullptr;
-    std::uint16_t* d_L_vals16_    = nullptr;
+    __half*       d_vals16_       = nullptr;
+    __half*       d_L_vals16_     = nullptr;
     float*        d_diag_         = nullptr;
     double*       d_inv_scale2_   = nullptr;
 };

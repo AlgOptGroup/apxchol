@@ -115,13 +115,18 @@ choices, retired knobs, and measurements belong in
   across the library boundary can corrupt allocation ownership. Validate with
   the external parent fixture in `tests/cmake_consumer`.
 - `APXCHOL_NATIVE_ARCH`: ON for local builds. Root, benchmark, and local Python
-  builds share the architecture-specific compiler probe; portable Python wheels
-  omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
+  builds share the architecture-specific compiler probe. cibuildwheel sets this
+  option OFF for portable wheels; Python optimization follows the CMake build
+  type. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
+  The shared CMake architecture helper rejects MSVC and clang-cl. The compiled
+  core checks the x86-64-v2 feature macros, including for native builds, without
+  running a configure-time program.
 - OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
   queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
   while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
-  OpenMP fails configuration instead of producing a serial build.
+  OpenMP fails configuration instead of producing a serial build. Both targets
+  link OpenMP directly; there is no long-double reduction/libatomic probe.
 - macOS: retain normal CMake compiler selection. Install Command Line Tools,
   CMake and libomp, then use the common build commands. libc++ `std::pmr`
   requires a macOS 14 deployment target. Linux-only `madvise`
@@ -129,6 +134,20 @@ choices, retired knobs, and measurements belong in
   parent-consumer build/test steps through YAML anchors. Keep `std::iota` for
   the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
 
+
+- Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
+  manylinux distribution package on Linux and Homebrew on macOS, targeting
+  macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
+  building, includes it in the wheels, repairs them and runs the Python tests.
+  Linux installs the distro's Clang and uses its C++ runtime libraries.
+  Untuned x86-64 builds share the x86-64-v2 minimum, including Debug and
+  benchmarks. Native Release builds retain host tuning. The portable Linux
+  Python binding is compiled for baseline
+  x86-64 to report an import error on unsupported CPUs before entering the core.
+  macOS arm64 retains Apple Clang's default target.
+  CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
+  Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
+  `python/pyproject.toml`.
 
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
@@ -185,6 +204,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   AUTO uses the structural critical-tail schedule when metadata permits;
   `levels` is the reference. Share row arithmetic across schedules and storage.
   Research schedules on other branches are not production modes.
+- CPU FP16 storage uses `_Float16` directly; setup uses native conversion under
+  the normal round-to-nearest environment and retains signed subnormal flushing.
+  Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
+  packed conversion and scalar widening workarounds stay local to conversion.
+  Runtime CPU dispatch is not yet enabled in portable wheels.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
   `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
   writer threads perform the first touch. Pointer, diagonal, scale, and other
@@ -193,6 +217,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
+- CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
+  because NVCC does not support `_Float16` in device code. Uploads copy the
+  common binary16 representation; the solve kernel widens only at accumulation.
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
   is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
   factor storage (GPU default on, CPU default off); scales and diagonals stay

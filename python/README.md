@@ -7,6 +7,12 @@ operators.
 pip install apxchol
 ```
 
+Wheels: Linux x86_64 (manylinux, x86-64-v2 CPU or newer) and macOS arm64
+(macOS 15 or newer), CPython 3.10–3.14. Both platforms use Clang and bundle LLVM's OpenMP runtime
+(license in `LICENSE.libomp.txt`); Homebrew is not needed to use the macOS
+wheels. Importing packages that bundle another OpenMP runtime in the same
+process can cause runtime conflicts.
+
 ```python
 import apxchol
 solver = apxchol.factorize(A)           # assembled scipy sparse operator
@@ -81,6 +87,6 @@ pytest python/tests -v
 
 The extension directly compiles `factorization.cpp`, `operator_class.cpp`
 and `solve.cpp`. Local builds tune for the build machine; distributed wheels
-are portable. On macOS, install the [build dependencies](../README.md#build-and-run)
+use the CPU baselines above. On macOS, install the [build dependencies](../README.md#build-and-run)
 first, then use the same pip command above.
 Without build isolation, install `pybind11 scikit-build-core` first. [License](../LICENSE).

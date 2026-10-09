@@ -121,14 +121,15 @@ __global__ void finalizer_unpack(
     }
 }
 
-__device__ std::uint16_t finalizer_half(float value) {
-    const auto bits = __half_as_ushort(__float2half_rn(value));
-    return (bits & 0x7c00u) == 0 ? std::uint16_t(bits & 0x8000u) : bits;
+__device__ __half finalizer_half(float value) {
+    const __half stored = __float2half_rn(value);
+    return fabsf(__half2float(stored)) < 0x1p-14f
+        ? __float2half_rn(copysignf(0.0f, value)) : stored;
 }
 
 __device__ bool finalizer_keep(float value, float scale, double rel, bool fp16) {
     if (!(fabs(double(value)) >= rel * double(scale))) return false;
-    return fp16 ? (finalizer_half(__fdiv_rn(value, scale)) & 0x7fffu) != 0
+    return fp16 ? __half2float(finalizer_half(__fdiv_rn(value, scale))) != 0.0f
                 : value != 0.0f;
 }
 
@@ -194,7 +195,7 @@ __global__ void finalizer_compact_columns(
 
 __global__ void finalizer_narrow_columns(
         int m, const int* ptr, const float* values, const float* scales,
-        std::uint16_t* half_values, float* diag, double* inv_scale2,
+        __half* half_values, float* diag, double* inv_scale2,
         unsigned long long* flushed, int* status) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= m) return;
@@ -209,7 +210,7 @@ __global__ void finalizer_narrow_columns(
         const auto h = finalizer_half(__fdiv_rn(v, scale));
         half_values[p] = h;
         if (p == ptr[j]) continue;
-        const float widened = __half2float(__ushort_as_half(h));
+        const float widened = __half2float(h);
         if (v != 0.0f && widened == 0.0f) ++count;
         residual += double(v) / double(scale) - double(widened);
     }
@@ -4425,7 +4426,7 @@ gpu_round_shadow_device_state::finalize_device_factor(
     device_buffer<float> lv(tracker), ltv(tracker), input_values(tracker);
     device_buffer<float> col_scale(tracker), dropped_values(tracker), diag(tracker);
     device_buffer<double> inv_scale2(tracker);
-    device_buffer<std::uint16_t> lh(tracker), lth(tracker);
+    device_buffer<__half> lh(tracker), lth(tracker);
     device_buffer<int> dropped_ptr(tracker);
     device_buffer<std::uint64_t> dropped_keys(tracker);
     device_buffer<unsigned long long> storage_counts(tracker);
@@ -4550,8 +4551,8 @@ gpu_round_shadow_device_state::finalize_device_factor(
     auto result = std::make_shared<cuda_sptrsv_device_factor>();
     if (fp16) {
         *result = cuda_sptrsv_device_factor::own_fp16_scaled(impl_->cuda_device, m, nnz,
-            {{lp.get(), (m + 1) * sizeof(int)}, {li.get(), std::size_t(nnz) * sizeof(int)}, {lh.get(), std::size_t(nnz) * sizeof(std::uint16_t)}},
-            {{column_ptr, (m + 1) * sizeof(int)}, {lti.get(), std::size_t(nnz) * sizeof(int)}, {lth.get(), std::size_t(nnz) * sizeof(std::uint16_t)}},
+            {{lp.get(), (m + 1) * sizeof(int)}, {li.get(), std::size_t(nnz) * sizeof(int)}, {lh.get(), std::size_t(nnz) * sizeof(__half)}},
+            {{column_ptr, (m + 1) * sizeof(int)}, {lti.get(), std::size_t(nnz) * sizeof(int)}, {lth.get(), std::size_t(nnz) * sizeof(__half)}},
             {diag.get(), m * sizeof(float)}, {inv_scale2.get(), m * sizeof(double)}, stats, counts[2], 0);
         lh.detach(); lth.detach(); diag.detach(); inv_scale2.detach();
     } else {
@@ -4592,7 +4593,7 @@ std::vector<std::byte> gpu_round_shadow_device_state::encode_finalized_factor_fo
     };
     const std::size_t m = factor.m_, nnz = factor.nnz_;
     const bool half = factor.storage_ == cuda_sptrsv_device_factor::storage::fp16_scaled;
-    const std::size_t value_bytes = nnz * (half ? sizeof(std::uint16_t) : sizeof(float));
+    const std::size_t value_bytes = nnz * (half ? sizeof(__half) : sizeof(float));
     append(factor.L_row_ptr_, (m + 1) * sizeof(int));
     append(factor.L_col_idx_, nnz * sizeof(int));
     append(factor.L_values_, value_bytes);
