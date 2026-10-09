@@ -1,3 +1,5 @@
+// This TU is built for every core target. Keep this out of public headers so
+// the Python import guard can still compile for baseline x86-64.
 #if defined(__x86_64__) && (!defined(__SSE3__) || !defined(__SSSE3__) \
     || !defined(__SSE4_1__) || !defined(__SSE4_2__) || !defined(__POPCNT__) \
     || !defined(__LAHF_SAHF__) || !defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16))

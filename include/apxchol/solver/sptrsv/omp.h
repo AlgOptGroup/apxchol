@@ -1599,7 +1599,7 @@ private:
         // Use __builtin_convertvector once GCC supports packed F16C conversion:
         // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=121688
         auto bits = _mm_cvtsi64_si128(std::bit_cast<std::int64_t>(h));
-        return dot_vector(_mm256_cvtps_pd(_mm_cvtph_ps(bits)));
+        return __builtin_convertvector(_mm_cvtph_ps(bits), dot_vector);
 #else
         return __builtin_convertvector(h, dot_vector);
 #endif
