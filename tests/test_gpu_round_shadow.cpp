@@ -5072,7 +5072,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 };
                 if (half) {
                     auto h = apxchol::cuda_host::narrow_fp16_scaled(lt, scale);
-                    apxchol::cuda_host::csr_int<std::uint16_t> lt16;
+                    apxchol::cuda_host::csr_int<_Float16> lt16;
                     lt16.m = m; lt16.nnz = lt.nnz; lt16.ptr = lt.ptr;
                     lt16.idx = std::move(lt.idx); lt16.vals = std::move(h.vals);
                     auto l16 = apxchol::cuda_host::transpose_csr(lt16);

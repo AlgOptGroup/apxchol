@@ -33,6 +33,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #ifdef _OPENMP
@@ -692,10 +693,10 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                     _Float16 h(v / s);                                    // RNE
                     if (apxchol::is_stored_subnormal(h))
                         h = std::copysign(0.0f, float(h));
-                    bits_mismatch += h16.vals[k] != std::bit_cast<std::uint16_t>(h);
+                    bits_mismatch += std::bit_cast<std::uint16_t>(h16.vals[k]) != std::bit_cast<std::uint16_t>(h);
                     if (k == LT.ptr[j]) continue;                                // diagonal slot
-                    sub += apxchol::is_stored_subnormal(std::bit_cast<_Float16>(h16.vals[k]));
-                    const double w = static_cast<double>(float(std::bit_cast<_Float16>(h16.vals[k])));
+                    sub += apxchol::is_stored_subnormal(h16.vals[k]);
+                    const double w = static_cast<double>(float(h16.vals[k]));
                     resid      += static_cast<double>(LT.vals[k]) / static_cast<double>(s) - w;
                     col_x      += static_cast<double>(LT.vals[k]) / static_cast<double>(s);
                     col_stored += w;
@@ -1154,8 +1155,11 @@ TEST(GpuSptrsvAdoptionHost, CsrPairIsExactlyTheExistingUploadPair) {
 #include <cuda_runtime.h>
 
 namespace {
-template <class T> T* dev_upload(const T* h, std::size_t count) {
-    T* d = nullptr;
+template <class T>
+using device_value_t = std::conditional_t<std::is_same_v<T, _Float16>, __half, T>;
+
+template <class T> device_value_t<T>* dev_upload(const T* h, std::size_t count) {
+    device_value_t<T>* d = nullptr;
     EXPECT_EQ(cudaMalloc(&d, count * sizeof(T)), cudaSuccess);
     EXPECT_EQ(cudaMemcpy(d, h, count * sizeof(T), cudaMemcpyHostToDevice), cudaSuccess);
     return d;
@@ -1186,7 +1190,7 @@ std::pair<double, std::size_t> rel_diff(const std::vector<float>& a, const std::
 //   out[i] = (rhs[i] * (in_scale ? in_scale[i] : 1) - sum_{j != i} T[i,j] out[j]) / T[i,i]
 std::vector<float> host_reference_sweep(int m, bool reverse,
                                         const int* rowptr, const int* colidx,
-                                        const float* vals, const std::uint16_t* vals16,
+                                        const float* vals, const _Float16* vals16,
                                         const float* diag, const double* in_scale,
                                         const std::vector<float>& rhs) {
     std::vector<double> out(static_cast<std::size_t>(m), 0.0);
@@ -1195,7 +1199,7 @@ std::vector<float> host_reference_sweep(int m, bool reverse,
         double sum = 0.0, d = 0.0;
         for (int p = rowptr[i]; p < rowptr[i + 1]; ++p) {
             const int j = colidx[p];
-            const double v = vals16 ? apxchol::widen(std::bit_cast<_Float16>(vals16[p]))
+            const double v = vals16 ? apxchol::widen(vals16[p])
                                     : static_cast<double>(vals[p]);
             if (j == i) { d = vals16 ? static_cast<double>(diag[i]) : v; continue; }
             sum += v * out[j];
@@ -1315,13 +1319,13 @@ void free_plan(dev_plan& d) { cudaFree(d.bs); cudaFree(d.sel); cudaFree(d.spec);
 struct df_factor {
     int m = 0;
     apxchol::cuda_host::csr_int<float>         LT, Lc;
-    apxchol::cuda_host::csr_int<std::uint16_t> LT16, L16;
+    apxchol::cuda_host::csr_int<_Float16> LT16, L16;
     apxchol::cuda_host::fp16_scaled_arrays     h16;
     std::vector<double> inv_scale2;
     std::vector<int>    lenL, lenT;
     int *d_Lp = nullptr, *d_Li = nullptr, *d_Tp = nullptr, *d_Ti = nullptr;
     float *d_Lv = nullptr, *d_Tv = nullptr, *d_diag = nullptr;
-    std::uint16_t *d_Lv16 = nullptr, *d_Tv16 = nullptr;
+    __half *d_Lv16 = nullptr, *d_Tv16 = nullptr;
     double* d_is2 = nullptr;
 
     df_factor(const sparse_csc& L, node_index mm) {
@@ -1334,7 +1338,7 @@ struct df_factor {
         LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
         LT16.idx = std::make_unique_for_overwrite<int[]>(static_cast<size_t>(LT.nnz));
         std::copy_n(LT.idx.get(), LT.nnz, LT16.idx.get());
-        LT16.vals = std::make_unique_for_overwrite<std::uint16_t[]>(static_cast<size_t>(LT.nnz));
+        LT16.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<size_t>(LT.nnz));
         std::copy_n(h16.vals.get(), LT.nnz, LT16.vals.get());
         L16 = apxchol::cuda_host::transpose_csr(LT16);
         inv_scale2.resize(static_cast<size_t>(m));
@@ -1397,9 +1401,9 @@ struct test_device_allocations {
     }
 
     template<class T>
-    T* upload(const T* host, std::size_t count) {
+    device_value_t<T>* upload(const T* host, std::size_t count) {
         pointers.push_back(nullptr);
-        T* device = nullptr;
+        device_value_t<T>* device = nullptr;
         apxchol::detail::check_cuda(
             cudaMalloc(&device, count * sizeof(T)), "test adoption cudaMalloc");
         pointers.back() = device;
@@ -1480,7 +1484,7 @@ prepared_adoption prepare_adoption(
         const double inv = narrowed.inv_scale[static_cast<std::size_t>(j)];
         inv_scale2[static_cast<std::size_t>(j)] = inv * inv;
     }
-    apxchol::cuda_host::csr_int<std::uint16_t> LT16;
+    apxchol::cuda_host::csr_int<_Float16> LT16;
     LT16.m = LT.m;
     LT16.nnz = LT.nnz;
     LT16.ptr = LT.ptr;
@@ -1513,10 +1517,10 @@ prepared_adoption prepare_adoption(
         current_device, static_cast<std::int64_t>(m), LT16.nnz,
         {{d_L_ptr, (static_cast<std::size_t>(m) + 1) * sizeof(int)},
          {d_L_idx, static_cast<std::size_t>(L16.nnz) * sizeof(int)},
-         {d_L_val, static_cast<std::size_t>(L16.nnz) * sizeof(std::uint16_t)}},
+         {d_L_val, static_cast<std::size_t>(L16.nnz) * sizeof(__half)}},
         {{d_LT_ptr, (static_cast<std::size_t>(m) + 1) * sizeof(int)},
          {d_LT_idx, static_cast<std::size_t>(LT16.nnz) * sizeof(int)},
-         {d_LT_val, static_cast<std::size_t>(LT16.nnz) * sizeof(std::uint16_t)}},
+         {d_LT_val, static_cast<std::size_t>(LT16.nnz) * sizeof(__half)}},
         {d_diag, static_cast<std::size_t>(m) * sizeof(float)},
         {d_inv_scale2, static_cast<std::size_t>(m) * sizeof(double)},
         stats,

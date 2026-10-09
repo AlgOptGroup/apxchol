@@ -1,8 +1,7 @@
 // Low-precision SpTRSV storage (include/apxchol/lowprec.h):
 //   * _Float16: IEEE binary16 round-trip bound (2^-11 relative, normal range),
 //     the documented subnormal / flush-to-zero / overflow behaviour, RNE ties,
-//     and an exhaustive cross-check of the bit-level converters against the
-//     compiler's _Float16;
+//     and conversion checks against independent numerical references;
 //   * the storage CONTRACT of omp_sptrsv::setup for whatever storage this
 //     build compiled: every stored CSR/CSC value == narrow_value(v, s_j),
 //     the per-column scales, the off-diagonal flush/subnormal statistics, the
@@ -49,34 +48,18 @@ float widen_bits_reference(std::uint16_t h) {
     return std::bit_cast<float>(sign | ((e + 112u) << 23) | (m << 13));
 }
 
-inline constexpr std::uint16_t round_bits_reference(std::uint32_t u) {
-    const std::uint32_t sign = (u >> 16) & 0x8000u;
-    const std::uint32_t a    = u & 0x7fffffffu;            // |x| pattern
-    if (a >= 0x7f800000u)                                  // inf or NaN
-        return static_cast<std::uint16_t>(sign | 0x7c00u | (a > 0x7f800000u ? 0x0200u : 0u));
-    if (a >= 0x477ff000u)                                  // >= 65520: RNE overflows to inf
-        return static_cast<std::uint16_t>(sign | 0x7c00u);
-    if (a >= 0x38800000u) {                                // normal fp16 range: |x| >= 2^-14
-        // Rebias the exponent (127 -> 15 == subtract 112 << 23), then drop
-        // the low 13 mantissa bits with the half-way-tie-to-even bias; a
-        // mantissa carry propagates into the exponent by plain addition.
-        const std::uint32_t m   = a - (112u << 23);
-        const std::uint32_t lsb = (m >> 13) & 1u;
-        return static_cast<std::uint16_t>(sign | ((m + 0xfffu + lsb) >> 13));
-    }
-    if (a >= 0x33000000u) {                                // subnormal fp16 range: 2^-25 <= |x| < 2^-14
-        // fp16 subnormal value = r * 2^-24. With the hidden bit restored the
-        // fp32 significand M (24 bits) represents M * 2^(e-150) (e = biased
-        // exponent), so r = round(M * 2^(e-126)) = RNE(M >> (126 - e)),
-        // shift in [14, 24]. r may round up to 0x400 == the smallest normal,
-        // which is the correct encoding.
-        const std::uint32_t M     = (a & 0x7fffffu) | 0x800000u;
-        const int           shift = 126 - static_cast<int>(a >> 23);
-        const std::uint32_t half  = 1u << (shift - 1);
-        const std::uint32_t lsb   = (M >> shift) & 1u;
-        return static_cast<std::uint16_t>(sign | ((M + half - 1u + lsb) >> shift));
-    }
-    return static_cast<std::uint16_t>(sign);               // |x| < 2^-25: flush to signed zero
+// Quantize to binary16 spacing in double precision, independently of the cast.
+float storage_reference(float x) {
+    if (!std::isfinite(x)) return x;
+    int exponent;
+    std::frexp(x, &exponent);
+    const double step = std::ldexp(1.0, std::max(exponent - 11, -24));
+    const double rounded = std::nearbyint(double(x) / step) * step;
+    if (std::abs(rounded) > 65504.0)
+        return std::copysign(std::numeric_limits<float>::infinity(), x);
+    if (std::abs(rounded) < 0x1p-14)
+        return std::copysign(0.0f, x);
+    return float(rounded);
 }
 
 bool half_is_subnormal(std::uint16_t h) { return (h & 0x7c00u) == 0 && (h & 0x03ffu) != 0; }
@@ -152,7 +135,7 @@ TEST(FP16, AllBitPatternsRoundTripAndMatchCompilerWiden) {
 // Native storage conversion agrees with the independent RNE reference on
 // random full-range fp32 patterns (normals, subnormal-range, overflow, both
 // signs; NaNs excluded).
-TEST(FP16, StorageConversionMatchesBitReference) {
+TEST(FP16, StorageConversionMatchesNumericalReference) {
     std::mt19937_64 rng(1602);
     std::uniform_int_distribution<std::uint32_t> ubits(0u, 0xffffffffu);
     // Bias the sampling towards the interesting fp16 exponents as well.
@@ -168,9 +151,10 @@ TEST(FP16, StorageConversionMatchesBitReference) {
             x = static_cast<float>(std::ldexp(umant(rng), static_cast<int>(std::floor(uexp(rng)))));
             if (t & 2) x = -x;
         }
-        auto expected = round_bits_reference(f2u(x));
-        if (half_is_subnormal(expected)) expected &= 0x8000u;
-        ASSERT_EQ(half_bits(apxchol::detail::narrow_scaled_fp16(x, 1.0f)), expected) << "x=" << x << " (" << std::hex << f2u(x) << ")";
+        const float expected = storage_reference(x);
+        const float actual = float(apxchol::detail::narrow_scaled_fp16(x, 1.0f));
+        ASSERT_EQ(actual, expected) << "x=" << x;
+        ASSERT_EQ(std::signbit(actual), std::signbit(expected)) << "x=" << x;
     }
 }
 

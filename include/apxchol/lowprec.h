@@ -52,7 +52,8 @@
 #include <cmath>
 #include <cstdlib>
 
-// TODO: use std::float16_t when supported by our Clang/libc++ baseline.
+// TODO: use std::float16_t once Clang defines __STDCPP_FLOAT16_T__
+// and libc++ provides <stdfloat> in our supported toolchains.
 // https://github.com/llvm/llvm-project/issues/105196
 // https://github.com/llvm/llvm-project/pull/78503
 namespace apxchol {

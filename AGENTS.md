@@ -217,6 +217,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
+- CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
+  because NVCC does not support `_Float16` in device code. Uploads copy the
+  common binary16 representation; the solve kernel widens only at accumulation.
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
   is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
   factor storage (GPU default on, CPU default off); scales and diagonals stay

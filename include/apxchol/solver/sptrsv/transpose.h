@@ -6,7 +6,7 @@
 // L^T -- the very same arrays, int32 -- for the dataflow backend through it.
 // Header-only, CUDA-free, OpenMP-parallel, templated on
 // the offset / index / value types (edge_index / node_index / sptrsv_value_t
-// on the CPU, int / int / cuda_value_t or uint16_t on the GPU) and on a
+// on the CPU, int / int / cuda_value_t or _Float16 in GPU host preparation) and on a
 // `store(v, j)` functor that maps the input value of an entry in column j to
 // the stored value (the CPU's narrow_value() through the storage format; a
 // plain copy on the GPU) -- the same code, so what the GPU uploads is what the
