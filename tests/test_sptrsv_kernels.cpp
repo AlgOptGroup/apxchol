@@ -73,14 +73,17 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     }
     {
         scoped_env on("APXCHOL_SPTRSV_FP16", "1");
-        apxchol::omp_sptrsv t; t.setup(L, 2);
-        // CPUs without F16C fall back to fp32, including in portable builds.
-        EXPECT_EQ(t.fp16(), apxchol::omp_sptrsv::fp16_supported());
-        EXPECT_EQ(t.value_bytes(), apxchol::omp_sptrsv::fp16_supported() ? 2u : 4u);
+        apxchol::omp_sptrsv t;
         if (apxchol::omp_sptrsv::fp16_supported()) {
+            t.setup(L, 2);
+            EXPECT_TRUE(t.fp16());
+            EXPECT_EQ(t.value_bytes(), 2u);
             EXPECT_STREQ(t.value_name(), "fp16 (per-column scaled)");
             EXPECT_EQ(t.csc_vals16().size(), 3u);
             EXPECT_EQ(t.csc_vals().size(), 0u);
+        } else {
+            EXPECT_THROW(t.setup(L, 2), std::runtime_error);
+            EXPECT_FALSE(t.ready());
         }
     }
 }
@@ -107,11 +110,6 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
 // serial double substitution on L_s (roundoff for y', 2^-23-class for z).
 namespace {
 
-// THE storage under test, as a runtime flag: what APXCHOL_SPTRSV_FP16
-// resolves to for this build (fp16 only where F16C exists).
-bool fp16_storage(const char* env_value) {
-    return std::string(env_value) == "1" && apxchol::omp_sptrsv::fp16_supported();
-}
 // The KERNEL matrix L~ as omp_sptrsv::setup stores it (widened, NOT
 // rescaled) for the OFF-DIAGONAL entry with value v in a column with scale s:
 // through narrow_value. On the fp32 storage this is v itself.
@@ -232,7 +230,8 @@ void reference_pair(const sparse_csc& L, const std::vector<double>& x,
 void run_kernel_precision_check() {
     for (const char* env : {"0", "1"})
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose path */}) {
-        const bool fp16 = fp16_storage(env);
+        const bool fp16 = env[0] == '1';
+        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE("m=" + std::to_string(m) + " APXCHOL_SPTRSV_FP16=" + env);
         scoped_env storage("APXCHOL_SPTRSV_FP16", env);
         sparse_csc L = make_random_lower(m, 4.0, 99);
@@ -361,7 +360,8 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
     std::vector<double> x(m);
     for (auto& v : x) v = ux(rng);
     for (const char* env : {"0", "1"}) {
-        const bool fp16 = fp16_storage(env);
+        const bool fp16 = env[0] == '1';
+        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE(std::string("APXCHOL_SPTRSV_FP16=") + env);
         scoped_env storage("APXCHOL_SPTRSV_FP16", env);
         std::vector<double> y_ref, z_ref;

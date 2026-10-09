@@ -230,20 +230,11 @@ public:
     }
     /// THE storage choice of the next setup(): the unified env
     /// APXCHOL_SPTRSV_FP16=0|1 (lowprec.h; the GPU backend reads the same
-    /// variable), unset = OFF on the CPU. Asking for fp16 on a CPU without
-    /// F16C falls back to fp32 with a one-shot stderr note.
+    /// variable), unset = OFF on the CPU. An unsupported explicit request fails.
     static bool fp16_from_env() {
         const bool want = sptrsv_fp16_env_tristate() == 1;
-        if (want && !fp16_supported()) {
-            static const bool warned = [] {
-                std::fprintf(stderr,
-                    "[apxchol] APXCHOL_SPTRSV_FP16=1 ignored by the CPU SpTRSV:"
-                    " this CPU lacks AVX/F16C; using fp32 storage\n");
-                return true;
-            }();
-            (void)warned;
-            return false;
-        }
+        if (want && !fp16_supported())
+            throw std::runtime_error("APXCHOL_SPTRSV_FP16=1 requires an x86 CPU with AVX/F16C support");
         return want;
     }
     /// Which storage the LAST setup() chose.
@@ -405,7 +396,6 @@ private:
         fp16_ = fp16_from_env();
 #ifdef __x86_64__
         if (fp16_) {
-            simd_fp16_ = simd_fp16_kernel();
             setup_impl<_Float16>(L, m, consumed);
             return;
         }
@@ -1186,17 +1176,9 @@ private:
                 const node_index level_sz =
                     static_cast<node_index>(level.size());
                 if (level_sz <= kSpTRSVOMPThreshold) {
-                    for (node_index k = 0; k < level_sz; ++k) {
-                        prefetch_ahead<Dir, V>(level, k, level_sz);
-                        solve_row<Dir, V, /*Fat=*/false>(
-                            level[k], x_in, y_out);
-                    }
+                    solve_level_rows<Dir, V, false, false>(level, x_in, y_out);
                 } else {
-                    for (node_index k = 0; k < level_sz; ++k) {
-                        prefetch_ahead<Dir, V>(level, k, level_sz);
-                        solve_row<Dir, V, /*Fat=*/true>(
-                            level[k], x_in, y_out);
-                    }
+                    solve_level_rows<Dir, V, true, false>(level, x_in, y_out);
                 }
             }
         });
@@ -1205,8 +1187,34 @@ private:
     // One thread owns one processor lane. Rows in a (processor, step) slot
     // stay in topological order, while cross-lane dependencies wait for the
     // staleness-2 frontier. Called collectively by the hybrid's OpenMP team.
+#ifdef __x86_64__
+    template <class Dir>
+    [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
+    void solve_critical_fma(const double* x_in, double* y_out) const {
+        solve_critical_team_impl<Dir, _Float16>(x_in, y_out);
+    }
+
+    template <class Dir>
+    [[gnu::target("f16c"), gnu::flatten]]
+    void solve_critical_fp16(const double* x_in, double* y_out) const {
+        solve_critical_team_impl<Dir, _Float16>(x_in, y_out);
+    }
+#endif
+
     template <class Dir, class V>
     void solve_critical_team(const double* x_in, double* y_out) const {
+#if defined(__x86_64__) && !(defined(__AVX2__) && defined(__F16C__) && defined(__FMA__))
+        if constexpr (std::is_same_v<V, _Float16>) {
+            if (simd_fp16_kernel())
+                return solve_critical_fma<Dir>(x_in, y_out);
+            return solve_critical_fp16<Dir>(x_in, y_out);
+        }
+#endif
+        solve_critical_team_impl<Dir, V>(x_in, y_out);
+    }
+
+    template <class Dir, class V>
+    void solve_critical_team_impl(const double* x_in, double* y_out) const {
 #ifdef _OPENMP
         const unsigned processor =
             static_cast<unsigned>(omp_get_thread_num());
@@ -1302,18 +1310,62 @@ private:
             const node_index level_sz = static_cast<node_index>(level.size());
             if (level_sz <= kSpTRSVOMPThreshold) {
                 #pragma omp single
-                for (node_index k = 0; k < level_sz; ++k) {
-                    prefetch_ahead<Dir, V>(level, k, level_sz);
-                    solve_row<Dir, V, /*Fat=*/false>(level[k], x_in, y_out);
-                } // implicit barrier on omp single
+                solve_level_rows<Dir, V, false, false>(level, x_in, y_out);
+                // implicit barrier on omp single
             } else {
-                #pragma omp for schedule(static)
-                for (node_index k = 0; k < level_sz; ++k) {
-                    prefetch_ahead<Dir, V>(level, k, level_sz);
-                    solve_row<Dir, V, /*Fat=*/true>(level[k], x_in, y_out);
-                } // implicit barrier on omp for
+                solve_level_rows<Dir, V, true, true>(level, x_in, y_out);
             }
         }
+    }
+
+    template <class Dir, class V, bool Fat, bool Simd, bool Parallel, class Level>
+    [[gnu::always_inline]]
+    void solve_level_rows_impl(const Level& level, const double* x_in, double* y_out) const {
+        const node_index size = static_cast<node_index>(level.size());
+        if constexpr (Parallel) {
+            #pragma omp for schedule(static)
+            for (node_index k = 0; k < size; ++k) {
+                prefetch_ahead<Dir, V>(level, k, size);
+                solve_row<Dir, V, Fat, Simd>(level[k], x_in, y_out);
+            }
+        } else {
+            for (node_index k = 0; k < size; ++k) {
+                prefetch_ahead<Dir, V>(level, k, size);
+                solve_row<Dir, V, Fat, Simd>(level[k], x_in, y_out);
+            }
+        }
+    }
+
+#ifdef __x86_64__
+    // Enter the target once per level. Flatten then inlines the row arithmetic
+    // and matching dot kernel, keeping calls and feature checks out of the rows.
+    template <class Dir, bool Fat, bool Parallel, class Level>
+    [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
+    void solve_level_rows_simd(const Level& level, const double* x_in, double* y_out) const {
+        solve_level_rows_impl<Dir, _Float16, Fat, Fat, Parallel>(level, x_in, y_out);
+    }
+
+    template <class Dir, bool Fat, bool Parallel, class Level>
+    [[gnu::target("f16c"), gnu::flatten]]
+    void solve_level_rows_f16c(const Level& level, const double* x_in, double* y_out) const {
+        solve_level_rows_impl<Dir, _Float16, Fat, false, Parallel>(level, x_in, y_out);
+    }
+#endif
+
+    template <class Dir, class V, bool Fat, bool Parallel, class Level>
+    [[gnu::always_inline]]
+    void solve_level_rows(const Level& level, const double* x_in, double* y_out) const {
+#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
+        if constexpr (std::is_same_v<V, _Float16>)
+            return solve_level_rows_impl<Dir, V, Fat, Fat, Parallel>(level, x_in, y_out);
+#elif defined(__x86_64__)
+        if constexpr (std::is_same_v<V, _Float16>) {
+            if (simd_fp16_kernel())
+                return solve_level_rows_simd<Dir, Fat, Parallel>(level, x_in, y_out);
+            return solve_level_rows_f16c<Dir, Fat, Parallel>(level, x_in, y_out);
+        } else
+#endif
+        solve_level_rows_impl<Dir, V, Fat, false, Parallel>(level, x_in, y_out);
     }
 
     // Two-stage prefetch: pull the row-pointer of the row 8 ahead (cheap ptr[]
@@ -1581,16 +1633,8 @@ private:
     // corresponding target_clones versions:
     // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95796
     // https://github.com/llvm/llvm-project/pull/230278
-    // Keep the direct, inlined kernel when the build already requires its ISA.
-    static constexpr bool kCompiledSimd =
-#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-        true;
-#else
-        false;
-#endif
-
     template <bool Fat>
-    __attribute__((target("f16c")))
+    [[gnu::target("f16c")]]
     static double dot_fp16_scalar(const _Float16* vals, const node_index* idx,
                                   edge_index p, edge_index end, const double* y) {
         if constexpr (!Fat) return dot_thin(vals, idx, p, end, y);
@@ -1605,7 +1649,7 @@ private:
     static constexpr std::size_t dot_lanes = sizeof(dot_vector) / sizeof(double);
     using half_vector [[gnu::vector_size(dot_lanes * sizeof(_Float16))]] = _Float16;
 
-    __attribute__((target("avx2,f16c,fma"), always_inline))
+    [[gnu::target("avx2,f16c,fma"), gnu::always_inline]]
     static inline dot_vector widen_vector(half_vector h) {
 #ifdef __clang__
         return __builtin_convertvector(h, dot_vector);
@@ -1618,7 +1662,7 @@ private:
 #endif
     }
 
-    __attribute__((target("avx2,f16c,fma")))
+    [[gnu::target("avx2,f16c,fma")]]
     static double dot_fat_simd(const _Float16* vals, const node_index* idx,
                                edge_index p, edge_index end, const double* y) {
         dot_vector sum = {};
@@ -1638,7 +1682,6 @@ private:
         return result;
     }
 
-    bool simd_fp16_ = false;
 #endif
 
     // One row (forward: CSR row i) / column (back: CSC column j) of the sweep:
@@ -1648,7 +1691,7 @@ private:
     // Fat: the `omp for` levels -- the SIMD kernel on 16-bit storage, else the
     // plain single-accumulator loop (instruction-identical to the pre-fold fp32
     // kernel); thin: dot_thin (4-way).
-    template <class Dir, class V, bool Fat>
+    template <class Dir, class V, bool Fat, bool Simd = false>
     void solve_row(node_index v, const double* x_in, double* y_out) const {
         const edge_index* ptr = Dir::ptr(*this).data();
         const edge_index p0 = Dir::first(ptr, v);
@@ -1656,16 +1699,10 @@ private:
         double sum;
 #ifdef __x86_64__
         if constexpr (std::is_same_v<V, _Float16>) {
-            const auto* vals = Dir::template vals<V>(*this).data();
-            const auto* idx = Dir::idx(*this).data();
-            if constexpr (Fat) {
-                if (kCompiledSimd || simd_fp16_)
-                    sum = dot_fat_simd(vals, idx, p0, p1, y_out);
-                else
-                    sum = dot_fp16_scalar<true>(vals, idx, p0, p1, y_out);
-            } else {
-                sum = dot_fp16_scalar<false>(vals, idx, p0, p1, y_out);
-            }
+            if constexpr (Simd)
+                sum = dot_fat_simd(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+            else
+                sum = dot_fp16_scalar<Fat>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
         } else
 #endif
         if constexpr (Fat) {

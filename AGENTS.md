@@ -149,7 +149,8 @@ choices, retired knobs, and measurements belong in
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
   `python/pyproject.toml`.
 
-- `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
+- `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
+  use C++23, requiring CUDA Toolkit 13.3+ and CMake 4.4+. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
   competitors independently require cuSPARSE/cuBLAS; distinguish their driver
   linkage from our library linkage.
@@ -208,9 +209,10 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   the normal round-to-nearest environment and retains signed subnormal flushing.
   Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
   packed conversion and scalar widening workarounds stay local to conversion.
-  Portable x86 builds select FP16 kernels at setup from runtime CPU features:
-  AVX/F16C permits scalar conversion, with AVX2/FMA enabling the fat-row kernel.
-  Unsupported CPUs retain FP32 storage; FP16 remains opt-in on the CPU.
+  Portable x86 builds check AVX/F16C before selecting FP16 storage. AVX2/FMA
+  selects the optimized kernels once per level or critical tail, before the row
+  loops; native builds use them directly.
+  FP16 remains opt-in on the CPU; unsupported explicit requests fail at setup.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
   `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
   writer threads perform the first touch. Pointer, diagonal, scale, and other

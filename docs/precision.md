@@ -15,7 +15,7 @@ installed triangular-solve arrays, and the outer iteration. A build with
 
 `APXCHOL_SPTRSV_FP16=0|1` selects triangular-solve storage at setup. CPU FP16
 is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
-checked at setup; unsupported CPUs retain FP32 storage. Fat levels use the
+checked at setup; an unsupported explicit FP16 request raises an error. Fat levels use the
 AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise.
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.

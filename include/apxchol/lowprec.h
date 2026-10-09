@@ -70,7 +70,7 @@ inline int sptrsv_fp16_env_tristate() {
 namespace detail {
 
 inline bool fp16_flushes(_Float16 value) {
-    // numeric_limits<_Float16> is unavailable with Clang and in CUDA's C++20 mode.
+    // numeric_limits<_Float16> is unavailable with our Clang toolchains.
     // https://github.com/llvm/llvm-project/issues/105196
     return std::abs(float(value)) < __FLT16_MIN__;
 }

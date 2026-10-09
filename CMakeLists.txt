@@ -122,10 +122,9 @@ endif()
 
 if (APXCHOL_USE_CUDA)
     enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
+    find_package(CUDAToolkit 13.3 REQUIRED)
     # Must be set before the target is created — CMAKE_CUDA_ARCHITECTURES is
-    # read at add_library() time. The "native" value requires CMake >= 3.24;
-    # pass -DCMAKE_CUDA_ARCHITECTURES=<sm> explicitly on older CMake.
+    # read at add_library() time.
     if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures")
     endif()
@@ -181,10 +180,7 @@ if (APXCHOL_USE_CUDA)
     # cudart only: the SpTRSV kernels, the GPU-resident PCG's SpMV / vector
     # kernels and its reductions are all ours; no cuSPARSE or cuBLAS.
     target_link_libraries(apxchol_core PUBLIC CUDA::cudart)
-    # nvcc (13.x) + recent CMake reject a "CUDA23" dialect, so the .cu device TUs
-    # compile as C++20 while the host .cpp TUs stay C++23 — same fix as
-    # benchmarks/apxchol_v1. Without this the CUDA configure fails outright.
-    set_target_properties(apxchol_core PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
+    set_target_properties(apxchol_core PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
 endif()
 
 if (APXCHOL_64BIT_EDGE_INDICES)
