@@ -42,11 +42,13 @@ test = ["pytest>=7"]
 cmake.version = ">=3.16"
 wheel.packages = ["apxchol"]
 build-dir = "build/{wheel_tag}"
-wheel.license-files = ["LICENSE", "LICENSE.libomp.txt"]
+wheel.license-files = ["LICENSE*"]
 
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_*"
+# Fetch the upstream license for the OpenMP runtime bundled by wheel repair.
+before-build = 'curl -fsSL --retry 3 https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.8/openmp/LICENSE.TXT -o "{package}/LICENSE.libomp.txt"'
 test-requires = ["pytest"]
 test-command = "python -m pytest {package}/tests -q"
 config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF" }

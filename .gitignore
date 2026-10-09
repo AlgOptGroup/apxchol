@@ -38,6 +38,7 @@ Thumbs.db
 *.mexa64
 
 # Python
+python/LICENSE.libomp.txt
 .venv/
 __pycache__/
 *.pyc

@@ -134,7 +134,8 @@ choices, retired knobs, and measurements belong in
 
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting
-  macOS 15.0. cibuildwheel repairs the wheels and runs the Python tests.
+  macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
+  building, includes it in the wheels, repairs them and runs the Python tests.
   Linux installs the distro's Clang and uses its C++ runtime libraries.
   Untuned x86-64 builds share the x86-64-v2 minimum, including Debug and
   benchmarks. Native Release builds retain host tuning. The portable Linux
