@@ -204,9 +204,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   AUTO uses the structural critical-tail schedule when metadata permits;
   `levels` is the reference. Share row arithmetic across schedules and storage.
   Research schedules on other branches are not production modes.
-- CPU FP16 storage uses the native `_Float16` alias `fp16_t`; setup retains
-  fixed round-to-nearest-even and signed subnormal flushing. Its AVX2 fat-row
-  kernel uses packed double arithmetic with a four-lane accumulator; GCC's
+- CPU FP16 storage uses `_Float16` directly; setup uses native conversion under
+  the normal round-to-nearest environment and retains signed subnormal flushing.
+  Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
   packed conversion and scalar widening workarounds stay local to conversion.
   Runtime CPU dispatch is not yet enabled in portable wheels.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use

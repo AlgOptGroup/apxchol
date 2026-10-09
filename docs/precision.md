@@ -25,7 +25,8 @@ or one for an empty/zero off-diagonal column. The factor-drop threshold uses
 this scale before dropping. Drop compensation runs on FP32 values before
 narrowing; the retained values preserve the column sum up to rounding.
 
-An off-diagonal is stored as round-to-nearest-even FP16 of `L_ij / s_j`.
+An off-diagonal is stored by native conversion of `L_ij / s_j` to FP16.
+Under the normal floating-point environment this rounds to nearest, ties to even.
 FP16 subnormals are flushed to signed zero. The scaled diagonal remains FP32
 and absorbs the off-diagonal rounding residual. Degenerate scales fall back
 to one before dropping; invalid final diagonals/scales are rejected.

@@ -2,7 +2,7 @@
 // (include/apxchol/solver/sptrsv/omp.h): the compiled storage type matches
 // the build flag, and the kernels compute in double from the WIDENED stored
 // factor values (whatever sptrsv_value_t this build compiled: fp16-scaled /
-// fp32 / fp64 -- see lowprec.h; fp16_t itself and the storage contract of
+// fp32 / fp64 -- see lowprec.h; _Float16 itself and the storage contract of
 // setup() are tested in test_lowprec.cpp) -- thin-level (`omp single`) and
 // fat-level (`omp for`, SIMD on 16-bit storage) kernels, both gather flavours.
 
@@ -59,7 +59,7 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     // widen() of every storage type this build can see is the exact value.
     EXPECT_EQ(apxchol::widen(0.75f), 0.75);
     EXPECT_EQ(apxchol::widen(0.75), 0.75);
-    EXPECT_EQ(apxchol::widen(apxchol::fp16_t(0.75f)), 0.75);
+    EXPECT_EQ(apxchol::widen(_Float16(0.75f)), 0.75);
 
     sparse_csc L; L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
     {
@@ -116,7 +116,7 @@ bool fp16_storage(const char* env_value) {
 // rescaled) for the OFF-DIAGONAL entry with value v in a column with scale s:
 // through narrow_value. On the fp32 storage this is v itself.
 double kernel_offdiag(factor_value_t v, float s, bool fp16) {
-    return fp16 ? apxchol::widen(apxchol::omp_sptrsv::narrow_value<apxchol::fp16_t>(v, s))
+    return fp16 ? apxchol::widen(apxchol::omp_sptrsv::narrow_value<_Float16>(v, s))
                 : apxchol::widen(apxchol::omp_sptrsv::narrow_value<float>(v, s));
 }
 // The per-column scale the kernels' input / output carry (1.0f on fp32).
@@ -131,7 +131,7 @@ double kernel_diag(const sparse_csc& L, node_index j, bool fp16) {
     const edge_index p0 = L.outer_[j];
     if (!fp16) return apxchol::omp_sptrsv::stored_diag<float>(L.vals_[p0], 1.0f);
     const float s = pair_scale(L, j, true);
-    double d = apxchol::omp_sptrsv::stored_diag<apxchol::fp16_t>(L.vals_[p0], s);
+    double d = apxchol::omp_sptrsv::stored_diag<_Float16>(L.vals_[p0], s);
     double resid = 0.0;
     for (edge_index p = p0 + 1; p < L.outer_[j + 1]; ++p)
         resid += static_cast<double>(L.vals_[p]) / static_cast<double>(s)
@@ -251,7 +251,7 @@ void run_kernel_precision_check() {
         trsv.transpose_solve(yp.data(), z.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
-            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<apxchol::fp16_t>(pair_scale(L, j, true)) : 1.0;
+            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z, /*transpose=*/true, fp16);
@@ -391,7 +391,7 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
         trsv.transpose_solve(yp.data(), z.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
-            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<apxchol::fp16_t>(pair_scale(L, j, true)) : 1.0;
+            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z,  /*transpose=*/true, fp16);

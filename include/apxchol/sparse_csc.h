@@ -1,6 +1,6 @@
 #pragma once
 #include "apxchol/types.h"
-#include "apxchol/lowprec.h"   // fp16_t, widen(), the APXCHOL_SPTRSV_FP16 reader
+#include "apxchol/lowprec.h"   // _Float16, widen(), the APXCHOL_SPTRSV_FP16 reader
 #include <vector>
 #include <cstddef>
 #include <limits>

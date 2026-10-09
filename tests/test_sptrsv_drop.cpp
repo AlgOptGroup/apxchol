@@ -24,6 +24,7 @@
 // test_lowprec.cpp.
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -632,7 +633,7 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
 // The fp16 per-column-scaled storage the dataflow backend uploads under
 // APXCHOL_SPTRSV_FP16=1 (cuda_host.h file header): each slot is
 // binary16(fp32(v) / s_j) RNE with fp16 subnormals flushed to signed zero
-// (restated here through lowprec.h's fp16_t on the bit level), diag[j] =
+// (restated here through lowprec.h's _Float16 on the bit level), diag[j] =
 // fp32(L_jj) / s_j, inv_scale[j] = fp32(1 / s_j); with diag_comp the column's
 // rounding residual is folded into diag[j] so the STORED column (diag +
 // widened off-diagonals) sums to the fp32 column / s_j; the drop's fp16 keep
@@ -661,7 +662,7 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 for (int k = LT.ptr[j] + 1; k < LT.ptr[j + 1]; ++k) {
                     const float v = static_cast<float>(LT.vals[k]);
                     const bool thr = std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(scales[j]);
-                    const apxchol::fp16_t h(v / scales[j]);
+                    const _Float16 h(v / scales[j]);
                     const bool fmt = h != 0 && !apxchol::is_stored_subnormal(h);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], rel, true) != (thr && fmt);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], 1e-30, true) != (v != 0.0f && fmt);
@@ -688,13 +689,13 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 double resid = 0.0, col_x = 0.0, col_stored = 0.0;
                 for (int k = LT.ptr[j]; k < LT.ptr[j + 1]; ++k) {
                     const float v = static_cast<float>(LT.vals[k]);
-                    apxchol::fp16_t h(v / s);                                    // RNE
+                    _Float16 h(v / s);                                    // RNE
                     if (apxchol::is_stored_subnormal(h))
                         h = std::copysign(0.0f, float(h));
                     bits_mismatch += h16.vals[k] != std::bit_cast<std::uint16_t>(h);
                     if (k == LT.ptr[j]) continue;                                // diagonal slot
-                    sub += apxchol::detail::fp16_is_subnormal(h16.vals[k]);
-                    const double w = static_cast<double>(float(std::bit_cast<apxchol::fp16_t>(h16.vals[k])));
+                    sub += apxchol::is_stored_subnormal(std::bit_cast<_Float16>(h16.vals[k]));
+                    const double w = static_cast<double>(float(std::bit_cast<_Float16>(h16.vals[k])));
                     resid      += static_cast<double>(LT.vals[k]) / static_cast<double>(s) - w;
                     col_x      += static_cast<double>(LT.vals[k]) / static_cast<double>(s);
                     col_stored += w;
@@ -1194,7 +1195,7 @@ std::vector<float> host_reference_sweep(int m, bool reverse,
         double sum = 0.0, d = 0.0;
         for (int p = rowptr[i]; p < rowptr[i + 1]; ++p) {
             const int j = colidx[p];
-            const double v = vals16 ? apxchol::widen(std::bit_cast<apxchol::fp16_t>(vals16[p]))
+            const double v = vals16 ? apxchol::widen(std::bit_cast<_Float16>(vals16[p]))
                                     : static_cast<double>(vals[p]);
             if (j == i) { d = vals16 ? static_cast<double>(diag[i]) : v; continue; }
             sum += v * out[j];

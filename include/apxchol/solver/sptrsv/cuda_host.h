@@ -8,7 +8,7 @@
 // transpose.h implementation, the one omp_sptrsv::setup runs), the dataflow
 // schedules and the dataflow batch tables. Deliberately CUDA-FREE (no cuda_runtime.h, no __half: fp16
 // values are IEEE binary16 BIT PATTERNS, std::uint16_t, produced by
-// lowprec.h's fp16_t -- the same RNE the CPU FP16_SCALED build uses -- and
+// lowprec.h's narrowing helper -- shared with CPU storage -- and
 // reinterpreted as __half on the device) so the CPU unit tests can state,
 // without a GPU, that what the GPU backend uploads is what the CPU backend
 // stores (tests/test_sptrsv_drop.cpp, "GpuHostPrep*").
@@ -36,6 +36,7 @@
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include "apxchol/solver/sptrsv/transpose.h"
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -148,7 +149,7 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
 template <class Val>
 inline bool keep_offdiag(Val v, float s, double rel, bool fp16_storage) {
     if (!(std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s))) return false;
-    if (fp16_storage) return !detail::fp16_flushes(static_cast<float>(v) / s);
+    if (fp16_storage) return !detail::fp16_flushes(_Float16(static_cast<float>(v) / s));
     return v != Val(0);
 }
 
@@ -212,8 +213,6 @@ struct fp16_scaled_arrays {
     std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0: they are always flushed)
 };
 
-inline float widen_fp16(std::uint16_t bits) { return float(std::bit_cast<fp16_t>(bits)); }
-
 template <class Val>
 inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std::vector<float>& col_scale) {
     fp16_scaled_arrays out;
@@ -237,12 +236,12 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
         double resid = 0.0;                                            // sum over the off-diagonals of (x - widen(stored))
         for (int p = L11.ptr[j]; p < L11.ptr[j + 1]; ++p) {
             const float v = static_cast<float>(L11.vals[p]);
-            const std::uint16_t h = std::bit_cast<std::uint16_t>(detail::narrow_scaled_fp16(v, s));
-            out.vals[p] = h;
+            const _Float16 h = detail::narrow_scaled_fp16(v, s);
+            out.vals[p] = std::bit_cast<std::uint16_t>(h);
             if (L11.idx[p] == j) continue;   // the diagonal SLOT: written, never read (see the file header)
-            const float w = widen_fp16(h);
+            const float w = float(h);
             if (v != 0.0f && w == 0.0f) ++n_flush;
-            else if (detail::fp16_is_subnormal(h)) ++n_sub;
+            else if (is_stored_subnormal(h)) ++n_sub;
             resid += static_cast<double>(L11.vals[p]) / static_cast<double>(s) - static_cast<double>(w);
         }
         d = static_cast<float>(static_cast<double>(d) + resid);

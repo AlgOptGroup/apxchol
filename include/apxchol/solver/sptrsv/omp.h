@@ -6,6 +6,7 @@
 #include "apxchol/solver/sptrsv/factor_drop.h"   // the compacting drop (shared with the CUDA backend)
 #include "apxchol/solver/sptrsv/transpose.h"     // the CSC -> CSR transpose (shared with the CUDA backend)
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -156,7 +157,7 @@ private:
 /// policy (fwd_dir / bck_dir, below the kernel) supplies the arrays, the level
 /// order, the off-diagonal slot range and diagonal slot of a row / column, and
 /// the input transform (identity, or the fp16 storage's folded x * r_j^2 on
-/// the back solve), and whose STORAGE type V is float or fp16_t.
+/// the back solve), and whose STORAGE type V is float or _Float16.
 /// Round-derived levels are implicit contiguous ranges over a setup-time
 /// snapshot of the supplied round bounds;
 /// schedule construction without valid round metadata retains the materialized
@@ -253,11 +254,11 @@ public:
     /// Which storage the LAST setup() chose.
     bool fp16() const { return fp16_; }
     /// Width / name of the stored off-diagonal values after the last setup().
-    std::size_t value_bytes() const { return fp16_ ? sizeof(fp16_t) : sizeof(float); }
+    std::size_t value_bytes() const { return fp16_ ? sizeof(_Float16) : sizeof(float); }
     const char* value_name() const { return fp16_ ? "fp16 (per-column scaled)" : "float (fp32)"; }
     /// Whether the fat-level kernels of the fp16 storage are the SIMD ones on
     /// this target (AVX2 + F16C + FMA).
-    static constexpr bool simd_fp16_kernel() { return simd_dot_v<fp16_t>; }
+    static constexpr bool simd_fp16_kernel() { return simd_dot_v<_Float16>; }
 
     // THE storage contract (public so the unit tests can state it): what
     // setup() stores for the factor entry with value v, in a column whose
@@ -270,7 +271,7 @@ public:
     // (APXCHOL_FACTOR_DROP) happens BEFORE this: dropped entries never reach it.
     template <class V = sptrsv_value_t>
     static V narrow_value(factor_value_t v, float s) {
-        if constexpr (std::is_same_v<V, fp16_t>) {
+        if constexpr (std::is_same_v<V, _Float16>) {
             return detail::narrow_scaled_fp16(static_cast<float>(v), s);
         } else {
             (void)s;
@@ -285,8 +286,8 @@ public:
     // rounding), which narrow_value flushes. Pure.
     template <class V = sptrsv_value_t>
     static bool format_flushes(factor_value_t v, float s) {
-        if constexpr (std::is_same_v<V, fp16_t>) {
-            return detail::fp16_flushes(static_cast<float>(v) / s);
+        if constexpr (std::is_same_v<V, _Float16>) {
+            return detail::fp16_flushes(_Float16(static_cast<float>(v) / s));
         } else {
             (void)s;
             return v == 0;
@@ -322,7 +323,7 @@ public:
     // fp32 storage reads the factor value inline (== L_jj).
     template <class V = sptrsv_value_t>
     static double stored_diag(factor_value_t L_jj, float s) {
-        if constexpr (std::is_same_v<V, fp16_t>) {
+        if constexpr (std::is_same_v<V, _Float16>) {
             return static_cast<double>(static_cast<float>(L_jj) / s);
         } else {
             (void)s;
@@ -334,7 +335,7 @@ public:
     // in double); 1.0 on the fp32 storage.
     template <class V = sptrsv_value_t>
     static double inv_scale(float s) {
-        if constexpr (std::is_same_v<V, fp16_t>) {
+        if constexpr (std::is_same_v<V, _Float16>) {
             return static_cast<double>(1.0f / s);
         } else {
             (void)s;
@@ -403,7 +404,7 @@ private:
         if (fp16_from_env()) {
             // `if constexpr` so a build without F16C never instantiates the
             // fp16 setup / kernels at all (see the file header).
-            if constexpr (fp16_supported()) { fp16_ = true; setup_impl<fp16_t>(L, m, consumed); return; }
+            if constexpr (fp16_supported()) { fp16_ = true; setup_impl<_Float16>(L, m, consumed); return; }
         }
         fp16_ = false;
         setup_impl<float>(L, m, consumed);
@@ -413,7 +414,7 @@ private:
     // setup_consuming); it then always aliases &L. V is the storage type.
     template <class V>
     void setup_impl(const sparse_csc& L, node_index m, sparse_csc* consumed) {
-        constexpr bool kScaled = std::is_same_v<V, fp16_t>;   // narrow_value / stored_diag read s_j
+        constexpr bool kScaled = std::is_same_v<V, _Float16>;   // narrow_value / stored_diag read s_j
         m_ = m;
         const bool trace = std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
         auto now = []() {
@@ -1115,7 +1116,7 @@ private:
     void solve_dispatch(const double* x_in, double* y_out) const {
         if (fp16_) {
             if constexpr (fp16_supported()) {
-                solve_selected<Dir, fp16_t>(x_in, y_out);
+                solve_selected<Dir, _Float16>(x_in, y_out);
                 return;
             }
         }
@@ -1406,11 +1407,11 @@ public:
         std::size_t b = csr_row_ptr_.capacity() * sizeof(edge_index)
                       + csr_col_idx_.capacity() * sizeof(node_index)
                       + csr_vals32_.capacity()  * sizeof(float)
-                      + csr_vals16_.capacity()  * sizeof(fp16_t)
+                      + csr_vals16_.capacity()  * sizeof(_Float16)
                       + csc_col_ptr_.capacity() * sizeof(edge_index)
                       + csc_row_idx_.capacity() * sizeof(node_index)
                       + csc_vals32_.capacity()  * sizeof(float)
-                      + csc_vals16_.capacity()  * sizeof(fp16_t)
+                      + csc_vals16_.capacity()  * sizeof(_Float16)
                       + pending_round_bounds_.capacity() * sizeof(node_index)
                       + active_round_bounds_.capacity() * sizeof(node_index)
                       + diag_.capacity()      * sizeof(float)
@@ -1454,24 +1455,24 @@ private:
     big_vec<edge_index>     csr_row_ptr_;
     big_output_vec<node_index> csr_col_idx_;
     big_output_vec<float>      csr_vals32_;
-    big_output_vec<fp16_t>     csr_vals16_;
+    big_output_vec<_Float16>     csr_vals16_;
 
     // CSC of L11 (back solve). col_ptr is an offset array (edge_index);
     // row_idx holds row ids (node_index).
     big_vec<edge_index>     csc_col_ptr_;
     big_output_vec<node_index> csc_row_idx_;
     big_output_vec<float>      csc_vals32_;
-    big_output_vec<fp16_t>     csc_vals16_;
+    big_output_vec<_Float16>     csc_vals16_;
 
     // Storage-array selection by type, for the templated setup / kernels.
     big_output_vec<float>&  vals_csr(std::type_identity<float>)  { return csr_vals32_; }
-    big_output_vec<fp16_t>& vals_csr(std::type_identity<fp16_t>) { return csr_vals16_; }
+    big_output_vec<_Float16>& vals_csr(std::type_identity<_Float16>) { return csr_vals16_; }
     big_output_vec<float>&  vals_csc(std::type_identity<float>)  { return csc_vals32_; }
-    big_output_vec<fp16_t>& vals_csc(std::type_identity<fp16_t>) { return csc_vals16_; }
+    big_output_vec<_Float16>& vals_csc(std::type_identity<_Float16>) { return csc_vals16_; }
     const big_output_vec<float>&  vals_csr(std::type_identity<float>)  const { return csr_vals32_; }
-    const big_output_vec<fp16_t>& vals_csr(std::type_identity<fp16_t>) const { return csr_vals16_; }
+    const big_output_vec<_Float16>& vals_csr(std::type_identity<_Float16>) const { return csr_vals16_; }
     const big_output_vec<float>&  vals_csc(std::type_identity<float>)  const { return csc_vals32_; }
-    const big_output_vec<fp16_t>& vals_csc(std::type_identity<fp16_t>) const { return csc_vals16_; }
+    const big_output_vec<_Float16>& vals_csc(std::type_identity<_Float16>) const { return csc_vals16_; }
 
     // fp32 diagonal, i < m_ (the fp16 storage only; see the file header): the
     // scaled L(i,i) / s_i (one fp32 division, stored_diag()) plus the column's
@@ -1530,7 +1531,7 @@ private:
         // see the file header -- x_in[j] itself on fp32.
         template <class V>
         static double rhs(const omp_sptrsv& s, node_index j, const double* x_in) {
-            if constexpr (std::is_same_v<V, fp16_t>) {
+            if constexpr (std::is_same_v<V, _Float16>) {
                 const double r = static_cast<double>(s.inv_scale_[j]);
                 return x_in[j] * (r * r);
             } else {
@@ -1547,7 +1548,7 @@ private:
     // column's rounding residual folded in).
     template <class Dir, class V>
     double diag(node_index v) const {
-        if constexpr (std::is_same_v<V, fp16_t>)
+        if constexpr (std::is_same_v<V, _Float16>)
             return static_cast<double>(diag_[v]);
         else
             return widen(Dir::template vals<V>(*this)[Dir::diag_slot(Dir::ptr(*this).data(), v)]);
@@ -1591,7 +1592,7 @@ private:
     // number of double accumulators. No alignment or row padding is required.
     using dot_vector [[gnu::vector_size(32)]] = double;
     static constexpr std::size_t dot_lanes = sizeof(dot_vector) / sizeof(double);
-    using half_vector [[gnu::vector_size(dot_lanes * sizeof(fp16_t))]] = fp16_t;
+    using half_vector [[gnu::vector_size(dot_lanes * sizeof(_Float16))]] = _Float16;
 
     static inline dot_vector widen_vector(half_vector h) {
 #if defined(__GNUC__) && !defined(__clang__)
@@ -1604,7 +1605,7 @@ private:
 #endif
     }
 
-    static double dot_fat_simd(const fp16_t* vals, const node_index* idx,
+    static double dot_fat_simd(const _Float16* vals, const node_index* idx,
                                edge_index p, edge_index end, const double* y) {
         dot_vector sum = {};
         for (; end - p >= dot_lanes; p += dot_lanes) {

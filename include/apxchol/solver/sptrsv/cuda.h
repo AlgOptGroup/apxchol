@@ -497,7 +497,7 @@ public:
             LT16.vals = std::move(h16.vals);
             mark("  fp16_diag+uploads");
             cuda_host::csr_int<std::uint16_t> L16 = cuda_host::transpose_csr(LT16);
-            mark("  fp16_transpose");
+            mark("  _Float16ranspose");
             dev_alloc(reinterpret_cast<void**>(&d_L_rowptr_), (m_ + 1) * sizeof(int));
             dev_alloc(reinterpret_cast<void**>(&d_L_colidx_), nnz_ * sizeof(int));
             dev_alloc(reinterpret_cast<void**>(&d_L_vals16_), nnz_ * sizeof(std::uint16_t));
