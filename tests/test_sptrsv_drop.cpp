@@ -24,7 +24,6 @@
 // test_lowprec.cpp.
 #include <gtest/gtest.h>
 #include <algorithm>
-#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -663,7 +662,7 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 for (int k = LT.ptr[j] + 1; k < LT.ptr[j + 1]; ++k) {
                     const float v = static_cast<float>(LT.vals[k]);
                     const bool thr = std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(scales[j]);
-                    const _Float16 h(v / scales[j]);
+                    const auto h = _Float16(v / scales[j]);
                     const bool fmt = h != 0 && !apxchol::is_stored_subnormal(h);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], rel, true) != (thr && fmt);
                     disagree += apxchol::cuda_host::keep_offdiag(LT.vals[k], scales[j], 1e-30, true) != (v != 0.0f && fmt);
@@ -680,7 +679,7 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
             const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales);
             ASSERT_EQ(h16.diag.size(), static_cast<size_t>(m));
             ASSERT_EQ(h16.inv_scale.size(), static_cast<size_t>(m));
-            std::uint64_t bits_mismatch = 0, sub = 0;
+            std::uint64_t value_mismatch = 0, sub = 0;
             double worst_cs = 0.0;
             for (node_index j = 0; j < m; ++j) {
                 const float s = scales[j];
@@ -690,10 +689,10 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 double resid = 0.0, col_x = 0.0, col_stored = 0.0;
                 for (int k = LT.ptr[j]; k < LT.ptr[j + 1]; ++k) {
                     const float v = static_cast<float>(LT.vals[k]);
-                    _Float16 h(v / s);                                    // RNE
+                    auto h = _Float16(v / s);
                     if (apxchol::is_stored_subnormal(h))
-                        h = std::copysign(0.0f, float(h));
-                    bits_mismatch += std::bit_cast<std::uint16_t>(h16.vals[k]) != std::bit_cast<std::uint16_t>(h);
+                        h = _Float16(std::copysign(0.0f, float(h)));
+                    value_mismatch += h16.vals[k] != h || std::signbit(float(h16.vals[k])) != std::signbit(float(h));
                     if (k == LT.ptr[j]) continue;                                // diagonal slot
                     sub += apxchol::is_stored_subnormal(h16.vals[k]);
                     const double w = static_cast<double>(float(h16.vals[k]));
@@ -710,7 +709,7 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
                 const double abs_scale  = std::fabs(static_cast<double>(d0)) + std::fabs(col_x) + 1e-300;
                 worst_cs = std::max(worst_cs, std::fabs(stored_sum - x_sum) / abs_scale);
             }
-            EXPECT_EQ(bits_mismatch, 0u);
+            EXPECT_EQ(value_mismatch, 0u);
             EXPECT_EQ(sub, 0u);                      // subnormals flushed
             EXPECT_EQ(h16.subnormal, 0u);
             EXPECT_LT(worst_cs, 4e-7);               // one fp32 rounding of the diagonal
