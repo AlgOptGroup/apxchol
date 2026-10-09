@@ -17,6 +17,9 @@ installed triangular-solve arrays, and the outer iteration. A build with
 is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
 checked at setup; an unsupported explicit FP16 request raises an error. Fat levels use the
 AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise.
+CPU setup converts the CSC values once and copies them into CSR. Consuming
+setup releases the input before transposing; non-consuming FP16 setup retains
+that input and the stored CSC alongside the parallel transpose's scratch.
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.
 

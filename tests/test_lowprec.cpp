@@ -129,6 +129,7 @@ TEST(FP16, StorageConversionMatchesNumericalReference) {
         const float actual = float(apxchol::detail::narrow_scaled_fp16(x, 1.0f));
         ASSERT_EQ(actual, expected) << "x=" << x;
         ASSERT_EQ(std::signbit(actual), std::signbit(expected)) << "x=" << x;
+        ASSERT_EQ(apxchol::omp_sptrsv::format_flushes<_Float16>(x, 1.0f), expected == 0.0f) << "x=" << x;
     }
 }
 
@@ -141,6 +142,13 @@ TEST(FP16, DocumentedSubnormalFlushOverflowAndTies) {
     EXPECT_EQ(float(apxchol::detail::narrow_scaled_fp16(normal_midpoint, 1.0f)), two_m14);
     EXPECT_EQ(float(apxchol::detail::narrow_scaled_fp16(-normal_midpoint, 1.0f)), -two_m14);
     const float below = std::nextafter(normal_midpoint, 0.0f);
+    for (float scale : {0x1p-20f, 1.0f, 3.0f, 0x1p20f})
+        for (float sign : {-1.0f, 1.0f})
+            for (float ratio : {below, normal_midpoint, std::nextafter(normal_midpoint, 1.0f)}) {
+                const float value = sign * ratio * scale;
+                EXPECT_EQ(apxchol::omp_sptrsv::format_flushes<_Float16>(value, scale),
+                          storage_reference(value / scale) == 0.0f);
+            }
     for (float sign : {-1.0f, 1.0f}) {
         const float stored = float(apxchol::detail::narrow_scaled_fp16(sign * below, 1.0f));
         EXPECT_EQ(stored, 0.0f);

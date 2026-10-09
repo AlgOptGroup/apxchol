@@ -257,8 +257,8 @@ public:
     // per-column scale is s (fp16: s_j = max |off-diagonal| of column j, 1.0f
     // if none; the fp32 storage ignores s -- pass 1.0f). fp16 subnormals are
     // flushed to signed zero (see the file header). A PURE function of its
-    // arguments: the CSR transpose and the CSC copy both call it, so the two
-    // stored copies of every entry agree bit-for-bit (a no-op cast on the fp32
+    // arguments: convert the CSC once, then transpose its stored values so
+    // both copies agree bit-for-bit (a no-op cast on the fp32
     // storage, exactly the static_cast it always did). The compacting drop
     // (APXCHOL_FACTOR_DROP) happens BEFORE this: dropped entries never reach it.
     template <class V = sptrsv_value_t>
@@ -279,7 +279,9 @@ public:
     template <class V = sptrsv_value_t>
     static bool format_flushes(factor_value_t v, float s) {
         if constexpr (std::is_same_v<V, _Float16>) {
-            return detail::fp16_flushes(_Float16(static_cast<float>(v) / s));
+            // RNE rounds the midpoint up to the smallest normal binary16 value.
+            constexpr float midpoint = float(__FLT16_MIN__) - 0.5f * float(__FLT16_DENORM_MIN__);
+            return std::abs(static_cast<float>(v) / s) < midpoint;
         } else {
             (void)s;
             return v == 0;
@@ -550,7 +552,7 @@ private:
         // entry is below the threshold the original arrays stay in place (no
         // second copy of the factor for the exact-no-op case, e.g. grids). All
         // of it at the FACTOR's precision (factor_value_t): narrowing to the
-        // storage type happens later, in store().
+        // storage type happens later, in the CSC copy.
         std::vector<edge_index>           drop_outer;
         std::unique_ptr<node_index[]>     drop_inner;
         std::unique_ptr<factor_value_t[]> drop_vals;
@@ -585,110 +587,50 @@ private:
         }
         assert(stats_.nnz_stored == static_cast<std::uint64_t>(nnz));
 
-        // store(v, j): the factor entry with value v in column j of the
-        // (possibly compacted) L11 -> the SpTRSV's storage width, via
-        // narrow_value() (see its contract above). Both stored copies of an
-        // entry (CSR transpose below, CSC copy) go through this same pure
-        // function.
-        const auto store = [=](factor_value_t v, node_index j) -> V {
-            const float s = kScaled ? col_scale[j] : 1.0f;
-            return narrow_value<V>(v, s);
+        auto transpose = [&](const edge_index* ptr, const node_index* idx, const V* vals) {
+            auto& csr_vals = vals_csr(std::type_identity<V>{});
+            csr_row_ptr_.resize(static_cast<size_t>(m_) + 1);
+            csr_col_idx_.resize(nnz);
+            csr_vals.resize(nnz);
+            transpose_csc_to_csr<edge_index, node_index, V>(
+                m_, ptr, idx, vals, csr_row_ptr_.data(), csr_col_idx_.data(), csr_vals.data(),
+                use_parallel_transpose(static_cast<std::int64_t>(m_)));
+            mark("csc_to_csr");
         };
-        if constexpr (kScaled) {
-            // fp32 diagonal, straight from the factor (factor_value_t == float;
-            // NOT via the narrowing path): the scaled L_jj / s_j (stored_diag()
-            // is the contract). L(j,j) is the FIRST entry of CSC column j --
-            // the invariant the back solve has always relied on.
-            diag_.resize(m_);
-            #pragma omp parallel for schedule(static)
-            for (node_index j = 0; j < m_; ++j) {
-                assert(L11_inner[L11_outer[j]] == j && "factor column must start with its diagonal");
-                diag_[j] = static_cast<float>(stored_diag<V>(L11_vals[L11_outer[j]], col_scale[j]));
-            }
-            mark("diag_fp32");
-        }
+        if constexpr (!kScaled) transpose(L11_outer, L11_inner, L11_vals);
 
-        // ── CSC → CSR of L11 (for forward solve) ─────
-        // THE shared transpose (transpose.h; the GPU backend's host prep runs
-        // the same code): the blocked counting-sort parallel transpose --
-        // O(nnz) total work, byte-identical to the serial column-order scatter
-        // at ANY thread count (SpTRSVTranspose.* unit tests) -- for m above
-        // kParTransposeMinRows (APXCHOL_PAR_TRANSPOSE=0 disables it), the
-        // serial scatter below it. Every stored value goes through store().
-        // The design, the memory transient (one nnz-sized bucket, freed on
-        // return) and the rejected alternatives are documented in transpose.h.
-        auto& csr_vals = vals_csr(std::type_identity<V>{});
+        // Convert CSC once, including its diagonal compensation and storage
+        // statistics. FP16 then transposes these stored values; FP32 transposes
+        // first to avoid keeping CSC live alongside the transpose scratch.
         auto& csc_vals = vals_csc(std::type_identity<V>{});
-        csr_row_ptr_.resize(static_cast<size_t>(m_) + 1);
-        csr_col_idx_.resize(nnz);
-        csr_vals.resize(nnz);
-        transpose_csc_to_csr<edge_index, node_index, factor_value_t, V>(
-            m_, L11_outer, L11_inner, L11_vals,
-            csr_row_ptr_.data(), csr_col_idx_.data(), csr_vals.data(),
-            store, use_parallel_transpose(static_cast<std::int64_t>(m_)));
-
-        // fp32 storage: no separate diagonal array -- the solve reads L(i,i)
-        // inline from the factor, the LAST entry of CSR row i (forward: sum loop
-        // stops one short) and the FIRST entry of CSC column j (back: sum loop
-        // starts one in), at the same precision as the off-diagonals (the read
-        // widens like every other one). This matches the GPU backend, which has
-        // always read the diagonal inline. The fp16 storage keeps the exact-fp32
-        // diag_ filled above instead (see diag<Dir, V>); its narrow diagonal
-        // slots in the CSR/CSC are written like every other entry but never read.
-        mark("csc_to_csr");
-
-        // ── CSC of L11 (for back solve) ─────────────────────────
-        // Parallel copy of the three arrays (values through store()), column
-        // by column so store() knows the entry's column; this pass also
-        // gathers the off-diagonal storage statistics (each entry once) and,
-        // under fp16, folds each column's storage-rounding residual into
-        // diag_[j] unconditionally (docs/precision.md, scaled FP16 contract).
         csc_col_ptr_.resize(static_cast<size_t>(m_) + 1);
         csc_row_idx_.resize(nnz);
         csc_vals.resize(nnz);
-        #pragma omp parallel for schedule(static)
-        for (node_index i = 0; i <= m_; ++i)
-            csc_col_ptr_[i] = L11_outer[i];
+        if constexpr (kScaled) diag_.resize(m_);
         {
             std::uint64_t n_off = 0, n_flush = 0, n_sub = 0, n_fsub = 0, n_dlt = 0;
-            #pragma omp parallel for schedule(static) reduction(+ : n_off, n_flush, n_sub, n_fsub, n_dlt)
-            for (node_index j = 0; j < m_; ++j) {
-                double resid = 0.0;                                // sum over the off-diagonals of (x - widen(stored))
-                for (edge_index k = L11_outer[j]; k < L11_outer[j + 1]; ++k) {
-                    const node_index    i  = L11_inner[k];
-                    const factor_value_t v = L11_vals[k];
-                    const V              w = store(v, j);
-                    csc_row_idx_[k] = i;
-                    csc_vals[k]     = w;
-                    if (is_stored_subnormal(v)) ++n_fsub;          // census: the FACTOR value (fp32), diagonal incl.
-                    if constexpr (kScaled) {
-                        if (i != j) {
-                            const double x = static_cast<double>(v) / static_cast<double>(col_scale[j]);
-                            resid += x - widen(w);
-                        }
-                    }
-                    if (i == j) {                                  // diagonal slot: never read under fp16 ...
-                        if constexpr (kScaled) {
-                            // ... but count L_jj < s_j among columns that HAVE
-                            // an off-diagonal (s_j is the placeholder 1.0f
-                            // otherwise): the diagonal-dominance sanity signal.
-                            if (L11_outer[j + 1] - L11_outer[j] > 1 &&
-                                static_cast<double>(v) < static_cast<double>(col_scale[j])) ++n_dlt;
-                        }
-                        continue;
-                    }
-                    ++n_off;
-                    if (v != 0 && widen(w) == 0.0) {
-                        ++n_flush;                                 // zeroed by the storage format
-                    } else if (is_stored_subnormal(w)) {
-                        ++n_sub;
-                    }
-                }
+            #pragma omp parallel reduction(+ : n_off, n_flush, n_sub, n_fsub, n_dlt)
+            {
+                int tid = 0, nt = 1;
+#ifdef _OPENMP
+                tid = omp_get_thread_num();
+                nt = omp_get_num_threads();
+#endif
+                const auto [first, last] = detail::work_balanced_range(L11_outer, m_, tid, nt);
+                lowprec_statistics counts;
+#if defined(__x86_64__) && !defined(__F16C__)
                 if constexpr (kScaled)
-                    diag_[j] = static_cast<float>(static_cast<double>(diag_[j]) + resid);
+                    counts = copy_csc_fp16(L11_outer, L11_inner, L11_vals, first, last);
                 else
-                    (void)resid;
+#endif
+                    counts = copy_csc_columns<V>(L11_outer, L11_inner, L11_vals, first, last);
+                n_off += counts.offdiag;
+                n_flush += counts.flushed;
+                n_sub += counts.subnormal;
+                n_fsub += counts.factor_subnormal;
+                n_dlt += counts.diag_below_scale;
             }
+            csc_col_ptr_[m_] = nnz;
             stats_.offdiag = n_off; stats_.flushed = n_flush;
             stats_.subnormal = n_sub; stats_.factor_subnormal = n_fsub;
             stats_.diag_below_scale = n_dlt;
@@ -748,7 +690,7 @@ private:
         mark("csc_copy");
         // Last read of L11 -- whichever of the input factor, the Laplacian-path
         // copy or the compacted (drop) copy the L11_* pointers aliased. The
-        // level sets and counters below use only the SpTRSV's own arrays, so
+        // transpose and level sets below use only the SpTRSV's own arrays, so
         // release all three sources HERE rather than at return (nnz-sized;
         // swap-with-empty / reset, since `v = {}` / clear() keep the capacity).
         if (consumed) consumed->release_values();
@@ -761,9 +703,70 @@ private:
         drop_vals.reset();
         L11_outer = nullptr; L11_inner = nullptr; L11_vals = nullptr; col_scale = nullptr;
 
+        if constexpr (kScaled)
+            transpose(csc_col_ptr_.data(), csc_row_idx_.data(), csc_vals.data());
+
         build_schedule(mark);
         ready_ = true;
     }
+
+    template <class V>
+    [[gnu::always_inline]]
+    lowprec_statistics copy_csc_columns(const edge_index* ptr, const node_index* idx,
+                                       const factor_value_t* vals, node_index first, node_index last) {
+        constexpr bool kScaled = std::is_same_v<V, _Float16>;
+        auto& csc_vals = vals_csc(std::type_identity<V>{});
+        lowprec_statistics counts;
+        for (node_index j = first; j < last; ++j) {
+            csc_col_ptr_[j] = ptr[j];
+            if constexpr (kScaled) {
+                assert(idx[ptr[j]] == j && "factor column must start with its diagonal");
+                diag_[j] = static_cast<float>(stored_diag<V>(vals[ptr[j]], scale_[j]));
+            }
+            double resid = 0.0; // Off-diagonal storage-rounding residual.
+            for (edge_index k = ptr[j]; k < ptr[j + 1]; ++k) {
+                const node_index    i  = idx[k];
+                const factor_value_t v = vals[k];
+                const V              w = narrow_value<V>(v, kScaled ? scale_[j] : 1.0f);
+                csc_row_idx_[k] = i;
+                csc_vals[k]     = w;
+                if (is_stored_subnormal(v)) ++counts.factor_subnormal;
+                if constexpr (kScaled) {
+                    if (i != j) {
+                        const double x = static_cast<double>(v) / static_cast<double>(scale_[j]);
+                        resid += x - widen(w);
+                    }
+                }
+                if (i == j) {
+                    if constexpr (kScaled) {
+                        // Count L_jj < s_j only when the column has off-diagonals.
+                        if (ptr[j + 1] - ptr[j] > 1 &&
+                            static_cast<double>(v) < static_cast<double>(scale_[j])) ++counts.diag_below_scale;
+                    }
+                    continue;
+                }
+                ++counts.offdiag;
+                if (v != 0 && widen(w) == 0.0) {
+                    ++counts.flushed;
+                } else if constexpr (!kScaled) {
+                    // FP16 subnormals were flushed by narrow_value.
+                    if (is_stored_subnormal(w)) ++counts.subnormal;
+                }
+            }
+            if constexpr (kScaled)
+                diag_[j] = static_cast<float>(static_cast<double>(diag_[j]) + resid);
+        }
+        return counts;
+    }
+
+#ifdef __x86_64__
+    // Enter F16C after OpenMP has outlined its worker, so Clang retains the target.
+    [[gnu::target("f16c"), gnu::flatten]]
+    lowprec_statistics copy_csc_fp16(const edge_index* ptr, const node_index* idx,
+                                    const factor_value_t* vals, node_index first, node_index last) {
+        return copy_csc_columns<_Float16>(ptr, idx, vals, first, last);
+    }
+#endif
 
     static bool round_levels_disabled() {
         const char* value = std::getenv("APXCHOL_ROUND_LEVELS");

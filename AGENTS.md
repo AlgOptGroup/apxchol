@@ -213,6 +213,10 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   selects the optimized kernels once per level or critical tail, before the row
   loops; native builds use them directly.
   FP16 remains opt-in on the CPU; unsupported explicit requests fail at setup.
+  Setup narrows CSC once inside an F16C-targeted worker and transposes those
+  stored values. The format-drop predicate compares the RNE normal/subnormal
+  midpoint without narrowing. Release consumed input before the transpose;
+  FP32 keeps transpose-before-copy ordering to retain its memory bound.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
   `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
   writer threads perform the first touch. Pointer, diagonal, scale, and other

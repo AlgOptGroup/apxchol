@@ -267,10 +267,10 @@ inline csr_int<V> transpose_csr(const csr_int<V>& in) {
     out.ptr.resize(static_cast<std::size_t>(in.m) + 1);
     out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(in.nnz));
     out.vals = std::make_unique_for_overwrite<V[]>(static_cast<std::size_t>(in.nnz));
-    transpose_csc_to_csr<int, int, V, V>(
+    transpose_csc_to_csr<int, int, V>(
         in.m, in.ptr.data(), in.idx.get(), in.vals.get(),
         out.ptr.data(), out.idx.get(), out.vals.get(),
-        [](V v, int) { return v; }, use_parallel_transpose(in.m));
+        use_parallel_transpose(in.m));
     return out;
 }
 

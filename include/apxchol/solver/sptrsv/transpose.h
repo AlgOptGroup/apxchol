@@ -4,14 +4,9 @@
 // forward solve's operand) from the factor's CSC through it, and the GPU
 // backend's host prep (cuda_host::transpose_csr) builds CSR of L from CSR of
 // L^T -- the very same arrays, int32 -- for the dataflow backend through it.
-// Header-only, CUDA-free, OpenMP-parallel, templated on
-// the offset / index / value types (edge_index / node_index / sptrsv_value_t
-// on the CPU, int / int / cuda_value_t or _Float16 in GPU host preparation) and on a
-// `store(v, j)` functor that maps the input value of an entry in column j to
-// the stored value (the CPU's narrow_value() through the storage format; a
-// plain copy on the GPU) -- the same code, so what the GPU uploads is what the
-// CPU stores (tests/test_sptrsv_transpose.cpp states the byte identity of
-// both callers against one serial reference at several thread counts).
+// Header-only, CUDA-free, OpenMP-parallel, templated on offset, index and
+// stored-value types. CPU and GPU host preparation both transpose values
+// after conversion; tests compare both callers with a serial reference.
 //
 // Blocked counting-sort parallel transpose (APXCHOL_PAR_TRANSPOSE, default on
 // for m > kParTransposeMinRows): O(nnz) TOTAL work. It replaced the row-range
@@ -46,7 +41,7 @@
 // byte-identical to the serial result for ANY thread count (verified by the
 // SpTRSVTranspose.* unit tests).
 //
-// Memory: one transient bucket of nnz * (2 * sizeof(Idx) + sizeof(OutVal))
+// Memory: one transient bucket of nnz * (2 * sizeof(Idx) + sizeof(Val))
 // bytes (12 B/nnz on the default 32-bit-index fp32 build, 10 B/nnz for the
 // GPU's fp16 storage), allocated uninitialized (every slot is written exactly
 // once in phase 2) and freed on return, plus the nt x NB count matrix
@@ -107,16 +102,15 @@ inline bool use_parallel_transpose(std::int64_t m) {
 /// the transpose) into the CSR out_ptr[m+1], out_idx[nnz], out_vals[nnz] --
 /// all three output arrays allocated by the caller, every slot written exactly
 /// once (out_ptr in full, out_ptr[m] == nnz). Entry (i, j) with input value v
-/// lands in row i with column j and value store(v, j) (Store: (InVal, Idx) ->
-/// OutVal, pure); within each output row the columns are ascending -- the
+/// lands in row i with column j and the same stored value; within each
+/// output row the columns are ascending -- the
 /// order the serial column walk produces -- on both paths. `parallel` selects
 /// the blocked counting-sort path (use_parallel_transpose(m) is the rule;
 /// without OpenMP it is the serial path regardless). Off / Idx are the
 /// offset / index types (unsigned or signed, 32 or 64 bit).
-template <class Off, class Idx, class InVal, class OutVal, class Store>
-inline void transpose_csc_to_csr(Idx m, const Off* in_ptr, const Idx* in_idx, const InVal* in_vals,
-                                 Off* out_ptr, Idx* out_idx, OutVal* out_vals,
-                                 Store&& store, bool parallel) {
+template <class Off, class Idx, class Val>
+inline void transpose_csc_to_csr(Idx m, const Off* in_ptr, const Idx* in_idx, const Val* in_vals,
+                                 Off* out_ptr, Idx* out_idx, Val* out_vals, bool parallel) {
     const Off nnz = in_ptr[m];
 #ifdef _OPENMP
     if (parallel && m > 0) {
@@ -125,7 +119,7 @@ inline void transpose_csc_to_csr(Idx m, const Off* in_ptr, const Idx* in_idx, co
         // once before phase 3 reads it.
         std::unique_ptr<Idx[]>    bkt_row(new Idx[nnz]);
         std::unique_ptr<Idx[]>    bkt_col(new Idx[nnz]);
-        std::unique_ptr<OutVal[]> bkt_val(new OutVal[nnz]);
+        std::unique_ptr<Val[]> bkt_val(new Val[nnz]);
         std::vector<Off> cnt;      // cnt[t*NB + b]: per-(thread, block) counts
         std::vector<Off> seg_off;  // segment starts, same layout as cnt
         std::vector<Off> blk_off;  // NB+1 block starts (== final CSR offsets)
@@ -193,7 +187,7 @@ inline void transpose_csc_to_csr(Idx m, const Off* in_ptr, const Idx* in_idx, co
                     const Off out = cur[row >> shift]++;
                     bkt_row[out] = row;
                     bkt_col[out] = j;
-                    bkt_val[out] = store(in_vals[p], j);
+                    bkt_val[out] = in_vals[p];
                 }
             #pragma omp barrier
             // Phase 3: per-block stable counting sort into the final CSR (each
@@ -239,7 +233,7 @@ inline void transpose_csc_to_csr(Idx m, const Off* in_ptr, const Idx* in_idx, co
         for (Off p = in_ptr[j]; p < in_ptr[j + 1]; ++p) {
             const Off out = pos[in_idx[p]]++;
             out_idx[out]  = j;
-            out_vals[out] = store(in_vals[p], j);
+            out_vals[out] = in_vals[p];
         }
 }
 
