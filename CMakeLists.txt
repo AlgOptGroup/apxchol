@@ -18,9 +18,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/apxchol_arch.cmake)
-if (NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
-endif()
+add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
 
 include(FetchContent)
 # Fetched projects must not register their own test suites in apxchol's CTest

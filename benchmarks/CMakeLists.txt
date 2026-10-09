@@ -12,9 +12,7 @@ set(APXCHOL_BENCH_ARCH_FLAGS "")
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_arch.cmake)
-if (NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
-endif()
+add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
 set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_ARCH_FLAG}")
 
 include(FetchContent)

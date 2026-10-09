@@ -119,6 +119,9 @@ choices, retired knobs, and measurements belong in
   option OFF for portable wheels; Python optimization follows the CMake build
   type. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
+  The shared CMake architecture helper rejects MSVC and clang-cl. The compiled
+  core checks the x86-64-v2 feature macros, including for native builds, without
+  running a configure-time program.
 - OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
   queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
   while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing

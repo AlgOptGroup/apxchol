@@ -1,3 +1,9 @@
+#if defined(__x86_64__) && (!defined(__SSE3__) || !defined(__SSSE3__) \
+    || !defined(__SSE4_1__) || !defined(__SSE4_2__) || !defined(__POPCNT__) \
+    || !defined(__LAHF_SAHF__) || !defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16))
+#error "apxchol requires an x86-64-v2 or newer compiler target"
+#endif
+
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/elimination/elimination.h"
 #include "apxchol/graph/graph.h"

@@ -6,7 +6,8 @@ GPU-resident solve. C++, Python and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
-Requires CMake, a C++23 compiler with OpenMP, and Eigen (fetched if absent).
+Requires CMake, GCC or Clang with C++23 and OpenMP, and Eigen (fetched if absent).
+MSVC and clang-cl are not supported.
 On x86-64, the minimum CPU requirement is x86-64-v2.
 
 ```bash
