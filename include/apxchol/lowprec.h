@@ -125,7 +125,8 @@ inline bool fp16_flushes(float value) {
 inline constexpr double widen(double v) { return v; }
 inline constexpr double widen(float v) { return static_cast<double>(v); }
 inline double widen(fp16_t v) {
-#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__) && __GNUC__ < 17
+#if defined(__GNUC__) && !defined(__clang__) && !defined(__CUDACC__) \
+    && defined(__x86_64__) && __GNUC__ < 17
     // Avoid software half-to-double conversion until GCC 17 is our minimum.
     // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=127720
     return double(__builtin_assoc_barrier(float(v)));
