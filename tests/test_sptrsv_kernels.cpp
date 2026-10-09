@@ -51,7 +51,7 @@ struct scoped_drop_off : scoped_env {
 
 // The DEFAULT storage width is fp32, and value_name / value_bytes (what the
 // APXCHOL_VERBOSE banner prints) report what the last setup() resolved --
-// fp32 unset, fp16 under APXCHOL_SPTRSV_FP16=1 where the build has F16C.
+// fp32 unset, fp16 under APXCHOL_SPTRSV_FP16=1 where the CPU has F16C.
 TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     EXPECT_EQ(sizeof(sptrsv_value_t), 4u);
     EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
@@ -74,7 +74,7 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     {
         scoped_env on("APXCHOL_SPTRSV_FP16", "1");
         apxchol::omp_sptrsv t; t.setup(L, 2);
-        // Without F16C the env falls back to fp32 with a note (portable builds).
+        // CPUs without F16C fall back to fp32, including in portable builds.
         EXPECT_EQ(t.fp16(), apxchol::omp_sptrsv::fp16_supported());
         EXPECT_EQ(t.value_bytes(), apxchol::omp_sptrsv::fp16_supported() ? 2u : 4u);
         if (apxchol::omp_sptrsv::fp16_supported()) {
@@ -285,9 +285,9 @@ TEST(SpTRSVKernels, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
 // A round-structured factor (R rounds of B > kSpTRSVOMPThreshold mutually
 // independent columns; every off-diagonal points to a LATER round) fed
 // through set_round_bounds so every level is fat and the `omp for` kernels
-// run -- on 16-bit storage the SIMD ones (simd_fp16_kernel()): 8-wide vector
-// widen, 4-wide step, scalar tail. CSR row lengths are spread over 0..48 so
-// every path (8-blocks, the 4-step, tails of 0..3) is exercised. Run at BOTH
+// run -- on 16-bit storage the SIMD ones (simd_fp16_kernel()): four-lane
+// widening and arithmetic, then a scalar tail. CSR row lengths span 0..48 so
+// every path (full vectors and tails of 0..3) is exercised. Run at BOTH
 // storages (APXCHOL_SPTRSV_FP16=0|1) and checked exactly like the thin-level
 // kernels: the pair contract at roundoff against L~ / R and against the
 // serial reference on L_s.
@@ -370,8 +370,10 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
         trsv.set_round_bounds(bounds);
         trsv.setup(L, m);
         ASSERT_EQ(trsv.fp16(), fp16);
-#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-        EXPECT_TRUE(apxchol::omp_sptrsv::simd_fp16_kernel());
+#ifdef __x86_64__
+        const bool simd = __builtin_cpu_supports("avx") && __builtin_cpu_supports("f16c")
+            && __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+        EXPECT_EQ(apxchol::omp_sptrsv::simd_fp16_kernel(), simd);
 #else
         EXPECT_FALSE(apxchol::omp_sptrsv::simd_fp16_kernel());
 #endif

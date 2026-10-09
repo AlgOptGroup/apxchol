@@ -77,10 +77,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: GCC 14
+          - name: GCC 14, portable x86-64-v2
             cc: gcc-14
             cxx: g++-14
             packages: g++-14
+            native_arch: 'OFF'
           - name: Clang 18
             cc: clang-18
             cxx: clang++-18
@@ -98,7 +99,7 @@ jobs:
       - &configure-build
         name: Configure + build (Release)
         run: |
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAPXCHOL_NATIVE_ARCH=${{ matrix.native_arch || 'ON' }}
           cmake --build build
       - &ctest
         name: Run unit tests

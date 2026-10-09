@@ -21,8 +21,8 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-#include <immintrin.h>   // fat-level SIMD kernels (16-bit storage): _mm256_cvtph_ps / _mm256_fmadd_pd
+#ifdef __x86_64__
+#include <immintrin.h>
 #endif
 
 namespace apxchol {
@@ -196,7 +196,7 @@ private:
 // Storage contract (derivation and historical decisions: docs/precision.md):
 //
 // * FP32 arrays by default; APXCHOL_SPTRSV_FP16=1 selects scaled FP16
-//   off-diagonals on F16C targets. Portable builds retain FP32. Arithmetic
+//   off-diagonals on CPUs with F16C, including portable builds. Arithmetic
 //   remains FP64 in both cases; only the stored preconditioner changes.
 // * Scale s_j is the pre-drop maximum absolute off-diagonal of column j, or
 //   one for an empty column. Compacting drop preserves the diagonal and
@@ -220,29 +220,25 @@ public:
     omp_sptrsv() = default;
 
     // ── Storage selection (runtime, per setup) ───────────────────────────
-    /// Whether THIS BUILD can do the fp16 factor storage at all: the target
-    /// must have F16C (the one-instruction fp16 -> fp32 widen). A portable
-    /// baseline-x86-64 build (the distributed wheels) compiles the fp32
-    /// storage only; see docs/precision.md.
-    static constexpr bool fp16_supported() {
-#if defined(__F16C__)
-        return true;
+    /// Whether this CPU supports efficient fp16 conversion.
+    static bool fp16_supported() {
+#ifdef __x86_64__
+        return __builtin_cpu_supports("avx") && __builtin_cpu_supports("f16c");
 #else
         return false;
 #endif
     }
     /// THE storage choice of the next setup(): the unified env
     /// APXCHOL_SPTRSV_FP16=0|1 (lowprec.h; the GPU backend reads the same
-    /// variable), unset = OFF on the CPU. Asking for fp16 on a build without
+    /// variable), unset = OFF on the CPU. Asking for fp16 on a CPU without
     /// F16C falls back to fp32 with a one-shot stderr note.
     static bool fp16_from_env() {
         const bool want = sptrsv_fp16_env_tristate() == 1;
         if (want && !fp16_supported()) {
             static const bool warned = [] {
                 std::fprintf(stderr,
-                    "[apxchol] APXCHOL_SPTRSV_FP16=1 ignored by the CPU SpTRSV: this build has no F16C"
-                    " (compiled for baseline x86-64 / without -march=native), where the fp16 -> fp32 widen"
-                    " becomes a libgcc call in the inner loop (measured 3x slower solve); using fp32 storage\n");
+                    "[apxchol] APXCHOL_SPTRSV_FP16=1 ignored by the CPU SpTRSV:"
+                    " this CPU lacks AVX/F16C; using fp32 storage\n");
                 return true;
             }();
             (void)warned;
@@ -257,7 +253,13 @@ public:
     const char* value_name() const { return fp16_ ? "fp16 (per-column scaled)" : "float (fp32)"; }
     /// Whether the fat-level kernels of the fp16 storage are the SIMD ones on
     /// this target (AVX2 + F16C + FMA).
-    static constexpr bool simd_fp16_kernel() { return simd_dot_v<_Float16>; }
+    static bool simd_fp16_kernel() {
+#ifdef __x86_64__
+        return fp16_supported() && __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+        return false;
+#endif
+    }
 
     // THE storage contract (public so the unit tests can state it): what
     // setup() stores for the factor entry with value v, in a column whose
@@ -400,12 +402,14 @@ public:
 
 private:
     void setup_dispatch(const sparse_csc& L, node_index m, sparse_csc* consumed) {
-        if (fp16_from_env()) {
-            // `if constexpr` so a build without F16C never instantiates the
-            // fp16 setup / kernels at all (see the file header).
-            if constexpr (fp16_supported()) { fp16_ = true; setup_impl<_Float16>(L, m, consumed); return; }
+        fp16_ = fp16_from_env();
+#ifdef __x86_64__
+        if (fp16_) {
+            simd_fp16_ = simd_fp16_kernel();
+            setup_impl<_Float16>(L, m, consumed);
+            return;
         }
-        fp16_ = false;
+#endif
         setup_impl<float>(L, m, consumed);
     }
 
@@ -718,7 +722,7 @@ private:
                         " scale fallbacks (s_j := 1)=%llu, columns with L_jj < s_j=%llu; fat-level kernel=%s\n",
                         static_cast<unsigned long long>(stats_.scale_fallback),
                         static_cast<unsigned long long>(n_dlt),
-                        simd_fp16_kernel() ? "simd" : "scalar (no AVX2/F16C/FMA at compile time)");
+                        simd_fp16_kernel() ? "simd" : "scalar");
             }
             if (std::getenv("APXCHOL_VERBOSE")) {
                 const double den = n_off ? static_cast<double>(n_off) : 1.0;
@@ -1109,16 +1113,16 @@ public:
     }
 
 private:
-    // ONE branch per solve on the storage the last setup() chose -- never per
-    // row. On a build without F16C the fp16 instantiation does not exist.
+    // One storage branch per solve; FP16 kernels are only entered after the
+    // setup-time CPU capability check.
     template <class Dir>
     void solve_dispatch(const double* x_in, double* y_out) const {
+#ifdef __x86_64__
         if (fp16_) {
-            if constexpr (fp16_supported()) {
-                solve_selected<Dir, _Float16>(x_in, y_out);
-                return;
-            }
+            solve_selected<Dir, _Float16>(x_in, y_out);
+            return;
         }
+#endif
         solve_selected<Dir, float>(x_in, y_out);
     }
 
@@ -1553,21 +1557,6 @@ private:
             return widen(Dir::template vals<V>(*this)[Dir::diag_slot(Dir::ptr(*this).data(), v)]);
     }
 
-    // SIMD conversion is retained only for FP16 storage on AVX2/F16C/FMA.
-    // FP32 keeps the measured scalar kernel.
-    // TODO: runtime-dispatch complete kernels in portable builds, keeping
-    // conversion helpers inline. Inlining between target_clones functions:
-    // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95796
-    // https://github.com/llvm/llvm-project/pull/230278
-    static constexpr bool kSimdIsa =
-#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-        true;
-#else
-        false;
-#endif
-    template <class V>
-    static constexpr bool simd_dot_v = kSimdIsa && sizeof(V) == 2;
-
     // sum over q in [p, end) of widen(vals[q]) * y[idx[q]] -- the thin-level
     // kernel: scalar, 4-way accumulators (see solve.cpp:31 for the rationale).
     template <class V>
@@ -1586,13 +1575,37 @@ private:
         return sum;
     }
 
+#ifdef __x86_64__
+    // Dispatch complete loops, with conversion helpers inlined into them.
+    // TODO: revisit automatic multiversioning once our compilers can inline
+    // corresponding target_clones versions:
+    // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95796
+    // https://github.com/llvm/llvm-project/pull/230278
+    // Keep the direct, inlined kernel when the build already requires its ISA.
+    static constexpr bool kCompiledSimd =
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
+        true;
+#else
+        false;
+#endif
+
+    template <bool Fat>
+    __attribute__((target("f16c")))
+    static double dot_fp16_scalar(const _Float16* vals, const node_index* idx,
+                                  edge_index p, edge_index end, const double* y) {
+        if constexpr (!Fat) return dot_thin(vals, idx, p, end, y);
+        double sum = 0;
+        for (; p < end; ++p) sum += widen(vals[p]) * y[idx[p]];
+        return sum;
+    }
+
     // AVX2 has 32-byte vectors; derive the matching storage width from the
     // number of double accumulators. No alignment or row padding is required.
     using dot_vector [[gnu::vector_size(32)]] = double;
     static constexpr std::size_t dot_lanes = sizeof(dot_vector) / sizeof(double);
     using half_vector [[gnu::vector_size(dot_lanes * sizeof(_Float16))]] = _Float16;
 
+    __attribute__((target("avx2,f16c,fma"), always_inline))
     static inline dot_vector widen_vector(half_vector h) {
 #ifdef __clang__
         return __builtin_convertvector(h, dot_vector);
@@ -1605,6 +1618,7 @@ private:
 #endif
     }
 
+    __attribute__((target("avx2,f16c,fma")))
     static double dot_fat_simd(const _Float16* vals, const node_index* idx,
                                edge_index p, edge_index end, const double* y) {
         dot_vector sum = {};
@@ -1623,6 +1637,8 @@ private:
         }
         return result;
     }
+
+    bool simd_fp16_ = false;
 #endif
 
     // One row (forward: CSR row i) / column (back: CSC column j) of the sweep:
@@ -1638,11 +1654,21 @@ private:
         const edge_index p0 = Dir::first(ptr, v);
         const edge_index p1 = Dir::last(ptr, v);
         double sum;
-        if constexpr (Fat && simd_dot_v<V>) {
-#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-            sum = dot_fat_simd(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+#ifdef __x86_64__
+        if constexpr (std::is_same_v<V, _Float16>) {
+            const auto* vals = Dir::template vals<V>(*this).data();
+            const auto* idx = Dir::idx(*this).data();
+            if constexpr (Fat) {
+                if (kCompiledSimd || simd_fp16_)
+                    sum = dot_fat_simd(vals, idx, p0, p1, y_out);
+                else
+                    sum = dot_fp16_scalar<true>(vals, idx, p0, p1, y_out);
+            } else {
+                sum = dot_fp16_scalar<false>(vals, idx, p0, p1, y_out);
+            }
+        } else
 #endif
-        } else if constexpr (Fat) {
+        if constexpr (Fat) {
             const V* vals = Dir::template vals<V>(*this).data();
             const node_index* idx = Dir::idx(*this).data();
             sum = 0.0;

@@ -46,11 +46,7 @@ target_include_directories(_apxchol PRIVATE ${APX_ROOT}/include ${APX_ROOT}/src)
 target_link_libraries(_apxchol PRIVATE Eigen3::Eigen OpenMP::OpenMP_CXX)
 target_compile_options(_apxchol PRIVATE ${APXCHOL_ARCH_FLAG})
 
-# Match the root library default (ON there). The SpTRSV's fp32 factor storage
-# needs no macro any more, and its fp16 variant is a runtime env knob
-# (APXCHOL_SPTRSV_FP16) that the portable wheel build below cannot offer:
-# without -march=native there is no __F16C__, so omp_sptrsv compiles the fp32
-# storage only and the env falls back with a note. See include/apxchol/lowprec.h.
+# Match the root library's graph-storage default.
 target_compile_definitions(_apxchol PRIVATE APXCHOL_POOL_FP32)
 
 install(TARGETS _apxchol LIBRARY DESTINATION apxchol)

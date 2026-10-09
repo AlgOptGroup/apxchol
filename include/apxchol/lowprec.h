@@ -70,7 +70,9 @@ inline int sptrsv_fp16_env_tristate() {
 namespace detail {
 
 inline bool fp16_flushes(_Float16 value) {
-    return std::abs(float(value)) < 0x1p-14f; // Smallest normal binary16 value.
+    // numeric_limits<_Float16> is unavailable with Clang and in CUDA's C++20 mode.
+    // https://github.com/llvm/llvm-project/issues/105196
+    return std::abs(float(value)) < __FLT16_MIN__;
 }
 
 inline _Float16 narrow_scaled_fp16(float value, float scale) {
@@ -92,7 +94,8 @@ inline double widen(_Float16 v) {
 #endif
 }
 
-// Clang and NVCC do not provide std::fpclassify(_Float16) yet.
+// The builtin also handles _Float16 before C++23 library support is available:
+// https://github.com/llvm/llvm-project/issues/105196
 template<class T>
 inline bool is_stored_subnormal(T v) {
     return __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, v) == FP_SUBNORMAL;

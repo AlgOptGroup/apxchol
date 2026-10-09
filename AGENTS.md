@@ -208,7 +208,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   the normal round-to-nearest environment and retains signed subnormal flushing.
   Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
   packed conversion and scalar widening workarounds stay local to conversion.
-  Runtime CPU dispatch is not yet enabled in portable wheels.
+  Portable x86 builds select FP16 kernels at setup from runtime CPU features:
+  AVX/F16C permits scalar conversion, with AVX2/FMA enabling the fat-row kernel.
+  Unsupported CPUs retain FP32 storage; FP16 remains opt-in on the CPU.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
   `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
   writer threads perform the first touch. Pointer, diagonal, scale, and other
