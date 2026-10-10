@@ -191,9 +191,8 @@ TEST(GpuPcgHost, GeneralFallbackMatchesIndependentLowerTriangleReference) {
             const Csr got = general(L, perm);
             EXPECT_EQ(got.ptr, ref.ptr);
             EXPECT_EQ(got.idx, ref.idx);
-            EXPECT_EQ(got.vals.size(), ref.vals.size());
-            if (got.vals.size() == ref.vals.size())
-                EXPECT_EQ(0, std::memcmp(got.vals.data(), ref.vals.data(), ref.vals.size() * sizeof(double)));
+            ASSERT_EQ(got.vals.size(), ref.vals.size());
+            EXPECT_EQ(0, std::memcmp(got.vals.data(), ref.vals.data(), ref.vals.size() * sizeof(double)));
             EXPECT_EQ(got.exact, ref.exact);
         }
     }
@@ -253,9 +252,8 @@ TEST(GpuPcgHost, GeneralFallbackOrdersDuplicateCoordinatesDeterministically) {
             const Csr got = general(L, perm);
             EXPECT_EQ(got.ptr, ref.ptr);
             EXPECT_EQ(got.idx, ref.idx);
-            EXPECT_EQ(got.vals.size(), ref.vals.size());
-            if (got.vals.size() == ref.vals.size())
-                EXPECT_EQ(0, std::memcmp(got.vals.data(), ref.vals.data(), ref.vals.size() * sizeof(double)));
+            ASSERT_EQ(got.vals.size(), ref.vals.size());
+            EXPECT_EQ(0, std::memcmp(got.vals.data(), ref.vals.data(), ref.vals.size() * sizeof(double)));
         }
     }
 #ifdef _OPENMP
