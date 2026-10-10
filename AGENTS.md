@@ -246,12 +246,17 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
-- `solver/detail/metal_schedule.h` prepares the Metal backend's packed factor
-  and dispatch plan using the existing `cuda_host.h` drop/transpose helpers.
-  Its kernel emulation lives in `tests/metal_schedule_reference.h`; portable
-  tests compare it against CPU sweeps. `solver/detail/permuted_operator.h`
-  builds the permuted symmetric operator, ordering duplicate entries by value
-  bits. These are internal prerequisites for Metal, not CPU/CUDA solve paths.
+- CUDA and Metal share `src/gpu_dataflow.inc` and the count/emit task packer in
+  `solver/detail/gpu_dataflow_plan.h`. CUDA builds trusted-factor tasks on device
+  and uses one global queue; Metal's `metal_schedule.h` partitions dependency
+  stages into independent workgroups. Cross-workgroup waits are forbidden on
+  Metal. Both reset atomic FP32 dependency words and solve roots before the
+  worker launch. Keep RHS/diagonal/scale loads before dependency polling.
+  Long rows use segment tasks and a fixed-order finalizer. No public scheduler
+  knob or retained reference kernel accompanies the shared implementation.
+- `solver/detail/permuted_operator.h` builds the permuted symmetric operator,
+  ordering duplicate entries by value bits. Metal retains shared host factor
+  dropping/transposition; CUDA's public route keeps device ownership.
 - CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
   because NVCC does not support `_Float16` in device code. Uploads copy the
   common binary16 representation; the solve kernel widens only at accumulation.

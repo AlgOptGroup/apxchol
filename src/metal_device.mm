@@ -10,7 +10,13 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
+#include <exception>
 #include <mutex>
+#include <cmath>
+#include <span>
+#include "apxchol/solver/detail/metal_schedule.h"
+#include "apxchol/solver/detail/gpu_dataflow_plan.h"
 #include <stdexcept>
 
 namespace apxchol::detail::metal {
@@ -18,13 +24,17 @@ namespace {
 
 const char kKernelSource[] =
 #include "metal_kernels.inc"
+    "\n#define APXCHOL_GPU_FUNCTION inline\n"
+    "\n#define APXCHOL_UNROLL _Pragma(\"unroll\")\n"
+#define APXCHOL_GPU_CODE(...) #__VA_ARGS__
+#include "gpu_dataflow.inc"
+#undef APXCHOL_GPU_CODE
+#include "metal_dataflow.inc"
     ;
 
 constexpr std::uint32_t kTreeRows = 256;
 constexpr std::uint32_t kTreeLanes = 16;
-constexpr std::uint32_t kVirtualLanes = 32;
 constexpr std::uint32_t kRowThreads = 256;     // threads per threadgroup of the row kernels
-constexpr std::uint32_t kNarrowThreads = 1024;
 
 enum finalize_mode : std::uint32_t {
     kFinalizeMuR = 0,
@@ -47,9 +57,7 @@ struct pipelines {
     id<MTLComputePipelineState> update_xr;
     id<MTLComputePipelineState> reduce[3];    // [reduce_mode]
     id<MTLComputePipelineState> finalize;
-    id<MTLComputePipelineState> level[2];     // [forward]
-    id<MTLComputePipelineState> heavy[2];
-    id<MTLComputePipelineState> narrow[2];
+    id<MTLComputePipelineState> dataflow_solve[2], dataflow_init[2];
     id<MTLComputePipelineState> p_update;
     id<MTLComputePipelineState> probe;
 };
@@ -134,9 +142,8 @@ context* make_context() {
             p.reduce[mode] = make_pipeline(device, library, "reduce", false, false, mode, error);
         p.finalize = make_pipeline(device, library, "finalize", false, false, 0, error);
         for (int fwd = 0; fwd < 2; ++fwd) {
-            p.level[fwd] = make_pipeline(device, library, "level", fwd != 0, false, 0, error);
-            p.heavy[fwd] = make_pipeline(device, library, "level_heavy", fwd != 0, false, 0, error);
-            p.narrow[fwd] = make_pipeline(device, library, "levels_narrow", fwd != 0, false, 0, error);
+            p.dataflow_init[fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, error);
+            p.dataflow_solve[fwd] = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, 0, error);
         }
         p.p_update = make_pipeline(device, library, "p_update", false, false, 0, error);
         p.probe = make_pipeline(device, library, "df_probe", false, false, 0, error);
@@ -144,22 +151,25 @@ context* make_context() {
             st.error = "Metal pipeline creation failed: " + error;
             return ctx;
         }
+        for (auto pipe : p.dataflow_solve) {
+            if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256) {
+                st.error = "Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups";
+                return ctx;
+            }
+        }
         auto threads = [](id<MTLComputePipelineState> pipe) {
             return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
         };
         st.tree_threads = std::min({threads(p.spmv[0]), threads(p.spmv[1]), threads(p.update_xr),
                                     threads(p.reduce[0]), threads(p.reduce[1]),
                                     threads(p.reduce[2]), threads(p.finalize)});
-        st.row_threads = std::min({threads(p.level[0]), threads(p.level[1]), threads(p.p_update)});
-        st.heavy_threads = std::min(threads(p.heavy[0]), threads(p.heavy[1]));
-        st.narrow_threads = std::min(threads(p.narrow[0]), threads(p.narrow[1]));
+        st.row_threads = threads(p.p_update);
         ctx->probe_queue = [device newCommandQueue];
         if (ctx->probe_queue == nil) {
             st.error = "no Metal command queue";
             return ctx;
         }
-        if (st.tree_threads < kTreeLanes || st.heavy_threads < kVirtualLanes ||
-            st.row_threads == 0 || st.narrow_threads == 0) {
+        if (st.tree_threads < kTreeLanes || st.row_threads == 0) {
             st.error = "Metal pipeline thread limits are insufficient";
             return ctx;
         }
@@ -192,12 +202,46 @@ std::string finish(id<MTLCommandBuffer> cb) {
     return {};
 }
 
-}  // namespace
+struct prepared_tri {
+    id<MTLBuffer> words = nil, blocks = nil, segments = nil;
+    unsigned tag_count = 0;
+    std::vector<metal_schedule::detail::step> stages;
+    id<MTLBuffer> ptr = nil, col = nil, val = nil;
+    std::uint32_t levels = 0;
+};
 
-const device_status& status() noexcept { return shared().status; }
+prepared_tri prepare_tri(context &ctx, const tri_arrays &a, std::uint32_t m, bool forward) {
+    prepared_tri out;
+    auto schedule =
+        metal_schedule::build({a.ptr, std::size_t(m) + 1}, {a.col, a.nnz}, {a.val, a.nnz}, !forward);
+    auto &packed = schedule.tasks;
+    out.tag_count = m + packed.slots;
+    // Metal validates the element type even when no task reads the buffer.
+    if (packed.segments.empty())
+        packed.segments.push_back({});
+    out.stages = std::move(schedule.stages);
+    out.levels = schedule.levels;
+    @autoreleasepool {
+        out.ptr = upload(ctx.device, a.ptr, (m + 1) * sizeof(unsigned));
+        out.col = upload(ctx.device, a.col, a.nnz * sizeof(unsigned));
+        out.val = upload(ctx.device, a.val, a.nnz * sizeof(float));
+        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned));
+        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned));
+        out.segments = upload(ctx.device, packed.segments.data(),
+                              packed.segments.size() * sizeof(gpu_dataflow::segment));
+    }
+    if (out.ptr == nil || out.col == nil || out.val == nil || out.words == nil || out.blocks == nil ||
+        out.segments == nil)
+        throw device_memory_error("Metal factor allocation failed");
+    return out;
+}
 
-std::vector<float> run_probe(const std::vector<float>& inputs) {
-    context& ctx = shared();
+} // namespace
+
+const device_status &status() noexcept { return shared().status; }
+
+std::vector<float> run_probe(const std::vector<float> &inputs) {
+    context &ctx = shared();
     if (!ctx.status.ok) throw std::runtime_error(ctx.status.error);
     const std::uint32_t count = static_cast<std::uint32_t>(inputs.size() / 4);
     std::vector<float> out(static_cast<std::size_t>(count) * 16);
@@ -238,10 +282,10 @@ struct engine::impl {
     bool operator_df = false;
     float inv_n_hi = 0.0f, inv_n_lo = 0.0f;
     id<MTLBuffer> op_ptr = nil, op_col = nil, op_hi = nil, op_lo = nil;
-    struct tri {
-        id<MTLBuffer> level_ptr = nil, rows = nil, ptr = nil, col = nil, val = nil, dinv = nil;
-    } fwd, bwd;
+    using tri = prepared_tri;
+    tri fwd, bwd;
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, cols = nil;
+    id<MTLBuffer> tags = nil;
 
     params base() const {
         params prm{};
@@ -293,46 +337,37 @@ struct engine::impl {
         dispatch_tree(enc);
     }
 
-    void encode_tri(id<MTLComputeCommandEncoder> enc, const tri& t,
-                    const std::vector<tri_step>& plan, bool forward) const {
+    void encode_tri(id<MTLComputeCommandEncoder> enc, const tri& t, bool forward) const {
+        if (!m) return;
         const int f = forward ? 1 : 0;
-        [enc setBuffer:t.rows offset:0 atIndex:1];
         [enc setBuffer:t.ptr offset:0 atIndex:2];
         [enc setBuffer:t.col offset:0 atIndex:3];
         [enc setBuffer:t.val offset:0 atIndex:4];
-        [enc setBuffer:t.dinv offset:0 atIndex:5];
         [enc setBuffer:r offset:0 atIndex:6];
         [enc setBuffer:z offset:0 atIndex:7];
         [enc setBuffer:cols offset:0 atIndex:8];
-        [enc setBuffer:t.level_ptr offset:0 atIndex:9];
+        [enc setBuffer:tags offset:0 atIndex:10];
         params prm = base();
-        const std::uint32_t narrow_threads = std::min(kNarrowThreads, ctx->status.narrow_threads);
-        for (const tri_step& s : plan) {
-            prm.offset = s.first;
-            prm.count = s.kind == 2 ? s.last : s.last - s.first;
-            if (s.kind == 0) {
-                [enc setComputePipelineState:ctx->pipes.level[f]];
-                set_params(enc, prm);
-                dispatch_rows(enc, prm.count);
-            } else if (s.kind == 1) {
-                [enc setComputePipelineState:ctx->pipes.heavy[f]];
-                set_params(enc, prm);
-                [enc dispatchThreadgroups:MTLSizeMake(prm.count, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(kVirtualLanes, 1, 1)];
-            } else {
-                [enc setComputePipelineState:ctx->pipes.narrow[f]];
-                set_params(enc, prm);
-                [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(narrow_threads, 1, 1)];
-            }
+        prm.count = t.tag_count;
+        set_params(enc, prm);
+        [enc setComputePipelineState:ctx->pipes.dataflow_init[f]];
+        dispatch_rows(enc, t.tag_count);
+        [enc setBuffer:t.words offset:0 atIndex:9];
+        [enc setBuffer:t.blocks offset:0 atIndex:11];
+        [enc setBuffer:t.segments offset:0 atIndex:12];
+        [enc setComputePipelineState:ctx->pipes.dataflow_solve[f]];
+        for (auto step : t.stages) {
+            prm.offset = step.first;
+            set_params(enc, prm);
+            [enc dispatchThreadgroups:MTLSizeMake(step.last - step.first, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
     }
 
     // z = L^-T L^-1 (r - mu_r), then for a Laplacian mu_z = mean(z).
-    void encode_precond(id<MTLComputeCommandEncoder> enc,
-                        const std::vector<tri_step>& fp, const std::vector<tri_step>& bp) const {
-        encode_tri(enc, fwd, fp, true);
-        encode_tri(enc, bwd, bp, false);
+    void encode_precond(id<MTLComputeCommandEncoder> enc) const {
+        encode_tri(enc, fwd, true);
+        encode_tri(enc, bwd, false);
         if (laplacian) {
             encode_reduce(enc, kReduceSumZ);
             encode_finalize(enc, kFinalizeMuZ, 0, 0);
@@ -355,8 +390,7 @@ struct engine::impl {
     }
 
     void encode_iteration(id<MTLComputeCommandEncoder> enc, std::uint32_t it,
-                          std::uint32_t window, const std::vector<tri_step>& fp,
-                          const std::vector<tri_step>& bp) const {
+                          std::uint32_t window) const {
         [enc setComputePipelineState:ctx->pipes.spmv[operator_df ? 1 : 0]];
         set_params(enc, base());
         [enc setBuffer:op_ptr offset:0 atIndex:1];
@@ -381,7 +415,7 @@ struct engine::impl {
         dispatch_tree(enc);
         encode_finalize(enc, kFinalizeCheck, it, window);
 
-        encode_precond(enc, fp, bp);
+        encode_precond(enc);
         encode_reduce(enc, kReduceRz);
         encode_finalize(enc, kFinalizeRz, it, window);
         encode_p_update(enc);
@@ -422,21 +456,11 @@ engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_array
         if (op.lo != nullptr) s.op_lo = upload(dev, op.lo, op.nnz * sizeof(float));
         ok = s.op_ptr != nil && s.op_col != nil && s.op_hi != nil &&
              (op.lo == nullptr || s.op_lo != nil);
-        auto load = [&](impl::tri& t, const tri_arrays& a) {
-            t.level_ptr = upload(dev, a.level_ptr, (a.levels + 1) * sizeof(std::uint32_t));
-            t.rows = upload(dev, a.rows, a.slots * sizeof(std::uint32_t));
-            t.ptr = upload(dev, a.ptr, (a.slots + 1) * sizeof(std::uint32_t));
-            t.col = upload(dev, a.col, a.deps * sizeof(std::uint32_t));
-            t.val = upload(dev, a.val, a.deps * sizeof(float));
-            t.dinv = upload(dev, a.dinv, a.slots * sizeof(float));
-            return t.level_ptr != nil && t.rows != nil && t.ptr != nil && t.col != nil &&
-                   t.val != nil && t.dinv != nil;
-        };
-        ok = load(s.fwd, fwd) && ok;
-        ok = load(s.bwd, bwd) && ok;
     }
     if (s.queue == nil) throw std::runtime_error("Metal command queue creation failed");
     if (!ok) throw device_memory_error("Metal buffer allocation failed for the operator or factor");
+    s.fwd = prepare_tri(ctx, fwd, m, true);
+    s.bwd = prepare_tri(ctx, bwd, m, false);
     ok = true;
     @autoreleasepool {
         id<MTLDevice> dev = s.ctx->device;
@@ -449,8 +473,11 @@ engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_array
         s.z = upload(dev, nullptr, entries * sizeof(float));
         s.partial = upload(dev, nullptr, 2 * static_cast<std::size_t>(s.groups) * sizeof(df32));
         s.cols = upload(dev, nullptr, sizeof(solve_state));
+        s.tags = upload(dev, nullptr, std::max({entries, std::size_t(s.fwd.tag_count),
+            std::size_t(s.bwd.tag_count)}) * sizeof(std::uint32_t));
         ok = s.x != nil && s.r != nil && s.ap != nil && s.p != nil && s.z != nil &&
-             s.partial != nil && s.cols != nil;
+             s.partial != nil && s.cols != nil &&
+             s.tags != nil;
     }
     if (!ok) throw device_memory_error("Metal buffer allocation failed for the PCG vectors");
 }
@@ -467,8 +494,11 @@ float* engine::p() noexcept { return static_cast<float*>([impl_->p contents]); }
 float* engine::z() noexcept { return static_cast<float*>([impl_->z contents]); }
 solve_state& engine::state() noexcept { return *static_cast<solve_state*>([impl_->cols contents]); }
 
-void engine::solve(const std::vector<tri_step>& fwd_plan,
-                   const std::vector<tri_step>& bwd_plan, std::uint32_t max_iter,
+factor_statistics engine::factor_stats() const {
+    return {impl_->fwd.levels, impl_->bwd.levels, impl_->fwd.stages.size() + unsigned(impl_->m != 0), impl_->bwd.stages.size() + unsigned(impl_->m != 0)};
+}
+
+void engine::solve(std::uint32_t max_iter,
                    std::uint32_t window, std::uint32_t check_every) {
     impl& s = *impl_;
     s.zero_grounded_row();
@@ -490,13 +520,13 @@ void engine::solve(const std::vector<tri_step>& fwd_plan,
             } else {
                 if (first) {
                     s.encode_initial_mu(enc);
-                    s.encode_precond(enc, fwd_plan, bwd_plan);
+                    s.encode_precond(enc);
                     s.encode_reduce(enc, kReduceRz);
                     s.encode_finalize(enc, kFinalizeRzInit, 0, window);
                     s.encode_p_update(enc);
                 }
                 for (std::uint32_t b = 0; b < batch; ++b)
-                    s.encode_iteration(enc, it + b + 1, window, fwd_plan, bwd_plan);
+                    s.encode_iteration(enc, it + b + 1, window);
                 [enc endEncoding];
                 error = finish(cb);
             }
@@ -507,8 +537,7 @@ void engine::solve(const std::vector<tri_step>& fwd_plan,
     if (!error.empty()) throw std::runtime_error(error);
 }
 
-void engine::apply(const std::vector<tri_step>& fwd_plan,
-                   const std::vector<tri_step>& bwd_plan) {
+void engine::apply() {
     impl& s = *impl_;
     s.zero_grounded_row();
     std::string error;
@@ -519,7 +548,7 @@ void engine::apply(const std::vector<tri_step>& fwd_plan,
             error = "Metal command buffer or encoder creation failed";
         } else {
             s.encode_initial_mu(enc);
-            s.encode_precond(enc, fwd_plan, bwd_plan);
+            s.encode_precond(enc);
             s.encode_p_update(enc);
             [enc endEncoding];
             error = finish(cb);

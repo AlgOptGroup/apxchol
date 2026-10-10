@@ -82,25 +82,16 @@ private:
     std::string what_;
 };
 
-// One step of a triangular solve (detail::metal_schedule::level_step, flattened):
-// kind 0 = light rows [first, last), 1 = heavy rows [first, last),
-// 2 = narrow levels [first, last) in one threadgroup.
-struct tri_step {
-    std::uint32_t kind;
-    std::uint32_t first;
-    std::uint32_t last;
+struct tri_arrays {
+    const std::uint32_t* ptr = nullptr;  // m + 1, CSR with diagonal
+    const std::uint32_t* col = nullptr;
+    const float* val = nullptr;
+    std::size_t nnz = 0;
 };
 
-struct tri_arrays {
-    const std::uint32_t* level_ptr = nullptr;  // levels + 1
-    std::size_t levels = 0;
-    const std::uint32_t* rows = nullptr;       // slots
-    const std::uint32_t* ptr = nullptr;        // slots + 1
-    std::size_t slots = 0;
-    const std::uint32_t* col = nullptr;        // deps
-    const float* val = nullptr;                // deps
-    std::size_t deps = 0;
-    const float* dinv = nullptr;               // slots
+struct factor_statistics {
+    std::size_t levels_forward, levels_backward;
+    std::size_t steps_forward, steps_backward;
 };
 
 struct operator_arrays {
@@ -120,8 +111,6 @@ struct device_status {
     bool contract_pragma = false;  // "#pragma METAL fp contract(off)" accepted
     std::uint32_t tree_threads = 0;    // min max-threads of the 16-lane tree kernels
     std::uint32_t row_threads = 0;     // min max-threads of the row kernels
-    std::uint32_t heavy_threads = 0;   // level_heavy (both directions)
-    std::uint32_t narrow_threads = 0;  // levels_narrow (both directions)
 };
 const device_status& status() noexcept;
 
@@ -145,11 +134,10 @@ public:
     float* z() noexcept;
     solve_state& state() noexcept;
 
-    void solve(const std::vector<tri_step>& fwd_plan,
-               const std::vector<tri_step>& bwd_plan, std::uint32_t max_iter,
+    factor_statistics factor_stats() const;
+    void solve(std::uint32_t max_iter,
                std::uint32_t window, std::uint32_t check_every);
-    void apply(const std::vector<tri_step>& fwd_plan,
-               const std::vector<tri_step>& bwd_plan);
+    void apply();
 private:
     struct impl;
     std::unique_ptr<impl> impl_;

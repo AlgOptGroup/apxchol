@@ -10,8 +10,8 @@ using namespace metal;
 struct Params {
     uint n;         // operator rows
     uint groups;    // reduction groups, ceil(n / 256)
-    uint offset;    // step: first slot, or first level of a narrow run
-    uint count;     // step: slot count, or end level of a narrow run
+    uint offset;    // first workgroup in this dependency stage
+    uint count;     // number of dependency words to initialize
     uint mode;      // finalize mode
     uint iter;      // 1-based PCG iteration
     uint window;    // stagnation window, 0 = off
@@ -46,7 +46,6 @@ constant uint kReduceMode [[function_constant(2)]];
 constant uint kTreeRows = 256;
 constant uint kTreeLanes = 16;
 constant uint kTreeSteps = 16;
-constant uint kVirtualLanes = 32;
 
 constant uint kStopTolerance = 1;
 constant uint kStopBreakdown = 2;
@@ -297,95 +296,6 @@ kernel void finalize(constant Params& P [[buffer(0)]],
 }
 
 // ---- triangular solves: forward rhs = r.hi - mu_r, backward in place on z ----
-inline float row_rhs(uint i, device const float2* r, device const float* z, float mu) {
-    return kForward ? r[i].x - mu : z[i];
-}
-
-inline float light_row(uint t, device const uint* rows, device const uint* ptr,
-                       device const uint* col, device const float* val, device const float* dinv,
-                       device const float2* r, device const float* z, float mu) {
-    const uint i = rows[t];
-    float s = row_rhs(i, r, z, mu);
-    const uint e1 = ptr[t + 1];
-    for (uint e = ptr[t]; e < e1; ++e) s = fma(-val[e], z[col[e]], s);
-    return s * dinv[t];
-}
-
-// One thread per light row.
-kernel void level(constant Params& P [[buffer(0)]],
-                  device const uint* rows [[buffer(1)]],
-                  device const uint* ptr [[buffer(2)]],
-                  device const uint* col [[buffer(3)]],
-                  device const float* val [[buffer(4)]],
-                  device const float* dinv [[buffer(5)]],
-                  device const float2* r [[buffer(6)]],
-                  device float* z [[buffer(7)]],
-                  device const SolveState& state [[buffer(8)]],
-                  uint i [[thread_position_in_grid]]) {
-    if (i >= P.count) return;
-    if (state.active == 0) return;
-    const uint t = P.offset + i;
-    z[rows[t]] = light_row(t, rows, ptr, col, val, dinv, r, z, state.mu_r);
-}
-
-// One 32-thread group per heavy row.
-kernel void level_heavy(constant Params& P [[buffer(0)]],
-                        device const uint* rows [[buffer(1)]],
-                        device const uint* ptr [[buffer(2)]],
-                        device const uint* col [[buffer(3)]],
-                        device const float* val [[buffer(4)]],
-                        device const float* dinv [[buffer(5)]],
-                        device const float2* r [[buffer(6)]],
-                        device float* z [[buffer(7)]],
-                        device const SolveState& state [[buffer(8)]],
-                        uint l [[thread_index_in_threadgroup]],
-                        uint g [[threadgroup_position_in_grid]]) {
-    threadgroup float sh[kVirtualLanes];
-    const uint t = P.offset + g;
-    const bool act = state.active != 0;
-    if (act) {
-        const uint b = ptr[t], e1 = ptr[t + 1];
-        float acc = 0.0f;
-        for (uint e = b + l; e < e1; e += kVirtualLanes)
-            acc = fma(val[e], z[col[e]], acc);
-        sh[l] = acc;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (l == 0 && act) {
-        float tot = sh[0];
-        for (uint v = 1; v < kVirtualLanes; ++v) tot += sh[v];
-        const uint i = rows[t];
-        z[i] = (row_rhs(i, r, z, state.mu_r) - tot) * dinv[t];
-    }
-}
-
-// A run of narrow levels [offset, count) (light rows only) in one
-// threadgroup, a device-memory barrier between levels.
-kernel void levels_narrow(constant Params& P [[buffer(0)]],
-                          device const uint* rows [[buffer(1)]],
-                          device const uint* ptr [[buffer(2)]],
-                          device const uint* col [[buffer(3)]],
-                          device const float* val [[buffer(4)]],
-                          device const float* dinv [[buffer(5)]],
-                          device const float2* r [[buffer(6)]],
-                          device float* z [[buffer(7)]],
-                          device const SolveState& state [[buffer(8)]],
-                          device const uint* level_ptr [[buffer(9)]],
-                          uint tid [[thread_index_in_threadgroup]],
-                          uint tgs [[threads_per_threadgroup]]) {
-    for (uint lv = P.offset; lv < P.count; ++lv) {
-        const uint t0 = level_ptr[lv];
-        const uint items = level_ptr[lv + 1] - t0;
-        for (uint q = tid; q < items; q += tgs) {
-            if (state.active == 0) continue;
-            const uint t = t0 + q;
-            z[rows[t]] = light_row(t, rows, ptr, col, val, dinv, r, z, state.mu_r);
-        }
-        threadgroup_barrier(mem_flags::mem_device);
-    }
-}
-
-// ---- p = (z - mu_z) + beta p (p = z - mu_z where beta is 0) ----
 kernel void p_update(constant Params& P [[buffer(0)]],
                      device float* p [[buffer(1)]],
                      device const float* z [[buffer(2)]],

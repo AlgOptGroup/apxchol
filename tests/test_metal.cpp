@@ -8,7 +8,8 @@
 #include "apxchol/solver/metal_solver.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
-#include "metal_schedule_reference.h"
+#include "apxchol/solver/detail/metal_schedule.h"
+#include "apxchol/solver/sptrsv/cuda_host.h"
 #include "metal_device.h"
 
 #include <Eigen/Sparse>
@@ -29,7 +30,6 @@ namespace {
 using Sparse = Eigen::SparseMatrix<double>;
 using apxchol::node_index;
 namespace mh = apxchol::detail::metal_host;
-namespace ls = apxchol::detail::metal_schedule;
 
 #define REQUIRE_METAL()                                                       \
     do {                                                                      \
@@ -119,7 +119,10 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     const std::size_t n = static_cast<std::size_t>(r.size());
     const bool lap = !F.sddm;
     const std::int64_t m = lap ? static_cast<std::int64_t>(n) - 1 : static_cast<std::int64_t>(n);
-    const ls::factor_schedules sch = ls::build_factor_schedules(F.L, m, apxchol::factor_drop_rel_from_env());
+    auto backward = apxchol::cuda_host::build_L11_csc_int<float>(F.L, m);
+    const auto scales = apxchol::cuda_host::column_scales(backward);
+    apxchol::cuda_host::apply_factor_drop(backward, scales, apxchol::factor_drop_rel_from_env(), false);
+    const auto forward = apxchol::cuda_host::transpose_csr(backward);
     std::vector<double> rp(n);
     mh::scatter(r.data(), F.perm.data(), n, rp.data());
     const double scale = mh::pow2_scale(mh::fold_max_abs(rp.data(), n));
@@ -133,8 +136,19 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     }
     std::vector<float> in(n), z(n, 0.0f);
     for (std::size_t q = 0; q < n; ++q) in[q] = w[q].hi - mu_r;
-    apxchol::test::emulate_sweep(sch.forward, in.data(), z.data());
-    apxchol::test::emulate_sweep(sch.backward, z.data(), z.data());
+    auto sweep = [&](const auto& factor, bool reverse, const float* input) {
+        for (std::int64_t q = 0; q < m; ++q) {
+            const auto row = reverse ? m - 1 - q : q;
+            double sum = input[row], diagonal = 0;
+            for (int p = factor.ptr[row]; p < factor.ptr[row + 1]; ++p) {
+                if (factor.idx[p] == row) diagonal = factor.vals[p];
+                else sum -= double(factor.vals[p]) * z[factor.idx[p]];
+            }
+            z[row] = float(sum / diagonal);
+        }
+    };
+    sweep(forward, false, in.data());
+    sweep(backward, true, z.data());
     float mu_z = 0.0f;
     if (lap) {
         const mh::df sum = mh::tree_reduce(static_cast<std::uint32_t>(n),
@@ -190,7 +204,7 @@ TEST(MetalDevice, DoubleFloatProbeExact) {
                 in.size() / 4);
 }
 
-TEST(MetalDevice, ApplyMatchesHostEmulationBitForBit) {
+TEST(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
     REQUIRE_METAL();
     for (const double shift : {0.0, 0.5}) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");
@@ -202,35 +216,28 @@ TEST(MetalDevice, ApplyMatchesHostEmulationBitForBit) {
             const Eigen::VectorXd r = rhs(A.rows(), salt, shift == 0.0) * std::ldexp(1.0, 9 * static_cast<int>(salt) - 20);
             const Eigen::VectorXd z = slv.apply(r);
             const Eigen::VectorXd ze = emulate_apply(Fcopy, r);
-            EXPECT_TRUE(same_bytes(z, ze)) << "max diff " << (z - ze).cwiseAbs().maxCoeff();
+            EXPECT_LT((z - ze).norm() / ze.norm(), 2e-5);
         }
     }
 }
 
-// Exercise heavy rows, merged narrow runs and wide levels on the device.
-TEST(MetalDevice, HeavyRowsAndNarrowRunsMatchEmulation) {
+// Exercise long rows and cross-workgroup dependency stages on the device.
+TEST(MetalDevice, HubFactorAgreesWithSerialDoubleReference) {
     REQUIRE_METAL();
     const Sparse A = hub_graph(110, 100, 4);
     apxchol::factorization F = apxchol::factorize(A);
     const apxchol::factorization Fcopy = F;
     ASSERT_FALSE(Fcopy.sddm);
-    const ls::factor_schedules sch =
-        ls::build_factor_schedules(Fcopy.L, A.rows() - 1, apxchol::factor_drop_rel_from_env());
-    int kinds[3] = {0, 0, 0};
-    for (const ls::level_solve* sv : {&sch.forward, &sch.backward})
-        for (const ls::level_step& st : ls::plan_steps(*sv)) ++kinds[static_cast<int>(st.kind)];
-    EXPECT_GT(kinds[0], 0) << "wide light steps";
-    EXPECT_GT(kinds[1], 0) << "heavy steps (the hubs' forward rows)";
-    EXPECT_GT(kinds[2], 0) << "narrow runs";
     const apxchol::metal_solver slv(A, std::move(F));
     const Eigen::VectorXd r = rhs(A.rows(), 2, true);
-    EXPECT_TRUE(same_bytes(slv.apply(r), emulate_apply(Fcopy, r)));
+    const auto reference = emulate_apply(Fcopy, r);
+    EXPECT_LT((slv.apply(r) - reference).norm() / reference.norm(), 2e-5);
 
 }
 
 // A synthetic factor with heavy rows in both sweeps (hub columns and hub
 // rows), on the SDDM (m = n) and Laplacian (m = n - 1) paths.
-TEST(MetalDevice, SyntheticHeavyFactorApplyMatchesEmulation) {
+TEST(MetalDevice, SyntheticHeavyFactorAgreesWithSerialDoubleReference) {
     REQUIRE_METAL();
     const node_index n = 5000;
     apxchol::factorization F;
@@ -268,19 +275,13 @@ TEST(MetalDevice, SyntheticHeavyFactorApplyMatchesEmulation) {
     for (const bool sddm : {true, false}) {
         SCOPED_TRACE(sddm ? "SDDM path" : "Laplacian path");
         F.sddm = sddm;
-        const ls::factor_schedules sch = ls::build_factor_schedules(
-            F.L, sddm ? n : n - 1, apxchol::factor_drop_rel_from_env());
-        for (const ls::level_solve* sv : {&sch.forward, &sch.backward}) {
-            bool heavy = false;
-            for (const ls::level_step& st : ls::plan_steps(*sv)) heavy |= st.kind == ls::step_kind::heavy;
-            EXPECT_TRUE(heavy);
-        }
         // The operator only has to match in size for an application.
         const Sparse A = grid(50, 100, sddm ? 0.5 : 0.0);
         const apxchol::metal_solver slv(A, apxchol::factorization(F));
         for (unsigned salt : {1u, 6u}) {
             const Eigen::VectorXd r = rhs(A.rows(), salt, !sddm);
-            EXPECT_TRUE(same_bytes(slv.apply(r), emulate_apply(F, r)));
+            const auto reference = emulate_apply(F, r);
+            EXPECT_LT((slv.apply(r) - reference).norm() / reference.norm(), 2e-5);
         }
     }
 }

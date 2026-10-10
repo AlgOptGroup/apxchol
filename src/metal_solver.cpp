@@ -9,6 +9,7 @@
 #include "apxchol/solver/detail/permuted_operator.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include "apxchol/solver/detail/metal_schedule.h"
+#include "apxchol/solver/sptrsv/cuda_host.h"
 #include "metal_device.h"
 
 #include <algorithm>
@@ -173,7 +174,6 @@ struct metal_solver::impl {
     std::unique_ptr<double[]> op_val;
     std::int64_t op_nnz = 0;
     std::unique_ptr<dm::engine> device;
-    std::vector<dm::tri_step> forward, backward;
     std::uint32_t check_every = 1;
     statistics stats;
 
@@ -238,9 +238,12 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::length_error("metal_solver: the factor exceeds the device's 32-bit offsets");
 
     if (cp) { cp->descend("setup"); cp->tick(); }
-    // The factor the CPU triangular solves store: L11, compacting drop at the
-    // same relative threshold, fp32 values, then the two level schedules.
-    ls::factor_schedules sched = ls::build_factor_schedules(F.L, m, factor_drop_rel_from_env());
+    // Keep compensated dropping in the shared FP64 host implementation.
+    // Both backends consume the CSR factor without a level-permuted value copy.
+    auto backward = cuda_host::build_L11_csc_int<float>(F.L, m);
+    const auto scales = cuda_host::column_scales(backward);
+    cuda_host::apply_factor_drop(backward, scales, factor_drop_rel_from_env(), false);
+    const auto forward = cuda_host::transpose_csr(backward);
     if (cp) (*cp)("metal_factor_prep");
 
     Eigen::SparseMatrix<double> compressed;
@@ -280,37 +283,25 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     op.lo = exact ? nullptr : lo.data();
     op.n = n;
     op.nnz = nnz;
-    auto arrays = [](const ls::level_solve& s) {
+    auto arrays = [](const cuda_host::csr_int<float>& s) {
         dm::tri_arrays t;
-        t.level_ptr = s.level_ptr.data();
-        t.levels = s.levels();
-        t.rows = s.rows.data();
-        t.ptr = s.ptr.data();
-        t.slots = s.slots();
-        t.col = s.col.data();
-        t.val = s.val.data();
-        t.deps = s.col.size();
-        t.dinv = s.dinv.data();
+        t.ptr = reinterpret_cast<const std::uint32_t*>(s.ptr.data());
+        t.col = reinterpret_cast<const std::uint32_t*>(s.idx.get());
+        t.val = s.vals.get();
+        t.nnz = static_cast<std::size_t>(s.nnz);
         return t;
     };
-    device = std::make_unique<dm::engine>(op, arrays(sched.forward), arrays(sched.backward), m, laplacian);
+    device = std::make_unique<dm::engine>(op, arrays(forward), arrays(backward), m, laplacian);
     // Inherited from the prototype: one iteration per command buffer on large
     // systems, four on small ones (fewer host round trips).
     check_every = n > 200000 ? 1 : 4;
 
-    auto plan = [](const ls::level_solve& schedule) {
-        std::vector<dm::tri_step> out;
-        for (const auto& step : ls::plan_steps(schedule))
-            out.push_back({static_cast<std::uint32_t>(step.kind), step.first, step.last});
-        return out;
-    };
-    forward = plan(sched.forward);
-    backward = plan(sched.backward);
+    const auto prepared = device->factor_stats();
     stats.n = static_cast<Eigen::Index>(n);
-    stats.levels_forward = sched.forward.levels();
-    stats.levels_backward = sched.backward.levels();
-    stats.steps_forward = forward.size();
-    stats.steps_backward = backward.size();
+    stats.levels_forward = prepared.levels_forward;
+    stats.levels_backward = prepared.levels_backward;
+    stats.steps_forward = prepared.steps_forward;
+    stats.steps_backward = prepared.steps_backward;
     stats.operator_double_float = !exact;
     stats.device = st.name;
     if (!opts.keep_factor_values) F.L.release_values();
@@ -419,7 +410,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     state.prev = to_device(mh::split_saturated(reference * reference));
     state.active = 1;
     cp("pack");
-    s.device->solve(s.forward, s.backward, static_cast<std::uint32_t>(max_iter), window, s.check_every);
+    s.device->solve(static_cast<std::uint32_t>(max_iter), window, s.check_every);
     cp("device");
     mh::unpack(as_df(s.device->x()), s.n, scale, work.data());
     #pragma omp parallel for schedule(static)
@@ -445,7 +436,7 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     auto& cs = s.device->state();
     cs = {};
     cs.active = 1;
-    s.device->apply(s.forward, s.backward);
+    s.device->apply();
     const float* p = s.device->p();
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(s.n); ++q) rp[q] = static_cast<double>(p[q]) / scale;
