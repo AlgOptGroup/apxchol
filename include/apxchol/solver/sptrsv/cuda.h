@@ -326,7 +326,7 @@ inline void check_cuda(cudaError_t err, const char* msg) {
 /// stored_nnz= on this backend too); the CPU unit tests state that the
 /// arrays this backend uploads are the arrays omp_sptrsv stores.
 ///
-/// FP16 STORAGE (env APXCHOL_SPTRSV_FP16, shared with the CPU backend --
+/// FP16 STORAGE (env APXCHOL_FACTOR_STORAGE, shared with the CPU backend --
 /// lowprec.h; default ON on the GPU): the storage is the
 /// CPU's FP16_SCALED contract (cuda_host.h file header; omp.h "FOLDED INTO
 /// THE VECTORS"): the off-diagonals hold binary16 of the column-scaled L~ =
@@ -485,7 +485,7 @@ public:
                     throw std::runtime_error(
                         "apxchol cuda_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                         " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(inv_scale2[j]) +
-                        "); set APXCHOL_SPTRSV_FP16=0");
+                        "); set APXCHOL_FACTOR_STORAGE=float32");
             dev_alloc(reinterpret_cast<void**>(&d_vals16_),     nnz_ * sizeof(__half));
             dev_alloc(reinterpret_cast<void**>(&d_diag_),       m_ * sizeof(float));
             dev_alloc(reinterpret_cast<void**>(&d_inv_scale2_), m_ * sizeof(double));
@@ -1159,7 +1159,7 @@ private:
     mutable unsigned    df_epoch_  = 0;         // last epoch handed out (0 = none)
     int*          d_df_ctrl_       = nullptr;   // {fwd ticket, fwd finished, bck ticket, bck finished}
     int           df_grid_         = 0;
-    // fp16 storage (APXCHOL_SPTRSV_FP16): binary16
+    // fp16 storage (APXCHOL_FACTOR_STORAGE): binary16
     // values of CSR(L~^T) (d_vals16_, replaces d_vals_) and CSR(L~)
     // (d_L_vals16_, replaces d_L_vals_), the fp32 scaled diagonal and the
     // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2

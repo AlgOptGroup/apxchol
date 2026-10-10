@@ -245,8 +245,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
   is accepted; other nonempty values are errors. `factor_options::factor_storage`
   selects per-solver storage. Its `automatic` default uses
-  `APXCHOL_SPTRSV_STORAGE=auto|float16|float32`. The legacy
-  `APXCHOL_SPTRSV_FP16=0|1` is read only when the named setting is unset/empty.
+  `APXCHOL_FACTOR_STORAGE=auto|float16|float32`.
   `auto` selects the backend default (GPU FP16, CPU FP32). Invalid values fail.
   Parsing and selection live in C++; Python only normalizes dtype names.
   Scales and diagonals stay

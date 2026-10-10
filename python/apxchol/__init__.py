@@ -129,7 +129,7 @@ class Solver:
         options.update(advanced)
         if factor_storage_dtype is not None:
             options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
-        self._impl = _apxchol.Solver(csc.indptr, csc.indices, data, self._n, options)
+        self._impl = _apxchol.Solver(csc.indptr, csc.indices, data, options)
         self._chol = None            # lazily built scipy factor (permuted space)
         self._P = None
         self._LD = None
@@ -335,8 +335,8 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
         off-diagonals with FP32 diagonals and scales; it requires x86 AVX/F16C.
         Unsupported FP16 requests raise an error. CPU arithmetic remains FP64;
         constructed factors and exports remain FP32. FP64 factor storage is
-        not supported. ``None`` uses ``APXCHOL_SPTRSV_STORAGE`` if set, otherwise
-        the legacy ``APXCHOL_SPTRSV_FP16``, then the CPU's FP32 default.
+        not supported. ``None`` uses ``APXCHOL_FACTOR_STORAGE`` if set, otherwise
+        the CPU's FP32 default.
         Explicit choices override the environment without changing it.
     **advanced
         Passed straight through to the core options: `degree_quantile`,

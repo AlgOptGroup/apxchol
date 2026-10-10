@@ -163,7 +163,7 @@ TEST(SolveRoutes, FactorStorageOverridesEnvironmentForNewAndAdoptedFactors) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (bool fp16 : {false, true}) {
-        scoped_environment env("APXCHOL_SPTRSV_FP16", fp16 ? "0" : "1");
+        scoped_environment env("APXCHOL_FACTOR_STORAGE", fp16 ? "float32" : "float16");
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::cpu;
         options.keep_factor_values = true;

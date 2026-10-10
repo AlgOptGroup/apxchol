@@ -2508,7 +2508,7 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
     scoped_omp_threads serial(1);
@@ -2708,7 +2708,7 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
@@ -3194,7 +3194,7 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     // Compare the complete GPU factor's action against independently built
     // CPU factor columns. This checks all entries after audit-only per-round
     // hashes have been removed, including the isolated tail and duplicate arcs.
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     std::vector<std::vector<apxchol::detail::factor_entry>> reference_entries(columns.size());
     std::vector<apxchol::detail::factor_col> reference_columns;
@@ -3404,7 +3404,7 @@ TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
@@ -3508,7 +3508,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
@@ -3995,7 +3995,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -4073,7 +4073,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -4964,7 +4964,7 @@ TEST(GpuRoundShadowIntegration,
 
 TEST(GpuFactorFinalize, ResidentPrefixCpuTailPermutationAndGrounding) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env dataflow("APXCHOL_GPU_SPTRSV", "dataflow");
     scoped_env segmentation("APXCHOL_GPU_DF_SPLIT", "1");
@@ -5056,22 +5056,22 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
     apxchol::factorization reference;
     apxchol::detail::build_csc(reference, cols, n, nullptr);
     ASSERT_EQ(reference.perm, perm);
-    for (const char* fp16 : {"0", "1"}) {
-        scoped_env storage("APXCHOL_SPTRSV_FP16", fp16);
+    for (const char* fp16 : {"float32", "float16"}) {
+        scoped_env storage("APXCHOL_FACTOR_STORAGE", fp16);
         for (const char* rel : {"0", "0.00001", "0.0001", "0.2"}) {
             scoped_env drop("APXCHOL_FACTOR_DROP", rel);
             for (node_index m : {n - 1, n}) {
                 SCOPED_TRACE(std::string(fp16) + "/" + rel + "/" + std::to_string(m));
                 apxchol::cuda_sptrsv ordinary, adopted;
                 ordinary.setup(reference.L, m);
-                const auto requested = *fp16 == '1'
+                const auto requested = std::string_view(fp16) == "float16"
                     ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
-                scoped_env conflicting("APXCHOL_SPTRSV_FP16", *fp16 == '1' ? "0" : "1");
+                scoped_env conflicting("APXCHOL_FACTOR_STORAGE", std::string_view(fp16) == "float16" ? "float32" : "float16");
                 auto factor = state.finalize_device_factor(perm, m, tail, requested);
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
                 auto lt = apxchol::cuda_host::build_L11_csc_int<float>(reference.L, m);
                 auto scale = apxchol::cuda_host::column_scales(lt);
-                const bool half = std::string_view(fp16) == "1";
+                const bool half = std::string_view(fp16) == "float16";
                 if (half) {
                     for (node_index j = 0; j < m; ++j)
                         if (!std::isfinite(1.0f / scale[j]) ||
@@ -5103,7 +5103,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 EXPECT_EQ(state.encode_finalized_factor_for_test(*factor), expected);
 #endif
                 adopted.setup_adopting_device_factor_for_research(std::move(*factor), requested);
-                EXPECT_EQ(adopted.fp16(), *fp16 == '1');
+                EXPECT_EQ(adopted.fp16(), std::string_view(fp16) == "float16");
                 const auto& want = ordinary.drop_stats(); const auto& got = adopted.drop_stats();
                 EXPECT_EQ(got.rel, want.rel); EXPECT_EQ(got.nnz_factor, want.nnz_factor);
                 EXPECT_EQ(got.nnz_stored, want.nnz_stored); EXPECT_EQ(got.dropped, want.dropped);
@@ -5121,7 +5121,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
 
 TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env storage("APXCHOL_SPTRSV_FP16", nullptr);
+    scoped_env storage("APXCHOL_FACTOR_STORAGE", nullptr);
     scoped_env drop("APXCHOL_FACTOR_DROP", nullptr);
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -5142,7 +5142,7 @@ TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
 
 TEST(GpuFactorFinalize, InvalidCoveragePermutationAndCoordinatesFailClosed) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     const std::vector<undirected_edge> edges = {{0, 1, 1}, {0, 2, 2}};
     const std::vector<node_index> pivots = {0};
@@ -5181,7 +5181,7 @@ TEST(GpuFactorFinalize, InvalidCoveragePermutationAndCoordinatesFailClosed) {
 
 TEST(GpuFactorFinalize, NormalPreconditionerInstallsAndReplacesResidentFactors) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -5223,7 +5223,7 @@ TEST(GpuFactorFinalize, NormalPreconditionerInstallsAndReplacesResidentFactors) 
 TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -5338,7 +5338,7 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
 TEST(GpuFactorFinalize, ConsumingPrefixOmissionRetainsTheCpuTailPayload) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");

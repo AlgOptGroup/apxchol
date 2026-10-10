@@ -411,7 +411,7 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneAttemptForBothImports)
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_env trace_enabled("APXCHOL_GPU_BLOCK_TRACE", "1");
     scoped_env sparsify("APXCHOL_RESIDUAL_SPARSIFY", "1");
-    scoped_env full_precision_factor("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env full_precision_factor("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     constexpr int n = 17;
     std::vector<Eigen::Triplet<double>> entries;

@@ -1846,10 +1846,10 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
 TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
     for (const char* choice : {static_cast<const char*>(nullptr), "", "dataflow"}) {
         const scoped_environment selected("APXCHOL_GPU_SPTRSV", choice);
-        for (const char* storage : {static_cast<const char*>(nullptr), "0", "1"}) {
-            const scoped_environment fp16("APXCHOL_SPTRSV_FP16", storage);
+        for (const char* storage : {static_cast<const char*>(nullptr), "float32", "float16"}) {
+            const scoped_environment fp16("APXCHOL_FACTOR_STORAGE", storage);
             EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(),
-                      !storage || *storage == '1');
+                      !storage || std::string_view(storage) == "float16");
             apxchol::sparse_csc factor;
             factor.n_ = 1;
             factor.outer_ = {0, 1};
@@ -1858,7 +1858,7 @@ TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
             apxchol::cuda_sptrsv trsv;
             ASSERT_NO_THROW(trsv.setup(factor, 1));
             EXPECT_STREQ(trsv.backend_name(), "dataflow");
-            EXPECT_EQ(trsv.fp16(), !storage || *storage == '1');
+            EXPECT_EQ(trsv.fp16(), !storage || std::string_view(storage) == "float16");
         }
     }
 }
@@ -2517,7 +2517,7 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
     const scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     const scoped_environment setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
     const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    const scoped_environment fp32("APXCHOL_SPTRSV_FP16", "0");
+    const scoped_environment fp32("APXCHOL_FACTOR_STORAGE", "float32");
     const scoped_environment drop("APXCHOL_FACTOR_DROP", "0");
     const bounded_fixture_threads serial;
     const auto A = grid_laplacian(9, 7);

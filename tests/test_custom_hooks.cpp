@@ -12,7 +12,7 @@
 
 namespace {
 // RAII env override: these tests state the DEFAULT (fp32) SpTRSV storage
-// contract, and the suite is also run with APXCHOL_SPTRSV_FP16=1 in the
+// contract, and the suite is also run with APXCHOL_FACTOR_STORAGE=float16 in the
 // environment, so they pin it.
 struct scoped_env {
     std::string name, saved; bool had = false;
@@ -26,7 +26,7 @@ struct scoped_env {
 
 // "Exact factor => O(1) PCG iterations" bound. An exact Cholesky factor stored
 // at fp32 preconditions PCG to <= 3 iterations. (Under the fp16 STORAGE --
-// APXCHOL_SPTRSV_FP16=1, see lowprec.h -- every off-diagonal carries a 2^-11
+// APXCHOL_FACTOR_STORAGE=float16, see lowprec.h -- every off-diagonal carries a 2^-11
 // relative rounding, so the "exact" factor is only an approximate one and PCG
 // needs a few more; iteration count, not the residual floor, is what
 // precision buys. These tests run at the default fp32 storage.)
@@ -136,8 +136,8 @@ TEST(CustomEliminator, LambdaViaAsEliminator) {
 
 TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     // With the exact clique rule the factorization is exact Cholesky:
     // P^T L L^T P == A up to roundoff (no sampling at all).
@@ -158,12 +158,12 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     // iteration on this grid). The residual floor is unaffected either way.
     for (bool fp16 : {false, true}) {
         SCOPED_TRACE(fp16 ? "fp16 storage" : "lossless storage");
-        setenv("APXCHOL_SPTRSV_FP16", fp16 ? "1" : "0", /*overwrite=*/1);
+        setenv("APXCHOL_FACTOR_STORAGE", fp16 ? "float16" : "float32", /*overwrite=*/1);
         auto res = solve_once();
         EXPECT_LE(res.iterations, kExactFactorMaxIters + (fp16 ? 1 : 0));
         EXPECT_LT(res.residual, 1e-12);
     }
-    unsetenv("APXCHOL_SPTRSV_FP16");
+    unsetenv("APXCHOL_FACTOR_STORAGE");
 #else
     auto res = solve_once();
     // An exact factor preconditions PCG to convergence in O(1) iterations.

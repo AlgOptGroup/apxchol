@@ -224,8 +224,8 @@ sparse_csc make_wide_magnitude_lower(node_index n) {
 // parallel transpose (m > 50000).
 TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     struct cfg { node_index n; bool laplacian; };
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
@@ -407,8 +407,8 @@ TEST(SpTRSVDrop, EnvContract) {
 // a diagonal one then (y = x / diag).
 TEST(SpTRSVDrop, EdgeCases) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     const node_index m = 2000;
     sparse_csc L = make_random_lower(m, 4.0, 31, 0.0, 1.0);
@@ -554,8 +554,8 @@ TEST(SpTRSVDrop, CompactedArraysAreByteIdenticalAcrossThreadCounts) {
 
 TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     struct cfg { node_index n; bool laplacian; };
     for (const char* rel_env : {"1e-4", static_cast<const char*>(nullptr), "0"})
@@ -631,7 +631,7 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
 }
 
 // The fp16 per-column-scaled storage the dataflow backend uploads under
-// APXCHOL_SPTRSV_FP16=1 (cuda_host.h file header): each slot is
+// APXCHOL_FACTOR_STORAGE=float16 (cuda_host.h file header): each slot is
 // binary16(fp32(v) / s_j) RNE with fp16 subnormals flushed to signed zero
 // (restated here with native _Float16 conversions), diag[j] =
 // fp32(L_jj) / s_j, inv_scale[j] = fp32(1 / s_j); with diag_comp the column's
@@ -1731,10 +1731,10 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
         { std::mt19937 rng(11); std::uniform_real_distribution<double> u(-1.0, 1.0); for (auto& v : x) v = u(rng); }
         // The CPU reference pair (fp32 storage, fp64 accumulation) -- one
         // setup, every GPU variant is compared against it. The storage is
-        // pinned: the suite is also run with APXCHOL_SPTRSV_FP16=1 in the
+        // pinned: the suite is also run with APXCHOL_FACTOR_STORAGE=float16 in the
         // environment, and the tolerances are stated against the fp32 pair.
         {
-            scoped_env cpu32("APXCHOL_SPTRSV_FP16", "0");
+            scoped_env cpu32("APXCHOL_FACTOR_STORAGE", "float32");
             apxchol::omp_sptrsv c; c.setup(L, m);
             std::vector<double> t(m);
             c.forward_solve(x.data(), t.data());
@@ -1743,7 +1743,7 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
         for (const char* seg : {"0", "256"}) {
             for (bool fp16 : {false, true}) {
                 SCOPED_TRACE(std::string("APXCHOL_GPU_DF_SPLIT=") + seg + (fp16 ? " fp16" : " fp32"));
-                scoped_env f16("APXCHOL_SPTRSV_FP16", fp16 ? "1" : "0");
+                scoped_env f16("APXCHOL_FACTOR_STORAGE", fp16 ? "float16" : "float32");
                 scoped_env sg("APXCHOL_GPU_DF_SPLIT", seg);
                 {
                     scoped_env be("APXCHOL_GPU_SPTRSV", "dataflow");
@@ -1788,7 +1788,7 @@ TEST(GpuSptrsvAdoptionDevice, Fp32AndFp16MatchTheExistingUploadPathBitForBit) {
     scoped_env split("APXCHOL_GPU_DF_SPLIT", "256");
     for (bool fp16 : {false, true}) {
         SCOPED_TRACE(fp16 ? "fp16" : "fp32");
-        scoped_env storage("APXCHOL_SPTRSV_FP16", fp16 ? "1" : "0");
+        scoped_env storage("APXCHOL_FACTOR_STORAGE", fp16 ? "float16" : "float32");
         apxchol::cuda_sptrsv uploaded;
         uploaded.setup(factor, m);
         ASSERT_FALSE(uploaded.adopted_device_factor());
@@ -1839,7 +1839,7 @@ TEST(GpuSptrsvAdoptionDevice, InvalidStructureRollsBackOwnershipAndDestination) 
     const sparse_csc factor = make_dominant_lower(n);
     scoped_drop_env drop("1e-4");
     scoped_env backend("APXCHOL_GPU_SPTRSV", "dataflow");
-    scoped_env storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     apxchol::cuda_sptrsv destination;
     prepared_adoption malformed =

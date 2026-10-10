@@ -5,9 +5,9 @@
 // Selected at setup by factor_options::factor_storage, or by the environment
 // when the option is automatic:
 //
-//     APXCHOL_SPTRSV_STORAGE = auto | float16 | float32
+//     APXCHOL_FACTOR_STORAGE = auto | float16 | float32
 //
-// (factor_storage_from_env() below is the one reader; unset resolves per
+// (resolve_fp16_storage() below is the one reader; unset resolves per
 // DEVICE -- OFF on the CPU, ON on the GPU -- because the two have different
 // measured verdicts, see the backend headers). Before 2026-08-20 the CPU side
 // was a CMake cache variable, APXCHOL_SPTRSV_LOWPREC=OFF|FP16_SCALED, and the
@@ -72,21 +72,10 @@ inline factor_storage_type parse_factor_storage(std::string_view value) {
     throw std::invalid_argument("factor storage must be auto, float16 or float32");
 }
 
-inline factor_storage_type factor_storage_from_env() {
-    if (const char* e = std::getenv("APXCHOL_SPTRSV_STORAGE"); e && *e)
-        return parse_factor_storage(e);
-    // Compatibility with existing scripts; the named setting takes precedence.
-    if (const char* e = std::getenv("APXCHOL_SPTRSV_FP16"); e && *e) {
-        if (std::string_view(e) == "0") return factor_storage_type::fp32;
-        if (std::string_view(e) == "1") return factor_storage_type::fp16;
-        throw std::invalid_argument("APXCHOL_SPTRSV_FP16 must be 0 or 1");
-    }
-    return factor_storage_type::automatic;
-}
-
 inline bool resolve_fp16_storage(factor_storage_type storage, bool default_fp16) {
     if (storage == factor_storage_type::automatic)
-        storage = factor_storage_from_env();
+        if (const char* e = std::getenv("APXCHOL_FACTOR_STORAGE"); e && *e)
+            storage = parse_factor_storage(e);
     switch (storage) {
     case factor_storage_type::automatic: return default_fp16;
     case factor_storage_type::fp16: return true;

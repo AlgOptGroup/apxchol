@@ -18,11 +18,11 @@ namespace {
 
 // CSC arrays -> column-major Eigen::SparseMatrix<double>.
 Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
-                                         py::array data, Eigen::Index n) {
+                                         py::array data) {
     if (indptr.ndim() != 1 || indices.ndim() != 1 || data.ndim() != 1)
         throw std::invalid_argument("CSC data, indices and indptr must be one-dimensional");
-    if (n < 0 || indptr.size() == 0 || indptr.size() - 1 != n)
-        throw std::invalid_argument("indptr length must be n+1");
+    if (indptr.size() == 0)
+        throw std::invalid_argument("CSC indptr must contain at least its initial zero");
 
     auto ip = indptr.cast<py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>>();
     auto ii = indices.cast<py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>>();
@@ -30,7 +30,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
     const std::int64_t* P = ip.data();
     const std::int64_t* I = ii.data();
     const double*        V = dd.data();
-    const Eigen::Index ncol = static_cast<Eigen::Index>(ip.size()) - 1;
+    const Eigen::Index n = ip.size() - 1;
     if (ii.size() != dd.size() || P[0] != 0 || P[n] != dd.size() ||
         !std::is_sorted(P, P + ip.size()))
         throw std::invalid_argument(
@@ -46,7 +46,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 
     std::vector<Eigen::Triplet<double>> trips;
     trips.reserve(static_cast<std::size_t>(dd.size()));
-    for (Eigen::Index j = 0; j < ncol; ++j)
+    for (Eigen::Index j = 0; j < n; ++j)
         for (std::int64_t p = P[j]; p < P[j + 1]; ++p) {
             if (I[p] < 0 || I[p] >= n)
                 throw std::invalid_argument("CSC row index out of range");
@@ -146,9 +146,9 @@ apxchol::solve_options parse_options(const py::dict& d) {
 // benchmark's one-shot solve() runs, so package and bench numbers match).
 class Solver {
 public:
-    Solver(py::array indptr, py::array indices, py::array data, Eigen::Index n,
+    Solver(py::array indptr, py::array indices, py::array data,
            const py::dict& options)
-        : slv_(csc_to_eigen(indptr, indices, data, n), parse_options(options)) {}
+        : slv_(csc_to_eigen(indptr, indices, data), parse_options(options)) {}
 
     Eigen::Index rows() const { return slv_.rows(); }
     bool sddm() const { return factor().sddm; }
@@ -274,8 +274,8 @@ PYBIND11_MODULE(_apxchol, m) {
 #endif
     m.doc() = "apxchol CPU approximate-Cholesky preconditioner (pybind11 binding)";
     py::class_<Solver>(m, "Solver")
-        .def(py::init<py::array, py::array, py::array, Eigen::Index, const py::dict&>(),
-             py::arg("indptr"), py::arg("indices"), py::arg("data"), py::arg("n"),
+        .def(py::init<py::array, py::array, py::array, const py::dict&>(),
+             py::arg("indptr"), py::arg("indices"), py::arg("data"),
              py::arg("options") = py::dict())
         .def("solve", &Solver::solve, py::arg("b"), py::arg("tol"), py::arg("maxiter"),
              py::arg("x0") = py::none(), py::arg("out") = py::none())

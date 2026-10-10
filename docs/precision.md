@@ -15,7 +15,7 @@ installed triangular-solve arrays, and the outer iteration. A build with
 
 `factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; C++ owns parsing and default selection.
 
-The environment setting is `APXCHOL_SPTRSV_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU FP32, GPU FP16). When the named setting is unset or empty, the legacy `APXCHOL_SPTRSV_FP16=0|1` is accepted. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
+The environment setting is `APXCHOL_FACTOR_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU FP32, GPU FP16). Unset or empty selects `auto`. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
 
 CPU FP16 is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
 checked at setup; an unsupported explicit FP16 request raises an error. Fat levels use the

@@ -504,7 +504,7 @@ def test_export_supports_float32_triangular_solve():
 
 
 @pytest.mark.parametrize("field, values", [
-    ("indptr", [0, 5, 4]), ("indices", [0, 2, 0, 1]),
+    ("indptr", []), ("indptr", [0, 5, 4]), ("indices", [0, 2, 0, 1]),
 ])
 def test_binding_rejects_invalid_csc_bounds(field, values):
     from apxchol import _apxchol
@@ -512,7 +512,7 @@ def test_binding_rejects_invalid_csc_bounds(field, values):
     A = sp.csc_matrix([[2.0, -1.0], [-1.0, 2.0]])
     setattr(A, field, np.asarray(values, dtype=np.int32))
     with pytest.raises(ValueError):
-        _apxchol.Solver(A.indptr, A.indices, A.data, A.shape[0])
+        _apxchol.Solver(A.indptr, A.indices, A.data)
 
 
 def test_placeholder_column_per_component():

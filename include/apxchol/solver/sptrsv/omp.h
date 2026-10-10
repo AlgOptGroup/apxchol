@@ -195,7 +195,7 @@ private:
 
 // Storage contract (derivation and historical decisions: docs/precision.md):
 //
-// * FP32 arrays by default; APXCHOL_SPTRSV_FP16=1 selects scaled FP16
+// * FP32 arrays by default; APXCHOL_FACTOR_STORAGE=float16 selects scaled FP16
 //   off-diagonals on CPUs with F16C, including portable builds. Arithmetic
 //   remains FP64 in both cases; only the stored preconditioner changes.
 // * Scale s_j is the pre-drop maximum absolute off-diagonal of column j, or
@@ -228,7 +228,7 @@ public:
         return false;
 #endif
     }
-    /// Resolve the next setup's storage; automatic reads APXCHOL_SPTRSV_STORAGE
+    /// Resolve the next setup's storage; automatic reads APXCHOL_FACTOR_STORAGE
     /// and defaults to FP32. Unsupported FP16 requests fail.
     static bool fp16_resolved(factor_storage_type storage = factor_storage_type::automatic) {
         const bool want = detail::resolve_fp16_storage(storage, false);
@@ -646,7 +646,7 @@ private:
                         throw std::runtime_error(
                             "apxchol omp_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                             " (diag=" + std::to_string(diag_[j]) + ", inv_scale^2=" + std::to_string(r * r) +
-                            "); set APXCHOL_SPTRSV_FP16=0");
+                            "); set APXCHOL_FACTOR_STORAGE=float32");
                 }
                 if (std::getenv("APXCHOL_VERBOSE"))
                     std::fprintf(stderr,
