@@ -131,8 +131,10 @@ choices, retired knobs, and measurements belong in
   CMake and libomp, then use the common build commands. libc++ `std::pmr`
   requires a macOS 14 deployment target. Linux-only `madvise`
   advice is compiled out; mmap remains. CI's `linux` and `macos` jobs share
-  parent-consumer build/test steps through YAML anchors. Keep `std::iota` for
-  the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
+  native/portable modes and parent-consumer build/test steps through YAML anchors.
+  Linux tests GCC and Clang in both modes; macOS tests Apple Clang in both modes.
+  Keep `std::iota` for the macos-15 runner's default Xcode 16.4 toolchain until
+  that baseline retires.
 
 
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
