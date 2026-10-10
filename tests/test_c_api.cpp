@@ -951,7 +951,7 @@ TEST(CApi, SolverFromFactorPreconditionsANearbyOperator) {
         EXPECT_EQ(info.converged, 1);
         const double res = true_residual(B, b, x);
         EXPECT_LT(res, o.tol) << shift;
-        if (shift == 0.0) EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());  // min-norm
+        if (shift == 0.0) { EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm()); }  // min-norm
 
         // The same solution as a solver that factorized B itself.
         handle fresh;
@@ -1455,7 +1455,7 @@ TEST(CApi, MetalSolverFromFactorPreconditionsANearbyOperator) {
         const double res = true_residual(Bop, b, x);
         EXPECT_LT(res, o.tol) << shift;
         EXPECT_NEAR(info.relative_residual, res, 1e-3 * res);
-        if (shift == 0.0) EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());
+        if (shift == 0.0) { EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm()); }
     }
 }
 
