@@ -15,8 +15,16 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | Metal triangular solves | The CPU's FP32 stored factor; FP32 reciprocal diagonals and arithmetic | Apple GPUs have no FP64; same applied preconditioner as the CPU |
 | Metal block PCG | Double-float x, r, A p and inexact operator; FP32 p and z; double-float fixed-tree reductions; host FP64 exit residual | About 48-bit recurrences reach original-system tolerances without FP64 hardware |
 
-`APXCHOL_SPTRSV_FP16=0|1` selects triangular-solve storage at setup. CPU FP16
-is available only on targets with F16C; it is not promised by portable wheels.
+`factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; C++ owns parsing and default selection.
+
+The environment setting is `APXCHOL_FACTOR_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU FP32, GPU FP16). Unset or empty selects `auto`. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
+
+CPU FP16 is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
+checked at setup; an unsupported explicit FP16 request raises an error. Fat levels use the
+AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise.
+CPU setup converts the CSC values once and copies them into CSR. Consuming
+setup releases the input before transposing; non-consuming FP16 setup retains
+that input and the stored CSC alongside the parallel transpose's scratch.
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.
 
@@ -27,7 +35,8 @@ or one for an empty/zero off-diagonal column. The factor-drop threshold uses
 this scale before dropping. Drop compensation runs on FP32 values before
 narrowing; the retained values preserve the column sum up to rounding.
 
-An off-diagonal is stored as round-to-nearest-even FP16 of `L_ij / s_j`.
+An off-diagonal is stored by native conversion of `L_ij / s_j` to FP16.
+Under the normal floating-point environment this rounds to nearest, ties to even.
 FP16 subnormals are flushed to signed zero. The scaled diagonal remains FP32
 and absorbs the off-diagonal rounding residual. Degenerate scales fall back
 to one before dropping; invalid final diagonals/scales are rejected.
@@ -109,8 +118,9 @@ must preserve its selected set and insertion order. Tests also retain exact
 single-thread factor and same-owned-factor repeated-solve checks. Parallel FP64
 rebuilds are checked for valid structure and the requested original-system
 residual, rather than equal factor bytes or iteration counts between builds.
-This also applies to host factor construction in CUDA-enabled builds; installing
-the resulting factor on the GPU does not make its earlier construction repeatable.
+This also applies to explicit host factor construction in CUDA-enabled builds.
+Low-level import of that factor onto the GPU does not make its earlier
+construction repeatable; public CPU solvers keep the factor and solves on CPU.
 
 Historical rejected precision variants and their limits are recorded in
 [implementation history](implementation-history.md). They are not universal

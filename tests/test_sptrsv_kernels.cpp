@@ -2,7 +2,7 @@
 // (include/apxchol/solver/sptrsv/omp.h): the compiled storage type matches
 // the build flag, and the kernels compute in double from the WIDENED stored
 // factor values (whatever sptrsv_value_t this build compiled: fp16-scaled /
-// fp32 / fp64 -- see lowprec.h; fp16_t itself and the storage contract of
+// fp32 / fp64 -- see lowprec.h; _Float16 itself and the storage contract of
 // setup() are tested in test_lowprec.cpp) -- thin-level (`omp single`) and
 // fat-level (`omp for`, SIMD on 16-bit storage) kernels, both gather flavours.
 
@@ -51,7 +51,7 @@ struct scoped_drop_off : scoped_env {
 
 // The DEFAULT storage width is fp32, and value_name / value_bytes (what the
 // APXCHOL_VERBOSE banner prints) report what the last setup() resolved --
-// fp32 unset, fp16 under APXCHOL_SPTRSV_FP16=1 where the build has F16C.
+// fp32 unset, fp16 under APXCHOL_FACTOR_STORAGE=float16 where the CPU has F16C.
 TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     EXPECT_EQ(sizeof(sptrsv_value_t), 4u);
     EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
@@ -59,11 +59,11 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     // widen() of every storage type this build can see is the exact value.
     EXPECT_EQ(apxchol::widen(0.75f), 0.75);
     EXPECT_EQ(apxchol::widen(0.75), 0.75);
-    EXPECT_EQ(apxchol::widen(apxchol::fp16_t(0.75f)), 0.75);
+    EXPECT_EQ(apxchol::widen(_Float16(0.75f)), 0.75);
 
     sparse_csc L; L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
     {
-        scoped_env off("APXCHOL_SPTRSV_FP16", "0");
+        scoped_env off("APXCHOL_FACTOR_STORAGE", "float32");
         apxchol::omp_sptrsv t; t.setup(L, 2);
         EXPECT_FALSE(t.fp16());
         EXPECT_EQ(t.value_bytes(), 4u);
@@ -72,15 +72,18 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
         EXPECT_EQ(t.csc_vals16().size(), 0u);
     }
     {
-        scoped_env on("APXCHOL_SPTRSV_FP16", "1");
-        apxchol::omp_sptrsv t; t.setup(L, 2);
-        // Without F16C the env falls back to fp32 with a note (portable builds).
-        EXPECT_EQ(t.fp16(), apxchol::omp_sptrsv::fp16_supported());
-        EXPECT_EQ(t.value_bytes(), apxchol::omp_sptrsv::fp16_supported() ? 2u : 4u);
+        scoped_env on("APXCHOL_FACTOR_STORAGE", "float16");
+        apxchol::omp_sptrsv t;
         if (apxchol::omp_sptrsv::fp16_supported()) {
+            t.setup(L, 2);
+            EXPECT_TRUE(t.fp16());
+            EXPECT_EQ(t.value_bytes(), 2u);
             EXPECT_STREQ(t.value_name(), "fp16 (per-column scaled)");
             EXPECT_EQ(t.csc_vals16().size(), 3u);
             EXPECT_EQ(t.csc_vals().size(), 0u);
+        } else {
+            EXPECT_THROW(t.setup(L, 2), std::runtime_error);
+            EXPECT_FALSE(t.ready());
         }
     }
 }
@@ -90,8 +93,8 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
 // back (L^T z = y) solves through omp_sptrsv, and check the residuals against
 // the values the SpTRSV STORES row by row with a componentwise bound. Because
 // the kernels accumulate in double, the residual is at roundoff level even
-// when the storage is 16-bit -- if any read did fp16/fp32 arithmetic this
-// would blow up to ~2^-11. Under the FP16_SCALED build the stored values
+// when the storage is 16-bit -- fp16/fp32 arithmetic would produce larger
+// rounding error. Under the FP16_SCALED build the stored values
 // are: off-diagonals narrowed by omp_sptrsv::narrow_value (RNE of L_ij / s_j,
 // s_j the per-column scale) and the DIAGONAL fp32 (omp_sptrsv::stored_diag:
 // L_jj / s_j) -- so this test also pins (a) that the kernels divide by that
@@ -107,16 +110,11 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
 // serial double substitution on L_s (roundoff for y', 2^-23-class for z).
 namespace {
 
-// THE storage under test, as a runtime flag: what APXCHOL_SPTRSV_FP16
-// resolves to for this build (fp16 only where F16C exists).
-bool fp16_storage(const char* env_value) {
-    return std::string(env_value) == "1" && apxchol::omp_sptrsv::fp16_supported();
-}
 // The KERNEL matrix L~ as omp_sptrsv::setup stores it (widened, NOT
 // rescaled) for the OFF-DIAGONAL entry with value v in a column with scale s:
 // through narrow_value. On the fp32 storage this is v itself.
 double kernel_offdiag(factor_value_t v, float s, bool fp16) {
-    return fp16 ? apxchol::widen(apxchol::omp_sptrsv::narrow_value<apxchol::fp16_t>(v, s))
+    return fp16 ? apxchol::widen(apxchol::omp_sptrsv::narrow_value<_Float16>(v, s))
                 : apxchol::widen(apxchol::omp_sptrsv::narrow_value<float>(v, s));
 }
 // The per-column scale the kernels' input / output carry (1.0f on fp32).
@@ -131,7 +129,7 @@ double kernel_diag(const sparse_csc& L, node_index j, bool fp16) {
     const edge_index p0 = L.outer_[j];
     if (!fp16) return apxchol::omp_sptrsv::stored_diag<float>(L.vals_[p0], 1.0f);
     const float s = pair_scale(L, j, true);
-    double d = apxchol::omp_sptrsv::stored_diag<apxchol::fp16_t>(L.vals_[p0], s);
+    double d = apxchol::omp_sptrsv::stored_diag<_Float16>(L.vals_[p0], s);
     double resid = 0.0;
     for (edge_index p = p0 + 1; p < L.outer_[j + 1]; ++p)
         resid += static_cast<double>(L.vals_[p]) / static_cast<double>(s)
@@ -196,8 +194,7 @@ void check_kernel_residual(const sparse_csc& L, const std::vector<double>& b,
     double worst = 0.0;
     for (node_index i = 0; i < m; ++i)
         worst = std::max(worst, std::fabs(r[i]) / (scale[i] + 1e-300));
-    // Double accumulation over <= ~70 terms: roundoff ~1e-14; 2^-11 would be
-    // the signature of any narrow-precision arithmetic.
+    // Double accumulation over <= ~70 terms has roundoff around 1e-14.
     EXPECT_LT(worst, 1e-11) << (transpose ? "back" : "forward") << " kernel residual";
 }
 
@@ -231,11 +228,12 @@ void reference_pair(const sparse_csc& L, const std::vector<double>& x,
 }
 
 void run_kernel_precision_check() {
-    for (const char* env : {"0", "1"})
+    for (const char* env : {"float32", "float16"})
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose path */}) {
-        const bool fp16 = fp16_storage(env);
-        SCOPED_TRACE("m=" + std::to_string(m) + " APXCHOL_SPTRSV_FP16=" + env);
-        scoped_env storage("APXCHOL_SPTRSV_FP16", env);
+        const bool fp16 = std::string_view(env) == "float16";
+        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        SCOPED_TRACE("m=" + std::to_string(m) + " APXCHOL_FACTOR_STORAGE=" + env);
+        scoped_env storage("APXCHOL_FACTOR_STORAGE", env);
         sparse_csc L = make_random_lower(m, 4.0, 99);
         apxchol::omp_sptrsv trsv;
         trsv.setup(L, m);
@@ -251,7 +249,7 @@ void run_kernel_precision_check() {
         trsv.transpose_solve(yp.data(), z.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
-            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<apxchol::fp16_t>(pair_scale(L, j, true)) : 1.0;
+            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z, /*transpose=*/true, fp16);
@@ -286,10 +284,10 @@ TEST(SpTRSVKernels, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
 // A round-structured factor (R rounds of B > kSpTRSVOMPThreshold mutually
 // independent columns; every off-diagonal points to a LATER round) fed
 // through set_round_bounds so every level is fat and the `omp for` kernels
-// run -- on 16-bit storage the SIMD ones (simd_fp16_kernel()): 8-wide vector
-// widen, 4-wide step, scalar tail. CSR row lengths are spread over 0..48 so
-// every path (8-blocks, the 4-step, tails of 0..3) is exercised. Run at BOTH
-// storages (APXCHOL_SPTRSV_FP16=0|1) and checked exactly like the thin-level
+// run -- on 16-bit storage the SIMD ones (simd_fp16_kernel()): four-lane
+// widening and arithmetic, then a scalar tail. CSR row lengths span 0..48 so
+// every path (full vectors and tails of 0..3) is exercised. Run at BOTH
+// storages (APXCHOL_FACTOR_STORAGE=float32|float16) and checked exactly like the thin-level
 // kernels: the pair contract at roundoff against L~ / R and against the
 // serial reference on L_s.
 namespace {
@@ -361,18 +359,21 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
     std::uniform_real_distribution<double> ux(-1.0, 1.0);
     std::vector<double> x(m);
     for (auto& v : x) v = ux(rng);
-    for (const char* env : {"0", "1"}) {
-        const bool fp16 = fp16_storage(env);
-        SCOPED_TRACE(std::string("APXCHOL_SPTRSV_FP16=") + env);
-        scoped_env storage("APXCHOL_SPTRSV_FP16", env);
+    for (const char* env : {"float32", "float16"}) {
+        const bool fp16 = std::string_view(env) == "float16";
+        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        SCOPED_TRACE(std::string("APXCHOL_FACTOR_STORAGE=") + env);
+        scoped_env storage("APXCHOL_FACTOR_STORAGE", env);
         std::vector<double> y_ref, z_ref;
         reference_pair(L, x, y_ref, z_ref, fp16);
         apxchol::omp_sptrsv trsv;
         trsv.set_round_bounds(bounds);
         trsv.setup(L, m);
         ASSERT_EQ(trsv.fp16(), fp16);
-#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-        EXPECT_TRUE(apxchol::omp_sptrsv::simd_fp16_kernel());
+#ifdef __x86_64__
+        const bool simd = __builtin_cpu_supports("avx") && __builtin_cpu_supports("f16c")
+            && __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+        EXPECT_EQ(apxchol::omp_sptrsv::simd_fp16_kernel(), simd);
 #else
         EXPECT_FALSE(apxchol::omp_sptrsv::simd_fp16_kernel());
 #endif
@@ -391,7 +392,7 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
         trsv.transpose_solve(yp.data(), z.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
-            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<apxchol::fp16_t>(pair_scale(L, j, true)) : 1.0;
+            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z,  /*transpose=*/true, fp16);

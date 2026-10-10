@@ -265,8 +265,9 @@ TEST(AdjacencyToLaplacian, DropsSelfLoops) {
     adjacency_to_laplacian(A);
 
     for (Sparse::InnerIterator it(A, 2); it; ++it)
-        if (it.row() == it.col())
+        if (it.row() == it.col()) {
             EXPECT_DOUBLE_EQ(it.value(), 2.0);   // degree 2, self-loop ignored
+        }
 }
 
 TEST(AdjacencyToLaplacian, UsesAbsoluteValues) {

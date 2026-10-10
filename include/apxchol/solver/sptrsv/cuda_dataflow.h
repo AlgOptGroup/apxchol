@@ -1,5 +1,6 @@
 #pragma once
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <cstddef>
 #include <cstdint>
 
@@ -128,8 +129,8 @@
 // input scale (dataflow_solve_fp16).
 //
 // fp16 PATH DESIGN (2026-08-19 rework; measurements RTX 4090 Laptop,
-// interleaved warm per-sweep medians): the values are loaded as raw 2-byte
-// bits (the diagonal slot zeroed -- it can be fp16 Inf, see cuda_host.h
+// interleaved warm per-sweep medians): the values are loaded as 2-byte
+// halves (the diagonal slot zeroed -- it can be fp16 Inf, see cuda_host.h
 // diag_bad), widened only in the accumulate as ONE packed half2 -> float2
 // per entry pair, and accumulated branchlessly in two ILP chains (dead
 // slots contribute +-0 because their y is 0). Rationale: a hub-heavy BACK
@@ -191,7 +192,7 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse,
                     const sptrsv_gpu_value_t* rhs, sptrsv_gpu_value_t* out);
 
 /// The same sweep on the fp16 per-column-scaled storage (cuda_host.h
-/// contract): `vals16` are binary16 bit patterns of the column-scaled factor
+/// contract): `vals16` holds half-precision values of the column-scaled factor
 /// L~ = L D^-1, the row's diagonal SLOT is present in the CSR but skipped,
 /// the row divides by the fp32 `diag[i]` = fp32(L_ii / s_i) (plus the
 /// column's rounding residual under the default diag_comp), and rhs[i] is
@@ -203,7 +204,7 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse,
 /// computes the very same double product; the forward sweep passes nullptr):
 ///   out[i] = (rhs[i] * in_scale[i] - sum_{j != i} widen(vals16[p]) * out[j]) / diag[i].
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
-                         const int* rowptr, const int* colidx, const unsigned short* vals16,
+                         const int* rowptr, const int* colidx, const __half* vals16,
                          const float* diag, const double* in_scale,
                          const int* batch_start, const int* batch_spec, const int4* spec, int n_batches,
                          unsigned long long* tag, unsigned epoch, int* ctrl, int grid,

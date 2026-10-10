@@ -3,6 +3,7 @@
 #include <pybind11/eigen.h>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -15,19 +16,25 @@ namespace py = pybind11;
 
 namespace {
 
-// scipy CSC (indptr, indices, data) -> column-major Eigen::SparseMatrix<double>.
-// forcecast accepts int32/int64 index arrays and any float data dtype.
+// CSC arrays -> column-major Eigen::SparseMatrix<double>.
 Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
-                                         py::array data, Eigen::Index n) {
+                                         py::array data) {
+    if (indptr.ndim() != 1 || indices.ndim() != 1 || data.ndim() != 1)
+        throw std::invalid_argument("CSC data, indices and indptr must be one-dimensional");
+    if (indptr.size() == 0)
+        throw std::invalid_argument("CSC indptr must contain at least its initial zero");
+
     auto ip = indptr.cast<py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>>();
     auto ii = indices.cast<py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>>();
     auto dd = data.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
     const std::int64_t* P = ip.data();
     const std::int64_t* I = ii.data();
     const double*        V = dd.data();
-    const Eigen::Index ncol = static_cast<Eigen::Index>(ip.size()) - 1;
-    if (ncol != n)
-        throw std::invalid_argument("indptr length must be n+1");
+    const Eigen::Index n = ip.size() - 1;
+    if (ii.size() != dd.size() || P[0] != 0 || P[n] != dd.size() ||
+        !std::is_sorted(P, P + ip.size()))
+        throw std::invalid_argument(
+            "CSC indptr must start at zero, be nondecreasing and end at the length of data and indices");
 
     // This build uses 32-bit Eigen storage indices; matrices with n or nnz beyond
     // 2^31 would silently truncate below. Reject them with a clear message.
@@ -39,9 +46,12 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 
     std::vector<Eigen::Triplet<double>> trips;
     trips.reserve(static_cast<std::size_t>(dd.size()));
-    for (Eigen::Index j = 0; j < ncol; ++j)
-        for (std::int64_t p = P[j]; p < P[j + 1]; ++p)
+    for (Eigen::Index j = 0; j < n; ++j)
+        for (std::int64_t p = P[j]; p < P[j + 1]; ++p) {
+            if (I[p] < 0 || I[p] >= n)
+                throw std::invalid_argument("CSC row index out of range");
             trips.emplace_back(static_cast<int>(I[p]), static_cast<int>(j), V[p]);
+        }
 
     Eigen::SparseMatrix<double> A(n, n);
     A.setFromTriplets(trips.begin(), trips.end());
@@ -58,7 +68,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "seed", "partitioner", "storage", "keep_factor",
+    "seed", "partitioner", "storage", "keep_factor", "factor_storage_dtype",
     "degree_quantile", "degree_multiplier", "degree_tiebreak",
     "exact_clique_max_degree",
     "residual_peel", "stagnation_window",
@@ -111,6 +121,8 @@ apxchol::solve_options parse_options(const py::dict& d) {
             so.factor_opts.exact_clique_max_degree = v.cast<std::size_t>();
         else if (key == "residual_peel")
             so.factor_opts.residual_peel = parse_peel(v.cast<std::string>());
+        else if (key == "factor_storage_dtype")
+            so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
         else
             throw std::invalid_argument(
                 "unknown option '" + key + "'; valid keys: " +
@@ -134,12 +146,15 @@ apxchol::solve_options parse_options(const py::dict& d) {
 // benchmark's one-shot solve() runs, so package and bench numbers match).
 class Solver {
 public:
-    Solver(py::array indptr, py::array indices, py::array data, Eigen::Index n,
+    Solver(py::array indptr, py::array indices, py::array data,
            const py::dict& options)
-        : slv_(csc_to_eigen(indptr, indices, data, n), parse_options(options)) {}
+        : slv_(csc_to_eigen(indptr, indices, data), parse_options(options)) {}
 
     Eigen::Index rows() const { return slv_.rows(); }
     bool sddm() const { return factor().sddm; }
+    const char* factor_storage_dtype() const {
+        return slv_.preconditioner().trsv().fp16() ? "float16" : "float32";
+    }
     // Positive off-diagonal entries M-matrix lumping moved onto the diagonal
     // while building the preconditioner; 0 for a Laplacian/SDDM operator.
     std::int64_t lumped() const {
@@ -218,7 +233,7 @@ public:
         const std::int64_t ncol = static_cast<std::int64_t>(F.L.rows());
         py::array_t<std::int64_t> indptr(ncol + 1);
         py::array_t<std::int32_t> indices(nnz);
-        py::array_t<double>       data(nnz);
+        py::array_t<apxchol::factor_value_t> data(nnz);
         auto* ip = indptr.mutable_data();
         auto* ii = indices.mutable_data();
         auto* dd = data.mutable_data();
@@ -226,7 +241,7 @@ public:
             ip[c] = static_cast<std::int64_t>(F.L.outer_[static_cast<std::size_t>(c)]);
         for (std::int64_t k = 0; k < nnz; ++k) {
             ii[k] = static_cast<std::int32_t>(F.L.inner_[static_cast<std::size_t>(k)]);
-            dd[k] = static_cast<double>(F.L.vals_[static_cast<std::size_t>(k)]);
+            dd[k] = F.L.vals_[static_cast<std::size_t>(k)];
         }
         return py::make_tuple(indptr, indices, data);
     }
@@ -252,16 +267,22 @@ private:
 }  // namespace
 
 PYBIND11_MODULE(_apxchol, m) {
+#ifdef APXCHOL_REQUIRE_X86_64_V2
+    if (!__builtin_cpu_supports("x86-64-v2")) {
+        throw py::import_error("apxchol requires an x86-64-v2 CPU.");
+    }
+#endif
     m.doc() = "apxchol CPU approximate-Cholesky preconditioner (pybind11 binding)";
     py::class_<Solver>(m, "Solver")
-        .def(py::init<py::array, py::array, py::array, Eigen::Index, const py::dict&>(),
-             py::arg("indptr"), py::arg("indices"), py::arg("data"), py::arg("n"),
+        .def(py::init<py::array, py::array, py::array, const py::dict&>(),
+             py::arg("indptr"), py::arg("indices"), py::arg("data"),
              py::arg("options") = py::dict())
         .def("solve", &Solver::solve, py::arg("b"), py::arg("tol"), py::arg("maxiter"),
              py::arg("x0") = py::none(), py::arg("out") = py::none())
         .def("apply", &Solver::apply, py::arg("r"))
         .def("rows", &Solver::rows)
         .def("sddm", &Solver::sddm)
+        .def("factor_storage_dtype", &Solver::factor_storage_dtype)
         .def("lumped", &Solver::lumped)
         .def("factor_nnz", &Solver::factor_nnz)
         .def("factor_csc", &Solver::factor_csc)

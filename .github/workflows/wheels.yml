@@ -1,0 +1,31 @@
+name: wheels
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+          - name: macos-arm64
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheels and run tests
+        uses: pypa/cibuildwheel@v4.2.1
+        with:
+          package-dir: python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error

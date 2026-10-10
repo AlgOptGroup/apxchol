@@ -194,6 +194,10 @@ def stale_reasons(cell, *, sha_contains_fn=None, kinds=None):
         reasons.append(("original-v1", "Solve now includes original-residual stopping checks and any retries"))
     matrix_id = identity.get("matrix_id", "")
     device = identity.get("device", "")
+    if (solver == "apxchol_v1" and cell.get("status") in {"complete", "not_converged"}
+            and "total_s" in (cell.get("metrics") or {})
+            and (cell.get("metrics") or {}).get("execution_route") != device):
+        reasons.append(("complete-route", "apxchol timing lacks the matching complete CPU/GPU route receipt"))
     matrix_meta = cell.get("matrix_meta")
     kind = matrix_meta.get("kind") if isinstance(matrix_meta, dict) else None
     if kind is None:

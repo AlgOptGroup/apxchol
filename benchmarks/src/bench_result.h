@@ -5,6 +5,7 @@
 struct BenchResult {
     std::string solver_name;
     std::string graph_name;
+    std::string execution_route; // v1: complete cpu or gpu setup/solve route; empty for other solvers
     int n = 0;
     int nnz = 0;
     double setup_time = 0;
@@ -13,6 +14,7 @@ struct BenchResult {
     int iterations = 0;
     double rel_residual = 0;
     double fillin = 0;
+    long long factor_offdiag = -1; // measured v1 owner; -1 = unavailable
     double us_per_nnz = 0;
     double solve_rss_mb = 0;   // host VmRSS held during the solve phase (factor+operator+
                                // vectors, after the setup pool is freed). Peak RSS comes
