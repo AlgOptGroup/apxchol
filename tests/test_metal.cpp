@@ -1,4 +1,4 @@
-// The Apple GPU block PCG (include/apxchol/solver/metal_solver.h). Device
+// The Apple GPU PCG (include/apxchol/solver/metal_solver.h). Device
 // tests skip when metal_solver::available() is false (no device, kernels not
 // compiled, or the double-float self-test failed).
 #include <gtest/gtest.h>
@@ -207,10 +207,8 @@ TEST(MetalDevice, ApplyMatchesHostEmulationBitForBit) {
     }
 }
 
-// Heavy rows (32 virtual lanes over 32 or 16 real lanes), merged narrow runs
-// and wide levels all on the device: the application matches the emulation
-// and a 64-column block (other plan, other lanes) matches its single solves.
-TEST(MetalDevice, HeavyRowsNarrowRunsAndBlockWidthKeepBits) {
+// Exercise heavy rows, merged narrow runs and wide levels on the device.
+TEST(MetalDevice, HeavyRowsAndNarrowRunsMatchEmulation) {
     REQUIRE_METAL();
     const Sparse A = hub_graph(110, 100, 4);
     apxchol::factorization F = apxchol::factorize(A);
@@ -220,25 +218,14 @@ TEST(MetalDevice, HeavyRowsNarrowRunsAndBlockWidthKeepBits) {
         ls::build_factor_schedules(Fcopy.L, A.rows() - 1, apxchol::factor_drop_rel_from_env());
     int kinds[3] = {0, 0, 0};
     for (const ls::level_solve* sv : {&sch.forward, &sch.backward})
-        for (const ls::level_step& st : ls::plan_steps(*sv, 1)) ++kinds[static_cast<int>(st.kind)];
+        for (const ls::level_step& st : ls::plan_steps(*sv)) ++kinds[static_cast<int>(st.kind)];
     EXPECT_GT(kinds[0], 0) << "wide light steps";
     EXPECT_GT(kinds[1], 0) << "heavy steps (the hubs' forward rows)";
     EXPECT_GT(kinds[2], 0) << "narrow runs";
     const apxchol::metal_solver slv(A, std::move(F));
     const Eigen::VectorXd r = rhs(A.rows(), 2, true);
     EXPECT_TRUE(same_bytes(slv.apply(r), emulate_apply(Fcopy, r)));
-    const Eigen::Index k = 64;
-    Eigen::MatrixXd B(A.rows(), k);
-    for (Eigen::Index c = 0; c < k; ++c) B.col(c) = rhs(A.rows(), static_cast<unsigned>(c + 11), true);
-    const apxchol::metal_block_result res = slv.solve(B, 1e-10, 500);
-    for (Eigen::Index c = 0; c < k; ++c) {
-        SCOPED_TRACE(c);
-        EXPECT_TRUE(res.columns[static_cast<std::size_t>(c)].converged);
-        const Eigen::VectorXd bc = B.col(c);
-        const apxchol::solve_result one = slv.solve(bc, 1e-10, 500);
-        EXPECT_TRUE(same_bytes(res.X.col(c), one.x));
-        EXPECT_EQ(res.columns[static_cast<std::size_t>(c)].iterations, one.iterations);
-    }
+
 }
 
 // A synthetic factor with heavy rows in both sweeps (hub columns and hub
@@ -285,7 +272,7 @@ TEST(MetalDevice, SyntheticHeavyFactorApplyMatchesEmulation) {
             F.L, sddm ? n : n - 1, apxchol::factor_drop_rel_from_env());
         for (const ls::level_solve* sv : {&sch.forward, &sch.backward}) {
             bool heavy = false;
-            for (const ls::level_step& st : ls::plan_steps(*sv, 1)) heavy |= st.kind == ls::step_kind::heavy;
+            for (const ls::level_step& st : ls::plan_steps(*sv)) heavy |= st.kind == ls::step_kind::heavy;
             EXPECT_TRUE(heavy);
         }
         // The operator only has to match in size for an application.
@@ -363,62 +350,7 @@ TEST(MetalDevice, SddmExactAndDoubleFloatOperators) {
     }
 }
 
-TEST(MetalDevice, Block64MixedConvergence) {
-    REQUIRE_METAL();
-    const Sparse A = grid(24, 31);
-    const apxchol::metal_solver slv(A);
-    const Eigen::Index n = A.rows(), k = 64;
-    const double scales[] = {1e-12, 1.0, 1e6};
-    Eigen::MatrixXd B(n, k), X0 = Eigen::MatrixXd::Zero(n, k);
-    for (Eigen::Index c = 0; c < k; ++c)
-        B.col(c) = rhs(n, static_cast<unsigned>(c + 1), true) * scales[c % 3];
-    B.col(5).setZero();
-    // Column 9 starts from its own solution: no iteration needed.
-    const Eigen::VectorXd b9 = B.col(9);
-    X0.col(9) = slv.solve(b9, 1e-12, 500).x;
-    const double tol = 1e-9;
-    const apxchol::metal_solver::block_cref X0r(X0);
-    const apxchol::metal_block_result res = slv.solve(B, tol, 500, &X0r);
-    ASSERT_EQ(res.X.cols(), k);
-    for (Eigen::Index c = 0; c < k; ++c) {
-        SCOPED_TRACE(c);
-        const auto& col = res.columns[static_cast<std::size_t>(c)];
-        EXPECT_TRUE(col.converged);
-        const Eigen::VectorXd bc = B.col(c);
-        const Eigen::VectorXd x0c = X0.col(c);
-        const apxchol::solve_result one = slv.solve(bc, tol, 500, c == 9 ? &x0c : nullptr);
-        EXPECT_TRUE(same_bytes(res.X.col(c), one.x));
-        EXPECT_EQ(col.iterations, one.iterations);
-        EXPECT_EQ(col.residual, one.residual);
-    }
-    EXPECT_EQ(res.columns[5].stop, apxchol::metal_stop::zero_rhs);
-    EXPECT_EQ(res.columns[5].iterations, 0);
-    EXPECT_EQ(res.columns[5].residual, 0.0);
-    EXPECT_EQ(res.columns[9].stop, apxchol::metal_stop::initial_guess);
-    EXPECT_EQ(res.columns[9].iterations, 0);
-    EXPECT_EQ(res.columns[0].stop, apxchol::metal_stop::recursive_tolerance);
-}
 
-TEST(MetalDevice, BatchesBeyond64) {
-    REQUIRE_METAL();
-    const Sparse A = grid(20, 20, 0.1);
-    const apxchol::metal_solver slv(A);
-    const Eigen::Index n = A.rows(), k = 150;
-    ASSERT_LE(slv.stats().block_columns, 64);
-    Eigen::MatrixXd B(n, k);
-    for (Eigen::Index c = 0; c < k; ++c) B.col(c) = rhs(n, static_cast<unsigned>(c + 3), false);
-    const apxchol::metal_block_result res = slv.solve(B, 1e-10, 400);
-    for (Eigen::Index c = 0; c < k; ++c) {
-        SCOPED_TRACE(c);
-        EXPECT_TRUE(res.columns[static_cast<std::size_t>(c)].converged);
-        const Eigen::VectorXd bc = B.col(c);
-        EXPECT_TRUE(same_bytes(res.X.col(c), slv.solve(bc, 1e-10, 400).x));
-    }
-    Eigen::MatrixXd X(n, k);
-    const apxchol::metal_block_result into = slv.solve(apxchol::metal_solver::block_cref(B), X, 1e-10, 400);
-    EXPECT_EQ(into.X.size(), 0);
-    EXPECT_EQ(0, std::memcmp(X.data(), res.X.data(), static_cast<std::size_t>(X.size()) * sizeof(double)));
-}
 
 TEST(MetalDevice, EarlyExitsTruthful) {
     REQUIRE_METAL();
@@ -429,9 +361,6 @@ TEST(MetalDevice, EarlyExitsTruthful) {
     EXPECT_EQ(none.iterations, 0);
     EXPECT_EQ(none.residual, 1.0);
     EXPECT_EQ(none.x.norm(), 0.0);
-    const apxchol::metal_block_result nb = slv.solve(Eigen::MatrixXd(b), 1e-8, 0);
-    EXPECT_FALSE(nb.columns[0].converged);
-    EXPECT_EQ(nb.columns[0].stop, apxchol::metal_stop::max_iterations);
 
     const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());
     const apxchol::solve_result z = slv.solve(zero);
@@ -452,11 +381,9 @@ TEST(MetalDevice, BreakdownIsNotConvergence) {
     const Sparse A = grid(10, 10);
     const apxchol::metal_solver slv(A);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
-    const apxchol::metal_block_result r = slv.solve(Eigen::MatrixXd(b), 1e-8, 50);
-    EXPECT_EQ(r.columns[0].stop, apxchol::metal_stop::breakdown);
-    EXPECT_EQ(r.columns[0].iterations, 0);
-    EXPECT_FALSE(r.columns[0].converged);
-    EXPECT_EQ(r.columns[0].residual, 1.0);
+    const apxchol::solve_result r = slv.solve(b, 1e-8, 50);
+    EXPECT_EQ(r.iterations, 0);
+    EXPECT_EQ(r.residual, 1.0);
 }
 
 TEST(MetalDevice, UnreachableTolStopsHonestly) {
@@ -464,16 +391,10 @@ TEST(MetalDevice, UnreachableTolStopsHonestly) {
     const Sparse A = grid(16, 16, 0.0, true);
     const apxchol::metal_solver slv(A);
     const Eigen::VectorXd b = rhs(A.rows(), 7, true);
-    const apxchol::metal_block_result r = slv.solve(Eigen::MatrixXd(b), 1e-30, 300);
-    const auto& c = r.columns[0];
-    EXPECT_FALSE(c.converged);
-    EXPECT_TRUE(c.stop == apxchol::metal_stop::stagnation || c.stop == apxchol::metal_stop::max_iterations)
-        << apxchol::to_string(c.stop);
-    EXPECT_GE(c.residual, 1e-30);
-    EXPECT_LE(c.iterations, 300);
-    EXPECT_NEAR(c.residual, true_residual(A, b, r.X.col(0)), 1e-2 * c.residual);
-    std::printf("[ metal ] tol 1e-30: stop %s after %lld iterations, residual %.3e\n",
-                apxchol::to_string(c.stop), static_cast<long long>(c.iterations), c.residual);
+    const apxchol::solve_result r = slv.solve(b, 1e-30, 300);
+    EXPECT_GE(r.residual, 1e-30);
+    EXPECT_LE(r.iterations, 300);
+    EXPECT_NEAR(r.residual, true_residual(A, b, r.x), 1e-2 * r.residual);
 }
 
 TEST(MetalDevice, PowerOfTwoScalingExact) {
@@ -507,69 +428,7 @@ TEST(MetalDevice, RepeatedAndTwinSolversBitIdentical) {
     EXPECT_TRUE(same_bytes(one.apply(b), two.apply(b)));
 }
 
-TEST(MetalDevice, HostThreadCountDoesNotChangeBits) {
-    REQUIRE_METAL();
-#ifndef _OPENMP
-    GTEST_SKIP() << "serial build";
-#else
-    // Above the folds' 4096-entry block so the host passes really split.
-    const Sparse A = grid(90, 80);
-    apxchol::factorization F = apxchol::factorize(A);
-    const Eigen::VectorXd b = rhs(A.rows(), 4, true);
-    const int saved = omp_get_max_threads();
-    std::vector<Eigen::VectorXd> xs;
-    for (const int threads : {1, 4, 6}) {
-        omp_set_num_threads(threads);
-        const apxchol::metal_solver slv(A, apxchol::factorization(F));
-        xs.push_back(slv.solve(b, 1e-10, 500).x);
-        xs.push_back(slv.apply(b));
-    }
-    omp_set_num_threads(saved);
-    for (std::size_t i = 2; i < xs.size(); ++i) EXPECT_TRUE(same_bytes(xs[i], xs[i % 2])) << i;
-#endif
-}
 
-TEST(MetalDevice, WarmBlockColumnsKeepBitsAcrossThreads) {
-    REQUIRE_METAL();
-#ifndef _OPENMP
-    GTEST_SKIP() << "serial build";
-#else
-    // More than one 4096-row fold block, so the host folds and SpMVs split
-    // across threads; two columns start from a nonzero x0 and still iterate.
-    const Sparse A = grid(90, 80);
-    apxchol::factorization F = apxchol::factorize(A);
-    const Eigen::Index n = A.rows(), k = 7;
-    Eigen::MatrixXd B(n, k), X0 = Eigen::MatrixXd::Zero(n, k);
-    for (Eigen::Index c = 0; c < k; ++c) B.col(c) = rhs(n, static_cast<unsigned>(c + 11), true);
-    X0.col(2) = rhs(n, 31, false);
-    X0.col(5) = rhs(n, 32, false);
-    const apxchol::metal_solver::block_cref X0r(X0);
-    const int saved = omp_get_max_threads();
-    std::vector<Eigen::MatrixXd> runs;
-    for (const int threads : {1, 6}) {
-        omp_set_num_threads(threads);
-        const apxchol::metal_solver slv(A, apxchol::factorization(F));
-        const apxchol::metal_block_result res = slv.solve(B, 1e-10, 500, &X0r);
-        for (Eigen::Index c = 0; c < k; ++c) {
-            SCOPED_TRACE(c);
-            const auto& col = res.columns[static_cast<std::size_t>(c)];
-            EXPECT_TRUE(col.converged);
-            EXPECT_GT(col.iterations, 0);
-            const Eigen::VectorXd bc = B.col(c), x0c = X0.col(c);
-            const apxchol::solve_result one =
-                slv.solve(bc, 1e-10, 500, x0c.isZero(0.0) ? nullptr : &x0c);
-            EXPECT_TRUE(same_bytes(res.X.col(c), one.x));
-            EXPECT_EQ(col.iterations, one.iterations);
-            EXPECT_EQ(col.residual, one.residual);
-            EXPECT_LT(true_residual(A, bc, one.x), 1e-10);
-        }
-        runs.push_back(res.X);
-    }
-    omp_set_num_threads(saved);
-    EXPECT_EQ(0, std::memcmp(runs[0].data(), runs[1].data(),
-                             static_cast<std::size_t>(runs[0].size()) * sizeof(double)));
-#endif
-}
 
 TEST(MetalDevice, LaplacianX0ConstantIrrelevant) {
     REQUIRE_METAL();
@@ -637,8 +496,6 @@ TEST(MetalDevice, StatisticsDescribeTheSetup) {
     const apxchol::metal_solver slv(A, keep_opts());
     const auto st = slv.stats();
     EXPECT_EQ(st.n, A.rows());
-    EXPECT_GE(st.block_columns, 1);
-    EXPECT_LE(st.block_columns, 64);
     EXPECT_GT(st.levels_forward, 0u);
     EXPECT_GT(st.levels_backward, 0u);
     EXPECT_GT(st.steps_forward, 0u);
@@ -648,4 +505,47 @@ TEST(MetalDevice, StatisticsDescribeTheSetup) {
     const apxchol::metal_solver released(A);
     EXPECT_TRUE(released.factor().L.vals_.empty());
     EXPECT_EQ(released.factor().perm.size(), static_cast<std::size_t>(A.rows()));
+}
+
+TEST(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
+    REQUIRE_METAL();
+    const Sparse A = grid(24, 31, 0.25);
+    const apxchol::metal_solver solver(A, keep_opts());
+    const auto ptr = solver.factor().L.outer_;
+    const auto idx = solver.factor().L.inner_;
+    const auto vals = solver.factor().L.vals_;
+    for (unsigned salt : {2u, 5u, 2u}) {
+        const Eigen::VectorXd b = rhs(A.rows(), salt, false);
+        const auto result = solver.solve(b, 1e-9, 400);
+        EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
+        EXPECT_LT(true_residual(A, b, result.x), 1e-9);
+        EXPECT_EQ(solver.factor().L.outer_, ptr);
+        EXPECT_EQ(solver.factor().L.inner_, idx);
+        EXPECT_EQ(solver.factor().L.vals_, vals);
+    }
+}
+
+TEST(MetalDevice, CommonSolverApiAndCpuDefault) {
+    REQUIRE_METAL();
+    const Sparse A = grid(20, 21, 0.25);
+    const Eigen::VectorXd b = rhs(A.rows(), 4, false);
+    apxchol::solve_options options;
+    const auto cpu = apxchol::solve(A, b, options);
+    EXPECT_EQ(cpu.backend, apxchol::solve_backend::cpu);
+    options.backend = apxchol::solve_backend::gpu;
+    const auto gpu = apxchol::solve(A, b, options);
+    EXPECT_EQ(gpu.backend, apxchol::solve_backend::gpu);
+    EXPECT_LT(true_residual(A, b, gpu.x), options.tol);
+    EXPECT_GT(gpu.timings.total("setup"), 0.0);
+    EXPECT_GT(gpu.timings.total("pcg"), 0.0);
+}
+
+TEST(MetalDevice, UnsupportedOptionsFailBeforeDeviceSetup) {
+    const Sparse A = grid(4, 4, 0.25);
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::cpu;
+    EXPECT_THROW(apxchol::metal_solver(A, options), std::invalid_argument);
+    options.backend = apxchol::solve_backend::gpu;
+    options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
+    EXPECT_THROW(apxchol::metal_solver(A, options), std::invalid_argument);
 }

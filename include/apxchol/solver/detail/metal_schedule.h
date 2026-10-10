@@ -18,10 +18,10 @@ namespace apxchol::detail::metal_schedule {
 /// Rows with more dependencies are heavy: one threadgroup per row, the
 /// dependencies dealt over kHeavyDeps fixed virtual lanes.
 inline constexpr std::uint32_t kHeavyDeps = 32;
-/// A level with only light rows and width * kc at most this many items runs
+/// A level with only light rows and width at most this many items runs
 /// inside one merged single-threadgroup step with its narrow neighbours.
 inline constexpr std::uint32_t kNarrowItems = 2048;
-/// Nonzero factor and operator magnitudes the double-float block PCG accepts:
+/// Nonzero factor and operator magnitudes the double-float PCG accepts:
 /// [2^-kRangeExponent, 2^kRangeExponent]. Outside it fp32 products and the
 /// low parts of double-floats leave the normal range.
 inline constexpr int kRangeExponent = 100;
@@ -163,16 +163,16 @@ struct level_step {
     std::uint32_t last;
 };
 
-/// Runs of narrow levels (light rows only, width * kc <= kNarrowItems) merge
+/// Runs of narrow levels (light rows only, width <= kNarrowItems) merge
 /// into one step; every other level becomes a light and/or a heavy step. The
 /// plan changes dispatches only: a row's arithmetic depends on whether it is
 /// heavy, never on the step that runs it.
-inline std::vector<level_step> plan_steps(const level_solve& s, std::uint32_t kc) {
+inline std::vector<level_step> plan_steps(const level_solve& s) {
     std::vector<level_step> out;
     const std::size_t L = s.levels();
     auto narrow = [&](std::size_t l) {
         const std::uint64_t width = s.level_ptr[l + 1] - s.level_ptr[l];
-        return s.heavy_ptr[l] == s.level_ptr[l + 1] && width * kc <= kNarrowItems;
+        return s.heavy_ptr[l] == s.level_ptr[l + 1] && width <= kNarrowItems;
     };
     for (std::size_t l = 0; l < L;) {
         if (narrow(l)) {

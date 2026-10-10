@@ -1,5 +1,5 @@
-// Host side of the Apple GPU block PCG (include/apxchol/solver/metal_solver.h):
-// factorization, the dropped-factor schedules, the permuted operator, packing,
+// Host side of the Apple GPU PCG (include/apxchol/solver/metal_solver.h):
+// factorization, the dropped-factor schedules, the permuted operator, vector conversion,
 // the fp64 exit checks and the Laplacian centring. All OpenMP host work lives
 // here; the device side (src/metal_device.mm) sees only plain arrays.
 #include "apxchol/solver/metal_solver.h"
@@ -18,18 +18,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <map>
 #include <mutex>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -38,6 +34,13 @@ namespace {
 namespace mh = detail::metal_host;
 namespace ls = detail::metal_schedule;
 namespace dm = detail::metal;
+
+void validate_options(const solve_options& opts) {
+    if (opts.backend == solve_backend::cpu)
+        throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
+    if (detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false))
+        throw std::invalid_argument("Metal requires float32 factor storage");
+}
 
 static_assert(sizeof(mh::df) == sizeof(dm::df32));
 
@@ -146,27 +149,14 @@ void print_banner_once(const metal_solver::statistics& st) {
     std::call_once(flag, [&] {
         if (!std::getenv("APXCHOL_VERBOSE")) return;
         std::fprintf(stderr,
-                     "[apxchol] Metal block PCG on %s: %d columns per batch, fp32 factor, "
+                     "[apxchol] Metal PCG on %s: fp32 factor, "
                      "double-float Krylov vectors, %s operator\n",
-                     st.device.c_str(), st.block_columns,
+                     st.device.c_str(),
                      st.operator_double_float ? "double-float" : "fp32-exact");
     });
 }
 
 }  // namespace
-
-const char* to_string(metal_stop stop) noexcept {
-    switch (stop) {
-    case metal_stop::zero_rhs: return "zero_rhs";
-    case metal_stop::initial_guess: return "initial_guess";
-    case metal_stop::recursive_tolerance: return "recursive_tolerance";
-    case metal_stop::max_iterations: return "max_iterations";
-    case metal_stop::breakdown: return "breakdown";
-    case metal_stop::stagnation: return "stagnation";
-    case metal_stop::nonfinite: return "nonfinite";
-    }
-    return "unknown";
-}
 
 bool metal_solver::available() noexcept { return check_availability().ok; }
 
@@ -182,28 +172,12 @@ struct metal_solver::impl {
     std::unique_ptr<int[]> op_col;
     std::unique_ptr<double[]> op_val;
     std::int64_t op_nnz = 0;
-    // Level structure only (plan_steps reads level_ptr / heavy_ptr).
-    ls::level_solve fwd_levels, bwd_levels;
     std::unique_ptr<dm::engine> device;
-    std::uint32_t block_columns = 0;
+    std::vector<dm::tri_step> forward, backward;
     std::uint32_t check_every = 1;
-    std::map<std::uint32_t, std::pair<std::vector<dm::tri_step>, std::vector<dm::tri_step>>> plans;
     statistics stats;
-    std::mutex mutex;
 
     void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp);
-
-    const std::pair<std::vector<dm::tri_step>, std::vector<dm::tri_step>>& plan(std::uint32_t kc) {
-        auto it = plans.find(kc);
-        if (it != plans.end()) return it->second;
-        auto flatten = [&](const ls::level_solve& s) {
-            std::vector<dm::tri_step> out;
-            for (const ls::level_step& st : ls::plan_steps(s, kc))
-                out.push_back({static_cast<std::uint32_t>(st.kind), st.first, st.last});
-            return out;
-        };
-        return plans.emplace(kc, std::make_pair(flatten(fwd_levels), flatten(bwd_levels))).first->second;
-    }
 
     // y = A' x in fp64, each row summed in storage order; rows are split across
     // threads by stored entries (detail::work_balanced_range).
@@ -215,10 +189,8 @@ struct metal_solver::impl {
         #pragma omp parallel
         {
             int tid = 0, nt = 1;
-#ifdef _OPENMP
             tid = omp_get_thread_num();
             nt = omp_get_num_threads();
-#endif
             const auto [lo, hi] = detail::work_balanced_range(ptr, rows, tid, nt);
             for (std::ptrdiff_t i = lo; i < hi; ++i) {
                 double acc = 0.0;
@@ -300,22 +272,6 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     if (cp) (*cp)("metal_operator");
 
     const dm::device_status& st = dm::status();
-    auto tri_bytes = [](const ls::level_solve& s) {
-        return (s.level_ptr.size() + s.rows.size() + s.ptr.size() + s.col.size()) * 4 +
-               (s.val.size() + s.dinv.size()) * 4;
-    };
-    mh::block_limits limits;
-    limits.max_buffer_bytes = st.max_buffer_bytes;
-    limits.working_set_bytes = st.working_set_bytes;
-    limits.static_bytes = (n + 1) * 4 + nnz * (exact ? 8 : 12) + tri_bytes(sched.forward) +
-                          tri_bytes(sched.backward);
-    limits.tree_threads = st.tree_threads;
-    limits.row_threads = std::min(st.row_threads, st.heavy_threads);
-    block_columns = mh::choose_block_columns(n, limits);
-    if (block_columns == 0)
-        throw dm::device_memory_error("metal_solver: the system does not fit the Metal device (n = " +
-                                      std::to_string(n) + ", operator nnz = " + std::to_string(nnz) + ")");
-
     static_assert(sizeof(int) == sizeof(std::uint32_t));
     dm::operator_arrays op;
     op.ptr = reinterpret_cast<const std::uint32_t*>(op_ptr.data());
@@ -342,17 +298,19 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     // systems, four on small ones (fewer host round trips).
     check_every = n > 200000 ? 1 : 4;
 
-    fwd_levels.level_ptr = std::move(sched.forward.level_ptr);
-    fwd_levels.heavy_ptr = std::move(sched.forward.heavy_ptr);
-    bwd_levels.level_ptr = std::move(sched.backward.level_ptr);
-    bwd_levels.heavy_ptr = std::move(sched.backward.heavy_ptr);
+    auto plan = [](const ls::level_solve& schedule) {
+        std::vector<dm::tri_step> out;
+        for (const auto& step : ls::plan_steps(schedule))
+            out.push_back({static_cast<std::uint32_t>(step.kind), step.first, step.last});
+        return out;
+    };
+    forward = plan(sched.forward);
+    backward = plan(sched.backward);
     stats.n = static_cast<Eigen::Index>(n);
-    stats.levels_forward = fwd_levels.levels();
-    stats.levels_backward = bwd_levels.levels();
-    const auto& full = plan(block_columns);
-    stats.steps_forward = full.first.size();
-    stats.steps_backward = full.second.size();
-    stats.block_columns = static_cast<int>(block_columns);
+    stats.levels_forward = sched.forward.levels();
+    stats.levels_backward = sched.backward.levels();
+    stats.steps_forward = forward.size();
+    stats.steps_backward = backward.size();
     stats.operator_double_float = !exact;
     stats.device = st.name;
     if (!opts.keep_factor_values) F.L.release_values();
@@ -363,6 +321,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                            checkpoint* cp)
     : impl_(std::make_unique<impl>()) {
+    validate_options(opts);
     if (!available())
         throw std::runtime_error("apxchol::metal_solver: the Metal backend is unavailable: " +
                                  check_availability().reason);
@@ -374,6 +333,7 @@ metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_opt
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, factorization F,
                            const solve_options& opts, checkpoint* cp)
     : impl_(std::make_unique<impl>()) {
+    validate_options(opts);
     if (!available())
         throw std::runtime_error("apxchol::metal_solver: the Metal backend is unavailable: " +
                                  check_availability().reason);
@@ -390,205 +350,87 @@ const factorization& metal_solver::factor() const { return impl_->F; }
 metal_solver::statistics metal_solver::stats() const { return impl_->stats; }
 Eigen::Index metal_solver::rows() const { return static_cast<Eigen::Index>(impl_->n); }
 
-namespace {
-
-bool all_finite(const metal_solver::block_cref& M) {
-    for (Eigen::Index j = 0; j < M.cols(); ++j)
-        for (Eigen::Index i = 0; i < M.rows(); ++i)
-            if (!std::isfinite(M(i, j))) return false;
-    return true;
+solve_result metal_solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
+                                 const Eigen::VectorXd* x0) const {
+    solve_result result;
+    solve(b, result, tol, max_iter, x0);
+    return result;
 }
 
-metal_stop stop_of(std::uint32_t code) {
-    switch (code) {
-    case dm::kStopTolerance: return metal_stop::recursive_tolerance;
-    case dm::kStopBreakdown: return metal_stop::breakdown;
-    case dm::kStopStagnation: return metal_stop::stagnation;
-    case dm::kStopNonfinite: return metal_stop::nonfinite;
-    default: return metal_stop::max_iterations;
-    }
-}
-
-}  // namespace
-
-metal_block_result metal_solver::solve(block_cref B, Eigen::Ref<Eigen::MatrixXd> X, double tol,
-                                       int max_iter, const block_cref* X0) const {
+void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
+                         int max_iter, const Eigen::VectorXd* x0) const {
     impl& s = *impl_;
-    const std::lock_guard<std::mutex> lock(s.mutex);
-    const Eigen::Index n = static_cast<Eigen::Index>(s.n);
-    const Eigen::Index k = B.cols();
-    if (B.rows() != n) throw std::invalid_argument("metal_solver::solve: B row count mismatch");
-    if (X.rows() != n || X.cols() != k)
-        throw std::invalid_argument("metal_solver::solve: output X size mismatch");
-    if (X0 != nullptr && (X0->rows() != n || X0->cols() != k))
-        throw std::invalid_argument("metal_solver::solve: x0 size mismatch");
-    if (!all_finite(B)) throw std::invalid_argument("metal_solver::solve: b contains a non-finite value");
-    if (X0 != nullptr && !all_finite(*X0))
-        throw std::invalid_argument("metal_solver::solve: x0 contains a non-finite value");
+    if (b.size() != rows()) throw std::invalid_argument("metal_solver::solve: RHS length mismatch");
+    if (x0 != nullptr && x0->size() != rows())
+        throw std::invalid_argument("metal_solver::solve: x0 length mismatch");
+    if (!b.allFinite() || (x0 != nullptr && !x0->allFinite()))
+        throw std::invalid_argument("metal_solver::solve: non-finite RHS or initial guess");
     if (tol < 0.0) tol = s.opts.tol;
     if (max_iter < 0) max_iter = s.opts.max_iter;
-    const std::uint32_t window = static_cast<std::uint32_t>(std::max(0, s.opts.stagnation_window));
+    const auto window = static_cast<std::uint32_t>(std::max(0, s.opts.stagnation_window));
 
-    metal_block_result result;
-    result.columns.resize(static_cast<std::size_t>(k));
+    result.iterations = 0;
+    result.residual = 0.0;
+    result.backend = solve_backend::gpu;
     result.lumped_offdiag = s.F.lumped_offdiag;
+    result.x = Eigen::VectorXd::Zero(rows());
     checkpoint& cp = result.timings;
     cp.descend("pcg");
     cp.tick();
+    const double bnorm = std::sqrt(mh::fold_sum_squares(b.data(), s.n));
+    if (bnorm == 0.0) { cp.ascend(); return; }
+    if (max_iter == 0 && (x0 == nullptr || x0->isZero(0.0))) {
+        result.residual = 1.0;
+        cp.ascend();
+        return;
+    }
 
     const node_index* perm = s.F.perm.data();
-    std::vector<double> work, column(s.n);
-
-    // A column resolved on the host from its permuted x (centred for a
-    // Laplacian), with the fp64 residual on the original operator.
-    auto finish = [&](Eigen::Index c, std::vector<double>& xp, const std::vector<double>& bp,
-                      double bnorm, Eigen::Index iterations, double recursive, metal_stop stop) {
+    std::vector<double> bp(s.n), xp(s.n, 0.0), work(s.n);
+    mh::scatter(b.data(), perm, s.n, bp.data());
+    auto finish = [&] {
         if (s.laplacian) s.centre(xp.data());
-        metal_column_result& out = result.columns[static_cast<std::size_t>(c)];
-        out.iterations = iterations;
-        out.residual = s.residual_norm(bp.data(), xp.data(), work) / bnorm;
-        out.recursive_residual = recursive;
-        out.converged = out.residual < tol;
-        out.stop = stop;
-        mh::gather(xp.data(), perm, s.n, column.data());
-        X.col(c) = Eigen::Map<const Eigen::VectorXd>(column.data(), n);
-    };
-
-    struct job {
-        Eigen::Index c;
-        std::vector<double> bp, x0p, w;
-        double bnorm, scale, initial;
-    };
-    std::vector<job> batch;
-
-    auto run_batch = [&] {
-        if (batch.empty()) return;
-        const std::uint32_t kc = static_cast<std::uint32_t>(batch.size());
-        s.device->reserve(kc);
-        mh::df* r = as_df(s.device->r());
-        dm::column_state* cs = s.device->columns();
-        for (std::uint32_t j = 0; j < kc; ++j) {
-            job& jb = batch[j];
-            mh::pack_column(jb.w.data(), s.n, jb.scale, kc, j, r);
-            const double thr = tol * jb.bnorm * jb.scale;
-            const double ref = jb.bnorm * jb.scale;
-            cs[j] = dm::column_state{};
-            cs[j].thr = to_device(mh::split_saturated(thr * thr));
-            cs[j].prev = to_device(mh::split_saturated(ref * ref));
-            cs[j].active = 1;
-            std::vector<double>().swap(jb.w);
-        }
-        cp("pack");
-        const auto& plans = s.plan(kc);
-        s.device->solve(kc, plans.first, plans.second, static_cast<std::uint32_t>(max_iter), window,
-                        s.check_every);
-        cp("device");
-        const mh::df* x = as_df(s.device->x());
-        for (std::uint32_t j = 0; j < kc; ++j) {
-            job& jb = batch[j];
-            const dm::column_state st = cs[j];
-            std::vector<double> xp(s.n);
-            mh::unpack_column(x, s.n, jb.scale, kc, j, xp.data());
-            if (!jb.x0p.empty()) {
-                #pragma omp parallel for schedule(static)
-                for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(s.n); ++q) xp[q] += jb.x0p[q];
-            }
-            const double recursive = st.iters > 0
-                ? std::sqrt(std::max(0.0, mh::join({st.rr.hi, st.rr.lo}))) / (jb.bnorm * jb.scale)
-                : jb.initial;
-            finish(jb.c, xp, jb.bp, jb.bnorm, st.iters, recursive, stop_of(st.stop));
-        }
+        result.residual = s.residual_norm(bp.data(), xp.data(), work) / bnorm;
+        mh::gather(xp.data(), perm, s.n, result.x.data());
         cp("exit_check");
-        batch.clear();
+        cp.ascend();
     };
 
-    for (Eigen::Index c = 0; c < k; ++c) {
-        job jb;
-        jb.c = c;
-        // ||b|| in the caller's order, so it does not depend on the permutation.
-        jb.bnorm = std::sqrt(mh::fold_sum_squares(B.col(c).data(), s.n));
-        jb.bp.resize(s.n);
-        mh::scatter(B.col(c).data(), perm, s.n, jb.bp.data());
-        metal_column_result& out = result.columns[static_cast<std::size_t>(c)];
-        if (jb.bnorm == 0.0) {
-            X.col(c).setZero();
-            out.converged = 0.0 < tol;
-            out.stop = metal_stop::zero_rhs;
-            continue;
-        }
-        const bool warm = X0 != nullptr && !X0->col(c).isZero(0.0);
-        if (warm) {
-            jb.x0p.resize(s.n);
-            mh::scatter(X0->col(c).data(), perm, s.n, jb.x0p.data());
-            jb.w.resize(s.n);
-            s.spmv(jb.x0p.data(), jb.w.data());
-            #pragma omp parallel for schedule(static)
-            for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(s.n); ++q)
-                jb.w[q] = jb.bp[q] - jb.w[q];
-            jb.initial = std::sqrt(mh::fold_sum_squares(jb.w.data(), s.n)) / jb.bnorm;
-            if (jb.initial < tol || max_iter == 0) {
-                finish(c, jb.x0p, jb.bp, jb.bnorm, 0, jb.initial,
-                       jb.initial < tol ? metal_stop::initial_guess : metal_stop::max_iterations);
-                continue;
-            }
-        } else {
-            jb.initial = 1.0;
-            if (max_iter == 0) {
-                // Honest pre-loop state: x = 0, relative residual exactly 1.
-                X.col(c).setZero();
-                out.residual = 1.0;
-                out.recursive_residual = 1.0;
-                out.converged = 1.0 < tol;
-                out.stop = metal_stop::max_iterations;
-                continue;
-            }
-            jb.w = jb.bp;
-        }
-        const double max_abs = mh::fold_max_abs(jb.w.data(), s.n);
-        if (max_abs == 0.0) {  // b - A x0 vanished in fp64: x0 is exact
-            finish(c, jb.x0p, jb.bp, jb.bnorm, 0, 0.0, metal_stop::initial_guess);
-            continue;
-        }
-        jb.scale = mh::pow2_scale(max_abs);
-        batch.push_back(std::move(jb));
-        if (batch.size() == s.block_columns) run_batch();
+    if (x0 != nullptr) {
+        mh::scatter(x0->data(), perm, s.n, xp.data());
+        s.spmv(xp.data(), work.data());
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(s.n); ++i)
+            work[i] = bp[i] - work[i];
+    } else {
+        work = bp;
     }
-    run_batch();
-    cp.ascend();
-    return result;
-}
-
-metal_block_result metal_solver::solve(block_cref B, double tol, int max_iter,
-                                       const block_cref* X0) const {
-    if (B.rows() != rows()) throw std::invalid_argument("metal_solver::solve: B row count mismatch");
-    Eigen::MatrixXd X(B.rows(), B.cols());
-    metal_block_result result = solve(B, X, tol, max_iter, X0);
-    result.X = std::move(X);
-    return result;
-}
-
-solve_result metal_solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                                 const Eigen::VectorXd* x0) const {
-    if (b.size() != rows()) throw std::invalid_argument("metal_solver::solve: b length mismatch");
-    if (x0 != nullptr && x0->size() != rows())
-        throw std::invalid_argument("metal_solver::solve: x0 length mismatch");
-    Eigen::MatrixXd X(b.size(), 1);
-    const block_cref B(b);
-    std::optional<block_cref> X0;
-    if (x0 != nullptr) X0.emplace(*x0);
-    metal_block_result block = solve(B, X, tol, max_iter, X0 ? &*X0 : nullptr);
-    solve_result res;
-    res.x = X.col(0);
-    res.iterations = block.columns[0].iterations;
-    res.residual = block.columns[0].residual;
-    res.lumped_offdiag = block.lumped_offdiag;
-    res.timings = std::move(block.timings);
-    return res;
+    const double initial = std::sqrt(mh::fold_sum_squares(work.data(), s.n)) / bnorm;
+    if (initial < tol || max_iter == 0) { finish(); return; }
+    const double max_abs = mh::fold_max_abs(work.data(), s.n);
+    if (max_abs == 0.0) { finish(); return; }
+    const double scale = mh::pow2_scale(max_abs);
+    mh::pack(work.data(), s.n, scale, as_df(s.device->r()));
+    auto& state = s.device->state();
+    state = {};
+    const double threshold = tol * bnorm * scale;
+    const double reference = bnorm * scale;
+    state.thr = to_device(mh::split_saturated(threshold * threshold));
+    state.prev = to_device(mh::split_saturated(reference * reference));
+    state.active = 1;
+    cp("pack");
+    s.device->solve(s.forward, s.backward, static_cast<std::uint32_t>(max_iter), window, s.check_every);
+    cp("device");
+    mh::unpack(as_df(s.device->x()), s.n, scale, work.data());
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(s.n); ++i) xp[i] += work[i];
+    result.iterations = state.iters;
+    finish();
+    return;
 }
 
 Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     impl& s = *impl_;
-    const std::lock_guard<std::mutex> lock(s.mutex);
     if (r.size() != static_cast<Eigen::Index>(s.n))
         throw std::invalid_argument("metal_solver::apply: r length mismatch");
     if (!r.allFinite()) throw std::invalid_argument("metal_solver::apply: r contains a non-finite value");
@@ -599,13 +441,11 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     const double max_abs = mh::fold_max_abs(rp.data(), s.n);
     if (max_abs == 0.0) return z;
     const double scale = mh::pow2_scale(max_abs);
-    s.device->reserve(1);
-    mh::pack_column(rp.data(), s.n, scale, 1, 0, as_df(s.device->r()));
-    dm::column_state& cs = s.device->columns()[0];
-    cs = dm::column_state{};
+    mh::pack(rp.data(), s.n, scale, as_df(s.device->r()));
+    auto& cs = s.device->state();
+    cs = {};
     cs.active = 1;
-    const auto& plans = s.plan(1);
-    s.device->apply(1, plans.first, plans.second);
+    s.device->apply(s.forward, s.backward);
     const float* p = s.device->p();
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(s.n); ++q) rp[q] = static_cast<double>(p[q]) / scale;

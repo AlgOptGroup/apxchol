@@ -116,7 +116,7 @@ option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to 
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 option(APXCHOL_BUILD_TOOLS "Build the developer analysis tools (bench_setup, analyze_factor)" OFF)
-option(APXCHOL_USE_METAL "Apple GPU block PCG (explicit apxchol::metal_solver; defaults unchanged)" OFF)
+option(APXCHOL_USE_METAL "Apple GPU PCG (explicit GPU route; automatic remains CPU)" OFF)
 
 if (APXCHOL_64BIT_INDICES)
     message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
@@ -180,7 +180,7 @@ add_library(apxchol_core
     # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
     # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
     $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>
-    # Apple GPU block PCG (metal_solver.h): C++ host side and the Objective-C++
+    # Apple GPU PCG (metal_solver.h): C++ host side and the Objective-C++
     # device side that compiles src/metal_kernels.inc at run time.
     $<$<BOOL:${APXCHOL_USE_METAL}>:src/metal_solver.cpp>
     $<$<BOOL:${APXCHOL_USE_METAL}>:src/metal_device.mm>

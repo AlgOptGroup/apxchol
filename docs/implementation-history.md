@@ -382,23 +382,16 @@ the CPU, or double-float on the GPU) kept the search directions but diverged at
 recurrences (x, r, A p and the operator) reached 1e-10 true residuals without
 restarts at close to FP64 iteration counts; it is the only mode retained.
 
-**Inherited constants.** At most 64 right-hand sides per batch, node-major
-blocks; rows with more than 32 dependencies are heavy; runs of narrow levels
-(light rows only, at most 2048 row-column items) share one threadgroup of up to
-1024 threads; one command buffer per iteration above 200,000 rows and per four
-iterations below. None is an environment knob.
+The initial integration solves one RHS per call and reuses the factor and
+workspace across calls. Batched RHS, batch-independent bitwise results and
+pipelined submissions are separate follow-up work. The original batched
+implementation remains in the PR history for that comparison.
 
-**Fixed while porting.** Breakdown reported as convergence (a skipped update
-left a zero r.r behind); `<=` stopping (now strict `<`); FP32 underflow of
-tol^2 ||b||^2 (now exact power-of-two scaling and a host double-float
-threshold); reductions whose order depended on the batch width (now one tree
-fixed by n, and 32 virtual lanes for heavy rows); 32-bit overflow of block
-indices (n kc < 2^32 is enforced); unchecked command-buffer errors; heavy-row
-lanes taken from another pipeline's thread limit; double-float exactness left
-to the compiler's defaults (now safe math mode, contraction off and a device
-self-test); device lookup without CoreGraphics linked. The prototype also
-applied the undropped factor; the port applies the CPU's dropped FP32 factor.
-Its other modes and their environment controls were not ported.
+The single-RHS kernels retain the precision safeguards: power-of-two input
+scaling, double-float stopping thresholds, explicit breakdown handling,
+safe compiler math and a device self-test. Sparse triangular solves retain
+light/heavy rows and merged narrow levels. These mechanisms also apply to
+one RHS and do not require the batching API.
 
 No timing study accompanies this integration; performance relative to the CPU
 or CUDA solves is not established.

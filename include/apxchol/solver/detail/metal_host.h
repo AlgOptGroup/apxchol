@@ -1,13 +1,6 @@
 #pragma once
-// Portable host-side arithmetic of the Metal block PCG (metal_solver.h):
-// the double-float error-free transforms exactly as src/metal_kernels.inc
-// writes them, the exact power-of-two right-hand-side scaling, the block
-// width choice, node-major packing, thread-count-independent fp64 folds, and
-// an emulation of the device's fixed reduction tree. No Metal and no
-// Objective-C: it builds on every platform, so the unit tests state these
-// contracts everywhere. Kernels and emulation must stay operation-for-
-// operation identical; nothing here may rely on floating-point contraction
-// (multiply-adds are explicit std::fma).
+// Host arithmetic for Metal PCG. Error-free transforms require explicit FMA
+// and no implicit floating-point contraction or reassociation.
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -15,9 +8,7 @@
 #include <limits>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol::detail::metal_host {
 
@@ -89,55 +80,21 @@ inline double join(df v) { return static_cast<double>(v.hi) + static_cast<double
 /// The exact power-of-two scale s = 2^-e with e = ilogb(max_abs), so that the
 /// scaled vector's largest magnitude lies in [1, 2). Multiplying by s (and
 /// dividing by it afterwards) is exact for every fp64 value that neither
-/// underflows nor overflows, so a column's device computation is the same for
+/// underflows nor overflows, so the device computation is the same for
 /// b and 2^k b. max_abs must be finite and positive.
 inline double pow2_scale(double max_abs) { return std::ldexp(1.0, -std::ilogb(max_abs)); }
 
 /// fp64 value as a double-float, saturated to the largest finite fp32 (used
-/// for the per-column stop thresholds, whose overflow would mean "stop").
+/// for the stop threshold, whose overflow would mean "stop").
 inline df split_saturated(double v) {
     constexpr double kMax = static_cast<double>(std::numeric_limits<float>::max());
     return split(std::min(v, kMax));
 }
 
-// ── Block width ──────────────────────────────────────────────────────────────
-
-inline constexpr std::uint32_t kMaxBlockColumns = 64;
-inline constexpr std::uint32_t kTreeRows = 256;    // rows per reduction group
-inline constexpr std::uint32_t kTreeLanes = 16;    // lanes per column in a group
-inline constexpr std::uint32_t kTreeSteps = 16;    // rows per lane in a group
-/// Device bytes per (row, column) block entry: x, r, Ap as double-float, p, z fp32.
-inline constexpr std::uint64_t kBlockBytesPerEntry = 3 * 8 + 2 * 4;
-
-struct block_limits {
-    std::uint64_t max_buffer_bytes = 0;   // device maxBufferLength
-    std::uint64_t working_set_bytes = 0;  // recommendedMaxWorkingSetSize; 0 = unknown
-    std::uint64_t static_bytes = 0;       // operator + schedules resident on the device
-    std::uint32_t tree_threads = 0;       // threads per threadgroup of the 16-lane tree kernels
-    std::uint32_t row_threads = 0;        // threads per threadgroup of the row kernels
-};
-
+inline constexpr std::uint32_t kTreeRows = 256;
+inline constexpr std::uint32_t kTreeLanes = 16;
+inline constexpr std::uint32_t kTreeSteps = 16;
 inline std::uint64_t reduction_groups(std::uint64_t n) { return (n + kTreeRows - 1) / kTreeRows; }
-
-/// Largest kc in [1, 64] with 32-bit block indices (n kc < 2^32), a 16 kc tree
-/// threadgroup and a kc row threadgroup within the pipelines' limits, block
-/// buffers within the buffer limit and the whole device state within the
-/// recommended working set. 0 if none fits. The choice never changes a
-/// column's bits (the kernels' arithmetic is independent of kc).
-inline std::uint32_t choose_block_columns(std::uint64_t n, const block_limits& lim) {
-    for (std::uint32_t kc = kMaxBlockColumns; kc >= 1; --kc) {
-        const std::uint64_t entries = n * kc;
-        if (entries >= (std::uint64_t{1} << 32)) continue;
-        if (std::uint64_t{kTreeLanes} * kc > lim.tree_threads) continue;
-        if (kc > lim.row_threads) continue;
-        if (entries * 8 > lim.max_buffer_bytes) continue;
-        const std::uint64_t partial = 2 * reduction_groups(n) * kc * 8;
-        const std::uint64_t total = lim.static_bytes + entries * kBlockBytesPerEntry + partial;
-        if (lim.working_set_bytes != 0 && total > lim.working_set_bytes) continue;
-        return kc;
-    }
-    return 0;
-}
 
 // ── Thread-count-independent fp64 folds ─────────────────────────────────────
 
@@ -172,7 +129,7 @@ inline double fold_max_abs(const double* v, std::size_t n) {
     return m;
 }
 
-// ── Permutation and node-major packing ──────────────────────────────────────
+// Permutation and vector packing.
 
 /// To the factor's permuted space: out[perm[v]] = v_in[v].
 template <class Index>
@@ -188,31 +145,25 @@ void gather(const double* v_perm, const Index* perm, std::size_t n, double* out)
     for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(n); ++v) out[v] = v_perm[perm[v]];
 }
 
-/// Column c of a node-major double-float block with kc columns from a
-/// permuted fp64 vector: block[q * kc + c] = split(scale * w[q]).
-inline void pack_column(const double* w, std::size_t n, double scale, std::uint32_t kc,
-                        std::uint32_t c, df* block) {
+inline void pack(const double* w, std::size_t n, double scale, df* out) {
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(n); ++q)
-        block[static_cast<std::size_t>(q) * kc + c] = split(scale * w[q]);
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+        out[i] = split(scale * w[i]);
 }
 
-/// Permuted fp64 vector of column c: out[q] = join(block[q * kc + c]) / scale.
-inline void unpack_column(const df* block, std::size_t n, double scale, std::uint32_t kc,
-                          std::uint32_t c, double* out) {
+inline void unpack(const df* v, std::size_t n, double scale, double* out) {
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(n); ++q)
-        out[q] = join(block[static_cast<std::size_t>(q) * kc + c]) / scale;
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+        out[i] = join(v[i]) / scale;
 }
 
 // ── The device's reduction tree ─────────────────────────────────────────────
 
-/// The fixed reduction tree of the device kernels for column c of a block
-/// with kc columns: term(i) is row i's double-float contribution. Group g
+/// The fixed reduction tree of the device kernels. Group g
 /// covers rows [256g, 256g + 256); lane l < 16 folds rows 256g + 16s + l for
 /// s = 0..15 in order; lanes fold 0..15 in order into partial g; the final
 /// lane l folds partials l, l + 16, ... in order, then lanes 0..15. Depends
-/// only on n: kc and c select the rows' block entries, not the order.
+/// only on n.
 template <class Term>
 df tree_reduce(std::uint32_t n, Term&& term) {
     const std::uint32_t groups = static_cast<std::uint32_t>(reduction_groups(n));

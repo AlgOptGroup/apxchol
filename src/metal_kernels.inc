@@ -1,30 +1,14 @@
-// Metal Shading Language source of the Apple GPU block PCG (metal_solver.h),
+// Metal Shading Language source of the Apple GPU PCG (metal_solver.h),
 // compiled at run time by src/metal_device.mm (newLibraryWithSource with
 // MTLMathModeSafe; "#pragma METAL fp contract(off)" is prepended when the
 // compiler accepts it). Checked in as one C++ raw string so that downstream
 // builds need no generation step or offline Metal compiler.
-//
-// Blocks are node-major: entry (row i, column c) of a block of kc <= 64
-// right-hand sides lives at i * kc + c. Everything runs in the factor's
-// permuted space. x, r and Ap are double-float (hi + lo fp32 pairs, about 48
-// bits) and so is the operator when some value is not fp32-exact; p, z and
-// the dropped factor are fp32. A column whose state is inactive is frozen:
-// every kernel skips it.
-//
-// Every per-column reduction uses one fixed tree that depends only on n:
-// threadgroup g covers rows [256g, 256g + 256); its thread (c, l), l < 16,
-// folds rows 256g + 16s + l for s = 0..15 in sequence; lanes are folded 0..15
-// in order into partial[g][c]; the finalize threadgroup's lane l folds
-// partials l, l + 16, ... in order, then lanes 0..15. Neither the block width
-// kc nor a column's position nor the other columns change a column's bits.
-// Heavy triangular rows use 32 fixed virtual lanes for the same reason.
 R"apxchol_msl(
 #include <metal_stdlib>
 using namespace metal;
 
 struct Params {
     uint n;         // operator rows
-    uint kc;        // columns of this batch (the block stride)
     uint groups;    // reduction groups, ceil(n / 256)
     uint offset;    // step: first slot, or first level of a narrow run
     uint count;     // step: slot count, or end level of a narrow run
@@ -36,9 +20,9 @@ struct Params {
     float inv_n_hi; // 1 / n as double-float
     float inv_n_lo;
 };
-static_assert(sizeof(Params) == 48, "Params mirrors detail::metal::params");
+static_assert(sizeof(Params) == 44, "Params mirrors detail::metal::params");
 
-struct ColState {
+struct SolveState {
     float2 rz;      // r . z of the current direction
     float2 rr;      // recursive r . r at the last check
     float2 thr;     // stop iff rr < thr (host: (tol ||b|| s)^2)
@@ -53,7 +37,7 @@ struct ColState {
     uint stop;
     uint pad;
 };
-static_assert(sizeof(ColState) == 72, "ColState mirrors detail::metal::column_state");
+static_assert(sizeof(SolveState) == 72, "SolveState mirrors detail::metal::solve_state");
 
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];
@@ -63,7 +47,6 @@ constant uint kTreeRows = 256;
 constant uint kTreeLanes = 16;
 constant uint kTreeSteps = 16;
 constant uint kVirtualLanes = 32;
-constant uint kMaxColumns = 64;
 
 constant uint kStopTolerance = 1;
 constant uint kStopBreakdown = 2;
@@ -136,9 +119,9 @@ inline float2 df_div(float2 a, float2 b) {
 
 inline bool df_lt(float2 a, float2 b) { return a.x < b.x || (a.x == b.x && a.y < b.y); }
 
-inline float2 fold_lanes(threadgroup const float2* sh, uint c, uint kc) {
+inline float2 fold_lanes(threadgroup const float2* sh) {
     float2 t = float2(0.0f);
-    for (uint q = 0; q < kTreeLanes; ++q) t = df_add(t, sh[q * kc + c]);
+    for (uint q = 0; q < kTreeLanes; ++q) t = df_add(t, sh[q]);
     return t;
 }
 
@@ -151,30 +134,28 @@ kernel void spmv_pap(constant Params& P [[buffer(0)]],
                      device const float* p [[buffer(5)]],
                      device float2* ap [[buffer(6)]],
                      device float2* partial [[buffer(7)]],
-                     device const ColState* cs [[buffer(8)]],
-                     uint2 tid [[thread_position_in_threadgroup]],
-                     uint2 tg [[threadgroup_position_in_grid]]) {
-    threadgroup float2 sh[kTreeLanes * kMaxColumns];
-    const uint c = tid.x, l = tid.y, kc = P.kc, g = tg.x;
+                     device const SolveState& state [[buffer(8)]],
+                     uint l [[thread_index_in_threadgroup]],
+                     uint g [[threadgroup_position_in_grid]]) {
+    threadgroup float2 sh[kTreeLanes];
     float2 acc = float2(0.0f);
-    if (cs[c].active != 0) {
+    if (state.active != 0) {
         for (uint s = 0; s < kTreeSteps; ++s) {
             const uint i = g * kTreeRows + s * kTreeLanes + l;
             if (i >= P.n) break;
             float2 y = float2(0.0f);
             const uint e1 = ptr[i + 1];
             for (uint e = ptr[i]; e < e1; ++e) {
-                const float pv = p[col[e] * kc + c];
+                const float pv = p[col[e]];
                 y = df_add(y, kOperatorDf ? df_mul_f(float2(ah[e], al[e]), pv) : two_prod(ah[e], pv));
             }
-            const uint o = i * kc + c;
-            ap[o] = y;
-            acc = df_add(acc, df_mul_f(y, p[o]));
+            ap[i] = y;
+            acc = df_add(acc, df_mul_f(y, p[i]));
         }
     }
-    sh[l * kc + c] = acc;
+    sh[l] = acc;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (l == 0) partial[g * kc + c] = fold_lanes(sh, c, kc);
+    if (l == 0) partial[g] = fold_lanes(sh);
 }
 
 // ---- x += alpha p, r -= alpha Ap; r . r and sum(r) over the fixed tree ----
@@ -184,31 +165,29 @@ kernel void update_xr(constant Params& P [[buffer(0)]],
                       device const float* p [[buffer(3)]],
                       device const float2* ap [[buffer(4)]],
                       device float2* partial [[buffer(5)]],
-                      device const ColState* cs [[buffer(6)]],
-                      uint2 tid [[thread_position_in_threadgroup]],
-                      uint2 tg [[threadgroup_position_in_grid]]) {
-    threadgroup float2 sh[2 * kTreeLanes * kMaxColumns];
-    const uint c = tid.x, l = tid.y, kc = P.kc, g = tg.x;
+                      device const SolveState& state [[buffer(6)]],
+                      uint l [[thread_index_in_threadgroup]],
+                      uint g [[threadgroup_position_in_grid]]) {
+    threadgroup float2 sh[2 * kTreeLanes];
     float2 rr = float2(0.0f), rs = float2(0.0f);
-    if (cs[c].active != 0) {
-        const float a = cs[c].alpha;
+    if (state.active != 0) {
+        const float a = state.alpha;
         for (uint s = 0; s < kTreeSteps; ++s) {
             const uint i = g * kTreeRows + s * kTreeLanes + l;
             if (i >= P.n) break;
-            const uint o = i * kc + c;
-            x[o] = df_add(x[o], two_prod(a, p[o]));
-            const float2 rv = df_add(r[o], df_neg(df_mul_f(ap[o], a)));
-            r[o] = rv;
+            x[i] = df_add(x[i], two_prod(a, p[i]));
+            const float2 rv = df_add(r[i], df_neg(df_mul_f(ap[i], a)));
+            r[i] = rv;
             rr = df_add(rr, df_mul(rv, rv));
             rs = df_add(rs, rv);
         }
     }
-    sh[l * kc + c] = rr;
-    sh[(kTreeLanes + l) * kc + c] = rs;
+    sh[l] = rr;
+    sh[kTreeLanes + l] = rs;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (l == 0) {
-        partial[g * kc + c] = fold_lanes(sh, c, kc);
-        partial[(P.groups + g) * kc + c] = fold_lanes(sh + kTreeLanes * kc, c, kc);
+        partial[g] = fold_lanes(sh);
+        partial[P.groups + g] = fold_lanes(sh + kTreeLanes);
     }
 }
 
@@ -217,48 +196,46 @@ kernel void reduce(constant Params& P [[buffer(0)]],
                    device const float2* r [[buffer(1)]],
                    device const float* z [[buffer(2)]],
                    device float2* partial [[buffer(3)]],
-                   device const ColState* cs [[buffer(4)]],
-                   uint2 tid [[thread_position_in_threadgroup]],
-                   uint2 tg [[threadgroup_position_in_grid]]) {
-    threadgroup float2 sh[kTreeLanes * kMaxColumns];
-    const uint c = tid.x, l = tid.y, kc = P.kc, g = tg.x;
+                   device const SolveState& state [[buffer(4)]],
+                   uint l [[thread_index_in_threadgroup]],
+                   uint g [[threadgroup_position_in_grid]]) {
+    threadgroup float2 sh[kTreeLanes];
     float2 acc = float2(0.0f);
-    if (cs[c].active != 0) {
-        const float mu = cs[c].mu_z;
+    if (state.active != 0) {
+        const float mu = state.mu_z;
         for (uint s = 0; s < kTreeSteps; ++s) {
             const uint i = g * kTreeRows + s * kTreeLanes + l;
             if (i >= P.n) break;
-            const uint o = i * kc + c;
             float2 term;
-            if (kReduceMode == kReduceSumR) term = r[o];
-            else if (kReduceMode == kReduceSumZ) term = float2(z[o], 0.0f);
-            else term = df_mul_f(r[o], z[o] - mu);
+            if (kReduceMode == kReduceSumR) term = r[i];
+            else if (kReduceMode == kReduceSumZ) term = float2(z[i], 0.0f);
+            else term = df_mul_f(r[i], z[i] - mu);
             acc = df_add(acc, term);
         }
     }
-    sh[l * kc + c] = acc;
+    sh[l] = acc;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (l == 0) partial[g * kc + c] = fold_lanes(sh, c, kc);
+    if (l == 0) partial[g] = fold_lanes(sh);
 }
 
-// ---- one threadgroup (kc, 16): fold the partials, then the PCG scalars ----
+// ---- one threadgroup of 16 lanes: fold the partials, then the PCG scalars ----
 kernel void finalize(constant Params& P [[buffer(0)]],
                      device const float2* partial [[buffer(1)]],
-                     device ColState* cs [[buffer(2)]],
-                     uint2 tid [[thread_position_in_threadgroup]]) {
-    threadgroup float2 sh[2 * kTreeLanes * kMaxColumns];
-    const uint c = tid.x, l = tid.y, kc = P.kc, G = P.groups;
+                     device SolveState& state [[buffer(2)]],
+                     uint l [[thread_index_in_threadgroup]]) {
+    threadgroup float2 sh[2 * kTreeLanes];
+    const uint G = P.groups;
     const uint slots = P.mode == kFinalizeCheck ? 2 : 1;
     for (uint k = 0; k < slots; ++k) {
         float2 acc = float2(0.0f);
-        for (uint g = l; g < G; g += kTreeLanes) acc = df_add(acc, partial[(k * G + g) * kc + c]);
-        sh[(k * kTreeLanes + l) * kc + c] = acc;
+        for (uint g = l; g < G; g += kTreeLanes) acc = df_add(acc, partial[k * G + g]);
+        sh[k * kTreeLanes + l] = acc;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (l != 0) return;
-    ColState st = cs[c];
+    SolveState st = state;
     if (st.active == 0) return;
-    const float2 t = fold_lanes(sh, c, kc);
+    const float2 t = fold_lanes(sh);
     const float2 inv_n = float2(P.inv_n_hi, P.inv_n_lo);
     if (P.mode == kFinalizeMuR) {
         st.mu_r = P.lap != 0 ? df_mul(t, inv_n).x : 0.0f;
@@ -305,7 +282,7 @@ kernel void finalize(constant Params& P [[buffer(0)]],
             }
         }
         if (st.active != 0 && P.lap != 0)
-            st.mu_r = df_mul(fold_lanes(sh + kTreeLanes * kc, c, kc), inv_n).x;
+            st.mu_r = df_mul(fold_lanes(sh + kTreeLanes), inv_n).x;
     } else if (P.mode == kFinalizeRz) {
         const float b = isfinite(t.x) ? df_div(t, st.rz).x : t.x;
         if (!isfinite(b)) {
@@ -316,25 +293,25 @@ kernel void finalize(constant Params& P [[buffer(0)]],
             st.rz = t;
         }
     }
-    cs[c] = st;
+    state = st;
 }
 
 // ---- triangular solves: forward rhs = r.hi - mu_r, backward in place on z ----
-inline float row_rhs(uint i, uint c, uint kc, device const float2* r, device const float* z, float mu) {
-    return kForward ? r[i * kc + c].x - mu : z[i * kc + c];
+inline float row_rhs(uint i, device const float2* r, device const float* z, float mu) {
+    return kForward ? r[i].x - mu : z[i];
 }
 
-inline float light_row(uint t, uint c, uint kc, device const uint* rows, device const uint* ptr,
+inline float light_row(uint t, device const uint* rows, device const uint* ptr,
                        device const uint* col, device const float* val, device const float* dinv,
                        device const float2* r, device const float* z, float mu) {
     const uint i = rows[t];
-    float s = row_rhs(i, c, kc, r, z, mu);
+    float s = row_rhs(i, r, z, mu);
     const uint e1 = ptr[t + 1];
-    for (uint e = ptr[t]; e < e1; ++e) s = fma(-val[e], z[col[e] * kc + c], s);
+    for (uint e = ptr[t]; e < e1; ++e) s = fma(-val[e], z[col[e]], s);
     return s * dinv[t];
 }
 
-// One level's light rows: thread per (row, column).
+// One thread per light row.
 kernel void level(constant Params& P [[buffer(0)]],
                   device const uint* rows [[buffer(1)]],
                   device const uint* ptr [[buffer(2)]],
@@ -343,18 +320,15 @@ kernel void level(constant Params& P [[buffer(0)]],
                   device const float* dinv [[buffer(5)]],
                   device const float2* r [[buffer(6)]],
                   device float* z [[buffer(7)]],
-                  device const ColState* cs [[buffer(8)]],
-                  uint2 gid [[thread_position_in_grid]]) {
-    const uint c = gid.x, kc = P.kc;
-    if (c >= kc || gid.y >= P.count) return;
-    if (cs[c].active == 0) return;
-    const uint t = P.offset + gid.y;
-    z[rows[t] * kc + c] = light_row(t, c, kc, rows, ptr, col, val, dinv, r, z, cs[c].mu_r);
+                  device const SolveState& state [[buffer(8)]],
+                  uint i [[thread_position_in_grid]]) {
+    if (i >= P.count) return;
+    if (state.active == 0) return;
+    const uint t = P.offset + i;
+    z[rows[t]] = light_row(t, rows, ptr, col, val, dinv, r, z, state.mu_r);
 }
 
-// One level's heavy rows (more than 32 dependencies): a threadgroup (kc, L)
-// per row. Dependency k of the row goes to virtual lane k mod 32; real lane l
-// accumulates virtual lanes l, l + L, ...; lane 0 folds lanes 0..31 in order.
+// One 32-thread group per heavy row.
 kernel void level_heavy(constant Params& P [[buffer(0)]],
                         device const uint* rows [[buffer(1)]],
                         device const uint* ptr [[buffer(2)]],
@@ -363,28 +337,25 @@ kernel void level_heavy(constant Params& P [[buffer(0)]],
                         device const float* dinv [[buffer(5)]],
                         device const float2* r [[buffer(6)]],
                         device float* z [[buffer(7)]],
-                        device const ColState* cs [[buffer(8)]],
-                        uint2 tid [[thread_position_in_threadgroup]],
-                        uint2 tgs [[threads_per_threadgroup]],
-                        uint2 tg [[threadgroup_position_in_grid]]) {
-    threadgroup float sh[kVirtualLanes * kMaxColumns];
-    const uint c = tid.x, l = tid.y, L = tgs.y, kc = P.kc;
-    const uint t = P.offset + tg.x;
-    const bool act = cs[c].active != 0;
+                        device const SolveState& state [[buffer(8)]],
+                        uint l [[thread_index_in_threadgroup]],
+                        uint g [[threadgroup_position_in_grid]]) {
+    threadgroup float sh[kVirtualLanes];
+    const uint t = P.offset + g;
+    const bool act = state.active != 0;
     if (act) {
         const uint b = ptr[t], e1 = ptr[t + 1];
-        for (uint v = l; v < kVirtualLanes; v += L) {
-            float s = 0.0f;
-            for (uint e = b + v; e < e1; e += kVirtualLanes) s = fma(val[e], z[col[e] * kc + c], s);
-            sh[v * kc + c] = s;
-        }
+        float acc = 0.0f;
+        for (uint e = b + l; e < e1; e += kVirtualLanes)
+            acc = fma(val[e], z[col[e]], acc);
+        sh[l] = acc;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (l == 0 && act) {
-        float tot = sh[c];
-        for (uint v = 1; v < kVirtualLanes; ++v) tot += sh[v * kc + c];
+        float tot = sh[0];
+        for (uint v = 1; v < kVirtualLanes; ++v) tot += sh[v];
         const uint i = rows[t];
-        z[i * kc + c] = (row_rhs(i, c, kc, r, z, cs[c].mu_r) - tot) * dinv[t];
+        z[i] = (row_rhs(i, r, z, state.mu_r) - tot) * dinv[t];
     }
 }
 
@@ -398,19 +369,17 @@ kernel void levels_narrow(constant Params& P [[buffer(0)]],
                           device const float* dinv [[buffer(5)]],
                           device const float2* r [[buffer(6)]],
                           device float* z [[buffer(7)]],
-                          device const ColState* cs [[buffer(8)]],
+                          device const SolveState& state [[buffer(8)]],
                           device const uint* level_ptr [[buffer(9)]],
                           uint tid [[thread_index_in_threadgroup]],
                           uint tgs [[threads_per_threadgroup]]) {
-    const uint kc = P.kc;
     for (uint lv = P.offset; lv < P.count; ++lv) {
         const uint t0 = level_ptr[lv];
-        const uint items = (level_ptr[lv + 1] - t0) * kc;
+        const uint items = level_ptr[lv + 1] - t0;
         for (uint q = tid; q < items; q += tgs) {
-            const uint c = q % kc;
-            if (cs[c].active == 0) continue;
-            const uint t = t0 + q / kc;
-            z[rows[t] * kc + c] = light_row(t, c, kc, rows, ptr, col, val, dinv, r, z, cs[c].mu_r);
+            if (state.active == 0) continue;
+            const uint t = t0 + q;
+            z[rows[t]] = light_row(t, rows, ptr, col, val, dinv, r, z, state.mu_r);
         }
         threadgroup_barrier(mem_flags::mem_device);
     }
@@ -420,15 +389,13 @@ kernel void levels_narrow(constant Params& P [[buffer(0)]],
 kernel void p_update(constant Params& P [[buffer(0)]],
                      device float* p [[buffer(1)]],
                      device const float* z [[buffer(2)]],
-                     device const ColState* cs [[buffer(3)]],
-                     uint2 gid [[thread_position_in_grid]]) {
-    const uint c = gid.x, i = gid.y, kc = P.kc;
-    if (c >= kc || i >= P.n) return;
-    if (cs[c].active == 0) return;
-    const uint o = i * kc + c;
-    const float zc = z[o] - cs[c].mu_z;
-    const float b = cs[c].beta;
-    p[o] = b == 0.0f ? zc : fma(b, p[o], zc);
+                     device const SolveState& state [[buffer(3)]],
+                     uint i [[thread_position_in_grid]]) {
+    if (i >= P.n) return;
+    if (state.active == 0) return;
+    const float zc = z[i] - state.mu_z;
+    const float b = state.beta;
+    p[i] = b == 0.0f ? zc : fma(b, p[i], zc);
 }
 
 // ---- self-test of the error-free transforms (metal_solver::available) ----
