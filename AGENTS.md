@@ -20,6 +20,9 @@ The root project builds the library, CLI, and unit tests. The separate
 CI builds its CPU-only native benchmark and runs the CLI/stopping CTest
 contracts alongside the Python harness tests; these checks are not performance
 campaigns. Native benchmark sources, CMake files, tests and patches trigger CI.
+Root and Python builds enable `-Wall -Wextra -Wpedantic`. CPU compiler-matrix
+and wheel CI also set `CMAKE_COMPILE_WARNING_AS_ERROR=ON`; local builds retain
+the caller's choice. Fetched Eigen and GoogleTest headers are system includes.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -123,19 +126,26 @@ choices, retired knobs, and measurements belong in
   across the library boundary can corrupt allocation ownership. Validate with
   the external parent fixture in `tests/cmake_consumer`.
 - `APXCHOL_NATIVE_ARCH`: ON for local builds. Root, benchmark, and local Python
-  builds share the architecture-specific compiler probe; portable Python wheels
-  omit native tuning. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
+  builds share the architecture-specific compiler probe. cibuildwheel sets this
+  option OFF for portable wheels; Python optimization follows the CMake build
+  type. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
+  The shared CMake architecture helper rejects MSVC and clang-cl. The compiled
+  core checks the x86-64-v2 feature macros, including for native builds, without
+  running a configure-time program.
 - OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
   queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
   while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
-  OpenMP fails configuration instead of producing a serial build.
+  OpenMP fails configuration instead of producing a serial build. Both targets
+  link OpenMP directly; there is no long-double reduction/libatomic probe.
 - macOS: retain normal CMake compiler selection. Install Command Line Tools,
   CMake and libomp, then use the common build commands. libc++ `std::pmr`
   requires a macOS 14 deployment target. Linux-only `madvise`
   advice is compiled out; mmap remains. CI's `linux` and `macos` jobs share
-  parent-consumer build/test steps through YAML anchors. Keep `std::iota` for
-  the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
+  native/portable modes and parent-consumer build/test steps through YAML anchors.
+  Linux tests GCC and Clang in both modes; macOS tests Apple Clang in both modes.
+  Keep `std::iota` for the macos-15 runner's default Xcode 16.4 toolchain until
+  that baseline retires.
 
 
 - `APXCHOL_USE_METAL=ON` (Apple only; exclusive with CUDA): the explicit
@@ -144,7 +154,30 @@ choices, retired knobs, and measurements belong in
   it compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
   links Metal, Foundation and CoreGraphics publicly. `solve()`, `cpu_solver`
   and every default are unchanged; without the option no Metal source builds.
-- `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
+- Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
+  manylinux distribution package on Linux and Homebrew on macOS, targeting
+  macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
+  building, includes it in the wheels, repairs them and runs the Python tests.
+  Linux installs the distro's Clang and uses its C++ runtime libraries.
+  Untuned x86-64 builds share the x86-64-v2 minimum, including Debug and
+  benchmarks. Native Release builds retain host tuning. The portable Linux
+  Python binding is compiled for baseline
+  x86-64 to report an import error on unsupported CPUs before entering the core.
+  macOS arm64 retains Apple Clang's default target.
+  CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
+  Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
+  `python/pyproject.toml`.
+
+- Python requires NumPy and SciPy and accepts SciPy sparse operators.
+  `factor_storage_dtype=None|np.float16|np.float32` selects per-solver SpTRSV
+  storage; strings and dtype objects are accepted. Explicit selections override
+  the environment without changing it; unsupported FP16 requests fail. The
+  resolved dtype is read-only on `Solver.factor_storage_dtype`. Factor exports
+  (`chol`, `L`, `D`) retain FP32, matching C++ factor values; CPU PCG uses FP64
+  vectors and arithmetic, including with FP32 inputs.
+
+- `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
+  use C++23, requiring CUDA Toolkit 13.3+ and CMake 4.4+. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
   competitors independently require cuSPARSE/cuBLAS; distinguish their driver
   linkage from our library linkage.
@@ -213,6 +246,19 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   AUTO uses the structural critical-tail schedule when metadata permits;
   `levels` is the reference. Share row arithmetic across schedules and storage.
   Research schedules on other branches are not production modes.
+- CPU FP16 storage uses `_Float16` directly; setup uses native conversion under
+  the normal round-to-nearest environment and retains signed subnormal flushing.
+  Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
+  packed conversion and scalar widening workarounds stay local to conversion.
+  Portable x86 builds check AVX/F16C before selecting FP16 storage. AVX2/FMA
+  selects the optimized kernels once per level or critical tail, before the row
+  loops; native builds use them directly.
+  FP16 remains opt-in on the CPU; unsupported explicit requests fail at setup.
+  Setup narrows CSC once inside an F16C-targeted worker and transposes those
+  stored values. Host narrowing and the format-drop predicate share the RNE
+  normal/subnormal boundary check, flushing before conversion to FP16.
+  Release consumed input before the transpose;
+  FP32 keeps transpose-before-copy ordering to retain its memory bound.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
   `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
   writer threads perform the first touch. Pointer, diagonal, scale, and other
@@ -229,32 +275,49 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   `detail::build_permuted_full_symmetric_csr` lives in `pcg_cuda_host.h`; its
   general fallback orders duplicate coordinates by value bits, so its output
   does not depend on the thread team.
+- CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
+  because NVCC does not support `_Float16` in device code. Uploads copy the
+  common binary16 representation; the solve kernel widens only at accumulation.
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
-  is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
-  factor storage (GPU default on, CPU default off); scales and diagonals stay
-  fp32, while outer CPU/CUDA PCG vectors and reductions stay fp64; the Metal
-  block PCG uses double-float instead. See
+  is accepted; other nonempty values are errors. `factor_options::factor_storage`
+  selects per-solver storage. Its `automatic` default uses
+  `APXCHOL_FACTOR_STORAGE=auto|float16|float32`.
+  `auto` selects the backend default (GPU FP16, CPU FP32). Invalid values fail.
+  Parsing and selection live in C++; Python only normalizes dtype names.
+  Scales and diagonals stay
+  fp32, while outer CPU/CUDA PCG vectors and reductions stay fp64; Metal
+  uses double-float recurrences. See
   [precision and storage](docs/precision.md). The old GPU-only alias is
-  retired. GPU block setup is explicit opt-in
-  through `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, independent of host threads.
-- GPU-owned numerical setup requires all three existing flags:
-  `APXCHOL_GPU_BLOCK_FRONTEND=on|force|1`, `APXCHOL_GPU_ROUND_SHADOW=force`
-  and `APXCHOL_GPU_FACTOR_FINALIZE=force`. It applies to an internal consuming
-  block-greedy/tree solve on directed AoS. It can eliminate supported rounds on
-  device and install the append log through dataflow SpTRSV. Public factorization,
-  custom strategies, exported factors and `keep_factor=true` retain their audited
-  or ordinary host path; copied capsules keep independent ownership validation.
+  retired.
+- Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
+  OpenMP SpTRSV and host PCG, even in CUDA builds. They must not initialize a
+  CUDA context or consume GPU stage flags. Explicit factor adoption remains CPU.
+- One-shot `solve` selects a complete route with `solve_options.backend`
+  (`automatic`, `cpu`, `gpu`); CLI uses `--backend auto|cpu|gpu`. Report the
+  selected route in `solve_result.backend` and CLI output. Auto is configuration
+  compatibility only: a CUDA build with 32-bit nodes, block-greedy/AoS, supported
+  sampler options and no export selects GPU; other options select CPU before
+  setup. It is not a performance predictor or a device-availability fallback.
+- GPU solves require device-owned factorization, finalization, dataflow plans,
+  operator preparation and PCG. Reject missing/nonunique device factor ownership
+  before a host-factor upload. Unsupported stored formats, missing device,
+  insufficient memory and runtime errors never trigger a CPU retry. The operator
+  must have supported compressed, sorted, unique and fully paired CSC storage;
+  callers can explicitly select CPU for other valid host layouts.
+- An explicit `detail::setup_route` threads through setup; production CPU/GPU
+  preconditioner specializations fix it at compile time. Legacy stage flags and
+  audited mixed-stage mechanisms remain low-level diagnostics, not end-to-end
+  solve modes. Explicit `cuda_sptrsv` host-factor import and copied capsule
+  validation remain independent facilities. No serialized factor API is added.
+- The internal GPU session shares one setup lifetime with benchmark native
+  retries. It is not a new public owner API. GPU PCG builds its permuted operator
+  on device; no host construction/upload fallback remains. Preserve canonical
+  lower values, lossless-fp32 selection and original-system residual grading.
 - An eligible compressed, sorted, unique, fully paired symmetric CSC operator
-  initializes the owned graph directly after operator validation. Its fresh,
-  unchanged operator view supplies the pairing proof only after strict layout
-  checks and when all stored off-diagonals are nonzero. Stored zeros, lumped
-  inputs and raw/test entry points retain full structural mate checks. Other
-  stored formats retain the host import fallback before device mutation. GPU PCG
-  constructs the permuted operator CSR on device only with all three existing
-  owned-setup flags enabled and its format checks satisfied. Ordinary calls and
-  unsupported formats keep host construction. Canonical lower values and
-  lossless-fp32 selection are unchanged.
-  Preserve original-system residual grading and full fallback validation.
+  initializes the owned graph directly after operator validation. Its unchanged
+  view supplies pairing proof only after strict layout checks and when stored
+  off-diagonals are nonzero. Stored zeros, lumped inputs and raw/test entry points
+  retain full structural mate checks. Diagnostic graph imports remain separate.
 - `operator_scan::triangles_bit_identical` is the proof that lets consumers of
   the caller's operator skip the per-entry transpose-partner search (about
   log2(column length) cache misses per entry, in the hub columns of power-law

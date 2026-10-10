@@ -8,6 +8,8 @@ FetchContent_Declare(
 
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
+target_include_directories(gtest SYSTEM PRIVATE
+        "${googletest_SOURCE_DIR}/googletest/include")
 
 add_executable(unit_tests
         test_core.cpp
@@ -28,8 +30,9 @@ add_executable(unit_tests
         test_lowprec.cpp
         test_mtx_input.cpp
         test_operator_class.cpp
-        test_pcg_cuda_host.cpp
+        test_solve_routes.cpp
         test_cuda_device_scope.cpp
+        test_pcg_cuda_host.cpp
         test_level_schedule.cpp
         test_metal_host.cpp
 )
@@ -81,6 +84,12 @@ if (OpenMP_CXX_FOUND)
         TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=8;OMP_THREAD_LIMIT=3;OMP_DYNAMIC=FALSE")
 endif()
 if (APXCHOL_USE_CUDA)
+    # The CPU route must run in a fresh process with no visible CUDA devices;
+    # eligible automatic/explicit GPU requests must fail without CPU fallback.
+    add_test(NAME solve_routes_no_cuda_device COMMAND unit_tests
+        --gtest_filter=SolveRoutes.ExplicitCpuIgnoresLegacyGpuStageFlagsAndDoesNotPrewarm:SolveRoutes.HiddenDeviceFailureNeverRetriesOnCpu)
+    set_tests_properties(solve_routes_no_cuda_device PROPERTIES TIMEOUT 120
+        ENVIRONMENT "OMP_NUM_THREADS=4;CUDA_VISIBLE_DEVICES=-1")
     # Device-wide free-memory accounting also sees other GPU applications.
     # Check this process's repeated finalizer allocations with the CUDA tool.
     find_program(APXCHOL_COMPUTE_SANITIZER NAMES compute-sanitizer
@@ -118,9 +127,18 @@ apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern
 apxchol_cli_test(cli_laplacian_converges path5_laplacian 0 "LAPLACIAN/SDDM operator")
 apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
 apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
-apxchol_cli_test(cli_lumping_disabled_warns path5_nearly_sddm 0 "M-matrix lumping is disabled")
+# Disabling lumping deliberately admits negative graph weights for the legacy
+# CPU diagnostic. The complete GPU route must reject those weights instead.
+apxchol_cli_test(cli_lumping_disabled_warns path5_nearly_sddm 0
+    "M-matrix lumping is disabled" --backend cpu)
 set_tests_properties(cli_lumping_disabled_warns PROPERTIES
     ENVIRONMENT "OMP_NUM_THREADS=4;APXCHOL_LUMP=0")
+if (APXCHOL_USE_CUDA AND NOT APXCHOL_64BIT_NODE_INDICES)
+    apxchol_cli_test(cli_gpu_lumping_disabled_is_rejected path5_nearly_sddm 2
+        "GPU direct CSC initialization rejected values or layout" --backend gpu)
+    set_tests_properties(cli_gpu_lumping_disabled_is_rejected PROPERTIES
+        ENVIRONMENT "OMP_NUM_THREADS=4;APXCHOL_LUMP=0")
+endif()
 apxchol_cli_test(cli_explicit_adjacency_on_laplacian path5_laplacian 0 "ADJACENCY graph"
     --input-kind adjacency)
 apxchol_cli_test(cli_ambiguous_input_is_rejected ambiguous 2 "cannot tell whether this matrix is")
@@ -146,3 +164,13 @@ apxchol_cli_test(cli_retired_forward_star_append_is_rejected path5_pattern 109 "
     --fs-filter-append)
 apxchol_cli_test(cli_retired_forward_star_no_append_is_rejected path5_pattern 109 "not expected"
     --no-fs-filter-append)
+
+# Complete solve-route CLI contract: the CPU choice is usable in every build,
+# and CLI enum transformations must not admit numeric or unknown selectors.
+apxchol_cli_test(cli_backend_cpu_converges path5_sddm 0 "backend: +cpu" --backend cpu)
+apxchol_cli_test(cli_numeric_backend_is_rejected path5_sddm 105 "not in" --backend 0)
+apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backend hybrid)
+if (NOT APXCHOL_USE_CUDA)
+    apxchol_cli_test(cli_unavailable_gpu_backend_is_rejected path5_sddm 2
+        "GPU route requested but CUDA support is not built" --backend gpu)
+endif()

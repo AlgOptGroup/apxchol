@@ -27,6 +27,7 @@
 //   --csv              output in CSV format
 //   --seed <int>       RNG seed                             (default: 42)
 //   --repeat <int>     repetitions per solver (median taken)  (default: 1)
+//   --v1-backend <b>   auto | cpu | gpu, complete setup/solve route (default: auto)
 
 #include <iostream>
 #include <iomanip>
@@ -82,6 +83,7 @@
 
 #ifdef HAVE_APXCHOL_V1
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/factorization.h"
 #ifdef _OPENMP
@@ -570,6 +572,33 @@ static double read_vmrss_mb() {
     return -1.0;
 }
 
+// Diagnostic only: stored diagonals are optional for zero rows. Subtracting the
+// row count from nnz therefore undercounts adjacency entries when isolates omit
+// their diagonal. Call this after the measured intervals, not inside Solve.
+static long long stored_offdiagonal_entries(const Eigen::SparseMatrix<double>& A) {
+    long long count = 0;
+    for (Eigen::Index col = 0; col < A.outerSize(); ++col)
+        for (Eigen::SparseMatrix<double>::InnerIterator entry(A, col); entry; ++entry)
+            if (entry.row() != entry.col()) ++count;
+    return count;
+}
+
+#ifdef APXCHOL_USE_CUDA
+// Shared process initialization is reported once and excluded from each solver's
+// measured setup. A CPU route must never call this, including auto-selected CPU.
+static void warm_up_cuda_once() {
+    static bool initialized = false;
+    if (initialized) return;
+    const auto begin = std::chrono::high_resolution_clock::now();
+    cudaFree(nullptr);
+    const double init_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - begin).count();
+    std::cerr << "[bench] cuda_init (once, before any timed solver): "
+              << std::fixed << std::setprecision(1) << init_ms << " ms\n";
+    initialized = true;
+}
+#endif
+
 static void print_result_pretty(const BenchResult& r) {
     std::cout << std::left
               << std::setw(16) << r.solver_name
@@ -587,7 +616,7 @@ static void print_result_pretty(const BenchResult& r) {
 }
 
 static void print_csv_header() {
-    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s\n";
+    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route\n";
 }
 
 static void print_result_csv(const BenchResult& r) {
@@ -607,7 +636,7 @@ static void print_result_csv(const BenchResult& r) {
               << r.retained_repeats << "," << r.representative_repeat << ","
               << std::scientific << std::setprecision(17)
               << r.max_repeat_rel_residual << "," << bench_stop::contract << ","
-              << r.solve_passes << "," << r.stop_check_seconds << "\n";
+              << r.solve_passes << "," << r.stop_check_seconds << "," << r.execution_route << "\n";
 }
 
 // ──────────────────── generate RHS ────────────────────
@@ -648,6 +677,7 @@ static BenchResult median_run(Fn&& fn, int repeats) {
                   << " stop_contract=" << bench_stop::contract
                   << " solve_passes=" << result.solve_passes
                   << " stop_check_s=" << result.stop_check_seconds
+                  << " execution_route=" << (result.execution_route.empty() ? "none" : result.execution_route)
                   << " solver=" << std::quoted(result.solver_name) << '\n';
         if (i < 0) continue;
         result.representative_repeat = i + 1;
@@ -732,7 +762,8 @@ static BenchResult run_apxchol_v1(
     double degree_multiplier_override = 0.0,
     apxchol::clique_sampler sampler = apxchol::clique_sampler::gks,
     size_t exact_core_max_h = apxchol::exact_core_by_route,
-    size_t double_cycle_min_h = 0)
+    size_t double_cycle_min_h = 0,
+    apxchol::solve_backend backend = apxchol::solve_backend::automatic)
 {
     BenchResult r;
     if (std::getenv("APXCHOL_PROFILE")) dump_profile = true;  // checkpoint breakdown
@@ -777,13 +808,39 @@ static BenchResult run_apxchol_v1(
     if (const char* e = std::getenv("APXCHOL_DEGREE_TIEBREAK"))
         fopts.partition.degree_tiebreak = std::atoi(e) != 0;
 
+    apxchol::solve_options opts{.tol = tol, .max_iter = maxiter,
+        .storage = storage, .factor_opts = fopts};
+    opts.backend = backend;
+    const auto route = apxchol::detail::select_solve_backend(opts);
+    opts.backend = route; // resolve once; retries reuse the same concrete owner
+#if defined(APXCHOL_USE_CUDA)
+    if (route == apxchol::solve_backend::gpu) warm_up_cuda_once();
+#endif
+    r.execution_route = route == apxchol::solve_backend::gpu ? "gpu" : "cpu";
+    const bool report_fill = std::getenv("APXCHOL_REPORT_FILL") != nullptr;
+    long long factor_nnz = 0, factor_rows = 0;
+    std::uint64_t stored_nnz = 0, l11_nnz = 0, dropped = 0;
+    double drop_rel = 0;
+    auto capture_fill = [&](const auto& precond) {
+        // Column pointers retain raw nnz even after factor values are released.
+        // Read this owner; never run a second, potentially different factorization.
+        factor_nnz = static_cast<long long>(precond.factor().L.nonZeros());
+        factor_rows = static_cast<long long>(precond.factor().L.rows());
+        if (report_fill) {
+            const auto& stats = precond.trsv().drop_stats();
+            stored_nnz = stats.nnz_stored;
+            l11_nnz = stats.nnz_factor;
+            dropped = stats.dropped;
+            drop_rel = stats.rel;
+        }
+    };
+
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
     apxchol::solve_result res;
 #if defined(APXCHOL_USE_CUDA)
-    {
+    if (route == apxchol::solve_backend::gpu) {
         Eigen::initParallel();
-        apxchol::detail::gpu_solve_session solver(L, {.tol = tol, .max_iter = maxiter,
-            .storage = storage, .factor_opts = fopts}, res);
+        apxchol::detail::gpu_solve_session solver(L, opts, res);
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool, Eigen::VectorXd& current) {
                 solver.solve(b, res, request, remaining);
@@ -792,11 +849,12 @@ static BenchResult run_apxchol_v1(
             });
         res.x = std::move(x);
         res.iterations = r.iterations;
-    }
-#else
+        capture_fill(solver.preconditioner());
+        r.solve_rss_mb = read_vmrss_mb();
+    } else
+#endif
     {
-        apxchol::cpu_solver solver(L, {.tol = tol, .max_iter = maxiter,
-            .storage = storage, .factor_opts = fopts},
+        apxchol::cpu_solver solver(L, opts,
             std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings);
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
@@ -806,8 +864,9 @@ static BenchResult run_apxchol_v1(
             });
         res.x = std::move(x);
         res.iterations = r.iterations;
+        capture_fill(solver.preconditioner());
+        r.solve_rss_mb = read_vmrss_mb();
     }
-#endif
     const auto t_wall_end = std::chrono::high_resolution_clock::now();
     const double wall_total =
         std::chrono::duration<double>(t_wall_end - t_wall_start).count();
@@ -824,7 +883,6 @@ static BenchResult run_apxchol_v1(
     r.solve_time = wall_total - r.setup_time;
     if (r.solve_time < 0.0) r.solve_time = 0.0;
     r.total_time = wall_total;
-    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
     r.solve_vram_mb = res.solve_vram_mb; // sampled INSIDE apxchol::solve (the GPU-resident
                                          // PCG frees all device state before returning);
                                          // -1 on CPU builds / host-PCG paths.
@@ -847,48 +905,21 @@ static BenchResult run_apxchol_v1(
         const double bn = b.norm();
         r.rel_residual = rg.norm() / (bn > 0 ? bn : 1.0);
     }
-    r.fillin = 0.0;  // not tracked in v1 solve_result
-    if (std::getenv("APXCHOL_REPORT_FILL")) {
-        // Measurement-only: re-factorize to read factor nnz. AC's fill ratio is
-        // 2*offdiag(L)/nnz(adj); match it. nnz(adj) = input L.nonZeros() - n.
-        auto Fmeas = apxchol::factorize(L, storage, fopts);
-        const long long Lnnz   = Fmeas.L.nonZeros();
-        const long long n_fac  = Fmeas.L.rows();
-        const long long offdiag = Lnnz - n_fac;          // strict lower entries
-        const long long adj_nnz = (long long)L.nonZeros() - L.rows();
-        std::string stored;
-        // What the SpTRSV actually holds after its setup (L11 = the factor minus
-        // the Laplacian's grounded last row/col, minus APXCHOL_FACTOR_DROP's
-        // compaction): the CSR and the CSC each store stored_nnz entries. Same
-        // shared drop on both backends (factor_drop.h); the CUDA backend
-        // additionally reports the device bytes of its factor arrays and its
-        // runtime storage mode. (Formatted before the FILL line is printed:
-        // setup itself prints a line under APXCHOL_VERBOSE.)
-        {
-#if defined(APXCHOL_USE_CUDA)
-            apxchol::cuda_sptrsv trsv;
-#else
-            apxchol::omp_sptrsv trsv;
-#endif
-            trsv.setup(Fmeas.L, static_cast<apxchol::node_index>(Fmeas.sddm ? n_fac : n_fac - 1));
-            const auto& st = trsv.drop_stats();
-            std::ostringstream os;
-            os << " stored_nnz=" << st.nnz_stored
-               << " (L11_nnz=" << st.nnz_factor << " dropped=" << st.dropped
-               << " drop_rel=" << st.rel << ")";
-#if defined(APXCHOL_USE_CUDA)
-            os << " gpu=" << trsv.backend_name()
-               << "/" << (trsv.fp16() ? "fp16" : apxchol::cuda_sptrsv::value_name)
-               << " factor_dev_MB=" << std::fixed << std::setprecision(1) << trsv.factor_device_bytes() / 1e6
-               << " dev_delta_MB=" << trsv.device_bytes_delta() / 1e6;
-#endif
-            stored = os.str();
-        }
+    const long long offdiag = factor_nnz - factor_rows;
+    r.factor_offdiag = offdiag;
+    const long long adj_nnz = stored_offdiagonal_entries(L);
+    r.fillin = adj_nnz > 0 ? 2.0 * offdiag / adj_nnz
+                           : std::numeric_limits<double>::quiet_NaN();
+    if (report_fill) {
         std::cerr << "FILL " << combo_name
-                  << "  Lnnz=" << Lnnz << " offdiag=" << offdiag
+                  << "  Lnnz=" << factor_nnz << " offdiag=" << offdiag
                   << " adj_nnz=" << adj_nnz
-                  << " ratio(2*offdiag/adj)=" << (2.0 * offdiag / adj_nnz)
-                  << stored << "\n" << std::flush;
+                  << " ratio(2*offdiag/adj)=" << r.fillin
+                  << " stored_nnz=" << stored_nnz
+                  << " (L11_nnz=" << l11_nnz << " dropped=" << dropped
+                  << " drop_rel=" << drop_rel << ")"
+                  << " execution_route=" << r.execution_route
+                  << " source=measured_owner\n" << std::flush;
     }
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     if (dump_profile) {
@@ -1114,6 +1145,7 @@ struct Args {
     // Match accepts either the bare combo name ("bg+tree") to run all
     // storage variants, or fully-qualified "bg+tree[vec]" / "bg+tree[bstr]".
     std::set<std::string> v1_configs;
+    std::string v1_backend = "auto";
     // De-singularization is two orthogonal axes (see resolve_desing). decompose:
     // auto|whole|split (auto = split iff disconnected). ground: auto|pin|coarse|native
     // (auto = pin for AMG solvers / native for apxchol). The grounding WORK is timed
@@ -1175,6 +1207,11 @@ static Args parse_args(int argc, char** argv) {
             std::istringstream ss(s);
             std::string tok;
             while (std::getline(ss, tok, ',')) a.solvers.insert(tok);
+        }
+        else if (arg == "--v1-backend") {
+            a.v1_backend = next();
+            if (a.v1_backend != "auto" && a.v1_backend != "cpu" && a.v1_backend != "gpu")
+                throw std::runtime_error("--v1-backend must be auto|cpu|gpu");
         }
         else if (arg == "--v1-configs") {
             std::string s = next();
@@ -1877,6 +1914,8 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     BenchResult r; r.graph_name=name; r.n=(int)L.rows(); r.nnz=(int)L.nonZeros(); r.fillin=0;
     double setup=0, solve=0, res2=0; int it=0; const double bn=b.norm();
     bool unavailable = false;
+    long long measured_offdiag = 0;
+    bool measured_fill = true;
     double rss=0, vram=-1;   // combined solve-held RSS/VRAM = MAX over components (peak
                              // resident during the largest sub-solve); else the combined
                              // cell loses these and shows blank on the memory heatmaps.
@@ -1916,6 +1955,8 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         setup += rc.setup_time; solve += rc.solve_time; it=std::max(it,rc.iterations);
         r.solve_passes = std::max(r.solve_passes, rc.solve_passes);
         r.stop_check_seconds += rc.stop_check_seconds;
+        measured_fill = measured_fill && rc.factor_offdiag >= 0;
+        if (rc.factor_offdiag >= 0) measured_offdiag += rc.factor_offdiag;
         if (rc.solve_rss_mb > rss) rss = rc.solve_rss_mb;       // peak over components
         if (rc.solve_vram_mb > vram) vram = rc.solve_vram_mb;
         // Adapters normalize by one when the component RHS is zero. Undo that
@@ -1925,6 +1966,11 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         // Squaring an adapter's n/a sentinel must not turn it into a result.
         unavailable = unavailable || rc.iterations < 0 || rc.rel_residual < 0.0;
         r.solver_name = rc.solver_name;
+        if (!rc.execution_route.empty()) {
+            if (!r.execution_route.empty() && r.execution_route != rc.execution_route)
+                throw std::runtime_error("split solve changed execution route between components");
+            r.execution_route = rc.execution_route;
+        }
         if (dbg) dbg_rows.emplace_back(sn, rc.rel_residual, rnc, rc.iterations);
     }
     if (dbg) {
@@ -1958,6 +2004,12 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     r.rel_residual = unavailable?-1.0:std::sqrt(res2)/(bn>0?bn:1.0);
     r.us_per_nnz = r.total_time/std::max(1,r.nnz)*1e6;
     r.solve_rss_mb = rss; r.solve_vram_mb = vram;   // carry peak over components
+    if (!r.execution_route.empty()) {
+        r.factor_offdiag = measured_fill ? measured_offdiag : -1;
+        const long long adj_nnz = stored_offdiagonal_entries(L);
+        r.fillin = measured_fill && adj_nnz > 0 ? 2.0 * measured_offdiag / adj_nnz
+                                              : std::numeric_limits<double>::quiet_NaN();
+    }
     return r;
 }
 
@@ -2625,14 +2677,10 @@ int main(int argc, char** argv) {
     // footing — and keeps them there now that apxchol's own library-side
     // prewarm (apxchol/solver/cuda_context.h) hides its share of the cost.
     // Printed rather than hidden. Nothing else about the timing logic changes.
-    {
-        const auto t_cuda_init = std::chrono::high_resolution_clock::now();
-        cudaFree(nullptr);
-        const double init_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::high_resolution_clock::now() - t_cuda_init).count();
-        std::cerr << "[bench] cuda_init (once, before any timed solver): "
-                  << std::fixed << std::setprecision(1) << init_ms << " ms\n";
-    }
+    // v1 resolves each configuration first and calls the same helper only for
+    // its GPU route. Competitor GPU initialization stays at this process point.
+    if (args.solvers.count("amgcl_cuda") || args.solvers.count("hypre_boomeramg_gpu"))
+        warm_up_cuda_once();
 #endif
 
 #ifdef HAVE_HYPRE
@@ -3194,12 +3242,15 @@ int main(int argc, char** argv) {
             // centering -- handles disconnection intrinsically); --decompose split
             // factorizes each component independently. The single-component callable
             // ignores `ground` (apxchol has only its native grounding).
-            auto apx_single = [&combo, label](const Eigen::SparseMatrix<double>& L_,
+            const auto backend = args.v1_backend == "cpu" ? apxchol::solve_backend::cpu
+                : args.v1_backend == "gpu" ? apxchol::solve_backend::gpu
+                                           : apxchol::solve_backend::automatic;
+            auto apx_single = [&combo, label, backend](const Eigen::SparseMatrix<double>& L_,
                                               const Eigen::VectorXd& b_, const std::string& nm,
                                               double tl, int mi, ground_mode) {
                 return run_apxchol_v1(L_, b_, nm, label, combo.is, combo.storage, tl, mi,
                                       false, combo.exact_clique_max_degree, combo.degree_mult,
-                                      combo.sampler, combo.exact_core_max_h, combo.double_cycle_min_h);
+                                      combo.sampler, combo.exact_core_max_h, combo.double_cycle_min_h, backend);
             };
             print(median_run([&]() {
                 return run_desing("apxchol", label, apx_single);

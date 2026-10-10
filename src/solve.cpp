@@ -1,4 +1,5 @@
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/csc_work.h"
 #include <algorithm>
 #include <chrono>
@@ -39,35 +40,13 @@ inline void ensure_eigen_parallel() {
     (void)dummy;
 }
 
-// One-time report of the SpTRSV backend this build compiled (CPU omp / GPU
-// cuda) and of the factor-value storage the env resolves to
-// (APXCHOL_SPTRSV_FP16, lowprec.h -- unset means OFF on the CPU, ON on the
-// GPU). The banner is one-shot, so it reports the resolution at the first
-// solve. Opt-in via APXCHOL_VERBOSE — a library should be silent on stderr by
-// default.
-inline void print_sptrsv_banner_once() {
-    static const bool printed = [] {
-        if (!std::getenv("APXCHOL_VERBOSE")) return true;
-#if defined(APXCHOL_USE_CUDA)
-        // Dataflow is the GPU backend; report the shared storage switch
-        // as it resolves at first solve (unset = fp16 on this device).
-        const bool gpu_fp16 = apxchol::cuda_sptrsv::fp16_resolved();
-        const char* backend = "GPU/dataflow";
-        const char* vname   = gpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_SPTRSV_FP16=0 opts out)"
-                                       : apxchol::cuda_sptrsv::value_name;
-        const std::size_t vbytes = gpu_fp16 ? 2 : apxchol::cuda_sptrsv::value_bytes;
-#else
-        const bool cpu_fp16 = apxchol::omp_sptrsv::fp16_from_env();
-        const char* backend = "CPU/omp";
-        const char* vname   = cpu_fp16 ? "fp16 (per-column scaled, diagonal fp32; APXCHOL_SPTRSV_FP16=0 opts out)"
-                                       : "float (fp32)";
-        const std::size_t vbytes = cpu_fp16 ? 2 : sizeof(apxchol::sptrsv_value_t);
-#endif
+template<solve_backend Route>
+void print_sptrsv_banner(bool fp16) {
+    constexpr const char* backend = Route == solve_backend::gpu ? "GPU/dataflow" : "CPU/omp";
+    if (std::getenv("APXCHOL_VERBOSE"))
         std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem\n",
-                     backend, vname, vbytes);
-        return true;
-    }();
-    (void)printed;
+                     backend, fp16 ? "fp16 (per-column scaled, diagonal fp32)" : "float (fp32)",
+                     fp16 ? std::size_t(2) : sizeof(sptrsv_value_t));
 }
 
 // Parallel symmetric SpMV: y = L * x where L is stored as a row-major
@@ -442,8 +421,9 @@ inline void center_x(double* x, Eigen::Index n, double* part) {
 cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
+    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
+        throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
-    print_sptrsv_banner_once();
 
     // Build preconditioner.
     precond_.set_options(opts_.factor_opts);
@@ -460,6 +440,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
         std::fprintf(stderr, "[pcg] precond.compute wall=%.0f ms (factorize=%.0f ms, sptrsv-setup+misc=%.0f ms)\n",
                      dt*1000, dt_factorize*1000, (dt - dt_factorize)*1000);
     }
+    print_sptrsv_banner<solve_backend::cpu>(precond_.trsv().fp16());
     build_operator(L, cp);
 }
 
@@ -467,8 +448,9 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        factorization F,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
+    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
+        throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
-    print_sptrsv_banner_once();
 
     if (static_cast<Eigen::Index>(F.L.rows()) != n_)
         throw std::invalid_argument("cpu_solver: factorization dimension mismatch");
@@ -478,7 +460,9 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
             "computed factorization");
     precond_.set_keep_factor(opts_.keep_factor_values);
     if (cp) precond_.set_checkpoint(cp);
+    precond_.set_options(opts_.factor_opts);
     precond_.set_factor(std::move(F));
+    print_sptrsv_banner<solve_backend::cpu>(precond_.trsv().fp16());
     build_operator(L, cp);
 }
 
@@ -662,6 +646,8 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     // Lrm_/Lrm_f_, built from the caller's matrix, so the residual it reports
     // is against the true operator whether anything was lumped or not.
     res.lumped_offdiag = precond_.factor().lumped_offdiag;
+    res.backend = solve_backend::cpu;
+    res.solve_vram_mb = -1.0;
 
     // Preconditioned CG with stagnation detection.
     const Eigen::Index n = n_;
@@ -864,33 +850,50 @@ solve_result cpu_solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::Vecto
     return res;
 }
 
-// ── one-shot solve ──────────────────────────────────────────────────────────────
+solve_backend detail::select_solve_backend(const solve_options& opts) {
+    if (opts.backend == solve_backend::cpu) return solve_backend::cpu;
+    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::gpu)
+        throw std::invalid_argument("invalid solve backend");
+#if defined(APXCHOL_USE_CUDA)
+    const bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
+        !opts.keep_factor_values && opts.storage == graph_storage::vec_pool_aos &&
+        opts.factor_opts.is_select == "block_greedy" &&
+        opts.factor_opts.exact_clique_max_degree == 0 &&
+        exact_core_or_off(opts.factor_opts.exact_core_max_h) == 0 &&
+        opts.factor_opts.double_cycle_min_h == 0;
+    if (compatible) return solve_backend::gpu;
+    if (opts.backend == solve_backend::gpu)
+        throw std::invalid_argument("GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
+            "no exported factor and supported sampler options; request CPU explicitly");
+    return solve_backend::cpu;
+#else
+    if (opts.backend == solve_backend::gpu)
+        throw std::invalid_argument("GPU route requested but CUDA support is not built");
+    return solve_backend::cpu;
+#endif
+}
+
+// One-shot solve: select once, then construct one complete setup/solve owner.
 solve_result solve(const Eigen::SparseMatrix<double>& L,
                    const Eigen::VectorXd& b,
                    const solve_options& opts) {
     ensure_eigen_parallel();
-    print_sptrsv_banner_once();
-
+    const auto backend = detail::select_solve_backend(opts);
+    solve_result res;
 #if defined(APXCHOL_USE_CUDA)
-    // GPU-resident ("native") PCG: keep A + all 5 PCG vectors on device and
-    // run our own SpMV / fused vector kernels with deterministic reductions
-    // (pcg_cuda.h; no cuSPARSE / cuBLAS), so nothing but three 8-byte scalars
-    // per iteration crosses the bus. (A host-PCG-with-GPU-SpTRSV path is
-    // transfer-bound and pointless; construct a cpu_solver directly if you
-    // really want it.)
-    {
-        solve_result res;
+    if (backend == solve_backend::gpu) {
         detail::gpu_solve_session solver(L, opts, res);
+        print_sptrsv_banner<solve_backend::gpu>(solver.preconditioner().trsv().fp16());
         solver.solve(b, res, opts.tol, opts.max_iter);
         return res;
     }
 #else
-    solve_result res;
+    (void)backend;
+#endif
     const cpu_solver slv(L, opts,
                          std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings);
     slv.solve(b, res);
     return res;
-#endif
 }
 
 Eigen::VectorXd generate_test_rhs(Eigen::Index n) {

@@ -95,6 +95,16 @@ Peak-memory diagnostics run separately from timing.
 
 ## GPU setup decisions
 
+**Complete CPU/GPU routes (2026-10-02).** The public mixed CPU-setup/GPU-solve
+workflow is removed. `cpu_solver` and Eigen preconditioning stay entirely on
+CPU in CUDA builds; one-shot GPU solves require device-owned setup and operator
+preparation. A single backend option selects the route before setup. Automatic
+selection considers configuration only, and a selected GPU route reports errors
+rather than retrying on CPU. Explicit low-level factor import remains useful for
+independent handoff and validation; no disk format or public session API is added.
+This is a contract simplification, not a claim of universal GPU speedup. The
+frontend and owned-setup measurements below retain their historical profiles.
+
 **The fixed-priority GPU frontend was removed.** A historical 90-record forced
 campaign produced setup ratio 1.102. An independently implemented asynchronous
 MIS variant preserved the recorded factors and iterations in 54 bracketed

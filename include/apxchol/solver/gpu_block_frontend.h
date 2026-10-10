@@ -5,11 +5,13 @@
 /// rebuilds CSR after each round. The consuming GPU path instead borrows the
 /// numerical owner's immutable current CSR through a private generation token.
 /// Both routes use the same degree cap and block-region selection policy.
-/// Enable explicitly with APXCHOL_GPU_BLOCK_FRONTEND=1|on|force (unset disables).
+/// Public GPU solves enable this as part of their complete route. Low-level
+/// diagnostics use APXCHOL_GPU_BLOCK_FRONTEND=1|on|force (unset disables).
 /// The implementation lives in src/cuda_block_frontend.cu; the default CPU setup
 /// has no topology capture or device-allocation overhead.
 
 #include "apxchol/solver/factor_options.h"
+#include "apxchol/solver/detail/setup_route.h"
 #include "apxchol/solver/factorize_workspace.h"
 #include "apxchol/solver/gpu_device_selection.h"
 #include "apxchol/solver/partition.h"
@@ -49,7 +51,7 @@ public:
 
     /// Unset/empty and 0/off/false disable; 1/on/force enable. Other values
     /// (including the removed auto policy) throw invalid_argument.
-    static mode configured_block_mode();
+    static mode configured_block_mode(setup_route route = setup_route::diagnostic);
     static runtime_probe probe_runtime(node_index n, std::size_t initial_edges);
 
     gpu_block_frontend(node_index n,

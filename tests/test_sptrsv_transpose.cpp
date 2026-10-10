@@ -31,7 +31,7 @@ using apxchol::sptrsv_value_t;
 
 namespace {
 // RAII env override: these tests state the DEFAULT (fp32) SpTRSV storage
-// contract, and the suite is also run with APXCHOL_SPTRSV_FP16=1 in the
+// contract, and the suite is also run with APXCHOL_FACTOR_STORAGE=float16 in the
 // environment, so they pin it.
 struct scoped_env {
     std::string name, saved; bool had = false;
@@ -145,8 +145,8 @@ void expect_byte_identical(const apxchol::omp_sptrsv& trsv, const ref_csr& R,
 // thread count — including T=1, and thread counts that do not divide m.
 TEST(SpTRSVTranspose, ByteIdenticalToSerialReferenceAcrossThreadCounts) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     const node_index m = 70000;   // > 50000: parallel path
     sparse_csc L = make_random_lower(m, 4.0, /*seed=*/12345);
@@ -238,8 +238,8 @@ void expect_gpu_transpose_identical(const apxchol::cuda_host::csr_int<V>& LT, co
 
 TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThreadCounts) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     const node_index m = 70000;   // > 50000: parallel path
     sparse_csc L = make_random_lower(m, 4.0, /*seed=*/12345);
@@ -297,8 +297,8 @@ TEST(SpTRSVTranspose, GpuHostTransposeSerialPathMatchesReference) {
 // The serial fallback (m <= 50000) must agree with the reference too.
 TEST(SpTRSVTranspose, SerialFallbackMatchesReference) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     const node_index m = 20000;   // <= 50000: serial path
     sparse_csc L = make_random_lower(m, 5.0, /*seed=*/4242);
