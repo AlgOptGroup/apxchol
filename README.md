@@ -2,7 +2,7 @@
 
 Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
 and SDDM systems. CPU setup and solve use OpenMP; CUDA provides an optional
-device-owned setup and GPU-resident solve. C++, Python and Octave/MATLAB interfaces are included.
+device-owned setup and GPU-resident solve; Metal provides an optional Apple-GPU block solve. C++, Python and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
@@ -44,6 +44,16 @@ Eigen::VectorXd z = solver.apply(r);
 CPU solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
+With `-DAPXCHOL_USE_METAL=ON` (macOS), `apxchol::metal_solver` solves up to 64
+right-hand sides in lockstep on the Apple GPU, with double-float recurrences
+and the CPU's factor. Default solves are unchanged. See
+[precision and storage](docs/precision.md).
+
+```cpp
+apxchol::metal_solver gpu(L);              // host factorization, GPU solves
+auto block = gpu.solve(B, 1e-10);          // B: n x k, per-column results
+```
+
 ```bash
 pip install apxchol                 # or: pip install -e python
 ```
@@ -62,6 +72,7 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 | CMake option | Purpose |
 |---|---|
 | `APXCHOL_USE_CUDA=ON` | Device-owned setup, dataflow triangular solves and GPU PCG; core links only `cudart` |
+| `APXCHOL_USE_METAL=ON` | Apple-GPU block PCG (`metal_solver`); macOS only, exclusive with CUDA |
 | `APXCHOL_POOL_FP32=OFF` | fp64 residual-pool weights instead of default fp32 |
 | `APXCHOL_64BIT_EDGE_INDICES=ON` | Wide factor/pool offsets |
 | `APXCHOL_64BIT_NODE_INDICES=ON` | Wide vertices and offsets |
