@@ -20,6 +20,7 @@
 #include <cstring>
 #include <iostream>
 #include <future>
+#include <latch>
 #include <limits>
 #include <memory>
 #include <memory_resource>
@@ -410,8 +411,10 @@ parallel_cpu_round_result run_parallel_cpu_round(
             input.pivots.size(), work_hint, options.omp_threshold,
             workspace.threads.size()) != workers)
         throw std::logic_error("test did not select the parallel CPU apply path");
-    if (input.pivots.size() < workers)
-        throw std::logic_error("parallel CPU apply test needs two pivots");
+    if (input.pivots.size() < workers ||
+        apxchol::detail::elimination_compute_chunk(
+            input.pivots.size(), options.omp_threshold) != 1)
+        throw std::logic_error("parallel CPU apply test needs one-pivot chunks per worker");
 
 #ifdef _OPENMP
     const int saved_dynamic = omp_get_dynamic();
@@ -419,19 +422,25 @@ parallel_cpu_round_result run_parallel_cpu_round(
 #endif
     std::atomic<std::uint32_t> worker_mask{0};
     std::atomic<int> team_width{0};
+    std::latch first_samples(workers);
     const apxchol::detail::tree_elimination tree;
     const auto recording_tree = apxchol::as_eliminator(
         [&](std::span<apxchol::weighted_neighbor> neighbors, double degree,
             std::uint64_t seed, apxchol::edge_emitter out) {
 #ifdef _OPENMP
             const int worker = omp_get_thread_num();
-            team_width.store(omp_get_num_threads(), std::memory_order_relaxed);
+            const int width = omp_get_num_threads();
 #else
             const int worker = 0;
-            team_width.store(1, std::memory_order_relaxed);
+            const int width = 1;
 #endif
-            worker_mask.fetch_or(std::uint32_t{1} << worker,
-                                 std::memory_order_relaxed);
+            team_width.store(width, std::memory_order_relaxed);
+            const auto bit = std::uint32_t{1} << worker;
+            const auto seen = worker_mask.fetch_or(bit, std::memory_order_relaxed);
+            // Meet on each worker's first pivot so dynamic scheduling cannot
+            // give all the work to one thread. A reduced team must fail, not hang.
+            if (!(seen & bit) && width == kResidentProvenanceWorkers)
+                first_samples.arrive_and_wait();
             tree.sample_clique(neighbors, degree, seed, out);
         });
     std::vector<apxchol::detail::factor_col> columns;
@@ -474,10 +483,9 @@ make_resident_provenance_graph() {
         {2, 3, 6.0}, {2, 4, 8.0}, {2, 5, 9.0},
         {3, 6, 10.0}, {4, 7, 11.0}, {5, 6, 12.0}})
         graph.add_edge(edge.u, edge.v, edge.weight);
-    // Sixteen independent degree-512 pivots ensure that the production dynamic
-    // CPU compute/apply path uses both workers. Their common neighbor set also
-    // permits relaxed endpoint-slot claims to differ from the GPU's stable
-    // pivot/emission order; an individual scheduling outcome may still match.
+    // Independent degree-512 pivots select the parallel compute/apply path.
+    // Their common neighbors permit endpoint-slot claims to differ from the
+    // GPU's stable pivot/emission order; an individual outcome may still match.
     for (node_index pivot = kResidentProvenanceFirstParallelPivot;
          pivot < kResidentProvenanceParallelPivotEnd; ++pivot) {
         for (node_index neighbor = kResidentProvenanceParallelPivotEnd;
