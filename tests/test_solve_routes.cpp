@@ -159,6 +159,34 @@ TEST(SolveRoutes, CpuFactorReuseAndExportRemainAvailable) {
     }
 }
 
+TEST(SolveRoutes, FactorStorageOverridesEnvironmentForNewAndAdoptedFactors) {
+    const auto matrix = operator_matrix();
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    for (bool fp16 : {false, true}) {
+        scoped_environment env("APXCHOL_SPTRSV_FP16", fp16 ? "0" : "1");
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::cpu;
+        options.keep_factor_values = true;
+        options.factor_opts.factor_storage = fp16
+            ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
+#if defined(APXCHOL_USE_CUDA)
+        EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(options.factor_opts.factor_storage), fp16);
+#endif
+        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) {
+            EXPECT_THROW(apxchol::cpu_solver(matrix, options), std::runtime_error);
+            continue;
+        }
+        apxchol::cpu_solver original(matrix, options);
+        auto factor = original.preconditioner().factor();
+        options.keep_factor_values = false;
+        apxchol::cpu_solver adopted(matrix, std::move(factor), options);
+        EXPECT_EQ(original.preconditioner().trsv().fp16(), fp16);
+        EXPECT_EQ(adopted.preconditioner().trsv().fp16(), fp16);
+        expect_solution(matrix, rhs, original.solve(rhs, 1e-10));
+        expect_solution(matrix, rhs, adopted.solve(rhs, 1e-10));
+    }
+}
+
 TEST(SolveRoutes, RequiredGpuPreconditionerRejectsHostFactorBeforeCuda) {
 #if !defined(APXCHOL_USE_CUDA)
     GTEST_SKIP() << "CUDA preconditioner type required";

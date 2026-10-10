@@ -7,6 +7,18 @@ operators.
 pip install apxchol
 ```
 
+NumPy is required. Install `apxchol[scipy]` for SciPy sparse inputs, factor export, `laplacian`, and `aspreconditioner`. Without SciPy, pass the square operator as a CSC `(data, indices, indptr)` tuple:
+
+```python
+import apxchol
+
+# [[2, -1], [-1, 2]]; NumPy arrays or sequences are accepted.
+A = ([2., -1., -1., 2.], [0, 1, 0, 1], [0, 2, 4])
+res = apxchol.solve(A, [1., 0.])
+```
+
+The dimension is `len(indptr) - 1`. The three arrays must be one-dimensional, with integer indices and pointers. Import validates the layout, sorts indices and sums duplicates without modifying the input.
+
 Wheels: Linux x86_64 (manylinux, x86-64-v2 CPU or newer) and macOS arm64
 (macOS 15 or newer), CPython 3.10–3.14. Both platforms use Clang and bundle LLVM's OpenMP runtime
 (license in `LICENSE.libomp.txt`); Homebrew is not needed to use the macOS
@@ -49,10 +61,14 @@ solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
 ```
 
 Partitioners: `block_greedy`, `priority_greedy`, `baumann_kyng`.
-Storage: `vec_pool_aos`, `vec`, `bstr`.
+Graph storage: `vec_pool_aos`, `vec`, `bstr`.
 `keep_factor=True` is the reusable API default and retains an extra factor
 copy (~8 bytes/nonzero in default builds). `False` disables factor export,
 but preserves `P`, `factor_nnz`, `fill_ratio`; one-shot `solve` uses `False`.
+
+`factor_storage_dtype=np.float16` or `np.float32` selects triangular-solve storage per solver; dtype objects and the strings `"float16"`/`"float32"` also work. Read the resolved dtype through `solver.factor_storage_dtype`. The default, `None`, respects `APXCHOL_SPTRSV_FP16` and otherwise uses FP32 on the CPU. An explicit dtype overrides that environment variable without changing it.
+
+FP16 stores scaled off-diagonals with FP32 diagonals and scales. It requires an x86 CPU with AVX/F16C; an unsupported request raises an error. CPU arithmetic remains FP64, and factor construction and exports are unchanged. FP64 factor storage is not supported. See [precision and storage](../docs/precision.md).
 
 Advanced keywords: `degree_quantile`, `degree_multiplier`, `degree_tiebreak`,
 `exact_clique_max_degree`, `residual_peel`, `stagnation_window`.
@@ -75,13 +91,13 @@ each component's last column contains a placeholder diagonal.
 `fill_ratio = (2 * factor_nnz - n) / nnz(A)` counts the symmetric factor pattern.
 Exports are float64 arrays carrying the default factor's fp32 precision.
 
-The SciPy import uses signed 32-bit dimensions/nonzero counts; default factor
+Matrix import uses signed 32-bit dimensions/nonzero counts; default factor
 offsets are unsigned 32-bit. The core's wide-index options are separate.
 
 ## Source build
 
 ```bash
-pip install -e python
+pip install -e 'python[test]'
 pytest python/tests -v
 ```
 

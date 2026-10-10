@@ -1436,7 +1436,8 @@ public:
     // and tail are uploaded; trusted adoption returns fixed-size plan statistics.
     std::shared_ptr<cuda_sptrsv_device_factor> finalize_device_factor(
         std::span<const node_index> permutation, node_index m,
-        const gpu_round_shadow_factor_log& tail);
+        const gpu_round_shadow_factor_log& tail,
+        factor_storage_type storage = factor_storage_type::automatic);
     /// Execute the next round from the preceding CUDA generation without
     /// consuming a host snapshot. The preceding generation must have been
     /// explicitly accepted after its independent audit. Selection ids
@@ -1985,7 +1986,7 @@ public:
     template<class Columns>
     std::shared_ptr<cuda_sptrsv_device_factor> finalize_device_factor(
             const Columns& columns, std::span<const node_index> permutation,
-            node_index m) {
+            node_index m, factor_storage_type storage = factor_storage_type::automatic) {
         if (!active_ || pending_ || !device_state_ || factor_log_columns_ == 0)
             throw std::logic_error("GPU finalizer requires a completed accepted device factor log");
         if (owned_complete_) {
@@ -1993,7 +1994,7 @@ public:
                 (!columns.empty() && columns.size() != factor_log_columns_))
                 throw std::logic_error("GPU finalizer complete factor coverage mismatch");
             // Every column and entry already belongs to the device log.
-            return device_state_->finalize_device_factor(permutation, m, {});
+            return device_state_->finalize_device_factor(permutation, m, {}, storage);
         }
         if (factor_log_columns_ > columns.size())
             throw std::logic_error("GPU finalizer prefix exceeds CPU factor");
@@ -2005,7 +2006,7 @@ public:
             for (node_index j = 0; j < c.entry_count; ++j)
                 tail.entries.push_back({c.entries[j].neighbor, c.entries[j].value});
         }
-        return device_state_->finalize_device_factor(permutation, m, tail);
+        return device_state_->finalize_device_factor(permutation, m, tail, storage);
     }
 #endif
 

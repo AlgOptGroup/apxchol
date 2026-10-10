@@ -88,6 +88,24 @@ def test_sddm_solve_converges():
     assert np.linalg.norm(L @ res.x - b) / np.linalg.norm(b) <= 1e-7
 
 
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_storage_dtype_preserves_original_system_accuracy(dtype):
+    A = random_sddm(80, seed=9)
+    b = np.random.default_rng(10).standard_normal(A.shape[0])
+    try:
+        solver = apxchol.factorize(A, factor_storage_dtype=dtype)
+    except RuntimeError as exc:
+        assert dtype == np.float16 and "AVX/F16C support" in str(exc)
+        pytest.skip("CPU lacks FP16 conversion support")
+    result = solver.solve(b)
+    assert result.converged
+    assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
+    assert solver.factor_storage_dtype == dtype
+    # Export is the constructed FP32 factor widened to float64, independently
+    # of the format used for the solver's triangular-solve arrays.
+    assert solver.chol().dtype == np.float64
+
+
 def test_factor_reused_across_many_b():
     L = grid2d_laplacian(40)
     solver = apxchol.solver(L)           # factor built ONCE

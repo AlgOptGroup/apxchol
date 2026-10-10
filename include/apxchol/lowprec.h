@@ -1,8 +1,9 @@
 #pragma once
 // fp16 STORAGE for the SpTRSV factor values -- the type, the converters, and
-// THE runtime switch both SpTRSV backends read.
+// the per-solver selection shared by both SpTRSV backends.
 //
-// Selected at RUNTIME, per setup, by the single environment variable
+// Selected at setup by factor_options::factor_storage, or by the environment
+// when the option is automatic:
 //
 //     APXCHOL_SPTRSV_FP16 = 0 | 1
 //
@@ -51,12 +52,15 @@
 // Both SpTRSV backends share these storage conversions and the env reader.
 #include <cmath>
 #include <cstdlib>
+#include <stdexcept>
 
 // TODO: use std::float16_t once Clang defines __STDCPP_FLOAT16_T__
 // and libc++ provides <stdfloat> in our supported toolchains.
 // https://github.com/llvm/llvm-project/issues/105196
 // https://github.com/llvm/llvm-project/pull/78503
 namespace apxchol {
+
+enum class factor_storage_type { automatic, fp16, fp32 };
 
 /// THE fp16-storage switch, read by BOTH SpTRSV backends at every setup:
 /// APXCHOL_SPTRSV_FP16=0|1. Tri-state: -1 unset (each backend applies its own
@@ -68,6 +72,18 @@ inline int sptrsv_fp16_env_tristate() {
 }
 
 namespace detail {
+
+inline bool resolve_fp16_storage(factor_storage_type storage, bool default_fp16) {
+    switch (storage) {
+    case factor_storage_type::fp16: return true;
+    case factor_storage_type::fp32: return false;
+    case factor_storage_type::automatic: {
+        const int setting = sptrsv_fp16_env_tristate();
+        return setting < 0 ? default_fp16 : setting == 1;
+    }
+    }
+    throw std::invalid_argument("invalid factor storage type");
+}
 
 // Whether a normalized FP32 value rounds to zero or a subnormal in FP16.
 inline bool fp16_flushes(float value) {

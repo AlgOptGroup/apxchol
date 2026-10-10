@@ -3,6 +3,7 @@
 #include <pybind11/eigen.h>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -15,10 +16,21 @@ namespace py = pybind11;
 
 namespace {
 
-// scipy CSC (indptr, indices, data) -> column-major Eigen::SparseMatrix<double>.
-// forcecast accepts int32/int64 index arrays and any float data dtype.
+// CSC arrays -> column-major Eigen::SparseMatrix<double>.
 Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
                                          py::array data, Eigen::Index n) {
+    if (indptr.ndim() != 1 || indices.ndim() != 1 || data.ndim() != 1)
+        throw std::invalid_argument("CSC data, indices and indptr must be one-dimensional");
+    for (const auto& array : {indptr, indices})
+        if (array.dtype().kind() != 'i' && array.dtype().kind() != 'u')
+            throw std::invalid_argument("CSC indices and indptr must have integer dtype");
+    if (data.dtype().kind() == 'c')
+        throw std::invalid_argument("A must be real; apxchol solves real symmetric systems");
+    if (std::string("biuf").find(data.dtype().kind()) == std::string::npos)
+        throw std::invalid_argument("CSC data must have a real numeric dtype");
+    if (n < 0 || indptr.size() == 0 || indptr.size() - 1 != n)
+        throw std::invalid_argument("indptr length must be n+1");
+
     auto ip = indptr.cast<py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>>();
     auto ii = indices.cast<py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>>();
     auto dd = data.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
@@ -26,8 +38,10 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
     const std::int64_t* I = ii.data();
     const double*        V = dd.data();
     const Eigen::Index ncol = static_cast<Eigen::Index>(ip.size()) - 1;
-    if (ncol != n)
-        throw std::invalid_argument("indptr length must be n+1");
+    if (ii.size() != dd.size() || P[0] != 0 || P[n] != dd.size() ||
+        !std::is_sorted(P, P + ip.size()))
+        throw std::invalid_argument(
+            "CSC indptr must start at zero, be nondecreasing and end at the length of data and indices");
 
     // This build uses 32-bit Eigen storage indices; matrices with n or nnz beyond
     // 2^31 would silently truncate below. Reject them with a clear message.
@@ -40,8 +54,11 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
     std::vector<Eigen::Triplet<double>> trips;
     trips.reserve(static_cast<std::size_t>(dd.size()));
     for (Eigen::Index j = 0; j < ncol; ++j)
-        for (std::int64_t p = P[j]; p < P[j + 1]; ++p)
+        for (std::int64_t p = P[j]; p < P[j + 1]; ++p) {
+            if (I[p] < 0 || I[p] >= n)
+                throw std::invalid_argument("CSC row index out of range");
             trips.emplace_back(static_cast<int>(I[p]), static_cast<int>(j), V[p]);
+        }
 
     Eigen::SparseMatrix<double> A(n, n);
     A.setFromTriplets(trips.begin(), trips.end());
@@ -58,7 +75,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "seed", "partitioner", "storage", "keep_factor",
+    "seed", "partitioner", "storage", "keep_factor", "factor_storage_dtype",
     "degree_quantile", "degree_multiplier", "degree_tiebreak",
     "exact_clique_max_degree",
     "residual_peel", "stagnation_window",
@@ -111,6 +128,15 @@ apxchol::solve_options parse_options(const py::dict& d) {
             so.factor_opts.exact_clique_max_degree = v.cast<std::size_t>();
         else if (key == "residual_peel")
             so.factor_opts.residual_peel = parse_peel(v.cast<std::string>());
+        else if (key == "factor_storage_dtype") {
+            const auto dtype = v.cast<std::string>();
+            if (dtype == "float16")
+                so.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
+            else if (dtype == "float32")
+                so.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
+            else
+                throw std::invalid_argument("factor_storage_dtype must be float16 or float32");
+        }
         else
             throw std::invalid_argument(
                 "unknown option '" + key + "'; valid keys: " +
@@ -140,6 +166,9 @@ public:
 
     Eigen::Index rows() const { return slv_.rows(); }
     bool sddm() const { return factor().sddm; }
+    const char* factor_storage_dtype() const {
+        return slv_.preconditioner().trsv().fp16() ? "float16" : "float32";
+    }
     // Positive off-diagonal entries M-matrix lumping moved onto the diagonal
     // while building the preconditioner; 0 for a Laplacian/SDDM operator.
     std::int64_t lumped() const {
@@ -267,6 +296,7 @@ PYBIND11_MODULE(_apxchol, m) {
         .def("apply", &Solver::apply, py::arg("r"))
         .def("rows", &Solver::rows)
         .def("sddm", &Solver::sddm)
+        .def("factor_storage_dtype", &Solver::factor_storage_dtype)
         .def("lumped", &Solver::lumped)
         .def("factor_nnz", &Solver::factor_nnz)
         .def("factor_csc", &Solver::factor_csc)

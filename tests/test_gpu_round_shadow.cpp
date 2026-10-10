@@ -5064,7 +5064,10 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 SCOPED_TRACE(std::string(fp16) + "/" + rel + "/" + std::to_string(m));
                 apxchol::cuda_sptrsv ordinary, adopted;
                 ordinary.setup(reference.L, m);
-                auto factor = state.finalize_device_factor(perm, m, tail);
+                const auto requested = *fp16 == '1'
+                    ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
+                scoped_env conflicting("APXCHOL_SPTRSV_FP16", *fp16 == '1' ? "0" : "1");
+                auto factor = state.finalize_device_factor(perm, m, tail, requested);
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
                 auto lt = apxchol::cuda_host::build_L11_csc_int<float>(reference.L, m);
                 auto scale = apxchol::cuda_host::column_scales(lt);
@@ -5099,7 +5102,8 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 }
                 EXPECT_EQ(state.encode_finalized_factor_for_test(*factor), expected);
 #endif
-                adopted.setup_adopting_device_factor_for_research(std::move(*factor));
+                adopted.setup_adopting_device_factor_for_research(std::move(*factor), requested);
+                EXPECT_EQ(adopted.fp16(), *fp16 == '1');
                 const auto& want = ordinary.drop_stats(); const auto& got = adopted.drop_stats();
                 EXPECT_EQ(got.rel, want.rel); EXPECT_EQ(got.nnz_factor, want.nnz_factor);
                 EXPECT_EQ(got.nnz_stored, want.nnz_stored); EXPECT_EQ(got.dropped, want.dropped);

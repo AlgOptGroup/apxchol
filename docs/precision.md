@@ -13,8 +13,9 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
 | Outer CPU/GPU PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
 
-`APXCHOL_SPTRSV_FP16=0|1` selects triangular-solve storage at setup. CPU FP16
-is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
+`factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). `automatic` reads `APXCHOL_SPTRSV_FP16=0|1`, then uses the backend default when unset. Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; they do not change factor construction or export precision.
+
+CPU FP16 is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
 checked at setup; an unsupported explicit FP16 request raises an error. Fat levels use the
 AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise.
 CPU setup converts the CSC values once and copies them into CSR. Consuming

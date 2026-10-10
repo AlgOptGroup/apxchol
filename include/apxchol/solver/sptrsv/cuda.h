@@ -376,7 +376,9 @@ public:
     // the CPU reads the same storage variable with the opposite default.
     static int fp16_env_tristate() { return sptrsv_fp16_env_tristate(); }
     static bool fp16_from_env() { return fp16_env_tristate() == 1; }
-    static bool fp16_resolved() { return fp16_env_tristate() != 0; }
+    static bool fp16_resolved(factor_storage_type storage = factor_storage_type::automatic) {
+        return detail::resolve_fp16_storage(storage, true);
+    }
     /// Setup: build L11 on the host, run the compacting drop, (fp16: narrow),
     /// copy to device, build the dataflow tables. Env APXCHOL_SPTRSV_SETUP_TRACE=1 (the
     /// CPU backend's knob, same name) prints the per-stage wall times of one
@@ -385,9 +387,10 @@ public:
     /// it before this call and reports it as "cuda_init"
     /// (solver/cuda_context.h, apx_cholesky::install_factor); it used to be
     /// charged to "build_L11", ~100-135 ms on this machine, ~715 ms on GH200.
-    void setup(const sparse_csc& L, node_index m) {
+    void setup(const sparse_csc& L, node_index m,
+               factor_storage_type storage = factor_storage_type::automatic) {
         validate_backend_env();
-        const bool fp16 = fp16_resolved();
+        const bool fp16 = fp16_resolved(storage);
         destroy();
         m_ = static_cast<int64_t>(m);
         const bool trace = detail::gpu_setup_diagnostics() &&
@@ -581,7 +584,8 @@ public:
     /// on device: only fixed-size statistics/counts cross to the host. Neither
     /// route downloads factor values or uploads a factor CSR again.
     void setup_adopting_device_factor_for_research(
-            cuda_sptrsv_device_factor factor) {
+            cuda_sptrsv_device_factor factor,
+            factor_storage_type storage = factor_storage_type::automatic) {
         // A prior failed ordinary setup may have left partial allocations. The
         // ordinary setup calls destroy() before reuse too; make the fresh-state
         // precondition concrete before adopting another owner.
@@ -596,12 +600,12 @@ public:
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: active CUDA device differs from the factor owner");
         validate_backend_env();
-        const bool requested_fp16 = fp16_resolved();
+        const bool requested_fp16 = fp16_resolved(storage);
         const bool factor_fp16 =
             factor.storage_ == cuda_sptrsv_device_factor::storage::fp16_scaled;
         if (requested_fp16 != factor_fp16)
             throw std::invalid_argument(
-                "apxchol cuda_sptrsv adoption: device storage does not match APXCHOL_SPTRSV_FP16 resolution");
+                "apxchol cuda_sptrsv adoption: device storage does not match requested factor storage");
         const double requested_drop = factor_drop_rel_from_env();
         if (factor.stats_.rel != requested_drop)
             throw std::invalid_argument(

@@ -40,29 +40,24 @@ inline void ensure_eigen_parallel() {
     (void)dummy;
 }
 
-// Report the concrete route, once per backend, rather than the build capability.
 template<solve_backend Route>
-void print_sptrsv_banner_once() {
-    static const bool printed = [] {
-        if (!std::getenv("APXCHOL_VERBOSE")) return true;
-        bool fp16;
-        const char* backend;
+void print_sptrsv_banner(factor_storage_type storage) {
+    bool fp16;
+    const char* backend;
 #if defined(APXCHOL_USE_CUDA)
-        if constexpr (Route == solve_backend::gpu) {
-            fp16 = cuda_sptrsv::fp16_resolved();
-            backend = "GPU/dataflow";
-        } else
+    if constexpr (Route == solve_backend::gpu) {
+        fp16 = cuda_sptrsv::fp16_resolved(storage);
+        backend = "GPU/dataflow";
+    } else
 #endif
-        {
-            fp16 = omp_sptrsv::fp16_from_env();
-            backend = "CPU/omp";
-        }
+    {
+        fp16 = omp_sptrsv::fp16_resolved(storage);
+        backend = "CPU/omp";
+    }
+    if (std::getenv("APXCHOL_VERBOSE"))
         std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem\n",
                      backend, fp16 ? "fp16 (per-column scaled, diagonal fp32)" : "float (fp32)",
                      fp16 ? std::size_t(2) : sizeof(sptrsv_value_t));
-        return true;
-    }();
-    (void)printed;
 }
 
 // Parallel symmetric SpMV: y = L * x where L is stored as a row-major
@@ -440,7 +435,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
         throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
-    print_sptrsv_banner_once<solve_backend::cpu>();
+    print_sptrsv_banner<solve_backend::cpu>(opts_.factor_opts.factor_storage);
 
     // Build preconditioner.
     precond_.set_options(opts_.factor_opts);
@@ -467,7 +462,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
         throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
-    print_sptrsv_banner_once<solve_backend::cpu>();
+    print_sptrsv_banner<solve_backend::cpu>(opts_.factor_opts.factor_storage);
 
     if (static_cast<Eigen::Index>(F.L.rows()) != n_)
         throw std::invalid_argument("cpu_solver: factorization dimension mismatch");
@@ -477,6 +472,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
             "computed factorization");
     precond_.set_keep_factor(opts_.keep_factor_values);
     if (cp) precond_.set_checkpoint(cp);
+    precond_.set_options(opts_.factor_opts);
     precond_.set_factor(std::move(F));
     build_operator(L, cp);
 }
@@ -897,7 +893,7 @@ solve_result solve(const Eigen::SparseMatrix<double>& L,
     solve_result res;
 #if defined(APXCHOL_USE_CUDA)
     if (backend == solve_backend::gpu) {
-        print_sptrsv_banner_once<solve_backend::gpu>();
+        print_sptrsv_banner<solve_backend::gpu>(opts.factor_opts.factor_storage);
         detail::gpu_solve_session solver(L, opts, res);
         solver.solve(b, res, opts.tol, opts.max_iter);
         return res;
