@@ -133,8 +133,7 @@ inline bool try_build_permuted_symmetric_csr(
 // Build full-symmetric CSR of A_perm = P L P^T from a (lower-half-stored)
 // symmetric matrix L and its permutation P. The factor F_.L was built on
 // A_perm, so running PCG in permuted space matches what trsv_.solve_LLt_dev
-// expects per iter. Used by cuda_pcg::setup and CUDA-free, so any backend that
-// runs its PCG in the permuted space can share it; requires compressed storage.
+// expects per iter. This host builder is CUDA-free and requires compressed storage.
 //
 // perm.indices()[orig_v] = new_idx ⇒  A_perm[i,j] = L[iperm(i), iperm(j)]
 // where iperm = P^{-1}. The permutation acts on BOTH row and col of L.
