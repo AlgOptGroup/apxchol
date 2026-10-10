@@ -7,23 +7,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # The machine-tuning flags actually put on the command line below. Recorded into
 # the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
-# cell says whether its numbers came from a tuned build. Empty = untuned.
+# cell records the native tuning or portable baseline used by that build.
 set(APXCHOL_BENCH_ARCH_FLAGS "")
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
 
-if (NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic)
-    if (APXCHOL_NATIVE_ARCH AND
-        (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
-        # This is a SEPARATE cmake project (not an add_subdirectory of the root),
-        # so the shared native-tuning module is included by relative path.
-        include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_native_arch.cmake)
-        if (APXCHOL_NATIVE_ARCH_FLAG)
-            add_compile_options(${APXCHOL_NATIVE_ARCH_FLAG})
-            set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_NATIVE_ARCH_FLAG}")
-        endif()
-    endif()
-endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_arch.cmake)
+add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
+set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_ARCH_FLAG}")
 
 include(FetchContent)
 
@@ -556,7 +546,7 @@ if (APXCHOL_POOL_FP32)
 endif()
 if (APXCHOL_USE_CUDA)
     enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
+    find_package(CUDAToolkit 13.3 REQUIRED)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_USE_CUDA)
     # Device precision-cast kernels for the mixed-precision GPU SpTRSV
     # (nvcc-compiled; the .cpp TUs are host-compiled and can't host __global__).
@@ -571,11 +561,7 @@ if (APXCHOL_USE_CUDA)
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_pcg_kernels.cu)
     # Our library uses only cudart; competitor libraries are linked separately.
     target_link_libraries(apxchol_v1 PUBLIC CUDA::cudart)
-    # Pin the CUDA dialect to 20: the target's host features are cxx_std_23, but nvcc
-    # (13.x) + recent CMake reject a "CUDA23" dialect, so the cuda_cast.cu sources must
-    # compile as C++20 (same reason amgcl_cuda.cu/benchmark pin CUDA_STANDARD 20 below).
-    # Host .cpp TUs still build at C++23; only the .cu device sources drop to 20.
-    set_target_properties(apxchol_v1 PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
+    set_target_properties(apxchol_v1 PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
 endif()
 # Boost headers are needed only by AMGCL (HAVE_AMGCL gate below); the apxchol
 # core itself is Boost-free.
@@ -611,7 +597,6 @@ if (APXCHOL_USE_CUDA)
 endif()
 
 # AMGCL CUDA backend adapter (uses thrust + cuSPARSE, compiled with nvcc).
-# CUDA standard pinned to 20 (nvcc may not fully support C++23 with our toolchain).
 if (APXCHOL_USE_CUDA AND Boost_FOUND)
     target_sources(benchmark PRIVATE src/amgcl_cuda.cu)
     # -Xcompiler=-fopenmp is REQUIRED: AMGCL builds its AMG hierarchy host-side
@@ -622,11 +607,10 @@ if (APXCHOL_USE_CUDA AND Boost_FOUND)
     # transitively via apxchol_v1.
     set_source_files_properties(src/amgcl_cuda.cu PROPERTIES
         LANGUAGE CUDA
-        COMPILE_OPTIONS "--extended-lambda;--expt-relaxed-constexpr;-Xcompiler=-fopenmp"
-        CUDA_STANDARD 20)
+        COMPILE_OPTIONS "--extended-lambda;--expt-relaxed-constexpr;-Xcompiler=-fopenmp")
     set_target_properties(benchmark PROPERTIES
-        CUDA_STANDARD 20
-        CUDA_STANDARD_REQUIRED OFF)
+        CUDA_STANDARD 23
+        CUDA_STANDARD_REQUIRED ON)
     # AMGCL uses cuSPARSE. This dependency belongs to the competitor driver;
     # our apxchol library links cudart only.
     target_link_libraries(benchmark PRIVATE CUDA::cudart CUDA::cusparse)
@@ -688,6 +672,10 @@ test_solver_rejection(contract_all_rejects_unknown_solver "all,unknown_solver")
 add_test(NAME contract_rejects_retired_storage
     COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_storage_rejection.cmake)
+add_test(NAME contract_v1_complete_cpu_route
+    COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
+        -DUSE_CUDA=${APXCHOL_USE_CUDA} -DWIDE_NODES=${APXCHOL_64BIT_NODE_INDICES}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_v1_complete_route.cmake)
 add_test(NAME contract_none_allows_input_exports
     COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_input_exports.cmake)

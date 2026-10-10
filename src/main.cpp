@@ -72,6 +72,7 @@ int main(int argc, char* argv[]) try {
 
     auto res = solve(L, b, cfg.solve_opts);
 
+    spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("iterations: {}", res.iterations);
     spdlog::info("residual:   {}", res.residual);
     spdlog::info("timings:\n{}", res.timings.report());

@@ -29,7 +29,7 @@ def record(status="complete", *, sha="old", cap=None,
             "device": device,
         },
         "matrix_meta": {"kind": "graph"},
-        "metrics": {"total_s": 1.0, "stop_contract": "original-v1"},
+        "metrics": {"total_s": 1.0, "stop_contract": "original-v1", "execution_route": device},
         "provenance": {"git_sha": sha},
         "status": status,
     }
@@ -209,6 +209,23 @@ class ImportBoundaryTest(unittest.TestCase):
                 self.assertEqual(completed.stderr, "")
 
 
+
+
+class CompleteRouteResumeTest(unittest.TestCase):
+    def test_missing_or_wrong_route_cannot_resume_as_current(self):
+        for device in ("cpu", "gpu"):
+            for actual in (None, "gpu" if device == "cpu" else "cpu"):
+                cell = record(sha="current", device=device)
+                if actual is None:
+                    cell["metrics"].pop("execution_route")
+                else:
+                    cell["metrics"]["execution_route"] = actual
+                with mock.patch.object(stale_cells, "sha_contains", return_value=True):
+                    self.assertIn("complete-route", dict(stale_cells.stale_reasons(cell)))
+                with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):
+                    rc.emit_cell("suitesparse", "com-Amazon", "apxchol_v1", "", "complete",
+                                 cell["metrics"], 16, device, {})
+                    self.assertFalse(rc.cell_done("suitesparse", "com-Amazon", "apxchol_v1", "", 16, device))
 
 
 class StoppingContractResumeTest(unittest.TestCase):
