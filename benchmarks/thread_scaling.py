@@ -103,6 +103,9 @@ def done(mid, solver, config, t):
     status = record.get("status")
     if status in {"complete", "not_converged"} and (record.get("metrics") or {}).get("stop_contract") != "original-v1":
         return False
+    if (solver == "apxchol_v1" and status in {"complete", "not_converged"}
+            and (record.get("metrics") or {}).get("execution_route") != DEVICE):
+        return False
     if status == "timeout" and not record.get("timeout_cap_s"):
         return False
     return status not in RERUN_STATUSES and status in (
@@ -134,7 +137,7 @@ def _scaling_records():
     return records
 
 def run_cpp(margs, solver, config, reg, t, mid="matrix"):
-    cfg = f"--v1-configs '{config}'" if solver == "apxchol_v1" else ""
+    cfg = f"--v1-configs '{config}' --v1-backend {DEVICE}" if solver == "apxchol_v1" else ""
     regf = "--reg-rel 1e-6" if reg else ""
     # Keep the default runner compatible with binaries predating explicit warmup.
     warmup_flag = f"--warmup {WARMUP}" if WARMUP else ""
@@ -169,6 +172,10 @@ def run_cpp(margs, solver, config, reg, t, mid="matrix"):
     # tol, same for every solver, no grace factor. Kept in sync with rc.classify.
     if m.get("stop_contract") != "original-v1":
         return "failed", {**m, "stopping_failure": "binary lacks original-v1 contract"}
+    if solver == "apxchol_v1":
+        route_error = rc.v1_route_error(m, p.stderr, DEVICE, REPS, WARMUP)
+        if route_error:
+            return "failed", {**m, "route_failure": route_error}
     return rc.classify(m, TOL)
 
 def _prepare_parac(mid, deadline=None):

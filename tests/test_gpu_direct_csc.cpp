@@ -77,7 +77,7 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
     return A;
 }
 
-matrix selector_matrix() {
+[[maybe_unused]] matrix selector_matrix() {
     std::vector<weighted_edge> edges;
     for (int u = 0; u < 12; ++u)
         for (int v = u + 1; v < 12; ++v) edges.push_back({u, v, 1.0});
@@ -88,7 +88,7 @@ matrix selector_matrix() {
     return make_matrix(132, edges); // Includes disconnected components and isolates.
 }
 
-gpu_round_shadow_input host_snapshot(const matrix& A, double reg_eps = 0.0) {
+[[maybe_unused]] gpu_round_shadow_input host_snapshot(const matrix& A, double reg_eps = 0.0) {
     auto graph = apxchol::make_graph<host_graph>(A);
     if (reg_eps > 0.0)
         for (node_index v = 0; v < graph.n(); ++v)
@@ -97,7 +97,7 @@ gpu_round_shadow_input host_snapshot(const matrix& A, double reg_eps = 0.0) {
         graph, std::span<const node_index>{}, 0);
 }
 
-void expect_same_snapshot(const gpu_round_shadow_input& got,
+[[maybe_unused]] void expect_same_snapshot(const gpu_round_shadow_input& got,
                           const gpu_round_shadow_input& expected) {
     ASSERT_EQ(got.vertex_count, expected.vertex_count);
     EXPECT_EQ(got.owner_offsets, expected.owner_offsets);
@@ -117,7 +117,7 @@ void expect_same_snapshot(const gpu_round_shadow_input& got,
     }
 }
 
-std::vector<apxchol::detail::gpu_topology_edge> topology(const host_graph& graph) {
+[[maybe_unused]] std::vector<apxchol::detail::gpu_topology_edge> topology(const host_graph& graph) {
     std::vector<apxchol::detail::gpu_topology_edge> result;
     for (node_index u = 0; u < graph.n(); ++u)
         for (const auto& edge : graph.neighbors(u))
@@ -202,7 +202,7 @@ TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
     fixtures.push_back(unrelated_zeros);
     auto lumped = make_matrix(3, {{0,1,1.0},{1,2,-1e-6}}, 1.0);
     const apxchol::operator_view op_lumped(lumped);
-    if (apxchol::detail::env_knobs::get().lump) EXPECT_EQ(op_lumped.lumped(), 2);
+    if (apxchol::detail::env_knobs::get().lump) { EXPECT_EQ(op_lumped.lumped(), 2); }
     fixtures.push_back(lumped);
     for (std::size_t i = 0; i < fixtures.size(); ++i) {
         SCOPED_TRACE(i);
@@ -542,7 +542,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
     scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
     scoped_environment blocks("APXCHOL_GPU_BLOCKS", "1");
-    scoped_environment fp16("APXCHOL_SPTRSV_FP16", nullptr);
+    scoped_environment fp16("APXCHOL_FACTOR_STORAGE", nullptr);
     scoped_environment drop("APXCHOL_FACTOR_DROP", nullptr);
     scoped_environment backend("APXCHOL_GPU_SPTRSV", nullptr);
     scoped_environment tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
@@ -555,7 +555,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         Eigen::VectorXd exact(n);
         for (int v = 0; v < n; ++v) exact[v] = std::sin(v + 0.25);
         const Eigen::VectorXd b = A * exact;
-        apxchol::apx_cholesky preconditioner;
+        apxchol::detail::gpu_preconditioner preconditioner;
         testing::internal::CaptureStderr();
         try { preconditioner.compute(A); }
         catch (...) { const auto trace=testing::internal::GetCapturedStderr(); ADD_FAILURE()<<trace; throw; }

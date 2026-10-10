@@ -334,9 +334,10 @@ TYPED_TEST(FactorizeTest, LowerTriangular) {
         for (apxchol::edge_index p = outer[k]; p < outer[k + 1]; ++p) {
             const int row = static_cast<int>(inner[p]);
             const int col = k;
-            if (row < m && col < m)
+            if (row < m && col < m) {
                 EXPECT_GE(row, col)
                     << "upper-triangle entry at (" << row << "," << col << ")";
+            }
         }
 }
 
@@ -529,7 +530,7 @@ void expect_same_graph_selection(
         for (const auto v : result) {
             for (const auto edge : graph.adj(v)) {
                 const auto u = graph.edge_target(edge, v);
-                if (graph.is_active(u) && u != v) EXPECT_FALSE(in_set[u]);
+                if (graph.is_active(u) && u != v) { EXPECT_FALSE(in_set[u]); }
             }
         }
     }
@@ -1085,11 +1086,12 @@ TEST(Solve, TimingsReported) {
     // the precond.solve() triangular-solve subtree nests as pcg.solve, while
     // the GPU-resident PCG records one pcg.gpu_pcg_loop leaf instead.
     EXPECT_GT(res.timings.total("pcg"), 0.0);
-#ifdef APXCHOL_USE_CUDA
-    EXPECT_GT(res.timings.total("pcg.gpu_pcg_loop"), 0.0);
-#else
-    EXPECT_GT(res.timings.total("pcg.solve"), 0.0);
-#endif
+    if (res.backend == apxchol::solve_backend::gpu) {
+        EXPECT_GT(res.timings.total("pcg.gpu_pcg_loop"), 0.0);
+    } else {
+        EXPECT_EQ(res.backend, apxchol::solve_backend::cpu);
+        EXPECT_GT(res.timings.total("pcg.solve"), 0.0);
+    }
 }
 
 // ── SDDM support tests ────────────────────────────────
@@ -1844,10 +1846,10 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
 TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
     for (const char* choice : {static_cast<const char*>(nullptr), "", "dataflow"}) {
         const scoped_environment selected("APXCHOL_GPU_SPTRSV", choice);
-        for (const char* storage : {static_cast<const char*>(nullptr), "0", "1"}) {
-            const scoped_environment fp16("APXCHOL_SPTRSV_FP16", storage);
+        for (const char* storage : {static_cast<const char*>(nullptr), "float32", "float16"}) {
+            const scoped_environment fp16("APXCHOL_FACTOR_STORAGE", storage);
             EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(),
-                      !storage || *storage == '1');
+                      !storage || std::string_view(storage) == "float16");
             apxchol::sparse_csc factor;
             factor.n_ = 1;
             factor.outer_ = {0, 1};
@@ -1856,7 +1858,7 @@ TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
             apxchol::cuda_sptrsv trsv;
             ASSERT_NO_THROW(trsv.setup(factor, 1));
             EXPECT_STREQ(trsv.backend_name(), "dataflow");
-            EXPECT_EQ(trsv.fp16(), !storage || *storage == '1');
+            EXPECT_EQ(trsv.fp16(), !storage || std::string_view(storage) == "float16");
         }
     }
 }
@@ -2515,7 +2517,7 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
     const scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     const scoped_environment setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
     const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    const scoped_environment fp32("APXCHOL_SPTRSV_FP16", "0");
+    const scoped_environment fp32("APXCHOL_FACTOR_STORAGE", "float32");
     const scoped_environment drop("APXCHOL_FACTOR_DROP", "0");
     const bounded_fixture_threads serial;
     const auto A = grid_laplacian(9, 7);

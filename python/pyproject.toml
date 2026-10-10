@@ -22,6 +22,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Mathematics",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -41,3 +42,31 @@ test = ["pytest>=7"]
 cmake.version = ">=3.16"
 wheel.packages = ["apxchol"]
 build-dir = "build/{wheel_tag}"
+wheel.license-files = ["LICENSE*"]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_*"
+# Fetch the upstream license for the OpenMP runtime bundled by wheel repair.
+before-build = 'curl -fsSL --retry 3 https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.8/openmp/LICENSE.TXT -o "{package}/LICENSE.libomp.txt"'
+test-extras = ["test"]
+test-command = "python -m pytest {package}/tests -q"
+config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF", "cmake.define.CMAKE_COMPILE_WARNING_AS_ERROR" = "ON" }
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+before-all = "dnf install -y clang libomp-devel"
+manylinux-x86_64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.linux.environment]
+CC = "clang"
+CXX = "clang++"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+before-all = "brew install libomp"
+
+[tool.cibuildwheel.macos.environment]
+MACOSX_DEPLOYMENT_TARGET = "15.0"
+# scikit-build-core prefers this over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
+_PYTHON_HOST_PLATFORM = "macosx-15.0-arm64"

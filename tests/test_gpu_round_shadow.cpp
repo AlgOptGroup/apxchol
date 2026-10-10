@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "apxchol/solver/solve.h"
+#include "gpu_preconditioner_fixture.h"
 
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
@@ -19,6 +20,7 @@
 #include <cstring>
 #include <iostream>
 #include <future>
+#include <latch>
 #include <limits>
 #include <memory>
 #include <memory_resource>
@@ -126,14 +128,14 @@ gpu_round_shadow_input make_input(
     input.owner_offsets.resize(static_cast<std::size_t>(n) + 1);
     for (node_index owner = 0; owner < n; ++owner) {
         input.owner_offsets[owner] = input.incidences.size();
-        for (const auto [neighbor, weight] : adjacency[owner])
+        for (const auto& [neighbor, weight] : adjacency[owner])
             input.incidences.push_back({owner, neighbor, weight});
     }
     input.owner_offsets[n] = input.incidences.size();
     return input;
 }
 
-gpu_round_shadow_input compact_live_snapshot(gpu_round_shadow_input input) {
+[[maybe_unused]] gpu_round_shadow_input compact_live_snapshot(gpu_round_shadow_input input) {
     std::vector<apxchol::detail::gpu_round_shadow_incidence> live;
     live.reserve(input.incidences.size());
     std::vector<std::size_t> offsets(
@@ -321,7 +323,7 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
 // the documented fixed warp degree fold, while normal batches fold raw slots
 // serially. The audited device path has its separate serial CPU oracle above.
 // Preserve exact comparisons: CPU/GPU summation order is part of this oracle.
-apxchol::detail::gpu_round_shadow_factor_log run_owned_host_oracle(
+[[maybe_unused]] apxchol::detail::gpu_round_shadow_factor_log run_owned_host_oracle(
         apxchol::graph<apxchol::directed_vec_pool_incidence>& graph,
         const gpu_round_shadow_input& input) {
     std::vector<std::vector<apxchol::detail::factor_entry>> entries(input.pivots.size());
@@ -409,8 +411,10 @@ parallel_cpu_round_result run_parallel_cpu_round(
             input.pivots.size(), work_hint, options.omp_threshold,
             workspace.threads.size()) != workers)
         throw std::logic_error("test did not select the parallel CPU apply path");
-    if (input.pivots.size() < workers)
-        throw std::logic_error("parallel CPU apply test needs two pivots");
+    if (input.pivots.size() < workers ||
+        apxchol::detail::elimination_compute_chunk(
+            input.pivots.size(), options.omp_threshold) != 1)
+        throw std::logic_error("parallel CPU apply test needs one-pivot chunks per worker");
 
 #ifdef _OPENMP
     const int saved_dynamic = omp_get_dynamic();
@@ -418,19 +422,25 @@ parallel_cpu_round_result run_parallel_cpu_round(
 #endif
     std::atomic<std::uint32_t> worker_mask{0};
     std::atomic<int> team_width{0};
+    std::latch first_samples(workers);
     const apxchol::detail::tree_elimination tree;
     const auto recording_tree = apxchol::as_eliminator(
         [&](std::span<apxchol::weighted_neighbor> neighbors, double degree,
             std::uint64_t seed, apxchol::edge_emitter out) {
 #ifdef _OPENMP
             const int worker = omp_get_thread_num();
-            team_width.store(omp_get_num_threads(), std::memory_order_relaxed);
+            const int width = omp_get_num_threads();
 #else
             const int worker = 0;
-            team_width.store(1, std::memory_order_relaxed);
+            const int width = 1;
 #endif
-            worker_mask.fetch_or(std::uint32_t{1} << worker,
-                                 std::memory_order_relaxed);
+            team_width.store(width, std::memory_order_relaxed);
+            const auto bit = std::uint32_t{1} << worker;
+            const auto seen = worker_mask.fetch_or(bit, std::memory_order_relaxed);
+            // Meet on each worker's first pivot so dynamic scheduling cannot
+            // give all the work to one thread. A reduced team must fail, not hang.
+            if (!(seen & bit) && width == kResidentProvenanceWorkers)
+                first_samples.arrive_and_wait();
             tree.sample_clique(neighbors, degree, seed, out);
         });
     std::vector<apxchol::detail::factor_col> columns;
@@ -473,10 +483,9 @@ make_resident_provenance_graph() {
         {2, 3, 6.0}, {2, 4, 8.0}, {2, 5, 9.0},
         {3, 6, 10.0}, {4, 7, 11.0}, {5, 6, 12.0}})
         graph.add_edge(edge.u, edge.v, edge.weight);
-    // Sixteen independent degree-512 pivots ensure that the production dynamic
-    // CPU compute/apply path uses both workers. Their common neighbor set also
-    // permits relaxed endpoint-slot claims to differ from the GPU's stable
-    // pivot/emission order; an individual scheduling outcome may still match.
+    // Independent degree-512 pivots select the parallel compute/apply path.
+    // Their common neighbors permit endpoint-slot claims to differ from the
+    // GPU's stable pivot/emission order; an individual outcome may still match.
     for (node_index pivot = kResidentProvenanceFirstParallelPivot;
          pivot < kResidentProvenanceParallelPivotEnd; ++pivot) {
         for (node_index neighbor = kResidentProvenanceParallelPivotEnd;
@@ -625,7 +634,7 @@ void expect_digest_equal(
 
 #if defined(APXCHOL_USE_CUDA)
 void expect_setup_api_receipt(const std::string& trace,
-                              const apxchol::apx_cholesky& solver) {
+                              const apxchol::test::diagnostic_gpu_preconditioner& solver) {
     const auto begin = trace.find("[gpu-setup-receipt] ");
     if (apxchol::detail::gpu_setup_diagnostics()) {
         ASSERT_NE(begin, std::string::npos) << trace;
@@ -2499,7 +2508,7 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
     scoped_omp_threads serial(1);
@@ -2699,7 +2708,7 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
@@ -3185,7 +3194,7 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     // Compare the complete GPU factor's action against independently built
     // CPU factor columns. This checks all entries after audit-only per-round
     // hashes have been removed, including the isolated tail and duplicate arcs.
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     std::vector<std::vector<apxchol::detail::factor_entry>> reference_entries(columns.size());
     std::vector<apxchol::detail::factor_col> reference_columns;
@@ -3395,7 +3404,7 @@ TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
@@ -3499,7 +3508,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
@@ -3986,7 +3995,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -4001,7 +4010,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     for (double shift : {0.0, 1.0}) {
         SCOPED_TRACE(shift);
         auto A = owned_solve_matrix(n, shift);
-        apxchol::apx_cholesky preconditioner;
+        apxchol::test::diagnostic_gpu_preconditioner preconditioner;
         apxchol::checkpoint owned_cp;
         preconditioner.set_checkpoint(&owned_cp);
         preconditioner.set_options(factor_options);
@@ -4064,7 +4073,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -4074,7 +4083,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     Eigen::SparseMatrix<double> tiny(2, 2);
     std::vector<Eigen::Triplet<double>> entries{{0,0,2},{1,1,2},{0,1,-1},{1,0,-1}};
     tiny.setFromTriplets(entries.begin(), entries.end());
-    apxchol::apx_cholesky small;
+    apxchol::test::diagnostic_gpu_preconditioner small;
     testing::internal::CaptureStderr(); small.compute(tiny);
     const auto zero_trace = testing::internal::GetCapturedStderr();
     if (apxchol::detail::gpu_setup_diagnostics()) {
@@ -4088,7 +4097,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     expect_setup_api_receipt(zero_trace, small);
     EXPECT_EQ(small.factor().perm.size(), 2u);
     auto A = owned_solve_matrix(64, 1.0);
-    apxchol::apx_cholesky kept;
+    apxchol::test::diagnostic_gpu_preconditioner kept;
     kept.set_keep_factor(true);
     testing::internal::CaptureStderr(); kept.compute(A);
     const auto kept_trace = testing::internal::GetCapturedStderr();
@@ -4105,11 +4114,12 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     const auto exported_trace = testing::internal::GetCapturedStderr();
     EXPECT_EQ(exported_trace.find("[gpu-owned-prefix]"), std::string::npos);
     EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
-    // Ordinary unforced defaults remain on their existing setup route.
+    // The test-only diagnostic route still permits ordinary host import.
+    // The public preconditioner no longer chooses CUDA from these flags.
     scoped_env shadow_off("APXCHOL_GPU_ROUND_SHADOW", "off");
     scoped_env finalize_off("APXCHOL_GPU_FACTOR_FINALIZE", "off");
     scoped_env frontend_off("APXCHOL_GPU_BLOCK_FRONTEND", "off");
-    apxchol::apx_cholesky ordinary;
+    apxchol::test::diagnostic_gpu_preconditioner ordinary;
     testing::internal::CaptureStderr(); ordinary.compute(A);
     const auto ordinary_trace = testing::internal::GetCapturedStderr();
     EXPECT_EQ(ordinary_trace.find("[gpu-owned-prefix]"), std::string::npos);
@@ -4954,7 +4964,7 @@ TEST(GpuRoundShadowIntegration,
 
 TEST(GpuFactorFinalize, ResidentPrefixCpuTailPermutationAndGrounding) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env dataflow("APXCHOL_GPU_SPTRSV", "dataflow");
     scoped_env segmentation("APXCHOL_GPU_DF_SPLIT", "1");
@@ -5046,19 +5056,22 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
     apxchol::factorization reference;
     apxchol::detail::build_csc(reference, cols, n, nullptr);
     ASSERT_EQ(reference.perm, perm);
-    for (const char* fp16 : {"0", "1"}) {
-        scoped_env storage("APXCHOL_SPTRSV_FP16", fp16);
+    for (const char* fp16 : {"float32", "float16"}) {
+        scoped_env storage("APXCHOL_FACTOR_STORAGE", fp16);
         for (const char* rel : {"0", "0.00001", "0.0001", "0.2"}) {
             scoped_env drop("APXCHOL_FACTOR_DROP", rel);
             for (node_index m : {n - 1, n}) {
                 SCOPED_TRACE(std::string(fp16) + "/" + rel + "/" + std::to_string(m));
                 apxchol::cuda_sptrsv ordinary, adopted;
                 ordinary.setup(reference.L, m);
-                auto factor = state.finalize_device_factor(perm, m, tail);
+                const auto requested = std::string_view(fp16) == "float16"
+                    ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
+                scoped_env conflicting("APXCHOL_FACTOR_STORAGE", std::string_view(fp16) == "float16" ? "float32" : "float16");
+                auto factor = state.finalize_device_factor(perm, m, tail, requested);
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
                 auto lt = apxchol::cuda_host::build_L11_csc_int<float>(reference.L, m);
                 auto scale = apxchol::cuda_host::column_scales(lt);
-                const bool half = std::string_view(fp16) == "1";
+                const bool half = std::string_view(fp16) == "float16";
                 if (half) {
                     for (node_index j = 0; j < m; ++j)
                         if (!std::isfinite(1.0f / scale[j]) ||
@@ -5072,7 +5085,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 };
                 if (half) {
                     auto h = apxchol::cuda_host::narrow_fp16_scaled(lt, scale);
-                    apxchol::cuda_host::csr_int<std::uint16_t> lt16;
+                    apxchol::cuda_host::csr_int<_Float16> lt16;
                     lt16.m = m; lt16.nnz = lt.nnz; lt16.ptr = lt.ptr;
                     lt16.idx = std::move(lt.idx); lt16.vals = std::move(h.vals);
                     auto l16 = apxchol::cuda_host::transpose_csr(lt16);
@@ -5089,7 +5102,8 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 }
                 EXPECT_EQ(state.encode_finalized_factor_for_test(*factor), expected);
 #endif
-                adopted.setup_adopting_device_factor_for_research(std::move(*factor));
+                adopted.setup_adopting_device_factor_for_research(std::move(*factor), requested);
+                EXPECT_EQ(adopted.fp16(), std::string_view(fp16) == "float16");
                 const auto& want = ordinary.drop_stats(); const auto& got = adopted.drop_stats();
                 EXPECT_EQ(got.rel, want.rel); EXPECT_EQ(got.nnz_factor, want.nnz_factor);
                 EXPECT_EQ(got.nnz_stored, want.nnz_stored); EXPECT_EQ(got.dropped, want.dropped);
@@ -5107,7 +5121,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
 
 TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env storage("APXCHOL_SPTRSV_FP16", nullptr);
+    scoped_env storage("APXCHOL_FACTOR_STORAGE", nullptr);
     scoped_env drop("APXCHOL_FACTOR_DROP", nullptr);
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -5128,7 +5142,7 @@ TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
 
 TEST(GpuFactorFinalize, InvalidCoveragePermutationAndCoordinatesFailClosed) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     const std::vector<undirected_edge> edges = {{0, 1, 1}, {0, 2, 2}};
     const std::vector<node_index> pivots = {0};
@@ -5167,7 +5181,7 @@ TEST(GpuFactorFinalize, InvalidCoveragePermutationAndCoordinatesFailClosed) {
 
 TEST(GpuFactorFinalize, NormalPreconditionerInstallsAndReplacesResidentFactors) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -5177,7 +5191,7 @@ TEST(GpuFactorFinalize, NormalPreconditionerInstallsAndReplacesResidentFactors) 
     ASSERT_EQ(apxchol::detail::gpu_block_frontend::configured_block_mode(),
               apxchol::detail::gpu_block_frontend::mode::disabled);
     scoped_omp_threads serial(1);
-    apxchol::apx_cholesky preconditioner;
+    apxchol::test::diagnostic_gpu_preconditioner preconditioner;
     preconditioner.set_keep_factor(true);
     constexpr int n = 64;
     Eigen::SparseMatrix<double> A(n, n);
@@ -5209,7 +5223,7 @@ TEST(GpuFactorFinalize, NormalPreconditionerInstallsAndReplacesResidentFactors) 
 TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -5236,23 +5250,28 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         auto reference = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
         ASSERT_EQ(reference.L.vals_.size(), reference.L.nonZeros());
         ASSERT_EQ(reference.L.inner_.size(), reference.L.nonZeros());
-        apxchol::apx_cholesky exported;
+        ASSERT_TRUE(reference.research_device_factor);
+        // Production GPU ownership cannot silently import a copied capsule;
+        // explicit diagnostic copies below keep their host-validation contract.
+        apxchol::detail::gpu_preconditioner strict_owner;
+        EXPECT_THROW(strict_owner.set_factor(reference), std::invalid_argument);
+        apxchol::test::diagnostic_gpu_preconditioner exported;
         exported.set_keep_factor(true);
         exported.set_factor(reference);
         ASSERT_EQ(exported.factor().L.vals_.size(), reference.L.nonZeros());
         ASSERT_FALSE(exported.trsv().adopted_device_factor());
         // Copied public factors do not mutate their shared capsule. A uniquely
         // moved factor retains the fast adoption path.
-        apxchol::apx_cholesky exported_again;
+        apxchol::test::diagnostic_gpu_preconditioner exported_again;
         exported_again.set_factor(reference);
         EXPECT_FALSE(exported_again.trsv().adopted_device_factor());
         auto moved_factor = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
-        apxchol::apx_cholesky moved_export;
+        apxchol::test::diagnostic_gpu_preconditioner moved_export;
         moved_export.set_factor(std::move(moved_factor));
         ASSERT_TRUE(moved_export.trsv().adopted_device_factor());
 
         apxchol::checkpoint cp;
-        apxchol::apx_cholesky consuming;
+        apxchol::test::diagnostic_gpu_preconditioner consuming;
         consuming.set_checkpoint(&cp);
         testing::internal::CaptureStderr();
         consuming.compute(A);
@@ -5287,7 +5306,7 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         const Eigen::VectorXd moved_result = moved_export.solve(b);
         EXPECT_EQ(std::memcmp(expected.data(), moved_result.data(), n * sizeof(double)), 0);
         auto install_copy = [reference, b]() mutable {
-            apxchol::apx_cholesky solver;
+            apxchol::test::diagnostic_gpu_preconditioner solver;
             solver.set_factor(std::move(reference));
             const bool adopted = solver.trsv().adopted_device_factor();
             Eigen::VectorXd result = solver.solve(b);
@@ -5305,7 +5324,7 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
         // a consuming solver; changing the internal call route must not alter it.
         scoped_env ordinary_mode("APXCHOL_GPU_FACTOR_FINALIZE", "off");
         apxchol::checkpoint ordinary_cp;
-        apxchol::apx_cholesky ordinary;
+        apxchol::test::diagnostic_gpu_preconditioner ordinary;
         ordinary.set_checkpoint(&ordinary_cp);
         ordinary.compute(A);
         EXPECT_FALSE(ordinary.trsv().adopted_device_factor());
@@ -5319,7 +5338,7 @@ TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports
 TEST(GpuFactorFinalize, ConsumingPrefixOmissionRetainsTheCpuTailPayload) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
     scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
@@ -5634,7 +5653,7 @@ TEST(GpuCycleSampler, AuditedExportRejectsUnsupportedSamplerClearly) {
     scoped_omp_threads serial(1);
     auto A=owned_solve_matrix(65,1.);
     for(auto sampler:{apxchol::clique_sampler::trace_cycle}) {
-        apxchol::apx_cholesky preconditioner;preconditioner.set_keep_factor(true);
+        apxchol::test::diagnostic_gpu_preconditioner preconditioner;preconditioner.set_keep_factor(true);
         apxchol::factor_options opts;opts.sampler=sampler;
         preconditioner.set_options(opts);
         try {preconditioner.compute(A);FAIL()<<"audited export unexpectedly accepted";}

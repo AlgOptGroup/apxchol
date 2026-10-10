@@ -111,7 +111,13 @@ auto result = solver.solve(b);
 ```
 
 Alternatively, install a factor with `apxchol::apx_cholesky::set_factor` and
-apply it as a preconditioner. A `factorization` holds CSC factor columns
+apply it as a preconditioner. These public APIs stay entirely on CPU, including
+in CUDA builds; they do not silently upload the factor. Explicit low-level
+`cuda_sptrsv::setup` can install a separately supplied host factor for device
+triangular solves, independently of the end-to-end GPU setup route. This is an
+in-memory handoff, not a serialized-factor API.
+
+A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,
 operator kind, and round metadata. Preserve these conventions. Enable
 `set_keep_factor(true)` before installation if the preconditioner must retain

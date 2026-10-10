@@ -117,7 +117,8 @@ class Solver:
     """
 
     def __init__(self, A, *, seed=42, partitioner="block_greedy",
-                 storage="vec_pool_aos", keep_factor=True, **advanced):
+                 storage="vec_pool_aos", keep_factor=True,
+                 factor_storage_dtype=None, **advanced):
         csc = _to_csc(A)
         self._n = int(csc.shape[0])
         self._nnz_A = int(csc.nnz)
@@ -126,7 +127,9 @@ class Solver:
         options = dict(seed=int(seed), partitioner=str(partitioner),
                        storage=str(storage), keep_factor=self._keep_factor)
         options.update(advanced)
-        self._impl = _apxchol.Solver(csc.indptr, csc.indices, data, self._n, options)
+        if factor_storage_dtype is not None:
+            options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
+        self._impl = _apxchol.Solver(csc.indptr, csc.indices, data, options)
         self._chol = None            # lazily built scipy factor (permuted space)
         self._P = None
         self._LD = None
@@ -138,6 +141,11 @@ class Solver:
     @property
     def sddm(self) -> bool:
         return self._impl.sddm()
+
+    @property
+    def factor_storage_dtype(self) -> np.dtype:
+        """Resolved triangular-solve storage dtype; CPU arithmetic remains float64."""
+        return np.dtype(self._impl.factor_storage_dtype())
 
     @property
     def lumped(self) -> int:
@@ -227,7 +235,7 @@ class Solver:
     def chol(self):
         """Lower-triangular factor G (sqrt-diagonal included) in PERMUTED space.
 
-        Returns a `scipy.sparse.csc_matrix` (float64) with
+        Returns a `scipy.sparse.csc_matrix` (float32) with
         `A[p][:, p] ≈ G @ G.T`, `p = np.argsort(self.P)`. G is an APPROXIMATE
         (randomly sampled) factor, so the identity holds only approximately.
         For a pure Laplacian (`sddm == False`) it holds on the rank-(n−k)
@@ -287,7 +295,7 @@ class Solver:
 
 
 def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
-              keep_factor=True, **advanced) -> Solver:
+              keep_factor=True, factor_storage_dtype=None, **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
     Parameters
@@ -321,6 +329,15 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
         those exports raise, while `P`, `factor_nnz` and `fill_ratio` remain
         available. Pass `keep_factor=False` for the leanest factor-once /
         solve-many footprint.
+    factor_storage_dtype : numpy dtype, dtype name, or None
+        ``np.float16`` or ``np.float32`` (also "float16"/"float32") selects
+        triangular-solve value storage for this solver. FP16 stores scaled
+        off-diagonals with FP32 diagonals and scales; it requires x86 AVX/F16C.
+        Unsupported FP16 requests raise an error. CPU arithmetic remains FP64;
+        constructed factors and exports remain FP32. FP64 factor storage is
+        not supported. ``None`` uses ``APXCHOL_FACTOR_STORAGE`` if set, otherwise
+        the CPU's FP32 default.
+        Explicit choices override the environment without changing it.
     **advanced
         Passed straight through to the core options: `degree_quantile`,
         `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,
@@ -330,7 +347,8 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
         (the quantile cap, default 0.2, replaces it).
     """
     return Solver(A, seed=seed, partitioner=partitioner, storage=storage,
-                  keep_factor=keep_factor, **advanced)
+                  keep_factor=keep_factor, factor_storage_dtype=factor_storage_dtype,
+                  **advanced)
 
 
 # `solver` is the conversational alias for `factorize` (factor once, reuse).
