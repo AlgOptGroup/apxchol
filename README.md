@@ -9,6 +9,7 @@ device-owned setup and GPU-resident solve. C++, Python and Octave/MATLAB interfa
 Requires CMake, GCC or Clang with C++23 and OpenMP, and Eigen (fetched if absent).
 MSVC and clang-cl are not supported.
 On x86-64, the minimum CPU requirement is x86-64-v2.
+Optional CUDA builds require CUDA Toolkit 13.3+ and CMake 4.4+ for C++23 support.
 
 ```bash
 git clone https://github.com/AlgOptGroup/apxchol

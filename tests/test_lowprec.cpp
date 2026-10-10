@@ -129,6 +129,7 @@ TEST(FP16, StorageConversionMatchesNumericalReference) {
         const float actual = float(apxchol::detail::narrow_scaled_fp16(x, 1.0f));
         ASSERT_EQ(actual, expected) << "x=" << x;
         ASSERT_EQ(std::signbit(actual), std::signbit(expected)) << "x=" << x;
+        ASSERT_EQ(apxchol::omp_sptrsv::format_flushes<_Float16>(x, 1.0f), expected == 0.0f) << "x=" << x;
     }
 }
 
@@ -141,6 +142,13 @@ TEST(FP16, DocumentedSubnormalFlushOverflowAndTies) {
     EXPECT_EQ(float(apxchol::detail::narrow_scaled_fp16(normal_midpoint, 1.0f)), two_m14);
     EXPECT_EQ(float(apxchol::detail::narrow_scaled_fp16(-normal_midpoint, 1.0f)), -two_m14);
     const float below = std::nextafter(normal_midpoint, 0.0f);
+    for (float scale : {0x1p-20f, 1.0f, 3.0f, 0x1p20f})
+        for (float sign : {-1.0f, 1.0f})
+            for (float ratio : {below, normal_midpoint, std::nextafter(normal_midpoint, 1.0f)}) {
+                const float value = sign * ratio * scale;
+                EXPECT_EQ(apxchol::omp_sptrsv::format_flushes<_Float16>(value, scale),
+                          storage_reference(value / scale) == 0.0f);
+            }
     for (float sign : {-1.0f, 1.0f}) {
         const float stored = float(apxchol::detail::narrow_scaled_fp16(sign * below, 1.0f));
         EXPECT_EQ(stored, 0.0f);
@@ -630,7 +638,7 @@ bool fp16_available() { return apxchol::omp_sptrsv::fp16_supported(); }
 }  // namespace
 
 TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
-    if (!fp16_available()) GTEST_SKIP() << "build has no F16C: fp16 storage not compiled";
+    if (!fp16_available()) GTEST_SKIP() << "CPU lacks AVX/F16C";
     scoped_drop_off drop_off;                              // storage contract on the un-dropped factor
     scoped_env fp16("APXCHOL_SPTRSV_FP16", "1");
     apxchol::omp_sptrsv trsv;
@@ -693,7 +701,7 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
 }
 
 TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
-    if (!fp16_available()) GTEST_SKIP() << "build has no F16C: fp16 storage not compiled";
+    if (!fp16_available()) GTEST_SKIP() << "CPU lacks AVX/F16C";
     scoped_drop_off drop_off;
     scoped_env fp16("APXCHOL_SPTRSV_FP16", "1");
     // Column 1's only off-diagonal is ~1e-40: s_j is an fp32 subnormal and
@@ -736,7 +744,10 @@ TEST(LowPrecFp16, TheUnifiedEnvIsTheOnlyStorageSwitch) {
     // Unset = OFF on the CPU (the GPU's default is the opposite: cuda.h).
     EXPECT_FALSE(storage_of("APXCHOL_SPTRSV_FP16", nullptr));
     EXPECT_FALSE(storage_of("APXCHOL_SPTRSV_FP16", "0"));
-    EXPECT_EQ(storage_of("APXCHOL_SPTRSV_FP16", "1"), fp16_available());
+    if (fp16_available())
+        EXPECT_TRUE(storage_of("APXCHOL_SPTRSV_FP16", "1"));
+    else
+        EXPECT_THROW(storage_of("APXCHOL_SPTRSV_FP16", "1"), std::runtime_error);
     // The retired GPU-only name no longer changes either backend.
     EXPECT_FALSE(storage_of("APXCHOL_GPU_SPTRSV_FP16", "1"));
     EXPECT_FALSE(storage_of("APXCHOL_GPU_SPTRSV_FP16", "0"));

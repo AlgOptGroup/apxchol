@@ -546,7 +546,7 @@ if (APXCHOL_POOL_FP32)
 endif()
 if (APXCHOL_USE_CUDA)
     enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
+    find_package(CUDAToolkit 13.3 REQUIRED)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_USE_CUDA)
     # Device precision-cast kernels for the mixed-precision GPU SpTRSV
     # (nvcc-compiled; the .cpp TUs are host-compiled and can't host __global__).
@@ -561,11 +561,7 @@ if (APXCHOL_USE_CUDA)
     target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_pcg_kernels.cu)
     # Our library uses only cudart; competitor libraries are linked separately.
     target_link_libraries(apxchol_v1 PUBLIC CUDA::cudart)
-    # Pin the CUDA dialect to 20: the target's host features are cxx_std_23, but nvcc
-    # (13.x) + recent CMake reject a "CUDA23" dialect, so the cuda_cast.cu sources must
-    # compile as C++20 (same reason amgcl_cuda.cu/benchmark pin CUDA_STANDARD 20 below).
-    # Host .cpp TUs still build at C++23; only the .cu device sources drop to 20.
-    set_target_properties(apxchol_v1 PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
+    set_target_properties(apxchol_v1 PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
 endif()
 # Boost headers are needed only by AMGCL (HAVE_AMGCL gate below); the apxchol
 # core itself is Boost-free.
@@ -601,7 +597,6 @@ if (APXCHOL_USE_CUDA)
 endif()
 
 # AMGCL CUDA backend adapter (uses thrust + cuSPARSE, compiled with nvcc).
-# CUDA standard pinned to 20 (nvcc may not fully support C++23 with our toolchain).
 if (APXCHOL_USE_CUDA AND Boost_FOUND)
     target_sources(benchmark PRIVATE src/amgcl_cuda.cu)
     # -Xcompiler=-fopenmp is REQUIRED: AMGCL builds its AMG hierarchy host-side
@@ -612,11 +607,10 @@ if (APXCHOL_USE_CUDA AND Boost_FOUND)
     # transitively via apxchol_v1.
     set_source_files_properties(src/amgcl_cuda.cu PROPERTIES
         LANGUAGE CUDA
-        COMPILE_OPTIONS "--extended-lambda;--expt-relaxed-constexpr;-Xcompiler=-fopenmp"
-        CUDA_STANDARD 20)
+        COMPILE_OPTIONS "--extended-lambda;--expt-relaxed-constexpr;-Xcompiler=-fopenmp")
     set_target_properties(benchmark PROPERTIES
-        CUDA_STANDARD 20
-        CUDA_STANDARD_REQUIRED OFF)
+        CUDA_STANDARD 23
+        CUDA_STANDARD_REQUIRED ON)
     # AMGCL uses cuSPARSE. This dependency belongs to the competitor driver;
     # our apxchol library links cudart only.
     target_link_libraries(benchmark PRIVATE CUDA::cudart CUDA::cusparse)

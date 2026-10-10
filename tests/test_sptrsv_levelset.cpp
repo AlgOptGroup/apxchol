@@ -545,7 +545,7 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
 }
 
 TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
-    if constexpr (!apxchol::omp_sptrsv::fp16_supported()) return;
+    if (!apxchol::omp_sptrsv::fp16_supported()) GTEST_SKIP() << "CPU lacks F16C";
     scoped_env fp16_storage("APXCHOL_SPTRSV_FP16", "1");
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
     std::vector<node_index> bounds;

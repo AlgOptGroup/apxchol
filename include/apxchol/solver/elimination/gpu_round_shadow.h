@@ -2070,8 +2070,8 @@ private:
     bool owned_materialized_ = false;
     bool owned_complete_ = false;
     bool owned_initial_from_csc_ = false;
-    std::size_t owned_initial_edges_ = 0;
-    std::size_t owned_fill_edges_ = 0;
+    [[maybe_unused]] std::size_t owned_initial_edges_ = 0;
+    [[maybe_unused]] std::size_t owned_fill_edges_ = 0;
     std::size_t owned_download_bytes_ = 0;
     std::size_t attempted_rounds_ = 0;
     std::size_t checked_rounds_ = 0;

@@ -51,7 +51,7 @@ struct scoped_drop_off : scoped_env {
 
 // The DEFAULT storage width is fp32, and value_name / value_bytes (what the
 // APXCHOL_VERBOSE banner prints) report what the last setup() resolved --
-// fp32 unset, fp16 under APXCHOL_SPTRSV_FP16=1 where the build has F16C.
+// fp32 unset, fp16 under APXCHOL_SPTRSV_FP16=1 where the CPU has F16C.
 TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     EXPECT_EQ(sizeof(sptrsv_value_t), 4u);
     EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
@@ -73,14 +73,17 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     }
     {
         scoped_env on("APXCHOL_SPTRSV_FP16", "1");
-        apxchol::omp_sptrsv t; t.setup(L, 2);
-        // Without F16C the env falls back to fp32 with a note (portable builds).
-        EXPECT_EQ(t.fp16(), apxchol::omp_sptrsv::fp16_supported());
-        EXPECT_EQ(t.value_bytes(), apxchol::omp_sptrsv::fp16_supported() ? 2u : 4u);
+        apxchol::omp_sptrsv t;
         if (apxchol::omp_sptrsv::fp16_supported()) {
+            t.setup(L, 2);
+            EXPECT_TRUE(t.fp16());
+            EXPECT_EQ(t.value_bytes(), 2u);
             EXPECT_STREQ(t.value_name(), "fp16 (per-column scaled)");
             EXPECT_EQ(t.csc_vals16().size(), 3u);
             EXPECT_EQ(t.csc_vals().size(), 0u);
+        } else {
+            EXPECT_THROW(t.setup(L, 2), std::runtime_error);
+            EXPECT_FALSE(t.ready());
         }
     }
 }
@@ -107,11 +110,6 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
 // serial double substitution on L_s (roundoff for y', 2^-23-class for z).
 namespace {
 
-// THE storage under test, as a runtime flag: what APXCHOL_SPTRSV_FP16
-// resolves to for this build (fp16 only where F16C exists).
-bool fp16_storage(const char* env_value) {
-    return std::string(env_value) == "1" && apxchol::omp_sptrsv::fp16_supported();
-}
 // The KERNEL matrix L~ as omp_sptrsv::setup stores it (widened, NOT
 // rescaled) for the OFF-DIAGONAL entry with value v in a column with scale s:
 // through narrow_value. On the fp32 storage this is v itself.
@@ -232,7 +230,8 @@ void reference_pair(const sparse_csc& L, const std::vector<double>& x,
 void run_kernel_precision_check() {
     for (const char* env : {"0", "1"})
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose path */}) {
-        const bool fp16 = fp16_storage(env);
+        const bool fp16 = env[0] == '1';
+        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE("m=" + std::to_string(m) + " APXCHOL_SPTRSV_FP16=" + env);
         scoped_env storage("APXCHOL_SPTRSV_FP16", env);
         sparse_csc L = make_random_lower(m, 4.0, 99);
@@ -285,9 +284,9 @@ TEST(SpTRSVKernels, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
 // A round-structured factor (R rounds of B > kSpTRSVOMPThreshold mutually
 // independent columns; every off-diagonal points to a LATER round) fed
 // through set_round_bounds so every level is fat and the `omp for` kernels
-// run -- on 16-bit storage the SIMD ones (simd_fp16_kernel()): 8-wide vector
-// widen, 4-wide step, scalar tail. CSR row lengths are spread over 0..48 so
-// every path (8-blocks, the 4-step, tails of 0..3) is exercised. Run at BOTH
+// run -- on 16-bit storage the SIMD ones (simd_fp16_kernel()): four-lane
+// widening and arithmetic, then a scalar tail. CSR row lengths span 0..48 so
+// every path (full vectors and tails of 0..3) is exercised. Run at BOTH
 // storages (APXCHOL_SPTRSV_FP16=0|1) and checked exactly like the thin-level
 // kernels: the pair contract at roundoff against L~ / R and against the
 // serial reference on L_s.
@@ -361,7 +360,8 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
     std::vector<double> x(m);
     for (auto& v : x) v = ux(rng);
     for (const char* env : {"0", "1"}) {
-        const bool fp16 = fp16_storage(env);
+        const bool fp16 = env[0] == '1';
+        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE(std::string("APXCHOL_SPTRSV_FP16=") + env);
         scoped_env storage("APXCHOL_SPTRSV_FP16", env);
         std::vector<double> y_ref, z_ref;
@@ -370,8 +370,10 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
         trsv.set_round_bounds(bounds);
         trsv.setup(L, m);
         ASSERT_EQ(trsv.fp16(), fp16);
-#if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
-        EXPECT_TRUE(apxchol::omp_sptrsv::simd_fp16_kernel());
+#ifdef __x86_64__
+        const bool simd = __builtin_cpu_supports("avx") && __builtin_cpu_supports("f16c")
+            && __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+        EXPECT_EQ(apxchol::omp_sptrsv::simd_fp16_kernel(), simd);
 #else
         EXPECT_FALSE(apxchol::omp_sptrsv::simd_fp16_kernel());
 #endif

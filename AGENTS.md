@@ -20,6 +20,9 @@ The root project builds the library, CLI, and unit tests. The separate
 CI builds its CPU-only native benchmark and runs the CLI/stopping CTest
 contracts alongside the Python harness tests; these checks are not performance
 campaigns. Native benchmark sources, CMake files, tests and patches trigger CI.
+Root and Python builds enable `-Wall -Wextra -Wpedantic`. CPU compiler-matrix
+and wheel CI also set `CMAKE_COMPILE_WARNING_AS_ERROR=ON`; local builds retain
+the caller's choice. Fetched Eigen and GoogleTest headers are system includes.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -131,8 +134,10 @@ choices, retired knobs, and measurements belong in
   CMake and libomp, then use the common build commands. libc++ `std::pmr`
   requires a macOS 14 deployment target. Linux-only `madvise`
   advice is compiled out; mmap remains. CI's `linux` and `macos` jobs share
-  parent-consumer build/test steps through YAML anchors. Keep `std::iota` for
-  the macos-15 runner's default Xcode 16.4 toolchain until that baseline retires.
+  native/portable modes and parent-consumer build/test steps through YAML anchors.
+  Linux tests GCC and Clang in both modes; macOS tests Apple Clang in both modes.
+  Keep `std::iota` for the macos-15 runner's default Xcode 16.4 toolchain until
+  that baseline retires.
 
 
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
@@ -149,7 +154,8 @@ choices, retired knobs, and measurements belong in
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
   `python/pyproject.toml`.
 
-- `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. The library
+- `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
+  use C++23, requiring CUDA Toolkit 13.3+ and CMake 4.4+. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
   competitors independently require cuSPARSE/cuBLAS; distinguish their driver
   linkage from our library linkage.
@@ -208,7 +214,15 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   the normal round-to-nearest environment and retains signed subnormal flushing.
   Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
   packed conversion and scalar widening workarounds stay local to conversion.
-  Runtime CPU dispatch is not yet enabled in portable wheels.
+  Portable x86 builds check AVX/F16C before selecting FP16 storage. AVX2/FMA
+  selects the optimized kernels once per level or critical tail, before the row
+  loops; native builds use them directly.
+  FP16 remains opt-in on the CPU; unsupported explicit requests fail at setup.
+  Setup narrows CSC once inside an F16C-targeted worker and transposes those
+  stored values. Host narrowing and the format-drop predicate share the RNE
+  normal/subnormal boundary check, flushing before conversion to FP16.
+  Release consumed input before the transpose;
+  FP32 keeps transpose-before-copy ordering to retain its memory bound.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
   `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
   writer threads perform the first touch. Pointer, diagonal, scale, and other

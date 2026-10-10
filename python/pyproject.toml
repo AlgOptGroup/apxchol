@@ -51,7 +51,7 @@ skip = "*-musllinux_*"
 before-build = 'curl -fsSL --retry 3 https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.8/openmp/LICENSE.TXT -o "{package}/LICENSE.libomp.txt"'
 test-requires = ["pytest"]
 test-command = "python -m pytest {package}/tests -q"
-config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF" }
+config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF", "cmake.define.CMAKE_COMPILE_WARNING_AS_ERROR" = "ON" }
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]

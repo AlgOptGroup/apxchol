@@ -738,8 +738,8 @@ TEST(GpuHostPrep, DataflowBatchesPackRowsIntoAlignedLaneGroups) {
         for (int len = 1; len <= 40 * pre; ++len) {
             const int G = apxchol::cuda_host::dataflow_lane_group(len, pre);
             ASSERT_TRUE(G >= 1 && G <= 32 && (G & (G - 1)) == 0) << len;
-            if (G < 32) ASSERT_GE(G * pre, len) << len;
-            if (G > 1)  ASSERT_LT((G / 2) * pre, len) << len;                     // minimal
+            if (G < 32) { ASSERT_GE(G * pre, len) << len; }
+            if (G > 1)  { ASSERT_LT((G / 2) * pre, len) << len; }                 // minimal
         }
         // On a real-shaped factor, both directions.
         const node_index n = 60001, m = n - 1;
@@ -912,7 +912,7 @@ TEST(GpuHostPrep, DataflowPlanSegmentsCoverSplitRowsExactlyOnce) {
                         ++slots_seen;
                         pending_slots.push_back(sp.c);
                         // whole chunks, so every segment has the same depth
-                        if (sp.b != t.ptr[static_cast<size_t>(sp.row) + 1]) EXPECT_EQ((sp.b - sp.a) % C, 0);
+                        if (sp.b != t.ptr[static_cast<size_t>(sp.row) + 1]) { EXPECT_EQ((sp.b - sp.a) % C, 0); }
                         for (int q = sp.a; q < sp.b; ++q) {
                             ASSERT_EQ(covered[static_cast<size_t>(q)], 0) << "entry " << q << " covered twice";
                             covered[static_cast<size_t>(q)] = 1;
@@ -926,7 +926,7 @@ TEST(GpuHostPrep, DataflowPlanSegmentsCoverSplitRowsExactlyOnce) {
                     EXPECT_EQ(t.idx[static_cast<size_t>(sp.c)], row) << "dpos must be the diagonal";
                     ASSERT_GE(sp.c, t.ptr[static_cast<size_t>(row)]);
                     ASSERT_LT(sp.c, t.ptr[static_cast<size_t>(row) + 1]);
-                    if (p.seg == (1 << 28)) EXPECT_EQ(sp.b, 1) << "seg > any row must give S = 1";
+                    if (p.seg == (1 << 28)) { EXPECT_EQ(sp.b, 1) << "seg > any row must give S = 1"; }
                     // the segments covered the row's whole CSR range
                     for (int q = t.ptr[static_cast<size_t>(row)]; q < t.ptr[static_cast<size_t>(row) + 1]; ++q)
                         ASSERT_EQ(covered[static_cast<size_t>(q)], 1) << "row " << row << " entry " << q;
@@ -1084,7 +1084,7 @@ TEST(GpuHostPrep, DataflowPlanCapsTheSegmentCountPerRow) {
         4, false, t.ptr.data(), t.idx.data(), len.data(), pre, p);
     EXPECT_EQ(apxchol::cuda_host::dataflow_plan_check(pl, 4, false, len.data(), pre), "");
     for (const auto& sp : pl.spec)
-        if (sp.row < 0 && ~sp.row == 2) EXPECT_LE(sp.b, p.max_seg);
+        if (sp.row < 0 && ~sp.row == 2) { EXPECT_LE(sp.b, p.max_seg); }
     EXPECT_LE(pl.n_slots, 8 + 3);
 }
 

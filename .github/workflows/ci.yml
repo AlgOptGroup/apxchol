@@ -71,12 +71,17 @@ jobs:
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
 
   linux:
-    name: Linux (${{ matrix.name }}, build + ctest)
+    name: Linux (${{ matrix.compiler.name }}, ${{ matrix.build.name }}, build + ctest)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
+        build: &build_modes
+          - name: native
+            native_arch: 'ON'
+          - name: portable
+            native_arch: 'OFF'
+        compiler:
           - name: GCC 14
             cc: gcc-14
             cxx: g++-14
@@ -86,27 +91,32 @@ jobs:
             cxx: clang++-18
             packages: clang-18 libomp-18-dev
     env:
-      CC: ${{ matrix.cc }}
-      CXX: ${{ matrix.cxx }}
+      CC: ${{ matrix.compiler.cc }}
+      CXX: ${{ matrix.compiler.cxx }}
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build
+          sudo apt-get install -y ${{ matrix.compiler.packages }} libeigen3-dev ninja-build
       - &configure-build
         name: Configure + build (Release)
         run: |
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
           cmake --build build
       - &ctest
         name: Run unit tests
         run: ctest --test-dir build --no-tests=error --output-on-failure
 
   macos:
-    name: macOS (Apple Clang, build + ctest)
+    name: macOS (Apple Clang, ${{ matrix.build.name }}, build + ctest)
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        build: *build_modes
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:

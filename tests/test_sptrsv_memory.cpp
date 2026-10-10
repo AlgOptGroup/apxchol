@@ -51,7 +51,7 @@ struct scoped_env {
     ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
 };
 
-long proc_status_kb(const char* key) {
+[[maybe_unused]] long proc_status_kb(const char* key) {
     std::ifstream f("/proc/self/status"); std::string ln;
     const std::size_t klen = std::strlen(key);
     while (std::getline(f, ln))
@@ -60,7 +60,7 @@ long proc_status_kb(const char* key) {
 }
 
 // Reset the process peak-RSS counter (VmHWM) to the current RSS.
-bool reset_peak_rss() {
+[[maybe_unused]] bool reset_peak_rss() {
     std::FILE* f = std::fopen("/proc/self/clear_refs", "w");
     if (!f) return false;
     const bool ok = std::fputs("5", f) >= 0;
@@ -78,7 +78,7 @@ Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
     return apxchol::laplacian(G);
 }
 
-constexpr std::size_t MB = 1024 * 1024;
+[[maybe_unused]] constexpr std::size_t MB = 1024 * 1024;
 
 } // namespace
 

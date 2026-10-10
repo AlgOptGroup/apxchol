@@ -156,8 +156,9 @@ TEST(SegmentedPool, ParallelClaimsAreDisjoint) {
     std::sort(offsets.begin(), offsets.end());
     for (size_t i = 0; i < offsets.size(); ++i) {
         EXPECT_LE(offsets[i] % pool.max_claim_slots() + slots_per_claim, pool.max_claim_slots());
-        if (i != 0)
+        if (i != 0) {
             EXPECT_GE(offsets[i], offsets[i - 1] + slots_per_claim);
+        }
     }
 }
 
@@ -230,7 +231,7 @@ apxchol::graph<Incidence> make_sparsify_graph() {
     apxchol::graph<Incidence> G(8);
     // Two connected components, both with many off-tree alternatives. Distinct
     // weights make the coarse maximum-weight forest deterministic.
-    for (const auto [u, v, w] : std::vector<std::tuple<int, int, double>>{
+    for (const auto& [u, v, w] : std::vector<std::tuple<int, int, double>>{
              {0, 1, 20.0}, {1, 2, 18.0}, {2, 3, 16.0},
              {0, 2, 4.0}, {0, 3, 3.0}, {1, 3, 2.0},
              {4, 5, 14.0}, {5, 6, 12.0}, {6, 7, 10.0},
@@ -353,7 +354,7 @@ TYPED_TEST(ResidualSparsifyTest,
     EXPECT_TRUE(reachable_within(A, 4, 7));
     EXPECT_EQ(canonical_edges(A), canonical_edges(B));
     const auto edges = canonical_edges(A);
-    for (const auto expected : std::vector<std::pair<
+    for (const auto& expected : std::vector<std::pair<
              apxchol::node_index, apxchol::node_index>>{
              {0, 1}, {1, 2}, {2, 3}, {4, 5}, {5, 6}, {6, 7}})
         EXPECT_TRUE(std::ranges::any_of(edges, [&](const auto& edge) {
