@@ -220,41 +220,40 @@ TEST(MetalSchedule, ArraysAndLevelsAreTheCpuStoredFactors) {
 TEST(MetalSchedule, StepPlanCoversEachLevelOnce) {
     for (const factor_case& fc : factor_cases()) {
         const ls::factor_schedules s = ls::build_factor_schedules(fc.L, fc.m, apxchol::factor_drop_rel_from_env());
-        for (const ls::level_solve* sv : {&s.forward, &s.backward})
-            for (const std::uint32_t kc : {1u, 7u, 64u}) {
-                SCOPED_TRACE(fc.name + " kc=" + std::to_string(kc));
-                std::uint32_t next_level = 0, next_slot = 0, narrow = 0;
-                for (const ls::level_step& st : ls::plan_steps(*sv, kc)) {
-                    if (st.kind == ls::step_kind::narrow) {
-                        ASSERT_EQ(st.first, next_level);
-                        ASSERT_EQ(next_slot, sv->level_ptr[st.first]);
-                        ASSERT_LT(st.first, st.last);
-                        for (std::uint32_t l = st.first; l < st.last; ++l) {
-                            EXPECT_EQ(sv->heavy_ptr[l], sv->level_ptr[l + 1]) << "light rows only";
-                            EXPECT_LE(std::uint64_t{sv->level_ptr[l + 1] - sv->level_ptr[l]} * kc, ls::kNarrowItems);
-                        }
-                        next_level = st.last;
-                        next_slot = sv->level_ptr[st.last];
-                        ++narrow;
-                        continue;
-                    }
-                    ASSERT_EQ(st.first, next_slot);
+        for (const ls::level_solve* sv : {&s.forward, &s.backward}) {
+            SCOPED_TRACE(fc.name);
+            std::uint32_t next_level = 0, next_slot = 0, narrow = 0;
+            for (const ls::level_step& st : ls::plan_steps(*sv)) {
+                if (st.kind == ls::step_kind::narrow) {
+                    ASSERT_EQ(st.first, next_level);
+                    ASSERT_EQ(next_slot, sv->level_ptr[st.first]);
                     ASSERT_LT(st.first, st.last);
-                    const std::uint32_t l = next_level;
-                    if (st.kind == ls::step_kind::light) {
-                        ASSERT_EQ(st.first, sv->level_ptr[l]);
-                        ASSERT_EQ(st.last, sv->heavy_ptr[l]);
-                    } else {
-                        ASSERT_EQ(st.first, sv->heavy_ptr[l]);
-                        ASSERT_EQ(st.last, sv->level_ptr[l + 1]);
+                    for (std::uint32_t l = st.first; l < st.last; ++l) {
+                        EXPECT_EQ(sv->heavy_ptr[l], sv->level_ptr[l + 1]) << "light rows only";
+                        EXPECT_LE(std::uint64_t{sv->level_ptr[l + 1] - sv->level_ptr[l]}, ls::kNarrowItems);
                     }
-                    next_slot = st.last;
-                    if (next_slot == sv->level_ptr[l + 1]) ++next_level;
+                    next_level = st.last;
+                    next_slot = sv->level_ptr[st.last];
+                    ++narrow;
+                    continue;
                 }
-                EXPECT_EQ(next_level, sv->levels());
-                EXPECT_EQ(next_slot, sv->slots());
-                if (kc == 1) { EXPECT_GT(narrow, 0u); }
+                ASSERT_EQ(st.first, next_slot);
+                ASSERT_LT(st.first, st.last);
+                const std::uint32_t l = next_level;
+                if (st.kind == ls::step_kind::light) {
+                    ASSERT_EQ(st.first, sv->level_ptr[l]);
+                    ASSERT_EQ(st.last, sv->heavy_ptr[l]);
+                } else {
+                    ASSERT_EQ(st.first, sv->heavy_ptr[l]);
+                    ASSERT_EQ(st.last, sv->level_ptr[l + 1]);
+                }
+                next_slot = st.last;
+                if (next_slot == sv->level_ptr[l + 1]) ++next_level;
             }
+            EXPECT_EQ(next_level, sv->levels());
+            EXPECT_EQ(next_slot, sv->slots());
+            EXPECT_GT(narrow, 0u);
+        }
     }
 }
 
