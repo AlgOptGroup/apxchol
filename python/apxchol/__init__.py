@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.sparse as sp
+from scipy.sparse.linalg import LinearOperator
 
 from . import _apxchol
 
@@ -43,16 +45,6 @@ class SolveResult:
     iters: int
     residual: float
     converged: bool
-
-
-def _scipy_sparse():
-    try:
-        import scipy.sparse as sp
-    except ModuleNotFoundError as exc:
-        if exc.name != "scipy":
-            raise
-        raise ImportError('This operation requires SciPy; install "apxchol[scipy]".') from exc
-    return sp
 
 
 def laplacian(A):
@@ -86,7 +78,6 @@ def laplacian(A):
     >>> A = scipy.io.mmread("com-Amazon.mtx").tocsc()   # adjacency
     >>> res = apxchol.solve(apxchol.laplacian(A), b)
     """
-    sp = _scipy_sparse()
     if not sp.issparse(A):
         raise ValueError("A must be a scipy.sparse matrix")
     if A.shape[0] != A.shape[1]:
@@ -102,12 +93,9 @@ def laplacian(A):
     return (sp.diags(deg, format="csc") - W).tocsc()
 
 
-def _csc_arrays(A):
-    if isinstance(A, tuple) and len(A) == 3:
-        return tuple(np.asarray(array) for array in A)
-    sp = _scipy_sparse()
+def _to_csc(A):
     if not sp.issparse(A):
-        raise ValueError("A must be a scipy.sparse matrix or a CSC (data, indices, indptr) tuple")
+        raise ValueError("A must be a scipy.sparse matrix")
     if A.shape[0] != A.shape[1]:
         raise ValueError(f"A must be square, got shape {A.shape}")
     A = sp.csc_matrix(A)
@@ -119,7 +107,7 @@ def _csc_arrays(A):
         A = A.copy()
         A.sum_duplicates()  # consolidate any unmerged (i,j) entries before assembly
         A.sort_indices()
-    return A.data, A.indices, A.indptr
+    return A
 
 
 class Solver:
@@ -131,19 +119,17 @@ class Solver:
     def __init__(self, A, *, seed=42, partitioner="block_greedy",
                  storage="vec_pool_aos", keep_factor=True,
                  factor_storage_dtype=None, **advanced):
-        data, indices, indptr = _csc_arrays(A)
-        self._n = int(indptr.size) - 1
-        self._nnz_A = int(data.size)
+        csc = _to_csc(A)
+        self._n = int(csc.shape[0])
+        self._nnz_A = int(csc.nnz)
         self._keep_factor = bool(keep_factor)
+        data = np.ascontiguousarray(csc.data, dtype=np.float64)
         options = dict(seed=int(seed), partitioner=str(partitioner),
                        storage=str(storage), keep_factor=self._keep_factor)
         options.update(advanced)
         if factor_storage_dtype is not None:
-            dtype = np.dtype(factor_storage_dtype)
-            if dtype.type not in (np.float16, np.float32):
-                raise ValueError("factor_storage_dtype must be float16 or float32; FP64 factors are not supported")
-            options["factor_storage_dtype"] = dtype.name
-        self._impl = _apxchol.Solver(indptr, indices, data, self._n, options)
+            options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
+        self._impl = _apxchol.Solver(csc.indptr, csc.indices, data, self._n, options)
         self._chol = None            # lazily built scipy factor (permuted space)
         self._P = None
         self._LD = None
@@ -222,11 +208,10 @@ class Solver:
             raise ValueError(f"r has length {r.shape[0]}, expected {self._n}")
         return self._impl.apply(r)
 
-    def aslinearoperator(self):
-        return _scipy_sparse().linalg.LinearOperator(
-            shape=self.shape, matvec=self.apply, dtype=np.float64)
+    def aslinearoperator(self) -> LinearOperator:
+        return LinearOperator(shape=self.shape, matvec=self.apply, dtype=np.float64)
 
-    def aspreconditioner(self):
+    def aspreconditioner(self) -> LinearOperator:
         """Alias of :meth:`aslinearoperator` (M= argument of scipy's Krylov solvers)."""
         return self.aslinearoperator()
 
@@ -250,7 +235,7 @@ class Solver:
     def chol(self):
         """Lower-triangular factor G (sqrt-diagonal included) in PERMUTED space.
 
-        Returns a `scipy.sparse.csc_matrix` (float64) with
+        Returns a `scipy.sparse.csc_matrix` (float32) with
         `A[p][:, p] ≈ G @ G.T`, `p = np.argsort(self.P)`. G is an APPROXIMATE
         (randomly sampled) factor, so the identity holds only approximately.
         For a pure Laplacian (`sddm == False`) it holds on the rank-(n−k)
@@ -262,7 +247,6 @@ class Solver:
         affect the solver.
         """
         if self._chol is None:
-            sp = _scipy_sparse()
             indptr, indices, data = self._impl.factor_csc()
             self._chol = sp.csc_matrix((data, indices, indptr),
                                        shape=(self._n, self._n))
@@ -316,7 +300,7 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
 
     Parameters
     ----------
-    A : scipy.sparse matrix or tuple (data, indices, indptr)
+    A : scipy.sparse matrix
         Square graph Laplacian (singular, rank n−1) or SDDM matrix; the two
         cases are auto-detected. This is the ASSEMBLED operator, not the
         adjacency matrix of a graph. The operator contract — symmetric,
@@ -328,10 +312,6 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
         otherwise valid operator are repaired by M-matrix lumping when the
         PRECONDITIONER is built (see :attr:`Solver.lumped`); the PCG still
         applies `A` itself, so the residual is for the system you passed.
-        A CSC tuple needs only NumPy. Its one-dimensional arrays describe a
-        square matrix with ``len(indptr) - 1`` rows and columns; indices and
-        indptr must have integer dtype. Duplicates are summed and indices
-        sorted during import. Input arrays are not modified.
     seed : int
         RNG seed for the randomized clique sampling (factorization is
         deterministic per seed at one thread only).
@@ -354,9 +334,10 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
         triangular-solve value storage for this solver. FP16 stores scaled
         off-diagonals with FP32 diagonals and scales; it requires x86 AVX/F16C.
         Unsupported FP16 requests raise an error. CPU arithmetic remains FP64;
-        factor construction and exports are unchanged. FP64 factor storage is
-        not supported. ``None`` uses ``APXCHOL_SPTRSV_FP16`` if set, otherwise
-        FP32. Explicit choices override the environment without changing it.
+        constructed factors and exports remain FP32. FP64 factor storage is
+        not supported. ``None`` uses ``APXCHOL_SPTRSV_STORAGE`` if set, otherwise
+        the legacy ``APXCHOL_SPTRSV_FP16``, then the CPU's FP32 default.
+        Explicit choices override the environment without changing it.
     **advanced
         Passed straight through to the core options: `degree_quantile`,
         `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,

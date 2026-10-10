@@ -374,8 +374,6 @@ public:
 
     // Read factor storage at every setup. The GPU defaults to fp16;
     // the CPU reads the same storage variable with the opposite default.
-    static int fp16_env_tristate() { return sptrsv_fp16_env_tristate(); }
-    static bool fp16_from_env() { return fp16_env_tristate() == 1; }
     static bool fp16_resolved(factor_storage_type storage = factor_storage_type::automatic) {
         return detail::resolve_fp16_storage(storage, true);
     }

@@ -101,9 +101,7 @@ def test_storage_dtype_preserves_original_system_accuracy(dtype):
     assert result.converged
     assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
     assert solver.factor_storage_dtype == dtype
-    # Export is the constructed FP32 factor widened to float64, independently
-    # of the format used for the solver's triangular-solve arrays.
-    assert solver.chol().dtype == np.float64
+    assert solver.chol().dtype == np.float32
 
 
 def test_factor_reused_across_many_b():
@@ -472,6 +470,7 @@ def test_factor_export_algebra_laplacian():
     assert not slv.sddm
     G = slv.chol()
     assert G.shape == (n, n)
+    assert G.dtype == slv.L.dtype == slv.D.dtype == np.float32
     assert slv.L.shape == (n, n)
     assert slv.D.shape == (n,)
 
@@ -494,6 +493,26 @@ def test_factor_export_algebra_laplacian():
     # L D L^T == G G^T stays exact in the singular case too.
     LDLt = (slv.L @ sp.diags(slv.D) @ slv.L.T).tocsc()
     assert spnorm(LDLt - GGt) / spnorm(GGt) < 1e-6
+
+
+def test_export_supports_float32_triangular_solve():
+    G = apxchol.factorize(random_sddm(30, seed=5)).chol()
+    exact = np.linspace(0.5, 1.5, G.shape[0], dtype=np.float32)
+    result = spsolve_triangular(G, G @ exact, lower=True)
+    assert result.dtype == np.float32
+    np.testing.assert_allclose(result, exact, rtol=1e-6)
+
+
+@pytest.mark.parametrize("field, values", [
+    ("indptr", [0, 5, 4]), ("indices", [0, 2, 0, 1]),
+])
+def test_binding_rejects_invalid_csc_bounds(field, values):
+    from apxchol import _apxchol
+
+    A = sp.csc_matrix([[2.0, -1.0], [-1.0, 2.0]])
+    setattr(A, field, np.asarray(values, dtype=np.int32))
+    with pytest.raises(ValueError):
+        _apxchol.Solver(A.indptr, A.indices, A.data, A.shape[0])
 
 
 def test_placeholder_column_per_component():

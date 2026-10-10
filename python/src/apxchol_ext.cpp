@@ -21,13 +21,6 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
                                          py::array data, Eigen::Index n) {
     if (indptr.ndim() != 1 || indices.ndim() != 1 || data.ndim() != 1)
         throw std::invalid_argument("CSC data, indices and indptr must be one-dimensional");
-    for (const auto& array : {indptr, indices})
-        if (array.dtype().kind() != 'i' && array.dtype().kind() != 'u')
-            throw std::invalid_argument("CSC indices and indptr must have integer dtype");
-    if (data.dtype().kind() == 'c')
-        throw std::invalid_argument("A must be real; apxchol solves real symmetric systems");
-    if (std::string("biuf").find(data.dtype().kind()) == std::string::npos)
-        throw std::invalid_argument("CSC data must have a real numeric dtype");
     if (n < 0 || indptr.size() == 0 || indptr.size() - 1 != n)
         throw std::invalid_argument("indptr length must be n+1");
 
@@ -128,15 +121,8 @@ apxchol::solve_options parse_options(const py::dict& d) {
             so.factor_opts.exact_clique_max_degree = v.cast<std::size_t>();
         else if (key == "residual_peel")
             so.factor_opts.residual_peel = parse_peel(v.cast<std::string>());
-        else if (key == "factor_storage_dtype") {
-            const auto dtype = v.cast<std::string>();
-            if (dtype == "float16")
-                so.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
-            else if (dtype == "float32")
-                so.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
-            else
-                throw std::invalid_argument("factor_storage_dtype must be float16 or float32");
-        }
+        else if (key == "factor_storage_dtype")
+            so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
         else
             throw std::invalid_argument(
                 "unknown option '" + key + "'; valid keys: " +
@@ -247,7 +233,7 @@ public:
         const std::int64_t ncol = static_cast<std::int64_t>(F.L.rows());
         py::array_t<std::int64_t> indptr(ncol + 1);
         py::array_t<std::int32_t> indices(nnz);
-        py::array_t<double>       data(nnz);
+        py::array_t<apxchol::factor_value_t> data(nnz);
         auto* ip = indptr.mutable_data();
         auto* ii = indices.mutable_data();
         auto* dd = data.mutable_data();
@@ -255,7 +241,7 @@ public:
             ip[c] = static_cast<std::int64_t>(F.L.outer_[static_cast<std::size_t>(c)]);
         for (std::int64_t k = 0; k < nnz; ++k) {
             ii[k] = static_cast<std::int32_t>(F.L.inner_[static_cast<std::size_t>(k)]);
-            dd[k] = static_cast<double>(F.L.vals_[static_cast<std::size_t>(k)]);
+            dd[k] = F.L.vals_[static_cast<std::size_t>(k)];
         }
         return py::make_tuple(indptr, indices, data);
     }

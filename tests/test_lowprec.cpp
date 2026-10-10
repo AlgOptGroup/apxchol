@@ -64,6 +64,44 @@ struct scoped_drop_off : scoped_env {
 
 } // namespace
 
+TEST(FactorStorage, EnvironmentPrecedenceAndBackendDefaults) {
+    using enum apxchol::factor_storage_type;
+    using apxchol::detail::resolve_fp16_storage;
+    for (bool gpu_default : {false, true}) {
+        scoped_env legacy("APXCHOL_SPTRSV_FP16", nullptr);
+        scoped_env named("APXCHOL_SPTRSV_STORAGE", nullptr);
+        EXPECT_EQ(resolve_fp16_storage(automatic, gpu_default), gpu_default);
+        for (const char* old : {"0", "1"}) {
+            scoped_env compat("APXCHOL_SPTRSV_FP16", old);
+            scoped_env empty("APXCHOL_SPTRSV_STORAGE", "");
+            EXPECT_EQ(resolve_fp16_storage(automatic, gpu_default), *old == '1');
+            for (const char* value : {"auto", "float16", "float32"}) {
+                scoped_env setting("APXCHOL_SPTRSV_STORAGE", value);
+                const bool expected = std::string_view(value) == "auto"
+                    ? gpu_default : std::string_view(value) == "float16";
+                EXPECT_EQ(resolve_fp16_storage(automatic, gpu_default), expected);
+                EXPECT_TRUE(resolve_fp16_storage(fp16, gpu_default));
+                EXPECT_FALSE(resolve_fp16_storage(fp32, gpu_default));
+            }
+        }
+    }
+}
+
+TEST(FactorStorage, InvalidSettingsFailUnlessOverridden) {
+    using enum apxchol::factor_storage_type;
+    using apxchol::detail::resolve_fp16_storage;
+    scoped_env legacy("APXCHOL_SPTRSV_FP16", "invalid");
+    scoped_env named("APXCHOL_SPTRSV_STORAGE", nullptr);
+    EXPECT_THROW(resolve_fp16_storage(automatic, false), std::invalid_argument);
+    for (const char* bad : {"on", "float64", "1", "float16,float32"}) {
+        scoped_env setting("APXCHOL_SPTRSV_STORAGE", bad);
+        EXPECT_THROW(resolve_fp16_storage(automatic, false), std::invalid_argument);
+        EXPECT_FALSE(resolve_fp16_storage(fp32, false));
+    }
+    scoped_env setting("APXCHOL_SPTRSV_STORAGE", "auto");
+    EXPECT_FALSE(resolve_fp16_storage(automatic, false));
+}
+
 // ── _Float16 ──────────────────────────────────────────────────────────────
 
 // Normal range [2^-14, 65504]: |fp16(x) - x| <= 2^-11 |x| (11 significant

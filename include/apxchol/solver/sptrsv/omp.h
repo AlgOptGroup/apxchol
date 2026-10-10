@@ -228,7 +228,7 @@ public:
         return false;
 #endif
     }
-    /// Resolve the next setup's storage; automatic reads APXCHOL_SPTRSV_FP16
+    /// Resolve the next setup's storage; automatic reads APXCHOL_SPTRSV_STORAGE
     /// and defaults to FP32. Unsupported FP16 requests fail.
     static bool fp16_resolved(factor_storage_type storage = factor_storage_type::automatic) {
         const bool want = detail::resolve_fp16_storage(storage, false);

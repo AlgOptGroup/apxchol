@@ -102,7 +102,7 @@ struct partition_options {
 struct factor_options {
     unsigned seed = 42;
     /// Triangular-solve storage; construction arithmetic and exports are unchanged.
-    /// automatic uses APXCHOL_SPTRSV_FP16 or the backend default (CPU fp32, GPU fp16).
+    /// automatic uses APXCHOL_SPTRSV_STORAGE or the backend default (CPU fp32, GPU fp16).
     factor_storage_type factor_storage = factor_storage_type::automatic;
     partition_options partition{};   // selection knobs (see above)
     /// Minimum selector yield before handing a large residual to the BK path:
