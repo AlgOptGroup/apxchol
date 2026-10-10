@@ -1,193 +1,190 @@
 #pragma once
-// Host preparation for the Metal triangular-solve kernels. No device is needed
-// to build or test these layouts; the CPU and CUDA solvers do not use them.
-#include "apxchol/solver/sptrsv/cuda_host.h"
-#include "apxchol/sparse_csc.h"
-#include "apxchol/types.h"
+#include "apxchol/solver/detail/gpu_dataflow_plan.h"
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
-#include <cstdint>
+#include <numeric>
+#include <span>
 #include <stdexcept>
-#include <string>
-#include <utility>
 #include <vector>
 
 namespace apxchol::detail::metal_schedule {
 
-/// Rows with more dependencies are heavy: one threadgroup per row, the
-/// dependencies dealt over kHeavyDeps fixed virtual lanes.
-inline constexpr std::uint32_t kHeavyDeps = 32;
-/// A level with only light rows and width at most this many items runs
-/// inside one merged single-threadgroup step with its narrow neighbours.
-inline constexpr std::uint32_t kNarrowItems = 2048;
-/// Nonzero factor and operator magnitudes the double-float PCG accepts:
-/// [2^-kRangeExponent, 2^kRangeExponent]. Outside it fp32 products and the
-/// low parts of double-floats leave the normal range.
-inline constexpr int kRangeExponent = 100;
-
-inline bool in_range(double v) {
-    const double a = std::fabs(v);
-    return a == 0.0 || (a >= std::ldexp(1.0, -kRangeExponent) && a <= std::ldexp(1.0, kRangeExponent));
+inline bool in_range(double value) {
+    const double magnitude = std::abs(value);
+    return magnitude == 0 || (magnitude >= 0x1p-100 && magnitude <= 0x1p100);
 }
-
-/// One triangular solve ordered by levels. Level l owns slots
-/// [level_ptr[l], level_ptr[l + 1]); slots [level_ptr[l], heavy_ptr[l]) are
-/// light. Slot t solves row rows[t] from the dependencies
-/// [ptr[t], ptr[t + 1]) of (col, val); dinv[t] = fp32(1 / fp64(L_ii)).
-struct level_solve {
-    std::vector<std::uint32_t> level_ptr;
-    std::vector<std::uint32_t> heavy_ptr;
-    std::vector<std::uint32_t> rows;
-    std::vector<std::uint32_t> ptr;
-    std::vector<std::uint32_t> col;
-    std::vector<float> val;
-    std::vector<float> dinv;
-
-    std::size_t levels() const { return level_ptr.empty() ? 0 : level_ptr.size() - 1; }
-    std::size_t slots() const { return rows.size(); }
-};
 
 namespace detail {
-
-// deps of unknown i: [dep_begin(i), dep_end(i)) of (idx, vals); its diagonal
-// at diag_slot(i). Forward (CSR of L) visits 0..m-1 with dependencies below
-// the row, backward (CSC of L) m-1..0 with dependencies above the column.
-inline level_solve build(const cuda_host::csr_int<float>& A, bool forward) {
-    const std::uint32_t m = static_cast<std::uint32_t>(A.m);
-    const int* ptr = A.ptr.data();
-    const int* idx = A.idx.get();
-    const float* vals = A.vals.get();
-    const char* what = forward ? "forward" : "backward";
-    auto diag_slot = [&](std::uint32_t i) { return forward ? ptr[i + 1] - 1 : ptr[i]; };
-    auto dep_begin = [&](std::uint32_t i) { return forward ? ptr[i] : ptr[i] + 1; };
-    auto dep_end = [&](std::uint32_t i) { return forward ? ptr[i + 1] - 1 : ptr[i + 1]; };
-
-    std::vector<std::uint32_t> depth(m, 0);
-    std::uint32_t levels = 0;
-    for (std::uint32_t k = 0; k < m; ++k) {
-        const std::uint32_t i = forward ? k : m - 1 - k;
-        if (ptr[i + 1] <= ptr[i] || static_cast<std::uint32_t>(idx[diag_slot(i)]) != i)
-            throw std::invalid_argument(std::string("apxchol level_schedule: ") + what +
-                                        " row " + std::to_string(i) +
-                                        " does not hold its diagonal where expected");
-        std::uint32_t d = 0;
-        for (int e = dep_begin(i); e < dep_end(i); ++e) {
-            const int j = idx[e];
-            if (forward ? !(j >= 0 && static_cast<std::uint32_t>(j) < i)
-                        : !(static_cast<std::uint32_t>(j) > i && static_cast<std::uint32_t>(j) < m))
-                throw std::invalid_argument(std::string("apxchol level_schedule: ") + what +
-                                            " row " + std::to_string(i) +
-                                            " has an entry outside its triangle");
-            d = std::max(d, depth[static_cast<std::uint32_t>(j)] + 1);
-        }
-        depth[i] = d;
-        levels = std::max(levels, d + 1);
-    }
-
-    level_solve s;
-    s.level_ptr.assign(static_cast<std::size_t>(levels) + 1, 0);
-    for (std::uint32_t i = 0; i < m; ++i) ++s.level_ptr[depth[i] + 1];
-    for (std::uint32_t l = 0; l < levels; ++l) s.level_ptr[l + 1] += s.level_ptr[l];
-    std::vector<std::uint32_t> fill(s.level_ptr.begin(), s.level_ptr.begin() + levels);
-    s.rows.assign(m, 0);
-    auto heavy = [&](std::uint32_t i) {
-        return static_cast<std::uint32_t>(dep_end(i) - dep_begin(i)) > kHeavyDeps;
-    };
-    for (std::uint32_t i = 0; i < m; ++i)
-        if (!heavy(i)) s.rows[fill[depth[i]]++] = i;
-    s.heavy_ptr.assign(fill.begin(), fill.end());
-    for (std::uint32_t i = 0; i < m; ++i)
-        if (heavy(i)) s.rows[fill[depth[i]]++] = i;
-
-    // At most ptr[m] <= INT_MAX dependencies: the 32-bit offsets cannot overflow.
-    std::size_t deps = 0;
-    for (std::uint32_t i = 0; i < m; ++i) deps += static_cast<std::size_t>(dep_end(i) - dep_begin(i));
-    s.ptr.reserve(static_cast<std::size_t>(m) + 1);
-    s.ptr.push_back(0);
-    s.col.reserve(deps);
-    s.val.reserve(deps);
-    s.dinv.reserve(m);
-    for (const std::uint32_t i : s.rows) {
-        for (int e = dep_begin(i); e < dep_end(i); ++e) {
-            if (!in_range(vals[e]))
-                throw std::domain_error("apxchol level_schedule: factor value " + std::to_string(vals[e]) +
-                                        " outside [2^-100, 2^100]");
-            s.col.push_back(static_cast<std::uint32_t>(idx[e]));
-            s.val.push_back(vals[e]);
-        }
-        s.ptr.push_back(static_cast<std::uint32_t>(s.col.size()));
-        const double d = static_cast<double>(vals[diag_slot(i)]);
-        const float inv = static_cast<float>(1.0 / d);
-        if (!(std::isfinite(d) && d != 0.0 && in_range(d) && std::isfinite(inv)))
-            throw std::domain_error("apxchol level_schedule: factor diagonal " + std::to_string(d) +
-                                    " of row " + std::to_string(i) + " is zero, non-finite or outside [2^-100, 2^100]");
-        s.dinv.push_back(inv);
-    }
-    return s;
-}
-
-}  // namespace detail
-
-/// Forward solve L y = b from the CSR of L (diagonal last in each row).
-inline level_solve build_forward(const cuda_host::csr_int<float>& L) { return detail::build(L, true); }
-/// Backward solve L^T x = y from the CSC of L (diagonal first in each column).
-inline level_solve build_backward(const cuda_host::csr_int<float>& LT) { return detail::build(LT, false); }
-
-struct factor_schedules {
-    level_solve forward;
-    level_solve backward;
-    factor_drop_stats drop;
+// Merge consecutive levels while every connected component fits one workgroup.
+// A failed merge is rolled back; no dependency may cross workgroups in a stage.
+struct step {
+    unsigned first, last;
+};
+struct plan {
+    std::vector<unsigned> block_ptr{0}, rows;
+    std::vector<step> steps;
 };
 
-/// Both schedules of L11 = L.topLeftCorner(m, m) after the compacting drop
-/// at `drop_rel` (factor_drop_rel_from_env() for the solver): the drop and
-/// transpose the GPU host preparation shares with omp_sptrsv's fp32 storage.
-inline factor_schedules build_factor_schedules(const sparse_csc& L, std::int64_t m, double drop_rel) {
-    auto LT = cuda_host::build_L11_csc_int<float>(L, m);
-    const std::vector<float> scales = cuda_host::column_scales(LT);
-    factor_schedules out;
-    out.drop = cuda_host::apply_factor_drop(LT, scales, drop_rel, /*fp16_storage=*/false);
-    const auto Lr = cuda_host::transpose_csr(LT);
-    out.forward = build_forward(Lr);
-    out.backward = build_backward(LT);
-    return out;
-}
-
-enum class step_kind : std::uint32_t { light = 0, heavy = 1, narrow = 2 };
-
-/// light / heavy: slots [first, last) of one level; narrow: levels [first, last).
-struct level_step {
-    step_kind kind;
-    std::uint32_t first;
-    std::uint32_t last;
-};
-
-/// Runs of narrow levels (light rows only, width <= kNarrowItems) merge
-/// into one step; every other level becomes a light and/or a heavy step. The
-/// plan changes dispatches only: a row's arithmetic depends on whether it is
-/// heavy, never on the step that runs it.
-inline std::vector<level_step> plan_steps(const level_solve& s) {
-    std::vector<level_step> out;
-    const std::size_t L = s.levels();
-    auto narrow = [&](std::size_t l) {
-        const std::uint64_t width = s.level_ptr[l + 1] - s.level_ptr[l];
-        return s.heavy_ptr[l] == s.level_ptr[l + 1] && width <= kNarrowItems;
+template <class P, class I>
+inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &levels,
+                      const std::vector<unsigned> &rows, const std::vector<unsigned> &depth,
+                      unsigned capacity) {
+    const unsigned n = rows.size();
+    std::vector<unsigned> parent(n), size(n, 1);
+    std::iota(parent.begin(), parent.end(), 0);
+    auto find = [&](unsigned x) {
+        while (x != parent[x])
+            x = parent[x];
+        return x;
     };
-    for (std::size_t l = 0; l < L;) {
-        if (narrow(l)) {
-            const std::size_t l0 = l;
-            while (l < L && narrow(l)) ++l;
-            out.push_back({step_kind::narrow, static_cast<std::uint32_t>(l0), static_cast<std::uint32_t>(l)});
-            continue;
+    struct change {
+        unsigned child, root, old_size;
+    };
+    std::vector<change> undo;
+    std::vector<int> head(n, -1), next(n);
+    plan out;
+    out.rows.reserve(n);
+    out.block_ptr.reserve(n / capacity + 16);
+    auto flush = [&](unsigned first, unsigned last) {
+        std::vector<unsigned> roots;
+        for (unsigned s = levels[first]; s < levels[last]; ++s) {
+            unsigned row = rows[s], root = find(row);
+            if (head[root] < 0)
+                roots.push_back(root);
+            next[row] = head[root];
+            head[root] = row;
         }
-        if (s.heavy_ptr[l] > s.level_ptr[l])
-            out.push_back({step_kind::light, s.level_ptr[l], s.heavy_ptr[l]});
-        if (s.level_ptr[l + 1] > s.heavy_ptr[l])
-            out.push_back({step_kind::heavy, s.heavy_ptr[l], s.level_ptr[l + 1]});
-        ++l;
+        std::vector<unsigned> buckets(capacity + 1, 0), ordered(roots.size());
+        for (unsigned root : roots)
+            ++buckets[capacity - size[root]];
+        unsigned offset = 0;
+        for (auto &count : buckets) {
+            unsigned next = offset + count;
+            count = offset;
+            offset = next;
+        }
+        for (unsigned root : roots)
+            ordered[buckets[capacity - size[root]]++] = root;
+        roots.swap(ordered);
+        step launch{unsigned(out.block_ptr.size() - 1), 0};
+        std::vector<unsigned> block;
+        block.reserve(capacity);
+        auto emit = [&] {
+            if (block.empty())
+                return;
+            out.rows.insert(out.rows.end(), block.begin(), block.end());
+            out.block_ptr.push_back(out.rows.size());
+            block.clear();
+        };
+        for (unsigned root : roots) {
+            if (block.size() + size[root] > capacity)
+                emit();
+            const auto begin = block.size();
+            for (int row = head[root]; row >= 0; row = next[row])
+                block.push_back(row);
+            // The list was built by increasing depth and prepended. Reverse
+            // this component to restore dependency order; components are independent.
+            std::reverse(block.begin() + begin, block.end());
+            head[root] = -1;
+        }
+        emit();
+        launch.last = out.block_ptr.size() - 1;
+        out.steps.push_back(launch);
+        for (unsigned s = levels[first]; s < levels[last]; ++s) {
+            parent[rows[s]] = rows[s];
+            size[rows[s]] = 1;
+        }
+        undo.clear();
+    };
+    for (unsigned first = 1, l = 1; l + 1 < levels.size();) {
+        const auto checkpoint = undo.size();
+        bool fits = true;
+        for (unsigned s = levels[l]; fits && s < levels[l + 1]; ++s) {
+            unsigned row = rows[s];
+            for (auto e = ptr[row]; e < ptr[row + 1]; ++e) {
+                unsigned other = col[e];
+                if (other == row || depth[other] < first)
+                    continue;
+                if (depth[other] >= l)
+                    throw std::runtime_error("non-topological levels");
+                unsigned a = find(row), b = find(other);
+                if (a == b)
+                    continue;
+                if (size[a] < size[b])
+                    std::swap(a, b);
+                undo.push_back({b, a, size[a]});
+                parent[b] = a;
+                size[a] += size[b];
+                if (size[a] > capacity) {
+                    fits = false;
+                    break;
+                }
+            }
+        }
+        if (!fits) {
+            while (undo.size() > checkpoint) {
+                auto u = undo.back();
+                undo.pop_back();
+                parent[u.child] = u.child;
+                size[u.root] = u.old_size;
+            }
+            flush(first, l);
+            first = l;
+        } else {
+            undo.clear();
+            ++l;
+            if (l + 1 == levels.size())
+                flush(first, l);
+        }
     }
     return out;
 }
+} // namespace detail
 
-}  // namespace apxchol::detail::metal_schedule
+struct schedule {
+    gpu_dataflow::packed_plan tasks;
+    std::vector<detail::step> stages;
+    unsigned levels = 0;
+};
+
+inline schedule build(std::span<const unsigned> ptr, std::span<const unsigned> col,
+                      std::span<const float> values, bool reverse) {
+    if (ptr.empty() || ptr.size() > gpu_dataflow::special_bit || ptr.front() != 0 ||
+        ptr.back() != col.size() || col.size() != values.size())
+        throw std::invalid_argument("Metal factor has invalid CSR dimensions");
+    const unsigned n = ptr.size() - 1;
+    std::vector<unsigned> depth(n);
+    unsigned height = 0;
+    for (unsigned q = 0; q < n; ++q) {
+        const unsigned row = reverse ? n - 1 - q : q;
+        if (ptr[row] >= ptr[row + 1] || ptr[row + 1] > col.size())
+            throw std::invalid_argument("Metal factor has invalid row pointers");
+        const unsigned diagonal = reverse ? ptr[row] : ptr[row + 1] - 1;
+        if (col[diagonal] != row || values[diagonal] == 0)
+            throw std::invalid_argument("Metal factor has a missing or zero diagonal");
+        for (unsigned p = ptr[row]; p < ptr[row + 1]; ++p) {
+            if (!in_range(values[p]))
+                throw std::domain_error("Metal factor outside [2^-100, 2^100]");
+            if (p == diagonal)
+                continue;
+            const unsigned other = col[p];
+            if (other >= n || (reverse ? other <= row : other >= row))
+                throw std::invalid_argument("Metal factor has a dependency outside its triangle");
+            depth[row] = std::max(depth[row], depth[other] + 1);
+        }
+        height = std::max(height, depth[row] + 1);
+    }
+    if (height <= 1)
+        return {{}, {}, height};
+    std::vector<unsigned> levels(height + 1), rows(n);
+    for (unsigned d : depth)
+        ++levels[d + 1];
+    std::partial_sum(levels.begin(), levels.end(), levels.begin());
+    auto cursor = levels;
+    for (unsigned row = 0; row < n; ++row)
+        rows[cursor[depth[row]]++] = row;
+    auto groups = detail::partition(ptr, col, levels, rows, depth, 128);
+    return {gpu_dataflow::pack(ptr.data(), {n, reverse, groups.rows.data()}, groups.block_ptr),
+            std::move(groups.steps), height};
+}
+} // namespace apxchol::detail::metal_schedule

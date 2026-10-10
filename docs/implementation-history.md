@@ -46,10 +46,28 @@ quality and cost, and requires its own correctness and performance validation.
 
 ## GPU solve and storage
 
+**CUDA and Metal share the dataflow worker and task format.** CUDA uses a global
+queue; Metal groups consecutive dependency levels into independent workgroups
+and orders the groups' stages through GPU dispatches. Their device adapters
+supply atomics, subgroup operations and factor storage. Task counting and
+emission use the same routine on the host and CUDA device, without downloading
+private device-owned factors. Metal no longer keeps a level-permuted value
+copy or separate light, heavy and narrow-level solve kernels.
+
+Each sweep initializes atomic FP32 words and solves roots before processing
+other tasks. Values and readiness share one word; canonical NaNs cannot match
+the pending marker. This replaces CUDA's epoch counter and last-worker reset
+protocol, and works on graph replay. RHS, diagonal and FP16 scale loads precede
+dependency polling: delaying them until publication put their latency on the
+critical path in the first prototype. Numerical tests use independent serial
+double references and repeated/grid-varied executions; old exact-reduction
+fixtures do not define the new arithmetic order.
+
 **Dataflow triangular solves replaced level launches and proprietary analysis.**
-The library uses its own persistent dataflow kernel, with an epoch-tagged
-value per row and topologically ordered work tickets. This avoids a kernel
-launch for every level and an analysis buffer proportional to factor nnz.
+The library uses its own persistent dataflow worker and topologically ordered
+work tickets. This avoids a kernel launch for every level and an analysis
+buffer proportional to factor nnz. The original CUDA implementation used
+epoch-tagged values.
 Our library links `cudart`; benchmark competitors may independently require
 cuSPARSE/cuBLAS. Earlier records describing a selectable cuSPARSE backend are
 obsolete. The design and ordering constraints are documented in
