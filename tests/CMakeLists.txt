@@ -32,6 +32,8 @@ add_executable(unit_tests
         test_operator_class.cpp
         test_solve_routes.cpp
         test_cuda_device_scope.cpp
+        test_permuted_operator.cpp
+        test_metal_schedule.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE
