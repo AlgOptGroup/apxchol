@@ -8,7 +8,7 @@ FetchContent_Declare(
 
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
-target_include_directories(gtest SYSTEM PUBLIC
+target_include_directories(gtest SYSTEM PRIVATE
         "${googletest_SOURCE_DIR}/googletest/include")
 
 add_executable(unit_tests
