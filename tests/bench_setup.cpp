@@ -199,12 +199,6 @@ static void print_csv(const bench_result& r) {
                 r.peak_MB);
 }
 
-template<typename Incidence>
-static constexpr const char* storage_name();
-template<> constexpr const char* storage_name<apxchol::vec_incidence>()            { return "vec"; }
-template<> constexpr const char* storage_name<apxchol::bstr_incidence>()           { return "bstr"; }
-template<> constexpr const char* storage_name<apxchol::directed_vec_pool_incidence>() { return "vec_pool_aos"; }
-
 enum class output_mode { table, csv, profile, report };
 
 using storage_filter_fn = std::function<bool(const char*)>;
