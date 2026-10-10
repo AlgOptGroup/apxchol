@@ -241,7 +241,7 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None,
 
 def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout=None, ground=None,
             mid=None):
-    cfg = f"--v1-configs '{config}'" if solver=="apxchol_v1" else ""
+    cfg = f"--v1-configs '{config}' --v1-backend {DEVICE}" if solver=="apxchol_v1" else ""
     # AMGCL de-singularization series: ground=coarse charts the relaxed-coarse cell
     # (--decompose stays auto, so whole+coarse on connected / split+coarse on
     # disconnected). The headline AMGCL series passes no --ground (auto = pin).
@@ -292,6 +292,11 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
         if st in {"complete", "not_converged"} and m.get("stop_contract") != "original-v1":
             st = "failed"
             m["stopping_failure"] = "binary lacks original-v1 stopping/timing contract"
+        if solver == "apxchol_v1" and st in {"complete", "not_converged"}:
+            route_error = rc.v1_route_error(m, p.stderr, DEVICE, REPS, WARMUP)
+            if route_error:
+                st = "failed"
+                m["route_failure"] = route_error
         if m is None:
             # No CSV row = crash. Distinguish allocation failures across all
             # solvers, including third-party CUDA libraries, from other errors.
@@ -487,15 +492,9 @@ NO_CAP = False
 NOCAP_TIMEOUT = int(os.environ.get("NOCAP_TIMEOUT_S", str(4 * 3600)))
 
 # --- GPU axis solver sets ---
-# apxchol on GPU = the single bg+tree config via the GPU-resident PCG (run_cpp adds
-# is 2D-structured-grid only (added per-matrix in do_matrix). amgcl_cuda's host-side
-# AMG setup is now OpenMP-parallel (CMakeLists -Xcompiler=-fopenmp fix).
-APX_GPU = [("apxchol_v1", APX_DEFAULT_CONFIG),
-           # Storage-matched selector ablation.  The AoS default above remains
-           # the sole headline/cap reference; the other selectors complete
-           # the {bg,greedy,bk} x AoS GPU comparison.
-           ("apxchol_v1","greedy+tree[vec_pool_aos]"), # priority-greedy is shallow and deterministic
-           ("apxchol_v1","bk+tree[vec_pool_aos]")]      # bg's variable depth; bk is the deep worst case
+# The GPU route owns both setup and solve. Host-only storage/selector ablations
+# remain on the CPU axis; historical mixed-route cells retain their own sources.
+APX_GPU = [("apxchol_v1", APX_DEFAULT_CONFIG)]
 COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda"]
 
 

@@ -2,19 +2,21 @@
 """One-time FILL measurement pass for the Cholesky-family solvers.
 
 Records each solver's fill ratio on a CONSISTENT definition — fill =
-2*offdiag(L) / offdiag(A) = 2*(factor_nnz - n) / (matrix_nnz - n) — so apxchol,
-ParAC and RCHOL are comparable (RCHOL's stored `fillin` uses 2*Lnnz/Annz incl.
+2*offdiag(L) / offdiag(A). The measured apxchol owner counts stored off-diagonal
+input entries directly: matrix_nnz - n is invalid when zero isolates omit their
+diagonal entries. ParAC and RCHOL use their reported stored counts
+(RCHOL's stored `fillin` uses 2*Lnnz/Annz incl.
 the diagonal, which is recomputed here from the off-diagonal counts). AMG solvers
 (BoomerAMG/AMGCL) have NO triangular factor, so no comparable number — they are
 intentionally absent from the fill chart.
 
-  - apxchol: APXCHOL_REPORT_FILL=1 re-factors and prints "FILL ... Lnnz=.. offdiag=.. adj_nnz=.."
+  - apxchol: APXCHOL_REPORT_FILL=1 reads the held measured factor and prints "FILL ... Lnnz=.. offdiag=.. adj_nnz=.."
   - ParAC  : the GPU graph driver prints "factorization nnz", "laplacian nnz", "num cols"
   - RCHOL/pRCHOL: back-computed from the existing per-cell store (fillin, nnz, n)
 
 Writes results/fill_cells/<mid>__<solver>.json; AoS apxchol series have an
-_aos suffix, preserving historical indexed series. No PCG-solve timing is used, so
-this is safe to run alongside other (timing) work. Run from repo root:
+_aos suffix, preserving historical indexed series. No PCG-solve timing is used.
+Run separately from timing work to avoid resource contention. Run from repo root:
   python3 benchmarks/fill_pass.py
 """
 import json, os, re
@@ -99,6 +101,8 @@ def done(mid, solver):
             and record.get("series") == solver
             and record.get("cell", {}).get("matrix_id") == mid
             and tuple(record.get("cell", {}).get(k) for k in ("solver", "config", "device")) == FILL_SOURCE[solver]
+            and (FILL_SOURCE[solver][0] != "apxchol_v1"
+                 or record.get("provenance", {}).get("measurement") == "factor-fill-measured-owner")
             and not chart_cells.stale_reasons(record))
 
 
@@ -117,7 +121,7 @@ def emit(mid, family, solver, n, adj_nnz, factor_offdiag):
                     "fill": round(fill, 4)},
         "status": "complete",
         "provenance": {"git_sha": git_sha(),
-                       "measurement": "factor-fill"},
+                       "measurement": "factor-fill-measured-owner" if source_solver == "apxchol_v1" else "factor-fill"},
         "series": solver,
     }
     with open(f"{OUT}/{mid}__{solver}.json", "w") as handle:
@@ -171,6 +175,26 @@ APX_SELECTORS = [("apxchol_bg_aos", "bg+tree[vec_pool_aos]"),
                  ("apxchol_greedy_aos", "greedy+tree[vec_pool_aos]"),
                  ("apxchol_bk_aos", "bk+tree[vec_pool_aos]")]
 
+def parse_apxchol_fill(stdout, stderr):
+    """Sum the actual owners in this one-repetition, possibly split CPU solve."""
+    metrics = rc.parse_csv(stdout)
+    if rc.v1_route_error(metrics, stderr, "cpu", 1, 0):
+        raise ValueError("missing complete CPU route receipt")
+    lines = [line for line in stderr.splitlines() if line.startswith("FILL ")]
+    if not lines:
+        raise ValueError("no measured-owner FILL records")
+    offdiag = adj = 0
+    for line in lines:
+        match = re.search(r"offdiag=(\d+)\s+adj_nnz=(\d+)", line)
+        if not match or not line.endswith(" execution_route=cpu source=measured_owner"):
+            raise ValueError("FILL record is not from the measured CPU owner")
+        offdiag += int(match.group(1))
+        adj += int(match.group(2))
+    if adj <= 0:
+        raise ValueError("fill ratio has no off-diagonal denominator")
+    return metrics["n"], adj, offdiag
+
+
 def apxchol_fill(mid, family, args, reg):
     regflag = f"--reg-rel {REG}" if reg else ""
     for solver_key, cfg in APX_SELECTORS:
@@ -178,19 +202,15 @@ def apxchol_fill(mid, family, args, reg):
             continue
         env = benchmark_openmp_env(
             16, dict(os.environ, APXCHOL_REPORT_FILL="1"))
-        cmd = (f"{BIN} {args} {regflag} --solver apxchol_v1 --v1-configs '{cfg}' "
+        cmd = (f"{BIN} {args} {regflag} --solver apxchol_v1 --v1-backend cpu --v1-configs '{cfg}' "
                f"--threads 16 --tol 1e-8 --maxiter 1 --repeat 1 --csv")
         o = sh(cmd, env=env)
-        m = re.search(r"FILL.*offdiag=(\d+)\s+adj_nnz=(\d+)", o.stderr)
-        if not m:
-            print(f"  {mid:16} {solver_key:16} FAILED (no FILL line)"); continue
-        offdiag, adj = int(m.group(1)), int(m.group(2))
-        n = 0
-        for line in o.stdout.splitlines():           # n = adj-row count, from the CSV
-            f = line.split(",")
-            if len(f) > 2 and f[0] not in ("solver",):
-                try: n = int(f[2])
-                except: pass
+        try:
+            if o.returncode != 0:
+                raise ValueError(f"benchmark exit {o.returncode}")
+            n, adj, offdiag = parse_apxchol_fill(o.stdout, o.stderr)
+        except ValueError as error:
+            print(f"  {mid:16} {solver_key:16} FAILED ({error})"); continue
         emit(mid, family, solver_key, n, adj, offdiag)
 
 

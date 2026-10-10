@@ -3,6 +3,7 @@
 #include "apxchol/operator_class.h"
 #include "apxchol/solver/elimination/elimination.h"
 #include "apxchol/solver/factor_options.h"
+#include "apxchol/solver/detail/setup_route.h"
 #include "apxchol/solver/partitioner_list.h"
 #include "apxchol/sparse_csc.h"
 #include <Eigen/Sparse>
@@ -192,7 +193,8 @@ namespace detail {
 factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                   graph_storage storage,
                                   const factor_options& opts,
-                                  checkpoint* cp, bool retain_host_factor);
+                                  checkpoint* cp, bool retain_host_factor,
+                                  setup_route route = setup_route::diagnostic);
 
 struct factor_entry {
     node_index neighbor;

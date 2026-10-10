@@ -3,20 +3,29 @@
 // native-solve retries. No change to GPU kernels, storage or native stop test.
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/pcg_cuda.h"
+#include "apxchol/solver/detail/solve_backend.h"
 
 namespace apxchol::detail {
 class gpu_solve_session {
-    apx_cholesky precond;
+    gpu_preconditioner precond;
     cuda_pcg gpcg;
     const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
 public:
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
                       const solve_options& opts, solve_result& res) {
+        if (opts.backend == solve_backend::cpu)
+            throw std::invalid_argument("GPU session cannot execute an explicit CPU request");
+        auto required = opts;
+        required.backend = solve_backend::gpu;
+        (void)select_solve_backend(required);
         precond.set_options(opts.factor_opts);
         precond.set_storage(opts.storage);
         if (!std::getenv("APXCHOL_NO_CHECKPOINT"))
             precond.set_checkpoint(&res.timings);
         precond.compute(L);
+        precond.set_checkpoint(nullptr);
+        if (!precond.trsv().adopted_device_factor())
+            throw std::runtime_error("GPU route did not produce a device-owned factor");
         // Lumping (if any) happened inside compute(), on a private copy; the
         // GPU operator below is built from L itself.
         res.lumped_offdiag = precond.factor().lumped_offdiag;
@@ -29,14 +38,20 @@ public:
             const double operator_setup_wall_s = std::chrono::duration<double>(
                 detail::gpu_setup_diagnostic_clock::now() - operator_setup_begin).count();
             // Host API interval, disjoint from factorize/install. The device
-            // builder completes inside setup; host fallback retains its prior
-            // behavior. Common benchmark timing adds its own completion boundary.
+            // builder completes inside setup. Common benchmark timing adds its
+            // own completion boundary.
             std::fprintf(stderr,
                 "[gpu-operator-setup-receipt] diagnostics=%s operator_setup_wall_s=%.17g\n",
                 detail::gpu_setup_diagnostics() ? "enabled" : "disabled", operator_setup_wall_s);
         }
     }
+    const gpu_preconditioner& preconditioner() const { return precond; }
+
     void solve(const Eigen::VectorXd& b, solve_result& res, double tol, int max_iter) {
+        if (b.size() != precond.rows())
+            throw std::invalid_argument("GPU solve: RHS length mismatch");
+        res.backend = solve_backend::gpu;
+        res.lumped_offdiag = precond.factor().lumped_offdiag;
         if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
         int iters = 0;
         double rnorm = 1.0;

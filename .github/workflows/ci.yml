@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &ci_paths
       - 'include/**'
       - 'src/**'
       - 'tests/**'
@@ -21,23 +21,10 @@ on:
       - 'python/**'
       - 'octave/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/wheels.yml'
+      - '.github/workflows/publish.yml'
   pull_request:
-    paths:
-      - 'include/**'
-      - 'src/**'
-      - 'tests/**'
-      - 'examples/**'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-      - 'benchmarks/**/*.py'
-      - 'benchmarks/requirements.txt'
-      - 'benchmarks/CMakeLists.txt'
-      - 'benchmarks/src/**'
-      - 'benchmarks/tests/**'
-      - 'benchmarks/patches/**'
-      - 'python/**'
-      - 'octave/**'
-      - '.github/workflows/ci.yml'
+    paths: *ci_paths
 
 permissions:
   contents: read
@@ -84,12 +71,17 @@ jobs:
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
 
   linux:
-    name: Linux (${{ matrix.name }}, build + ctest)
+    name: Linux (${{ matrix.compiler.name }}, ${{ matrix.build.name }}, build + ctest)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
+        build: &build_modes
+          - name: native
+            native_arch: 'ON'
+          - name: portable
+            native_arch: 'OFF'
+        compiler:
           - name: GCC 14
             cc: gcc-14
             cxx: g++-14
@@ -99,64 +91,45 @@ jobs:
             cxx: clang++-18
             packages: clang-18 libomp-18-dev
     env:
-      CC: ${{ matrix.cc }}
-      CXX: ${{ matrix.cxx }}
+      CC: ${{ matrix.compiler.cc }}
+      CXX: ${{ matrix.compiler.cxx }}
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build
+          sudo apt-get install -y ${{ matrix.compiler.packages }} libeigen3-dev ninja-build
       - &configure-build
         name: Configure + build (Release)
         run: |
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS:-}
-          cmake --build build --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
+          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS:-}
+          cmake --build build
       - &ctest
         name: Run unit tests
         run: ctest --test-dir build --no-tests=error --output-on-failure
 
   macos:
-    name: macOS (${{ matrix.name }}, build + ctest)
+    name: macOS (Apple Clang, ${{ matrix.build.name }}, Metal ${{ matrix.metal }}, build + ctest)
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Apple Clang
-            cmake_args: '-DAPXCHOL_BUILD_TOOLS=ON'
-          - name: Apple Clang + Metal
-            cmake_args: '-DAPXCHOL_USE_METAL=ON -DAPXCHOL_BUILD_TOOLS=ON'
+        build: *build_modes
+        metal: ['OFF', 'ON']
     env:
-      CMAKE_ARGS: ${{ matrix.cmake_args }}
+      CMAKE_ARGS: -DAPXCHOL_USE_METAL=${{ matrix.metal }} -DAPXCHOL_BUILD_TOOLS=ON
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: brew install libomp ninja
       - *configure-build
-      - name: Check OpenMP linkage
-        run: otool -L build/apxchol/tests/unit_tests | grep -q libomp
       - *ctest
 
   python:
-    name: python (manylinux wheel + pytest)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # One Python only (cp312) — same manylinux path as the release wheels, so
-      # it catches the old-environment portability breaks ubuntu-latest can't,
-      # and runs the package test suite inside the built wheel.
-      - name: Build wheel + run pytest
-        uses: pypa/cibuildwheel@v3.2
-        env:
-          CIBW_BUILD: "cp312-manylinux_x86_64"
-          CIBW_ENVIRONMENT: APXCHOL_PORTABLE_BUILD=1
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest {project}/python/tests -v
-        with:
-          package-dir: python
+    uses: ./.github/workflows/wheels.yml
 
   octave:
     name: octave (mkoctfile + tests)

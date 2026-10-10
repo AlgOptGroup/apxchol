@@ -10,6 +10,8 @@ namespace apxchol {
 inline constexpr double default_tol      = 1e-8;
 inline constexpr int    default_max_iter = 200;
 
+enum class solve_backend { automatic, cpu, gpu };
+
 struct solve_options {
     double tol       = default_tol;
     int    max_iter  = default_max_iter;
@@ -21,7 +23,9 @@ struct solve_options {
     /// cpu_solver::preconditioner().factor().L stays readable (costs one extra
     /// factor-sized copy in memory; the bindings' L/D/P export needs it).
     bool keep_factor_values = false;
-    factor_options factor_opts;
+    factor_options factor_opts{};
+    /// Select a complete setup/solve route; execution errors never change it.
+    solve_backend backend = solve_backend::automatic;
 };
 
 struct solve_result {
@@ -39,15 +43,15 @@ struct solve_result {
     // Sampled inside solve() because the GPU-resident PCG frees all device state
     // before returning -- callers can't measure it post-hoc.
     double solve_vram_mb = -1.0;
+    solve_backend backend = solve_backend::cpu;
 };
 
 /// Generate a random zero-mean unit RHS vector.
 Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 
 /// Reusable CPU solver: factor + SpMV operator built ONCE, then PCG-solve any
-/// number of right-hand sides. This is the machinery of the one-shot solve()
-/// (which delegates to it), exposed for repeated-solve callers — the Python /
-/// Octave bindings hold one of these per matrix.
+/// number of right-hand sides. Setup, triangular solves and PCG always run on
+/// the CPU, including in CUDA builds. Python/Octave bindings hold one per matrix.
 ///
 ///   cpu_solver slv(L);                       // factorize + build parallel-SpMV operator
 ///   auto r1 = slv.solve(b1);                 // tol/max_iter from opts
@@ -134,8 +138,9 @@ private:
 };
 
 /// One-shot solve: factorize L, then solve Lx = b via PCG.
-/// (Constructs a cpu_solver internally; on CUDA builds the GPU-resident PCG
-/// path is taken instead.)
+/// Automatic selects the complete GPU route for compatible CUDA configurations,
+/// otherwise CPU. An explicit GPU request requires device-owned setup and solve;
+/// unsupported inputs and execution failures are errors, never a CPU retry.
 solve_result solve(const Eigen::SparseMatrix<double>& L,
                    const Eigen::VectorXd& b,
                    const solve_options& opts = {});

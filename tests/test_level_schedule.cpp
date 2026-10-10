@@ -174,7 +174,7 @@ TEST(LevelSchedule, EveryRowOnceDependenciesEarlierLightBeforeHeavy) {
 // What the schedules apply is what omp_sptrsv stores on its fp32 storage (the
 // same L11, drop and transpose), and the levels are its topological levels.
 TEST(LevelSchedule, ArraysAndLevelsAreTheCpuStoredFactors) {
-    const scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    const scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     for (const char* drop : {static_cast<const char*>(nullptr), "0", "1e-3"}) {
         const scoped_env env("APXCHOL_FACTOR_DROP", drop);
         for (const factor_case& fc : factor_cases()) {
@@ -260,7 +260,7 @@ TEST(LevelSchedule, StepPlanCoversEachLevelOnce) {
 // The fp32 emulation of the device kernels agrees with omp_sptrsv's fp64
 // sweeps on the same stored factor to fp32 accuracy.
 TEST(LevelSchedule, Fp32EmulationAgreesWithCpuSweeps) {
-    const scoped_env fp32("APXCHOL_SPTRSV_FP16", "0");
+    const scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     for (const factor_case& fc : factor_cases()) {
         SCOPED_TRACE(fc.name);
         apxchol::omp_sptrsv cpu;

@@ -26,6 +26,19 @@ Committed CSVs carry selected results and provenance.
   and RCHOL reuse setup with cold native restarts. Julia AC/AC2 reuse their native
   solver closures; Julia CG, regularized ICC and direct methods can use residual
   corrections. These are adapter stopping policies, not vendor kernel rewrites.
+- apxchol v1 uses a complete `--v1-backend cpu|gpu|auto` route. CPU includes
+  host setup, OpenMP triangular solves and host PCG even in a CUDA build. GPU
+  includes device-owned setup and GPU PCG, and rejects unsupported configurations.
+  Route selection is fixed before setup and retained through original-v1 retries;
+  no failure silently falls back to another route. The fair/scaling runners force
+  their device and require matching `execution_route` CSV/repetition receipts.
+  Old mixed-route rows remain historical and cannot resume a current comparison.
+- `APXCHOL_REPORT_FILL` reads the actual held factor and its SpTRSV drop statistics.
+  It never constructs another factor or uploads a host diagnostic factor. Raw
+  factor off-diagonals and stored L11 entries are distinct counts; CSR and CSC each
+  hold the latter. The input denominator counts stored off-diagonal entries after
+  timing, rather than subtracting the row count: zero isolates may omit diagonal
+  storage. A zero off-diagonal input denominator makes the ratio unavailable.
 - New rows must carry `stop_contract=original-v1`. Old timings remain historical
   evidence, but cannot resume or enter current comparisons as if their cheaper
   stopping rule were the same measurement. Re-run affected comparisons; never
@@ -38,6 +51,11 @@ Committed CSVs carry selected results and provenance.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA
   initialization is separately reported; solver-specific allocations/module loading
   remain charged. Hypre initialization is charged once per row.
+- v1 host `solve_rss_mb` is sampled while the measured owner is still alive; the
+  `/proc` sampling cost is included in Solve. Older v1 rows sampled after owner
+  destruction and are not comparable as solve-held RSS. GNU child peak RSS keeps
+  its separate whole-process definition; do not infer a memory win from that
+  boundary correction.
 - Whole-cell deadlines may cover calibration and all repetitions: a timeout is **not**
   a lower bound on one solve. Preserve failure, nonconvergence, timeout, unsupported,
   unattempted and missing statuses. Unknown memory is not zero.
