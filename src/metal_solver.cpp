@@ -6,9 +6,9 @@
 
 #include "apxchol/csc_work.h"
 #include "apxchol/solver/detail/metal_host.h"
-#include "apxchol/solver/pcg_cuda_host.h"
+#include "apxchol/solver/detail/permuted_operator.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
-#include "apxchol/solver/sptrsv/level_schedule.h"
+#include "apxchol/solver/detail/metal_schedule.h"
 #include "metal_device.h"
 
 #include <algorithm>
@@ -36,7 +36,7 @@ namespace apxchol {
 namespace {
 
 namespace mh = detail::metal_host;
-namespace ls = level_schedule;
+namespace ls = detail::metal_schedule;
 namespace dm = detail::metal;
 
 static_assert(sizeof(mh::df) == sizeof(dm::df32));
