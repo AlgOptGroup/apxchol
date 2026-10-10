@@ -1,18 +1,6 @@
 #pragma once
-// Level schedules of the two triangular solves of a dropped apxchol factor in
-// the layout the Metal block kernels read, plus an fp32 host emulation of
-// exactly the arithmetic those kernels perform. Portable: no Metal, so the
-// schedule and its emulation are tested on every platform
-// (tests/test_level_schedule.cpp).
-//
-// The factor is prepared by the CUDA-free host code the GPU backends share
-// (cuda_host.h: L11 extraction, the compacting drop of factor_drop.h with the
-// fp32 keep predicate, the shared CSC -> CSR transpose), so the applied
-// operator is the one omp_sptrsv stores on its fp32 storage. Rows are grouped
-// by dependency depth (the topological levels omp_sptrsv builds when it has no
-// elimination-round metadata). Within a level light rows (at most kHeavyDeps
-// dependencies) come first, then heavy rows, each ascending. Dependencies keep
-// the CSR / CSC order, which fixes every row's accumulation order.
+// Host preparation for the Metal triangular-solve kernels. No device is needed
+// to build or test these layouts; the CPU and CUDA solvers do not use them.
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/types.h"
@@ -25,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace apxchol::level_schedule {
+namespace apxchol::detail::metal_schedule {
 
 /// Rows with more dependencies are heavy: one threadgroup per row, the
 /// dependencies dealt over kHeavyDeps fixed virtual lanes.
@@ -166,8 +154,6 @@ inline factor_schedules build_factor_schedules(const sparse_csc& L, std::int64_t
     return out;
 }
 
-// ── Dispatch plan ───────────────────────────────────────────────────────────
-
 enum class step_kind : std::uint32_t { light = 0, heavy = 1, narrow = 2 };
 
 /// light / heavy: slots [first, last) of one level; narrow: levels [first, last).
@@ -204,36 +190,4 @@ inline std::vector<level_step> plan_steps(const level_solve& s, std::uint32_t kc
     return out;
 }
 
-// ── fp32 emulation of the kernels ───────────────────────────────────────────
-
-/// Slot t of one column: light rows run s = rhs; s = fma(-v, z_j, s) in
-/// dependency order; z_i = s * dinv. Heavy rows deal dependency k to virtual
-/// lane k mod 32 (each lane s_v = fma(v, z_j, s_v) from 0), fold lanes 0..31
-/// in order and compute z_i = (rhs - total) * dinv.
-inline float solve_slot(const level_solve& s, std::uint32_t t, float rhs, const float* z) {
-    const std::uint32_t b = s.ptr[t], e1 = s.ptr[t + 1];
-    if (e1 - b <= kHeavyDeps) {
-        float acc = rhs;
-        for (std::uint32_t e = b; e < e1; ++e) acc = std::fma(-s.val[e], z[s.col[e]], acc);
-        return acc * s.dinv[t];
-    }
-    float lane[kHeavyDeps] = {};
-    for (std::uint32_t e = b; e < e1; ++e) {
-        float& v = lane[(e - b) % kHeavyDeps];
-        v = std::fma(s.val[e], z[s.col[e]], v);
-    }
-    float total = lane[0];
-    for (std::uint32_t v = 1; v < kHeavyDeps; ++v) total = total + lane[v];
-    return (rhs - total) * s.dinv[t];
-}
-
-/// One sweep in slot order: z[rows[t]] = solve_slot(t, rhs[rows[t]], z).
-/// rhs may alias z (the backward sweep runs in place on the forward result).
-inline void emulate_sweep(const level_solve& s, const float* rhs, float* z) {
-    for (std::uint32_t t = 0; t < s.slots(); ++t) {
-        const std::uint32_t i = s.rows[t];
-        z[i] = solve_slot(s, t, rhs[i], z);
-    }
-}
-
-}  // namespace apxchol::level_schedule
+}  // namespace apxchol::detail::metal_schedule
