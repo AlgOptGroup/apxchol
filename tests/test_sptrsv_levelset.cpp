@@ -341,11 +341,11 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
     const std::vector<int> expected_bck = {1, 1, 1, 1, 0, 4, 0, 4, 0};
     const auto x = random_x(L.rows(), 8802);
 
-    for (const char* storage : {"0", "1"}) {
-        if (storage[0] == '1' && !apxchol::omp_sptrsv::fp16_supported())
+    for (const char* storage : {"float32", "float16"}) {
+        if (std::string_view(storage) == "float16" && !apxchol::omp_sptrsv::fp16_supported())
             continue;
-        SCOPED_TRACE(std::string("APXCHOL_SPTRSV_FP16=") + storage);
-        scoped_env storage_mode("APXCHOL_SPTRSV_FP16", storage);
+        SCOPED_TRACE(std::string("APXCHOL_FACTOR_STORAGE=") + storage);
+        scoped_env storage_mode("APXCHOL_FACTOR_STORAGE", storage);
 
         apxchol::omp_sptrsv implicit;
         implicit.set_round_bounds(bounds);
@@ -366,7 +366,7 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
         EXPECT_LT(implicit.memory_bytes(), materialized.memory_bytes());
 
         const pair_out reference = solve_pair(materialized, x);
-        if (storage[0] == '0') expect_correct_pair(L, x, reference);
+        if (std::string_view(storage) == "float32") expect_correct_pair(L, x, reference);
         expect_same_bytes(reference, solve_pair(implicit, x),
                           "implicit ranges vs materialized fallback");
         set_threads(1);
@@ -377,7 +377,7 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
 }
 
 TEST(SpTRSVRoundRanges, PostSetupBoundsMutationDoesNotChangeActiveSchedule) {
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
     scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
     scoped_env rounds_on("APXCHOL_ROUND_LEVELS", "1");
@@ -405,7 +405,7 @@ TEST(SpTRSVRoundRanges, PostSetupBoundsMutationDoesNotChangeActiveSchedule) {
 }
 
 TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
     scoped_env rounds_on("APXCHOL_ROUND_LEVELS", "1");
     set_threads(4);
@@ -446,8 +446,8 @@ TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
 // out of place; anchored to a correct solve at T=1.
 TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");   // state the storage contract on the un-dropped factor
     const std::vector<int> T = thread_counts();
@@ -501,7 +501,7 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
 }
 
 TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
     std::vector<node_index> bounds;
     const sparse_csc L = make_fat_prefix_thin_tail(
@@ -546,7 +546,7 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
 
 TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
     if (!apxchol::omp_sptrsv::fp16_supported()) GTEST_SKIP() << "CPU lacks F16C";
-    scoped_env fp16_storage("APXCHOL_SPTRSV_FP16", "1");
+    scoped_env fp16_storage("APXCHOL_FACTOR_STORAGE", "float16");
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
     std::vector<node_index> bounds;
     const sparse_csc L = make_fat_prefix_thin_tail(
@@ -572,7 +572,7 @@ TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
 }
 
 TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
     set_threads(4);
 
@@ -624,7 +624,7 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
 }
 
 TEST(CriticalSchedule, AutoUsesAnyThinSuffixWithRoundsAndMultipleThreads) {
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
     scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
     std::vector<node_index> bounds;

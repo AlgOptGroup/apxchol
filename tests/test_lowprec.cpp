@@ -64,6 +64,33 @@ struct scoped_drop_off : scoped_env {
 
 } // namespace
 
+TEST(FactorStorage, EnvironmentPrecedenceAndBackendDefaults) {
+    using enum apxchol::factor_storage_type;
+    using apxchol::detail::resolve_fp16_storage;
+    for (bool gpu_default : {false, true}) {
+        scoped_env named("APXCHOL_FACTOR_STORAGE", nullptr);
+        EXPECT_EQ(resolve_fp16_storage(automatic, gpu_default), gpu_default);
+        for (const char* value : {"", "auto", "float16", "float32"}) {
+            scoped_env setting("APXCHOL_FACTOR_STORAGE", value);
+            const bool expected = !*value || std::string_view(value) == "auto"
+                ? gpu_default : std::string_view(value) == "float16";
+            EXPECT_EQ(resolve_fp16_storage(automatic, gpu_default), expected);
+            EXPECT_TRUE(resolve_fp16_storage(fp16, gpu_default));
+            EXPECT_FALSE(resolve_fp16_storage(fp32, gpu_default));
+        }
+    }
+}
+
+TEST(FactorStorage, InvalidSettingsFailUnlessOverridden) {
+    using enum apxchol::factor_storage_type;
+    using apxchol::detail::resolve_fp16_storage;
+    for (const char* bad : {"on", "float64", "0", "1", "float16,float32"}) {
+        scoped_env setting("APXCHOL_FACTOR_STORAGE", bad);
+        EXPECT_THROW(resolve_fp16_storage(automatic, false), std::invalid_argument);
+        EXPECT_FALSE(resolve_fp16_storage(fp32, false));
+    }
+}
+
 // ── _Float16 ──────────────────────────────────────────────────────────────
 
 // Normal range [2^-14, 65504]: |fp16(x) - x| <= 2^-11 |x| (11 significant
@@ -264,8 +291,8 @@ std::vector<float> reference_scales(const sparse_csc& L) {
 // does its CSR twin; the scales (if any) match; offdiag count is right.
 TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     scoped_drop_off drop_off;   // storage contract on the un-dropped factor
     // Reuse output storage across growth and shrink as well as the serial
@@ -316,8 +343,8 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
 // the STORED values either way.
 TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     scoped_drop_off drop_off;   // the 1e-6 / 1e-9 entries must reach the storage format
     // 4x4 lower factor: column 0 = diag 2, off-diagonals 1.0 (max), 1e-6 (fp16
@@ -437,8 +464,8 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel) {
 // under 1e-4.
 TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     struct cfg { node_index n; bool laplacian; };
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
@@ -567,8 +594,8 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
 // a stored entry) -- the drop's second criterion.
 TEST(LowPrec, FactorDropEdgeCases) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_SPTRSV_FP16=1 in the environment.
-    scoped_env fp32_storage("APXCHOL_SPTRSV_FP16", "0");
+    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     sparse_csc L = make_random_lower(2000, 4.0, 31, -1.0, 1.0);
     for (edge_index p = 0; p < L.nonZeros(); ++p)
@@ -619,7 +646,7 @@ TEST(LowPrec, FactorDropEdgeCases) {
     }
 }
 
-// ── The fp16 STORAGE at runtime (APXCHOL_SPTRSV_FP16=1) ─────────────────
+// ── The fp16 STORAGE at runtime (APXCHOL_FACTOR_STORAGE=float16) ─────────────────
 // The storage is a per-setup choice now, not a build flag, so these state its
 // contract against the same binary that runs the fp32 tests above:
 //   * every stored slot is narrow_value<_Float16>(v, s_j) bit-for-bit, in the
@@ -631,8 +658,6 @@ TEST(LowPrec, FactorDropEdgeCases) {
 //   * a column whose scale cannot be represented falls back to s_j = 1 and
 //     the setup still produces finite, nonzero diagonals (it THROWS
 //     otherwise -- see omp.h "DEGENERATE SCALES");
-//   * APXCHOL_SPTRSV_FP16 is the only storage switch; the retired GPU-only
-//     name has no effect.
 namespace {
 bool fp16_available() { return apxchol::omp_sptrsv::fp16_supported(); }
 }  // namespace
@@ -640,7 +665,7 @@ bool fp16_available() { return apxchol::omp_sptrsv::fp16_supported(); }
 TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
     if (!fp16_available()) GTEST_SKIP() << "CPU lacks AVX/F16C";
     scoped_drop_off drop_off;                              // storage contract on the un-dropped factor
-    scoped_env fp16("APXCHOL_SPTRSV_FP16", "1");
+    scoped_env fp16("APXCHOL_FACTOR_STORAGE", "float16");
     apxchol::omp_sptrsv trsv;
     for (node_index m : {node_index(3000), node_index(60000), node_index(2000)}) {
         SCOPED_TRACE("m=" + std::to_string(m));
@@ -703,7 +728,7 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
 TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
     if (!fp16_available()) GTEST_SKIP() << "CPU lacks AVX/F16C";
     scoped_drop_off drop_off;
-    scoped_env fp16("APXCHOL_SPTRSV_FP16", "1");
+    scoped_env fp16("APXCHOL_FACTOR_STORAGE", "float16");
     // Column 1's only off-diagonal is ~1e-40: s_j is an fp32 subnormal and
     // fp32(1 / s_j) overflows, so the setup must fall back to s_j = 1.
     sparse_csc L;
@@ -729,33 +754,4 @@ TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
     trsv.forward_solve(x.data(), y.data());
     trsv.transpose_solve(y.data(), z.data());
     for (node_index j = 0; j < 3; ++j) { EXPECT_TRUE(std::isfinite(y[j])); EXPECT_TRUE(std::isfinite(z[j])); }
-}
-
-TEST(LowPrecFp16, TheUnifiedEnvIsTheOnlyStorageSwitch) {
-    sparse_csc L;
-    L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
-    auto storage_of = [&](const char* var, const char* value) {
-        scoped_env a("APXCHOL_SPTRSV_FP16", nullptr);
-        scoped_env b("APXCHOL_GPU_SPTRSV_FP16", nullptr);
-        scoped_env c(var, value);
-        apxchol::omp_sptrsv t; t.setup(L, 2);
-        return t.fp16();
-    };
-    // Unset = OFF on the CPU (the GPU's default is the opposite: cuda.h).
-    EXPECT_FALSE(storage_of("APXCHOL_SPTRSV_FP16", nullptr));
-    EXPECT_FALSE(storage_of("APXCHOL_SPTRSV_FP16", "0"));
-    if (fp16_available())
-        EXPECT_TRUE(storage_of("APXCHOL_SPTRSV_FP16", "1"));
-    else
-        EXPECT_THROW(storage_of("APXCHOL_SPTRSV_FP16", "1"), std::runtime_error);
-    // The retired GPU-only name no longer changes either backend.
-    EXPECT_FALSE(storage_of("APXCHOL_GPU_SPTRSV_FP16", "1"));
-    EXPECT_FALSE(storage_of("APXCHOL_GPU_SPTRSV_FP16", "0"));
-    // A stale GPU-only variable cannot override the supported name.
-    {
-        scoped_env a("APXCHOL_SPTRSV_FP16", "0");
-        scoped_env b("APXCHOL_GPU_SPTRSV_FP16", "1");
-        apxchol::omp_sptrsv t; t.setup(L, 2);
-        EXPECT_FALSE(t.fp16());
-    }
 }

@@ -51,7 +51,7 @@ struct scoped_drop_off : scoped_env {
 
 // The DEFAULT storage width is fp32, and value_name / value_bytes (what the
 // APXCHOL_VERBOSE banner prints) report what the last setup() resolved --
-// fp32 unset, fp16 under APXCHOL_SPTRSV_FP16=1 where the CPU has F16C.
+// fp32 unset, fp16 under APXCHOL_FACTOR_STORAGE=float16 where the CPU has F16C.
 TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
     EXPECT_EQ(sizeof(sptrsv_value_t), 4u);
     EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
@@ -63,7 +63,7 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
 
     sparse_csc L; L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
     {
-        scoped_env off("APXCHOL_SPTRSV_FP16", "0");
+        scoped_env off("APXCHOL_FACTOR_STORAGE", "float32");
         apxchol::omp_sptrsv t; t.setup(L, 2);
         EXPECT_FALSE(t.fp16());
         EXPECT_EQ(t.value_bytes(), 4u);
@@ -72,7 +72,7 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
         EXPECT_EQ(t.csc_vals16().size(), 0u);
     }
     {
-        scoped_env on("APXCHOL_SPTRSV_FP16", "1");
+        scoped_env on("APXCHOL_FACTOR_STORAGE", "float16");
         apxchol::omp_sptrsv t;
         if (apxchol::omp_sptrsv::fp16_supported()) {
             t.setup(L, 2);
@@ -228,12 +228,12 @@ void reference_pair(const sparse_csc& L, const std::vector<double>& x,
 }
 
 void run_kernel_precision_check() {
-    for (const char* env : {"0", "1"})
+    for (const char* env : {"float32", "float16"})
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose path */}) {
-        const bool fp16 = env[0] == '1';
+        const bool fp16 = std::string_view(env) == "float16";
         if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
-        SCOPED_TRACE("m=" + std::to_string(m) + " APXCHOL_SPTRSV_FP16=" + env);
-        scoped_env storage("APXCHOL_SPTRSV_FP16", env);
+        SCOPED_TRACE("m=" + std::to_string(m) + " APXCHOL_FACTOR_STORAGE=" + env);
+        scoped_env storage("APXCHOL_FACTOR_STORAGE", env);
         sparse_csc L = make_random_lower(m, 4.0, 99);
         apxchol::omp_sptrsv trsv;
         trsv.setup(L, m);
@@ -287,7 +287,7 @@ TEST(SpTRSVKernels, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
 // run -- on 16-bit storage the SIMD ones (simd_fp16_kernel()): four-lane
 // widening and arithmetic, then a scalar tail. CSR row lengths span 0..48 so
 // every path (full vectors and tails of 0..3) is exercised. Run at BOTH
-// storages (APXCHOL_SPTRSV_FP16=0|1) and checked exactly like the thin-level
+// storages (APXCHOL_FACTOR_STORAGE=float32|float16) and checked exactly like the thin-level
 // kernels: the pair contract at roundoff against L~ / R and against the
 // serial reference on L_s.
 namespace {
@@ -359,11 +359,11 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
     std::uniform_real_distribution<double> ux(-1.0, 1.0);
     std::vector<double> x(m);
     for (auto& v : x) v = ux(rng);
-    for (const char* env : {"0", "1"}) {
-        const bool fp16 = env[0] == '1';
+    for (const char* env : {"float32", "float16"}) {
+        const bool fp16 = std::string_view(env) == "float16";
         if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
-        SCOPED_TRACE(std::string("APXCHOL_SPTRSV_FP16=") + env);
-        scoped_env storage("APXCHOL_SPTRSV_FP16", env);
+        SCOPED_TRACE(std::string("APXCHOL_FACTOR_STORAGE=") + env);
+        scoped_env storage("APXCHOL_FACTOR_STORAGE", env);
         std::vector<double> y_ref, z_ref;
         reference_pair(L, x, y_ref, z_ref, fp16);
         apxchol::omp_sptrsv trsv;

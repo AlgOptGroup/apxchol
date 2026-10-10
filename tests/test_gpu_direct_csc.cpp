@@ -542,7 +542,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
     scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
     scoped_environment blocks("APXCHOL_GPU_BLOCKS", "1");
-    scoped_environment fp16("APXCHOL_SPTRSV_FP16", nullptr);
+    scoped_environment fp16("APXCHOL_FACTOR_STORAGE", nullptr);
     scoped_environment drop("APXCHOL_FACTOR_DROP", nullptr);
     scoped_environment backend("APXCHOL_GPU_SPTRSV", nullptr);
     scoped_environment tail("APXCHOL_RESIDUAL_SPARSIFY", "0");

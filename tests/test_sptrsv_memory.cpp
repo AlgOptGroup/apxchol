@@ -163,7 +163,7 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
 
     // FB: the factor's value width (the L11 copy and the compacted copy are at
     // factor precision); VB: the SpTRSV's storage width (CSR / bucket) -- equal
-    // to it at the default fp32 storage, 2 under APXCHOL_SPTRSV_FP16=1.
+    // to it at the default fp32 storage, 2 under APXCHOL_FACTOR_STORAGE=float16.
     constexpr std::size_t FB = sizeof(factor_value_t), VB = sizeof(sptrsv_value_t);
     constexpr std::size_t NB = sizeof(node_index), EB = sizeof(edge_index);
     const std::size_t slack = 6 * MB;   // page rounding + per-thread RSS batching + level-vector heap

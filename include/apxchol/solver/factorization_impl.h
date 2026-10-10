@@ -2214,7 +2214,7 @@ factorization factorize_impl(const Eliminator& elim,
 #if defined(APXCHOL_USE_CUDA)
     if (finalize_on_device) {
         result.research_device_factor = gpu_round_shadow.finalize_device_factor(
-            factor_cols, result.perm, result.sddm ? n : n - 1);
+            factor_cols, result.perm, result.sddm ? n : n - 1, opts.factor_storage);
         if (cp) (*cp)("gpu_factor_finalize");
         if (detail::gpu_setup_diagnostics()) {
             std::size_t payload_bytes = 0;

@@ -309,8 +309,8 @@ private:
             // point it no longer reads them (Laplacian path: right after its L11
             // copy), so its setup transient does not sit on a dead copy of the
             // factor. The release below then finds nothing left to free.
-            if (keep_factor_) trsv_.setup(F_.L, factor_dim);
-            else              trsv_.setup_consuming(F_.L, factor_dim);
+            if (keep_factor_) trsv_.setup(F_.L, factor_dim, opts_.factor_storage);
+            else              trsv_.setup_consuming(F_.L, factor_dim, opts_.factor_storage);
         }
 #if defined(APXCHOL_USE_CUDA)
         else {
@@ -331,19 +331,19 @@ private:
                              "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
             if constexpr (Route == setup_route::gpu) {
                 trsv_.setup_adopting_device_factor_for_research(
-                    std::move(*F_.research_device_factor));
+                    std::move(*F_.research_device_factor), opts_.factor_storage);
                 F_.research_device_factor.reset();
             } else if (F_.research_device_factor &&
                        F_.research_device_factor.use_count() == 1 &&
                        !F_.research_device_factor->empty()) {
                 trsv_.setup_adopting_device_factor_for_research(
-                    std::move(*F_.research_device_factor));
+                    std::move(*F_.research_device_factor), opts_.factor_storage);
                 F_.research_device_factor.reset();
             } else {
                 // Diagnostic copies must not race to move a shared capsule. Their
                 // explicit host-import path leaves the independent copy untouched.
                 F_.research_device_factor.reset();
-                trsv_.setup(F_.L, factor_dim);
+                trsv_.setup(F_.L, factor_dim, opts_.factor_storage);
             }
         }
 #endif

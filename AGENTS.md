@@ -154,6 +154,14 @@ choices, retired knobs, and measurements belong in
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
   `python/pyproject.toml`.
 
+- Python requires NumPy and SciPy and accepts SciPy sparse operators.
+  `factor_storage_dtype=None|np.float16|np.float32` selects per-solver SpTRSV
+  storage; strings and dtype objects are accepted. Explicit selections override
+  the environment without changing it; unsupported FP16 requests fail. The
+  resolved dtype is read-only on `Solver.factor_storage_dtype`. Factor exports
+  (`chol`, `L`, `D`) retain FP32, matching C++ factor values; CPU PCG uses FP64
+  vectors and arithmetic, including with FP32 inputs.
+
 - `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
   use C++23, requiring CUDA Toolkit 13.3+ and CMake 4.4+. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
@@ -235,8 +243,12 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   because NVCC does not support `_Float16` in device code. Uploads copy the
   common binary16 representation; the solve kernel widens only at accumulation.
 - GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
-  is accepted; other nonempty values are errors. `APXCHOL_SPTRSV_FP16` controls
-  factor storage (GPU default on, CPU default off); scales and diagonals stay
+  is accepted; other nonempty values are errors. `factor_options::factor_storage`
+  selects per-solver storage. Its `automatic` default uses
+  `APXCHOL_FACTOR_STORAGE=auto|float16|float32`.
+  `auto` selects the backend default (GPU FP16, CPU FP32). Invalid values fail.
+  Parsing and selection live in C++; Python only normalizes dtype names.
+  Scales and diagonals stay
   fp32, while outer CPU/GPU PCG vectors and reductions stay fp64. See
   [precision and storage](docs/precision.md). The old GPU-only alias is
   retired.

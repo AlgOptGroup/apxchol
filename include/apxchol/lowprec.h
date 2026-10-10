@@ -1,12 +1,13 @@
 #pragma once
 // fp16 STORAGE for the SpTRSV factor values -- the type, the converters, and
-// THE runtime switch both SpTRSV backends read.
+// the per-solver selection shared by both SpTRSV backends.
 //
-// Selected at RUNTIME, per setup, by the single environment variable
+// Selected at setup by factor_options::factor_storage, or by the environment
+// when the option is automatic:
 //
-//     APXCHOL_SPTRSV_FP16 = 0 | 1
+//     APXCHOL_FACTOR_STORAGE = auto | float16 | float32
 //
-// (sptrsv_fp16_env_tristate() below is the one reader; unset resolves per
+// (resolve_fp16_storage() below is the one reader; unset resolves per
 // DEVICE -- OFF on the CPU, ON on the GPU -- because the two have different
 // measured verdicts, see the backend headers). Before 2026-08-20 the CPU side
 // was a CMake cache variable, APXCHOL_SPTRSV_LOWPREC=OFF|FP16_SCALED, and the
@@ -51,6 +52,8 @@
 // Both SpTRSV backends share these storage conversions and the env reader.
 #include <cmath>
 #include <cstdlib>
+#include <stdexcept>
+#include <string_view>
 
 // TODO: use std::float16_t once Clang defines __STDCPP_FLOAT16_T__
 // and libc++ provides <stdfloat> in our supported toolchains.
@@ -58,16 +61,28 @@
 // https://github.com/llvm/llvm-project/pull/78503
 namespace apxchol {
 
-/// THE fp16-storage switch, read by BOTH SpTRSV backends at every setup:
-/// APXCHOL_SPTRSV_FP16=0|1. Tri-state: -1 unset (each backend applies its own
-/// default -- OFF on the CPU, ON on the GPU), else 0/1.
-inline int sptrsv_fp16_env_tristate() {
-    if (const char* e = std::getenv("APXCHOL_SPTRSV_FP16"); e && *e)
-        return std::atoi(e) != 0 ? 1 : 0;
-    return -1;
-}
+enum class factor_storage_type { automatic, fp16, fp32 };
 
 namespace detail {
+
+inline factor_storage_type parse_factor_storage(std::string_view value) {
+    if (value == "auto") return factor_storage_type::automatic;
+    if (value == "float16") return factor_storage_type::fp16;
+    if (value == "float32") return factor_storage_type::fp32;
+    throw std::invalid_argument("factor storage must be auto, float16 or float32");
+}
+
+inline bool resolve_fp16_storage(factor_storage_type storage, bool default_fp16) {
+    if (storage == factor_storage_type::automatic)
+        if (const char* e = std::getenv("APXCHOL_FACTOR_STORAGE"); e && *e)
+            storage = parse_factor_storage(e);
+    switch (storage) {
+    case factor_storage_type::automatic: return default_fp16;
+    case factor_storage_type::fp16: return true;
+    case factor_storage_type::fp32: return false;
+    }
+    throw std::invalid_argument("invalid factor storage type");
+}
 
 // Whether a normalized FP32 value rounds to zero or a subnormal in FP16.
 inline bool fp16_flushes(float value) {

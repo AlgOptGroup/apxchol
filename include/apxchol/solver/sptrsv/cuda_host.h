@@ -4,7 +4,7 @@
 // into the dataflow kernels' int32 arrays, the compacting factor drop (the shared
 // factor_drop.h implementation, the same one omp_sptrsv::setup runs), the
 // fp16 per-column-scaled narrowing of the runtime fp16
-// storage (APXCHOL_SPTRSV_FP16=1), the CSR transpose (the shared
+// storage (APXCHOL_FACTOR_STORAGE=float16), the CSR transpose (the shared
 // transpose.h implementation, the one omp_sptrsv::setup runs), the dataflow
 // schedules and the dataflow batch tables. Deliberately CUDA-FREE: host FP16
 // values use _Float16 and share lowprec.h's narrowing helper with CPU storage.

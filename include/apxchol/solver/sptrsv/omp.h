@@ -195,7 +195,7 @@ private:
 
 // Storage contract (derivation and historical decisions: docs/precision.md):
 //
-// * FP32 arrays by default; APXCHOL_SPTRSV_FP16=1 selects scaled FP16
+// * FP32 arrays by default; APXCHOL_FACTOR_STORAGE=float16 selects scaled FP16
 //   off-diagonals on CPUs with F16C, including portable builds. Arithmetic
 //   remains FP64 in both cases; only the stored preconditioner changes.
 // * Scale s_j is the pre-drop maximum absolute off-diagonal of column j, or
@@ -228,13 +228,12 @@ public:
         return false;
 #endif
     }
-    /// THE storage choice of the next setup(): the unified env
-    /// APXCHOL_SPTRSV_FP16=0|1 (lowprec.h; the GPU backend reads the same
-    /// variable), unset = OFF on the CPU. An unsupported explicit request fails.
-    static bool fp16_from_env() {
-        const bool want = sptrsv_fp16_env_tristate() == 1;
+    /// Resolve the next setup's storage; automatic reads APXCHOL_FACTOR_STORAGE
+    /// and defaults to FP32. Unsupported FP16 requests fail.
+    static bool fp16_resolved(factor_storage_type storage = factor_storage_type::automatic) {
+        const bool want = detail::resolve_fp16_storage(storage, false);
         if (want && !fp16_supported())
-            throw std::runtime_error("APXCHOL_SPTRSV_FP16=1 requires an x86 CPU with AVX/F16C support");
+            throw std::runtime_error("FP16 factor storage requires an x86 CPU with AVX/F16C support");
         return want;
     }
     /// Which storage the LAST setup() chose.
@@ -372,8 +371,11 @@ public:
 
     /// Analyze L11 = L.topLeftCorner(m, m): build CSR, CSC, and level sets.
     /// L is read only; the caller keeps it. The storage width is resolved from
-    /// the env HERE, once (fp16_from_env()).
-    void setup(const sparse_csc& L, node_index m) { setup_dispatch(L, m, nullptr); }
+    /// explicit storage option or the environment at setup.
+    void setup(const sparse_csc& L, node_index m,
+               factor_storage_type storage = factor_storage_type::automatic) {
+        setup_dispatch(L, m, nullptr, storage);
+    }
 
     /// Same analysis, but the SpTRSV CONSUMES L: its row/value arrays are
     /// released (sparse_csc::release_values) at the first point setup no longer
@@ -385,11 +387,15 @@ public:
     /// L11 aliases L, so the release happens after the compacting drop copied it
     /// (if it did) or else after the CSC copy. Column pointers stay (nonZeros()
     /// still works). For callers that keep the factor, use setup().
-    void setup_consuming(sparse_csc& L, node_index m) { setup_dispatch(L, m, &L); }
+    void setup_consuming(sparse_csc& L, node_index m,
+                         factor_storage_type storage = factor_storage_type::automatic) {
+        setup_dispatch(L, m, &L, storage);
+    }
 
 private:
-    void setup_dispatch(const sparse_csc& L, node_index m, sparse_csc* consumed) {
-        fp16_ = fp16_from_env();
+    void setup_dispatch(const sparse_csc& L, node_index m, sparse_csc* consumed,
+                        factor_storage_type storage) {
+        fp16_ = fp16_resolved(storage);
 #ifdef __x86_64__
         if (fp16_) {
             setup_impl<_Float16>(L, m, consumed);
@@ -640,7 +646,7 @@ private:
                         throw std::runtime_error(
                             "apxchol omp_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                             " (diag=" + std::to_string(diag_[j]) + ", inv_scale^2=" + std::to_string(r * r) +
-                            "); set APXCHOL_SPTRSV_FP16=0");
+                            "); set APXCHOL_FACTOR_STORAGE=float32");
                 }
                 if (std::getenv("APXCHOL_VERBOSE"))
                     std::fprintf(stderr,

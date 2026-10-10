@@ -4398,12 +4398,12 @@ void gpu_round_shadow_device_state::reject_device_generation(
 std::shared_ptr<cuda_sptrsv_device_factor>
 gpu_round_shadow_device_state::finalize_device_factor(
         std::span<const node_index> permutation, node_index factor_dim,
-        const gpu_round_shadow_factor_log& tail) {
+        const gpu_round_shadow_factor_log& tail, factor_storage_type storage) {
     impl_->require_current_device("factor finalization");
     if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted ||
         (impl_->device_owned_prefix && !impl_->owned_prefix_materialized))
         throw std::logic_error("GPU finalizer requires an accepted generation and published owned output");
-    const bool fp16 = cuda_sptrsv::fp16_resolved();
+    const bool fp16 = cuda_sptrsv::fp16_resolved(storage);
     const double drop_rel = factor_drop_rel_from_env();
     const std::size_t n = permutation.size(), m = factor_dim;
     const std::size_t prefix = impl_->factor_column_count;
