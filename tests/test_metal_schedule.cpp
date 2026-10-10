@@ -1,11 +1,9 @@
-// The level schedules of the dropped factor
-// (apxchol/solver/sptrsv/level_schedule.h) with their fp32 kernel emulation.
-// No device needed: these build and run on every platform.
+// Metal factor preparation is tested without a device.
 #include <gtest/gtest.h>
 
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
-#include "apxchol/solver/sptrsv/level_schedule.h"
+#include "metal_schedule_reference.h"
 #include "apxchol/solver/sptrsv/omp.h"
 #include "apxchol/sparse_csc.h"
 
@@ -25,7 +23,7 @@ namespace {
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
-namespace ls = apxchol::level_schedule;
+namespace ls = apxchol::detail::metal_schedule;
 
 struct scoped_env {
     std::string name, saved;
@@ -135,7 +133,7 @@ std::vector<std::uint32_t> slot_levels(const ls::level_solve& s) {
 
 }  // namespace
 
-TEST(LevelSchedule, EveryRowOnceDependenciesEarlierLightBeforeHeavy) {
+TEST(MetalSchedule, EveryRowOnceDependenciesEarlierLightBeforeHeavy) {
     std::size_t heavy_rows = 0;
     for (const factor_case& fc : factor_cases()) {
         SCOPED_TRACE(fc.name);
@@ -174,7 +172,7 @@ TEST(LevelSchedule, EveryRowOnceDependenciesEarlierLightBeforeHeavy) {
 
 // What the schedules apply is what omp_sptrsv stores on its fp32 storage (the
 // same L11, drop and transpose), and the levels are its topological levels.
-TEST(LevelSchedule, ArraysAndLevelsAreTheCpuStoredFactors) {
+TEST(MetalSchedule, ArraysAndLevelsAreTheCpuStoredFactors) {
     const scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     for (const char* drop : {static_cast<const char*>(nullptr), "0", "1e-3"}) {
         const scoped_env env("APXCHOL_FACTOR_DROP", drop);
@@ -219,7 +217,7 @@ TEST(LevelSchedule, ArraysAndLevelsAreTheCpuStoredFactors) {
     }
 }
 
-TEST(LevelSchedule, StepPlanCoversEachLevelOnce) {
+TEST(MetalSchedule, StepPlanCoversEachLevelOnce) {
     for (const factor_case& fc : factor_cases()) {
         const ls::factor_schedules s = ls::build_factor_schedules(fc.L, fc.m, apxchol::factor_drop_rel_from_env());
         for (const ls::level_solve* sv : {&s.forward, &s.backward})
@@ -262,7 +260,7 @@ TEST(LevelSchedule, StepPlanCoversEachLevelOnce) {
 
 // The fp32 emulation of the device kernels agrees with omp_sptrsv's fp64
 // sweeps on the same stored factor to fp32 accuracy.
-TEST(LevelSchedule, Fp32EmulationAgreesWithCpuSweeps) {
+TEST(MetalSchedule, Fp32EmulationAgreesWithCpuSweeps) {
     const scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     for (const factor_case& fc : factor_cases()) {
         SCOPED_TRACE(fc.name);
@@ -276,12 +274,12 @@ TEST(LevelSchedule, Fp32EmulationAgreesWithCpuSweeps) {
             b[i] = bf[i];
         }
         cpu.forward_solve(b.data(), y.data());
-        ls::emulate_sweep(s.forward, bf.data(), yf.data());
+        apxchol::test::emulate_sweep(s.forward, bf.data(), yf.data());
         double num = 0, den = 0;
         for (node_index i = 0; i < fc.m; ++i) { num += (y[i] - yf[i]) * (y[i] - yf[i]); den += y[i] * y[i]; }
         const double fwd = std::sqrt(num / den);
         cpu.transpose_solve(y.data(), z.data());
-        ls::emulate_sweep(s.backward, yf.data(), yf.data());
+        apxchol::test::emulate_sweep(s.backward, yf.data(), yf.data());
         num = den = 0;
         for (node_index i = 0; i < fc.m; ++i) { num += (z[i] - yf[i]) * (z[i] - yf[i]); den += z[i] * z[i]; }
         const double both = std::sqrt(num / den);
@@ -292,7 +290,7 @@ TEST(LevelSchedule, Fp32EmulationAgreesWithCpuSweeps) {
     }
 }
 
-TEST(LevelSchedule, RejectsMisplacedOrInvalidDiagonalsAndRanges) {
+TEST(MetalSchedule, RejectsMisplacedOrInvalidDiagonalsAndRanges) {
     auto csr = [](int m, std::vector<int> ptr, std::vector<int> idx, std::vector<float> vals) {
         apxchol::cuda_host::csr_int<float> A;
         A.m = m;

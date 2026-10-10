@@ -32,8 +32,8 @@ add_executable(unit_tests
         test_operator_class.cpp
         test_solve_routes.cpp
         test_cuda_device_scope.cpp
-        test_pcg_cuda_host.cpp
-        test_level_schedule.cpp
+        test_permuted_operator.cpp
+        test_metal_schedule.cpp
         test_metal_host.cpp
 )
 if (APXCHOL_USE_METAL)

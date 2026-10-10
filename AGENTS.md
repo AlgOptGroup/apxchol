@@ -253,14 +253,12 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
-- `solver/sptrsv/level_schedule.h` (portable, no device) builds topological
-  level schedules of the factor `omp_sptrsv` stores on fp32 storage, from the
-  shared `cuda_host.h` preparation, plus an fp32 emulation of the block
-  kernels that apply them; `LevelSchedule.*` runs in every build. The
-  CUDA-free permuted-operator builder
-  `detail::build_permuted_full_symmetric_csr` lives in `pcg_cuda_host.h`; its
-  general fallback orders duplicate coordinates by value bits, so its output
-  does not depend on the thread team.
+- `solver/detail/metal_schedule.h` prepares the Metal backend's packed factor
+  and dispatch plan using the existing `cuda_host.h` drop/transpose helpers.
+  Its kernel emulation lives in `tests/metal_schedule_reference.h`; portable
+  tests compare it against CPU sweeps. `solver/detail/permuted_operator.h`
+  builds the permuted symmetric operator, ordering duplicate entries by value
+  bits. These are internal prerequisites for Metal, not CPU/CUDA solve paths.
 - CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
   because NVCC does not support `_Float16` in device code. Uploads copy the
   common binary16 representation; the solve kernel widens only at accumulation.
@@ -398,7 +396,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   quality, setup, solve, one-RHS total, RSS and owner memory.
 - Metal block PCG (`metal_solver.h`, `src/metal_solver.cpp`, `src/metal_device.mm`):
   host factorization as `cpu_solver`; the applied factor is the CPU's dropped
-  fp32 storage, scheduled by `level_schedule.h`; the permuted operator uses the CUDA-free host helper
+  fp32 storage, scheduled by `detail/metal_schedule.h`; the permuted operator uses the CUDA-free host helper
   `detail::build_permuted_full_symmetric_csr`. Up to 64 node-major
   columns per lockstep batch, wider blocks in sequential batches. Double-float
   x, r, A p (and an inexact operator), fp32 p, z and factor; every reduction on
@@ -411,9 +409,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   batch's exit residuals, staged in the dead r and A p buffers) and perform
   each column's one-column operations in the same order; two command buffers
   are in flight. No env knobs (`APXCHOL_FACTOR_STORAGE` and
-  center-k do not apply). Keep the MSL kernels, `level_schedule::emulate_sweep`
+  center-k do not apply). Keep the MSL kernels, `test::emulate_sweep`
   and `metal_host.h` operation-for-operation identical. Validate with
-  `LevelSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*`
+  `MetalSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*`
   (device tests skip without a usable device),
   `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 unit_tests --gtest_filter='MetalDevice*'`,
   `tests/cmake_consumer` configured with `-DAPXCHOL_USE_METAL=ON`, and

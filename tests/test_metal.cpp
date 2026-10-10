@@ -8,7 +8,7 @@
 #include "apxchol/solver/metal_solver.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
-#include "apxchol/solver/sptrsv/level_schedule.h"
+#include "metal_schedule_reference.h"
 #include "metal_device.h"
 
 #include <Eigen/Sparse>
@@ -29,7 +29,7 @@ namespace {
 using Sparse = Eigen::SparseMatrix<double>;
 using apxchol::node_index;
 namespace mh = apxchol::detail::metal_host;
-namespace ls = apxchol::level_schedule;
+namespace ls = apxchol::detail::metal_schedule;
 
 #define REQUIRE_METAL()                                                       \
     do {                                                                      \
@@ -133,8 +133,8 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     }
     std::vector<float> in(n), z(n, 0.0f);
     for (std::size_t q = 0; q < n; ++q) in[q] = w[q].hi - mu_r;
-    ls::emulate_sweep(sch.forward, in.data(), z.data());
-    ls::emulate_sweep(sch.backward, z.data(), z.data());
+    apxchol::test::emulate_sweep(sch.forward, in.data(), z.data());
+    apxchol::test::emulate_sweep(sch.backward, z.data(), z.data());
     float mu_z = 0.0f;
     if (lap) {
         const mh::df sum = mh::tree_reduce(static_cast<std::uint32_t>(n),
