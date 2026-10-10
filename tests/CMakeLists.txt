@@ -32,13 +32,33 @@ add_executable(unit_tests
         test_operator_class.cpp
         test_solve_routes.cpp
         test_cuda_device_scope.cpp
+        test_permuted_operator.cpp
+        test_metal_schedule.cpp
+        test_metal_host.cpp
 )
+if (APXCHOL_USE_METAL)
+    target_sources(unit_tests PRIVATE test_metal.cpp)
+endif()
 
 target_link_libraries(unit_tests PRIVATE
         apxchol_core
         apxchol_mtx_input
         GTest::gtest_main
 )
+
+if (TARGET apxchol_c)
+    target_sources(unit_tests PRIVATE test_c_api.cpp)
+    target_link_libraries(unit_tests PRIVATE apxchol_c)
+    # A pure C11 consumer: proves the header is C, checks the struct layout
+    # and runs one solve through the ABI.
+    add_executable(c_api_c_consumer test_c_header.c)
+    set_target_properties(c_api_c_consumer PROPERTIES
+        C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+    target_link_libraries(c_api_c_consumer PRIVATE apxchol_c)
+    add_test(NAME c_api_c_consumer COMMAND c_api_c_consumer)
+    set_tests_properties(c_api_c_consumer PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+endif()
 
 include(GoogleTest)
 # Default per-test wall-clock timeout: 120s. Individual tests are <250ms

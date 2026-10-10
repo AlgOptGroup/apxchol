@@ -110,8 +110,16 @@ choices, retired knobs, and measurements belong in
 - `APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS`: ON by default. Only tests
   require GoogleTest. `APXCHOL_BUILD_TOOLS`: OFF by default, independently builds
   `build/tests/bench_setup` and `build/tests/analyze_factor`, including when tests
-  are disabled. `analyze_factor MATRIX --solve [--seed N]` reports setup, solve,
+  are disabled. `analyze_factor MATRIX --solve [--seed N] [--tol T]` reports setup, solve,
   iterations and the original-system residual for a component-compatible RHS.
+  `--backend cpu|metal --columns K` solves K such columns (each projected per
+  component) and reports the iteration range, converged/K, the maximum FP64
+  original-system residual, and digests of the factor, the solution and the
+  solver's per-column report; `--factor-threads N` builds that factor on its
+  own team so runs can share one factor. `--repeat R` solves the block R times
+  on one solver and reports the warm solves' times and whether every repeat
+  reproduced the solution and report bit for bit. These options are rejected
+  in CUDA builds.
 - CMake usage requirements on `apxchol_core` and `apxchol_mtx_input` must export
   C++23 and any native architecture flag actually used by the library. Parent
   projects do not inherit directory compile options; mismatched Eigen alignment
@@ -140,6 +148,12 @@ choices, retired knobs, and measurements belong in
   that baseline retires.
 
 
+- `APXCHOL_USE_METAL=ON` (Apple only; exclusive with CUDA): the explicit
+  `apxchol::metal_solver` block PCG and the C API's `APXCHOL_BACKEND_METAL`.
+  `src/metal_device.mm` is the only Objective-C++ source (no Eigen, no OpenMP);
+  it compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
+  links Metal, Foundation and CoreGraphics publicly. `solve()`, `cpu_solver`
+  and every default are unchanged; without the option no Metal source builds.
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
@@ -189,6 +203,20 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
   convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
   `src/solve.cpp` provide the CPU compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
+- `include/apxchol/c_api.h` / `src/c_api.cpp` (target `apxchol_c`, not built
+  with CUDA) are the exception-safe C ABI over `cpu_solver` for Julia/Rust and
+  other non-C++ consumers. Structs carry `struct_size`; defaults come from
+  `solve_options{}`; NOT_CONVERGED writes outputs and is never an acceptance;
+  `converged` is `residual < tol` as in the PCG loop. `threads` scopes the
+  calling thread's OpenMP limit per call. n and nnz are limited to 2^31-1;
+  edge-index overflow still aborts. A factor handle (`apxchol_factor_*`) is
+  an immutable host factorization that always keeps its values; solvers adopt
+  a copy (`apxchol_solver_create_from_factor`, CPU or METAL) for any validated
+  operator of its dimension, except that a Laplacian factor refuses an SDDM
+  operator by the factorization's own excess test. `apxchol_solver_copy_factor`
+  needs `keep_factor_values`. Keep `tests/test_c_header.c` layout asserts in
+  step with the header. `APXCHOL_C_ABI_VERSION` stays 1 until the ABI's first
+  release, then bumps on every layout change.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
   M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
   adjacency versus an assembled operator. Bindings must use the operator
@@ -239,6 +267,12 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
+- `solver/detail/metal_schedule.h` prepares the Metal backend's packed factor
+  and dispatch plan using the existing `cuda_host.h` drop/transpose helpers.
+  Its kernel emulation lives in `tests/metal_schedule_reference.h`; portable
+  tests compare it against CPU sweeps. `solver/detail/permuted_operator.h`
+  builds the permuted symmetric operator, ordering duplicate entries by value
+  bits. These are internal prerequisites for Metal, not CPU/CUDA solve paths.
 - CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
   because NVCC does not support `_Float16` in device code. Uploads copy the
   common binary16 representation; the solve kernel widens only at accumulation.
@@ -249,7 +283,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   `auto` selects the backend default (GPU FP16, CPU FP32). Invalid values fail.
   Parsing and selection live in C++; Python only normalizes dtype names.
   Scales and diagonals stay
-  fp32, while outer CPU/GPU PCG vectors and reductions stay fp64. See
+  fp32, while outer CPU/CUDA PCG vectors and reductions stay fp64; Metal
+  uses double-float recurrences. See
   [precision and storage](docs/precision.md). The old GPU-only alias is
   retired.
 - Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
@@ -373,6 +408,32 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   performance acceptance: compare the default route against current main and
   the owned route against its frozen research reference, with original-system
   quality, setup, solve, one-RHS total, RSS and owner memory.
+- Metal block PCG (`metal_solver.h`, `src/metal_solver.cpp`, `src/metal_device.mm`):
+  host factorization as `cpu_solver`; the applied factor is the CPU's dropped
+  fp32 storage, scheduled by `detail/metal_schedule.h`; the permuted operator uses the CUDA-free host helper
+  `detail::build_permuted_full_symmetric_csr`. Up to 64 node-major
+  columns per lockstep batch, wider blocks in sequential batches. Double-float
+  x, r, A p (and an inexact operator), fp32 p, z and factor; every reduction on
+  one tree fixed by n and heavy rows on 32 virtual lanes, so a column's bits do
+  not depend on batch width, composition, position or host threads. The
+  reported residual is the host fp64 original-system residual (strict `<`);
+  breakdown is neither convergence nor a counted iteration; stagnation, x0 and
+  early exits mirror `cpu_solver`. Host passes are block-wide (node-major pack,
+  unpack, centring, and one work-balanced fp64 pass over the operator for the
+  batch's exit residuals, staged in the dead r and A p buffers) and perform
+  each column's one-column operations in the same order; two command buffers
+  are in flight. The C API reports a valid operator the device cannot
+  represent (`std::domain_error`, `std::length_error`) as UNSUPPORTED and a
+  device allocation failure as OUT_OF_MEMORY. No env knobs (`APXCHOL_FACTOR_STORAGE` and
+  center-k do not apply). Keep the MSL kernels, `test::emulate_sweep`
+  and `metal_host.h` operation-for-operation identical. Validate with
+  `MetalSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*` and
+  `CApi.MetalBackendRoundTrip` (device tests skip without a usable device),
+  `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 unit_tests --gtest_filter='MetalDevice*:CApi*'`,
+  `tests/cmake_consumer` configured with `-DAPXCHOL_USE_METAL=ON`, and
+  `analyze_factor MATRIX --solve --backend metal --columns 64` (with
+  `APXCHOL_BUILD_TOOLS=ON`). Correctness only: no performance claim has been
+  established.
 - CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
   only after its upload has completed and no further host RHS reads remain.
 - GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`
