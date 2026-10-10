@@ -9,13 +9,15 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | Mutable residual graph | FP32 weights by default; optional FP64 weights | Storage/bandwidth versus rounding during factor construction |
 | Assembled factor | FP32 values | Shared factor/export representation |
 | CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
-| GPU triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
+| CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
-| Outer CPU/GPU PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
+| Outer CPU/CUDA PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
+| Metal triangular solves | The CPU's FP32 stored factor; FP32 reciprocal diagonals and arithmetic | Apple GPUs have no FP64; same applied preconditioner as the CPU |
+| Metal PCG | Double-float x, r, A p and inexact operator; FP32 p and z; double-float fixed-tree reductions; host FP64 exit residual | About 48-bit recurrences reach original-system tolerances without FP64 hardware |
 
 `factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; C++ owns parsing and default selection.
 
-The environment setting is `APXCHOL_FACTOR_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU FP32, GPU FP16). Unset or empty selects `auto`. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
+The environment setting is `APXCHOL_FACTOR_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU/Metal FP32, CUDA FP16). Unset or empty selects `auto`. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
 
 CPU FP16 is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
 checked at setup; an unsupported explicit FP16 request raises an error. Fat levels use the
@@ -45,6 +47,54 @@ arithmetic widens to FP64, GPU triangular-solve arithmetic to FP32. A stored
 FP16 factor is not an FP16 outer solve. CPU and GPU-host preparation share the
 narrowing/flush rules in `lowprec.h`; device finalization has its own CUDA
 implementation and is checked by the GPU finalization tests.
+
+## Apple Metal PCG
+
+`apxchol::metal_solver` (`APXCHOL_USE_METAL=ON`, macOS) is an explicit opt-in;
+`solve(..., opts)` selects it for an explicit GPU request. Automatic selection
+and `cpu_solver` stay on CPU. Each call solves one RHS; repeated calls on a
+`metal_solver` reuse its factor, operator and device workspace.
+
+- **Preconditioner.** The same L11, compacting drop (`APXCHOL_FACTOR_DROP`) and
+  FP32 values as the CPU's FP32 storage; the schedule arrays are byte-identical
+  to `omp_sptrsv`'s CSR/CSC. Diagonals are applied as `fp32(1 / fp64(L_ii))`.
+  Arithmetic is FP32 fused multiply-add in dependency order; a row with more
+  than 32 dependencies accumulates them in 32 fixed virtual lanes folded in
+  order. The device stores FP32. `APXCHOL_FACTOR_STORAGE` and the per-solver setting
+  use the shared parser; explicit FP16 requests fail.
+- **Recurrences.** x, r and A p are double-float (hi + lo FP32, about 48
+  significant bits). The operator is FP32 when every value is FP32-exact and
+  double-float otherwise (the CPU/CUDA exactness rule, without an override).
+  p and z are FP32; alpha and beta are FP32. Every reduction (p.Ap, r.r, sum r,
+  r.z, sum z) is double-float on one fixed tree that depends only on n.
+- **Scaling and stopping.** Each right-hand side (or b - A x0) is scaled by an
+  exact power of two so that its largest entry lies in [1, 2). The threshold
+  (tol ||b|| s)^2 is formed on the host in FP64 and compared as a double-float
+  with strict `<`. Breakdown (p.Ap <= 0 or non-finite) is not convergence and
+  its iteration is not counted.
+- **Reported residual.** ||b - A x|| / ||b|| is recomputed on the host in FP64
+  against the caller's operator (canonical lower values, as the CPU operator)
+  on the returned x; convergence requires this residual to be below tol. The
+  device's recursive residual is only the iteration stopping criterion. With
+  about 48 bits in the recurrences and operator, the attainable original-system
+  residual is limited to roughly 2^-48 || |A| |x| || / ||b||; within that margin
+  of tol a solve can stop on its recursive residual and still report
+  a residual above the requested tolerance.
+- **Laplacians.** Every preconditioner application is centred (input and
+  output means in double-float); the CPU's `APXCHOL_CENTER_K` schedule does
+  not apply. The returned x is centred once more on the host in FP64.
+- **Reproducibility.** Repeated solves using the same factor and execution
+  configuration are tested for repeatability. Equality across host thread
+  counts, devices, OS or compiler versions is not part of this interface.
+  Independent parallel factorizations remain a separate question.
+- **Compilation and range.** Kernels are compiled at run time with
+  `MTLMathModeSafe`, precise math functions and `#pragma METAL fp contract(off)`
+  when accepted; `metal_solver::available()` also requires a device self-test
+  of the double-float operations to match the host bit for bit. Nonzero
+  operator and factor magnitudes must lie in [2^-100, 2^100]
+  (`std::domain_error` otherwise), and the factor's stored entries and the
+  two-triangle operator must fit the device's 32-bit offsets (at most 2^30
+  stored operator entries; `std::length_error` otherwise).
 
 ## Accuracy and configuration choice
 

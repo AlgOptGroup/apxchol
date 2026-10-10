@@ -2,7 +2,7 @@
 
 Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
 and SDDM systems. CPU setup and solve use OpenMP; CUDA provides an optional
-device-owned setup and GPU-resident solve. C++, Python and Octave/MATLAB interfaces are included.
+device-owned setup and GPU-resident solve; Metal provides an optional Apple-GPU solve. C++, Python and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
@@ -44,6 +44,18 @@ Eigen::VectorXd z = solver.apply(r);
 CPU solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
+With `-DAPXCHOL_USE_METAL=ON` (macOS), `--backend gpu` and
+`solve_options::backend = solve_backend::gpu` select the Apple GPU.
+Automatic selection stays on CPU. Metal uses host factorization, FP32 factor
+storage and double-float GPU recurrences; explicit FP16 storage is unsupported.
+See [precision and storage](docs/precision.md).
+
+```cpp
+apxchol::metal_solver gpu(L);       // factor and device workspace built once
+auto r1 = gpu.solve(b1);
+auto r2 = gpu.solve(b2, 1e-10);      // reuse them for another right-hand side
+```
+
 ```bash
 pip install apxchol                 # or: pip install -e python
 ```
@@ -62,13 +74,14 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 | CMake option | Purpose |
 |---|---|
 | `APXCHOL_USE_CUDA=ON` | Device-owned setup, dataflow triangular solves and GPU PCG; core links only `cudart` |
+| `APXCHOL_USE_METAL=ON` | Apple-GPU PCG (`metal_solver`); macOS only, exclusive with CUDA |
 | `APXCHOL_POOL_FP32=OFF` | fp64 residual-pool weights instead of default fp32 |
 | `APXCHOL_64BIT_EDGE_INDICES=ON` | Wide factor/pool offsets |
 | `APXCHOL_64BIT_NODE_INDICES=ON` | Wide vertices and offsets |
 
 `cmake -LH build` lists build options. Algorithm defaults live in
 [factor_options.h](include/apxchol/solver/factor_options.h).
-`APXCHOL_FACTOR_STORAGE=auto|float16|float32` controls triangular-solve factor storage (`auto`: GPU FP16, CPU FP32).
+`APXCHOL_FACTOR_STORAGE=auto|float16|float32` controls triangular-solve factor storage (`auto`: CUDA FP16, CPU/Metal FP32).
 FP16 narrows scaled off-diagonals, retaining FP32 diagonals; it
 does not change the outer PCG to FP16. See [precision and storage](docs/precision.md).
 `--sampler gks|trace_cycle` selects the clique sampler; GKS remains

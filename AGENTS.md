@@ -140,6 +140,13 @@ choices, retired knobs, and measurements belong in
   that baseline retires.
 
 
+- `APXCHOL_USE_METAL=ON` (Apple only; exclusive with CUDA): single-RHS
+  `apxchol::metal_solver` PCG with factor and workspace reuse.
+  `src/metal_device.mm` is the only Objective-C++ source (no Eigen, no OpenMP);
+  it compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
+  links Metal, Foundation and CoreGraphics publicly. Explicit GPU requests in
+  `solve()` use Metal; automatic and named CPU solves stay on CPU. Without
+  the option no Metal source builds.
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
@@ -239,6 +246,12 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
+- `solver/detail/metal_schedule.h` prepares the Metal backend's packed factor
+  and dispatch plan using the existing `cuda_host.h` drop/transpose helpers.
+  Its kernel emulation lives in `tests/metal_schedule_reference.h`; portable
+  tests compare it against CPU sweeps. `solver/detail/permuted_operator.h`
+  builds the permuted symmetric operator, ordering duplicate entries by value
+  bits. These are internal prerequisites for Metal, not CPU/CUDA solve paths.
 - CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
   because NVCC does not support `_Float16` in device code. Uploads copy the
   common binary16 representation; the solve kernel widens only at accumulation.
@@ -249,7 +262,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   `auto` selects the backend default (GPU FP16, CPU FP32). Invalid values fail.
   Parsing and selection live in C++; Python only normalizes dtype names.
   Scales and diagonals stay
-  fp32, while outer CPU/GPU PCG vectors and reductions stay fp64. See
+  fp32, while outer CPU/CUDA PCG vectors and reductions stay fp64; Metal
+  uses double-float recurrences. See
   [precision and storage](docs/precision.md). The old GPU-only alias is
   retired.
 - Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
@@ -261,7 +275,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   compatibility only: a CUDA build with 32-bit nodes, block-greedy/AoS, supported
   sampler options and no export selects GPU; other options select CPU before
   setup. It is not a performance predictor or a device-availability fallback.
-- GPU solves require device-owned factorization, finalization, dataflow plans,
+- CUDA solves require device-owned factorization, finalization, dataflow plans,
   operator preparation and PCG. Reject missing/nonunique device factor ownership
   before a host-factor upload. Unsupported stored formats, missing device,
   insufficient memory and runtime errors never trigger a CPU retry. The operator
@@ -373,6 +387,17 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   performance acceptance: compare the default route against current main and
   the owned route against its frozen research reference, with original-system
   quality, setup, solve, one-RHS total, RSS and owner memory.
+- Metal PCG uses host factorization and the shared FP32 drop/transpose helpers.
+  Each call solves one RHS; the solver retains its factor, operator and device
+  workspace. `solve()` uses it for explicit GPU requests in Metal builds;
+  automatic selection stays on CPU. FP16 storage and explicit CPU requests to
+  `metal_solver` fail rather than silently selecting another configuration.
+  Keep double-float arithmetic, power-of-two scaling, checked command buffers
+  and the host FP64 exit residual. Report the actual original-system residual
+  even when the recursive residual has already met tolerance. Repeatability
+  is tested for a fixed factor and execution configuration; cross-thread-count
+  and batching guarantees are deferred. Validate `MetalSchedule.*`, `MetalHost.*`
+  and `MetalDevice.*` on a device, including with Metal shader validation.
 - CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
   only after its upload has completed and no further host RHS reads remain.
 - GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`

@@ -119,6 +119,13 @@ TEST(SolveRoutes, AutoSelectsCpuForHostOnlyConfigurationsBeforeSetup) {
 }
 
 TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
+#if defined(APXCHOL_USE_METAL)
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::gpu;
+    options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
+    const auto matrix = operator_matrix();
+    EXPECT_THROW(apxchol::solve(matrix, Eigen::VectorXd::Ones(matrix.rows()), options), std::invalid_argument);
+#else
 #if defined(APXCHOL_USE_CUDA)
     const bool started = apxchol::cuda_ctx::detail::state().started;
 #endif
@@ -133,6 +140,7 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
     }
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+#endif
 #endif
 }
 
@@ -274,7 +282,7 @@ TEST(SolveRoutes, HiddenDeviceFailureNeverRetriesOnCpu) {
 }
 
 TEST(SolveRoutes, IncompatibleBuildRejectsExplicitGpuAndAutoSelectsCpu) {
-#if defined(APXCHOL_USE_CUDA) && !defined(APXCHOL_64BIT_NODE_INDICES)
+#if defined(APXCHOL_USE_METAL) || (defined(APXCHOL_USE_CUDA) && !defined(APXCHOL_64BIT_NODE_INDICES))
     GTEST_SKIP() << "exercised by the CPU-only and wide-node configurations";
 #else
     apxchol::solve_options options;

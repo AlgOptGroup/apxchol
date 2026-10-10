@@ -15,6 +15,8 @@
 #endif
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/detail/gpu_solve_session.h"
+#elif defined(APXCHOL_USE_METAL)
+#include "apxchol/solver/metal_solver.h"
 #endif
 
 namespace apxchol {
@@ -866,9 +868,12 @@ solve_backend detail::select_solve_backend(const solve_options& opts) {
         throw std::invalid_argument("GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
             "no exported factor and supported sampler options; request CPU explicitly");
     return solve_backend::cpu;
+#elif defined(APXCHOL_USE_METAL)
+    // Metal is explicit opt-in until its performance policy is established.
+    return opts.backend == solve_backend::gpu ? solve_backend::gpu : solve_backend::cpu;
 #else
     if (opts.backend == solve_backend::gpu)
-        throw std::invalid_argument("GPU route requested but CUDA support is not built");
+        throw std::invalid_argument("GPU route requested but GPU support is not built");
     return solve_backend::cpu;
 #endif
 }
@@ -885,6 +890,13 @@ solve_result solve(const Eigen::SparseMatrix<double>& L,
         detail::gpu_solve_session solver(L, opts, res);
         print_sptrsv_banner<solve_backend::gpu>(solver.preconditioner().trsv().fp16());
         solver.solve(b, res, opts.tol, opts.max_iter);
+        return res;
+    }
+#elif defined(APXCHOL_USE_METAL)
+    if (backend == solve_backend::gpu) {
+        const metal_solver slv(L, opts,
+            std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings);
+        slv.solve(b, res);
         return res;
     }
 #else

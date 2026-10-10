@@ -139,8 +139,9 @@ private:
 
 /// One-shot solve: factorize L, then solve Lx = b via PCG.
 /// Automatic selects the complete GPU route for compatible CUDA configurations,
-/// otherwise CPU. An explicit GPU request requires device-owned setup and solve;
-/// unsupported inputs and execution failures are errors, never a CPU retry.
+/// otherwise CPU (including Metal builds). Explicit GPU selects CUDA's device-owned
+/// route or Metal's host-factor/GPU-solve route, according to the build.
+/// Unsupported inputs and execution failures are errors, never a CPU retry.
 solve_result solve(const Eigen::SparseMatrix<double>& L,
                    const Eigen::VectorXd& b,
                    const solve_options& opts = {});

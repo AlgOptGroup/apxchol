@@ -104,20 +104,22 @@ jobs:
         name: Configure + build (Release)
         run: |
           cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+                -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS:-}
           cmake --build build
       - &ctest
         name: Run unit tests
         run: ctest --test-dir build --no-tests=error --output-on-failure
 
   macos:
-    name: macOS (Apple Clang, ${{ matrix.build.name }}, build + ctest)
+    name: macOS (Apple Clang, ${{ matrix.build.name }}, Metal ${{ matrix.metal }}, build + ctest)
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         build: *build_modes
+        metal: ['OFF', 'ON']
     env:
+      CMAKE_ARGS: -DAPXCHOL_USE_METAL=${{ matrix.metal }}
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4
