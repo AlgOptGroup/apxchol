@@ -1,6 +1,6 @@
 #pragma once
-// CUDA-free preparation for the GPU PCG operator. Internal only: the caller
-// supplies the same valid original->permuted bijection used by the factor.
+// Internal host preparation of P A P^T for device solvers. The caller supplies
+// the validated operator and the original-to-permuted bijection of its factor.
 #include "apxchol/csc_work.h"
 #include "apxchol/types.h"
 #include <Eigen/Sparse>
@@ -12,22 +12,17 @@
 #include <utility>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol::detail {
 
 // A fully stored symmetric CSC column k owns row perm[k] of the permuted
-// symmetric CSR. This removes shared row counters and scatter cursors. The
-// inner indices still need sorting after permutation. As in the general
-// builder, values come from the canonical LOWER triangle and fp32_exact
-// examines only that triangle; an accepted near-symmetric upper value must
-// neither replace its lower partner nor change the precision decision.
+// symmetric CSR, avoiding atomic scatter. Values and fp32_exact use only the
+// canonical lower triangle, even when upper values differ within tolerance.
 //
 // Return false for uncompressed, unsorted, duplicate or unpaired storage so
-// the established general builder retains those cases. On false, row_ptr is
-// scratch and the other outputs are unchanged. No CUDA runtime is required.
+// the caller can choose a fallback. On false, row_ptr is scratch and the other
+// outputs are unchanged.
 inline bool try_build_permuted_symmetric_csr(
         const Eigen::SparseMatrix<double>& L,
         const std::vector<node_index>& perm,
@@ -47,34 +42,25 @@ inline bool try_build_permuted_symmetric_csr(
     row_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
     bool eligible = true, exact = true;
     std::int64_t lower = 0, upper = 0;
-    // Columns are split by stored entries, not by count: the work of a column
-    // is its length, and with the natural labelling the heaviest equal-count
-    // chunk carries 2.0x the mean on the IPM normal equations and 4.0x on
-    // as-Skitter (see detail::work_balanced_range). Both loops here write
-    // per-column disjoint output and reduce only integers and booleans, so the
-    // split cannot change a single stored byte.
+    // Balance by stored entries; each column owns a disjoint output row.
     #pragma omp parallel reduction(&& : eligible, exact) reduction(+ : lower, upper)
     {
-#ifdef _OPENMP
-    const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
-#else
-    const int tid = 0, nt = 1;
-#endif
-    const auto [c_lo, c_hi] = work_balanced_range(outer, n, tid, nt);
-    for (int col = c_lo; col < c_hi; ++col) {
-        row_ptr[perm[col] + 1] = outer[col + 1] - outer[col];
-        for (int p = outer[col]; p < outer[col + 1]; ++p) {
-            const int row = inner[p];
-            if (p > outer[col] && inner[p - 1] >= row) eligible = false;
-            if (row < col) {
-                ++upper;
-            } else {
-                if (row > col) ++lower;
-                if (static_cast<double>(static_cast<float>(input[p])) != input[p])
-                    exact = false;
+        const auto [c_lo, c_hi] = work_balanced_range(
+            outer, n, omp_get_thread_num(), omp_get_num_threads());
+        for (int col = c_lo; col < c_hi; ++col) {
+            row_ptr[perm[col] + 1] = outer[col + 1] - outer[col];
+            for (int p = outer[col]; p < outer[col + 1]; ++p) {
+                const int row = inner[p];
+                if (p > outer[col] && inner[p - 1] >= row) eligible = false;
+                if (row < col) {
+                    ++upper;
+                } else {
+                    if (row > col) ++lower;
+                    if (static_cast<double>(static_cast<float>(input[p])) != input[p])
+                        exact = false;
+                }
             }
         }
-    }
     }
     if (!eligible || lower != upper) return false;
     for (int row = 0; row < n; ++row) row_ptr[row + 1] += row_ptr[row];
@@ -88,12 +74,8 @@ inline bool try_build_permuted_symmetric_csr(
     #pragma omp parallel reduction(&& : paired)
     {
         std::vector<std::pair<int, double>> entries;
-#ifdef _OPENMP
-        const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
-#else
-        const int tid = 0, nt = 1;
-#endif
-        const auto [c_lo, c_hi] = work_balanced_range(outer, n, tid, nt);
+        const auto [c_lo, c_hi] = work_balanced_range(
+            outer, n, omp_get_thread_num(), omp_get_num_threads());
         for (int col = c_lo; col < c_hi; ++col) {
             entries.clear();
             entries.reserve(static_cast<std::size_t>(outer[col + 1] - outer[col]));
@@ -130,28 +112,10 @@ inline bool try_build_permuted_symmetric_csr(
     return true;
 }
 
-// Build full-symmetric CSR of A_perm = P L P^T from a (lower-half-stored)
-// symmetric matrix L and its permutation P. The factor F_.L was built on
-// A_perm, so running PCG in permuted space matches what trsv_.solve_LLt_dev
-// expects per iter. This host builder is CUDA-free and requires compressed storage.
-//
-// perm.indices()[orig_v] = new_idx ⇒  A_perm[i,j] = L[iperm(i), iperm(j)]
-// where iperm = P^{-1}. The permutation acts on BOTH row and col of L.
-// Output: row_ptr/col_idx/vals = CSR of A_perm (full symmetric, sorted),
-// nnz = row_ptr[n] (col_idx/vals hold exactly that many entries; they are
-// plain arrays, not vectors — see the allocation note below).
-//
-// Fully paired, unique sorted CSC uses column ownership: source column k
-// owns output row perm[k], retaining the sort by permuted column indices.
-// The general fallback below counts and scatters through atomic row
-// counters, then sorts each row by column (duplicate coordinates by value
-// bits). Both preserve canonical lower values.
-// fp32_exact (out) := every operator value round-trips fp32 (v == double(float(v))),
-// so storing A in fp32 is LOSSLESS. Computed FOR FREE as an OMP reduction in PASS 2's
-// existing value loop -- no separate scan. (A is symmetric; PASS 2 visits the upper
-// triangle incl. diagonal = every distinct value.) This is the "detect at input"
-// gate that lets exact matrices use the half-size fp32 operator while Krylov compute
-// stays fp64 (so the 1e-8 residual floor is preserved).
+// Build sorted, full-symmetric CSR of P L P^T from L's canonical lower triangle.
+// Requires compressed square storage and a valid permutation; the caller must
+// ensure that the expanded operator fits int offsets. Duplicate entries remain
+// separate, ordered by value bits. fp32_exact reports lossless FP32 storage.
 inline void build_permuted_full_symmetric_csr(
     const Eigen::SparseMatrix<double>& L,
     const std::vector<node_index>& perm,
@@ -161,17 +125,16 @@ inline void build_permuted_full_symmetric_csr(
     std::int64_t& nnz,
     bool& fp32_exact)
 {
-    if (detail::try_build_permuted_symmetric_csr(
+    if (try_build_permuted_symmetric_csr(
             L, perm, row_ptr, col_idx, vals, nnz, fp32_exact))
         return;
     const int n = static_cast<int>(L.rows());
     const int* L_outer = L.outerIndexPtr();
     const int* L_inner = L.innerIndexPtr();
     const double* L_vals = L.valuePtr();
-    // perm_[v] = new_idx for original vertex v.
     const node_index* p_idx = perm.data();
 
-    // PASS 1 (parallel): atomic count per-row of A_perm.
+    // Count both mirrored entries of each off-diagonal lower value.
     row_ptr.assign(n + 1, 0);
     #pragma omp parallel for schedule(static)
     for (int k = 0; k < n; ++k) {
@@ -185,29 +148,15 @@ inline void build_permuted_full_symmetric_csr(
                 __atomic_fetch_add(&row_ptr[pk + 1], 1, __ATOMIC_RELAXED);
         }
     }
-    // Prefix sum (serial, m+1 entries — sub-ms even for n=4M).
     for (int i = 0; i < n; ++i)
         row_ptr[i + 1] += row_ptr[i];
     const int total = row_ptr[n];
     nnz = total;
-    // UNINITIALIZED, deliberately: PASS 2 below writes every one of the
-    // `total` slots exactly once (its scatter is the same walk PASS 1 just
-    // counted), so a zero fill is pure waste -- and a SERIAL one, 80 MB of
-    // int + 160 MB of double on grid_2000, memset on one thread and then
-    // immediately overwritten. Same idiom (and same reason) as the fp32
-    // operator cast in setup(). The prefix sum above stays serial: it is
-    // n+1 entries, sub-ms even at n = 4M.
-    // Worth less than it looks: the page faults just move from the memset
-    // into PASS 2's (parallel) first touch, so the measured `gpu_pcg_setup`
-    // win is only grid_2000 79.9 -> 77.7 ms, iter0040 64.3 -> 63.3 (medians
-    // of 48, RTX 4090 Laptop, T=16, warm context). Kept because it is
-    // strictly less work and strictly less peak-transient traffic.
+    // The scatter writes every slot, allowing parallel first touch.
     col_idx = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(total));
     vals    = std::make_unique_for_overwrite<double[]>(static_cast<std::size_t>(total));
 
-    // PASS 2 (parallel): atomic-claim slot, scatter. Non-deterministic
-    // per-row order across threads; the per-row sort below restores one order. The fp32
-    // exactness reduction rides along for free (every value v is read here anyway).
+    // Scatter and check FP32 exactness in the same pass over the lower triangle.
     std::vector<int> pos(row_ptr.begin(), row_ptr.begin() + n);
     bool exact = true;
     #pragma omp parallel for schedule(static) reduction(&&:exact)
@@ -233,12 +182,8 @@ inline void build_permuted_full_symmetric_csr(
     }
     fp32_exact = exact;
 
-    // Sort each row's (col, val) ascending: sorted CSR gives the SpMV its
-    // best locality on the x gathers. Duplicate coordinates, which the
-    // operator contract accepts, are ordered by value bits, so the stored
-    // order (and every SpMV's summation order) does not depend on which
-    // thread claimed which slot. Per-thread kv buffer reused across rows
-    // (avoids n tiny mallocs).
+    // Sort by column and then value bits so duplicate order is independent
+    // of the threads' scatter order. Reuse one scratch buffer per worker.
     #pragma omp parallel
     {
         std::vector<std::pair<int, double>> kv;

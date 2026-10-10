@@ -83,7 +83,7 @@ private:
     std::string what_;
 };
 
-// One step of a triangular solve (level_schedule::level_step, flattened):
+// One step of a triangular solve (detail::metal_schedule::level_step, flattened):
 // kind 0 = light rows [first, last), 1 = heavy rows [first, last),
 // 2 = narrow levels [first, last) in one threadgroup.
 struct tri_step {
