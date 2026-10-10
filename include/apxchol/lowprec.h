@@ -69,15 +69,18 @@ inline int sptrsv_fp16_env_tristate() {
 
 namespace detail {
 
-inline bool fp16_flushes(_Float16 value) {
+// Whether a normalized FP32 value rounds to zero or a subnormal in FP16.
+inline bool fp16_flushes(float value) {
     // numeric_limits<_Float16> is unavailable with our Clang toolchains.
     // https://github.com/llvm/llvm-project/issues/105196
-    return std::abs(float(value)) < __FLT16_MIN__;
+    // The midpoint itself rounds up to the smallest normal FP16 value.
+    constexpr float flush_threshold = __FLT16_MIN__ - 0.5f * __FLT16_DENORM_MIN__;
+    return std::abs(value) < flush_threshold;
 }
 
 inline _Float16 narrow_scaled_fp16(float value, float scale) {
-    const auto stored = _Float16(value / scale);
-    return fp16_flushes(stored) ? _Float16(std::copysign(0.0f, float(stored))) : stored;
+    value /= scale;
+    return _Float16(fp16_flushes(value) ? std::copysign(0.0f, value) : value);
 }
 
 } // namespace detail

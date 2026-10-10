@@ -146,8 +146,8 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
 /// |v / s| (fp16_flushes). The diagonal is never passed through this.
 template <class Val>
 inline bool keep_offdiag(Val v, float s, double rel, bool fp16_storage) {
-    if (!(std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s))) return false;
-    if (fp16_storage) return !detail::fp16_flushes(_Float16(static_cast<float>(v) / s));
+    if (!(std::fabs(v) >= rel * s)) return false;
+    if (fp16_storage) return !detail::fp16_flushes(static_cast<float>(v) / s);
     return v != Val(0);
 }
 
@@ -217,8 +217,8 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     out.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<std::size_t>(L11.nnz));
     out.diag.resize(static_cast<std::size_t>(L11.m));
     out.inv_scale.resize(static_cast<std::size_t>(L11.m));
-    std::uint64_t n_flush = 0, n_sub = 0;
-    #pragma omp parallel reduction(+ : n_flush, n_sub)
+    std::uint64_t n_flush = 0;
+    #pragma omp parallel reduction(+ : n_flush)
     {
 #ifdef _OPENMP
     const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
@@ -239,14 +239,13 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
             if (L11.idx[p] == j) continue;   // the diagonal SLOT: written, never read (see the file header)
             const float w = float(h);
             if (v != 0.0f && w == 0.0f) ++n_flush;
-            else if (is_stored_subnormal(h)) ++n_sub;
-            resid += static_cast<double>(L11.vals[p]) / static_cast<double>(s) - static_cast<double>(w);
+            resid += static_cast<double>(L11.vals[p]) / s - w;
         }
         d = static_cast<float>(static_cast<double>(d) + resid);
         out.diag[j] = d;
     }
     }
-    out.flushed = n_flush; out.subnormal = n_sub;
+    out.flushed = n_flush;
     return out;
 }
 

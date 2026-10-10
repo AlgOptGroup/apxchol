@@ -219,8 +219,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   loops; native builds use them directly.
   FP16 remains opt-in on the CPU; unsupported explicit requests fail at setup.
   Setup narrows CSC once inside an F16C-targeted worker and transposes those
-  stored values. The format-drop predicate compares the RNE normal/subnormal
-  midpoint without narrowing. Release consumed input before the transpose;
+  stored values. Host narrowing and the format-drop predicate share the RNE
+  normal/subnormal boundary check, flushing before conversion to FP16.
+  Release consumed input before the transpose;
   FP32 keeps transpose-before-copy ordering to retain its memory bound.
 - CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
   `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so

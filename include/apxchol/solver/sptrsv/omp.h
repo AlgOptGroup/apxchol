@@ -271,17 +271,11 @@ public:
         }
     }
 
-    // True iff the storage format V maps the off-diagonal v (in a column with
-    // scale s) to zero: an exact zero on the fp32 storage (a nonzero factor
-    // entry never rounds to zero there); on fp16 everything fp16 flushes
-    // (|v / s| < 2^-25 under RNE) plus the fp16 subnormal range (< 2^-14 after
-    // rounding), which narrow_value flushes. Pure.
+    // Whether storage maps v to zero, including flushed FP16 subnormals.
     template <class V = sptrsv_value_t>
     static bool format_flushes(factor_value_t v, float s) {
         if constexpr (std::is_same_v<V, _Float16>) {
-            // RNE rounds the midpoint up to the smallest normal binary16 value.
-            constexpr float midpoint = float(__FLT16_MIN__) - 0.5f * float(__FLT16_DENORM_MIN__);
-            return std::abs(static_cast<float>(v) / s) < midpoint;
+            return detail::fp16_flushes(v / s);
         } else {
             (void)s;
             return v == 0;
@@ -294,7 +288,7 @@ public:
     // diagonal is never passed through this (always kept).
     template <class V = sptrsv_value_t>
     static bool keep_offdiag(factor_value_t v, float s, double rel) {
-        return std::fabs(static_cast<double>(v)) >= rel * static_cast<double>(s) &&
+        return std::fabs(v) >= rel * s &&
                !format_flushes<V>(v, s);
     }
 
@@ -730,10 +724,11 @@ private:
                 const V              w = narrow_value<V>(v, kScaled ? scale_[j] : 1.0f);
                 csc_row_idx_[k] = i;
                 csc_vals[k]     = w;
-                if (is_stored_subnormal(v)) ++counts.factor_subnormal;
+                const bool subnormal = is_stored_subnormal(v);
+                counts.factor_subnormal += subnormal;
                 if constexpr (kScaled) {
                     if (i != j) {
-                        const double x = static_cast<double>(v) / static_cast<double>(scale_[j]);
+                        const double x = static_cast<double>(v) / scale_[j];
                         resid += x - widen(w);
                     }
                 }
@@ -741,16 +736,15 @@ private:
                     if constexpr (kScaled) {
                         // Count L_jj < s_j only when the column has off-diagonals.
                         if (ptr[j + 1] - ptr[j] > 1 &&
-                            static_cast<double>(v) < static_cast<double>(scale_[j])) ++counts.diag_below_scale;
+                            v < scale_[j]) ++counts.diag_below_scale;
                     }
                     continue;
                 }
                 ++counts.offdiag;
-                if (v != 0 && widen(w) == 0.0) {
-                    ++counts.flushed;
-                } else if constexpr (!kScaled) {
-                    // FP16 subnormals were flushed by narrow_value.
-                    if (is_stored_subnormal(w)) ++counts.subnormal;
+                if constexpr (kScaled) {
+                    if (v != 0 && w == 0) ++counts.flushed;
+                } else {
+                    counts.subnormal += subnormal;
                 }
             }
             if constexpr (kScaled)
