@@ -41,8 +41,6 @@ inline df df_add(df a, df b) {
     return quick_two_sum(s.hi, s.lo);
 }
 
-inline df df_neg(df a) { return {-a.hi, -a.lo}; }
-
 inline df two_prod(float a, float b) {
     const float p = a * b;
     const float e = std::fma(a, b, -p);
@@ -63,8 +61,6 @@ inline df df_mul_f(df a, float b) {
     e = std::fma(a.lo, b, e);
     return quick_two_sum(p, e);
 }
-
-inline bool df_lt(df a, df b) { return a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo); }
 
 /// fp64 -> double-float: hi = fp32(v), lo = fp32(v - hi). Exact for any v
 /// with at most 48 significant bits whose parts stay in the fp32 normal range.
@@ -145,16 +141,20 @@ void gather(const double* v_perm, const Index* perm, std::size_t n, double* out)
     for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(n); ++v) out[v] = v_perm[perm[v]];
 }
 
-inline void pack(const double* w, std::size_t n, double scale, df* out) {
+template <class Pair>
+void pack(const double* w, std::size_t n, double scale, Pair* out) {
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
-        out[i] = split(scale * w[i]);
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
+        const df value = split(scale * w[i]);
+        out[i] = {value.hi, value.lo};
+    }
 }
 
-inline void unpack(const df* v, std::size_t n, double scale, double* out) {
+template <class Pair>
+void unpack(const Pair* v, std::size_t n, double scale, double* out) {
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
-        out[i] = join(v[i]) / scale;
+        out[i] = join({v[i].hi, v[i].lo}) / scale;
 }
 
 // ── The device's reduction tree ─────────────────────────────────────────────

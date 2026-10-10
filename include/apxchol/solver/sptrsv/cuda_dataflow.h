@@ -21,7 +21,7 @@ int dataflow_grid_size(bool fp16);
 // be hidden behind a waiting consumer, including within one warp.
 //
 // The owner supplies tag_count >= m + number of segment partials, and one
-// ticket word per direction. Initialization resets both on every invocation,
+// ticket word. Initialization resets both on every invocation,
 // including graph replay. rhs and out must be distinct; sweeps share workspace
 // only when ordered on the same stream. Factor CSR includes its diagonal.
 void dataflow_solve(cudaStream_t stream, int m, bool reverse,

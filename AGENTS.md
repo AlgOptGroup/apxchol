@@ -264,7 +264,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   is accepted; other nonempty values are errors. `factor_options::factor_storage`
   selects per-solver storage. Its `automatic` default uses
   `APXCHOL_FACTOR_STORAGE=auto|float16|float32`.
-  `auto` selects the backend default (GPU FP16, CPU FP32). Invalid values fail.
+  `auto` selects the backend default (CUDA FP16, CPU/Metal FP32). Invalid values fail.
   Parsing and selection live in C++; Python only normalizes dtype names.
   Scales and diagonals stay
   fp32, while outer CPU/CUDA PCG vectors and reductions stay fp64; Metal

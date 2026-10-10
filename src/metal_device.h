@@ -64,13 +64,6 @@ static_assert(offsetof(solve_state, mu_z) == 52);
 static_assert(offsetof(solve_state, active) == 56);
 static_assert(offsetof(solve_state, stop) == 64);
 
-// solve_state::stop codes written by the device (0 = still running).
-inline constexpr std::uint32_t kStopRunning = 0;
-inline constexpr std::uint32_t kStopTolerance = 1;
-inline constexpr std::uint32_t kStopBreakdown = 2;
-inline constexpr std::uint32_t kStopStagnation = 3;
-inline constexpr std::uint32_t kStopNonfinite = 4;
-
 /// The device cannot hold a buffer. A std::bad_alloc, so callers that map
 /// out-of-memory report it as one; what() names the buffer.
 class device_memory_error : public std::bad_alloc {
@@ -131,7 +124,6 @@ public:
     df32* r() noexcept;
     df32* x() noexcept;
     float* p() noexcept;
-    float* z() noexcept;
     solve_state& state() noexcept;
 
     factor_statistics factor_stats() const;

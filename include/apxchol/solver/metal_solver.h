@@ -11,7 +11,6 @@
 #include <cstddef>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace apxchol {
 
@@ -29,9 +28,10 @@ public:
 
     /// Factorizes A (operator contract of operator_class.h) and prepares the
     /// device. Throws std::runtime_error if available() is false (before
-    /// factorizing), std::invalid_argument on an operator-contract violation,
+    /// factorizing), std::invalid_argument on an operator-contract violation or
+    /// invalid factor layout/diagonal,
     /// std::domain_error on operator or factor magnitudes outside
-    /// [2^-100, 2^100] (or a zero factor diagonal), std::length_error when the
+    /// [2^-100, 2^100], std::length_error when the
     /// factor or the operator (above 2^30 stored entries) exceeds the device's
     /// 32-bit offsets, and a std::bad_alloc (what() names the buffer) when the
     /// device cannot hold the system.

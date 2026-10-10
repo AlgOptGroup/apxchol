@@ -386,31 +386,12 @@ dominated, and it does not change the default solver or its numerical controls.
 
 ## Apple Metal backend
 
-`metal_solver` ports a private downstream feasibility prototype (a Rust host
-with MSL kernels, run on exported apxchol factors). Its measurements belong to
-that project and are not reproduced here; the findings below are historical
-and qualitative, not a validation of this integration.
+The initial proposal combined a Metal backend with batched right-hand sides
+and batching-specific reproducibility guarantees. The integration keeps one
+RHS per call and factor/workspace reuse; batching and pipelined submission
+remain separate work. The original light/heavy/narrow-level kernels were
+replaced by the shared CUDA/Metal dataflow worker described above.
 
-**Precision variants.** An all-FP32 solve reached its recursive tolerance while
-the true original-system residual stalled far above 1e-8. FP64 iterative
-refinement on the CPU around restarted FP32 solves converged but cost several
-times the FP64 iteration count at 1e-10. FP32 PCG with reliable updates (FP64 on
-the CPU, or double-float on the GPU) kept the search directions but diverged at
-1e-10 on the largest case. The FP32 preconditioner with double-float Krylov
-recurrences (x, r, A p and the operator) reached 1e-10 true residuals without
-restarts at close to FP64 iteration counts; it is the only mode retained.
-
-The initial integration solves one RHS per call and reuses the factor and
-workspace across calls. Batched RHS, batch-independent bitwise results and
-pipelined submissions are separate follow-up work. The original batched
-implementation remains in the PR history for that comparison.
-
-The single-RHS kernels retain the precision safeguards: power-of-two input
-scaling, double-float stopping thresholds, explicit breakdown handling,
-safe compiler math and a device self-test. Sparse triangular solves now use
-the shared dataflow worker with independent workgroups. These mechanisms
-also apply to one RHS and do not require the batching API.
-
-Comparisons with the previous single-RHS Metal implementation cover setup
-and solve separately. They do not establish performance relative to CPU or
-CUDA solves, or a universal improvement across factors.
+Metal retains FP32 factor storage, double-float PCG recurrences and a host
+FP64 exit residual. Its supported range, stopping behavior and repeatability
+contract are documented in [precision and storage](precision.md).

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "apxchol/solver/detail/metal_host.h"
+#include "../src/metal_device.h"
 
 #include <cmath>
 #include <cstdint>
@@ -74,7 +75,7 @@ TEST(MetalHost, VectorPackingRoundTrip) {
     const std::size_t n = 50001;
     std::vector<double> v(n), permuted(n), back(n), out(n);
     std::vector<std::uint32_t> perm(n);
-    std::vector<mh::df> packed(n);
+    std::vector<apxchol::detail::metal::df32> packed(n);
     for (std::size_t i = 0; i < n; ++i) {
         v[i] = std::sin(0.3 * static_cast<double>(i)) * std::ldexp(1.0, static_cast<int>(i % 40) - 20);
         perm[i] = static_cast<std::uint32_t>((i * 7919) % n);

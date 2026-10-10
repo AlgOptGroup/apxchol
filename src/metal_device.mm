@@ -10,13 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
-#include <cstdlib>
-#include <exception>
-#include <mutex>
-#include <cmath>
-#include <span>
 #include "apxchol/solver/detail/metal_schedule.h"
-#include "apxchol/solver/detail/gpu_dataflow_plan.h"
 #include <stdexcept>
 
 namespace apxchol::detail::metal {
@@ -282,8 +276,7 @@ struct engine::impl {
     bool operator_df = false;
     float inv_n_hi = 0.0f, inv_n_lo = 0.0f;
     id<MTLBuffer> op_ptr = nil, op_col = nil, op_hi = nil, op_lo = nil;
-    using tri = prepared_tri;
-    tri fwd, bwd;
+    prepared_tri fwd, bwd;
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, cols = nil;
     id<MTLBuffer> tags = nil;
 
@@ -337,7 +330,7 @@ struct engine::impl {
         dispatch_tree(enc);
     }
 
-    void encode_tri(id<MTLComputeCommandEncoder> enc, const tri& t, bool forward) const {
+    void encode_tri(id<MTLComputeCommandEncoder> enc, const prepared_tri& t, bool forward) const {
         if (!m) return;
         const int f = forward ? 1 : 0;
         [enc setBuffer:t.ptr offset:0 atIndex:2];
@@ -465,7 +458,6 @@ engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_array
     @autoreleasepool {
         id<MTLDevice> dev = s.ctx->device;
         const std::size_t entries = static_cast<std::size_t>(s.n);
-        s.x = s.r = s.ap = s.p = s.z = s.partial = s.cols = nil;
         s.x = upload(dev, nullptr, entries * sizeof(df32));
         s.r = upload(dev, nullptr, entries * sizeof(df32));
         s.ap = upload(dev, nullptr, entries * sizeof(df32));
@@ -491,7 +483,6 @@ engine::~engine() {
 df32* engine::r() noexcept { return static_cast<df32*>([impl_->r contents]); }
 df32* engine::x() noexcept { return static_cast<df32*>([impl_->x contents]); }
 float* engine::p() noexcept { return static_cast<float*>([impl_->p contents]); }
-float* engine::z() noexcept { return static_cast<float*>([impl_->z contents]); }
 solve_state& engine::state() noexcept { return *static_cast<solve_state*>([impl_->cols contents]); }
 
 factor_statistics engine::factor_stats() const {

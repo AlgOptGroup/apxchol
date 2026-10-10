@@ -43,9 +43,6 @@ void validate_options(const solve_options& opts) {
         throw std::invalid_argument("Metal requires float32 factor storage");
 }
 
-static_assert(sizeof(mh::df) == sizeof(dm::df32));
-
-mh::df* as_df(dm::df32* p) { return reinterpret_cast<mh::df*>(p); }
 dm::df32 to_device(mh::df v) { return {v.hi, v.lo}; }
 
 // ── Device self-test ─────────────────────────────────────────────────────────
@@ -188,9 +185,7 @@ struct metal_solver::impl {
         const std::ptrdiff_t rows = static_cast<std::ptrdiff_t>(n);
         #pragma omp parallel
         {
-            int tid = 0, nt = 1;
-            tid = omp_get_thread_num();
-            nt = omp_get_num_threads();
+            const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
             const auto [lo, hi] = detail::work_balanced_range(ptr, rows, tid, nt);
             for (std::ptrdiff_t i = lo; i < hi; ++i) {
                 double acc = 0.0;
@@ -292,8 +287,8 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         return t;
     };
     device = std::make_unique<dm::engine>(op, arrays(forward), arrays(backward), m, laplacian);
-    // Inherited from the prototype: one iteration per command buffer on large
-    // systems, four on small ones (fewer host round trips).
+    // Group four iterations on small systems to amortize command submission;
+    // check large solves after each iteration.
     check_every = n > 200000 ? 1 : 4;
 
     const auto prepared = device->factor_stats();
@@ -401,7 +396,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     const double max_abs = mh::fold_max_abs(work.data(), s.n);
     if (max_abs == 0.0) { finish(); return; }
     const double scale = mh::pow2_scale(max_abs);
-    mh::pack(work.data(), s.n, scale, as_df(s.device->r()));
+    mh::pack(work.data(), s.n, scale, s.device->r());
     auto& state = s.device->state();
     state = {};
     const double threshold = tol * bnorm * scale;
@@ -412,12 +407,11 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     cp("pack");
     s.device->solve(static_cast<std::uint32_t>(max_iter), window, s.check_every);
     cp("device");
-    mh::unpack(as_df(s.device->x()), s.n, scale, work.data());
+    mh::unpack(s.device->x(), s.n, scale, work.data());
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(s.n); ++i) xp[i] += work[i];
     result.iterations = state.iters;
     finish();
-    return;
 }
 
 Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
@@ -432,7 +426,7 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     const double max_abs = mh::fold_max_abs(rp.data(), s.n);
     if (max_abs == 0.0) return z;
     const double scale = mh::pow2_scale(max_abs);
-    mh::pack(rp.data(), s.n, scale, as_df(s.device->r()));
+    mh::pack(rp.data(), s.n, scale, s.device->r());
     auto& cs = s.device->state();
     cs = {};
     cs.active = 1;

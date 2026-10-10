@@ -12,7 +12,7 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
 | Outer CPU/CUDA PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
-| Metal triangular solves | The CPU's FP32 stored factor; FP32 reciprocal diagonals and arithmetic | Apple GPUs have no FP64; same applied preconditioner as the CPU |
+| Metal triangular solves | FP32 factor values, diagonals and arithmetic | Shared dataflow worker; no FP64 device arithmetic |
 | Metal PCG | Double-float x, r, A p and inexact operator; FP32 p and z; double-float fixed-tree reductions; host FP64 exit residual | About 48-bit recurrences reach original-system tolerances without FP64 hardware |
 
 `factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; C++ owns parsing and default selection.
@@ -55,13 +55,12 @@ implementation and is checked by the GPU finalization tests.
 and `cpu_solver` stay on CPU. Each call solves one RHS; repeated calls on a
 `metal_solver` reuse its factor, operator and device workspace.
 
-- **Preconditioner.** The same L11, compacting drop (`APXCHOL_FACTOR_DROP`) and
-  FP32 values as the CPU's FP32 storage; the schedule arrays are byte-identical
-  to `omp_sptrsv`'s CSR/CSC. Diagonals are applied as `fp32(1 / fp64(L_ii))`.
-  Arithmetic is FP32 fused multiply-add in dependency order; a row with more
-  than 32 dependencies accumulates them in 32 fixed virtual lanes folded in
-  order. The device stores FP32. `APXCHOL_FACTOR_STORAGE` and the per-solver setting
-  use the shared parser; explicit FP16 requests fail.
+- **Preconditioner.** Factor preparation uses the shared L11 extraction,
+  compensated drop (`APXCHOL_FACTOR_DROP`) and transpose helpers. Values and
+  diagonals are FP32. The CUDA/Metal dataflow worker uses fused multiply-add,
+  fixed subgroup reductions and segmented long rows; each row finishes with
+  FP32 division by its diagonal. `APXCHOL_FACTOR_STORAGE` and the per-solver
+  setting use the shared parser; explicit FP16 requests fail.
 - **Recurrences.** x, r and A p are double-float (hi + lo FP32, about 48
   significant bits). The operator is FP32 when every value is FP32-exact and
   double-float otherwise (the CPU/CUDA exactness rule, without an override).
