@@ -158,8 +158,9 @@ TEST(LevelSchedule, EveryRowOnceDependenciesEarlierLightBeforeHeavy) {
                     const bool heavy = sv->ptr[t + 1] - sv->ptr[t] > ls::kHeavyDeps;
                     EXPECT_EQ(heavy, t >= sv->heavy_ptr[l]) << "light rows precede heavy rows";
                     heavy_rows += heavy;
-                    if (t + 1 < sv->heavy_ptr[l] || (t >= sv->heavy_ptr[l] && t + 1 < sv->level_ptr[l + 1]))
+                    if (t + 1 < sv->heavy_ptr[l] || (t >= sv->heavy_ptr[l] && t + 1 < sv->level_ptr[l + 1])) {
                         EXPECT_LT(sv->rows[t], sv->rows[t + 1]) << "ascending within each part";
+                    }
                     for (std::uint32_t e = sv->ptr[t]; e < sv->ptr[t + 1]; ++e) {
                         EXPECT_LT(row_level[sv->col[e]], l) << "dependency solved earlier";
                         EXPECT_TRUE(forward ? sv->col[e] < sv->rows[t] : sv->col[e] > sv->rows[t]);
@@ -184,7 +185,9 @@ TEST(LevelSchedule, ArraysAndLevelsAreTheCpuStoredFactors) {
             const ls::factor_schedules s = ls::build_factor_schedules(fc.L, fc.m, apxchol::factor_drop_rel_from_env());
             EXPECT_EQ(s.drop.nnz_stored, cpu.stored_nnz());
             EXPECT_EQ(s.drop.dropped, cpu.drop_stats().dropped);
-            if (drop && std::string(drop) == "1e-3" && fc.name.rfind("random", 0) == 0) EXPECT_GT(s.drop.dropped, 0u);
+            if (drop && std::string(drop) == "1e-3" && fc.name.rfind("random", 0) == 0) {
+                EXPECT_GT(s.drop.dropped, 0u);
+            }
             std::size_t mismatches = 0;
             for (const bool forward : {true, false}) {
                 const ls::level_solve& sv = forward ? s.forward : s.backward;
@@ -252,7 +255,7 @@ TEST(LevelSchedule, StepPlanCoversEachLevelOnce) {
                 }
                 EXPECT_EQ(next_level, sv->levels());
                 EXPECT_EQ(next_slot, sv->slots());
-                if (kc == 1) EXPECT_GT(narrow, 0u);
+                if (kc == 1) { EXPECT_GT(narrow, 0u); }
             }
     }
 }
