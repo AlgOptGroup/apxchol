@@ -1,13 +1,11 @@
 #include <gtest/gtest.h>
-#include "apxchol/solver/pcg_cuda_host.h"
+#include "apxchol/solver/detail/permuted_operator.h"
 #include <array>
 #include <bit>
 #include <cstring>
 #include <numeric>
 #include <random>
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace {
 using Matrix = Eigen::SparseMatrix<double>;
@@ -75,15 +73,11 @@ bool accepted(const Matrix& L) {
 }
 } // namespace
 
-TEST(GpuPcgHost, PermutedArraysMatchIndependentLowerTriangleReference) {
+TEST(PermutedOperator, PermutedArraysMatchIndependentLowerTriangleReference) {
     std::mt19937 rng(418932);
-#ifdef _OPENMP
     const int saved = omp_get_max_threads();
-#endif
     for (int team : {1, 2, 4}) {
-#ifdef _OPENMP
         omp_set_num_threads(team);
-#endif
         for (int trial = 0; trial < 80; ++trial) {
             const int n = trial * 13 % 131;
             std::vector<Eigen::Triplet<double>> entries;
@@ -94,7 +88,7 @@ TEST(GpuPcgHost, PermutedArraysMatchIndependentLowerTriangleReference) {
                     const double value = trial % 5 ? -0.25 * (rng() % 8) : -0.1;
                     entries.emplace_back(row, col, value);
                     // Deliberately different, possibly inexact upper values:
-                    // the old GPU builder ignores them, including precision.
+                    // only canonical lower values determine the operator and its precision.
                     entries.emplace_back(col, row, value + 1e-10);
                 }
             }
@@ -105,25 +99,23 @@ TEST(GpuPcgHost, PermutedArraysMatchIndependentLowerTriangleReference) {
             check(L, perm);
         }
     }
-#ifdef _OPENMP
     omp_set_num_threads(saved);
-#endif
 }
 
-TEST(GpuPcgHost, ExplicitZerosAndMissingDiagonalsPreserveCanonicalPrecision) {
+TEST(PermutedOperator, ExplicitZerosAndMissingDiagonalsPreserveCanonicalPrecision) {
     const auto L = from_entries(5, {{2, 0, -0.0}, {0, 2, 0.1},
                                    {3, 1, -0.5}, {1, 3, -0.500000001}, {4, 4, 2.0}});
     check(L, {3, 0, 4, 2, 1});
     EXPECT_TRUE(serial_reference(L, {3, 0, 4, 2, 1}).exact);
 }
 
-TEST(GpuPcgHost, RejectsUnpairedStorageEvenWhenTriangleCountsBalance) {
+TEST(PermutedOperator, RejectsUnpairedStorageEvenWhenTriangleCountsBalance) {
     EXPECT_FALSE(accepted(from_entries(3, {{1, 0, -1.0}, {0, 2, -1.0}})));
     EXPECT_FALSE(accepted(from_entries(3, {{1, 0, -1.0}})));
     EXPECT_FALSE(accepted(from_entries(3, {{0, 1, -1.0}})));
 }
 
-TEST(GpuPcgHost, MissingPartnerDoesNotPublishPartiallyWrittenArrays) {
+TEST(PermutedOperator, MissingPartnerDoesNotPublishPartiallyWrittenArrays) {
     const auto L = from_entries(3, {{1, 0, -1.0}, {0, 2, -1.0}});
     std::vector<int> ptr;
     auto idx = std::make_unique<int[]>(1);
@@ -139,7 +131,7 @@ TEST(GpuPcgHost, MissingPartnerDoesNotPublishPartiallyWrittenArrays) {
     EXPECT_EQ(nnz, 91); EXPECT_FALSE(exact);
 }
 
-TEST(GpuPcgHost, RejectsDuplicatesUnsortedAndUncompressedStorage) {
+TEST(PermutedOperator, RejectsDuplicatesUnsortedAndUncompressedStorage) {
     Matrix duplicate(2, 2);
     duplicate.resizeNonZeros(4);
     std::copy_n(std::array<int, 3>{0, 2, 4}.data(), 3, duplicate.outerIndexPtr());
@@ -155,20 +147,16 @@ TEST(GpuPcgHost, RejectsDuplicatesUnsortedAndUncompressedStorage) {
     EXPECT_FALSE(accepted(uncompressed));
 }
 
-TEST(GpuPcgHost, GeneralFallbackMatchesIndependentLowerTriangleReference) {
+TEST(PermutedOperator, GeneralFallbackMatchesIndependentLowerTriangleReference) {
     // Lower-triangle-only storage is unpaired, so the column-ownership path
     // declines it and the atomic count, scatter and per-row sort build the
     // CSR. Fully stored inputs take the column-ownership path. Both must equal
     // the serial reference byte for byte at every team size. No input has
-    // duplicate coordinates (the per-row sort compares columns only).
+    // duplicate coordinates; those are tested separately below.
     std::mt19937 rng(20261002);
-#ifdef _OPENMP
     const int saved = omp_get_max_threads();
-#endif
     for (int team : {1, 2, 4}) {
-#ifdef _OPENMP
         omp_set_num_threads(team);
-#endif
         for (int trial = 0; trial < 40; ++trial) {
             const int n = 2 + trial * 17 % 97;
             const bool lower_only = trial % 2 == 0;
@@ -196,12 +184,10 @@ TEST(GpuPcgHost, GeneralFallbackMatchesIndependentLowerTriangleReference) {
             EXPECT_EQ(got.exact, ref.exact);
         }
     }
-#ifdef _OPENMP
     omp_set_num_threads(saved);
-#endif
 }
 
-TEST(GpuPcgHost, GeneralFallbackOrdersDuplicateCoordinatesDeterministically) {
+TEST(PermutedOperator, GeneralFallbackOrdersDuplicateCoordinatesDeterministically) {
     // Lower-only storage with every off-diagonal coordinate stored two or
     // three times, and a hub row that every column writes to: the scatter's
     // slot order depends on the threads, the sorted result must not.
@@ -240,13 +226,9 @@ TEST(GpuPcgHost, GeneralFallbackOrdersDuplicateCoordinatesDeterministically) {
             ref.vals[p] = std::bit_cast<double>(row[p - ref.ptr[r]].second);
         }
     }
-#ifdef _OPENMP
     const int saved = omp_get_max_threads();
-#endif
     for (int team : {1, 2, 4, 8}) {
-#ifdef _OPENMP
         omp_set_num_threads(team);
-#endif
         for (int run = 0; run < 3; ++run) {
             SCOPED_TRACE("team=" + std::to_string(team) + " run=" + std::to_string(run));
             const Csr got = general(L, perm);
@@ -256,7 +238,5 @@ TEST(GpuPcgHost, GeneralFallbackOrdersDuplicateCoordinatesDeterministically) {
             EXPECT_EQ(0, std::memcmp(got.vals.data(), ref.vals.data(), ref.vals.size() * sizeof(double)));
         }
     }
-#ifdef _OPENMP
     omp_set_num_threads(saved);
-#endif
 }
