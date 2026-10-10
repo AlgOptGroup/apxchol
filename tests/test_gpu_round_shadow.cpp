@@ -127,14 +127,14 @@ gpu_round_shadow_input make_input(
     input.owner_offsets.resize(static_cast<std::size_t>(n) + 1);
     for (node_index owner = 0; owner < n; ++owner) {
         input.owner_offsets[owner] = input.incidences.size();
-        for (const auto [neighbor, weight] : adjacency[owner])
+        for (const auto& [neighbor, weight] : adjacency[owner])
             input.incidences.push_back({owner, neighbor, weight});
     }
     input.owner_offsets[n] = input.incidences.size();
     return input;
 }
 
-gpu_round_shadow_input compact_live_snapshot(gpu_round_shadow_input input) {
+[[maybe_unused]] gpu_round_shadow_input compact_live_snapshot(gpu_round_shadow_input input) {
     std::vector<apxchol::detail::gpu_round_shadow_incidence> live;
     live.reserve(input.incidences.size());
     std::vector<std::size_t> offsets(
@@ -322,7 +322,7 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
 // the documented fixed warp degree fold, while normal batches fold raw slots
 // serially. The audited device path has its separate serial CPU oracle above.
 // Preserve exact comparisons: CPU/GPU summation order is part of this oracle.
-apxchol::detail::gpu_round_shadow_factor_log run_owned_host_oracle(
+[[maybe_unused]] apxchol::detail::gpu_round_shadow_factor_log run_owned_host_oracle(
         apxchol::graph<apxchol::directed_vec_pool_incidence>& graph,
         const gpu_round_shadow_input& input) {
     std::vector<std::vector<apxchol::detail::factor_entry>> entries(input.pivots.size());

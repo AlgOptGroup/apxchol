@@ -334,9 +334,10 @@ TYPED_TEST(FactorizeTest, LowerTriangular) {
         for (apxchol::edge_index p = outer[k]; p < outer[k + 1]; ++p) {
             const int row = static_cast<int>(inner[p]);
             const int col = k;
-            if (row < m && col < m)
+            if (row < m && col < m) {
                 EXPECT_GE(row, col)
                     << "upper-triangle entry at (" << row << "," << col << ")";
+            }
         }
 }
 
@@ -529,7 +530,7 @@ void expect_same_graph_selection(
         for (const auto v : result) {
             for (const auto edge : graph.adj(v)) {
                 const auto u = graph.edge_target(edge, v);
-                if (graph.is_active(u) && u != v) EXPECT_FALSE(in_set[u]);
+                if (graph.is_active(u) && u != v) { EXPECT_FALSE(in_set[u]); }
             }
         }
     }

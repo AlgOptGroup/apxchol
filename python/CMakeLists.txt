@@ -26,6 +26,8 @@ if (NOT Eigen3_FOUND)
         GIT_TAG        3.4.0
         GIT_SHALLOW    TRUE)
     FetchContent_MakeAvailable(eigen)
+    set_property(TARGET eigen APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+        "$<TARGET_PROPERTY:eigen,INTERFACE_INCLUDE_DIRECTORIES>")
 endif()
 
 include(${APX_ROOT}/cmake/apxchol_openmp.cmake)
@@ -44,7 +46,7 @@ pybind11_add_module(_apxchol
 )
 target_include_directories(_apxchol PRIVATE ${APX_ROOT}/include ${APX_ROOT}/src)
 target_link_libraries(_apxchol PRIVATE Eigen3::Eigen OpenMP::OpenMP_CXX)
-target_compile_options(_apxchol PRIVATE ${APXCHOL_ARCH_FLAG})
+target_compile_options(_apxchol PRIVATE -Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
 
 # Match the root library's graph-storage default.
 target_compile_definitions(_apxchol PRIVATE APXCHOL_POOL_FP32)

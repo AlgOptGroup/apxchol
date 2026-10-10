@@ -23,7 +23,7 @@ struct solve_options {
     /// cpu_solver::preconditioner().factor().L stays readable (costs one extra
     /// factor-sized copy in memory; the bindings' L/D/P export needs it).
     bool keep_factor_values = false;
-    factor_options factor_opts;
+    factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
     solve_backend backend = solve_backend::automatic;
 };

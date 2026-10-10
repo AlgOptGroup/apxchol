@@ -54,6 +54,8 @@ if (NOT Eigen3_FOUND)
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(eigen)
+    set_property(TARGET eigen APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+        "$<TARGET_PROPERTY:eigen,INTERFACE_INCLUDE_DIRECTORIES>")
 endif()
 
 # ── CLI11 ────────────────────────────────────────────

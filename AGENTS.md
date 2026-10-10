@@ -20,6 +20,9 @@ The root project builds the library, CLI, and unit tests. The separate
 CI builds its CPU-only native benchmark and runs the CLI/stopping CTest
 contracts alongside the Python harness tests; these checks are not performance
 campaigns. Native benchmark sources, CMake files, tests and patches trigger CI.
+Root and Python builds enable `-Wall -Wextra -Wpedantic`. CPU compiler-matrix
+and wheel CI also set `CMAKE_COMPILE_WARNING_AS_ERROR=ON`; local builds retain
+the caller's choice. Fetched Eigen and GoogleTest headers are system includes.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

@@ -1131,7 +1131,7 @@ factorization factorize_impl(const Eliminator& elim,
                              graph<Incidence> G,
                              const factor_options& opts_in,
                              checkpoint* cp, bool retain_host_factor = true,
-                             bool initial_graph_is_paired = false,
+                             [[maybe_unused]] bool initial_graph_is_paired = false,
                              const Eigen::SparseMatrix<double>* initial_csc = nullptr,
                              detail::setup_route route = detail::setup_route::diagnostic) {
     const node_index n = initial_csc ? static_cast<node_index>(initial_csc->rows()) : G.n();

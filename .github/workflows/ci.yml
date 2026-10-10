@@ -103,7 +103,8 @@ jobs:
       - &configure-build
         name: Configure + build (Release)
         run: |
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }}
+          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
           cmake --build build
       - &ctest
         name: Run unit tests

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <limits>
 #include <random>
+#include <span>
 #include <vector>
 
 using namespace apxchol;
@@ -16,10 +17,11 @@ using namespace apxchol;
 namespace {
 
 std::vector<deferred_edge> reference_tree_sample(
-        std::vector<weighted_neighbor> neighbors,
+        std::span<const weighted_neighbor> input,
         double deg,
         std::uint64_t seed) {
-    if (neighbors.empty()) return {};
+    if (input.empty()) return {};
+    std::vector<weighted_neighbor> neighbors(input.begin(), input.end());
     std::sort(neighbors.begin(), neighbors.end(),
               [](const auto& a, const auto& b) {
                   return a.weight != b.weight ? a.weight < b.weight
@@ -131,7 +133,7 @@ TEST(TreeSampler, MatchesIndependentExactReference) {
 TEST(TreeSampler, SuffixUpperBoundPreservesExactBoundarySemantics) {
     const double inf = std::numeric_limits<double>::infinity();
     const double tiny = std::numeric_limits<double>::denorm_min();
-    for (const std::vector<double> cdf : {
+    for (const std::vector<double>& cdf : {
             std::vector<double>{}, {1.0}, {-0.0, 0.0, 0.0, 1.0},
             {tiny, tiny, 2*tiny, 1.0}, {1.0, 1.0, 1.0, 2.0, 3.0},
             {0x1p53, 0x1p53 + 1.0, 0x1p53 + 2.0, inf}}) {
@@ -184,7 +186,7 @@ TEST(CycleSampler, PreservesDegreeTwoAndDeclaredCapacity) {
             rule.sample_clique(n, 60., 42, edge_emitter(edges));
             EXPECT_LE(edges.size(), rule.max_clique_edges(d));
             EXPECT_EQ(edges.size(), d < 2 ? 0u : d == 2 ? 1u : size_t(d));
-            if (d == 2) EXPECT_DOUBLE_EQ(edges[0].w, 2. / 60.);
+            if (d == 2) { EXPECT_DOUBLE_EQ(edges[0].w, 2. / 60.); }
             for (auto edge : edges) {
                 EXPECT_NE(edge.u, edge.v);
                 EXPECT_GT(edge.w, 0.);
@@ -392,7 +394,8 @@ TEST(CycleSampler, InputOnlyFallbackMatchesGksAtEverySeed) {
         for (const auto& profile : profiles) for (std::uint64_t seed=0;seed<16;++seed) {
             auto n=profile,reference=profile;
             const double D=profile.back().weight>1e200?1e300:1.;
-            std::vector<deferred_edge> got{{7,8,9.}},expected=got;
+            const deferred_edge prefix{7,8,9.};
+            std::vector<deferred_edge> got{prefix},expected{prefix};
             tree_elimination{}.sample_clique(reference,D,seed,edge_emitter(expected));
             ASSERT_NO_THROW((tree_elimination{.sampler=kind}.sample_clique(n,D,seed,edge_emitter(got))));
             ASSERT_EQ(got.size(),expected.size());
@@ -428,8 +431,9 @@ TEST(CycleSampler, RejectsNonpositiveAndNonfinitePoolEdges) {
         EXPECT_THROW(detail::require_pool_edge(value),std::domain_error);
     EXPECT_NO_THROW(detail::require_pool_edge(std::numeric_limits<pool_value_t>::denorm_min()));
     EXPECT_NO_THROW(detail::require_pool_edge(std::numeric_limits<pool_value_t>::max()));
-    if constexpr (sizeof(pool_value_t)<sizeof(double))
+    if constexpr (sizeof(pool_value_t)<sizeof(double)) {
         EXPECT_THROW(detail::require_pool_edge(double(std::numeric_limits<pool_value_t>::max())*2),std::domain_error);
+    }
 }
 
 TEST(CycleSampler, G3CircuitRepresentableSubnormalParent) {
@@ -448,8 +452,9 @@ TEST(CycleSampler, G3CircuitRepresentableSubnormalParent) {
     auto parent=std::find_if(edges.begin(),edges.end(),[](const auto& edge){return edge.u==639860;});
     ASSERT_NE(parent,edges.end());
     EXPECT_GT(static_cast<pool_value_t>(parent->w),0);
-    if constexpr(sizeof(pool_value_t)==4)
+    if constexpr(sizeof(pool_value_t)==4) {
         EXPECT_EQ(std::fpclassify(static_cast<pool_value_t>(parent->w)),FP_SUBNORMAL);
+    }
 }
 
 TEST(CycleSampler, G3CircuitZeroRoundingUsesOriginalGksSeed) {
