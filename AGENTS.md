@@ -412,8 +412,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   quality, setup, solve, one-RHS total, RSS and owner memory.
 - Metal block PCG (`metal_solver.h`, `src/metal_solver.cpp`, `src/metal_device.mm`):
   host factorization as `cpu_solver`; the applied factor is the CPU's dropped
-  fp32 storage, scheduled by `level_schedule.h`; the permuted operator shares
-  `detail::build_permuted_full_symmetric_csr` with CUDA. Up to 64 node-major
+  fp32 storage, scheduled by `level_schedule.h`; the permuted operator uses the CUDA-free host helper
+  `detail::build_permuted_full_symmetric_csr`. Up to 64 node-major
   columns per lockstep batch, wider blocks in sequential batches. Double-float
   x, r, A p (and an inexact operator), fp32 p, z and factor; every reduction on
   one tree fixed by n and heavy rows on 32 virtual lanes, so a column's bits do
@@ -426,7 +426,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   each column's one-column operations in the same order; two command buffers
   are in flight. The C API reports a valid operator the device cannot
   represent (`std::domain_error`, `std::length_error`) as UNSUPPORTED and a
-  device allocation failure as OUT_OF_MEMORY. No env knobs (`APXCHOL_SPTRSV_FP16` and
+  device allocation failure as OUT_OF_MEMORY. No env knobs (`APXCHOL_FACTOR_STORAGE` and
   center-k do not apply). Keep the MSL kernels, `level_schedule::emulate_sweep`
   and `metal_host.h` operation-for-operation identical. Validate with
   `LevelSchedule.*` and `MetalHost.*` (all builds), `MetalDevice.*` and
