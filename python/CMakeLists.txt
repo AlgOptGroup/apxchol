@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(apxchol_ext LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -21,18 +21,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND APXCHOL_ARCH_FLAG STREQUAL "-march=x8
         COMPILE_DEFINITIONS APXCHOL_REQUIRE_X86_64_V2)
 endif()
 
-# ── Eigen (system or fetched, mirrors root) ──
-find_package(Eigen3 3.3 CONFIG QUIET)
-if (NOT Eigen3_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG        3.4.0
-        GIT_SHALLOW    TRUE)
-    FetchContent_MakeAvailable(eigen)
-    set_property(TARGET eigen APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
-        "$<TARGET_PROPERTY:eigen,INTERFACE_INCLUDE_DIRECTORIES>")
-endif()
+include(${APX_ROOT}/cmake/apxchol_eigen.cmake)
 
 include(${APX_ROOT}/cmake/apxchol_openmp.cmake)
 find_package(pybind11 CONFIG REQUIRED)

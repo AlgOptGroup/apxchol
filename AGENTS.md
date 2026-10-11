@@ -15,7 +15,7 @@ an established algorithm/default; historical examples are not current verificati
 
 ## Build and tests
 
-The root project builds the library, CLI, and unit tests. The separate
+CMake 3.20+ builds the library, CLI, and unit tests. The separate
 `benchmarks/` project fetches competitor implementations.
 CI builds its CPU-only native benchmark and runs the CLI/stopping CTest
 contracts alongside the Python harness tests; these checks are not performance

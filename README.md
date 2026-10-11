@@ -6,7 +6,7 @@ device-owned setup and GPU-resident solve; Metal provides an optional Apple-GPU 
 
 ## Build and run
 
-Requires CMake, GCC or Clang with C++23 and OpenMP, and Eigen (fetched if absent).
+Requires CMake 3.20+, GCC or Clang with C++23 and OpenMP, and Eigen (fetched if absent).
 MSVC and clang-cl are not supported.
 On x86-64, the minimum CPU requirement is x86-64-v2.
 Optional CUDA builds require CUDA Toolkit 13.3+ and CMake 4.4+ for C++23 support.

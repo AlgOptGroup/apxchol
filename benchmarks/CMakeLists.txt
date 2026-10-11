@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(laplacian_benchmarks LANGUAGES C CXX)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_device.cmake)
@@ -33,16 +33,7 @@ set(PARENT_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 set(ARCHIVE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
 set(ARCHIVE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
 
-# ── Eigen ────────────────────────────────────────────
-find_package(Eigen3 3.3 CONFIG QUIET)
-if (NOT Eigen3_FOUND)
-    FetchContent_Declare(eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG        3.4.0
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(eigen)
-endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_eigen.cmake)
 
 # ── Core library (legacy v0 solver) ───────────────────
 add_library(laplacian_core STATIC

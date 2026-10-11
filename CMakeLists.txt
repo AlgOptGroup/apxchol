@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(apxchol VERSION 0.2.2 LANGUAGES CXX)
 include(cmake/apxchol_device.cmake)
 
@@ -22,42 +22,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/apxchol_arch.cmake)
 add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
 
 include(FetchContent)
-# Fetched projects must not register their own test suites in apxchol's CTest
-# tree. In particular, Eigen defaults BUILD_TESTING to ON and otherwise adds
-# hundreds of unbuilt tests. Temporarily override both its visible value and
-# cache entry while dependencies are added, then restore a parent project's
-# original state exactly below.
-if (DEFINED BUILD_TESTING)
-    set(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE TRUE)
-    set(_APXCHOL_SAVED_BUILD_TESTING_VALUE "${BUILD_TESTING}")
-else()
-    set(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE FALSE)
-endif()
-get_property(_APXCHOL_SAVED_BUILD_TESTING_TYPE
-             CACHE BUILD_TESTING PROPERTY TYPE)
-if (_APXCHOL_SAVED_BUILD_TESTING_TYPE)
-    get_property(_APXCHOL_SAVED_BUILD_TESTING_CACHE
-                 CACHE BUILD_TESTING PROPERTY VALUE)
-    get_property(_APXCHOL_SAVED_BUILD_TESTING_HELP
-                 CACHE BUILD_TESTING PROPERTY HELPSTRING)
-endif()
-# Eigen 3.4 resets CMP0077 to its legacy behavior, so a normal variable alone
-# is insufficient: temporarily pin the cache too, then restore it exactly.
-set(BUILD_TESTING OFF CACHE BOOL "Disable tests in apxchol dependencies" FORCE)
-set(BUILD_TESTING OFF)
-
-# ── Eigen ────────────────────────────────────────────
-find_package(Eigen3 3.3 CONFIG QUIET)
-if (NOT Eigen3_FOUND)
-    FetchContent_Declare(eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG        3.4.0
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(eigen)
-    set_property(TARGET eigen APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
-        "$<TARGET_PROPERTY:eigen,INTERFACE_INCLUDE_DIRECTORIES>")
-endif()
+include(cmake/apxchol_eigen.cmake)
 
 # ── CLI11 ────────────────────────────────────────────
 FetchContent_Declare(cli11
@@ -86,24 +51,6 @@ FetchContent_Declare(fast_matrix_market
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(fast_matrix_market)
-
-if (_APXCHOL_SAVED_BUILD_TESTING_TYPE)
-    set(BUILD_TESTING "${_APXCHOL_SAVED_BUILD_TESTING_CACHE}"
-        CACHE ${_APXCHOL_SAVED_BUILD_TESTING_TYPE}
-        "${_APXCHOL_SAVED_BUILD_TESTING_HELP}" FORCE)
-else()
-    unset(BUILD_TESTING CACHE)
-endif()
-if (_APXCHOL_SAVED_BUILD_TESTING_VISIBLE)
-    set(BUILD_TESTING "${_APXCHOL_SAVED_BUILD_TESTING_VALUE}")
-else()
-    unset(BUILD_TESTING)
-endif()
-unset(_APXCHOL_SAVED_BUILD_TESTING_CACHE)
-unset(_APXCHOL_SAVED_BUILD_TESTING_HELP)
-unset(_APXCHOL_SAVED_BUILD_TESTING_TYPE)
-unset(_APXCHOL_SAVED_BUILD_TESTING_VALUE)
-unset(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE)
 
 # ── OpenMP ────────────────────────────────
 include(cmake/apxchol_openmp.cmake)
