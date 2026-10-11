@@ -7,6 +7,7 @@
 // not see either. The structs below mirror the MSL structs in
 // src/metal_kernels.inc byte for byte (4-byte fields, double-float as a pair
 // of floats); the static_asserts here and in the MSL source pin the layout.
+#include "apxchol/solver/detail/gpu_pcg.h"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -41,21 +42,7 @@ static_assert(offsetof(params, mode) == 16);
 static_assert(offsetof(params, m) == 32);
 static_assert(offsetof(params, inv_n_hi) == 36);
 
-struct solve_state {
-    df32 rz;
-    df32 rr;
-    df32 thr;
-    df32 prev;
-    df32 pap;
-    float alpha;
-    float beta;
-    float mu_r;
-    float mu_z;
-    std::uint32_t active;
-    std::uint32_t iters;
-    std::uint32_t stop;
-    std::uint32_t pad;
-};
+using solve_state = gpu_pcg::solve_state<df32, float>;
 static_assert(sizeof(solve_state) == 72);
 static_assert(offsetof(solve_state, thr) == 16);
 static_assert(offsetof(solve_state, pap) == 32);

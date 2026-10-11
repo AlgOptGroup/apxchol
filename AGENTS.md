@@ -254,6 +254,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   worker launch. Keep RHS/diagonal/scale loads before dependency polling.
   Long rows use segment tasks and a fixed-order finalizer. No public scheduler
   knob or retained reference kernel accompanies the shared implementation.
+- CUDA and Metal share PCG vector loops and scalar state transitions in
+  `solver/detail/gpu_pcg.inc`. Backend adapters retain arithmetic precision,
+  stopping comparisons, reduction trees, index widths and launch ownership.
 - `solver/detail/permuted_operator.h` builds the permuted symmetric operator,
   ordering duplicate entries by value bits. Metal retains shared host factor
   dropping/transposition; CUDA's public route keeps device ownership.

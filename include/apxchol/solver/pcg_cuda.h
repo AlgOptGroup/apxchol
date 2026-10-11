@@ -42,10 +42,26 @@
 // check_cuda lives in apxchol/solver/sptrsv/cuda.h (already included
 // transitively via preconditioner.h).
 #include "apxchol/solver/pcg_cuda_kernels.h"
+#include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol {
+
+namespace detail {
+struct cuda_pcg_math {
+    double bnorm;
+    bool valid_initial(double) const { return true; }
+    bool positive(double x) const { return x > 0; }
+    bool valid_residual(double rr) const { return std::isfinite(std::sqrt(rr) / bnorm); }
+    bool valid_rz(double x) const { return std::isfinite(x) && x != 0; }
+    bool accept_ratio(double) const { return true; }
+    double ratio(double x, double y) const { return x / y; }
+    double mean(double) const { return 0; }
+    bool converged(double rr, double tolerance) const { return std::sqrt(rr) / bnorm < tolerance; }
+    bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
+};
+} // namespace detail
 
 #define APXCHOL_PCG_CUDA_CHECK(c)      apxchol::detail::check_cuda((c), #c)
 
@@ -179,47 +195,29 @@ public:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_p_, d_z_, n_ * sizeof(double),
                                                 cudaMemcpyDeviceToDevice, 0));
         pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
-        double rz = reduce(vec_blocks_);
-
-        // x starts at zero, so its relative residual is 1 even if no PCG
-        // update runs (zero iteration budget or an immediate breakdown).
-        double rnorm = 1.0;
-        int it;
-        for (it = 0; it < max_iter; ++it) {
-            // Ap = A * p with pAp = p·Ap folded into the row loop (fp32-operator:
-            // fp32 loads promoted per product, fp64 accumulate -- Ap stays
-            // fp64-accurate either way). !(pAp > 0) catches NaN and <= 0.
+        namespace pcg = detail::gpu_pcg;
+        pcg::solve_state<double, double> state{};
+        state.rz = reduce(vec_blocks_);
+        state.thr = tol;
+        state.active = 1;
+        const detail::cuda_pcg_math math{bnorm};
+        for (int it = 0; it < max_iter; ++it) {
             if (fp32_op_) pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_f32_, d_p_, d_Ap_, d_part_, spmv_lanes_);
             else          pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_,     d_p_, d_Ap_, d_part_, spmv_lanes_);
-            const double pAp = reduce(spmv_blocks_);
-            if (!(pAp > 0.0)) break;
+            state = pcg::advance(math, state, pcg::kFinalizeAlpha, reduce(spmv_blocks_), 0.0, it + 1, 0, false);
+            if (!state.active) break;
 
-            const double alpha = rz / pAp;
+            pcg_cuda::update_xr(0, n_, d_x_, d_p_, d_r_, d_Ap_, state.alpha, d_part_);
+            state = pcg::advance(math, state, pcg::kFinalizeCheck, reduce(vec_blocks_), 0.0, it + 1, 0, false);
+            if (!state.active) break;
 
-            // x += alpha * p ; r -= alpha * Ap ; rr = r·r  -- one pass.
-            pcg_cuda::update_xr(0, n_, d_x_, d_p_, d_r_, d_Ap_, alpha, d_part_);
-            const double rr = reduce(vec_blocks_);
-
-            // rnorm = ||r|| / bnorm. NaN propagates through the reductions;
-            // !(rnorm < tol) would re-enter the loop forever on NaN, so guard
-            // with an isfinite check. ++it before break to count the just-
-            // completed iter (matches apxchol_v1's `res.iterations = i + 1`).
-            rnorm = std::sqrt(rr) / bnorm;
-            if (!std::isfinite(rnorm)) { ++it; break; }
-            if (rnorm < tol) { ++it; break; }
-
-            // z = M^{-1} r ; rz_new = r·z
             precond.trsv().solve_LLt_dev(d_r_, d_z_);
             if (laplacian)
                 APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
             pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
-            const double rz_new = reduce(vec_blocks_);
-            if (!std::isfinite(rz_new) || rz_new == 0.0) { ++it; break; }
-            const double beta = rz_new / rz;
-            rz = rz_new;
-
-            // p = z + beta * p
-            pcg_cuda::update_p(0, n_, d_p_, d_z_, beta);
+            state = pcg::advance(math, state, pcg::kFinalizeRz, reduce(vec_blocks_), 0.0, it + 1, 0, false);
+            if (!state.active) break;
+            pcg_cuda::update_p(0, n_, d_p_, d_z_, state.beta);
         }
 
         // The uploaded RHS is no longer needed. Reuse its touched host buffer
@@ -234,8 +232,8 @@ public:
         if (laplacian)
             x_host.array() -= x_host.mean();
 
-        iters_out = it;
-        residual_out = rnorm;
+        iters_out = state.iters;
+        residual_out = state.iters ? std::sqrt(state.rr) / bnorm : 1.0;
     }
 
     bool ready() const { return ready_; }

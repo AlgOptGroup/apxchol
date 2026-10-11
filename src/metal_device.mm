@@ -17,10 +17,12 @@ namespace apxchol::detail::metal {
 namespace {
 
 const char kKernelSource[] =
-#include "metal_kernels.inc"
     "\n#define APXCHOL_GPU_FUNCTION inline\n"
-    "\n#define APXCHOL_UNROLL _Pragma(\"unroll\")\n"
+    "\n#define APXCHOL_GPU_BUFFER(T) device T*\n"
 #define APXCHOL_GPU_CODE(...) #__VA_ARGS__
+#include "apxchol/solver/detail/gpu_pcg.inc"
+#include "metal_kernels.inc"
+    "\n#define APXCHOL_UNROLL _Pragma(\"unroll\")\n"
 #include "gpu_dataflow.inc"
 #undef APXCHOL_GPU_CODE
 #include "metal_dataflow.inc"
@@ -30,15 +32,7 @@ constexpr std::uint32_t kTreeRows = 256;
 constexpr std::uint32_t kTreeLanes = 16;
 constexpr std::uint32_t kRowThreads = 256;     // threads per threadgroup of the row kernels
 
-enum finalize_mode : std::uint32_t {
-    kFinalizeMuR = 0,
-    kFinalizeRzInit = 1,
-    kFinalizeMuZ = 2,
-    kFinalizeAlpha = 3,
-    kFinalizeCheck = 4,
-    kFinalizeRz = 5,
-};
-enum reduce_mode : std::uint32_t { kReduceSumR = 0, kReduceSumZ = 1, kReduceRz = 2 };
+using namespace gpu_pcg;
 
 std::string describe(NSError* error) {
     if (error == nil) return "unknown error";

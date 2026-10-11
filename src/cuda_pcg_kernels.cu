@@ -1,4 +1,5 @@
 #include "apxchol/solver/pcg_cuda_kernels.h"
+#include "apxchol/solver/detail/gpu_pcg.h"
 
 #include <cub/cub.cuh>
 #include <limits>
@@ -14,6 +15,8 @@
 namespace apxchol::pcg_cuda {
 
 namespace {
+
+using namespace apxchol::detail::gpu_pcg;
 
 constexpr int kWarps = kBlockThreads / 32;
 
@@ -36,71 +39,82 @@ __device__ __forceinline__ double block_reduce_sum(double v, double* sh) {
     return r;
 }
 
-// y = A x with LANES threads per row; per-block partial of x.y into
-// part[blockIdx.x]. The row-group loop bound (`base < n`) is uniform over the
-// block, so every thread reaches every sub-warp shuffle (full mask, width
-// LANES) and the block reduce.
-template <class VAL, int LANES>
-__global__ void __launch_bounds__(kBlockThreads)
-spmv_pAp_kernel(int n, const int* __restrict__ rowptr, const int* __restrict__ colidx,
-                const VAL* __restrict__ vals, const double* __restrict__ x,
-                double* __restrict__ y, double* __restrict__ part) {
-    __shared__ double sh[kWarps];
-    constexpr int ROWS_PER_BLOCK = kBlockThreads / LANES;
-    const int lane      = threadIdx.x & (LANES - 1);
-    const int local_row = threadIdx.x / LANES;
-    double acc = 0.0;
-    for (int base = blockIdx.x * ROWS_PER_BLOCK; base < n; base += gridDim.x * ROWS_PER_BLOCK) {
-        const int row = base + local_row;
-        double sum = 0.0;
-        if (row < n) {
-            const int beg = rowptr[row], end = rowptr[row + 1];
-            for (int p = beg + lane; p < end; p += LANES)
-                sum += static_cast<double>(vals[p]) * x[colidx[p]];   // promote A, fp64 MAC
-        }
-        #pragma unroll
-        for (int o = LANES / 2; o > 0; o >>= 1)
-            sum += __shfl_down_sync(0xffffffffu, sum, o, LANES);
-        if (row < n && lane == 0) { y[row] = sum; acc += x[row] * sum; }
+template<class Value = double, int Lanes = 1>
+struct pcg_memory {
+    using wide = double;
+    pcg_arrays<double, double, Value, int> arrays;
+    double* scratch = nullptr;
+    double coefficient = 0;
+    __device__ pcg_memory() {
+        arrays.row_lane = threadIdx.x % Lanes;
+        arrays.row_lanes = Lanes;
     }
-    const double bs = block_reduce_sum(acc, sh);
-    if (threadIdx.x == 0) part[blockIdx.x] = bs;
+    __device__ bool active() const { return true; }
+    __device__ double alpha() const { return coefficient; }
+    __device__ double beta() const { return coefficient; }
+    __device__ double add(double a, double b) const { return a + b; }
+    __device__ double add_product(double sum, double a, double b) const { return sum + a * b; }
+    __device__ double subtract_product(double a, double b, double c) const { return a - b * c; }
+    __device__ double residual_sum(double sum, double) const { return sum; }
+    __device__ double direction(double z, double p, double beta) const { return z + beta * p; }
+    __device__ double reduction_term(unsigned long i) const { return arrays.r[i] * arrays.z[i]; }
+    __device__ double add_entry(double sum, unsigned e, double p) const { return sum + double(arrays.hi[e]) * p; }
+    __device__ double sum_row(double sum) const {
+        #pragma unroll
+        for (int offset = Lanes / 2; offset; offset /= 2)
+            sum += __shfl_down_sync(0xffffffffu, sum, offset, Lanes);
+        return sum;
+    }
+    __device__ void publish(double sum, double) const {
+        const double total = block_reduce_sum(sum, scratch);
+        if (threadIdx.x == 0) arrays.partial[blockIdx.x] = total;
+    }
+};
+
+__device__ pcg_work<std::int64_t> vector_work(std::int64_t n) {
+    return {static_cast<std::int64_t>(blockIdx.x) * blockDim.x, n,
+            static_cast<std::int64_t>(gridDim.x) * blockDim.x, threadIdx.x, n};
+}
+
+template <class Value, int Lanes>
+__global__ void __launch_bounds__(kBlockThreads)
+spmv_pAp_kernel(int n, const int* __restrict__ ptr, const int* __restrict__ col,
+                const Value* __restrict__ val, const double* __restrict__ p,
+                double* __restrict__ ap, double* __restrict__ partial) {
+    __shared__ double scratch[kWarps];
+    pcg_memory<Value, Lanes> m;
+    m.arrays.ptr = ptr; m.arrays.col = col; m.arrays.hi = val;
+    m.arrays.p = p; m.arrays.ap_out = ap; m.arrays.partial = partial; m.scratch = scratch;
+    constexpr int rows = kBlockThreads / Lanes;
+    pcg_spmv(m, pcg_work<int>{static_cast<int>(blockIdx.x) * rows, n, static_cast<int>(gridDim.x) * rows,
+                            static_cast<int>(threadIdx.x) / Lanes, n});
 }
 
 __global__ void __launch_bounds__(kBlockThreads)
 update_xr_kernel(std::int64_t n, double* __restrict__ x, const double* __restrict__ p,
-                 double* __restrict__ r, const double* __restrict__ Ap, double alpha,
-                 double* __restrict__ part) {
-    __shared__ double sh[kWarps];
-    double q = 0.0;
-    for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
-         i += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
-        x[i] += alpha * p[i];
-        const double ri = r[i] - alpha * Ap[i];
-        r[i] = ri;
-        q += ri * ri;
-    }
-    const double bs = block_reduce_sum(q, sh);
-    if (threadIdx.x == 0) part[blockIdx.x] = bs;
+                 double* __restrict__ r, const double* __restrict__ ap, double alpha,
+                 double* __restrict__ partial) {
+    __shared__ double scratch[kWarps];
+    pcg_memory<> m;
+    m.arrays.x = x; m.arrays.p = p; m.arrays.r = r; m.arrays.r_out = r; m.arrays.ap = ap;
+    m.coefficient = alpha; m.arrays.partial = partial; m.scratch = scratch;
+    pcg_update_xr(m, vector_work(n));
 }
 
 __global__ void __launch_bounds__(kBlockThreads)
 dot_kernel(std::int64_t n, const double* __restrict__ a, const double* __restrict__ b,
-           double* __restrict__ part) {
-    __shared__ double sh[kWarps];
-    double q = 0.0;
-    for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
-         i += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
-        q += a[i] * b[i];
-    const double bs = block_reduce_sum(q, sh);
-    if (threadIdx.x == 0) part[blockIdx.x] = bs;
+           double* __restrict__ partial) {
+    __shared__ double scratch[kWarps];
+    pcg_memory<> m;
+    m.arrays.r = a; m.arrays.z = b; m.arrays.partial = partial; m.scratch = scratch;
+    pcg_reduce(m, vector_work(n));
 }
 
 __global__ void __launch_bounds__(kBlockThreads)
 update_p_kernel(std::int64_t n, double* __restrict__ p, const double* __restrict__ z, double beta) {
-    for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
-         i += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
-        p[i] = z[i] + beta * p[i];
+    pcg_memory<> m;
+    m.arrays.p = p; m.arrays.p_out = p; m.arrays.z = z; m.coefficient = beta;
+    pcg_update_p(m, vector_work(n));
 }
 
 // One block: thread t sums part[t], part[t + kBlockThreads], ... in order,
