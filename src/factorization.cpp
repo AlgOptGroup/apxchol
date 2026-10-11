@@ -100,7 +100,7 @@ static void assemble_csc(
         block_overflow[static_cast<std::size_t>(tid)] = local_overflow;
 
         #pragma omp barrier
-        #pragma omp master
+        #pragma omp masked
         {
             try {
                 if (cp) (*cp)("permutation");

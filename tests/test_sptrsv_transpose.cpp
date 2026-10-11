@@ -12,6 +12,7 @@
 // against an independent serial reference at several thread counts.
 
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 #include <cstring>
 #include <random>
 #include <vector>
@@ -33,14 +34,6 @@ namespace {
 // RAII env override: these tests state the DEFAULT (fp32) SpTRSV storage
 // contract, and the suite is also run with APXCHOL_FACTOR_STORAGE=float16 in the
 // environment, so they pin it.
-struct scoped_env {
-    std::string name, saved; bool had = false;
-    scoped_env(const char* var, const char* value) : name(var) {
-        if (const char* e = std::getenv(var)) { had = true; saved = e; }
-        if (value) setenv(var, value, 1); else unsetenv(var);
-    }
-    ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
-};
 
 
 // ── Serial reference transpose ───────────────────────

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 #include "gpu_preconditioner_fixture.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/pcg_cuda.h"
@@ -188,14 +189,6 @@ void check(const gpu_round_shadow_input& input, const Output& actual,
         EXPECT_EQ(actual.stats.normalization_passes, expected.passes);
     }
 }
-struct scoped_env {
-    std::string name, old; bool existed;
-    scoped_env(const char* key, const char* value) : name(key), existed(std::getenv(key) != nullptr) {
-        if (existed) old = std::getenv(key);
-        setenv(key, value, 1);
-    }
-    ~scoped_env() { if (existed) setenv(name.c_str(), old.c_str(), 1); else unsetenv(name.c_str()); }
-};
 #define REQUIRE_OWNED_SPARSIFY_DEVICE() do { \
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) \
         GTEST_SKIP() << "CUDA owned sparsifier device unavailable"; \

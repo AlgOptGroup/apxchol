@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include "scoped_env.h"
+#include "scoped_omp_threads.h"
 #include <array>
 #include <bit>
 #include <cmath>
@@ -403,25 +405,6 @@ struct scoped_threads {
     }
 };
 
-struct scoped_environment {
-    std::string name;
-    std::string saved;
-    bool had_value = false;
-
-    scoped_environment(const char* variable, const char* value)
-        : name(variable) {
-        if (const char* old = std::getenv(variable)) {
-            saved = old;
-            had_value = true;
-        }
-        if (value) setenv(variable, value, 1);
-        else unsetenv(variable);
-    }
-    ~scoped_environment() {
-        if (had_value) setenv(name.c_str(), saved.c_str(), 1);
-        else unsetenv(name.c_str());
-    }
-};
 
 // Byte-for-byte equality of two factors: same column pointers, same row
 // indices, same values. Structure AND values, not a norm.
@@ -592,7 +575,7 @@ TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
             const scoped_threads team(threads);
             int actual_threads = 0;
             #pragma omp parallel
-            #pragma omp master
+            #pragma omp masked
             actual_threads = omp_get_num_threads();
             ASSERT_EQ(actual_threads, threads);
             apxchol::detail::build_csc(parallel, cols, n, nullptr);
@@ -659,7 +642,7 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
     opts.omp_threshold = 16;
     opts.min_is_fraction = 0.0;
     auto run = [&](const char* mode) {
-        const scoped_environment gate(
+        const scoped_env gate(
             "APXCHOL_INCREMENTAL_DEGREE_SPARSE", mode);
         return apxchol::factorize(
             L, apxchol::graph_storage::vec_pool_aos, opts);
@@ -706,7 +689,7 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
     opts.omp_threshold = 16;
     opts.parallel_residual_threshold = 5;
     auto run = [&](const char* mode) {
-        const scoped_environment gate(
+        const scoped_env gate(
             "APXCHOL_INCREMENTAL_DEGREE_SPARSE", mode);
         return apxchol::factorize(
             L, apxchol::graph_storage::vec_pool_aos, opts);
@@ -818,7 +801,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 7;
     opts.factor_opts.omp_threshold = 16;
     auto run = [&](const char* factor) {
-        const scoped_environment gate("APXCHOL_PRUNE_SKIP", factor);
+        const scoped_env gate("APXCHOL_PRUNE_SKIP", factor);
         apxchol::cpu_solver solver(A, opts);
         return solver.solve(b);
     };
@@ -836,7 +819,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     // raw count, dead entries included, so some round's average degree is
     // larger than the exact one.
     auto round_degrees = [&](const char* factor) {
-        const scoped_environment gate("APXCHOL_PRUNE_SKIP", factor);
+        const scoped_env gate("APXCHOL_PRUNE_SKIP", factor);
         const auto f = apxchol::factorize(
             A, apxchol::graph_storage::vec_pool_aos, opts.factor_opts);
         std::vector<double> avg;
@@ -1549,7 +1532,7 @@ TEST(ResidualSparsifyGate, UsesObservedTrafficAndHandoffYield) {
 
 TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting) {
     const scoped_threads team(4);
-    const scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
+    const scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
     constexpr apxchol::node_index n = 96;
     apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
     for (apxchol::node_index u = 0; u < n; ++u)
@@ -1563,7 +1546,7 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
     options.min_is_fraction = 0.5;
     for (const char* setting : {"0", "1"}) {
         SCOPED_TRACE(setting);
-        const scoped_environment sparsify("APXCHOL_RESIDUAL_SPARSIFY", setting);
+        const scoped_env sparsify("APXCHOL_RESIDUAL_SPARSIFY", setting);
         apxchol::checkpoint timings;
         auto factor = apxchol::factorize(graph, options, &timings);
         EXPECT_EQ(timings.total("setup.sparsify_residual") > 0.0, *setting == '1')
@@ -1845,9 +1828,9 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
 #if defined(APXCHOL_USE_CUDA)
 TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
     for (const char* choice : {static_cast<const char*>(nullptr), "", "dataflow"}) {
-        const scoped_environment selected("APXCHOL_GPU_SPTRSV", choice);
+        const scoped_env selected("APXCHOL_GPU_SPTRSV", choice);
         for (const char* storage : {static_cast<const char*>(nullptr), "float32", "float16"}) {
-            const scoped_environment fp16("APXCHOL_FACTOR_STORAGE", storage);
+            const scoped_env fp16("APXCHOL_FACTOR_STORAGE", storage);
             EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(),
                       !storage || std::string_view(storage) == "float16");
             apxchol::sparse_csc factor;
@@ -1865,7 +1848,7 @@ TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
 
 TEST(GpuSptrsvConfiguration, RejectsUnknownAndRetiredBackendsBeforeSetup) {
     for (const char* choice : {"cusparse", "auto", "levelset", "typo"}) {
-        const scoped_environment selected("APXCHOL_GPU_SPTRSV", choice);
+        const scoped_env selected("APXCHOL_GPU_SPTRSV", choice);
         apxchol::cuda_sptrsv trsv;
         EXPECT_THROW(trsv.setup(apxchol::sparse_csc{}, 0),
                      std::invalid_argument);
@@ -1875,22 +1858,22 @@ TEST(GpuSptrsvConfiguration, RejectsUnknownAndRetiredBackendsBeforeSetup) {
 TEST(GpuBlockFrontend, RequiresExplicitOptIn) {
     using frontend = apxchol::detail::gpu_block_frontend;
     for (const char* value : {static_cast<const char*>(nullptr), "", "0", "off", "false"}) {
-        const scoped_environment mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
+        const scoped_env mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
         EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::disabled);
     }
     for (const char* value : {"1", "on", "force"}) {
-        const scoped_environment mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
+        const scoped_env mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
         EXPECT_EQ(frontend::configured_block_mode(), frontend::mode::forced);
     }
     for (const char* value : {"auto", "typo", "2"}) {
-        const scoped_environment mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
+        const scoped_env mode("APXCHOL_GPU_BLOCK_FRONTEND", value);
         EXPECT_THROW(frontend::configured_block_mode(), std::invalid_argument);
     }
 }
 
 TEST(GpuBlockFrontend, RejectsIncompatibleFactorizationBeforeDeviceProbe) {
     const auto L = grid_laplacian(4, 4);
-    const scoped_environment enabled("APXCHOL_GPU_BLOCK_FRONTEND", "on");
+    const scoped_env enabled("APXCHOL_GPU_BLOCK_FRONTEND", "on");
     apxchol::factor_options options;
     EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec, options),
                  std::invalid_argument);
@@ -1993,7 +1976,7 @@ static void check_block_selection_reference(apxchol::node_index n,
                                                 block_frontier_fixture::original) {
     using apxchol::detail::gpu_topology_edge;
     const std::string region_text = std::to_string(requested_regions);
-    const scoped_environment region_setting("APXCHOL_GPU_BLOCKS",
+    const scoped_env region_setting("APXCHOL_GPU_BLOCKS",
         requested_regions ? region_text.c_str() : nullptr);
     SCOPED_TRACE("n=" + std::to_string(n) + " regions=" + region_text +
                  " degree=" + std::to_string(degree_tiebreak) +
@@ -2286,21 +2269,6 @@ namespace {
 using bounded_vertex = apxchol::node_index;
 using bounded_edge = apxchol::detail::gpu_topology_edge;
 
-class bounded_fixture_threads {
-public:
-    bounded_fixture_threads() {
-#ifdef _OPENMP
-        previous_ = omp_get_max_threads(); omp_set_num_threads(1);
-#endif
-    }
-    ~bounded_fixture_threads() {
-#ifdef _OPENMP
-        omp_set_num_threads(previous_);
-#endif
-    }
-private:
-    int previous_ = 1;
-};
 
 // Independent scalar specification: no production priority or selector helper.
 static std::uint64_t bounded_fixture_key(std::uint64_t seed,
@@ -2432,8 +2400,8 @@ static void check_owned_bounded_selection(
 } // namespace
 
 TEST(GpuBoundedSelection, OwnedSnapshotsMatchIndependentFourPassOracle) {
-    const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    const bounded_fixture_threads serial;
+    const scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    const scoped_omp_threads serial(1);
     const std::array<std::pair<std::uint64_t, std::uint64_t>, 4> keys = {{
         {42, 0}, {0, 0}, {42, 7}, {UINT64_MAX, UINT64_MAX}}};
     for (const bounded_vertex n : {2u, 4u, 31u, 32u, 33u, 255u, 256u, 257u})
@@ -2462,8 +2430,8 @@ TEST(GpuBoundedSelection, OwnedSnapshotsMatchIndependentFourPassOracle) {
 }
 
 TEST(GpuBoundedSelection, FourPassCapLeavesAnUncoveredEligibleVertex) {
-    const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    const bounded_fixture_threads serial;
+    const scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    const scoped_omp_threads serial(1);
     constexpr bounded_vertex n = 65;
     std::vector<bounded_vertex> order(n);
     std::iota(order.begin(), order.end(), bounded_vertex{0});
@@ -2480,8 +2448,8 @@ TEST(GpuBoundedSelection, FourPassCapLeavesAnUncoveredEligibleVertex) {
 }
 
 TEST(GpuBoundedSelection, OwnedZeroDegreeCandidatesMakeProgress) {
-    const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    const bounded_fixture_threads serial;
+    const scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    const scoped_omp_threads serial(1);
     for (const bounded_vertex n : {1u, 33u}) {
         SCOPED_TRACE(n);
         Eigen::SparseMatrix<double> A(n, n);
@@ -2513,13 +2481,13 @@ TEST(GpuBoundedSelection, OwnedZeroDegreeCandidatesMakeProgress) {
 }
 
 TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
-    const scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    const scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    const scoped_environment setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    const scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    const scoped_environment fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    const scoped_environment drop("APXCHOL_FACTOR_DROP", "0");
-    const bounded_fixture_threads serial;
+    const scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
+    const scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
+    const scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
+    const scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    const scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
+    const scoped_env drop("APXCHOL_FACTOR_DROP", "0");
+    const scoped_omp_threads serial(1);
     const auto A = grid_laplacian(9, 7);
     Eigen::VectorXd exact(A.rows());
     for (Eigen::Index i = 0; i < exact.size(); ++i) exact[i] = std::sin(double(i) + 0.25);

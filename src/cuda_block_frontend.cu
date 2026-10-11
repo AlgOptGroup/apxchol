@@ -1,3 +1,4 @@
+#include "cuda_buffer.cuh"
 #include "apxchol/solver/detail/setup_route.h"
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
@@ -45,40 +46,7 @@ void cuda_check(cudaError_t err, const char *what) {
         cuda_failure(err, what);
 }
 
-template <class T> class device_buffer {
-public:
-    device_buffer() = default;
-    ~device_buffer() {
-        if (ptr_)
-            cudaFree(ptr_);
-    }
-    device_buffer(const device_buffer &) = delete;
-    device_buffer &operator=(const device_buffer &) = delete;
-
-    void reserve(std::size_t count) {
-        if (count <= capacity_)
-            return;
-        T *next = nullptr;
-        cuda_check(
-            cudaMalloc(reinterpret_cast<void **>(&next), count * sizeof(T)),
-            "cudaMalloc");
-        // Keep the replacement owned if releasing the previous allocation
-        // reports an error. Publish it only after the release succeeds.
-        std::unique_ptr<T, decltype(&cudaFree)> next_owner(next, &cudaFree);
-        if (ptr_)
-            cuda_check(cudaFree(ptr_), "cudaFree during growth");
-        ptr_ = next_owner.release();
-        capacity_ = count;
-    }
-
-    T *get() { return ptr_; }
-    const T *get() const { return ptr_; }
-    std::size_t capacity() const { return capacity_; }
-
-private:
-    T *ptr_ = nullptr;
-    std::size_t capacity_ = 0;
-};
+template<class T> using device_buffer = cuda_buffer<T, cuda_check>;
 
 struct residual_endpoints {
     __host__ __device__ gpu_topology_edge operator()(
@@ -1266,7 +1234,7 @@ struct gpu_block_frontend::impl {
                 bounded_passes, static_cast<unsigned long long>(bounded_candidate_visits),
                 static_cast<unsigned long long>(bounded_seed),
                 static_cast<unsigned long long>(bounded_phase),
-                update_ids.capacity() * sizeof(node_index));
+                update_ids.count() * sizeof(node_index));
         if (trace_enabled()) {
             std::fprintf(stderr,
                          "[gpu-block] select candidates=%zu regions=%zu "
@@ -1322,7 +1290,7 @@ struct gpu_block_frontend::impl {
         if (expected.vertex_count != n || expected.active_count > active_count ||
             directed_count % 2 || directed_count / 2 > live_edge_count)
             throw std::logic_error("GPU selector resident projection has invalid dimensions");
-        const std::size_t scratch_before = cub_temp.capacity();
+        const std::size_t scratch_before = cub_temp.count();
         const int next = 1 - current_coo;
         // The accepted residual has paired directed incidences. Selecting one
         // orientation retains EVERY multigraph edge; neither weights nor owner
@@ -1365,7 +1333,7 @@ struct gpu_block_frontend::impl {
         host_active_degrees_valid = host_candidate_ids_valid = false;
         cuda_check(cudaDeviceSynchronize(), "finish resident selector projection");
         ++transfers.resident_advances;
-        const std::size_t scratch_after = cub_temp.capacity();
+        const std::size_t scratch_after = cub_temp.count();
         if (scratch_after > scratch_before)
             transfers.projection_scratch_peak_extra_bytes = std::max(
                 transfers.projection_scratch_peak_extra_bytes,

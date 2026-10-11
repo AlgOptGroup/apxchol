@@ -16,6 +16,7 @@
 // accounting would not reflect the release. Linux + glibc only (skipped
 // elsewhere).
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -41,15 +42,6 @@ using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
-
-struct scoped_env {
-    std::string name, saved; bool had = false;
-    scoped_env(const char* var, const char* value) : name(var) {
-        if (const char* e = std::getenv(var)) { had = true; saved = e; }
-        if (value) setenv(var, value, 1); else unsetenv(var);
-    }
-    ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
-};
 
 [[maybe_unused]] long proc_status_kb(const char* key) {
     std::ifstream f("/proc/self/status"); std::string ln;

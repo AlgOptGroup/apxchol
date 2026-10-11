@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include "scoped_env.h"
+#include "scoped_omp_threads.h"
 #include "apxchol/solver/solve.h"
 #include <algorithm>
 #include <array>
@@ -13,9 +15,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/pcg_cuda.h"
@@ -158,29 +157,6 @@ HostCsc precision_input(bool inexact) {
     }
     return from_entries(static_cast<int>(values.size()+1),entries);
 }
-class scoped_environment {
-public:
-    scoped_environment(const char* key,const char* value):key_(key) {
-        if (const char* old=std::getenv(key)) { present_=true;old_=old; }
-        if (value) setenv(key,value,1);else unsetenv(key);
-    }
-    ~scoped_environment(){if(present_)setenv(key_.c_str(),old_.c_str(),1);else unsetenv(key_.c_str());}
-private:std::string key_,old_;bool present_=false;
-};
-class scoped_threads {
-public:
-    scoped_threads() {
-#ifdef _OPENMP
-        previous_=omp_get_max_threads();omp_set_num_threads(1);
-#endif
-    }
-    ~scoped_threads() {
-#ifdef _OPENMP
-        omp_set_num_threads(previous_);
-#endif
-    }
-private:int previous_=1;
-};
 }
 #endif
 
@@ -346,14 +322,14 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
     GTEST_SKIP()<<"CUDA operator CSR required";
 #else
     if (!runtime_available()) GTEST_SKIP()<<"CUDA unavailable";
-    scoped_threads serial;
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND","force");
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW","force");
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
-    scoped_environment fp16("APXCHOL_FACTOR_STORAGE",nullptr);
-    scoped_environment drop("APXCHOL_FACTOR_DROP",nullptr);
-    scoped_environment backend("APXCHOL_GPU_SPTRSV",nullptr);
-    scoped_environment tail("APXCHOL_RESIDUAL_SPARSIFY","0");
+    scoped_omp_threads serial(1);
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND","force");
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW","force");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
+    scoped_env fp16("APXCHOL_FACTOR_STORAGE",nullptr);
+    scoped_env drop("APXCHOL_FACTOR_DROP",nullptr);
+    scoped_env backend("APXCHOL_GPU_SPTRSV",nullptr);
+    scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY","0");
     constexpr int n=65;
     for (double shift : {0.0,1.0}) {
         SCOPED_TRACE(shift);
@@ -373,7 +349,7 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
         EXPECT_TRUE(preconditioner.trsv().fp16());
         EXPECT_GT(preconditioner.trsv().drop_stats().rel,0.0);
         for(const char* precision : {static_cast<const char*>(nullptr),"0"}) {
-            scoped_environment op_precision("APXCHOL_GPU_FP32_OPERATOR",precision);
+            scoped_env op_precision("APXCHOL_GPU_FP32_OPERATOR",precision);
             apxchol::cuda_pcg solver;
             solver.setup(A,preconditioner.factor().perm);
             EXPECT_EQ(solver.fp32_operator(),precision==nullptr);
@@ -393,10 +369,10 @@ TEST(GpuOperatorCsr, DeviceSetupIgnoresLegacyFlagsAndRejectsUnsupportedStorage) 
     GTEST_SKIP() << "32-bit-node CUDA operator CSR required";
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial;
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "off");
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "off");
+    scoped_omp_threads serial(1);
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "off");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "off");
     constexpr int n = 9;
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
@@ -412,7 +388,7 @@ TEST(GpuOperatorCsr, DeviceSetupIgnoresLegacyFlagsAndRejectsUnsupportedStorage) 
     preconditioner.compute(A);
     ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
     apxchol::cuda_pcg solver;
-    scoped_environment trace("APXCHOL_VERBOSE", "1");
+    scoped_env trace("APXCHOL_VERBOSE", "1");
     testing::internal::CaptureStderr();
     solver.setup(A, preconditioner.factor().perm);
     const auto diagnostic = testing::internal::GetCapturedStderr();
@@ -456,10 +432,10 @@ TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
     GTEST_SKIP() << "CUDA solve required";
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial;
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", nullptr);
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", nullptr);
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", nullptr);
+    scoped_omp_threads serial(1);
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", nullptr);
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", nullptr);
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", nullptr);
     constexpr int n = 5;
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
@@ -489,10 +465,10 @@ TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
     GTEST_SKIP() << "CUDA solve required";
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial;
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", nullptr);
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", nullptr);
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", nullptr);
+    scoped_omp_threads serial(1);
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", nullptr);
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", nullptr);
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", nullptr);
     constexpr int n = 5;
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {

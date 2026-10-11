@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include "scoped_env.h"
+#include "scoped_omp_threads.h"
 #include "apxchol/solver/solve.h"
 #include "gpu_preconditioner_fixture.h"
 
@@ -50,27 +52,6 @@ using apxchol::detail::gpu_round_shadow_excess_bound;
 using apxchol::detail::gpu_round_shadow_input;
 using apxchol::detail::gpu_round_shadow_report;
 
-class scoped_omp_threads {
-public:
-    explicit scoped_omp_threads(int threads) {
-#ifdef _OPENMP
-        before_ = omp_get_max_threads();
-        omp_set_num_threads(threads);
-#else
-        (void)threads;
-#endif
-    }
-    ~scoped_omp_threads() {
-#ifdef _OPENMP
-        omp_set_num_threads(before_);
-#endif
-    }
-
-private:
-#ifdef _OPENMP
-    int before_ = 1;
-#endif
-};
 
 inline constexpr int kResidentProvenanceWorkers = 2;
 
@@ -761,28 +742,6 @@ void expect_exception_contains(F&& operation, std::string_view needle) {
     }
 }
 
-class scoped_env {
-public:
-    scoped_env(const char* name, const char* value) : name_(name) {
-        if (const char* before = std::getenv(name)) {
-            had_value_ = true;
-            before_ = before;
-        }
-        if (value) setenv(name, value, 1);
-        else unsetenv(name);
-    }
-    ~scoped_env() {
-        if (had_value_)
-            setenv(name_.c_str(), before_.c_str(), 1);
-        else
-            unsetenv(name_.c_str());
-    }
-
-private:
-    std::string name_;
-    std::string before_;
-    bool had_value_ = false;
-};
 
 
 #define REQUIRE_GPU_ROUND_SHADOW_DEVICE()                                      \

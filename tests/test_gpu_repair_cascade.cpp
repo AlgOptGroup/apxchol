@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/gpu_block_frontend.h"
@@ -18,20 +19,6 @@ using apxchol::node_index;
 using apxchol::detail::gpu_block_frontend;
 using apxchol::detail::gpu_topology_edge;
 
-class scoped_environment {
-public:
-    scoped_environment(const char* key, const char* value) : key_(key) {
-        if (const char* old = std::getenv(key)) { present_ = true; old_ = old; }
-        if (value) setenv(key, value, 1); else unsetenv(key);
-    }
-    ~scoped_environment() {
-        if (present_) setenv(key_.c_str(), old_.c_str(), 1);
-        else unsetenv(key_.c_str());
-    }
-private:
-    std::string key_, old_;
-    bool present_ = false;
-};
 
 struct cascade_fixture {
     node_index path_size;
@@ -217,7 +204,7 @@ TEST(GpuBlockFrontend, CsrRepairCascadesMatchIndependentSpec) {
         SCOPED_TRACE(n);
         const auto fixture = make_fixture(n);
         const auto regions = std::to_string(n);
-        scoped_environment blocks("APXCHOL_GPU_BLOCKS", regions.c_str());
+        scoped_env blocks("APXCHOL_GPU_BLOCKS", regions.c_str());
         for (const bool degree_tiebreak : {false, true}) {
             SCOPED_TRACE(degree_tiebreak);
             gpu_block_frontend gpu(n, fixture.edges);
@@ -232,14 +219,14 @@ TEST(GpuBlockFrontend, OwnedBoundedSelectionMakesIndependentProgress) {
     GTEST_SKIP() << "CUDA direct CSC required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     for (const node_index n : {31u, 32u, 33u, 255u, 256u, 257u, 1025u}) {
         SCOPED_TRACE(n);
         const auto fixture = make_fixture(n);
         const auto matrix = owned_matrix(fixture);
         ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(matrix));
         const auto regions = std::to_string(n);
-        scoped_environment blocks("APXCHOL_GPU_BLOCKS", regions.c_str());
+        scoped_env blocks("APXCHOL_GPU_BLOCKS", regions.c_str());
         for (const bool degree_tiebreak : {false, true}) {
             SCOPED_TRACE(degree_tiebreak);
             // Destruction is ordered: the borrowing frontend dies before its

@@ -1,3 +1,4 @@
+#include "cuda_buffer.cuh"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 #include "apxchol/solver/gpu_block_frontend.h"
@@ -253,6 +254,9 @@ std::size_t geometric_capacity(std::size_t required) {
 }
 
 struct allocation_tracker {
+    static std::size_t size_bytes(std::size_t count, std::size_t width, const char* what) {
+        return gpu_round_shadow_checked_mul(count, width, what);
+    }
     std::size_t current = 0;
     std::size_t peak = 0;
 
@@ -269,110 +273,7 @@ struct allocation_tracker {
     void begin_round() noexcept { peak = current; }
 };
 
-template<class T>
-class device_buffer {
-public:
-    explicit device_buffer(allocation_tracker& tracker) : tracker_(&tracker) {}
-    ~device_buffer() {
-        if (data_) {
-            cudaFree(data_);
-            tracker_->remove(bytes_);
-        }
-    }
-
-    device_buffer(const device_buffer&) = delete;
-    device_buffer& operator=(const device_buffer&) = delete;
-
-    void allocate(std::size_t count, const char* what) {
-        if (data_ || count == 0) return;
-        const std::size_t bytes =
-            gpu_round_shadow_checked_mul(count, sizeof(T), what);
-        // Account first so an overflow cannot happen after cudaMalloc. Roll the
-        // accounting back if allocation itself fails; data_ is published only
-        // after both operations succeed.
-        tracker_->add(bytes);
-        T* allocated = nullptr;
-        const cudaError_t status = cudaMalloc(
-            reinterpret_cast<void**>(&allocated), bytes);
-        if (status != cudaSuccess) {
-            tracker_->remove(bytes);
-            cuda_failure(status, what);
-        }
-        data_ = allocated;
-        bytes_ = bytes;
-        count_ = count;
-    }
-
-    T* detach() noexcept {
-        T* result = data_;
-        tracker_->remove(bytes_);
-        data_ = nullptr; bytes_ = count_ = 0;
-        return result;
-    }
-
-    void release(const char* what) {
-        if (!data_) return;
-        // Retain ownership if cudaFree reports an error, so stack unwinding can
-        // make a best-effort retry in the noexcept destructor.
-        cuda_check(cudaFree(data_), what);
-        tracker_->remove(bytes_);
-        data_ = nullptr;
-        bytes_ = 0;
-        count_ = 0;
-    }
-
-    void grow_preserve(std::size_t count, std::size_t used,
-                       const char* allocate_what,
-                       const char* copy_what,
-                       const char* release_what) {
-        if (count <= count_) return;
-        if (used > count_)
-            throw std::logic_error(
-                "GPU round shadow: preserved prefix exceeds buffer capacity");
-        const std::size_t new_bytes =
-            gpu_round_shadow_checked_mul(count, sizeof(T), allocate_what);
-        tracker_->add(new_bytes);
-        T* allocated = nullptr;
-        const cudaError_t allocation = cudaMalloc(
-            reinterpret_cast<void**>(&allocated), new_bytes);
-        if (allocation != cudaSuccess) {
-            tracker_->remove(new_bytes);
-            cuda_failure(allocation, allocate_what);
-        }
-        if (used) {
-            const cudaError_t copy = cudaMemcpy(
-                allocated, data_, used * sizeof(T), cudaMemcpyDeviceToDevice);
-            if (copy != cudaSuccess) {
-                cudaFree(allocated);
-                tracker_->remove(new_bytes);
-                cuda_failure(copy, copy_what);
-            }
-        }
-        if (data_) {
-            const cudaError_t release = cudaFree(data_);
-            if (release != cudaSuccess) {
-                cudaFree(allocated);
-                tracker_->remove(new_bytes);
-                cuda_failure(release, release_what);
-            }
-            tracker_->remove(bytes_);
-        }
-        data_ = allocated;
-        bytes_ = new_bytes;
-        count_ = count;
-    }
-
-    T* get() noexcept { return data_; }
-    const T* get() const noexcept { return data_; }
-    std::size_t count() const noexcept { return count_; }
-    std::size_t bytes() const noexcept { return bytes_; }
-
-private:
-    allocation_tracker* tracker_;
-    T* data_ = nullptr;
-    std::size_t count_ = 0;
-    std::size_t bytes_ = 0;
-};
+template<class T> using device_buffer = cuda_buffer<T, cuda_check, allocation_tracker>;
 
 class cuda_event {
 public:
@@ -2185,7 +2086,7 @@ struct round_common_scratch {
     static void prepare(device_buffer<T>& buffer, std::size_t count,
                         const char* what) {
         if (count <= buffer.count()) return;
-        buffer.release("replace common round scratch");
+        buffer.reset("replace common round scratch");
         buffer.allocate(count, what);
     }
 
@@ -2210,17 +2111,17 @@ struct round_common_scratch {
     }
 
     void release() {
-        cub_temp.release("retire common CUB workspace");
-        selected_count.release("retire common selected count");
-        pivots.release("retire common pivots");
-        pivot_counts.release("retire common pivot counts");
-        pivot_offsets.release("retire common pivot offsets");
-        total_degree.release("retire common total degrees");
-        semantics.release("retire common semantic report");
-        flags.release("retire owned round flags");
-        oversized_starts.release("retire oversized unique starts");
-        batch_counts.release("retire normal-batch counters");
-        batch_descriptors.release("retire normal-batch descriptors");
+        cub_temp.reset("retire common CUB workspace");
+        selected_count.reset("retire common selected count");
+        pivots.reset("retire common pivots");
+        pivot_counts.reset("retire common pivot counts");
+        pivot_offsets.reset("retire common pivot offsets");
+        total_degree.reset("retire common total degrees");
+        semantics.reset("retire common semantic report");
+        flags.reset("retire owned round flags");
+        oversized_starts.reset("retire oversized unique starts");
+        batch_counts.reset("retire normal-batch counters");
+        batch_descriptors.reset("retire normal-batch descriptors");
     }
 };
 
@@ -2339,7 +2240,7 @@ struct gpu_round_shadow_device_state::impl {
                              const char* release_what) {
         if (buffer.count() >= count) return false;
         const bool growth = buffer.count() != 0;
-        if (growth) buffer.release(release_what);
+        if (growth) buffer.reset(release_what);
         buffer.allocate(count, allocate_what);
         ++state_buffer_allocations;
         if (growth) ++state_buffer_growths;
@@ -3139,8 +3040,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         }
         report.gathered_incidences = g;
     });
-    first.release("release gather candidates");
-    if (!device_owned_prefix) flags.release("release gather flags");
+    first.reset("release gather candidates");
+    if (!device_owned_prefix) flags.reset("release gather flags");
 
     auto& keys_a = sort_keys_a;
     auto& keys_b = sort_keys_b;
@@ -3197,10 +3098,10 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         set_last_offset<<<1, 1>>>(pivot_offsets.get(), p, static_cast<std::uint32_t>(u));
         cuda_check(cudaGetLastError(), "publish final pivot offset");
     });
-    second.release("release gathered records");
-    first.release("release sorted gathered records");
-    scratch.release("release dedup candidates");
-    if (!device_owned_prefix) flags.release("release dedup flags");
+    second.reset("release gathered records");
+    first.reset("release sorted gathered records");
+    scratch.reset("release dedup candidates");
+    if (!device_owned_prefix) flags.reset("release dedup flags");
     if (device_owned_prefix) {
         unique.allocate(std::max<std::size_t>(u, 1), "allocate combined canonical neighbors");
         if (oversized_u) {
@@ -3408,7 +3309,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 }
             }
         }
-        oversized_unique.release("release oversized canonical neighbors");
+        oversized_unique.reset("release oversized canonical neighbors");
         const int raw_fill = cub.select(
             fill_candidates.get(), flags.get(), fills.get(), u,
             "compact raw GKS fill");
@@ -3487,11 +3388,11 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             cuda_check(cudaGetLastError(), "launch reduced excess apply");
         }
     });
-    prefix.release("release GKS prefix sums");
-    fill_candidates.release("release raw fill candidates");
-    unique.release("release canonical neighbors");
-    scratch.release("release canonical scratch");
-    if (!device_owned_prefix) flags.release("release canonical flags");
+    prefix.reset("release GKS prefix sums");
+    fill_candidates.reset("release raw fill candidates");
+    unique.reset("release canonical neighbors");
+    scratch.reset("release canonical scratch");
+    if (!device_owned_prefix) flags.reset("release canonical flags");
 
     if (audit_payload && f) {
         report.timings.fill_materialize_ms = timer.measure_ms([&] {
@@ -3552,8 +3453,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             cuda_check(cudaGetLastError(), "launch raw multigraph-fill application");
         }
     });
-    if (!device_owned_prefix) flags.release("release surviving-incidence flags");
-    fills.release("release raw multigraph fill");
+    if (!device_owned_prefix) flags.reset("release surviving-incidence flags");
+    fills.reset("release raw multigraph fill");
 
     l = gpu_round_shadow_checked_add(
         s, gpu_round_shadow_checked_mul(f, 2, "actual directed fill"),
@@ -3705,7 +3606,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     // borrows degrees. A failed release is still covered by the generation
     // guard and the existing device-aware state teardown.
     if (device_owned_prefix && report.active_count == 0 && l == 0) {
-        owned_degrees.release("release completed owned degrees");
+        owned_degrees.reset("release completed owned degrees");
         owned_common_scratch.release();
     }
 
@@ -4045,10 +3946,10 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     if (t.peak > planned)
         throw std::logic_error("GPU CSC owner allocation exceeded initialization plan");
     // CSC is scratch only; release it before the selector and numerical rounds.
-    ptr.release("release initial CSC pointers"); idx.release("release initial CSC rows");
-    values.release("release initial CSC values"); counts.release("release initial CSC counts");
-    scratch.release("release initial CSC scan scratch"); status.release("release initial CSC status");
-    semantics.release("release initial CSC content digest");
+    ptr.reset("release initial CSC pointers"); idx.reset("release initial CSC rows");
+    values.reset("release initial CSC values"); counts.reset("release initial CSC counts");
+    scratch.reset("release initial CSC scan scratch"); status.reset("release initial CSC status");
+    semantics.reset("release initial CSC content digest");
     impl_->vertex_count = static_cast<node_index>(n);
     impl_->resident_count = directed; impl_->current_slot = 0;
     impl_->has_state = true; impl_->device_owned_prefix = true;
@@ -4469,7 +4370,7 @@ gpu_round_shadow_device_state::finalize_device_factor(
     std::size_t sort_bytes = 0;
     cuda_check(cub::DeviceRadixSort::SortPairs(nullptr, sort_bytes, keys.get(), sorted_keys.get(), input_values.get(), ltv.get(), nnz), "finalizer sort size");
     if (sort_bytes > scan_bytes) {
-        temporary.release("finalizer replace scratch");
+        temporary.reset("finalizer replace scratch");
         temporary.allocate(sort_bytes, "finalizer sort scratch");
     }
     cuda_check(cub::DeviceRadixSort::SortPairs(temporary.get(), sort_bytes, keys.get(), sorted_keys.get(), input_values.get(), ltv.get(), nnz), "finalizer sort LT");
@@ -4524,7 +4425,7 @@ gpu_round_shadow_device_state::finalize_device_factor(
         cuda_check(cub::DeviceRadixSort::SortPairs(nullptr, half_sort_bytes,
             keys.get(), sorted_keys.get(), lth.get(), lh.get(), nnz), "finalizer half sort size");
         if (half_sort_bytes > std::max(sort_bytes, scan_bytes)) {
-            temporary.release("finalizer replace half scratch");
+            temporary.reset("finalizer replace half scratch");
             temporary.allocate(half_sort_bytes, "finalizer half sort scratch");
         }
         cuda_check(cub::DeviceRadixSort::SortPairs(temporary.get(), half_sort_bytes,
@@ -4554,17 +4455,17 @@ gpu_round_shadow_device_state::finalize_device_factor(
             {{lp.get(), (m + 1) * sizeof(int)}, {li.get(), std::size_t(nnz) * sizeof(int)}, {lh.get(), std::size_t(nnz) * sizeof(__half)}},
             {{column_ptr, (m + 1) * sizeof(int)}, {lti.get(), std::size_t(nnz) * sizeof(int)}, {lth.get(), std::size_t(nnz) * sizeof(__half)}},
             {diag.get(), m * sizeof(float)}, {inv_scale2.get(), m * sizeof(double)}, stats, counts[2], 0);
-        lh.detach(); lth.detach(); diag.detach(); inv_scale2.detach();
+        lh.release(); lth.release(); diag.release(); inv_scale2.release();
     } else {
         *result = cuda_sptrsv_device_factor::own_fp32(impl_->cuda_device, m, nnz,
             {{lp.get(), (m + 1) * sizeof(int)}, {li.get(), std::size_t(nnz) * sizeof(int)}, {lv.get(), std::size_t(nnz) * sizeof(float)}},
             {{column_ptr, (m + 1) * sizeof(int)}, {lti.get(), std::size_t(nnz) * sizeof(int)}, {column_values, std::size_t(nnz) * sizeof(float)}}, stats);
-        lv.detach();
-        if (column_values == ltv.get()) ltv.detach(); else dropped_values.detach();
+        lv.release();
+        if (column_values == ltv.get()) ltv.release(); else dropped_values.release();
     }
     result->finalized_sorted_triangular_ = true;
-    lp.detach(); li.detach(); lti.detach();
-    if (column_ptr == ltp.get()) ltp.detach(); else dropped_ptr.detach();
+    lp.release(); li.release(); lti.release();
+    if (column_ptr == ltp.get()) ltp.release(); else dropped_ptr.release();
     const std::size_t upload = n * sizeof(node_index) +
         tail.columns.size() * sizeof(gpu_round_shadow_factor_column) +
         tail.entries.size() * sizeof(gpu_round_shadow_factor_entry);

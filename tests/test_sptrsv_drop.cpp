@@ -23,6 +23,7 @@
 // storage-format-specific drop clause (format_flushes) has its own tests in
 // test_lowprec.cpp.
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -50,20 +51,6 @@ using apxchol::sptrsv_value_t;
 
 namespace {
 
-// RAII env override: sets one variable for one scope, restores after (unset
-// if it was unset), so the tests never leak state into each other.
-struct scoped_env {
-    std::string name, saved; bool had = false;
-    scoped_env(const char* var, const char* value) : name(var) {
-        if (const char* e = std::getenv(var)) { had = true; saved = e; }
-        if (value) setenv(var, value, 1);
-        else       unsetenv(var);
-    }
-    ~scoped_env() {
-        if (had) setenv(name.c_str(), saved.c_str(), 1);
-        else     unsetenv(name.c_str());
-    }
-};
 struct scoped_drop_env : scoped_env {
     explicit scoped_drop_env(const char* value) : scoped_env("APXCHOL_FACTOR_DROP", value) {}
 };
@@ -795,21 +782,26 @@ TEST(GpuSptrsvAdoptionHost, CsrPairIsExactlyTheExistingUploadPair) {
             short_L_ptr.data(), L.idx.get(), LT.ptr.data(), LT.idx.get());
     EXPECT_NE(bad_extent.find("rowptr[m]"), std::string::npos) << bad_extent;
 
-    std::vector<int> bad_L_idx(
-        L.idx.get(), L.idx.get() + static_cast<std::size_t>(L.nnz));
-    std::size_t offdiag = 0;
-    while (offdiag < bad_L_idx.size() &&
-           bad_L_idx[offdiag] == static_cast<int>(
-               std::upper_bound(L.ptr.begin(), L.ptr.end(),
-                                static_cast<int>(offdiag)) -
-               L.ptr.begin() - 1))
-        ++offdiag;
-    ASSERT_LT(offdiag, bad_L_idx.size());
-    bad_L_idx[offdiag] = bad_L_idx[offdiag] + 1;
-    EXPECT_NE(apxchol::cuda_host::dataflow_factor_structure_check(
-                  static_cast<int>(m), LT.nnz,
-                  L.ptr.data(), bad_L_idx.data(), LT.ptr.data(), LT.idx.get()),
-              "");
+    // Corrupt every pointer/index position in either half, including integer
+    // extremes and valid triangular entries that cease to be exact transposes.
+    const std::array<std::vector<int>, 4> valid{{
+        {0, 1, 3, 5}, {0, 0, 1, 0, 2}, {0, 3, 4, 5}, {0, 1, 2, 1, 2}}};
+    const auto check = [](const auto& pair) {
+        return apxchol::cuda_host::dataflow_factor_structure_check(
+            3, 5, pair[0].data(), pair[1].data(), pair[2].data(), pair[3].data());
+    };
+    ASSERT_TRUE(check(valid).empty());
+    for (std::size_t array = 0; array < valid.size(); ++array)
+        for (std::size_t slot = 0; slot < valid[array].size(); ++slot)
+            for (int replacement : {-1, 0, 1, 2, 3, 4, 5, 6,
+                                    std::numeric_limits<int>::min(),
+                                    std::numeric_limits<int>::max()}) {
+                if (replacement == valid[array][slot]) continue;
+                auto malformed = valid;
+                malformed[array][slot] = replacement;
+                EXPECT_FALSE(check(malformed).empty())
+                    << "array=" << array << " slot=" << slot << " value=" << replacement;
+            }
 }
 
 #ifdef APXCHOL_USE_CUDA

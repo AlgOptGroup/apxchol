@@ -296,69 +296,51 @@ inline std::string dataflow_factor_structure_check(
     if (!L_ptr || !L_idx || !LT_ptr || !LT_idx)
         return "CSR pointers must be non-null";
 
-    auto check_one = [&](const char* name, const int* ptr, const int* idx,
-                         bool lower) -> std::string {
-        if (ptr[0] != 0)
-            return std::string(name) + " rowptr[0] is not zero";
-        if (ptr[m] != nnz)
-            return std::string(name) + " rowptr[m] does not equal nnz";
-        for (int row = 0; row < m; ++row) {
-            const int beg = ptr[row], end = ptr[row + 1];
-            if (beg < 0 || end < beg || end > nnz)
-                return std::string(name) + " rowptr is not a bounded monotone prefix at row " +
-                       std::to_string(row);
-            int previous = -1;
-            int diagonals = 0;
-            for (int p = beg; p < end; ++p) {
-                const int col = idx[p];
-                if (col < 0 || col >= m)
-                    return std::string(name) + " has an out-of-range column at entry " +
-                           std::to_string(p);
-                if (col <= previous)
-                    return std::string(name) + " row " + std::to_string(row) +
-                           " is not strictly column-sorted";
-                if ((lower && col > row) || (!lower && col < row))
-                    return std::string(name) + " has an entry outside its triangular half at (" +
-                           std::to_string(row) + "," + std::to_string(col) + ")";
-                diagonals += col == row;
-                previous = col;
-            }
-            if (diagonals != 1)
-                return std::string(name) + " row " + std::to_string(row) +
-                       " does not contain exactly one diagonal";
-        }
-        return {};
-    };
+    if (L_ptr[0] != 0) return "CSR(L) rowptr[0] is not zero";
+    if (L_ptr[m] != nnz) return "CSR(L) rowptr[m] does not equal nnz";
+    if (LT_ptr[0] != 0) return "CSR(L^T) rowptr[0] is not zero";
+    if (LT_ptr[m] != nnz) return "CSR(L^T) rowptr[m] does not equal nnz";
 
-    if (std::string why = check_one("CSR(L)", L_ptr, L_idx, true); !why.empty())
-        return why;
-    if (std::string why = check_one("CSR(L^T)", LT_ptr, LT_idx, false); !why.empty())
-        return why;
-
-    // Exact structural transpose, reconstructed in the same stable source-row
-    // order as transpose_csr(). This also checks both row-pointer arrays rather
-    // than accepting an order-independent coordinate hash.
+    // Validate LT and count its transpose. An exact match to this transpose
+    // proves L is also sorted, triangular and has exactly one diagonal per row.
     std::vector<int> expected_ptr(static_cast<std::size_t>(m) + 1, 0);
-    for (std::int64_t p = 0; p < nnz; ++p)
-        ++expected_ptr[static_cast<std::size_t>(LT_idx[p]) + 1];
-    for (int row = 0; row < m; ++row)
+    for (int row = 0; row < m; ++row) {
+        const int beg = LT_ptr[row], end = LT_ptr[row + 1];
+        if (beg < 0 || end < beg || end > nnz)
+            return "CSR(L^T) rowptr is not a bounded monotone prefix at row " +
+                   std::to_string(row);
+        int previous = -1;
+        for (int p = beg; p < end; ++p) {
+            const int col = LT_idx[p];
+            if (col < 0 || col >= m)
+                return "CSR(L^T) has an out-of-range column at entry " + std::to_string(p);
+            if (col <= previous)
+                return "CSR(L^T) row " + std::to_string(row) + " is not strictly column-sorted";
+            if (col < row)
+                return "CSR(L^T) has an entry outside its triangular half at (" +
+                       std::to_string(row) + "," + std::to_string(col) + ")";
+            ++expected_ptr[static_cast<std::size_t>(col) + 1];
+            previous = col;
+        }
+        if (beg == end || LT_idx[beg] != row)
+            return "CSR(L^T) row " + std::to_string(row) + " does not contain exactly one diagonal";
+    }
+    for (int row = 0; row < m; ++row) {
         expected_ptr[static_cast<std::size_t>(row) + 1] +=
             expected_ptr[static_cast<std::size_t>(row)];
-    for (int row = 0; row <= m; ++row)
-        if (expected_ptr[static_cast<std::size_t>(row)] != L_ptr[row])
+        if (expected_ptr[static_cast<std::size_t>(row) + 1] != L_ptr[row + 1])
             return "CSR(L) row pointers are not the transpose of CSR(L^T)";
+    }
 
-    std::vector<int> cursor = expected_ptr;
-    std::vector<int> expected_idx(static_cast<std::size_t>(nnz));
+    // Consume the validated row starts as cursors in stable source-row order.
+    // Their counts bound every L_idx read without trusting the supplied L_ptr.
     for (int row = 0; row < m; ++row)
         for (int p = LT_ptr[row]; p < LT_ptr[row + 1]; ++p) {
-            const int out_row = LT_idx[p];
-            expected_idx[static_cast<std::size_t>(cursor[out_row]++)] = row;
+            const int out = expected_ptr[static_cast<std::size_t>(LT_idx[p])]++;
+            if (L_idx[out] != row)
+                return "CSR(L) column indices are not the transpose of CSR(L^T) at entry " +
+                       std::to_string(out);
         }
-    for (std::int64_t p = 0; p < nnz; ++p)
-        if (expected_idx[static_cast<std::size_t>(p)] != L_idx[p])
-            return "CSR(L) column indices are not the transpose of CSR(L^T) at entry " +
-                   std::to_string(p);
     return {};
 }
 

@@ -1,3 +1,4 @@
+#include "cuda_buffer.cuh"
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/csc_work.h"
@@ -134,26 +135,19 @@ void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* 
 
 namespace {
 
-void operator_check(cudaError_t status) {
+void operator_check(cudaError_t status, const char* = nullptr) {
     if (status != cudaSuccess)
         throw std::runtime_error(std::string("GPU operator CSR: ") + cudaGetErrorString(status));
 }
 
-// Every temporary owns its allocation until the final, nonthrowing publication.
-// cudaFree also retires work using a temporary when an earlier CUDA call throws.
-template<class T> struct operator_buffer {
-    T* ptr = nullptr;
-    explicit operator_buffer(std::size_t count) {
-        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T))
+struct operator_allocation : detail::cuda_untracked_allocation {
+    static std::size_t size_bytes(std::size_t count, std::size_t width, const char*) {
+        if (count > std::numeric_limits<std::size_t>::max() / width)
             throw std::overflow_error("GPU operator CSR allocation overflow");
-        if (count) operator_check(cudaMalloc(&ptr, count * sizeof(T)));
+        return count * width;
     }
-    operator_buffer(const operator_buffer&) = delete;
-    operator_buffer& operator=(const operator_buffer&) = delete;
-    ~operator_buffer() { if (ptr) cudaFree(ptr); }
-    void reset() { if (ptr) { operator_check(cudaFree(ptr)); ptr = nullptr; } }
-    T* release() { return std::exchange(ptr, nullptr); }
 };
+template<class T> using operator_buffer = detail::cuda_buffer<T, operator_check, operator_allocation>;
 
 struct operator_status {
     // Each count is <= nnz <= INT_MAX: adding packed counts cannot carry from
@@ -249,18 +243,18 @@ bool try_build_permuted_operator_csr(
     operator_buffer<double> input(nnz);
     operator_buffer<std::uint32_t> perm(n);
     operator_buffer<operator_status> status(1);
-    operator_check(cudaMemcpy(outer.ptr, host_outer, (static_cast<std::size_t>(n) + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    operator_check(cudaMemcpy(outer.get(), host_outer, (static_cast<std::size_t>(n) + 1) * sizeof(int), cudaMemcpyHostToDevice));
     if (nnz) {
-        operator_check(cudaMemcpy(inner.ptr, host_inner, static_cast<std::size_t>(nnz) * sizeof(int), cudaMemcpyHostToDevice));
-        operator_check(cudaMemcpy(input.ptr, host_values, static_cast<std::size_t>(nnz) * sizeof(double), cudaMemcpyHostToDevice));
+        operator_check(cudaMemcpy(inner.get(), host_inner, static_cast<std::size_t>(nnz) * sizeof(int), cudaMemcpyHostToDevice));
+        operator_check(cudaMemcpy(input.get(), host_values, static_cast<std::size_t>(nnz) * sizeof(double), cudaMemcpyHostToDevice));
     }
-    if (n) operator_check(cudaMemcpy(perm.ptr, host_perm, static_cast<std::size_t>(n) * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
-    operator_check(cudaMemset(status.ptr, 0, sizeof(operator_status)));
+    if (n) operator_check(cudaMemcpy(perm.get(), host_perm, static_cast<std::size_t>(n) * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
+    operator_check(cudaMemset(status.get(), 0, sizeof(operator_status)));
     const int column_blocks = pcg_blocks(static_cast<std::int64_t>(n) * 32);
-    operator_count_columns<<<column_blocks, kBlockThreads>>>(n, nnz, outer.ptr, inner.ptr, input.ptr, perm.ptr, counts.ptr, status.ptr);
+    operator_count_columns<<<column_blocks, kBlockThreads>>>(n, nnz, outer.get(), inner.get(), input.get(), perm.get(), counts.get(), status.get());
     operator_check(cudaGetLastError());
     operator_status observed{};
-    operator_check(cudaMemcpy(&observed, status.ptr, sizeof(observed), cudaMemcpyDeviceToHost));
+    operator_check(cudaMemcpy(&observed, status.get(), sizeof(observed), cudaMemcpyDeviceToHost));
     if ((observed.flags & 1U) || (observed.triangles & 0xffffffffULL) != (observed.triangles >> 32))
         return false;
     const bool fp32 = precision == 1 || (precision == -1 && !(observed.flags & 2U));
@@ -268,9 +262,9 @@ bool try_build_permuted_operator_csr(
     operator_buffer<std::uint64_t> keys_a(nnz);
     operator_buffer<double> values_a(nnz);
     if (nnz) {
-        operator_fill_columns<<<column_blocks, kBlockThreads>>>(n, outer.ptr, inner.ptr, input.ptr, perm.ptr, keys_a.ptr, values_a.ptr, status.ptr);
+        operator_fill_columns<<<column_blocks, kBlockThreads>>>(n, outer.get(), inner.get(), input.get(), perm.get(), keys_a.get(), values_a.get(), status.get());
         operator_check(cudaGetLastError());
-        operator_check(cudaMemcpy(&observed, status.ptr, sizeof(observed), cudaMemcpyDeviceToHost));
+        operator_check(cudaMemcpy(&observed, status.get(), sizeof(observed), cudaMemcpyDeviceToHost));
         if (observed.flags & 1U) return false;
     }
     // The two completed status copies precede retirement of input storage.
@@ -279,28 +273,28 @@ bool try_build_permuted_operator_csr(
     operator_buffer<int> rows(static_cast<std::size_t>(n) + 1);
     if (n) {
         std::size_t bytes = 0;
-        operator_check(cub::DeviceScan::ExclusiveSum(nullptr, bytes, counts.ptr, rows.ptr, n));
+        operator_check(cub::DeviceScan::ExclusiveSum(nullptr, bytes, counts.get(), rows.get(), n));
         operator_buffer<unsigned char> scratch(bytes);
-        operator_check(cub::DeviceScan::ExclusiveSum(scratch.ptr, bytes, counts.ptr, rows.ptr, n));
+        operator_check(cub::DeviceScan::ExclusiveSum(scratch.get(), bytes, counts.get(), rows.get(), n));
     }
-    operator_check(cudaMemcpy(rows.ptr + n, &nnz, sizeof(int), cudaMemcpyHostToDevice));
+    operator_check(cudaMemcpy(rows.get() + n, &nnz, sizeof(int), cudaMemcpyHostToDevice));
     counts.reset();
     operator_buffer<std::uint64_t> keys_b(nnz);
     operator_buffer<double> values_b(nnz);
     if (nnz) {
         std::size_t bytes = 0;
-        operator_check(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keys_a.ptr, keys_b.ptr, values_a.ptr, values_b.ptr, nnz));
+        operator_check(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keys_a.get(), keys_b.get(), values_a.get(), values_b.get(), nnz));
         operator_buffer<unsigned char> scratch(bytes);
-        operator_check(cub::DeviceRadixSort::SortPairs(scratch.ptr, bytes, keys_a.ptr, keys_b.ptr, values_a.ptr, values_b.ptr, nnz));
+        operator_check(cub::DeviceRadixSort::SortPairs(scratch.get(), bytes, keys_a.get(), keys_b.get(), values_a.get(), values_b.get(), nnz));
     }
     keys_a.reset(); values_a.reset();
     operator_buffer<int> columns(nnz);
     operator_buffer<float> narrow(fp32 ? nnz : 0);
     if (nnz) {
-        operator_decode_columns<<<pcg_blocks(nnz), kBlockThreads>>>(nnz, keys_b.ptr, columns.ptr);
+        operator_decode_columns<<<pcg_blocks(nnz), kBlockThreads>>>(nnz, keys_b.get(), columns.get());
         operator_check(cudaGetLastError());
         if (fp32) {
-            operator_narrow_values<<<pcg_blocks(nnz), kBlockThreads>>>(nnz, values_b.ptr, narrow.ptr);
+            operator_narrow_values<<<pcg_blocks(nnz), kBlockThreads>>>(nnz, values_b.get(), narrow.get());
             operator_check(cudaGetLastError());
         }
         operator_check(cudaStreamSynchronize(nullptr));

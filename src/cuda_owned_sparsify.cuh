@@ -353,7 +353,7 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
         throw std::logic_error("GPU sparsification returned invalid coalesced count");
     const auto distinct = std::size_t(distinct_count);
     result.scalar_download_bytes += sizeof(int); check_error(); result.distinct_before = distinct;
-    scratch.release("retire sparsification coalescing scratch");
+    scratch.reset("retire sparsification coalescing scratch");
     if (test) { test->canonical.resize(distinct); copy_to_host(test->canonical.data(), canonical.get(), distinct, "download test canonical edges"); }
     backbone.allocate(distinct, "allocate sparsification backbone");
     parent.allocate(n, "allocate sparsification parents"); labels.allocate(n, "allocate sparsification labels"); best.allocate(n, "allocate sparsification choices");
@@ -376,7 +376,7 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
         owned_sparsify_labels<<<blocks_for(n), kBlock>>>(n, parent.get(), labels.get());
         cuda_check(cudaGetLastError(), "refresh sparsification component labels");
     }
-    parent.release("retire sparsification parents"); labels.release("retire sparsification labels"); best.release("retire sparsification choices");
+    parent.reset("retire sparsification parents"); labels.reset("retire sparsification labels"); best.reset("retire sparsification choices");
     importance.allocate(distinct, "allocate sparsification importance");
     result.normalization_blocks = (distinct + 16383) / 16384;
     partials.allocate(result.normalization_blocks, "allocate sparsification ordered partials"); scale.allocate(1, "allocate sparsification scale");
@@ -397,7 +397,7 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
     cuda_check(cudaMemset(counts.get(), 0, 2 * sizeof(unsigned)), "clear sparsification weight validation");
     owned_sparsify_sample<<<blocks_for(distinct), kBlock>>>(canonical.get(), distinct, backbone.get(), importance.get(), scale.get(), scale_override, seed, flags.get(), counts.get());
     cuda_check(cudaGetLastError(), "sample and validate HT sparsification weights"); check_error();
-    partials.release("retire sparsification normalization partials");
+    partials.reset("retire sparsification normalization partials");
     diagnostic_partials.allocate(result.normalization_blocks, "allocate sparsification diagnostic partials");
     device_stats.allocate(1, "allocate sparsification diagnostics");
     copy_to_device(device_stats.get(), &result, 1, "initialize sparsification diagnostics");
@@ -418,7 +418,7 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
         cuda_check(cudaGetLastError(), "convert test backbone flags"); test->backbone.resize(distinct);
         copy_to_host(test->backbone.data(), flags.get(), distinct, "download test backbone flags");
     }
-    diagnostic_partials.release("retire sparsification diagnostic partials"); scale.release("retire sparsification scale"); device_stats.release("retire sparsification diagnostics");
+    diagnostic_partials.reset("retire sparsification diagnostic partials"); scale.reset("retire sparsification scale"); device_stats.reset("retire sparsification diagnostics");
     const auto directed = 2 * result.kept_edges;
     expanded.allocate(directed, "allocate paired sparsification rebuild");
     cuda_check(cudaMemset(output_degrees, 0, std::size_t(n) * sizeof(std::uint32_t)), "clear sparsification output degrees");

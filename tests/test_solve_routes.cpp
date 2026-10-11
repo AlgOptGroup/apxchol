@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include <cstdlib>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -10,21 +10,6 @@
 #include <vector>
 
 namespace {
-class scoped_environment {
-public:
-    scoped_environment(const char* key, const char* value) : key_(key) {
-        if (const char* old = std::getenv(key)) old_ = old;
-        if (value) setenv(key, value, 1);
-        else unsetenv(key);
-    }
-    ~scoped_environment() {
-        if (old_) setenv(key_, old_->c_str(), 1);
-        else unsetenv(key_);
-    }
-private:
-    const char* key_;
-    std::optional<std::string> old_;
-};
 
 Eigen::SparseMatrix<double> operator_matrix() {
     constexpr int n = 64;
@@ -70,9 +55,9 @@ TEST(SolveRoutes, CpuPreconditionerTypeIsIndependentOfCudaBuild) {
 }
 
 TEST(SolveRoutes, ExplicitCpuIgnoresLegacyGpuStageFlagsAndDoesNotPrewarm) {
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "invalid");
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "invalid");
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "invalid");
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "invalid");
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "invalid");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "invalid");
 #if defined(APXCHOL_USE_CUDA)
     const bool started = apxchol::cuda_ctx::detail::state().started;
     if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
@@ -171,7 +156,7 @@ TEST(SolveRoutes, FactorStorageOverridesEnvironmentForNewAndAdoptedFactors) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (bool fp16 : {false, true}) {
-        scoped_environment env("APXCHOL_FACTOR_STORAGE", fp16 ? "float32" : "float16");
+        scoped_env env("APXCHOL_FACTOR_STORAGE", fp16 ? "float32" : "float16");
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::cpu;
         options.keep_factor_values = true;
@@ -217,9 +202,9 @@ TEST(SolveRoutes, AutomaticAndExplicitGpuUseOwnedSetupWithLegacyFlagsOff) {
 #else
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) GTEST_SKIP() << "CUDA unavailable";
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "off");
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "off");
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "off");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "off");
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (const auto backend : {apxchol::solve_backend::automatic, apxchol::solve_backend::gpu}) {

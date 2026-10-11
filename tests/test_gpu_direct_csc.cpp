@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include "scoped_env.h"
+#include "scoped_omp_threads.h"
 #include "apxchol/graph/conversions.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
@@ -17,9 +19,6 @@
 #include <span>
 #include <string>
 #include <vector>
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace {
 using apxchol::node_index;
@@ -29,38 +28,7 @@ using apxchol::detail::gpu_round_shadow_input;
 
 // Local guards follow the existing GPU round-shadow tests; no process-wide
 // cached grounding knob is changed by this test file.
-class scoped_environment {
-public:
-    scoped_environment(const char* key, const char* value) : key_(key) {
-        if (const char* old = std::getenv(key)) { present_ = true; old_ = old; }
-        if (value) setenv(key, value, 1); else unsetenv(key);
-    }
-    ~scoped_environment() {
-        if (present_) setenv(key_.c_str(), old_.c_str(), 1);
-        else unsetenv(key_.c_str());
-    }
-private:
-    std::string key_, old_;
-    bool present_ = false;
-};
 
-class scoped_threads {
-public:
-    explicit scoped_threads(int count) {
-#ifdef _OPENMP
-        before_ = omp_get_max_threads(); omp_set_num_threads(count);
-#else
-        (void)count;
-#endif
-    }
-    ~scoped_threads() {
-#ifdef _OPENMP
-        omp_set_num_threads(before_);
-#endif
-    }
-private:
-    int before_ = 1;
-};
 
 struct weighted_edge { int u, v; double weight; };
 
@@ -127,7 +95,7 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
 } // namespace
 
 TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     using apxchol::detail::gpu_owned_csc_supported;
     const auto valid = make_matrix(3, {{0,1,1.0},{0,2,2.0},{1,2,0.5}});
     ASSERT_TRUE(gpu_owned_csc_supported(valid));
@@ -169,7 +137,7 @@ TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
 }
 
 TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     using apxchol::detail::gpu_owned_csc_supported;
     std::vector<matrix> fixtures;
     fixtures.push_back(make_matrix(4, {{0,1,1.0},{1,2,2.0}}, 0.5));
@@ -216,7 +184,7 @@ TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
 }
 
 TEST(GpuDirectCscHost, CertifiedEligibilityRejectsDuplicateAndUnsortedZeroColumns) {
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     using apxchol::detail::gpu_owned_csc_supported;
     for (bool duplicate : {false, true}) {
         auto A = make_matrix(4, {{0,2,0.0},{0,3,0.0}}, 1.0);
@@ -234,7 +202,7 @@ TEST(GpuDirectCscHost, CertifiedEligibilityRejectsDuplicateAndUnsortedZeroColumn
 }
 
 TEST(GpuDirectCscHost, NumericalCertificateRejectsMissingTinyNonzeroMates) {
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     for (double weight : {1.0, std::numeric_limits<double>::denorm_min()}) {
         for (bool lower : {false, true}) {
             auto A = make_matrix(3, {}, 1.0);
@@ -274,7 +242,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
     signed_zero.coeffRef(1,0) = +0.0; signed_zero.coeffRef(0,1) = -0.0;
     fixtures.push_back(signed_zero);
     for (int threads : {1, 3}) {
-        scoped_threads team(threads);
+        scoped_omp_threads team(threads);
         for (std::size_t i = 0; i < fixtures.size(); ++i) {
             SCOPED_TRACE(threads);
             SCOPED_TRACE(i);
@@ -310,7 +278,7 @@ TEST(GpuDirectCsc, ExcessUsesOriginalOrderedDoublesAndStrictThresholdBeforeRegul
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     ASSERT_EQ(apxchol::detail::env_knobs::get().ground, apxchol::detail::grounding_kind::center_k);
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     constexpr double diagonal = 1e12;
     const double equal = diagonal - 1.0;
     auto A = make_matrix(6, {{0,1,equal},{2,3,std::nextafter(equal,diagonal)},
@@ -342,7 +310,7 @@ TEST(GpuDirectCsc, InvalidNumericalInputsFailWithoutPublishingAnInitialSnapshot)
     GTEST_SKIP() << "CUDA direct CSC experiment and test hooks required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     const auto valid = make_matrix(2, {{0,1,1.0}}, 1.0);
     for (int fault = 0; fault < 4; ++fault) {
         auto A = valid;
@@ -367,14 +335,14 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
     GTEST_SKIP() << "CUDA direct CSC required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial(1);
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    scoped_omp_threads serial(1);
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     const auto A = selector_matrix();
     const auto graph = apxchol::make_graph<host_graph>(A);
     ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
     std::vector<node_index> active(graph.n()); std::iota(active.begin(),active.end(),node_index{0});
     for (const char* regions : {"1", "7", static_cast<const char*>(nullptr)}) {
-        scoped_environment blocks("APXCHOL_GPU_BLOCKS", regions);
+        scoped_env blocks("APXCHOL_GPU_BLOCKS", regions);
         for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
             SCOPED_TRACE(regions);
             SCOPED_TRACE(ties);
@@ -441,9 +409,9 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
     GTEST_SKIP() << "CUDA direct CSC required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial(1);
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_environment blocks("APXCHOL_GPU_BLOCKS", "1");
+    scoped_omp_threads serial(1);
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    scoped_env blocks("APXCHOL_GPU_BLOCKS", "1");
     for (int operation = 0; operation < 5; ++operation) {
         SCOPED_TRACE(operation);
         auto owner = std::make_unique<apxchol::detail::gpu_round_shadow_session>(true);
@@ -536,16 +504,16 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
     GTEST_SKIP() << "CUDA direct CSC required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial(1);
-    scoped_environment setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    scoped_environment blocks("APXCHOL_GPU_BLOCKS", "1");
-    scoped_environment fp16("APXCHOL_FACTOR_STORAGE", nullptr);
-    scoped_environment drop("APXCHOL_FACTOR_DROP", nullptr);
-    scoped_environment backend("APXCHOL_GPU_SPTRSV", nullptr);
-    scoped_environment tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
+    scoped_omp_threads serial(1);
+    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
+    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
+    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
+    scoped_env blocks("APXCHOL_GPU_BLOCKS", "1");
+    scoped_env fp16("APXCHOL_FACTOR_STORAGE", nullptr);
+    scoped_env drop("APXCHOL_FACTOR_DROP", nullptr);
+    scoped_env backend("APXCHOL_GPU_SPTRSV", nullptr);
+    scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
     constexpr int n = 257;
     std::vector<weighted_edge> edges;
     for (int u = 0; u < n; ++u) for (int offset : {1,7}) edges.push_back({u,(u+offset)%n,1.0});
