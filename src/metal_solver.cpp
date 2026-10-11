@@ -145,7 +145,7 @@ struct metal_solver::impl {
     double residual_norm(const Eigen::VectorXd& bp, const Eigen::VectorXd& xp,
                          Eigen::VectorXd& work) const {
         spmv(xp.data(), work.data());
-        return (bp - work).stableNorm();
+        return mh::norm(bp - work);
     }
 
     void centre(Eigen::VectorXd& x) const { x.array() -= x.mean(); }
@@ -291,7 +291,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     checkpoint& cp = result.timings;
     cp.descend("pcg");
     cp.tick();
-    const double bnorm = b.stableNorm();
+    const double bnorm = mh::norm(b);
     if (bnorm == 0.0) { cp.ascend(); return; }
     if (max_iter == 0 && (x0 == nullptr || x0->isZero(0.0))) {
         result.residual = 1.0;
@@ -319,7 +319,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     } else {
         work = bp;
     }
-    const double initial = work.stableNorm() / bnorm;
+    const double initial = x0 ? mh::norm(work) / bnorm : 1.0;
     if (initial < tol || max_iter == 0) { finish(); return; }
     if (s.laplacian) s.centre(work);
     const double max_abs = work.cwiseAbs().maxCoeff();

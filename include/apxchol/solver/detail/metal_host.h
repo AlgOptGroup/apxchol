@@ -16,6 +16,13 @@ namespace apxchol::detail::metal_host { using std::fma; }
 
 namespace apxchol::detail::metal_host {
 
+// Use the stable reduction when the sum of squares is outside the normal range.
+template <class Vector>
+auto norm(const Vector& v) {
+    const auto squared = v.squaredNorm();
+    return std::isnormal(squared) ? std::sqrt(squared) : v.stableNorm();
+}
+
 /// fp64 -> double-float: hi = fp32(v), lo = fp32(v - hi). Exact for any v
 /// with at most 48 significant bits whose parts stay in the fp32 normal range.
 inline df split(double v) {

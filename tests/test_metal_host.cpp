@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <Eigen/Core>
 
 #include "apxchol/solver/detail/metal_host.h"
 #include "../src/metal_device.h"
@@ -80,4 +81,27 @@ TEST(MetalHost, VectorPackingRoundTrip) {
     mh::gather(back.data(), perm.data(), n, out.data());
     for (std::size_t i = 0; i < n; ++i)
         EXPECT_LE(std::fabs(out[i] - 2 * v[i]), std::ldexp(std::fabs(v[i]), -46));
+}
+
+TEST(MetalHost, NormAcrossMagnitudes) {
+    for (const double scale : {0.0, std::numeric_limits<double>::denorm_min(),
+                               0x1p-530, 1e-200, 1.0, 1e200,
+                               std::numeric_limits<double>::max() / 8}) {
+        SCOPED_TRACE(scale);
+        const Eigen::Vector2d v(3 * scale, 4 * scale);
+        const double expected = std::hypot(v[0], v[1]);
+        if (expected == 0.0) EXPECT_EQ(mh::norm(v), 0.0);
+        else EXPECT_NEAR(mh::norm(v) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
+    }
+    for (const Eigen::Vector2d& v : {Eigen::Vector2d(1.0, 1e-200),
+                                     Eigen::Vector2d(1e200, 1e-200)}) {
+        const double expected = std::hypot(v[0], v[1]);
+        EXPECT_NEAR(mh::norm(v) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
+    }
+    const Eigen::Vector2f narrow(1e-22f, 3e-22f);
+    const double expected = std::hypot(double(narrow[0]), double(narrow[1]));
+    EXPECT_NEAR(mh::norm(narrow) / expected, 1.0, 4 * std::numeric_limits<float>::epsilon());
+    EXPECT_EQ(mh::norm(Eigen::VectorXd{}), 0.0);
+    EXPECT_TRUE(std::isinf(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::infinity(), 1.0))));
+    EXPECT_TRUE(std::isnan(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::quiet_NaN(), 1.0))));
 }
