@@ -259,10 +259,14 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - CUDA and Metal share PCG vector loops and scalar state transitions in
   `solver/detail/gpu_pcg.inc`. Backend adapters retain arithmetic precision,
   stopping comparisons, reduction trees, index widths and launch ownership.
-  Shared operations take their buffers directly; Metal owns its centering stages.
-  `gpu_pcg.h` owns initialization and iteration order, budgets and batch stopping.
-  CUDA submits one iteration at a time with immediate scalar checks; Metal
-  records device-predicated operations and reads active state after batch completion.
+  `gpu_pcg.h` owns initialization, iteration order, budgets and batch stopping.
+  Both keep scalar recurrences and stopping on device and predicate work after
+  convergence; CUDA reads completed state once per iteration, Metal once per
+  batch. Laplacian iterations use grounded coordinates, with host centering at
+  the solve/apply boundary. CUDA narrows/widens PCG vectors in the triangular
+  sweeps, without separate cast kernels. Metal host/device double-float
+  transforms share `solver/detail/double_float.inc`; preserve no-contraction
+  compilation and the device arithmetic probe.
 - `solver/detail/permuted_operator.h` builds the permuted symmetric operator,
   ordering duplicate entries by value bits. Metal retains shared host factor
   dropping/transposition; CUDA's public route keeps device ownership.

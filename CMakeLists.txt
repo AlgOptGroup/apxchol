@@ -172,7 +172,7 @@ target_include_directories(apxchol_core PUBLIC
 )
 
 if (APXCHOL_DEVICE STREQUAL "CUDA")
-    target_sources(apxchol_core PRIVATE src/cuda_cast.cu src/cuda_dataflow.cu
+    target_sources(apxchol_core PRIVATE src/cuda_dataflow.cu
         src/cuda_block_frontend.cu src/cuda_round_shadow.cu src/cuda_pcg_kernels.cu)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_CUDA)
     # cudart only: the SpTRSV kernels, the GPU-resident PCG's SpMV / vector

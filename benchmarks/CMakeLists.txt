@@ -553,7 +553,7 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
     find_package(CUDAToolkit 13.3 REQUIRED)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_USE_CUDA)
     target_sources(apxchol_v1 PRIVATE
-        ${PARENT_SRC}/cuda_cast.cu ${PARENT_SRC}/cuda_dataflow.cu
+        ${PARENT_SRC}/cuda_dataflow.cu
         ${PARENT_SRC}/cuda_block_frontend.cu ${PARENT_SRC}/cuda_round_shadow.cu
         ${PARENT_SRC}/cuda_pcg_kernels.cu)
     target_link_libraries(apxchol_v1 PUBLIC CUDA::cudart)

@@ -1,32 +1,7 @@
 #pragma once
-/// GPU-resident PCG loop -- our own kernels only (pcg_cuda_kernels.h): no
-/// cuSPARSE, no cuBLAS. The CUDA library build links cudart alone.
-///
-/// Operator construction and all iteration arithmetic use the device. CPU
-/// solves have their own complete host route; there is no host-operator
-/// construction fallback in this owner.
-///
-/// `cuda_pcg` keeps the input matrix A as a full-symmetric CSR on the
-/// device once, allocates all 5 PCG vectors (x, r, p, z, Ap) on device,
-/// and runs every iteration entirely on the GPU:
-///   - SpMV + p.Ap: our CSR kernel (pcg_cuda::spmv_pAp; LANES threads per
-///     row picked from the average nnz/row, fp64 or fp32-exact operator
-///     values promoted per product, fp64 accumulate)
-///   - the fused vector passes mirroring the CPU loop (src/solve.cpp):
-///     update_xr (x += alpha p, r -= alpha Ap, r.r in one pass), r.z,
-///     update_p (p = z + beta p)
-///   - precond.solve via the existing cuda_sptrsv::solve_LLt_dev
-/// Every reduction is DETERMINISTIC (fixed grid, per-block partials, fixed-
-/// order final reduce -- no floating-point atomics; see pcg_cuda_kernels.h),
-/// so on our dataflow SpTRSV kernel the whole solve is bit-
-/// identical run to run. Only the initial b is H2D'd, three 8-byte scalars
-/// per iteration (p.Ap, r.r, r.z) come back to the host, only the final x
-/// is D2H'd.
-///
-/// Env: APXCHOL_GPU_SPMV_LANES=1|2|4|8|16|32 overrides the SpMV's threads-
-/// per-row choice (A/B only; read at setup; spmv_lanes() reports it).
-/// APXCHOL_GPU_FP32_OPERATOR=0|1 overrides the operator storage precision
-/// (default AUTO: fp32 iff every value round-trips fp32).
+// GPU-owned operator and reusable PCG workspace. Kernels use native FP64,
+// fixed reductions and the shared device recurrence; only the completed state
+// is read by the host each iteration. The core links cudart alone.
 
 #include <Eigen/Sparse>
 #include <Eigen/Core>
@@ -47,19 +22,6 @@
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol {
-
-namespace detail {
-struct cuda_pcg_math {
-    double bnorm;
-    bool positive(double x) const { return x > 0; }
-    bool valid_residual(double rr) const { return std::isfinite(std::sqrt(rr) / bnorm); }
-    bool valid_rz(double x) const { return std::isfinite(x) && x != 0; }
-    bool accept_ratio(double) const { return true; }
-    double ratio(double x, double y) const { return x / y; }
-    bool converged(double rr, double tolerance) const { return std::sqrt(rr) / bnorm < tolerance; }
-    bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
-};
-} // namespace detail
 
 #define APXCHOL_PCG_CUDA_CHECK(c)      apxchol::detail::check_cuda((c), #c)
 
@@ -124,14 +86,12 @@ public:
         spmv_blocks_ = pcg_cuda::pcg_blocks(n_ * spmv_lanes_);
         vec_blocks_  = pcg_cuda::pcg_blocks(n_);
 
-        // PCG iterate vectors, the reduction partials (one double per block of
-        // the fixed grid) and the device / pinned-host scalar the fixed-order
-        // final reduce lands in.
-        for (double** p : {&d_b_, &d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_})
+        // Vectors, fixed reduction scratch and the completed device state.
+        for (double** p : {&d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_})
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(p, n_ * sizeof(double)));
         APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_part_, pcg_cuda::kMaxBlocks * sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_scalar_, sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&h_scalar_), sizeof(double), cudaHostAllocDefault));
+        APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_state_, sizeof(pcg_cuda::solve_state)));
+        APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&h_state_), sizeof(pcg_cuda::solve_state), cudaHostAllocDefault));
 
         // Complete owned setup before returning, including direct cuda_pcg
         // callers. The input CSC storage may end immediately after this call.
@@ -174,52 +134,18 @@ public:
             return;
         }
 
-        // H2D b_perm into d_b_. d_x_ starts at 0. d_r_ = d_b_.
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_b_, b_perm.data(), n_ * sizeof(double),
-                                          cudaMemcpyHostToDevice));
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_r_, b_perm.data(), n_ * sizeof(double), cudaMemcpyHostToDevice));
         APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_x_, 0, n_ * sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_r_, d_b_, n_ * sizeof(double),
-                                                cudaMemcpyDeviceToDevice, 0));
 
-        namespace pcg = detail::gpu_pcg;
-        pcg::solve_state<double, double> state{};
-        state.thr = tol;
-        state.active = 1;
-        const detail::cuda_pcg_math math{bnorm};
-        auto run = [&](pcg::operation op, unsigned it) {
-            switch (op) {
-            case pcg::operation::precondition:
-                precond.trsv().solve_LLt_dev(d_r_, d_z_);
-                // L11 omits the grounded row; keep its unwritten z entry zero.
-                if (laplacian)
-                    APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
-                break;
-            case pcg::operation::initial_direction:
-                APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_p_, d_z_, n_ * sizeof(double), cudaMemcpyDeviceToDevice, 0));
-                pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
-                state.rz = reduce(vec_blocks_);
-                break;
-            case pcg::operation::multiply:
-                if (fp32_op_) pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_f32_, d_p_, d_Ap_, d_part_, spmv_lanes_);
-                else          pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_,     d_p_, d_Ap_, d_part_, spmv_lanes_);
-                state = pcg::advance(math, state, pcg::kFinalizeAlpha, reduce(spmv_blocks_), it);
-                break;
-            case pcg::operation::update_residual:
-                pcg_cuda::update_xr(0, n_, d_x_, d_p_, d_r_, d_Ap_, state.alpha, d_part_);
-                state = pcg::advance(math, state, pcg::kFinalizeCheck, reduce(vec_blocks_), it);
-                break;
-            case pcg::operation::update_direction:
-                pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
-                state = pcg::advance(math, state, pcg::kFinalizeRz, reduce(vec_blocks_), it);
-                if (state.active) pcg_cuda::update_p(0, n_, d_p_, d_z_, state.beta);
-                break;
-            }
-            return state.active != 0;
-        };
-        pcg::solve(std::max(max_iter, 0), 1, [&](bool, auto&& execute) {
-            execute(run);
-            return state.active != 0;
-        });
+        *h_state_ = {};
+        h_state_->thr = tol;
+        h_state_->active = 1;
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_state_, h_state_, sizeof(*d_state_), cudaMemcpyHostToDevice));
+        if (laplacian)
+            APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
+        auto precondition = [&] { precond.trsv().solve_LLt_dev(d_r_, d_z_, &d_state_->active); };
+        iteration commands{*this, precondition, bnorm};
+        detail::gpu_pcg::solve(commands, std::max(max_iter, 0), 1);
 
         // The uploaded RHS is no longer needed. Reuse its touched host buffer
         // for D2H, then un-permute and (for Laplacian) re-center.
@@ -233,8 +159,8 @@ public:
         if (laplacian)
             x_host.array() -= x_host.mean();
 
-        iters_out = state.iters;
-        residual_out = state.iters ? std::sqrt(state.rr) / bnorm : 1.0;
+        iters_out = h_state_->iters;
+        residual_out = h_state_->iters ? std::sqrt(h_state_->rr) / bnorm : 1.0;
     }
 
     bool ready() const { return ready_; }
@@ -246,23 +172,46 @@ public:
     int spmv_lanes() const { return spmv_lanes_; }
 
 private:
-    // Fixed-order final reduce of the first `blocks` per-block partials in
-    // d_part_ (written by the kernel that just ran on stream 0) into the device
-    // scalar, then 8 bytes back into pinned host memory. Synchronises stream 0.
-    double reduce(int blocks) const {
-        pcg_cuda::reduce_partials(0, d_part_, blocks, d_scalar_);
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(h_scalar_, d_scalar_, sizeof(double), cudaMemcpyDeviceToHost, 0));
-        APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(0));
-        return *h_scalar_;
-    }
+    template<class Precondition>
+    struct iteration {
+        cuda_pcg& s;
+        Precondition& apply;
+        double bnorm;
+        void precondition() const { apply(); }
+        void finalize(unsigned mode, unsigned it, int blocks) const {
+            pcg_cuda::finalize(0, s.d_part_, blocks, s.d_state_, mode, it, bnorm);
+        }
+        void direction(unsigned it) const {
+            pcg_cuda::dot(0, s.n_, s.d_r_, s.d_z_, s.d_part_, s.d_state_);
+            finalize(it ? detail::gpu_pcg::kFinalizeRz : detail::gpu_pcg::kFinalizeRzInit, it, s.vec_blocks_);
+            pcg_cuda::update_p(0, s.n_, s.d_p_, s.d_z_, s.d_state_);
+        }
+        void multiply(unsigned it) const {
+            if (s.fp32_op_) pcg_cuda::spmv_pAp(0, static_cast<int>(s.n_), s.d_row_ptr_, s.d_col_idx_, s.d_vals_f32_, s.d_p_, s.d_Ap_, s.d_part_, s.spmv_lanes_, s.d_state_);
+            else           pcg_cuda::spmv_pAp(0, static_cast<int>(s.n_), s.d_row_ptr_, s.d_col_idx_, s.d_vals_, s.d_p_, s.d_Ap_, s.d_part_, s.spmv_lanes_, s.d_state_);
+            finalize(detail::gpu_pcg::kFinalizeAlpha, it, s.spmv_blocks_);
+        }
+        void update_residual(unsigned it) const {
+            pcg_cuda::update_xr(0, s.n_, s.d_x_, s.d_p_, s.d_r_, s.d_Ap_, s.d_state_, s.d_part_);
+            finalize(detail::gpu_pcg::kFinalizeCheck, it, s.vec_blocks_);
+        }
+        template<class Record>
+        bool submit(bool, Record&& record) const {
+            record();
+            APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(s.h_state_, s.d_state_, sizeof(*s.d_state_), cudaMemcpyDeviceToHost, 0));
+            APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(0));
+            return s.h_state_->active;
+        }
+    };
 
     void destroy() {
         // A setup failure can own operator arrays before ready_ becomes true.
         // Non-null ownership, not successful completion, controls retirement.
-        for (double** p : {&d_b_, &d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_, &d_part_, &d_scalar_}) {
+        for (double** p : {&d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_, &d_part_}) {
             if (*p) { cudaFree(*p); *p = nullptr; }
         }
-        if (h_scalar_) { cudaFreeHost(h_scalar_); h_scalar_ = nullptr; }
+        if (d_state_) { cudaFree(d_state_); d_state_ = nullptr; }
+        if (h_state_) { cudaFreeHost(h_state_); h_state_ = nullptr; }
         if (d_row_ptr_) { cudaFree(d_row_ptr_); d_row_ptr_ = nullptr; }
         if (d_col_idx_) { cudaFree(d_col_idx_); d_col_idx_ = nullptr; }
         if (d_vals_)     { cudaFree(d_vals_);     d_vals_     = nullptr; }
@@ -294,15 +243,14 @@ private:
     std::vector<node_index> h_perm_;
 
     // Device PCG vectors + reduction scratch.
-    double* d_b_  = nullptr;
     double* d_x_  = nullptr;
     double* d_r_  = nullptr;
     double* d_p_  = nullptr;
     double* d_z_  = nullptr;
     double* d_Ap_ = nullptr;
     double* d_part_   = nullptr;   // kMaxBlocks per-block partials
-    double* d_scalar_ = nullptr;   // the final reduce's result
-    double* h_scalar_ = nullptr;   // pinned host mirror of d_scalar_
+    pcg_cuda::solve_state* d_state_ = nullptr;
+    pcg_cuda::solve_state* h_state_ = nullptr;
 };
 
 #undef APXCHOL_PCG_CUDA_CHECK

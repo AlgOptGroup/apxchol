@@ -393,6 +393,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     }
     const double initial = std::sqrt(mh::fold_sum_squares(work.data(), s.n)) / bnorm;
     if (initial < tol || max_iter == 0) { finish(); return; }
+    if (s.laplacian) s.centre(work.data());
     const double max_abs = mh::fold_max_abs(work.data(), s.n);
     if (max_abs == 0.0) { finish(); return; }
     const double scale = mh::pow2_scale(max_abs);
@@ -420,21 +421,28 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
         throw std::invalid_argument("metal_solver::apply: r length mismatch");
     if (!r.allFinite()) throw std::invalid_argument("metal_solver::apply: r contains a non-finite value");
     const node_index* perm = s.F.perm.data();
-    std::vector<double> rp(s.n);
-    mh::scatter(r.data(), perm, s.n, rp.data());
+    const double mean = s.laplacian
+        ? mh::fold_sum(s.n, [&](std::size_t i) { return r[i]; }) / s.n : 0;
+    double max_abs = 0;
+    for (Eigen::Index i = 0; i < r.size(); ++i)
+        max_abs = std::max(max_abs, std::abs(r[i] - mean));
     Eigen::VectorXd z = Eigen::VectorXd::Zero(r.size());
-    const double max_abs = mh::fold_max_abs(rp.data(), s.n);
     if (max_abs == 0.0) return z;
     const double scale = mh::pow2_scale(max_abs);
-    mh::pack(rp.data(), s.n, scale, s.device->r());
+    auto* packed = s.device->r();
+    #pragma omp parallel for schedule(static)
+    for (Eigen::Index i = 0; i < r.size(); ++i)
+        packed[perm[i]] = to_device(mh::split(scale * (r[i] - mean)));
     auto& cs = s.device->state();
     cs = {};
     cs.active = 1;
     s.device->apply();
     const float* p = s.device->p();
+    const double mean_z = s.laplacian
+        ? mh::fold_sum(s.n, [&](std::size_t i) { return double(p[i]); }) / s.n : 0;
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t q = 0; q < static_cast<std::ptrdiff_t>(s.n); ++q) rp[q] = static_cast<double>(p[q]) / scale;
-    mh::gather(rp.data(), perm, s.n, z.data());
+    for (Eigen::Index i = 0; i < r.size(); ++i)
+        z[i] = (double(p[perm[i]]) - mean_z) / scale;
     return z;
 }
 

@@ -32,24 +32,19 @@ struct params {
     std::uint32_t mode;
     std::uint32_t iter;
     std::uint32_t window;
-    std::uint32_t lap;
     std::uint32_t m;
-    float inv_n_hi;
-    float inv_n_lo;
 };
-static_assert(sizeof(params) == 44);
+static_assert(sizeof(params) == 32);
 static_assert(offsetof(params, mode) == 16);
-static_assert(offsetof(params, m) == 32);
-static_assert(offsetof(params, inv_n_hi) == 36);
+static_assert(offsetof(params, m) == 28);
 
 using solve_state = gpu_pcg::solve_state<df32, float>;
-static_assert(sizeof(solve_state) == 72);
+static_assert(sizeof(solve_state) == 64);
 static_assert(offsetof(solve_state, thr) == 16);
 static_assert(offsetof(solve_state, pap) == 32);
 static_assert(offsetof(solve_state, alpha) == 40);
-static_assert(offsetof(solve_state, mu_z) == 52);
-static_assert(offsetof(solve_state, active) == 56);
-static_assert(offsetof(solve_state, stop) == 64);
+static_assert(offsetof(solve_state, active) == 48);
+static_assert(offsetof(solve_state, stop) == 56);
 
 /// The device cannot hold a buffer. A std::bad_alloc, so callers that map
 /// out-of-memory report it as one; what() names the buffer.

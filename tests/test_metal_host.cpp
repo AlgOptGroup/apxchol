@@ -47,30 +47,6 @@ TEST(MetalHost, PowerOfTwoScalingIsExact) {
 }
 
 
-TEST(MetalHost, ReductionTreeMatchesItsDefinition) {
-    std::mt19937 rng(5);
-    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
-    for (const std::uint32_t n : {1u, 15u, 255u, 256u, 257u, 4097u, 70001u}) {
-        SCOPED_TRACE(n);
-        std::vector<mh::df> v(n);
-        for (auto& x : v) x = mh::quick_two_sum(u(rng) * 1000.0f, u(rng) * 1e-5f);
-        const std::uint32_t groups = static_cast<std::uint32_t>(mh::reduction_groups(n));
-        std::vector<mh::df> lane(static_cast<std::size_t>(groups) * 16);
-        for (std::uint32_t i = 0; i < n; ++i) {
-            mh::df& acc = lane[(i / 256) * 16 + i % 16];
-            acc = mh::df_add(acc, v[i]);
-        }
-        std::vector<mh::df> partial(groups), fin(16);
-        for (std::uint32_t g = 0; g < groups; ++g)
-            for (int l = 0; l < 16; ++l) partial[g] = mh::df_add(partial[g], lane[g * 16 + l]);
-        for (std::uint32_t g = 0; g < groups; ++g) fin[g % 16] = mh::df_add(fin[g % 16], partial[g]);
-        mh::df ref{};
-        for (int l = 0; l < 16; ++l) ref = mh::df_add(ref, fin[l]);
-        const mh::df t = mh::tree_reduce(n, [&](std::uint32_t i) { return v[i]; });
-        EXPECT_EQ(std::memcmp(&t, &ref, sizeof t), 0);
-    }
-}
-
 TEST(MetalHost, VectorPackingRoundTrip) {
     const std::size_t n = 50001;
     std::vector<double> v(n), permuted(n), back(n), out(n);

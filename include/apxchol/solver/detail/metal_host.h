@@ -10,57 +10,12 @@
 
 #include <omp.h>
 
+namespace apxchol::detail::metal_host { using std::fma; }
+#define APXCHOL_GPU_CODE(...) __VA_ARGS__
+#include "double_float.inc"
+#undef APXCHOL_GPU_CODE
+
 namespace apxchol::detail::metal_host {
-
-/// A double-float: the unevaluated sum hi + lo of two fp32 values, normalized
-/// so that |lo| <= ulp(hi) / 2 (about 48 significant bits).
-struct df {
-    float hi = 0.0f;
-    float lo = 0.0f;
-};
-
-inline df two_sum(float a, float b) {
-    const float s = a + b;
-    const float bb = s - a;
-    const float e = (a - (s - bb)) + (b - bb);
-    return {s, e};
-}
-
-inline df quick_two_sum(float a, float b) {
-    const float s = a + b;
-    const float e = b - (s - a);
-    return {s, e};
-}
-
-inline df df_add(df a, df b) {
-    df s = two_sum(a.hi, b.hi);
-    const df t = two_sum(a.lo, b.lo);
-    s.lo += t.hi;
-    s = quick_two_sum(s.hi, s.lo);
-    s.lo += t.lo;
-    return quick_two_sum(s.hi, s.lo);
-}
-
-inline df two_prod(float a, float b) {
-    const float p = a * b;
-    const float e = std::fma(a, b, -p);
-    return {p, e};
-}
-
-inline df df_mul(df a, df b) {
-    const float p = a.hi * b.hi;
-    float e = std::fma(a.hi, b.hi, -p);
-    e = std::fma(a.hi, b.lo, e);
-    e = std::fma(a.lo, b.hi, e);
-    return quick_two_sum(p, e);
-}
-
-inline df df_mul_f(df a, float b) {
-    const float p = a.hi * b;
-    float e = std::fma(a.hi, b, -p);
-    e = std::fma(a.lo, b, e);
-    return quick_two_sum(p, e);
-}
 
 /// fp64 -> double-float: hi = fp32(v), lo = fp32(v - hi). Exact for any v
 /// with at most 48 significant bits whose parts stay in the fp32 normal range.
@@ -86,11 +41,6 @@ inline df split_saturated(double v) {
     constexpr double kMax = static_cast<double>(std::numeric_limits<float>::max());
     return split(std::min(v, kMax));
 }
-
-inline constexpr std::uint32_t kTreeRows = 256;
-inline constexpr std::uint32_t kTreeLanes = 16;
-inline constexpr std::uint32_t kTreeSteps = 16;
-inline std::uint64_t reduction_groups(std::uint64_t n) { return (n + kTreeRows - 1) / kTreeRows; }
 
 // ── Thread-count-independent fp64 folds ─────────────────────────────────────
 
@@ -156,46 +106,5 @@ void unpack(const Pair* v, std::size_t n, double scale, double* out) {
     for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
         out[i] = join({v[i].hi, v[i].lo}) / scale;
 }
-
-// ── The device's reduction tree ─────────────────────────────────────────────
-
-/// The fixed reduction tree of the device kernels. Group g
-/// covers rows [256g, 256g + 256); lane l < 16 folds rows 256g + 16s + l for
-/// s = 0..15 in order; lanes fold 0..15 in order into partial g; the final
-/// lane l folds partials l, l + 16, ... in order, then lanes 0..15. Depends
-/// only on n.
-template <class Term>
-df tree_reduce(std::uint32_t n, Term&& term) {
-    const std::uint32_t groups = static_cast<std::uint32_t>(reduction_groups(n));
-    std::vector<df> partial(groups);
-    for (std::uint32_t g = 0; g < groups; ++g) {
-        df lanes[kTreeLanes];
-        for (std::uint32_t l = 0; l < kTreeLanes; ++l) {
-            df acc{};
-            for (std::uint32_t s = 0; s < kTreeSteps; ++s) {
-                const std::uint64_t i = std::uint64_t{g} * kTreeRows + s * kTreeLanes + l;
-                if (i >= n) break;
-                acc = df_add(acc, term(static_cast<std::uint32_t>(i)));
-            }
-            lanes[l] = acc;
-        }
-        df t{};
-        for (const df& v : lanes) t = df_add(t, v);
-        partial[g] = t;
-    }
-    df lanes[kTreeLanes];
-    for (std::uint32_t l = 0; l < kTreeLanes; ++l) {
-        df acc{};
-        for (std::uint32_t g = l; g < groups; g += kTreeLanes) acc = df_add(acc, partial[g]);
-        lanes[l] = acc;
-    }
-    df t{};
-    for (const df& v : lanes) t = df_add(t, v);
-    return t;
-}
-
-/// 1 / n as the double-float the device multiplies sums by for the
-/// Laplacian centring (mean = hi part of sum * inv_n).
-inline df inverse_count(std::size_t n) { return split(1.0 / static_cast<double>(n)); }
 
 }  // namespace apxchol::detail::metal_host

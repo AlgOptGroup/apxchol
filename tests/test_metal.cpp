@@ -112,9 +112,8 @@ apxchol::solve_options keep_opts() {
     return o;
 }
 
-// The device's preconditioner application emulated on the host from the same
-// factor: permute, power-of-two scale, double-float split, (Laplacian) the
-// fixed-tree mean, the fp32 sweeps, (Laplacian) the output mean, unscale.
+// Independent FP64 sweeps of the stored FP32 factor, with host centering at
+// the public apply boundary. Device scheduling may change the rounding order.
 Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::VectorXd& r) {
     const std::size_t n = static_cast<std::size_t>(r.size());
     const bool lap = !F.sddm;
@@ -125,17 +124,15 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     const auto forward = apxchol::cuda_host::transpose_csr(backward);
     std::vector<double> rp(n);
     mh::scatter(r.data(), F.perm.data(), n, rp.data());
+    if (lap) {
+        const double mean = mh::fold_sum(n, [&](std::size_t q) { return rp[q]; }) / n;
+        for (auto& value : rp) value -= mean;
+    }
     const double scale = mh::pow2_scale(mh::fold_max_abs(rp.data(), n));
     std::vector<mh::df> w(n);
     for (std::size_t q = 0; q < n; ++q) w[q] = mh::split(scale * rp[q]);
-    const mh::df inv_n = mh::inverse_count(n);
-    float mu_r = 0.0f;
-    if (lap) {
-        const mh::df sum = mh::tree_reduce(static_cast<std::uint32_t>(n), [&](std::uint32_t q) { return w[q]; });
-        mu_r = mh::df_mul(sum, inv_n).hi;
-    }
     std::vector<float> in(n), z(n, 0.0f);
-    for (std::size_t q = 0; q < n; ++q) in[q] = w[q].hi - mu_r;
+    for (std::size_t q = 0; q < n; ++q) in[q] = w[q].hi;
     auto sweep = [&](const auto& factor, bool reverse, const float* input) {
         for (std::int64_t q = 0; q < m; ++q) {
             const auto row = reverse ? m - 1 - q : q;
@@ -149,13 +146,11 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     };
     sweep(forward, false, in.data());
     sweep(backward, true, z.data());
-    float mu_z = 0.0f;
+    for (std::size_t q = 0; q < n; ++q) rp[q] = static_cast<double>(z[q]) / scale;
     if (lap) {
-        const mh::df sum = mh::tree_reduce(static_cast<std::uint32_t>(n),
-                                           [&](std::uint32_t q) { return mh::df{z[q], 0.0f}; });
-        mu_z = mh::df_mul(sum, inv_n).hi;
+        const double mean = mh::fold_sum(n, [&](std::size_t q) { return rp[q]; }) / n;
+        for (auto& value : rp) value -= mean;
     }
-    for (std::size_t q = 0; q < n; ++q) rp[q] = static_cast<double>(z[q] - mu_z) / scale;
     Eigen::VectorXd out(r.size());
     mh::gather(rp.data(), F.perm.data(), n, out.data());
     return out;

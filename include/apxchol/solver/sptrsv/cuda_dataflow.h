@@ -27,14 +27,18 @@ int dataflow_grid_size(bool fp16);
 void dataflow_solve(cudaStream_t stream, int m, bool reverse,
     const int* rowptr, const int* colidx, const float* vals,
     const unsigned* words, const detail::gpu_dataflow::segment* segments, unsigned batches,
-    unsigned* tags, unsigned tag_count, unsigned* ticket, int grid, const float* rhs, float* out);
+    unsigned* tags, unsigned tag_count, unsigned* ticket, int grid, const float* rhs, float* out, const unsigned* active = nullptr,
+    const double* rhs64 = nullptr, double* out64 = nullptr);
+
+// PCG may supply rhs64/out64 to fuse its vector conversions into the sweep.
 
 // FP16 keeps the existing compensated column scaling: the diagonal is FP32,
 // and optional backward RHS scaling is multiplied in FP64 before narrowing.
 void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse,
     const int* rowptr, const int* colidx, const __half* vals, const float* diag, const double* scale,
     const unsigned* words, const detail::gpu_dataflow::segment* segments, unsigned batches,
-    unsigned* tags, unsigned tag_count, unsigned* ticket, int grid, const float* rhs, float* out);
+    unsigned* tags, unsigned tag_count, unsigned* ticket, int grid, const float* rhs, float* out, const unsigned* active = nullptr,
+    const double* rhs64 = nullptr, double* out64 = nullptr);
 
 namespace detail {
 // Returned allocations transfer to the caller. Only fixed-size statistics and

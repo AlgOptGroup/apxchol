@@ -2,7 +2,6 @@
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/detail/cuda_device_scope.h"
 #include "apxchol/sparse_csc.h"
-#include "apxchol/solver/sptrsv/cuda_cast.h"
 #include "apxchol/solver/sptrsv/cuda_dataflow.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
@@ -782,16 +781,10 @@ public:
 
     /// GPU-resident variant: input/output are DEVICE pointers. Avoids
     /// the two host↔device transfers per call. Used by GPU-resident PCG
-    /// loops so vectors stay on device between iters. d_in and d_out
-    /// may alias (we copy in → internal d_x, ping-pong on device, then
-    /// copy d_x → out).
-    void solve_LLt_dev(const double* d_in, double* d_out) const {
-        // GPU-resident PCG keeps its vectors fp64; narrow into d_x_ (fp32),
-        // solve in fp32, widen back into d_out. Two elementwise device passes,
-        // on the SpSV's stream.
-        cast_f64_to_f32(d_in, d_x_, m_, 0);
-        solve_LLt_dev_impl();
-        cast_f32_to_f64(d_x_, d_out, m_, 0);
+    /// loops so vectors stay on device between iterations. Narrowing input and
+    /// widening output are fused into the sweeps; dependencies remain FP32.
+    void solve_LLt_dev(const double* d_in, double* d_out, const unsigned* active = nullptr) const {
+        solve_LLt_dev_impl(active, d_in, d_out);
     }
 
     bool ready() const { return ready_; }
@@ -974,24 +967,25 @@ private:
 
 
 
-    void solve_LLt_dev_impl() const {
+    void solve_LLt_dev_impl(const unsigned* active = nullptr,
+                            const double* rhs64 = nullptr, double* out64 = nullptr) const {
         // Initialize roots, then solve each direction with the shared dataflow worker.
         const int m = static_cast<int>(m_);
         const unsigned tag_count = unsigned(m_) + unsigned(df_slots_);
         if (fp16_) {
             dataflow_solve_fp16(0, m, false, d_L_rowptr_, d_L_colidx_, d_L_vals16_, d_diag_, nullptr,
                                 d_fwd_words_, d_fwd_segments_, fwd_batches_,
-                                d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_x_, d_y_);
+                                d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_x_, d_y_, active, rhs64, nullptr);
             dataflow_solve_fp16(0, m, true, d_rowPtr_, d_colIdx_, d_vals16_, d_diag_, d_inv_scale2_,
                                 d_bck_words_, d_bck_segments_, bck_batches_,
-                                d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_y_, d_x_);
+                                d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_y_, d_x_, active, nullptr, out64);
         } else {
             dataflow_solve(0, m, false, d_L_rowptr_, d_L_colidx_, d_L_vals_,
                            d_fwd_words_, d_fwd_segments_, fwd_batches_,
-                           d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_x_, d_y_);
+                           d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_x_, d_y_, active, rhs64, nullptr);
             dataflow_solve(0, m, true, d_rowPtr_, d_colIdx_, d_vals_,
                            d_bck_words_, d_bck_segments_, bck_batches_,
-                           d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_y_, d_x_);
+                           d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_y_, d_x_, active, nullptr, out64);
         }
     }
 

@@ -11,10 +11,9 @@ struct dataflow_memory {
     device const uint* words;
     device atomic_uint* tags;
     threadgroup atomic_uint* ticket;
-    device const float2* r;
+    device const df* r;
     device float* z;
     uint batches;
-    float mu;
     device const uint4* segments;
     uint n;
     dataflow_task describe(uint word) const {
@@ -35,7 +34,7 @@ struct dataflow_memory {
     uint load(uint row) const { return atomic_load_explicit(tags + row, memory_order_relaxed); }
     float as_float(uint x) const { return as_type<float>(x); }
     void prepare(uint row, thread float& rhs, thread float& diagonal) const {
-        rhs = kForward ? r[row].x - mu : z[row];
+        rhs = kForward ? r[row].hi : z[row];
         diagonal = val[kForward ? ptr[row + 1] - 1 : ptr[row]];
     }
     float finish(float rhs, float diagonal, float sum) const {
@@ -48,11 +47,11 @@ struct dataflow_memory {
 };
 kernel void dataflow_init(constant Params& P [[buffer(0)]],
                         device const uint* ptr [[buffer(2)]], device const float* val [[buffer(4)]],
-                        device const float2* r [[buffer(6)]], device float* z [[buffer(7)]],
+                        device const df* r [[buffer(6)]], device float* z [[buffer(7)]],
                         device const SolveState& state [[buffer(8)]], device atomic_uint* tags [[buffer(10)]],
                         uint row [[thread_position_in_grid]]) {
     if (row >= P.count || !state.active) return;
-    dataflow_memory m{ptr, nullptr, val, nullptr, tags, nullptr, r, z, 0, state.mu_r, nullptr, P.m};
+    dataflow_memory m{ptr, nullptr, val, nullptr, tags, nullptr, r, z, 0, nullptr, P.m};
     if (row < P.m && m.begin(row) == m.end(row)) {
         float rhs, diagonal;
         m.prepare(row, rhs, diagonal);
@@ -62,7 +61,7 @@ kernel void dataflow_init(constant Params& P [[buffer(0)]],
 }
 kernel void dataflow_solve(constant Params& P [[buffer(0)]],
                         device const uint* ptr [[buffer(2)]], device const uint* col [[buffer(3)]],
-                        device const float* val [[buffer(4)]], device const float2* r [[buffer(6)]],
+                        device const float* val [[buffer(4)]], device const df* r [[buffer(6)]],
                         device float* z [[buffer(7)]], device const SolveState& state [[buffer(8)]],
                         device const uint* words [[buffer(9)]], device atomic_uint* tags [[buffer(10)]],
                         device const uint* blocks [[buffer(11)]], device const uint4* segments [[buffer(12)]], uint group [[threadgroup_position_in_grid]],
@@ -72,6 +71,6 @@ kernel void dataflow_solve(constant Params& P [[buffer(0)]],
     const uint block = P.offset + group;
     if (tid == 0) atomic_store_explicit(&ticket, blocks[block], memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    dataflow_run(dataflow_memory{ptr, col, val, words, tags, &ticket, r, z, blocks[block + 1], state.mu_r, segments, P.m}, lane);
+    dataflow_run(dataflow_memory{ptr, col, val, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m}, lane);
 }
 )apxchol_msl"

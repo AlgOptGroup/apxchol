@@ -14,27 +14,24 @@
 
 namespace apxchol::detail::gpu_pcg {
 
-enum class operation { precondition, initial_direction, multiply, update_residual, update_direction };
-
-// submit records/executes a batch and returns its completed active state.
-// run may stop submission immediately (CUDA), or enqueue device-predicated
-// operations until the batch completes (Metal). Neither requires an extra wait.
-template<class Submit>
-void solve(unsigned max_iter, unsigned batch_size, Submit&& submit) {
+// Both backends enqueue the same device-predicated recurrence. submit owns
+// the stream/command-buffer lifetime and reads the completed state once per batch.
+template<class Backend>
+void solve(Backend& gpu, unsigned max_iter, unsigned batch_size) {
     batch_size = std::max(batch_size, 1u);
     unsigned first = 0;
     do {
         const unsigned last = first + std::min(batch_size, max_iter - first);
-        if (!submit(first == 0, [&](auto&& run) {
-            if (first == 0 &&
-                (!run(operation::precondition, 0) || !run(operation::initial_direction, 0)))
-                return;
+        if (!gpu.submit(first == 0, [&] {
+            if (first == 0) {
+                gpu.precondition();
+                gpu.direction(0);
+            }
             for (unsigned it = first; it < last; ++it) {
-                if (!run(operation::multiply, it + 1) ||
-                    !run(operation::update_residual, it + 1) ||
-                    !run(operation::precondition, it + 1) ||
-                    !run(operation::update_direction, it + 1))
-                    break;
+                gpu.multiply(it + 1);
+                gpu.update_residual(it + 1);
+                gpu.precondition();
+                gpu.direction(it + 1);
             }
         })) break;
         first = last;

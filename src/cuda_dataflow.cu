@@ -38,6 +38,9 @@ template <class Value> struct dataflow_memory {
     bool reverse;
     const float *__restrict__ diag = nullptr;
     const double *__restrict__ scale = nullptr;
+    const unsigned *active = nullptr;
+    const double *rhs64 = nullptr;
+    double *out64 = nullptr;
 
     __device__ dataflow_task describe(unsigned word) const {
         if (word >> 31) {
@@ -81,7 +84,8 @@ template <class Value> struct dataflow_memory {
         }
     }
     __device__ void prepare(unsigned row, float &b, float &d) const {
-        b = scale ? float(double(rhs[row]) * scale[row]) : rhs[row];
+        const float input = rhs64 ? float(rhs64[row]) : rhs[row];
+        b = scale ? float(double(input) * scale[row]) : input;
         if constexpr (std::is_same_v<Value, __half>)
             d = diag[row];
         else
@@ -89,8 +93,10 @@ template <class Value> struct dataflow_memory {
     }
     __device__ float finish(float b, float d, float sum) const { return (b - sum) / d; }
     __device__ void publish(unsigned row, float x) const {
-        if (row < n)
-            out[row] = x;
+        if (row < n) {
+            if (out64) out64[row] = x;
+            else out[row] = x;
+        }
         // Ready and value share one atomic word. Canonicalize NaNs so a failed
         // numerical solve cannot turn into an endless wait on the pending marker.
         cuda::atomic_ref<unsigned, cuda::thread_scope_device>(tags[row]).store(
@@ -99,6 +105,7 @@ template <class Value> struct dataflow_memory {
 };
 
 template <class Memory> __global__ void initialize(Memory m, unsigned count) {
+    if (m.active && !*m.active) return;
     const unsigned row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row == 0)
         *m.ticket = 0;
@@ -113,7 +120,7 @@ template <class Memory> __global__ void initialize(Memory m, unsigned count) {
 }
 
 template <class Memory> __global__ void __launch_bounds__(kDataflowBlock) solve_dataflow(Memory m) {
-    dataflow_run(m, threadIdx.x % 32);
+    if (!m.active || *m.active) dataflow_run(m, threadIdx.x % 32);
 }
 
 template <class Value>
@@ -148,10 +155,11 @@ int dataflow_grid_size(bool fp16) {
 void dataflow_solve(cudaStream_t stream, int m, bool reverse, const int *ptr, const int *col,
                     const float *val, const unsigned *words, const detail::gpu_dataflow::segment *segments,
                     unsigned batches, unsigned *tags, unsigned tag_count, unsigned *ticket, int grid,
-                    const float *rhs, float *out) {
+                    const float *rhs, float *out, const unsigned *active,
+                    const double *rhs64, double *out64) {
     launch(stream,
            dataflow_memory<float>{ptr, col, val, words, segments, tags, ticket, rhs, out, unsigned(m),
-                                  batches, reverse},
+                                  batches, reverse, nullptr, nullptr, active, rhs64, out64},
            tag_count, grid);
 }
 
@@ -159,10 +167,11 @@ void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse, const int *pt
                          const __half *val, const float *__restrict__ diag, const double *__restrict__ scale,
                          const unsigned *words, const detail::gpu_dataflow::segment *segments,
                          unsigned batches, unsigned *tags, unsigned tag_count, unsigned *ticket, int grid,
-                         const float *rhs, float *out) {
+                         const float *rhs, float *out, const unsigned *active,
+                    const double *rhs64, double *out64) {
     launch(stream,
            dataflow_memory<__half>{ptr, col, val, words, segments, tags, ticket, rhs, out, unsigned(m),
-                                   batches, reverse, diag, scale},
+                                   batches, reverse, diag, scale, active, rhs64, out64},
            tag_count, grid);
 }
 } // namespace apxchol

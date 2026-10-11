@@ -18,10 +18,12 @@ namespace apxchol::detail::metal {
 namespace {
 
 const char kKernelSource[] =
+    "\n#include <metal_stdlib>\nusing namespace metal;\n"
     "\n#define APXCHOL_GPU_FUNCTION inline\n"
     "\n#define APXCHOL_GPU_BUFFER(T) device T*\n"
 #define APXCHOL_GPU_CODE(...) #__VA_ARGS__
 #include "apxchol/solver/detail/gpu_pcg.inc"
+#include "apxchol/solver/detail/double_float.inc"
 #include "metal_kernels.inc"
     "\n#define APXCHOL_UNROLL _Pragma(\"unroll\")\n"
 #include "gpu_dataflow.inc"
@@ -44,7 +46,7 @@ std::string describe(NSError* error) {
 struct pipelines {
     id<MTLComputePipelineState> spmv[2];      // [operator double-float]
     id<MTLComputePipelineState> update_xr;
-    id<MTLComputePipelineState> reduce[3];    // [reduce_mode]
+    id<MTLComputePipelineState> reduce;
     id<MTLComputePipelineState> finalize;
     id<MTLComputePipelineState> dataflow_solve[2], dataflow_init[2];
     id<MTLComputePipelineState> p_update;
@@ -60,11 +62,10 @@ struct context {
 
 id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> library,
                                           const char* name, bool forward, bool operator_df,
-                                          std::uint32_t reduce, std::string& error) {
+                                          std::string& error) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
     [values setConstantValue:&forward type:MTLDataTypeBool atIndex:0];
     [values setConstantValue:&operator_df type:MTLDataTypeBool atIndex:1];
-    [values setConstantValue:&reduce type:MTLDataTypeUInt atIndex:2];
     NSError* err = nil;
     id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]
                                        constantValues:values
@@ -125,17 +126,16 @@ context* make_context() {
         }
         pipelines& p = ctx->pipes;
         for (int df = 0; df < 2; ++df)
-            p.spmv[df] = make_pipeline(device, library, "spmv_pap", false, df != 0, 0, error);
-        p.update_xr = make_pipeline(device, library, "update_xr", false, false, 0, error);
-        for (std::uint32_t mode = 0; mode < 3; ++mode)
-            p.reduce[mode] = make_pipeline(device, library, "reduce", false, false, mode, error);
-        p.finalize = make_pipeline(device, library, "finalize", false, false, 0, error);
+            p.spmv[df] = make_pipeline(device, library, "spmv_pap", false, df != 0, error);
+        p.update_xr = make_pipeline(device, library, "update_xr", false, false, error);
+        p.reduce = make_pipeline(device, library, "reduce", false, false, error);
+        p.finalize = make_pipeline(device, library, "finalize", false, false, error);
         for (int fwd = 0; fwd < 2; ++fwd) {
-            p.dataflow_init[fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, error);
-            p.dataflow_solve[fwd] = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, 0, error);
+            p.dataflow_init[fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, error);
+            p.dataflow_solve[fwd] = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, error);
         }
-        p.p_update = make_pipeline(device, library, "p_update", false, false, 0, error);
-        p.probe = make_pipeline(device, library, "df_probe", false, false, 0, error);
+        p.p_update = make_pipeline(device, library, "p_update", false, false, error);
+        p.probe = make_pipeline(device, library, "df_probe", false, false, error);
         if (!error.empty()) {
             st.error = "Metal pipeline creation failed: " + error;
             return ctx;
@@ -150,8 +150,7 @@ context* make_context() {
             return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
         };
         st.tree_threads = std::min({threads(p.spmv[0]), threads(p.spmv[1]), threads(p.update_xr),
-                                    threads(p.reduce[0]), threads(p.reduce[1]),
-                                    threads(p.reduce[2]), threads(p.finalize)});
+                                    threads(p.reduce), threads(p.finalize)});
         st.row_threads = threads(p.p_update);
         ctx->probe_queue = [device newCommandQueue];
         if (ctx->probe_queue == nil) {
@@ -269,7 +268,6 @@ struct engine::impl {
     std::uint32_t n = 0, m = 0, groups = 0;
     bool laplacian = false;
     bool operator_df = false;
-    float inv_n_hi = 0.0f, inv_n_lo = 0.0f;
     id<MTLBuffer> op_ptr = nil, op_col = nil, op_hi = nil, op_lo = nil;
     prepared_tri fwd, bwd;
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, cols = nil;
@@ -279,10 +277,7 @@ struct engine::impl {
         params prm{};
         prm.n = n;
         prm.groups = groups;
-        prm.lap = laplacian ? 1u : 0u;
         prm.m = m;
-        prm.inv_n_hi = inv_n_hi;
-        prm.inv_n_lo = inv_n_lo;
         return prm;
     }
 
@@ -316,10 +311,6 @@ struct engine::impl {
         encode_kernel(enc, ctx->pipes.finalize, prm, {partial, cols}, 1, kTreeLanes);
     }
 
-    void encode_reduce(id<MTLComputeCommandEncoder> enc, std::uint32_t mode) const {
-        encode_kernel(enc, ctx->pipes.reduce[mode], base(), {r, z, partial, cols}, groups, kTreeLanes);
-    }
-
     void encode_tri(id<MTLComputeCommandEncoder> enc, const prepared_tri& t, bool forward) const {
         if (!m) return;
         const int f = forward ? 1 : 0;
@@ -347,14 +338,10 @@ struct engine::impl {
         }
     }
 
-    // z = L^-T L^-1 (r - mu_r), then for a Laplacian mu_z = mean(z).
+    // Grounded-coordinate preconditioning, shared with the CUDA recurrence.
     void encode_precond(id<MTLComputeCommandEncoder> enc) const {
         encode_tri(enc, fwd, true);
         encode_tri(enc, bwd, false);
-        if (laplacian) {
-            encode_reduce(enc, kReduceSumZ);
-            encode_finalize(enc, kFinalizeMuZ, 0, 0);
-        }
     }
 
     void encode_p_update(id<MTLComputeCommandEncoder> enc) const {
@@ -362,38 +349,45 @@ struct engine::impl {
         encode_kernel(enc, ctx->pipes.p_update, base(), {p, z, cols}, (n + threads - 1) / threads, threads);
     }
 
-    void encode_initial_mu(id<MTLComputeCommandEncoder> enc) const {
-        if (!laplacian) return;
-        encode_reduce(enc, kReduceSumR);
-        encode_finalize(enc, kFinalizeMuR, 0, 0);
-    }
+    id<MTLComputeCommandEncoder> encoder = nil;
+    unsigned window = 0;
 
-    void encode(id<MTLComputeCommandEncoder> enc, operation op, std::uint32_t it,
-                std::uint32_t window) const {
-        switch (op) {
-        case operation::precondition:
-            encode_precond(enc);
-            break;
-        case operation::initial_direction:
-            encode_reduce(enc, kReduceRz);
-            encode_finalize(enc, kFinalizeRzInit, 0, window);
-            encode_p_update(enc);
-            break;
-        case operation::multiply:
-            encode_kernel(enc, ctx->pipes.spmv[operator_df ? 1 : 0], base(),
-                          {op_ptr, op_col, op_hi, op_lo != nil ? op_lo : op_hi, p, ap, partial, cols}, groups, kTreeLanes);
-            encode_finalize(enc, kFinalizeAlpha, it, window);
-            break;
-        case operation::update_residual:
-            encode_kernel(enc, ctx->pipes.update_xr, base(), {x, r, p, ap, partial, cols}, groups, kTreeLanes);
-            encode_finalize(enc, kFinalizeCheck, it, window);
-            break;
-        case operation::update_direction:
-            encode_reduce(enc, kReduceRz);
-            encode_finalize(enc, kFinalizeRz, it, window);
-            encode_p_update(enc);
-            break;
+    template<class Record>
+    bool submit(bool first, Record&& record) {
+        std::string error;
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            id<MTLBlitCommandEncoder> blit = first ? [cb blitCommandEncoder] : nil;
+            if (blit != nil) {
+                [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(n) * sizeof(df32)) value:0];
+                [blit endEncoding];
+            }
+            encoder = cb != nil && (!first || blit != nil) ? [cb computeCommandEncoder] : nil;
+            if (encoder == nil) error = "Metal command buffer or encoder creation failed";
+            else {
+                record();
+                [encoder endEncoding];
+                error = finish(cb);
+                encoder = nil;
+            }
         }
+        if (!error.empty()) throw std::runtime_error(error);
+        return active();
+    }
+    void precondition() const { encode_precond(encoder); }
+    void direction(unsigned it) const {
+        encode_kernel(encoder, ctx->pipes.reduce, base(), {r, z, partial, cols}, groups, kTreeLanes);
+        encode_finalize(encoder, it ? kFinalizeRz : kFinalizeRzInit, it, window);
+        encode_p_update(encoder);
+    }
+    void multiply(unsigned it) const {
+        encode_kernel(encoder, ctx->pipes.spmv[operator_df ? 1 : 0], base(),
+                      {op_ptr, op_col, op_hi, op_lo != nil ? op_lo : op_hi, p, ap, partial, cols}, groups, kTreeLanes);
+        encode_finalize(encoder, kFinalizeAlpha, it, window);
+    }
+    void update_residual(unsigned it) const {
+        encode_kernel(encoder, ctx->pipes.update_xr, base(), {x, r, p, ap, partial, cols}, groups, kTreeLanes);
+        encode_finalize(encoder, kFinalizeCheck, it, window);
     }
 
     bool active() const {
@@ -418,9 +412,6 @@ engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_array
     s.groups = (s.n + kTreeRows - 1) / kTreeRows;
     s.laplacian = laplacian;
     s.operator_df = op.lo != nullptr;
-    const double inv_n = 1.0 / static_cast<double>(op.n);
-    s.inv_n_hi = static_cast<float>(inv_n);
-    s.inv_n_lo = static_cast<float>(inv_n - static_cast<double>(s.inv_n_hi));
     bool ok = true;
     @autoreleasepool {
         id<MTLDevice> dev = ctx.device;
@@ -445,7 +436,7 @@ engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_array
         s.ap = upload(dev, nullptr, entries * sizeof(df32));
         s.p = upload(dev, nullptr, entries * sizeof(float));
         s.z = upload(dev, nullptr, entries * sizeof(float));
-        s.partial = upload(dev, nullptr, 2 * static_cast<std::size_t>(s.groups) * sizeof(df32));
+        s.partial = upload(dev, nullptr, static_cast<std::size_t>(s.groups) * sizeof(df32));
         s.cols = upload(dev, nullptr, sizeof(solve_state));
         s.tags = upload(dev, nullptr, std::max({entries, std::size_t(s.fwd.tag_count),
             std::size_t(s.bwd.tag_count)}) * sizeof(std::uint32_t));
@@ -475,51 +466,17 @@ void engine::solve(std::uint32_t max_iter,
                    std::uint32_t window, std::uint32_t check_every) {
     impl& s = *impl_;
     s.zero_grounded_row();
-    gpu_pcg::solve(max_iter, check_every, [&](bool first, auto&& record) {
-        std::string error;
-        @autoreleasepool {
-            id<MTLCommandBuffer> cb = [s.queue commandBuffer];
-            id<MTLBlitCommandEncoder> blit = first ? [cb blitCommandEncoder] : nil;
-            if (blit != nil) {
-                [blit fillBuffer:s.x range:NSMakeRange(0, static_cast<NSUInteger>(s.n) * sizeof(df32)) value:0];
-                [blit endEncoding];
-            }
-            id<MTLComputeCommandEncoder> enc = cb != nil && (!first || blit != nil) ? [cb computeCommandEncoder] : nil;
-            if (enc == nil) {
-                error = "Metal command buffer or encoder creation failed";
-            } else {
-                if (first) s.encode_initial_mu(enc);
-                record([&](operation op, unsigned it) {
-                    s.encode(enc, op, it, window);
-                    return true;
-                });
-                [enc endEncoding];
-                error = finish(cb);
-            }
-        }
-        if (!error.empty()) throw std::runtime_error(error);
-        return s.active();
-    });
+    s.window = window;
+    gpu_pcg::solve(s, max_iter, check_every);
 }
 
 void engine::apply() {
     impl& s = *impl_;
     s.zero_grounded_row();
-    std::string error;
-    @autoreleasepool {
-        id<MTLCommandBuffer> cb = [s.queue commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-        if (enc == nil) {
-            error = "Metal command buffer or encoder creation failed";
-        } else {
-            s.encode_initial_mu(enc);
-            s.encode_precond(enc);
-            s.encode_p_update(enc);
-            [enc endEncoding];
-            error = finish(cb);
-        }
-    }
-    if (!error.empty()) throw std::runtime_error(error);
+    s.submit(false, [&] {
+        s.precondition();
+        s.encode_p_update(s.encoder);
+    });
 }
 
 }  // namespace apxchol::detail::metal

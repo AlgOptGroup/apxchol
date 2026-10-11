@@ -64,8 +64,7 @@ and `cpu_solver` stay on CPU. Each call solves one RHS; repeated calls on a
 - **Recurrences.** x, r and A p are double-float (hi + lo FP32, about 48
   significant bits). The operator is FP32 when every value is FP32-exact and
   double-float otherwise (the CPU/CUDA exactness rule, without an override).
-  p and z are FP32; alpha and beta are FP32. Every reduction (p.Ap, r.r, sum r,
-  r.z, sum z) is double-float on one fixed tree that depends only on n.
+  p and z are FP32; alpha and beta are FP32. Every reduction (p.Ap, r.r, r.z) is double-float on one fixed tree that depends only on n.
 - **Scaling and stopping.** Each right-hand side (or b - A x0) is scaled by an
   exact power of two so that its largest entry lies in [1, 2). The threshold
   (tol ||b|| s)^2 is formed on the host in FP64 and compared as a double-float
@@ -79,9 +78,10 @@ and `cpu_solver` stay on CPU. Each call solves one RHS; repeated calls on a
   residual is limited to roughly 2^-48 || |A| |x| || / ||b||; within that margin
   of tol a solve can stop on its recursive residual and still report
   a residual above the requested tolerance.
-- **Laplacians.** Every preconditioner application is centred (input and
-  output means in double-float); the CPU's `APXCHOL_CENTER_K` schedule does
-  not apply. The returned x is centred once more on the host in FP64.
+- **Laplacians.** Iterations use grounded coordinates, as on CUDA. The
+  initial residual and returned x are centred on the host in FP64; `apply`
+  also centres its input and output there. There are no per-iteration mean
+  reductions. The reported residual still uses the unmodified caller RHS.
 - **Reproducibility.** Repeated solves using the same factor and execution
   configuration are tested for repeatability. Equality across host thread
   counts, devices, OS or compiler versions is not part of this interface.
