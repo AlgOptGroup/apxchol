@@ -67,10 +67,10 @@ void pack(const double* w, std::size_t n, double scale, Pair* out) {
 }
 
 template <class Pair>
-void unpack(const Pair* v, std::size_t n, double scale, double* out) {
+void add_unpacked(const Pair* v, std::size_t n, double scale, double* out) {
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
-        out[i] = join({v[i].hi, v[i].lo}) / scale;
+        out[i] += join({v[i].hi, v[i].lo}) / scale;
 }
 
 }  // namespace apxchol::detail::metal_host

@@ -362,15 +362,6 @@ inline std::string dataflow_factor_structure_check(
     return {};
 }
 
-inline std::vector<int> csr_row_lengths(int m, const int* rowptr) {
-    std::vector<int> len(static_cast<std::size_t>(m));
-    // O(m) and called four times per setup (both directions, lengths + stats);
-    // one element each, so an equal-count split is the right one here.
-    #pragma omp parallel for schedule(static) if(m > 16384)
-    for (int i = 0; i < m; ++i) len[i] = rowptr[i + 1] - rowptr[i];
-    return len;
-}
-
 // Row-length histograms choose the split threshold and support setup diagnostics.
 struct dataflow_len_stats {
     static constexpr int kBuckets = 12;
@@ -383,7 +374,7 @@ struct dataflow_len_stats {
     std::int64_t nnz_ge[kBuckets]{};      // and the entries they hold
 };
 
-inline dataflow_len_stats dataflow_row_stats(int m, const int* len, int pre) {
+inline dataflow_len_stats dataflow_row_stats(int m, const int* rowptr, int pre) {
     dataflow_len_stats s;
     s.m = m;
     s.base = 32 * pre;
@@ -396,7 +387,7 @@ inline dataflow_len_stats dataflow_row_stats(int m, const int* len, int pre) {
         reduction(+ : rows_ge[:dataflow_len_stats::kBuckets]) \
         reduction(+ : nnz_ge[:dataflow_len_stats::kBuckets])
     for (int i = 0; i < m; ++i) {
-        const int l = len[i];
+        const int l = rowptr[i + 1] - rowptr[i];
         nnz += l;
         if (l > max_len) max_len = l;
         for (int k = 0; k < dataflow_len_stats::kBuckets; ++k) {

@@ -87,7 +87,9 @@ register, memory, or integer-instruction costs without a useful overall win.
 **GPU PCG owns its arithmetic and reductions.** Fused operator application and
 fixed reduction structure avoid proprietary solver dependencies. CUDA and Metal
 share the solve driver, vector workspace, operation loop, scalar state transitions
-and lane shuffle-sum tree. Metal's former serial 16-value fold used threadgroup
+and lane shuffle-sum tree. Preconditioning starts each iteration, so a completed
+iteration budget does not launch preparation for an unused next direction.
+Metal's former serial 16-value fold used threadgroup
 scratch and a barrier; the shared tree removes both and changes its floating-point
 summation order. Backend adapters retain block grouping and stopping comparisons. CUDA
 uses native FP64; Metal uses double-float arithmetic shared with its host probe.

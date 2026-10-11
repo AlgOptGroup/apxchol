@@ -560,10 +560,9 @@ public:
         ready_ = true;
     }
 
-    /// Research-only installation boundary for a factor whose final CSR(L)
-    /// and CSR(L^T) storage already lives on the active CUDA device. This call
-    /// is used by the FORCE-only resident-finalizer prototype. The ordinary
-    /// production path remains the default and owns host preprocessing.
+    /// Install final CSR(L) and CSR(L^T) storage on the active CUDA device.
+    /// Production uses the private resident finalizer; diagnostic callers may
+    /// supply generic ownership capsules, which receive full validation.
     ///
     /// Ownership and rollback:
     ///   * pass a move-only cuda_sptrsv_device_factor by value;
@@ -806,8 +805,7 @@ public:
     /// free-memory delta across the whole setup, at allocation granularity.
     std::size_t factor_device_bytes() const { return factor_bytes_; }
     std::size_t device_bytes_delta() const { return device_delta_bytes_; }
-    /// True only for setup_adopting_device_factor_for_research(). The ordinary
-    /// production upload path always reports false / zero.
+    /// True for device-factor adoption; false for host preprocessing/upload.
     bool adopted_device_factor() const { return adopted_device_factor_; }
     /// Exact D2H bytes: fixed-size statistics for trusted finalized factors; complete
     /// int32 structures and fp16 metadata for externally supplied capsules.
@@ -833,12 +831,7 @@ private:
             throw std::invalid_argument(
                 std::string("apxchol cuda_sptrsv adoption: cannot inspect ") +
                 name + ": " + cudaGetErrorString(attr_status));
-#if CUDART_VERSION >= 10000
-        const cudaMemoryType memory_type = attributes.type;
-#else
-        const cudaMemoryType memory_type = attributes.memoryType;
-#endif
-        if (memory_type != cudaMemoryTypeDevice ||
+        if (attributes.type != cudaMemoryTypeDevice ||
             attributes.device != expected_device)
             throw std::invalid_argument(
                 std::string("apxchol cuda_sptrsv adoption: ") + name +
@@ -850,14 +843,12 @@ private:
     // lengths), the m tagged words, the control ints, the resident grid.
     void setup_kernel_backend(const std::vector<int>& LT_ptr, const std::vector<int>& L_ptr) {
         const int mi = static_cast<int>(m_);
-        const std::vector<int> len_L  = cuda_host::csr_row_lengths(mi, L_ptr.data());
-        const std::vector<int> len_LT = cuda_host::csr_row_lengths(mi, LT_ptr.data());
         const int pre = dataflow_prefetch_depth();
         // Row segmentation: each direction gets its own threshold, from its
         // own row-length histogram (the two differ a lot -- an elimination
         // factor's hub rows land in CSR of L, its columns stay bounded).
-        const cuda_host::dataflow_len_stats st_L  = cuda_host::dataflow_row_stats(mi, len_L.data(), pre);
-        const cuda_host::dataflow_len_stats st_LT = cuda_host::dataflow_row_stats(mi, len_LT.data(), pre);
+        const auto st_L = cuda_host::dataflow_row_stats(mi, L_ptr.data(), pre);
+        const auto st_LT = cuda_host::dataflow_row_stats(mi, LT_ptr.data(), pre);
         const unsigned split_fwd = dataflow_split_threshold_for(st_L);
         const unsigned split_bck = dataflow_split_threshold_for(st_LT);
         namespace df = detail::gpu_dataflow;

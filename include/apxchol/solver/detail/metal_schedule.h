@@ -38,12 +38,13 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
         return x;
     };
     struct change {
-        unsigned child, root, old_size;
+        unsigned child, root;
     };
     std::vector<change> undo;
     std::vector<int> head(n, -1), next(n);
     plan out;
-    out.rows.reserve(n);
+    out.rows.resize(n);
+    unsigned written = 0;
     out.block_ptr.reserve(n / capacity + 16);
     auto flush = [&](unsigned first, unsigned last) {
         std::vector<unsigned> roots;
@@ -67,37 +68,25 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
             ordered[buckets[capacity - size[root]]++] = root;
         roots.swap(ordered);
         step launch{unsigned(out.block_ptr.size() - 1), 0};
-        std::vector<unsigned> block;
-        block.reserve(capacity);
-        auto emit = [&] {
-            if (block.empty())
-                return;
-            out.rows.insert(out.rows.end(), block.begin(), block.end());
-            out.block_ptr.push_back(out.rows.size());
-            block.clear();
-        };
         for (unsigned root : roots) {
-            if (block.size() + size[root] > capacity)
-                emit();
-            const auto begin = block.size();
+            if (written - out.block_ptr.back() + size[root] > capacity)
+                out.block_ptr.push_back(written);
+            written += size[root];
+            auto position = written;
             for (int row = head[root]; row >= 0; row = next[row])
-                block.push_back(row);
-            // The list was built by increasing depth and prepended. Reverse
-            // this component to restore dependency order; components are independent.
-            std::reverse(block.begin() + begin, block.end());
+                out.rows[--position] = row;
             head[root] = -1;
         }
-        emit();
+        if (out.block_ptr.back() != written)
+            out.block_ptr.push_back(written);
         launch.last = out.block_ptr.size() - 1;
         out.steps.push_back(launch);
         for (unsigned s = levels[first]; s < levels[last]; ++s) {
             parent[rows[s]] = rows[s];
             size[rows[s]] = 1;
         }
-        undo.clear();
     };
     for (unsigned first = 1, l = 1; l + 1 < levels.size();) {
-        const auto checkpoint = undo.size();
         bool fits = true;
         for (unsigned s = levels[l]; fits && s < levels[l + 1]; ++s) {
             unsigned row = rows[s];
@@ -112,7 +101,7 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
                     continue;
                 if (size[a] < size[b])
                     std::swap(a, b);
-                undo.push_back({b, a, size[a]});
+                undo.push_back({b, a});
                 parent[b] = a;
                 size[a] += size[b];
                 if (size[a] > capacity) {
@@ -122,11 +111,11 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
             }
         }
         if (!fits) {
-            while (undo.size() > checkpoint) {
+            while (!undo.empty()) {
                 auto u = undo.back();
                 undo.pop_back();
                 parent[u.child] = u.child;
-                size[u.root] = u.old_size;
+                size[u.root] -= size[u.child];
             }
             flush(first, l);
             first = l;
@@ -137,6 +126,7 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
                 flush(first, l);
         }
     }
+    out.rows.resize(written);
     return out;
 }
 } // namespace detail

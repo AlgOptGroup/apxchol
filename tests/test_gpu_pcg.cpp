@@ -35,10 +35,10 @@ TEST(GpuPcg, DevicePredicationRespectsIterationLimitsAndConvergence) {
         commands gpu{stop};
         pcg::solve(gpu, limit, batch);
         const unsigned expected = std::min(limit, stop), width = std::max(batch, 1u);
-        EXPECT_EQ(gpu.initializations, 1u);
+        EXPECT_EQ(gpu.initializations, unsigned(expected > 0));
         EXPECT_EQ(gpu.iterations, expected);
-        EXPECT_EQ(gpu.directions, expected - unsigned(stop <= limit));
-        EXPECT_EQ(gpu.preconditions, gpu.directions + 1);
+        EXPECT_EQ(gpu.directions, expected ? expected - 1 : 0);
+        EXPECT_EQ(gpu.preconditions, expected);
         EXPECT_EQ(gpu.batches, std::max(1u, (expected + width - 1) / width));
     }
 }

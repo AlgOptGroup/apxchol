@@ -142,13 +142,10 @@ choices, retired knobs, and measurements belong in
 
 - `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend (default CPU).
   GPU builds retain CPU solves. Invalid or removed boolean options fail configuration.
-- `APXCHOL_DEVICE=METAL` (macOS): single-RHS
-  `apxchol::metal_solver` PCG with factor and workspace reuse.
-  `src/metal_device.mm` is the only Objective-C++ source (no Eigen, no OpenMP);
+- `APXCHOL_DEVICE=METAL` (macOS): `src/metal_device.mm` is the only
+  Objective-C++ source (no Eigen, no OpenMP);
   it compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
-  links Metal, Foundation and CoreGraphics publicly. Explicit GPU requests in
-  `solve()` use Metal; automatic and named CPU solves stay on CPU. Without
-  the option no Metal source builds.
+  links Metal, Foundation and CoreGraphics publicly. Other builds omit Metal sources.
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
@@ -263,6 +260,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   its arithmetic precision, stopping comparisons and block grouping. `gpu_pcg.h` owns the full launch
   sequence, iteration budgets and batch stopping. Metal binds common workspace
   buffers once per batch; triangular sweeps only rebind their factor arrays.
+  Preconditioning starts each iteration; exhausted budgets do not prepare another.
   Both keep scalar recurrences and stopping on device and predicate work after
   convergence; CUDA reads completed state once per iteration, Metal once per
   batch. Laplacian iterations use grounded coordinates, with host centering at
@@ -411,14 +409,13 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   performance acceptance: compare the default route against current main and
   the owned route against its frozen research reference, with original-system
   quality, setup, solve, one-RHS total, RSS and owner memory.
-- Metal PCG uses host factorization and the shared FP32 drop/transpose helpers.
-  Each call solves one RHS; the solver retains its factor, operator and device
-  workspace. `solve()` uses it for explicit GPU requests in Metal builds;
+- Metal's `metal_solver` uses host factorization and handles one RHS per call,
+  retaining its factor, operator and device workspace. `solve()` selects it for
+  explicit GPU requests in Metal builds;
   automatic selection stays on CPU. FP16 storage and explicit CPU requests to
   `metal_solver` fail rather than silently selecting another configuration.
-  Keep double-float arithmetic, power-of-two scaling, checked command buffers
-  and the host FP64 exit residual. Report the actual original-system residual
-  even when the recursive residual has already met tolerance. Repeatability
+  Keep power-of-two scaling, checked command buffers and the FP64 original-system
+  exit check even when the recursive residual has met tolerance. Repeatability
   is tested for a fixed factor and execution configuration; cross-thread-count
   and batching guarantees are deferred. Validate `MetalSchedule.*`, `MetalHost.*`
   and `MetalDevice.*` on a device, including with Metal shader validation.

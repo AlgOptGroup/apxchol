@@ -92,12 +92,12 @@ nodes and no factor export; other configurations select CPU. This is an option
 compatibility policy, not a speed predictor or device-availability probe.
 `solve_result.backend` and the CLI report the actual route.
 
-The GPU route requires device-owned factor and operator construction. Unsupported
+The CUDA route requires device-owned factor and operator construction. Unsupported
 stored formats, unavailable devices, allocation failures and execution errors are
 reported without retrying on CPU. Use `--backend cpu` (or `solve_backend::cpu`)
 for CPU execution in a CUDA build, including lower-only or otherwise unsupported
-CSC layouts. GPU operator input must be compressed, sorted, unique and fully
-paired. Ordinary GPU solves no longer need the three per-stage environment flags;
+CSC layouts. CUDA operator input must be compressed, sorted, unique and fully
+paired. Ordinary CUDA solves no longer need the three per-stage environment flags;
 those flags remain low-level diagnostic controls. Public factorization, custom
 strategies and factor export stay available on CPU. See the
 [extension guide](docs/extending.md) for explicit factor handoff.

@@ -82,7 +82,6 @@ struct device_status {
     std::string error;             // why ok is false
     std::string name;
     bool contract_pragma = false;  // "#pragma METAL fp contract(off)" accepted
-    std::uint32_t tree_threads = 0;    // min max-threads of the 16-lane tree kernels
     std::uint32_t row_threads = 0;     // min max-threads of the row kernels
 };
 const device_status& status() noexcept;
@@ -95,7 +94,7 @@ std::vector<float> run_probe(const std::vector<float>& inputs);
 class engine {
 public:
     engine(const operator_arrays& op, const tri_arrays& fwd, const tri_arrays& bwd,
-           std::uint32_t m, bool laplacian);
+           std::uint32_t m);
     ~engine();
     engine(const engine&) = delete;
     engine& operator=(const engine&) = delete;
@@ -103,13 +102,12 @@ public:
     // Shared-memory views, touched only between device calls.
     df32* r() noexcept;
     df32* x() noexcept;
-    float* p() noexcept;
     solve_state& state() noexcept;
 
     factor_statistics factor_stats() const;
     void solve(std::uint32_t max_iter,
                std::uint32_t window, std::uint32_t check_every);
-    void apply();
+    const float* apply();
 private:
     struct impl;
     std::unique_ptr<impl> impl_;

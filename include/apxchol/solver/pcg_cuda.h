@@ -77,9 +77,6 @@ public:
             if (v == 1 || v == 2 || v == 4 || v == 8 || v == 16 || v == 32) spmv_lanes_ = v;
             else if (*e) std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPMV_LANES=%s ignored (expected 1|2|4|8|16|32); using %d\n", e, spmv_lanes_);
         }
-        spmv_blocks_ = pcg_cuda::pcg_blocks(n_ * spmv_lanes_);
-        vec_blocks_  = pcg_cuda::pcg_blocks(n_);
-
         // Vectors, fixed reduction scratch and the completed device state.
         for (double** p : {&vectors_.x, &vectors_.r, &vectors_.p, &vectors_.z, &vectors_.ap})
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(p, n_ * sizeof(double)));
@@ -172,7 +169,8 @@ private:
         double bnorm;
         void precondition() const { precond.trsv().solve_LLt_dev(s.vectors_.r, s.vectors_.z, &s.vectors_.state->active); }
         void finalize(unsigned mode, unsigned it) const {
-            const int blocks = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_blocks_ : s.vec_blocks_;
+            const int lanes = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_lanes_ : 1;
+            const int blocks = pcg_cuda::pcg_blocks(s.n_ * lanes);
             pcg_cuda::finalize(0, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
         }
         void step(detail::gpu_pcg::operation op) const {
@@ -197,7 +195,7 @@ private:
         vectors_ = {};
         matrix_ = {};
         if (h_state_) { cudaFreeHost(h_state_); h_state_ = nullptr; }
-        spmv_lanes_ = 1; spmv_blocks_ = vec_blocks_ = 0;
+        spmv_lanes_ = 1;
         ready_ = false;
     }
 
@@ -206,10 +204,8 @@ private:
     pcg_cuda::operator_csr matrix_;
     pcg_cuda::workspace vectors_{};
     pcg_cuda::solve_state* h_state_ = nullptr;
-    // SpMV row mapping (threads per row) and the two fixed grids.
+    // SpMV row mapping (threads per row).
     int     spmv_lanes_  = 1;
-    int     spmv_blocks_ = 0;
-    int     vec_blocks_  = 0;
 
     // Host-side permutation map (perm.indices()) for one-time use in solve()
     // to permute b -> b_perm and x_perm -> x.

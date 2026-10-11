@@ -58,8 +58,12 @@ TEST(MetalHost, VectorPackingRoundTrip) {
     }
     mh::scatter(v.data(), perm.data(), n, permuted.data());
     mh::pack(permuted.data(), n, 0.25, packed.data());
-    mh::unpack(packed.data(), n, 0.25, back.data());
+    mh::add_unpacked(packed.data(), n, 0.25, back.data());
     mh::gather(back.data(), perm.data(), n, out.data());
     for (std::size_t i = 0; i < n; ++i)
         EXPECT_LE(std::fabs(out[i] - v[i]), std::ldexp(std::fabs(v[i]), -47));
+    mh::add_unpacked(packed.data(), n, 0.25, back.data());
+    mh::gather(back.data(), perm.data(), n, out.data());
+    for (std::size_t i = 0; i < n; ++i)
+        EXPECT_LE(std::fabs(out[i] - 2 * v[i]), std::ldexp(std::fabs(v[i]), -46));
 }

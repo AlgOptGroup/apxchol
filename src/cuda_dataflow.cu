@@ -234,12 +234,11 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
         throw std::invalid_argument("GPU dataflow plan: invalid dimensions or metadata");
     dataflow_device_plan result;
     plan_row_stats *statistics = nullptr;
-    plan_counts *counts_by_chunk = nullptr, *prefix = nullptr;
+    plan_counts *counts_by_chunk = nullptr;
     void *scratch = nullptr;
     auto cleanup = [&] {
         cudaFree(statistics);
         cudaFree(counts_by_chunk);
-        cudaFree(prefix);
         cudaFree(scratch);
     };
     try {
@@ -271,8 +270,8 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
         }
         const int chunks = m / kPlanChunk + (m % kPlanChunk != 0);
         const std::size_t count_bytes = static_cast<std::size_t>(chunks + 1) * sizeof(plan_counts);
-        dataflow_check(cudaMalloc(&counts_by_chunk, count_bytes), "allocate tile counts");
-        dataflow_check(cudaMalloc(&prefix, count_bytes), "allocate tile prefixes");
+        dataflow_check(cudaMalloc(&counts_by_chunk, 2 * count_bytes), "allocate tile counts and prefixes");
+        plan_counts *prefix = counts_by_chunk + chunks + 1;
         pack_chunks<false><<<(chunks + 128) / 128, 128>>>(m, reverse, rowptr, split_min, chunks,
                                                           counts_by_chunk, nullptr, nullptr, nullptr);
         dataflow_check(cudaGetLastError(), "tile count launch");

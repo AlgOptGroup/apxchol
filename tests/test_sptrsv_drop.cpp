@@ -722,7 +722,9 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
 TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
     const int pre = 8;                                     // C = 256
     const std::vector<int> len = {1, 2, 255, 256, 257, 512, 1024, 100000};
-    const auto st = apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), len.data(), pre);
+    std::vector<int> ptr(len.size() + 1);
+    std::partial_sum(len.begin(), len.end(), ptr.begin() + 1);
+    const auto st = apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), ptr.data(), pre);
     EXPECT_EQ(st.base, 256);
     EXPECT_EQ(st.m, 8);
     std::int64_t total = 0; for (int l : len) total += l;
@@ -745,8 +747,10 @@ TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
 TEST(GpuHostPrep, DataflowSplitThresholdFollowsTheLongRowShare) {
     const int pre = 8, C = 32 * pre;
     auto threshold_for = [&](const std::vector<int>& len) {
+        std::vector<int> ptr(len.size() + 1);
+        std::partial_sum(len.begin(), len.end(), ptr.begin() + 1);
         return apxchol::cuda_host::dataflow_split_threshold(
-            apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), len.data(), pre));
+            apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), ptr.data(), pre));
     };
     // Hub-heavy: a handful of very long rows hold nearly all the entries.
     std::vector<int> hub(10000, 4);
@@ -986,7 +990,6 @@ struct df_factor {
     apxchol::cuda_host::csr_int<_Float16> LT16, L16;
     apxchol::cuda_host::fp16_scaled_arrays     h16;
     std::vector<double> inv_scale2;
-    std::vector<int>    lenL, lenT;
     int *d_Lp = nullptr, *d_Li = nullptr, *d_Tp = nullptr, *d_Ti = nullptr;
     float *d_Lv = nullptr, *d_Tv = nullptr, *d_diag = nullptr;
     __half *d_Lv16 = nullptr, *d_Tv16 = nullptr;
@@ -1008,8 +1011,6 @@ struct df_factor {
         inv_scale2.resize(static_cast<size_t>(m));
         for (int j = 0; j < m; ++j) inv_scale2[static_cast<size_t>(j)] =
             static_cast<double>(h16.inv_scale[static_cast<size_t>(j)]) * h16.inv_scale[static_cast<size_t>(j)];
-        lenL = apxchol::cuda_host::csr_row_lengths(m, Lc.ptr.data());
-        lenT = apxchol::cuda_host::csr_row_lengths(m, LT.ptr.data());
         d_Lp = dev_upload(Lc.ptr.data(), static_cast<size_t>(m) + 1);
         d_Li = dev_upload(Lc.idx.get(), static_cast<size_t>(Lc.nnz));
         d_Lv = dev_upload(Lc.vals.get(), static_cast<size_t>(Lc.nnz));
@@ -1488,7 +1489,7 @@ TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
                     len[reverse ? m - 1 - q : q] = std::min(q + 1, requested);
                 }
                 for (unsigned row = 0; row < m; ++row) ptr[row + 1] = ptr[row] + len[row];
-                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, len.data(), pre);
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, ptr.data(), pre);
                 std::vector<unsigned> blocks{0};
                 for (unsigned q = 0; q < m; q += 256) blocks.push_back(std::min(m, q + 256));
                 for (int threshold : {-1, 0, 1, 256, 768}) {
@@ -1603,9 +1604,8 @@ TEST(GpuDataflowDevicePlan, TilePackingPreservesFp32AndFp16SweepsBitForBit) {
         for (node_index row = 0; row < m; ++row) input[row] = std::sin(row + 0.123);
         for (bool reverse : {false, true}) {
             const auto& ptr = reverse ? F.LT.ptr : F.Lc.ptr;
-            const auto& len = reverse ? F.lenT : F.lenL;
             for (int threshold : {-1, 0, 1, 256}) {
-                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, len.data(), apxchol::dataflow_prefetch_depth());
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, ptr.data(), apxchol::dataflow_prefetch_depth());
                 const auto reference = F.plan(reverse,
                     threshold < 0 ? apxchol::cuda_host::dataflow_split_threshold(stats) : threshold);
                 test_device_allocations memory;

@@ -361,6 +361,12 @@ TEST(MetalDevice, EarlyExitsTruthful) {
     EXPECT_EQ(none.residual, 1.0);
     EXPECT_EQ(none.x.norm(), 0.0);
 
+    const Eigen::VectorXd guess = rhs(A.rows(), 2, true);
+    const auto seeded = slv.solve(b, 1e-8, 0, &guess);
+    EXPECT_EQ(seeded.iterations, 0);
+    EXPECT_LT((seeded.x - guess).norm(), 1e-12);
+    EXPECT_NEAR(seeded.residual, true_residual(A, b, seeded.x), 1e-12);
+
     for (int limit : {1, 4, 5}) {
         const auto limited = slv.solve(b, 1e-30, limit);
         EXPECT_EQ(limited.iterations, limit);
@@ -425,6 +431,8 @@ TEST(MetalDevice, RepeatedAndTwinSolversBitIdentical) {
     const apxchol::metal_solver two(A, std::move(F));
     const Eigen::VectorXd b = rhs(A.rows(), 6, true);
     const apxchol::solve_result a1 = one.solve(b, 1e-10, 400);
+    const Eigen::VectorXd other = rhs(A.rows(), 11, true);
+    EXPECT_TRUE(same_bytes(one.apply(other), two.apply(other)));
     const apxchol::solve_result a2 = one.solve(b, 1e-10, 400);
     const apxchol::solve_result b1 = two.solve(b, 1e-10, 400);
     EXPECT_TRUE(same_bytes(a1.x, a2.x));

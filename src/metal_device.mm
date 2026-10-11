@@ -145,15 +145,16 @@ context* make_context() {
         auto threads = [](id<MTLComputePipelineState> pipe) {
             return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
         };
-        st.tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
-                                    threads(p.pcg[2][0]), threads(p.finalize)});
-        st.row_threads = threads(p.pcg[unsigned(operation::direction)][0]);
+        const auto tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
+                                           threads(p.pcg[2][0]), threads(p.finalize)});
+        st.row_threads = std::min({threads(p.pcg[unsigned(operation::direction)][0]),
+                                  threads(p.dataflow_init[0]), threads(p.dataflow_init[1])});
         ctx->probe_queue = [device newCommandQueue];
         if (ctx->probe_queue == nil) {
             st.error = "no Metal command queue";
             return ctx;
         }
-        if (st.tree_threads < kTreeLanes || st.row_threads == 0) {
+        if (tree_threads < kTreeLanes || st.row_threads == 0) {
             st.error = "Metal pipeline thread limits are insufficient";
             return ctx;
         }
@@ -261,25 +262,12 @@ std::vector<float> run_probe(const std::vector<float> &inputs) {
 struct engine::impl {
     context* ctx = nullptr;
     id<MTLCommandQueue> queue = nil;
-    std::uint32_t n = 0, m = 0, groups = 0;
-    bool laplacian = false;
+    params arguments{};
     bool operator_df = false;
     id<MTLBuffer> op_ptr = nil, op_col = nil, op_hi = nil, op_lo = nil;
     prepared_tri fwd, bwd;
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
     id<MTLBuffer> tags = nil;
-
-    params base() const {
-        params prm{};
-        prm.n = n;
-        prm.groups = groups;
-        prm.m = m;
-        return prm;
-    }
-
-    static void set_params(id<MTLComputeCommandEncoder> enc, const params& prm) {
-        [enc setBytes:&prm length:sizeof prm atIndex:0];
-    }
 
     static void bind(id<MTLComputeCommandEncoder> enc, unsigned index,
                      std::initializer_list<id<MTLBuffer>> buffers) {
@@ -289,23 +277,22 @@ struct engine::impl {
     void dispatch(id<MTLComputePipelineState> pipe, const params& prm,
                   unsigned groups, unsigned threads) const {
         [encoder setComputePipelineState:pipe];
-        set_params(encoder, prm);
+        [encoder setBytes:&prm length:sizeof prm atIndex:0];
         [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
     }
 
     void finalize(unsigned mode, unsigned it) const {
-        params prm = base();
+        params prm = arguments;
         prm.mode = mode;
         prm.iter = it;
-        prm.window = window;
         dispatch(ctx->pipes.finalize, prm, 1, kTreeLanes);
     }
 
     void encode_tri(const prepared_tri& t, bool forward) const {
-        if (!m) return;
+        if (!arguments.m) return;
         bind(encoder, 13, {t.ptr, t.col, t.val, t.words, t.blocks, t.segments});
-        params prm = base();
+        params prm = arguments;
         prm.count = t.tag_count;
         const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
         dispatch(ctx->pipes.dataflow_init[forward], prm, (t.tag_count + threads - 1) / threads, threads);
@@ -324,11 +311,10 @@ struct engine::impl {
         const auto pipe = ctx->pipes.pcg[unsigned(op)][op == operation::multiply && operator_df];
         const bool direction = op == operation::direction;
         const unsigned threads = direction ? std::min(kRowThreads, ctx->status.row_threads) : kTreeLanes;
-        dispatch(pipe, base(), direction ? (n + threads - 1) / threads : groups, threads);
+        dispatch(pipe, arguments, direction ? (arguments.n + threads - 1) / threads : arguments.groups, threads);
     }
 
     id<MTLComputeCommandEncoder> encoder = nil;
-    unsigned window = 0;
 
     template<class Record>
     bool submit(bool first, Record&& record) {
@@ -337,7 +323,7 @@ struct engine::impl {
             id<MTLCommandBuffer> cb = [queue commandBuffer];
             id<MTLBlitCommandEncoder> blit = first ? [cb blitCommandEncoder] : nil;
             if (blit != nil) {
-                [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(n) * sizeof(df32)) value:0];
+                [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(arguments.n) * sizeof(df32)) value:0];
                 [blit endEncoding];
             }
             encoder = cb != nil && (!first || blit != nil) ? [cb computeCommandEncoder] : nil;
@@ -352,30 +338,20 @@ struct engine::impl {
             }
         }
         if (!error.empty()) throw std::runtime_error(error);
-        return active();
-    }
-
-    bool active() const {
         return static_cast<const solve_state*>([state_buffer contents])->active != 0;
     }
-
-    void zero_grounded_row() const {
-        if (laplacian) static_cast<float*>([z contents])[m] = 0.0f;
-    }
-
 };
 
 engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_arrays& bwd,
-               std::uint32_t m, bool laplacian)
+               std::uint32_t m)
     : impl_(std::make_unique<impl>()) {
     context& ctx = shared();
     if (!ctx.status.ok) throw std::runtime_error(ctx.status.error);
     impl& s = *impl_;
     s.ctx = &ctx;
-    s.n = static_cast<std::uint32_t>(op.n);
-    s.m = m;
-    s.groups = (s.n + kTreeRows - 1) / kTreeRows;
-    s.laplacian = laplacian;
+    s.arguments.n = static_cast<std::uint32_t>(op.n);
+    s.arguments.m = m;
+    s.arguments.groups = (s.arguments.n + kTreeRows - 1) / kTreeRows;
     s.operator_df = op.lo != nullptr;
     bool ok = true;
     @autoreleasepool {
@@ -395,13 +371,14 @@ engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_array
     ok = true;
     @autoreleasepool {
         id<MTLDevice> dev = s.ctx->device;
-        const std::size_t entries = static_cast<std::size_t>(s.n);
+        const std::size_t entries = static_cast<std::size_t>(s.arguments.n);
         s.x = upload(dev, nullptr, entries * sizeof(df32));
         s.r = upload(dev, nullptr, entries * sizeof(df32));
         s.ap = upload(dev, nullptr, entries * sizeof(df32));
         s.p = upload(dev, nullptr, entries * sizeof(float));
+        // Sweeps write rows < m; the extra Laplacian coordinate stays zero.
         s.z = upload(dev, nullptr, entries * sizeof(float));
-        s.partial = upload(dev, nullptr, static_cast<std::size_t>(s.groups) * sizeof(df32));
+        s.partial = upload(dev, nullptr, static_cast<std::size_t>(s.arguments.groups) * sizeof(df32));
         s.state_buffer = upload(dev, nullptr, sizeof(solve_state));
         s.tags = upload(dev, nullptr, std::max({entries, std::size_t(s.fwd.tag_count),
             std::size_t(s.bwd.tag_count)}) * sizeof(std::uint32_t));
@@ -420,28 +397,23 @@ engine::~engine() {
 
 df32* engine::r() noexcept { return static_cast<df32*>([impl_->r contents]); }
 df32* engine::x() noexcept { return static_cast<df32*>([impl_->x contents]); }
-float* engine::p() noexcept { return static_cast<float*>([impl_->p contents]); }
 solve_state& engine::state() noexcept { return *static_cast<solve_state*>([impl_->state_buffer contents]); }
 
 factor_statistics engine::factor_stats() const {
-    return {impl_->fwd.levels, impl_->bwd.levels, impl_->fwd.stages.size() + unsigned(impl_->m != 0), impl_->bwd.stages.size() + unsigned(impl_->m != 0)};
+    return {impl_->fwd.levels, impl_->bwd.levels, impl_->fwd.stages.size() + unsigned(impl_->arguments.m != 0), impl_->bwd.stages.size() + unsigned(impl_->arguments.m != 0)};
 }
 
 void engine::solve(std::uint32_t max_iter,
                    std::uint32_t window, std::uint32_t check_every) {
     impl& s = *impl_;
-    s.zero_grounded_row();
-    s.window = window;
+    s.arguments.window = window;
     gpu_pcg::solve(s, max_iter, check_every);
 }
 
-void engine::apply() {
+const float* engine::apply() {
     impl& s = *impl_;
-    s.zero_grounded_row();
-    s.submit(false, [&] {
-        s.precondition();
-        s.step(operation::direction);
-    });
+    s.submit(false, [&] { s.precondition(); });
+    return static_cast<const float*>([s.z contents]);
 }
 
 }  // namespace apxchol::detail::metal

@@ -36,13 +36,6 @@ namespace mh = detail::metal_host;
 namespace ls = detail::metal_schedule;
 namespace dm = detail::metal;
 
-void validate_options(const solve_options& opts) {
-    if (opts.backend == solve_backend::cpu)
-        throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
-    if (detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false))
-        throw std::invalid_argument("Metal requires float32 factor storage");
-}
-
 dm::df32 to_device(mh::df v) { return {v.hi, v.lo}; }
 
 // ── Device self-test ─────────────────────────────────────────────────────────
@@ -162,17 +155,25 @@ struct metal_solver::impl {
     solve_options opts;
     factorization F;
     std::size_t n = 0;
-    std::uint32_t m = 0;
     bool laplacian = false;
     // The permuted operator A' = P A P^T (canonical lower values) in fp64:
     // the host residuals run on it.
     std::vector<int> op_ptr;
     std::unique_ptr<int[]> op_col;
     std::unique_ptr<double[]> op_val;
-    std::int64_t op_nnz = 0;
     std::unique_ptr<dm::engine> device;
     std::uint32_t check_every = 1;
     statistics stats;
+
+    explicit impl(const solve_options& options) : opts(options) {
+        if (opts.backend == solve_backend::cpu)
+            throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
+        if (detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false))
+            throw std::invalid_argument("Metal requires float32 factor storage");
+        if (!metal_solver::available())
+            throw std::runtime_error("apxchol::metal_solver: the Metal backend is unavailable: " +
+                                     check_availability().reason);
+    }
 
     void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp);
 
@@ -218,7 +219,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     // operator are checked here.
     static_assert(std::is_same_v<Eigen::SparseMatrix<double>::StorageIndex, int>);
     laplacian = !F.sddm;
-    m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
+    const auto m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
     if (F.L.outerIndexPtr()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
         throw std::length_error("metal_solver: the factor exceeds the device's 32-bit offsets");
 
@@ -243,6 +244,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::length_error("metal_solver: operators above 2^30 stored entries exceed the "
                                 "device's 32-bit offsets");
     bool exact = true;
+    std::int64_t op_nnz = 0;
     detail::build_permuted_full_symmetric_csr(*src, F.perm, op_ptr, op_col, op_val, op_nnz, exact);
     const std::size_t nnz = static_cast<std::size_t>(op_nnz);
     std::vector<float> hi(nnz), lo(exact ? 0 : nnz);
@@ -276,7 +278,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         t.nnz = static_cast<std::size_t>(s.nnz);
         return t;
     };
-    device = std::make_unique<dm::engine>(op, arrays(forward), arrays(backward), m, laplacian);
+    device = std::make_unique<dm::engine>(op, arrays(forward), arrays(backward), m);
     // Group four iterations on small systems to amortize command submission;
     // check large solves after each iteration.
     check_every = n > 200000 ? 1 : 4;
@@ -296,24 +298,14 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                            checkpoint* cp)
-    : impl_(std::make_unique<impl>()) {
-    validate_options(opts);
-    if (!available())
-        throw std::runtime_error("apxchol::metal_solver: the Metal backend is unavailable: " +
-                                 check_availability().reason);
-    impl_->opts = opts;
+    : impl_(std::make_unique<impl>(opts)) {
     impl_->F = detail::factorize_for_solver(A, opts.storage, opts.factor_opts, cp, true);
     impl_->setup(A, cp);
 }
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, factorization F,
                            const solve_options& opts, checkpoint* cp)
-    : impl_(std::make_unique<impl>()) {
-    validate_options(opts);
-    if (!available())
-        throw std::runtime_error("apxchol::metal_solver: the Metal backend is unavailable: " +
-                                 check_availability().reason);
-    impl_->opts = opts;
+    : impl_(std::make_unique<impl>(opts)) {
     impl_->F = std::move(F);
     impl_->setup(A, cp);
 }
@@ -362,12 +354,14 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     }
 
     const node_index* perm = s.F.perm.data();
-    Eigen::VectorXd bp(s.n), xp = Eigen::VectorXd::Zero(s.n), work(s.n);
+    Eigen::VectorXd bp(s.n), work(s.n);
+    auto& xp = result.x;
     mh::scatter(b.data(), perm, s.n, bp.data());
     auto finish = [&] {
         if (s.laplacian) s.centre(xp);
         result.residual = s.residual_norm(bp, xp, work) / bnorm;
-        mh::gather(xp.data(), perm, s.n, result.x.data());
+        mh::gather(xp.data(), perm, s.n, work.data());
+        result.x.swap(work);
         cp("exit_check");
         cp.ascend();
     };
@@ -396,8 +390,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     cp("pack");
     s.device->solve(static_cast<std::uint32_t>(max_iter), window, s.check_every);
     cp("device");
-    mh::unpack(s.device->x(), s.n, scale, work.data());
-    xp += work;
+    mh::add_unpacked(s.device->x(), s.n, scale, xp.data());
     result.iterations = state.iters;
     finish();
 }
@@ -420,13 +413,12 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     auto& cs = s.device->state();
     cs = {};
     cs.active = 1;
-    s.device->apply();
-    const float* p = s.device->p();
+    const float* applied = s.device->apply();
     const double mean_z = s.laplacian
-        ? Eigen::Map<const Eigen::VectorXf>(p, s.n).cast<double>().mean() : 0;
+        ? Eigen::Map<const Eigen::VectorXf>(applied, s.n).cast<double>().mean() : 0;
     #pragma omp parallel for schedule(static)
     for (Eigen::Index i = 0; i < r.size(); ++i)
-        z[i] = (double(p[perm[i]]) - mean_z) / scale;
+        z[i] = (double(applied[perm[i]]) - mean_z) / scale;
     return z;
 }
 
