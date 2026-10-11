@@ -359,9 +359,7 @@ struct metal_solver::impl {
     bool laplacian = false;
     // The permuted operator A' = P A P^T (canonical lower values) in fp64:
     // the host residuals run on it.
-    std::vector<int> op_ptr;
-    std::unique_ptr<int[]> op_col;
-    std::unique_ptr<double[]> op_val;
+    detail::permuted_operator_csr op;
     std::uint32_t check_every = 1;
     statistics stats;
 
@@ -461,9 +459,9 @@ struct metal_solver::impl {
     // y = A' x in fp64, each row summed in storage order; rows are split across
     // threads by stored entries (detail::work_balanced_range).
     void spmv(const double* x, double* y) const {
-        const int* ptr = op_ptr.data();
-        const int* col = op_col.get();
-        const double* val = op_val.get();
+        const int* ptr = op.ptr.data();
+        const int* col = op.idx.get();
+        const double* val = op.vals.get();
         const std::ptrdiff_t rows = static_cast<std::ptrdiff_t>(n);
         #pragma omp parallel
         {
@@ -524,15 +522,14 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     if (src->nonZeros() > std::numeric_limits<int>::max() / 2)
         throw std::length_error("metal_solver: operators above 2^30 stored entries exceed the "
                                 "device's 32-bit offsets");
-    bool exact = true;
-    std::int64_t op_nnz = 0;
-    detail::build_permuted_full_symmetric_csr(*src, F.perm, op_ptr, op_col, op_val, op_nnz, exact);
-    const std::size_t nnz = static_cast<std::size_t>(op_nnz);
+    op = detail::build_permuted_full_symmetric_csr(*src, F.perm);
+    const bool exact = op.fp32_exact;
+    const std::size_t nnz = static_cast<std::size_t>(op.ptr.back());
     std::vector<float> hi(nnz), lo(exact ? 0 : nnz);
     bool in_range = true;
     #pragma omp parallel for schedule(static) reduction(&& : in_range)
     for (std::ptrdiff_t p = 0; p < static_cast<std::ptrdiff_t>(nnz); ++p) {
-        const double v = op_val[p];
+        const double v = op.vals[p];
         in_range = in_range && ls::in_range(v);
         const mh::df d = mh::split(v);
         hi[p] = d.hi;
@@ -570,14 +567,14 @@ void metal_solver::impl::prepare_device(const cuda_host::csr_int<float>& forward
     s.arguments.n = static_cast<std::uint32_t>(n);
     s.arguments.m = m;
     s.arguments.groups = (s.arguments.n + kTreeRows - 1) / kTreeRows;
-    const auto nnz = op_ptr.back();
+    const auto nnz = op.ptr.back();
     s.operator_df = !lo.empty();
     with_pool([&] {
         id<MTLDevice> dev = ctx.device;
         s.queue = [dev newCommandQueue];
         if (s.queue == nil) throw std::runtime_error("Metal command queue creation failed");
-        s.device_op_ptr = upload(dev, op_ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
-        s.device_op_col = upload(dev, op_col.get(), nnz * sizeof(std::uint32_t), "operator indices");
+        s.device_op_ptr = upload(dev, op.ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
+        s.device_op_col = upload(dev, op.idx.get(), nnz * sizeof(std::uint32_t), "operator indices");
         s.op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
         if (!lo.empty()) s.op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
     });

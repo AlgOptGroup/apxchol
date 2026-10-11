@@ -17,21 +17,24 @@
 
 namespace apxchol::detail {
 
+struct permuted_operator_csr {
+    std::vector<int> ptr;
+    std::unique_ptr<int[]> idx;
+    std::unique_ptr<double[]> vals;
+    bool fp32_exact = true;
+};
+
 // A fully stored symmetric CSC column k owns row perm[k] of the permuted
 // symmetric CSR, avoiding atomic scatter. Values and fp32_exact use only the
 // canonical lower triangle, even when upper values differ within tolerance.
 //
 // Return false for uncompressed, unsorted, duplicate or unpaired storage so
-// the caller can choose a fallback. On false, row_ptr is scratch and the other
-// outputs are unchanged.
+// the caller can choose a fallback. On false, out.ptr is scratch and the other
+// members are unchanged.
 inline bool try_build_permuted_symmetric_csr(
         const Eigen::SparseMatrix<double>& L,
         const std::vector<node_index>& perm,
-        std::vector<int>& row_ptr,
-        std::unique_ptr<int[]>& col_idx,
-        std::unique_ptr<double[]>& vals,
-        std::int64_t& nnz,
-        bool& fp32_exact) {
+        permuted_operator_csr& out) {
     if (!L.isCompressed() || L.rows() != L.cols() ||
         L.rows() > std::numeric_limits<int>::max() ||
         L.nonZeros() > std::numeric_limits<int>::max())
@@ -40,6 +43,7 @@ inline bool try_build_permuted_symmetric_csr(
     const int* outer = L.outerIndexPtr();
     const int* inner = L.innerIndexPtr();
     const double* input = L.valuePtr();
+    auto& row_ptr = out.ptr;
     row_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
     bool eligible = true, exact = true;
     std::int64_t lower = 0, upper = 0;
@@ -96,10 +100,9 @@ inline bool try_build_permuted_symmetric_csr(
         }
     }
     if (!paired) return false;
-    col_idx = std::move(out_idx);
-    vals = std::move(out_vals);
-    nnz = count;
-    fp32_exact = exact;
+    out.idx = std::move(out_idx);
+    out.vals = std::move(out_vals);
+    out.fp32_exact = exact;
     return true;
 }
 
@@ -107,31 +110,26 @@ inline bool try_build_permuted_symmetric_csr(
 // Requires compressed square storage and a valid permutation; the caller must
 // ensure that the expanded operator fits int offsets. Duplicate entries remain
 // separate, ordered by value bits. fp32_exact reports lossless FP32 storage.
-inline void build_permuted_full_symmetric_csr(
+inline permuted_operator_csr build_permuted_full_symmetric_csr(
     const Eigen::SparseMatrix<double>& L,
-    const std::vector<node_index>& perm,
-    std::vector<int>& row_ptr,
-    std::unique_ptr<int[]>& col_idx,
-    std::unique_ptr<double[]>& vals,
-    std::int64_t& nnz,
-    bool& fp32_exact)
+    const std::vector<node_index>& perm)
 {
-    if (try_build_permuted_symmetric_csr(
-            L, perm, row_ptr, col_idx, vals, nnz, fp32_exact))
-        return;
-    row_ptr.resize(static_cast<std::size_t>(L.rows()) + 1);
-    fp32_exact = reflect_lower_to_csr<true>(L, row_ptr.data(),
+    permuted_operator_csr out;
+    if (try_build_permuted_symmetric_csr(L, perm, out))
+        return out;
+    out.ptr.resize(static_cast<std::size_t>(L.rows()) + 1);
+    out.fp32_exact = reflect_lower_to_csr<true>(L, out.ptr.data(),
         [p = perm.data()](Eigen::Index i) { return static_cast<int>(p[i]); },
         [&](int count) {
-            nnz = count;
-            col_idx = std::make_unique_for_overwrite<int[]>(count);
-            vals = std::make_unique_for_overwrite<double[]>(count);
-            return std::pair{col_idx.get(), vals.get()};
+            out.idx = std::make_unique_for_overwrite<int[]>(count);
+            out.vals = std::make_unique_for_overwrite<double[]>(count);
+            return std::pair{out.idx.get(), out.vals.get()};
         },
         [](const auto& a, const auto& b) {
             if (a.first != b.first) return a.first < b.first;
             return std::bit_cast<std::uint64_t>(a.second) < std::bit_cast<std::uint64_t>(b.second);
         });
+    return out;
 }
 
 } // namespace apxchol::detail
