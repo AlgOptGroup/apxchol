@@ -142,9 +142,9 @@ choices, retired knobs, and measurements belong in
 
 - `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend (default CPU).
   GPU builds retain CPU solves. Invalid or removed boolean options fail configuration.
-- `APXCHOL_DEVICE=METAL` (macOS): `src/metal_device.mm` is the only
-  Objective-C++ source (no Eigen, no OpenMP);
-  it compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
+- `APXCHOL_DEVICE=METAL` (macOS): `src/metal_solver.mm` is the only
+  Objective-C++ source and owns both host preparation and device execution.
+  It uses the discovered C++ OpenMP flags explicitly, and compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
   links Metal, Foundation and CoreGraphics publicly. Other builds omit Metal sources.
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting

@@ -1,5 +1,5 @@
 // Metal Shading Language source of the Apple GPU PCG (metal_solver.h),
-// compiled at run time by src/metal_device.mm (newLibraryWithSource with
+// compiled at run time by src/metal_solver.mm (newLibraryWithSource with
 // MTLMathModeSafe; "#pragma METAL fp contract(off)" is prepended when the
 // compiler accepts it). Checked in as one C++ raw string so that downstream
 // builds need no generation step or offline Metal compiler.

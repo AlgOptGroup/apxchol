@@ -70,7 +70,10 @@ public:
 
 private:
     struct impl;
-    std::unique_ptr<impl> impl_;
+    struct impl_deleter {
+        void operator()(impl*) const;
+    };
+    std::unique_ptr<impl, impl_deleter> impl_;
 };
 
 }  // namespace apxchol

@@ -37,10 +37,7 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
             x = parent[x];
         return x;
     };
-    struct change {
-        unsigned child, root;
-    };
-    std::vector<change> undo;
+    std::vector<unsigned> undo;
     std::vector<int> head(n, -1), next(n);
     plan out;
     out.rows.resize(n);
@@ -101,7 +98,7 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
                     continue;
                 if (size[a] < size[b])
                     std::swap(a, b);
-                undo.push_back({b, a});
+                undo.push_back(b);
                 parent[b] = a;
                 size[a] += size[b];
                 if (size[a] > capacity) {
@@ -112,10 +109,10 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
         }
         if (!fits) {
             while (!undo.empty()) {
-                auto u = undo.back();
+                const unsigned child = undo.back(), root = parent[child];
                 undo.pop_back();
-                parent[u.child] = u.child;
-                size[u.root] -= size[u.child];
+                parent[child] = child;
+                size[root] -= size[child];
             }
             flush(first, l);
             first = l;

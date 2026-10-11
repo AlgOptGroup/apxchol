@@ -123,8 +123,7 @@ if (APXCHOL_64BIT_INDICES)
 endif()
 
 if (APXCHOL_DEVICE STREQUAL "METAL")
-    # Only src/metal_device.mm is Objective-C++; OpenMP host work stays in the
-    # C++ sources (FindOpenMP's flags apply to CXX only).
+    # The Metal implementation uses Objective-C++ for its host and device owner.
     enable_language(OBJCXX)
 endif()
 
@@ -182,9 +181,11 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
 endif()
 
 if (APXCHOL_DEVICE STREQUAL "METAL")
-    target_sources(apxchol_core PRIVATE src/metal_solver.cpp src/metal_device.mm)
+    target_sources(apxchol_core PRIVATE src/metal_solver.mm)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_METAL)
-    set_source_files_properties(src/metal_device.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    set_source_files_properties(src/metal_solver.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    target_compile_options(apxchol_core PRIVATE
+        "$<$<COMPILE_LANGUAGE:OBJCXX>:SHELL:${OpenMP_CXX_FLAGS}>")
     set_target_properties(apxchol_core PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)
     # PUBLIC: the static library hands the framework dependencies to its
     # consumers. CoreGraphics lets MTLCreateSystemDefaultDevice find the GPU

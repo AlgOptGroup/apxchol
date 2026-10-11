@@ -65,20 +65,17 @@ void gather(const double* v_perm, const Index* perm, std::size_t n, double* out)
     for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(n); ++v) out[v] = v_perm[perm[v]];
 }
 
-template <class Pair>
-void pack(const double* w, std::size_t n, double scale, Pair* out) {
+inline void pack(const double* w, std::size_t n, double scale, df* out) {
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
-        const df value = split(scale * w[i]);
-        out[i] = {value.hi, value.lo};
+        out[i] = split(scale * w[i]);
     }
 }
 
-template <class Pair>
-void add_unpacked(const Pair* v, std::size_t n, double scale, double* out) {
+inline void add_unpacked(const df* v, std::size_t n, double scale, double* out) {
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
-        out[i] += join({v[i].hi, v[i].lo}) / scale;
+        out[i] += join(v[i]) / scale;
 }
 
 }  // namespace apxchol::detail::metal_host
