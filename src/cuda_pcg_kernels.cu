@@ -1,5 +1,6 @@
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
+#include "apxchol/csc_work.h"
 
 #include <cub/cub.cuh>
 #include <limits>
@@ -20,30 +21,14 @@ using namespace apxchol::detail::gpu_pcg;
 
 constexpr int kWarps = kBlockThreads / 32;
 
-// Deterministic block sum: warp shuffle tree (fixed order) -> one value per
-// warp in shared memory -> the first warp's shuffle tree over the kWarps
-// values (fixed order). Every thread of the block must call it (full masks);
-// the result is valid in thread 0.
-__device__ __forceinline__ double block_reduce_sum(double v, double* sh) {
-    #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    if (lane == 0) sh[warp] = v;
-    __syncthreads();
-    double r = 0.0;
-    if (warp == 0) {
-        r = lane < kWarps ? sh[lane] : 0.0;
-        #pragma unroll
-        for (int o = 16; o > 0; o >>= 1) r += __shfl_down_sync(0xffffffffu, r, o);
-    }
-    return r;
-}
-
 template<int Lanes = 1>
 struct pcg_math {
     using wide = double;
     using scalar = double;
     __device__ double add(double a, double b) const { return a + b; }
+    __device__ double shuffle_down(double value, unsigned offset, unsigned width) const {
+        return __shfl_down_sync(0xffffffffu, value, offset, width);
+    }
     __device__ double add_product(double sum, double a, double b) const { return sum + a * b; }
     __device__ double subtract_product(double a, double b, double c) const { return a - b * c; }
     __device__ double direction(double z, double p, double beta) const { return z + beta * p; }
@@ -52,12 +37,18 @@ struct pcg_math {
         return sum + double(hi[e]) * p;
     }
     __device__ double sum_row(double sum) const {
-        #pragma unroll
-        for (int offset = Lanes / 2; offset; offset /= 2)
-            sum += __shfl_down_sync(0xffffffffu, sum, offset, Lanes);
-        return sum;
+        return sum_lanes<Lanes>(*this, sum);
     }
 };
+
+// Every thread participates; the first warp folds one partial per warp.
+__device__ __forceinline__ double block_reduce_sum(double v, double* sh) {
+    v = sum_lanes<32>(pcg_math<>{}, v);
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    if (lane == 0) sh[warp] = v;
+    __syncthreads();
+    return warp == 0 ? sum_lanes<32>(pcg_math<>{}, lane < kWarps ? sh[lane] : 0.0) : 0.0;
+}
 
 template<operation Op, int Lanes = 1, class Value = double>
 __global__ void __launch_bounds__(kBlockThreads)
@@ -216,29 +207,19 @@ operator_fill_columns(int n, const int* outer, const int* inner,
     const int lane = threadIdx.x & 31;
     const std::int64_t warp = (static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) / 32;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x / 32;
-    bool bad = false;
+    bool paired = true;
     for (std::int64_t col = warp; col < n; col += stride) {
         for (std::int64_t p = static_cast<std::int64_t>(outer[col]) + lane;
              p < outer[col + 1]; p += 32) {
             const int row = inner[p];
-            double value = input[p];
-            if (row < col) {
-                int lo = outer[row], hi = outer[row + 1];
-                while (lo < hi) {
-                    const int mid = lo + (hi - lo) / 2;
-                    if (inner[mid] < col) lo = mid + 1;
-                    else hi = mid;
-                }
-                if (lo == outer[row + 1] || inner[lo] != col) bad = true;
-                else value = input[lo];
-            }
+            const double value = detail::canonical_lower_value(outer, inner, input, col, p, paired);
             // Input ordinal p is a unique fixed slot. Sorting this integer key
             // orders CSR rows and their columns without any floating arithmetic.
             keys[p] = (static_cast<std::uint64_t>(perm[col]) << 32) | perm[row];
             values[p] = value;
         }
     }
-    if (__syncthreads_or(bad) && threadIdx.x == 0) atomicOr(&status->flags, 1U);
+    if (__syncthreads_or(!paired) && threadIdx.x == 0) atomicOr(&status->flags, 1U);
 }
 
 __global__ void __launch_bounds__(kBlockThreads)

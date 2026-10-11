@@ -5,6 +5,14 @@ enum finalize_mode : unsigned {
 };
 enum class operation : unsigned { multiply, residual, dot, direction };
 
+// All lanes participate; the complete sum is returned in lane zero.
+template<unsigned Lanes, class Math>
+APXCHOL_GPU_FUNCTION typename Math::wide sum_lanes(Math math, typename Math::wide value) {
+    for (unsigned offset = Lanes / 2; offset; offset /= 2)
+        value = math.add(value, math.shuffle_down(value, offset, Lanes));
+    return value;
+}
+
 template<class Wide, class Scalar>
 struct solve_state {
     Wide rz, rr, thr, prev;

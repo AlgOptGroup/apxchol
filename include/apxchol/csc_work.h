@@ -11,6 +11,28 @@
 
 namespace apxchol::detail {
 
+// Sorted, unique CSC storage uses the lower triangle for both symmetric entries.
+// Missing partners invalidate the caller's unpublished output.
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+inline double canonical_lower_value(const int* ptr, const int* idx, const double* vals,
+                                    int col, int p, bool& paired) {
+    const int row = idx[p];
+    if (row >= col) return vals[p];
+    int lo = ptr[row], hi = ptr[row + 1];
+    while (lo < hi) {
+        const int mid = lo + (hi - lo) / 2;
+        if (idx[mid] < col) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == ptr[row + 1] || idx[lo] != col) {
+        paired = false;
+        return vals[p];
+    }
+    return vals[lo];
+}
+
 /// Contiguous range [lo, hi) of the n rows/columns of a compressed matrix that
 /// thread `tid` of `nt` owns when the WORK, not the index count, is split
 /// evenly. The work of index i is its stored entries plus one,

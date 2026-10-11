@@ -249,7 +249,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
 - CUDA and Metal share `src/gpu_dataflow.inc` and the count/emit task packer in
-  `solver/detail/gpu_dataflow_plan.h`. CUDA builds trusted-factor tasks on device
+  `solver/detail/gpu_dataflow_plan.h`, including task decoding, root initialization
+  and FP32 accumulation. CUDA builds trusted-factor tasks on device
   and uses one global queue; Metal's `metal_schedule.h` partitions dependency
   stages into independent workgroups. Cross-workgroup waits are forbidden on
   Metal. Both reset atomic FP32 dependency words and solve roots before the
@@ -257,9 +258,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   Long rows use segment tasks and a fixed-order finalizer. No public scheduler
   knob or retained reference kernel accompanies the shared implementation.
 - CUDA and Metal share the PCG workspace, operation loop and scalar state
-  transitions in `solver/detail/gpu_pcg.inc`. Each backend specializes one
-  kernel wrapper for the four operations and retains its arithmetic precision,
-  stopping comparisons and reduction tree. `gpu_pcg.h` owns the full launch
+  transitions in `solver/detail/gpu_pcg.inc`, including the lane shuffle-sum tree.
+  Each backend specializes one kernel wrapper for the four operations and retains
+  its arithmetic precision, stopping comparisons and block grouping. `gpu_pcg.h` owns the full launch
   sequence, iteration budgets and batch stopping. Metal binds common workspace
   buffers once per batch; triangular sweeps only rebind their factor arrays.
   Both keep scalar recurrences and stopping on device and predicate work after
@@ -271,9 +272,10 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   compilation and the device arithmetic probe. Metal host norms, means and
   vector updates use Eigen, as the CPU/CUDA routes do; the independent exit
   residual remains FP64.
-- `solver/detail/permuted_operator.h` builds the permuted symmetric operator,
-  ordering duplicate entries by value bits. Metal retains shared host factor
-  dropping/transposition; CUDA's public route keeps device ownership.
+- Host and CUDA operator preparation share canonical lower-triangle lookup in
+  `csc_work.h`. `solver/detail/permuted_operator.h` retains the host fallback,
+  ordering duplicate entries by value bits. Metal shares host factor dropping
+  and transposition; CUDA's public route keeps device ownership.
 - CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
   because NVCC does not support `_Float16` in device code. Uploads copy the
   common binary16 representation; the solve kernel widens only at accumulation.

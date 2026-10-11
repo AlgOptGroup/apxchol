@@ -48,8 +48,9 @@ quality and cost, and requires its own correctness and performance validation.
 
 **CUDA and Metal share the dataflow worker and task format.** CUDA uses a global
 queue; Metal groups consecutive dependency levels into independent workgroups
-and orders the groups' stages through GPU dispatches. Their device adapters
-supply atomics, subgroup operations and factor storage. Task counting and
+and orders the groups' stages through GPU dispatches. Task decoding, root
+initialization and FP32 accumulation also share one implementation; device
+adapters supply atomics, subgroup operations and FP16 conversion. Task counting and
 emission use the same routine on the host and CUDA device, without downloading
 private device-owned factors. Metal no longer keeps a level-permuted value
 copy or separate light, heavy and narrow-level solve kernels.
@@ -85,9 +86,10 @@ register, memory, or integer-instruction costs without a useful overall win.
 
 **GPU PCG owns its arithmetic and reductions.** Fused operator application and
 fixed reduction structure avoid proprietary solver dependencies. CUDA and Metal
-share the solve driver, vector workspace, operation loop and scalar state
-transitions. One kernel wrapper per backend specializes the four PCG operations;
-backend adapters retain their reduction trees and stopping comparisons. CUDA
+share the solve driver, vector workspace, operation loop, scalar state transitions
+and lane shuffle-sum tree. Metal's former serial 16-value fold used threadgroup
+scratch and a barrier; the shared tree removes both and changes its floating-point
+summation order. Backend adapters retain block grouping and stopping comparisons. CUDA
 uses native FP64; Metal uses double-float arithmetic shared with its host probe.
 Both predicate operations after convergence and read state after a completed
 batch (one iteration on CUDA). CUDA fuses narrowing and widening into its

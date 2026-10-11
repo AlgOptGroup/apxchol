@@ -1,5 +1,30 @@
 APXCHOL_GPU_CODE(
+struct alignas(16) dataflow_segment { unsigned row, begin, end, output; };
+static_assert(sizeof(dataflow_segment) == 16, "Matches gpu_dataflow::segment in the plan");
 struct dataflow_task { unsigned row, begin, end, output, kind; };
+template<class Memory>
+APXCHOL_GPU_FUNCTION dataflow_task dataflow_describe(Memory m, unsigned word) {
+    if (word >> 31) {
+        auto s = m.segments[word & 0x7fffffffu];
+        return {s.row & 0x7fffffffu, s.begin, s.end, s.output, (s.row >> 31) ? 2u : 1u};
+    }
+    return {word, unsigned(m.ptr[word]) + unsigned(m.reverse),
+            unsigned(m.ptr[word + 1]) - unsigned(!m.reverse), word, 0};
+}
+template<class Pointer>
+APXCHOL_GPU_FUNCTION float dataflow_accumulate(Pointer v, Pointer y, float sum) {
+    APXCHOL_UNROLL
+    for (unsigned k = 0; k < 8; ++k) sum = fma(v[k], y[k], sum);
+    return sum;
+}
+template<class Memory>
+APXCHOL_GPU_FUNCTION void dataflow_initialize(Memory m, unsigned row) {
+    if (row < m.n && m.ptr[row + 1] - m.ptr[row] == 1) {
+        float rhs, diagonal;
+        m.prepare(row, rhs, diagonal);
+        m.publish(row, m.finish(rhs, diagonal, 0));
+    } else m.reset(row);
+}
 template<class Memory>
 APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
     using Value = typename Memory::stored_value;
@@ -9,7 +34,7 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
         if (task >= m.batches) break;
         const unsigned word = m.words[task * 32 + lane];
         bool have = word != ~0u;
-        const dataflow_task t = have ? m.describe(word) : dataflow_task{};
+        const dataflow_task t = have ? dataflow_describe(m, word) : dataflow_task{};
         const unsigned g = t.kind ? 32 : m.width(t.end - t.begin), sub = lane & (g - 1);
         unsigned p = t.begin + sub, end = t.end;
         float rhs = 0, diagonal = 1;
@@ -48,7 +73,7 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
             const unsigned group_mask = (0xffffffffu >> (32 - g)) << (lane & ~(g - 1));
             const unsigned waiting = m.ballot(pending != 0);
             const bool ready = have && !(waiting & group_mask);
-            if (ready) sum = m.accumulate(vals, values, sum);
+            if (ready) sum = dataflow_accumulate(vals, values, sum);
             float total = sum;
             for (unsigned o = 16; o; o /= 2) {
                 const float other = m.shuffle(total, o);

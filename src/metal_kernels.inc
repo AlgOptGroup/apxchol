@@ -31,16 +31,13 @@ constant uint kOperation [[function_constant(2)]];
 constant uint kTreeRows = 256;
 constant uint kTreeLanes = 16;
 
-inline df fold_lanes(threadgroup const df* sh) {
-    df t = df{};
-    for (uint q = 0; q < kTreeLanes; ++q) t = df_add(t, sh[q]);
-    return t;
-}
-
 struct pcg_math {
     using wide = df;
     using scalar = float;
     df add(df a, df b) const { return df_add(a, b); }
+    df shuffle_down(df value, uint offset, uint) const {
+        return {simd_shuffle_down(value.hi, offset), simd_shuffle_down(value.lo, offset)};
+    }
     df add_product(df sum, float a, float b) const { return df_add(sum, two_prod(a, b)); }
     df add_product(df sum, df a, float b) const { return df_add(sum, df_mul_f(a, b)); }
     df add_product(df sum, df a, df b) const { return df_add(sum, df_mul(a, b)); }
@@ -69,10 +66,8 @@ kernel void pcg_step(constant Params& P [[buffer(0)]],
     const auto sum = step<1>(op, pcg_math{}, workspace<df, float>{x, r, ap, p, z, partial, &state},
                              ptr, col, hi, lo, work, 0);
     if (op != operation::direction) {
-        threadgroup df scratch[kTreeLanes];
-        scratch[lane] = sum;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane == 0) partial[group] = fold_lanes(scratch);
+        const auto total = sum_lanes<kTreeLanes>(pcg_math{}, sum);
+        if (lane == 0) partial[group] = total;
     }
 }
 
@@ -92,12 +87,10 @@ kernel void finalize(constant Params& P [[buffer(0)]],
                      device const df* partial [[buffer(6)]],
                      device SolveState& state [[buffer(7)]],
                      uint l [[thread_index_in_threadgroup]]) {
-    threadgroup df sh[kTreeLanes];
     const pcg_work<uint> work{0, P.groups, kTreeLanes, l, P.groups};
-    sh[l] = sum_partials(pcg_math{}, partial, work);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const auto sum = sum_lanes<kTreeLanes>(pcg_math{}, sum_partials(pcg_math{}, partial, work));
     if (l == 0 && state.active)
-        state = advance(recurrence_math{}, state, P.mode, fold_lanes(sh), P.iter, P.window);
+        state = advance(recurrence_math{}, state, P.mode, sum, P.iter, P.window);
 }
 
 // ---- self-test of the error-free transforms (metal_solver::available) ----

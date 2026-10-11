@@ -15,6 +15,16 @@ void dataflow_check(cudaError_t status, const char *operation) {
         throw std::runtime_error(std::string("GPU dataflow: ") + operation + ": " +
                                  cudaGetErrorString(status));
 }
+__device__ __forceinline__ float dataflow_accumulate(__half *values, float *x, float sum) {
+    float a = 0, b = 0;
+#pragma unroll
+    for (unsigned k = 0; k < 8; k += 2) {
+        const float2 v = __half22float2(__halves2half2(values[k], values[k + 1]));
+        a = fmaf(v.x, x[k], a);
+        b = fmaf(v.y, x[k + 1], b);
+    }
+    return sum + (a + b);
+}
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #define APXCHOL_GPU_FUNCTION __device__ __forceinline__
 #define APXCHOL_UNROLL _Pragma("unroll")
@@ -42,15 +52,6 @@ template <class Value> struct dataflow_memory {
     const double *rhs64 = nullptr;
     double *out64 = nullptr;
 
-    __device__ dataflow_task describe(unsigned word) const {
-        if (word >> 31) {
-            auto s = segments[word & 0x7fffffffu];
-            return {s.row & 0x7fffffffu, s.begin, s.end, s.output, (s.row >> 31) ? 2u : 1u};
-        }
-        return {word, begin(word), end(word), word, 0};
-    }
-    __device__ unsigned begin(unsigned row) const { return ptr[row] + unsigned(reverse); }
-    __device__ unsigned end(unsigned row) const { return ptr[row + 1] - unsigned(!reverse); }
     __device__ unsigned width(unsigned size) const {
         return 1u << min(5u, 32u - __clz((size ? size - 1 : 0) / 8));
     }
@@ -66,23 +67,7 @@ template <class Value> struct dataflow_memory {
             cuda::memory_order_relaxed);
     }
     __device__ float as_float(unsigned x) const { return __uint_as_float(x); }
-    __device__ float accumulate(const Value *values, const float *x, float sum) const {
-        if constexpr (std::is_same_v<Value, __half>) {
-            float a = 0, b = 0;
-#pragma unroll
-            for (unsigned k = 0; k < 8; k += 2) {
-                const float2 v = __half22float2(__halves2half2(values[k], values[k + 1]));
-                a = fmaf(v.x, x[k], a);
-                b = fmaf(v.y, x[k + 1], b);
-            }
-            return sum + (a + b);
-        } else {
-#pragma unroll
-            for (unsigned k = 0; k < 8; ++k)
-                sum = fmaf(values[k], x[k], sum);
-            return sum;
-        }
-    }
+    __device__ void reset(unsigned row) const { tags[row] = 0x7f800001u; }
     __device__ void prepare(unsigned row, float &b, float &d) const {
         const float input = rhs64 ? float(rhs64[row]) : rhs[row];
         b = scale ? float(double(input) * scale[row]) : input;
@@ -111,12 +96,7 @@ template <class Memory> __global__ void initialize(Memory m, unsigned count) {
         *m.ticket = 0;
     if (row >= count)
         return;
-    if (row < m.n && m.begin(row) == m.end(row)) {
-        float rhs, diagonal;
-        m.prepare(row, rhs, diagonal);
-        m.publish(row, m.finish(rhs, diagonal, 0));
-    } else
-        m.tags[row] = 0x7f800001u;
+    dataflow_initialize(m, row);
 }
 
 template <class Memory> __global__ void __launch_bounds__(kDataflowBlock) solve_dataflow(Memory m) {
