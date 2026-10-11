@@ -20,7 +20,9 @@ struct commands {
         if (it == 0) ++initializations;
         else ++directions;
     }
-    void multiply(unsigned it) const { if (active) EXPECT_EQ(it, iterations + 1); }
+    void multiply(unsigned it) const {
+        if (active) { EXPECT_EQ(it, iterations + 1); }
+    }
     void update_residual(unsigned it) {
         if (active) { iterations = it; active = it < stop; }
     }
