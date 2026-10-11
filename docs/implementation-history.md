@@ -85,9 +85,12 @@ register, memory, or integer-instruction costs without a useful overall win.
 
 **GPU PCG owns its arithmetic and reductions.** Fused operator application and
 fixed reduction structure avoid proprietary solver dependencies. CUDA and Metal
-share vector loops and scalar state transitions; backend adapters preserve
+share the solve driver, vector loops and scalar state transitions; backend adapters preserve
 their reduction trees and stopping comparisons. CUDA uses native FP64; Metal
-uses double-float arithmetic. The triangular-solve dataflow state is FP32;
+uses double-float arithmetic. The common driver orders device operations and
+checks the completed batch state; CUDA retains immediate scalar checks while
+Metal records predicated operations without per-operation host waits.
+The triangular-solve dataflow state is FP32;
 its tagged representation does not provide an FP64 triangular-solve path.
 The former untested FP64-factor-storage build choice was removed rather than
 advertised as supported. These are separate choices; see [precision and

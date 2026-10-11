@@ -24,6 +24,7 @@ add_executable(unit_tests
         test_gpu_direct_csc.cpp
         test_gpu_repair_cascade.cpp
         test_gpu_operator_csr.cpp
+        test_gpu_pcg.cpp
         test_sptrsv_memory.cpp
         test_sptrsv_levelset.cpp
         test_sptrsv_kernels.cpp

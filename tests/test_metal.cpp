@@ -363,6 +363,12 @@ TEST(MetalDevice, EarlyExitsTruthful) {
     EXPECT_EQ(none.residual, 1.0);
     EXPECT_EQ(none.x.norm(), 0.0);
 
+    for (int limit : {1, 4, 5}) {
+        const auto limited = slv.solve(b, 1e-30, limit);
+        EXPECT_EQ(limited.iterations, limit);
+        EXPECT_NEAR(limited.residual, true_residual(A, b, limited.x), 1e-12);
+    }
+
     const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());
     const apxchol::solve_result z = slv.solve(zero);
     EXPECT_EQ(z.iterations, 0);

@@ -181,42 +181,45 @@ public:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_r_, d_b_, n_ * sizeof(double),
                                                 cudaMemcpyDeviceToDevice, 0));
 
-        // z = M^{-1} r ; p = z ; rz = r·z
-        // The factor was built with m = laplacian ? n-1 : n. For the Laplacian
-        // path, solve_LLt_dev only writes z[0..n-2]; z[n-1] is left untouched
-        // (would be uninitialized on first iter, stale on later iters). Zero
-        // it to keep p[n-1] = 0 throughout the loop (matches the CPU path
-        // which sets x(m)=0 inside _solve_impl).
-        precond.trsv().solve_LLt_dev(d_r_, d_z_);
-        if (laplacian)
-            APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_p_, d_z_, n_ * sizeof(double),
-                                                cudaMemcpyDeviceToDevice, 0));
-        pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
         namespace pcg = detail::gpu_pcg;
         pcg::solve_state<double, double> state{};
-        state.rz = reduce(vec_blocks_);
         state.thr = tol;
         state.active = 1;
         const detail::cuda_pcg_math math{bnorm};
-        for (int it = 0; it < max_iter; ++it) {
-            if (fp32_op_) pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_f32_, d_p_, d_Ap_, d_part_, spmv_lanes_);
-            else          pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_,     d_p_, d_Ap_, d_part_, spmv_lanes_);
-            state = pcg::advance(math, state, pcg::kFinalizeAlpha, reduce(spmv_blocks_), it + 1);
-            if (!state.active) break;
-
-            pcg_cuda::update_xr(0, n_, d_x_, d_p_, d_r_, d_Ap_, state.alpha, d_part_);
-            state = pcg::advance(math, state, pcg::kFinalizeCheck, reduce(vec_blocks_), it + 1);
-            if (!state.active) break;
-
-            precond.trsv().solve_LLt_dev(d_r_, d_z_);
-            if (laplacian)
-                APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
-            pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
-            state = pcg::advance(math, state, pcg::kFinalizeRz, reduce(vec_blocks_), it + 1);
-            if (!state.active) break;
-            pcg_cuda::update_p(0, n_, d_p_, d_z_, state.beta);
-        }
+        auto run = [&](pcg::operation op, unsigned it) {
+            switch (op) {
+            case pcg::operation::precondition:
+                precond.trsv().solve_LLt_dev(d_r_, d_z_);
+                // L11 omits the grounded row; keep its unwritten z entry zero.
+                if (laplacian)
+                    APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
+                break;
+            case pcg::operation::initial_direction:
+                APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_p_, d_z_, n_ * sizeof(double), cudaMemcpyDeviceToDevice, 0));
+                pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
+                state.rz = reduce(vec_blocks_);
+                break;
+            case pcg::operation::multiply:
+                if (fp32_op_) pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_f32_, d_p_, d_Ap_, d_part_, spmv_lanes_);
+                else          pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_,     d_p_, d_Ap_, d_part_, spmv_lanes_);
+                state = pcg::advance(math, state, pcg::kFinalizeAlpha, reduce(spmv_blocks_), it);
+                break;
+            case pcg::operation::update_residual:
+                pcg_cuda::update_xr(0, n_, d_x_, d_p_, d_r_, d_Ap_, state.alpha, d_part_);
+                state = pcg::advance(math, state, pcg::kFinalizeCheck, reduce(vec_blocks_), it);
+                break;
+            case pcg::operation::update_direction:
+                pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
+                state = pcg::advance(math, state, pcg::kFinalizeRz, reduce(vec_blocks_), it);
+                if (state.active) pcg_cuda::update_p(0, n_, d_p_, d_z_, state.beta);
+                break;
+            }
+            return state.active != 0;
+        };
+        pcg::solve(std::max(max_iter, 0), 1, [&](bool, auto&& execute) {
+            execute(run);
+            return state.active != 0;
+        });
 
         // The uploaded RHS is no longer needed. Reuse its touched host buffer
         // for D2H, then un-permute and (for Laplacian) re-center.

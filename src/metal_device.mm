@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <initializer_list>
 #include "apxchol/solver/detail/metal_schedule.h"
 #include <stdexcept>
 
@@ -289,9 +290,15 @@ struct engine::impl {
         [enc setBytes:&prm length:sizeof prm atIndex:0];
     }
 
-    void dispatch_tree(id<MTLComputeCommandEncoder> enc) const {
+    static void encode_kernel(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pipe,
+                              const params& prm, std::initializer_list<id<MTLBuffer>> buffers,
+                              unsigned groups, unsigned threads) {
+        [enc setComputePipelineState:pipe];
+        set_params(enc, prm);
+        NSUInteger index = 1;
+        for (auto buffer : buffers) [enc setBuffer:buffer offset:0 atIndex:index++];
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(kTreeLanes, 1, 1)];
+            threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
     }
 
     void dispatch_rows(id<MTLComputeCommandEncoder> enc, std::uint32_t rows) const {
@@ -306,22 +313,11 @@ struct engine::impl {
         prm.mode = mode;
         prm.iter = iter;
         prm.window = window;
-        [enc setComputePipelineState:ctx->pipes.finalize];
-        set_params(enc, prm);
-        [enc setBuffer:partial offset:0 atIndex:1];
-        [enc setBuffer:cols offset:0 atIndex:2];
-        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(kTreeLanes, 1, 1)];
+        encode_kernel(enc, ctx->pipes.finalize, prm, {partial, cols}, 1, kTreeLanes);
     }
 
     void encode_reduce(id<MTLComputeCommandEncoder> enc, std::uint32_t mode) const {
-        [enc setComputePipelineState:ctx->pipes.reduce[mode]];
-        set_params(enc, base());
-        [enc setBuffer:r offset:0 atIndex:1];
-        [enc setBuffer:z offset:0 atIndex:2];
-        [enc setBuffer:partial offset:0 atIndex:3];
-        [enc setBuffer:cols offset:0 atIndex:4];
-        dispatch_tree(enc);
+        encode_kernel(enc, ctx->pipes.reduce[mode], base(), {r, z, partial, cols}, groups, kTreeLanes);
     }
 
     void encode_tri(id<MTLComputeCommandEncoder> enc, const prepared_tri& t, bool forward) const {
@@ -362,12 +358,8 @@ struct engine::impl {
     }
 
     void encode_p_update(id<MTLComputeCommandEncoder> enc) const {
-        [enc setComputePipelineState:ctx->pipes.p_update];
-        set_params(enc, base());
-        [enc setBuffer:p offset:0 atIndex:1];
-        [enc setBuffer:z offset:0 atIndex:2];
-        [enc setBuffer:cols offset:0 atIndex:3];
-        dispatch_rows(enc, n);
+        const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
+        encode_kernel(enc, ctx->pipes.p_update, base(), {p, z, cols}, (n + threads - 1) / threads, threads);
     }
 
     void encode_initial_mu(id<MTLComputeCommandEncoder> enc) const {
@@ -376,36 +368,32 @@ struct engine::impl {
         encode_finalize(enc, kFinalizeMuR, 0, 0);
     }
 
-    void encode_iteration(id<MTLComputeCommandEncoder> enc, std::uint32_t it,
-                          std::uint32_t window) const {
-        [enc setComputePipelineState:ctx->pipes.spmv[operator_df ? 1 : 0]];
-        set_params(enc, base());
-        [enc setBuffer:op_ptr offset:0 atIndex:1];
-        [enc setBuffer:op_col offset:0 atIndex:2];
-        [enc setBuffer:op_hi offset:0 atIndex:3];
-        [enc setBuffer:(op_lo != nil ? op_lo : op_hi) offset:0 atIndex:4];
-        [enc setBuffer:p offset:0 atIndex:5];
-        [enc setBuffer:ap offset:0 atIndex:6];
-        [enc setBuffer:partial offset:0 atIndex:7];
-        [enc setBuffer:cols offset:0 atIndex:8];
-        dispatch_tree(enc);
-        encode_finalize(enc, kFinalizeAlpha, it, window);
-
-        [enc setComputePipelineState:ctx->pipes.update_xr];
-        set_params(enc, base());
-        [enc setBuffer:x offset:0 atIndex:1];
-        [enc setBuffer:r offset:0 atIndex:2];
-        [enc setBuffer:p offset:0 atIndex:3];
-        [enc setBuffer:ap offset:0 atIndex:4];
-        [enc setBuffer:partial offset:0 atIndex:5];
-        [enc setBuffer:cols offset:0 atIndex:6];
-        dispatch_tree(enc);
-        encode_finalize(enc, kFinalizeCheck, it, window);
-
-        encode_precond(enc);
-        encode_reduce(enc, kReduceRz);
-        encode_finalize(enc, kFinalizeRz, it, window);
-        encode_p_update(enc);
+    void encode(id<MTLComputeCommandEncoder> enc, operation op, std::uint32_t it,
+                std::uint32_t window) const {
+        switch (op) {
+        case operation::precondition:
+            encode_precond(enc);
+            break;
+        case operation::initial_direction:
+            encode_reduce(enc, kReduceRz);
+            encode_finalize(enc, kFinalizeRzInit, 0, window);
+            encode_p_update(enc);
+            break;
+        case operation::multiply:
+            encode_kernel(enc, ctx->pipes.spmv[operator_df ? 1 : 0], base(),
+                          {op_ptr, op_col, op_hi, op_lo != nil ? op_lo : op_hi, p, ap, partial, cols}, groups, kTreeLanes);
+            encode_finalize(enc, kFinalizeAlpha, it, window);
+            break;
+        case operation::update_residual:
+            encode_kernel(enc, ctx->pipes.update_xr, base(), {x, r, p, ap, partial, cols}, groups, kTreeLanes);
+            encode_finalize(enc, kFinalizeCheck, it, window);
+            break;
+        case operation::update_direction:
+            encode_reduce(enc, kReduceRz);
+            encode_finalize(enc, kFinalizeRz, it, window);
+            encode_p_update(enc);
+            break;
+        }
     }
 
     bool active() const {
@@ -487,11 +475,8 @@ void engine::solve(std::uint32_t max_iter,
                    std::uint32_t window, std::uint32_t check_every) {
     impl& s = *impl_;
     s.zero_grounded_row();
-    std::string error;
-    std::uint32_t it = 0;
-    bool first = true;
-    while (error.empty() && (first || (it < max_iter && s.active()))) {
-        const std::uint32_t batch = std::min(std::max<std::uint32_t>(check_every, 1), max_iter - it);
+    gpu_pcg::solve(max_iter, check_every, [&](bool first, auto&& record) {
+        std::string error;
         @autoreleasepool {
             id<MTLCommandBuffer> cb = [s.queue commandBuffer];
             id<MTLBlitCommandEncoder> blit = first ? [cb blitCommandEncoder] : nil;
@@ -503,23 +488,18 @@ void engine::solve(std::uint32_t max_iter,
             if (enc == nil) {
                 error = "Metal command buffer or encoder creation failed";
             } else {
-                if (first) {
-                    s.encode_initial_mu(enc);
-                    s.encode_precond(enc);
-                    s.encode_reduce(enc, kReduceRz);
-                    s.encode_finalize(enc, kFinalizeRzInit, 0, window);
-                    s.encode_p_update(enc);
-                }
-                for (std::uint32_t b = 0; b < batch; ++b)
-                    s.encode_iteration(enc, it + b + 1, window);
+                if (first) s.encode_initial_mu(enc);
+                record([&](operation op, unsigned it) {
+                    s.encode(enc, op, it, window);
+                    return true;
+                });
                 [enc endEncoding];
                 error = finish(cb);
             }
         }
-        it += batch;
-        first = false;
-    }
-    if (!error.empty()) throw std::runtime_error(error);
+        if (!error.empty()) throw std::runtime_error(error);
+        return s.active();
+    });
 }
 
 void engine::apply() {
