@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -126,7 +127,7 @@ std::string run_arithmetic_probe(context& ctx) {
 
 id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> library,
                                           const char* name, bool forward, bool operator_df,
-                                          std::string& error, unsigned op = 0) {
+                                          unsigned op = 0) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
     [values setConstantValue:&forward type:MTLDataTypeBool atIndex:0];
     [values setConstantValue:&operator_df type:MTLDataTypeBool atIndex:1];
@@ -135,12 +136,11 @@ id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> l
     id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]
                                        constantValues:values
                                                 error:&err];
-    if (fn == nil) {
-        error = std::string("function ") + name + ": " + describe(err);
-        return nil;
-    }
+    if (fn == nil)
+        throw std::runtime_error(std::string("Metal function ") + name + ": " + describe(err));
     id<MTLComputePipelineState> pipe = [device newComputePipelineStateWithFunction:fn error:&err];
-    if (pipe == nil) error = std::string("pipeline ") + name + ": " + describe(err);
+    if (pipe == nil)
+        throw std::runtime_error(std::string("Metal pipeline ") + name + ": " + describe(err));
     return pipe;
 }
 
@@ -170,72 +170,52 @@ context* make_context() {
     auto* ctx = new context;  // process lifetime: never destroyed
     device_status& st = ctx->status;
     @autoreleasepool {
-        // Command-line tools need CoreGraphics linked for this to find the GPU.
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        if (device == nil) {
-            st.error = "no Metal device";
-            return ctx;
-        }
-        ctx->device = device;
-        st.name = [[device name] UTF8String];
-        std::string error;
-        id<MTLLibrary> library = compile(device, true, error);
-        st.contract_pragma = library != nil;
-        if (library == nil) {
-            std::string retry;
-            library = compile(device, false, retry);
+        try {
+            // Command-line tools need CoreGraphics linked for this to find the GPU.
+            id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+            if (device == nil) throw std::runtime_error("no Metal device");
+            ctx->device = device;
+            st.name = [[device name] UTF8String];
+            std::string error;
+            id<MTLLibrary> library = compile(device, true, error);
+            st.contract_pragma = library != nil;
             if (library == nil) {
-                st.error = "Metal kernel compilation failed: " + retry;
-                return ctx;
+                library = compile(device, false, error);
+                if (library == nil)
+                    throw std::runtime_error("Metal kernel compilation failed: " + error);
             }
-        }
-        pipelines& p = ctx->pipes;
-        for (unsigned op = 0; op < 4; ++op)
-            for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
-                p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, error, op);
-        p.finalize = make_pipeline(device, library, "finalize", false, false, error);
-        for (int fwd = 0; fwd < 2; ++fwd) {
-            p.dataflow_init[fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, error);
-            p.dataflow_solve[fwd] = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, error);
-        }
-        p.probe = make_pipeline(device, library, "df_probe", false, false, error);
-        if (!error.empty()) {
-            st.error = "Metal pipeline creation failed: " + error;
-            return ctx;
-        }
-        for (auto pipe : p.dataflow_solve) {
-            if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256) {
-                st.error = "Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups";
-                return ctx;
+            pipelines& p = ctx->pipes;
+            for (unsigned op = 0; op < 4; ++op)
+                for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
+                    p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op);
+            p.finalize = make_pipeline(device, library, "finalize", false, false);
+            for (int fwd = 0; fwd < 2; ++fwd) {
+                p.dataflow_init[fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false);
+                p.dataflow_solve[fwd] = make_pipeline(device, library, "dataflow_solve", fwd != 0, false);
             }
+            p.probe = make_pipeline(device, library, "df_probe", false, false);
+            for (auto pipe : p.dataflow_solve) {
+                if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
+                    throw std::runtime_error("Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups");
+            }
+            auto threads = [](id<MTLComputePipelineState> pipe) {
+                return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
+            };
+            const auto tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
+                                               threads(p.pcg[2][0]), threads(p.finalize)});
+            st.row_threads = std::min({threads(p.pcg[unsigned(operation::direction)][0]),
+                                      threads(p.dataflow_init[0]), threads(p.dataflow_init[1])});
+            ctx->probe_queue = [device newCommandQueue];
+            if (ctx->probe_queue == nil) throw std::runtime_error("no Metal command queue");
+            if (tree_threads < kTreeLanes || st.row_threads == 0)
+                throw std::runtime_error("Metal pipeline thread limits are insufficient");
+            st.error = run_arithmetic_probe(*ctx);
+            st.ok = st.error.empty();
+        } catch (const std::exception& e) {
+            st.error = e.what();
+        } catch (...) {
+            st.error = "unknown error";
         }
-        auto threads = [](id<MTLComputePipelineState> pipe) {
-            return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
-        };
-        const auto tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
-                                           threads(p.pcg[2][0]), threads(p.finalize)});
-        st.row_threads = std::min({threads(p.pcg[unsigned(operation::direction)][0]),
-                                  threads(p.dataflow_init[0]), threads(p.dataflow_init[1])});
-        ctx->probe_queue = [device newCommandQueue];
-        if (ctx->probe_queue == nil) {
-            st.error = "no Metal command queue";
-            return ctx;
-        }
-        if (tree_threads < kTreeLanes || st.row_threads == 0) {
-            st.error = "Metal pipeline thread limits are insufficient";
-            return ctx;
-        }
-        st.ok = true;
-    }
-    try {
-        st.error = run_arithmetic_probe(*ctx);
-        st.ok = st.error.empty();
-    } catch (const std::exception& e) {
-        st.error = e.what();
-        st.ok = false;
-    } catch (...) {
-        st.error = "unknown error";
-        st.ok = false;
     }
     return ctx;
 }
@@ -245,23 +225,32 @@ context& shared() {
     return *ctx;
 }
 
-id<MTLBuffer> upload(id<MTLDevice> device, const void* data, std::size_t bytes) {
+// Exceptions must be caught inside the pool so that it drains before rethrowing.
+template<class F>
+void with_pool(F&& f) {
+    std::exception_ptr failure;
+    @autoreleasepool {
+        try { f(); }
+        catch (...) { failure = std::current_exception(); }
+    }
+    if (failure) std::rethrow_exception(failure);
+}
+
+id<MTLBuffer> upload(id<MTLDevice> device, const void* data, std::size_t bytes, const char* name) {
     const std::size_t len = std::max<std::size_t>(bytes, 4);
-    if (len > [device maxBufferLength]) return nil;
-    id<MTLBuffer> b = [device newBufferWithLength:len options:MTLResourceStorageModeShared];
-    if (b == nil) return nil;
+    id<MTLBuffer> b = len <= [device maxBufferLength]
+        ? [device newBufferWithLength:len options:MTLResourceStorageModeShared] : nil;
+    if (b == nil) throw device_memory_error(std::string("Metal buffer allocation failed: ") + name);
     if (data != nullptr && bytes != 0) std::memcpy([b contents], data, bytes);
     else std::memset([b contents], 0, len);
     return b;
 }
 
-// Waits for `cb` and returns its error text ("" on success).
-std::string finish(id<MTLCommandBuffer> cb) {
+void finish(id<MTLCommandBuffer> cb) {
     [cb commit];
     [cb waitUntilCompleted];
     if ([cb status] != MTLCommandBufferStatusCompleted || [cb error] != nil)
-        return "Metal command buffer failed: " + describe([cb error]);
-    return {};
+        throw std::runtime_error("Metal command buffer failed: " + describe([cb error]));
 }
 
 struct prepared_tri {
@@ -286,18 +275,15 @@ prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<float>& a, bool 
         packed.segments.push_back({});
     out.stages = std::move(schedule.stages);
     out.levels = schedule.levels;
-    @autoreleasepool {
-        out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned));
-        out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned));
-        out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(float));
-        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned));
-        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned));
+    with_pool([&] {
+        out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
+        out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
+        out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(float), "factor values");
+        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
+        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
         out.segments = upload(ctx.device, packed.segments.data(),
-                              packed.segments.size() * sizeof(gpu_dataflow::segment));
-    }
-    if (out.ptr == nil || out.col == nil || out.val == nil || out.words == nil || out.blocks == nil ||
-        out.segments == nil)
-        throw device_memory_error("Metal factor allocation failed");
+                              packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
+    });
     return out;
 }
 
@@ -309,32 +295,23 @@ namespace {
 std::vector<float> run_probe(context& ctx, const std::vector<float>& inputs) {
     const std::uint32_t count = static_cast<std::uint32_t>(inputs.size() / 4);
     std::vector<float> out(static_cast<std::size_t>(count) * 16);
-    std::string error;
-    @autoreleasepool {
-        id<MTLBuffer> in = upload(ctx.device, inputs.data(), inputs.size() * sizeof(float));
-        id<MTLBuffer> res = upload(ctx.device, nullptr, out.size() * sizeof(float));
-        if (in == nil || res == nil) {
-            error = "Metal buffer allocation failed";
-        } else {
-            id<MTLCommandBuffer> cb = [ctx.probe_queue commandBuffer];
-            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-            if (enc == nil) {
-                error = "Metal command buffer or encoder creation failed";
-            } else {
-                [enc setComputePipelineState:ctx.pipes.probe];
-                [enc setBuffer:in offset:0 atIndex:0];
-                [enc setBuffer:res offset:0 atIndex:1];
-                [enc setBytes:&count length:sizeof count atIndex:2];
-                const NSUInteger w = 64;
-                [enc dispatchThreadgroups:MTLSizeMake((count + w - 1) / w, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(w, 1, 1)];
-                [enc endEncoding];
-                error = finish(cb);
-                if (error.empty()) std::memcpy(out.data(), [res contents], out.size() * sizeof(float));
-            }
-        }
-    }
-    if (!error.empty()) throw std::runtime_error(error);
+    with_pool([&] {
+        id<MTLBuffer> in = upload(ctx.device, inputs.data(), inputs.size() * sizeof(float), "probe input");
+        id<MTLBuffer> res = upload(ctx.device, nullptr, out.size() * sizeof(float), "probe result");
+        id<MTLCommandBuffer> cb = [ctx.probe_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        if (enc == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
+        [enc setComputePipelineState:ctx.pipes.probe];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:res offset:0 atIndex:1];
+        [enc setBytes:&count length:sizeof count atIndex:2];
+        const NSUInteger w = 64;
+        [enc dispatchThreadgroups:MTLSizeMake((count + w - 1) / w, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(w, 1, 1)];
+        [enc endEncoding];
+        finish(cb);
+        std::memcpy(out.data(), [res contents], out.size() * sizeof(float));
+    });
     return out;
 }
 
@@ -446,26 +423,23 @@ struct metal_solver::impl {
 
     template<class Record>
     bool submit(bool first, Record&& record) {
-        std::string error;
-        @autoreleasepool {
+        with_pool([&] {
             id<MTLCommandBuffer> cb = [queue commandBuffer];
-            id<MTLBlitCommandEncoder> blit = first ? [cb blitCommandEncoder] : nil;
-            if (blit != nil) {
+            if (first) {
+                id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+                if (blit == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
                 [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(arguments.n) * sizeof(df32)) value:0];
                 [blit endEncoding];
             }
-            encoder = cb != nil && (!first || blit != nil) ? [cb computeCommandEncoder] : nil;
-            if (encoder == nil) error = "Metal command buffer or encoder creation failed";
-            else {
-                bind(encoder, 1, {x, r, ap, p, z, partial, state_buffer, device_op_ptr, device_op_col, op_hi,
-                                  op_lo != nil ? op_lo : op_hi, tags});
-                record();
-                [encoder endEncoding];
-                error = finish(cb);
-                encoder = nil;
-            }
-        }
-        if (!error.empty()) throw std::runtime_error(error);
+            encoder = [cb computeCommandEncoder];
+            if (encoder == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
+            bind(encoder, 1, {x, r, ap, p, z, partial, state_buffer, device_op_ptr, device_op_col, op_hi,
+                              op_lo != nil ? op_lo : op_hi, tags});
+            record();
+            [encoder endEncoding];
+            encoder = nil;
+            finish(cb);
+        });
         return static_cast<const solve_state*>([state_buffer contents])->active != 0;
     }
 
@@ -598,40 +572,31 @@ void metal_solver::impl::prepare_device(const cuda_host::csr_int<float>& forward
     s.arguments.groups = (s.arguments.n + kTreeRows - 1) / kTreeRows;
     const auto nnz = op_ptr.back();
     s.operator_df = !lo.empty();
-    bool ok = true;
-    @autoreleasepool {
+    with_pool([&] {
         id<MTLDevice> dev = ctx.device;
         s.queue = [dev newCommandQueue];
-        s.device_op_ptr = upload(dev, op_ptr.data(), (n + 1) * sizeof(std::uint32_t));
-        s.device_op_col = upload(dev, op_col.get(), nnz * sizeof(std::uint32_t));
-        s.op_hi = upload(dev, hi.data(), nnz * sizeof(float));
-        if (!lo.empty()) s.op_lo = upload(dev, lo.data(), nnz * sizeof(float));
-        ok = s.device_op_ptr != nil && s.device_op_col != nil && s.op_hi != nil &&
-             (lo.empty() || s.op_lo != nil);
-    }
-    if (s.queue == nil) throw std::runtime_error("Metal command queue creation failed");
-    if (!ok) throw device_memory_error("Metal buffer allocation failed for the operator or factor");
+        if (s.queue == nil) throw std::runtime_error("Metal command queue creation failed");
+        s.device_op_ptr = upload(dev, op_ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
+        s.device_op_col = upload(dev, op_col.get(), nnz * sizeof(std::uint32_t), "operator indices");
+        s.op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
+        if (!lo.empty()) s.op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
+    });
     s.fwd = prepare_tri(ctx, forward, true);
     s.bwd = prepare_tri(ctx, backward, false);
-    ok = true;
-    @autoreleasepool {
+    with_pool([&] {
         id<MTLDevice> dev = s.ctx->device;
         const std::size_t entries = static_cast<std::size_t>(s.arguments.n);
-        s.x = upload(dev, nullptr, entries * sizeof(df32));
-        s.r = upload(dev, nullptr, entries * sizeof(df32));
-        s.ap = upload(dev, nullptr, entries * sizeof(df32));
-        s.p = upload(dev, nullptr, entries * sizeof(float));
+        s.x = upload(dev, nullptr, entries * sizeof(df32), "solution");
+        s.r = upload(dev, nullptr, entries * sizeof(df32), "residual");
+        s.ap = upload(dev, nullptr, entries * sizeof(df32), "operator product");
+        s.p = upload(dev, nullptr, entries * sizeof(float), "search direction");
         // Sweeps write rows < m; the extra Laplacian coordinate stays zero.
-        s.z = upload(dev, nullptr, entries * sizeof(float));
-        s.partial = upload(dev, nullptr, static_cast<std::size_t>(s.arguments.groups) * sizeof(df32));
-        s.state_buffer = upload(dev, nullptr, sizeof(solve_state));
+        s.z = upload(dev, nullptr, entries * sizeof(float), "preconditioner result");
+        s.partial = upload(dev, nullptr, static_cast<std::size_t>(s.arguments.groups) * sizeof(df32), "partial sums");
+        s.state_buffer = upload(dev, nullptr, sizeof(solve_state), "solve state");
         s.tags = upload(dev, nullptr, std::max({entries, std::size_t(s.fwd.tag_count),
-            std::size_t(s.bwd.tag_count)}) * sizeof(std::uint32_t));
-        ok = s.x != nil && s.r != nil && s.ap != nil && s.p != nil && s.z != nil &&
-             s.partial != nil && s.state_buffer != nil &&
-             s.tags != nil;
-    }
-    if (!ok) throw device_memory_error("Metal buffer allocation failed for the PCG vectors");
+            std::size_t(s.bwd.tag_count)}) * sizeof(std::uint32_t), "dataflow tags");
+    });
 }
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,

@@ -32,10 +32,11 @@ using Sparse = Eigen::SparseMatrix<double>;
 using apxchol::node_index;
 namespace mh = apxchol::detail::metal_host;
 
-#define REQUIRE_METAL()                                                       \
-    do {                                                                      \
-        if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device"; \
-    } while (0)
+class MetalDevice : public testing::Test {
+    void SetUp() override {
+        if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    }
+};
 
 // Grid Laplacian (shift = 0) or SDDM (shift > 0) with weights 1 + k/4 (all
 // fp32-exact) or, with `inexact`, weights 1 + k/3 (not fp32-exact).
@@ -161,8 +162,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
 
 }  // namespace
 
-TEST(MetalDevice, DoubleFloatProbeExact) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, DoubleFloatProbeExact) {
     // Test full arithmetic separately from available()'s fixed capability sentinels.
     std::vector<float> in;
     std::uint32_t state = 12345u;
@@ -209,8 +209,7 @@ TEST(MetalDevice, DoubleFloatProbeExact) {
                 in.size() / 4);
 }
 
-TEST(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
     for (const double shift : {0.0, 0.5}) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");
         const Sparse A = grid(37, 29, shift, true);
@@ -227,8 +226,7 @@ TEST(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
 }
 
 // Exercise long rows and cross-workgroup dependency stages on the device.
-TEST(MetalDevice, HubFactorAgreesWithSerialDoubleReference) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, HubFactorAgreesWithSerialDoubleReference) {
     const Sparse A = hub_graph(110, 100, 4);
     apxchol::factorization F = apxchol::factorize(A);
     const apxchol::factorization Fcopy = F;
@@ -242,8 +240,7 @@ TEST(MetalDevice, HubFactorAgreesWithSerialDoubleReference) {
 
 // A synthetic factor with heavy rows in both sweeps (hub columns and hub
 // rows), on the SDDM (m = n) and Laplacian (m = n - 1) paths.
-TEST(MetalDevice, SyntheticHeavyFactorAgreesWithSerialDoubleReference) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, SyntheticHeavyFactorAgreesWithSerialDoubleReference) {
     const node_index n = 5000;
     apxchol::factorization F;
     std::mt19937 rng(19);
@@ -291,8 +288,7 @@ TEST(MetalDevice, SyntheticHeavyFactorAgreesWithSerialDoubleReference) {
     }
 }
 
-TEST(MetalDevice, ApplyAgreesWithCpuApply) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, ApplyAgreesWithCpuApply) {
     for (const double shift : {0.0, 0.25}) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");
         const Sparse A = grid(40, 40, shift);
@@ -314,8 +310,7 @@ TEST(MetalDevice, ApplyAgreesWithCpuApply) {
     }
 }
 
-TEST(MetalDevice, GridLaplacianOriginalResidual) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, GridLaplacianOriginalResidual) {
     const Sparse A = grid(48, 48);
     apxchol::factorization F = apxchol::factorize(A);
     const apxchol::cpu_solver cpu(A, apxchol::factorization(F));
@@ -341,8 +336,7 @@ TEST(MetalDevice, GridLaplacianOriginalResidual) {
     }
 }
 
-TEST(MetalDevice, SddmExactAndDoubleFloatOperators) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, SddmExactAndDoubleFloatOperators) {
     for (const bool inexact : {false, true}) {
         SCOPED_TRACE(inexact ? "double-float operator" : "fp32-exact operator");
         const Sparse A = grid(30, 50, 0.125, inexact);
@@ -358,8 +352,7 @@ TEST(MetalDevice, SddmExactAndDoubleFloatOperators) {
 
 
 
-TEST(MetalDevice, EarlyExitsTruthful) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, EarlyExitsTruthful) {
     const Sparse A = grid(12, 12);
     const apxchol::metal_solver slv(A);
     const Eigen::VectorXd b = rhs(A.rows(), 1, true);
@@ -392,8 +385,7 @@ TEST(MetalDevice, EarlyExitsTruthful) {
     EXPECT_THROW(slv.apply(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
 }
 
-TEST(MetalDevice, BreakdownIsNotConvergence) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, BreakdownIsNotConvergence) {
     // A constant right-hand side is orthogonal to a Laplacian's range: the
     // centred preconditioner returns 0, p.Ap = 0 on the first iteration.
     const Sparse A = grid(10, 10);
@@ -404,8 +396,7 @@ TEST(MetalDevice, BreakdownIsNotConvergence) {
     EXPECT_EQ(r.residual, 1.0);
 }
 
-TEST(MetalDevice, UnreachableTolStopsHonestly) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, UnreachableTolStopsHonestly) {
     const Sparse A = grid(16, 16, 0.0, true);
     const apxchol::metal_solver slv(A);
     const Eigen::VectorXd b = rhs(A.rows(), 7, true);
@@ -415,8 +406,7 @@ TEST(MetalDevice, UnreachableTolStopsHonestly) {
     EXPECT_NEAR(r.residual, true_residual(A, b, r.x), 1e-2 * r.residual);
 }
 
-TEST(MetalDevice, PowerOfTwoScalingExact) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, PowerOfTwoScalingExact) {
     const Sparse A = grid(15, 21, 0.3, true);
     const apxchol::metal_solver slv(A);
     const Eigen::VectorXd b = rhs(A.rows(), 2, false);
@@ -430,8 +420,7 @@ TEST(MetalDevice, PowerOfTwoScalingExact) {
     }
 }
 
-TEST(MetalDevice, RepeatedAndTwinSolversBitIdentical) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, RepeatedAndTwinSolversBitIdentical) {
     const Sparse A = grid(33, 17);
     apxchol::factorization F = apxchol::factorize(A);
     const apxchol::metal_solver one(A, apxchol::factorization(F));
@@ -450,8 +439,7 @@ TEST(MetalDevice, RepeatedAndTwinSolversBitIdentical) {
 
 
 
-TEST(MetalDevice, LaplacianX0ConstantIrrelevant) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, LaplacianX0ConstantIrrelevant) {
     const Sparse A = grid(26, 26);
     const apxchol::metal_solver slv(A);
     const Eigen::VectorXd b = rhs(A.rows(), 8, true);
@@ -466,8 +454,7 @@ TEST(MetalDevice, LaplacianX0ConstantIrrelevant) {
     EXPECT_LE((r1.x - r2.x).norm() / r1.x.norm(), 1e-6);
 }
 
-TEST(MetalDevice, NonFiniteRhsRejected) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, NonFiniteRhsRejected) {
     const Sparse A = grid(8, 8, 0.5);
     const apxchol::metal_solver slv(A);
     Eigen::VectorXd b = rhs(A.rows(), 1, false);
@@ -482,16 +469,14 @@ TEST(MetalDevice, NonFiniteRhsRejected) {
     EXPECT_THROW(slv.solve(ok, 1e-8, 10, &x0), std::invalid_argument);
 }
 
-TEST(MetalDevice, OutOfRangeOperatorIsADomainError) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, OutOfRangeOperatorIsADomainError) {
     Sparse A = grid(6, 6, 0.5);
     A.coeffRef(0, 0) = 1e40;
     apxchol::factorization F = apxchol::factorize(grid(6, 6, 0.5));
     EXPECT_THROW(apxchol::metal_solver(A, std::move(F)), std::domain_error);
 }
 
-TEST(MetalDevice, TinyFactorOffDiagonalsRemainUsable) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, TinyFactorOffDiagonalsRemainUsable) {
     Sparse A(2, 2);
     A.setIdentity();
     const Eigen::Vector2d b(1.0, -2.0);
@@ -514,8 +499,7 @@ TEST(MetalDevice, TinyFactorOffDiagonalsRemainUsable) {
     }
 }
 
-TEST(MetalDevice, ScaledRightHandSides) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, ScaledRightHandSides) {
     Sparse A(2, 2);
     A.setIdentity();
     const apxchol::metal_solver solver(A);
@@ -543,8 +527,7 @@ TEST(MetalDevice, ScaledRightHandSides) {
     }
 }
 
-TEST(MetalDevice, TinySystems) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, TinySystems) {
     Sparse one(1, 1);
     one.insert(0, 0) = 4.0;
     one.makeCompressed();
@@ -563,8 +546,7 @@ TEST(MetalDevice, TinySystems) {
     }
 }
 
-TEST(MetalDevice, StatisticsDescribeTheSetup) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, StatisticsDescribeTheSetup) {
     const Sparse A = grid(50, 40);
     const apxchol::metal_solver slv(A, keep_opts());
     const auto st = slv.stats();
@@ -580,8 +562,7 @@ TEST(MetalDevice, StatisticsDescribeTheSetup) {
     EXPECT_EQ(released.factor().perm.size(), static_cast<std::size_t>(A.rows()));
 }
 
-TEST(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
     const Sparse A = grid(24, 31, 0.25);
     const apxchol::metal_solver solver(A, keep_opts());
     const auto ptr = solver.factor().L.outer_;
@@ -598,8 +579,7 @@ TEST(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
     }
 }
 
-TEST(MetalDevice, CommonSolverApiAndCpuDefault) {
-    REQUIRE_METAL();
+TEST_F(MetalDevice, CommonSolverApiAndCpuDefault) {
     const Sparse A = grid(20, 21, 0.25);
     const Eigen::VectorXd b = rhs(A.rows(), 4, false);
     apxchol::solve_options options;
@@ -613,7 +593,7 @@ TEST(MetalDevice, CommonSolverApiAndCpuDefault) {
     EXPECT_GT(gpu.timings.total("pcg"), 0.0);
 }
 
-TEST(MetalDevice, UnsupportedOptionsFailBeforeDeviceSetup) {
+TEST(MetalOptions, UnsupportedOptionsFailBeforeDeviceSetup) {
     const Sparse A = grid(4, 4, 0.25);
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::cpu;

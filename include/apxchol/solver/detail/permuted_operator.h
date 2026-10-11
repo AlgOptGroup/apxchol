@@ -2,6 +2,7 @@
 // Internal host preparation of P A P^T for device solvers. The caller supplies
 // the validated operator and the original-to-permuted bijection of its factor.
 #include "apxchol/csc_work.h"
+#include "apxchol/solver/detail/lower_triangle_csr.h"
 #include "apxchol/types.h"
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -118,83 +119,19 @@ inline void build_permuted_full_symmetric_csr(
     if (try_build_permuted_symmetric_csr(
             L, perm, row_ptr, col_idx, vals, nnz, fp32_exact))
         return;
-    const int n = static_cast<int>(L.rows());
-    const int* L_outer = L.outerIndexPtr();
-    const int* L_inner = L.innerIndexPtr();
-    const double* L_vals = L.valuePtr();
-    const node_index* p_idx = perm.data();
-
-    // Count both mirrored entries of each off-diagonal lower value.
-    row_ptr.assign(n + 1, 0);
-    #pragma omp parallel for schedule(static)
-    for (int k = 0; k < n; ++k) {
-        const int pk = p_idx[k];
-        for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-            const int row = L_inner[p];
-            if (row < k) continue;
-            const int pr = p_idx[row];
-            __atomic_fetch_add(&row_ptr[pr + 1], 1, __ATOMIC_RELAXED);
-            if (row != k)
-                __atomic_fetch_add(&row_ptr[pk + 1], 1, __ATOMIC_RELAXED);
-        }
-    }
-    for (int i = 0; i < n; ++i)
-        row_ptr[i + 1] += row_ptr[i];
-    const int total = row_ptr[n];
-    nnz = total;
-    // The scatter writes every slot, allowing parallel first touch.
-    col_idx = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(total));
-    vals    = std::make_unique_for_overwrite<double[]>(static_cast<std::size_t>(total));
-
-    // Scatter and check FP32 exactness in the same pass over the lower triangle.
-    std::vector<int> pos(row_ptr.begin(), row_ptr.begin() + n);
-    bool exact = true;
-    #pragma omp parallel for schedule(static) reduction(&&:exact)
-    for (int k = 0; k < n; ++k) {
-        const int pk = p_idx[k];
-        for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-            const int row = L_inner[p];
-            if (row < k) continue;
-            const double v = L_vals[p];
-            if (static_cast<double>(static_cast<float>(v)) != v) exact = false;  // lossless-fp32 check
-            const int pr = p_idx[row];
-            // A_perm[pr, pk] = v
-            const int slot_pr = __atomic_fetch_add(&pos[pr], 1, __ATOMIC_RELAXED);
-            col_idx[slot_pr] = pk;
-            vals[slot_pr]    = v;
-            if (row != k) {
-                // A_perm[pk, pr] = v
-                const int slot_pk = __atomic_fetch_add(&pos[pk], 1, __ATOMIC_RELAXED);
-                col_idx[slot_pk] = pr;
-                vals[slot_pk]    = v;
-            }
-        }
-    }
-    fp32_exact = exact;
-
-    // Sort by column and then value bits so duplicate order is independent
-    // of the threads' scatter order. Reuse one scratch buffer per worker.
-    #pragma omp parallel
-    {
-        std::vector<std::pair<int, double>> kv;
-        #pragma omp for schedule(static)
-        for (int i = 0; i < n; ++i) {
-            const int rs = row_ptr[i], re = row_ptr[i + 1];
-            if (re - rs < 2) continue;
-            kv.clear();
-            kv.reserve(re - rs);
-            for (int p = rs; p < re; ++p)
-                kv.emplace_back(col_idx[p], vals[p]);
-            std::sort(kv.begin(), kv.end(), [](const auto& a, const auto& b) {
-                if (a.first != b.first) return a.first < b.first;
-                return std::bit_cast<std::uint64_t>(a.second) < std::bit_cast<std::uint64_t>(b.second);
-            });
-            for (int p = rs; p < re; ++p) {
-                col_idx[p] = kv[p - rs].first;
-                vals[p]    = kv[p - rs].second;
-            }
-        }
-    }
+    row_ptr.resize(static_cast<std::size_t>(L.rows()) + 1);
+    fp32_exact = reflect_lower_to_csr<true>(L, row_ptr.data(),
+        [p = perm.data()](Eigen::Index i) { return static_cast<int>(p[i]); },
+        [&](int count) {
+            nnz = count;
+            col_idx = std::make_unique_for_overwrite<int[]>(count);
+            vals = std::make_unique_for_overwrite<double[]>(count);
+            return std::pair{col_idx.get(), vals.get()};
+        },
+        [](const auto& a, const auto& b) {
+            if (a.first != b.first) return a.first < b.first;
+            return std::bit_cast<std::uint64_t>(a.second) < std::bit_cast<std::uint64_t>(b.second);
+        });
 }
 
 } // namespace apxchol::detail

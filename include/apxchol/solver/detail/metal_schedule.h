@@ -55,12 +55,7 @@ inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &l
         std::vector<unsigned> buckets(capacity + 1, 0), ordered(roots.size());
         for (unsigned root : roots)
             ++buckets[capacity - size[root]];
-        unsigned offset = 0;
-        for (auto &count : buckets) {
-            unsigned next = offset + count;
-            count = offset;
-            offset = next;
-        }
+        std::exclusive_scan(buckets.begin(), buckets.end(), buckets.begin(), 0u);
         for (unsigned root : roots)
             ordered[buckets[capacity - size[root]]++] = root;
         roots.swap(ordered);

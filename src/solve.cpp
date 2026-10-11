@@ -1,5 +1,6 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
+#include "apxchol/solver/detail/lower_triangle_csr.h"
 #include "apxchol/csc_work.h"
 #include <algorithm>
 #include <chrono>
@@ -520,71 +521,14 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
             if (op_fp32_)
                 Eigen::SparseMatrix<float, Eigen::RowMajor>().swap(Lrm_f_);
 
-            const Eigen::Index n_eig = Lcsc.rows();
-            const int* L_outer = Lcsc.outerIndexPtr();
-            const int* L_inner = Lcsc.innerIndexPtr();
-            const double* L_vals = Lcsc.valuePtr();
-            std::vector<int> row_nnz(static_cast<size_t>(n_eig), 0);
-            #pragma omp parallel for schedule(static)
-            for (Eigen::Index k = 0; k < n_eig; ++k) {
-                for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-                    const int row = L_inner[p];
-                    if (row < k) continue;
-                    __atomic_fetch_add(&row_nnz[row], 1, __ATOMIC_RELAXED);
-                    if (row != k)
-                        __atomic_fetch_add(&row_nnz[k], 1, __ATOMIC_RELAXED);
-                }
-            }
-            Lrm_.resize(n_eig, n_eig);
-            int* Lrm_outer = Lrm_.outerIndexPtr();
-            Lrm_outer[0] = 0;
-            for (Eigen::Index i = 0; i < n_eig; ++i)
-                Lrm_outer[i + 1] = Lrm_outer[i] + row_nnz[i];
-            const int total_nnz = Lrm_outer[n_eig];
-            Lrm_.resizeNonZeros(total_nnz);
-            int* Lrm_inner = Lrm_.innerIndexPtr();
-            double* Lrm_vals = Lrm_.valuePtr();
-            std::vector<int> row_pos(static_cast<size_t>(n_eig));
-            std::copy(Lrm_outer, Lrm_outer + n_eig, row_pos.begin());
-            #pragma omp parallel for schedule(static)
-            for (Eigen::Index k = 0; k < n_eig; ++k) {
-                for (int p = L_outer[k]; p < L_outer[k + 1]; ++p) {
-                    const int row = L_inner[p];
-                    if (row < k) continue;
-                    const double v = L_vals[p];
-                    const int slot = __atomic_fetch_add(
-                        &row_pos[row], 1, __ATOMIC_RELAXED);
-                    Lrm_inner[slot] = static_cast<int>(k);
-                    Lrm_vals[slot] = v;
-                    if (row != k) {
-                        const int slot2 = __atomic_fetch_add(
-                            &row_pos[k], 1, __ATOMIC_RELAXED);
-                        Lrm_inner[slot2] = row;
-                        Lrm_vals[slot2] = v;
-                    }
-                }
-            }
-            #pragma omp parallel
-            {
-                std::vector<std::pair<int, double>> kv;
-                #pragma omp for schedule(static)
-                for (Eigen::Index i = 0; i < n_eig; ++i) {
-                    const int rs = Lrm_outer[i], re = Lrm_outer[i + 1];
-                    if (re - rs < 2) continue;
-                    kv.clear();
-                    kv.reserve(re - rs);
-                    for (int p = rs; p < re; ++p)
-                        kv.emplace_back(Lrm_inner[p], Lrm_vals[p]);
-                    std::sort(kv.begin(), kv.end(),
-                              [](const auto& a, const auto& b) {
-                                  return a.first < b.first;
-                              });
-                    for (int p = rs; p < re; ++p) {
-                        Lrm_inner[p] = kv[p - rs].first;
-                        Lrm_vals[p] = kv[p - rs].second;
-                    }
-                }
-            }
+            Lrm_.resize(Lcsc.rows(), Lcsc.cols());
+            detail::reflect_lower_to_csr(Lcsc, Lrm_.outerIndexPtr(),
+                [](Eigen::Index i) { return static_cast<int>(i); },
+                [&](int nnz) {
+                    Lrm_.resizeNonZeros(nnz);
+                    return std::pair{Lrm_.innerIndexPtr(), Lrm_.valuePtr()};
+                },
+                [](const auto& a, const auto& b) { return a.first < b.first; });
             Lrm_.makeCompressed();
             fallback_needs_fp32_cast = op_fp32_;
         }

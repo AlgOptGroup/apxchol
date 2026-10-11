@@ -29,7 +29,9 @@ Csr serial_reference(const Matrix& L, const std::vector<node_index>& perm) {
         }
     ref.ptr.push_back(0);
     for (auto& row : rows) {
-        std::sort(row.begin(), row.end());
+        std::ranges::sort(row, {}, [](const auto& entry) {
+            return std::pair{entry.first, std::bit_cast<std::uint64_t>(entry.second)};
+        });
         for (auto [index, value] : row) { ref.idx.push_back(index); ref.vals.push_back(value); }
         ref.ptr.push_back(static_cast<int>(ref.idx.size()));
     }
@@ -214,18 +216,7 @@ TEST(PermutedOperator, GeneralFallbackOrdersDuplicateCoordinatesDeterministicall
     ASSERT_FALSE(accepted(L));
     std::vector<node_index> perm(n); std::iota(perm.begin(), perm.end(), 0);
     std::shuffle(perm.begin(), perm.end(), rng);
-    // The serial reference with each row's duplicates in value-bit order.
-    Csr ref = serial_reference(L, perm);
-    for (std::size_t r = 0; r + 1 < ref.ptr.size(); ++r) {
-        std::vector<std::pair<int, std::uint64_t>> row;
-        for (int p = ref.ptr[r]; p < ref.ptr[r + 1]; ++p)
-            row.emplace_back(ref.idx[p], std::bit_cast<std::uint64_t>(ref.vals[p]));
-        std::sort(row.begin(), row.end());
-        for (int p = ref.ptr[r]; p < ref.ptr[r + 1]; ++p) {
-            ref.idx[p] = row[p - ref.ptr[r]].first;
-            ref.vals[p] = std::bit_cast<double>(row[p - ref.ptr[r]].second);
-        }
-    }
+    const Csr ref = serial_reference(L, perm);
     const int saved = omp_get_max_threads();
     for (int team : {1, 2, 4, 8}) {
         omp_set_num_threads(team);
