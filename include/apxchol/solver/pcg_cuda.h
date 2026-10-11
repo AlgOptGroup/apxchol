@@ -143,8 +143,7 @@ public:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_state_, h_state_, sizeof(*d_state_), cudaMemcpyHostToDevice));
         if (laplacian)
             APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
-        auto precondition = [&] { precond.trsv().solve_LLt_dev(d_r_, d_z_, &d_state_->active); };
-        iteration commands{*this, precondition, bnorm};
+        iteration commands{*this, precond, bnorm};
         detail::gpu_pcg::solve(commands, std::max(max_iter, 0), 1);
 
         // The uploaded RHS is no longer needed. Reuse its touched host buffer
@@ -172,12 +171,12 @@ public:
     int spmv_lanes() const { return spmv_lanes_; }
 
 private:
-    template<class Precondition>
+    template<class Precond>
     struct iteration {
         cuda_pcg& s;
-        Precondition& apply;
+        const Precond& precond;
         double bnorm;
-        void precondition() const { apply(); }
+        void precondition() const { precond.trsv().solve_LLt_dev(s.d_r_, s.d_z_, &s.d_state_->active); }
         void finalize(unsigned mode, unsigned it, int blocks) const {
             pcg_cuda::finalize(0, s.d_part_, blocks, s.d_state_, mode, it, bnorm);
         }

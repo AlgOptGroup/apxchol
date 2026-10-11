@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <numeric>
 #include <random>
 #include <stdexcept>
 #include <vector>
@@ -125,10 +126,12 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     std::vector<double> rp(n);
     mh::scatter(r.data(), F.perm.data(), n, rp.data());
     if (lap) {
-        const double mean = mh::fold_sum(n, [&](std::size_t q) { return rp[q]; }) / n;
+        const double mean = std::accumulate(rp.begin(), rp.end(), 0.0) / n;
         for (auto& value : rp) value -= mean;
     }
-    const double scale = mh::pow2_scale(mh::fold_max_abs(rp.data(), n));
+    double max_abs = 0;
+    for (double value : rp) max_abs = std::max(max_abs, std::abs(value));
+    const double scale = mh::pow2_scale(max_abs);
     std::vector<mh::df> w(n);
     for (std::size_t q = 0; q < n; ++q) w[q] = mh::split(scale * rp[q]);
     std::vector<float> in(n), z(n, 0.0f);
@@ -148,7 +151,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     sweep(backward, true, z.data());
     for (std::size_t q = 0; q < n; ++q) rp[q] = static_cast<double>(z[q]) / scale;
     if (lap) {
-        const double mean = mh::fold_sum(n, [&](std::size_t q) { return rp[q]; }) / n;
+        const double mean = std::accumulate(rp.begin(), rp.end(), 0.0) / n;
         for (auto& value : rp) value -= mean;
     }
     Eigen::VectorXd out(r.size());

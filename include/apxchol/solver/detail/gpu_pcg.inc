@@ -4,13 +4,12 @@ enum finalize_mode : unsigned {
     kFinalizeRzInit, kFinalizeAlpha, kFinalizeCheck, kFinalizeRz
 };
 enum reduce_mode : unsigned { kReduceSum, kReduceRz };
-enum stop_reason : unsigned { kStopRunning, kStopTolerance, kStopBreakdown, kStopStagnation, kStopNonfinite };
 
 template<class Wide, class Scalar>
 struct solve_state {
-    Wide rz, rr, thr, prev, pap;
+    Wide rz, rr, thr, prev;
     Scalar alpha, beta;
-    unsigned active, iters, stop, pad;
+    unsigned active, iters;
 };
 
 // The arithmetic policy preserves each backend's precision and stopping
@@ -19,29 +18,28 @@ template<class Math, class State, class Wide>
 APXCHOL_GPU_FUNCTION State advance(Math math, State st, unsigned mode, Wide t,
                      unsigned iteration, unsigned window = 0) {
     if (mode == kFinalizeRzInit) {
-        if (!math.valid_initial(t)) { st.active = 0; st.stop = kStopNonfinite; }
+        if (!math.valid_initial(t)) st.active = 0;
         else { st.rz = t; st.beta = 0; }
     } else if (mode == kFinalizeAlpha) {
-        st.pap = t;
-        if (!math.positive(t)) { st.active = 0; st.stop = kStopBreakdown; }
+        if (!math.positive(t)) st.active = 0;
         else {
             st.alpha = math.ratio(st.rz, t);
-            if (!math.accept_ratio(st.alpha)) { st.active = 0; st.stop = kStopNonfinite; }
+            if (!math.accept_ratio(st.alpha)) st.active = 0;
         }
     } else if (mode == kFinalizeCheck) {
         st.rr = t;
         st.iters = iteration;
-        if (!math.valid_residual(t)) { st.active = 0; st.stop = kStopNonfinite; }
-        else if (math.converged(t, st.thr)) { st.active = 0; st.stop = kStopTolerance; }
+        if (!math.valid_residual(t)) st.active = 0;
+        else if (math.converged(t, st.thr)) st.active = 0;
         else if (window && iteration % window == 0) {
-            if (math.stagnated(st.prev, t)) { st.active = 0; st.stop = kStopStagnation; }
+            if (math.stagnated(st.prev, t)) st.active = 0;
             else st.prev = t;
         }
     } else if (mode == kFinalizeRz) {
-        if (!math.valid_rz(t)) { st.active = 0; st.stop = kStopNonfinite; }
+        if (!math.valid_rz(t)) st.active = 0;
         else {
             const auto beta = math.ratio(t, st.rz);
-            if (!math.accept_ratio(beta)) { st.active = 0; st.stop = kStopNonfinite; }
+            if (!math.accept_ratio(beta)) st.active = 0;
             else { st.beta = beta; st.rz = t; }
         }
     }

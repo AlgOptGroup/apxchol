@@ -266,7 +266,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   the solve/apply boundary. CUDA narrows/widens PCG vectors in the triangular
   sweeps, without separate cast kernels. Metal host/device double-float
   transforms share `solver/detail/double_float.inc`; preserve no-contraction
-  compilation and the device arithmetic probe.
+  compilation and the device arithmetic probe. Metal host norms, means and
+  vector updates use Eigen, as the CPU/CUDA routes do; the independent exit
+  residual remains FP64.
 - `solver/detail/permuted_operator.h` builds the permuted symmetric operator,
   ordering duplicate entries by value bits. Metal retains shared host factor
   dropping/transposition; CUDA's public route keeps device ownership.

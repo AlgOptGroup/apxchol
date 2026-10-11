@@ -92,7 +92,8 @@ Both predicate operations after convergence and read state after a completed
 batch (one iteration on CUDA). CUDA fuses narrowing and widening into its
 triangular sweeps. Grounded-coordinate Laplacian iterations replace Metal's
 per-iteration mean reductions; host boundary centering and the independent
-FP64 exit residual remain.
+FP64 exit residual remain. Host vector reductions and updates use Eigen
+instead of a separate fixed-block fold implementation.
 The triangular-solve dataflow state is FP32;
 its tagged representation does not provide an FP64 triangular-solve path.
 The former untested FP64-factor-storage build choice was removed rather than

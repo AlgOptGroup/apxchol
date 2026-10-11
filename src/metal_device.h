@@ -39,12 +39,10 @@ static_assert(offsetof(params, mode) == 16);
 static_assert(offsetof(params, m) == 28);
 
 using solve_state = gpu_pcg::solve_state<df32, float>;
-static_assert(sizeof(solve_state) == 64);
+static_assert(sizeof(solve_state) == 48);
 static_assert(offsetof(solve_state, thr) == 16);
-static_assert(offsetof(solve_state, pap) == 32);
-static_assert(offsetof(solve_state, alpha) == 40);
-static_assert(offsetof(solve_state, active) == 48);
-static_assert(offsetof(solve_state, stop) == 56);
+static_assert(offsetof(solve_state, alpha) == 32);
+static_assert(offsetof(solve_state, active) == 40);
 
 /// The device cannot hold a buffer. A std::bad_alloc, so callers that map
 /// out-of-memory report it as one; what() names the buffer.

@@ -195,23 +195,13 @@ struct metal_solver::impl {
         }
     }
 
-    // ||bp - A' xp|| (permuted vectors), thread-count independent.
-    double residual_norm(const double* bp, const double* xp, std::vector<double>& work) const {
-        work.resize(n);
-        spmv(xp, work.data());
-        const double* y = work.data();
-        return std::sqrt(mh::fold_sum(n, [=](std::size_t i) {
-            const double d = bp[i] - y[i];
-            return d * d;
-        }));
+    double residual_norm(const Eigen::VectorXd& bp, const Eigen::VectorXd& xp,
+                         Eigen::VectorXd& work) const {
+        spmv(xp.data(), work.data());
+        return (bp - work).norm();
     }
 
-    void centre(double* xp) const {
-        const double mean = mh::fold_sum(n, [=](std::size_t i) { return xp[i]; }) /
-                            static_cast<double>(n);
-        #pragma omp parallel for schedule(static)
-        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) xp[i] -= mean;
-    }
+    void centre(Eigen::VectorXd& x) const { x.array() -= x.mean(); }
 };
 
 void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp) {
@@ -363,7 +353,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     checkpoint& cp = result.timings;
     cp.descend("pcg");
     cp.tick();
-    const double bnorm = std::sqrt(mh::fold_sum_squares(b.data(), s.n));
+    const double bnorm = b.norm();
     if (bnorm == 0.0) { cp.ascend(); return; }
     if (max_iter == 0 && (x0 == nullptr || x0->isZero(0.0))) {
         result.residual = 1.0;
@@ -372,11 +362,11 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     }
 
     const node_index* perm = s.F.perm.data();
-    std::vector<double> bp(s.n), xp(s.n, 0.0), work(s.n);
+    Eigen::VectorXd bp(s.n), xp = Eigen::VectorXd::Zero(s.n), work(s.n);
     mh::scatter(b.data(), perm, s.n, bp.data());
     auto finish = [&] {
-        if (s.laplacian) s.centre(xp.data());
-        result.residual = s.residual_norm(bp.data(), xp.data(), work) / bnorm;
+        if (s.laplacian) s.centre(xp);
+        result.residual = s.residual_norm(bp, xp, work) / bnorm;
         mh::gather(xp.data(), perm, s.n, result.x.data());
         cp("exit_check");
         cp.ascend();
@@ -385,16 +375,14 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     if (x0 != nullptr) {
         mh::scatter(x0->data(), perm, s.n, xp.data());
         s.spmv(xp.data(), work.data());
-        #pragma omp parallel for schedule(static)
-        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(s.n); ++i)
-            work[i] = bp[i] - work[i];
+        work = bp - work;
     } else {
         work = bp;
     }
-    const double initial = std::sqrt(mh::fold_sum_squares(work.data(), s.n)) / bnorm;
+    const double initial = work.norm() / bnorm;
     if (initial < tol || max_iter == 0) { finish(); return; }
-    if (s.laplacian) s.centre(work.data());
-    const double max_abs = mh::fold_max_abs(work.data(), s.n);
+    if (s.laplacian) s.centre(work);
+    const double max_abs = work.cwiseAbs().maxCoeff();
     if (max_abs == 0.0) { finish(); return; }
     const double scale = mh::pow2_scale(max_abs);
     mh::pack(work.data(), s.n, scale, s.device->r());
@@ -409,8 +397,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     s.device->solve(static_cast<std::uint32_t>(max_iter), window, s.check_every);
     cp("device");
     mh::unpack(s.device->x(), s.n, scale, work.data());
-    #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(s.n); ++i) xp[i] += work[i];
+    xp += work;
     result.iterations = state.iters;
     finish();
 }
@@ -421,11 +408,8 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
         throw std::invalid_argument("metal_solver::apply: r length mismatch");
     if (!r.allFinite()) throw std::invalid_argument("metal_solver::apply: r contains a non-finite value");
     const node_index* perm = s.F.perm.data();
-    const double mean = s.laplacian
-        ? mh::fold_sum(s.n, [&](std::size_t i) { return r[i]; }) / s.n : 0;
-    double max_abs = 0;
-    for (Eigen::Index i = 0; i < r.size(); ++i)
-        max_abs = std::max(max_abs, std::abs(r[i] - mean));
+    const double mean = s.laplacian ? r.mean() : 0;
+    const double max_abs = (r.array() - mean).abs().maxCoeff();
     Eigen::VectorXd z = Eigen::VectorXd::Zero(r.size());
     if (max_abs == 0.0) return z;
     const double scale = mh::pow2_scale(max_abs);
@@ -439,7 +423,7 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     s.device->apply();
     const float* p = s.device->p();
     const double mean_z = s.laplacian
-        ? mh::fold_sum(s.n, [&](std::size_t i) { return double(p[i]); }) / s.n : 0;
+        ? Eigen::Map<const Eigen::VectorXf>(p, s.n).cast<double>().mean() : 0;
     #pragma omp parallel for schedule(static)
     for (Eigen::Index i = 0; i < r.size(); ++i)
         z[i] = (double(p[perm[i]]) - mean_z) / scale;

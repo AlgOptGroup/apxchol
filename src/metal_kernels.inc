@@ -22,7 +22,7 @@ struct Params {
 static_assert(sizeof(Params) == 32, "Params mirrors detail::metal::params");
 
 using SolveState = solve_state<df, float>;
-static_assert(sizeof(SolveState) == 64, "SolveState mirrors detail::metal::solve_state");
+static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve_state");
 
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];

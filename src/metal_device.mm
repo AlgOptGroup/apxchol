@@ -270,7 +270,7 @@ struct engine::impl {
     bool operator_df = false;
     id<MTLBuffer> op_ptr = nil, op_col = nil, op_hi = nil, op_lo = nil;
     prepared_tri fwd, bwd;
-    id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, cols = nil;
+    id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
     id<MTLBuffer> tags = nil;
 
     params base() const {
@@ -308,7 +308,7 @@ struct engine::impl {
         prm.mode = mode;
         prm.iter = iter;
         prm.window = window;
-        encode_kernel(enc, ctx->pipes.finalize, prm, {partial, cols}, 1, kTreeLanes);
+        encode_kernel(enc, ctx->pipes.finalize, prm, {partial, state_buffer}, 1, kTreeLanes);
     }
 
     void encode_tri(id<MTLComputeCommandEncoder> enc, const prepared_tri& t, bool forward) const {
@@ -319,7 +319,7 @@ struct engine::impl {
         [enc setBuffer:t.val offset:0 atIndex:4];
         [enc setBuffer:r offset:0 atIndex:6];
         [enc setBuffer:z offset:0 atIndex:7];
-        [enc setBuffer:cols offset:0 atIndex:8];
+        [enc setBuffer:state_buffer offset:0 atIndex:8];
         [enc setBuffer:tags offset:0 atIndex:10];
         params prm = base();
         prm.count = t.tag_count;
@@ -346,7 +346,7 @@ struct engine::impl {
 
     void encode_p_update(id<MTLComputeCommandEncoder> enc) const {
         const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
-        encode_kernel(enc, ctx->pipes.p_update, base(), {p, z, cols}, (n + threads - 1) / threads, threads);
+        encode_kernel(enc, ctx->pipes.p_update, base(), {p, z, state_buffer}, (n + threads - 1) / threads, threads);
     }
 
     id<MTLComputeCommandEncoder> encoder = nil;
@@ -376,22 +376,22 @@ struct engine::impl {
     }
     void precondition() const { encode_precond(encoder); }
     void direction(unsigned it) const {
-        encode_kernel(encoder, ctx->pipes.reduce, base(), {r, z, partial, cols}, groups, kTreeLanes);
+        encode_kernel(encoder, ctx->pipes.reduce, base(), {r, z, partial, state_buffer}, groups, kTreeLanes);
         encode_finalize(encoder, it ? kFinalizeRz : kFinalizeRzInit, it, window);
         encode_p_update(encoder);
     }
     void multiply(unsigned it) const {
         encode_kernel(encoder, ctx->pipes.spmv[operator_df ? 1 : 0], base(),
-                      {op_ptr, op_col, op_hi, op_lo != nil ? op_lo : op_hi, p, ap, partial, cols}, groups, kTreeLanes);
+                      {op_ptr, op_col, op_hi, op_lo != nil ? op_lo : op_hi, p, ap, partial, state_buffer}, groups, kTreeLanes);
         encode_finalize(encoder, kFinalizeAlpha, it, window);
     }
     void update_residual(unsigned it) const {
-        encode_kernel(encoder, ctx->pipes.update_xr, base(), {x, r, p, ap, partial, cols}, groups, kTreeLanes);
+        encode_kernel(encoder, ctx->pipes.update_xr, base(), {x, r, p, ap, partial, state_buffer}, groups, kTreeLanes);
         encode_finalize(encoder, kFinalizeCheck, it, window);
     }
 
     bool active() const {
-        return static_cast<const solve_state*>([cols contents])->active != 0;
+        return static_cast<const solve_state*>([state_buffer contents])->active != 0;
     }
 
     void zero_grounded_row() const {
@@ -437,11 +437,11 @@ engine::engine(const operator_arrays& op, const tri_arrays& fwd, const tri_array
         s.p = upload(dev, nullptr, entries * sizeof(float));
         s.z = upload(dev, nullptr, entries * sizeof(float));
         s.partial = upload(dev, nullptr, static_cast<std::size_t>(s.groups) * sizeof(df32));
-        s.cols = upload(dev, nullptr, sizeof(solve_state));
+        s.state_buffer = upload(dev, nullptr, sizeof(solve_state));
         s.tags = upload(dev, nullptr, std::max({entries, std::size_t(s.fwd.tag_count),
             std::size_t(s.bwd.tag_count)}) * sizeof(std::uint32_t));
         ok = s.x != nil && s.r != nil && s.ap != nil && s.p != nil && s.z != nil &&
-             s.partial != nil && s.cols != nil &&
+             s.partial != nil && s.state_buffer != nil &&
              s.tags != nil;
     }
     if (!ok) throw device_memory_error("Metal buffer allocation failed for the PCG vectors");
@@ -456,7 +456,7 @@ engine::~engine() {
 df32* engine::r() noexcept { return static_cast<df32*>([impl_->r contents]); }
 df32* engine::x() noexcept { return static_cast<df32*>([impl_->x contents]); }
 float* engine::p() noexcept { return static_cast<float*>([impl_->p contents]); }
-solve_state& engine::state() noexcept { return *static_cast<solve_state*>([impl_->cols contents]); }
+solve_state& engine::state() noexcept { return *static_cast<solve_state*>([impl_->state_buffer contents]); }
 
 factor_statistics engine::factor_stats() const {
     return {impl_->fwd.levels, impl_->bwd.levels, impl_->fwd.stages.size() + unsigned(impl_->m != 0), impl_->bwd.stages.size() + unsigned(impl_->m != 0)};

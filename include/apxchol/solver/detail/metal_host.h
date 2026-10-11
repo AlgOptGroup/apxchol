@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <vector>
 
 #include <omp.h>
 
@@ -40,39 +39,6 @@ inline double pow2_scale(double max_abs) { return std::ldexp(1.0, -std::ilogb(ma
 inline df split_saturated(double v) {
     constexpr double kMax = static_cast<double>(std::numeric_limits<float>::max());
     return split(std::min(v, kMax));
-}
-
-// ── Thread-count-independent fp64 folds ─────────────────────────────────────
-
-/// Block size of the host folds: blocks are summed serially, block partials
-/// in block order, so the result is the same at every OpenMP team size.
-inline constexpr std::size_t kFoldBlock = 4096;
-
-template <class Term>
-double fold_sum(std::size_t n, Term&& term) {
-    const std::size_t blocks = (n + kFoldBlock - 1) / kFoldBlock;
-    std::vector<double> part(blocks, 0.0);
-    #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t b = 0; b < static_cast<std::ptrdiff_t>(blocks); ++b) {
-        const std::size_t lo = static_cast<std::size_t>(b) * kFoldBlock;
-        const std::size_t hi = std::min(n, lo + kFoldBlock);
-        double s = 0.0;
-        for (std::size_t i = lo; i < hi; ++i) s += term(i);
-        part[static_cast<std::size_t>(b)] = s;
-    }
-    double s = 0.0;
-    for (const double v : part) s += v;
-    return s;
-}
-
-inline double fold_sum_squares(const double* v, std::size_t n) {
-    return fold_sum(n, [v](std::size_t i) { return v[i] * v[i]; });
-}
-
-inline double fold_max_abs(const double* v, std::size_t n) {
-    double m = 0.0;
-    for (std::size_t i = 0; i < n; ++i) m = std::max(m, std::fabs(v[i]));
-    return m;
 }
 
 // Permutation and vector packing.
