@@ -51,13 +51,11 @@ namespace apxchol {
 namespace detail {
 struct cuda_pcg_math {
     double bnorm;
-    bool valid_initial(double) const { return true; }
     bool positive(double x) const { return x > 0; }
     bool valid_residual(double rr) const { return std::isfinite(std::sqrt(rr) / bnorm); }
     bool valid_rz(double x) const { return std::isfinite(x) && x != 0; }
     bool accept_ratio(double) const { return true; }
     double ratio(double x, double y) const { return x / y; }
-    double mean(double) const { return 0; }
     bool converged(double rr, double tolerance) const { return std::sqrt(rr) / bnorm < tolerance; }
     bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
 };
@@ -204,18 +202,18 @@ public:
         for (int it = 0; it < max_iter; ++it) {
             if (fp32_op_) pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_f32_, d_p_, d_Ap_, d_part_, spmv_lanes_);
             else          pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_,     d_p_, d_Ap_, d_part_, spmv_lanes_);
-            state = pcg::advance(math, state, pcg::kFinalizeAlpha, reduce(spmv_blocks_), 0.0, it + 1, 0, false);
+            state = pcg::advance(math, state, pcg::kFinalizeAlpha, reduce(spmv_blocks_), it + 1);
             if (!state.active) break;
 
             pcg_cuda::update_xr(0, n_, d_x_, d_p_, d_r_, d_Ap_, state.alpha, d_part_);
-            state = pcg::advance(math, state, pcg::kFinalizeCheck, reduce(vec_blocks_), 0.0, it + 1, 0, false);
+            state = pcg::advance(math, state, pcg::kFinalizeCheck, reduce(vec_blocks_), it + 1);
             if (!state.active) break;
 
             precond.trsv().solve_LLt_dev(d_r_, d_z_);
             if (laplacian)
                 APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
             pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
-            state = pcg::advance(math, state, pcg::kFinalizeRz, reduce(vec_blocks_), 0.0, it + 1, 0, false);
+            state = pcg::advance(math, state, pcg::kFinalizeRz, reduce(vec_blocks_), it + 1);
             if (!state.active) break;
             pcg_cuda::update_p(0, n_, d_p_, d_z_, state.beta);
         }

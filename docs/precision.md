@@ -50,7 +50,7 @@ implementation and is checked by the GPU finalization tests.
 
 ## Apple Metal PCG
 
-`apxchol::metal_solver` (`APXCHOL_USE_METAL=ON`, macOS) is an explicit opt-in;
+`apxchol::metal_solver` (`APXCHOL_DEVICE=METAL`, macOS) is an explicit opt-in;
 `solve(..., opts)` selects it for an explicit GPU request. Automatic selection
 and `cpu_solver` stay on CPU. Each call solves one RHS; repeated calls on a
 `metal_solver` reuse its factor, operator and device workspace.

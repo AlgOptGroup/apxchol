@@ -44,7 +44,7 @@ Eigen::VectorXd z = solver.apply(r);
 CPU solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
-With `-DAPXCHOL_USE_METAL=ON` (macOS), `--backend gpu` and
+With `-DAPXCHOL_DEVICE=METAL` (macOS), `--backend gpu` and
 `solve_options::backend = solve_backend::gpu` select the Apple GPU.
 Automatic selection stays on CPU. Metal uses host factorization, FP32 factor
 storage and double-float GPU recurrences; explicit FP16 storage is unsupported.
@@ -73,8 +73,7 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 
 | CMake option | Purpose |
 |---|---|
-| `APXCHOL_USE_CUDA=ON` | Device-owned setup, dataflow triangular solves and GPU PCG; core links only `cudart` |
-| `APXCHOL_USE_METAL=ON` | Apple-GPU PCG (`metal_solver`); macOS only, exclusive with CUDA |
+| `APXCHOL_DEVICE=CPU` | Build for `CPU` (default), `CUDA`, or `METAL` (macOS). GPU builds also support CPU solves |
 | `APXCHOL_POOL_FP32=OFF` | fp64 residual-pool weights instead of default fp32 |
 | `APXCHOL_64BIT_EDGE_INDICES=ON` | Wide factor/pool offsets |
 | `APXCHOL_64BIT_NODE_INDICES=ON` | Wide vertices and offsets |

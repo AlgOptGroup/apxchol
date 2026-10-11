@@ -16,16 +16,9 @@ struct solve_state {
 // The arithmetic policy preserves each backend's precision and stopping
 // comparison. The recurrence and its state transitions have one implementation.
 template<class Math, class State, class Wide>
-inline State advance(Math math, State st, unsigned mode, Wide t, Wide sum_r,
-                     unsigned iteration, unsigned window, bool laplacian) {
-    if (mode == kFinalizeMuR) {
-        st.mu_r = laplacian ? math.mean(t) : 0;
-    } else if (mode == kFinalizeMuZ) {
-        st.mu_z = laplacian ? math.mean(t) : 0;
-    } else if (mode == kFinalizeRzInit) {
-        if (!math.valid_initial(t)) { st.active = 0; st.stop = kStopNonfinite; }
-        else { st.rz = t; st.beta = 0; }
-    } else if (mode == kFinalizeAlpha) {
+inline State advance(Math math, State st, unsigned mode, Wide t,
+                     unsigned iteration, unsigned window = 0) {
+    if (mode == kFinalizeAlpha) {
         st.pap = t;
         if (!math.positive(t)) { st.active = 0; st.stop = kStopBreakdown; }
         else {
@@ -41,7 +34,6 @@ inline State advance(Math math, State st, unsigned mode, Wide t, Wide sum_r,
             if (math.stagnated(st.prev, t)) { st.active = 0; st.stop = kStopStagnation; }
             else st.prev = t;
         }
-        if (st.active && laplacian) st.mu_r = math.mean(sum_r);
     } else if (mode == kFinalizeRz) {
         if (!math.valid_rz(t)) { st.active = 0; st.stop = kStopNonfinite; }
         else {
@@ -53,97 +45,91 @@ inline State advance(Math math, State st, unsigned mode, Wide t, Wide sum_r,
     return st;
 }
 
-template<class Wide, class Direction, class Entry, class Index = unsigned>
-struct pcg_arrays {
-    APXCHOL_GPU_BUFFER(Wide) x = nullptr;
-    APXCHOL_GPU_BUFFER(const Wide) r = nullptr;
-    APXCHOL_GPU_BUFFER(Wide) r_out = nullptr;
-    APXCHOL_GPU_BUFFER(const Direction) p = nullptr;
-    APXCHOL_GPU_BUFFER(Direction) p_out = nullptr;
-    APXCHOL_GPU_BUFFER(const Wide) ap = nullptr;
-    APXCHOL_GPU_BUFFER(Wide) ap_out = nullptr;
-    APXCHOL_GPU_BUFFER(const Direction) z = nullptr;
-    APXCHOL_GPU_BUFFER(const Index) ptr = nullptr;
-    APXCHOL_GPU_BUFFER(const Index) col = nullptr;
-    APXCHOL_GPU_BUFFER(const Entry) hi = nullptr;
-    APXCHOL_GPU_BUFFER(const Entry) lo = nullptr;
-    APXCHOL_GPU_BUFFER(Wide) partial = nullptr;
-    unsigned row_lane = 0, row_lanes = 1;
-};
-// A uniform loop range for all threads participating in a reduction. offset
-// selects a row/lane; limit clips a partial group without changing its fixed
-// loop bound. The adapter owns the reduction tree.
+// Keep each backend's index width and fixed group bounds. limit clips the
+// final partial group; all lanes still participate in the row reduction.
 template<class Index>
 struct pcg_work {
     Index first, last, stride, offset, limit;
 };
 
-template<class Memory, class Index>
-APXCHOL_GPU_FUNCTION void pcg_spmv(Memory m, pcg_work<Index> work) {
-    using Wide = typename Memory::wide;
-    const auto a = m.arrays;
+template<class Wide>
+struct pcg_sums { Wide norm, sum; };
+
+template<int Lanes, class Math, class Index, class Entry, class Offset>
+APXCHOL_GPU_FUNCTION typename Math::wide pcg_spmv(
+    Math math, APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
+    APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const typename Math::scalar) p,
+    APXCHOL_GPU_BUFFER(typename Math::wide) ap, pcg_work<Index> work, unsigned lane,
+    bool active = true, APXCHOL_GPU_BUFFER(const Entry) lo = nullptr) {
+    using Wide = typename Math::wide;
     Wide pap = Wide(0);
-    if (m.active()) {
+    if (active) {
         for (auto base = work.first; base < work.last; base += work.stride) {
             const auto row = base + work.offset;
             Wide sum = Wide(0);
             if (row < work.limit) {
-                auto e = a.ptr[row];
-                e += a.row_lane;
-                const auto end = a.ptr[row + 1];
-                for (; e < end; e += a.row_lanes)
-                    sum = m.add_entry(sum, e, a.p[a.col[e]]);
+                auto e = ptr[row];
+                e += lane;
+                const auto end = ptr[row + 1];
+                for (; e < end; e += Lanes)
+                    sum = math.add_entry(sum, hi, lo, e, p[col[e]]);
             }
-            sum = m.sum_row(sum);
-            if (row < work.limit && a.row_lane == 0) {
-                a.ap_out[row] = sum;
-                pap = m.add_product(pap, sum, a.p[row]);
+            sum = math.sum_row(sum);
+            if (row < work.limit && lane == 0) {
+                ap[row] = sum;
+                pap = math.add_product(pap, sum, p[row]);
             }
         }
     }
-    m.publish(pap, Wide(0));
+    return pap;
 }
 
-template<class Memory, class Index>
-APXCHOL_GPU_FUNCTION void pcg_update_xr(Memory m, pcg_work<Index> work) {
-    using Wide = typename Memory::wide;
-    const auto a = m.arrays;
-    Wide rr = Wide(0), rs = Wide(0);
-    if (m.active()) {
-        const auto alpha = m.alpha();
+template<class Math, class Index>
+APXCHOL_GPU_FUNCTION pcg_sums<typename Math::wide> pcg_update_xr(
+    Math math, APXCHOL_GPU_BUFFER(typename Math::wide) x,
+    APXCHOL_GPU_BUFFER(const typename Math::scalar) p, APXCHOL_GPU_BUFFER(typename Math::wide) r,
+    APXCHOL_GPU_BUFFER(const typename Math::wide) ap, typename Math::scalar alpha,
+    pcg_work<Index> work, bool sum_residual = false, bool active = true) {
+    using Wide = typename Math::wide;
+    pcg_sums<Wide> sums{Wide(0), Wide(0)};
+    if (active)
         for (auto i = work.first + work.offset; i < work.last; i += work.stride) {
             if (i >= work.limit) break;
-            a.x[i] = m.add_product(a.x[i], alpha, a.p[i]);
-            const auto r = m.subtract_product(a.r[i], a.ap[i], alpha);
-            a.r_out[i] = r;
-            rr = m.add_product(rr, r, r);
-            rs = m.residual_sum(rs, r);
+            x[i] = math.add_product(x[i], alpha, p[i]);
+            const auto value = math.subtract_product(r[i], ap[i], alpha);
+            r[i] = value;
+            sums.norm = math.add_product(sums.norm, value, value);
+            if (sum_residual) sums.sum = math.add(sums.sum, value);
         }
-    }
-    m.publish(rr, rs);
+    return sums;
 }
 
-template<class Memory, class Index>
-APXCHOL_GPU_FUNCTION void pcg_reduce(Memory m, pcg_work<Index> work) {
-    using Wide = typename Memory::wide;
-    const auto a = m.arrays;
+template<class Math, class Index>
+APXCHOL_GPU_FUNCTION typename Math::wide pcg_reduce(
+    Math math, APXCHOL_GPU_BUFFER(const typename Math::wide) r,
+    APXCHOL_GPU_BUFFER(const typename Math::scalar) z, pcg_work<Index> work,
+    unsigned mode = kReduceRz, typename Math::scalar mean_z = 0, bool active = true) {
+    using Wide = typename Math::wide;
     Wide sum = Wide(0);
-    if (m.active())
+    if (active)
         for (auto i = work.first + work.offset; i < work.last; i += work.stride) {
             if (i >= work.limit) break;
-            sum = m.add(sum, m.reduction_term(i));
+            if (mode == kReduceSumR) sum = math.add(sum, r[i]);
+            else if (mode == kReduceSumZ) sum = math.add(sum, math.from_scalar(z[i]));
+            else sum = math.add_product(sum, r[i], z[i] - mean_z);
         }
-    m.publish(sum, Wide(0));
+    return sum;
 }
 
-template<class Memory, class Index>
-APXCHOL_GPU_FUNCTION void pcg_update_p(Memory m, pcg_work<Index> work) {
-    if (!m.active()) return;
-    const auto a = m.arrays;
-    const auto beta = m.beta();
+template<class Math, class Index>
+APXCHOL_GPU_FUNCTION void pcg_update_p(
+    Math math, APXCHOL_GPU_BUFFER(typename Math::scalar) p,
+    APXCHOL_GPU_BUFFER(const typename Math::scalar) z, typename Math::scalar beta,
+    pcg_work<Index> work, typename Math::scalar mean_z = 0, bool active = true) {
+    if (!active) return;
     for (auto i = work.first + work.offset; i < work.last; i += work.stride) {
         if (i >= work.limit) break;
-        a.p_out[i] = m.direction(a.z[i], a.p[i], beta);
+        p[i] = math.direction(z[i] - mean_z, p[i], beta);
     }
 }
 

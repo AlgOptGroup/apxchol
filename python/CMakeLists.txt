@@ -8,6 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
 # Repo root (this CMakeLists lives in python/).
 set(APX_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+include(${APX_ROOT}/cmake/apxchol_device.cmake)
+if (NOT APXCHOL_DEVICE STREQUAL "CPU")
+    message(FATAL_ERROR "The Python extension currently supports APXCHOL_DEVICE=CPU only")
+endif()
 include(${APX_ROOT}/cmake/apxchol_arch.cmake)
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND APXCHOL_ARCH_FLAG STREQUAL "-march=x86-64-v2")
     # Keep module initialization runnable on older CPUs so it can report the

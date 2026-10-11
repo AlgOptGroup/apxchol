@@ -36,7 +36,7 @@ add_executable(unit_tests
         test_metal_schedule.cpp
         test_metal_host.cpp
 )
-if (APXCHOL_USE_METAL)
+if (APXCHOL_DEVICE STREQUAL "METAL")
     target_sources(unit_tests PRIVATE test_metal.cpp)
 endif()
 
@@ -69,7 +69,7 @@ if (OpenMP_CXX_FOUND)
     set_tests_properties(factorize_reduced_team_incremental_degrees PROPERTIES
         TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=8;OMP_THREAD_LIMIT=3;OMP_DYNAMIC=FALSE")
 endif()
-if (APXCHOL_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA")
     # The CPU route must run in a fresh process with no visible CUDA devices;
     # eligible automatic/explicit GPU requests must fail without CPU fallback.
     add_test(NAME solve_routes_no_cuda_device COMMAND unit_tests
@@ -119,7 +119,7 @@ apxchol_cli_test(cli_lumping_disabled_warns path5_nearly_sddm 0
     "M-matrix lumping is disabled" --backend cpu)
 set_tests_properties(cli_lumping_disabled_warns PROPERTIES
     ENVIRONMENT "OMP_NUM_THREADS=4;APXCHOL_LUMP=0")
-if (APXCHOL_USE_CUDA AND NOT APXCHOL_64BIT_NODE_INDICES)
+if (APXCHOL_DEVICE STREQUAL "CUDA" AND NOT APXCHOL_64BIT_NODE_INDICES)
     apxchol_cli_test(cli_gpu_lumping_disabled_is_rejected path5_nearly_sddm 2
         "GPU direct CSC initialization rejected values or layout" --backend gpu)
     set_tests_properties(cli_gpu_lumping_disabled_is_rejected PROPERTIES
@@ -156,7 +156,7 @@ apxchol_cli_test(cli_retired_forward_star_no_append_is_rejected path5_pattern 10
 apxchol_cli_test(cli_backend_cpu_converges path5_sddm 0 "backend: +cpu" --backend cpu)
 apxchol_cli_test(cli_numeric_backend_is_rejected path5_sddm 105 "not in" --backend 0)
 apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backend hybrid)
-if (NOT APXCHOL_USE_CUDA AND NOT APXCHOL_USE_METAL)
+if (APXCHOL_DEVICE STREQUAL "CPU")
     apxchol_cli_test(cli_unavailable_gpu_backend_is_rejected path5_sddm 2
         "GPU route requested but GPU support is not built" --backend gpu)
 endif()

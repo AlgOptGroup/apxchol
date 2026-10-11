@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(apxchol VERSION 0.2.2 LANGUAGES CXX)
+include(cmake/apxchol_device.cmake)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -108,7 +109,6 @@ unset(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE)
 include(cmake/apxchol_openmp.cmake)
 
 # ── Build options ───────────────────────────────────
-option(APXCHOL_USE_CUDA "GPU build: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG with our own SpMV / vector kernels; links cudart only" OFF)
 option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
 option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
 option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
@@ -116,26 +116,19 @@ option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to 
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 option(APXCHOL_BUILD_TOOLS "Build the developer analysis tools (bench_setup, analyze_factor)" OFF)
-option(APXCHOL_USE_METAL "Apple GPU PCG (explicit GPU route; automatic remains CPU)" OFF)
 
 if (APXCHOL_64BIT_INDICES)
     message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
     set(APXCHOL_64BIT_EDGE_INDICES ON)
 endif()
 
-if (APXCHOL_USE_METAL)
-    if (NOT APPLE)
-        message(FATAL_ERROR "APXCHOL_USE_METAL requires an Apple platform")
-    endif()
-    if (APXCHOL_USE_CUDA)
-        message(FATAL_ERROR "APXCHOL_USE_METAL and APXCHOL_USE_CUDA are mutually exclusive")
-    endif()
+if (APXCHOL_DEVICE STREQUAL "METAL")
     # Only src/metal_device.mm is Objective-C++; OpenMP host work stays in the
     # C++ sources (FindOpenMP's flags apply to CXX only).
     enable_language(OBJCXX)
 endif()
 
-if (APXCHOL_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA")
     enable_language(CUDA)
     find_package(CUDAToolkit 13.3 REQUIRED)
     # Must be set before the target is created — CMAKE_CUDA_ARCHITECTURES is
@@ -168,22 +161,6 @@ add_library(apxchol_core
     src/factorization.cpp
     src/operator_class.cpp
     src/solve.cpp
-    # Device precision-cast kernels for the mixed-precision GPU SpTRSV. Compiled
-    # by nvcc only on the CUDA build (the .cpp TUs are host-compiled and can't
-    # host __global__).
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_cast.cu>
-    # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow), same reason.
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_dataflow.cu>
-    # GPU-resident residual topology for the opt-in block-region frontend.
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_block_frontend.cu>
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_round_shadow.cu>
-    # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
-    # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>
-    # Apple GPU PCG (metal_solver.h): C++ host side and the Objective-C++
-    # device side that compiles src/metal_kernels.inc at run time.
-    $<$<BOOL:${APXCHOL_USE_METAL}>:src/metal_solver.cpp>
-    $<$<BOOL:${APXCHOL_USE_METAL}>:src/metal_device.mm>
 )
 # The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
 # solely for the CLI and analyze_factor, and is linked on those targets.
@@ -194,7 +171,9 @@ target_include_directories(apxchol_core PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}/include
 )
 
-if (APXCHOL_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA")
+    target_sources(apxchol_core PRIVATE src/cuda_cast.cu src/cuda_dataflow.cu
+        src/cuda_block_frontend.cu src/cuda_round_shadow.cu src/cuda_pcg_kernels.cu)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_CUDA)
     # cudart only: the SpTRSV kernels, the GPU-resident PCG's SpMV / vector
     # kernels and its reductions are all ours; no cuSPARSE or cuBLAS.
@@ -202,7 +181,8 @@ if (APXCHOL_USE_CUDA)
     set_target_properties(apxchol_core PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
 endif()
 
-if (APXCHOL_USE_METAL)
+if (APXCHOL_DEVICE STREQUAL "METAL")
+    target_sources(apxchol_core PRIVATE src/metal_solver.cpp src/metal_device.mm)
     target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_METAL)
     set_source_files_properties(src/metal_device.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
     set_target_properties(apxchol_core PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)

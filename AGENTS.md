@@ -140,7 +140,9 @@ choices, retired knobs, and measurements belong in
   that baseline retires.
 
 
-- `APXCHOL_USE_METAL=ON` (Apple only; exclusive with CUDA): single-RHS
+- `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend (default CPU).
+  GPU builds retain CPU solves. Invalid or removed boolean options fail configuration.
+- `APXCHOL_DEVICE=METAL` (macOS): single-RHS
   `apxchol::metal_solver` PCG with factor and workspace reuse.
   `src/metal_device.mm` is the only Objective-C++ source (no Eigen, no OpenMP);
   it compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
@@ -169,7 +171,7 @@ choices, retired knobs, and measurements belong in
   (`chol`, `L`, `D`) retain FP32, matching C++ factor values; CPU PCG uses FP64
   vectors and arithmetic, including with FP32 inputs.
 
-- `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
+- `APXCHOL_DEVICE=CUDA`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
   use C++23, requiring CUDA Toolkit 13.3+ and CMake 4.4+. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
   competitors independently require cuSPARSE/cuBLAS; distinguish their driver
@@ -257,6 +259,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - CUDA and Metal share PCG vector loops and scalar state transitions in
   `solver/detail/gpu_pcg.inc`. Backend adapters retain arithmetic precision,
   stopping comparisons, reduction trees, index widths and launch ownership.
+  Shared operations take their buffers directly; Metal owns its centering stages.
 - `solver/detail/permuted_operator.h` builds the permuted symmetric operator,
   ordering duplicate entries by value bits. Metal retains shared host factor
   dropping/transposition; CUDA's public route keeps device ownership.

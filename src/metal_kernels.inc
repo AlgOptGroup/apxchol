@@ -94,47 +94,32 @@ inline float2 fold_lanes(threadgroup const float2* sh) {
     return t;
 }
 
-struct pcg_memory {
+struct pcg_math {
     using wide = float2;
-    pcg_arrays<float2, float, float> arrays;
-    uint group, groups, lane;
-    threadgroup float2* scratch;
-    device const SolveState* state;
-    bool two_sums = false;
-
-    pcg_memory(uint group_, uint groups_, uint lane_,
-               threadgroup float2* scratch_, device const SolveState* state_)
-        : group(group_), groups(groups_), lane(lane_), scratch(scratch_), state(state_) {}
-
-    bool active() const { return state->active != 0; }
-    float alpha() const { return state->alpha; }
-    float beta() const { return state->beta; }
+    using scalar = float;
     float2 add(float2 a, float2 b) const { return df_add(a, b); }
+    float2 from_scalar(float a) const { return float2(a, 0); }
     float2 add_product(float2 sum, float a, float b) const { return df_add(sum, two_prod(a, b)); }
     float2 add_product(float2 sum, float2 a, float b) const { return df_add(sum, df_mul_f(a, b)); }
     float2 add_product(float2 sum, float2 a, float2 b) const { return df_add(sum, df_mul(a, b)); }
     float2 subtract_product(float2 a, float2 b, float c) const { return df_add(a, df_neg(df_mul_f(b, c))); }
-    float2 residual_sum(float2 sum, float2 r) const { return df_add(sum, r); }
-    float direction(float z, float p, float beta) const { return beta == 0 ? z - state->mu_z : fma(beta, p, z - state->mu_z); }
-    float2 reduction_term(ulong i) const {
-        if (kReduceMode == kReduceSumR) return arrays.r[i];
-        if (kReduceMode == kReduceSumZ) return float2(arrays.z[i], 0);
-        return df_mul_f(arrays.r[i], arrays.z[i] - state->mu_z);
-    }
-    float2 add_entry(float2 sum, uint e, float p) const {
-        return df_add(sum, kOperatorDf ? df_mul_f(float2(arrays.hi[e], arrays.lo[e]), p) : two_prod(arrays.hi[e], p));
+    float direction(float z, float p, float beta) const { return beta == 0 ? z : fma(beta, p, z); }
+    float2 add_entry(float2 sum, device const float* hi, device const float* lo, uint e, float p) const {
+        return df_add(sum, kOperatorDf ? df_mul_f(float2(hi[e], lo[e]), p) : two_prod(hi[e], p));
     }
     float2 sum_row(float2 sum) const { return sum; }
-    void publish(float2 sum, float2 extra) const {
-        scratch[lane] = sum;
-        if (two_sums) scratch[kTreeLanes + lane] = extra;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane == 0) {
-            arrays.partial[group] = fold_lanes(scratch);
-            if (two_sums) arrays.partial[groups + group] = fold_lanes(scratch + kTreeLanes);
-        }
-    }
 };
+
+inline void publish(float2 sum, float2 extra, device float2* partial,
+                    threadgroup float2* scratch, uint lane, uint group, uint groups, bool two_sums = false) {
+    scratch[lane] = sum;
+    if (two_sums) scratch[kTreeLanes + lane] = extra;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0) {
+        partial[group] = fold_lanes(scratch);
+        if (two_sums) partial[groups + group] = fold_lanes(scratch + kTreeLanes);
+    }
+}
 
 inline pcg_work<uint> tree_work(uint n, uint group, uint lane) {
     return {group * kTreeRows, (group + 1) * kTreeRows, kTreeLanes, lane, n};
@@ -147,9 +132,8 @@ kernel void spmv_pap(constant Params& P [[buffer(0)]],
                      device float2* partial [[buffer(7)]], device const SolveState& state [[buffer(8)]],
                      uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]]) {
     threadgroup float2 scratch[kTreeLanes];
-    pcg_memory m{group, P.groups, lane, scratch, &state};
-    m.arrays.ptr = ptr; m.arrays.col = col; m.arrays.hi = hi; m.arrays.lo = lo; m.arrays.p = p; m.arrays.ap_out = ap; m.arrays.partial = partial;
-    pcg_spmv(m, tree_work(P.n, group, lane));
+    const auto sum = pcg_spmv<1>(pcg_math{}, ptr, col, hi, p, ap, tree_work(P.n, group, lane), 0, state.active, lo);
+    publish(sum, float2(0), partial, scratch, lane, group, P.groups);
 }
 
 kernel void update_xr(constant Params& P [[buffer(0)]],
@@ -158,9 +142,8 @@ kernel void update_xr(constant Params& P [[buffer(0)]],
                       device float2* partial [[buffer(5)]], device const SolveState& state [[buffer(6)]],
                       uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]]) {
     threadgroup float2 scratch[2 * kTreeLanes];
-    pcg_memory m{group, P.groups, lane, scratch, &state};
-    m.arrays.x = x; m.arrays.r = r; m.arrays.r_out = r; m.arrays.p = p; m.arrays.ap = ap; m.arrays.partial = partial; m.two_sums = true;
-    pcg_update_xr(m, tree_work(P.n, group, lane));
+    const auto sums = pcg_update_xr(pcg_math{}, x, p, r, ap, state.alpha, tree_work(P.n, group, lane), true, state.active);
+    publish(sums.norm, sums.sum, partial, scratch, lane, group, P.groups, true);
 }
 
 kernel void reduce(constant Params& P [[buffer(0)]],
@@ -168,20 +151,16 @@ kernel void reduce(constant Params& P [[buffer(0)]],
                    device float2* partial [[buffer(3)]], device const SolveState& state [[buffer(4)]],
                    uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]]) {
     threadgroup float2 scratch[kTreeLanes];
-    pcg_memory m{group, P.groups, lane, scratch, &state};
-    m.arrays.r = r; m.arrays.z = z; m.arrays.partial = partial;
-    pcg_reduce(m, tree_work(P.n, group, lane));
+    const auto sum = pcg_reduce(pcg_math{}, r, z, tree_work(P.n, group, lane), kReduceMode, state.mu_z, state.active);
+    publish(sum, float2(0), partial, scratch, lane, group, P.groups);
 }
 
 struct recurrence_math {
-    float2 inv_n;
-    bool valid_initial(float2 x) const { return isfinite(x.x); }
     bool positive(float2 x) const { return x.x > 0 && isfinite(x.x); }
     bool valid_residual(float2 x) const { return isfinite(x.x); }
     bool valid_rz(float2 x) const { return isfinite(x.x); }
     bool accept_ratio(float x) const { return isfinite(x); }
     float ratio(float2 x, float2 y) const { return df_div(x, y).x; }
-    float mean(float2 x) const { return df_mul(x, inv_n).x; }
     bool converged(float2 x, float2 threshold) const { return df_lt(x, threshold); }
     bool stagnated(float2 previous, float2 current) const { return df_lt(df_mul_f(previous, 0.25f), current); }
 };
@@ -195,23 +174,30 @@ kernel void finalize(constant Params& P [[buffer(0)]],
     const uint G = P.groups;
     const uint slots = P.mode == kFinalizeCheck ? 2 : 1;
     for (uint k = 0; k < slots; ++k) {
-        float2 acc = float2(0.0f);
-        for (uint g = l; g < G; g += kTreeLanes) acc = df_add(acc, partial[k * G + g]);
-        sh[k * kTreeLanes + l] = acc;
+        const pcg_work<uint> work{0, G, kTreeLanes, l, G};
+        sh[k * kTreeLanes + l] = pcg_reduce(pcg_math{}, partial + k * G, nullptr, work, kReduceSumR);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (l != 0 || !state.active) return;
-    state = advance(recurrence_math{float2(P.inv_n_hi, P.inv_n_lo)}, state, P.mode,
-                    fold_lanes(sh), slots == 2 ? fold_lanes(sh + kTreeLanes) : float2(0),
-                    P.iter, P.window, P.lap != 0);
+    const float2 t = fold_lanes(sh), inv_n = float2(P.inv_n_hi, P.inv_n_lo);
+    if (P.mode == kFinalizeMuR || P.mode == kFinalizeMuZ) {
+        const float mean = P.lap ? df_mul(t, inv_n).x : 0;
+        if (P.mode == kFinalizeMuR) state.mu_r = mean;
+        else state.mu_z = mean;
+    } else if (P.mode == kFinalizeRzInit) {
+        if (!isfinite(t.x)) { state.active = 0; state.stop = kStopNonfinite; }
+        else { state.rz = t; state.beta = 0; }
+    } else {
+        state = advance(recurrence_math{}, state, P.mode, t, P.iter, P.window);
+        if (P.mode == kFinalizeCheck && state.active && P.lap)
+            state.mu_r = df_mul(fold_lanes(sh + kTreeLanes), inv_n).x;
+    }
 }
 
 kernel void p_update(constant Params& P [[buffer(0)]],
                      device float* p [[buffer(1)]], device const float* z [[buffer(2)]],
                      device const SolveState& state [[buffer(3)]], uint i [[thread_position_in_grid]]) {
-    pcg_memory m{0, 0, 0, nullptr, &state};
-    m.arrays.p = p; m.arrays.p_out = p; m.arrays.z = z;
-    pcg_update_p(m, pcg_work<uint>{i, P.n, P.n, 0, P.n});
+    pcg_update_p(pcg_math{}, p, z, state.beta, pcg_work<uint>{i, P.n, P.n, 0, P.n}, state.mu_z, state.active);
 }
 
 // ---- self-test of the error-free transforms (metal_solver::available) ----
