@@ -44,12 +44,9 @@ std::string describe(NSError* error) {
 }
 
 struct pipelines {
-    id<MTLComputePipelineState> spmv[2];      // [operator double-float]
-    id<MTLComputePipelineState> update_xr;
-    id<MTLComputePipelineState> reduce;
+    id<MTLComputePipelineState> pcg[4][2];  // operation, operator double-float
     id<MTLComputePipelineState> finalize;
     id<MTLComputePipelineState> dataflow_solve[2], dataflow_init[2];
-    id<MTLComputePipelineState> p_update;
     id<MTLComputePipelineState> probe;
 };
 
@@ -62,10 +59,11 @@ struct context {
 
 id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> library,
                                           const char* name, bool forward, bool operator_df,
-                                          std::string& error) {
+                                          std::string& error, unsigned op = 0) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
     [values setConstantValue:&forward type:MTLDataTypeBool atIndex:0];
     [values setConstantValue:&operator_df type:MTLDataTypeBool atIndex:1];
+    [values setConstantValue:&op type:MTLDataTypeUInt atIndex:2];
     NSError* err = nil;
     id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]
                                        constantValues:values
@@ -125,16 +123,14 @@ context* make_context() {
             }
         }
         pipelines& p = ctx->pipes;
-        for (int df = 0; df < 2; ++df)
-            p.spmv[df] = make_pipeline(device, library, "spmv_pap", false, df != 0, error);
-        p.update_xr = make_pipeline(device, library, "update_xr", false, false, error);
-        p.reduce = make_pipeline(device, library, "reduce", false, false, error);
+        for (unsigned op = 0; op < 4; ++op)
+            for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
+                p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, error, op);
         p.finalize = make_pipeline(device, library, "finalize", false, false, error);
         for (int fwd = 0; fwd < 2; ++fwd) {
             p.dataflow_init[fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, error);
             p.dataflow_solve[fwd] = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, error);
         }
-        p.p_update = make_pipeline(device, library, "p_update", false, false, error);
         p.probe = make_pipeline(device, library, "df_probe", false, false, error);
         if (!error.empty()) {
             st.error = "Metal pipeline creation failed: " + error;
@@ -149,9 +145,9 @@ context* make_context() {
         auto threads = [](id<MTLComputePipelineState> pipe) {
             return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
         };
-        st.tree_threads = std::min({threads(p.spmv[0]), threads(p.spmv[1]), threads(p.update_xr),
-                                    threads(p.reduce), threads(p.finalize)});
-        st.row_threads = threads(p.p_update);
+        st.tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
+                                    threads(p.pcg[2][0]), threads(p.finalize)});
+        st.row_threads = threads(p.pcg[unsigned(operation::direction)][0]);
         ctx->probe_queue = [device newCommandQueue];
         if (ctx->probe_queue == nil) {
             st.error = "no Metal command queue";
@@ -285,68 +281,50 @@ struct engine::impl {
         [enc setBytes:&prm length:sizeof prm atIndex:0];
     }
 
-    static void encode_kernel(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pipe,
-                              const params& prm, std::initializer_list<id<MTLBuffer>> buffers,
-                              unsigned groups, unsigned threads) {
-        [enc setComputePipelineState:pipe];
-        set_params(enc, prm);
-        NSUInteger index = 1;
+    static void bind(id<MTLComputeCommandEncoder> enc, unsigned index,
+                     std::initializer_list<id<MTLBuffer>> buffers) {
         for (auto buffer : buffers) [enc setBuffer:buffer offset:0 atIndex:index++];
-        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
     }
 
-    void dispatch_rows(id<MTLComputeCommandEncoder> enc, std::uint32_t rows) const {
-        const std::uint32_t per = std::min(kRowThreads, ctx->status.row_threads);
-        [enc dispatchThreadgroups:MTLSizeMake((rows + per - 1) / per, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(per, 1, 1)];
+    void dispatch(id<MTLComputePipelineState> pipe, const params& prm,
+                  unsigned groups, unsigned threads) const {
+        [encoder setComputePipelineState:pipe];
+        set_params(encoder, prm);
+        [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
     }
 
-    void encode_finalize(id<MTLComputeCommandEncoder> enc, std::uint32_t mode,
-                         std::uint32_t iter, std::uint32_t window) const {
+    void finalize(unsigned mode, unsigned it) const {
         params prm = base();
         prm.mode = mode;
-        prm.iter = iter;
+        prm.iter = it;
         prm.window = window;
-        encode_kernel(enc, ctx->pipes.finalize, prm, {partial, state_buffer}, 1, kTreeLanes);
+        dispatch(ctx->pipes.finalize, prm, 1, kTreeLanes);
     }
 
-    void encode_tri(id<MTLComputeCommandEncoder> enc, const prepared_tri& t, bool forward) const {
+    void encode_tri(const prepared_tri& t, bool forward) const {
         if (!m) return;
-        const int f = forward ? 1 : 0;
-        [enc setBuffer:t.ptr offset:0 atIndex:2];
-        [enc setBuffer:t.col offset:0 atIndex:3];
-        [enc setBuffer:t.val offset:0 atIndex:4];
-        [enc setBuffer:r offset:0 atIndex:6];
-        [enc setBuffer:z offset:0 atIndex:7];
-        [enc setBuffer:state_buffer offset:0 atIndex:8];
-        [enc setBuffer:tags offset:0 atIndex:10];
+        bind(encoder, 13, {t.ptr, t.col, t.val, t.words, t.blocks, t.segments});
         params prm = base();
         prm.count = t.tag_count;
-        set_params(enc, prm);
-        [enc setComputePipelineState:ctx->pipes.dataflow_init[f]];
-        dispatch_rows(enc, t.tag_count);
-        [enc setBuffer:t.words offset:0 atIndex:9];
-        [enc setBuffer:t.blocks offset:0 atIndex:11];
-        [enc setBuffer:t.segments offset:0 atIndex:12];
-        [enc setComputePipelineState:ctx->pipes.dataflow_solve[f]];
-        for (auto step : t.stages) {
-            prm.offset = step.first;
-            set_params(enc, prm);
-            [enc dispatchThreadgroups:MTLSizeMake(step.last - step.first, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
+        dispatch(ctx->pipes.dataflow_init[forward], prm, (t.tag_count + threads - 1) / threads, threads);
+        for (auto stage : t.stages) {
+            prm.offset = stage.first;
+            dispatch(ctx->pipes.dataflow_solve[forward], prm, stage.last - stage.first, 256);
         }
     }
 
-    // Grounded-coordinate preconditioning, shared with the CUDA recurrence.
-    void encode_precond(id<MTLComputeCommandEncoder> enc) const {
-        encode_tri(enc, fwd, true);
-        encode_tri(enc, bwd, false);
+    void precondition() const {
+        encode_tri(fwd, true);
+        encode_tri(bwd, false);
     }
 
-    void encode_p_update(id<MTLComputeCommandEncoder> enc) const {
-        const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
-        encode_kernel(enc, ctx->pipes.p_update, base(), {p, z, state_buffer}, (n + threads - 1) / threads, threads);
+    void step(operation op) const {
+        const auto pipe = ctx->pipes.pcg[unsigned(op)][op == operation::multiply && operator_df];
+        const bool direction = op == operation::direction;
+        const unsigned threads = direction ? std::min(kRowThreads, ctx->status.row_threads) : kTreeLanes;
+        dispatch(pipe, base(), direction ? (n + threads - 1) / threads : groups, threads);
     }
 
     id<MTLComputeCommandEncoder> encoder = nil;
@@ -365,6 +343,8 @@ struct engine::impl {
             encoder = cb != nil && (!first || blit != nil) ? [cb computeCommandEncoder] : nil;
             if (encoder == nil) error = "Metal command buffer or encoder creation failed";
             else {
+                bind(encoder, 1, {x, r, ap, p, z, partial, state_buffer, op_ptr, op_col, op_hi,
+                                  op_lo != nil ? op_lo : op_hi, tags});
                 record();
                 [encoder endEncoding];
                 error = finish(cb);
@@ -373,21 +353,6 @@ struct engine::impl {
         }
         if (!error.empty()) throw std::runtime_error(error);
         return active();
-    }
-    void precondition() const { encode_precond(encoder); }
-    void direction(unsigned it) const {
-        encode_kernel(encoder, ctx->pipes.reduce, base(), {r, z, partial, state_buffer}, groups, kTreeLanes);
-        encode_finalize(encoder, it ? kFinalizeRz : kFinalizeRzInit, it, window);
-        encode_p_update(encoder);
-    }
-    void multiply(unsigned it) const {
-        encode_kernel(encoder, ctx->pipes.spmv[operator_df ? 1 : 0], base(),
-                      {op_ptr, op_col, op_hi, op_lo != nil ? op_lo : op_hi, p, ap, partial, state_buffer}, groups, kTreeLanes);
-        encode_finalize(encoder, kFinalizeAlpha, it, window);
-    }
-    void update_residual(unsigned it) const {
-        encode_kernel(encoder, ctx->pipes.update_xr, base(), {x, r, p, ap, partial, state_buffer}, groups, kTreeLanes);
-        encode_finalize(encoder, kFinalizeCheck, it, window);
     }
 
     bool active() const {
@@ -475,7 +440,7 @@ void engine::apply() {
     s.zero_grounded_row();
     s.submit(false, [&] {
         s.precondition();
-        s.encode_p_update(s.encoder);
+        s.step(operation::direction);
     });
 }
 

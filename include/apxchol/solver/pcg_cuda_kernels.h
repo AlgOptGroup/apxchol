@@ -9,6 +9,7 @@
 namespace apxchol::pcg_cuda {
 
 using solve_state = detail::gpu_pcg::solve_state<double, double>;
+using workspace = detail::gpu_pcg::workspace<double, double>;
 
 // Private experiment ABI. Input arrays are valid borrowed host arrays of
 // lengths n+1,nnz,nnz,n; permutation is the factor's validated bijection.
@@ -54,25 +55,10 @@ inline int spmv_lanes_for(double avg_nnz_per_row) {
     return L;
 }
 
-/// y = A x, and per-block partials of x.y (the PCG p.Ap) into part[0..blocks)
-/// where blocks = pcg_blocks(n * lanes); lanes in {1, 2, 4, 8, 16, 32}
-/// (spmv_lanes_for). A: CSR rowptr[n+1] / colidx[nnz] / vals[nnz] (VAL = double
-/// or float, promoted per product); x, y, part fp64 device pointers.
-void spmv_pAp(cudaStream_t stream, int n, const int* rowptr, const int* colidx,
-              const double* vals, const double* x, double* y, double* part, int lanes, const solve_state* state);
-void spmv_pAp(cudaStream_t stream, int n, const int* rowptr, const int* colidx,
-              const float* vals, const double* x, double* y, double* part, int lanes, const solve_state* state);
-
-/// x += alpha p ; r -= alpha Ap ; per-block partials of r.r (on the UPDATED r)
-/// into part[0..pcg_blocks(n)).
-void update_xr(cudaStream_t stream, std::int64_t n, double* x, const double* p,
-               double* r, const double* Ap, const solve_state* state, double* part);
-
-/// Per-block partials of a.b into part[0..pcg_blocks(n)).
-void dot(cudaStream_t stream, std::int64_t n, const double* a, const double* b, double* part, const solve_state* state);
-
-/// p = z + beta p.
-void update_p(cudaStream_t stream, std::int64_t n, double* p, const double* z, const solve_state* state);
+// Launch one shared vector operation; only multiply reads the operator.
+// Partials use pcg_blocks(n * lanes) for multiply, pcg_blocks(n) otherwise.
+void step(cudaStream_t stream, detail::gpu_pcg::operation op, std::int64_t n,
+          workspace vectors, const operator_csr& matrix, int lanes);
 
 // Fold partials in the fixed tree and advance the device recurrence.
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,

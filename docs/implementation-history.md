@@ -85,7 +85,8 @@ register, memory, or integer-instruction costs without a useful overall win.
 
 **GPU PCG owns its arithmetic and reductions.** Fused operator application and
 fixed reduction structure avoid proprietary solver dependencies. CUDA and Metal
-share the solve driver, vector loops and device scalar state transitions;
+share the solve driver, vector workspace, operation loop and scalar state
+transitions. One kernel wrapper per backend specializes the four PCG operations;
 backend adapters retain their reduction trees and stopping comparisons. CUDA
 uses native FP64; Metal uses double-float arithmetic shared with its host probe.
 Both predicate operations after convergence and read state after a completed

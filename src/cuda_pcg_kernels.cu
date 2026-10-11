@@ -59,47 +59,21 @@ struct pcg_math {
     }
 };
 
-__device__ void publish(double sum, double* scratch, double* partial) {
-    const double total = block_reduce_sum(sum, scratch);
-    if (threadIdx.x == 0) partial[blockIdx.x] = total;
-}
-
-__device__ pcg_work<std::int64_t> vector_work(std::int64_t n) {
-    return {static_cast<std::int64_t>(blockIdx.x) * blockDim.x, n,
-            static_cast<std::int64_t>(gridDim.x) * blockDim.x, threadIdx.x, n};
-}
-
-template <class Value, int Lanes>
+template<operation Op, int Lanes = 1, class Value = double>
 __global__ void __launch_bounds__(kBlockThreads)
-spmv_pAp_kernel(int n, const int* __restrict__ ptr, const int* __restrict__ col,
-                const Value* __restrict__ val, const double* __restrict__ p,
-                double* __restrict__ ap, double* __restrict__ partial, const solve_state* state) {
-    __shared__ double scratch[kWarps];
+step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
+            const int* col = nullptr, const Value* val = nullptr) {
     constexpr int rows = kBlockThreads / Lanes;
-    const pcg_work<int> work{static_cast<int>(blockIdx.x) * rows, n, static_cast<int>(gridDim.x) * rows,
-                             static_cast<int>(threadIdx.x) / Lanes, n};
-    publish(pcg_spmv<Lanes>(pcg_math<Lanes>{}, ptr, col, val, p, ap, work, threadIdx.x % Lanes, state->active), scratch, partial);
-}
-
-__global__ void __launch_bounds__(kBlockThreads)
-update_xr_kernel(std::int64_t n, double* __restrict__ x, const double* __restrict__ p,
-                 double* __restrict__ r, const double* __restrict__ ap, const solve_state* state,
-                 double* __restrict__ partial) {
-    __shared__ double scratch[kWarps];
-    const auto sums = pcg_update_xr(pcg_math<>{}, x, p, r, ap, state->alpha, vector_work(n), state->active);
-    publish(sums, scratch, partial);
-}
-
-__global__ void __launch_bounds__(kBlockThreads)
-dot_kernel(std::int64_t n, const double* __restrict__ a, const double* __restrict__ b,
-           double* __restrict__ partial, const solve_state* state) {
-    __shared__ double scratch[kWarps];
-    publish(pcg_reduce(pcg_math<>{}, a, b, vector_work(n), kReduceRz, state->active), scratch, partial);
-}
-
-__global__ void __launch_bounds__(kBlockThreads)
-update_p_kernel(std::int64_t n, double* __restrict__ p, const double* __restrict__ z, const solve_state* state) {
-    pcg_update_p(pcg_math<>{}, p, z, state->beta, vector_work(n), state->active);
+    const pcg_work<std::int64_t> work{static_cast<std::int64_t>(blockIdx.x) * rows, n,
+        static_cast<std::int64_t>(gridDim.x) * rows, threadIdx.x / Lanes, n};
+    const double sum = detail::gpu_pcg::step<Lanes>(
+        Op, pcg_math<Lanes>{}, v, ptr, col, val, static_cast<const Value*>(nullptr),
+        work, threadIdx.x % Lanes);
+    if constexpr (Op != operation::direction) {
+        __shared__ double scratch[kWarps];
+        const double total = block_reduce_sum(sum, scratch);
+        if (threadIdx.x == 0) v.partial[blockIdx.x] = total;
+    }
 }
 
 struct recurrence_math {
@@ -119,48 +93,49 @@ finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mod
                 unsigned iteration, double bnorm) {
     __shared__ double scratch[kWarps];
     const pcg_work<int> work{0, blocks, kBlockThreads, static_cast<int>(threadIdx.x), blocks};
-    const double sum = block_reduce_sum(pcg_reduce(pcg_math<>{}, part, nullptr, work, kReduceSum), scratch);
+    const double sum = block_reduce_sum(sum_partials(pcg_math<>{}, part, work), scratch);
     if (threadIdx.x == 0 && state->active)
         *state = advance(recurrence_math{bnorm}, *state, mode, sum, iteration);
 }
 
-template <class VAL>
-void spmv_pAp_impl(cudaStream_t stream, int n, const int* rowptr, const int* colidx,
-                   const VAL* vals, const double* x, double* y, double* part, int lanes, const solve_state* state) {
-    const int grid = pcg_blocks(static_cast<std::int64_t>(n) * lanes);
+template<class Value>
+void multiply(cudaStream_t stream, std::int64_t n, workspace v,
+              const operator_csr& a, const Value* values, int lanes) {
+    const int grid = pcg_blocks(n * lanes);
+    auto launch = [&]<int Lanes>() {
+        step_kernel<operation::multiply, Lanes><<<grid, kBlockThreads, 0, stream>>>(
+            n, v, a.row_ptr, a.col_idx, values);
+    };
     switch (lanes) {
-        case 1:  spmv_pAp_kernel<VAL, 1> <<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part, state); break;
-        case 2:  spmv_pAp_kernel<VAL, 2> <<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part, state); break;
-        case 4:  spmv_pAp_kernel<VAL, 4> <<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part, state); break;
-        case 8:  spmv_pAp_kernel<VAL, 8> <<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part, state); break;
-        case 16: spmv_pAp_kernel<VAL, 16><<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part, state); break;
-        default: spmv_pAp_kernel<VAL, 32><<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part, state); break;
+        case 1: launch.template operator()<1>(); break;
+        case 2: launch.template operator()<2>(); break;
+        case 4: launch.template operator()<4>(); break;
+        case 8: launch.template operator()<8>(); break;
+        case 16: launch.template operator()<16>(); break;
+        default: launch.template operator()<32>(); break;
     }
 }
 
 } // namespace
 
-void spmv_pAp(cudaStream_t stream, int n, const int* rowptr, const int* colidx,
-              const double* vals, const double* x, double* y, double* part, int lanes, const solve_state* state) {
-    spmv_pAp_impl(stream, n, rowptr, colidx, vals, x, y, part, lanes, state);
-}
-
-void spmv_pAp(cudaStream_t stream, int n, const int* rowptr, const int* colidx,
-              const float* vals, const double* x, double* y, double* part, int lanes, const solve_state* state) {
-    spmv_pAp_impl(stream, n, rowptr, colidx, vals, x, y, part, lanes, state);
-}
-
-void update_xr(cudaStream_t stream, std::int64_t n, double* x, const double* p,
-               double* r, const double* Ap, const solve_state* state, double* part) {
-    update_xr_kernel<<<pcg_blocks(n), kBlockThreads, 0, stream>>>(n, x, p, r, Ap, state, part);
-}
-
-void dot(cudaStream_t stream, std::int64_t n, const double* a, const double* b, double* part, const solve_state* state) {
-    dot_kernel<<<pcg_blocks(n), kBlockThreads, 0, stream>>>(n, a, b, part, state);
-}
-
-void update_p(cudaStream_t stream, std::int64_t n, double* p, const double* z, const solve_state* state) {
-    update_p_kernel<<<pcg_blocks(n), kBlockThreads, 0, stream>>>(n, p, z, state);
+void step(cudaStream_t stream, operation op, std::int64_t n, workspace v,
+          const operator_csr& matrix, int lanes) {
+    const int grid = pcg_blocks(n);
+    switch (op) {
+        case operation::multiply:
+            if (matrix.fp32) multiply(stream, n, v, matrix, matrix.values_f32, lanes);
+            else multiply(stream, n, v, matrix, matrix.values_f64, lanes);
+            break;
+        case operation::residual:
+            step_kernel<operation::residual><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            break;
+        case operation::dot:
+            step_kernel<operation::dot><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            break;
+        case operation::direction:
+            step_kernel<operation::direction><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            break;
+    }
 }
 
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,

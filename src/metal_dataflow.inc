@@ -46,9 +46,9 @@ struct dataflow_memory {
     }
 };
 kernel void dataflow_init(constant Params& P [[buffer(0)]],
-                        device const uint* ptr [[buffer(2)]], device const float* val [[buffer(4)]],
-                        device const df* r [[buffer(6)]], device float* z [[buffer(7)]],
-                        device const SolveState& state [[buffer(8)]], device atomic_uint* tags [[buffer(10)]],
+                        device const uint* ptr [[buffer(13)]], device const float* val [[buffer(15)]],
+                        device const df* r [[buffer(2)]], device float* z [[buffer(5)]],
+                        device const SolveState& state [[buffer(7)]], device atomic_uint* tags [[buffer(12)]],
                         uint row [[thread_position_in_grid]]) {
     if (row >= P.count || !state.active) return;
     dataflow_memory m{ptr, nullptr, val, nullptr, tags, nullptr, r, z, 0, nullptr, P.m};
@@ -60,11 +60,11 @@ kernel void dataflow_init(constant Params& P [[buffer(0)]],
     else atomic_store_explicit(tags + row, 0x7f800001u, memory_order_relaxed);
 }
 kernel void dataflow_solve(constant Params& P [[buffer(0)]],
-                        device const uint* ptr [[buffer(2)]], device const uint* col [[buffer(3)]],
-                        device const float* val [[buffer(4)]], device const df* r [[buffer(6)]],
-                        device float* z [[buffer(7)]], device const SolveState& state [[buffer(8)]],
-                        device const uint* words [[buffer(9)]], device atomic_uint* tags [[buffer(10)]],
-                        device const uint* blocks [[buffer(11)]], device const uint4* segments [[buffer(12)]], uint group [[threadgroup_position_in_grid]],
+                        device const uint* ptr [[buffer(13)]], device const uint* col [[buffer(14)]],
+                        device const float* val [[buffer(15)]], device const df* r [[buffer(2)]],
+                        device float* z [[buffer(5)]], device const SolveState& state [[buffer(7)]],
+                        device const uint* words [[buffer(16)]], device atomic_uint* tags [[buffer(12)]],
+                        device const uint* blocks [[buffer(17)]], device const uint4* segments [[buffer(18)]], uint group [[threadgroup_position_in_grid]],
                         uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     if (!state.active) return;
     threadgroup atomic_uint ticket;

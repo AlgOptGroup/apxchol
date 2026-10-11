@@ -3,13 +3,24 @@ namespace apxchol { namespace detail { namespace gpu_pcg {
 enum finalize_mode : unsigned {
     kFinalizeRzInit, kFinalizeAlpha, kFinalizeCheck, kFinalizeRz
 };
-enum reduce_mode : unsigned { kReduceSum, kReduceRz };
+enum class operation : unsigned { multiply, residual, dot, direction };
 
 template<class Wide, class Scalar>
 struct solve_state {
     Wide rz, rr, thr, prev;
     Scalar alpha, beta;
     unsigned active, iters;
+};
+
+template<class Wide, class Scalar>
+struct workspace {
+    using state_type = solve_state<Wide, Scalar>;
+    using wide_pointer = APXCHOL_GPU_BUFFER(Wide);
+    using scalar_pointer = APXCHOL_GPU_BUFFER(Scalar);
+    wide_pointer x, r, ap;
+    scalar_pointer p, z;
+    wide_pointer partial;
+    APXCHOL_GPU_BUFFER(state_type) state;
 };
 
 // The arithmetic policy preserves each backend's precision and stopping
@@ -53,80 +64,58 @@ struct pcg_work {
     Index first, last, stride, offset, limit;
 };
 
+// Each backend specializes op before launching. The shared loop preserves its
+// row assignment and reduction order while using one vector workspace.
 template<int Lanes, class Math, class Index, class Entry, class Offset>
-APXCHOL_GPU_FUNCTION typename Math::wide pcg_spmv(
-    Math math, APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
-    APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const typename Math::scalar) p,
-    APXCHOL_GPU_BUFFER(typename Math::wide) ap, pcg_work<Index> work, unsigned lane,
-    bool active = true, APXCHOL_GPU_BUFFER(const Entry) lo = nullptr) {
+APXCHOL_GPU_FUNCTION typename Math::wide step(
+    operation op, Math math, workspace<typename Math::wide, typename Math::scalar> v,
+    APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
+    APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const Entry) lo,
+    pcg_work<Index> work, unsigned lane) {
     using Wide = typename Math::wide;
-    Wide pap{};
-    if (active) {
-        for (auto base = work.first; base < work.last; base += work.stride) {
-            const auto row = base + work.offset;
+    Wide total{};
+    if (!v.state->active) return total;
+    for (auto base = work.first; base < work.last; base += work.stride) {
+        const auto row = base + work.offset;
+        if (op == operation::multiply) {
             Wide sum{};
             if (row < work.limit) {
                 auto e = ptr[row];
                 e += lane;
                 const auto end = ptr[row + 1];
                 for (; e < end; e += Lanes)
-                    sum = math.add_entry(sum, hi, lo, e, p[col[e]]);
+                    sum = math.add_entry(sum, hi, lo, e, v.p[col[e]]);
             }
             sum = math.sum_row(sum);
             if (row < work.limit && lane == 0) {
-                ap[row] = sum;
-                pap = math.add_product(pap, sum, p[row]);
+                v.ap[row] = sum;
+                total = math.add_product(total, sum, v.p[row]);
+            }
+        } else if (row < work.limit) {
+            if (op == operation::residual) {
+                v.x[row] = math.add_product(v.x[row], v.state->alpha, v.p[row]);
+                const auto value = math.subtract_product(v.r[row], v.ap[row], v.state->alpha);
+                v.r[row] = value;
+                total = math.add_product(total, value, value);
+            } else if (op == operation::dot) {
+                total = math.add_product(total, v.r[row], v.z[row]);
+            } else {
+                const auto beta = v.state->beta;
+                v.p[row] = beta == 0 ? v.z[row] : math.direction(v.z[row], v.p[row], beta);
             }
         }
     }
-    return pap;
+    return total;
 }
 
 template<class Math, class Index>
-APXCHOL_GPU_FUNCTION typename Math::wide pcg_update_xr(
-    Math math, APXCHOL_GPU_BUFFER(typename Math::wide) x,
-    APXCHOL_GPU_BUFFER(const typename Math::scalar) p, APXCHOL_GPU_BUFFER(typename Math::wide) r,
-    APXCHOL_GPU_BUFFER(const typename Math::wide) ap, typename Math::scalar alpha,
-    pcg_work<Index> work, bool active = true) {
-    using Wide = typename Math::wide;
-    Wide norm{};
-    if (active)
-        for (auto i = work.first + work.offset; i < work.last; i += work.stride) {
-            if (i >= work.limit) break;
-            x[i] = math.add_product(x[i], alpha, p[i]);
-            const auto value = math.subtract_product(r[i], ap[i], alpha);
-            r[i] = value;
-            norm = math.add_product(norm, value, value);
-        }
-    return norm;
-}
-
-template<class Math, class Index>
-APXCHOL_GPU_FUNCTION typename Math::wide pcg_reduce(
-    Math math, APXCHOL_GPU_BUFFER(const typename Math::wide) r,
-    APXCHOL_GPU_BUFFER(const typename Math::scalar) z, pcg_work<Index> work,
-    unsigned mode = kReduceRz, bool active = true) {
+APXCHOL_GPU_FUNCTION typename Math::wide sum_partials(
+    Math math, APXCHOL_GPU_BUFFER(const typename Math::wide) partial, pcg_work<Index> work) {
     using Wide = typename Math::wide;
     Wide sum{};
-    if (active)
-        for (auto i = work.first + work.offset; i < work.last; i += work.stride) {
-            if (i >= work.limit) break;
-            if (mode == kReduceSum) sum = math.add(sum, r[i]);
-            else sum = math.add_product(sum, r[i], z[i]);
-        }
+    for (auto i = work.first + work.offset; i < work.last; i += work.stride)
+        sum = math.add(sum, partial[i]);
     return sum;
-}
-
-template<class Math, class Index>
-APXCHOL_GPU_FUNCTION void pcg_update_p(
-    Math math, APXCHOL_GPU_BUFFER(typename Math::scalar) p,
-    APXCHOL_GPU_BUFFER(const typename Math::scalar) z, typename Math::scalar beta,
-    pcg_work<Index> work, bool active = true) {
-    if (!active) return;
-    for (auto i = work.first + work.offset; i < work.last; i += work.stride) {
-        if (i >= work.limit) break;
-        p[i] = beta == 0 ? z[i] : math.direction(z[i], p[i], beta);
-    }
 }
 
 } } }

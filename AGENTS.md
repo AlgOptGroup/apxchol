@@ -256,10 +256,12 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   worker launch. Keep RHS/diagonal/scale loads before dependency polling.
   Long rows use segment tasks and a fixed-order finalizer. No public scheduler
   knob or retained reference kernel accompanies the shared implementation.
-- CUDA and Metal share PCG vector loops and scalar state transitions in
-  `solver/detail/gpu_pcg.inc`. Backend adapters retain arithmetic precision,
-  stopping comparisons, reduction trees, index widths and launch ownership.
-  `gpu_pcg.h` owns initialization, iteration order, budgets and batch stopping.
+- CUDA and Metal share the PCG workspace, operation loop and scalar state
+  transitions in `solver/detail/gpu_pcg.inc`. Each backend specializes one
+  kernel wrapper for the four operations and retains its arithmetic precision,
+  stopping comparisons and reduction tree. `gpu_pcg.h` owns the full launch
+  sequence, iteration budgets and batch stopping. Metal binds common workspace
+  buffers once per batch; triangular sweeps only rebind their factor arrays.
   Both keep scalar recurrences and stopping on device and predicate work after
   convergence; CUDA reads completed state once per iteration, Metal once per
   batch. Laplacian iterations use grounded coordinates, with host centering at

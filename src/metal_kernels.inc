@@ -26,6 +26,7 @@ static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve
 
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];
+constant uint kOperation [[function_constant(2)]];
 
 constant uint kTreeRows = 256;
 constant uint kTreeLanes = 16;
@@ -51,44 +52,28 @@ struct pcg_math {
     df sum_row(df sum) const { return sum; }
 };
 
-inline void publish(df sum, device df* partial, threadgroup df* scratch, uint lane, uint group) {
-    scratch[lane] = sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (lane == 0) partial[group] = fold_lanes(scratch);
-}
-
-inline pcg_work<uint> tree_work(uint n, uint group, uint lane) {
-    return {group * kTreeRows, (group + 1) * kTreeRows, kTreeLanes, lane, n};
-}
-
-kernel void spmv_pap(constant Params& P [[buffer(0)]],
-                     device const uint* ptr [[buffer(1)]], device const uint* col [[buffer(2)]],
-                     device const float* hi [[buffer(3)]], device const float* lo [[buffer(4)]],
-                     device const float* p [[buffer(5)]], device df* ap [[buffer(6)]],
-                     device df* partial [[buffer(7)]], device const SolveState& state [[buffer(8)]],
-                     uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]]) {
-    threadgroup df scratch[kTreeLanes];
-    const auto sum = pcg_spmv<1>(pcg_math{}, ptr, col, hi, p, ap, tree_work(P.n, group, lane), 0, state.active, lo);
-    publish(sum, partial, scratch, lane, group);
-}
-
-kernel void update_xr(constant Params& P [[buffer(0)]],
-                      device df* x [[buffer(1)]], device df* r [[buffer(2)]],
-                      device const float* p [[buffer(3)]], device const df* ap [[buffer(4)]],
-                      device df* partial [[buffer(5)]], device const SolveState& state [[buffer(6)]],
-                      uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]]) {
-    threadgroup df scratch[kTreeLanes];
-    const auto sums = pcg_update_xr(pcg_math{}, x, p, r, ap, state.alpha, tree_work(P.n, group, lane), state.active);
-    publish(sums, partial, scratch, lane, group);
-}
-
-kernel void reduce(constant Params& P [[buffer(0)]],
-                   device const df* r [[buffer(1)]], device const float* z [[buffer(2)]],
-                   device df* partial [[buffer(3)]], device const SolveState& state [[buffer(4)]],
-                   uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]]) {
-    threadgroup df scratch[kTreeLanes];
-    const auto sum = pcg_reduce(pcg_math{}, r, z, tree_work(P.n, group, lane), kReduceRz, state.active);
-    publish(sum, partial, scratch, lane, group);
+// Workspace slots stay bound for the whole command batch, including SpTRSV.
+kernel void pcg_step(constant Params& P [[buffer(0)]],
+                     device df* x [[buffer(1)]], device df* r [[buffer(2)]],
+                     device df* ap [[buffer(3)]], device float* p [[buffer(4)]],
+                     device float* z [[buffer(5)]], device df* partial [[buffer(6)]],
+                     device SolveState& state [[buffer(7)]],
+                     device const uint* ptr [[buffer(8)]], device const uint* col [[buffer(9)]],
+                     device const float* hi [[buffer(10)]], device const float* lo [[buffer(11)]],
+                     uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]],
+                     uint tid [[thread_position_in_grid]]) {
+    const operation op = operation(kOperation);
+    const pcg_work<uint> work = op == operation::direction
+        ? pcg_work<uint>{tid, P.n, P.n, 0, P.n}
+        : pcg_work<uint>{group * kTreeRows, (group + 1) * kTreeRows, kTreeLanes, lane, P.n};
+    const auto sum = step<1>(op, pcg_math{}, workspace<df, float>{x, r, ap, p, z, partial, &state},
+                             ptr, col, hi, lo, work, 0);
+    if (op != operation::direction) {
+        threadgroup df scratch[kTreeLanes];
+        scratch[lane] = sum;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane == 0) partial[group] = fold_lanes(scratch);
+    }
 }
 
 struct recurrence_math {
@@ -104,21 +89,15 @@ struct recurrence_math {
 
 // ---- one threadgroup of 16 lanes: fold the partials, then the PCG scalars ----
 kernel void finalize(constant Params& P [[buffer(0)]],
-                     device const df* partial [[buffer(1)]],
-                     device SolveState& state [[buffer(2)]],
+                     device const df* partial [[buffer(6)]],
+                     device SolveState& state [[buffer(7)]],
                      uint l [[thread_index_in_threadgroup]]) {
     threadgroup df sh[kTreeLanes];
     const pcg_work<uint> work{0, P.groups, kTreeLanes, l, P.groups};
-    sh[l] = pcg_reduce(pcg_math{}, partial, nullptr, work, kReduceSum);
+    sh[l] = sum_partials(pcg_math{}, partial, work);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (l == 0 && state.active)
         state = advance(recurrence_math{}, state, P.mode, fold_lanes(sh), P.iter, P.window);
-}
-
-kernel void p_update(constant Params& P [[buffer(0)]],
-                     device float* p [[buffer(1)]], device const float* z [[buffer(2)]],
-                     device const SolveState& state [[buffer(3)]], uint i [[thread_position_in_grid]]) {
-    pcg_update_p(pcg_math{}, p, z, state.beta, pcg_work<uint>{i, P.n, P.n, 0, P.n}, state.active);
 }
 
 // ---- self-test of the error-free transforms (metal_solver::available) ----

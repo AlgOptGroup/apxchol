@@ -19,19 +19,26 @@ namespace apxchol::detail::gpu_pcg {
 template<class Backend>
 void solve(Backend& gpu, unsigned max_iter, unsigned batch_size) {
     batch_size = std::max(batch_size, 1u);
+    auto direction = [&](unsigned it) {
+        gpu.step(operation::dot);
+        gpu.finalize(it ? kFinalizeRz : kFinalizeRzInit, it);
+        gpu.step(operation::direction);
+    };
     unsigned first = 0;
     do {
         const unsigned last = first + std::min(batch_size, max_iter - first);
         if (!gpu.submit(first == 0, [&] {
             if (first == 0) {
                 gpu.precondition();
-                gpu.direction(0);
+                direction(0);
             }
             for (unsigned it = first; it < last; ++it) {
-                gpu.multiply(it + 1);
-                gpu.update_residual(it + 1);
+                gpu.step(operation::multiply);
+                gpu.finalize(kFinalizeAlpha, it + 1);
+                gpu.step(operation::residual);
+                gpu.finalize(kFinalizeCheck, it + 1);
                 gpu.precondition();
-                gpu.direction(it + 1);
+                direction(it + 1);
             }
         })) break;
         first = last;

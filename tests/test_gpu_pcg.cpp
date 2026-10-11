@@ -15,16 +15,15 @@ struct commands {
         return active;
     }
     void precondition() { preconditions += active; }
-    void direction(unsigned it) {
+    void step(pcg::operation) const {}
+    void finalize(unsigned mode, unsigned it) {
         if (!active) return;
-        if (it == 0) ++initializations;
-        else ++directions;
-    }
-    void multiply(unsigned it) const {
-        if (active) { EXPECT_EQ(it, iterations + 1); }
-    }
-    void update_residual(unsigned it) {
-        if (active) { iterations = it; active = it < stop; }
+        switch (mode) {
+            case pcg::kFinalizeRzInit: ++initializations; break;
+            case pcg::kFinalizeRz: ++directions; break;
+            case pcg::kFinalizeAlpha: EXPECT_EQ(it, iterations + 1); break;
+            case pcg::kFinalizeCheck: iterations = it; active = it < stop; break;
+        }
     }
 };
 } // namespace
