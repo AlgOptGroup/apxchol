@@ -192,6 +192,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 
 ## Architecture and contracts
 
+Backend placement, scheduling and precision are implementation choices, not
+requirements for future designs. Compare replacements on numerical quality,
+complete setup/solve cost, memory and total maintenance burden; preserve buffer
+lifetime and truthful error/convergence reporting.
+
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
   convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
   `src/solve.cpp` provide the CPU compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
@@ -249,16 +254,18 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   `solver/detail/gpu_dataflow_plan.h`, including task decoding, root initialization
   and FP32 accumulation. CUDA builds trusted-factor tasks on device
   and uses one global queue; Metal's `metal_schedule.h` partitions dependency
-  stages into independent workgroups. Cross-workgroup waits are forbidden on
-  Metal. Both reset atomic FP32 dependency words and solve roots before the
-  worker launch. Keep RHS/diagonal/scale loads before dependency polling.
+  stages into independent workgroups. Metal confines dependency waits to one
+  workgroup, where SIMD-group progress is guaranteed. Both reset atomic FP32
+  dependency words and solve roots before the worker launch. Keep
+  RHS/diagonal/scale loads before dependency polling.
   Long rows use segment tasks and a fixed-order finalizer. No public scheduler
   knob or retained reference kernel accompanies the shared implementation.
 - CUDA and Metal share the PCG workspace, operation loop and scalar state
   transitions in `solver/detail/gpu_pcg.inc`, including the lane shuffle-sum tree.
-  Each backend specializes one kernel wrapper for the four operations and retains
-  its arithmetic precision, stopping comparisons and block grouping. `gpu_pcg.h` owns the full launch
-  sequence, iteration budgets and batch stopping. Metal binds common workspace
+  Both reject invalid scalar products and coefficient ratios. Each backend
+  specializes one kernel wrapper for the four operations and retains its
+  arithmetic precision, stopping comparisons and block grouping. `gpu_pcg.h`
+  owns the full launch sequence, iteration budgets and batch stopping. Metal binds common workspace
   buffers once per batch; triangular sweeps only rebind their factor arrays.
   Preconditioning starts each iteration; exhausted budgets do not prepare another.
   Both keep scalar recurrences and stopping on device and predicate work after
@@ -297,8 +304,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   compatibility only: a CUDA build with 32-bit nodes, block-greedy/AoS, supported
   sampler options and no export selects GPU; other options select CPU before
   setup. It is not a performance predictor or a device-availability fallback.
-- CUDA solves require device-owned factorization, finalization, dataflow plans,
-  operator preparation and PCG. Reject missing/nonunique device factor ownership
+- The current CUDA route uses device-owned factorization, finalization, dataflow
+  plans, operator preparation and PCG. Reject missing/nonunique device factor ownership
   before a host-factor upload. Unsupported stored formats, missing device,
   insufficient memory and runtime errors never trigger a CPU retry. The operator
   must have supported compressed, sorted, unique and fully paired CSC storage;

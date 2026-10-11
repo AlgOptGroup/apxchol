@@ -72,10 +72,8 @@ kernel void pcg_step(constant Params& P [[buffer(0)]],
 }
 
 struct recurrence_math {
-    bool positive(df x) const { return x.hi > 0 && isfinite(x.hi); }
-    bool valid_initial(df x) const { return isfinite(x.hi); }
-    bool valid_residual(df x) const { return isfinite(x.hi); }
-    bool valid_rz(df x) const { return isfinite(x.hi); }
+    bool positive(df x) const { return x.hi > 0 && isfinite(x.hi) && isfinite(x.lo); }
+    bool valid_residual(df x) const { return !df_lt(x, df{}) && isfinite(x.hi) && isfinite(x.lo); }
     bool accept_ratio(float x) const { return isfinite(x); }
     float ratio(df x, df y) const { return df_div(x, y).hi; }
     bool converged(df x, df threshold) const { return df_lt(x, threshold); }

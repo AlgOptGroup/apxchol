@@ -36,9 +36,13 @@ struct workspace {
 template<class Math, class State, class Wide>
 APXCHOL_GPU_FUNCTION State advance(Math math, State st, unsigned mode, Wide t,
                      unsigned iteration, unsigned window = 0) {
-    if (mode == kFinalizeRzInit) {
-        if (!math.valid_initial(t)) st.active = 0;
-        else { st.rz = t; st.beta = 0; }
+    if (mode == kFinalizeRzInit || mode == kFinalizeRz) {
+        if (!math.positive(t)) st.active = 0;
+        else {
+            const auto beta = mode == kFinalizeRzInit ? 0 : math.ratio(t, st.rz);
+            if (!math.accept_ratio(beta)) st.active = 0;
+            else { st.beta = beta; st.rz = t; }
+        }
     } else if (mode == kFinalizeAlpha) {
         if (!math.positive(t)) st.active = 0;
         else {
@@ -53,13 +57,6 @@ APXCHOL_GPU_FUNCTION State advance(Math math, State st, unsigned mode, Wide t,
         else if (window && iteration % window == 0) {
             if (math.stagnated(st.prev, t)) st.active = 0;
             else st.prev = t;
-        }
-    } else if (mode == kFinalizeRz) {
-        if (!math.valid_rz(t)) st.active = 0;
-        else {
-            const auto beta = math.ratio(t, st.rz);
-            if (!math.accept_ratio(beta)) st.active = 0;
-            else { st.beta = beta; st.rz = t; }
         }
     }
     return st;

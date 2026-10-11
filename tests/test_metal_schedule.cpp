@@ -1,6 +1,7 @@
 #include "apxchol/solver/detail/metal_schedule.h"
 #include <array>
 #include <gtest/gtest.h>
+#include <limits>
 #include <random>
 
 namespace {
@@ -140,6 +141,25 @@ TEST(MetalSchedule, RejectsInvalidStructureAndValues) {
         a = make_triangle(5, false, 1);
         a.val[0] = value;
         EXPECT_THROW(ms::build(a.ptr, a.col, a.val, false), std::domain_error);
+    }
+}
+
+TEST(MetalSchedule, OffDiagonalsOnlyRequireFiniteValues) {
+    for (bool reverse : {false, true}) {
+        auto a = make_triangle(2, reverse, 1);
+        for (float value : {0x1p-110f, -0x1p-110f, std::numeric_limits<float>::min(),
+                            -std::numeric_limits<float>::denorm_min()}) {
+            SCOPED_TRACE(::testing::Message() << "reverse=" << reverse << " value=" << value);
+            a.val[1] = value;
+            EXPECT_NO_THROW(check_schedule(a, reverse));
+        }
+        for (float value : {std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::quiet_NaN()}) {
+            SCOPED_TRACE(::testing::Message() << "reverse=" << reverse << " value=" << value);
+            a.val[1] = value;
+            EXPECT_THROW(ms::build(a.ptr, a.col, a.val, reverse), std::domain_error);
+        }
     }
 }
 

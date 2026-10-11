@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -46,6 +47,19 @@ TEST(MetalHost, PowerOfTwoScalingIsExact) {
     }
 }
 
+TEST(MetalHost, ScalingRemainsFiniteAtFloatingPointLimits) {
+    for (const double value : {std::numeric_limits<double>::denorm_min(),
+                               std::numeric_limits<double>::min(),
+                               std::numeric_limits<double>::max()}) {
+        SCOPED_TRACE(value);
+        const double scale = mh::pow2_scale(value);
+        EXPECT_TRUE(std::isfinite(scale));
+        EXPECT_GT(scale, 0.0);
+        EXPECT_GT(value * scale, 0.0);
+        EXPECT_LT(value * scale, 2.0);
+        EXPECT_EQ(value * scale / scale, value);
+    }
+}
 
 TEST(MetalHost, VectorPackingRoundTrip) {
     const std::size_t n = 50001;

@@ -88,10 +88,13 @@ and `cpu_solver` stay on CPU. Each call solves one RHS; repeated calls on a
   Independent parallel factorizations remain a separate question.
 - **Compilation and range.** Kernels are compiled at run time with
   `MTLMathModeSafe`, precise math functions and `#pragma METAL fp contract(off)`
-  when accepted; `metal_solver::available()` also requires a device self-test
-  of the double-float operations to match the host bit for bit. Nonzero
-  operator and factor magnitudes must lie in [2^-100, 2^100]
-  (`std::domain_error` otherwise), and the factor's stored entries and the
+  when accepted; `metal_solver::available()` checks nearest-even rounding,
+  separately rounded intermediates and fused multiply-add using fixed cases.
+  Full double-float arithmetic is checked separately in device tests. Nonzero
+  operator values and factor diagonals must lie in [2^-100, 2^100]; factor
+  off-diagonals need only be finite (`std::domain_error` otherwise). These
+  bounds do not guarantee convergence; the returned residual is checked in
+  FP64 against the original operator. The factor's stored entries and the
   two-triangle operator must fit the device's 32-bit offsets (at most 2^30
   stored operator entries; `std::length_error` otherwise).
 

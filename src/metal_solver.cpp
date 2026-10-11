@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -38,74 +37,21 @@ namespace dm = detail::metal;
 
 dm::df32 to_device(mh::df v) { return {v.hi, v.lo}; }
 
-// ── Device self-test ─────────────────────────────────────────────────────────
-// The double-float kernels are only exact if the Metal compiler neither
-// contracts nor reassociates them. Compare the device's error-free transforms
-// with the host's (metal_host.h) bit for bit, and check two_sum / two_prod
-// against exact fp64 arithmetic, on deterministic inputs whose exponents keep
-// every exact sum and product inside fp64.
-
-std::uint32_t next_random(std::uint32_t& state) {
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    return state;
-}
-
-float random_float(std::uint32_t& state, int exponent_span) {
-    const std::uint32_t bits = next_random(state);
-    const float mantissa = 1.0f + static_cast<float>(bits & 0x7fffff) / 8388608.0f;
-    const int e = static_cast<int>((bits >> 23) % static_cast<std::uint32_t>(2 * exponent_span + 1)) - exponent_span;
-    const float v = std::ldexp(mantissa, e);
-    return (bits >> 31) ? -v : v;
-}
-
-std::vector<float> probe_inputs(std::size_t count) {
-    std::vector<float> in(count * 4);
-    std::uint32_t state = 0x9e3779b9u;
-    for (std::size_t i = 0; i < count; ++i) {
-        for (int k = 0; k < 2; ++k) {
-            const float hi = random_float(state, 12);
-            const float lo = hi * std::ldexp(random_float(state, 0) * 0.5f, -24);
-            const mh::df v = mh::quick_two_sum(hi, lo);
-            in[4 * i + 2 * k] = v.hi;
-            in[4 * i + 2 * k + 1] = v.lo;
-        }
-    }
-    return in;
-}
-
-bool same_bits(float a, float b) { return std::memcmp(&a, &b, sizeof a) == 0; }
-
-std::string run_self_test() {
-    constexpr std::size_t kCases = 2048;
-    const std::vector<float> in = probe_inputs(kCases);
-    const std::vector<float> out = dm::run_probe(in);
-    for (std::size_t i = 0; i < kCases; ++i) {
-        const mh::df x{in[4 * i], in[4 * i + 1]}, y{in[4 * i + 2], in[4 * i + 3]};
-        const float* o = &out[16 * i];
-        const mh::df ts = mh::two_sum(x.hi, y.hi), tp = mh::two_prod(x.hi, y.hi);
-        const mh::df da = mh::df_add(x, y), dmul = mh::df_mul(x, y), dmf = mh::df_mul_f(x, y.hi);
-        const float expect[] = {ts.hi, ts.lo, tp.hi, tp.lo, da.hi, da.lo, dmul.hi, dmul.lo,
-                                dmf.hi, dmf.lo, std::fma(x.hi, y.hi, x.lo),
-                                std::fma(-x.hi, y.hi, x.lo) * y.lo};
-        for (int k = 0; k < 12; ++k)
-            if (!same_bits(o[k], expect[k]))
-                return "double-float self-test: device result " + std::to_string(k) +
-                       " differs from the host's on case " + std::to_string(i);
-        if (!same_bits(o[14], (x.hi - y.hi) * y.lo) || !same_bits(o[15], mh::quick_two_sum(x.hi, x.lo).lo))
-            return "double-float self-test: device rounding differs on case " + std::to_string(i);
-        const double sum = static_cast<double>(x.hi) + static_cast<double>(y.hi);
-        const double prod = static_cast<double>(x.hi) * static_cast<double>(y.hi);
-        if (static_cast<double>(o[0]) + static_cast<double>(o[1]) != sum ||
-            static_cast<double>(o[2]) + static_cast<double>(o[3]) != prod)
-            return "double-float self-test: two_sum / two_prod are not error-free on case " +
-                   std::to_string(i);
-        const double q = mh::join({o[12], o[13]});
-        const double q_ref = mh::join(x) / mh::join(y);
-        if (!(std::fabs(q - q_ref) <= 1e-12 * std::fabs(q_ref)))
-            return "double-float self-test: division is inaccurate on case " + std::to_string(i);
-    }
+// Error-free transforms need round-to-nearest-even, separately rounded
+// intermediates and an actual fused multiply-add.
+std::string run_arithmetic_probe() {
+    const auto out = dm::run_probe({
+        0x1p0f, 0x1.8p-24f, 0x1.8p-24f, 0.0f, // Sum rounds up, leaving -2^-25.
+        0x1p0f, 0.0f, 0x1p-24f, 0.0f,         // Halfway sum rounds to the even mantissa.
+        0x1.000002p0f, 0x1p-24f, 0x1.000002p0f, 0.0f,
+    });
+    // The last quick_two_sum starts with an odd mantissa, so its tie rounds up.
+    if (out[0] != 0x1.000002p0f || out[1] != -0x1p-25f || out[15] != -0x1p-25f ||
+        out[16] != 0x1p0f || out[17] != 0x1p-24f || out[47] != -0x1p-24f)
+        return "Metal double-float transforms require round-to-nearest-even without reassociation";
+    // (1 + 2^-23)^2 = 1 + 2^-22 + 2^-46; only FMA retains the product residual.
+    if (out[34] != 0x1.000004p0f || out[35] != 0x1p-46f)
+        return "Metal double-float transforms require a fused multiply-add";
     return {};
 }
 
@@ -123,7 +69,7 @@ const availability& check_availability() noexcept {
                 a.reason = st.error;
                 return a;
             }
-            a.reason = run_self_test();
+            a.reason = run_arithmetic_probe();
             a.ok = a.reason.empty();
         } catch (const std::exception& e) {
             a.reason = e.what();
@@ -199,7 +145,7 @@ struct metal_solver::impl {
     double residual_norm(const Eigen::VectorXd& bp, const Eigen::VectorXd& xp,
                          Eigen::VectorXd& work) const {
         spmv(xp.data(), work.data());
-        return (bp - work).norm();
+        return (bp - work).stableNorm();
     }
 
     void centre(Eigen::VectorXd& x) const { x.array() -= x.mean(); }
@@ -345,7 +291,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     checkpoint& cp = result.timings;
     cp.descend("pcg");
     cp.tick();
-    const double bnorm = b.norm();
+    const double bnorm = b.stableNorm();
     if (bnorm == 0.0) { cp.ascend(); return; }
     if (max_iter == 0 && (x0 == nullptr || x0->isZero(0.0))) {
         result.residual = 1.0;
@@ -373,7 +319,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     } else {
         work = bp;
     }
-    const double initial = work.norm() / bnorm;
+    const double initial = work.stableNorm() / bnorm;
     if (initial < tol || max_iter == 0) { finish(); return; }
     if (s.laplacian) s.centre(work);
     const double max_abs = work.cwiseAbs().maxCoeff();
@@ -382,8 +328,8 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     mh::pack(work.data(), s.n, scale, s.device->r());
     auto& state = s.device->state();
     state = {};
-    const double threshold = tol * bnorm * scale;
     const double reference = bnorm * scale;
+    const double threshold = tol * reference;
     state.thr = to_device(mh::split_saturated(threshold * threshold));
     state.prev = to_device(mh::split_saturated(reference * reference));
     state.active = 1;

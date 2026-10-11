@@ -27,12 +27,13 @@ inline df split(double v) {
 /// hi + lo in fp64: exact for a normalized double-float.
 inline double join(df v) { return static_cast<double>(v.hi) + static_cast<double>(v.lo); }
 
-/// The exact power-of-two scale s = 2^-e with e = ilogb(max_abs), so that the
-/// scaled vector's largest magnitude lies in [1, 2). Multiplying by s (and
-/// dividing by it afterwards) is exact for every fp64 value that neither
-/// underflows nor overflows, so the device computation is the same for
-/// b and 2^k b. max_abs must be finite and positive.
-inline double pow2_scale(double max_abs) { return std::ldexp(1.0, -std::ilogb(max_abs)); }
+/// A finite power-of-two scale that brings max_abs into [1, 2), except for
+/// the smallest inputs, where the scale's exponent is capped. Scaling preserves
+/// significands unless a value underflows or overflows. max_abs is finite and positive.
+inline double pow2_scale(double max_abs) {
+    const int exponent = std::min(-std::ilogb(max_abs), std::numeric_limits<double>::max_exponent - 1);
+    return std::ldexp(1.0, exponent);
+}
 
 /// fp64 value as a double-float, saturated to the largest finite fp32 (used
 /// for the stop threshold, whose overflow would mean "stop").

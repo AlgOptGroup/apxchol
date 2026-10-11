@@ -69,11 +69,9 @@ step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
 
 struct recurrence_math {
     double bnorm;
-    __device__ bool positive(double x) const { return x > 0; }
+    __device__ bool positive(double x) const { return x > 0 && isfinite(x); }
     __device__ bool valid_residual(double x) const { return isfinite(sqrt(x) / bnorm); }
-    __device__ bool valid_initial(double) const { return true; }
-    __device__ bool valid_rz(double x) const { return isfinite(x) && x != 0; }
-    __device__ bool accept_ratio(double) const { return true; }
+    __device__ bool accept_ratio(double x) const { return isfinite(x); }
     __device__ double ratio(double x, double y) const { return x / y; }
     __device__ bool converged(double x, double threshold) const { return sqrt(x) / bnorm < threshold; }
     __device__ bool stagnated(double previous, double current) const { return previous * 0.25 < current; }

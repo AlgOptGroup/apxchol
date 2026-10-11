@@ -153,8 +153,8 @@ inline schedule build(std::span<const unsigned> ptr, std::span<const unsigned> c
         if (col[diagonal] != row || values[diagonal] == 0)
             throw std::invalid_argument("Metal factor has a missing or zero diagonal");
         for (unsigned p = ptr[row]; p < ptr[row + 1]; ++p) {
-            if (!in_range(values[p]))
-                throw std::domain_error("Metal factor outside [2^-100, 2^100]");
+            if (!std::isfinite(values[p]) || (p == diagonal && !in_range(values[p])))
+                throw std::domain_error("Metal factor has a non-finite value or unsupported diagonal");
             if (p == diagonal)
                 continue;
             const unsigned other = col[p];

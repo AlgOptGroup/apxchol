@@ -1,6 +1,6 @@
 // The Apple GPU PCG (include/apxchol/solver/metal_solver.h). Device
 // tests skip when metal_solver::available() is false (no device, kernels not
-// compiled, or the double-float self-test failed).
+// compiled, or the arithmetic capability probe failed).
 #include <gtest/gtest.h>
 
 #include "apxchol/solver/detail/metal_host.h"
@@ -163,7 +163,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
 
 TEST(MetalDevice, DoubleFloatProbeExact) {
     REQUIRE_METAL();
-    // A second, wider set of cases than available()'s self-test.
+    // Test full arithmetic separately from available()'s fixed capability sentinels.
     std::vector<float> in;
     std::uint32_t state = 12345u;
     auto next = [&] {
@@ -194,6 +194,13 @@ TEST(MetalDevice, DoubleFloatProbeExact) {
             mismatches += std::memcmp(&out[16 * i + k], &expect[k], sizeof(float)) != 0;
         EXPECT_EQ(static_cast<double>(out[16 * i]) + static_cast<double>(out[16 * i + 1]),
                   static_cast<double>(x.hi) + static_cast<double>(y.hi));
+        EXPECT_EQ(static_cast<double>(out[16 * i + 2]) + static_cast<double>(out[16 * i + 3]),
+                  static_cast<double>(x.hi) * static_cast<double>(y.hi));
+        const double quotient = mh::join({out[16 * i + 12], out[16 * i + 13]});
+        const double reference = mh::join(x) / mh::join(y);
+        EXPECT_LE(std::abs(quotient - reference), 1e-12 * std::abs(reference));
+        const float rounding[] = {(x.hi - y.hi) * y.lo, mh::quick_two_sum(x.hi, x.lo).lo};
+        mismatches += std::memcmp(&out[16 * i + 14], rounding, sizeof rounding) != 0;
     }
     EXPECT_EQ(mismatches, 0u);
     std::printf("[ metal ] device %s, contract pragma %s, %zu probe cases bit-identical to the host\n",
@@ -481,6 +488,59 @@ TEST(MetalDevice, OutOfRangeOperatorIsADomainError) {
     A.coeffRef(0, 0) = 1e40;
     apxchol::factorization F = apxchol::factorize(grid(6, 6, 0.5));
     EXPECT_THROW(apxchol::metal_solver(A, std::move(F)), std::domain_error);
+}
+
+TEST(MetalDevice, TinyFactorOffDiagonalsRemainUsable) {
+    REQUIRE_METAL();
+    Sparse A(2, 2);
+    A.setIdentity();
+    const Eigen::Vector2d b(1.0, -2.0);
+    for (float value : {-0x1p-110f, -std::numeric_limits<float>::min(),
+                        -std::numeric_limits<float>::denorm_min()}) {
+        SCOPED_TRACE(value);
+        apxchol::factorization F;
+        F.L.n_ = 2;
+        F.L.outer_ = {0, 2, 3};
+        F.L.inner_ = {0, 1, 1};
+        F.L.vals_ = {1.0f, value, 1.0f};
+        F.perm = {0, 1};
+        F.sddm = true;
+        const apxchol::metal_solver solver(A, std::move(F));
+        EXPECT_EQ(solver.stats().levels_forward, 2u);
+        EXPECT_EQ(solver.stats().levels_backward, 2u);
+        EXPECT_TRUE(solver.apply(b).allFinite());
+        const auto result = solver.solve(b, 1e-8, 10);
+        EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+    }
+}
+
+TEST(MetalDevice, ScaledRightHandSides) {
+    REQUIRE_METAL();
+    Sparse A(2, 2);
+    A.setIdentity();
+    const apxchol::metal_solver solver(A);
+    for (const double magnitude : {0.0, 1e-200, 1.0, 1e200,
+                                   std::numeric_limits<double>::denorm_min()}) {
+        SCOPED_TRACE(magnitude);
+        Eigen::VectorXd b(2);
+        b << magnitude, -2 * magnitude;
+        const auto result = solver.solve(b, 1e-10, 10);
+        const auto applied = solver.apply(b);
+        EXPECT_TRUE(result.x.allFinite());
+        EXPECT_TRUE(applied.allFinite());
+        if (magnitude == 0) {
+            EXPECT_TRUE(result.x.isZero(0.0));
+            EXPECT_TRUE(applied.isZero(0.0));
+            EXPECT_EQ(result.iterations, 0);
+            EXPECT_EQ(result.residual, 0.0);
+            continue;
+        }
+        const double residual = (b - A * result.x).stableNorm() / b.stableNorm();
+        EXPECT_GT(result.iterations, 0);
+        EXPECT_LT(residual, 1e-10);
+        EXPECT_NEAR(result.residual, residual, 1e-15);
+        EXPECT_LT((applied - b).stableNorm() / b.stableNorm(), 1e-6);
+    }
 }
 
 TEST(MetalDevice, TinySystems) {
