@@ -18,7 +18,6 @@
 #include <cstring>
 #include <numeric>
 #include <random>
-#include <span>
 #include <stdexcept>
 #include <vector>
 

@@ -4,6 +4,7 @@
 
 Keep this file current when builds, APIs, defaults or architecture change.
 Deliver the requested scope; prefer removing redundancy to adding modes or knobs.
+Backend design may change; compare accuracy, setup/solve cost, memory and complexity.
 Verify claims with current-session evidence; label historical results and hypotheses.
 Factor identity requires structure/value digests, not equal fill or residuals.
 The [precision contract](docs/precision.md) separates parallel factor rebuilds
@@ -142,8 +143,6 @@ choices, retired knobs, and measurements belong in
 
 - `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend (default CPU).
   GPU builds retain CPU solves. Invalid or removed boolean options fail configuration.
-- Metal builds compile `src/metal_solver.mm` with the C++ OpenMP flags and
-  link Metal, Foundation and CoreGraphics. Shaders compile at run time.
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
@@ -189,9 +188,6 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 `cudaMemGetInfo` equality is not a process-leak assertion.
 
 ## Architecture and contracts
-
-Evaluate backend changes by numerical quality, complete setup/solve cost,
-memory and maintainability; existing implementation choices may change.
 
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
   convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
@@ -253,9 +249,7 @@ memory and maintainability; existing implementation choices may change.
   dependency polling. Long-row finalizers combine segments in a fixed order.
 - `solver/detail/gpu_pcg.h` and `.inc` share GPU iteration control and arithmetic
   operations. Reject invalid scalar products and ratios; stop device work after
-  convergence or an exhausted budget. Keep CUDA vector conversions fused into
-  triangular sweeps. Metal's `double_float.inc` requires no-contraction
-  compilation and the device arithmetic probe. Numerical requirements live in
+  convergence or an exhausted budget. Metal's arithmetic requirements live in
   [precision and storage](docs/precision.md#apple-metal-pcg).
 - Host and CUDA operator preparation share canonical lower lookup in
   `csc_work.h`; the host fallback orders duplicate entries by value bits.

@@ -9,7 +9,6 @@
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "metal_device.h"
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -273,13 +272,15 @@ prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<float>& a, bool 
         packed.segments.push_back({});
     out.stages = std::move(schedule.stages);
     out.levels = schedule.levels;
-    out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
-    out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
-    out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(float), "factor values");
-    out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
-    out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
-    out.segments = upload(ctx.device, packed.segments.data(),
-                          packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
+    with_pool([&] {
+        out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
+        out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
+        out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(float), "factor values");
+        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
+        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
+        out.segments = upload(ctx.device, packed.segments.data(),
+                              packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
+    });
     return out;
 }
 
@@ -329,8 +330,6 @@ namespace mh = detail::metal_host;
 namespace ls = detail::metal_schedule;
 namespace dm = detail::metal;
 using namespace dm;
-using detail::gpu_pcg::operation;
-using solve_state = dm::solve_state;
 
 void print_banner_once(const metal_solver::statistics& st) {
     static std::once_flag flag;
@@ -448,6 +447,9 @@ struct metal_solver::impl {
     }
 
     void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp);
+    void prepare_device(const cuda_host::csr_int<float>& forward,
+                        const cuda_host::csr_int<float>& backward,
+                        const std::vector<float>& hi, const std::vector<float>& lo, unsigned m);
 
     // y = A' x in fp64, each row summed in storage order; rows are split across
     // threads by stored entries (detail::work_balanced_range).
@@ -531,33 +533,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::domain_error("metal_solver: an operator value is non-finite or outside [2^-100, 2^100]");
     if (cp) (*cp)("metal_operator");
 
-    ctx = &shared();
-    arguments.n = static_cast<std::uint32_t>(n);
-    arguments.m = m;
-    arguments.groups = (arguments.n + kTreeRows - 1) / kTreeRows;
-    operator_df = !lo.empty();
-    with_pool([&] {
-        id<MTLDevice> dev = ctx->device;
-        queue = [dev newCommandQueue];
-        if (queue == nil) throw std::runtime_error("Metal command queue creation failed");
-        device_op_ptr = upload(dev, op.ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
-        device_op_col = upload(dev, op.idx.get(), nnz * sizeof(std::uint32_t), "operator indices");
-        op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
-        if (!lo.empty()) op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
-        fwd = prepare_tri(*ctx, forward, true);
-        bwd = prepare_tri(*ctx, backward, false);
-        const std::size_t entries = static_cast<std::size_t>(arguments.n);
-        x = upload(dev, nullptr, entries * sizeof(df32), "solution");
-        r = upload(dev, nullptr, entries * sizeof(df32), "residual");
-        ap = upload(dev, nullptr, entries * sizeof(df32), "operator product");
-        p = upload(dev, nullptr, entries * sizeof(float), "search direction");
-        // Sweeps write rows < m; the extra Laplacian coordinate stays zero.
-        z = upload(dev, nullptr, entries * sizeof(float), "preconditioner result");
-        partial = upload(dev, nullptr, static_cast<std::size_t>(arguments.groups) * sizeof(df32), "partial sums");
-        state_buffer = upload(dev, nullptr, sizeof(solve_state), "solve state");
-        tags = upload(dev, nullptr, std::max({entries, std::size_t(fwd.tag_count),
-            std::size_t(bwd.tag_count)}) * sizeof(std::uint32_t), "dataflow tags");
-    });
+    prepare_device(forward, backward, hi, lo, m);
     // Group four iterations on small systems to amortize command submission;
     // check large solves after each iteration.
     check_every = n > 200000 ? 1 : 4;
@@ -572,6 +548,43 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     if (!opts.keep_factor_values) F.L.release_values();
     if (cp) { (*cp)("metal_upload"); cp->ascend(); }
     print_banner_once(stats);
+}
+
+void metal_solver::impl::prepare_device(const cuda_host::csr_int<float>& forward,
+                                       const cuda_host::csr_int<float>& backward,
+                                       const std::vector<float>& hi, const std::vector<float>& lo,
+                                       unsigned m) {
+    context& ctx = shared();
+    this->ctx = &ctx;
+    arguments.n = static_cast<std::uint32_t>(n);
+    arguments.m = m;
+    arguments.groups = (arguments.n + kTreeRows - 1) / kTreeRows;
+    const auto nnz = op.ptr.back();
+    operator_df = !lo.empty();
+    with_pool([&] {
+        id<MTLDevice> dev = ctx.device;
+        queue = [dev newCommandQueue];
+        if (queue == nil) throw std::runtime_error("Metal command queue creation failed");
+        device_op_ptr = upload(dev, op.ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
+        device_op_col = upload(dev, op.idx.get(), nnz * sizeof(std::uint32_t), "operator indices");
+        op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
+        if (!lo.empty()) op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
+    });
+    fwd = prepare_tri(ctx, forward, true);
+    bwd = prepare_tri(ctx, backward, false);
+    with_pool([&] {
+        id<MTLDevice> dev = ctx.device;
+        x = upload(dev, nullptr, n * sizeof(df32), "solution");
+        r = upload(dev, nullptr, n * sizeof(df32), "residual");
+        ap = upload(dev, nullptr, n * sizeof(df32), "operator product");
+        p = upload(dev, nullptr, n * sizeof(float), "search direction");
+        // Sweeps write rows < m; the extra Laplacian coordinate stays zero.
+        z = upload(dev, nullptr, n * sizeof(float), "preconditioner result");
+        partial = upload(dev, nullptr, static_cast<std::size_t>(arguments.groups) * sizeof(df32), "partial sums");
+        state_buffer = upload(dev, nullptr, sizeof(solve_state), "solve state");
+        tags = upload(dev, nullptr, std::max({n, std::size_t(fwd.tag_count),
+            std::size_t(bwd.tag_count)}) * sizeof(std::uint32_t), "dataflow tags");
+    });
 }
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,

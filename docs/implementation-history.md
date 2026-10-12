@@ -56,8 +56,7 @@ epoch counters; each sweep initializes that state before processing tasks.
 **Dataflow triangular solves replaced level launches and proprietary analysis.**
 The library uses its own persistent dataflow worker and topologically ordered
 work tickets. This avoids a kernel launch for every level and an analysis
-buffer proportional to factor nnz. The original CUDA implementation used
-epoch-tagged values.
+buffer proportional to factor nnz.
 Our library links `cudart`; benchmark competitors may independently require
 cuSPARSE/cuBLAS. Earlier records describing a selectable cuSPARSE backend are
 obsolete. The design and ordering constraints are documented in

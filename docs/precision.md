@@ -50,10 +50,9 @@ implementation and is checked by the GPU finalization tests.
 
 ## Apple Metal PCG
 
-[Metal solves](../README.md#interfaces) handle one RHS per call and reuse the
-factor and workspace. Factor preparation runs on the host with compensated
-dropping. Factor values, diagonals and triangular arithmetic are FP32;
-explicit FP16 requests fail.
+Metal uses host factor preparation with compensated dropping and rejects
+explicit FP16 storage. [The solver](../README.md#interfaces) handles one RHS
+per call, reusing its factor and workspace.
 
 Double-float represents a value as the sum of two FP32 numbers, giving about
 48 significant bits but not IEEE FP64 precision or range. Metal uses it for

@@ -4,12 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <cstdint>
 #include <limits>
 #include <span>
 #include <vector>
-
-#include <omp.h>
 
 namespace apxchol::detail::metal_host { using std::fma; }
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
