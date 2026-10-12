@@ -545,6 +545,33 @@ bool add_allocation(std::size_t &total, std::size_t count,
 } // namespace
 
 struct gpu_block_frontend::impl {
+    auto scan_operation(const edge_index* input, edge_index* output,
+                        std::size_t count) {
+        require_cub_count(count, "scan");
+        return [=] [[gnu::always_inline]] (void* storage, std::size_t& bytes) {
+            return cub::DeviceScan::ExclusiveSum(storage, bytes, input, output,
+                                                static_cast<int>(count));
+        };
+    }
+
+    template<class Input, class T, class Predicate>
+    auto select_operation(Input input, T* output, std::size_t count,
+                          Predicate predicate) {
+        require_cub_count(count, "selection");
+        return [=, this] [[gnu::always_inline]] (void* storage, std::size_t& bytes) {
+            return cub::DeviceSelect::If(storage, bytes, input, output,
+                                        selected_count.get(), static_cast<int>(count), predicate);
+        };
+    }
+
+    auto degree_sort_operation(std::size_t count) {
+        require_cub_count(count, "degree sort");
+        return [=, this] [[gnu::always_inline]] (void* storage, std::size_t& bytes) {
+            return cub::DeviceRadixSort::SortKeys(storage, bytes, active_degrees.get(),
+                                                sorted_degrees.get(), static_cast<int>(count));
+        };
+    }
+
     explicit impl(node_index n_in,
                   std::span<const gpu_topology_edge> initial_edges,
                   std::shared_ptr<gpu_device_selection_producer> producer,
@@ -639,45 +666,15 @@ struct gpu_block_frontend::impl {
             cuda_check(cudaGetLastError(), "initialize active vertex ids");
         }
 
-        // Reserve the ordinary host-update path's largest CUB workspace;
-        // its counts only shrink after round zero. Resident projection selects
-        // directed incidences and may grow this scratch; advance_resident
-        // accounts for that additional allocation.
-        std::size_t cub_bytes = 0;
-        std::size_t bytes = 0;
         if (!owning_initial) {
-            cuda_check(cub::DeviceScan::ExclusiveSum(
-                           nullptr, bytes, degrees.get(), row_offsets.get(),
-                           static_cast<int>(std::size_t(n) + 1)),
-                       "query initial CUB scan workspace");
-            cub_bytes = std::max(cub_bytes, bytes);
+            cub_temp.reserve(std::max({
+                cub_bytes(scan_operation(degrees.get(), row_offsets.get(), std::size_t(n) + 1)),
+                initial_edges.empty() ? 0 : cub_bytes(select_operation(
+                    coo[0].get(), coo[1].get(), initial_edges.size(), edge_is_live{active_mask.get()})),
+                n ? cub_bytes(select_operation(candidates_original.get(), selected_ids.get(),
+                    n, status_equals{status.get(), 1})) : 0,
+                n ? cub_bytes(degree_sort_operation(n)) : 0}));
         }
-        if (!initial_edges.empty()) {
-            bytes = 0;
-            cuda_check(
-                cub::DeviceSelect::If(nullptr, bytes, coo[0].get(),
-                                      coo[1].get(), selected_count.get(),
-                                      static_cast<int>(initial_edges.size()),
-                                      edge_is_live{active_mask.get()}),
-                "query initial edge-selection workspace");
-            cub_bytes = std::max(cub_bytes, bytes);
-        }
-        if (n) {
-            bytes = 0;
-            cuda_check(cub::DeviceSelect::If(
-                           nullptr, bytes, candidates_original.get(),
-                           selected_ids.get(), selected_count.get(),
-                           static_cast<int>(n), status_equals{status.get(), 1}),
-                       "query initial vertex-selection workspace");
-            cub_bytes = std::max(cub_bytes, bytes);
-            bytes = 0;
-            cuda_check(cub::DeviceRadixSort::SortKeys(
-                           nullptr, bytes, active_degrees.get(),
-                           sorted_degrees.get(), static_cast<int>(n)),
-                       "query initial degree-sort workspace");
-            cub_bytes = std::max(cub_bytes, bytes);
-        }
-        cub_temp.reserve(cub_bytes);
     }
 
     void require_current_device(bool read_residual = true) const {
@@ -748,56 +745,28 @@ struct gpu_block_frontend::impl {
                                       what + " exceeds CUB's item-count limit");
     }
 
-    void exclusive_sum(const edge_index *input, edge_index *output,
-                       std::size_t count) {
-        require_cub_count(count, "scan");
+    template<class Operation>
+    std::size_t cub_bytes(Operation operation) {
         std::size_t bytes = 0;
-        cuda_check(cub::DeviceScan::ExclusiveSum(nullptr, bytes, input, output,
-                                                 static_cast<int>(count)),
-                   "query CUB scan workspace");
-        cub_temp.reserve(bytes);
-        cuda_check(cub::DeviceScan::ExclusiveSum(cub_temp.get(), bytes, input,
-                                                 output,
-                                                 static_cast<int>(count)),
-                   "CUB exclusive scan");
+        cuda_check(operation(nullptr, bytes), "query CUB workspace");
+        return bytes;
     }
 
-    template <class Input, class T, class Predicate>
-    int select_if(Input input, T *output, std::size_t count,
-                  Predicate predicate) {
-        require_cub_count(count, "selection");
-        selected_count.reserve(1);
-        std::size_t bytes = 0;
-        cuda_check(cub::DeviceSelect::If(nullptr, bytes, input, output,
-                                         selected_count.get(),
-                                         static_cast<int>(count), predicate),
-                   "query CUB selection workspace");
+    template<class Operation>
+    void execute_cub(Operation operation, const char* what) {
+        auto bytes = cub_bytes(operation);
         cub_temp.reserve(bytes);
-        cuda_check(cub::DeviceSelect::If(cub_temp.get(), bytes, input, output,
-                                         selected_count.get(),
-                                         static_cast<int>(count), predicate),
-                   "CUB ordered selection");
+        cuda_check(operation(cub_temp.get(), bytes), what);
+    }
+
+    template<class Input, class T, class Predicate>
+    int select_if(Input input, T* output, std::size_t count, Predicate predicate) {
+        execute_cub(select_operation(input, output, count, predicate), "CUB ordered selection");
         int host_count = 0;
         cuda_check(cudaMemcpy(&host_count, selected_count.get(),
                               sizeof(host_count), cudaMemcpyDeviceToHost),
                    "download selection count");
         return host_count;
-    }
-
-    void sort_degrees(std::size_t count) {
-        require_cub_count(count, "degree sort");
-        if (!count)
-            return;
-        std::size_t bytes = 0;
-        cuda_check(cub::DeviceRadixSort::SortKeys(
-                       nullptr, bytes, active_degrees.get(),
-                       sorted_degrees.get(), static_cast<int>(count)),
-                   "query degree-sort workspace");
-        cub_temp.reserve(bytes);
-        cuda_check(cub::DeviceRadixSort::SortKeys(
-                       cub_temp.get(), bytes, active_degrees.get(),
-                       sorted_degrees.get(), static_cast<int>(count)),
-                   "sort active degrees");
     }
 
     void gather_csr_degrees(std::size_t count) {
@@ -872,7 +841,8 @@ struct gpu_block_frontend::impl {
                 &prepare_status.get()->topology);
             cuda_check(cudaGetLastError(), "launch degree count");
         }
-        exclusive_sum(degrees.get(), row_offsets.get(), std::size_t(n) + 1);
+        execute_cub(scan_operation(degrees.get(), row_offsets.get(), std::size_t(n) + 1),
+                    "CUB exclusive scan");
 
         csr_neighbors.reserve(directed);
         if (n) {
@@ -934,7 +904,7 @@ struct gpu_block_frontend::impl {
             if (owns_residual_view) --quantile_count; // Yves' floor(q*(active-1))
             std::size_t rank = static_cast<std::size_t>(q * quantile_count);
             if (rank >= active.size()) rank = active.size() - 1;
-            sort_degrees(active.size());
+            execute_cub(degree_sort_operation(active.size()), "sort active degrees");
             node_index quantile = 0;
             cuda_check(cudaMemcpy(&quantile, sorted_degrees.get() + rank,
                                   sizeof(quantile), cudaMemcpyDeviceToHost),

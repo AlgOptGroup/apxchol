@@ -14,118 +14,13 @@ inline bool in_range(double value) {
     return magnitude == 0 || (magnitude >= 0x1p-100 && magnitude <= 0x1p100);
 }
 
-namespace detail {
-// Merge consecutive levels while every connected component fits one workgroup.
-// A failed merge is rolled back; no dependency may cross workgroups in a stage.
 struct step {
     unsigned first, last;
 };
-struct plan {
-    std::vector<unsigned> block_ptr{0}, rows;
-    std::vector<step> steps;
-};
-
-template <class P, class I>
-inline plan partition(const P &ptr, const I &col, const std::vector<unsigned> &levels,
-                      const std::vector<unsigned> &rows, const std::vector<unsigned> &depth,
-                      unsigned capacity) {
-    const unsigned n = rows.size();
-    std::vector<unsigned> parent(n), size(n, 1);
-    std::iota(parent.begin(), parent.end(), 0);
-    auto find = [&](unsigned x) {
-        while (x != parent[x])
-            x = parent[x];
-        return x;
-    };
-    std::vector<unsigned> undo;
-    std::vector<int> head(n, -1), next(n);
-    plan out;
-    out.rows.resize(n);
-    unsigned written = 0;
-    out.block_ptr.reserve(n / capacity + 16);
-    auto flush = [&](unsigned first, unsigned last) {
-        std::vector<unsigned> roots;
-        for (unsigned s = levels[first]; s < levels[last]; ++s) {
-            unsigned row = rows[s], root = find(row);
-            if (head[root] < 0)
-                roots.push_back(root);
-            next[row] = head[root];
-            head[root] = row;
-        }
-        std::vector<unsigned> buckets(capacity + 1, 0), ordered(roots.size());
-        for (unsigned root : roots)
-            ++buckets[capacity - size[root]];
-        std::exclusive_scan(buckets.begin(), buckets.end(), buckets.begin(), 0u);
-        for (unsigned root : roots)
-            ordered[buckets[capacity - size[root]]++] = root;
-        roots.swap(ordered);
-        step launch{unsigned(out.block_ptr.size() - 1), 0};
-        for (unsigned root : roots) {
-            if (written - out.block_ptr.back() + size[root] > capacity)
-                out.block_ptr.push_back(written);
-            written += size[root];
-            auto position = written;
-            for (int row = head[root]; row >= 0; row = next[row])
-                out.rows[--position] = row;
-            head[root] = -1;
-        }
-        if (out.block_ptr.back() != written)
-            out.block_ptr.push_back(written);
-        launch.last = out.block_ptr.size() - 1;
-        out.steps.push_back(launch);
-        for (unsigned s = levels[first]; s < levels[last]; ++s) {
-            parent[rows[s]] = rows[s];
-            size[rows[s]] = 1;
-        }
-    };
-    for (unsigned first = 1, l = 1; l + 1 < levels.size();) {
-        bool fits = true;
-        for (unsigned s = levels[l]; fits && s < levels[l + 1]; ++s) {
-            unsigned row = rows[s];
-            for (auto e = ptr[row]; e < ptr[row + 1]; ++e) {
-                unsigned other = col[e];
-                if (other == row || depth[other] < first)
-                    continue;
-                if (depth[other] >= l)
-                    throw std::runtime_error("non-topological levels");
-                unsigned a = find(row), b = find(other);
-                if (a == b)
-                    continue;
-                if (size[a] < size[b])
-                    std::swap(a, b);
-                undo.push_back(b);
-                parent[b] = a;
-                size[a] += size[b];
-                if (size[a] > capacity) {
-                    fits = false;
-                    break;
-                }
-            }
-        }
-        if (!fits) {
-            while (!undo.empty()) {
-                const unsigned child = undo.back(), root = parent[child];
-                undo.pop_back();
-                parent[child] = child;
-                size[root] -= size[child];
-            }
-            flush(first, l);
-            first = l;
-        } else {
-            undo.clear();
-            ++l;
-            if (l + 1 == levels.size())
-                flush(first, l);
-        }
-    }
-    out.rows.resize(written);
-    return out;
-}
-} // namespace detail
 
 struct schedule {
     gpu_dataflow::packed_plan tasks;
-    std::vector<detail::step> stages;
+    std::vector<step> stages;
     unsigned levels = 0;
 };
 
@@ -158,15 +53,98 @@ inline schedule build(std::span<const unsigned> ptr, std::span<const unsigned> c
     }
     if (height <= 1)
         return {{}, {}, height};
-    std::vector<unsigned> levels(height + 1), rows(n);
-    for (unsigned d : depth)
-        ++levels[d + 1];
-    std::partial_sum(levels.begin(), levels.end(), levels.begin());
-    auto cursor = levels;
-    for (unsigned row = 0; row < n; ++row)
-        rows[cursor[depth[row]]++] = row;
-    auto groups = detail::partition(ptr, col, levels, rows, depth, 128);
-    return {gpu_dataflow::pack(ptr.data(), {n, reverse, groups.rows.data()}, groups.block_ptr),
-            std::move(groups.steps), height};
+    std::vector<unsigned> block_ptr, rows;
+    std::vector<step> stages;
+    {
+        // Dependencies within a stage share one component and workgroup. A row that
+        // would exceed a workgroup's capacity starts a later stage instead.
+        constexpr unsigned capacity = 128;
+        std::vector<unsigned> parent(n), size(n, 1), stage(n), seen(n);
+        std::iota(parent.begin(), parent.end(), 0);
+        auto find = [&](unsigned row) {
+            while (row != parent[row]) {
+                parent[row] = parent[parent[row]];
+                row = parent[row];
+            }
+            return row;
+        };
+        gpu_dataflow::row_order order{n, reverse};
+        std::vector<unsigned> roots;
+        unsigned stage_count = 0;
+        for (unsigned q = 0; q < n; ++q) {
+            const unsigned row = order(q);
+            if (!depth[row])
+                continue;
+            roots.clear();
+            for (auto p = ptr[row] + 1; p < ptr[row + 1]; ++p) {
+                const auto e = reverse ? p : ptr[row + 1] - 1 - (p - ptr[row]);
+                const unsigned other = col[e];
+                if (!depth[other] || stage[other] < stage[row])
+                    continue;
+                if (stage[other] > stage[row]) {
+                    stage[row] = stage[other];
+                    size[row] = 1;
+                    roots.clear();
+                }
+                const unsigned root = find(other);
+                if (seen[root] == row + 1)
+                    continue;
+                seen[root] = row + 1;
+                roots.push_back(root);
+                size[row] += size[root];
+            }
+            if (size[row] > capacity) {
+                ++stage[row];
+                size[row] = 1;
+            } else {
+                const unsigned leader = roots.empty() ? row : *std::max_element(roots.begin(), roots.end(),
+                    [&](unsigned a, unsigned b) { return size[a] < size[b]; });
+                size[leader] = size[row];
+                parent[row] = leader;
+                for (unsigned root : roots)
+                    parent[root] = leader;
+            }
+            stage_count = std::max(stage_count, stage[row] + 1);
+        }
+        roots.clear();
+        for (unsigned row = 0; row < n; ++row)
+            if (depth[row] && parent[row] == row)
+                roots.push_back(row);
+        auto key = [&](unsigned root) {
+            return std::size_t(stage[root]) * (capacity + 1) + capacity - size[root];
+        };
+        std::vector<unsigned> buckets(std::size_t(stage_count) * (capacity + 1)), ordered(roots.size());
+        for (unsigned root : roots)
+            ++buckets[key(root)];
+        std::exclusive_scan(buckets.begin(), buckets.end(), buckets.begin(), 0u);
+        for (unsigned root : roots)
+            ordered[buckets[key(root)]++] = root;
+        auto &cursor = seen; // Visit stamps are no longer needed.
+        block_ptr.push_back(0);
+        rows.resize(n);
+        unsigned written = 0, component = 0;
+        for (unsigned st = 0; st < stage_count; ++st) {
+            step launch{unsigned(block_ptr.size() - 1), 0};
+            while (component < ordered.size() && stage[ordered[component]] == st) {
+                const unsigned root = ordered[component++];
+                if (written - block_ptr.back() + size[root] > capacity)
+                    block_ptr.push_back(written);
+                cursor[root] = written;
+                written += size[root];
+            }
+            if (block_ptr.back() != written)
+                block_ptr.push_back(written);
+            launch.last = block_ptr.size() - 1;
+            stages.push_back(launch);
+        }
+        rows.resize(written);
+        for (unsigned q = 0; q < n; ++q) {
+            const unsigned row = order(q);
+            if (depth[row])
+                rows[cursor[find(row)]++] = row;
+        }
+    }
+    return {gpu_dataflow::pack(ptr.data(), {n, reverse, rows.data()}, block_ptr),
+            std::move(stages), height};
 }
 } // namespace apxchol::detail::metal_schedule

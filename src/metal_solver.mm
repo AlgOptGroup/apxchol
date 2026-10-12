@@ -245,7 +245,7 @@ void finish(id<MTLCommandBuffer> cb) {
 struct prepared_tri {
     id<MTLBuffer> words = nil, blocks = nil, segments = nil;
     unsigned tag_count = 0;
-    std::vector<metal_schedule::detail::step> stages;
+    std::vector<metal_schedule::step> stages;
     id<MTLBuffer> ptr = nil, col = nil, val = nil;
     std::uint32_t levels = 0;
 };

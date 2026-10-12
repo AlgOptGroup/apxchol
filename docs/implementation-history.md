@@ -47,7 +47,7 @@ quality and cost, and requires its own correctness and performance validation.
 ## GPU solve and storage
 
 **CUDA and Metal share the dataflow worker and task format.** CUDA uses a global
-queue; Metal groups dependency levels into workgroups so that waiting threads
+queue; Metal groups dependent rows into workgroups so that waiting threads
 cannot block an unscheduled dependency. Shared task packing works on host or
 device. This replaced Metal's separate row kernels and level-permuted value
 copy. FP32 values and readiness now share one atomic word, replacing CUDA's

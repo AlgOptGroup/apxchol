@@ -581,10 +581,8 @@ __global__ void gather_selected_neighbors(
     const bool keep = pivot >= 0 && active[edge.owner] &&
                       active[edge.neighbor];
     flags[i] = keep ? 1 : 0;
-    if (keep)
-        candidates[i] = {static_cast<std::uint32_t>(pivot),
-                         static_cast<std::uint32_t>(edge.neighbor),
-                         edge.weight};
+    candidates[i] = {static_cast<std::uint32_t>(pivot),
+                     static_cast<std::uint32_t>(edge.neighbor), edge.weight};
 }
 
 __global__ void build_pair_keys(const work_record* records,
@@ -628,7 +626,10 @@ __global__ void reduce_equal_pairs(const work_record* sorted,
     const bool first = i == 0 || sorted[i - 1].a != sorted[i].a ||
                        sorted[i - 1].b != sorted[i].b;
     flags[i] = first ? 1 : 0;
-    if (!first) return;
+    if (!first) {
+        candidates[i] = {}; // CUB may load records whose flags are zero.
+        return;
+    }
     std::size_t end = i + 1;
     double sum = sorted[i].value;
     while (end < count && sorted[end].a == sorted[i].a &&
@@ -856,9 +857,11 @@ __global__ void sample_gks_items(
     const std::uint32_t begin = offsets[ordinal];
     const std::uint32_t end = offsets[ordinal + 1];
     fill_flags[i] = 0;
-    if (i + 1 == end) return;
     const double suffix = prefix[end - 1] - prefix[i];
-    if (suffix <= 0.0) return;
+    if (i + 1 == end || suffix <= 0.0) {
+        fill_candidates[i] = {};
+        return;
+    }
 
     // Nonnegative canonical weights make finite prefixes nondecreasing:
     // skipped zero suffixes are trailing, so this item's draw is i-begin.
@@ -1188,9 +1191,11 @@ __global__ void normal_batch_pass(
                         canonical[dest] = {record.pivot, record.neighbor, record.value};
                         fill_flags[dest] = 0;
                         if constexpr (!GksFill) continue;
-                        if (local + 1 == local_end) continue;
                         const double suffix = prefixes[warp][local_end - 1] - prefixes[warp][local];
-                        if (suffix <= 0.0) continue;
+                        if (local + 1 == local_end || suffix <= 0.0) {
+                            fills[dest] = {};
+                            continue;
+                        }
                         unsigned long long state = pivots[ordinal].seed +
                             0x9E3779B97F4A7C15ULL * static_cast<unsigned long long>(local - local_begin);
                         const auto partner = gks_partner(prefixes[warp], local, local_end, suffix, state);
@@ -1222,10 +1227,8 @@ __global__ void make_excess_updates(
     const double ev = excess[pivots[ordinal].vertex];
     const bool keep = ev > 0.0;
     flags[i] = keep ? 1 : 0;
-    if (keep)
-        candidates[i] = {
-            canonical[i].b, 0,
-            canonical[i].value * ev / total_degree[ordinal]};
+    candidates[i] = {canonical[i].b, 0,
+        keep ? canonical[i].value * ev / total_degree[ordinal] : 0.0};
 }
 
 __global__ void apply_excess_updates(const work_record* updates,
@@ -1539,8 +1542,6 @@ std::size_t planned_peak_bytes(std::size_t n, std::size_t r, std::size_t p,
     const std::size_t g = static_cast<std::size_t>(shape.gathered_incidences);
     const std::size_t u = static_cast<std::size_t>(shape.unique_neighbors);
     const std::size_t f = static_cast<std::size_t>(shape.raw_fill_edges);
-    const std::size_t e = static_cast<std::size_t>(shape.excess_updates);
-    const std::size_t q = static_cast<std::size_t>(shape.excess_targets);
     const std::size_t s =
         static_cast<std::size_t>(shape.surviving_input_incidences);
     const std::size_t l = static_cast<std::size_t>(shape.live_incidences);
@@ -1590,8 +1591,7 @@ std::size_t planned_peak_bytes(std::size_t n, std::size_t r, std::size_t p,
     peak = std::max(peak, phase({
         {2 * u, sizeof(work_record)}, {2 * u, sizeof(std::uint64_t)},
         {u, sizeof(double)}, {u, sizeof(work_record)},
-        {u, sizeof(std::uint8_t)}, {f, sizeof(work_record)},
-        {e, sizeof(work_record)}, {q, sizeof(work_record)}}));
+        {u, sizeof(std::uint8_t)}, {f, sizeof(work_record)}}));
     peak = std::max(peak, phase({
         {f, sizeof(work_record)}, {r, sizeof(std::uint8_t)},
         {l, sizeof(gpu_round_shadow_incidence)},
@@ -1697,8 +1697,8 @@ public:
                   device_buffer<int>& count)
         : storage_(storage), count_(count) {}
 
-    template<class T>
-    int select(const T* input, const std::uint8_t* flags, T* output,
+    template<class Input, class T>
+    int select(Input input, const std::uint8_t* flags, T* output,
                std::size_t count, const char* what) {
         if (!count) return 0;
         execute(count, what, [&](void* buffer, std::size_t& bytes, int n) {
@@ -3153,21 +3153,10 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 scratch.get(), flags.get());
             cuda_check(cudaGetLastError(), "launch excess-update construction");
         }
-        device_buffer<work_record> compact_excess(tracker);
-        const std::size_t e_capacity = expected_shape
-            ? static_cast<std::size_t>(expected_shape->excess_updates)
-            : u;
         // Raw fill was already compacted into the separate fills buffer.
-        // Reuse its dead u-slot candidate storage for e<=u excess updates;
-        // audited/reference callers retain their original local allocations.
-        auto* compact_excess_data = fill_candidates.get();
-        if (!device_owned_prefix) {
-            compact_excess.allocate(std::max<std::size_t>(e_capacity, 1),
-                                    "allocate compact excess updates");
-            compact_excess_data = compact_excess.get();
-        }
+        // Its candidate storage fits e<=u excess updates.
         const int excess_count = cub.select(
-            scratch.get(), flags.get(), compact_excess_data, u,
+            scratch.get(), flags.get(), fill_candidates.get(), u,
             "compact excess updates");
         require_count_if_expected(
             excess_count, expected_shape,
@@ -3177,28 +3166,18 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         report.excess_updates = e;
         if (e) {
             build_first_keys<<<blocks_for(e), kBlock>>>(
-                compact_excess_data, e, keys_a.get());
+                fill_candidates.get(), e, keys_a.get());
             cuda_check(cudaGetLastError(), "launch excess target keys");
-            cub.sort_pairs(keys_a.get(), keys_b.get(), compact_excess_data,
+            cub.sort_pairs(keys_a.get(), keys_b.get(), fill_candidates.get(),
                            unique.get(), e, "stable sort excess updates");
             reduce_equal_pairs<<<blocks_for(e), kBlock>>>(
                 unique.get(), e, scratch.get(), flags.get());
             cuda_check(cudaGetLastError(), "launch deterministic excess reduce");
         }
-        device_buffer<work_record> reduced_excess(tracker);
-        const std::size_t q_capacity = expected_shape
-            ? static_cast<std::size_t>(expected_shape->excess_targets)
-            : e;
         // The sorted input now lives in unique, and its reduction in scratch.
         // The same dead candidate storage fits q<=e<=u without in/out aliasing.
-        auto* reduced_excess_data = fill_candidates.get();
-        if (!device_owned_prefix) {
-            reduced_excess.allocate(std::max<std::size_t>(q_capacity, 1),
-                                    "allocate reduced excess updates");
-            reduced_excess_data = reduced_excess.get();
-        }
         const int reduced_count = cub.select(
-            scratch.get(), flags.get(), reduced_excess_data, e,
+            scratch.get(), flags.get(), fill_candidates.get(), e,
             "compact reduced excess updates");
         require_count_if_expected(
             reduced_count, expected_shape,
@@ -3208,7 +3187,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         report.excess_targets = q;
         if (q) {
             apply_excess_updates<<<blocks_for(q), kBlock>>>(
-                reduced_excess_data, q, excess.get());
+                fill_candidates.get(), q, excess.get());
             cuda_check(cudaGetLastError(), "launch reduced excess apply");
         }
     });

@@ -133,11 +133,13 @@ __device__ std::uint32_t sample_gks_row(const work_record* a, std::uint32_t d,
     if (!d) return 0;
     gks_prefix(a, d, prefix);
     flags[d - 1] = 0;
+    fill[d - 1] = {};
     std::uint32_t emitted = 0;
     for (std::uint32_t i = 0; i + 1 < d; ++i) {
         const double suffix = prefix[d - 1] - prefix[i];
         if (suffix <= 0) {
             flags[i] = 0;
+            fill[i] = {};
             continue;
         }
         const auto j = gks_partner(prefix, i, d, suffix, state);

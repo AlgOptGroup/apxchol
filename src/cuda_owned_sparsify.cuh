@@ -62,11 +62,6 @@ __device__ std::uint64_t owned_sparsify_priority(double weight, unsigned id) {
     return (bucket << 32) | id;
 }
 
-__global__ void owned_sparsify_ids(std::size_t count, std::uint32_t* ids) {
-    const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i < count) ids[i] = unsigned(i);
-}
-
 __global__ void owned_sparsify_initialize(node_index n,
         std::uint32_t* parents, std::uint32_t* labels) {
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
@@ -282,7 +277,7 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
     device_buffer<gpu_round_shadow_incidence> canonical(tracker), scratch(tracker), expanded(tracker);
     device_buffer<std::uint8_t> flags(tracker);
     device_buffer<std::uint64_t> keys_a(tracker), keys_b(tracker);
-    device_buffer<std::uint32_t> ids(tracker), ordered_ids(tracker), parent(tracker), labels(tracker);
+    device_buffer<std::uint32_t> ordered_ids(tracker), parent(tracker), labels(tracker);
     device_buffer<unsigned> backbone(tracker), counts(tracker);
     device_buffer<unsigned long long> best(tracker);
     device_buffer<double> importance(tracker), partials(tracker);
@@ -300,14 +295,15 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
             static_cast<const std::uint64_t*>(nullptr), static_cast<std::uint64_t*>(nullptr),
             static_cast<const gpu_round_shadow_incidence*>(nullptr), static_cast<gpu_round_shadow_incidence*>(nullptr), int(count)), "query sparsification incidence sort"); note();
     }
-    cuda_check(cub::DeviceSelect::Flagged(nullptr, bytes, static_cast<const std::uint32_t*>(nullptr),
+    const thrust::counting_iterator<std::uint32_t> ids{0};
+    cuda_check(cub::DeviceSelect::Flagged(nullptr, bytes, ids,
         static_cast<const std::uint8_t*>(nullptr), static_cast<std::uint32_t*>(nullptr), static_cast<int*>(nullptr), int(edges)), "query sparsification ID select"); note();
     cuda_check(cub::DeviceScan::ExclusiveSum(nullptr, bytes, output_degrees, output_offsets, int(n)), "query sparsification degree scan"); note();
     // Conservative sum of all phase allocations (larger than the live maximum).
     // Existing input, spare, offsets, degrees, factor log and retained scratch
     // already consume free memory and remain in the caller's allocation tracker.
     std::size_t required = cub_bytes;
-    required = add_bytes(required, edges, 2 * sizeof(gpu_round_shadow_incidence) + 3 * sizeof(unsigned) + sizeof(double), "sparsification canonical workspace");
+    required = add_bytes(required, edges, 2 * sizeof(gpu_round_shadow_incidence) + 2 * sizeof(unsigned) + sizeof(double), "sparsification canonical workspace");
     required = add_bytes(required, live, sizeof(gpu_round_shadow_incidence) + 2 * sizeof(std::uint64_t) + sizeof(std::uint8_t), "sparsification paired workspace");
     required = add_bytes(required, n, 2 * sizeof(unsigned) + sizeof(unsigned long long), "sparsification forest workspace");
     required = add_bytes(required, max_blocks, sizeof(double) + sizeof(owned_sparsify_diagnostic_partial), "sparsification reduction blocks");
@@ -357,11 +353,10 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
     if (test) { test->canonical.resize(distinct); copy_to_host(test->canonical.data(), canonical.get(), distinct, "download test canonical edges"); }
     backbone.allocate(distinct, "allocate sparsification backbone");
     parent.allocate(n, "allocate sparsification parents"); labels.allocate(n, "allocate sparsification labels"); best.allocate(n, "allocate sparsification choices");
-    ids.allocate(distinct, "allocate sparsification canonical IDs"); ordered_ids.allocate(distinct, "allocate sparsification ordered IDs");
+    ordered_ids.allocate(distinct, "allocate sparsification ordered IDs");
     cuda_check(cudaMemset(backbone.get(), 0, distinct * sizeof(unsigned)), "clear sparsification backbone");
     owned_sparsify_initialize<<<blocks_for(n), kBlock>>>(n, parent.get(), labels.get());
-    owned_sparsify_ids<<<blocks_for(distinct), kBlock>>>(distinct, ids.get());
-    cuda_check(cudaGetLastError(), "initialize sparsification forest and IDs");
+    cuda_check(cudaGetLastError(), "initialize sparsification forest");
     for (std::size_t round = 0;; ++round) {
         if (round > std::size_t(n)) throw std::logic_error("GPU sparsification forest did not converge");
         cuda_check(cudaMemset(best.get(), 0xff, std::size_t(n) * sizeof(unsigned long long)), "clear sparsification choices");
@@ -406,7 +401,7 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
     cuda_check(cudaGetLastError(), "compute bounded parallel sparsification diagnostics");
     copy_to_host(&result, device_stats.get(), 1, "download bounded sparsification diagnostics"); result.scalar_download_bytes += sizeof(result);
     // Stable selection preserves the canonical encounter order in the rebuild.
-    const int kept_count = cub.select(ids.get(), flags.get(), ordered_ids.get(), distinct, "compact kept sparsification IDs");
+    const int kept_count = cub.select(ids, flags.get(), ordered_ids.get(), distinct, "compact kept sparsification IDs");
     if (kept_count < 0 || std::size_t(kept_count) > distinct)
         throw std::logic_error("GPU sparsification returned invalid kept count");
     result.kept_edges = std::size_t(kept_count);
