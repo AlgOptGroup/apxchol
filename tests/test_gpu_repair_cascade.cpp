@@ -162,8 +162,11 @@ void check_cascade(gpu_block_frontend& gpu, const cascade_fixture& fixture,
         for (const auto v : fixture.active) {
             bool adjacent_pick = false;
             for (const auto u : fixture.neighbors[v]) adjacent_pick |= picked[u] != 0;
-            if (picked[v]) EXPECT_FALSE(adjacent_pick);
-            else EXPECT_TRUE(adjacent_pick) << "uncovered vertex=" << v;
+            if (picked[v]) {
+                EXPECT_FALSE(adjacent_pick);
+            } else {
+                EXPECT_TRUE(adjacent_pick) << "uncovered vertex=" << v;
+            }
         }
         for (std::size_t v = path; v < n; ++v) EXPECT_TRUE(picked[v]);
     }

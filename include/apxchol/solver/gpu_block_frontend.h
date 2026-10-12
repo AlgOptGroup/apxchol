@@ -98,7 +98,7 @@ public:
 #endif
 
     /// Commit a selection after CPU elimination succeeded and enqueue the
-    /// sampled clique endpoints that must be present in the next round.
+    /// sampled clique edges between retained vertices for the next round.
     void advance(std::span<const node_index> eliminated,
                  std::span<const gpu_topology_edge> new_edges,
                  std::span<const gpu_topology_batch> new_edge_batches = {});

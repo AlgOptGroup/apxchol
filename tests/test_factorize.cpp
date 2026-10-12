@@ -1876,6 +1876,18 @@ TEST(GpuBlockFrontend, RejectsIncompatibleFactorizationBeforeDeviceProbe) {
     options.exact_clique_max_degree = 8;
     EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, options),
                  std::invalid_argument);
+    const scoped_env host_elimination("APXCHOL_GPU_ROUND_SHADOW", "off");
+    options.exact_clique_max_degree = 0;
+    options.sampler = apxchol::clique_sampler::trace_cycle;
+    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, options),
+                 std::invalid_argument);
+    options.exact_core_max_h = 4;
+    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, options),
+                 std::invalid_argument);
+    options.exact_core_max_h = 0;
+    options.double_cycle_min_h = 4;
+    EXPECT_THROW(apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, options),
+                 std::invalid_argument);
 }
 
 TEST(GpuBlockFrontend, TracksCandidatesAndDynamicUpdatesExactly) {
@@ -2030,8 +2042,9 @@ static void check_block_selection_reference(apxchol::node_index n,
         options.degree_multiplier = n; // Total degree admits every vertex.
     }
     (void)gpu.prepare(active, options);
-    if (fixture != block_frontier_fixture::original)
+    if (fixture != block_frontier_fixture::original) {
         ASSERT_EQ(gpu.host_candidates().size(), n);
+    }
 
     const auto first = gpu.select_block_greedy().data;
     const auto first_work = gpu.selected_degree_work();

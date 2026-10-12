@@ -1262,10 +1262,12 @@ factorization factorize_impl(const Eliminator& elim,
                 "graph storage and the standard tree sampler");
     } else {
         if (!initial_csc && gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled) {
-            if (opts.exact_clique_max_degree != 0)
+            if (elim.exact_clique_max_degree != 0 ||
+                (elim.sampler == clique_sampler::trace_cycle &&
+                 (elim.exact_core_max_h > 3 || elim.double_cycle_min_h != 0)))
                 throw std::invalid_argument(
-                    "the GPU setup front-end requires a bounded built-in "
-                    "sampler (exact clique mode can grow topology)");
+                    "the GPU setup front-end requires a bounded built-in sampler "
+                    "(topology-expanding exact-clique and trace-cycle core rules are unsupported)");
             const auto runtime = detail::gpu_block_frontend::probe_runtime(
                 n, static_cast<std::size_t>(work.m()));
             if (!runtime.cooperative_launch || !runtime.memory_fits)

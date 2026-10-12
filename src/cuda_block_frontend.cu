@@ -1,4 +1,5 @@
 #include "cuda_buffer.cuh"
+#include "cuda_digest.cuh"
 #include "apxchol/solver/detail/setup_route.h"
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
@@ -86,50 +87,16 @@ struct device_selection_digest {
 };
 
 struct device_prepare_status {
-    unsigned long long degree_sum;
     device_selection_digest topology;
     device_selection_digest active;
 };
-static_assert(sizeof(device_prepare_status) == 40);
+static_assert(sizeof(device_prepare_status) == 32);
 
 struct device_selected_status {
     unsigned long long degree_sum;
     device_selection_digest selection;
 };
 static_assert(sizeof(device_selected_status) == 24);
-
-__device__ void block_selection_digest_add(
-        unsigned long long item, device_selection_digest* digest,
-        unsigned long long* warp_xor,
-        unsigned long long* warp_sum) {
-    constexpr unsigned kWarp = 32;
-    constexpr unsigned kWarpsPerBlock = kBlock / kWarp;
-    const unsigned lane = threadIdx.x % kWarp;
-    const unsigned warp = threadIdx.x / kWarp;
-    unsigned long long xor_value = item;
-    unsigned long long sum_value = item;
-    for (unsigned offset = kWarp / 2; offset; offset >>= 1) {
-        xor_value ^= __shfl_down_sync(0xffffffffU, xor_value, offset);
-        sum_value += __shfl_down_sync(0xffffffffU, sum_value, offset);
-    }
-    if (lane == 0) {
-        warp_xor[warp] = xor_value;
-        warp_sum[warp] = sum_value;
-    }
-    __syncthreads();
-    if (warp == 0) {
-        xor_value = lane < kWarpsPerBlock ? warp_xor[lane] : 0;
-        sum_value = lane < kWarpsPerBlock ? warp_sum[lane] : 0;
-        for (unsigned offset = kWarp / 2; offset; offset >>= 1) {
-            xor_value ^= __shfl_down_sync(0xffffffffU, xor_value, offset);
-            sum_value += __shfl_down_sync(0xffffffffU, sum_value, offset);
-        }
-        if (lane == 0) {
-            atomicXor(&digest->xor_hash, xor_value);
-            atomicAdd(&digest->sum_hash, sum_value);
-        }
-    }
-}
 
 __global__ void count_degrees(const gpu_topology_edge *edges, std::size_t m,
                               edge_index *degrees,
@@ -142,10 +109,8 @@ __global__ void count_degrees(const gpu_topology_edge *edges, std::size_t m,
         atomic_increment(&degrees[e.v]);
         item_hash = gpu_device_selection_topology_hash(e.u, e.v);
     }
-    __shared__ unsigned long long warp_xor[kBlock / 32];
-    __shared__ unsigned long long warp_sum[kBlock / 32];
-    block_selection_digest_add(
-        item_hash, topology_digest, warp_xor, warp_sum);
+    __shared__ device_selection_digest warp_values[kBlock / 32];
+    digest_add_block<kBlock>({item_hash, item_hash}, topology_digest, warp_values);
 }
 
 __global__ void scatter_csr(const gpu_topology_edge *edges, std::size_t m,
@@ -198,23 +163,15 @@ __global__ void gather_active_degrees(const node_index *active_ids,
         output[i] = view.degree(vertex);
         if constexpr (Audit) item_hash = gpu_device_selection_active_hash(vertex);
     }
-    __shared__ unsigned long long warp_xor[kBlock / 32];
-    __shared__ unsigned long long warp_sum[kBlock / 32];
+    __shared__ device_selection_digest warp_values[kBlock / 32];
     if constexpr (Audit)
-        block_selection_digest_add(item_hash, active_digest, warp_xor, warp_sum);
+        digest_add_block<kBlock>({item_hash, item_hash}, active_digest, warp_values);
 }
 
 __global__ void initialize_vertex_ids(std::size_t count, node_index *ids) {
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i < count)
         ids[i] = static_cast<node_index>(i);
-}
-
-__global__ void sum_degree_values(const node_index *values, std::size_t count,
-                                  unsigned long long *sum) {
-    const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i < count)
-        atomicAdd(sum, static_cast<unsigned long long>(values[i]));
 }
 
 template<class View>
@@ -238,10 +195,8 @@ __global__ void sum_vertex_degrees(const node_index *ids, std::size_t count,
     const unsigned warp = threadIdx.x / 32;
     if (lane == 0)
         warp_degrees[warp] = degree_sum;
-    __shared__ unsigned long long warp_xor[kBlock / 32];
-    __shared__ unsigned long long warp_sum[kBlock / 32];
-    block_selection_digest_add(
-        item_hash, &status->selection, warp_xor, warp_sum);
+    __shared__ device_selection_digest warp_values[kBlock / 32];
+    digest_add_block<kBlock>({item_hash, item_hash}, &status->selection, warp_values);
     if (warp == 0) {
         degree_sum = lane < kBlock / 32 ? warp_degrees[lane] : 0;
         for (unsigned offset = 16; offset; offset >>= 1)
@@ -290,13 +245,28 @@ __device__ bool block_priority_precedes(node_index a, node_index b,
     return da != db ? da < db : a < b;
 }
 
+// Warp callers must supply the same vertex on all 32 participating lanes.
+template<bool Warp, class View, class Predicate>
+__device__ bool any_neighbor(node_index v, View view, Predicate predicate) {
+    const std::size_t end = view.end(v);
+    const unsigned lane = Warp ? (threadIdx.x & 31U) : 0;
+    constexpr std::size_t stride = Warp ? 32 : 1;
+    for (std::size_t base = view.begin(v); base < end; base += stride) {
+        const std::size_t at = base + lane;
+        bool found = at < end && predicate(view.neighbor(static_cast<edge_index>(at)));
+        if constexpr (Warp)
+            found = __any_sync(0xffffffffU, found);
+        if (found)
+            return true;
+    }
+    return false;
+}
+
 __global__ void initialize_block_candidates(const node_index *candidates,
                                              std::size_t count,
                                              std::size_t region_count,
                                              int *status,
-                                             node_index *region_of,
-                                             int *frontier,
-                                             unsigned char *scratch) {
+                                             node_index *region_of) {
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i >= count)
         return;
@@ -304,8 +274,6 @@ __global__ void initialize_block_candidates(const node_index *candidates,
     status[v] = 0;
     region_of[v] = static_cast<node_index>(
         (i * region_count) / count);
-    frontier[v] = 0;
-    scratch[v] = 0;
 }
 
 template<class View>
@@ -333,7 +301,7 @@ __global__ void block_greedy_regions(
         for (edge_index p = view.begin(v) + lane;
              p < view.end(v); p += 32) {
             const node_index u = view.neighbor(p);
-            blocked |= status[u] == 1 && region_of[u] == warp;
+            blocked |= region_of[u] == warp && status[u] == 1;
         }
         const bool any = __any_sync(kFullWarp, blocked);
         if (lane == 0 && !any)
@@ -368,31 +336,23 @@ __global__ void decide_block_conflicts(
 
 __global__ void apply_block_drops(const node_index *candidates,
                                   std::size_t count, int *status,
-                                  int *frontier, unsigned char *drop) {
+                                  int *frontier, const unsigned char *drop) {
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i >= count)
         return;
     const node_index v = candidates[i];
     if (drop[v])
         status[v] = 0;
-    // Regional greedy picks dominate every candidate before conflict drops.
-    // Thus every now-free unselected candidate is a drop or its neighbor.
-    // The repair's first free scan produces exactly the old explicit frontier's
-    // pending set when started from all unselected candidates. This avoids the
-    // dropped-row scatter and repeated atomic marks, at the cost of testing
-    // additional blocked rows once. Later repair passes are unchanged.
+    // Repair starts with every unselected candidate. Its first pass discards
+    // vertices adjacent to a retained pick.
     frontier[v] = status[v] == 1 ? 0 : 1;
-    drop[v] = 0;
 }
 
 template<class View>
 __global__ void block_greedy_repair(
     const node_index *candidates, std::size_t count,
     View view, int *status, int *frontier,
-    unsigned char *winner, bool degree_tiebreak, int *has_pending) {
-    // Keep the private launch ABI; decisions now commit status directly and
-    // leave the caller's zeroed winner scratch untouched.
-    (void)winner;
+    bool degree_tiebreak, int *has_pending) {
     namespace cg = cooperative_groups;
     const cg::grid_group grid = cg::this_grid();
     constexpr unsigned full_warp = 0xffffffffU;
@@ -420,13 +380,8 @@ __global__ void block_greedy_repair(
             }
             const bool long_row = active && view.degree(v) > 32;
             if (active && !long_row) {
-                bool free = true;
-                for (std::size_t p = view.begin(v); p < std::size_t(view.end(v)); ++p) {
-                    if (status[view.neighbor(p)] == 1) {
-                        free = false;
-                        break;
-                    }
-                }
+                const bool free = !any_neighbor<false>(v, view,
+                    [&](node_index u) { return status[u] == 1; });
                 frontier[v] = free ? 2 : 0;
                 thread_pending |= free;
             }
@@ -434,16 +389,8 @@ __global__ void block_greedy_repair(
             while (rows) {
                 const unsigned owner = __ffs(rows) - 1;
                 const node_index row = __shfl_sync(full_warp, v, owner);
-                bool free = true;
-                const std::size_t end = view.end(row);
-                for (std::size_t base = view.begin(row); base < end; base += 32) {
-                    const std::size_t p = base + lane;
-                    const bool blocked = p < end && status[view.neighbor(p)] == 1;
-                    if (__any_sync(full_warp, blocked)) {
-                        free = false;
-                        break;
-                    }
-                }
+                const bool free = !any_neighbor<true>(row, view,
+                    [&](node_index u) { return status[u] == 1; });
                 if (lane == owner) {
                     frontier[row] = free ? 2 : 0;
                     thread_pending |= free;
@@ -469,15 +416,10 @@ __global__ void block_greedy_repair(
             const bool active = i < count && frontier[v] == 2;
             const bool long_row = active && view.degree(v) > 32;
             if (active && !long_row) {
-                bool wins = true;
-                for (std::size_t p = view.begin(v); p < std::size_t(view.end(v)); ++p) {
-                    const node_index u = view.neighbor(p);
-                    if (frontier[u] == 2 &&
-                        block_priority_precedes(u, v, view, degree_tiebreak)) {
-                        wins = false;
-                        break;
-                    }
-                }
+                const bool wins = !any_neighbor<false>(v, view, [&](node_index u) {
+                    return frontier[u] == 2 &&
+                        block_priority_precedes(u, v, view, degree_tiebreak);
+                });
                 if (wins)
                     status[v] = 1;
             }
@@ -485,21 +427,10 @@ __global__ void block_greedy_repair(
             while (rows) {
                 const unsigned owner = __ffs(rows) - 1;
                 const node_index row = __shfl_sync(full_warp, v, owner);
-                bool wins = true;
-                const std::size_t end = view.end(row);
-                for (std::size_t base = view.begin(row); base < end; base += 32) {
-                    const std::size_t p = base + lane;
-                    bool loses = false;
-                    if (p < end) {
-                        const node_index u = view.neighbor(p);
-                        loses = frontier[u] == 2 &&
-                            block_priority_precedes(u, row, view, degree_tiebreak);
-                    }
-                    if (__any_sync(full_warp, loses)) {
-                        wins = false;
-                        break;
-                    }
-                }
+                const bool wins = !any_neighbor<true>(row, view, [&](node_index u) {
+                    return frontier[u] == 2 &&
+                        block_priority_precedes(u, row, view, degree_tiebreak);
+                });
                 // Only the owning lane publishes; decision scans read the
                 // unchanged frontier and priority, never another pick's status.
                 if (lane == owner && wins)
@@ -535,18 +466,10 @@ __global__ void bounded_decide(const node_index* candidates, std::size_t count,
     const unsigned lane = threadIdx.x & 31U;
     if (index >= count) return; // whole warp, including the final partial block
     const node_index v = candidates[index];
-    bool wins = true;
-    const std::size_t end = view.end(v);
-    for (std::size_t begin = view.begin(v); begin < end; begin += 32) {
-        const std::size_t at = begin + lane;
-        bool loses = false;
-        if (at < end) {
-            const auto u = view.neighbor(static_cast<edge_index>(at));
-            loses = status[u] == 0 &&
-                bounded_priority_precedes(u, v, view, degree_tiebreak, seed, phase);
-        }
-        if (__any_sync(0xffffffffU, loses)) { wins = false; break; }
-    }
+    const bool wins = !any_neighbor<true>(v, view, [&](node_index u) {
+        return status[u] == 0 &&
+            bounded_priority_precedes(u, v, view, degree_tiebreak, seed, phase);
+    });
     if (lane == 0) winners[index] = wins;
 }
 
@@ -662,14 +585,6 @@ struct gpu_block_frontend::impl {
                    "query CUDA multiprocessor count");
         block_repair_grid_limit = block_repair_blocks_per_sm * sms;
         block_region_limit = block_scan_blocks_per_sm * sms * (kBlock / 32);
-        int owned_repair_blocks_per_sm = 0;
-        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                       &owned_repair_blocks_per_sm,
-                       block_greedy_repair<selector_owned_view>, kBlock, 0),
-                   "query owned block-greedy repair occupancy");
-        owned_block_repair_grid_limit = owned_repair_blocks_per_sm * sms;
-        if (owned_block_repair_grid_limit <= 0)
-            throw std::runtime_error("GPU owned selector has no repair residency");
         // Logical regions remain those of the existing selector policy. The
         // region scan is not cooperative, so its residency is not a launch
         // constraint; changing its region count would change the sampled factor.
@@ -885,22 +800,20 @@ struct gpu_block_frontend::impl {
                    "sort active degrees");
     }
 
-    unsigned long long sum_active_degree_values(std::size_t count) {
-        cuda_check(cudaMemset(&prepare_status.get()->degree_sum, 0,
-                              sizeof(unsigned long long)),
-                   "clear active-degree sum");
+    void gather_csr_degrees(std::size_t count) {
+        cuda_check(cudaMemset(&prepare_status.get()->active, 0,
+                              sizeof(device_selection_digest)),
+                   "clear producer active-set digest");
         if (count) {
-            sum_degree_values<<<blocks_for(count), kBlock>>>(
-                active_degrees.get(), count,
-                &prepare_status.get()->degree_sum);
-            cuda_check(cudaGetLastError(), "sum active degrees");
+            gather_active_degrees<<<blocks_for(count), kBlock>>>(
+                active_ids[current_active].get(), count, csr_view(),
+                active_degrees.get(), &prepare_status.get()->active);
+            cuda_check(cudaGetLastError(), "launch active-degree gather");
         }
         device_prepare_status host_status{};
-        // This replaces the old 8-byte degree-sum readback: the same bounded
-        // synchronization also publishes the producer-owned content digest.
         cuda_check(cudaMemcpy(&host_status, prepare_status.get(),
                               sizeof(host_status), cudaMemcpyDeviceToHost),
-                   "download active-degree sum and selection content");
+                   "download selection content");
         selection_content = {
             n,
             count,
@@ -909,7 +822,6 @@ struct gpu_block_frontend::impl {
             {host_status.active.xor_hash,
              host_status.active.sum_hash},
             {}};
-        return host_status.degree_sum;
     }
 
     unsigned long long sum_selected_degrees(std::size_t count) {
@@ -997,7 +909,6 @@ struct gpu_block_frontend::impl {
         host_active_degrees_valid = false;
         host_candidate_ids_valid = false;
 
-        unsigned long long total_degree = 0;
         if (owns_residual_view) {
             if (!active.empty()) {
                 gather_active_degrees<selector_owned_view, false>
@@ -1006,24 +917,14 @@ struct gpu_block_frontend::impl {
                         active_degrees.get(), nullptr);
                 cuda_check(cudaGetLastError(), "gather owned active degrees");
             }
-            // Paired owner incidences are exactly the active degree sum.
-            total_degree = 2ULL * live_edge_count;
             selection_content.selection = {};
         } else {
-            cuda_check(cudaMemset(&prepare_status.get()->active, 0,
-                                  sizeof(device_selection_digest)),
-                       "clear producer active-set digest");
-            if (!active.empty()) {
-                gather_active_degrees<<<blocks_for(active.size()), kBlock>>>(
-                    active_ids[current_active].get(), active.size(), csr_view(),
-                    active_degrees.get(), &prepare_status.get()->active);
-                cuda_check(cudaGetLastError(), "launch active-degree gather");
-            }
-            total_degree = sum_active_degree_values(active.size());
+            gather_csr_degrees(active.size());
         }
+        // Each retained edge contributes to two active vertices.
         const double average =
             active.empty() ? 0.0
-                           : static_cast<double>(total_degree) /
+                           : static_cast<double>(2ULL * live_edge_count) /
                                  static_cast<double>(active.size());
 
         double threshold = options.degree_multiplier * average;
@@ -1109,8 +1010,8 @@ struct gpu_block_frontend::impl {
                                      static_cast<std::size_t>(block_region_limit));
     }
 
-    template<class View>
-    void launch_selection(View view, std::size_t regions, int repair_grid_limit) {
+    void launch_selection(std::size_t regions) {
+        auto view = csr_view();
         constexpr std::size_t warps_per_block = kBlock / 32;
         const std::size_t scan_blocks =
             (regions + warps_per_block - 1) / warps_per_block;
@@ -1131,19 +1032,18 @@ struct gpu_block_frontend::impl {
 
         const int wanted = blocks_for(candidate_count);
         const int grid =
-            std::max(1, std::min(wanted, repair_grid_limit));
+            std::max(1, std::min(wanted, block_repair_grid_limit));
         const node_index *candidate_ptr = candidates_original.get();
         int *status_ptr = status.get();
         int *frontier_ptr = block_frontier.get();
-        unsigned char *winner_ptr = pick.get();
         bool degree_tiebreak = current_options.degree_tiebreak;
         int *pending_ptr = cooperative_flag.get();
         void *args[] = {
             &candidate_ptr, &candidate_count, &view,
-            &status_ptr, &frontier_ptr, &winner_ptr,
+            &status_ptr, &frontier_ptr,
             &degree_tiebreak, &pending_ptr};
         cuda_check(cudaLaunchCooperativeKernel(
-                       reinterpret_cast<void *>(block_greedy_repair<View>), grid,
+                       reinterpret_cast<void *>(block_greedy_repair<selector_csr_view>), grid,
                        kBlock, args, 0, nullptr),
                    "launch cooperative block-greedy repair");
     }
@@ -1201,18 +1101,22 @@ struct gpu_block_frontend::impl {
             launch_bounded_selection();
         } else
         {
-            block_region.reserve(n);
-            block_frontier.reserve(n);
+            if (!block_region.get()) {
+                // Neighbor scans also read vertices outside the candidate set.
+                block_region.reserve(n);
+                cuda_check(cudaMemset(block_region.get(), 0xff, n * sizeof(node_index)),
+                           "initialize region tags");
+                block_frontier.reserve(n);
+                cuda_check(cudaMemset(block_frontier.get(), 0, n * sizeof(int)),
+                           "initialize repair frontier");
+            }
             regions = block_region_count();
             initialize_block_candidates<<<blocks_for(candidate_count), kBlock>>>(
                 candidates_original.get(), candidate_count, regions, status.get(),
-                block_region.get(), block_frontier.get(), pick.get());
+                block_region.get());
             cuda_check(cudaGetLastError(), "initialize block-greedy candidates");
 
-            if (owns_residual_view)
-                launch_selection(owned_view, regions, owned_block_repair_grid_limit);
-            else
-                launch_selection(csr_view(), regions, block_repair_grid_limit);
+            launch_selection(regions);
         }
         const std::size_t chosen = static_cast<std::size_t>(
             select_if(candidates_original.get(), selected_ids.get(),
@@ -1324,16 +1228,7 @@ struct gpu_block_frontend::impl {
         live_edge_count = count;
         topology_dirty = true;
         rebuild_topology();
-        cuda_check(cudaMemset(&prepare_status.get()->active, 0,
-                              sizeof(device_selection_digest)),
-                   "clear projected active digest");
-        if (active_count) {
-            gather_active_degrees<<<blocks_for(active_count), kBlock>>>(
-                active_ids[current_active].get(), active_count, csr_view(),
-                active_degrees.get(), &prepare_status.get()->active);
-            cuda_check(cudaGetLastError(), "gather projected active digest");
-        }
-        sum_active_degree_values(active_count);
+        gather_csr_degrees(active_count);
         if (!gpu_device_selection_state_matches(selection_content, expected))
             throw std::logic_error("GPU selector resident projection content mismatch");
         candidate_count = 0;
@@ -1492,7 +1387,6 @@ struct gpu_block_frontend::impl {
     std::size_t selected_size = 0;
     std::size_t selected_degree_work = 0;
     int block_repair_grid_limit = 0;
-    int owned_block_repair_grid_limit = 0;
     int block_region_limit = 0;
     bool topology_dirty = true;
     gpu_device_selection_content selection_content;

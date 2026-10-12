@@ -133,26 +133,19 @@ int dataflow_grid_size(bool fp16) {
 }
 
 void dataflow_solve(cudaStream_t stream, int m, bool reverse, const int *ptr, const int *col,
-                    const float *val, const unsigned *words, const detail::gpu_dataflow::segment *segments,
+                    const void *val, const float *diag, const double *scale,
+                    const unsigned *words, const detail::gpu_dataflow::segment *segments,
                     unsigned batches, unsigned *tags, unsigned tag_count, unsigned *ticket, int grid,
                     const float *rhs, float *out, const unsigned *active,
                     const double *rhs64, double *out64) {
-    launch(stream,
-           dataflow_memory<float>{ptr, col, val, words, segments, tags, ticket, rhs, out, unsigned(m),
-                                  batches, reverse, nullptr, nullptr, active, rhs64, out64},
-           tag_count, grid);
-}
-
-void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse, const int *ptr, const int *col,
-                         const __half *val, const float *__restrict__ diag, const double *__restrict__ scale,
-                         const unsigned *words, const detail::gpu_dataflow::segment *segments,
-                         unsigned batches, unsigned *tags, unsigned tag_count, unsigned *ticket, int grid,
-                         const float *rhs, float *out, const unsigned *active,
-                    const double *rhs64, double *out64) {
-    launch(stream,
-           dataflow_memory<__half>{ptr, col, val, words, segments, tags, ticket, rhs, out, unsigned(m),
-                                   batches, reverse, diag, scale, active, rhs64, out64},
-           tag_count, grid);
+    auto run = [&]<class Value>(const Value* values) {
+        launch(stream,
+               dataflow_memory<Value>{ptr, col, values, words, segments, tags, ticket, rhs, out,
+                                      unsigned(m), batches, reverse, diag, scale, active, rhs64, out64},
+               tag_count, grid);
+    };
+    if (diag) run(static_cast<const __half*>(val));
+    else run(static_cast<const float*>(val));
 }
 } // namespace apxchol
 

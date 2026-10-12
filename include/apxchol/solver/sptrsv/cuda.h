@@ -430,32 +430,24 @@ public:
 
         if (data_.fp16) {
             // FP16 per-column-scaled storage (cuda_host.h contract): values of
-            // CSR(L^T) narrowed on the host, fp32 diag / inv_scale^2 alongside,
+            // CSR(L^T) narrowed on the host, fp32 diagonal and fp64 inverse squares alongside,
             // then the transpose (carrying the same 16-bit patterns) for CSR(L).
             cuda_host::fp16_scaled_arrays h16 = cuda_host::narrow_fp16_scaled(LT, col_scale);
             mark("  fp16_narrow");
             data_.fp16_flushed = h16.flushed; data_.fp16_subnormal = h16.subnormal;
-            // r_j^2 in DOUBLE (exact; the kernels multiply rhs * r_j^2 in
-            // double and narrow once -- pre-squaring into fp32 overflows for
-            // s_j < ~5.4e-20 and the Inf became silent NaN downstream).
-            std::vector<double> inv_scale2(static_cast<std::size_t>(data_.m));
-            for (int64_t j = 0; j < data_.m; ++j) {
-                const double r = static_cast<double>(h16.inv_scale[j]);
-                inv_scale2[j] = r * r;
-            }
             // Fail LOUDLY on a factor the fp16 storage cannot represent
             // (unreachable after the scale fallback above -- a guard, not a
             // policy): a non-finite diag/inv_scale would dissolve the solve
             // into NaN with no error anywhere.
             for (int64_t j = 0; j < data_.m; ++j)
-                if (!(std::isfinite(h16.diag[j]) && h16.diag[j] != 0.0f && std::isfinite(inv_scale2[j])))
+                if (!(std::isfinite(h16.diag[j]) && h16.diag[j] != 0.0f && std::isfinite(h16.inv_scale2[j])))
                     throw std::runtime_error(
                         "apxchol cuda_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
-                        " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(inv_scale2[j]) +
+                        " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(h16.inv_scale2[j]) +
                         "); set APXCHOL_FACTOR_STORAGE=float32");
             upload_factor(data_.LT_values, h16.vals.get(), data_.nnz);
             upload_factor(data_.diag, h16.diag.data(), data_.m);
-            upload_factor(data_.inv_scale2, inv_scale2.data(), data_.m);
+            upload_factor(data_.inv_scale2, h16.inv_scale2.data(), data_.m);
             // CSR of L for the forward solve: transpose of (structure of LT,
             // fp16 values).
             cuda_host::csr_int<_Float16> LT16;
@@ -783,28 +775,24 @@ private:
         // Row segmentation: each direction gets its own threshold, from its
         // own row-length histogram (the two differ a lot -- an elimination
         // factor's hub rows land in CSR of L, its columns stay bounded).
-        const auto st_L = cuda_host::dataflow_row_stats(L_ptr);
-        const auto st_LT = cuda_host::dataflow_row_stats(LT_ptr);
-        const unsigned split_fwd = dataflow_split_threshold_for(st_L);
-        const unsigned split_bck = dataflow_split_threshold_for(st_LT);
         namespace df = detail::gpu_dataflow;
         const std::array blocks{0u, unsigned(mi)};
-        const auto fwd = df::pack(L_ptr.data(), {unsigned(mi), false}, blocks, split_fwd);
-        const auto bck = df::pack(LT_ptr.data(), {unsigned(mi), true}, blocks, split_bck);
-        data_.fwd_batches = fwd.words.size() / df::lanes;
-        data_.bck_batches = bck.words.size() / df::lanes;
-        data_.df_slots = std::max(fwd.slots, bck.slots);
-        data_.df_split_rows = fwd.segments.size() + bck.segments.size() - fwd.slots - bck.slots;
-        auto upload = [&](auto*& device, const auto& host) {
-            if (!host.empty()) upload_factor(device, host.data(), host.size());
-        };
-        upload(data_.d_fwd_words, fwd.words);
-        upload(data_.d_bck_words, bck.words);
-        upload(data_.d_fwd_segments, fwd.segments);
-        upload(data_.d_bck_segments, bck.segments);
-        if (std::getenv("APXCHOL_GPU_SPTRSV_STATS")) {
-            dataflow_print_direction_stats(st_L, split_fwd, false, data_.fwd_batches, fwd.slots, fwd.segments.size() - fwd.slots);
-            dataflow_print_direction_stats(st_LT, split_bck, true, data_.bck_batches, bck.slots, bck.segments.size() - bck.slots);
+        for (bool reverse : {false, true}) {
+            const auto ptr = reverse ? LT_ptr : L_ptr;
+            const auto stats = cuda_host::dataflow_row_stats(ptr);
+            const unsigned split = dataflow_split_threshold_for(stats);
+            const auto plan = df::pack(ptr.data(), {unsigned(mi), reverse}, blocks, split);
+            const int batches = plan.words.size() / df::lanes;
+            const int splits = plan.segments.size() - plan.slots;
+            (reverse ? data_.bck_batches : data_.fwd_batches) = batches;
+            data_.df_slots = std::max(data_.df_slots, static_cast<int>(plan.slots));
+            data_.df_split_rows += splits;
+            if (!plan.words.empty())
+                upload_factor(reverse ? data_.d_bck_words : data_.d_fwd_words, plan.words.data(), plan.words.size());
+            if (!plan.segments.empty())
+                upload_factor(reverse ? data_.d_bck_segments : data_.d_fwd_segments, plan.segments.data(), plan.segments.size());
+            if (std::getenv("APXCHOL_GPU_SPTRSV_STATS"))
+                dataflow_print_direction_stats(stats, split, reverse, batches, plan.slots, splits);
         }
         initialize_dataflow_state();
     }
@@ -890,21 +878,12 @@ private:
         // Initialize roots, then solve each direction with the shared dataflow worker.
         const int m = static_cast<int>(data_.m);
         const unsigned tag_count = unsigned(data_.m) + unsigned(data_.df_slots);
-        if (data_.fp16) {
-            dataflow_solve_fp16(0, m, false, data_.L_row_ptr, data_.L_col_idx, static_cast<const __half*>(data_.L_values), data_.diag, nullptr,
-                                data_.d_fwd_words, data_.d_fwd_segments, data_.fwd_batches,
-                                data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_x, data_.d_y, active, rhs64, nullptr);
-            dataflow_solve_fp16(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, static_cast<const __half*>(data_.LT_values), data_.diag, data_.inv_scale2,
-                                data_.d_bck_words, data_.d_bck_segments, data_.bck_batches,
-                                data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_y, data_.d_x, active, nullptr, out64);
-        } else {
-            dataflow_solve(0, m, false, data_.L_row_ptr, data_.L_col_idx, static_cast<const cuda_value_t*>(data_.L_values),
-                           data_.d_fwd_words, data_.d_fwd_segments, data_.fwd_batches,
-                           data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_x, data_.d_y, active, rhs64, nullptr);
-            dataflow_solve(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, static_cast<const cuda_value_t*>(data_.LT_values),
-                           data_.d_bck_words, data_.d_bck_segments, data_.bck_batches,
-                           data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_y, data_.d_x, active, nullptr, out64);
-        }
+        dataflow_solve(0, m, false, data_.L_row_ptr, data_.L_col_idx, data_.L_values, data_.diag, nullptr,
+                       data_.d_fwd_words, data_.d_fwd_segments, data_.fwd_batches,
+                       data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_x, data_.d_y, active, rhs64, nullptr);
+        dataflow_solve(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, data_.LT_values, data_.diag, data_.inv_scale2,
+                       data_.d_bck_words, data_.d_bck_segments, data_.bck_batches,
+                       data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_y, data_.d_x, active, nullptr, out64);
     }
 
     void destroy() noexcept {

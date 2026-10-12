@@ -19,9 +19,9 @@
 // slots hold fp16(fp32(L_ij) / s_j) (native conversion; fp16 subnormals flushed
 // to signed zero), the
 // diagonal is NOT read from its (still present, fp16) slot but from a
-// separate fp32 diag[j] = fp32(L_jj) / s_j, and inv_scale[j] = fp32(1 / s_j).
+// separate fp32 diag[j] = fp32(L_jj) / s_j, and inv_scale2[j] = fp64(fp32(1 / s_j))^2.
 // The kernels never multiply a scale back: the forward solve on L~ returns
-// y' = D y, the back solve reads its input scaled by inv_scale[j]^2 and
+// y' = D y, the back solve reads its input scaled by inv_scale2[j] and
 // solves L~^T z = D^-2 y', so the pair applies (L_s L_s^T)^-1 for the stored
 // factor L_s = L~ D. The rounding residual of every column,
 // sum_i (x_ij - widen(h_ij)) with x_ij = fp64(L_ij) / s_j, is folded into
@@ -184,12 +184,12 @@ inline factor_drop_stats apply_factor_drop(csr_int<Val>& L11, const std::vector<
 /// The fp16 per-column-scaled storage of an int CSC (see the file header for
 /// the contract): vals = binary16 bit patterns of fp32(L_ij) / s_j (diagonal
 /// slot included, unread by the kernels), diag = fp32(L_jj) / s_j (+ the
-/// column's rounding residual, always), inv_scale = fp32(1 / s_j),
+/// column's rounding residual, always), inv_scale2 = fp64(fp32(1 / s_j))^2,
 /// plus the storage statistics over the off-diagonals.
 struct fp16_scaled_arrays {
     std::unique_ptr<_Float16[]>       vals;       // nnz
     std::vector<float>               diag;       // m
-    std::vector<float>               inv_scale;  // m
+    std::vector<double>              inv_scale2; // m; squaring in fp32 can overflow
     std::uint64_t flushed   = 0;   // stored off-diagonals with v != 0 stored as zero
     std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0: they are always flushed)
 };
@@ -199,14 +199,15 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     fp16_scaled_arrays out;
     out.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<std::size_t>(L11.nnz));
     out.diag.resize(static_cast<std::size_t>(L11.m));
-    out.inv_scale.resize(static_cast<std::size_t>(L11.m));
+    out.inv_scale2.resize(static_cast<std::size_t>(L11.m));
     std::uint64_t n_flush = 0;
     #pragma omp parallel reduction(+ : n_flush)
     {
     const auto [bal_lo, bal_hi] = detail::work_balanced_range(L11.ptr.data(), L11.m);
     for (int j = bal_lo; j < bal_hi; ++j) {
         const float s = col_scale[j];
-        out.inv_scale[j] = 1.0f / s;
+        const double inv = 1.0f / s;
+        out.inv_scale2[j] = inv * inv;
         assert(L11.idx[L11.ptr[j]] == j && "factor column must start with its diagonal");
         float  d     = static_cast<float>(L11.vals[L11.ptr[j]]) / s;   // stored_diag(): fp32(L_jj) / s_j
         double resid = 0.0;                                            // sum over the off-diagonals of (x - widen(stored))

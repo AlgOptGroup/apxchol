@@ -1,4 +1,5 @@
 #include "cuda_buffer.cuh"
+#include "cuda_digest.cuh"
 #include "apxchol/csc_work.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/sptrsv/cuda.h"
@@ -371,40 +372,6 @@ struct device_semantics {
     }
 };
 
-// XOR and unsigned sum are associative modulo 2^64. Reduce exact audit
-// digests inside the block before contending on the one global report word.
-// Every thread participates, including inactive lanes in the final block.
-__device__ device_digest reduce_block_digest(
-        device_digest value, device_digest* warp_values) {
-    const unsigned lane = threadIdx.x % 32;
-    const unsigned warp = threadIdx.x / 32;
-    for (unsigned offset = 16; offset; offset >>= 1) {
-        value.xor_hash ^= __shfl_down_sync(0xffffffffU, value.xor_hash, offset);
-        value.sum_hash += __shfl_down_sync(0xffffffffU, value.sum_hash, offset);
-    }
-    if (!lane) warp_values[warp] = value;
-    __syncthreads();
-    if (!warp) {
-        value = lane < kBlock / 32 ? warp_values[lane] : device_digest{};
-        for (unsigned offset = 16; offset; offset >>= 1) {
-            value.xor_hash ^= __shfl_down_sync(0xffffffffU, value.xor_hash, offset);
-            value.sum_hash += __shfl_down_sync(0xffffffffU, value.sum_hash, offset);
-        }
-    }
-    // Callers may immediately reuse the same shared array for another digest.
-    __syncthreads();
-    return value;  // only thread zero contains the block's complete result
-}
-
-__device__ void digest_add_block(device_digest value, device_digest* target,
-                                 device_digest* warp_values) {
-    value = reduce_block_digest(value, warp_values);
-    if (!threadIdx.x) {
-        atomicXor(&target->xor_hash, value.xor_hash);
-        atomicAdd(&target->sum_hash, value.sum_hash);
-    }
-}
-
 __device__ void digest_add_local(device_digest& digest, unsigned long long item) {
     digest.xor_hash ^= item;
     digest.sum_hash += item;
@@ -531,7 +498,7 @@ __global__ void validate_selected_vertices(
     }
 
     __shared__ device_digest warp_values[kBlock / 32];
-    const auto digest = reduce_block_digest({item_hash, item_hash}, warp_values);
+    const auto digest = reduce_block_digest<kBlock>({item_hash, item_hash}, warp_values);
     if (threadIdx.x == 0) {
         atomicXor(&digest_state->xor_hash, digest.xor_hash);
         atomicAdd(&digest_state->sum_hash, digest.sum_hash);
@@ -827,7 +794,7 @@ __global__ void prepare_factor(
     }
     if constexpr (Audit) {
         __shared__ device_digest warp_values[kBlock / 32];
-        digest_add_block(digest, &semantics->factor, warp_values);
+        digest_add_block<kBlock>(digest, &semantics->factor, warp_values);
     }
 }
 
@@ -1276,7 +1243,7 @@ __global__ void hash_raw_fill(const work_record* fill,
         gpu_round_shadow_tags::fill, fill[i].a, fill[i].b,
         stored_weight_bits(fill[i].value)) : 0;
     __shared__ device_digest warp_values[kBlock / 32];
-    digest_add_block({item, item}, &semantics->fill, warp_values);
+    digest_add_block<kBlock>({item, item}, &semantics->fill, warp_values);
 }
 
 __global__ void deactivate_pivots(const device_pivot* pivots,
@@ -1331,8 +1298,8 @@ __global__ void hash_residual_incidences(
     }
     __shared__ device_digest warp_values[kBlock / 32];
     if constexpr (Audit)
-        digest_add_block({item, item}, &semantics->residual, warp_values);
-    digest_add_block({topology, topology}, &semantics->topology, warp_values);
+        digest_add_block<kBlock>({item, item}, &semantics->residual, warp_values);
+    digest_add_block<kBlock>({topology, topology}, &semantics->topology, warp_values);
 }
 
 // Co-rank a prefix of a stable merge: left (survivor) records win owner ties.
@@ -1400,7 +1367,7 @@ __global__ void merge_survivors_and_fill(
         // Every lane joins, including the partial final tile. Keep reduction
         // storage separate: other warps can still be reading the merge tile.
         __shared__ device_digest warp_values[kBlock / 32];
-        digest_add_block({topology, topology}, &semantics->topology, warp_values);
+        digest_add_block<kBlock>({topology, topology}, &semantics->topology, warp_values);
     }
 }
 
@@ -1448,7 +1415,7 @@ __global__ void hash_ordered_residual_incidences(
             edge.owner, ordinal, edge.neighbor, stored_weight_bits(edge.weight));
     }
     __shared__ device_digest warp_values[kBlock / 32];
-    digest_add_block({item, item}, &semantics->ordered_residual, warp_values);
+    digest_add_block<kBlock>({item, item}, &semantics->ordered_residual, warp_values);
 }
 
 template<bool Audit>
@@ -1471,12 +1438,12 @@ __global__ void hash_residual_state(
         }
     }
     __shared__ device_digest warp_values[kBlock / 32];
-    digest_add_block({active_hash, active_hash}, &semantics->active, warp_values);
+    digest_add_block<kBlock>({active_hash, active_hash}, &semantics->active, warp_values);
     if constexpr (Audit) {
-        digest_add_block({degree_hash, degree_hash}, &semantics->live_degree, warp_values);
-        digest_add_block({excess_hash, excess_hash}, &semantics->canonical_excess, warp_values);
+        digest_add_block<kBlock>({degree_hash, degree_hash}, &semantics->live_degree, warp_values);
+        digest_add_block<kBlock>({excess_hash, excess_hash}, &semantics->canonical_excess, warp_values);
     }
-    const auto count = reduce_block_digest({0, live ? 1ULL : 0ULL}, warp_values);
+    const auto count = reduce_block_digest<kBlock>({0, live ? 1ULL : 0ULL}, warp_values);
     if (!threadIdx.x) atomicAdd(&semantics->active_count, count.sum_hash);
 }
 

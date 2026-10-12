@@ -26,7 +26,6 @@ using apxchol::detail::gpu_round_shadow_incidence;
 using apxchol::detail::gpu_round_shadow_input;
 using edge = gpu_round_shadow_incidence;
 constexpr std::size_t block_size = 16384;
-std::uint64_t bits(double x) { return std::bit_cast<std::uint64_t>(x); }
 double pool(double x) { return static_cast<double>(static_cast<pool_value_t>(x)); }
 
 gpu_round_shadow_input make_input(node_index n, const std::vector<edge>& edges) {
@@ -149,6 +148,8 @@ oracle_output reference(const gpu_round_shadow_input& input, std::uint64_t seed,
     });
     return out;
 }
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+std::uint64_t bits(double x) { return std::bit_cast<std::uint64_t>(x); }
 void same_edges(const std::vector<edge>& a, const std::vector<edge>& b) {
     ASSERT_EQ(a.size(), b.size());
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -194,6 +195,7 @@ void check(const gpu_round_shadow_input& input, const Output& actual,
         EXPECT_EQ(actual.stats.normalization_passes, expected.passes);
     }
 }
+#endif
 #define REQUIRE_OWNED_SPARSIFY_DEVICE() do { \
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) \
         GTEST_SKIP() << "CUDA owned sparsifier device unavailable"; \
@@ -214,8 +216,12 @@ TEST(GpuOwnedSparsify, CanonicalBucketsAndCoalescingMatchCpuLaw) {
         const auto expected = reference(input, 42);
         const auto result = apxchol::detail::gpu_sparsify_owned_residual_for_test(input, 42);
         check(input, result, expected);
-        if (case_id == 0) EXPECT_EQ(expected.backbone, (std::vector<std::uint8_t>{1,1,0}));
-        if (case_id == 1) EXPECT_EQ(bits(result.canonical.front().weight), bits(0.0));
+        if (case_id == 0) {
+            EXPECT_EQ(expected.backbone, (std::vector<std::uint8_t>{1,1,0}));
+        }
+        if (case_id == 1) {
+            EXPECT_EQ(bits(result.canonical.front().weight), bits(0.0));
+        }
         RecordProperty("owned_sparsify_canonical_" + std::to_string(case_id++), "pass");
     }
 }
@@ -231,7 +237,9 @@ TEST(GpuOwnedSparsify, FixedScaleHashAndHorvitzThompsonMatchCpuLaw) {
         check(input, result, expected, false);
         for (std::size_t i = 0; i < result.canonical.size(); ++i) {
             const double p = result.probabilities[i], w = result.canonical[i].weight;
-            if (p > 0) EXPECT_NEAR(p * (w * (1.0 / p)), w, 4 * std::numeric_limits<double>::epsilon() * w);
+            if (p > 0) {
+                EXPECT_NEAR(p * (w * (1.0 / p)), w, 4 * std::numeric_limits<double>::epsilon() * w);
+            }
         }
         RecordProperty("owned_sparsify_fixed_scale_" + std::to_string(case_id++), "pass");
     }
@@ -479,7 +487,9 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneAttemptForBothImports)
         EXPECT_EQ(number("physical_before="),136u);EXPECT_EQ(number("distinct_before="),136u);
         EXPECT_LT(number("kept="),136u);EXPECT_GE(number("kept="),16u);
         EXPECT_NE(trace.find("[gpu-owned-factorization] complete"),std::string::npos) << trace;
-        if (!compressed) EXPECT_NE(trace.find("fallback=unsupported_stored_format before_device_mutation=1"),std::string::npos) << trace;
+        if (!compressed) {
+            EXPECT_NE(trace.find("fallback=unsupported_stored_format before_device_mutation=1"),std::string::npos) << trace;
+        }
         ASSERT_EQ(solved.x.size(),n);
         EXPECT_TRUE(solved.x.allFinite());
         EXPECT_LE((original*solved.x-rhs).norm()/rhs.norm(),1e-8);

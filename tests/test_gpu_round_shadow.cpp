@@ -2128,7 +2128,9 @@ struct resident_selector_fixture {
         const auto report = apxchol::detail::run_verified_gpu_round_shadow(
             state, input, &capability, seed, rounds != 0, &bounds);
         EXPECT_EQ(report.resident_selection_consumed, rounds != 0);
-        if (rounds) EXPECT_EQ(report.round_state_upload_bytes, 0u);
+        if (rounds) {
+            EXPECT_EQ(report.round_state_upload_bytes, 0u);
+        }
         const auto cpu = run_serial_cpu_round(graph, input, report, bounds);
         EXPECT_EQ(cpu.bounded_excess_vertices, 0u);
         if (certify) state.certify_cpu_round(true, fingerprint_graph(graph));
@@ -2285,7 +2287,9 @@ struct owned_selector_view_fixture {
             work += expected_degrees[std::lower_bound(active.begin(), active.end(), v)-active.begin()];
         }
         for (auto v : selected) for (const auto& edge : oracle.neighbors(v))
-            if (oracle.is_active(edge.to)) EXPECT_FALSE(picked[edge.to]);
+            if (oracle.is_active(edge.to)) {
+                EXPECT_FALSE(picked[edge.to]);
+            }
         EXPECT_EQ(selector.selected_degree_work(), work);
         // Bounded progress and independence, not the generic CSR maximal law.
     }
@@ -2818,7 +2822,9 @@ TEST(GpuOwnedPrefix, SharedResidualViewPreservesCandidatesAndIndependentProgress
             EXPECT_EQ(traffic.owned_residual_binds, round + 1);
             EXPECT_EQ(traffic.host_update_bytes, 0u);
             EXPECT_EQ(traffic.projection_scratch_peak_extra_bytes, 0u);
-            if (round) EXPECT_EQ(report.round_state_upload_bytes, 0u);
+            if (round) {
+                EXPECT_EQ(report.round_state_upload_bytes, 0u);
+            }
         }
        }
       }
@@ -3331,7 +3337,9 @@ TEST(GpuOwnedPrefix, DegreeScratchHandbackPreservesEveryOrderedField) {
         // physically contains only active-both incidences; restrict the CPU
         // oracle stably, without changing or filtering the actual handback.
         const auto expected = compact_live_snapshot(stored_cpu);
-        if (rounds == 1) EXPECT_GT(stored_cpu.incidences.size(), expected.incidences.size());
+        if (rounds == 1) {
+            EXPECT_GT(stored_cpu.incidences.size(), expected.incidences.size());
+        }
         ASSERT_EQ(actual.incidences.size(), final_live_incidences);
         ASSERT_EQ(expected.incidences.size(), final_live_incidences);
         EXPECT_EQ(actual.owner_offsets, expected.owner_offsets);
@@ -3577,8 +3585,12 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
                 EXPECT_EQ(got.normal_pivots, 2u);
                 EXPECT_EQ(got.oversized_pivots, 1u);
             }
-            if (profile == 1) EXPECT_EQ(got.batches, 3u);
-            if (profile == 2) EXPECT_EQ(got.batches, 1u);
+            if (profile == 1) {
+                EXPECT_EQ(got.batches, 3u);
+            }
+            if (profile == 2) {
+                EXPECT_EQ(got.batches, 1u);
+            }
             if (profile == 3) {
                 EXPECT_EQ(got.normal_pivots, 32u);
                 EXPECT_EQ(got.normal_spans, 0u);
@@ -3621,7 +3633,9 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             EXPECT_EQ(report.raw_fill_edges, reference.raw_fill_edges);
             EXPECT_EQ(report.unique_neighbors, reference.unique_neighbors);
             EXPECT_EQ(report.excess_updates, reference.excess_updates);
-            if (mode) EXPECT_GT(report.excess_updates, 0u);
+            if (mode) {
+                EXPECT_GT(report.excess_updates, 0u);
+            }
 
             ASSERT_EQ(actual_columns.size(), expected_log.columns.size());
             std::vector<std::vector<apxchol::detail::factor_entry>> prefix_entries(count);
@@ -3735,7 +3749,9 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
         selector.prepare(active, options);
         const auto selected = selector.select_block_greedy().data;
         ASSERT_EQ(selected.size(), 1u);
-        if (round == 0) ASSERT_EQ(selected.front(), 0u);
+        if (round == 0) {
+            ASSERT_EQ(selected.front(), 0u);
+        }
         auto input = apxchol::detail::make_gpu_round_shadow_input(oracle, selected, seed);
         if (round) input = compact_live_snapshot(input);
         const auto pivot = selected.front();
@@ -3744,7 +3760,9 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
         for (std::size_t j = input.owner_offsets[pivot]; j < input.owner_offsets[pivot + 1]; ++j)
             live += input.active[input.incidences[j].neighbor] != 0;
         ASSERT_GT(span, 128u);
-        if (round == 0) ASSERT_EQ(span, 129u);
+        if (round == 0) {
+            ASSERT_EQ(span, 129u);
+        }
         ASSERT_EQ(span, live);
         const auto report = session.run_owned_prefix_round(
             graph, selected, selector.device_selection(), seed);
@@ -3753,7 +3771,9 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
         EXPECT_EQ(report.normal_batch.normal_pivots, 0u);
         EXPECT_EQ(report.normal_batch.oversized_spans, span);
         EXPECT_EQ(report.normal_batch.oversized_gathered, live);
-        if (round) EXPECT_EQ(report.round_state_upload_bytes, 0u);
+        if (round) {
+            EXPECT_EQ(report.round_state_upload_bytes, 0u);
+        }
         std::vector<gpu_round_shadow_excess_bound> bounds;
         const auto reference = apxchol::detail::reference_gpu_round_shadow(input, &bounds);
         apxchol::detail::gpu_round_shadow_factor_log round_log;
@@ -5051,9 +5071,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                     append(l16.ptr.data(), m + 1); append(l16.idx.get(), l16.nnz); append(l16.vals.get(), l16.nnz);
                     append(lt16.ptr.data(), m + 1); append(lt16.idx.get(), lt16.nnz); append(lt16.vals.get(), lt16.nnz);
                     append(h.diag.data(), m);
-                    std::vector<double> inv2(m);
-                    for (node_index j = 0; j < m; ++j) inv2[j] = double(h.inv_scale[j]) * double(h.inv_scale[j]);
-                    append(inv2.data(), m);
+                    append(h.inv_scale2.data(), m);
                 } else {
                     auto l = apxchol::cuda_host::transpose_csr(lt);
                     append(l.ptr.data(), m + 1); append(l.idx.get(), l.nnz); append(l.vals.get(), l.nnz);
@@ -5453,7 +5471,9 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                 EXPECT_EQ(report.raw_fill_edges,expected.size());
                 EXPECT_EQ(report.live_incidences,2*expected.size());
                 EXPECT_LE(report.live_incidences,2*edges.size());
-                if(profile==1 || profile==3)EXPECT_EQ(report.live_incidences,2*edges.size()); // f=d uses every slot.
+                if(profile==1 || profile==3) {
+                    EXPECT_EQ(report.live_incidences,2*edges.size()); // f=d uses every slot.
+                }
                 std::vector<apxchol::detail::factor_col> columns;
                 session.materialize_owned_prefix(graph,active,columns);
                 std::vector<std::tuple<node_index,node_index,double>> got;
@@ -5463,9 +5483,10 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     if(v<u)got.emplace_back(v,u,static_cast<double>(w));
                 }
                 std::sort(got.begin(),got.end());ASSERT_EQ(got.size(),expected.size());
-                if (profile==3 && sizeof(apxchol::pool_value_t)==4)
+                if (profile==3 && sizeof(apxchol::pool_value_t)==4) {
                     for (const auto& edge:got)
                         EXPECT_EQ(std::fpclassify(static_cast<apxchol::pool_value_t>(std::get<2>(edge))),FP_SUBNORMAL);
+                }
                 std::vector<node_index> owner(n),rank(n);
                 for(node_index pivot=0;pivot<count;++pivot)
                     for(node_index j=0;j<stars[pivot].size();++j) {
@@ -5563,7 +5584,9 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                         EXPECT_GE(target+tolerance,lower);EXPECT_LE(target-tolerance,upper);
                     }
                 }
-                if(repeat)EXPECT_EQ(got,previous);
+                if(repeat) {
+                    EXPECT_EQ(got,previous);
+                }
                 previous=got;
             }
         }

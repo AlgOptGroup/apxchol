@@ -394,7 +394,9 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
             for (node_index v : candidates) {
                 bool neighbor_picked = false;
                 for (const auto& edge : graph.neighbors(v)) neighbor_picked |= picked[edge.to];
-                if (picked[v]) EXPECT_FALSE(neighbor_picked);
+                if (picked[v]) {
+                    EXPECT_FALSE(neighbor_picked);
+                }
             }
             EXPECT_EQ(direct->selected_degree_work(), degree_work);
             EXPECT_EQ(direct->transfers().owned_residual_binds, 1u);
