@@ -20,8 +20,7 @@ namespace apxchol::detail {
 __host__ __device__
 #endif
 inline double canonical_lower_value(const int* ptr, const int* idx, const double* vals,
-                                    int col, int p, bool& paired) {
-    const int row = idx[p];
+                                    int col, int row, int p, bool& paired) {
     if (row >= col) return vals[p];
     int lo = ptr[row], hi = ptr[row + 1];
     while (lo < hi) {

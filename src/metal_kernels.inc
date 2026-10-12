@@ -6,17 +6,7 @@ using namespace metal;
 using namespace apxchol::detail::gpu_pcg;
 using namespace apxchol::detail::metal_host;
 
-struct Params {
-    uint n;         // operator rows
-    uint groups;    // reduction groups, ceil(n / 256)
-    uint offset;    // first workgroup in this dependency stage
-    uint count;     // number of dependency words to initialize
-    uint mode;      // finalize mode
-    uint iter;      // 1-based PCG iteration
-    uint window;    // stagnation window, 0 = off
-    uint m;         // factor dimension
-};
-static_assert(sizeof(Params) == 32, "Params mirrors detail::metal::params");
+static_assert(sizeof(Params) == 32, "Params mirrors the host layout");
 
 using SolveState = solve_state<df, float>;
 static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve_state");
@@ -24,9 +14,6 @@ static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];
 constant uint kOperation [[function_constant(2)]];
-
-constant uint kTreeRows = 256;
-constant uint kTreeLanes = 16;
 
 struct pcg_math {
     using wide = df;

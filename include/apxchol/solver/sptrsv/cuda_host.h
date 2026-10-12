@@ -80,21 +80,11 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
                                  ") exceeds the dataflow GPU backend's 32-bit index range");
     out.m = static_cast<int>(m);
     out.ptr.assign(static_cast<std::size_t>(m) + 1, 0);
+    const node_index drop = static_cast<node_index>(n - 1);
     if (m == n) {
         for (std::int64_t j = 0; j < m; ++j)
             out.ptr[j + 1] = out.ptr[j] + static_cast<int>(Lo[j + 1] - Lo[j]);
-        const edge_index nnz = Lo[m];
-        out.nnz  = static_cast<std::int64_t>(nnz);
-        out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(nnz));
-        out.vals = std::make_unique_for_overwrite<Val[]>(static_cast<std::size_t>(nnz));
-        #pragma omp parallel for schedule(static)
-        for (edge_index p = 0; p < nnz; ++p) {
-            out.idx[p]  = static_cast<int>(Li[p]);
-            out.vals[p] = static_cast<Val>(Lv[p]);
-        }
     } else {
-        const node_index drop = static_cast<node_index>(n - 1);
-        std::vector<int> kept(static_cast<std::size_t>(m));
         #pragma omp parallel
         {
         const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m);
@@ -102,13 +92,22 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
             int k = 0;
             for (edge_index p = Lo[j]; p < Lo[j + 1]; ++p)
                 if (Li[p] != drop) ++k;
-            kept[j] = k;
+            out.ptr[j + 1] = k;
         }
         }
-        for (std::int64_t j = 0; j < m; ++j) out.ptr[j + 1] = out.ptr[j] + kept[j];
-        out.nnz  = out.ptr[static_cast<std::size_t>(m)];
-        out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(out.nnz));
-        out.vals = std::make_unique_for_overwrite<Val[]>(static_cast<std::size_t>(out.nnz));
+        for (std::int64_t j = 0; j < m; ++j) out.ptr[j + 1] += out.ptr[j];
+    }
+    out.nnz  = out.ptr[static_cast<std::size_t>(m)];
+    out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(out.nnz));
+    out.vals = std::make_unique_for_overwrite<Val[]>(static_cast<std::size_t>(out.nnz));
+    if (m == n) {
+        const edge_index nnz = Lo[m];
+        #pragma omp parallel for schedule(static)
+        for (edge_index p = 0; p < nnz; ++p) {
+            out.idx[p]  = static_cast<int>(Li[p]);
+            out.vals[p] = static_cast<Val>(Lv[p]);
+        }
+    } else {
         #pragma omp parallel
         {
         const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m);

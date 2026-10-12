@@ -31,19 +31,12 @@ namespace {
 using df32 = metal_host::df;
 static_assert(sizeof(df32) == 8);
 
-struct params {
-    std::uint32_t n;
-    std::uint32_t groups;
-    std::uint32_t offset;
-    std::uint32_t count;
-    std::uint32_t mode;
-    std::uint32_t iter;
-    std::uint32_t window;
-    std::uint32_t m;
-};
-static_assert(sizeof(params) == 32);
-static_assert(offsetof(params, mode) == 16);
-static_assert(offsetof(params, m) == 28);
+#define APXCHOL_GPU_CODE(...) __VA_ARGS__
+#include "metal_params.inc"
+#undef APXCHOL_GPU_CODE
+static_assert(sizeof(Params) == 32);
+static_assert(offsetof(Params, mode) == 16);
+static_assert(offsetof(Params, m) == 28);
 
 using solve_state = gpu_pcg::solve_state<df32, float>;
 static_assert(sizeof(solve_state) == 48);
@@ -69,6 +62,7 @@ const char kKernelSource[] =
 #define APXCHOL_GPU_CODE(...) #__VA_ARGS__
 #include "apxchol/solver/detail/gpu_pcg.inc"
 #include "apxchol/solver/detail/double_float.inc"
+#include "metal_params.inc"
 #include "metal_kernels.inc"
     "\n#define APXCHOL_UNROLL _Pragma(\"unroll\")\n"
 #include "gpu_dataflow.inc"
@@ -76,8 +70,6 @@ const char kKernelSource[] =
 #include "metal_dataflow.inc"
     ;
 
-constexpr std::uint32_t kTreeRows = 256;
-constexpr std::uint32_t kTreeLanes = 16;
 constexpr std::uint32_t kRowThreads = 256;     // threads per threadgroup of the row kernels
 
 using gpu_pcg::operation;
@@ -360,7 +352,7 @@ struct metal_solver::impl {
 
     context* ctx = nullptr;
     id<MTLCommandQueue> queue = nil;
-    params arguments{};
+    Params arguments{};
     bool operator_df = false;
     id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
     prepared_tri fwd, bwd;
@@ -372,7 +364,7 @@ struct metal_solver::impl {
         for (auto buffer : buffers) [enc setBuffer:buffer offset:0 atIndex:index++];
     }
 
-    void dispatch(id<MTLComputePipelineState> pipe, const params& prm,
+    void dispatch(id<MTLComputePipelineState> pipe, const Params& prm,
                   unsigned groups, unsigned threads) const {
         [encoder setComputePipelineState:pipe];
         [encoder setBytes:&prm length:sizeof prm atIndex:0];
@@ -381,7 +373,7 @@ struct metal_solver::impl {
     }
 
     void finalize(unsigned mode, unsigned it) const {
-        params prm = arguments;
+        Params prm = arguments;
         prm.mode = mode;
         prm.iter = it;
         dispatch(ctx->pipes.finalize, prm, 1, kTreeLanes);
@@ -390,7 +382,7 @@ struct metal_solver::impl {
     void encode_tri(const prepared_tri& t, bool forward) const {
         if (!arguments.m) return;
         bind(encoder, 13, {t.ptr, t.col, t.val, t.words, t.blocks, t.segments});
-        params prm = arguments;
+        Params prm = arguments;
         prm.count = t.tag_count;
         const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
         dispatch(ctx->pipes.dataflow_init[forward], prm, (t.tag_count + threads - 1) / threads, threads);
@@ -408,7 +400,7 @@ struct metal_solver::impl {
     void step(operation op) const {
         const auto pipe = ctx->pipes.pcg[unsigned(op)][op == operation::multiply && operator_df];
         const bool direction = op == operation::direction;
-        const unsigned threads = direction ? std::min(kRowThreads, ctx->status.row_threads) : kTreeLanes;
+        const unsigned threads = direction ? std::min(kRowThreads, ctx->status.row_threads) : unsigned(kTreeLanes);
         dispatch(pipe, arguments, direction ? (arguments.n + threads - 1) / threads : arguments.groups, threads);
     }
 

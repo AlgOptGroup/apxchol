@@ -3,7 +3,6 @@
 // Large trace parents use an indexed one-draw CDF; other rows retain their streams.
 // Materialize standard-library constants outside device functions for NVCC.
 constexpr double kCyclePoolMax = std::numeric_limits<pool_value_t>::max();
-constexpr double kCycleEpsilon = std::numeric_limits<double>::epsilon();
 constexpr double kCycleInfinity = std::numeric_limits<double>::infinity();
 constexpr std::uint32_t kCycleCooperativeDegree = 128;
 __device__ std::uint32_t cycle_uniform_index(unsigned long long& state,
@@ -26,41 +25,6 @@ __device__ int cycle_pool_range(double value) {
 __device__ double cycle_edge_weight(const work_record* a, double D,
         std::uint32_t h, std::uint32_t i, std::uint32_t j) {
     return a[i].value * a[j].value / D * (h - 1) * .5;
-}
-__device__ bool cycle_nonnegative(double value, double magnitude, double& out) {
-    const double tolerance = 512 * kCycleEpsilon * fmax(1., magnitude);
-    if (!isfinite(value) || value < -tolerance) return false;
-    out = fmax(0., value); return true;
-}
-__device__ std::uint32_t cycle_trace_cut(const work_record* a, std::uint32_t d,
-        double* suffix, double* square) {
-    const double scale = a[d - 1].value;
-    if (!(scale > 0) || !isfinite(scale)) return d;
-    double sum = 0, sq = 0;
-    for (std::uint32_t i = d; i-- > 0;) {
-        const double x = a[i].value / scale;
-        if (!(x > 0) || !isfinite(x) || (i && a[i].value < a[i - 1].value)) return d;
-        sum = x + sum; sq = x * x + sq;
-        if (!isfinite(sum) || !isfinite(sq)) return d;
-        suffix[i] = sum; square[i] = sq;
-    }
-    if (!(sum > 0) || !isfinite(sum * sum)) return d;
-    double parents = 0, best = kCycleInfinity;
-    std::uint32_t cut = 0;
-    for (std::uint32_t i = 0; i + 2 < d; ++i) {
-        const auto h = d - i;
-        const double cycle = h == 3 ? 0. : double(h - 3) * double(h - 1) * .5 * square[i];
-        // The finite positive total^2 is common to every cutoff. Compare the
-        // numerators directly; no normalized objective escapes this routine.
-        const double score = parents + cycle;
-        if (!(score >= 0) || !isfinite(score)) return d;
-        if (score < best) { best = score; cut = i; }
-        if (i + 3 < d) {
-            const double x = a[i].value / scale, m = d - i - 1;
-            parents += (m - 1) * x * (2 * suffix[i + 1] + m * x);
-        }
-    }
-    return cut;
 }
 // Large-row planning keeps the same positive moment objective, but folds each
 // 32-item tile cooperatively. Floating-point sums/cutoff ties can differ from

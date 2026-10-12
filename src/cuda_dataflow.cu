@@ -1,4 +1,5 @@
 #include "apxchol/solver/sptrsv/cuda_dataflow.h"
+#include "cuda_buffer.cuh"
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
@@ -233,84 +234,68 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
         static_cast<bool>(diag) != static_cast<bool>(inv_scale2))
         throw std::invalid_argument("GPU dataflow plan: invalid dimensions or metadata");
     dataflow_device_plan result;
-    plan_row_stats *statistics = nullptr;
-    plan_counts *counts_by_chunk = nullptr;
-    void *scratch = nullptr;
-    auto cleanup = [&] {
-        cudaFree(statistics);
-        cudaFree(counts_by_chunk);
-        cudaFree(scratch);
-    };
-    try {
-        dataflow_check(cudaMalloc(&statistics, sizeof(plan_row_stats)), "allocate statistics");
-        dataflow_check(cudaMemset(statistics, 0, sizeof(plan_row_stats)), "clear statistics");
-        plan_row_statistics<<<std::max(1, m / 256 + (m % 256 != 0)), 256>>>(m, nnz, rowptr, diag, inv_scale2,
-                                                                            statistics);
-        dataflow_check(cudaGetLastError(), "validate/statistics launch");
-        plan_row_stats host_stats{};
-        dataflow_check(cudaMemcpy(&host_stats, statistics, sizeof(host_stats), cudaMemcpyDeviceToHost),
-                       "download statistics");
-        result.host_download_bytes = sizeof(host_stats);
-        if (host_stats.error)
-            throw std::invalid_argument(
-                "GPU dataflow plan: invalid CSR row pointers or fp16 metadata (code " +
-                std::to_string(host_stats.error) + ")");
-        result.max_len = host_stats.max_len;
-        for (int k = 0; k < kPlanBuckets; ++k) {
-            result.rows_ge[k] = host_stats.rows[k];
-            result.nnz_ge[k] = host_stats.nnz[k];
-        }
-        if (split_min == -1)
-            split_min = nnz && host_stats.nnz[0] * 4 >= static_cast<unsigned long long>(nnz)
-                            ? 32 * gpu_dataflow::prefetch
-                            : 96 * gpu_dataflow::prefetch;
-        if (m == 0) {
-            cleanup();
-            return result;
-        }
-        const int chunks = m / kPlanChunk + (m % kPlanChunk != 0);
-        const std::size_t count_bytes = static_cast<std::size_t>(chunks + 1) * sizeof(plan_counts);
-        dataflow_check(cudaMalloc(&counts_by_chunk, 2 * count_bytes), "allocate tile counts and prefixes");
-        plan_counts *prefix = counts_by_chunk + chunks + 1;
-        pack_chunks<false><<<(chunks + 128) / 128, 128>>>(m, reverse, rowptr, split_min, chunks,
-                                                          counts_by_chunk, nullptr, nullptr, nullptr);
-        dataflow_check(cudaGetLastError(), "tile count launch");
-        std::size_t scratch_bytes = 0;
-        dataflow_check(cub::DeviceScan::ExclusiveScan(nullptr, scratch_bytes, counts_by_chunk, prefix,
-                                                      add_plan_counts{}, plan_counts{}, chunks + 1),
-                       "tile scan size");
-        dataflow_check(cudaMalloc(&scratch, scratch_bytes), "allocate tile scan scratch");
-        dataflow_check(cub::DeviceScan::ExclusiveScan(scratch, scratch_bytes, counts_by_chunk, prefix,
-                                                      add_plan_counts{}, plan_counts{}, chunks + 1),
-                       "tile prefix scan");
-        plan_counts counts{};
-        dataflow_check(cudaMemcpy(&counts, prefix + chunks, sizeof(counts), cudaMemcpyDeviceToHost),
-                       "download final counts");
-        result.host_download_bytes += sizeof(counts);
-        if (counts.words > UINT_MAX || counts.segments >= gpu_dataflow::special_bit ||
-            counts.slots + static_cast<unsigned long long>(m) >= gpu_dataflow::special_bit)
-            throw std::overflow_error("GPU dataflow plan exceeds 32-bit capacity");
-        result.n_batches = static_cast<int>(counts.words / gpu_dataflow::lanes);
-        result.n_slots = static_cast<int>(counts.slots);
-        result.n_split = static_cast<int>(counts.segments - counts.slots);
-        const std::size_t word_bytes = counts.words * sizeof(unsigned);
-        const std::size_t segment_bytes = counts.segments * sizeof(gpu_dataflow::segment);
-        if (word_bytes)
-            dataflow_check(cudaMalloc(&result.words, word_bytes), "allocate tasks");
-        if (segment_bytes)
-            dataflow_check(cudaMalloc(&result.segments, segment_bytes), "allocate segments");
-        pack_chunks<true><<<(chunks + 127) / 128, 128>>>(m, reverse, rowptr, split_min, chunks, nullptr,
-                                                         prefix, result.words, result.segments);
-        dataflow_check(cudaGetLastError(), "emit chunk plans");
-        dataflow_check(cudaDeviceSynchronize(), "finish device plan");
-        result.bytes = word_bytes + segment_bytes;
-        cleanup();
-        return result;
-    } catch (...) {
-        cleanup();
-        cudaFree(result.words);
-        cudaFree(result.segments);
-        throw;
+    cuda_buffer<plan_row_stats, dataflow_check> statistics;
+    statistics.allocate(1, "allocate statistics");
+    dataflow_check(cudaMemset(statistics.get(), 0, sizeof(plan_row_stats)), "clear statistics");
+    plan_row_statistics<<<std::max(1, m / 256 + (m % 256 != 0)), 256>>>(m, nnz, rowptr, diag, inv_scale2,
+                                                                        statistics.get());
+    dataflow_check(cudaGetLastError(), "validate/statistics launch");
+    plan_row_stats host_stats{};
+    dataflow_check(cudaMemcpy(&host_stats, statistics.get(), sizeof(host_stats), cudaMemcpyDeviceToHost),
+                   "download statistics");
+    result.host_download_bytes = sizeof(host_stats);
+    if (host_stats.error)
+        throw std::invalid_argument(
+            "GPU dataflow plan: invalid CSR row pointers or fp16 metadata (code " +
+            std::to_string(host_stats.error) + ")");
+    result.max_len = host_stats.max_len;
+    for (int k = 0; k < kPlanBuckets; ++k) {
+        result.rows_ge[k] = host_stats.rows[k];
+        result.nnz_ge[k] = host_stats.nnz[k];
     }
+    if (split_min == -1)
+        split_min = nnz && host_stats.nnz[0] * 4 >= static_cast<unsigned long long>(nnz)
+                        ? 32 * gpu_dataflow::prefetch
+                        : 96 * gpu_dataflow::prefetch;
+    if (m == 0)
+        return result;
+    const int chunks = m / kPlanChunk + (m % kPlanChunk != 0);
+    cuda_buffer<plan_counts, dataflow_check> counts_by_chunk;
+    counts_by_chunk.allocate(2 * static_cast<std::size_t>(chunks + 1), "allocate tile counts and prefixes");
+    plan_counts *prefix = counts_by_chunk.get() + chunks + 1;
+    pack_chunks<false><<<(chunks + 128) / 128, 128>>>(m, reverse, rowptr, split_min, chunks,
+                                                      counts_by_chunk.get(), nullptr, nullptr, nullptr);
+    dataflow_check(cudaGetLastError(), "tile count launch");
+    std::size_t scratch_bytes = 0;
+    dataflow_check(cub::DeviceScan::ExclusiveScan(nullptr, scratch_bytes, counts_by_chunk.get(), prefix,
+                                                  add_plan_counts{}, plan_counts{}, chunks + 1),
+                   "tile scan size");
+    cuda_buffer<char, dataflow_check> scratch;
+    scratch.allocate(scratch_bytes, "allocate tile scan scratch");
+    dataflow_check(cub::DeviceScan::ExclusiveScan(scratch.get(), scratch_bytes, counts_by_chunk.get(), prefix,
+                                                  add_plan_counts{}, plan_counts{}, chunks + 1),
+                   "tile prefix scan");
+    plan_counts counts{};
+    dataflow_check(cudaMemcpy(&counts, prefix + chunks, sizeof(counts), cudaMemcpyDeviceToHost),
+                   "download final counts");
+    result.host_download_bytes += sizeof(counts);
+    if (counts.words > UINT_MAX || counts.segments >= gpu_dataflow::special_bit ||
+        counts.slots + static_cast<unsigned long long>(m) >= gpu_dataflow::special_bit)
+        throw std::overflow_error("GPU dataflow plan exceeds 32-bit capacity");
+    result.n_batches = static_cast<int>(counts.words / gpu_dataflow::lanes);
+    result.n_slots = static_cast<int>(counts.slots);
+    result.n_split = static_cast<int>(counts.segments - counts.slots);
+    cuda_buffer<unsigned, dataflow_check> words;
+    cuda_buffer<gpu_dataflow::segment, dataflow_check> segments;
+    words.allocate(counts.words, "allocate tasks");
+    segments.allocate(counts.segments, "allocate segments");
+    pack_chunks<true><<<(chunks + 127) / 128, 128>>>(m, reverse, rowptr, split_min, chunks, nullptr,
+                                                     prefix, words.get(), segments.get());
+    dataflow_check(cudaGetLastError(), "emit chunk plans");
+    dataflow_check(cudaDeviceSynchronize(), "finish device plan");
+    result.bytes = words.bytes() + segments.bytes();
+    result.words = words.release();
+    result.segments = segments.release();
+    return result;
 }
 } // namespace apxchol::detail

@@ -1,4 +1,5 @@
 #include "cuda_buffer.cuh"
+#include "apxchol/csc_work.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 #include "apxchol/solver/gpu_block_frontend.h"
@@ -1741,51 +1742,7 @@ __global__ void csc_initial_counts_excess(
     excess[v] = e;
 }
 
-__global__ void csc_initial_incidences(
-        int n, const int* ptr, const int* idx, const double* values,
-        const std::uint32_t* offsets, gpu_round_shadow_incidence* output,
-        std::uint32_t* status) {
-    const int v = blockIdx.x * blockDim.x + threadIdx.x;
-    if (v >= n) return;
-    std::uint32_t out = offsets[v];
-    for (int k = ptr[v]; k < ptr[v + 1]; ++k) {
-        const int u = idx[k];
-        if (u == v) continue;
-        int canonical = k;
-        if (u < v) {
-            int lo = ptr[u], hi = ptr[u + 1];
-            while (lo < hi) {
-                const int mid = lo + (hi - lo) / 2;
-                if (idx[mid] < v) lo = mid + 1; else hi = mid;
-            }
-            if (lo == ptr[u + 1] || idx[lo] != v) {
-                atomicOr(status, 2u); continue;
-            }
-            canonical = lo;
-        }
-        const double original = -values[canonical];
-#ifdef APXCHOL_POOL_FP32
-        const double weight = static_cast<double>(__double2float_rn(original));
-#else
-        const double weight = original;
-#endif
-        if (!isfinite(weight) || weight < 0.0) atomicOr(status, 1u);
-        if (out >= offsets[v + 1]) { atomicOr(status, 4u); continue; }
-        output[out++] = {static_cast<node_index>(v), static_cast<node_index>(u), weight};
-    }
-    if (out != offsets[v + 1]) atomicOr(status, 4u);
-}
-
-/// Warp-per-vertex form of the above. One thread per vertex means one thread
-/// walks a whole CSC column doing a binary partner search per entry, and on a
-/// power-law graph a hub column is thousands of entries while its warp
-/// neighbours have a handful: nsys measured this kernel at 15.6 ms in a SINGLE
-/// launch, 6.2% of kron's GPU time. Each entry's output is independent, so the
-/// warp splits the column and recovers its slot with a ballot prefix count.
-/// Every written value is computed exactly as before, so the result is
-/// bit-identical -- only the order the slots are filled in differs, and slots
-/// are disjoint. The malformed-input paths (status 1/2/4) already abort the
-/// run, so their slot accounting need not match the serial form.
+// One warp per column; ballot prefixes preserve source order in the output.
 __global__ void csc_initial_incidences_warp(
         int n, const int* ptr, const int* idx, const double* values,
         const std::uint32_t* offsets, gpu_round_shadow_incidence* output,
@@ -1805,20 +1762,10 @@ __global__ void csc_initial_incidences_warp(
         const unsigned mask = __ballot_sync(0xffffffffu, kept);
         const std::uint32_t rank = __popc(mask & ((1u << lane) - 1u));
         if (kept) {
-            int canonical = k;
-            bool ok = true;
-            if (u < static_cast<int>(v)) {
-                int lo = ptr[u], hi = ptr[u + 1];
-                while (lo < hi) {
-                    const int mid = lo + (hi - lo) / 2;
-                    if (idx[mid] < static_cast<int>(v)) lo = mid + 1; else hi = mid;
-                }
-                if (lo == ptr[u + 1] || idx[lo] != static_cast<int>(v)) {
-                    atomicOr(status, 2u); ok = false;
-                } else canonical = lo;
-            }
-            if (ok) {
-                const double original = -values[canonical];
+            bool paired = true;
+            const double original = -canonical_lower_value(ptr, idx, values, static_cast<int>(v), u, k, paired);
+            if (!paired) atomicOr(status, 2u);
+            else {
 #ifdef APXCHOL_POOL_FP32
                 const double weight =
                     static_cast<double>(__double2float_rn(original));

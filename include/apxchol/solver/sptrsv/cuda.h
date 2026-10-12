@@ -96,31 +96,7 @@ public:
             cuda_sptrsv_device_csr_fp32 L,
             cuda_sptrsv_device_csr_fp32 LT,
             factor_drop_stats stats) {
-        const std::size_t rows = static_cast<std::size_t>(m);
-        const std::size_t entries = static_cast<std::size_t>(nnz);
-        validate_metadata(cuda_device, m, nnz, stats,
-                          {{L.row_ptr.data, L.row_ptr.bytes, (rows + 1) * sizeof(int)},
-                           {L.col_idx.data, L.col_idx.bytes, entries * sizeof(int)},
-                           {L.values.data, L.values.bytes, entries * sizeof(cuda_value_t)},
-                           {LT.row_ptr.data, LT.row_ptr.bytes, (rows + 1) * sizeof(int)},
-                           {LT.col_idx.data, LT.col_idx.bytes, entries * sizeof(int)},
-                           {LT.values.data, LT.values.bytes, entries * sizeof(cuda_value_t)}});
-        cuda_sptrsv_device_factor out;
-        out.data_.cuda_device = cuda_device;
-        out.data_.m = m;
-        out.data_.nnz = nnz;
-        out.data_.format = storage::fp32;
-        out.data_.stats = stats;
-        out.data_.L_row_ptr = L.row_ptr.data;
-        out.data_.L_col_idx = L.col_idx.data;
-        out.data_.L_values = L.values.data;
-        out.data_.LT_row_ptr = LT.row_ptr.data;
-        out.data_.LT_col_idx = LT.col_idx.data;
-        out.data_.LT_values = LT.values.data;
-        out.data_.allocation_bytes = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
-                                 LT.row_ptr.bytes, LT.col_idx.bytes, LT.values.bytes,
-                                 0, 0};
-        return out;
+        return own<storage::fp32>(cuda_device, m, nnz, L, LT, stats);
     }
 
     /// FP16_SCALED form of the same handoff. `diag` and `inv_scale2` are
@@ -134,37 +110,8 @@ public:
             cuda_sptrsv_device_allocation<double> inv_scale2,
             factor_drop_stats stats,
             std::uint64_t flushed, std::uint64_t subnormal) {
-        const std::size_t rows = static_cast<std::size_t>(m);
-        const std::size_t entries = static_cast<std::size_t>(nnz);
-        validate_metadata(cuda_device, m, nnz, stats,
-                          {{L.row_ptr.data, L.row_ptr.bytes, (rows + 1) * sizeof(int)},
-                           {L.col_idx.data, L.col_idx.bytes, entries * sizeof(int)},
-                           {L.values.data, L.values.bytes, entries * sizeof(__half)},
-                           {LT.row_ptr.data, LT.row_ptr.bytes, (rows + 1) * sizeof(int)},
-                           {LT.col_idx.data, LT.col_idx.bytes, entries * sizeof(int)},
-                           {LT.values.data, LT.values.bytes, entries * sizeof(__half)},
-                           {diag.data, diag.bytes, rows * sizeof(float)},
-                           {inv_scale2.data, inv_scale2.bytes, rows * sizeof(double)}});
-        cuda_sptrsv_device_factor out;
-        out.data_.cuda_device = cuda_device;
-        out.data_.m = m;
-        out.data_.nnz = nnz;
-        out.data_.format = storage::fp16_scaled;
-        out.data_.stats = stats;
-        out.data_.fp16_flushed = flushed;
-        out.data_.fp16_subnormal = subnormal;
-        out.data_.L_row_ptr = L.row_ptr.data;
-        out.data_.L_col_idx = L.col_idx.data;
-        out.data_.L_values = L.values.data;
-        out.data_.LT_row_ptr = LT.row_ptr.data;
-        out.data_.LT_col_idx = LT.col_idx.data;
-        out.data_.LT_values = LT.values.data;
-        out.data_.diag = diag.data;
-        out.data_.inv_scale2 = inv_scale2.data;
-        out.data_.allocation_bytes = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
-                                 LT.row_ptr.bytes, LT.col_idx.bytes, LT.values.bytes,
-                                 diag.bytes, inv_scale2.bytes};
-        return out;
+        return own<storage::fp16_scaled>(cuda_device, m, nnz, L, LT, stats,
+                                        diag, inv_scale2, flushed, subnormal);
     }
 
     bool empty() const noexcept { return data_.L_row_ptr == nullptr; }
@@ -183,10 +130,52 @@ private:
         std::size_t required;
     };
 
+    template<storage Format, class Csr>
+    static cuda_sptrsv_device_factor own(
+            int cuda_device, std::int64_t m, std::int64_t nnz,
+            Csr L, Csr LT, factor_drop_stats stats,
+            cuda_sptrsv_device_allocation<float> diag = {},
+            cuda_sptrsv_device_allocation<double> inv_scale2 = {},
+            std::uint64_t flushed = 0, std::uint64_t subnormal = 0) {
+        const std::size_t rows = static_cast<std::size_t>(m);
+        const std::size_t entries = static_cast<std::size_t>(nnz);
+        const allocation_metadata allocations[] = {
+            {L.row_ptr.data, L.row_ptr.bytes, (rows + 1) * sizeof(int)},
+            {L.col_idx.data, L.col_idx.bytes, entries * sizeof(int)},
+            {L.values.data, L.values.bytes, entries * sizeof(*L.values.data)},
+            {LT.row_ptr.data, LT.row_ptr.bytes, (rows + 1) * sizeof(int)},
+            {LT.col_idx.data, LT.col_idx.bytes, entries * sizeof(int)},
+            {LT.values.data, LT.values.bytes, entries * sizeof(*LT.values.data)},
+            {diag.data, diag.bytes, rows * sizeof(float)},
+            {inv_scale2.data, inv_scale2.bytes, rows * sizeof(double)}};
+        validate_metadata(cuda_device, m, nnz, stats,
+                          std::span(allocations).first(Format == storage::fp32 ? 6 : 8));
+        cuda_sptrsv_device_factor out;
+        out.data_.cuda_device = cuda_device;
+        out.data_.m = m;
+        out.data_.nnz = nnz;
+        out.data_.format = Format;
+        out.data_.stats = stats;
+        out.data_.fp16_flushed = flushed;
+        out.data_.fp16_subnormal = subnormal;
+        out.data_.L_row_ptr = L.row_ptr.data;
+        out.data_.L_col_idx = L.col_idx.data;
+        out.data_.L_values = L.values.data;
+        out.data_.LT_row_ptr = LT.row_ptr.data;
+        out.data_.LT_col_idx = LT.col_idx.data;
+        out.data_.LT_values = LT.values.data;
+        out.data_.diag = diag.data;
+        out.data_.inv_scale2 = inv_scale2.data;
+        out.data_.allocation_bytes = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
+                                     LT.row_ptr.bytes, LT.col_idx.bytes, LT.values.bytes,
+                                     diag.bytes, inv_scale2.bytes};
+        return out;
+    }
+
     static void validate_metadata(
             int cuda_device, std::int64_t m, std::int64_t nnz,
             const factor_drop_stats& stats,
-            std::initializer_list<allocation_metadata> allocations) {
+            std::span<const allocation_metadata> allocations) {
         if (cuda_device < 0)
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: CUDA device must be nonnegative");
