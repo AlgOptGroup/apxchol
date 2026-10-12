@@ -349,6 +349,8 @@ struct device_pivot {
 struct device_digest {
     unsigned long long xor_hash;
     unsigned long long sum_hash;
+
+    gpu_round_shadow_digest host() const { return {xor_hash, sum_hash}; }
 };
 static_assert(sizeof(device_digest) == sizeof(gpu_round_shadow_digest));
 
@@ -362,6 +364,11 @@ struct device_semantics {
     device_digest live_degree;
     device_digest canonical_excess;
     unsigned long long active_count;
+
+    gpu_round_shadow_state_fingerprint fingerprint(std::size_t live_incidences) const {
+        return {residual.host(), ordered_residual.host(), active.host(), topology.host(),
+                live_degree.host(), canonical_excess.host(), active_count, live_incidences};
+    }
 };
 
 // XOR and unsigned sum are associative modulo 2^64. Reduce exact audit
@@ -523,21 +530,11 @@ __global__ void validate_selected_vertices(
         }
     }
 
-    __shared__ unsigned long long block_xor[kBlock];
-    __shared__ unsigned long long block_sum[kBlock];
-    block_xor[threadIdx.x] = item_hash;
-    block_sum[threadIdx.x] = item_hash;
-    __syncthreads();
-    for (unsigned stride = kBlock / 2; stride; stride >>= 1) {
-        if (threadIdx.x < stride) {
-            block_xor[threadIdx.x] ^= block_xor[threadIdx.x + stride];
-            block_sum[threadIdx.x] += block_sum[threadIdx.x + stride];
-        }
-        __syncthreads();
-    }
+    __shared__ device_digest warp_values[kBlock / 32];
+    const auto digest = reduce_block_digest({item_hash, item_hash}, warp_values);
     if (threadIdx.x == 0) {
-        atomicXor(&digest_state->xor_hash, block_xor[0]);
-        atomicAdd(&digest_state->sum_hash, block_sum[0]);
+        atomicXor(&digest_state->xor_hash, digest.xor_hash);
+        atomicAdd(&digest_state->sum_hash, digest.sum_hash);
         // Standard threadFenceReduction completion: the final block observes
         // every preceding block's digest contribution before certifying it.
         __threadfence();
@@ -849,37 +846,9 @@ __global__ void sample_gks_tree(
     const std::uint32_t begin = offsets[ordinal];
     const std::uint32_t end = offsets[ordinal + 1];
     if (begin == end) return;
-    prefix[begin] = canonical[begin].value;
-    for (std::uint32_t i = begin + 1; i < end; ++i)
-        prefix[i] = prefix[i - 1] + canonical[i].value;
-    fill_flags[end - 1] = 0;
-    unsigned long long state = pivots[ordinal].seed;
-    std::uint64_t emitted = 0;
-    for (std::uint32_t i = begin; i + 1 < end; ++i) {
-        const double suffix = prefix[end - 1] - prefix[i];
-        if (suffix <= 0.0) {
-            fill_flags[i] = 0;
-            continue;
-        }
-        const double target = prefix[i] + next_unit(state) * suffix;
-        std::uint32_t lo = i + 1;
-        std::uint32_t hi = end;
-        while (lo < hi) {
-            const std::uint32_t mid = lo + (hi - lo) / 2;
-            if (prefix[mid] <= target)
-                lo = mid + 1;
-            else
-                hi = mid;
-        }
-        const std::uint32_t partner = lo < end ? lo : end - 1;
-        const std::uint32_t a = canonical[i].b;
-        const std::uint32_t b = canonical[partner].b;
-        fill_candidates[i] = {
-            min(a, b), max(a, b),
-            canonical[i].value * suffix / total_degree[ordinal]};
-        fill_flags[i] = 1;
-        ++emitted;
-    }
+    const auto emitted = sample_gks_row(canonical + begin, end - begin,
+        total_degree[ordinal], pivots[ordinal].seed, prefix + begin,
+        fill_candidates + begin, fill_flags + begin);
     if (counters) counters[ordinal].emitted_edges = emitted;
 }
 
@@ -898,9 +867,7 @@ __global__ void prepare_gks_prefix(
     const std::uint32_t begin = offsets[ordinal];
     const std::uint32_t end = offsets[ordinal + 1];
     if (begin == end) return;
-    prefix[begin] = canonical[begin].value;
-    for (std::uint32_t i = begin + 1; i < end; ++i)
-        prefix[i] = prefix[i - 1] + canonical[i].value;
+    gks_prefix(canonical + begin, end - begin, prefix + begin);
 }
 
 template<bool OversizedOnly = false>
@@ -932,17 +899,7 @@ __global__ void sample_gks_items(
     // final increment and the unchanged mixing/conversion operations.
     unsigned long long state = pivots[ordinal].seed +
         0x9E3779B97F4A7C15ULL * static_cast<unsigned long long>(i - begin);
-    const double target = prefix[i] + next_unit(state) * suffix;
-    std::uint32_t lo = i + 1;
-    std::uint32_t hi = end;
-    while (lo < hi) {
-        const std::uint32_t mid = lo + (hi - lo) / 2;
-        if (prefix[mid] <= target)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    const std::uint32_t partner = lo < end ? lo : end - 1;
+    const auto partner = gks_partner(prefix, i, end, suffix, state);
     const std::uint32_t a = canonical[i].b;
     const std::uint32_t b = canonical[partner].b;
     fill_candidates[i] = {
@@ -1257,11 +1214,7 @@ __global__ void normal_batch_pass(
                 for (std::size_t ordinal = first; ordinal < end; ++ordinal) {
                     const auto begin = offsets[ordinal], finish = offsets[ordinal + 1];
                     const unsigned count = finish - begin, local_end = local_begin + count;
-                    if (count) {
-                        prefixes[warp][local_begin] = records[warp][local_begin].value;
-                        for (unsigned i = local_begin + 1; i < local_end; ++i)
-                            prefixes[warp][i] = prefixes[warp][i - 1] + records[warp][i].value;
-                    }
+                    gks_prefix(records[warp] + local_begin, count, prefixes[warp] + local_begin);
                     for (unsigned local = local_begin; local < local_end; ++local) {
                         const auto record = records[warp][local];
                         const auto dest = begin + local - local_begin;
@@ -1273,14 +1226,7 @@ __global__ void normal_batch_pass(
                         if (suffix <= 0.0) continue;
                         unsigned long long state = pivots[ordinal].seed +
                             0x9E3779B97F4A7C15ULL * static_cast<unsigned long long>(local - local_begin);
-                        const double target = prefixes[warp][local] + next_unit(state) * suffix;
-                        unsigned lo = local + 1, hi = local_end;
-                        while (lo < hi) {
-                            const unsigned mid = lo + (hi - lo) / 2;
-                            if (prefixes[warp][mid] <= target) lo = mid + 1;
-                            else hi = mid;
-                        }
-                        const unsigned partner = lo < local_end ? lo : local_end - 1;
+                        const auto partner = gks_partner(prefixes[warp], local, local_end, suffix, state);
                         const auto a = record.neighbor, b = records[warp][partner].neighbor;
                         fills[dest] = {min(a, b), max(a, b), record.value * suffix / total_degree[ordinal]};
                         fill_flags[dest] = 1;
@@ -1545,69 +1491,45 @@ std::size_t query_cub_bytes(std::size_t vertex_count,
                             const gpu_round_shadow_report& shape) {
     std::size_t maximum = 1;
     std::size_t bytes = 0;
-    auto query_select_work = [&](std::size_t count) {
+    auto query_select = [&]<class T = work_record>(std::size_t count) {
         if (!count) return;
         bytes = 0;
         cuda_check(cub::DeviceSelect::Flagged(
             nullptr, bytes,
-            fake_pointer<work_record>(0x100),
+            fake_pointer<T>(0x100),
             fake_pointer<std::uint8_t>(0x200),
-            fake_pointer<work_record>(0x300),
+            fake_pointer<T>(0x300),
             fake_pointer<int>(0x400), cub_count(count, "selection query")),
-            "query work-record selection temporary bytes");
+            "query selection temporary bytes");
         maximum = std::max(maximum, bytes);
     };
-    auto query_select_incidence = [&](std::size_t count) {
-        if (!count) return;
-        bytes = 0;
-        cuda_check(cub::DeviceSelect::Flagged(
-            nullptr, bytes,
-            fake_pointer<gpu_round_shadow_incidence>(0x500),
-            fake_pointer<std::uint8_t>(0x600),
-            fake_pointer<gpu_round_shadow_incidence>(0x700),
-            fake_pointer<int>(0x800), cub_count(count, "incidence selection query")),
-            "query incidence selection temporary bytes");
-        maximum = std::max(maximum, bytes);
-    };
-    auto query_sort = [&](std::size_t count) {
+    auto query_sort = [&]<class T = work_record>(std::size_t count, int end_bit = 64) {
         if (!count) return;
         bytes = 0;
         cuda_check(cub::DeviceRadixSort::SortPairs(
             nullptr, bytes,
             fake_pointer<std::uint64_t>(0x900),
             fake_pointer<std::uint64_t>(0xa00),
-            fake_pointer<work_record>(0xb00),
-            fake_pointer<work_record>(0xc00),
-            cub_count(count, "sort query")),
+            fake_pointer<T>(0xb00),
+            fake_pointer<T>(0xc00),
+            cub_count(count, "sort query"), 0, end_bit),
             "query stable radix-sort temporary bytes");
         maximum = std::max(maximum, bytes);
     };
-    auto query_incidence_sort = [&](std::size_t count) {
-        if (!count) return;
-        bytes = 0;
-        cuda_check(cub::DeviceRadixSort::SortPairs(
-            nullptr, bytes,
-            fake_pointer<std::uint64_t>(0xf00),
-            fake_pointer<std::uint64_t>(0x1100),
-            fake_pointer<gpu_round_shadow_incidence>(0x1300),
-            fake_pointer<gpu_round_shadow_incidence>(0x1500),
-            cub_count(count, "residual owner-sort query"),
-            0, owner_sort_end_bit(vertex_count)),
-            "query stable residual owner sort temporary bytes");
-        maximum = std::max(maximum, bytes);
-    };
 
-    query_select_work(incidence_count);
-    query_select_work(shape.gathered_incidences);
-    query_select_work(shape.unique_neighbors);
-    query_select_work(shape.excess_updates);
+    query_select(incidence_count);
+    query_select(shape.gathered_incidences);
+    query_select(shape.unique_neighbors);
+    query_select(shape.excess_updates);
     query_sort(shape.gathered_incidences);
     query_sort(shape.unique_neighbors);
     query_sort(shape.excess_updates);
-    query_incidence_sort(shape.live_incidences);
-    query_incidence_sort(gpu_round_shadow_checked_mul(
-        static_cast<std::size_t>(shape.raw_fill_edges), 2, "fill-only sort query"));
-    query_select_incidence(incidence_count);
+    query_sort.operator()<gpu_round_shadow_incidence>(
+        shape.live_incidences, owner_sort_end_bit(vertex_count));
+    query_sort.operator()<gpu_round_shadow_incidence>(gpu_round_shadow_checked_mul(
+        static_cast<std::size_t>(shape.raw_fill_edges), 2, "fill-only sort query"),
+        owner_sort_end_bit(vertex_count));
+    query_select.operator()<gpu_round_shadow_incidence>(incidence_count);
     if (pivot_count) {
         bytes = 0;
         cuda_check(cub::DeviceScan::ExclusiveSum(
@@ -1812,16 +1734,10 @@ public:
     int select(const T* input, const std::uint8_t* flags, T* output,
                std::size_t count, const char* what) {
         if (!count) return 0;
-        std::size_t bytes = 0;
-        cuda_check(cub::DeviceSelect::Flagged(
-            nullptr, bytes, input, flags, output, count_.get(),
-            cub_count(count, what)), "query CUB ordered selection");
-        if (bytes > storage_.count())
-            throw std::logic_error(
-                "GPU round shadow: preflight underestimated CUB selection");
-        cuda_check(cub::DeviceSelect::Flagged(
-            storage_.get(), bytes, input, flags, output, count_.get(),
-            cub_count(count, what)), what);
+        execute(count, what, [&](void* buffer, std::size_t& bytes, int n) {
+            return cub::DeviceSelect::Flagged(
+                buffer, bytes, input, flags, output, count_.get(), n);
+        });
         int result = 0;
         copy_to_host(&result, count_.get(), 1, "download selection count");
         return result;
@@ -1831,48 +1747,42 @@ public:
     void sort_pairs(const std::uint64_t* keys_in, std::uint64_t* keys_out,
                     const T* values_in, T* values_out,
                     std::size_t count, const char* what, int end_bit = 64) {
-        if (!count) return;
-        std::size_t bytes = 0;
-        cuda_check(cub::DeviceRadixSort::SortPairs(
-            nullptr, bytes, keys_in, keys_out, values_in, values_out,
-            cub_count(count, what), 0, end_bit), "query CUB stable radix sort");
-        if (bytes > storage_.count())
-            throw std::logic_error(
-                "GPU round shadow: preflight underestimated CUB sort");
-        cuda_check(cub::DeviceRadixSort::SortPairs(
-            storage_.get(), bytes, keys_in, keys_out, values_in, values_out,
-            cub_count(count, what), 0, end_bit), what);
+        execute(count, what, [&](void* buffer, std::size_t& bytes, int n) {
+            return cub::DeviceRadixSort::SortPairs(
+                buffer, bytes, keys_in, keys_out, values_in, values_out,
+                n, 0, end_bit);
+        });
     }
 
     void inclusive_owner_max(std::uint32_t* offsets, std::size_t count) {
-        if (!count) return;
-        std::size_t bytes = 0;
-        cuda_check(cub::DeviceScan::InclusiveScan(
-            nullptr, bytes, offsets, offsets, owner_offset_max{},
-            cub_count(count, "owner-offset maximum")), "query owner-offset maximum");
-        if (bytes > storage_.count())
-            throw std::logic_error("GPU round shadow: underestimated owner-offset maximum");
-        cuda_check(cub::DeviceScan::InclusiveScan(
-            storage_.get(), bytes, offsets, offsets, owner_offset_max{},
-            cub_count(count, "owner-offset maximum")), "propagate empty owner offsets");
+        execute(count, "propagate empty owner offsets",
+                [&](void* buffer, std::size_t& bytes, int n) {
+            return cub::DeviceScan::InclusiveScan(
+                buffer, bytes, offsets, offsets, owner_offset_max{}, n);
+        });
     }
 
     void exclusive_sum(const std::uint32_t* input, std::uint32_t* output,
                        std::size_t count) {
-        if (!count) return;
-        std::size_t bytes = 0;
-        cuda_check(cub::DeviceScan::ExclusiveSum(
-            nullptr, bytes, input, output, cub_count(count, "pivot scan")),
-            "query CUB pivot scan");
-        if (bytes > storage_.count())
-            throw std::logic_error(
-                "GPU round shadow: preflight underestimated CUB scan");
-        cuda_check(cub::DeviceScan::ExclusiveSum(
-            storage_.get(), bytes, input, output,
-            cub_count(count, "pivot scan")), "CUB pivot-offset scan");
+        execute(count, "CUB pivot-offset scan",
+                [&](void* buffer, std::size_t& bytes, int n) {
+            return cub::DeviceScan::ExclusiveSum(buffer, bytes, input, output, n);
+        });
     }
 
 private:
+    template<class Operation>
+    void execute(std::size_t count, const char* what, Operation operation) {
+        if (!count) return;
+        const int n = cub_count(count, what);
+        std::size_t bytes = 0;
+        cuda_check(operation(nullptr, bytes, n), what);
+        if (bytes > storage_.count())
+            throw std::logic_error(
+                "GPU round shadow: preflight underestimated CUB workspace");
+        cuda_check(operation(storage_.get(), bytes, n), what);
+    }
+
     device_buffer<std::byte>& storage_;
     device_buffer<int>& count_;
 };
@@ -2252,12 +2162,11 @@ struct gpu_round_shadow_device_state::impl {
 
     struct failed_generation_guard {
         impl& state;
-        bool armed = false;
+        bool armed = true;
 
         ~failed_generation_guard() {
             if (armed) state.poison_failed_generation();
         }
-        void arm() noexcept { armed = true; }
         void commit() noexcept { armed = false; }
     };
 
@@ -2312,7 +2221,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     // continuity check, allocation, or CUDA call. A failed compute attempt
     // must never leave an older accepted generation consumable.
     failed_generation_guard generation_guard{*this};
-    generation_guard.arm();
     // Revoke before any validation, allocation, or numerical mutation. A failed
     // next generation cannot leave a selector borrowing the previous arrays.
     owned_residual_epoch.reset();
@@ -3513,22 +3421,13 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         report.timings.total_ms = std::numeric_limits<double>::quiet_NaN();
     }
 
-    report.factor = {host_semantics.factor.xor_hash,
-                     host_semantics.factor.sum_hash};
-    report.fill = {host_semantics.fill.xor_hash,
-                   host_semantics.fill.sum_hash};
-    report.residual = {host_semantics.residual.xor_hash,
-                       host_semantics.residual.sum_hash};
-    report.ordered_residual = {
-        host_semantics.ordered_residual.xor_hash,
-        host_semantics.ordered_residual.sum_hash};
-    report.active = {host_semantics.active.xor_hash,
-                     host_semantics.active.sum_hash};
-    report.live_degree = {host_semantics.live_degree.xor_hash,
-                          host_semantics.live_degree.sum_hash};
-    report.canonical_excess = {
-        host_semantics.canonical_excess.xor_hash,
-        host_semantics.canonical_excess.sum_hash};
+    report.factor = host_semantics.factor.host();
+    report.fill = host_semantics.fill.host();
+    report.residual = host_semantics.residual.host();
+    report.ordered_residual = host_semantics.ordered_residual.host();
+    report.active = host_semantics.active.host();
+    report.live_degree = host_semantics.live_degree.host();
+    report.canonical_excess = host_semantics.canonical_excess.host();
     report.active_count = host_semantics.active_count;
     report.live_incidences = l;
     report.state_imports = state_imports;
@@ -3588,16 +3487,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         {host_semantics.active.xor_hash,
          host_semantics.active.sum_hash},
         {}};
-    fingerprint.residual = report.residual;
-    fingerprint.ordered_residual = report.ordered_residual;
-    fingerprint.active = report.active;
-    fingerprint.topology = {
-        host_semantics.topology.xor_hash,
-        host_semantics.topology.sum_hash};
-    fingerprint.live_degree = report.live_degree;
-    fingerprint.excess = report.canonical_excess;
-    fingerprint.active_count = report.active_count;
-    fingerprint.live_incidences = report.live_incidences;
+    fingerprint = host_semantics.fingerprint(l);
     if (device_owned_prefix) owned_residual_epoch = std::make_shared<const int>(0);
     // Survivor filtering, active-neighbor fill and the stable merge above
     // published exact compact rows. No subsequent mutation may inherit this
@@ -3613,7 +3503,6 @@ gpu_round_shadow_device_state::impl::download_factor_log() {
         throw std::logic_error(
             "GPU round shadow: device state is poisoned by a failed generation");
     failed_generation_guard generation_guard{*this};
-    generation_guard.arm();
     require_current_device("factor-log download");
     gpu_round_shadow_factor_log result;
     result.columns.resize(factor_column_count);
@@ -3782,7 +3671,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::compute_owned_prefix(
         const gpu_round_shadow_input* initial, gpu_device_selection selected,
         std::uint64_t seed, const gpu_device_selection_content* paired_initial_content) {
     impl::failed_generation_guard guard{*impl_};
-    guard.arm();
     if (impl_->poisoned || impl_->owned_prefix_materialized ||
         (initial ? impl_->has_state : !impl_->device_owned_prefix))
         throw std::logic_error("GPU-owned prefix generation is out of order");
@@ -3807,7 +3695,7 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     // gpu_owned_csc_supported once before entering the owning session.
     // Repeating its full stored-pattern traversal here would undo the import
     // simplification; the device value/status checks below remain mandatory.
-    impl::failed_generation_guard guard{*impl_}; guard.arm();
+    impl::failed_generation_guard guard{*impl_};
     if (impl_->has_state || impl_->poisoned || impl_->factor_column_count)
         throw std::logic_error("GPU direct CSC initialization requires a fresh numerical owner");
     const auto start = gpu_setup_diagnostic_clock::now();
@@ -3907,8 +3795,8 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     impl_->resident_selection_content = {static_cast<node_index>(n), n,
         {content.topology.xor_hash, content.topology.sum_hash},
         {content.active.xor_hash, content.active.sum_hash}, {}};
-    impl_->fingerprint.topology = {content.topology.xor_hash, content.topology.sum_hash};
-    impl_->fingerprint.active = {content.active.xor_hash, content.active.sum_hash};
+    impl_->fingerprint.topology = content.topology.host();
+    impl_->fingerprint.active = content.active.host();
     impl_->fingerprint.active_count = n; impl_->fingerprint.live_incidences = directed;
     impl_->owned_residual_epoch = std::make_shared<const int>(0);
     const auto selector_start = gpu_setup_diagnostic_clock::now();
@@ -3947,7 +3835,6 @@ gpu_owned_csc_test_result gpu_initial_owned_csc_buffers_for_test(
 
 gpu_owned_prefix_handback gpu_round_shadow_device_state::download_owned_prefix() {
     impl::failed_generation_guard guard{*impl_};
-    guard.arm();
     impl_->require_current_device("owned prefix handback");
     if (impl_->poisoned || !impl_->device_owned_prefix || impl_->owned_prefix_materialized ||
         !impl_->has_state || !impl_->generation_accepted)
@@ -4002,14 +3889,7 @@ gpu_owned_prefix_handback gpu_round_shadow_device_state::download_owned_prefix()
     }
     device_semantics checked{};
     copy_to_host(&checked, audit.get(), 1, "download handback audit");
-    result.fingerprint = {
-        {checked.residual.xor_hash, checked.residual.sum_hash},
-        {checked.ordered_residual.xor_hash, checked.ordered_residual.sum_hash},
-        {checked.active.xor_hash, checked.active.sum_hash},
-        {checked.topology.xor_hash, checked.topology.sum_hash},
-        {checked.live_degree.xor_hash, checked.live_degree.sum_hash},
-        {checked.canonical_excess.xor_hash, checked.canonical_excess.sum_hash},
-        checked.active_count, impl_->resident_count};
+    result.fingerprint = checked.fingerprint(impl_->resident_count);
     if (result.fingerprint.active != impl_->fingerprint.active ||
         result.fingerprint.topology != impl_->fingerprint.topology ||
         result.fingerprint.active_count != impl_->fingerprint.active_count)
@@ -4029,7 +3909,6 @@ std::vector<gpu_round_shadow_factor_column>
 gpu_round_shadow_device_state::download_owned_factor_columns(
         std::span<node_index> permutation, std::span<edge_index> raw_offsets) {
     impl::failed_generation_guard guard{*impl_};
-    guard.arm();
     impl_->require_current_device("owned factorization completion");
     if (impl_->poisoned || !impl_->device_owned_prefix || impl_->owned_prefix_materialized ||
         !impl_->has_state || !impl_->generation_accepted ||
@@ -4051,7 +3930,6 @@ gpu_round_shadow_device_state::download_owned_factor_columns(
 double gpu_round_shadow_device_state::probe_owned_distinct_degree(
         std::span<const node_index> active_ids, gpu_block_frontend& frontend) {
     impl::failed_generation_guard guard{*impl_};
-    guard.arm();
     impl_->validate_owned_preview(frontend);
     if (active_ids.size() != impl_->resident_selection_content.active_count ||
         !std::is_sorted(active_ids.begin(), active_ids.end()) ||
@@ -4129,7 +4007,6 @@ double gpu_round_shadow_device_state::probe_owned_distinct_degree(
 gpu_owned_sparsify_stats gpu_round_shadow_device_state::sparsify_owned_residual(
         gpu_block_frontend& frontend, std::uint64_t seed) {
     impl::failed_generation_guard guard{*impl_};
-    guard.arm();
     impl_->validate_owned_preview(frontend);
     const std::size_t n = impl_->vertex_count, live = impl_->resident_count;
     const auto spare = 1 - impl_->current_slot;
@@ -4178,19 +4055,14 @@ gpu_owned_sparsify_stats gpu_round_shadow_device_state::sparsify_owned_residual(
     }
     device_semantics content{};
     copy_to_host(&content, semantics.get(), 1, "download sparse semantic receipt");
-    const gpu_round_shadow_digest active_hash{content.active.xor_hash, content.active.sum_hash};
-    if (active_hash != impl_->fingerprint.active || content.active_count != impl_->fingerprint.active_count)
+    if (content.active.host() != impl_->fingerprint.active ||
+        content.active_count != impl_->fingerprint.active_count)
         throw std::logic_error("GPU sparsification changed active state");
     // All output checks and consumers completed before publishing this epoch.
     impl_->current_slot = spare;
     impl_->resident_count = after;
     impl_->resident_selection_content.topology = {content.topology.xor_hash, content.topology.sum_hash};
-    impl_->fingerprint = {{content.residual.xor_hash, content.residual.sum_hash},
-        {content.ordered_residual.xor_hash, content.ordered_residual.sum_hash},
-        active_hash, {content.topology.xor_hash, content.topology.sum_hash},
-        {content.live_degree.xor_hash, content.live_degree.sum_hash},
-        {content.canonical_excess.xor_hash, content.canonical_excess.sum_hash},
-        static_cast<std::size_t>(content.active_count), after};
+    impl_->fingerprint = content.fingerprint(after);
     impl_->owned_residual_epoch = std::make_shared<const int>(0);
     impl_->resident_rows_all_live = true;
     frontend.bind_owned_residual(impl_->residual(spare).get(), impl_->owner_offsets(spare).get(),
@@ -4203,7 +4075,6 @@ gpu_owned_sparsify_stats gpu_round_shadow_device_state::sparsify_owned_residual(
 
 void gpu_round_shadow_device_state::advance_selector(gpu_block_frontend& frontend) {
     impl::failed_generation_guard guard{*impl_};
-    guard.arm();
     impl_->require_current_device("resident selector handoff");
     if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted ||
         (!impl_->certified && !(impl_->device_owned_prefix && !impl_->owned_prefix_materialized)) ||

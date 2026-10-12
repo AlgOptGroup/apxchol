@@ -107,26 +107,48 @@ __device__ double cycle_parent_weight(const work_record* a, std::uint32_t d,
     const double mass=suffix[i+1]+double(d-i-1)*ai;
     return (a[i].value*(scale/D))*(mass/(1+ai/aj));
 }
-// Input-only numerical fallback uses the established GKS law and original seed.
-__device__ std::uint32_t cycle_gks_row(const work_record* a, std::uint32_t d,
+template<class Record>
+__device__ void gks_prefix(const Record* a, std::uint32_t d, double* prefix) {
+    if (!d) return;
+    prefix[0] = a[0].value;
+    for (std::uint32_t i = 1; i < d; ++i)
+        prefix[i] = prefix[i - 1] + a[i].value;
+}
+
+__device__ std::uint32_t gks_partner(const double* prefix, std::uint32_t i,
+        std::uint32_t end, double suffix, unsigned long long& state) {
+    const double target = prefix[i] + next_unit(state) * suffix;
+    std::uint32_t lo = i + 1, hi = end;
+    while (lo < hi) {
+        const auto mid = lo + (hi - lo) / 2;
+        if (prefix[mid] <= target) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < end ? lo : end - 1;
+}
+
+__device__ std::uint32_t sample_gks_row(const work_record* a, std::uint32_t d,
         double D, unsigned long long state, double* prefix,
         work_record* fill, std::uint8_t* flags) {
     if (!d) return 0;
-    prefix[0]=a[0].value;
-    for (std::uint32_t i=1;i<d;++i) prefix[i]=prefix[i-1]+a[i].value;
-    std::uint32_t emitted=0;
-    for (std::uint32_t i=0;i+1<d;++i) {
-        const double suffix=prefix[d-1]-prefix[i];
-        if (suffix<=0) continue;
-        const double target=prefix[i]+next_unit(state)*suffix;
-        std::uint32_t lo=i+1,hi=d;
-        while(lo<hi) {const auto mid=lo+(hi-lo)/2;if(prefix[mid]<=target)lo=mid+1;else hi=mid;}
-        const auto j=lo<d?lo:d-1;
-        fill[i]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),a[i].value*suffix/D};
-        flags[i]=1;++emitted;
+    gks_prefix(a, d, prefix);
+    flags[d - 1] = 0;
+    std::uint32_t emitted = 0;
+    for (std::uint32_t i = 0; i + 1 < d; ++i) {
+        const double suffix = prefix[d - 1] - prefix[i];
+        if (suffix <= 0) {
+            flags[i] = 0;
+            continue;
+        }
+        const auto j = gks_partner(prefix, i, d, suffix, state);
+        fill[i] = {min(a[i].b, a[j].b), max(a[i].b, a[j].b), a[i].value * suffix / D};
+        flags[i] = 1;
+        ++emitted;
     }
     return emitted;
 }
+
+// Input-only numerical fallback uses the established GKS law and original seed.
 __device__ std::uint32_t cycle_gks_fallback_row(const work_record* a, std::uint32_t d,
         double D, unsigned long long state, double* prefix,
         work_record* fill, std::uint8_t* flags, std::uint32_t* status) {
@@ -141,7 +163,7 @@ __device__ std::uint32_t cycle_gks_fallback_row(const work_record* a, std::uint3
         }
     }
     atomicAdd(status+1,1u);
-    return cycle_gks_row(a,d,D,state,prefix,fill,flags);
+    return sample_gks_row(a,d,D,state,prefix,fill,flags);
 }
 
 // PERF: the plan kernel's validity scan, suffix moments and cutoff search are
@@ -215,7 +237,7 @@ __global__ void prepare_trace_plan(const work_record* canonical,
     // paths below need the zeroed flags the row kernel used to clear up front.
     auto fallback=[&](bool gks_law)->void{
         for(std::uint32_t i=0;i<d;++i)flags[i]=0;
-        const auto emitted=gks_law?cycle_gks_row(a,d,D,state,sums,fill,flags)
+        const auto emitted=gks_law?sample_gks_row(a,d,D,state,sums,fill,flags)
                                   :cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
         if(counters)counters[ordinal].emitted_edges=emitted;
     };

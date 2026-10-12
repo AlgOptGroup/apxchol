@@ -69,8 +69,8 @@ struct oracle_output {
     std::size_t blocks = 0, forest_count = 0;
 };
 
-// Independent scalar law, not a call to graph::sparsify_active or the production
-// normalization helper. Canonical ordinal is the forest's full tie breaker.
+// Independent GPU law with its fixed chunk reduction order. Canonical ordinal
+// is the forest's full tie breaker.
 oracle_output reference(const gpu_round_shadow_input& input, std::uint64_t seed,
                         double keep = 0.25, double fixed_scale = -1) {
     oracle_output out;
@@ -110,10 +110,15 @@ oracle_output reference(const gpu_round_shadow_input& input, std::uint64_t seed,
     auto folded = [&](bool initial) {
         double total = 0;
         for (std::size_t begin = 0; begin < n; begin += block_size) {
-            double partial = 0;
-            for (std::size_t i = begin; i < std::min(n, begin + block_size); ++i)
-                if (!out.backbone[i]) partial += initial ? importance[i] : std::min(1.0, out.scale * importance[i]);
-            total += partial;
+            std::array<double, 256> partial{};
+            for (std::size_t lane = 0; lane < partial.size(); ++lane)
+                for (std::size_t i = begin + lane; i < std::min(n, begin + block_size); i += partial.size())
+                    if (!out.backbone[i])
+                        partial[lane] += initial ? importance[i] : std::min(1.0, out.scale * importance[i]);
+            for (std::size_t stride = partial.size() / 2; stride; stride /= 2)
+                for (std::size_t lane = 0; lane < stride; ++lane)
+                    partial[lane] += partial[lane + stride];
+            total += partial[0];
         }
         return total;
     };
