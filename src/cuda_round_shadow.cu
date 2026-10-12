@@ -1763,7 +1763,7 @@ __global__ void csc_initial_incidences_warp(
         const std::uint32_t rank = __popc(mask & ((1u << lane) - 1u));
         if (kept) {
             bool paired = true;
-            const double original = -canonical_lower_value(ptr, idx, values, static_cast<int>(v), u, k, paired);
+            const double original = -values[canonical_lower_index(ptr, idx, static_cast<int>(v), u, k, paired)];
             if (!paired) atomicOr(status, 2u);
             else {
 #ifdef APXCHOL_POOL_FP32

@@ -19,9 +19,9 @@ namespace apxchol::detail {
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-inline double canonical_lower_value(const int* ptr, const int* idx, const double* vals,
-                                    int col, int row, int p, bool& paired) {
-    if (row >= col) return vals[p];
+inline int canonical_lower_index(const int* ptr, const int* idx,
+                                  int col, int row, int p, bool& paired) {
+    if (row >= col) return p;
     int lo = ptr[row], hi = ptr[row + 1];
     while (lo < hi) {
         const int mid = lo + (hi - lo) / 2;
@@ -30,9 +30,9 @@ inline double canonical_lower_value(const int* ptr, const int* idx, const double
     }
     if (lo == ptr[row + 1] || idx[lo] != col) {
         paired = false;
-        return vals[p];
+        return p;
     }
-    return vals[lo];
+    return lo;
 }
 
 /// Contiguous range [lo, hi) of the n rows/columns of a compressed matrix that

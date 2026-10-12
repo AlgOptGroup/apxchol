@@ -86,7 +86,7 @@ inline bool try_build_permuted_symmetric_csr(
             entries.reserve(static_cast<std::size_t>(outer[col + 1] - outer[col]));
             for (int p = outer[col]; p < outer[col + 1]; ++p) {
                 const int row = inner[p];
-                const double value = canonical_lower_value(outer, inner, input, col, row, p, paired);
+                const double value = input[canonical_lower_index(outer, inner, col, row, p, paired)];
                 entries.emplace_back(static_cast<int>(perm[row]), value);
             }
             std::sort(entries.begin(), entries.end(),

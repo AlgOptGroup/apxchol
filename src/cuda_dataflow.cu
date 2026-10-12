@@ -234,6 +234,9 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
         static_cast<bool>(diag) != static_cast<bool>(inv_scale2))
         throw std::invalid_argument("GPU dataflow plan: invalid dimensions or metadata");
     dataflow_device_plan result;
+    // Preserve the temporary cudaFree order while allocating at first use.
+    cuda_buffer<char, dataflow_check> scratch;
+    cuda_buffer<plan_counts, dataflow_check> counts_by_chunk;
     cuda_buffer<plan_row_stats, dataflow_check> statistics;
     statistics.allocate(1, "allocate statistics");
     dataflow_check(cudaMemset(statistics.get(), 0, sizeof(plan_row_stats)), "clear statistics");
@@ -260,7 +263,6 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
     if (m == 0)
         return result;
     const int chunks = m / kPlanChunk + (m % kPlanChunk != 0);
-    cuda_buffer<plan_counts, dataflow_check> counts_by_chunk;
     counts_by_chunk.allocate(2 * static_cast<std::size_t>(chunks + 1), "allocate tile counts and prefixes");
     plan_counts *prefix = counts_by_chunk.get() + chunks + 1;
     pack_chunks<false><<<(chunks + 128) / 128, 128>>>(m, reverse, rowptr, split_min, chunks,
@@ -270,7 +272,6 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
     dataflow_check(cub::DeviceScan::ExclusiveScan(nullptr, scratch_bytes, counts_by_chunk.get(), prefix,
                                                   add_plan_counts{}, plan_counts{}, chunks + 1),
                    "tile scan size");
-    cuda_buffer<char, dataflow_check> scratch;
     scratch.allocate(scratch_bytes, "allocate tile scan scratch");
     dataflow_check(cub::DeviceScan::ExclusiveScan(scratch.get(), scratch_bytes, counts_by_chunk.get(), prefix,
                                                   add_plan_counts{}, plan_counts{}, chunks + 1),
