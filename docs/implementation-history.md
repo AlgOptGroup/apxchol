@@ -47,22 +47,11 @@ quality and cost, and requires its own correctness and performance validation.
 ## GPU solve and storage
 
 **CUDA and Metal share the dataflow worker and task format.** CUDA uses a global
-queue; Metal groups consecutive dependency levels into independent workgroups
-and orders the groups' stages through GPU dispatches. Task decoding, root
-initialization and FP32 accumulation also share one implementation; device
-adapters supply atomics, subgroup operations and FP16 conversion. Task counting and
-emission use the same routine on the host and CUDA device, without downloading
-private device-owned factors. Metal no longer keeps a level-permuted value
-copy or separate light, heavy and narrow-level solve kernels.
-
-Each sweep initializes atomic FP32 words and solves roots before processing
-other tasks. Values and readiness share one word; canonical NaNs cannot match
-the pending marker. This replaces CUDA's epoch counter and last-worker reset
-protocol, and works on graph replay. RHS, diagonal and FP16 scale loads precede
-dependency polling: delaying them until publication put their latency on the
-critical path in the first prototype. Numerical tests use independent serial
-double references and repeated/grid-varied executions; old exact-reduction
-fixtures do not define the new arithmetic order.
+queue; Metal groups dependency levels into workgroups so that waiting threads
+cannot block an unscheduled dependency. Shared task packing works on host or
+device. This replaced Metal's separate row kernels and level-permuted value
+copy. FP32 values and readiness now share one atomic word, replacing CUDA's
+epoch counters; each sweep initializes that state before processing tasks.
 
 **Dataflow triangular solves replaced level launches and proprietary analysis.**
 The library uses its own persistent dataflow worker and topologically ordered
@@ -86,19 +75,10 @@ register, memory, or integer-instruction costs without a useful overall win.
 
 **GPU PCG owns its arithmetic and reductions.** Fused operator application and
 fixed reduction structure avoid proprietary solver dependencies. CUDA and Metal
-share the solve driver, vector workspace, operation loop, scalar state transitions
-and lane shuffle-sum tree. Preconditioning starts each iteration, so a completed
-iteration budget does not launch preparation for an unused next direction.
-Metal's former serial 16-value fold used threadgroup
-scratch and a barrier; the shared tree removes both and changes its floating-point
-summation order. Backend adapters retain block grouping and stopping comparisons. CUDA
-uses native FP64; Metal uses double-float arithmetic shared with its host probe.
-Both predicate operations after convergence and read state after a completed
-batch (one iteration on CUDA). CUDA fuses narrowing and widening into its
-triangular sweeps. Grounded-coordinate Laplacian iterations replace Metal's
-per-iteration mean reductions; host boundary centering and the independent
-FP64 exit residual remain. Host vector reductions and updates use Eigen
-instead of a separate fixed-block fold implementation.
+share the driver, workspace and operation loop, with native FP64 arithmetic on
+CUDA and double-float on Metal. The shared shuffle tree replaced Metal's serial
+fold, scratch and barrier; grounded Laplacian coordinates removed per-iteration
+mean reductions. Host centering and an independent FP64 exit residual remain.
 The triangular-solve dataflow state is FP32;
 its tagged representation does not provide an FP64 triangular-solve path.
 The former untested FP64-factor-storage build choice was removed rather than
@@ -397,15 +377,3 @@ default or fixed-storage sweeps and label new output accordingly. Historical
 forward-star measurements and their chart labels remain unchanged. This
 retirement does not establish that the surviving layouts are universally
 dominated, and it does not change the default solver or its numerical controls.
-
-## Apple Metal backend
-
-The initial proposal combined a Metal backend with batched right-hand sides
-and batching-specific reproducibility guarantees. The integration keeps one
-RHS per call and factor/workspace reuse; batching and pipelined submission
-remain separate work. The original light/heavy/narrow-level kernels were
-replaced by the shared CUDA/Metal dataflow worker described above.
-
-Metal retains FP32 factor storage, double-float PCG recurrences and a host
-FP64 exit residual. Its supported range, stopping behavior and repeatability
-contract are documented in [precision and storage](precision.md).

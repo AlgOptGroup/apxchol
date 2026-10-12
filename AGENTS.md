@@ -142,10 +142,8 @@ choices, retired knobs, and measurements belong in
 
 - `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend (default CPU).
   GPU builds retain CPU solves. Invalid or removed boolean options fail configuration.
-- `APXCHOL_DEVICE=METAL` (macOS): `src/metal_solver.mm` is the only
-  Objective-C++ source and owns both host preparation and device execution.
-  It uses the discovered C++ OpenMP flags explicitly, and compiles the checked-in `src/metal_kernels.inc` at run time. `apxchol_core`
-  links Metal, Foundation and CoreGraphics publicly. Other builds omit Metal sources.
+- Metal builds compile `src/metal_solver.mm` with the C++ OpenMP flags and
+  link Metal, Foundation and CoreGraphics. Shaders compile at run time.
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
@@ -192,10 +190,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 
 ## Architecture and contracts
 
-Backend placement, scheduling and precision are implementation choices, not
-requirements for future designs. Compare replacements on numerical quality,
-complete setup/solve cost, memory and total maintenance burden; preserve buffer
-lifetime and truthful error/convergence reporting.
+Evaluate backend changes by numerical quality, complete setup/solve cost,
+memory and maintainability; existing implementation choices may change.
 
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
   convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
@@ -250,37 +246,19 @@ lifetime and truthful error/convergence reporting.
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
-- CUDA and Metal share `src/gpu_dataflow.inc` and the count/emit task packer in
-  `solver/detail/gpu_dataflow_plan.h`, including task decoding, root initialization
-  and FP32 accumulation. CUDA builds trusted-factor tasks on device
-  and uses one global queue; Metal's `metal_schedule.h` partitions dependency
-  stages into independent workgroups. Metal confines dependency waits to one
-  workgroup, where SIMD-group progress is guaranteed. Both reset atomic FP32
-  dependency words and solve roots before the worker launch. Keep
-  RHS/diagonal/scale loads before dependency polling.
-  Long rows use segment tasks and a fixed-order finalizer. No public scheduler
-  knob or retained reference kernel accompanies the shared implementation.
-- CUDA and Metal share the PCG workspace, operation loop and scalar state
-  transitions in `solver/detail/gpu_pcg.inc`, including the lane shuffle-sum tree.
-  Both reject invalid scalar products and coefficient ratios. Each backend
-  specializes one kernel wrapper for the four operations and retains its
-  arithmetic precision, stopping comparisons and block grouping. `gpu_pcg.h`
-  owns the full launch sequence, iteration budgets and batch stopping. Metal binds common workspace
-  buffers once per batch; triangular sweeps only rebind their factor arrays.
-  Preconditioning starts each iteration; exhausted budgets do not prepare another.
-  Both keep scalar recurrences and stopping on device and predicate work after
-  convergence; CUDA reads completed state once per iteration, Metal once per
-  batch. Laplacian iterations use grounded coordinates, with host centering at
-  the solve/apply boundary. CUDA narrows/widens PCG vectors in the triangular
-  sweeps, without separate cast kernels. Metal host/device double-float
-  transforms share `solver/detail/double_float.inc`; preserve no-contraction
-  compilation and the device arithmetic probe. Metal host norms, means and
-  vector updates use Eigen, as the CPU/CUDA routes do; the independent exit
-  residual remains FP64.
-- Host and CUDA operator preparation share canonical lower-triangle lookup in
-  `csc_work.h`. `solver/detail/permuted_operator.h` retains the host fallback,
-  ordering duplicate entries by value bits. Metal shares host factor dropping
-  and transposition; CUDA's public route keeps device ownership.
+- CUDA and Metal share `src/gpu_dataflow.inc` and the task packer in
+  `solver/detail/gpu_dataflow_plan.h`. Metal's `metal_schedule.h` confines
+  dependencies within a dispatch to one workgroup. Initialize dependency words
+  and solve roots before launching workers; load RHS, diagonal and scale before
+  dependency polling. Long-row finalizers combine segments in a fixed order.
+- `solver/detail/gpu_pcg.h` and `.inc` share GPU iteration control and arithmetic
+  operations. Reject invalid scalar products and ratios; stop device work after
+  convergence or an exhausted budget. Keep CUDA vector conversions fused into
+  triangular sweeps. Metal's `double_float.inc` requires no-contraction
+  compilation and the device arithmetic probe. Numerical requirements live in
+  [precision and storage](docs/precision.md#apple-metal-pcg).
+- Host and CUDA operator preparation share canonical lower lookup in
+  `csc_work.h`; the host fallback orders duplicate entries by value bits.
 - CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
   because NVCC does not support `_Float16` in device code. Uploads copy the
   common binary16 representation; the solve kernel widens only at accumulation.
@@ -290,11 +268,8 @@ lifetime and truthful error/convergence reporting.
   `APXCHOL_FACTOR_STORAGE=auto|float16|float32`.
   `auto` selects the backend default (CUDA FP16, CPU/Metal FP32). Invalid values fail.
   Parsing and selection live in C++; Python only normalizes dtype names.
-  Scales and diagonals stay
-  fp32, while outer CPU/CUDA PCG vectors and reductions stay fp64; Metal
-  uses double-float recurrences. See
-  [precision and storage](docs/precision.md). The old GPU-only alias is
-  retired.
+  [Precision and storage](docs/precision.md) defines arithmetic and scaling.
+  The old GPU-only alias is retired.
 - Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
   OpenMP SpTRSV and host PCG, even in CUDA builds. They must not initialize a
   CUDA context or consume GPU stage flags. Explicit factor adoption remains CPU.
@@ -417,15 +392,11 @@ lifetime and truthful error/convergence reporting.
   the owned route against its frozen research reference, with original-system
   quality, setup, solve, one-RHS total, RSS and owner memory.
 - Metal's `metal_solver` uses host factorization and handles one RHS per call,
-  retaining its factor, operator and device workspace. `solve()` selects it for
-  explicit GPU requests in Metal builds;
-  automatic selection stays on CPU. FP16 storage and explicit CPU requests to
-  `metal_solver` fail rather than silently selecting another configuration.
-  Keep power-of-two scaling, checked command buffers and the FP64 original-system
-  exit check even when the recursive residual has met tolerance. Repeatability
-  is tested for a fixed factor and execution configuration; cross-thread-count
-  and batching guarantees are deferred. Validate `MetalSchedule.*`, `MetalHost.*`
-  and `MetalDevice.*` on a device, including with Metal shader validation.
+  retaining its factor, operator and workspace. `solve()` selects it only for
+  explicit GPU requests. FP16 storage and CPU requests to `metal_solver` fail.
+  Check command-buffer errors and the FP64 original-system exit residual.
+  Run `MetalSchedule.*`, `MetalHost.*` and `MetalDevice.*` with device/shader
+  validation as described in [CONTRIBUTING.md](CONTRIBUTING.md#build-and-test).
 - CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
   only after its upload has completed and no further host RHS reads remain.
 - GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`

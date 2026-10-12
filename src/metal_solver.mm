@@ -1,6 +1,4 @@
-// Metal factor preparation, PCG and command submission share one owner.
-// Per-call Objective-C objects are retired inside autorelease pools; command
-// errors are thrown after leaving the pool.
+// Metal factor preparation, PCG and command submission.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "apxchol/solver/metal_solver.h"
@@ -275,15 +273,13 @@ prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<float>& a, bool 
         packed.segments.push_back({});
     out.stages = std::move(schedule.stages);
     out.levels = schedule.levels;
-    with_pool([&] {
-        out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
-        out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
-        out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(float), "factor values");
-        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
-        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
-        out.segments = upload(ctx.device, packed.segments.data(),
-                              packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
-    });
+    out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
+    out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
+    out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(float), "factor values");
+    out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
+    out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
+    out.segments = upload(ctx.device, packed.segments.data(),
+                          packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
     return out;
 }
 
@@ -452,13 +448,10 @@ struct metal_solver::impl {
     }
 
     void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp);
-    void prepare_device(const cuda_host::csr_int<float>& forward,
-                        const cuda_host::csr_int<float>& backward,
-                        const std::vector<float>& hi, const std::vector<float>& lo, unsigned m);
 
     // y = A' x in fp64, each row summed in storage order; rows are split across
     // threads by stored entries (detail::work_balanced_range).
-    void spmv(const double* x, double* y) const {
+    void spmv(const Eigen::VectorXd& x, Eigen::VectorXd& y) const {
         const int* ptr = op.ptr.data();
         const int* col = op.idx.get();
         const double* val = op.vals.get();
@@ -477,7 +470,7 @@ struct metal_solver::impl {
 
     double residual_norm(const Eigen::VectorXd& bp, const Eigen::VectorXd& xp,
                          Eigen::VectorXd& work) const {
-        spmv(xp.data(), work.data());
+        spmv(xp, work);
         return mh::norm(bp - work);
     }
 
@@ -512,17 +505,16 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     if (cp) (*cp)("metal_factor_prep");
 
     Eigen::SparseMatrix<double> compressed;
-    const Eigen::SparseMatrix<double>* src = &A;
     if (!A.isCompressed()) {
         compressed = A;
         compressed.makeCompressed();
-        src = &compressed;
     }
+    const auto& src = A.isCompressed() ? A : compressed;
     // Both triangles are stored: up to twice the stored entries of one triangle.
-    if (src->nonZeros() > std::numeric_limits<int>::max() / 2)
-        throw std::length_error("metal_solver: operators above 2^30 stored entries exceed the "
+    if (src.nonZeros() > std::numeric_limits<int>::max() / 2)
+        throw std::length_error("metal_solver: operators with 2^30 or more stored entries exceed the "
                                 "device's 32-bit offsets");
-    op = detail::build_permuted_full_symmetric_csr(*src, F.perm);
+    op = detail::build_permuted_full_symmetric_csr(src, F.perm);
     const bool exact = op.fp32_exact;
     const std::size_t nnz = static_cast<std::size_t>(op.ptr.back());
     std::vector<float> hi(nnz), lo(exact ? 0 : nnz);
@@ -539,7 +531,33 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::domain_error("metal_solver: an operator value is non-finite or outside [2^-100, 2^100]");
     if (cp) (*cp)("metal_operator");
 
-    prepare_device(forward, backward, hi, lo, m);
+    ctx = &shared();
+    arguments.n = static_cast<std::uint32_t>(n);
+    arguments.m = m;
+    arguments.groups = (arguments.n + kTreeRows - 1) / kTreeRows;
+    operator_df = !lo.empty();
+    with_pool([&] {
+        id<MTLDevice> dev = ctx->device;
+        queue = [dev newCommandQueue];
+        if (queue == nil) throw std::runtime_error("Metal command queue creation failed");
+        device_op_ptr = upload(dev, op.ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
+        device_op_col = upload(dev, op.idx.get(), nnz * sizeof(std::uint32_t), "operator indices");
+        op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
+        if (!lo.empty()) op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
+        fwd = prepare_tri(*ctx, forward, true);
+        bwd = prepare_tri(*ctx, backward, false);
+        const std::size_t entries = static_cast<std::size_t>(arguments.n);
+        x = upload(dev, nullptr, entries * sizeof(df32), "solution");
+        r = upload(dev, nullptr, entries * sizeof(df32), "residual");
+        ap = upload(dev, nullptr, entries * sizeof(df32), "operator product");
+        p = upload(dev, nullptr, entries * sizeof(float), "search direction");
+        // Sweeps write rows < m; the extra Laplacian coordinate stays zero.
+        z = upload(dev, nullptr, entries * sizeof(float), "preconditioner result");
+        partial = upload(dev, nullptr, static_cast<std::size_t>(arguments.groups) * sizeof(df32), "partial sums");
+        state_buffer = upload(dev, nullptr, sizeof(solve_state), "solve state");
+        tags = upload(dev, nullptr, std::max({entries, std::size_t(fwd.tag_count),
+            std::size_t(bwd.tag_count)}) * sizeof(std::uint32_t), "dataflow tags");
+    });
     // Group four iterations on small systems to amortize command submission;
     // check large solves after each iteration.
     check_every = n > 200000 ? 1 : 4;
@@ -554,46 +572,6 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     if (!opts.keep_factor_values) F.L.release_values();
     if (cp) { (*cp)("metal_upload"); cp->ascend(); }
     print_banner_once(stats);
-}
-
-void metal_solver::impl::prepare_device(const cuda_host::csr_int<float>& forward,
-                                       const cuda_host::csr_int<float>& backward,
-                                       const std::vector<float>& hi, const std::vector<float>& lo,
-                                       unsigned m) {
-    context& ctx = shared();
-    if (!ctx.status.ok) throw std::runtime_error(ctx.status.error);
-    impl& s = *this;
-    s.ctx = &ctx;
-    s.arguments.n = static_cast<std::uint32_t>(n);
-    s.arguments.m = m;
-    s.arguments.groups = (s.arguments.n + kTreeRows - 1) / kTreeRows;
-    const auto nnz = op.ptr.back();
-    s.operator_df = !lo.empty();
-    with_pool([&] {
-        id<MTLDevice> dev = ctx.device;
-        s.queue = [dev newCommandQueue];
-        if (s.queue == nil) throw std::runtime_error("Metal command queue creation failed");
-        s.device_op_ptr = upload(dev, op.ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
-        s.device_op_col = upload(dev, op.idx.get(), nnz * sizeof(std::uint32_t), "operator indices");
-        s.op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
-        if (!lo.empty()) s.op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
-    });
-    s.fwd = prepare_tri(ctx, forward, true);
-    s.bwd = prepare_tri(ctx, backward, false);
-    with_pool([&] {
-        id<MTLDevice> dev = s.ctx->device;
-        const std::size_t entries = static_cast<std::size_t>(s.arguments.n);
-        s.x = upload(dev, nullptr, entries * sizeof(df32), "solution");
-        s.r = upload(dev, nullptr, entries * sizeof(df32), "residual");
-        s.ap = upload(dev, nullptr, entries * sizeof(df32), "operator product");
-        s.p = upload(dev, nullptr, entries * sizeof(float), "search direction");
-        // Sweeps write rows < m; the extra Laplacian coordinate stays zero.
-        s.z = upload(dev, nullptr, entries * sizeof(float), "preconditioner result");
-        s.partial = upload(dev, nullptr, static_cast<std::size_t>(s.arguments.groups) * sizeof(df32), "partial sums");
-        s.state_buffer = upload(dev, nullptr, sizeof(solve_state), "solve state");
-        s.tags = upload(dev, nullptr, std::max({entries, std::size_t(s.fwd.tag_count),
-            std::size_t(s.bwd.tag_count)}) * sizeof(std::uint32_t), "dataflow tags");
-    });
 }
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
@@ -657,22 +635,22 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
         return;
     }
 
-    const node_index* perm = s.F.perm.data();
+    const auto& perm = s.F.perm;
     Eigen::VectorXd bp(s.n), work(s.n);
     auto& xp = result.x;
-    mh::scatter(b.data(), perm, s.n, bp.data());
+    mh::scatter({b.data(), s.n}, perm, {bp.data(), s.n});
     auto finish = [&] {
         if (s.laplacian) s.centre(xp);
         result.residual = s.residual_norm(bp, xp, work) / bnorm;
-        mh::gather(xp.data(), perm, s.n, work.data());
+        mh::gather({xp.data(), s.n}, perm, {work.data(), s.n});
         result.x.swap(work);
         cp("exit_check");
         cp.ascend();
     };
 
     if (x0 != nullptr) {
-        mh::scatter(x0->data(), perm, s.n, xp.data());
-        s.spmv(xp.data(), work.data());
+        mh::scatter({x0->data(), s.n}, perm, {xp.data(), s.n});
+        s.spmv(xp, work);
         work = bp - work;
     } else {
         work = bp;
@@ -683,7 +661,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     const double max_abs = work.cwiseAbs().maxCoeff();
     if (max_abs == 0.0) { finish(); return; }
     const double scale = mh::pow2_scale(max_abs);
-    mh::pack(work.data(), s.n, scale, static_cast<df32*>([s.r contents]));
+    mh::pack({work.data(), s.n}, scale, {static_cast<df32*>([s.r contents]), s.n});
     auto& state = *static_cast<solve_state*>([s.state_buffer contents]);
     state = {};
     const double reference = bnorm * scale;
@@ -695,7 +673,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     s.arguments.window = window;
     detail::gpu_pcg::solve(s, static_cast<std::uint32_t>(max_iter), s.check_every);
     cp("device");
-    mh::add_unpacked(static_cast<df32*>([s.x contents]), s.n, scale, xp.data());
+    mh::add_unpacked({static_cast<df32*>([s.x contents]), s.n}, scale, {xp.data(), s.n});
     result.iterations = state.iters;
     finish();
 }
@@ -705,7 +683,7 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     if (r.size() != static_cast<Eigen::Index>(s.n))
         throw std::invalid_argument("metal_solver::apply: r length mismatch");
     if (!r.allFinite()) throw std::invalid_argument("metal_solver::apply: r contains a non-finite value");
-    const node_index* perm = s.F.perm.data();
+    const auto& perm = s.F.perm;
     const double mean = s.laplacian ? r.mean() : 0;
     const double max_abs = (r.array() - mean).abs().maxCoeff();
     Eigen::VectorXd z = Eigen::VectorXd::Zero(r.size());

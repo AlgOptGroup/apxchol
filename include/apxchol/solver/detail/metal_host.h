@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
+#include <vector>
 
 #include <omp.h>
 
@@ -53,28 +55,28 @@ inline df split_saturated(double v) {
 
 /// To the factor's permuted space: out[perm[v]] = v_in[v].
 template <class Index>
-void scatter(const double* v_in, const Index* perm, std::size_t n, double* out) {
+void scatter(std::span<const double> v_in, const std::vector<Index>& perm, std::span<double> out) {
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(n); ++v) out[perm[v]] = v_in[v];
+    for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(v_in.size()); ++v) out[perm[v]] = v_in[v];
 }
 
 /// Back from the permuted space: out[v] = v_perm[perm[v]].
 template <class Index>
-void gather(const double* v_perm, const Index* perm, std::size_t n, double* out) {
+void gather(std::span<const double> v_perm, const std::vector<Index>& perm, std::span<double> out) {
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(n); ++v) out[v] = v_perm[perm[v]];
+    for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(v_perm.size()); ++v) out[v] = v_perm[perm[v]];
 }
 
-inline void pack(const double* w, std::size_t n, double scale, df* out) {
+inline void pack(std::span<const double> w, double scale, std::span<df> out) {
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(w.size()); ++i) {
         out[i] = split(scale * w[i]);
     }
 }
 
-inline void add_unpacked(const df* v, std::size_t n, double scale, double* out) {
+inline void add_unpacked(std::span<const df> v, double scale, std::span<double> out) {
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(v.size()); ++i)
         out[i] += join(v[i]) / scale;
 }
 

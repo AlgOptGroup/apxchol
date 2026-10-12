@@ -8,7 +8,6 @@
 #include "apxchol/solver/metal_solver.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
-#include "apxchol/solver/detail/metal_schedule.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "metal_device.h"
 
@@ -19,12 +18,9 @@
 #include <cstring>
 #include <numeric>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <vector>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace {
 
@@ -125,7 +121,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     apxchol::cuda_host::apply_factor_drop(backward, scales, apxchol::factor_drop_rel_from_env(), false);
     const auto forward = apxchol::cuda_host::transpose_csr(backward);
     std::vector<double> rp(n);
-    mh::scatter(r.data(), F.perm.data(), n, rp.data());
+    mh::scatter({r.data(), n}, F.perm, rp);
     if (lap) {
         const double mean = std::accumulate(rp.begin(), rp.end(), 0.0) / n;
         for (auto& value : rp) value -= mean;
@@ -133,10 +129,8 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     double max_abs = 0;
     for (double value : rp) max_abs = std::max(max_abs, std::abs(value));
     const double scale = mh::pow2_scale(max_abs);
-    std::vector<mh::df> w(n);
-    for (std::size_t q = 0; q < n; ++q) w[q] = mh::split(scale * rp[q]);
     std::vector<float> in(n), z(n, 0.0f);
-    for (std::size_t q = 0; q < n; ++q) in[q] = w[q].hi;
+    for (std::size_t q = 0; q < n; ++q) in[q] = static_cast<float>(scale * rp[q]);
     auto sweep = [&](const auto& factor, bool reverse, const float* input) {
         for (std::int64_t q = 0; q < m; ++q) {
             const auto row = reverse ? m - 1 - q : q;
@@ -156,7 +150,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
         for (auto& value : rp) value -= mean;
     }
     Eigen::VectorXd out(r.size());
-    mh::gather(rp.data(), F.perm.data(), n, out.data());
+    mh::gather(rp, F.perm, {out.data(), n});
     return out;
 }
 

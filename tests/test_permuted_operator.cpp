@@ -1,11 +1,11 @@
 #include <gtest/gtest.h>
 #include "apxchol/solver/detail/permuted_operator.h"
+#include "scoped_omp_threads.h"
 #include <array>
 #include <bit>
 #include <cstring>
 #include <numeric>
 #include <random>
-#include <omp.h>
 
 namespace {
 using Matrix = Eigen::SparseMatrix<double>;
@@ -65,9 +65,8 @@ bool accepted(const Matrix& L) {
 
 TEST(PermutedOperator, PermutedArraysMatchIndependentLowerTriangleReference) {
     std::mt19937 rng(418932);
-    const int saved = omp_get_max_threads();
     for (int team : {1, 2, 4}) {
-        omp_set_num_threads(team);
+        scoped_omp_threads threads(team);
         for (int trial = 0; trial < 80; ++trial) {
             const int n = trial * 13 % 131;
             std::vector<Eigen::Triplet<double>> entries;
@@ -89,7 +88,6 @@ TEST(PermutedOperator, PermutedArraysMatchIndependentLowerTriangleReference) {
             check(L, perm);
         }
     }
-    omp_set_num_threads(saved);
 }
 
 TEST(PermutedOperator, ExplicitZerosAndMissingDiagonalsPreserveCanonicalPrecision) {
@@ -144,9 +142,8 @@ TEST(PermutedOperator, GeneralFallbackMatchesIndependentLowerTriangleReference) 
     // the serial reference byte for byte at every team size. No input has
     // duplicate coordinates; those are tested separately below.
     std::mt19937 rng(20261002);
-    const int saved = omp_get_max_threads();
     for (int team : {1, 2, 4}) {
-        omp_set_num_threads(team);
+        scoped_omp_threads threads(team);
         for (int trial = 0; trial < 40; ++trial) {
             const int n = 2 + trial * 17 % 97;
             const bool lower_only = trial % 2 == 0;
@@ -168,7 +165,6 @@ TEST(PermutedOperator, GeneralFallbackMatchesIndependentLowerTriangleReference) 
             check(L, perm, /*use_full_builder=*/true);
         }
     }
-    omp_set_num_threads(saved);
 }
 
 TEST(PermutedOperator, GeneralFallbackOrdersDuplicateCoordinatesDeterministically) {
@@ -198,13 +194,11 @@ TEST(PermutedOperator, GeneralFallbackOrdersDuplicateCoordinatesDeterministicall
     ASSERT_FALSE(accepted(L));
     std::vector<node_index> perm(n); std::iota(perm.begin(), perm.end(), 0);
     std::shuffle(perm.begin(), perm.end(), rng);
-    const int saved = omp_get_max_threads();
     for (int team : {1, 2, 4, 8}) {
-        omp_set_num_threads(team);
+        scoped_omp_threads threads(team);
         for (int run = 0; run < 3; ++run) {
             SCOPED_TRACE("team=" + std::to_string(team) + " run=" + std::to_string(run));
             check(L, perm, /*use_full_builder=*/true);
         }
     }
-    omp_set_num_threads(saved);
 }

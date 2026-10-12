@@ -12,8 +12,8 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
 | Outer CPU/CUDA PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
-| Metal triangular solves | FP32 factor values, diagonals and arithmetic | Shared dataflow worker; no FP64 device arithmetic |
-| Metal PCG | Double-float x, r, A p and inexact operator; FP32 p and z; double-float fixed-tree reductions; host FP64 exit residual | About 48-bit recurrences reach original-system tolerances without FP64 hardware |
+| Metal triangular solves | FP32 storage and arithmetic | Shared CUDA/Metal dataflow worker |
+| Metal PCG | Mixed FP32 and double-float; host FP64 exit residual | Metal has no native FP64 arithmetic; see below |
 
 `factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; C++ owns parsing and default selection.
 
@@ -50,53 +50,36 @@ implementation and is checked by the GPU finalization tests.
 
 ## Apple Metal PCG
 
-`apxchol::metal_solver` (`APXCHOL_DEVICE=METAL`, macOS) is an explicit opt-in;
-`solve(..., opts)` selects it for an explicit GPU request. Automatic selection
-and `cpu_solver` stay on CPU. Each call solves one RHS; repeated calls on a
-`metal_solver` reuse its factor, operator and device workspace.
+[Metal solves](../README.md#interfaces) handle one RHS per call and reuse the
+factor and workspace. Factor preparation runs on the host with compensated
+dropping. Factor values, diagonals and triangular arithmetic are FP32;
+explicit FP16 requests fail.
 
-- **Preconditioner.** Factor preparation uses the shared L11 extraction,
-  compensated drop (`APXCHOL_FACTOR_DROP`) and transpose helpers. Values and
-  diagonals are FP32. The CUDA/Metal dataflow worker uses fused multiply-add,
-  fixed subgroup reductions and segmented long rows; each row finishes with
-  FP32 division by its diagonal. `APXCHOL_FACTOR_STORAGE` and the per-solver
-  setting use the shared parser; explicit FP16 requests fail.
-- **Recurrences.** x, r and A p are double-float (hi + lo FP32, about 48
-  significant bits). The operator is FP32 when every value is FP32-exact and
-  double-float otherwise (the CPU/CUDA exactness rule, without an override).
-  p and z are FP32; alpha and beta are FP32. Every reduction (p.Ap, r.r, r.z) is double-float on one fixed tree that depends only on n.
-- **Scaling and stopping.** Each right-hand side (or b - A x0) is scaled by an
-  exact power of two so that its largest entry lies in [1, 2). The threshold
-  (tol ||b|| s)^2 is formed on the host in FP64 and compared as a double-float
-  with strict `<`. Breakdown (p.Ap <= 0 or non-finite) is not convergence and
-  its iteration is not counted.
-- **Reported residual.** ||b - A x|| / ||b|| is recomputed on the host in FP64
-  against the caller's operator (canonical lower values, as the CPU operator)
-  on the returned x; convergence requires this residual to be below tol. The
-  device's recursive residual is only the iteration stopping criterion. With
-  about 48 bits in the recurrences and operator, the attainable original-system
-  residual is limited to roughly 2^-48 || |A| |x| || / ||b||; within that margin
-  of tol a solve can stop on its recursive residual and still report
-  a residual above the requested tolerance.
-- **Laplacians.** Iterations use grounded coordinates, as on CUDA. The
-  initial residual and returned x are centred on the host in FP64; `apply`
-  also centres its input and output there. There are no per-iteration mean
-  reductions. The reported residual still uses the unmodified caller RHS.
-- **Reproducibility.** Repeated solves using the same factor and execution
-  configuration are tested for repeatability. Equality across host thread
-  counts, devices, OS or compiler versions is not part of this interface.
-  Independent parallel factorizations remain a separate question.
-- **Compilation and range.** Kernels are compiled at run time with
-  `MTLMathModeSafe`, precise math functions and `#pragma METAL fp contract(off)`
-  when accepted; `metal_solver::available()` checks nearest-even rounding,
-  separately rounded intermediates and fused multiply-add using fixed cases.
-  Full double-float arithmetic is checked separately in device tests. Nonzero
-  operator values and factor diagonals must lie in [2^-100, 2^100]; factor
-  off-diagonals need only be finite (`std::domain_error` otherwise). These
-  bounds do not guarantee convergence; the returned residual is checked in
-  FP64 against the original operator. The factor's stored entries and the
-  two-triangle operator must fit the device's 32-bit offsets (at most 2^30
-  stored operator entries; `std::length_error` otherwise).
+Double-float represents a value as the sum of two FP32 numbers, giving about
+48 significant bits but not IEEE FP64 precision or range. Metal uses it for
+x, r, A p and fixed-tree reductions. The operator uses FP32 when all values
+are exactly representable there, and double-float otherwise. Directions p,
+preconditioned residuals z, alpha and beta are FP32.
+
+Each RHS (or initial residual b - A x0) is scaled by an exact power of two,
+targeting a largest magnitude in [1, 2) within FP64's exponent range. The host
+computes `(tol ||b|| s)^2` in FP64; the device stops when its recursive squared
+residual is strictly below that threshold. Breakdown is not convergence.
+The returned residual is recomputed in FP64 against the original
+operator and unmodified RHS; it can exceed tolerance even after the recursive
+test passed, especially on ill-conditioned problems or at tight tolerances.
+
+Laplacian iterations use grounded coordinates. Host FP64 centering applies to
+the initial residual and returned solution, and to both sides of `apply`.
+Repeatability covers the same factor and execution configuration, not different
+host thread counts, devices, OS/compiler versions or independent factorizations.
+
+Runtime compilation uses safe math and disables contraction where supported;
+`metal_solver::available()` checks rounding, intermediate precision and FMA.
+Nonzero operator values and factor diagonals need magnitudes in [2^-100, 2^100];
+factor off-diagonals must be finite (`std::domain_error` otherwise). Factor and
+operator offsets must fit signed 32-bit integers; operator inputs must have
+fewer than 2^30 stored entries (`std::length_error` otherwise).
 
 ## Accuracy and configuration choice
 

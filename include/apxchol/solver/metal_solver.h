@@ -1,8 +1,6 @@
 #pragma once
-// Reusable single-RHS Metal PCG. Host factorization and FP32 factor storage;
-// double-float GPU recurrences, with the reported residual checked in host FP64.
-// Repeated calls reuse the factor, operator and device workspace. Like cpu_solver,
-// concurrent calls on one instance are unsupported.
+// Single-RHS Metal PCG with reusable factor, operator and workspace.
+// Concurrent calls on one instance are unsupported; see docs/precision.md.
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
@@ -26,15 +24,8 @@ public:
         std::string device;
     };
 
-    /// Factorizes A (operator contract of operator_class.h) and prepares the
-    /// device. Throws std::runtime_error if available() is false (before
-    /// factorizing), std::invalid_argument on an operator-contract violation or
-    /// invalid factor layout/diagonal,
-    /// std::domain_error on operator or factor magnitudes outside
-    /// [2^-100, 2^100], std::length_error when the
-    /// factor or the operator (above 2^30 stored entries) exceeds the device's
-    /// 32-bit offsets, and a std::bad_alloc (what() names the buffer) when the
-    /// device cannot hold the system.
+    /// Factorizes A and prepares the device. Requires available() and the
+    /// operator contract in operator_class.h; numerical limits are in docs/precision.md.
     explicit metal_solver(const Eigen::SparseMatrix<double>& A,
                           const solve_options& opts = {}, checkpoint* cp = nullptr);
     /// Adopts an externally computed factorization of A (values retained).

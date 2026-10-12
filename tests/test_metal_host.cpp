@@ -5,14 +5,9 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <random>
 #include <vector>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace mh = apxchol::detail::metal_host;
 
@@ -70,14 +65,14 @@ TEST(MetalHost, VectorPackingRoundTrip) {
         v[i] = std::sin(0.3 * static_cast<double>(i)) * std::ldexp(1.0, static_cast<int>(i % 40) - 20);
         perm[i] = static_cast<std::uint32_t>((i * 7919) % n);
     }
-    mh::scatter(v.data(), perm.data(), n, permuted.data());
-    mh::pack(permuted.data(), n, 0.25, packed.data());
-    mh::add_unpacked(packed.data(), n, 0.25, back.data());
-    mh::gather(back.data(), perm.data(), n, out.data());
+    mh::scatter(v, perm, permuted);
+    mh::pack(permuted, 0.25, packed);
+    mh::add_unpacked(packed, 0.25, back);
+    mh::gather(back, perm, out);
     for (std::size_t i = 0; i < n; ++i)
         EXPECT_LE(std::fabs(out[i] - v[i]), std::ldexp(std::fabs(v[i]), -47));
-    mh::add_unpacked(packed.data(), n, 0.25, back.data());
-    mh::gather(back.data(), perm.data(), n, out.data());
+    mh::add_unpacked(packed, 0.25, back);
+    mh::gather(back, perm, out);
     for (std::size_t i = 0; i < n; ++i)
         EXPECT_LE(std::fabs(out[i] - 2 * v[i]), std::ldexp(std::fabs(v[i]), -46));
 }

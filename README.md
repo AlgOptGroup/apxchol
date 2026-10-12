@@ -1,8 +1,8 @@
 # apxchol
 
 Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
-and SDDM systems. CPU setup and solve use OpenMP; CUDA provides an optional
-device-owned setup and GPU-resident solve; Metal provides an optional Apple-GPU solve. C++, Python and Octave/MATLAB interfaces are included.
+and SDDM systems, with OpenMP CPU, CUDA and Apple Metal backends.
+C++, Python and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
@@ -46,15 +46,9 @@ Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
 With `-DAPXCHOL_DEVICE=METAL` (macOS), `--backend gpu` and
 `solve_options::backend = solve_backend::gpu` select the Apple GPU.
-Automatic selection stays on CPU. Metal uses host factorization, FP32 factor
-storage and double-float GPU recurrences; explicit FP16 storage is unsupported.
-See [precision and storage](docs/precision.md).
-
-```cpp
-apxchol::metal_solver gpu(L);       // factor and device workspace built once
-auto r1 = gpu.solve(b1);
-auto r2 = gpu.solve(b2, 1e-10);      // reuse them for another right-hand side
-```
+Automatic selection stays on CPU. Use `apxchol::metal_solver` in place of
+`cpu_solver` above to reuse its host-built factor and GPU workspace.
+Metal supports FP32 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
 
 ```bash
 pip install apxchol                 # or: pip install -e python
