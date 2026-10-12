@@ -811,9 +811,16 @@ struct gpu_block_frontend::impl {
         selection_producer->begin_topology_advance();
     }
 
-    void poison_selection_producer() noexcept {
-        selection_producer->poison();
-        selected_size = 0;
+    template<class Operation>
+    decltype(auto) checked_operation(Operation&& operation, bool read_residual = true) {
+        try {
+            require_current_device(read_residual);
+            return operation();
+        } catch (...) {
+            selection_producer->poison();
+            selected_size = 0;
+            throw;
+        }
     }
 
     void retire_selection_producer() noexcept {
@@ -1619,92 +1626,60 @@ gpu_block_frontend::prepare(std::span<const node_index> active,
                            const partition_options &options
                            , std::uint64_t seed, std::uint64_t phase
                            ) {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         p_->invalidate_selection();
         p_->current_options = options;
         p_->bounded_seed = seed;
         p_->bounded_phase = phase;
         return p_->prepare(active, options);
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 std::size_t gpu_block_frontend::resident_region_capacity() const {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         return static_cast<std::size_t>(p_->block_region_limit);
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 std::span<const node_index> gpu_block_frontend::host_candidates() const {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         return p_->download_host_candidates();
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 std::span<const node_index> gpu_block_frontend::host_active_degrees() const {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         return p_->download_host_active_degrees();
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 const partition_result &gpu_block_frontend::select_block_greedy() {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&]() -> const partition_result& {
         p_->invalidate_selection();
         const auto& selected = p_->select_block_greedy();
         if (!selected.data.empty()) p_->publish_selection();
         return selected;
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 std::size_t gpu_block_frontend::selected_degree_work() const {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         return p_->selected_degree_work;
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 gpu_device_selection gpu_block_frontend::device_selection() const {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         return gpu_device_selection::issue(p_->selection_producer);
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 void gpu_block_frontend::inject_device_selection_fault_for_test(
         std::span<const node_index> replacement) {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         p_->inject_device_selection_fault_for_test(replacement);
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 #endif
 
@@ -1712,25 +1687,17 @@ void gpu_block_frontend::advance(std::span<const node_index> eliminated,
                                 std::span<const gpu_topology_edge> new_edges,
                                 std::span<const gpu_topology_batch>
                                     new_edge_batches) {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         p_->invalidate_selection();
         p_->begin_topology_advance();
         p_->advance(eliminated, new_edges, new_edge_batches);
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 gpu_device_selection gpu_block_frontend::selection_for_residual_handoff() const {
-    try {
-        p_->require_current_device(/*read_residual=*/false);
+    return p_->checked_operation([&] {
         return gpu_device_selection::issue(p_->selection_producer);
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    }, /*read_residual=*/false);
 }
 
 void gpu_block_frontend::bind_owned_residual(
@@ -1738,31 +1705,23 @@ void gpu_block_frontend::bind_owned_residual(
         const std::uint8_t* active, std::size_t directed_count,
         const gpu_device_selection_content& expected,
         std::weak_ptr<const void> epoch) {
-    try {
-        p_->require_current_device(/*read_residual=*/false);
+    return p_->checked_operation([&] {
         p_->invalidate_selection();
         p_->begin_topology_advance();
         p_->bind_owned_residual(incidences, offsets, active, directed_count,
                                 expected, std::move(epoch));
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    }, /*read_residual=*/false);
 }
 
 void gpu_block_frontend::advance_resident(
         const gpu_round_shadow_incidence* incidences, std::size_t directed_count,
         const std::uint8_t* active,
         const gpu_device_selection_content& expected) {
-    try {
-        p_->require_current_device();
+    return p_->checked_operation([&] {
         p_->invalidate_selection();
         p_->begin_topology_advance();
         p_->advance_resident(incidences, directed_count, active, expected);
-    } catch (...) {
-        p_->poison_selection_producer();
-        throw;
-    }
+    });
 }
 
 gpu_block_frontend::transfer_stats gpu_block_frontend::transfers() const {

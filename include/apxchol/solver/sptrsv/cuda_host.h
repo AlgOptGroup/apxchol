@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "apxchol/csc_work.h"
+#include "apxchol/solver/detail/gpu_dataflow_plan.h"
 
 namespace apxchol::cuda_host {
 
@@ -322,56 +323,28 @@ inline std::string dataflow_factor_structure_check(
 }
 
 // Row-length histograms choose the split threshold and support setup diagnostics.
-struct dataflow_len_stats {
-    static constexpr int kBuckets = 12;
-    int          m        = 0;
-    std::int64_t nnz      = 0;
-    int          max_len  = 0;
-    double       mean_len = 0.0;
-    int          base     = 0;            // C = 32 * pre, one unsplit chunk
-    std::int64_t rows_ge[kBuckets]{};     // rows with len >= base << k
-    std::int64_t nnz_ge[kBuckets]{};      // and the entries they hold
-};
-
-inline dataflow_len_stats dataflow_row_stats(std::span<const int> rowptr, int pre) {
+inline detail::gpu_dataflow::row_stats dataflow_row_stats(std::span<const int> rowptr) {
+    using Stats = detail::gpu_dataflow::row_stats;
     const int m = rowptr.empty() ? 0 : static_cast<int>(rowptr.size() - 1);
-    dataflow_len_stats s;
-    s.m = m;
-    s.base = 32 * pre;
+    Stats s{};
     // Integer sums and a max, so the reduction order cannot change a result.
-    std::int64_t nnz = 0; int max_len = s.max_len;
-    std::int64_t rows_ge[dataflow_len_stats::kBuckets]{};
-    std::int64_t nnz_ge[dataflow_len_stats::kBuckets]{};
+    int max_len = 0;
+    auto* rows_ge = s.rows_ge;
+    auto* nnz_ge = s.nnz_ge;
     #pragma omp parallel for schedule(static) if(m > 16384) \
-        reduction(+ : nnz) reduction(max : max_len) \
-        reduction(+ : rows_ge[:dataflow_len_stats::kBuckets]) \
-        reduction(+ : nnz_ge[:dataflow_len_stats::kBuckets])
+        reduction(max : max_len) \
+        reduction(+ : rows_ge[:Stats::kBuckets], nnz_ge[:Stats::kBuckets])
     for (int i = 0; i < m; ++i) {
         const int l = rowptr[i + 1] - rowptr[i];
-        nnz += l;
         if (l > max_len) max_len = l;
-        for (int k = 0; k < dataflow_len_stats::kBuckets; ++k) {
-            if (l < (static_cast<std::int64_t>(s.base) << k)) break;
+        for (int k = 0; k < Stats::kBuckets; ++k) {
+            if (l < (static_cast<std::int64_t>(detail::gpu_dataflow::chunk_size) << k)) break;
             ++rows_ge[k];
             nnz_ge[k] += l;
         }
     }
-    s.nnz = nnz; s.max_len = max_len;
-    for (int k = 0; k < dataflow_len_stats::kBuckets; ++k) {
-        s.rows_ge[k] += rows_ge[k];
-        s.nnz_ge[k] += nnz_ge[k];
-    }
-    s.mean_len = m > 0 ? static_cast<double>(s.nnz) / static_cast<double>(m) : 0.0;
+    s.max_len = max_len;
     return s;
-}
-
-// Split after one chunk when long rows hold at least a quarter of the entries;
-// otherwise wait until three chunks. The historical trade-off is documented in
-// docs/implementation-history.md. Neither grid size nor scheduling affects it.
-inline constexpr double kDataflowSplitShare = 0.25;
-inline int dataflow_split_threshold(const dataflow_len_stats& st) {
-    const double share = st.nnz ? static_cast<double>(st.nnz_ge[0]) / static_cast<double>(st.nnz) : 0.0;
-    return share >= kDataflowSplitShare ? st.base : 3 * st.base;
 }
 
 } // namespace apxchol::cuda_host

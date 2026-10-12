@@ -26,6 +26,18 @@ struct counts {
     std::uint64_t words = 0, segments = 0, slots = 0;
 };
 
+// Shared host/device histogram; CUDA adds validation errors in the same row pass.
+struct row_stats {
+    static constexpr int kBuckets = 12;
+    unsigned long long rows_ge[kBuckets], nnz_ge[kBuckets];
+    int max_len, error;
+
+    // Split after one chunk when long rows hold at least a quarter of entries.
+    unsigned split_threshold(std::uint64_t nnz) const {
+        return nnz && nnz_ge[0] * 4 >= nnz ? chunk_size : 3 * chunk_size;
+    }
+};
+
 struct row_order {
     unsigned n;
     bool reverse;

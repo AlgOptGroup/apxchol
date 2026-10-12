@@ -708,17 +708,15 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
 // ── The dataflow backend's host side (cuda_host.h; CUDA-free) ────────────────
 //
 TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
-    const int pre = 8;                                     // C = 256
     const std::vector<int> len = {1, 2, 255, 256, 257, 512, 1024, 100000};
     std::vector<int> ptr(len.size() + 1);
     std::partial_sum(len.begin(), len.end(), ptr.begin() + 1);
-    const auto st = apxchol::cuda_host::dataflow_row_stats(ptr, pre);
-    EXPECT_EQ(st.base, 256);
-    EXPECT_EQ(st.m, 8);
+    const auto st = apxchol::cuda_host::dataflow_row_stats(ptr);
+    EXPECT_EQ(apxchol::detail::gpu_dataflow::chunk_size, 256);
+    EXPECT_EQ(st.error, 0);
     std::int64_t total = 0; for (int l : len) total += l;
-    EXPECT_EQ(st.nnz, total);
+    EXPECT_EQ(st.split_threshold(total), 256);
     EXPECT_EQ(st.max_len, 100000);
-    EXPECT_DOUBLE_EQ(st.mean_len, static_cast<double>(total) / 8.0);
     EXPECT_EQ(st.rows_ge[0], 5);                           // 256, 257, 512, 1024, 100000
     EXPECT_EQ(st.nnz_ge[0], 256 + 257 + 512 + 1024 + 100000);
     EXPECT_EQ(st.rows_ge[1], 3);                           // >= 512
@@ -728,17 +726,16 @@ TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
     EXPECT_EQ(st.rows_ge[9], 0);                           // >= 131072
     EXPECT_EQ(st.nnz_ge[8], 100000);
     // Empty input: no buckets, no division by zero.
-    const auto e = apxchol::cuda_host::dataflow_row_stats({}, pre);
-    EXPECT_EQ(e.nnz, 0); EXPECT_EQ(e.max_len, 0); EXPECT_DOUBLE_EQ(e.mean_len, 0.0);
+    const auto e = apxchol::cuda_host::dataflow_row_stats({});
+    EXPECT_EQ(e.error, 0); EXPECT_EQ(e.max_len, 0); EXPECT_EQ(e.split_threshold(0), 768);
 }
 
 TEST(GpuHostPrep, DataflowSplitThresholdFollowsTheLongRowShare) {
-    const int pre = 8, C = 32 * pre;
+    const int C = apxchol::detail::gpu_dataflow::chunk_size;
     auto threshold_for = [&](const std::vector<int>& len) {
         std::vector<int> ptr(len.size() + 1);
         std::partial_sum(len.begin(), len.end(), ptr.begin() + 1);
-        return apxchol::cuda_host::dataflow_split_threshold(
-            apxchol::cuda_host::dataflow_row_stats(ptr, pre));
+        return apxchol::cuda_host::dataflow_row_stats(ptr).split_threshold(ptr.back());
     };
     // Hub-heavy: a handful of very long rows hold nearly all the entries.
     std::vector<int> hub(10000, 4);
@@ -757,7 +754,7 @@ TEST(GpuHostPrep, DataflowSplitThresholdFollowsTheLongRowShare) {
     std::vector<int> len(1000, 1);
     len[0] = C;                                   // share = C / (C + 999)
     const double share = static_cast<double>(C) / static_cast<double>(C + 999);
-    EXPECT_EQ(threshold_for(len), share >= apxchol::cuda_host::kDataflowSplitShare ? C : 3 * C);
+    EXPECT_EQ(threshold_for(len), share >= 0.25 ? C : 3 * C);
 }
 
 TEST(GpuSptrsvAdoptionHost, CsrPairIsExactlyTheExistingUploadPair) {
@@ -1470,7 +1467,6 @@ df::packed_plan download_device_plan(const apxchol::detail::dataflow_device_plan
 }
 
 TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
-    const int pre = apxchol::dataflow_prefetch_depth();
     const int choices[] = {1, 8, 9, 16, 17, 32, 33, 64, 65, 128, 129, 256, 257, 769, 2050};
     for (unsigned m : {0, 1, 31, 255, 256, 257, 513, 4097}) {
         for (bool reverse : {false, true}) {
@@ -1482,7 +1478,7 @@ TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
                     len[reverse ? m - 1 - q : q] = std::min(q + 1, requested);
                 }
                 for (unsigned row = 0; row < m; ++row) ptr[row + 1] = ptr[row] + len[row];
-                const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr, pre);
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr);
                 std::vector<unsigned> blocks{0};
                 for (unsigned q = 0; q < m; q += 256) blocks.push_back(std::min(m, q + 256));
                 for (int threshold : {-1, 0, 1, 256, 768}) {
@@ -1494,17 +1490,17 @@ TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
                         m, reverse, ptr.back(), d_ptr, threshold);
                     const auto plan = download_device_plan(device, memory);
                     const auto expected = df::pack(ptr.data(), {m, reverse}, blocks,
-                        threshold < 0 ? apxchol::cuda_host::dataflow_split_threshold(stats) : threshold);
+                        threshold < 0 ? stats.split_threshold(ptr.back()) : threshold);
                     EXPECT_EQ(plan.words, expected.words);
                     EXPECT_EQ(plan.slots, expected.slots);
                     ASSERT_EQ(plan.segments.size(), expected.segments.size());
                     if (!plan.segments.empty()) EXPECT_EQ(std::memcmp(plan.segments.data(), expected.segments.data(),
                         plan.segments.size() * sizeof(df::segment)), 0);
-                    EXPECT_EQ(device.max_len, stats.max_len);
+                    EXPECT_EQ(device.stats.max_len, stats.max_len);
                     EXPECT_LE(device.host_download_bytes, 256u);
-                    for (int k = 0; k < apxchol::cuda_host::dataflow_len_stats::kBuckets; ++k) {
-                        EXPECT_EQ(device.rows_ge[k], stats.rows_ge[k]);
-                        EXPECT_EQ(device.nnz_ge[k], stats.nnz_ge[k]);
+                    for (int k = 0; k < apxchol::detail::gpu_dataflow::row_stats::kBuckets; ++k) {
+                        EXPECT_EQ(device.stats.rows_ge[k], stats.rows_ge[k]);
+                        EXPECT_EQ(device.stats.nnz_ge[k], stats.nnz_ge[k]);
                     }
                 }
             }
@@ -1598,9 +1594,9 @@ TEST(GpuDataflowDevicePlan, TilePackingPreservesFp32AndFp16SweepsBitForBit) {
         for (bool reverse : {false, true}) {
             const auto& ptr = reverse ? F.LT.ptr : F.Lc.ptr;
             for (int threshold : {-1, 0, 1, 256}) {
-                const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr, apxchol::dataflow_prefetch_depth());
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr);
                 const auto reference = F.plan(reverse,
-                    threshold < 0 ? apxchol::cuda_host::dataflow_split_threshold(stats) : threshold);
+                    threshold < 0 ? stats.split_threshold(ptr.back()) : threshold);
                 test_device_allocations memory;
                 const auto device = apxchol::detail::build_dataflow_device_plan(
                     m, reverse, ptr.back(), reverse ? F.d_Tp : F.d_Lp, threshold,

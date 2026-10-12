@@ -7,7 +7,6 @@ namespace apxchol {
 
 using sptrsv_gpu_value_t = float;
 inline constexpr int kDataflowBlock = 256;
-int dataflow_prefetch_depth();
 int dataflow_grid_size(bool fp16);
 
 // Each sweep initializes atomic FP32 words and solves dependency-free rows,
@@ -44,12 +43,10 @@ namespace detail {
 // Returned allocations transfer to the caller. Only fixed-size statistics and
 // counts cross to the host; trusted device-owned factors remain on the device.
 struct dataflow_device_plan {
-    static constexpr int kBuckets = 12;
     unsigned* words = nullptr;
     gpu_dataflow::segment* segments = nullptr;
-    int n_batches = 0, n_slots = 0, n_split = 0, max_len = 0;
-    std::uint64_t rows_ge[kBuckets]{};
-    std::uint64_t nnz_ge[kBuckets]{};
+    int n_batches = 0, n_slots = 0, n_split = 0;
+    gpu_dataflow::row_stats stats{};
     std::size_t bytes = 0, host_download_bytes = 0;
 };
 

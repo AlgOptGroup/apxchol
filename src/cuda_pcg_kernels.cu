@@ -217,17 +217,13 @@ operator_fill_columns(int n, const int* outer, const int* inner,
 }
 
 __global__ void __launch_bounds__(kBlockThreads)
-operator_decode_columns(int nnz, const std::uint64_t* keys, int* columns) {
+operator_decode_entries(int nnz, const std::uint64_t* keys, int* columns,
+                        const double* values, float* narrow) {
     for (std::int64_t p = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         p < nnz; p += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
+         p < nnz; p += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
         columns[p] = static_cast<int>(keys[p] & 0xffffffffULL);
-}
-
-__global__ void __launch_bounds__(kBlockThreads)
-operator_narrow_values(int nnz, const double* input, float* output) {
-    for (std::int64_t p = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         p < nnz; p += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
-        output[p] = __double2float_rn(input[p]);
+        if (narrow) narrow[p] = __double2float_rn(values[p]);
+    }
 }
 
 } // namespace
@@ -293,12 +289,9 @@ bool try_build_permuted_operator_csr(
     operator_buffer<int> columns(nnz);
     operator_buffer<float> narrow(fp32 ? nnz : 0);
     if (nnz) {
-        operator_decode_columns<<<pcg_blocks(nnz), kBlockThreads>>>(nnz, keys_b.get(), columns.get());
+        operator_decode_entries<<<pcg_blocks(nnz), kBlockThreads>>>(
+            nnz, keys_b.get(), columns.get(), values_b.get(), narrow.get());
         operator_check(cudaGetLastError());
-        if (fp32) {
-            operator_narrow_values<<<pcg_blocks(nnz), kBlockThreads>>>(nnz, values_b.get(), narrow.get());
-            operator_check(cudaGetLastError());
-        }
         operator_check(cudaStreamSynchronize(nullptr));
     }
     // Publication cannot throw; the caller now owns exactly the final arrays.

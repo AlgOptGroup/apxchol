@@ -115,7 +115,6 @@ void launch(cudaStream_t stream, dataflow_memory<Value> memory, unsigned count, 
 }
 } // namespace
 
-int dataflow_prefetch_depth() { return detail::gpu_dataflow::prefetch; }
 
 int dataflow_grid_size(bool fp16) {
     int device, sms, resident;
@@ -160,11 +159,8 @@ void dataflow_solve_fp16(cudaStream_t stream, int m, bool reverse, const int *pt
 namespace apxchol::detail {
 namespace {
 constexpr int kPlanChunk = 256;
-constexpr int kPlanBuckets = dataflow_device_plan::kBuckets;
-struct plan_row_stats {
-    unsigned long long rows[kPlanBuckets], nnz[kPlanBuckets];
-    int max_len, error;
-};
+using plan_row_stats = gpu_dataflow::row_stats;
+constexpr int kPlanBuckets = plan_row_stats::kBuckets;
 
 __global__ void plan_row_statistics(int m, int nnz, const int *ptr, const float *__restrict__ diag,
                                     const double *inv_scale2, plan_row_stats *out) {
@@ -184,19 +180,19 @@ __global__ void plan_row_statistics(int m, int nnz, const int *ptr, const float 
             const int len = hi - lo;
             atomicMax(&block.max_len, len);
             for (int k = 0; k < kPlanBuckets; ++k) {
-                if (static_cast<long long>(len) < (static_cast<long long>(32 * gpu_dataflow::prefetch) << k))
+                if (static_cast<long long>(len) < (static_cast<long long>(gpu_dataflow::chunk_size) << k))
                     break;
-                atomicAdd(&block.rows[k], 1ULL);
-                atomicAdd(&block.nnz[k], static_cast<unsigned long long>(len));
+                atomicAdd(&block.rows_ge[k], 1ULL);
+                atomicAdd(&block.nnz_ge[k], static_cast<unsigned long long>(len));
             }
         }
         if (diag && (!isfinite(diag[row]) || diag[row] == 0.0f || !isfinite(inv_scale2[row])))
             atomicOr(&block.error, 2);
     }
     __syncthreads();
-    if (threadIdx.x < kPlanBuckets && block.rows[threadIdx.x]) {
-        atomicAdd(&out->rows[threadIdx.x], block.rows[threadIdx.x]);
-        atomicAdd(&out->nnz[threadIdx.x], block.nnz[threadIdx.x]);
+    if (threadIdx.x < kPlanBuckets && block.rows_ge[threadIdx.x]) {
+        atomicAdd(&out->rows_ge[threadIdx.x], block.rows_ge[threadIdx.x]);
+        atomicAdd(&out->nnz_ge[threadIdx.x], block.nnz_ge[threadIdx.x]);
     }
     if (threadIdx.x == 0) {
         atomicMax(&out->max_len, block.max_len);
@@ -251,15 +247,9 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
         throw std::invalid_argument(
             "GPU dataflow plan: invalid CSR row pointers or fp16 metadata (code " +
             std::to_string(host_stats.error) + ")");
-    result.max_len = host_stats.max_len;
-    for (int k = 0; k < kPlanBuckets; ++k) {
-        result.rows_ge[k] = host_stats.rows[k];
-        result.nnz_ge[k] = host_stats.nnz[k];
-    }
+    result.stats = host_stats;
     if (split_min == -1)
-        split_min = nnz && host_stats.nnz[0] * 4 >= static_cast<unsigned long long>(nnz)
-                        ? 32 * gpu_dataflow::prefetch
-                        : 96 * gpu_dataflow::prefetch;
+        split_min = host_stats.split_threshold(nnz);
     if (m == 0)
         return result;
     const int chunks = m / kPlanChunk + (m % kPlanChunk != 0);
