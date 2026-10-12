@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -333,7 +334,8 @@ struct dataflow_len_stats {
     std::int64_t nnz_ge[kBuckets]{};      // and the entries they hold
 };
 
-inline dataflow_len_stats dataflow_row_stats(int m, const int* rowptr, int pre) {
+inline dataflow_len_stats dataflow_row_stats(std::span<const int> rowptr, int pre) {
+    const int m = rowptr.empty() ? 0 : static_cast<int>(rowptr.size() - 1);
     dataflow_len_stats s;
     s.m = m;
     s.base = 32 * pre;

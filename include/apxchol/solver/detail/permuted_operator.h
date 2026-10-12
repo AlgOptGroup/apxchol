@@ -118,7 +118,7 @@ inline permuted_operator_csr build_permuted_full_symmetric_csr(
     if (try_build_permuted_symmetric_csr(L, perm, out))
         return out;
     out.ptr.resize(static_cast<std::size_t>(L.rows()) + 1);
-    out.fp32_exact = reflect_lower_to_csr<true>(L, out.ptr.data(),
+    out.fp32_exact = reflect_lower_to_csr<true>(L, out.ptr,
         [p = perm.data()](Eigen::Index i) { return static_cast<int>(p[i]); },
         [&](int count) {
             out.idx = std::make_unique_for_overwrite<int[]>(count);

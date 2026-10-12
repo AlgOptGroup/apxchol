@@ -1,6 +1,8 @@
 #pragma once
 #include <Eigen/Sparse>
 #include <algorithm>
+#include <atomic>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -10,22 +12,22 @@ namespace apxchol::detail {
 // map maps input vertices to output rows; allocate returns writable index/value
 // arrays after the counts establish their size. Each scatter slot is written once.
 template<bool CheckFp32 = false, class Map, class Allocate, class Less>
-bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, int* row_ptr,
+bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, std::span<int> row_ptr,
                           Map map, Allocate allocate, Less less) {
     const Eigen::Index n = L.rows();
     const int* outer = L.outerIndexPtr();
     const int* inner = L.innerIndexPtr();
     const double* input = L.valuePtr();
-    std::fill_n(row_ptr, n + 1, 0);
+    std::fill_n(row_ptr.begin(), n + 1, 0);
     #pragma omp parallel for schedule(static)
     for (Eigen::Index col = 0; col < n; ++col) {
         const int target = map(col);
         for (int p = outer[col]; p < outer[col + 1]; ++p) {
             const int row = inner[p];
             if (row < col) continue;
-            __atomic_fetch_add(&row_ptr[map(row) + 1], 1, __ATOMIC_RELAXED);
+            std::atomic_ref(row_ptr[map(row) + 1]).fetch_add(1, std::memory_order_relaxed);
             if (row != col)
-                __atomic_fetch_add(&row_ptr[target + 1], 1, __ATOMIC_RELAXED);
+                std::atomic_ref(row_ptr[target + 1]).fetch_add(1, std::memory_order_relaxed);
         }
     }
     for (Eigen::Index row = 0; row < n; ++row)
@@ -33,7 +35,7 @@ bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, int* row_ptr,
     const auto output = allocate(row_ptr[n]);
     int* indices = output.first;
     double* values = output.second;
-    std::vector<int> pos(row_ptr, row_ptr + n);
+    std::vector<int> pos(row_ptr.begin(), row_ptr.begin() + n);
     bool exact = true;
     #pragma omp parallel for schedule(static) reduction(&&:exact)
     for (Eigen::Index col = 0; col < n; ++col) {
@@ -45,11 +47,11 @@ bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, int* row_ptr,
             const double value = input[p];
             if constexpr (CheckFp32)
                 if (double(float(value)) != value) exact = false;
-            const int slot = __atomic_fetch_add(&pos[mapped_row], 1, __ATOMIC_RELAXED);
+            const int slot = std::atomic_ref(pos[mapped_row]).fetch_add(1, std::memory_order_relaxed);
             indices[slot] = target;
             values[slot] = value;
             if (row != col) {
-                const int mirror = __atomic_fetch_add(&pos[target], 1, __ATOMIC_RELAXED);
+                const int mirror = std::atomic_ref(pos[target]).fetch_add(1, std::memory_order_relaxed);
                 indices[mirror] = mapped_row;
                 values[mirror] = value;
             }

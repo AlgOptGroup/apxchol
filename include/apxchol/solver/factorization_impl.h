@@ -21,6 +21,7 @@
 #endif
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cassert>
 #include <cmath>
@@ -729,10 +730,10 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         offsets.resize(2 * my_buf.size());
                         for (size_t i = 0; i < my_buf.size(); ++i) {
                             const auto& e = my_buf[i];
-                            offsets[2 * i] = __atomic_fetch_add(
-                                &incoming[e.u], 1, __ATOMIC_RELAXED);
-                            offsets[2 * i + 1] = __atomic_fetch_add(
-                                &incoming[e.v], 1, __ATOMIC_RELAXED);
+                            offsets[2 * i] = std::atomic_ref(incoming[e.u]).fetch_add(
+                                1, std::memory_order_relaxed);
+                            offsets[2 * i + 1] = std::atomic_ref(incoming[e.v]).fetch_add(
+                                1, std::memory_order_relaxed);
                             if (offsets[2 * i] == 0)
                                 my_touched.push_back(e.u);
                             if (offsets[2 * i + 1] == 0)
@@ -740,11 +741,11 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         }
                     } else {
                         for (const auto& e : my_buf) {
-                            if (__atomic_fetch_add(&incoming[e.u], 1,
-                                                   __ATOMIC_RELAXED) == 0)
+                            if (std::atomic_ref(incoming[e.u]).fetch_add(
+                                    1, std::memory_order_relaxed) == 0)
                                 my_touched.push_back(e.u);
-                            if (__atomic_fetch_add(&incoming[e.v], 1,
-                                                   __ATOMIC_RELAXED) == 0)
+                            if (std::atomic_ref(incoming[e.v]).fetch_add(
+                                    1, std::memory_order_relaxed) == 0)
                                 my_touched.push_back(e.v);
                         }
                     }

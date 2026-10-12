@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 #include "scoped_env.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -711,7 +712,7 @@ TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
     const std::vector<int> len = {1, 2, 255, 256, 257, 512, 1024, 100000};
     std::vector<int> ptr(len.size() + 1);
     std::partial_sum(len.begin(), len.end(), ptr.begin() + 1);
-    const auto st = apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), ptr.data(), pre);
+    const auto st = apxchol::cuda_host::dataflow_row_stats(ptr, pre);
     EXPECT_EQ(st.base, 256);
     EXPECT_EQ(st.m, 8);
     std::int64_t total = 0; for (int l : len) total += l;
@@ -727,7 +728,7 @@ TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
     EXPECT_EQ(st.rows_ge[9], 0);                           // >= 131072
     EXPECT_EQ(st.nnz_ge[8], 100000);
     // Empty input: no buckets, no division by zero.
-    const auto e = apxchol::cuda_host::dataflow_row_stats(0, nullptr, pre);
+    const auto e = apxchol::cuda_host::dataflow_row_stats({}, pre);
     EXPECT_EQ(e.nnz, 0); EXPECT_EQ(e.max_len, 0); EXPECT_DOUBLE_EQ(e.mean_len, 0.0);
 }
 
@@ -737,7 +738,7 @@ TEST(GpuHostPrep, DataflowSplitThresholdFollowsTheLongRowShare) {
         std::vector<int> ptr(len.size() + 1);
         std::partial_sum(len.begin(), len.end(), ptr.begin() + 1);
         return apxchol::cuda_host::dataflow_split_threshold(
-            apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), ptr.data(), pre));
+            apxchol::cuda_host::dataflow_row_stats(ptr, pre));
     };
     // Hub-heavy: a handful of very long rows hold nearly all the entries.
     std::vector<int> hub(10000, 4);
@@ -1023,7 +1024,7 @@ struct df_factor {
 
     df::packed_plan plan(bool reverse, unsigned threshold) const {
         const auto& A = reverse ? LT : Lc;
-        return df::pack(A.ptr.data(), {unsigned(m), reverse}, {0, unsigned(m)},
+        return df::pack(A.ptr.data(), {unsigned(m), reverse}, std::array{0u, unsigned(m)},
                         threshold);
     }
 
@@ -1481,7 +1482,7 @@ TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
                     len[reverse ? m - 1 - q : q] = std::min(q + 1, requested);
                 }
                 for (unsigned row = 0; row < m; ++row) ptr[row + 1] = ptr[row] + len[row];
-                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, ptr.data(), pre);
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr, pre);
                 std::vector<unsigned> blocks{0};
                 for (unsigned q = 0; q < m; q += 256) blocks.push_back(std::min(m, q + 256));
                 for (int threshold : {-1, 0, 1, 256, 768}) {
@@ -1597,7 +1598,7 @@ TEST(GpuDataflowDevicePlan, TilePackingPreservesFp32AndFp16SweepsBitForBit) {
         for (bool reverse : {false, true}) {
             const auto& ptr = reverse ? F.LT.ptr : F.Lc.ptr;
             for (int threshold : {-1, 0, 1, 256}) {
-                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, ptr.data(), apxchol::dataflow_prefetch_depth());
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr, apxchol::dataflow_prefetch_depth());
                 const auto reference = F.plan(reverse,
                     threshold < 0 ? apxchol::cuda_host::dataflow_split_threshold(stats) : threshold);
                 test_device_allocations memory;

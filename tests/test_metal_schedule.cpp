@@ -165,7 +165,7 @@ TEST(MetalSchedule, OffDiagonalsOnlyRequireFiniteValues) {
 
 TEST(GpuDataflowPlan, BoundsPartialStorageForVeryLongRows) {
     const unsigned ptr[] = {0, 1, 20000001};
-    const auto plan = df::pack(ptr, {2, false}, {0, 2});
+    const auto plan = df::pack(ptr, {2, false}, std::array{0u, 2u});
     EXPECT_LE(plan.slots, 4096u);
     EXPECT_EQ(plan.segments.size(), plan.slots + 1);
     EXPECT_EQ(plan.segments.front().begin, 1u);

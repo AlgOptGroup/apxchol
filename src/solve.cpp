@@ -518,7 +518,7 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
                 Eigen::SparseMatrix<float, Eigen::RowMajor>().swap(Lrm_f_);
 
             Lrm_.resize(Lcsc.rows(), Lcsc.cols());
-            detail::reflect_lower_to_csr(Lcsc, Lrm_.outerIndexPtr(),
+            detail::reflect_lower_to_csr(Lcsc, {Lrm_.outerIndexPtr(), std::size_t(Lcsc.rows()) + 1},
                 [](Eigen::Index i) { return static_cast<int>(i); },
                 [&](int nnz) {
                     Lrm_.resizeNonZeros(nnz);

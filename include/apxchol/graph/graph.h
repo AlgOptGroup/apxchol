@@ -4,6 +4,7 @@
 #include "apxchol/graph/residual_normalization.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cassert>
 #include <chrono>
@@ -183,10 +184,9 @@ public:
 
     /// Atomic-claim a single slot from the pre-reserved range.
     /// Returns an absolute edge_index in [base, base + N).
-    /// Thread-safe via __atomic_fetch_add.
     edge_index claim_edge_slot() {
-        const edge_index off = __atomic_fetch_add(
-            &edges_pool_count_, 1, __ATOMIC_RELAXED);
+        const edge_index off = std::atomic_ref(edges_pool_count_).fetch_add(
+            1, std::memory_order_relaxed);
         return edges_pool_base_ + off;
     }
 

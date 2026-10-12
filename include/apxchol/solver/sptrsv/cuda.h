@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -796,19 +797,20 @@ private:
     // The dataflow backend's host-side tables (cuda_dataflow.h): no levels at
     // all -- the warp batch tables of both directions (from the CSR row
     // lengths), the m tagged words, the control ints, the resident grid.
-    void setup_kernel_backend(const std::vector<int>& LT_ptr, const std::vector<int>& L_ptr) {
+    void setup_kernel_backend(std::span<const int> LT_ptr, std::span<const int> L_ptr) {
         const int mi = static_cast<int>(data_.m);
         const int pre = dataflow_prefetch_depth();
         // Row segmentation: each direction gets its own threshold, from its
         // own row-length histogram (the two differ a lot -- an elimination
         // factor's hub rows land in CSR of L, its columns stay bounded).
-        const auto st_L = cuda_host::dataflow_row_stats(mi, L_ptr.data(), pre);
-        const auto st_LT = cuda_host::dataflow_row_stats(mi, LT_ptr.data(), pre);
+        const auto st_L = cuda_host::dataflow_row_stats(L_ptr, pre);
+        const auto st_LT = cuda_host::dataflow_row_stats(LT_ptr, pre);
         const unsigned split_fwd = dataflow_split_threshold_for(st_L);
         const unsigned split_bck = dataflow_split_threshold_for(st_LT);
         namespace df = detail::gpu_dataflow;
-        const auto fwd = df::pack(L_ptr.data(), {unsigned(mi), false}, {0, unsigned(mi)}, split_fwd);
-        const auto bck = df::pack(LT_ptr.data(), {unsigned(mi), true}, {0, unsigned(mi)}, split_bck);
+        const std::array blocks{0u, unsigned(mi)};
+        const auto fwd = df::pack(L_ptr.data(), {unsigned(mi), false}, blocks, split_fwd);
+        const auto bck = df::pack(LT_ptr.data(), {unsigned(mi), true}, blocks, split_bck);
         data_.fwd_batches = fwd.words.size() / df::lanes;
         data_.bck_batches = bck.words.size() / df::lanes;
         data_.df_slots = std::max(fwd.slots, bck.slots);

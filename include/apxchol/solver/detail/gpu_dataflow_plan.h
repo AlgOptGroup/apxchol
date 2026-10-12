@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -101,7 +102,7 @@ struct packed_plan {
 };
 
 template <class Pointer>
-inline packed_plan pack(const Pointer *ptr, row_order order, const std::vector<unsigned> &blocks,
+inline packed_plan pack(const Pointer *ptr, row_order order, std::span<const unsigned> blocks,
                         unsigned split_min = chunk_size) {
     std::vector<counts> prefix(blocks.size());
     for (std::size_t b = 1; b < blocks.size(); ++b) {
