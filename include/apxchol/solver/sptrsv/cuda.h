@@ -75,13 +75,12 @@ public:
     cuda_sptrsv_device_factor(const cuda_sptrsv_device_factor&) = delete;
     cuda_sptrsv_device_factor& operator=(const cuda_sptrsv_device_factor&) = delete;
 
-    cuda_sptrsv_device_factor(cuda_sptrsv_device_factor&& other) noexcept {
-        move_from(other);
-    }
+    cuda_sptrsv_device_factor(cuda_sptrsv_device_factor&& other) noexcept
+        : data_(std::exchange(other.data_, {})) {}
     cuda_sptrsv_device_factor& operator=(cuda_sptrsv_device_factor&& other) noexcept {
         if (this != &other) {
             reset();
-            move_from(other);
+            data_ = std::exchange(other.data_, {});
         }
         return *this;
     }
@@ -106,18 +105,18 @@ public:
                            {LT.col_idx.data, LT.col_idx.bytes, entries * sizeof(int)},
                            {LT.values.data, LT.values.bytes, entries * sizeof(cuda_value_t)}});
         cuda_sptrsv_device_factor out;
-        out.cuda_device_ = cuda_device;
-        out.m_ = m;
-        out.nnz_ = nnz;
-        out.storage_ = storage::fp32;
-        out.stats_ = stats;
-        out.L_row_ptr_ = L.row_ptr.data;
-        out.L_col_idx_ = L.col_idx.data;
-        out.L_values_ = L.values.data;
-        out.LT_row_ptr_ = LT.row_ptr.data;
-        out.LT_col_idx_ = LT.col_idx.data;
-        out.LT_values_ = LT.values.data;
-        out.allocation_bytes_ = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
+        out.data_.cuda_device = cuda_device;
+        out.data_.m = m;
+        out.data_.nnz = nnz;
+        out.data_.format = storage::fp32;
+        out.data_.stats = stats;
+        out.data_.L_row_ptr = L.row_ptr.data;
+        out.data_.L_col_idx = L.col_idx.data;
+        out.data_.L_values = L.values.data;
+        out.data_.LT_row_ptr = LT.row_ptr.data;
+        out.data_.LT_col_idx = LT.col_idx.data;
+        out.data_.LT_values = LT.values.data;
+        out.data_.allocation_bytes = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
                                  LT.row_ptr.bytes, LT.col_idx.bytes, LT.values.bytes,
                                  0, 0};
         return out;
@@ -146,32 +145,32 @@ public:
                            {diag.data, diag.bytes, rows * sizeof(float)},
                            {inv_scale2.data, inv_scale2.bytes, rows * sizeof(double)}});
         cuda_sptrsv_device_factor out;
-        out.cuda_device_ = cuda_device;
-        out.m_ = m;
-        out.nnz_ = nnz;
-        out.storage_ = storage::fp16_scaled;
-        out.stats_ = stats;
-        out.fp16_flushed_ = flushed;
-        out.fp16_subnormal_ = subnormal;
-        out.L_row_ptr_ = L.row_ptr.data;
-        out.L_col_idx_ = L.col_idx.data;
-        out.L_values_ = L.values.data;
-        out.LT_row_ptr_ = LT.row_ptr.data;
-        out.LT_col_idx_ = LT.col_idx.data;
-        out.LT_values_ = LT.values.data;
-        out.diag_ = diag.data;
-        out.inv_scale2_ = inv_scale2.data;
-        out.allocation_bytes_ = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
+        out.data_.cuda_device = cuda_device;
+        out.data_.m = m;
+        out.data_.nnz = nnz;
+        out.data_.format = storage::fp16_scaled;
+        out.data_.stats = stats;
+        out.data_.fp16_flushed = flushed;
+        out.data_.fp16_subnormal = subnormal;
+        out.data_.L_row_ptr = L.row_ptr.data;
+        out.data_.L_col_idx = L.col_idx.data;
+        out.data_.L_values = L.values.data;
+        out.data_.LT_row_ptr = LT.row_ptr.data;
+        out.data_.LT_col_idx = LT.col_idx.data;
+        out.data_.LT_values = LT.values.data;
+        out.data_.diag = diag.data;
+        out.data_.inv_scale2 = inv_scale2.data;
+        out.data_.allocation_bytes = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
                                  LT.row_ptr.bytes, LT.col_idx.bytes, LT.values.bytes,
                                  diag.bytes, inv_scale2.bytes};
         return out;
     }
 
-    bool empty() const noexcept { return L_row_ptr_ == nullptr; }
-    int cuda_device() const noexcept { return cuda_device_; }
-    std::int64_t rows() const noexcept { return m_; }
-    std::int64_t nonzeros() const noexcept { return nnz_; }
-    storage value_storage() const noexcept { return storage_; }
+    bool empty() const noexcept { return data_.L_row_ptr == nullptr; }
+    int cuda_device() const noexcept { return data_.cuda_device; }
+    std::int64_t rows() const noexcept { return data_.m; }
+    std::int64_t nonzeros() const noexcept { return data_.nnz; }
+    storage value_storage() const noexcept { return data_.format; }
 
 private:
     friend class cuda_sptrsv;
@@ -220,72 +219,40 @@ private:
                 "apxchol cuda_sptrsv adoption: device allocations must be distinct bases");
     }
 
-    void clear() noexcept {
-        cuda_device_ = -1;
-        m_ = nnz_ = 0;
-        storage_ = storage::fp32;
-        finalized_sorted_triangular_ = false;
-        stats_ = factor_drop_stats{};
-        fp16_flushed_ = fp16_subnormal_ = 0;
-        L_row_ptr_ = LT_row_ptr_ = nullptr;
-        L_col_idx_ = LT_col_idx_ = nullptr;
-        L_values_ = LT_values_ = nullptr;
-        diag_ = nullptr;
-        inv_scale2_ = nullptr;
-        allocation_bytes_.fill(0);
-    }
-
-    void move_from(cuda_sptrsv_device_factor& other) noexcept {
-        cuda_device_ = other.cuda_device_;
-        m_ = other.m_;
-        nnz_ = other.nnz_;
-        storage_ = other.storage_;
-        finalized_sorted_triangular_ = other.finalized_sorted_triangular_;
-        stats_ = other.stats_;
-        fp16_flushed_ = other.fp16_flushed_;
-        fp16_subnormal_ = other.fp16_subnormal_;
-        L_row_ptr_ = other.L_row_ptr_;
-        L_col_idx_ = other.L_col_idx_;
-        L_values_ = other.L_values_;
-        LT_row_ptr_ = other.LT_row_ptr_;
-        LT_col_idx_ = other.LT_col_idx_;
-        LT_values_ = other.LT_values_;
-        diag_ = other.diag_;
-        inv_scale2_ = other.inv_scale2_;
-        allocation_bytes_ = other.allocation_bytes_;
-        other.clear();
-    }
+    void clear() noexcept { data_ = {}; }
 
     void reset() noexcept {
         if (empty()) return;
-        const detail::cuda_device_scope device(cuda_device_);
-        for (void* p : {static_cast<void*>(L_row_ptr_),
-                        static_cast<void*>(L_col_idx_), L_values_,
-                        static_cast<void*>(LT_row_ptr_),
-                        static_cast<void*>(LT_col_idx_), LT_values_,
-                        static_cast<void*>(diag_),
-                        static_cast<void*>(inv_scale2_)})
+        const detail::cuda_device_scope device(data_.cuda_device);
+        for (void* p : {static_cast<void*>(data_.L_row_ptr),
+                        static_cast<void*>(data_.L_col_idx), data_.L_values,
+                        static_cast<void*>(data_.LT_row_ptr),
+                        static_cast<void*>(data_.LT_col_idx), data_.LT_values,
+                        static_cast<void*>(data_.diag),
+                        static_cast<void*>(data_.inv_scale2)})
             if (p) (void)cudaFree(p);
         clear();
     }
 
-    int cuda_device_ = -1;
-    std::int64_t m_ = 0;
-    std::int64_t nnz_ = 0;
-    storage storage_ = storage::fp32;
-    bool finalized_sorted_triangular_ = false;
-    factor_drop_stats stats_;
-    std::uint64_t fp16_flushed_ = 0;
-    std::uint64_t fp16_subnormal_ = 0;
-    int* L_row_ptr_ = nullptr;
-    int* L_col_idx_ = nullptr;
-    void* L_values_ = nullptr;
-    int* LT_row_ptr_ = nullptr;
-    int* LT_col_idx_ = nullptr;
-    void* LT_values_ = nullptr;
-    float* diag_ = nullptr;
-    double* inv_scale2_ = nullptr;
-    std::array<std::size_t, 8> allocation_bytes_{};
+    struct state {
+        int cuda_device = -1;
+        std::int64_t m = 0;
+        std::int64_t nnz = 0;
+        storage format = storage::fp32;
+        bool finalized_sorted_triangular = false;
+        factor_drop_stats stats;
+        std::uint64_t fp16_flushed = 0;
+        std::uint64_t fp16_subnormal = 0;
+        int* L_row_ptr = nullptr;
+        int* L_col_idx = nullptr;
+        void* L_values = nullptr;
+        int* LT_row_ptr = nullptr;
+        int* LT_col_idx = nullptr;
+        void* LT_values = nullptr;
+        float* diag = nullptr;
+        double* inv_scale2 = nullptr;
+        std::array<std::size_t, 8> allocation_bytes{};
+    } data_;
 };
 
 
@@ -389,7 +356,7 @@ public:
         validate_backend_env();
         const bool fp16 = fp16_resolved(storage);
         destroy();
-        m_ = static_cast<int64_t>(m);
+        data_.m = static_cast<int64_t>(m);
         const bool trace = detail::gpu_setup_diagnostics() &&
             std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
         auto t_prev = detail::gpu_setup_diagnostic_clock::now();
@@ -402,22 +369,22 @@ public:
             t_prev = std::chrono::steady_clock::now();
         };
 
-        fp16_ = fp16;
+        data_.fp16 = fp16;
         if (detail::gpu_setup_diagnostics() && std::getenv("APXCHOL_VERBOSE"))
             std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s (%s storage)\n",
-                         backend_name(), fp16_ ? "fp16" : "fp32");
+                         backend_name(), data_.fp16 ? "fp16" : "fp32");
         const double factor_drop_rel = factor_drop_rel_from_env();
 
         // Build L11 = top-left m×m block of the factor in CSC, with checked
         // 32-bit indices for the dataflow kernels.
         // The same three arrays are CSR of L^T (the back solve's operand).
-        cuda_host::csr_int<cuda_value_t> LT = cuda_host::build_L11_csc_int<cuda_value_t>(L, m_);
+        cuda_host::csr_int<cuda_value_t> LT = cuda_host::build_L11_csc_int<cuda_value_t>(L, data_.m);
         mark("build_L11");
 
         // Per-column scales (the drop's threshold reference; the fp16 storage's
         // scale), from the factor BEFORE the drop.
         std::vector<float> col_scale;
-        if (factor_drop_rel > 0.0 || fp16_) col_scale = cuda_host::column_scales(LT);
+        if (factor_drop_rel > 0.0 || data_.fp16) col_scale = cuda_host::column_scales(LT);
         // fp16 storage only: a column whose scale cannot be represented --
         // fp32 1/s_j (s_j < ~3e-39) or the scaled diagonal fp32(L_jj)/s_j
         // (off-diagonals >= ~1e38x below the diagonal) would overflow --
@@ -426,8 +393,8 @@ public:
         // that diagonal, and the drop/flush below removes them. Applied
         // BEFORE the drop so the threshold and the storage agree on the
         // scale.
-        if (fp16_)
-            for (int64_t j = 0; j < m_; ++j) {
+        if (data_.fp16)
+            for (int64_t j = 0; j < data_.m; ++j) {
                 const float s = col_scale[static_cast<std::size_t>(j)];
                 const float d = static_cast<float>(LT.vals[LT.ptr[static_cast<std::size_t>(j)]]);
                 if (!std::isfinite(1.0f / s) || !std::isfinite(d / s))
@@ -435,43 +402,48 @@ public:
             }
 
         // ── Compacting drop (factor_drop.h; see the class comment) ──
-        stats_ = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, fp16_);
-        nnz_ = LT.nnz;
+        data_.stats = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, data_.fp16);
+        data_.nnz = LT.nnz;
         mark("col_scale+drop");
 
         size_t free_before = 0, total = 0;
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
-        cleanup_needed_ = true;
-        factor_bytes_ = 0;
-        auto dev_alloc = [&](void** p, std::size_t bytes) {
-            APXCHOL_CUDA_CHECK(cudaMalloc(p, bytes));
-            factor_bytes_ += bytes;
+        data_.cleanup_needed = true;
+        data_.factor_bytes = 0;
+        // Both storage formats use the same transpose, upload and plan construction.
+        auto upload_transpose = [&](const auto& back, auto*& values, const char* stage) {
+            const auto forward = cuda_host::transpose_csr(back);
+            mark(stage);
+            upload_factor(data_.d_L_rowptr, forward.ptr.data(), data_.m + 1);
+            upload_factor(data_.d_L_colidx, forward.idx.get(), data_.nnz);
+            upload_factor(values, forward.vals.get(), data_.nnz);
+            mark("upload_L");
+            setup_kernel_backend(back.ptr, forward.ptr);
+            mark("kernel_backend_tables");
         };
 
         // Structure of CSR(L^T) (every storage).
-        dev_alloc(reinterpret_cast<void**>(&d_rowPtr_), (m_ + 1) * sizeof(int));
-        dev_alloc(reinterpret_cast<void**>(&d_colIdx_), nnz_ * sizeof(int));
-        APXCHOL_CUDA_CHECK(cudaMemcpy(d_rowPtr_, LT.ptr.data(), (m_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
-        APXCHOL_CUDA_CHECK(cudaMemcpy(d_colIdx_, LT.idx.get(),  nnz_ * sizeof(int),     cudaMemcpyHostToDevice));
+        upload_factor(data_.d_rowPtr, LT.ptr.data(), data_.m + 1);
+        upload_factor(data_.d_colIdx, LT.idx.get(), data_.nnz);
 
         // Allocate device vectors (solve runs at cuda_value_t width).
-        APXCHOL_CUDA_CHECK(cudaMalloc(&d_x_, m_ * sizeof(cuda_value_t)));
-        APXCHOL_CUDA_CHECK(cudaMalloc(&d_y_, m_ * sizeof(cuda_value_t)));
-        h_stage_.resize(static_cast<size_t>(m_));
+        APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_x, data_.m * sizeof(cuda_value_t)));
+        APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_y, data_.m * sizeof(cuda_value_t)));
+        h_stage_.resize(static_cast<size_t>(data_.m));
         mark("upload_LT_struct+vecs");
 
-        if (fp16_) {
+        if (data_.fp16) {
             // FP16 per-column-scaled storage (cuda_host.h contract): values of
             // CSR(L^T) narrowed on the host, fp32 diag / inv_scale^2 alongside,
             // then the transpose (carrying the same 16-bit patterns) for CSR(L).
             cuda_host::fp16_scaled_arrays h16 = cuda_host::narrow_fp16_scaled(LT, col_scale);
             mark("  fp16_narrow");
-            fp16_flushed_ = h16.flushed; fp16_subnormal_ = h16.subnormal;
+            data_.fp16_flushed = h16.flushed; data_.fp16_subnormal = h16.subnormal;
             // r_j^2 in DOUBLE (exact; the kernels multiply rhs * r_j^2 in
             // double and narrow once -- pre-squaring into fp32 overflows for
             // s_j < ~5.4e-20 and the Inf became silent NaN downstream).
-            std::vector<double> inv_scale2(static_cast<std::size_t>(m_));
-            for (int64_t j = 0; j < m_; ++j) {
+            std::vector<double> inv_scale2(static_cast<std::size_t>(data_.m));
+            for (int64_t j = 0; j < data_.m; ++j) {
                 const double r = static_cast<double>(h16.inv_scale[j]);
                 inv_scale2[j] = r * r;
             }
@@ -479,18 +451,15 @@ public:
             // (unreachable after the scale fallback above -- a guard, not a
             // policy): a non-finite diag/inv_scale would dissolve the solve
             // into NaN with no error anywhere.
-            for (int64_t j = 0; j < m_; ++j)
+            for (int64_t j = 0; j < data_.m; ++j)
                 if (!(std::isfinite(h16.diag[j]) && h16.diag[j] != 0.0f && std::isfinite(inv_scale2[j])))
                     throw std::runtime_error(
                         "apxchol cuda_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                         " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(inv_scale2[j]) +
                         "); set APXCHOL_FACTOR_STORAGE=float32");
-            dev_alloc(reinterpret_cast<void**>(&d_vals16_),     nnz_ * sizeof(__half));
-            dev_alloc(reinterpret_cast<void**>(&d_diag_),       m_ * sizeof(float));
-            dev_alloc(reinterpret_cast<void**>(&d_inv_scale2_), m_ * sizeof(double));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_vals16_, h16.vals.get(), nnz_ * sizeof(__half), cudaMemcpyHostToDevice));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_diag_, h16.diag.data(), m_ * sizeof(float), cudaMemcpyHostToDevice));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_inv_scale2_, inv_scale2.data(), m_ * sizeof(double), cudaMemcpyHostToDevice));
+            upload_factor(data_.d_vals16, h16.vals.get(), data_.nnz);
+            upload_factor(data_.d_diag, h16.diag.data(), data_.m);
+            upload_factor(data_.d_inv_scale2, inv_scale2.data(), data_.m);
             // CSR of L for the forward solve: transpose of (structure of LT,
             // fp16 values).
             cuda_host::csr_int<_Float16> LT16;
@@ -498,66 +467,43 @@ public:
             LT16.idx  = std::move(LT.idx);
             LT16.vals = std::move(h16.vals);
             mark("  fp16_diag+uploads");
-            cuda_host::csr_int<_Float16> L16 = cuda_host::transpose_csr(LT16);
-            mark("  fp16_transpose");
-            dev_alloc(reinterpret_cast<void**>(&d_L_rowptr_), (m_ + 1) * sizeof(int));
-            dev_alloc(reinterpret_cast<void**>(&d_L_colidx_), nnz_ * sizeof(int));
-            dev_alloc(reinterpret_cast<void**>(&d_L_vals16_), nnz_ * sizeof(__half));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_rowptr_, L16.ptr.data(), (m_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, L16.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals16_, L16.vals.get(), nnz_ * sizeof(__half), cudaMemcpyHostToDevice));
-            mark("upload_L");
-            setup_kernel_backend(LT16.ptr, L16.ptr);
-            mark("kernel_backend_tables");
+            upload_transpose(LT16, data_.d_L_vals16, "  fp16_transpose");
         } else {
-            dev_alloc(reinterpret_cast<void**>(&d_vals_), nnz_ * sizeof(cuda_value_t));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_vals_, LT.vals.get(), nnz_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
+            upload_factor(data_.d_vals, LT.vals.get(), data_.nnz);
             mark("upload_LT_vals");
-            // Forward solve L y = x gathers over rows of L -> needs CSR of L.
-            // Transpose the stored CSR of L^T for the forward sweep.
-            cuda_host::csr_int<cuda_value_t> Lc = cuda_host::transpose_csr(LT);
-            mark("transpose");
-            dev_alloc(reinterpret_cast<void**>(&d_L_rowptr_), (m_ + 1) * sizeof(int));
-            dev_alloc(reinterpret_cast<void**>(&d_L_colidx_), nnz_ * sizeof(int));
-            dev_alloc(reinterpret_cast<void**>(&d_L_vals_),   nnz_ * sizeof(cuda_value_t));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_rowptr_, Lc.ptr.data(), (m_ + 1) * sizeof(int), cudaMemcpyHostToDevice));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_colidx_, Lc.idx.get(),  nnz_ * sizeof(int), cudaMemcpyHostToDevice));
-            APXCHOL_CUDA_CHECK(cudaMemcpy(d_L_vals_,   Lc.vals.get(), nnz_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
-            mark("upload_L");
-            setup_kernel_backend(LT.ptr, Lc.ptr);
-            mark("kernel_backend_tables");
+            upload_transpose(LT, data_.d_L_vals, "transpose");
         }
         size_t free_after = 0;
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_after, &total));
-        device_delta_bytes_ = free_before >= free_after ? free_before - free_after : 0;
+        data_.device_delta_bytes = free_before >= free_after ? free_before - free_after : 0;
 
         if (std::getenv("APXCHOL_VERBOSE") || std::getenv("APXCHOL_GPU_MEM_DEBUG")) {
-            const std::uint64_t off = stats_.nnz_stored - static_cast<std::uint64_t>(m_);
-            const std::uint64_t off0 = off + stats_.dropped;
+            const std::uint64_t off = data_.stats.nnz_stored - static_cast<std::uint64_t>(data_.m);
+            const std::uint64_t off0 = off + data_.stats.dropped;
             std::fprintf(stderr,
                 "[apxchol] sptrsv storage GPU/%s %s: stored_nnz=%llu offdiag=%llu%s"
                 " | factor device bytes=%.1f MB (cudaMemGetInfo delta %.1f MB; free %.2f -> %.2f of %.2f GB)\n",
                 backend_name(),
-                fp16_ ? "fp16 (per-column scaled, diag fp32 + rounding residual)" : value_name,
-                static_cast<unsigned long long>(stats_.nnz_stored), static_cast<unsigned long long>(off),
-                fp16_ ? (" flushed_to_zero=" + std::to_string(fp16_flushed_) + " subnormal=" + std::to_string(fp16_subnormal_)).c_str() : "",
-                factor_bytes_ / 1e6, device_delta_bytes_ / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
-            if (stats_.rel > 0.0)
+                data_.fp16 ? "fp16 (per-column scaled, diag fp32 + rounding residual)" : value_name,
+                static_cast<unsigned long long>(data_.stats.nnz_stored), static_cast<unsigned long long>(off),
+                data_.fp16 ? (" flushed_to_zero=" + std::to_string(data_.fp16_flushed) + " subnormal=" + std::to_string(data_.fp16_subnormal)).c_str() : "",
+                data_.factor_bytes / 1e6, data_.device_delta_bytes / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
+            if (data_.stats.rel > 0.0)
                 std::fprintf(stderr,
                     "[apxchol] factor drop (APXCHOL_FACTOR_DROP=%g, column sums preserved): dropped=%llu"
                     " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
                     " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
-                    stats_.rel,
-                    static_cast<unsigned long long>(stats_.dropped),
-                    100.0 * static_cast<double>(stats_.dropped) / static_cast<double>(off0 ? off0 : 1),
+                    data_.stats.rel,
+                    static_cast<unsigned long long>(data_.stats.dropped),
+                    100.0 * static_cast<double>(data_.stats.dropped) / static_cast<double>(off0 ? off0 : 1),
                     static_cast<unsigned long long>(off0),
-                    static_cast<unsigned long long>(stats_.dropped_threshold),
-                    static_cast<unsigned long long>(stats_.dropped_flush),
-                    static_cast<unsigned long long>(stats_.nnz_factor),
-                    static_cast<unsigned long long>(stats_.nnz_stored),
-                    100.0 * static_cast<double>(stats_.nnz_stored) / static_cast<double>(stats_.nnz_factor ? stats_.nnz_factor : 1));
+                    static_cast<unsigned long long>(data_.stats.dropped_threshold),
+                    static_cast<unsigned long long>(data_.stats.dropped_flush),
+                    static_cast<unsigned long long>(data_.stats.nnz_factor),
+                    static_cast<unsigned long long>(data_.stats.nnz_stored),
+                    100.0 * static_cast<double>(data_.stats.nnz_stored) / static_cast<double>(data_.stats.nnz_factor ? data_.stats.nnz_factor : 1));
         }
-        ready_ = true;
+        data_.ready = true;
     }
 
     /// Install final CSR(L) and CSR(L^T) storage on the active CUDA device.
@@ -592,24 +538,24 @@ public:
 
         int current_device = -1;
         APXCHOL_CUDA_CHECK(cudaGetDevice(&current_device));
-        if (current_device != factor.cuda_device_)
+        if (current_device != factor.data_.cuda_device)
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: active CUDA device differs from the factor owner");
         validate_backend_env();
         const bool requested_fp16 = fp16_resolved(storage);
         const bool factor_fp16 =
-            factor.storage_ == cuda_sptrsv_device_factor::storage::fp16_scaled;
+            factor.data_.format == cuda_sptrsv_device_factor::storage::fp16_scaled;
         if (requested_fp16 != factor_fp16)
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: device storage does not match requested factor storage");
         const double requested_drop = factor_drop_rel_from_env();
-        if (factor.stats_.rel != requested_drop)
+        if (factor.data_.stats.rel != requested_drop)
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: preprocessed drop provenance does not match APXCHOL_FACTOR_DROP");
 
-        const int m = static_cast<int>(factor.m_);
+        const int m = static_cast<int>(factor.data_.m);
         const std::size_t rows = static_cast<std::size_t>(m);
-        const std::size_t nnz = static_cast<std::size_t>(factor.nnz_);
+        const std::size_t nnz = static_cast<std::size_t>(factor.data_.nnz);
         const std::size_t ptr_bytes = (rows + 1) * sizeof(int);
         const std::size_t idx_bytes = nnz * sizeof(int);
         const std::size_t val_bytes = nnz * (factor_fp16
@@ -620,7 +566,7 @@ public:
         auto account = [&](const void* pointer, std::size_t required,
                            const char* name) {
             const std::size_t bytes =
-                factor.allocation_bytes_[allocation_index++];
+                factor.data_.allocation_bytes[allocation_index++];
             if (bytes < required)
                 throw std::logic_error(
                     "apxchol cuda_sptrsv adoption: ownership metadata lost its validated capacity");
@@ -630,15 +576,15 @@ public:
                     "apxchol cuda_sptrsv adoption: device allocation byte total overflows size_t");
             adopted_bytes += bytes;
         };
-        account(factor.L_row_ptr_, ptr_bytes, "CSR(L) row pointers");
-        account(factor.L_col_idx_, idx_bytes, "CSR(L) column indices");
-        account(factor.L_values_, val_bytes, "CSR(L) values");
-        account(factor.LT_row_ptr_, ptr_bytes, "CSR(L^T) row pointers");
-        account(factor.LT_col_idx_, idx_bytes, "CSR(L^T) column indices");
-        account(factor.LT_values_, val_bytes, "CSR(L^T) values");
+        account(factor.data_.L_row_ptr, ptr_bytes, "CSR(L) row pointers");
+        account(factor.data_.L_col_idx, idx_bytes, "CSR(L) column indices");
+        account(factor.data_.L_values, val_bytes, "CSR(L) values");
+        account(factor.data_.LT_row_ptr, ptr_bytes, "CSR(L^T) row pointers");
+        account(factor.data_.LT_col_idx, idx_bytes, "CSR(L^T) column indices");
+        account(factor.data_.LT_values, val_bytes, "CSR(L^T) values");
         if (factor_fp16) {
-            account(factor.diag_, rows * sizeof(float), "fp16 scaled diagonal");
-            account(factor.inv_scale2_, rows * sizeof(double), "fp16 inverse scale squared");
+            account(factor.data_.diag, rows * sizeof(float), "fp16 scaled diagonal");
+            account(factor.data_.inv_scale2, rows * sizeof(double), "fp16 inverse scale squared");
         }
 
         const bool trace = detail::gpu_setup_diagnostics() &&
@@ -655,35 +601,35 @@ public:
 
         std::vector<int> L_ptr, LT_ptr, L_idx, LT_idx;
         std::size_t adoption_download_bytes = 0;
-        if (!factor.finalized_sorted_triangular_) {
+        if (!factor.data_.finalized_sorted_triangular) {
             L_ptr.resize(rows + 1); LT_ptr.resize(rows + 1);
             L_idx.resize(nnz); LT_idx.resize(nnz);
             APXCHOL_CUDA_CHECK(cudaMemcpy(
-                L_ptr.data(), factor.L_row_ptr_, ptr_bytes, cudaMemcpyDeviceToHost));
+                L_ptr.data(), factor.data_.L_row_ptr, ptr_bytes, cudaMemcpyDeviceToHost));
             APXCHOL_CUDA_CHECK(cudaMemcpy(
-                LT_ptr.data(), factor.LT_row_ptr_, ptr_bytes, cudaMemcpyDeviceToHost));
+                LT_ptr.data(), factor.data_.LT_row_ptr, ptr_bytes, cudaMemcpyDeviceToHost));
             APXCHOL_CUDA_CHECK(cudaMemcpy(
-                L_idx.data(), factor.L_col_idx_, idx_bytes, cudaMemcpyDeviceToHost));
+                L_idx.data(), factor.data_.L_col_idx, idx_bytes, cudaMemcpyDeviceToHost));
             APXCHOL_CUDA_CHECK(cudaMemcpy(
-                LT_idx.data(), factor.LT_col_idx_, idx_bytes, cudaMemcpyDeviceToHost));
+                LT_idx.data(), factor.data_.LT_col_idx, idx_bytes, cudaMemcpyDeviceToHost));
             adoption_download_bytes = 2 * (ptr_bytes + idx_bytes);
             mark("download CSR structure");
             const std::string structure_error =
                 cuda_host::dataflow_factor_structure_check(
-                    m, factor.nnz_, L_ptr.data(), L_idx.data(),
+                    m, factor.data_.nnz, L_ptr.data(), L_idx.data(),
                     LT_ptr.data(), LT_idx.data());
             if (!structure_error.empty())
                 throw std::invalid_argument("apxchol cuda_sptrsv adoption: " + structure_error);
         }
 
-        if (factor_fp16 && !factor.finalized_sorted_triangular_) {
+        if (factor_fp16 && !factor.data_.finalized_sorted_triangular) {
             std::vector<float> diag(rows);
             std::vector<double> inv_scale2(rows);
             APXCHOL_CUDA_CHECK(cudaMemcpy(
-                diag.data(), factor.diag_, rows * sizeof(float),
+                diag.data(), factor.data_.diag, rows * sizeof(float),
                 cudaMemcpyDeviceToHost));
             APXCHOL_CUDA_CHECK(cudaMemcpy(
-                inv_scale2.data(), factor.inv_scale2_, rows * sizeof(double),
+                inv_scale2.data(), factor.data_.inv_scale2, rows * sizeof(double),
                 cudaMemcpyDeviceToHost));
             adoption_download_bytes +=
                 rows * (sizeof(float) + sizeof(double));
@@ -700,23 +646,23 @@ public:
         size_t free_before = 0, total = 0;
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
         try {
-            cleanup_needed_ = true;
-            m_ = factor.m_;
-            nnz_ = factor.nnz_;
-            stats_ = factor.stats_;
-            fp16_ = factor_fp16;
-            fp16_flushed_ = factor.fp16_flushed_;
-            fp16_subnormal_ = factor.fp16_subnormal_;
-            adopted_device_factor_ = true;
-            adopted_cuda_device_ = current_device;
-            adoption_host_download_bytes_ = adoption_download_bytes;
-            factor_bytes_ = adopted_bytes;
+            data_.cleanup_needed = true;
+            data_.m = factor.data_.m;
+            data_.nnz = factor.data_.nnz;
+            data_.stats = factor.data_.stats;
+            data_.fp16 = factor_fp16;
+            data_.fp16_flushed = factor.data_.fp16_flushed;
+            data_.fp16_subnormal = factor.data_.fp16_subnormal;
+            data_.adopted_device_factor = true;
+            data_.adopted_cuda_device = current_device;
+            data_.adoption_host_download_bytes = adoption_download_bytes;
+            data_.factor_bytes = adopted_bytes;
 
-            APXCHOL_CUDA_CHECK(cudaMalloc(&d_x_, rows * sizeof(cuda_value_t)));
-            APXCHOL_CUDA_CHECK(cudaMalloc(&d_y_, rows * sizeof(cuda_value_t)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_x, rows * sizeof(cuda_value_t)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_y, rows * sizeof(cuda_value_t)));
             h_stage_.resize(rows);
             mark("allocate solve vectors");
-            if (factor.finalized_sorted_triangular_)
+            if (factor.data_.finalized_sorted_triangular)
                 setup_device_kernel_backend(factor);
             else
                 setup_kernel_backend(LT_ptr, L_ptr);
@@ -724,26 +670,26 @@ public:
 
             size_t free_after = 0;
             APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_after, &total));
-            device_delta_bytes_ =
+            data_.device_delta_bytes =
                 free_before >= free_after ? free_before - free_after : 0;
 
             // Final no-throw ownership commit. Until here `factor` remained the
             // sole owner of every input allocation.
-            d_L_rowptr_ = factor.L_row_ptr_;
-            d_L_colidx_ = factor.L_col_idx_;
-            d_rowPtr_ = factor.LT_row_ptr_;
-            d_colIdx_ = factor.LT_col_idx_;
-            if (fp16_) {
-                d_L_vals16_ = static_cast<__half*>(factor.L_values_);
-                d_vals16_ = static_cast<__half*>(factor.LT_values_);
-                d_diag_ = factor.diag_;
-                d_inv_scale2_ = factor.inv_scale2_;
+            data_.d_L_rowptr = factor.data_.L_row_ptr;
+            data_.d_L_colidx = factor.data_.L_col_idx;
+            data_.d_rowPtr = factor.data_.LT_row_ptr;
+            data_.d_colIdx = factor.data_.LT_col_idx;
+            if (data_.fp16) {
+                data_.d_L_vals16 = static_cast<__half*>(factor.data_.L_values);
+                data_.d_vals16 = static_cast<__half*>(factor.data_.LT_values);
+                data_.d_diag = factor.data_.diag;
+                data_.d_inv_scale2 = factor.data_.inv_scale2;
             } else {
-                d_L_vals_ = static_cast<cuda_value_t*>(factor.L_values_);
-                d_vals_ = static_cast<cuda_value_t*>(factor.LT_values_);
+                data_.d_L_vals = static_cast<cuda_value_t*>(factor.data_.L_values);
+                data_.d_vals = static_cast<cuda_value_t*>(factor.data_.LT_values);
             }
             factor.clear();
-            ready_ = true;
+            data_.ready = true;
 
             if (std::getenv("APXCHOL_VERBOSE") ||
                 std::getenv("APXCHOL_GPU_MEM_DEBUG"))
@@ -751,11 +697,11 @@ public:
                     "[apxchol] sptrsv storage GPU/dataflow adopted %s: "
                     "stored_nnz=%llu factor_device_bytes=%.1f MB "
                     "host_structure_download=%.1f MB install_delta=%.1f MB\n",
-                    fp16_ ? "fp16" : value_name,
-                    static_cast<unsigned long long>(stats_.nnz_stored),
-                    factor_bytes_ / 1e6,
-                    adoption_host_download_bytes_ / 1e6,
-                    device_delta_bytes_ / 1e6);
+                    data_.fp16 ? "fp16" : value_name,
+                    static_cast<unsigned long long>(data_.stats.nnz_stored),
+                    data_.factor_bytes / 1e6,
+                    data_.adoption_host_download_bytes / 1e6,
+                    data_.device_delta_bytes / 1e6);
         } catch (...) {
             // Factor pointers have not moved before the no-throw commit above;
             // destroy() owns only partial solve/plan allocations here.
@@ -771,11 +717,11 @@ public:
         // Narrow on the host into the staging buffer, ship half the bytes, solve
         // in fp32, ship back, widen. The host casts are O(m) and dwarfed by the
         // (now-halved) PCIe transfer they bracket.
-        for (int64_t i = 0; i < m_; ++i) h_stage_[i] = static_cast<cuda_value_t>(x_in[i]);
-        APXCHOL_CUDA_CHECK(cudaMemcpy(d_x_, h_stage_.data(), m_ * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
+        for (int64_t i = 0; i < data_.m; ++i) h_stage_[i] = static_cast<cuda_value_t>(x_in[i]);
+        APXCHOL_CUDA_CHECK(cudaMemcpy(data_.d_x, h_stage_.data(), data_.m * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
         solve_LLt_dev_impl();
-        APXCHOL_CUDA_CHECK(cudaMemcpy(h_stage_.data(), d_x_, m_ * sizeof(cuda_value_t), cudaMemcpyDeviceToHost));
-        for (int64_t i = 0; i < m_; ++i) x_out[i] = static_cast<double>(h_stage_[i]);
+        APXCHOL_CUDA_CHECK(cudaMemcpy(h_stage_.data(), data_.d_x, data_.m * sizeof(cuda_value_t), cudaMemcpyDeviceToHost));
+        for (int64_t i = 0; i < data_.m; ++i) x_out[i] = static_cast<double>(h_stage_[i]);
     }
 
     /// GPU-resident variant: input/output are DEVICE pointers. Avoids
@@ -786,31 +732,31 @@ public:
         solve_LLt_dev_impl(active, d_in, d_out);
     }
 
-    bool ready() const { return ready_; }
+    bool ready() const { return data_.ready; }
     /// What the compacting drop did at the last setup() (factor_drop.h): rel /
     /// nnz_factor / nnz_stored / dropped*.
-    const factor_drop_stats& drop_stats() const { return stats_; }
+    const factor_drop_stats& drop_stats() const { return data_.stats; }
     /// nnz the device CSR(s) hold after the last setup() (after the drop).
-    std::uint64_t stored_nnz() const { return stats_.nnz_stored; }
+    std::uint64_t stored_nnz() const { return data_.stats.nnz_stored; }
     /// Backend name for benchmark metadata.
     const char* backend_name() const { return "dataflow"; }
     /// Blocks of the persistent grid chosen at setup.
-    int dataflow_grid() const { return df_grid_; }
-    bool fp16() const { return fp16_; }
+    int dataflow_grid() const { return data_.df_grid; }
+    bool fp16() const { return data_.fp16; }
     /// Bytes per stored off-diagonal value on the device (2 under fp16).
-    std::size_t value_bytes_effective() const { return fp16_ ? 2 : value_bytes; }
+    std::size_t value_bytes_effective() const { return data_.fp16 ? 2 : value_bytes; }
     /// Device bytes of the factor arrays cudaMalloc'd by the last setup()
     /// (structure + values of every CSR copy, fp16's diag / inv_scale^2 and the
     /// dataflow batch tables; NOT the solve vectors) and the cudaMemGetInfo
     /// free-memory delta across the whole setup, at allocation granularity.
-    std::size_t factor_device_bytes() const { return factor_bytes_; }
-    std::size_t device_bytes_delta() const { return device_delta_bytes_; }
+    std::size_t factor_device_bytes() const { return data_.factor_bytes; }
+    std::size_t device_bytes_delta() const { return data_.device_delta_bytes; }
     /// True for device-factor adoption; false for host preprocessing/upload.
-    bool adopted_device_factor() const { return adopted_device_factor_; }
+    bool adopted_device_factor() const { return data_.adopted_device_factor; }
     /// Exact D2H bytes: fixed-size statistics for trusted finalized factors; complete
     /// int32 structures and fp16 metadata for externally supplied capsules.
     std::size_t adoption_host_download_bytes() const {
-        return adoption_host_download_bytes_;
+        return data_.adoption_host_download_bytes;
     }
 private:
     static void validate_backend_env() {
@@ -838,11 +784,20 @@ private:
                 " is not device memory on the recorded CUDA device");
     }
 
+    template<class Device, class Host>
+    void upload_factor(Device*& device, const Host* host, std::size_t count) {
+        static_assert(sizeof(Device) == sizeof(Host));
+        const auto bytes = count * sizeof(Device);
+        APXCHOL_CUDA_CHECK(cudaMalloc(&device, bytes));
+        data_.factor_bytes += bytes;
+        APXCHOL_CUDA_CHECK(cudaMemcpy(device, host, bytes, cudaMemcpyHostToDevice));
+    }
+
     // The dataflow backend's host-side tables (cuda_dataflow.h): no levels at
     // all -- the warp batch tables of both directions (from the CSR row
     // lengths), the m tagged words, the control ints, the resident grid.
     void setup_kernel_backend(const std::vector<int>& LT_ptr, const std::vector<int>& L_ptr) {
-        const int mi = static_cast<int>(m_);
+        const int mi = static_cast<int>(data_.m);
         const int pre = dataflow_prefetch_depth();
         // Row segmentation: each direction gets its own threshold, from its
         // own row-length histogram (the two differ a lot -- an elimination
@@ -854,24 +809,20 @@ private:
         namespace df = detail::gpu_dataflow;
         const auto fwd = df::pack(L_ptr.data(), {unsigned(mi), false}, {0, unsigned(mi)}, split_fwd);
         const auto bck = df::pack(LT_ptr.data(), {unsigned(mi), true}, {0, unsigned(mi)}, split_bck);
-        fwd_batches_ = fwd.words.size() / df::lanes;
-        bck_batches_ = bck.words.size() / df::lanes;
-        df_slots_ = std::max(fwd.slots, bck.slots);
-        df_split_rows_ = fwd.segments.size() + bck.segments.size() - fwd.slots - bck.slots;
-        auto upload = [&](auto** device, const auto& host) {
-            if (host.empty()) return;
-            const auto bytes = host.size() * sizeof(host[0]);
-            APXCHOL_CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(device), bytes));
-            factor_bytes_ += bytes;
-            APXCHOL_CUDA_CHECK(cudaMemcpy(*device, host.data(), bytes, cudaMemcpyHostToDevice));
+        data_.fwd_batches = fwd.words.size() / df::lanes;
+        data_.bck_batches = bck.words.size() / df::lanes;
+        data_.df_slots = std::max(fwd.slots, bck.slots);
+        data_.df_split_rows = fwd.segments.size() + bck.segments.size() - fwd.slots - bck.slots;
+        auto upload = [&](auto*& device, const auto& host) {
+            if (!host.empty()) upload_factor(device, host.data(), host.size());
         };
-        upload(&d_fwd_words_, fwd.words);
-        upload(&d_bck_words_, bck.words);
-        upload(&d_fwd_segments_, fwd.segments);
-        upload(&d_bck_segments_, bck.segments);
+        upload(data_.d_fwd_words, fwd.words);
+        upload(data_.d_bck_words, bck.words);
+        upload(data_.d_fwd_segments, fwd.segments);
+        upload(data_.d_bck_segments, bck.segments);
         if (std::getenv("APXCHOL_GPU_SPTRSV_STATS")) {
-            dataflow_print_direction_stats(st_L, split_fwd, false, fwd_batches_, fwd.slots, fwd.segments.size() - fwd.slots);
-            dataflow_print_direction_stats(st_LT, split_bck, true, bck_batches_, bck.slots, bck.segments.size() - bck.slots);
+            dataflow_print_direction_stats(st_L, split_fwd, false, data_.fwd_batches, fwd.slots, fwd.segments.size() - fwd.slots);
+            dataflow_print_direction_stats(st_LT, split_bck, true, data_.bck_batches, bck.slots, bck.segments.size() - bck.slots);
         }
         initialize_dataflow_state();
     }
@@ -884,25 +835,25 @@ private:
         for (int direction = 0; direction < 2; ++direction) {
             const bool reverse = direction != 0;
             const auto plan = detail::build_dataflow_device_plan(
-                static_cast<int>(m_), reverse, static_cast<int>(nnz_),
-                reverse ? factor.LT_row_ptr_ : factor.L_row_ptr_, split_min,
-                !reverse && fp16_ ? factor.diag_ : nullptr,
-                !reverse && fp16_ ? factor.inv_scale2_ : nullptr);
+                static_cast<int>(data_.m), reverse, static_cast<int>(data_.nnz),
+                reverse ? factor.data_.LT_row_ptr : factor.data_.L_row_ptr, split_min,
+                !reverse && data_.fp16 ? factor.data_.diag : nullptr,
+                !reverse && data_.fp16 ? factor.data_.inv_scale2 : nullptr);
             // Consume allocations immediately, before any operation can throw.
             // The outer setup catch then owns every partial plan via destroy().
-            (reverse ? d_bck_words_ : d_fwd_words_) = plan.words;
-            (reverse ? d_bck_segments_ : d_fwd_segments_) = plan.segments;
-            (reverse ? bck_batches_ : fwd_batches_) = plan.n_batches;
-            df_slots_ = std::max(df_slots_, plan.n_slots);
-            df_split_rows_ += plan.n_split;
-            factor_bytes_ += plan.bytes;
-            adoption_host_download_bytes_ += plan.host_download_bytes;
+            (reverse ? data_.d_bck_words : data_.d_fwd_words) = plan.words;
+            (reverse ? data_.d_bck_segments : data_.d_fwd_segments) = plan.segments;
+            (reverse ? data_.bck_batches : data_.fwd_batches) = plan.n_batches;
+            data_.df_slots = std::max(data_.df_slots, plan.n_slots);
+            data_.df_split_rows += plan.n_split;
+            data_.factor_bytes += plan.bytes;
+            data_.adoption_host_download_bytes += plan.host_download_bytes;
             if (std::getenv("APXCHOL_GPU_SPTRSV_STATS")) {
                 cuda_host::dataflow_len_stats st;
-                st.m = static_cast<int>(m_); st.nnz = nnz_;
+                st.m = static_cast<int>(data_.m); st.nnz = data_.nnz;
                 st.base = 32 * dataflow_prefetch_depth();
                 st.max_len = plan.max_len;
-                st.mean_len = static_cast<double>(nnz_) / static_cast<double>(m_);
+                st.mean_len = static_cast<double>(data_.nnz) / static_cast<double>(data_.m);
                 for (int k = 0; k < cuda_host::dataflow_len_stats::kBuckets; ++k) {
                     st.rows_ge[k] = plan.rows_ge[k]; st.nnz_ge[k] = plan.nnz_ge[k];
                 }
@@ -914,18 +865,18 @@ private:
     }
 
     void initialize_dataflow_state() {
-        const std::size_t tag_words = static_cast<std::size_t>(m_) + static_cast<std::size_t>(df_slots_);
-        APXCHOL_CUDA_CHECK(cudaMalloc(&d_df_tag_, tag_words * sizeof(unsigned)));
-        APXCHOL_CUDA_CHECK(cudaMalloc(&d_df_ticket_, sizeof(unsigned)));
-        factor_bytes_ += tag_words * sizeof(unsigned) + sizeof(unsigned);
-        df_grid_ = dataflow_grid_size(fp16_);
+        const std::size_t tag_words = static_cast<std::size_t>(data_.m) + static_cast<std::size_t>(data_.df_slots);
+        APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_df_tag, tag_words * sizeof(unsigned)));
+        APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_df_ticket, sizeof(unsigned)));
+        data_.factor_bytes += tag_words * sizeof(unsigned) + sizeof(unsigned);
+        data_.df_grid = dataflow_grid_size(data_.fp16);
 
         if (std::getenv("APXCHOL_GPU_MEM_DEBUG")) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
             fprintf(stderr,"[mem] SpTRSV dataflow: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
                     "fwd_batches=%d bck_batches=%d grid=%dx%d tag=%.1fMB slots=%d split_rows=%d | GPU free=%.2f/%.2f GB\n",
-                    2.0*nnz_*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
-                    fwd_batches_, bck_batches_, df_grid_, kDataflowBlock, tag_words * 4.0 / 1e6,
-                    df_slots_, df_split_rows_, mf/1e9, mt/1e9); }
+                    2.0*data_.nnz*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
+                    data_.fwd_batches, data_.bck_batches, data_.df_grid, kDataflowBlock, tag_words * 4.0 / 1e6,
+                    data_.df_slots, data_.df_split_rows, mf/1e9, mt/1e9); }
     }
 
     static unsigned dataflow_split_threshold_for(const cuda_host::dataflow_len_stats& stats) {
@@ -961,120 +912,93 @@ private:
     void solve_LLt_dev_impl(const unsigned* active = nullptr,
                             const double* rhs64 = nullptr, double* out64 = nullptr) const {
         // Initialize roots, then solve each direction with the shared dataflow worker.
-        const int m = static_cast<int>(m_);
-        const unsigned tag_count = unsigned(m_) + unsigned(df_slots_);
-        if (fp16_) {
-            dataflow_solve_fp16(0, m, false, d_L_rowptr_, d_L_colidx_, d_L_vals16_, d_diag_, nullptr,
-                                d_fwd_words_, d_fwd_segments_, fwd_batches_,
-                                d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_x_, d_y_, active, rhs64, nullptr);
-            dataflow_solve_fp16(0, m, true, d_rowPtr_, d_colIdx_, d_vals16_, d_diag_, d_inv_scale2_,
-                                d_bck_words_, d_bck_segments_, bck_batches_,
-                                d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_y_, d_x_, active, nullptr, out64);
+        const int m = static_cast<int>(data_.m);
+        const unsigned tag_count = unsigned(data_.m) + unsigned(data_.df_slots);
+        if (data_.fp16) {
+            dataflow_solve_fp16(0, m, false, data_.d_L_rowptr, data_.d_L_colidx, data_.d_L_vals16, data_.d_diag, nullptr,
+                                data_.d_fwd_words, data_.d_fwd_segments, data_.fwd_batches,
+                                data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_x, data_.d_y, active, rhs64, nullptr);
+            dataflow_solve_fp16(0, m, true, data_.d_rowPtr, data_.d_colIdx, data_.d_vals16, data_.d_diag, data_.d_inv_scale2,
+                                data_.d_bck_words, data_.d_bck_segments, data_.bck_batches,
+                                data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_y, data_.d_x, active, nullptr, out64);
         } else {
-            dataflow_solve(0, m, false, d_L_rowptr_, d_L_colidx_, d_L_vals_,
-                           d_fwd_words_, d_fwd_segments_, fwd_batches_,
-                           d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_x_, d_y_, active, rhs64, nullptr);
-            dataflow_solve(0, m, true, d_rowPtr_, d_colIdx_, d_vals_,
-                           d_bck_words_, d_bck_segments_, bck_batches_,
-                           d_df_tag_, tag_count, d_df_ticket_, df_grid_, d_y_, d_x_, active, nullptr, out64);
+            dataflow_solve(0, m, false, data_.d_L_rowptr, data_.d_L_colidx, data_.d_L_vals,
+                           data_.d_fwd_words, data_.d_fwd_segments, data_.fwd_batches,
+                           data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_x, data_.d_y, active, rhs64, nullptr);
+            dataflow_solve(0, m, true, data_.d_rowPtr, data_.d_colIdx, data_.d_vals,
+                           data_.d_bck_words, data_.d_bck_segments, data_.bck_batches,
+                           data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_y, data_.d_x, active, nullptr, out64);
         }
     }
 
     void destroy() noexcept {
-        // setup() calls destroy() on a pristine object. Do not turn that host-
-        // only no-op into cudaFree(nullptr): it would be eligible to create the
-        // lazy CUDA context inside the timed production setup boundary.
-        if (!cleanup_needed_) return;
+        // Pristine and pre-allocation lifetimes must not initialize CUDA.
+        if (!data_.cleanup_needed) return;
         const detail::cuda_device_scope device(
-            adopted_cuda_device_, adopted_device_factor_ && adopted_cuda_device_ >= 0);
-
-        // Free by pointer presence, not by ready_: setup/adoption exceptions can
-        // leave a valid partial allocation graph before the final ready commit.
-        cudaFree(d_L_rowptr_); cudaFree(d_L_colidx_); cudaFree(d_L_vals_); cudaFree(d_L_vals16_);
-        cudaFree(d_vals16_); cudaFree(d_diag_); cudaFree(d_inv_scale2_);
-        cudaFree(d_df_tag_); cudaFree(d_df_ticket_);
-        cudaFree(d_fwd_words_); cudaFree(d_bck_words_);
-
-        cudaFree(d_fwd_segments_); cudaFree(d_bck_segments_);
-        d_df_tag_ = nullptr; d_df_ticket_ = nullptr;
-        d_fwd_words_ = d_bck_words_ = nullptr; fwd_batches_ = bck_batches_ = 0;
-
-        d_fwd_segments_ = d_bck_segments_ = nullptr;
-        df_slots_ = df_split_rows_ = 0;
-        d_L_rowptr_ = d_L_colidx_ = nullptr;
-        d_L_vals_ = nullptr; d_L_vals16_ = nullptr;
-        d_vals16_ = nullptr; d_diag_ = nullptr; d_inv_scale2_ = nullptr;
-        df_grid_ = 0;
-        cudaFree(d_rowPtr_);
-        cudaFree(d_colIdx_);
-        cudaFree(d_vals_);
-        cudaFree(d_x_);
-        cudaFree(d_y_);
-        d_rowPtr_ = d_colIdx_ = nullptr;
-        d_vals_ = nullptr;
-        d_x_    = nullptr;
-        d_y_    = nullptr;
-        ready_ = false;
-        fp16_ = false;
-        factor_bytes_ = device_delta_bytes_ = 0;
-        fp16_flushed_ = fp16_subnormal_ = 0;
-        stats_ = factor_drop_stats{};
-        adopted_device_factor_ = false;
-        adopted_cuda_device_ = -1;
-        adoption_host_download_bytes_ = 0;
-        m_ = nnz_ = 0;
-        cleanup_needed_ = false;
+            data_.adopted_cuda_device, data_.adopted_device_factor && data_.adopted_cuda_device >= 0);
+        // Include partial setup allocations in their existing release order.
+        void* const allocations[] = {
+            data_.d_L_rowptr, data_.d_L_colidx, data_.d_L_vals, data_.d_L_vals16,
+            data_.d_vals16, data_.d_diag, data_.d_inv_scale2,
+            data_.d_df_tag, data_.d_df_ticket, data_.d_fwd_words, data_.d_bck_words,
+            data_.d_fwd_segments, data_.d_bck_segments,
+            data_.d_rowPtr, data_.d_colIdx, data_.d_vals, data_.d_x, data_.d_y};
+        for (void* allocation : allocations) (void)cudaFree(allocation);
+        data_ = {};
     }
 
-    int64_t m_ = 0;
-    int64_t nnz_ = 0;
-    bool ready_ = false;
-    bool cleanup_needed_ = false;
+    struct state {
+        int64_t m = 0;
+        int64_t nnz = 0;
+        bool ready = false;
+        bool cleanup_needed = false;
 
-    // What the compacting drop did (factor_drop.h) and the device footprint.
-    factor_drop_stats stats_;
-    std::size_t factor_bytes_ = 0;         // cudaMalloc'd factor arrays (see factor_device_bytes)
-    std::size_t device_delta_bytes_ = 0;   // cudaMemGetInfo free delta over setup
-    std::uint64_t fp16_flushed_ = 0, fp16_subnormal_ = 0;
-    bool adopted_device_factor_ = false;
-    int adopted_cuda_device_ = -1;
-    std::size_t adoption_host_download_bytes_ = 0;
+        // What the compacting drop did (factor_drop.h) and the device footprint.
+        factor_drop_stats stats;
+        std::size_t factor_bytes = 0;         // cudaMalloc'd factor arrays (see factor_device_bytes)
+        std::size_t device_delta_bytes = 0;   // cudaMemGetInfo free delta over setup
+        std::uint64_t fp16_flushed = 0, fp16_subnormal = 0;
+        bool adopted_device_factor = false;
+        int adopted_cuda_device = -1;
+        std::size_t adoption_host_download_bytes = 0;
 
-    // Device memory (values + solve vectors at cuda_value_t width).
-    int*          d_rowPtr_ = nullptr;
-    int*          d_colIdx_ = nullptr;
-    cuda_value_t* d_vals_   = nullptr;
-    cuda_value_t* d_x_      = nullptr;
-    cuda_value_t* d_y_      = nullptr;
+        // Device memory (values + solve vectors at cuda_value_t width).
+        int*          d_rowPtr = nullptr;
+        int*          d_colIdx = nullptr;
+        cuda_value_t* d_vals   = nullptr;
+        cuda_value_t* d_x      = nullptr;
+        cuda_value_t* d_y      = nullptr;
+
+        // Our dataflow backend. The stored d_* arrays are CSR
+        // of L^T (back solve); the forward solve needs CSR of L (d_L_*).
+        int*          d_L_rowptr     = nullptr;
+        int*          d_L_colidx     = nullptr;
+        cuda_value_t* d_L_vals       = nullptr;
+        // Both directions share the reset-on-sweep value tags and ticket counter.
+        unsigned* d_fwd_words = nullptr;
+        unsigned* d_bck_words = nullptr;
+        detail::gpu_dataflow::segment* d_fwd_segments = nullptr;
+        detail::gpu_dataflow::segment* d_bck_segments = nullptr;
+        int           fwd_batches = 0, bck_batches = 0;
+        int           df_slots = 0;                // extra tagged words for the segment partials
+        int           df_split_rows = 0;           // rows the plan split (both directions summed)
+        unsigned*     d_df_tag  = nullptr;
+        unsigned*     d_df_ticket       = nullptr;   // shared ticket counter
+        int           df_grid         = 0;
+        // fp16 storage (APXCHOL_FACTOR_STORAGE): binary16
+        // values of CSR(L~^T) (d_vals16, replaces d_vals) and CSR(L~)
+        // (d_L_vals16, replaces d_L_vals), the fp32 scaled diagonal and the
+        // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
+        // exact; fp32 overflows for tiny scales, see the class comment).
+        bool          fp16           = false;
+        __half*       d_vals16       = nullptr;
+        __half*       d_L_vals16     = nullptr;
+        float*        d_diag         = nullptr;
+        double*       d_inv_scale2   = nullptr;
+    } data_;
+
     // Host staging for the fp32 host-PCG boundary (narrow/widen).
     mutable std::vector<cuda_value_t> h_stage_;
-
-    // Our dataflow backend. The stored d_* arrays are CSR
-    // of L^T (back solve); the forward solve needs CSR of L (d_L_*).
-    int*          d_L_rowptr_     = nullptr;
-    int*          d_L_colidx_     = nullptr;
-    cuda_value_t* d_L_vals_       = nullptr;
-    // Both directions share the reset-on-sweep value tags and ticket counter.
-    unsigned* d_fwd_words_ = nullptr;
-    unsigned* d_bck_words_ = nullptr;
-    detail::gpu_dataflow::segment* d_fwd_segments_ = nullptr;
-    detail::gpu_dataflow::segment* d_bck_segments_ = nullptr;
-    int           fwd_batches_ = 0, bck_batches_ = 0;
-    int           df_slots_ = 0;                // extra tagged words for the segment partials
-    int           df_split_rows_ = 0;           // rows the plan split (both directions summed)
-    unsigned*     d_df_tag_  = nullptr;
-    unsigned*     d_df_ticket_       = nullptr;   // shared ticket counter
-    int           df_grid_         = 0;
-    // fp16 storage (APXCHOL_FACTOR_STORAGE): binary16
-    // values of CSR(L~^T) (d_vals16_, replaces d_vals_) and CSR(L~)
-    // (d_L_vals16_, replaces d_L_vals_), the fp32 scaled diagonal and the
-    // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
-    // exact; fp32 overflows for tiny scales, see the class comment).
-    bool          fp16_           = false;
-    __half*       d_vals16_       = nullptr;
-    __half*       d_L_vals16_     = nullptr;
-    float*        d_diag_         = nullptr;
-    double*       d_inv_scale2_   = nullptr;
 };
 
 #undef APXCHOL_CUDA_CHECK

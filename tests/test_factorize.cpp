@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "grid_laplacian.h"
 #include "scoped_env.h"
 #include "scoped_omp_threads.h"
 #include <array>
@@ -178,16 +179,7 @@ static Eigen::SparseMatrix<double> path_laplacian(int n) {
     return apxchol::laplacian(G);
 }
 
-static Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
-    apxchol::graph<> G(rows * cols);
-    auto id = [cols](int r, int c) { return r * cols + c; };
-    for (int r = 0; r < rows; ++r)
-        for (int c = 0; c < cols; ++c) {
-            if (r + 1 < rows) G.add_edge(id(r, c), id(r + 1, c), 1.0);
-            if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), 1.0);
-        }
-    return apxchol::laplacian(G);
-}
+using apxchol::test::grid_laplacian;
 
 static Eigen::SparseMatrix<double> star_laplacian(int n) {
     apxchol::graph<> G(n);

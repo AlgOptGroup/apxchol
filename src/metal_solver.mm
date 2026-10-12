@@ -336,15 +336,15 @@ using namespace dm;
 using detail::gpu_pcg::operation;
 using solve_state = dm::solve_state;
 
-void print_banner_once(const metal_solver::statistics& st) {
+void print_banner_once(const std::string& device, bool operator_df) {
     static std::once_flag flag;
     std::call_once(flag, [&] {
         if (!std::getenv("APXCHOL_VERBOSE")) return;
         std::fprintf(stderr,
                      "[apxchol] Metal PCG on %s: fp32 factor, "
                      "double-float Krylov vectors, %s operator\n",
-                     st.device.c_str(),
-                     st.operator_double_float ? "double-float" : "fp32-exact");
+                     device.c_str(),
+                     operator_df ? "double-float" : "fp32-exact");
     });
 }
 
@@ -361,7 +361,6 @@ struct metal_solver::impl {
     // the host residuals run on it.
     detail::permuted_operator_csr op;
     std::uint32_t check_every = 1;
-    statistics stats;
 
     context* ctx = nullptr;
     id<MTLCommandQueue> queue = nil;
@@ -544,16 +543,9 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     // check large solves after each iteration.
     check_every = n > 200000 ? 1 : 4;
 
-    stats.n = static_cast<Eigen::Index>(n);
-    stats.levels_forward = fwd.levels;
-    stats.levels_backward = bwd.levels;
-    stats.steps_forward = fwd.stages.size() + unsigned(m != 0);
-    stats.steps_backward = bwd.stages.size() + unsigned(m != 0);
-    stats.operator_double_float = !exact;
-    stats.device = ctx->status.name;
     if (!opts.keep_factor_values) F.L.release_values();
     if (cp) { (*cp)("metal_upload"); cp->ascend(); }
-    print_banner_once(stats);
+    print_banner_once(ctx->status.name, operator_df);
 }
 
 void metal_solver::impl::prepare_device(const cuda_host::csr_int<float>& forward,
@@ -619,7 +611,13 @@ metal_solver::metal_solver(metal_solver&&) noexcept = default;
 metal_solver& metal_solver::operator=(metal_solver&&) noexcept = default;
 
 const factorization& metal_solver::factor() const { return impl_->F; }
-metal_solver::statistics metal_solver::stats() const { return impl_->stats; }
+metal_solver::statistics metal_solver::stats() const {
+    const impl& s = *impl_;
+    return {rows(), s.fwd.levels, s.bwd.levels,
+            s.fwd.stages.size() + unsigned(s.arguments.m != 0),
+            s.bwd.stages.size() + unsigned(s.arguments.m != 0),
+            s.operator_df, s.ctx->status.name};
+}
 Eigen::Index metal_solver::rows() const { return static_cast<Eigen::Index>(impl_->n); }
 
 solve_result metal_solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,

@@ -905,12 +905,8 @@ private:
         }
         #pragma omp parallel reduction(+:before_incidence,after_incidence)
         {
-        int bal_tid = 0, bal_nt = 1;
-#ifdef _OPENMP
-        bal_tid = omp_get_thread_num(); bal_nt = omp_get_num_threads();
-#endif
         const auto [k_lo, k_hi] = detail::work_balanced_range(
-            work_prefix.data(), active.size(), bal_tid, bal_nt);
+            work_prefix.data(), active.size());
         for (std::size_t k = k_lo; k < k_hi; ++k) {
             const node_index u = active[k];
             const auto [before, after] = adj_.coalesce_slab(

@@ -147,11 +147,7 @@ bool copy_symmetric_csc_as_owned_csr(
         Eigen::Index direct_lower = 0, direct_upper = 0;
         #pragma omp parallel reduction(+ : hash_lower, hash_upper, direct_lower, direct_upper)
         {
-            int tid = 0, nt = 1;
-#ifdef _OPENMP
-            tid = omp_get_thread_num(); nt = omp_get_num_threads();
-#endif
-            const auto [lo, hi] = detail::work_balanced_range(src_outer, n, tid, nt);
+            const auto [lo, hi] = detail::work_balanced_range(src_outer, n);
             for (Eigen::Index col = lo; col < hi; ++col) {
                 dst_outer[col] = src_outer[col];
                 const int col_i = static_cast<int>(col);

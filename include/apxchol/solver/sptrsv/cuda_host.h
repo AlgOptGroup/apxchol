@@ -46,9 +46,6 @@
 #include <vector>
 
 #include "apxchol/csc_work.h"
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace apxchol::cuda_host {
 
@@ -99,12 +96,7 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
         std::vector<int> kept(static_cast<std::size_t>(m));
         #pragma omp parallel
         {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m, bal_tid, bal_nt);
+        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m);
         for (std::int64_t j = bal_lo; j < bal_hi; ++j) {
             int k = 0;
             for (edge_index p = Lo[j]; p < Lo[j + 1]; ++p)
@@ -118,12 +110,7 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
         out.vals = std::make_unique_for_overwrite<Val[]>(static_cast<std::size_t>(out.nnz));
         #pragma omp parallel
         {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m, bal_tid, bal_nt);
+        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m);
         for (std::int64_t j = bal_lo; j < bal_hi; ++j) {
             int o = out.ptr[j];
             for (edge_index p = Lo[j]; p < Lo[j + 1]; ++p) {
@@ -158,12 +145,7 @@ inline std::vector<float> column_scales(const csr_int<Val>& A) {
     std::vector<float> s(static_cast<std::size_t>(A.m));
     #pragma omp parallel
     {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-    const auto [bal_lo, bal_hi] = detail::work_balanced_range(A.ptr.data(), A.m, bal_tid, bal_nt);
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(A.ptr.data(), A.m);
     for (int j = bal_lo; j < bal_hi; ++j)
         s[j] = factor_column_scale(A.vals.get(), A.ptr[j], A.ptr[j + 1]);
     }
@@ -220,12 +202,7 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     std::uint64_t n_flush = 0;
     #pragma omp parallel reduction(+ : n_flush)
     {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-    const auto [bal_lo, bal_hi] = detail::work_balanced_range(L11.ptr.data(), L11.m, bal_tid, bal_nt);
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(L11.ptr.data(), L11.m);
     for (int j = bal_lo; j < bal_hi; ++j) {
         const float s = col_scale[j];
         out.inv_scale[j] = 1.0f / s;

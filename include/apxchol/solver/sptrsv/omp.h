@@ -611,12 +611,7 @@ private:
             std::uint64_t n_off = 0, n_flush = 0, n_sub = 0, n_fsub = 0, n_dlt = 0;
             #pragma omp parallel reduction(+ : n_off, n_flush, n_sub, n_fsub, n_dlt)
             {
-                int tid = 0, nt = 1;
-#ifdef _OPENMP
-                tid = omp_get_thread_num();
-                nt = omp_get_num_threads();
-#endif
-                const auto [first, last] = detail::work_balanced_range(L11_outer, m_, tid, nt);
+                const auto [first, last] = detail::work_balanced_range(L11_outer, m_);
                 lowprec_statistics counts;
 #if defined(__x86_64__) && !defined(__F16C__)
                 if constexpr (kScaled)

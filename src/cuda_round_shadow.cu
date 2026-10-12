@@ -4463,7 +4463,7 @@ gpu_round_shadow_device_state::finalize_device_factor(
         lv.release();
         if (column_values == ltv.get()) ltv.release(); else dropped_values.release();
     }
-    result->finalized_sorted_triangular_ = true;
+    result->data_.finalized_sorted_triangular = true;
     lp.release(); li.release(); lti.release();
     if (column_ptr == ltp.get()) ltp.release(); else dropped_ptr.release();
     const std::size_t upload = n * sizeof(node_index) +
@@ -4483,7 +4483,7 @@ gpu_round_shadow_device_state::finalize_device_factor(
 std::vector<std::byte> gpu_round_shadow_device_state::encode_finalized_factor_for_test(
         const cuda_sptrsv_device_factor& factor) const {
     impl_->require_current_device("test storage snapshot");
-    if (factor.cuda_device_ != impl_->cuda_device || factor.empty())
+    if (factor.data_.cuda_device != impl_->cuda_device || factor.empty())
         throw std::invalid_argument("GPU finalizer test snapshot device/storage mismatch");
     std::vector<std::byte> encoded;
     auto append = [&](const void* device, std::size_t bytes) {
@@ -4492,18 +4492,18 @@ std::vector<std::byte> gpu_round_shadow_device_state::encode_finalized_factor_fo
         cuda_check(cudaMemcpy(encoded.data() + start, device, bytes, cudaMemcpyDeviceToHost),
             "test finalized storage download");
     };
-    const std::size_t m = factor.m_, nnz = factor.nnz_;
-    const bool half = factor.storage_ == cuda_sptrsv_device_factor::storage::fp16_scaled;
+    const std::size_t m = factor.data_.m, nnz = factor.data_.nnz;
+    const bool half = factor.data_.format == cuda_sptrsv_device_factor::storage::fp16_scaled;
     const std::size_t value_bytes = nnz * (half ? sizeof(__half) : sizeof(float));
-    append(factor.L_row_ptr_, (m + 1) * sizeof(int));
-    append(factor.L_col_idx_, nnz * sizeof(int));
-    append(factor.L_values_, value_bytes);
-    append(factor.LT_row_ptr_, (m + 1) * sizeof(int));
-    append(factor.LT_col_idx_, nnz * sizeof(int));
-    append(factor.LT_values_, value_bytes);
+    append(factor.data_.L_row_ptr, (m + 1) * sizeof(int));
+    append(factor.data_.L_col_idx, nnz * sizeof(int));
+    append(factor.data_.L_values, value_bytes);
+    append(factor.data_.LT_row_ptr, (m + 1) * sizeof(int));
+    append(factor.data_.LT_col_idx, nnz * sizeof(int));
+    append(factor.data_.LT_values, value_bytes);
     if (half) {
-        append(factor.diag_, m * sizeof(float));
-        append(factor.inv_scale2_, m * sizeof(double));
+        append(factor.data_.diag, m * sizeof(float));
+        append(factor.data_.inv_scale2, m * sizeof(double));
     }
     return encoded;
 }

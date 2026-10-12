@@ -37,10 +37,6 @@
 #include <memory>
 #include <vector>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
 namespace apxchol {
 
 // DEFAULT relative threshold of the COMPACTING FACTOR DROP: at setup, factor
@@ -153,12 +149,7 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
     // split cannot change a result.
     #pragma omp parallel reduction(+ : n_thr, n_fmt)
     {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-    const auto [bal_lo, bal_hi] = detail::work_balanced_range(outer, m, bal_tid, bal_nt);
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(outer, m);
     for (Idx j = bal_lo; j < bal_hi; ++j) {
         const float s = col_scale[j];
         Off kept = 0;
@@ -189,12 +180,7 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
     std::unique_ptr<Val[]> drop_vals(new Val[static_cast<std::size_t>(nnz_kept)]);
     #pragma omp parallel
     {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-    const auto [bal_lo, bal_hi] = detail::work_balanced_range(outer, m, bal_tid, bal_nt);
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(outer, m);
     for (Idx j = bal_lo; j < bal_hi; ++j) {
         const float s = col_scale[j];
         const Off first = drop_outer[j];

@@ -8,6 +8,9 @@
 #include <cstdint>
 #include <cstring>
 #include <utility>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace apxchol::detail {
 
@@ -73,6 +76,18 @@ work_balanced_range(const Offset* ptr, Index n, int tid, int nt) noexcept {
         return a;
     };
     return {bound(tid), bound(tid + 1)};
+}
+
+// Use the current OpenMP team, or the whole range in a serial translation unit.
+template<class Offset, class Index>
+static inline std::pair<Index, Index>
+work_balanced_range(const Offset* ptr, Index n) noexcept {
+#ifdef _OPENMP
+    const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
+    return work_balanced_range(ptr, n, tid, nt);
+#else
+    return work_balanced_range(ptr, n, 0, 1);
+#endif
 }
 
 /// Order-independent fingerprint of one stored off-diagonal entry, keyed by its
