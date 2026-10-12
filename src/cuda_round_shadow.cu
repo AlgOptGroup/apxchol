@@ -6,6 +6,7 @@
 #include "apxchol/solver/detail/cuda_device_scope.h"
 
 #include <cub/cub.cuh>
+#include <thrust/iterator/counting_iterator.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
@@ -1763,7 +1764,8 @@ __global__ void csc_initial_incidences_warp(
         const std::uint32_t rank = __popc(mask & ((1u << lane) - 1u));
         if (kept) {
             bool paired = true;
-            const double original = -values[canonical_lower_index(ptr, idx, static_cast<int>(v), u, k, paired)];
+            const double original = -values[canonical_lower_value(
+                ptr, idx, thrust::counting_iterator<int>{0}, static_cast<int>(v), u, k, paired)];
             if (!paired) atomicOr(status, 2u);
             else {
 #ifdef APXCHOL_POOL_FP32

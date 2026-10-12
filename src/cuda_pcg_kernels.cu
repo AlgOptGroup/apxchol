@@ -4,6 +4,7 @@
 #include "apxchol/csc_work.h"
 
 #include <cub/cub.cuh>
+#include <thrust/iterator/counting_iterator.h>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -204,7 +205,8 @@ operator_fill_columns(int n, const int* outer, const int* inner,
         for (std::int64_t p = static_cast<std::int64_t>(outer[col]) + lane;
              p < outer[col + 1]; p += 32) {
             const int row = inner[p];
-            const double value = input[detail::canonical_lower_index(outer, inner, col, row, p, paired)];
+            const double value = input[detail::canonical_lower_value(
+                outer, inner, thrust::counting_iterator<int>{0}, col, row, p, paired)];
             // Input ordinal p is a unique fixed slot. Sorting this integer key
             // orders CSR rows and their columns without any floating arithmetic.
             keys[p] = (static_cast<std::uint64_t>(perm[col]) << 32) | perm[row];

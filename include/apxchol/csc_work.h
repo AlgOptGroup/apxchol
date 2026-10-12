@@ -16,12 +16,13 @@ namespace apxchol::detail {
 
 // Sorted, unique CSC storage uses the lower triangle for both symmetric entries.
 // Missing partners invalidate the caller's unpublished output.
+template<class Values>
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-inline int canonical_lower_index(const int* ptr, const int* idx,
+inline auto canonical_lower_value(const int* ptr, const int* idx, Values values,
                                   int col, int row, int p, bool& paired) {
-    if (row >= col) return p;
+    if (row >= col) return values[p];
     int lo = ptr[row], hi = ptr[row + 1];
     while (lo < hi) {
         const int mid = lo + (hi - lo) / 2;
@@ -30,9 +31,9 @@ inline int canonical_lower_index(const int* ptr, const int* idx,
     }
     if (lo == ptr[row + 1] || idx[lo] != col) {
         paired = false;
-        return p;
+        return values[p];
     }
-    return lo;
+    return values[lo];
 }
 
 /// Contiguous range [lo, hi) of the n rows/columns of a compressed matrix that
