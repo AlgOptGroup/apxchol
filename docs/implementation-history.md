@@ -116,13 +116,18 @@ independent handoff and validation; no disk format or public session API is adde
 This is a contract simplification, not a claim of universal GPU speedup. The
 frontend and owned-setup measurements below retain their historical profiles.
 
+**Mixed diagnostic setup retired (2026-10-13).** CPU elimination with GPU
+selection, mirrored GPU rounds and GPU-prefix/CPU-tail handoffs were removed.
+Public factorization uses the CPU; GPU solves complete setup on the device.
+Independent CPU oracles and test-only inspection validate the owned GPU path.
+
 **The fixed-priority GPU frontend was removed.** A historical 90-record forced
 campaign produced setup ratio 1.102. An independently implemented asynchronous
 MIS variant preserved the recorded factors and iterations in 54 bracketed
 runs, but selector time was 1.057 and enclosing partition time 1.069; setup
 was near noise at 0.989. Keeping another mode was not justified.
 
-**The block frontend is explicit opt-in.** An automatic thread-count governor
+**The former hybrid block frontend was opt-in.** An automatic thread-count governor
 was removed: host-thread count must not silently choose a different algorithm.
 The historical 270-record GH200 study found single-RHS total ratios
 0.711/0.762/0.826/0.927 at T=1/2/4/8, but 1.050 at T=16 and 1.201 at T=72,
@@ -131,7 +136,7 @@ an explicit research choice, not universal GPU dominance. Batching transfers
 and reusing resident topology were useful; a tested 2D-copy alternative did
 not justify retention.
 
-**GPU-owned setup remains explicit research functionality.** The internal
+**GPU-owned setup began as research functionality.** The internal
 consuming path supports numerical rounds on device, direct CSC/operator
 preparation, bounded selection, local row batches and device factor/plan
 construction. Host metadata and validated public/export/fallback paths remain.

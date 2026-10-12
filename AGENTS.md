@@ -279,11 +279,12 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   insufficient memory and runtime errors never trigger a CPU retry. The operator
   must have supported compressed, sorted, unique and fully paired CSC storage;
   callers can explicitly select CPU for other valid host layouts.
-- An explicit `detail::setup_route` threads through setup; production CPU/GPU
-  preconditioner specializations fix it at compile time. Legacy stage flags and
-  audited mixed-stage mechanisms remain low-level diagnostics, not end-to-end
-  solve modes. Explicit `cuda_sptrsv` host-factor import and copied capsule
-  validation remain independent facilities. No serialized factor API is added.
+- An explicit `detail::setup_route` selects complete CPU or GPU setup;
+  preconditioner specializations fix it at compile time. Public `factorize()`
+  uses CPU setup. GPU setup has no stage switches or CPU-tail continuation.
+  Explicit `cuda_sptrsv` host-factor import and copied capsule validation remain
+  independent facilities. Test-only owned-state inspection is compiled into
+  the CUDA test core, not the production library.
 - The internal GPU session shares one setup lifetime with benchmark native
   retries. It is not a new public owner API. GPU PCG builds its permuted operator
   on device; no host construction/upload fallback remains. Preserve canonical
@@ -329,9 +330,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   `APXCHOL_PRUNE_SKIP_TRACE=1` prints the audits.
 - `factor_options.sampler` / `--sampler` selects `gks` (default) or
   `trace_cycle`. Trace-cycle emits at most d edges from a degree-d star and
-  retains GKS for degree below three. CPU setup and full GPU-owned setup support
-  it; it rejects forced CPU-shadow/export combinations instead of silently
-  substituting a backend. The owned device sampler covers normal and oversized
+  retains GKS for degree below three. CPU and GPU-owned setup both support it.
+  The owned device sampler covers normal and oversized
   rows and retains per-session moment scratch. Trace-cycle retains positive
   subnormals; finite zero neighbors or unrepresentable numerical plans use
   input-only GKS fallback with the original seed before sampling. Invalid inputs

@@ -323,9 +323,6 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
 #else
     if (!runtime_available()) GTEST_SKIP()<<"CUDA unavailable";
     scoped_omp_threads serial(1);
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND","force");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW","force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
     scoped_env fp16("APXCHOL_FACTOR_STORAGE",nullptr);
     scoped_env drop("APXCHOL_FACTOR_DROP",nullptr);
     scoped_env backend("APXCHOL_GPU_SPTRSV",nullptr);
@@ -364,15 +361,12 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
 #endif
 }
 
-TEST(GpuOperatorCsr, DeviceSetupIgnoresLegacyFlagsAndRejectsUnsupportedStorage) {
+TEST(GpuOperatorCsr, DeviceSetupRejectsUnsupportedStorage) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA operator CSR required";
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "off");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "off");
     constexpr int n = 9;
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
@@ -433,9 +427,6 @@ TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", nullptr);
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", nullptr);
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", nullptr);
     constexpr int n = 5;
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
@@ -450,7 +441,8 @@ TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
     for (double scale : {1e-12, 1.0, 1e6}) {
         SCOPED_TRACE(scale);
         const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, scale);
-        const auto result = apxchol::solve(A, b, {.tol = 1e-8, .max_iter = 0});
+        const auto result = apxchol::solve(A, b, {.tol = 1e-8, .max_iter = 0,
+                                                 .backend = apxchol::solve_backend::gpu});
         ASSERT_EQ(result.x.size(), n);
         EXPECT_TRUE(result.x.isZero(0.0));
         EXPECT_EQ(result.iterations, 0);
@@ -466,9 +458,6 @@ TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", nullptr);
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", nullptr);
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", nullptr);
     constexpr int n = 5;
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {

@@ -103,52 +103,61 @@ configure_file(
 )
 
 # ── Core library: ApxChol preconditioner ─────────────
-add_library(apxchol_core
-    src/factorization.cpp
-    src/operator_class.cpp
-    src/solve.cpp
-)
-# The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
-# solely for the CLI and analyze_factor, and is linked on those targets.
-target_link_libraries(apxchol_core PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
+function(apxchol_add_core target)
+    add_library(${target} ${ARGN}
+        src/factorization.cpp
+        src/operator_class.cpp
+        src/solve.cpp
+    )
+    # The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
+    # solely for the CLI and analyze_factor, and is linked on those targets.
+    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
 
-target_include_directories(apxchol_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_BINARY_DIR}/include
-)
+    target_include_directories(${target} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_BINARY_DIR}/include
+    )
 
-if (APXCHOL_DEVICE STREQUAL "CUDA")
-    target_sources(apxchol_core PRIVATE src/cuda_dataflow.cu
-        src/cuda_block_frontend.cu src/cuda_round_shadow.cu src/cuda_pcg_kernels.cu)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_CUDA)
-    # cudart only: the SpTRSV kernels, the GPU-resident PCG's SpMV / vector
-    # kernels and its reductions are all ours; no cuSPARSE or cuBLAS.
-    target_link_libraries(apxchol_core PUBLIC CUDA::cudart)
-    set_target_properties(apxchol_core PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
-endif()
+    if (APXCHOL_DEVICE STREQUAL "CUDA")
+        target_sources(${target} PRIVATE src/cuda_dataflow.cu
+            src/cuda_block_frontend.cu src/cuda_round_shadow.cu src/cuda_pcg_kernels.cu)
+        target_compile_definitions(${target} PUBLIC APXCHOL_USE_CUDA)
+        # cudart only: the SpTRSV kernels, the GPU-resident PCG's SpMV / vector
+        # kernels and its reductions are all ours; no cuSPARSE or cuBLAS.
+        target_link_libraries(${target} PUBLIC CUDA::cudart)
+        set_target_properties(${target} PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
+    endif()
 
-if (APXCHOL_DEVICE STREQUAL "METAL")
-    target_sources(apxchol_core PRIVATE src/metal_solver.mm)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_METAL)
-    set_source_files_properties(src/metal_solver.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
-    target_compile_options(apxchol_core PRIVATE
-        "$<$<COMPILE_LANGUAGE:OBJCXX>:SHELL:${OpenMP_CXX_FLAGS}>")
-    set_target_properties(apxchol_core PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)
-    # PUBLIC: the static library hands the framework dependencies to its
-    # consumers. CoreGraphics lets MTLCreateSystemDefaultDevice find the GPU
-    # from command-line tools.
-    target_link_libraries(apxchol_core PUBLIC "-framework Metal" "-framework Foundation"
-                          "-framework CoreGraphics")
-endif()
+    if (APXCHOL_DEVICE STREQUAL "METAL")
+        target_sources(${target} PRIVATE src/metal_solver.mm)
+        target_compile_definitions(${target} PUBLIC APXCHOL_USE_METAL)
+        set_source_files_properties(src/metal_solver.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:OBJCXX>:SHELL:${OpenMP_CXX_FLAGS}>")
+        set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)
+        # PUBLIC: the static library hands the framework dependencies to its
+        # consumers. CoreGraphics lets MTLCreateSystemDefaultDevice find the GPU
+        # from command-line tools.
+        target_link_libraries(${target} PUBLIC "-framework Metal" "-framework Foundation"
+                              "-framework CoreGraphics")
+    endif()
 
-if (APXCHOL_64BIT_EDGE_INDICES)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_64BIT_EDGE_INDICES)
-endif()
-if (APXCHOL_64BIT_NODE_INDICES)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_64BIT_NODE_INDICES)
-endif()
-if (APXCHOL_POOL_FP32)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_POOL_FP32)
+    if (APXCHOL_64BIT_EDGE_INDICES)
+        target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_EDGE_INDICES)
+    endif()
+    if (APXCHOL_64BIT_NODE_INDICES)
+        target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_NODE_INDICES)
+    endif()
+    if (APXCHOL_POOL_FP32)
+        target_compile_definitions(${target} PUBLIC APXCHOL_POOL_FP32)
+    endif()
+endfunction()
+
+apxchol_add_core(apxchol_core)
+if (APXCHOL_BUILD_TESTS AND APXCHOL_DEVICE STREQUAL "CUDA")
+    # Test-only declarations must agree across the whole core and its consumers.
+    apxchol_add_core(apxchol_test_core STATIC)
+    target_compile_definitions(apxchol_test_core PUBLIC APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 endif()
 
 # ── CLI input interpretation ─────────────────────────
@@ -162,7 +171,10 @@ target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/
 # Directory settings do not reach targets in a parent add_subdirectory caller.
 # Public Eigen objects must use the same alignment/ISA configuration on both
 # sides of the library boundary. Export the architecture flag used by this build.
-foreach (_apxchol_target IN ITEMS apxchol_core apxchol_mtx_input)
+foreach (_apxchol_target IN ITEMS apxchol_core apxchol_test_core apxchol_mtx_input)
+    if (NOT TARGET ${_apxchol_target})
+        continue()
+    endif()
     target_compile_features(${_apxchol_target} PUBLIC cxx_std_23)
     if (APXCHOL_ARCH_FLAG)
         target_compile_options(${_apxchol_target} INTERFACE

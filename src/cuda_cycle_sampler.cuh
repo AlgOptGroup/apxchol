@@ -127,14 +127,13 @@ __device__ std::uint32_t gks_partner(const double* prefix, std::uint32_t i,
     return lo < end ? lo : end - 1;
 }
 
-__device__ std::uint32_t sample_gks_row(const work_record* a, std::uint32_t d,
+__device__ void sample_gks_row(const work_record* a, std::uint32_t d,
         double D, unsigned long long state, double* prefix,
         work_record* fill, std::uint8_t* flags) {
-    if (!d) return 0;
+    if (!d) return;
     gks_prefix(a, d, prefix);
     flags[d - 1] = 0;
     fill[d - 1] = {};
-    std::uint32_t emitted = 0;
     for (std::uint32_t i = 0; i + 1 < d; ++i) {
         const double suffix = prefix[d - 1] - prefix[i];
         if (suffix <= 0) {
@@ -145,27 +144,25 @@ __device__ std::uint32_t sample_gks_row(const work_record* a, std::uint32_t d,
         const auto j = gks_partner(prefix, i, d, suffix, state);
         fill[i] = {min(a[i].b, a[j].b), max(a[i].b, a[j].b), a[i].value * suffix / D};
         flags[i] = 1;
-        ++emitted;
     }
-    return emitted;
 }
 
 // Input-only numerical fallback uses the established GKS law and original seed.
-__device__ std::uint32_t cycle_gks_fallback_row(const work_record* a, std::uint32_t d,
+__device__ void cycle_gks_fallback_row(const work_record* a, std::uint32_t d,
         double D, unsigned long long state, double* prefix,
         work_record* fill, std::uint8_t* flags, std::uint32_t* status) {
     double total=0,partial=0;
     for(std::uint32_t i=0;i<d;++i) total+=a[i].value;
-    if(!isfinite(total)) {atomicOr(status,2u);return 0;}
+    if(!isfinite(total)) {atomicOr(status,2u);return;}
     for(std::uint32_t i=0;i+1<d;++i) {
         partial+=a[i].value;
         const double suffix=total-partial;
         if(suffix>0 && cycle_pool_range(a[i].value*suffix/D)==2) {
-            atomicOr(status,2u);return 0;
+            atomicOr(status,2u);return;
         }
     }
     atomicAdd(status+1,1u);
-    return sample_gks_row(a,d,D,state,prefix,fill,flags);
+    sample_gks_row(a,d,D,state,prefix,fill,flags);
 }
 
 // PERF: the plan kernel's validity scan, suffix moments and cutoff search are
@@ -222,7 +219,6 @@ __global__ void prepare_trace_plan(const work_record* canonical,
         const std::uint32_t* offsets, const device_pivot* pivots, std::size_t p,
         const double* total_degree, double* prefix, double* workspace,
         work_record* fills, std::uint8_t* fill_flags,
-        gpu_round_shadow_pivot_counter* counters,
         std::uint32_t* cut_out, unsigned long long* state_out,
         std::uint32_t* status) {
     const std::size_t ordinal=blockIdx.x*blockDim.x+threadIdx.x;
@@ -230,7 +226,7 @@ __global__ void prepare_trace_plan(const work_record* canonical,
     const auto begin=offsets[ordinal],d=offsets[ordinal+1]-begin;
     cut_out[ordinal]=d;   // default: nothing left for the item kernel
     if(d>kCycleCooperativeDegree)return;            // cooperative kernel owns this row
-    if(!d){if(counters)counters[ordinal].emitted_edges=0;return;}
+    if(!d)return;
     const auto* a=canonical+begin;auto* fill=fills+begin;auto* flags=fill_flags+begin;
     auto* sums=prefix+begin;
     const double D=total_degree[ordinal];
@@ -239,9 +235,8 @@ __global__ void prepare_trace_plan(const work_record* canonical,
     // paths below need the zeroed flags the row kernel used to clear up front.
     auto fallback=[&](bool gks_law)->void{
         for(std::uint32_t i=0;i<d;++i)flags[i]=0;
-        const auto emitted=gks_law?sample_gks_row(a,d,D,state,sums,fill,flags)
-                                  :cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
-        if(counters)counters[ordinal].emitted_edges=emitted;
+        if(gks_law)sample_gks_row(a,d,D,state,sums,fill,flags);
+        else cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
     };
     if(d<3){fallback(true);return;}
     int reason=0;
@@ -274,7 +269,6 @@ __global__ void prepare_trace_plan(const work_record* canonical,
     }
     state_out[ordinal]=state;   // post-shuffle stream: the parents draw beyond it
     cut_out[ordinal]=cut;
-    if(counters)counters[ordinal].emitted_edges=d;
 }
 
 __global__ void sample_trace_items(const work_record* canonical, std::size_t count,
@@ -335,7 +329,7 @@ __global__ void sample_large_trace_rows(const work_record* canonical,
         const std::uint32_t* offsets, const device_pivot* pivots, std::size_t p,
         const double* total_degree, double* prefix, double* workspace,
         work_record* fills, std::uint8_t* fill_flags,
-        gpu_round_shadow_pivot_counter* counters, std::uint32_t* status) {
+        std::uint32_t* status) {
     const unsigned lane=threadIdx.x%32;
     const std::size_t ordinal=(blockIdx.x*blockDim.x+threadIdx.x)/32;
     if(ordinal>=p)return;
@@ -356,18 +350,12 @@ __global__ void sample_large_trace_rows(const work_record* canonical,
     range=cycle_warp_range(range);
     if(range==2) {if(!lane)atomicOr(status,2u);return;}
     if(range==1) {
-        if(!lane) {
-            const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
-            if(counters)counters[ordinal].emitted_edges=emitted;
-        }
+        if(!lane)cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
         return;
     }
     const auto cut=cycle_trace_cut_warp(a,d,sums,workspace+begin);
     if(cut==d) {
-        if(!lane) {
-            const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
-            if(counters)counters[ordinal].emitted_edges=emitted;
-        }
+        if(!lane)cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
         return;
     }
     const auto h=d-cut;
@@ -385,10 +373,7 @@ __global__ void sample_large_trace_rows(const work_record* canonical,
     range=cycle_warp_range(range);
     if(range==2) {if(!lane)atomicOr(status,2u);return;}
     if(range==1) {
-        if(!lane) {
-            const auto emitted=cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
-            if(counters)counters[ordinal].emitted_edges=emitted;
-        }
+        if(!lane)cycle_gks_fallback_row(a,d,D,state,sums,fill,flags,status);
         return;
     }
     for(std::uint32_t k=lane;k<h;k+=32)fill[cut+k].a=cut+k;
@@ -430,5 +415,4 @@ __global__ void sample_large_trace_rows(const work_record* canonical,
         if(!cycle_pool_edge(value))atomicOr(status,2u);
         else {fill[i]={min(a[i].b,a[j].b),max(a[i].b,a[j].b),value};flags[i]=1;}
     }
-    if(!lane && counters)counters[ordinal].emitted_edges=d;
 }

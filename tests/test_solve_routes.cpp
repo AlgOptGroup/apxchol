@@ -54,10 +54,7 @@ TEST(SolveRoutes, CpuPreconditionerTypeIsIndependentOfCudaBuild) {
     SUCCEED();
 }
 
-TEST(SolveRoutes, ExplicitCpuIgnoresLegacyGpuStageFlagsAndDoesNotPrewarm) {
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "invalid");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "invalid");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "invalid");
+TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
 #if defined(APXCHOL_USE_CUDA)
     const bool started = apxchol::cuda_ctx::detail::state().started;
     if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
@@ -80,6 +77,13 @@ TEST(SolveRoutes, ExplicitCpuIgnoresLegacyGpuStageFlagsAndDoesNotPrewarm) {
     const auto reused = reusable.solve(rhs, 1e-10);
     EXPECT_EQ(reused.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, reused);
+    const auto factor = apxchol::factorize(matrix, apxchol::graph_storage::vec_pool_aos);
+    EXPECT_EQ(factor.L.vals_.size(), factor.L.nonZeros());
+    EXPECT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
+    EXPECT_EQ(factor.perm.size(), static_cast<std::size_t>(matrix.rows()));
+#if defined(APXCHOL_USE_CUDA)
+    EXPECT_FALSE(factor.research_device_factor);
+#endif
     apxchol::apx_cholesky eigen_preconditioner;
     eigen_preconditioner.compute(matrix);
     const Eigen::VectorXd applied = eigen_preconditioner.solve(rhs);
@@ -196,15 +200,12 @@ TEST(SolveRoutes, RequiredGpuPreconditionerRejectsHostFactorBeforeCuda) {
 #endif
 }
 
-TEST(SolveRoutes, AutomaticAndExplicitGpuUseOwnedSetupWithLegacyFlagsOff) {
+TEST(SolveRoutes, AutomaticAndExplicitGpuUseOwnedSetup) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA solve required";
 #else
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) GTEST_SKIP() << "CUDA unavailable";
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "off");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "off");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "off");
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (const auto backend : {apxchol::solve_backend::automatic, apxchol::solve_backend::gpu}) {
@@ -222,9 +223,6 @@ TEST(SolveRoutes, AutomaticAndExplicitGpuUseOwnedSetupWithLegacyFlagsOff) {
             expect_solution(matrix, rhs, result);
         }
     }
-    EXPECT_STREQ(std::getenv("APXCHOL_GPU_BLOCK_FRONTEND"), "off");
-    EXPECT_STREQ(std::getenv("APXCHOL_GPU_ROUND_SHADOW"), "off");
-    EXPECT_STREQ(std::getenv("APXCHOL_GPU_FACTOR_FINALIZE"), "off");
 #endif
 }
 

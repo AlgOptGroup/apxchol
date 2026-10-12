@@ -503,28 +503,12 @@ void process_vertex(const Eliminator& elim,
     double sqrt_deg = std::sqrt(total_deg);
     col.vertex = v;
     col.diag = static_cast<factor_value_t>(sqrt_deg);
-    if (ws.retain_factor_payload) {
-        col.entries = static_cast<factor_entry*>(ws.factor_entries->allocate(
-            nbrs.size() * sizeof(factor_entry), alignof(factor_entry)));
-        for (const auto& [u, w] : nbrs) {
-            std::construct_at(col.entries + col.entry_count,
-                factor_entry{u, static_cast<factor_value_t>(w / sqrt_deg)});
-            ++col.entry_count;
-        }
-    } else {
-        // The audited device log already owns this prefix. Compute the same
-        // fp32 values solely for the independent CPU digest, without allocating
-        // or constructing duplicate factor entries. Neighbor scratch, excess
-        // propagation and clique sampling below retain their existing order.
-        col.entry_count = static_cast<node_index>(nbrs.size());
-        for (const auto& [u, w] : nbrs) {
-            const auto value = static_cast<factor_value_t>(w / sqrt_deg);
-            const std::uint64_t hash = gpu_round_shadow_item_hash(
-                gpu_round_shadow_tags::factor_entry, v, u,
-                gpu_round_shadow_factor_bits(value));
-            ws.streamed_factor_entries[0] ^= hash;
-            ws.streamed_factor_entries[1] += hash;
-        }
+    col.entries = static_cast<factor_entry*>(ws.factor_entries->allocate(
+        nbrs.size() * sizeof(factor_entry), alignof(factor_entry)));
+    for (const auto& [u, w] : nbrs) {
+        std::construct_at(col.entries + col.entry_count,
+            factor_entry{u, static_cast<factor_value_t>(w / sqrt_deg)});
+        ++col.entry_count;
     }
 
     // Propagate excess to neighbors (deferred for thread safety). Runs BEFORE
@@ -554,7 +538,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                    factorize_workspace& ws,
                                    const factor_options& opts,
                                    checkpoint* cp = nullptr,
-                                   bool capture_gpu_topology = false,
                                    size_t work_hint = 0,
                                    std::vector<node_index>* live_degrees = nullptr) {
     const size_t n_verts = part.num_vertices();
@@ -568,10 +551,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
     auto output_col = [&](size_t k) -> factor_col& {
         return factor_cols[factor_base + k];
     };
-    if (capture_gpu_topology) {
-        ws.gpu_topology_updates.clear();
-        ws.gpu_topology_batches.clear();
-    }
     if (live_degrees) {
         auto& offsets = ws.degree_decrement_offsets;
         offsets.resize(n_verts + 1);
@@ -820,8 +799,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                             G.adj_atomic_push_reserved(v, es);
                         }
                     }
-                    if (!capture_gpu_topology)
-                        ws.threads[tid].edge_buffer.clear();
+                    ws.threads[tid].edge_buffer.clear();
                     // Apply excess atomically (each thread's own buffer).
                     for (auto [u, delta] : ws.threads[tid].excess_buffer)
                         G.atomic_add_excess(u, delta);
@@ -854,17 +832,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     G.set_inactive_unchecked(part.data[k]);
             }
             G.bulk_decrement_active(static_cast<node_index>(n_verts));
-
-            if (capture_gpu_topology) {
-                ws.gpu_topology_batches.reserve(ws.threads.size());
-                for (const auto& thread : ws.threads) {
-                    if (!thread.edge_buffer.empty()) {
-                        ws.gpu_topology_batches.push_back(
-                            {thread.edge_buffer.data(),
-                             thread.edge_buffer.size()});
-                    }
-                }
-            }
 
             if (cp) (*cp)("compute+apply_fused");
         } else {
@@ -917,8 +884,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 }
             }
             for (auto [u, v, w] : wt.edge_buffer) {
-                if (capture_gpu_topology)
-                    ws.gpu_topology_updates.push_back({u, v});
                 G.add_edge(u, v, w);
                 if (live_degrees) {
                     ++ws.degree_fill_edges;
@@ -946,7 +911,6 @@ void eliminate_partition(const Eliminator& elim,
                          factorize_workspace& ws,
                          const factor_options& opts,
                          checkpoint* cp = nullptr,
-                         bool capture_gpu_topology = false,
                          size_t work_hint = 0,
                          std::vector<node_index>* live_degrees = nullptr) {
     if (cp) { cp->descend("eliminate"); cp->tick(); }
@@ -965,7 +929,7 @@ void eliminate_partition(const Eliminator& elim,
     }
     const size_t factor_base = factor_cols.size();
     eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp,
-                                  capture_gpu_topology, work_hint, live_degrees);
+                                  work_hint, live_degrees);
     if (live_degrees && std::getenv("APXCHOL_INCREMENTAL_DEGREE_TRACE")) {
         const std::size_t raw = ws.degree_decrements.size();
         std::size_t unique = 0;
@@ -1131,23 +1095,14 @@ factorization factorize_impl(const Eliminator& elim,
                              Partitioner& partitioner,
                              graph<Incidence> G,
                              const factor_options& opts_in,
-                             checkpoint* cp, bool retain_host_factor = true,
-                             [[maybe_unused]] bool initial_graph_is_paired = false,
+                             checkpoint* cp,
                              const Eigen::SparseMatrix<double>* initial_csc = nullptr,
-                             detail::setup_route route = detail::setup_route::diagnostic) {
+                             detail::setup_route route = detail::setup_route::cpu) {
     const node_index n = initial_csc ? static_cast<node_index>(initial_csc->rows()) : G.n();
     if (n == 0)
         return {};
 
-    // The GPU-owned setup route pays a fixed cost per round that the host does
-    // not, so it wants a wider candidate cap. This is the one place that knows
-    // the route before the partitioner runs: the explicit policy below plus the
-    // template conditions make_gpu_round_shadow_session would otherwise reject.
-    const bool gpu_owned_setup_route =
-        std::is_same_v<Partitioner, block_greedy_partitioner> &&
-        std::is_same_v<Incidence, directed_vec_pool_incidence> &&
-        !retain_host_factor &&
-        detail::gpu_owned_setup_configured(route);
+    const bool gpu_owned_setup_route = route == detail::setup_route::gpu;
 
     // APXCHOL_OMP_THRESHOLD (experiment knob, see env_knobs.h) overrides
     // factor_options::omp_threshold for this factorization -- it flows from
@@ -1161,13 +1116,9 @@ factorization factorize_impl(const Eliminator& elim,
             o.partition.degree_quantile = gpu_owned_setup_route
                                               ? degree_quantile_device_default
                                               : degree_quantile_host_default;
-        // The device rejects the trace-cycle core rules rather than ignoring
-        // them, so the sentinel resolves to off for ANY requested GPU round
-        // shadow -- not just the full consuming route. The auditing and export
-        // paths force a shadow without meeting the consuming route's other
-        // conditions, and they throw on these knobs just the same.
+        // The device route does not implement the host trace-cycle core rules.
         if (o.exact_core_max_h == exact_core_by_route)
-            o.exact_core_max_h = detail::gpu_round_shadow_requested(route)
+            o.exact_core_max_h = gpu_owned_setup_route
                                      ? 0u : exact_core_host_default;
         return o;
     }();
@@ -1180,10 +1131,7 @@ factorization factorize_impl(const Eliminator& elim,
     if (cp) (*cp)("graph_copy");
     auto gpu_round_shadow =
         detail::make_gpu_round_shadow_session<Eliminator, Incidence>(elim,
-            !retain_host_factor && std::is_same_v<Partitioner, block_greedy_partitioner>, route);
-    const bool finalize_on_device = detail::gpu_factor_finalize_requested(route);
-    const bool omit_shadow_factor_payload = !retain_host_factor &&
-        gpu_round_shadow.active() && finalize_on_device;
+            route);
 
     // Detect SDDM: any vertex with positive excess means the matrix
     // is positive definite (not just semidefinite like a Laplacian).
@@ -1204,25 +1152,9 @@ factorization factorize_impl(const Eliminator& elim,
         for (auto& t : ws.threads) {
             t.factor_entries =
                 std::make_unique<std::pmr::monotonic_buffer_resource>();
-            t.retain_factor_payload = !omit_shadow_factor_payload;
         }
     }
     std::vector<detail::factor_col> factor_cols;
-    bool owned_factor_metadata = false;
-    auto verify_shadow_round = [&](std::size_t factor_base) {
-        if (!gpu_round_shadow.active()) return;
-        detail::gpu_round_shadow_digest streamed_entries;
-        if (omit_shadow_factor_payload) {
-            for (const auto& t : ws.threads) {
-                streamed_entries.xor_hash ^= t.streamed_factor_entries[0];
-                streamed_entries.sum_hash += t.streamed_factor_entries[1];
-            }
-        }
-        gpu_round_shadow.verify_cpu_round(
-            work, std::span<const detail::factor_col>(factor_cols).subspan(factor_base),
-            omit_shadow_factor_payload ? &streamed_entries : nullptr);
-    };
-
     constexpr bool sample_bounded = partitioner_sample_bounded_v<Partitioner>;
     constexpr size_t residual_handoff_default =
         partitioner_residual_handoff_v<Partitioner>;
@@ -1238,69 +1170,20 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<node_index> active_scratch;
 
 #if defined(APXCHOL_USE_CUDA)
-    constexpr bool gpu_block_frontend_eligible =
-        std::is_same_v<Partitioner, block_greedy_partitioner> &&
-        is_vec_pool_incidence_v<Incidence> &&
-        std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
-    std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
-    if (initial_csc) {
-        if constexpr (gpu_block_frontend_eligible &&
-                      std::is_same_v<Incidence, directed_vec_pool_incidence>) {
-            if (!omit_shadow_factor_payload)
-                throw std::logic_error("direct CSC initialization requires consuming GPU setup");
+    if (gpu_owned_setup_route) {
+        constexpr bool eligible =
+            std::is_same_v<Partitioner, block_greedy_partitioner> &&
+            std::is_same_v<Incidence, directed_vec_pool_incidence> &&
+            std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
+        if constexpr (!eligible) {
+            throw std::invalid_argument("GPU setup requires block_greedy, vec_pool_aos and the built-in sampler");
+        } else {
+            if (!initial_csc)
+                throw std::invalid_argument("GPU setup requires a supported CSC operator");
+            std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
             result.sddm = gpu_round_shadow.initialize_owned_csc(
                 detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend);
             if (cp) (*cp)("gpu_csc_initialize");
-        } else throw std::logic_error("direct CSC initialization has an unsupported strategy");
-    }
-    const auto gpu_frontend_mode =
-        detail::gpu_block_frontend::configured_block_mode(route);
-    if constexpr (!gpu_block_frontend_eligible) {
-        if (gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled)
-            throw std::invalid_argument(
-                "the GPU setup front-end requires block_greedy, pooled "
-                "graph storage and the standard tree sampler");
-    } else {
-        if (!initial_csc && gpu_frontend_mode != detail::gpu_block_frontend::mode::disabled) {
-            if (elim.exact_clique_max_degree != 0 ||
-                (elim.sampler == clique_sampler::trace_cycle &&
-                 (elim.exact_core_max_h > 3 || elim.double_cycle_min_h != 0)))
-                throw std::invalid_argument(
-                    "the GPU setup front-end requires a bounded built-in sampler "
-                    "(topology-expanding exact-clique and trace-cycle core rules are unsupported)");
-            const auto runtime = detail::gpu_block_frontend::probe_runtime(
-                n, static_cast<std::size_t>(work.m()));
-            if (!runtime.cooperative_launch || !runtime.memory_fits)
-                throw std::runtime_error(
-                    !runtime.cooperative_launch
-                        ? "the GPU setup front-end requires a CUDA device "
-                          "with cooperative-kernel launch support"
-                        : "the GPU setup front-end does not fit in currently "
-                          "free device memory");
-            if (cp) (*cp)("gpu_frontend_probe");
-            std::vector<detail::gpu_topology_edge> initial_topology;
-            initial_topology.reserve(static_cast<std::size_t>(work.m()));
-            for (node_index v = 0; v < n; ++v) {
-                for (auto idx : work.adj(v)) {
-                    const node_index u = work.edge_target(idx, v);
-                    if (v < u) initial_topology.push_back({v, u});
-                }
-            }
-            gpu_frontend = std::make_unique<detail::gpu_block_frontend>(
-                n, initial_topology);
-            if (cp) (*cp)("gpu_frontend_init");
-        }
-    }
-#endif
-
-#if defined(APXCHOL_USE_CUDA)
-    if constexpr (gpu_block_frontend_eligible &&
-                  std::is_same_v<Incidence, directed_vec_pool_incidence>) {
-        // A forced consuming factorization owns every numerical round on the
-        // device, including the under-occupied tail. CPU occupancy/yield exits
-        // are not applicable when the CPU graph is intentionally stale.
-        // Public/exported factors retain their ordinary CPU-audited route.
-        if (omit_shadow_factor_payload && gpu_frontend) {
             std::size_t previous_nnz = 0;
             bool sparsification_attempted = false;
             const char* sparse_value = std::getenv("APXCHOL_RESIDUAL_SPARSIFY");
@@ -1321,16 +1204,14 @@ factorization factorize_impl(const Eliminator& elim,
                         prep.candidate_count, active.size(), min_yield, residual_thresh,
                         opts.omp_threshold)) {
                     // This is a preview, not an eliminated/countable round.
-                    // Capture its gate inputs before a possible frontend replacement.
+                    // Capture its gate inputs before changing the residual.
                     sparsification_attempted = true;
                     const auto handoff = part.num_vertices();
                     part.clear();
                     double distinct_degree = 0.0;
                     bool worthwhile = false;
                     if (active.size() > residual_thresh && handoff) {
-                        distinct_degree = gpu_round_shadow.has_owned_residual()
-                            ? gpu_round_shadow.probe_owned_distinct_degree(active, *gpu_frontend)
-                            : detail::residual_coalescer<Incidence>::sample(work, active).avg_distinct_degree;
+                        distinct_degree = gpu_round_shadow.probe_owned_distinct_degree(active, *gpu_frontend);
                         worthwhile = detail::residual_sparsify_worthwhile(active.size(),
                             residual_thresh, handoff, distinct_degree);
                     }
@@ -1340,36 +1221,17 @@ factorization factorize_impl(const Eliminator& elim,
                             ws.round_index, active.size(), handoff, distinct_degree, int(worthwhile));
                     if (worthwhile) {
                         const auto sparse_seed = opts.seed ^ ws.round_index;
-                        if (gpu_round_shadow.has_owned_residual()) {
-                            const auto stats = gpu_round_shadow.sparsify_owned_residual(*gpu_frontend, sparse_seed);
-                            if (detail::gpu_setup_diagnostics())
-                                std::fprintf(stderr, "[gpu-owned-sparsify] implementation=device round=%zu "
-                                    "seed=%llu physical_before=%zu distinct_before=%zu kept=%zu backbone=%zu "
-                                    "expected=%.17g min_p=%.17g max_inv_p=%.17g "
-                                    "scalar_download_bytes=%zu peak_device_bytes=%zu\n",
-                                    ws.round_index, static_cast<unsigned long long>(sparse_seed),
-                                    stats.physical_before, stats.distinct_before, stats.kept_edges,
-                                    stats.backbone_edges, stats.expected_kept_edges,
-                                    stats.min_offtree_probability, stats.max_inverse_probability,
-                                    stats.scalar_download_bytes, stats.peak_device_bytes);
-                        } else {
-                            // Generic round zero still owns its host graph. Preserve
-                            // that fallback before any device numerical import.
-                            gpu_frontend.reset();
-                            const auto stats = detail::residual_coalescer<Incidence>::sparsify(
-                                work, active, detail::kResidualSparsifyKeepProbability, sparse_seed);
-                            std::vector<detail::gpu_topology_edge> topology;
-                            for (node_index v : active) for (auto idx : work.adj(v)) {
-                                const auto u = work.edge_target(idx, v);
-                                if (v < u) topology.push_back({v, u});
-                            }
-                            gpu_frontend = std::make_unique<detail::gpu_block_frontend>(n, topology);
-                            if (detail::gpu_setup_diagnostics())
-                                std::fprintf(stderr, "[gpu-owned-sparsify] implementation=host_initial round=%zu "
-                                    "seed=%llu physical_before=%zu distinct_before=%zu kept=%zu backbone=%zu\n",
-                                    ws.round_index, static_cast<unsigned long long>(sparse_seed),
-                                    stats.physical_before, stats.distinct_before, stats.kept_edges, stats.backbone_edges);
-                        }
+                        const auto stats = gpu_round_shadow.sparsify_owned_residual(*gpu_frontend, sparse_seed);
+                        if (detail::gpu_setup_diagnostics())
+                            std::fprintf(stderr, "[gpu-owned-sparsify] implementation=device round=%zu "
+                                "seed=%llu physical_before=%zu distinct_before=%zu kept=%zu backbone=%zu "
+                                "expected=%.17g min_p=%.17g max_inv_p=%.17g "
+                                "scalar_download_bytes=%zu peak_device_bytes=%zu\n",
+                                ws.round_index, static_cast<unsigned long long>(sparse_seed),
+                                stats.physical_before, stats.distinct_before, stats.kept_edges,
+                                stats.backbone_edges, stats.expected_kept_edges,
+                                stats.min_offtree_probability, stats.max_inverse_probability,
+                                stats.scalar_download_bytes, stats.peak_device_bytes);
                         if (cp) (*cp)("gpu_owned_sparsify");
                     }
                     // Reprepare even when the one-shot traffic test says keep.
@@ -1377,10 +1239,7 @@ factorization factorize_impl(const Eliminator& elim,
                     continue;
                 }
                 const auto report = gpu_round_shadow.run_owned_prefix_round(
-                    work, part.data, gpu_frontend->device_selection(), opts.seed, initial_graph_is_paired);
-                // The initial input is no longer needed after the first import.
-                // No later round, CPU fallback, or handback reads this graph.
-                if (ws.round_index == 0) work = graph<Incidence>();
+                    gpu_frontend->device_selection(), opts.seed);
                 const std::size_t nnz = report.factor_log_columns + report.factor_log_entries;
                 result.rounds.push_back({active.size(), part.num_regions(), prep.average_degree,
                     cp ? nnz - previous_nnz : 0, cp ? nnz : 0});
@@ -1402,7 +1261,6 @@ factorization factorize_impl(const Eliminator& elim,
                 ++ws.round_index;
             }
             gpu_round_shadow.complete_owned_factorization(result.perm, result.L);
-            owned_factor_metadata = true;
             gpu_frontend.reset();
             if (cp) (*cp)("gpu_owned_factorization");
         }
@@ -1483,46 +1341,11 @@ factorization factorize_impl(const Eliminator& elim,
     double last_avg_degree = 0.0;
     size_t last_candidate_count = 0;
     bool last_candidates_host_resident = false;
-#if defined(APXCHOL_USE_CUDA)
-    size_t gpu_elimination_work_hint = 0;
-#endif
     auto run_partitioner = [&](auto& p, graph<Incidence>& g,
                                std::span<const node_index> act)
         -> const partition_result& {
         using P = std::remove_reference_t<decltype(p)>;
         last_candidates_host_resident = false;
-#if defined(APXCHOL_USE_CUDA)
-        if constexpr (gpu_block_frontend_eligible &&
-                      std::is_same_v<P, block_greedy_partitioner>) {
-            if (gpu_frontend) {
-                if (cp) { cp->descend("find_partition"); cp->tick(); }
-                const auto prep = gpu_frontend->prepare(act, opts.partition);
-                last_candidate_count = prep.candidate_count;
-                last_avg_degree = prep.average_degree;
-                if (cp) (*cp)("prune");
-                // Once one resident warp is available per candidate, fixed
-                // kernel/round-trip latency dominates the region scan. The
-                // CPU graph is current already, so hand off permanently and
-                // redo this round through the ordinary CPU prepass. This is a
-                // hardware occupancy boundary, not a graph-size heuristic.
-                if (prep.candidate_count >
-                    gpu_frontend->resident_region_capacity()) {
-                    const partition_result& part =
-                        gpu_frontend->select_block_greedy();
-                    gpu_elimination_work_hint =
-                        gpu_frontend->selected_degree_work();
-                    if (cp) {
-                        (*cp)("select");
-                        (*cp)("collect");
-                        cp->ascend();
-                    }
-                    return part;
-                }
-                gpu_frontend.reset();
-                if (cp) cp->ascend();
-            }
-        }
-#endif
         sel.reset(g.n());
         last_avg_degree = 0.0;
         last_candidate_count = act.size();
@@ -1753,30 +1576,17 @@ factorization factorize_impl(const Eliminator& elim,
             elimination_work_hint =
                 static_cast<size_t>(partitioner.selected_degree_work());
         } else if constexpr (partitioner_degree_prepass_v<Partitioner>) {
-#if defined(APXCHOL_USE_CUDA)
-            if (gpu_frontend) {
-                elimination_work_hint = gpu_elimination_work_hint;
-            } else
-#endif
-            {
-                for (node_index v : part.data) {
-                    const size_t degree = static_cast<size_t>(live_degrees[v]);
-                    if (elimination_work_hint >
-                        std::numeric_limits<size_t>::max() - degree) {
-                        elimination_work_hint =
-                            std::numeric_limits<size_t>::max();
-                        break;
-                    }
-                    elimination_work_hint += degree;
+            for (node_index v : part.data) {
+                const size_t degree = static_cast<size_t>(live_degrees[v]);
+                if (elimination_work_hint >
+                    std::numeric_limits<size_t>::max() - degree) {
+                    elimination_work_hint =
+                        std::numeric_limits<size_t>::max();
+                    break;
                 }
+                elimination_work_hint += degree;
             }
         }
-        const bool capture_gpu_topology =
-#if defined(APXCHOL_USE_CUDA)
-            static_cast<bool>(gpu_frontend);
-#else
-            false;
-#endif
         const long double prune_work =
             static_cast<long double>(active.size()) * last_avg_degree;
         const long double prune_to_update = elimination_work_hint == 0
@@ -1785,9 +1595,8 @@ factorization factorize_impl(const Eliminator& elim,
         const size_t incremental_workers = detail::elimination_round_team_size(
             part.num_vertices(), elimination_work_hint, opts.omp_threshold,
             static_cast<size_t>(num_threads_factorize));
-        // Every host-resident ordinary prepass is an exact decision sample (a
-        // GPU frontend may own earlier rounds). Across the nine-graph screen
-        // the measured
+        // Every ordinary prepass is an exact decision sample. Across the
+        // nine-graph screen the measured
         // crossover lies near 10 adjacency visits per pivot update; require 16
         // for margin. A sample below the measured break-even ratio 10 is a
         // permanent OFF decision. Ratios in [10,16), and traffic-favourable
@@ -1830,39 +1639,11 @@ factorization factorize_impl(const Eliminator& elim,
                 incremental_degree_active ? 1 : 0,
                 incremental_degree_auto_decided ? 1 : 0);
         }
-        const size_t shadow_factor_base = gpu_round_shadow.active()
-            ? factor_cols.size() : 0;
-#if defined(APXCHOL_USE_CUDA)
-        detail::gpu_device_selection round_device_selection;
-        const detail::gpu_device_selection* round_device_selection_ptr = nullptr;
-        if (gpu_frontend) {
-            round_device_selection = gpu_frontend->device_selection();
-            round_device_selection_ptr = &round_device_selection;
-        }
-#endif
-        // This is the benchmark boundary for the complete FORCE-only R2b
-        // call.  Keep the tick before begin_round(): that call owns the host
-        // residual snapshot, independent reference, capacity planning and all
-        // phase-local/resident allocations in addition to the CUDA work.  The
-        // CUDA-event total reported by the sidecar intentionally cannot cover
-        // those host intervals.
-        if (cp && gpu_round_shadow.active()) cp->tick();
-        gpu_round_shadow.begin_round(
-            work, part.data, opts.seed, ws.round_index,
-            incremental_workers == 1
-#if defined(APXCHOL_USE_CUDA)
-            , round_device_selection_ptr
-#endif
-        );
-        if (cp && gpu_round_shadow.active())
-            (*cp)("gpu_round_shadow");
         detail::eliminate_partition(elim, work, part, factor_cols, ws, opts, cp,
-                                    capture_gpu_topology,
                                     elimination_work_hint,
                                     incremental_degree_active &&
                                             incremental_degree_ready
                                         ? &live_degrees : nullptr);
-        verify_shadow_round(shadow_factor_base);
         if (incremental_degree_active && incremental_degree_ready) {
             const std::size_t removed = ws.degree_removed_incidence;
             const std::size_t retired_dead =
@@ -1875,16 +1656,6 @@ factorization factorize_impl(const Eliminator& elim,
             incremental_dead_incidence -= retired_dead;
             incremental_dead_incidence += removed;
         }
-#if defined(APXCHOL_USE_CUDA)
-        if (gpu_frontend) {
-            if (gpu_round_shadow.active())
-                gpu_round_shadow.advance_selector(*gpu_frontend);
-            else
-                gpu_frontend->advance(part.data, ws.gpu_topology_updates,
-                                      ws.gpu_topology_batches);
-            if (cp) (*cp)("gpu_frontend_advance");
-        }
-#endif
         // Tally nnz added this round (only when caller wants the stats).
         if (cp) {
             size_t round_nnz = 0;
@@ -1950,7 +1721,6 @@ factorization factorize_impl(const Eliminator& elim,
                         work, active,
                         detail::kResidualSparsifyKeepProbability,
                         opts.seed ^ ws.round_index);
-                gpu_round_shadow.authoritative_host_rebuild(work);
                 if (std::getenv("APXCHOL_VERBOSE"))
                     std::fprintf(stderr,
                         "[apxchol] residual sparsify: active=%zu p=%.2f "
@@ -2089,23 +1859,10 @@ factorization factorize_impl(const Eliminator& elim,
             result.rounds.push_back({active.size(), bk_part.num_regions(),
                                      last_avg_degree, 0, 0});
             const size_t cols_before_bk =
-                (cp || gpu_round_shadow.active()) ? factor_cols.size() : 0;
-            // Match the main-loop timing boundary above.  In particular, do
-            // not let eliminate_partition()'s entry tick discard the complete
-            // sidecar call from a future R2b benchmark.
-            if (cp && gpu_round_shadow.active()) cp->tick();
-            gpu_round_shadow.begin_round(
-                work, bk_part.data, opts.seed, ws.round_index,
-                detail::elimination_round_team_size(
-                    bk_part.num_vertices(), bk.selected_degree_work(),
-                    opts.omp_threshold,
-                    static_cast<std::size_t>(num_threads_factorize)) == 1);
-            if (cp && gpu_round_shadow.active())
-                (*cp)("gpu_round_shadow");
+                cp ? factor_cols.size() : 0;
             detail::eliminate_partition(
                 elim, work, bk_part, factor_cols, ws, opts, cp,
-                /*capture_gpu_topology=*/false, bk.selected_degree_work());
-            verify_shadow_round(cols_before_bk);
+                bk.selected_degree_work());
             if (cp) {
                 size_t bk_round_nnz = 0;
                 for (size_t ci = cols_before_bk; ci < factor_cols.size(); ++ci)
@@ -2129,9 +1886,6 @@ factorization factorize_impl(const Eliminator& elim,
             ++ws.round_index;
         }
     }
-    // The tail is not present in the audited device prefix and must still be
-    // materialized on the CPU for the finalizer's existing tail upload.
-    for (auto& t : ws.threads) t.retain_factor_payload = true;
     if (!active.empty()) {
         detail::eliminate_remaining(elim, work, active, factor_cols, ws, opts);
     }
@@ -2145,7 +1899,7 @@ factorization factorize_impl(const Eliminator& elim,
     // off-diagonal count + one diagonal per column -- what assemble_csc builds).
     if (const char* e = std::getenv("APXCHOL_MEM_DUMP"); e && *e) {
         const double MB = 1.0 / (1024.0 * 1024.0);
-        size_t nnz = owned_factor_metadata ? result.L.nonZeros() : factor_cols.size();
+        size_t nnz = gpu_owned_setup_route ? result.L.nonZeros() : factor_cols.size();
         for (const auto& c : factor_cols) nnz += c.entry_count;
         double live_frac = -1.0;
         if constexpr (is_vec_pool_incidence_v<Incidence>)
@@ -2186,9 +1940,6 @@ factorization factorize_impl(const Eliminator& elim,
     // (grid_2000: ~960 MB of dead state under a 200 MB assembly; iter0040:
     // ~300 MB under 70 MB). Freeing them first moves the peak back to the
     // elimination phase itself. Pure lifetime change: bit-identical output.
-#if defined(APXCHOL_USE_CUDA)
-    gpu_frontend.reset();
-#endif
     std::vector<std::unique_ptr<std::pmr::monotonic_buffer_resource>>
         factor_entry_resources;
     factor_entry_resources.reserve(ws.threads.size());
@@ -2206,40 +1957,28 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<std::array<size_t, 256>>().swap(pre_histograms);
     std::vector<size_t>().swap(pre_filter_offsets);
 
-    bool build_host_values = true;
+    if (!gpu_owned_setup_route)
+        detail::build_csc(result, factor_cols, n, cp);
 #if defined(APXCHOL_USE_CUDA)
-    build_host_values = retain_host_factor || !finalize_on_device;
-#else
-    (void)retain_host_factor;
-#endif
-    if (!owned_factor_metadata)
-        detail::build_csc(result, factor_cols, n, cp, build_host_values);
-#if defined(APXCHOL_USE_CUDA)
-    if (finalize_on_device) {
+    if (gpu_owned_setup_route) {
         result.research_device_factor = gpu_round_shadow.finalize_device_factor(
-            factor_cols, result.perm, result.sddm ? n : n - 1, opts.factor_storage);
+            result.perm, result.sddm ? n : n - 1, opts.factor_storage);
         if (cp) (*cp)("gpu_factor_finalize");
         if (detail::gpu_setup_diagnostics()) {
-            std::size_t payload_bytes = 0;
-            std::size_t omitted_payload_bytes = owned_factor_metadata
-                ? (static_cast<std::size_t>(result.L.nonZeros()) - n) * sizeof(detail::factor_entry)
-                : 0;
-            for (const auto& column : factor_cols) {
-                const std::size_t bytes = column.entry_count * sizeof(detail::factor_entry);
-                (column.entries ? payload_bytes : omitted_payload_bytes) += bytes;
-            }
+            const std::size_t omitted_payload_bytes =
+                (static_cast<std::size_t>(result.L.nonZeros()) - n) * sizeof(detail::factor_entry);
             std::fprintf(stderr,
                 "[gpu-factor-assembly] host_csc=%s host_csc_array_bytes=%zu "
                 "host_metadata_bytes=%zu raw_factor_nnz=%zu "
                 "host_factor_entry_alloc_bytes=%zu host_factor_entry_write_bytes=%zu "
                 "host_factor_entry_omitted_bytes=%zu\n",
-                build_host_values ? "retained" : "omitted",
+                "omitted",
                 result.L.inner_.capacity() * sizeof(node_index) +
                     result.L.vals_.capacity() * sizeof(factor_value_t),
                 result.perm.size() * sizeof(node_index) +
                     result.L.outer_.size() * sizeof(edge_index),
                 static_cast<std::size_t>(result.L.nonZeros()),
-                payload_bytes, payload_bytes, omitted_payload_bytes);
+                std::size_t{0}, std::size_t{0}, omitted_payload_bytes);
         }
     }
 #endif
@@ -2267,15 +2006,11 @@ factorization factorize_impl(const Eliminator& elim,
 // the place the by-route exact-core sentinel has to be resolved, since the
 // eliminator is built here, before factorize_impl sees the options, and the
 // GPU round shadow inspects the ELIMINATOR's copy of the knob.
-//
-// The condition must match the one that rejects the knob: any requested round
-// shadow throws on it, including the auditing and export paths that never meet
-// the consuming route's other requirements.
 inline detail::tree_elimination make_tree_elim(const factor_options& opts,
-        detail::setup_route route = detail::setup_route::diagnostic) {
+        detail::setup_route route = detail::setup_route::cpu) {
     const std::size_t exact_core =
         opts.exact_core_max_h == exact_core_by_route
-            ? (detail::gpu_round_shadow_requested(route) ? 0u : exact_core_host_default)
+            ? (route == detail::setup_route::gpu ? 0u : exact_core_host_default)
             : opts.exact_core_max_h;
     return detail::tree_elimination{
         .exact_clique_max_degree = opts.exact_clique_max_degree,

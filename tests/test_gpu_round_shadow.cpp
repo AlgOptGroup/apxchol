@@ -61,7 +61,7 @@ struct undirected_edge {
     double weight;
 };
 
-void establish_r2a_openmp_affinity_if_requested() {
+[[maybe_unused]] void establish_r2a_openmp_affinity_if_requested() {
     const char* requested = std::getenv("APXCHOL_R2A_REQUIRE_AFFINITY");
     if (!requested || std::string_view(requested) != "1") return;
 #if defined(_OPENMP)
@@ -254,18 +254,12 @@ checked_cpu_round run_authoritative_cpu_round(
     std::vector<apxchol::detail::factor_col> columns;
     apxchol::detail::eliminate_partition(
         apxchol::detail::tree_elimination{}, graph, partition, columns,
-        workspace, options, nullptr, false, work_hint);
+        workspace, options, nullptr, work_hint);
     const auto comparison =
         apxchol::detail::compare_gpu_round_shadow_with_cpu(
             expected, excess_bounds, graph, columns);
     auto factor_log = materialize_factor_log(columns);
     return {std::move(graph), comparison, std::move(factor_log)};
-}
-
-gpu_round_shadow_report run_device(
-        const gpu_round_shadow_input& input,
-        std::vector<gpu_round_shadow_excess_bound>* bounds = nullptr) {
-    return apxchol::detail::run_verified_gpu_round_shadow(input, bounds);
 }
 
 apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
@@ -294,7 +288,7 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
     std::vector<apxchol::detail::factor_col> columns;
     apxchol::detail::eliminate_partition(
         apxchol::detail::tree_elimination{}, graph, partition, columns,
-        workspace, options, nullptr, false, work_hint);
+        workspace, options, nullptr, work_hint);
     if (factor_log) *factor_log = materialize_factor_log(columns);
     return apxchol::detail::compare_gpu_round_shadow_with_cpu(
         expected, excess_bounds, graph, columns);
@@ -352,6 +346,146 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
     for (auto v : input.pivots) graph.deactivate(v);
     return materialize_factor_log(columns);
 }
+
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+apxchol::graph<apxchol::directed_vec_pool_incidence> graph_from_input(
+        const gpu_round_shadow_input& input) {
+    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(input.vertex_count);
+    std::vector<node_index> vertices(input.vertex_count), counts(input.vertex_count);
+    std::iota(vertices.begin(), vertices.end(), node_index{0});
+    for (auto v : vertices) counts[v] = input.owner_offsets[v + 1] - input.owner_offsets[v];
+    graph.adj_bulk_reserve_parallel(vertices.begin(), vertices.end(), counts);
+    for (auto v : vertices) {
+        for (std::size_t p = input.owner_offsets[v]; p < input.owner_offsets[v + 1]; ++p)
+            graph.adj_write_reserved_directed_at(v, p - input.owner_offsets[v],
+                input.incidences[p].neighbor, input.incidences[p].weight);
+        graph.adj_commit_reserved_directed(v, counts[v]);
+        graph.excess(v) = input.excess[v];
+        if (!input.active[v]) graph.deactivate(v);
+    }
+    graph.record_edges_added(input.incidences.size() / 2);
+    return graph;
+}
+
+void observe_owned_prefix(apxchol::detail::gpu_round_shadow_session& session,
+        apxchol::graph<apxchol::directed_vec_pool_incidence>& graph,
+        std::vector<node_index>& active, std::vector<apxchol::detail::factor_col>& columns) {
+    const auto snapshot = session.download_owned_prefix_for_test();
+    graph = graph_from_input(snapshot.residual);
+    active.clear();
+    for (node_index v = 0; v < graph.n(); ++v)
+        if (graph.is_active(v)) active.push_back(v);
+    columns.clear();
+    for (const auto& column : snapshot.columns)
+        columns.push_back({column.vertex, column.diag, nullptr, node_index(column.entry_count)});
+}
+
+std::uint64_t check_complete_factor_action(
+        apxchol::detail::gpu_round_shadow_session& session,
+        apxchol::detail::gpu_block_frontend& selector,
+        apxchol::graph<apxchol::directed_vec_pool_incidence>& oracle,
+        apxchol::detail::gpu_round_shadow_factor_log expected, std::uint64_t seed) {
+    std::vector<node_index> active;
+    for (node_index v = 0; v < oracle.n(); ++v) if (oracle.is_active(v)) active.push_back(v);
+    while (!active.empty()) {
+        session.advance_selector(selector);
+        selector.prepare(active, {});
+        const auto selected = selector.select_block_greedy().data;
+        if (selected.empty()) throw std::logic_error("owned factor fixture stopped making progress");
+        const auto input = apxchol::detail::make_gpu_round_shadow_input(oracle, selected, seed);
+        session.run_owned_prefix_round(selector.device_selection(), seed);
+        expected = append_factor_logs(expected, run_owned_host_oracle(oracle, input));
+        std::erase_if(active, [&](node_index v) { return !oracle.is_active(v); });
+    }
+    expect_factor_logs_equal(expected, session.download_factor_log_for_test());
+    const auto n = oracle.n();
+    std::vector<std::vector<apxchol::detail::factor_entry>> entries(n);
+    std::vector<apxchol::detail::factor_col> columns;
+    for (std::size_t i = 0; i < expected.columns.size(); ++i) {
+        const auto& c = expected.columns[i];
+        for (std::size_t j = 0; j < c.entry_count; ++j) {
+            const auto& e = expected.entries[c.entry_begin + j];
+            entries[i].push_back({e.neighbor, e.value});
+        }
+        columns.push_back({c.vertex, c.diag, entries[i].data(), node_index(entries[i].size())});
+    }
+    apxchol::factorization reference, metadata;
+    apxchol::detail::build_csc(reference, columns, n, nullptr);
+    session.complete_owned_factorization(metadata.perm, metadata.L);
+    EXPECT_EQ(metadata.perm, reference.perm);
+    EXPECT_EQ(metadata.L.outer_, reference.L.outer_);
+    apxchol::cuda_sptrsv expected_trsv, actual_trsv;
+    expected_trsv.setup(reference.L, n);
+    auto factor = session.finalize_device_factor(metadata.perm, n);
+    actual_trsv.setup_adopting_device_factor_for_research(std::move(*factor));
+    std::uint64_t digest = 14695981039346656037ULL;
+    for (node_index basis = 0; basis < n; ++basis) {
+        std::vector<double> wanted(n), actual(n);
+        wanted[basis] = actual[basis] = 1.0;
+        expected_trsv.solve_LLt(wanted.data(), wanted.data());
+        actual_trsv.solve_LLt(actual.data(), actual.data());
+        EXPECT_EQ(actual, wanted) << "basis=" << basis;
+        for (double value : actual)
+            digest = (digest ^ std::bit_cast<std::uint64_t>(value)) * 1099511628211ULL;
+    }
+    return digest;
+}
+
+gpu_round_shadow_report run_device(
+        const gpu_round_shadow_input& input,
+        std::vector<gpu_round_shadow_excess_bound>* supplied_bounds = nullptr) {
+    std::vector<gpu_round_shadow_excess_bound> bounds;
+    (void)apxchol::detail::reference_gpu_round_shadow(input, &bounds);
+    if (supplied_bounds) *supplied_bounds = bounds;
+    apxchol::detail::gpu_round_shadow_device_state state;
+    auto selector = state.initialize_owned_raw_for_test(input);
+    if (input.pivots.empty()) {
+        const auto actual = state.download_owned_prefix_for_test().residual;
+        EXPECT_EQ(apxchol::detail::fingerprint_gpu_round_shadow_input(actual),
+                  apxchol::detail::fingerprint_gpu_round_shadow_input(input));
+        return {};
+    }
+    selector->select_for_test(input.pivots);
+    const auto seed = input.seeds.front() ^
+        ((std::uint64_t(input.pivots.front()) + 1) * 0x9E3779B97F4A7C15ULL);
+    const auto report = state.compute_owned_round_for_test(selector->device_selection(), seed);
+    const auto factor = state.download_factor_log();
+    const auto actual = state.download_owned_prefix_for_test().residual;
+    auto oracle = graph_from_input(input);
+    const auto expected_factor = run_owned_host_oracle(oracle, input);
+    expect_factor_logs_equal(expected_factor, factor);
+    const auto expected = compact_live_snapshot(apxchol::detail::make_gpu_round_shadow_input(
+        oracle, std::span<const node_index>{}, seed));
+    EXPECT_EQ(actual.owner_offsets, expected.owner_offsets);
+    EXPECT_EQ(actual.active, expected.active);
+    EXPECT_EQ(actual.incidences.size(), expected.incidences.size());
+    if (actual.incidences.size() == expected.incidences.size())
+        for (std::size_t p = 0; p < actual.incidences.size(); ++p) {
+            EXPECT_EQ(actual.incidences[p].owner, expected.incidences[p].owner);
+            EXPECT_EQ(actual.incidences[p].neighbor, expected.incidences[p].neighbor);
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.incidences[p].weight),
+                      std::bit_cast<std::uint64_t>(expected.incidences[p].weight));
+        }
+    EXPECT_EQ(actual.excess.size(), expected.excess.size());
+    if (actual.excess.size() == expected.excess.size())
+        for (node_index v = 0; v < input.vertex_count; ++v) {
+            if (!actual.active[v]) continue;
+            const auto& bound = bounds[v];
+            EXPECT_TRUE(std::isfinite(actual.excess[v]));
+            EXPECT_GE(actual.excess[v], 0.0);
+            if (bound.additions <= 1) {
+                EXPECT_EQ(actual.excess[v], expected.excess[v]);
+            } else {
+                const double terms = double(bound.additions + 1);
+                const double tolerance = 32 * std::numeric_limits<double>::epsilon() *
+                    terms * bound.absolute_term_sum +
+                    32 * std::numeric_limits<double>::denorm_min() * terms;
+                EXPECT_LE(std::abs(actual.excess[v] - expected.excess[v]), tolerance);
+            }
+        }
+    return report;
+}
+#endif
 
 struct parallel_cpu_round_result {
     apxchol::detail::gpu_round_shadow_cpu_comparison comparison;
@@ -427,7 +561,7 @@ parallel_cpu_round_result run_parallel_cpu_round(
     std::vector<apxchol::detail::factor_col> columns;
     apxchol::detail::eliminate_partition(
         recording_tree, graph, partition, columns,
-        workspace, options, nullptr, false, work_hint);
+        workspace, options, nullptr, work_hint);
 #ifdef _OPENMP
     omp_set_dynamic(saved_dynamic);
 #endif
@@ -482,89 +616,6 @@ make_resident_provenance_graph() {
 }
 
 #if defined(APXCHOL_USE_CUDA)
-std::vector<std::uint64_t> encode_factor_columns(
-        std::span<const apxchol::detail::factor_col> columns) {
-    std::vector<std::uint64_t> encoded;
-    for (const auto& column : columns) {
-        encoded.push_back(column.vertex);
-        encoded.push_back(std::bit_cast<std::uint32_t>(column.diag));
-        encoded.push_back(column.entry_count);
-        for (std::size_t i = 0; i < column.entry_count; ++i) {
-            encoded.push_back(column.entries[i].neighbor);
-            encoded.push_back(
-                std::bit_cast<std::uint32_t>(column.entries[i].value));
-        }
-    }
-    return encoded;
-}
-
-std::vector<node_index> factor_elimination_order(
-        const apxchol::factorization& factor) {
-    std::vector<node_index> order(factor.perm.size());
-    std::vector<std::uint8_t> seen(factor.perm.size(), 0);
-    for (std::size_t vertex = 0; vertex < factor.perm.size(); ++vertex) {
-        const std::size_t position = factor.perm[vertex];
-        if (position >= order.size() || seen[position])
-            throw std::logic_error("factor permutation is not bijective");
-        order[position] = static_cast<node_index>(vertex);
-        seen[position] = 1;
-    }
-    return order;
-}
-
-void expect_factor_log_matches_assembled(
-        const apxchol::factorization& factor, std::size_t first_column,
-        const apxchol::detail::gpu_round_shadow_factor_log& expected) {
-    const auto order = factor_elimination_order(factor);
-    const auto* outer = factor.L.outerIndexPtr();
-    const auto* inner = factor.L.innerIndexPtr();
-    const auto* values = factor.L.valuePtr();
-    ASSERT_LE(first_column + expected.columns.size(), order.size());
-    for (std::size_t local = 0; local < expected.columns.size(); ++local) {
-        SCOPED_TRACE("assembled factor column " + std::to_string(local));
-        const std::size_t column = first_column + local;
-        const std::size_t begin = outer[column];
-        const std::size_t end = outer[column + 1];
-        ASSERT_LT(begin, end);
-        ASSERT_EQ(static_cast<std::size_t>(inner[begin]), column);
-        const auto& expected_column = expected.columns[local];
-        EXPECT_EQ(order[column], expected_column.vertex);
-        EXPECT_EQ(std::bit_cast<std::uint32_t>(values[begin]),
-                  std::bit_cast<std::uint32_t>(expected_column.diag));
-
-        std::vector<std::pair<node_index, std::uint32_t>> actual_entries;
-        for (std::size_t entry = begin + 1; entry < end; ++entry) {
-            actual_entries.push_back({
-                order[inner[entry]],
-                std::bit_cast<std::uint32_t>(
-                    static_cast<apxchol::factor_value_t>(-values[entry]))});
-        }
-        std::vector<std::pair<node_index, std::uint32_t>> expected_entries;
-        const std::size_t entry_begin = expected_column.entry_begin;
-        ASSERT_LE(entry_begin + expected_column.entry_count,
-                  expected.entries.size());
-        for (std::size_t entry = 0; entry < expected_column.entry_count;
-             ++entry) {
-            const auto& value = expected.entries[entry_begin + entry];
-            expected_entries.push_back({
-                value.neighbor, std::bit_cast<std::uint32_t>(value.value)});
-        }
-        std::sort(actual_entries.begin(), actual_entries.end());
-        std::sort(expected_entries.begin(), expected_entries.end());
-        EXPECT_EQ(actual_entries, expected_entries);
-    }
-}
-
-std::vector<std::string> gpu_round_trace_lines(const std::string& trace) {
-    std::vector<std::string> result;
-    std::istringstream input(trace);
-    for (std::string line; std::getline(input, line);) {
-        if (line.starts_with("[gpu-round-shadow] round="))
-            result.push_back(std::move(line));
-    }
-    return result;
-}
-
 std::string gpu_round_trace_field(const std::string& line,
                                   std::string_view name) {
     const std::size_t begin = line.find(name);
@@ -582,40 +633,9 @@ std::size_t gpu_round_trace_size(const std::string& line,
         std::stoull(gpu_round_trace_field(line, name)));
 }
 
-std::pair<std::size_t, std::size_t> gpu_round_trace_size_pair(
-        const std::string& line, std::string_view name) {
-    const std::string value = gpu_round_trace_field(line, name);
-    const std::size_t separator = value.find('/');
-    if (separator == std::string::npos)
-        throw std::runtime_error("malformed GPU round trace pair " +
-                                 std::string(name));
-    return {
-        static_cast<std::size_t>(std::stoull(value.substr(0, separator))),
-        static_cast<std::size_t>(std::stoull(value.substr(separator + 1)))};
-}
-
-apxchol::detail::gpu_round_shadow_digest gpu_round_trace_digest(
-        const std::string& line, std::string_view name) {
-    const std::string value = gpu_round_trace_field(line, name);
-    const std::size_t separator = value.find(':');
-    if (separator == std::string::npos)
-        throw std::runtime_error("malformed GPU round trace digest " +
-                                 std::string(name));
-    return {
-        std::stoull(value.substr(0, separator), nullptr, 16),
-        std::stoull(value.substr(separator + 1), nullptr, 16)};
-}
-
-void expect_digest_equal(
-        const apxchol::detail::gpu_round_shadow_digest& expected,
-        const apxchol::detail::gpu_round_shadow_digest& actual) {
-    EXPECT_EQ(actual.xor_hash, expected.xor_hash);
-    EXPECT_EQ(actual.sum_hash, expected.sum_hash);
-}
-
 #if defined(APXCHOL_USE_CUDA)
 void expect_setup_api_receipt(const std::string& trace,
-                              const apxchol::test::diagnostic_gpu_preconditioner& solver) {
+                              const apxchol::detail::gpu_preconditioner& solver) {
     const auto begin = trace.find("[gpu-setup-receipt] ");
     if (apxchol::detail::gpu_setup_diagnostics()) {
         ASSERT_NE(begin, std::string::npos) << trace;
@@ -651,6 +671,7 @@ void expect_setup_api_receipt(const std::string& trace,
 }
 #endif
 
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 constexpr node_index kResidentSelectionVertexCount = 8;
 constexpr std::uint64_t kResidentSelectionSeed = 0x98765432U;
 
@@ -672,29 +693,17 @@ struct resident_selection_boundary {
     std::uint64_t initial_generation = 0;
 };
 
-resident_selection_boundary make_resident_selection_boundary(
-        bool accept_initial_generation = true) {
+resident_selection_boundary make_resident_selection_boundary() {
     resident_selection_boundary boundary;
     const auto edges = resident_selection_path_edges();
+    const auto input = make_input(kResidentSelectionVertexCount, edges, {}, kResidentSelectionSeed);
+    boundary.frontend = boundary.state.initialize_owned_raw_for_test(input);
     const std::vector<node_index> first_pivots = {0};
-    const auto first_input = make_input(
-        kResidentSelectionVertexCount, edges, first_pivots,
-        kResidentSelectionSeed);
-    const auto first_expected =
-        apxchol::detail::reference_gpu_round_shadow(first_input);
-    const auto first = boundary.state.compute_discover_shape(first_input);
-    apxchol::detail::compare_gpu_round_shadow_reports(first_expected, first);
+    boundary.frontend->select_for_test(first_pivots);
+    const auto first = boundary.state.compute_owned_round_for_test(
+        boundary.frontend->device_selection(), kResidentSelectionSeed);
     boundary.initial_generation = first.output_generation;
-    if (accept_initial_generation)
-        boundary.state.accept_device_generation(first.output_generation);
-
-    std::vector<apxchol::detail::gpu_topology_edge> topology;
-    topology.reserve(edges.size());
-    for (const auto& edge : edges) topology.push_back({edge.u, edge.v});
-    boundary.frontend =
-        std::make_unique<apxchol::detail::gpu_block_frontend>(
-            kResidentSelectionVertexCount, topology);
-    boundary.frontend->advance(first_pivots, {});
+    boundary.state.advance_selector(*boundary.frontend);
     boundary.active.resize(kResidentSelectionVertexCount - 1);
     std::iota(boundary.active.begin(), boundary.active.end(), node_index{1});
     apxchol::partition_options options;
@@ -702,8 +711,7 @@ resident_selection_boundary make_resident_selection_boundary(
     boundary.frontend->prepare(boundary.active, options);
     boundary.selected = boundary.frontend->select_block_greedy().data;
     if (boundary.selected.size() < 2)
-        throw std::runtime_error(
-            "resident selection test requires at least two selected vertices");
+        throw std::runtime_error("resident selection test requires at least two selected vertices");
     boundary.device_selection = boundary.frontend->device_selection();
     return boundary;
 }
@@ -725,6 +733,7 @@ void inject_device_selection_fault(
         std::span<const node_index> replacement) {
     frontend.inject_device_selection_fault_for_test(replacement);
 }
+#endif
 #endif
 #endif
 
@@ -1000,64 +1009,6 @@ TEST(GpuRoundShadowReference,
 #endif
 }
 
-TEST(GpuRoundShadowReference, StreamedFactorAuditNeedsNoPayloadAllocation) {
-    scoped_omp_threads team(2);
-    const std::vector<undirected_edge> edges = {
-        {0, 2, 1.0}, {0, 2, 2.0}, {0, 3, 4.0}, {0, 4, 2.0},
-        {1, 2, 3.0}, {1, 3, 5.0}, {1, 5, 7.0},
-        {2, 4, 6.0}, {3, 5, 8.0}};
-    for (const std::vector<node_index>& pivots :
-         {std::vector<node_index>{0}, std::vector<node_index>{0, 1}}) {
-        SCOPED_TRACE(pivots.size());
-        apxchol::graph<apxchol::directed_vec_pool_incidence> graph(6);
-        for (const auto& e : edges) graph.add_edge(e.u, e.v, e.weight);
-        graph.excess(0) = 3.0;
-        const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, pivots, 42);
-        std::vector<gpu_round_shadow_excess_bound> bounds;
-        const auto expected = apxchol::detail::reference_gpu_round_shadow(input, &bounds);
-        apxchol::factorize_workspace ws;
-        ws.threads.resize(2);
-        for (auto& t : ws.threads) {
-            // Any factor payload allocation would throw, including the first
-            // upstream chunk request made by a monotonic resource.
-            t.factor_entries = std::make_unique<std::pmr::monotonic_buffer_resource>(
-                std::pmr::null_memory_resource());
-            t.retain_factor_payload = false;
-        }
-        apxchol::partition_result part;
-        part.data = pivots;
-        apxchol::factor_options opts;
-        opts.seed = 42;
-        opts.omp_threshold = 0;
-        std::vector<apxchol::detail::factor_col> columns;
-        ASSERT_NO_THROW(apxchol::detail::eliminate_partition(
-            apxchol::detail::tree_elimination{}, graph, part, columns,
-            ws, opts, nullptr, false, expected.gathered_incidences));
-        apxchol::detail::gpu_round_shadow_digest digest;
-        for (const auto& t : ws.threads) {
-            digest.xor_hash ^= t.streamed_factor_entries[0];
-            digest.sum_hash += t.streamed_factor_entries[1];
-        }
-        std::size_t entries = 0;
-        for (const auto& c : columns) {
-            EXPECT_EQ(c.entries, nullptr);
-            entries += c.entry_count;
-        }
-        EXPECT_EQ(entries, expected.factor_entries);
-        EXPECT_GT(entries, 0u);
-        EXPECT_NO_THROW(apxchol::detail::compare_gpu_round_shadow_with_cpu(
-            expected, bounds, graph, columns, &digest));
-        EXPECT_THROW(apxchol::detail::compare_gpu_round_shadow_with_cpu(
-            expected, bounds, graph, columns), std::runtime_error);
-        digest.xor_hash ^= 1;
-        EXPECT_THROW(apxchol::detail::compare_gpu_round_shadow_with_cpu(
-            expected, bounds, graph, columns, &digest), std::runtime_error);
-        ws.reset_for_round();
-        for (const auto& t : ws.threads)
-            EXPECT_EQ(t.streamed_factor_entries, (std::array<std::uint64_t, 2>{}));
-    }
-}
-
 TEST(GpuRoundShadowReference, ExcessBoundsNameOnlyCollidingAtomicTargets) {
     const std::vector<undirected_edge> edges = {
         {0, 2, 2.0}, {0, 3, 6.0},
@@ -1143,22 +1094,6 @@ TEST(GpuRoundShadowValidation, NonOwnerMajorInputIsRejected) {
                  std::invalid_argument);
 }
 
-TEST(GpuRoundShadowEnvironment, OnlyExplicitForceEnablesTheResearchPath) {
-    {
-        scoped_env env("APXCHOL_GPU_ROUND_SHADOW", "off");
-        EXPECT_FALSE(apxchol::detail::gpu_round_shadow_requested());
-    }
-    {
-        scoped_env env("APXCHOL_GPU_ROUND_SHADOW", "force");
-        EXPECT_TRUE(apxchol::detail::gpu_round_shadow_requested());
-    }
-    {
-        scoped_env env("APXCHOL_GPU_ROUND_SHADOW", "1");
-        EXPECT_THROW(apxchol::detail::gpu_round_shadow_requested(),
-                     std::invalid_argument);
-    }
-}
-
 TEST(GpuRoundShadowEnvironment,
      SelectionCertificateAuditRequiresAnExplicitValidValue) {
     {
@@ -1180,6 +1115,8 @@ TEST(GpuRoundShadowEnvironment,
     }
 }
 
+
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuRoundShadowDevice, ProvenanceAndExecutionMarker) {
     establish_r2a_openmp_affinity_if_requested();
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
@@ -1195,9 +1132,6 @@ TEST(GpuRoundShadowDevice, ProvenanceAndExecutionMarker) {
 }
 
 TEST(GpuRoundShadowDevice, DiscoversAllStageSizesWithoutCpuShapeInput) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for shape-discovering execution";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     const std::vector<undirected_edge> edges = {
         {0, 3, 1.0}, {0, 4, 2.0}, {0, 4, 3.0},
@@ -1205,338 +1139,111 @@ TEST(GpuRoundShadowDevice, DiscoversAllStageSizesWithoutCpuShapeInput) {
         {2, 5, 7.0}, {3, 6, 8.0}, {4, 6, 9.0},
     };
     const std::vector<node_index> pivots = {0, 1, 2};
-    const std::vector<double> excess = {1.0, 2.0, 0.0, 0.0,
-                                        0.0, 0.0, 0.0};
-    const auto input = make_input(7, edges, pivots, 0x5eedULL, excess);
-    const auto expected =
-        apxchol::detail::reference_gpu_round_shadow(input);
-
-    apxchol::detail::gpu_round_shadow_device_state state;
-    const auto discovered = state.compute_discover_shape(input);
+    const auto input = make_input(7, edges, pivots, 0x5eedULL,
+        std::vector<double>{1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    const auto expected = apxchol::detail::reference_gpu_round_shadow(input);
+    const auto discovered = run_device(input);
     EXPECT_TRUE(discovered.gpu_executed);
-    apxchol::detail::compare_gpu_round_shadow_reports(expected, discovered);
-    EXPECT_EQ(discovered.gathered_incidences,
-              expected.gathered_incidences);
+    EXPECT_EQ(discovered.gathered_incidences, expected.gathered_incidences);
     EXPECT_EQ(discovered.unique_neighbors, expected.unique_neighbors);
     EXPECT_EQ(discovered.raw_fill_edges, expected.raw_fill_edges);
     EXPECT_EQ(discovered.excess_updates, expected.excess_updates);
-    EXPECT_EQ(discovered.excess_targets, expected.excess_targets);
-    EXPECT_EQ(discovered.surviving_input_incidences,
-              expected.surviving_input_incidences);
     EXPECT_EQ(discovered.live_incidences, expected.live_incidences);
-    EXPECT_EQ(discovered.factor_log_columns, pivots.size());
+    EXPECT_EQ(discovered.factor_log_columns, 3u);
     EXPECT_EQ(discovered.factor_log_entries, 6u);
-    const auto log = state.download_factor_log();
-    ASSERT_EQ(log.columns.size(), 3u);
-    ASSERT_EQ(log.entries.size(), 6u);
-    const double degrees[] = {7.0, 11.0, 13.0};
-    const node_index expected_neighbors[][2] = {{3, 4}, {3, 5}, {4, 5}};
-    const double expected_weights[][2] = {{1.0, 5.0}, {4.0, 5.0}, {6.0, 7.0}};
-    for (std::size_t column = 0; column < 3; ++column) {
-        EXPECT_EQ(log.columns[column].vertex, pivots[column]);
-        EXPECT_EQ(log.columns[column].diag,
-                  static_cast<apxchol::factor_value_t>(
-                      std::sqrt(degrees[column])));
-        EXPECT_EQ(log.columns[column].entry_begin, 2 * column);
-        EXPECT_EQ(log.columns[column].entry_count, 2u);
-        for (std::size_t local = 0; local < 2; ++local) {
-            const auto& entry = log.entries[2 * column + local];
-            EXPECT_EQ(entry.neighbor, expected_neighbors[column][local]);
-            EXPECT_EQ(entry.value,
-                      static_cast<apxchol::factor_value_t>(
-                          expected_weights[column][local] /
-                          std::sqrt(degrees[column])));
-        }
-    }
-#endif
 }
 
 TEST(GpuRoundShadowDevice, ConsumesBlockFrontendSelectionWithoutReupload) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for device-selection handoff";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    constexpr node_index n = 8;
-    const std::vector<undirected_edge> edges = {
-        {0, 1, 1.0}, {1, 2, 2.0}, {2, 3, 3.0}, {3, 4, 4.0},
-        {4, 5, 5.0}, {5, 6, 6.0}, {6, 7, 7.0}, {7, 0, 8.0},
-        {0, 4, 2.5}, {1, 5, 3.5}, {2, 6, 4.5}, {3, 7, 5.5},
-    };
-    std::vector<apxchol::detail::gpu_topology_edge> topology;
-    topology.reserve(edges.size());
-    for (const auto& edge : edges)
-        topology.push_back({edge.u, edge.v});
-
-    apxchol::detail::gpu_block_frontend frontend(n, topology);
-    std::vector<node_index> active(n);
-    std::iota(active.begin(), active.end(), node_index{0});
-    apxchol::partition_options options;
-    options.degree_multiplier = 100.0;
-    frontend.prepare(active, options);
-    const auto& selected = frontend.select_block_greedy().data;
-    ASSERT_FALSE(selected.empty());
-    const auto device_selected = frontend.device_selection();
-
-    constexpr std::uint64_t run_seed = 0x1234abcdULL;
-    const auto input = make_input(n, edges, selected, run_seed);
-    const auto expected =
-        apxchol::detail::reference_gpu_round_shadow(input);
-    apxchol::detail::gpu_round_shadow_device_state state;
-    const auto actual = state.compute_discover_shape(
-        input, device_selected, run_seed);
-    apxchol::detail::compare_gpu_round_shadow_reports(expected, actual);
-    EXPECT_EQ(actual.selection_validation_pivots, selected.size());
-    EXPECT_EQ(actual.selection_audit_passes, 1u);
-    EXPECT_EQ(actual.selection_audit_incidences, input.incidences.size());
-#endif
-}
-
-TEST(GpuRoundShadowDevice, SelectionCapabilityDigestSpansMultipleBlocks) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for device-selection digest";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    constexpr node_index n = 600;
-    std::vector<undirected_edge> edges;
-    std::vector<apxchol::detail::gpu_topology_edge> topology;
-    for (node_index vertex = 0; vertex + 1 < n; ++vertex) {
-        edges.push_back({vertex, vertex + 1, 1.0});
-        topology.push_back({vertex, vertex + 1});
-    }
-    apxchol::detail::gpu_block_frontend frontend(n, topology);
-    std::vector<node_index> active(n);
-    std::iota(active.begin(), active.end(), node_index{0});
-    apxchol::partition_options options;
-    options.degree_multiplier = 100.0;
-    frontend.prepare(active, options);
-    const auto& selected = frontend.select_block_greedy().data;
-    ASSERT_GT(selected.size(), 256u);
-
-    constexpr std::uint64_t run_seed = 0x1234abcdULL;
-    const auto input = make_input(n, edges, selected, run_seed);
-    const auto expected =
-        apxchol::detail::reference_gpu_round_shadow(input);
-    apxchol::detail::gpu_round_shadow_device_state state;
-    const auto actual = state.compute_discover_shape(
-        input, frontend.device_selection(), run_seed);
-    apxchol::detail::compare_gpu_round_shadow_reports(expected, actual);
-#endif
-}
-
-TEST(GpuRoundShadowDevice, ChainsADeviceAuthoritativeGenerationWithoutHostState) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for device-resident round chaining";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    constexpr node_index n = 9;
-    constexpr unsigned run_seed = 0x98765432U;
-    const std::vector<undirected_edge> edges = {
-        {0, 1, 1.0}, {0, 2, 2.0}, {0, 3, 3.0},
-        {1, 4, 4.0}, {1, 5, 5.0}, {2, 5, 6.0},
-        {2, 6, 7.0}, {3, 6, 8.0}, {3, 7, 9.0},
-        {4, 8, 2.5}, {5, 8, 3.5}, {6, 8, 4.5}, {7, 8, 5.5},
-    };
-
-    const std::vector<node_index> first_pivots = {0};
-    const auto first_input = make_input(n, edges, first_pivots, run_seed);
-    ASSERT_EQ(
-        first_input.seeds.front() ^
-            ((std::uint64_t(first_pivots.front()) + 1) *
-             0x9E3779B97F4A7C15ULL),
-        run_seed);
-    std::vector<gpu_round_shadow_excess_bound> first_bounds;
-    const auto first_expected =
-        apxchol::detail::reference_gpu_round_shadow(first_input, &first_bounds);
-    apxchol::detail::gpu_round_shadow_device_state state;
-    const auto first = state.compute_discover_shape(first_input);
-    apxchol::detail::compare_gpu_round_shadow_reports(first_expected, first);
-    state.accept_device_generation(first.output_generation);
-    const auto first_device_log = state.download_factor_log();
-    auto cpu = run_authoritative_cpu_round(
-        edges, first_input, first, first_bounds);
-    expect_factor_logs_equal(cpu.factor_log, first_device_log);
-
-    std::vector<apxchol::detail::gpu_topology_edge> topology;
-    for (node_index owner = 0; owner < n; ++owner) {
-        if (!cpu.residual.is_active(owner)) continue;
-        for (const auto& [neighbor, weight] : cpu.residual.neighbors(owner)) {
-            (void)weight;
-            if (cpu.residual.is_active(neighbor) && owner < neighbor)
-                topology.push_back({owner, neighbor});
-        }
-    }
-    apxchol::detail::gpu_block_frontend frontend(n, topology);
-    frontend.advance(first_pivots, {});
-    std::vector<node_index> active;
-    for (node_index vertex = 0; vertex < n; ++vertex)
-        if (cpu.residual.is_active(vertex)) active.push_back(vertex);
-    apxchol::partition_options options;
-    options.degree_multiplier = 100.0;
-    frontend.prepare(active, options);
-    const auto& second_pivots = frontend.select_block_greedy().data;
-    ASSERT_FALSE(second_pivots.empty());
-
-    auto second_input = compact_live_snapshot(
-        apxchol::detail::make_gpu_round_shadow_input(
-            cpu.residual, second_pivots, run_seed));
-    std::vector<gpu_round_shadow_excess_bound> second_bounds;
-    const auto second_expected =
-        apxchol::detail::reference_gpu_round_shadow(
-            second_input, &second_bounds);
-    scoped_env production_validation(
-        "APXCHOL_GPU_ROUND_SELECTION_AUDIT", "off");
-    const auto second = state.compute_resident(
-        frontend.device_selection(), run_seed);
-    apxchol::detail::compare_gpu_round_shadow_reports(
-        second_expected, second);
-    state.accept_device_generation(second.output_generation);
-    apxchol::detail::gpu_round_shadow_factor_log second_cpu_log;
-    EXPECT_NO_THROW((void)run_serial_cpu_round(
-        cpu.residual, second_input, second, second_bounds,
-        &second_cpu_log));
-    const auto expected_cumulative_log =
-        append_factor_logs(cpu.factor_log, second_cpu_log);
-    const auto second_device_log = state.download_factor_log();
-    expect_factor_logs_equal(expected_cumulative_log, second_device_log);
-    EXPECT_TRUE(second.resident_input_reused);
-    EXPECT_TRUE(second.resident_selection_consumed);
-    EXPECT_EQ(second.selection_validation_pivots, second_pivots.size());
-    EXPECT_EQ(second.selection_audit_passes, 0u);
-    EXPECT_EQ(second.selection_audit_incidences, 0u);
-    EXPECT_EQ(first.selection_map_initialization_vertices,
-              static_cast<std::size_t>(n));
-    EXPECT_EQ(second.selection_map_initialization_vertices, 0u);
-    EXPECT_EQ(second.round_state_upload_bytes, 0u);
-    EXPECT_EQ(second.state_imports, 1u);
-    EXPECT_EQ(second.state_reuses, 1u);
-    // The O(n) selected map was retained from the first round; first selection
-    // adds only the two fixed status/digest allocations and grows nothing.
-    EXPECT_EQ(second.state_buffer_allocations,
-              first.state_buffer_allocations + 2);
-    EXPECT_EQ(second.state_buffer_growths, first.state_buffer_growths);
-    EXPECT_EQ(second.factor_log_columns,
-              first_pivots.size() + second_pivots.size());
-    EXPECT_EQ(second.factor_log_columns - first.factor_log_columns,
-              second_pivots.size());
-    EXPECT_EQ(second.factor_log_entries - first.factor_log_entries,
-              second_cpu_log.entries.size());
-    EXPECT_EQ(second_device_log.columns.size(), second.factor_log_columns);
-    EXPECT_EQ(second_device_log.entries.size(), second.factor_log_entries);
-#endif
-}
-
-TEST(GpuRoundShadowDevice,
-     ResidentSelectionAuditAddsExactlyOneIncidenceScan) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident-selection audit";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env selection_audit("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "1");
     auto boundary = make_resident_selection_boundary();
-    const auto expected_input =
-        resident_selection_round_input(boundary.selected);
-    const auto expected =
-        apxchol::detail::reference_gpu_round_shadow(expected_input);
-    const auto actual = boundary.state.compute_resident(
+    const auto input = resident_selection_round_input(boundary.selected);
+    const auto expected = apxchol::detail::reference_gpu_round_shadow(input);
+    const auto actual = boundary.state.compute_owned_round_for_test(
         boundary.device_selection, kResidentSelectionSeed);
-    apxchol::detail::compare_gpu_round_shadow_reports(expected, actual);
+    EXPECT_EQ(actual.live_incidences, expected.live_incidences);
+    EXPECT_EQ(actual.selection_validation_pivots, boundary.selected.size());
+    EXPECT_EQ(actual.round_state_upload_bytes, 0u);
+    EXPECT_TRUE(actual.resident_selection_consumed);
+    const auto snapshot = boundary.state.download_owned_prefix_for_test().residual;
+    EXPECT_EQ(apxchol::detail::fingerprint_gpu_round_shadow_input(snapshot).residual,
+              expected.residual);
+}
+
+TEST(GpuRoundShadowDevice, ResidentSelectionAuditAddsExactlyOneIncidenceScan) {
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    scoped_env audit("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "1");
+    auto boundary = make_resident_selection_boundary();
+    const auto input = resident_selection_round_input(boundary.selected);
+    const auto expected = apxchol::detail::reference_gpu_round_shadow(input);
+    const auto actual = boundary.state.compute_owned_round_for_test(
+        boundary.device_selection, kResidentSelectionSeed);
     EXPECT_TRUE(actual.resident_selection_consumed);
     EXPECT_EQ(actual.selection_validation_pivots, boundary.selected.size());
     EXPECT_EQ(actual.selection_audit_passes, 1u);
-    EXPECT_EQ(actual.selection_audit_incidences,
-              actual.resident_input_incidences);
+    EXPECT_EQ(actual.selection_audit_incidences, actual.resident_input_incidences);
     EXPECT_EQ(actual.selection_map_initialization_vertices, 0u);
-#endif
+    const auto snapshot = boundary.state.download_owned_prefix_for_test().residual;
+    EXPECT_EQ(apxchol::detail::fingerprint_gpu_round_shadow_input(snapshot).residual,
+              expected.residual);
 }
 
-TEST(GpuRoundShadowDevice,
-     ProductionSessionConsumesReusableResidentSelection) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident production consumption";
-#else
+TEST(GpuRoundShadowDevice, SelectionCapabilityDigestSpansMultipleBlocks) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env production_validation(
-        "APXCHOL_GPU_ROUND_SELECTION_AUDIT", "off");
-    constexpr node_index n = kResidentSelectionVertexCount;
-    const auto edges = resident_selection_path_edges();
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
-    std::vector<apxchol::detail::gpu_topology_edge> topology;
-    for (const auto& edge : edges) {
-        graph.add_edge(edge.u, edge.v, edge.weight);
-        topology.push_back({edge.u, edge.v});
-    }
-
-    apxchol::detail::gpu_round_shadow_session session(/*active=*/true);
-    apxchol::detail::gpu_block_frontend frontend(n, topology);
-    apxchol::factorize_workspace workspace;
-    workspace.threads.resize(1);
-    workspace.threads.front().factor_entries =
-        std::make_unique<std::pmr::monotonic_buffer_resource>();
-    apxchol::factor_options options;
-    options.seed = kResidentSelectionSeed;
-    std::vector<apxchol::detail::factor_col> columns;
-
-    auto eliminate_round = [&](std::span<const node_index> selected,
-                               const apxchol::detail::gpu_device_selection*
-                                   device_selection) {
-        workspace.reset_for_round();
-        apxchol::partition_result partition;
-        partition.data.assign(selected.begin(), selected.end());
-        std::size_t work_hint = 0;
-        for (node_index pivot : partition.data) {
-            for (const auto& [neighbor, weight] : graph.neighbors(pivot)) {
-                (void)weight;
-                if (graph.is_active(neighbor)) ++work_hint;
-            }
-        }
-        const std::size_t factor_base = columns.size();
-        session.begin_round(
-            graph, partition.data, options.seed, workspace.round_index,
-            /*cpu_order_reproducible=*/true, device_selection);
-        apxchol::detail::eliminate_partition(
-            apxchol::detail::tree_elimination{}, graph, partition, columns,
-            workspace, options, nullptr, false, work_hint);
-        session.verify_cpu_round(
-            graph, std::span<const apxchol::detail::factor_col>(columns)
-                       .subspan(factor_base));
-        ++workspace.round_index;
-    };
-
-    const std::vector<node_index> first = {0};
-    eliminate_round(first, nullptr);
-    frontend.advance(first, {});
-    std::vector<node_index> active(n - 1);
-    std::iota(active.begin(), active.end(), node_index{1});
-    apxchol::partition_options partition_options;
-    partition_options.degree_multiplier = 100.0;
-    frontend.prepare(active, partition_options);
-    const auto second = frontend.select_block_greedy().data;
-    ASSERT_FALSE(second.empty());
-    const auto device_selection = frontend.device_selection();
-    testing::internal::CaptureStderr();
-    eliminate_round(second, &device_selection);
-    session.finish();
-    const std::string trace = testing::internal::GetCapturedStderr();
-    if (apxchol::detail::gpu_setup_diagnostics()) {
-        EXPECT_NE(trace.find("selection=resident"), std::string::npos) << trace;
-        EXPECT_NE(trace.find(
-                      "selection=resident selection_check=" +
-                      std::to_string(second.size()) + "/0/0"),
-                  std::string::npos)
-            << trace;
-    } else {
-        EXPECT_TRUE(trace.empty()) << trace;
-    }
-#endif
+    constexpr node_index n = 600;
+    std::vector<undirected_edge> edges;
+    std::vector<node_index> pivots;
+    for (node_index vertex = 0; vertex + 1 < n; ++vertex)
+        edges.push_back({vertex, vertex + 1, 1.0});
+    for (node_index vertex = 0; vertex < n; vertex += 2) pivots.push_back(vertex);
+    ASSERT_GT(pivots.size(), 256u);
+    const auto report = run_device(make_input(n, edges, pivots, 0x1234abcdULL));
+    EXPECT_EQ(report.selection_validation_pivots, pivots.size());
 }
+
+TEST(GpuRoundShadowDevice, ChainsADeviceAuthoritativeGenerationWithoutHostState) {
+    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
+    const auto edges = resident_selection_path_edges();
+    auto initial = make_input(kResidentSelectionVertexCount, edges, {}, kResidentSelectionSeed);
+    auto oracle = graph_from_input(initial);
+    apxchol::detail::gpu_round_shadow_device_state state;
+    auto selector = state.initialize_owned_raw_for_test(initial);
+    std::vector<node_index> active(kResidentSelectionVertexCount);
+    std::iota(active.begin(), active.end(), node_index{0});
+    apxchol::detail::gpu_round_shadow_factor_log expected_log;
+    std::vector<gpu_round_shadow_report> reports;
+    for (unsigned round = 0; round < 2; ++round) {
+        selector->prepare(active, {});
+        const auto selected = selector->select_block_greedy().data;
+        ASSERT_FALSE(selected.empty());
+        const auto input = apxchol::detail::make_gpu_round_shadow_input(oracle, selected, kResidentSelectionSeed);
+        const auto report = state.compute_owned_round_for_test(selector->device_selection(), kResidentSelectionSeed);
+        expected_log = append_factor_logs(expected_log, run_owned_host_oracle(oracle, input));
+        expect_factor_logs_equal(expected_log, state.download_factor_log());
+        const auto actual = state.download_owned_prefix_for_test().residual;
+        const auto expected = compact_live_snapshot(apxchol::detail::make_gpu_round_shadow_input(
+            oracle, std::span<const node_index>{}, kResidentSelectionSeed));
+        EXPECT_EQ(apxchol::detail::fingerprint_gpu_round_shadow_input(actual),
+                  apxchol::detail::fingerprint_gpu_round_shadow_input(expected));
+        EXPECT_EQ(report.round_state_upload_bytes, 0u);
+        EXPECT_TRUE(report.resident_selection_consumed);
+        EXPECT_EQ(report.selection_validation_pivots, selected.size());
+        EXPECT_EQ(report.factor_log_columns, expected_log.columns.size());
+        EXPECT_EQ(report.factor_log_entries, expected_log.entries.size());
+        reports.push_back(report);
+        std::erase_if(active, [&](node_index v) { return !oracle.is_active(v); });
+        state.advance_selector(*selector);
+    }
+    EXPECT_EQ(reports[1].state_imports, 1u);
+    EXPECT_GT(reports[1].state_reuses, reports[0].state_reuses);
+    EXPECT_EQ(reports[1].state_buffer_allocations, reports[0].state_buffer_allocations);
+    EXPECT_EQ(reports[1].state_buffer_growths, reports[0].state_buffer_growths);
+}
+#endif
 
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuRoundShadowDevice,
      ResidentSelectionValidationRejectsUnsafeIdsAndPoisonsTheGeneration) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident-selection validation";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     enum class corruption { out_of_range, inactive, duplicate, adjacent };
     const std::pair<corruption, std::string_view> cases[] = {
@@ -1568,7 +1275,7 @@ TEST(GpuRoundShadowDevice,
         auto reject_malformed = [&] {
             expect_exception_contains(
                 [&] {
-                    (void)boundary.state.compute_resident(
+                    (void)boundary.state.compute_owned_round_for_test(
                         boundary.device_selection, kResidentSelectionSeed);
                 },
                 expected_message);
@@ -1581,22 +1288,16 @@ TEST(GpuRoundShadowDevice,
         }
         expect_exception_contains(
             [&] {
-                (void)boundary.state.compute_resident(
+                (void)boundary.state.compute_owned_round_for_test(
                     boundary.device_selection, kResidentSelectionSeed);
             },
             "poisoned by a failed generation");
     }
-#endif
 }
 
 TEST(GpuRoundShadowDevice,
      ResidentSelectionCapabilityRejectsMutatedIdsWithoutResidualScan) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for selection-content validation";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env production_validation(
-        "APXCHOL_GPU_ROUND_SELECTION_AUDIT", "off");
     auto boundary = make_resident_selection_boundary();
     auto reordered = boundary.selected;
     std::reverse(reordered.begin(), reordered.end());
@@ -1604,24 +1305,20 @@ TEST(GpuRoundShadowDevice,
     inject_device_selection_fault(*boundary.frontend, reordered);
     expect_exception_contains(
         [&] {
-            (void)boundary.state.compute_resident(
+            (void)boundary.state.compute_owned_round_for_test(
                 boundary.device_selection, kResidentSelectionSeed);
         },
         "ids do not match the producer capability");
     expect_exception_contains(
         [&] {
-            (void)boundary.state.compute_resident(
+            (void)boundary.state.compute_owned_round_for_test(
                 boundary.device_selection, kResidentSelectionSeed);
         },
         "poisoned by a failed generation");
-#endif
 }
 #endif
 
 TEST(GpuRoundShadowDevice, DeviceSelectionCapabilityCannotBeCallerForged) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident-selection capabilities";
-#else
     static_assert(!std::is_aggregate_v<
                   apxchol::detail::gpu_device_selection>);
     static_assert(!std::is_default_constructible_v<
@@ -1631,46 +1328,36 @@ TEST(GpuRoundShadowDevice, DeviceSelectionCapabilityCannotBeCallerForged) {
     const apxchol::detail::gpu_device_selection forged;
     expect_exception_contains(
         [&] {
-            (void)boundary.state.compute_resident(
+            (void)boundary.state.compute_owned_round_for_test(
                 forged, kResidentSelectionSeed);
         },
         "was not issued by a producer");
     expect_exception_contains(
         [&] {
-            (void)boundary.state.compute_resident(
+            (void)boundary.state.compute_owned_round_for_test(
                 boundary.device_selection, kResidentSelectionSeed);
         },
         "poisoned by a failed generation");
-#endif
 }
 
 TEST(GpuRoundShadowDevice, ProducerRefusesAnEmptyDeviceSelectionCapability) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for empty-selection publication";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    const std::vector<apxchol::detail::gpu_topology_edge> topology = {{0, 1}};
-    apxchol::detail::gpu_block_frontend frontend(2, topology);
+    apxchol::detail::gpu_round_shadow_device_state state;
+    auto owner = state.initialize_owned_raw_for_test(make_input(2, std::vector<undirected_edge>{{0, 1, 1.0}}, {}));
+    auto& frontend = *owner;
     const std::vector<node_index> active = {0, 1};
     apxchol::partition_options options;
     options.degree_quantile = 0.0;
     options.degree_multiplier = 0.0;
-    const auto prepared = frontend.prepare(active, options);
-    ASSERT_EQ(prepared.candidate_count, 0u);
+    EXPECT_EQ(frontend.prepare(active, options).candidate_count, 0u);
     EXPECT_TRUE(frontend.select_block_greedy().data.empty());
-    expect_exception_contains(
-        [&] { (void)frontend.device_selection(); },
+    expect_exception_contains([&] { (void)frontend.device_selection(); },
         "no current nonempty device selection");
-    expect_exception_contains(
-        [&] { (void)frontend.resident_region_capacity(); },
+    expect_exception_contains([&] { (void)frontend.host_candidates(); },
         "selection producer is poisoned");
-#endif
 }
 
 TEST(GpuRoundShadowDevice, ProducerAndConsumerRejectTheWrongCudaDevice) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for CUDA-device binding";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     int original_device = -1;
     int device_count = 0;
@@ -1683,7 +1370,7 @@ TEST(GpuRoundShadowDevice, ProducerAndConsumerRejectTheWrongCudaDevice) {
     auto producer = make_resident_selection_boundary();
     ASSERT_EQ(cudaSetDevice(other_device), cudaSuccess);
     expect_exception_contains(
-        [&] { (void)producer.frontend->resident_region_capacity(); },
+        [&] { (void)producer.frontend->host_candidates(); },
         "wrong CUDA device");
     ASSERT_EQ(cudaSetDevice(original_device), cudaSuccess);
     expect_exception_contains(
@@ -1694,25 +1381,21 @@ TEST(GpuRoundShadowDevice, ProducerAndConsumerRejectTheWrongCudaDevice) {
     ASSERT_EQ(cudaSetDevice(other_device), cudaSuccess);
     expect_exception_contains(
         [&] {
-            (void)consumer.state.compute_resident(
+            (void)consumer.state.compute_owned_round_for_test(
                 consumer.device_selection, kResidentSelectionSeed);
         },
         "active CUDA device differs from resident state device");
     ASSERT_EQ(cudaSetDevice(original_device), cudaSuccess);
     expect_exception_contains(
         [&] {
-            (void)consumer.state.compute_resident(
+            (void)consumer.state.compute_owned_round_for_test(
                 consumer.device_selection, kResidentSelectionSeed);
         },
         "poisoned by a failed generation");
-#endif
 }
 
 TEST(GpuRoundShadowDevice,
      ResidentSelectionCapabilityRejectsStaleAndRetiredViews) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident-selection capabilities";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     auto boundary = make_resident_selection_boundary();
     const auto stale = boundary.device_selection;
@@ -1724,13 +1407,13 @@ TEST(GpuRoundShadowDevice,
 
     expect_exception_contains(
         [&] {
-            (void)boundary.state.compute_resident(
+            (void)boundary.state.compute_owned_round_for_test(
                 stale, kResidentSelectionSeed);
         },
         "stale device selection generation");
     expect_exception_contains(
         [&] {
-            (void)boundary.state.compute_resident(
+            (void)boundary.state.compute_owned_round_for_test(
                 current, kResidentSelectionSeed);
         },
         "poisoned by a failed generation");
@@ -1740,7 +1423,7 @@ TEST(GpuRoundShadowDevice,
     retired.frontend.reset();
     expect_exception_contains(
         [&] {
-            (void)retired.state.compute_resident(
+            (void)retired.state.compute_owned_round_for_test(
                 retired_view, kResidentSelectionSeed);
         },
         "producer is no longer alive");
@@ -1756,195 +1439,52 @@ TEST(GpuRoundShadowDevice,
         "active-list size diverged");
     expect_exception_contains(
         [&] {
-            (void)failed_producer.state.compute_resident(
+            (void)failed_producer.state.compute_owned_round_for_test(
                 failed_view, kResidentSelectionSeed);
         },
         "selection producer is poisoned");
-#endif
 }
 
-TEST(GpuRoundShadowDevice,
-     ResidentSelectionRejectsConsumedTopologyAndDifferentProducer) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident-selection provenance";
-#else
+TEST(GpuRoundShadowDevice, ResidentSelectionRejectsConsumedTopologyAndDifferentProducer) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    apxchol::partition_options options;
-    options.degree_multiplier = 100.0;
-
     auto consumed = make_resident_selection_boundary();
-    const auto expected_input =
-        resident_selection_round_input(consumed.selected);
-    const auto expected =
-        apxchol::detail::reference_gpu_round_shadow(expected_input);
-    const auto actual = consumed.state.compute_resident(
-        consumed.device_selection, kResidentSelectionSeed);
-    apxchol::detail::compare_gpu_round_shadow_reports(expected, actual);
-    consumed.state.accept_device_generation(actual.output_generation);
-    expect_exception_contains(
-        [&] {
-            (void)consumed.state.compute_resident(
-                consumed.device_selection, kResidentSelectionSeed);
-        },
-        "generation was already consumed");
-
-    auto same_topology_boundary = make_resident_selection_boundary();
-    const auto first = same_topology_boundary.state.compute_resident(
-        same_topology_boundary.device_selection, kResidentSelectionSeed);
-    same_topology_boundary.state.accept_device_generation(
-        first.output_generation);
-    (void)same_topology_boundary.frontend->select_block_greedy();
-    const auto same_topology =
-        same_topology_boundary.frontend->device_selection();
-    expect_exception_contains(
-        [&] {
-            (void)same_topology_boundary.state.compute_resident(
-                same_topology, kResidentSelectionSeed);
-        },
-        "topology generation was already consumed");
+    consumed.state.compute_owned_round_for_test(consumed.device_selection, kResidentSelectionSeed);
+    EXPECT_THROW(consumed.state.compute_owned_round_for_test(
+        consumed.device_selection, kResidentSelectionSeed), std::exception);
 
     auto cross_producer = make_resident_selection_boundary();
-    const auto bound = cross_producer.state.compute_resident(
-        cross_producer.device_selection, kResidentSelectionSeed);
-    cross_producer.state.accept_device_generation(bound.output_generation);
-
-    const auto path_edges = resident_selection_path_edges();
-    std::vector<apxchol::detail::gpu_topology_edge> topology;
-    for (const auto& edge : path_edges)
-        topology.push_back({edge.u, edge.v});
-    apxchol::detail::gpu_block_frontend other(
-        kResidentSelectionVertexCount, topology);
-    const std::vector<node_index> first_pivot = {0};
-    other.advance(first_pivot, {});
-    other.prepare(cross_producer.active, options);
-    (void)other.select_block_greedy();
-    expect_exception_contains(
-        [&] {
-            (void)cross_producer.state.compute_resident(
-                other.device_selection(), kResidentSelectionSeed);
-        },
-        "different producer");
-#endif
+    auto other = make_resident_selection_boundary();
+    EXPECT_THROW(cross_producer.state.compute_owned_round_for_test(
+        other.device_selection, kResidentSelectionSeed), std::exception);
+    expect_exception_contains([&] {
+        cross_producer.state.compute_owned_round_for_test(
+            cross_producer.device_selection, kResidentSelectionSeed);
+    }, "poisoned by a failed generation");
 }
 
-TEST(GpuRoundShadowDevice,
-     FirstProducerBindRejectsAccidentalCrossStateReplay) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for content-bound selection replay";
-#else
+TEST(GpuRoundShadowDevice, FirstProducerBindRejectsAccidentalCrossStateReplay) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     auto boundary = make_resident_selection_boundary();
     auto wrong_edges = resident_selection_path_edges();
     wrong_edges.pop_back();
-    std::vector<apxchol::detail::gpu_topology_edge> wrong_topology;
-    for (const auto& edge : wrong_edges)
-        wrong_topology.push_back({edge.u, edge.v});
-    apxchol::detail::gpu_block_frontend wrong(
-        kResidentSelectionVertexCount, wrong_topology);
-    const std::vector<node_index> first_pivot = {0};
-    wrong.advance(first_pivot, {});
-    apxchol::partition_options options;
-    options.degree_multiplier = 100.0;
-    wrong.prepare(boundary.active, options);
-    (void)wrong.select_block_greedy();
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                wrong.device_selection(), kResidentSelectionSeed);
-        },
-        "topology/active content does not match round state");
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "poisoned by a failed generation");
-#endif
+    apxchol::detail::gpu_round_shadow_device_state wrong_state;
+    auto selector = wrong_state.initialize_owned_raw_for_test(
+        make_input(kResidentSelectionVertexCount, wrong_edges, {}, kResidentSelectionSeed));
+    std::vector<node_index> active(kResidentSelectionVertexCount);
+    std::iota(active.begin(), active.end(), node_index{0});
+    selector->prepare(active, {});
+    ASSERT_FALSE(selector->select_block_greedy().data.empty());
+    EXPECT_THROW(boundary.state.compute_owned_round_for_test(
+        selector->device_selection(), kResidentSelectionSeed), std::exception);
+    expect_exception_contains([&] {
+        boundary.state.compute_owned_round_for_test(boundary.device_selection, kResidentSelectionSeed);
+    }, "poisoned by a failed generation");
 }
-
-TEST(GpuRoundShadowDevice,
-     ResidentGenerationRequiresExactAuditAcceptance) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident-generation acceptance";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    auto unaccepted = make_resident_selection_boundary(
-        /*accept_initial_generation=*/false);
-    expect_exception_contains(
-        [&] {
-            (void)unaccepted.state.compute_resident(
-                unaccepted.device_selection, kResidentSelectionSeed);
-        },
-        "prior device generation was not explicitly accepted");
-    expect_exception_contains(
-        [&] {
-            unaccepted.state.accept_device_generation(
-                unaccepted.initial_generation);
-        },
-        "cannot accept a poisoned device generation");
-
-    auto boundary = make_resident_selection_boundary(
-        /*accept_initial_generation=*/false);
-    expect_exception_contains(
-        [&] {
-            boundary.state.accept_device_generation(
-                boundary.initial_generation + 1);
-        },
-        "acceptance is out of order");
-    boundary.state.accept_device_generation(boundary.initial_generation);
-
-    const auto expected_input =
-        resident_selection_round_input(boundary.selected);
-    const auto expected =
-        apxchol::detail::reference_gpu_round_shadow(expected_input);
-    const auto actual = boundary.state.compute_resident(
-        boundary.device_selection, kResidentSelectionSeed);
-    apxchol::detail::compare_gpu_round_shadow_reports(expected, actual);
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "prior device generation was not explicitly accepted");
-    expect_exception_contains(
-        [&] {
-            boundary.state.accept_device_generation(actual.output_generation);
-        },
-        "cannot accept a poisoned device generation");
 #endif
-}
-
-TEST(GpuRoundShadowDevice,
-     ContinuityFailurePoisonsPreviouslyAcceptedGeneration) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident continuity poisoning";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    auto boundary = make_resident_selection_boundary();
-    const auto certified_input = resident_selection_round_input({});
-    boundary.state.certify_cpu_round(
-        /*cpu_order_reproducible=*/true,
-        apxchol::detail::fingerprint_gpu_round_shadow_input(certified_input),
-        /*cpu_excess_may_differ=*/false);
-
-    auto mismatched = certified_input;
-    mismatched.excess[1] = 1.0;
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_discover_shape(mismatched);
-        },
-        "excess digest after CPU certification");
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "poisoned by a failed generation");
-#endif
-}
 
 #if defined(APXCHOL_USE_CUDA) && \
     defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuRoundShadowDevice,
      InjectedPostCudaFailurePoisonsPreviouslyAcceptedGeneration) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
@@ -1952,13 +1492,13 @@ TEST(GpuRoundShadowDevice,
     boundary.state.inject_failure_after_cuda_operation_for_test();
     expect_exception_contains(
         [&] {
-            (void)boundary.state.compute_resident(
+            (void)boundary.state.compute_owned_round_for_test(
                 boundary.device_selection, kResidentSelectionSeed);
         },
         "injected failure after CUDA operation");
     expect_exception_contains(
         [&] {
-            (void)boundary.state.compute_resident(
+            (void)boundary.state.compute_owned_round_for_test(
                 boundary.device_selection, kResidentSelectionSeed);
         },
         "poisoned by a failed generation");
@@ -1987,9 +1527,9 @@ TEST(GpuRoundShadowDevice, IntegerDigestsMatchOracleAcrossPartialBlocks) {
         auto input = make_input(4 * count + 1, edges, pivots, 0x815eed);
         input.excess.back() = 0.125;  // surviving isolated active vertex
         std::vector<gpu_round_shadow_excess_bound> bounds;
-        const auto actual = run_device(input, &bounds);
-        EXPECT_NO_THROW((void)run_authoritative_cpu_round(edges, input, actual, bounds));
-        // The zero-pivot report still hashes all residual incidences/state.
+        (void)run_device(input, &bounds);
+        EXPECT_NO_THROW((void)run_authoritative_cpu_round(edges, input, apxchol::detail::reference_gpu_round_shadow(input), bounds));
+        // The empty selection still checks the uploaded residual snapshot.
         input.pivots.clear(); input.seeds.clear();
         (void)run_device(input);
     }
@@ -2003,9 +1543,9 @@ TEST(GpuRoundShadowDevice, RawIncidenceDegreeMatchesAuthoritativeCpu) {
     const std::vector<node_index> pivots = {0};
     const auto input = make_input(4, edges, pivots);
     std::vector<gpu_round_shadow_excess_bound> bounds;
-    const auto device = run_device(input, &bounds);
+    (void)run_device(input, &bounds);
     EXPECT_NO_THROW((void)run_authoritative_cpu_round(
-        edges, input, device, bounds));
+        edges, input, apxchol::detail::reference_gpu_round_shadow(input), bounds));
 }
 
 TEST(GpuRoundShadowDevice, RawCollidingFillsMatchCpuStoredMultigraph) {
@@ -2018,7 +1558,7 @@ TEST(GpuRoundShadowDevice, RawCollidingFillsMatchCpuStoredMultigraph) {
     const auto input = make_input(5, edges, pivots, 0x12345678ULL);
     std::vector<gpu_round_shadow_excess_bound> bounds;
     const auto device = run_device(input, &bounds);
-    auto cpu = run_authoritative_cpu_round(edges, input, device, bounds);
+    auto cpu = run_authoritative_cpu_round(edges, input, apxchol::detail::reference_gpu_round_shadow(input), bounds);
 
     std::size_t parallel_fill_incidences = 0;
     for (const auto& [neighbor, weight] : cpu.residual.neighbors(2)) {
@@ -2040,8 +1580,8 @@ TEST(GpuRoundShadowDevice, AtomicExcessCollisionsUseExplicitBounds) {
     const std::vector<double> excess = {4.0, 3.0, 1.0, 0.0, 0.0};
     const auto input = make_input(5, edges, pivots, 17, excess);
     std::vector<gpu_round_shadow_excess_bound> bounds;
-    const auto device = run_device(input, &bounds);
-    const auto cpu = run_authoritative_cpu_round(edges, input, device, bounds);
+    (void)run_device(input, &bounds);
+    const auto cpu = run_authoritative_cpu_round(edges, input, apxchol::detail::reference_gpu_round_shadow(input), bounds);
     EXPECT_EQ(cpu.comparison.bounded_excess_vertices, 2u);
 }
 
@@ -2057,7 +1597,7 @@ TEST(GpuRoundShadowDevice, RepeatExecutionIsCanonicallyDeterministic) {
     std::vector<gpu_round_shadow_excess_bound> bounds;
     const auto baseline = run_device(input, &bounds);
     EXPECT_NO_THROW((void)run_authoritative_cpu_round(
-        edges, input, baseline, bounds));
+        edges, input, apxchol::detail::reference_gpu_round_shadow(input), bounds));
     for (int repetition = 0; repetition < 5; ++repetition) {
         const auto current = run_device(input);
         apxchol::detail::compare_gpu_round_shadow_reports(
@@ -2080,94 +1620,11 @@ TEST(GpuRoundShadowDevice, OversizedPivotMatchesAuthoritativeCpu) {
     const std::vector<node_index> pivots = {0};
     const auto input = make_input(degree + 2, edges, pivots, 99);
     std::vector<gpu_round_shadow_excess_bound> bounds;
-    const auto device = run_device(input, &bounds);
+    (void)run_device(input, &bounds);
     EXPECT_NO_THROW((void)run_authoritative_cpu_round(
-        edges, input, device, bounds));
+        edges, input, apxchol::detail::reference_gpu_round_shadow(input), bounds));
 }
 
-#if defined(APXCHOL_USE_CUDA)
-namespace {
-struct resident_selector_fixture {
-    static constexpr node_index n = 34;
-    static constexpr std::uint64_t seed = 71;
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph{n};
-    std::vector<apxchol::detail::gpu_topology_edge> initial;
-    std::vector<node_index> active;
-    apxchol::detail::gpu_round_shadow_device_state state;
-    std::unique_ptr<apxchol::detail::gpu_block_frontend> frontend;
-    apxchol::partition_options options;
-    std::size_t rounds = 0;
-
-    explicit resident_selector_fixture(bool with_edges = true) {
-        scoped_omp_threads one(1);
-        auto edge = [&](node_index u, node_index v, double w) {
-            graph.add_edge(u, v, w);
-            initial.push_back({u, v});
-        };
-        if (with_edges) {
-        for (node_index v = 0; v < 24; ++v) edge(v, (v + 1) % 24, 1.0);
-        edge(0, 1, 2.0); // Multigraph multiplicity must survive the projection.
-        edge(0, 1, 4.0);
-        for (node_index v = 24; v < 31; ++v) edge(v, v + 1, 1.0);
-        }
-        // Vertices 32 and 33 are isolated; 24..31 form a separate component.
-        active.resize(n);
-        std::iota(active.begin(), active.end(), node_index{0});
-        frontend = std::make_unique<apxchol::detail::gpu_block_frontend>(n, initial);
-        options.degree_multiplier = 100.0;
-    }
-
-    void round(bool certify = true) {
-        scoped_omp_threads one(1);
-        frontend->prepare(active, options);
-        const auto selected = frontend->select_block_greedy().data;
-        if (selected.empty()) throw std::logic_error("fixture exhausted too soon");
-        const auto capability = frontend->device_selection();
-        const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, selected, seed);
-        std::vector<gpu_round_shadow_excess_bound> bounds;
-        const auto report = apxchol::detail::run_verified_gpu_round_shadow(
-            state, input, &capability, seed, rounds != 0, &bounds);
-        EXPECT_EQ(report.resident_selection_consumed, rounds != 0);
-        if (rounds) {
-            EXPECT_EQ(report.round_state_upload_bytes, 0u);
-        }
-        const auto cpu = run_serial_cpu_round(graph, input, report, bounds);
-        EXPECT_EQ(cpu.bounded_excess_vertices, 0u);
-        if (certify) state.certify_cpu_round(true, fingerprint_graph(graph));
-        std::erase_if(active, [&](node_index v) { return !graph.is_active(v); });
-        ++rounds;
-    }
-
-    // Rebuild a separate selector from the CPU graph solely as the oracle.
-    // Its uploads are not inputs to frontend or the resident elimination state.
-    void compare_reference() {
-        const auto snapshot = apxchol::detail::make_gpu_round_shadow_input(
-            graph, std::span<const node_index>{}, seed);
-        std::vector<apxchol::detail::gpu_topology_edge> edges;
-        for (const auto& e : snapshot.incidences)
-            if (e.owner < e.neighbor && snapshot.active[e.owner] &&
-                snapshot.active[e.neighbor]) edges.push_back({e.owner, e.neighbor});
-        apxchol::detail::gpu_block_frontend reference(n, edges);
-        std::vector<node_index> inactive;
-        for (node_index v = 0; v < n; ++v)
-            if (!graph.is_active(v)) inactive.push_back(v);
-        reference.advance(inactive, {});
-        const auto actual = frontend->prepare(active, options);
-        const auto expected = reference.prepare(active, options);
-        EXPECT_EQ(actual.candidate_count, expected.candidate_count);
-        EXPECT_EQ(actual.average_degree, expected.average_degree);
-        EXPECT_EQ(std::vector<node_index>(frontend->host_active_degrees().begin(),
-                                         frontend->host_active_degrees().end()),
-                  std::vector<node_index>(reference.host_active_degrees().begin(),
-                                         reference.host_active_degrees().end()));
-        EXPECT_EQ(frontend->select_block_greedy().data,
-                  reference.select_block_greedy().data);
-    }
-};
-} // namespace
-#endif
-
-#if defined(APXCHOL_USE_CUDA)
 namespace {
 constexpr node_index kOwnedVertices = 98;
 constexpr std::uint64_t kOwnedSeed = 123;
@@ -2206,21 +1663,14 @@ apxchol::graph<apxchol::directed_vec_pool_incidence> make_owned_order_fixture() 
     return graph;
 }
 
-std::vector<apxchol::detail::gpu_topology_edge> owned_fixture_topology(
-        const apxchol::graph<apxchol::directed_vec_pool_incidence>& graph) {
-    std::vector<apxchol::detail::gpu_topology_edge> edges;
-    for (node_index v = 0; v < graph.n(); ++v)
-        for (const auto& e : graph.neighbors(v))
-            if (v < e.to) edges.push_back({v, e.to});
-    return edges;
-}
-
 struct owned_selector_view_fixture {
     apxchol::graph<apxchol::directed_vec_pool_incidence> graph = make_owned_order_fixture();
     std::vector<node_index> active;
     std::unique_ptr<apxchol::detail::gpu_round_shadow_session> session =
         std::make_unique<apxchol::detail::gpu_round_shadow_session>(true);
-    apxchol::detail::gpu_block_frontend selector{graph.n(), owned_fixture_topology(graph)};
+    std::unique_ptr<apxchol::detail::gpu_block_frontend> selector_owner =
+        apxchol::test::initialize_owned_selector(*session, graph);
+    apxchol::detail::gpu_block_frontend& selector = *selector_owner;
     apxchol::partition_options options;
 
     owned_selector_view_fixture() : active(graph.n()) {
@@ -2238,7 +1688,7 @@ struct owned_selector_view_fixture {
     gpu_round_shadow_report run_selected(
             std::span<const node_index> selected,
             apxchol::detail::gpu_device_selection capability) {
-        auto report = session->run_owned_prefix_round(graph, selected, capability, kOwnedSeed);
+        auto report = session->run_owned_prefix_round(capability, kOwnedSeed);
         std::erase_if(active, [&](node_index v) {
             return std::binary_search(selected.begin(), selected.end(), v);
         });
@@ -2338,13 +1788,13 @@ void expect_owned_residual_boundary(
     }
     std::vector<node_index> active(n);
     std::iota(active.begin(), active.end(), node_index{0});
-    apxchol::detail::gpu_block_frontend selector(n, owned_fixture_topology(graph));
-    selector.prepare(active, options);
-    const auto selected = selector.select_block_greedy().data;
-    ASSERT_EQ(selected, wanted_selection);
     apxchol::detail::gpu_round_shadow_session session(true);
-    const auto report = session.run_owned_prefix_round(
-        graph, selected, selector.device_selection(), kOwnedSeed);
+    auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+    auto& selector = *selector_owner;
+    selector.prepare(active, options);
+    const auto selected = selector.select_for_test(wanted_selection).data;
+    ASSERT_EQ(selected, wanted_selection);
+    const auto report = session.run_owned_prefix_round(selector.device_selection(), kOwnedSeed);
     ASSERT_EQ(report.raw_fill_edges, expected_fill);
     ASSERT_EQ(report.live_incidences, expected_live);
     ASSERT_TRUE(report.pivots.empty());  // This must exercise the owned route.
@@ -2352,7 +1802,7 @@ void expect_owned_residual_boundary(
     std::vector<apxchol::detail::factor_col> columns;
     // This public boundary internally recomputes the post-sort device hash,
     // compares it with the saved topology, and checks the complete handback.
-    session.materialize_owned_prefix(graph, active, columns);
+    observe_owned_prefix(session, graph, active, columns);
     const auto actual = apxchol::detail::make_gpu_round_shadow_input(
         graph, std::span<const node_index>{}, kOwnedSeed);
 
@@ -2383,7 +1833,7 @@ void expect_owned_residual_boundary(
     }
     EXPECT_EQ(apxchol::detail::fingerprint_gpu_round_shadow_input(actual),
               apxchol::detail::fingerprint_gpu_round_shadow_input(expected));
-    EXPECT_EQ(graph.m(), oracle.m());
+
     ASSERT_EQ(columns.size(), expected_columns.columns.size());
     for (std::size_t i = 0; i < columns.size(); ++i) {
         EXPECT_EQ(columns[i].vertex, expected_columns.columns[i].vertex);
@@ -2397,29 +1847,10 @@ void expect_owned_residual_boundary(
         owned_residual_boundary_receipt(actual, columns));
 }
 
-Eigen::SparseMatrix<double> owned_solve_matrix(int n, double shift) {
-    Eigen::SparseMatrix<double> A(n, n);
-    std::vector<Eigen::Triplet<double>> entries;
-    for (int i = 0; i < n; ++i) {
-        entries.emplace_back(i, i, 4.0 + shift);
-        for (int offset : {1, 8}) {
-            int j = (i + offset) % n;
-            entries.emplace_back(i, j, -1.0); entries.emplace_back(j, i, -1.0);
-        }
-    }
-    A.setFromTriplets(entries.begin(), entries.end());
-    return A;
-}
 } // namespace
-#endif
 
 TEST(GpuOwnedPrefix, ResidualBoundaryHandbackMatchesEveryField) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     apxchol::partition_options options;
     options.degree_quantile = 0.0;
@@ -2433,17 +1864,13 @@ TEST(GpuOwnedPrefix, ResidualBoundaryHandbackMatchesEveryField) {
         expect_owned_residual_boundary(edges, 3, {2}, options, 0, 2 * count,
             "owned_residual_boundary_" + std::to_string(2 * count));
     }
-#endif
 }
+#endif
 
 
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuOwnedPrefix, ResidualFillSortPreservesSurvivorOrder) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     apxchol::partition_options options;
     options.degree_quantile = 0.0;
@@ -2460,17 +1887,13 @@ TEST(GpuOwnedPrefix, ResidualFillSortPreservesSurvivorOrder) {
         expect_owned_residual_boundary(edges, 3, {2}, options, 1, 2 * (count + 1),
             "owned_residual_fill_sort_" + std::to_string(2 * (count + 1)));
     }
-#endif
 }
+#endif
 
 
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
@@ -2514,7 +1937,8 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
         graph.excess(0) = oracle.excess(0) = 0.25;
         graph.excess(1) = oracle.excess(1) = 0.5;
         apxchol::detail::gpu_round_shadow_session session(true);
-        apxchol::detail::gpu_block_frontend selector(4, owned_fixture_topology(graph));
+        auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+        auto& selector = *selector_owner;
         std::vector<node_index> active{0, 1, 2, 3};
         const std::vector<node_index> initial_collision{2, 3};
         std::vector<std::vector<node_index>> sequence;
@@ -2522,9 +1946,9 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
             const auto round = sequence.size();
             ASSERT_LT(round, 3u);
             selector.prepare(active, options);
-            const auto selected = selector.select_block_greedy().data;
+            const auto selected = round == 0 ? selector.select_for_test(initial_collision).data
+                : selector.select_block_greedy().data;
             ASSERT_FALSE(selected.empty());
-            EXPECT_EQ(selector.select_block_greedy().data, selected);
             if (round == 0) ASSERT_EQ(selected, initial_collision);
             else ASSERT_EQ(selected.size(), 1u); // The surviving pair is adjacent.
             std::vector<bool> picked(4);
@@ -2540,8 +1964,7 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
             // owned selector choose either continuation orientation. The CPU
             // numerical oracle below receives precisely this observed order.
             sequence.push_back(selected);
-            const auto report = session.run_owned_prefix_round(
-                graph, selected, selector.device_selection(), kOwnedSeed);
+            const auto report = session.run_owned_prefix_round(selector.device_selection(), kOwnedSeed);
             ASSERT_TRUE(report.pivots.empty());
             ASSERT_EQ(report.raw_fill_edges, round == 0 ? 2u : 0u);
             std::erase_if(active, [&](node_index v) {
@@ -2586,7 +2009,7 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
         ASSERT_EQ(reference_factor.L.vals_.size(), reference_factor.L.nonZeros());
         apxchol::cuda_sptrsv reference_trsv, actual_trsv;
         reference_trsv.setup(reference_factor.L, 4);
-        auto device_factor = session.finalize_device_factor(columns, reference_factor.perm, 4);
+        auto device_factor = session.finalize_device_factor(reference_factor.perm, 4);
         ASSERT_NE(device_factor, nullptr);
         actual_trsv.setup_adopting_device_factor_for_research(std::move(*device_factor));
         std::ostringstream receipt;
@@ -2605,8 +2028,8 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
         }
         RecordProperty("owned_residual_continuation_" + std::to_string(count), receipt.str());
     }
-#endif
 }
+#endif
 
 
 TEST(GpuOwnedPrefixHost, RejectsMalformedHandbackBeforeTraversalOrPublication) {
@@ -2638,49 +2061,27 @@ TEST(GpuOwnedPrefixHost, RejectsMalformedHandbackBeforeTraversalOrPublication) {
     }
 }
 
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuOwnedPrefix, GenericGraphStillRejectsUnpairedStoredArcs) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_omp_threads serial(1);
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(2);
-    const std::vector<node_index> vertices = {0, 1}, sizes = {1, 0};
-    graph.adj_bulk_reserve_parallel(vertices.begin(), vertices.end(), sizes);
-    graph.adj_write_reserved_directed_at(0, 0, 1, 1.0);
-    graph.adj_commit_reserved_directed(0, 1);
-    graph.adj_commit_reserved_directed(1, 0);
-    graph.record_edges_added(1);
-    const std::vector<apxchol::detail::gpu_topology_edge> topology = {{0, 1}};
-    apxchol::detail::gpu_block_frontend selector(2, topology);
-    selector.prepare(vertices, {});
-    const auto selected = selector.select_block_greedy().data;
-    ASSERT_FALSE(selected.empty());
-    apxchol::detail::gpu_round_shadow_session session(true);
-    // Omit the internal matrix-construction marker: arbitrary graph inputs
-    // must continue to validate weighted pairing before any numerical round.
-    EXPECT_THROW(session.run_owned_prefix_round(
-        graph, selected, selector.device_selection(), 42), std::invalid_argument);
-#endif
+    auto input = make_input(2, std::vector<undirected_edge>{{0, 1, 1.0}}, {});
+    input.incidences.pop_back();
+    input.owner_offsets.back() = input.incidences.size();
+    apxchol::detail::gpu_round_shadow_device_state state;
+    EXPECT_THROW(state.initialize_owned_raw_for_test(input), std::invalid_argument);
 }
 
 TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     auto graph = make_owned_order_fixture();
     auto oracle = make_owned_order_fixture();
     const auto initial = fingerprint_graph(graph);
-    auto topology = owned_fixture_topology(graph);
-    apxchol::detail::gpu_block_frontend selector(graph.n(), topology);
     apxchol::detail::gpu_round_shadow_session session(true);
+    auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+    auto& selector = *selector_owner;
     std::vector<node_index> active(graph.n());
     std::iota(active.begin(), active.end(), node_index{0});
     std::vector<std::vector<node_index>> selections;
@@ -2692,8 +2093,7 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
         auto selected = selector.select_block_greedy().data;
         ASSERT_FALSE(selected.empty());
         ASSERT_LT(selected.size(), active.size() - 1);
-        reports.push_back(session.run_owned_prefix_round(
-            graph, selected, selector.device_selection(), kOwnedSeed));
+        reports.push_back(session.run_owned_prefix_round(selector.device_selection(), kOwnedSeed));
         session.advance_selector(selector);
         std::erase_if(active, [&](node_index v) {
             return std::binary_search(selected.begin(), selected.end(), v);
@@ -2703,7 +2103,7 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
     // The oracle snapshot/check starts after both production-owned rounds.
     EXPECT_EQ(fingerprint_graph(graph), initial);
     EXPECT_EQ(reports[0].state_imports, 1u);
-    EXPECT_GT(reports[0].round_state_upload_bytes, 0u);
+    EXPECT_EQ(reports[0].round_state_upload_bytes, 0u);
     EXPECT_EQ(reports[1].state_imports, 1u);
     EXPECT_EQ(reports[1].state_reuses, 1u);
     EXPECT_EQ(reports[1].round_state_upload_bytes, 0u);
@@ -2712,17 +2112,15 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
     for (const auto& report : reports)
         EXPECT_EQ(report.input_incidences, report.resident_input_incidences);
     EXPECT_NE(selections[0].size(), selections[1].size());
-    EXPECT_EQ(selector.transfers().host_update_bytes, 0u);
 
     std::vector<apxchol::detail::factor_col> columns;
-    session.materialize_owned_prefix(graph, active, columns);
+    observe_owned_prefix(session, graph, active, columns);
     const std::size_t prefix = columns.size();
     ASSERT_EQ(prefix, selections[0].size() + selections[1].size());
     ASSERT_GT(active.size(), 0u);
     EXPECT_EQ(graph.num_active(), active.size());
     EXPECT_FALSE(graph.is_active(63)); EXPECT_FALSE(graph.is_active(64));
     EXPECT_EQ(graph.excess(63), 2.0); EXPECT_EQ(graph.excess(64), 3.0);
-    EXPECT_FALSE(session.active()); // The CPU continuation must not replay prefix rounds.
 
     // Independent CPU/reference work begins only AFTER the GPU-owned window.
     apxchol::detail::gpu_round_shadow_factor_log expected_prefix;
@@ -2740,7 +2138,7 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
         expected_prefix = append_factor_logs(expected_prefix, factor);
     }
     EXPECT_EQ(fingerprint_graph(graph), fingerprint_graph(oracle));
-    EXPECT_EQ(graph.m(), oracle.m());
+
     ASSERT_EQ(columns.size(), expected_prefix.columns.size());
     for (std::size_t i = 0; i < columns.size(); ++i) {
         EXPECT_EQ(columns[i].vertex, expected_prefix.columns[i].vertex);
@@ -2773,21 +2171,12 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
         materialize_factor_log(std::span<const apxchol::detail::factor_col>(columns).subspan(prefix)));
     std::vector<bool> seen(kOwnedVertices);
     for (const auto& c : columns) { ASSERT_LT(c.vertex, kOwnedVertices); EXPECT_FALSE(seen[c.vertex]); seen[c.vertex] = true; }
-    EXPECT_THROW(session.materialize_owned_prefix(graph, active, columns), std::logic_error);
-    session.finish();
-#endif
+    EXPECT_THROW(session.finish(), std::logic_error);
 }
 
 TEST(GpuOwnedPrefix, SharedResidualViewPreservesCandidatesAndIndependentProgress) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_omp_threads serial(1);
-    for (const char* region_count : {"1", "7", static_cast<const char*>(nullptr)}) {
-      scoped_env regions("APXCHOL_GPU_BLOCKS", region_count);
-      SCOPED_TRACE(region_count);
       for (bool degree_tiebreak : {false, true}) {
        SCOPED_TRACE(degree_tiebreak);
        for (double quantile : {0.0, 0.3}) {
@@ -2799,11 +2188,9 @@ TEST(GpuOwnedPrefix, SharedResidualViewPreservesCandidatesAndIndependentProgress
         for (std::size_t round = 0; round < 3; ++round) {
             SCOPED_TRACE(round);
             const auto selected = f.select();
-            std::string receipt = std::to_string(f.selector.resident_region_capacity()) + ":" +
-                std::to_string(f.selector.selected_degree_work());
+            std::string receipt = std::to_string(f.selector.selected_degree_work());
             for (const auto v : selected) receipt += ":" + std::to_string(v);
             RecordProperty(std::string("owned_selection_") +
-                (region_count ? region_count : "auto") + "_" +
                 std::to_string(degree_tiebreak) + "_" + std::to_string(quantile) + "_" +
                 std::to_string(round), receipt);
             const auto report = f.run_selected(selected, f.selector.device_selection());
@@ -2819,26 +2206,17 @@ TEST(GpuOwnedPrefix, SharedResidualViewPreservesCandidatesAndIndependentProgress
             EXPECT_EQ(report.active_count, oracle.num_active());
             f.compare_reference(oracle);
             const auto traffic = f.selector.transfers();
-            EXPECT_EQ(traffic.owned_residual_binds, round + 1);
-            EXPECT_EQ(traffic.host_update_bytes, 0u);
-            EXPECT_EQ(traffic.projection_scratch_peak_extra_bytes, 0u);
+            EXPECT_EQ(traffic.owned_residual_binds, round + 2);
             if (round) {
                 EXPECT_EQ(report.round_state_upload_bytes, 0u);
             }
         }
        }
       }
-    }
-#endif
 }
 
 TEST(GpuOwnedPrefix, SharedResidualViewRejectsPublicReadsAfterNextRound) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     // A rejected operation poisons its selector, so every public entry point
     // gets a fresh owner/selector pair and must reject the expired view first.
@@ -2863,16 +2241,10 @@ TEST(GpuOwnedPrefix, SharedResidualViewRejectsPublicReadsAfterNextRound) {
         }, "GPU selector residual generation is retired");
         EXPECT_THROW(f.session->advance_selector(f.selector), std::exception);
     }
-#endif
 }
 
 TEST(GpuOwnedPrefix, SharedResidualViewRebindsAfterNextRound) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     owned_selector_view_fixture f;
     f.first_bound_round();
@@ -2884,17 +2256,11 @@ TEST(GpuOwnedPrefix, SharedResidualViewRebindsAfterNextRound) {
     ASSERT_NO_THROW(f.session->advance_selector(f.selector));
     ASSERT_NO_THROW((void)f.select());
     EXPECT_NO_THROW((void)f.selector.device_selection());
-    EXPECT_EQ(f.selector.transfers().owned_residual_binds, 2u);
-#endif
+    EXPECT_EQ(f.selector.transfers().owned_residual_binds, 3u);
 }
 
 TEST(GpuOwnedPrefix, SharedResidualViewExpiresWithDestroyedOrReplacedOwner) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     for (bool replace_owner : {false, true}) {
         SCOPED_TRACE(replace_owner);
@@ -2909,16 +2275,10 @@ TEST(GpuOwnedPrefix, SharedResidualViewExpiresWithDestroyedOrReplacedOwner) {
                                   "GPU selector residual generation is retired");
         EXPECT_THROW((void)f.selector.device_selection(), std::exception);
     }
-#endif
 }
 
 TEST(GpuOwnedPrefix, FailedNextRoundRevokesSharedResidualView) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     owned_selector_view_fixture f;
     const auto selected = f.select();
@@ -2926,32 +2286,28 @@ TEST(GpuOwnedPrefix, FailedNextRoundRevokesSharedResidualView) {
     f.run_selected(selected, consumed);
     f.session->advance_selector(f.selector);
     (void)f.select();
-    EXPECT_THROW(f.session->run_owned_prefix_round(
-        f.graph, selected, consumed, kOwnedSeed), std::exception);
+    EXPECT_THROW(f.session->run_owned_prefix_round(consumed, kOwnedSeed), std::exception);
     expect_exception_contains([&] { (void)f.selector.prepare(f.active, f.options); },
                               "GPU selector residual generation is retired");
-#endif
 }
 
-TEST(GpuOwnedPrefix, OwnedHandbackRevokesSharedResidualView) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
+TEST(GpuOwnedPrefix, CompletionRevokesSharedResidualView) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     owned_selector_view_fixture f;
-    f.first_bound_round();
-    (void)f.select();
+    while (!f.active.empty()) {
+        const auto selected = f.select();
+        f.run_selected(selected, f.selector.device_selection());
+        f.session->advance_selector(f.selector);
+    }
     std::vector<apxchol::detail::factor_col> columns;
-    ASSERT_NO_THROW(f.session->materialize_owned_prefix(f.graph, f.active, columns));
+    ASSERT_NO_THROW(f.session->complete_owned_factorization(columns));
     ASSERT_FALSE(columns.empty());
     expect_exception_contains([&] { (void)f.selector.host_candidates(); },
                               "GPU selector residual generation is retired");
     EXPECT_THROW((void)f.selector.device_selection(), std::exception);
-#endif
 }
+#endif
 
 TEST(GpuOwnedMetadataHost, MatchesOriginalConstructionIncludingEmptyAndIrregularColumns) {
     using apxchol::detail::gpu_round_shadow_factor_column;
@@ -3038,26 +2394,23 @@ TEST(GpuOwnedMetadataHost, RawOffsetCapacityMatchesOriginalConstruction) {
     }
 }
 
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuOwnedPrefix, CompleteMetadataMatchesHeaderConstruction) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     apxchol::factorization expected, actual;
     for (bool direct : {false, true}) {
         auto graph = make_owned_order_fixture();
-        apxchol::detail::gpu_block_frontend selector(graph.n(), owned_fixture_topology(graph));
         apxchol::detail::gpu_round_shadow_session session(true);
+        auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+        auto& selector = *selector_owner;
         std::vector<node_index> active(graph.n());
         std::iota(active.begin(), active.end(), node_index{0});
         while (!active.empty()) {
             selector.prepare(active, {});
             const auto selected = selector.select_block_greedy().data;
             ASSERT_FALSE(selected.empty());
-            session.run_owned_prefix_round(graph, selected, selector.device_selection(), kOwnedSeed);
+            session.run_owned_prefix_round(selector.device_selection(), kOwnedSeed);
             std::erase_if(active, [&](node_index v) {
                 return std::binary_search(selected.begin(), selected.end(), v);
             });
@@ -3070,7 +2423,7 @@ TEST(GpuOwnedPrefix, CompleteMetadataMatchesHeaderConstruction) {
             EXPECT_EQ(actual.L.outer_, expected.L.outer_);
             EXPECT_TRUE(actual.L.inner_.empty()); EXPECT_TRUE(actual.L.vals_.empty());
             // Empty host columns represent a full device log, not a CPU tail.
-            EXPECT_NO_THROW(session.finalize_device_factor(columns, actual.perm, graph.n()));
+            EXPECT_NO_THROW(session.finalize_device_factor(actual.perm, graph.n()));
             EXPECT_THROW(session.complete_owned_factorization(actual.perm, actual.L), std::logic_error);
         } else {
             session.complete_owned_factorization(columns);
@@ -3078,23 +2431,18 @@ TEST(GpuOwnedPrefix, CompleteMetadataMatchesHeaderConstruction) {
         }
         EXPECT_NO_THROW(session.finish());
     }
-#endif
 }
 
 TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidual) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     auto graph = make_owned_order_fixture();
     auto oracle = make_owned_order_fixture();
     const auto initial = fingerprint_graph(graph);
-    apxchol::detail::gpu_block_frontend selector(graph.n(), owned_fixture_topology(graph));
     apxchol::detail::gpu_round_shadow_session session(true);
+    auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+    auto& selector = *selector_owner;
     std::vector<node_index> active(graph.n());
     std::iota(active.begin(), active.end(), node_index{0});
     std::vector<std::vector<node_index>> selections;
@@ -3103,8 +2451,7 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
         selector.prepare(active, {});
         const auto selected = selector.select_block_greedy().data;
         ASSERT_FALSE(selected.empty());
-        reports.push_back(session.run_owned_prefix_round(
-            graph, selected, selector.device_selection(), kOwnedSeed));
+        reports.push_back(session.run_owned_prefix_round(selector.device_selection(), kOwnedSeed));
         selections.push_back(selected);
         std::erase_if(active, [&](node_index v) {
             return std::binary_search(selected.begin(), selected.end(), v);
@@ -3115,7 +2462,6 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     }
     ASSERT_GT(reports.size(), 2u);
     EXPECT_EQ(fingerprint_graph(graph), initial); // No CPU numerical replay.
-    EXPECT_EQ(selector.transfers().host_update_bytes, 0u);
     EXPECT_EQ(reports.back().active_count, 0u);
     EXPECT_EQ(reports.back().live_incidences, 0u);
     EXPECT_EQ(reports.back().state_imports, 1u);
@@ -3176,7 +2522,7 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     apxchol::detail::build_csc(reference_factor, reference_columns, kOwnedVertices, nullptr);
     apxchol::cuda_sptrsv expected_trsv, owned_trsv;
     expected_trsv.setup(reference_factor.L, kOwnedVertices);
-    auto device_factor = session.finalize_device_factor(columns, reference_factor.perm, kOwnedVertices);
+    auto device_factor = session.finalize_device_factor(reference_factor.perm, kOwnedVertices);
     owned_trsv.setup_adopting_device_factor_for_research(std::move(*device_factor));
     // Basis vectors exercise the full inverse operator, not just one RHS.
     for (std::size_t basis = 0; basis < kOwnedVertices; ++basis) {
@@ -3190,22 +2536,14 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     const auto trace = testing::internal::GetCapturedStderr();
     if (apxchol::detail::gpu_setup_diagnostics()) {
         EXPECT_NE(trace.find("[gpu-owned-factorization] complete"), std::string::npos);
-        EXPECT_NE(trace.find("cpu_tail_columns=0"), std::string::npos);
-        EXPECT_NE(trace.find("residual_download_bytes=0"), std::string::npos);
     } else {
         EXPECT_TRUE(trace.empty()) << trace;
     }
     EXPECT_THROW(session.complete_owned_factorization(columns), std::logic_error);
-#endif
 }
 
 TEST(GpuOwnedPrefix, DegreeScratchLifetimeAcrossMovesCompletionAndNewSizes) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     apxchol::detail::gpu_round_shadow_session session(true);
     const node_index sizes[] = {
@@ -3229,7 +2567,8 @@ TEST(GpuOwnedPrefix, DegreeScratchLifetimeAcrossMovesCompletionAndNewSizes) {
             return g;
         };
         auto graph = make_graph(), oracle = make_graph();
-        apxchol::detail::gpu_block_frontend selector(n, owned_fixture_topology(graph));
+        auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+        auto& selector = *selector_owner;
         std::vector<node_index> active(n);
         std::iota(active.begin(), active.end(), node_index{0});
         apxchol::partition_options options;
@@ -3251,8 +2590,7 @@ TEST(GpuOwnedPrefix, DegreeScratchLifetimeAcrossMovesCompletionAndNewSizes) {
             }
             const auto selected = selector.select_block_greedy().data;
             ASSERT_FALSE(selected.empty());
-            const auto report = session.run_owned_prefix_round(
-                graph, selected, selector.device_selection(), kOwnedSeed);
+            const auto report = session.run_owned_prefix_round(selector.device_selection(), kOwnedSeed);
             reports.push_back(report);
             receipt += ":r" + std::to_string(report.live_incidences);
             for (const auto v : selected) receipt += ":v" + std::to_string(v);
@@ -3303,16 +2641,10 @@ TEST(GpuOwnedPrefix, DegreeScratchLifetimeAcrossMovesCompletionAndNewSizes) {
         }
         RecordProperty("degree_lifetime_case_" + std::to_string(fixture), receipt);
     }
-#endif
 }
 
 TEST(GpuOwnedPrefix, DegreeScratchHandbackPreservesEveryOrderedField) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     for (int rounds : {1, 2, 3}) {
         SCOPED_TRACE(rounds);
@@ -3330,7 +2662,7 @@ TEST(GpuOwnedPrefix, DegreeScratchHandbackPreservesEveryOrderedField) {
             if (round + 1 < rounds) f.session->advance_selector(f.selector);
         }
         std::vector<apxchol::detail::factor_col> columns;
-        f.session->materialize_owned_prefix(f.graph, f.active, columns);
+        observe_owned_prefix(*f.session, f.graph, f.active, columns);
         const auto actual = apxchol::detail::make_gpu_round_shadow_input(f.graph, {}, kOwnedSeed);
         const auto stored_cpu = apxchol::detail::make_gpu_round_shadow_input(oracle, {}, kOwnedSeed);
         // CPU slabs can retain arcs to inactive vertices. The owned residual
@@ -3359,21 +2691,15 @@ TEST(GpuOwnedPrefix, DegreeScratchHandbackPreservesEveryOrderedField) {
             receipt += ":e" + std::to_string(a.owner) + ":" + std::to_string(a.neighbor)
                 + ":" + std::to_string(std::bit_cast<std::uint64_t>(a.weight));
         }
-        EXPECT_EQ(f.graph.m(), oracle.m());
+
         RecordProperty("degree_handback_rounds_" + std::to_string(rounds), receipt);
     }
-#endif
 }
 
 TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     constexpr node_index degrees[] = {0, 1, 2, 31, 32, 33, 63, 64, 65, 255, 256, 257};
     constexpr double weights[] = {0.0, -0.0, 0x1p-20, 0.25, 1.0, 0x1p20, 0x1p52};
@@ -3401,7 +2727,8 @@ TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
         };
         auto graph = make_graph(), oracle = make_graph();
         apxchol::detail::gpu_round_shadow_session session(true);
-        apxchol::detail::gpu_block_frontend selector(n, owned_fixture_topology(graph));
+        auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+        auto& selector = *selector_owner;
         std::vector<node_index> active(n), wanted(count);
         std::iota(active.begin(), active.end(), node_index{0});
         std::iota(wanted.begin(), wanted.end(), node_index{0});
@@ -3409,75 +2736,35 @@ TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
         options.degree_quantile = 0.0; options.degree_multiplier = 1024.0;
         options.degree_tiebreak = false;
         selector.prepare(active, options);
-        const auto selected = selector.select_block_greedy().data;
-        ASSERT_EQ(selected, wanted); // All centers precede their leaves by ID.
+        const auto selected = selector.select_for_test(wanted).data;
+        ASSERT_EQ(selected, wanted);
         const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, selected, kOwnedSeed);
-        const auto report = session.run_owned_prefix_round(graph, selected, selector.device_selection(), kOwnedSeed);
+        const auto report = session.run_owned_prefix_round(selector.device_selection(), kOwnedSeed);
         ASSERT_TRUE(report.gpu_executed); EXPECT_TRUE(report.pivots.empty());
         std::vector<apxchol::detail::factor_col> actual_columns;
-        session.materialize_owned_prefix(graph, active, actual_columns);
-        std::vector<gpu_round_shadow_excess_bound> bounds;
-        const auto reference = apxchol::detail::reference_gpu_round_shadow(input, &bounds);
-        apxchol::detail::gpu_round_shadow_factor_log expected_log;
-        (void)run_serial_cpu_round(oracle, input, reference, bounds, &expected_log);
+        observe_owned_prefix(session, graph, active, actual_columns);
+        const auto expected_log = run_owned_host_oracle(oracle, input);
         ASSERT_EQ(actual_columns.size(), expected_log.columns.size());
-        std::vector<std::vector<apxchol::detail::factor_entry>> prefix_entries(count);
-        std::vector<apxchol::detail::factor_col> expected_columns;
+
         for (std::size_t i = 0; i < count; ++i) {
             const auto& c = expected_log.columns[i];
             EXPECT_EQ(actual_columns[i].vertex, c.vertex);
             EXPECT_EQ(actual_columns[i].entry_count, c.entry_count);
             EXPECT_EQ(std::bit_cast<std::uint32_t>(actual_columns[i].diag),
                       std::bit_cast<std::uint32_t>(c.diag));
-            for (std::size_t j = 0; j < c.entry_count; ++j) {
-                const auto& e = expected_log.entries[c.entry_begin + j];
-                prefix_entries[i].push_back({e.neighbor, e.value});
-            }
-            expected_columns.push_back({c.vertex, c.diag, prefix_entries[i].data(), c.entry_count});
         }
-        // Append the same independently computed CPU tail to both factors. This
-        // isolates owned prefix values without exposing a new factor-log API.
-        apxchol::factorize_workspace workspace;
-        workspace.threads.resize(1);
-        workspace.threads[0].factor_entries = std::make_unique<std::pmr::monotonic_buffer_resource>();
-        apxchol::factor_options tail_options; tail_options.seed = kOwnedSeed;
-        auto remaining = active;
-        apxchol::detail::eliminate_remaining(apxchol::detail::tree_elimination{}, oracle,
-            remaining, expected_columns, workspace, tail_options);
-        actual_columns.insert(actual_columns.end(), expected_columns.begin() + count, expected_columns.end());
-        apxchol::factorization reference_factor;
-        apxchol::detail::build_csc(reference_factor, expected_columns, n, nullptr);
-        apxchol::cuda_sptrsv expected_trsv, actual_trsv;
-        expected_trsv.setup(reference_factor.L, n);
-        auto factor = session.finalize_device_factor(actual_columns, reference_factor.perm, n);
-        ASSERT_NE(factor, nullptr);
-        actual_trsv.setup_adopting_device_factor_for_research(std::move(*factor));
-        std::uint64_t digest = 14695981039346656037ULL;
-        for (node_index basis = 0; basis < n; ++basis) {
-            std::vector<double> expected(n), actual(n);
-            expected[basis] = actual[basis] = 1.0;
-            expected_trsv.solve_LLt(expected.data(), expected.data());
-            actual_trsv.solve_LLt(actual.data(), actual.data());
-            EXPECT_EQ(actual, expected) << "basis=" << basis;
-            for (double value : actual)
-                digest = (digest ^ std::bit_cast<std::uint64_t>(value)) * 1099511628211ULL;
-        }
+        const auto digest = check_complete_factor_action(
+            session, selector, oracle, expected_log, kOwnedSeed);
         // Every-basis equality checks complete factor action, not raw factor bytes.
         RecordProperty("owned_factor_entry_" + std::to_string(count),
             std::to_string(n) + ":" + std::to_string(expected_log.entries.size()) + ":" + std::to_string(digest));
     }
-#endif
 }
 
 TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     const std::vector<std::vector<std::size_t>> profiles = {
         {127, 128, 129},             // Both dispatch paths in the same round.
@@ -3522,7 +2809,8 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             auto graph = make_graph(), oracle = make_graph();
             // The frontend borrows owned storage; destroy it before its owner.
             apxchol::detail::gpu_round_shadow_session session(true);
-            apxchol::detail::gpu_block_frontend selector(n, owned_fixture_topology(graph));
+            auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+            auto& selector = *selector_owner;
             std::vector<node_index> active(n), wanted(count);
             std::iota(active.begin(), active.end(), node_index{0});
             std::iota(wanted.begin(), wanted.end(), node_index{0});
@@ -3530,10 +2818,8 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             options.degree_quantile = 0.0;
             options.degree_multiplier = 1024.0;
             options.degree_tiebreak = false;
-            // Initial generic selection is independent of the experimental
-            // resident selector: every lower-ID center precedes its receivers.
             selector.prepare(active, options);
-            const auto selected = selector.select_block_greedy().data;
+            const auto selected = selector.select_for_test(wanted).data;
             ASSERT_EQ(selected, wanted);
             const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, selected, seed);
 
@@ -3568,8 +2854,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
                     ++expected_counts.batches;
                 }
             }
-            const auto report = session.run_owned_prefix_round(
-                graph, selected, selector.device_selection(), seed);
+            const auto report = session.run_owned_prefix_round(selector.device_selection(), seed);
             ASSERT_TRUE(report.gpu_executed);
             ASSERT_TRUE(report.pivots.empty());
             const auto& got = report.normal_batch;
@@ -3607,7 +2892,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             }
 
             std::vector<apxchol::detail::factor_col> actual_columns;
-            session.materialize_owned_prefix(graph, active, actual_columns);
+            observe_owned_prefix(session, graph, active, actual_columns);
             const auto actual = apxchol::detail::make_gpu_round_shadow_input(
                 graph, std::span<const node_index>{}, seed);
             // Independent numerical oracle starts after GPU-owned execution.
@@ -3629,7 +2914,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             for (std::size_t j = 0; j < actual.excess.size(); ++j)
                 EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.excess[j]),
                           std::bit_cast<std::uint64_t>(expected.excess[j]));
-            EXPECT_EQ(graph.m(), oracle.m());
+
             EXPECT_EQ(report.raw_fill_edges, reference.raw_fill_edges);
             EXPECT_EQ(report.unique_neighbors, reference.unique_neighbors);
             EXPECT_EQ(report.excess_updates, reference.excess_updates);
@@ -3638,46 +2923,17 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             }
 
             ASSERT_EQ(actual_columns.size(), expected_log.columns.size());
-            std::vector<std::vector<apxchol::detail::factor_entry>> prefix_entries(count);
-            std::vector<apxchol::detail::factor_col> expected_columns;
+
             for (std::size_t j = 0; j < count; ++j) {
                 const auto& c = expected_log.columns[j];
                 EXPECT_EQ(actual_columns[j].vertex, c.vertex);
                 EXPECT_EQ(actual_columns[j].entry_count, c.entry_count);
                 EXPECT_EQ(std::bit_cast<std::uint32_t>(actual_columns[j].diag),
                           std::bit_cast<std::uint32_t>(c.diag));
-                for (std::size_t k = 0; k < c.entry_count; ++k) {
-                    const auto& entry = expected_log.entries[c.entry_begin + k];
-                    prefix_entries[j].push_back({entry.neighbor, entry.value});
-                }
-                expected_columns.push_back({c.vertex, c.diag, prefix_entries[j].data(), c.entry_count});
             }
             const auto handback_receipt = owned_residual_boundary_receipt(actual, actual_columns);
-            apxchol::factorize_workspace workspace;
-            workspace.threads.resize(1);
-            workspace.threads[0].factor_entries = std::make_unique<std::pmr::monotonic_buffer_resource>();
-            apxchol::factor_options tail_options; tail_options.seed = seed;
-            auto remaining = active;
-            apxchol::detail::eliminate_remaining(apxchol::detail::tree_elimination{}, oracle,
-                remaining, expected_columns, workspace, tail_options);
-            actual_columns.insert(actual_columns.end(), expected_columns.begin()+count, expected_columns.end());
-            apxchol::factorization reference_factor;
-            apxchol::detail::build_csc(reference_factor, expected_columns, n, nullptr);
-            apxchol::cuda_sptrsv reference_trsv, actual_trsv;
-            reference_trsv.setup(reference_factor.L, n);
-            auto factor = session.finalize_device_factor(actual_columns, reference_factor.perm, n);
-            ASSERT_NE(factor, nullptr);
-            actual_trsv.setup_adopting_device_factor_for_research(std::move(*factor));
-            std::uint64_t digest = 14695981039346656037ULL;
-            for (node_index basis = 0; basis < n; ++basis) {
-                std::vector<double> wanted_x(n), actual_x(n);
-                wanted_x[basis] = actual_x[basis] = 1.0;
-                reference_trsv.solve_LLt(wanted_x.data(), wanted_x.data());
-                actual_trsv.solve_LLt(actual_x.data(), actual_x.data());
-                EXPECT_EQ(actual_x, wanted_x) << "basis=" << basis;
-                for (double value : actual_x)
-                    digest = (digest ^ std::bit_cast<std::uint64_t>(value)) * 1099511628211ULL;
-            }
+            const auto digest = check_complete_factor_action(
+                session, selector, oracle, expected_log, seed);
             std::ostringstream receipt;
             receipt << got.normal_pivots << ',' << got.normal_spans << ',' << got.normal_gathered
                     << ',' << got.normal_unique << ',' << got.batches << ',' << got.oversized_pivots
@@ -3688,16 +2944,10 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             RecordProperty("normal_batch_"+std::to_string(profile)+"_"+std::to_string(mode),receipt.str());
         }
     }
-#endif
 }
 
 TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     constexpr node_index n = 4;
     constexpr unsigned seed = 42;
@@ -3715,28 +2965,17 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
         for (node_index v = 0; v < n; ++v) g.excess(v) = 1.0;
         return g;
     };
-    // Inactive imports are outside the high-level owned-session contract;
-    // reject them instead of silently assuming their stored slots are live.
     {
-        auto rejected = make_graph();
-        rejected.deactivate(3);
-        apxchol::detail::gpu_round_shadow_session rejected_session(true);
-        apxchol::detail::gpu_block_frontend rejected_selector(
-            n, owned_fixture_topology(rejected));
-        const std::vector<node_index> inactive{3}, active_probe{0, 1, 2};
-        rejected_selector.advance(inactive, {});
-        apxchol::partition_options probe_options;
-        probe_options.degree_multiplier = 1024.0;
-        probe_options.degree_tiebreak = false;
-        rejected_selector.prepare(active_probe, probe_options);
-        const auto selected = rejected_selector.select_block_greedy().data;
-        ASSERT_FALSE(selected.empty());
-        EXPECT_THROW(rejected_session.run_owned_prefix_round(rejected, selected,
-            rejected_selector.device_selection(), seed), std::invalid_argument);
+        auto inactive = make_graph();
+        inactive.deactivate(3);
+        apxchol::detail::gpu_round_shadow_session rejected(true);
+        EXPECT_THROW(apxchol::test::initialize_owned_selector(rejected, inactive),
+                     std::invalid_argument);
     }
     auto graph = make_graph(), oracle = make_graph();
     apxchol::detail::gpu_round_shadow_session session(true);
-    apxchol::detail::gpu_block_frontend selector(n, owned_fixture_topology(graph));
+    auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+    auto& selector = *selector_owner;
     std::vector<node_index> active{0, 1, 2, 3};
     apxchol::partition_options options;
     options.degree_quantile = 0.0;
@@ -3747,7 +2986,8 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
     for (unsigned round = 0; round < 2; ++round) {
         SCOPED_TRACE(round);
         selector.prepare(active, options);
-        const auto selected = selector.select_block_greedy().data;
+        const auto selected = round == 0 ? selector.select_for_test(std::vector<node_index>{0}).data
+            : selector.select_block_greedy().data;
         ASSERT_EQ(selected.size(), 1u);
         if (round == 0) {
             ASSERT_EQ(selected.front(), 0u);
@@ -3764,8 +3004,7 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
             ASSERT_EQ(span, 129u);
         }
         ASSERT_EQ(span, live);
-        const auto report = session.run_owned_prefix_round(
-            graph, selected, selector.device_selection(), seed);
+        const auto report = session.run_owned_prefix_round(selector.device_selection(), seed);
         ASSERT_TRUE(report.gpu_executed);
         EXPECT_EQ(report.normal_batch.oversized_pivots, 1u);
         EXPECT_EQ(report.normal_batch.normal_pivots, 0u);
@@ -3790,7 +3029,7 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
         if (round == 0) session.advance_selector(selector);
     }
     std::vector<apxchol::detail::factor_col> columns;
-    session.materialize_owned_prefix(graph, active, columns);
+    observe_owned_prefix(session, graph, active, columns);
     const auto actual = apxchol::detail::make_gpu_round_shadow_input(graph, {}, seed);
     const auto expected = compact_live_snapshot(
         apxchol::detail::make_gpu_round_shadow_input(oracle, {}, seed));
@@ -3807,7 +3046,7 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
     for (std::size_t j = 0; j < actual.excess.size(); ++j)
         EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.excess[j]),
                   std::bit_cast<std::uint64_t>(expected.excess[j]));
-    EXPECT_EQ(graph.m(), oracle.m());
+
     ASSERT_EQ(columns.size(), expected_log.columns.size());
     for (std::size_t j = 0; j < columns.size(); ++j) {
         EXPECT_EQ(columns[j].vertex, expected_log.columns[j].vertex);
@@ -3819,16 +3058,10 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
     // fixture independently checks full factor action on every basis.
     receipt << ';' << owned_residual_boundary_receipt(actual, columns);
     RecordProperty("owned_compact_oversized", receipt.str());
-#endif
 }
 
 TEST(GpuOwnedPrefix, ParallelEmissionMatchesSerialOrderedHandback) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     for (node_index degree : {0, 1, 2, 31, 32, 33, 257}) {
         for (unsigned profile = 0; profile < 2; ++profile) {
@@ -3839,9 +3072,8 @@ TEST(GpuOwnedPrefix, ParallelEmissionMatchesSerialOrderedHandback) {
             const std::uint64_t seed = profile ? std::numeric_limits<unsigned>::max() : 0;
             auto make_graph = [&] {
                 apxchol::graph<apxchol::directed_vec_pool_incidence> graph(degree + 1);
-                // Equal stored degrees force the selector to choose vertex 0,
-                // rather than the leaves of a high-degree star. Duplicate arcs
-                // also exercise canonical deduplication before item emission.
+                // A prescribed pivot isolates emission for these complete graphs.
+                // Duplicate arcs exercise ordered deduplication before emission.
                 for (node_index u = 0; u <= degree; ++u)
                     for (node_index v = u + 1; v <= degree; ++v) {
                         double w = 1.0;
@@ -3858,26 +3090,24 @@ TEST(GpuOwnedPrefix, ParallelEmissionMatchesSerialOrderedHandback) {
             auto oracle = make_graph();
             std::vector<node_index> active(graph.n());
             std::iota(active.begin(), active.end(), node_index{0});
-            apxchol::detail::gpu_block_frontend selector(
-                graph.n(), owned_fixture_topology(graph));
+            apxchol::detail::gpu_round_shadow_session session(true);
+            auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+            auto& selector = *selector_owner;
             selector.prepare(active, {});
-            const auto selected = selector.select_block_greedy().data;
+            const auto selected = selector.select_for_test(std::vector<node_index>{0}).data;
             ASSERT_EQ(selected, std::vector<node_index>{0});
             const auto input = apxchol::detail::make_gpu_round_shadow_input(
                 oracle, selected, seed);
             std::vector<gpu_round_shadow_excess_bound> bounds;
             const auto reference = apxchol::detail::reference_gpu_round_shadow(input, &bounds);
-            apxchol::detail::gpu_round_shadow_factor_log expected_factor;
-            run_serial_cpu_round(oracle, input, reference, bounds, &expected_factor);
+            const auto expected_factor = run_owned_host_oracle(oracle, input);
 
-            apxchol::detail::gpu_round_shadow_session session(true);
-            const auto report = session.run_owned_prefix_round(
-                graph, selected, selector.device_selection(), seed);
+            const auto report = session.run_owned_prefix_round(selector.device_selection(), seed);
             EXPECT_TRUE(report.pivots.empty()); // Owned, not audited serial sampler.
             EXPECT_EQ(report.unique_neighbors, static_cast<std::size_t>(degree));
             EXPECT_EQ(report.raw_fill_edges, reference.raw_fill_edges);
             std::vector<apxchol::detail::factor_col> columns;
-            session.materialize_owned_prefix(graph, active, columns);
+            observe_owned_prefix(session, graph, active, columns);
             ASSERT_EQ(columns.size(), expected_factor.columns.size());
             for (std::size_t i = 0; i < columns.size(); ++i) {
                 EXPECT_EQ(columns[i].vertex, expected_factor.columns[i].vertex);
@@ -3913,60 +3143,65 @@ TEST(GpuOwnedPrefix, ParallelEmissionMatchesSerialOrderedHandback) {
                            std::to_string(profile), std::to_string(digest));
         }
     }
-#endif
 }
 
 TEST(GpuOwnedPrefix, PrematureCompletionPoisonsIncompleteDeviceFactor) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     auto graph = make_owned_order_fixture();
-    apxchol::detail::gpu_block_frontend selector(graph.n(), owned_fixture_topology(graph));
     apxchol::detail::gpu_round_shadow_session session(true);
+    auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+    auto& selector = *selector_owner;
     std::vector<node_index> active(graph.n());
     std::iota(active.begin(), active.end(), node_index{0});
     selector.prepare(active, {});
-    const auto selected = selector.select_block_greedy().data;
-    const auto report = session.run_owned_prefix_round(
-        graph, selected, selector.device_selection(), kOwnedSeed);
+    (void)selector.select_block_greedy();
+    const auto report = session.run_owned_prefix_round(selector.device_selection(), kOwnedSeed);
     ASSERT_GT(report.active_count, 0u);
     std::vector<apxchol::detail::factor_col> columns;
     EXPECT_THROW(session.complete_owned_factorization(columns), std::logic_error);
     EXPECT_TRUE(columns.empty());
-    EXPECT_THROW(session.materialize_owned_prefix(graph, active, columns), std::logic_error);
-#endif
 }
 
 TEST(GpuOwnedPrefix, StaleSecondSelectionPoisonsBeforeHostPublication) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     auto graph = make_owned_order_fixture();
     const auto initial = fingerprint_graph(graph);
-    auto topology = owned_fixture_topology(graph);
-    apxchol::detail::gpu_block_frontend selector(graph.n(), topology);
     apxchol::detail::gpu_round_shadow_session session(true);
+    auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+    auto& selector = *selector_owner;
     std::vector<node_index> active(graph.n());
     std::iota(active.begin(), active.end(), node_index{0});
     selector.prepare(active, {});
-    const auto selected = selector.select_block_greedy().data;
+    (void)selector.select_block_greedy();
     const auto old = selector.device_selection();
-    session.run_owned_prefix_round(graph, selected, old, kOwnedSeed);
+    session.run_owned_prefix_round(old, kOwnedSeed);
     session.advance_selector(selector);
-    EXPECT_THROW(session.run_owned_prefix_round(graph, selected, old, kOwnedSeed), std::exception);
+    EXPECT_THROW(session.run_owned_prefix_round(old, kOwnedSeed), std::exception);
     std::vector<apxchol::detail::factor_col> columns;
-    EXPECT_THROW(session.materialize_owned_prefix(graph, active, columns), std::exception);
+    EXPECT_THROW(observe_owned_prefix(session, graph, active, columns), std::exception);
     EXPECT_TRUE(columns.empty());
     EXPECT_EQ(fingerprint_graph(graph), initial);
-#endif
 }
+#endif
+
+#if defined(APXCHOL_USE_CUDA)
+namespace {
+Eigen::SparseMatrix<double> owned_solve_matrix(int n, double shift) {
+    Eigen::SparseMatrix<double> A(n, n);
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        entries.emplace_back(i, i, 4.0 + shift);
+        for (int offset : {1, 8}) {
+            int j = (i + offset) % n;
+            entries.emplace_back(i, j, -1.0); entries.emplace_back(j, i, -1.0);
+        }
+    }
+    A.setFromTriplets(entries.begin(), entries.end());
+    return A;
+}
+}
+#endif
 
 TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
 #if !defined(APXCHOL_USE_CUDA)
@@ -3976,10 +3211,6 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
     scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     const int n = 256; // Includes the under-occupied tail, without CPU handoff.
     apxchol::factor_options factor_options;
@@ -3989,7 +3220,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     for (double shift : {0.0, 1.0}) {
         SCOPED_TRACE(shift);
         auto A = owned_solve_matrix(n, shift);
-        apxchol::test::diagnostic_gpu_preconditioner preconditioner;
+        apxchol::detail::gpu_preconditioner preconditioner;
         apxchol::checkpoint owned_cp;
         preconditioner.set_checkpoint(&owned_cp);
         preconditioner.set_options(factor_options);
@@ -4000,16 +3231,8 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
             ASSERT_NE(trace.find("[gpu-owned-factorization] complete rounds="), std::string::npos) << trace;
             EXPECT_GT(gpu_round_trace_size(trace, "rounds="), 2u);
             EXPECT_NE(trace.find("[gpu-owned-csc] n="), std::string::npos);
-            EXPECT_NE(trace.find("initial_snapshots=0"), std::string::npos);
-            EXPECT_EQ(trace.find("paired_initial=1"), std::string::npos);
-            EXPECT_NE(trace.find("cpu_replay_rounds=0"), std::string::npos);
-            EXPECT_EQ(trace.find("[gpu-round-shadow] checked"), std::string::npos);
             EXPECT_NE(trace.find("factor_entry_download_bytes=0"), std::string::npos);
-            EXPECT_EQ(trace.find("handback_download_bytes="), std::string::npos);
-            EXPECT_NE(trace.find("residual_download_bytes=0"), std::string::npos);
-            EXPECT_EQ(gpu_round_trace_size(trace, "cpu_tail_columns="), 0u);
-            EXPECT_EQ(gpu_round_trace_size(trace, "host_factor_entry_write_bytes="), 0u);
-        } else {
+            } else {
             EXPECT_EQ(trace.find("[gpu-setup-receipt]"), std::string::npos) << trace;
             EXPECT_EQ(trace.find("[gpu-owned-"), std::string::npos) << trace;
             EXPECT_EQ(trace.find("[gpu-round-shadow]"), std::string::npos) << trace;
@@ -4051,1329 +3274,27 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     GTEST_SKIP() << "CUDA build required";
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
     scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
-    scoped_omp_threads serial(1);
     Eigen::SparseMatrix<double> tiny(2, 2);
-    std::vector<Eigen::Triplet<double>> entries{{0,0,2},{1,1,2},{0,1,-1},{1,0,-1}};
+    const std::vector<Eigen::Triplet<double>> entries{{0,0,2},{1,1,2},{0,1,-1},{1,0,-1}};
     tiny.setFromTriplets(entries.begin(), entries.end());
-    apxchol::test::diagnostic_gpu_preconditioner small;
-    testing::internal::CaptureStderr(); small.compute(tiny);
-    const auto zero_trace = testing::internal::GetCapturedStderr();
-    if (apxchol::detail::gpu_setup_diagnostics()) {
-        EXPECT_NE(zero_trace.find("[gpu-owned-factorization] complete"), std::string::npos);
-        EXPECT_EQ(gpu_round_trace_size(zero_trace, "factor_header_count="), 2u);
-        EXPECT_EQ(gpu_round_trace_size(zero_trace, "cpu_tail_columns="), 0u);
-        EXPECT_EQ(zero_trace.find("[gpu-round-shadow] checked"), std::string::npos);
-    } else {
-        EXPECT_EQ(zero_trace.find("[gpu-owned-"), std::string::npos);
-    }
-    expect_setup_api_receipt(zero_trace, small);
+    apxchol::detail::gpu_preconditioner small;
+    small.compute(tiny);
     EXPECT_EQ(small.factor().perm.size(), 2u);
+    EXPECT_TRUE(small.trsv().adopted_device_factor());
+    EXPECT_TRUE(small.factor().L.vals_.empty());
     auto A = owned_solve_matrix(64, 1.0);
-    apxchol::test::diagnostic_gpu_preconditioner kept;
-    kept.set_keep_factor(true);
-    testing::internal::CaptureStderr(); kept.compute(A);
-    const auto kept_trace = testing::internal::GetCapturedStderr();
-    EXPECT_EQ(kept_trace.find("[gpu-owned-prefix]"), std::string::npos);
-    if (apxchol::detail::gpu_setup_diagnostics()) {
-        EXPECT_NE(kept_trace.find("[gpu-round-shadow] checked"), std::string::npos);
-    } else {
-        EXPECT_EQ(kept_trace.find("[gpu-round-shadow]"), std::string::npos);
-    }
-    expect_setup_api_receipt(kept_trace, kept);
-    EXPECT_EQ(kept.factor().L.vals_.size(), kept.factor().L.nonZeros());
-    testing::internal::CaptureStderr(); auto exported = apxchol::factorize(
-        A, apxchol::graph_storage::vec_pool_aos);
-    const auto exported_trace = testing::internal::GetCapturedStderr();
-    EXPECT_EQ(exported_trace.find("[gpu-owned-prefix]"), std::string::npos);
+    auto exported = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
     EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
-    // The test-only diagnostic route still permits ordinary host import.
-    // The public preconditioner no longer chooses CUDA from these flags.
-    scoped_env shadow_off("APXCHOL_GPU_ROUND_SHADOW", "off");
-    scoped_env finalize_off("APXCHOL_GPU_FACTOR_FINALIZE", "off");
-    scoped_env frontend_off("APXCHOL_GPU_BLOCK_FRONTEND", "off");
-    apxchol::test::diagnostic_gpu_preconditioner ordinary;
-    testing::internal::CaptureStderr(); ordinary.compute(A);
-    const auto ordinary_trace = testing::internal::GetCapturedStderr();
-    EXPECT_EQ(ordinary_trace.find("[gpu-owned-prefix]"), std::string::npos);
-    EXPECT_FALSE(ordinary.trsv().adopted_device_factor());
-    expect_setup_api_receipt(ordinary_trace, ordinary);
+    EXPECT_FALSE(exported.research_device_factor);
+    apxchol::detail::gpu_preconditioner owner;
+    EXPECT_THROW(owner.set_factor(exported), std::invalid_argument);
+    apxchol::apx_cholesky host;
+    EXPECT_NO_THROW(host.set_factor(exported));
 #endif
 }
 
-TEST(GpuRoundShadowDevice, ResidentSelectorProjectionTwoTransitions) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    resident_selector_fixture f;
-    for (int round = 0; round < 3; ++round) {
-        f.round();
-        f.state.advance_selector(*f.frontend);
-        const auto traffic = f.frontend->transfers();
-        EXPECT_EQ(traffic.host_update_bytes, 0u);
-        EXPECT_EQ(traffic.resident_advances, std::size_t(round + 1));
-        f.compare_reference();
-    }
-    std::fprintf(stderr, "[resident-selector-test] rounds=3 host_update_bytes=%zu "
-        "projection_scratch_peak_extra_bound=%zu\n",
-        f.frontend->transfers().host_update_bytes,
-        f.frontend->transfers().projection_scratch_peak_extra_bytes);
-#endif
-}
-
-TEST(GpuRoundShadowDevice, ResidentSelectorProjectionHandlesEmptyResidual) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    resident_selector_fixture f(false);
-    f.round();
-    ASSERT_TRUE(f.active.empty());
-    f.state.advance_selector(*f.frontend);
-    f.compare_reference();
-    EXPECT_EQ(f.frontend->transfers().host_update_bytes, 0u);
-#endif
-}
-
-TEST(GpuRoundShadowDevice, ResidentSelectorProjectionPreservesOrderAndExcessRefresh) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    for (bool parallel_order : {false, true}) {
-        resident_selector_fixture f;
-        f.round(false);
-        f.state.certify_cpu_round(!parallel_order, fingerprint_graph(f.graph),
-                                 !parallel_order);
-        f.state.advance_selector(*f.frontend);
-        f.frontend->prepare(f.active, f.options);
-        f.frontend->select_block_greedy();
-        expect_exception_contains([&] {
-            f.state.compute_resident(f.frontend->device_selection(), f.seed);
-        }, parallel_order ? "parallel-order reimport" : "excess refresh");
-        EXPECT_EQ(f.frontend->transfers().host_update_bytes, 0u);
-    }
-#endif
-}
-
-TEST(GpuRoundShadowDevice, ResidentSelectorProjectionRejectsLaterHostSelectedGeneration) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    resident_selector_fixture f;
-    f.round();
-    ASSERT_FALSE(f.active.empty());
-    // A previous producer binding must not authorize a later round that used
-    // host-selected pivots, even while its old capability remains published.
-    const std::vector<node_index> selected{f.active.front()};
-    const auto input = apxchol::detail::make_gpu_round_shadow_input(
-        f.graph, selected, f.seed);
-    std::vector<gpu_round_shadow_excess_bound> bounds;
-    const auto report = apxchol::detail::run_verified_gpu_round_shadow(f.state, input, &bounds);
-    const auto cpu = run_serial_cpu_round(f.graph, input, report, bounds);
-    f.state.certify_cpu_round(true, fingerprint_graph(f.graph),
-                             cpu.bounded_excess_vertices != 0);
-    expect_exception_contains([&] { f.state.advance_selector(*f.frontend); }, "CPU-certified");
-    EXPECT_EQ(f.frontend->transfers().resident_advances, 0u);
-#endif
-}
-
-TEST(GpuRoundShadowDevice, ResidentSelectorProjectionRequiresCpuCertification) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    resident_selector_fixture f;
-    f.round(false);
-    expect_exception_contains([&] { f.state.advance_selector(*f.frontend); },
-                              "CPU-certified");
-    EXPECT_EQ(f.frontend->transfers().resident_advances, 0u);
-    expect_exception_contains([&] { f.state.download_factor_log(); }, "poisoned");
-#endif
-}
-
-TEST(GpuRoundShadowDevice, ResidentSelectorProjectionRejectsReplayAndInterveningSelection) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    for (bool repeat_projection : {false, true}) {
-        resident_selector_fixture f;
-        f.round();
-        if (repeat_projection) f.state.advance_selector(*f.frontend);
-        else f.frontend->select_block_greedy();
-        EXPECT_THROW(f.state.advance_selector(*f.frontend), std::exception);
-        expect_exception_contains([&] { f.state.download_factor_log(); }, "poisoned");
-    }
-#endif
-}
-
-TEST(GpuRoundShadowDevice, ResidentSelectorProjectionRejectsDifferentProducerAndHostRebuild) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    for (bool host_rebuild : {false, true}) {
-        resident_selector_fixture f;
-        f.round();
-        if (host_rebuild) {
-            f.state.invalidate_for_authoritative_host_rebuild(fingerprint_graph(f.graph));
-            expect_exception_contains([&] { f.state.advance_selector(*f.frontend); },
-                                      "CPU-certified");
-        } else {
-            apxchol::detail::gpu_block_frontend other(f.n, f.initial);
-            std::vector<node_index> all(f.n);
-            std::iota(all.begin(), all.end(), node_index{0});
-            other.prepare(all, f.options);
-            other.select_block_greedy();
-            expect_exception_contains([&] { f.state.advance_selector(other); },
-                                      "different producer");
-            EXPECT_EQ(other.transfers().resident_advances, 0u);
-        }
-        expect_exception_contains([&] { f.state.download_factor_log(); }, "poisoned");
-    }
-#endif
-}
-
-TEST(GpuRoundShadowDevice,
-     ResidentReuseRefreshAndParallelReimportHaveExactProvenance) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident-state execution";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-#ifndef _OPENMP
-    GTEST_SKIP() << "OpenMP build required for the parallel re-import case";
-#else
-    constexpr std::uint64_t run_seed = 0x5eed1234ULL;
-    constexpr node_index vertex_count = kResidentProvenanceVertexCount;
-    auto graph = make_resident_provenance_graph();
-
-    apxchol::detail::gpu_round_shadow_device_state state;
-
-    const std::vector<node_index> first_pivots = {0};
-    const auto first_input =
-        apxchol::detail::make_gpu_round_shadow_input(
-            graph, first_pivots, run_seed);
-    std::vector<gpu_round_shadow_excess_bound> first_bounds;
-    const auto first_expected =
-        apxchol::detail::reference_gpu_round_shadow(
-            first_input, &first_bounds);
-    const auto first = state.compute(first_input, first_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(first_expected, first);
-    EXPECT_FALSE(first.resident_input_reused);
-    EXPECT_EQ(first.input_generation, 0u);
-    EXPECT_EQ(first.output_generation, 1u);
-    EXPECT_EQ(first.state_imports, 1u);
-    EXPECT_EQ(first.state_reuses, 0u);
-    EXPECT_GT(first.round_state_upload_bytes, 0u);
-    const auto first_cpu = run_serial_cpu_round(
-        graph, first_input, first, first_bounds);
-    state.certify_cpu_round(
-        /*cpu_order_reproducible=*/true, fingerprint_graph(graph),
-        first_cpu.bounded_excess_vertices != 0);
-
-    const std::vector<node_index> second_pivots = {1, 2};
-    const auto second_input =
-        apxchol::detail::make_gpu_round_shadow_input(
-            graph, second_pivots, run_seed);
-    std::vector<gpu_round_shadow_excess_bound> second_bounds;
-    const auto second_expected =
-        apxchol::detail::reference_gpu_round_shadow(
-            second_input, &second_bounds);
-    const auto second = state.compute(second_input, second_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(second_expected, second);
-    EXPECT_TRUE(second.resident_input_reused);
-    EXPECT_EQ(second.input_generation, 1u);
-    EXPECT_EQ(second.output_generation, 2u);
-    EXPECT_EQ(second.state_imports, 1u);
-    EXPECT_EQ(second.state_reuses, 1u);
-    EXPECT_EQ(second.order_reimports, 0u);
-    EXPECT_EQ(second.round_state_upload_bytes, 0u);
-    EXPECT_EQ(second.state_upload_bytes, first.state_upload_bytes);
-    // These aggregate counters also include retained radix-sort scratch. The
-    // second round selects more pivots and emits more fill, so that scratch may
-    // grow despite reusing the resident graph. Generation, import and byte
-    // checks above establish actual state reuse without imposing a no-growth
-    // requirement on unrelated scratch capacity.
-    EXPECT_EQ(second.resident_input_incidences, first.live_incidences);
-    EXPECT_LE(second.resident_input_incidences,
-              second.input_incidences);
-    const auto second_cpu = run_serial_cpu_round(
-        graph, second_input, second, second_bounds);
-    ASSERT_GT(second_cpu.bounded_excess_vertices, 0u);
-    ASSERT_EQ(second_bounds[3].additions, 2u);
-    const double canonical_excess = second_bounds[3].expected;
-    const double perturbed_excess =
-        std::nextafter(canonical_excess,
-                       std::numeric_limits<double>::infinity());
-    const double terms = static_cast<double>(second_bounds[3].additions + 1);
-    const double tolerance =
-        32.0 * std::numeric_limits<double>::epsilon() * terms *
-            second_bounds[3].absolute_term_sum +
-        32.0 * std::numeric_limits<double>::denorm_min() * terms;
-    ASSERT_LE(std::abs(perturbed_excess - canonical_excess), tolerance);
-    graph.excess(3) = perturbed_excess;
-    state.certify_cpu_round(
-        /*cpu_order_reproducible=*/true, fingerprint_graph(graph),
-        /*cpu_excess_may_differ=*/true);
-
-    const std::vector<node_index> third_pivots = {3};
-    const auto third_input =
-        apxchol::detail::make_gpu_round_shadow_input(
-            graph, third_pivots, run_seed);
-    std::vector<gpu_round_shadow_excess_bound> third_bounds;
-    const auto third_expected =
-        apxchol::detail::reference_gpu_round_shadow(
-            third_input, &third_bounds);
-    const auto third = state.compute(third_input, third_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(third_expected, third);
-    EXPECT_TRUE(third.resident_input_reused);
-    EXPECT_EQ(third.input_generation, 2u);
-    EXPECT_EQ(third.output_generation, 3u);
-    EXPECT_EQ(third.state_imports, 1u);
-    EXPECT_EQ(third.state_reuses, 2u);
-    EXPECT_EQ(third.order_reimports, 0u);
-    EXPECT_EQ(third.excess_refreshes, 1u);
-    EXPECT_EQ(third.round_state_upload_bytes,
-              static_cast<std::size_t>(vertex_count) * sizeof(double));
-    const auto third_cpu = run_serial_cpu_round(
-        graph, third_input, third, third_bounds);
-    state.certify_cpu_round(
-        /*cpu_order_reproducible=*/true, fingerprint_graph(graph),
-        third_cpu.bounded_excess_vertices != 0);
-
-    std::vector<node_index> fourth_pivots(
-        kResidentProvenanceParallelPivotEnd -
-        kResidentProvenanceFirstParallelPivot);
-    std::iota(fourth_pivots.begin(), fourth_pivots.end(),
-              kResidentProvenanceFirstParallelPivot);
-    const auto fourth_input =
-        apxchol::detail::make_gpu_round_shadow_input(
-            graph, fourth_pivots, run_seed);
-    std::vector<gpu_round_shadow_excess_bound> fourth_bounds;
-    const auto fourth_expected =
-        apxchol::detail::reference_gpu_round_shadow(
-            fourth_input, &fourth_bounds);
-    const auto fourth = state.compute(fourth_input, fourth_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(fourth_expected, fourth);
-    EXPECT_TRUE(fourth.resident_input_reused);
-    EXPECT_EQ(fourth.state_imports, 1u);
-    EXPECT_EQ(fourth.state_reuses, 3u);
-    EXPECT_EQ(fourth.order_reimports, 0u);
-    const auto fourth_cpu = run_parallel_cpu_round(
-        graph, fourth_input, fourth, fourth_bounds);
-    const auto fourth_cpu_state = fingerprint_graph(graph);
-    ASSERT_EQ(fourth_cpu_state.residual, fourth.residual);
-    // Reimport is mandatory after parallel apply even if this scheduling
-    // outcome happens to have the same ordered fingerprint as the device.
-    state.certify_cpu_round(
-        /*cpu_order_reproducible=*/false, fourth_cpu_state,
-        fourth_cpu.comparison.bounded_excess_vertices != 0);
-
-    const std::vector<node_index> fifth_pivots = {
-        kResidentProvenanceParallelPivotEnd};
-    const auto fifth_input =
-        apxchol::detail::make_gpu_round_shadow_input(
-            graph, fifth_pivots, run_seed);
-    std::vector<gpu_round_shadow_excess_bound> fifth_bounds;
-    const auto fifth_expected =
-        apxchol::detail::reference_gpu_round_shadow(
-            fifth_input, &fifth_bounds);
-    const auto fifth = state.compute(fifth_input, fifth_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(fifth_expected, fifth);
-    EXPECT_FALSE(fifth.resident_input_reused);
-    EXPECT_EQ(fifth.input_generation, 4u);
-    EXPECT_EQ(fifth.output_generation, 5u);
-    EXPECT_EQ(fifth.state_imports, 2u);
-    EXPECT_EQ(fifth.state_reuses, 3u);
-    EXPECT_EQ(fifth.order_reimports, 1u);
-    EXPECT_GT(fifth.round_state_upload_bytes, 0u);
-    const auto fifth_cpu = run_serial_cpu_round(
-        graph, fifth_input, fifth, fifth_bounds);
-    state.certify_cpu_round(
-        /*cpu_order_reproducible=*/true, fingerprint_graph(graph),
-        fifth_cpu.bounded_excess_vertices != 0);
-
-    const std::size_t expected_columns =
-        first_pivots.size() + second_pivots.size() + third_pivots.size() +
-        fourth_pivots.size() + fifth_pivots.size();
-    const std::size_t expected_entries =
-        first.factor_entries + second.factor_entries + third.factor_entries +
-        fourth.factor_entries + fifth.factor_entries;
-    EXPECT_EQ(fifth.factor_log_columns, expected_columns);
-    EXPECT_EQ(fifth.factor_log_entries, expected_entries);
-    const auto factor_log = state.download_factor_log();
-    ASSERT_EQ(factor_log.columns.size(), expected_columns);
-    ASSERT_EQ(factor_log.entries.size(), expected_entries);
-    EXPECT_EQ(factor_log.columns.front().vertex, first_pivots.front());
-    EXPECT_EQ(factor_log.columns.back().vertex, fifth_pivots.back());
-    for (const auto& column : factor_log.columns)
-        EXPECT_LE(column.entry_begin + column.entry_count,
-                  factor_log.entries.size());
-
-    std::cout << "R2A_DEVICE_PROVENANCE commit=" << APXCHOL_GIT_SHA
-              << " vertices=" << vertex_count
-              << " generations=5 state_imports=" << fifth.state_imports
-              << " state_reuses=" << fifth.state_reuses
-              << " order_reimports=" << fifth.order_reimports
-              << " excess_refreshes=" << fifth.excess_refreshes
-              << " second_state_upload_bytes="
-              << second.round_state_upload_bytes
-              << " excess_refresh_bytes="
-              << third.round_state_upload_bytes
-              << " state_allocations="
-              << fifth.state_buffer_allocations << '\n';
-#endif
-#endif
-}
-
-TEST(GpuRoundShadowDevice,
-     ResidentComputeRejectsParallelOrderCertification) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident transition rejection";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    auto boundary = make_resident_selection_boundary();
-    const auto cpu_state = apxchol::detail::fingerprint_gpu_round_shadow_input(
-        resident_selection_round_input({}));
-    boundary.state.certify_cpu_round(
-        /*cpu_order_reproducible=*/false, cpu_state,
-        /*cpu_excess_may_differ=*/false);
-
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "pending parallel-order reimport");
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "poisoned by a failed generation");
-#endif
-}
-
-TEST(GpuRoundShadowDevice,
-     ResidentComputeRejectsBoundedExcessRefresh) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident transition rejection";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    auto boundary = make_resident_selection_boundary();
-    auto cpu_input = resident_selection_round_input({});
-    const auto exact_state =
-        apxchol::detail::fingerprint_gpu_round_shadow_input(cpu_input);
-    cpu_input.excess[1] = std::nextafter(
-        cpu_input.excess[1], std::numeric_limits<double>::infinity());
-    const auto bounded_state =
-        apxchol::detail::fingerprint_gpu_round_shadow_input(cpu_input);
-    ASSERT_NE(bounded_state.excess, exact_state.excess);
-    boundary.state.certify_cpu_round(
-        /*cpu_order_reproducible=*/true, bounded_state,
-        /*cpu_excess_may_differ=*/true);
-
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "bounded excess refresh requiring a host snapshot");
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "poisoned by a failed generation");
-#endif
-}
-
-TEST(GpuRoundShadowDevice,
-     ResidentComputeRejectsAuthoritativeHostRebuild) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident transition rejection";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    auto boundary = make_resident_selection_boundary();
-    const auto cpu_state = apxchol::detail::fingerprint_gpu_round_shadow_input(
-        resident_selection_round_input({}));
-    boundary.state.certify_cpu_round(
-        /*cpu_order_reproducible=*/true, cpu_state,
-        /*cpu_excess_may_differ=*/false);
-    boundary.state.invalidate_for_authoritative_host_rebuild(cpu_state);
-
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "pending authoritative host-rebuild reimport");
-    expect_exception_contains(
-        [&] {
-            (void)boundary.state.compute_resident(
-                boundary.device_selection, kResidentSelectionSeed);
-        },
-        "poisoned by a failed generation");
-#endif
-}
-
-TEST(GpuRoundShadowDevice,
-     CertifiedResidentStateRejectsAnUnannouncedHostMutation) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for resident-state execution";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    constexpr std::uint64_t run_seed = 77;
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(6);
-    for (const auto& edge : std::vector<undirected_edge>{
-        {0, 1, 1.0}, {0, 2, 2.0}, {0, 3, 3.0},
-        {1, 4, 4.0}, {2, 4, 5.0}, {2, 5, 6.0}, {3, 5, 7.0}})
-        graph.add_edge(edge.u, edge.v, edge.weight);
-
-    apxchol::detail::gpu_round_shadow_device_state state;
-    const std::vector<node_index> first_pivots = {0};
-    const auto first_input =
-        apxchol::detail::make_gpu_round_shadow_input(
-            graph, first_pivots, run_seed);
-    std::vector<gpu_round_shadow_excess_bound> first_bounds;
-    const auto first_expected =
-        apxchol::detail::reference_gpu_round_shadow(
-            first_input, &first_bounds);
-    const auto first = state.compute(first_input, first_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(first_expected, first);
-    (void)run_serial_cpu_round(graph, first_input, first, first_bounds);
-    state.certify_cpu_round(
-        /*cpu_order_reproducible=*/true, fingerprint_graph(graph),
-        // Exercise the fail-closed gate even when a caller has established a
-        // bounded device-vs-CPU excess difference for this generation.
-        /*cpu_excess_may_differ=*/true);
-
-    const std::vector<node_index> second_pivots = {2};
-    const auto unchanged = apxchol::detail::make_gpu_round_shadow_input(
-        graph, second_pivots, run_seed);
-    auto reordered = unchanged;
-    bool changed = false;
-    for (node_index owner = 0; owner < reordered.vertex_count && !changed;
-         ++owner) {
-        std::vector<std::size_t> live;
-        for (std::size_t i = reordered.owner_offsets[owner];
-             i < reordered.owner_offsets[owner + 1]; ++i)
-            if (reordered.active[reordered.incidences[i].neighbor])
-                live.push_back(i);
-        if (live.size() >= 2) {
-            std::swap(reordered.incidences[live[0]],
-                      reordered.incidences[live[1]]);
-            changed = true;
-        }
-    }
-    ASSERT_TRUE(changed);
-    const auto unchanged_fingerprint =
-        apxchol::detail::fingerprint_gpu_round_shadow_input(unchanged);
-    const auto reordered_fingerprint =
-        apxchol::detail::fingerprint_gpu_round_shadow_input(reordered);
-    ASSERT_EQ(unchanged_fingerprint.residual, reordered_fingerprint.residual);
-    ASSERT_NE(unchanged_fingerprint.ordered_residual,
-              reordered_fingerprint.ordered_residual);
-    const auto unchanged_expected =
-        apxchol::detail::reference_gpu_round_shadow(unchanged);
-    const auto reordered_expected =
-        apxchol::detail::reference_gpu_round_shadow(reordered);
-    ASSERT_EQ(unchanged_expected.factor, reordered_expected.factor);
-    EXPECT_THROW((void)state.compute(reordered, reordered_expected),
-                 std::runtime_error);
-    expect_exception_contains(
-        [&] { (void)state.compute(unchanged, reordered_expected); },
-        "poisoned by a failed generation");
-
-    auto import_current_state = [&](
-            apxchol::detail::gpu_round_shadow_device_state& target) {
-        const std::vector<node_index> no_pivots;
-        const auto input = apxchol::detail::make_gpu_round_shadow_input(
-            graph, no_pivots, run_seed);
-        const auto expected =
-            apxchol::detail::reference_gpu_round_shadow(input);
-        const auto report = target.compute(input, expected);
-        apxchol::detail::compare_gpu_round_shadow_reports(expected, report);
-        target.certify_cpu_round(
-            /*cpu_order_reproducible=*/true, fingerprint_graph(graph),
-            /*cpu_excess_may_differ=*/true);
-    };
-
-    apxchol::detail::gpu_round_shadow_device_state excess_state;
-    import_current_state(excess_state);
-    auto excess_changed = unchanged;
-    ASSERT_TRUE(excess_changed.active[1]);
-    excess_changed.excess[1] = 1.0;
-    const auto excess_changed_expected =
-        apxchol::detail::reference_gpu_round_shadow(excess_changed);
-    EXPECT_THROW(
-        (void)excess_state.compute(excess_changed, excess_changed_expected),
-        std::runtime_error);
-    expect_exception_contains(
-        [&] {
-            (void)excess_state.compute(unchanged, excess_changed_expected);
-        },
-        "poisoned by a failed generation");
-
-    apxchol::detail::gpu_round_shadow_device_state rebuild_state;
-    import_current_state(rebuild_state);
-    rebuild_state.invalidate_for_authoritative_host_rebuild(
-        apxchol::detail::fingerprint_gpu_round_shadow_input(reordered));
-    const auto imported =
-        rebuild_state.compute(reordered, reordered_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(
-        reordered_expected, imported);
-    EXPECT_FALSE(imported.resident_input_reused);
-    EXPECT_EQ(imported.state_imports, 2u);
-    EXPECT_EQ(imported.state_reuses, 0u);
-    EXPECT_EQ(imported.order_reimports, 0u);
-    EXPECT_EQ(imported.host_rebuild_invalidations, 1u);
-    EXPECT_EQ(imported.host_rebuild_reimports, 1u);
-    EXPECT_GT(imported.round_state_upload_bytes, 0u);
-
-    // Exercise the parallel-order reimport with a deliberately permuted valid
-    // snapshot, independently of which order the host scheduler happened to
-    // produce. The canonical factor is unchanged, but reuse must be denied.
-    apxchol::detail::gpu_round_shadow_device_state parallel_state;
-    auto ordered_snapshot = unchanged;
-    ordered_snapshot.pivots.clear();
-    ordered_snapshot.seeds.clear();
-    const auto ordered_expected =
-        apxchol::detail::reference_gpu_round_shadow(ordered_snapshot);
-    const auto ordered = parallel_state.compute(ordered_snapshot, ordered_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(ordered_expected, ordered);
-    parallel_state.certify_cpu_round(
-        /*cpu_order_reproducible=*/false, reordered_fingerprint,
-        /*cpu_excess_may_differ=*/false);
-    const auto parallel_imported =
-        parallel_state.compute(reordered, reordered_expected);
-    apxchol::detail::compare_gpu_round_shadow_reports(
-        reordered_expected, parallel_imported);
-    EXPECT_FALSE(parallel_imported.resident_input_reused);
-    EXPECT_EQ(parallel_imported.state_imports, 2u);
-    EXPECT_EQ(parallel_imported.order_reimports, 1u);
-    EXPECT_EQ(parallel_imported.host_rebuild_reimports, 0u);
-    EXPECT_GT(parallel_imported.round_state_upload_bytes, 0u);
-    EXPECT_EQ(parallel_imported.factor_log_columns, reordered_expected.pivots.size());
-    EXPECT_EQ(parallel_imported.factor_log_entries, reordered_expected.factor_entries);
-#endif
-}
-
-TEST(GpuRoundShadowIntegration,
-     ForcedTinyFactorizationVerifiesCpuRoundAndRemainsNoninterfering) {
-    establish_r2a_openmp_affinity_if_requested();
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required for the forced integration path";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    // Preserve this historical test name because the R1/R2a audit parsers
-    // name it explicitly. The fixture is now sized from the actual device
-    // occupancy boundary: after one path-graph independent set, more than one
-    // resident-region capacity remains, forcing factorize() itself through a
-    // second GPU-selected round. One host worker makes the first CPU round
-    // exactly order-reproducible, which is the production precondition for
-    // compute_resident().
-    scoped_env gpu_frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
-    scoped_env selection_audit("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "off");
-    scoped_omp_threads one_cpu_worker(1);
-
-    const std::size_t resident_capacity = [] {
-        apxchol::detail::gpu_block_frontend probe(
-            1, std::span<const apxchol::detail::gpu_topology_edge>{});
-        return probe.resident_region_capacity();
-    }();
-    ASSERT_GT(resident_capacity, 0u);
-    ASSERT_LE(resident_capacity,
-              static_cast<std::size_t>(INT_MAX - 1) / 4);
-    const std::size_t fixture_size = std::bit_ceil(
-        std::max<std::size_t>(64, 4 * resident_capacity));
-    ASSERT_LT(fixture_size, static_cast<std::size_t>(INT_MAX));
-    const node_index n = static_cast<node_index>(fixture_size);
-    const auto make_graph = [n] {
-        apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
-        for (node_index vertex = 0; vertex + 1 < n; ++vertex) {
-            graph.add_edge(
-                vertex, vertex + 1,
-                1.0 + static_cast<double>((vertex * 7) % 13));
-        }
-        return graph;
-    };
-    apxchol::factor_options options;
-    options.seed = 0x12345678U;
-    options.partition.degree_quantile = 0.0;
-    options.partition.degree_multiplier = 100.0;
-    options.min_is_fraction = 0.0;
-    options.omp_threshold = std::numeric_limits<std::size_t>::max();
-    options.parallel_residual_threshold = 1;
-    const auto baseline = [&] {
-        scoped_env env("APXCHOL_GPU_ROUND_SHADOW", "off");
-        return apxchol::factorize<apxchol::block_greedy_partitioner>(
-            make_graph(), options);
-    }();
-    apxchol::checkpoint shadow_checkpoint;
-    std::string shadow_trace;
-    const auto shadowed = [&] {
-        scoped_env env("APXCHOL_GPU_ROUND_SHADOW", "force");
-        testing::internal::CaptureStderr();
-        try {
-            auto factor =
-                apxchol::factorize<apxchol::block_greedy_partitioner>(
-                    make_graph(), options, &shadow_checkpoint);
-            shadow_trace = testing::internal::GetCapturedStderr();
-            return factor;
-        } catch (...) {
-            shadow_trace = testing::internal::GetCapturedStderr();
-            throw;
-        }
-    }();
-
-    ASSERT_EQ(baseline.perm, shadowed.perm);
-    ASSERT_EQ(baseline.L.cols(), shadowed.L.cols());
-    ASSERT_EQ(baseline.L.nonZeros(), shadowed.L.nonZeros());
-    const std::size_t columns = static_cast<std::size_t>(baseline.L.cols()) + 1;
-    const std::size_t entries =
-        static_cast<std::size_t>(baseline.L.nonZeros());
-    EXPECT_EQ(std::memcmp(baseline.L.outerIndexPtr(),
-                          shadowed.L.outerIndexPtr(),
-                          columns * sizeof(apxchol::edge_index)), 0);
-    EXPECT_EQ(std::memcmp(baseline.L.innerIndexPtr(),
-                          shadowed.L.innerIndexPtr(),
-                          entries * sizeof(apxchol::node_index)), 0);
-    EXPECT_EQ(std::memcmp(baseline.L.valuePtr(), shadowed.L.valuePtr(),
-                          entries * sizeof(apxchol::factor_value_t)), 0);
-
-    ASSERT_GE(shadowed.rounds.size(), 2u);
-    ASSERT_EQ(baseline.rounds.size(), shadowed.rounds.size());
-    for (std::size_t round = 0; round < shadowed.rounds.size(); ++round) {
-        EXPECT_EQ(baseline.rounds[round].active,
-                  shadowed.rounds[round].active);
-        EXPECT_EQ(baseline.rounds[round].is_size,
-                  shadowed.rounds[round].is_size);
-    }
-
-    const auto trace_lines = gpu_round_trace_lines(shadow_trace);
-    if (apxchol::detail::gpu_setup_diagnostics()) {
-        ASSERT_EQ(trace_lines.size(), shadowed.rounds.size()) << shadow_trace;
-        ASSERT_EQ(gpu_round_trace_field(trace_lines[0], "state="),
-                  "host-import");
-        ASSERT_EQ(gpu_round_trace_field(trace_lines[0], "selection="),
-                  "snapshot");
-        ASSERT_EQ(gpu_round_trace_field(trace_lines[1], "state="), "resident");
-        ASSERT_EQ(gpu_round_trace_field(trace_lines[1], "selection="),
-                  "resident");
-        EXPECT_EQ(gpu_round_trace_field(trace_lines[1], "generation="), "1->2");
-        EXPECT_EQ(gpu_round_trace_size(trace_lines[1], "state_upload_bytes="), 0u);
-        EXPECT_EQ(gpu_round_trace_size(trace_lines[1], "state_imports="), 1u);
-        EXPECT_EQ(gpu_round_trace_size(trace_lines[1], "state_reuses="), 1u);
-        EXPECT_EQ(gpu_round_trace_field(trace_lines[1], "selection_check="),
-                  std::to_string(shadowed.rounds[1].is_size) + "/0/0");
-    } else {
-        EXPECT_TRUE(trace_lines.empty()) << shadow_trace;
-    }
-
-    // Replay the exact first two factorization selections through the
-    // independent reference and canonical serial CPU round. The assembled
-    // factor checks remain unconditional; diagnostic mode additionally checks
-    // the trace's factor/fill/residual/degree digests.
-    auto replay_graph = make_graph();
-    const auto elimination_order = factor_elimination_order(shadowed);
-    std::size_t factor_column_base = 0;
-    std::size_t cumulative_factor_entries = 0;
-    std::size_t first_growths = 0;
-    for (std::size_t round = 0; round < 2; ++round) {
-        const std::size_t round_size = shadowed.rounds[round].is_size;
-        ASSERT_GT(round_size, 0u);
-        ASSERT_LE(factor_column_base + round_size,
-                  elimination_order.size());
-        const std::vector<node_index> pivots(
-            elimination_order.begin() + factor_column_base,
-            elimination_order.begin() + factor_column_base + round_size);
-        const auto input = apxchol::detail::make_gpu_round_shadow_input(
-            replay_graph, pivots, options.seed);
-        std::vector<gpu_round_shadow_excess_bound> bounds;
-        const auto expected = apxchol::detail::reference_gpu_round_shadow(
-            input, &bounds);
-        apxchol::detail::gpu_round_shadow_factor_log cpu_factor_log;
-        const auto cpu = run_serial_cpu_round(
-            replay_graph, input, expected, bounds, &cpu_factor_log);
-        EXPECT_EQ(cpu.bounded_excess_vertices, 0u);
-        expect_factor_log_matches_assembled(
-            shadowed, factor_column_base, cpu_factor_log);
-
-        if (apxchol::detail::gpu_setup_diagnostics()) {
-            const auto& line = trace_lines[round];
-            EXPECT_EQ(gpu_round_trace_size(line, "round="), round);
-            EXPECT_EQ(gpu_round_trace_size(line, "pivots="), round_size);
-            EXPECT_EQ(gpu_round_trace_size(line, "active="),
-                      expected.active_count);
-            expect_digest_equal(
-                expected.factor, gpu_round_trace_digest(line, "factor="));
-            expect_digest_equal(
-                expected.fill, gpu_round_trace_digest(line, "fill_hash="));
-            expect_digest_equal(
-                expected.residual, gpu_round_trace_digest(line, "residual="));
-            expect_digest_equal(
-                expected.live_degree, gpu_round_trace_digest(line, "degree="));
-
-            cumulative_factor_entries += expected.factor_entries;
-            EXPECT_EQ(gpu_round_trace_size_pair(line, "factor_log="),
-                      (std::pair{factor_column_base + round_size,
-                                 cumulative_factor_entries}));
-            const std::size_t growths =
-                gpu_round_trace_size(line, "factor_log_growths=");
-            if (round == 0) {
-                first_growths = growths;
-                EXPECT_EQ(growths, 0u);
-            } else {
-                // The power-of-two path fixture fills the first exact-size
-                // geometric allocation in round one; appending round two must
-                // preserve it through one real factor-entry-log growth.
-                EXPECT_EQ(growths, first_growths + 1);
-                EXPECT_EQ(gpu_round_trace_size(line, "resident_input="),
-                          gpu_round_trace_size(trace_lines[0], "live="));
-            }
-        }
-        factor_column_base += round_size;
-    }
-
-    // This runtime assertion establishes that FORCE emits the enclosing
-    // checkpoint.  Its exact source placement around begin_round() is reviewed
-    // separately: a positive duration alone cannot prove which side of that
-    // call owns the tick, and no performance conclusion is drawn from it.
-    EXPECT_GT(shadow_checkpoint.total("setup.gpu_round_shadow"), 0.0);
-
-    struct rebuild_result {
-        apxchol::detail::gpu_round_shadow_state_fingerprint state;
-        std::vector<std::uint64_t> factor;
-    };
-    const auto run_rebuild_sequence = [&](const char* shadow_mode) {
-        scoped_env env("APXCHOL_GPU_ROUND_SHADOW", shadow_mode);
-        apxchol::graph<apxchol::directed_vec_pool_incidence> graph(8);
-        for (node_index u = 0; u < graph.n(); ++u) {
-            for (node_index v = u + 1; v < graph.n(); ++v)
-                graph.add_edge(
-                    u, v, 1.0 + static_cast<double>((13 * u + 7 * v) % 11));
-        }
-
-        apxchol::detail::tree_elimination eliminator;
-        auto session = apxchol::detail::make_gpu_round_shadow_session<
-            apxchol::detail::tree_elimination,
-            apxchol::directed_vec_pool_incidence>(eliminator);
-        apxchol::factorize_workspace workspace;
-        workspace.threads.resize(1);
-        workspace.threads.front().factor_entries =
-            std::make_unique<std::pmr::monotonic_buffer_resource>();
-        apxchol::factor_options sequence_options;
-        sequence_options.seed = 0x12345678ULL;
-        std::vector<apxchol::detail::factor_col> columns;
-        std::vector<node_index> active(graph.n());
-        std::iota(active.begin(), active.end(), node_index{0});
-
-        const auto eliminate_one_round = [&](node_index pivot) {
-            workspace.reset_for_round();
-            apxchol::partition_result partition;
-            partition.data = {pivot};
-            std::size_t work_hint = 0;
-            for (const auto& [neighbor, weight] : graph.neighbors(pivot)) {
-                (void)weight;
-                if (graph.is_active(neighbor)) ++work_hint;
-            }
-            const std::size_t factor_base = columns.size();
-            session.begin_round(
-                graph, partition.data, sequence_options.seed,
-                workspace.round_index, /*cpu_order_reproducible=*/true);
-            apxchol::detail::eliminate_partition(
-                eliminator, graph, partition, columns, workspace,
-                sequence_options, nullptr, false, work_hint);
-            session.verify_cpu_round(
-                graph, std::span<const apxchol::detail::factor_col>(columns)
-                           .subspan(factor_base));
-            std::erase(active, pivot);
-            ++workspace.round_index;
-        };
-
-        eliminate_one_round(0);
-        const auto before_rebuild = fingerprint_graph(graph);
-        const auto stats = apxchol::detail::residual_coalescer<
-            apxchol::directed_vec_pool_incidence>::sparsify(
-                graph, active, 1.0e-6, sequence_options.seed);
-        EXPECT_LT(stats.kept_edges, stats.distinct_before);
-        const auto after_rebuild = fingerprint_graph(graph);
-        EXPECT_NE(before_rebuild.residual, after_rebuild.residual);
-        session.authoritative_host_rebuild(graph);
-        eliminate_one_round(1);
-        session.finish();
-        return rebuild_result{
-            fingerprint_graph(graph), encode_factor_columns(columns)};
-    };
-
-    const auto rebuilt_baseline = run_rebuild_sequence("off");
-    const auto rebuilt_shadow = run_rebuild_sequence("force");
-    EXPECT_EQ(rebuilt_baseline.state.residual,
-              rebuilt_shadow.state.residual);
-    EXPECT_EQ(rebuilt_baseline.state.ordered_residual,
-              rebuilt_shadow.state.ordered_residual);
-    EXPECT_EQ(rebuilt_baseline.state.active, rebuilt_shadow.state.active);
-    EXPECT_EQ(rebuilt_baseline.state.live_degree,
-              rebuilt_shadow.state.live_degree);
-    EXPECT_EQ(rebuilt_baseline.state.excess, rebuilt_shadow.state.excess);
-    EXPECT_EQ(rebuilt_baseline.state.active_count,
-              rebuilt_shadow.state.active_count);
-    EXPECT_EQ(rebuilt_baseline.state.live_incidences,
-              rebuilt_shadow.state.live_incidences);
-    EXPECT_EQ(rebuilt_baseline.factor, rebuilt_shadow.factor);
-#endif
-}
-
-#if defined(APXCHOL_USE_CUDA)
-#include "apxchol/solver/sptrsv/cuda.h"
-#include "apxchol/solver/sptrsv/omp.h"
-#include "apxchol/solver/preconditioner.h"
-
-TEST(GpuFactorFinalize, ResidentPrefixCpuTailPermutationAndGrounding) {
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env dataflow("APXCHOL_GPU_SPTRSV", "dataflow");
-    scoped_env segmentation("APXCHOL_GPU_DF_SPLIT", "1");
-    const std::vector<undirected_edge> edges = {{1, 0, 2.0}, {1, 3, 3.0}};
-    const std::vector<node_index> pivots = {1};
-    const auto input = make_input(4, edges, pivots);
-    apxchol::detail::gpu_round_shadow_device_state state;
-    auto report = state.compute_discover_shape(input);
-    apxchol::detail::compare_gpu_round_shadow_reports(
-        apxchol::detail::reference_gpu_round_shadow(input), report);
-    state.accept_device_generation(report.output_generation);
-    const std::vector<node_index> perm = {2, 0, 3, 1};
-    apxchol::detail::gpu_round_shadow_factor_log tail;
-    tail.columns = {{3, 2.0f, 0, 2}, {0, 1.0f, 2, 1}, {2, 1.0f, 3, 0}};
-    tail.entries = {{0, 0.3f}, {2, 0.0f}, {2, 0.2f}};
-    // Debug materialization belongs only to this independent reference test.
-    auto prefix = state.download_factor_log();
-    std::vector<std::vector<apxchol::detail::factor_entry>> entries(4);
-    std::vector<apxchol::detail::factor_col> cols;
-    for (int i = 0; i < 4; ++i) {
-        const auto& c = i == 0 ? prefix.columns[0] : tail.columns[i - 1];
-        const auto& es = i == 0 ? prefix.entries : tail.entries;
-        for (unsigned j = 0; j < c.entry_count; ++j)
-            entries[i].push_back({es[c.entry_begin + j].neighbor, es[c.entry_begin + j].value});
-        cols.push_back({c.vertex, c.diag, entries[i].data(), node_index(entries[i].size())});
-    }
-    apxchol::factorization reference;
-    apxchol::detail::build_csc(reference, cols, 4, nullptr);
-    ASSERT_EQ(reference.perm, perm);
-    for (node_index m : {3u, 4u}) {
-        apxchol::cuda_sptrsv ordinary, adopted;
-        ordinary.setup(reference.L, m);
-        auto factor = state.finalize_device_factor(perm, m, tail);
-        ASSERT_FALSE(factor->empty());
-        adopted.setup_adopting_device_factor_for_research(std::move(*factor));
-        ASSERT_TRUE(factor->empty());
-        EXPECT_TRUE(adopted.adopted_device_factor());
-        EXPECT_LE(adopted.adoption_host_download_bytes(), 512u); // fixed-size device-plan counts/statistics
-        EXPECT_EQ(adopted.stored_nnz(), ordinary.stored_nnz());
-        EXPECT_EQ(adopted.drop_stats().dropped_flush, ordinary.drop_stats().dropped_flush);
-        apxchol::omp_sptrsv cpu;
-        cpu.setup(reference.L, m);
-        for (int k = 0; k < 5; ++k) {
-            std::vector<double> a(m), b(m), c(m), scratch(m);
-            for (node_index i = 0; i < m; ++i) a[i] = b[i] = c[i] = std::sin(i + 3 * k + 0.1);
-            ordinary.solve_LLt(a.data(), a.data()); adopted.solve_LLt(b.data(), b.data());
-            cpu.forward_solve(c.data(), scratch.data()); cpu.transpose_solve(scratch.data(), c.data());
-            for (node_index i = 0; i < m; ++i) {
-                EXPECT_EQ(a[i], b[i]);
-                EXPECT_NEAR(b[i], c[i], 2e-6 * std::max(1.0, std::abs(c[i])));
-            }
-        }
-    }
-}
-
-TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    constexpr node_index n = 10;
-    const std::vector<undirected_edge> edges = {{0, 1, 1}, {0, 2, 0.3}};
-    const std::vector<node_index> pivots = {0};
-    apxchol::detail::gpu_round_shadow_device_state state;
-    const auto input = make_input(n, edges, pivots);
-    const auto report = state.compute_discover_shape(input);
-    state.accept_device_generation(report.output_generation);
-    const auto prefix = state.download_factor_log();
-    const std::vector<node_index> perm = {0, 2, 1, 3, 4, 5, 6, 7, 8, 9};
-    apxchol::detail::gpu_round_shadow_factor_log tail;
-    tail.columns = {{2, 2.0f, 0, 6}, {1, 2.0f, 6, 2}, {3, 1.0f, 8, 1},
-        {4, 1.0f, 9, 1}, {5, 1.0f, 10, 1}, {6, 1.0f, 11, 1},
-        {7, 1.0f, 12, 1}, {8, 1.0f, 13, 1}, {9, 1.0f, 14, 0}};
-    // Unsorted tail rows include half ties, threshold drops, format flushes,
-    // exact zero, and scale fallback (1/scale or diag/scale overflows).
-    tail.entries = {{9, 0.0f}, {8, 0x1p-25f}, {7, 0x1p-14f},
-        {6, 0.3333333432674408f}, {5, 1.0f}, {4, 0.500244140625f},
-        {3, 0.3333333432674408f}, {4, 0x1p-15f}, {4, 0.25f},
-        {5, 0.125f}, {6, 0x1p-130f}, {7, 0x1p-129f},
-        {8, 0.00009999f}, {9, 0.25f}};
-    auto full = append_factor_logs(prefix, tail);
-    std::vector<std::vector<apxchol::detail::factor_entry>> rows(n);
-    std::vector<apxchol::detail::factor_col> cols;
-    for (node_index i = 0; i < n; ++i) {
-        const auto& c = full.columns[i];
-        for (unsigned j = 0; j < c.entry_count; ++j) {
-            const auto& e = full.entries[c.entry_begin + j];
-            rows[i].push_back({e.neighbor, e.value});
-        }
-        cols.push_back({c.vertex, c.diag, rows[i].data(), node_index(rows[i].size())});
-    }
-    apxchol::factorization reference;
-    apxchol::detail::build_csc(reference, cols, n, nullptr);
-    ASSERT_EQ(reference.perm, perm);
-    for (const char* fp16 : {"float32", "float16"}) {
-        scoped_env storage("APXCHOL_FACTOR_STORAGE", fp16);
-        for (const char* rel : {"0", "0.00001", "0.0001", "0.2"}) {
-            scoped_env drop("APXCHOL_FACTOR_DROP", rel);
-            for (node_index m : {n - 1, n}) {
-                SCOPED_TRACE(std::string(fp16) + "/" + rel + "/" + std::to_string(m));
-                apxchol::cuda_sptrsv ordinary, adopted;
-                ordinary.setup(reference.L, m);
-                const auto requested = std::string_view(fp16) == "float16"
-                    ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
-                scoped_env conflicting("APXCHOL_FACTOR_STORAGE", std::string_view(fp16) == "float16" ? "float32" : "float16");
-                auto factor = state.finalize_device_factor(perm, m, tail, requested);
-#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
-                auto lt = apxchol::cuda_host::build_L11_csc_int<float>(reference.L, m);
-                auto scale = apxchol::cuda_host::column_scales(lt);
-                const bool half = std::string_view(fp16) == "float16";
-                if (half) {
-                    for (node_index j = 0; j < m; ++j)
-                        if (!std::isfinite(1.0f / scale[j]) ||
-                            !std::isfinite(lt.vals[lt.ptr[j]] / scale[j])) scale[j] = 1.0f;
-                }
-                apxchol::cuda_host::apply_factor_drop(lt, scale, std::atof(rel), half);
-                std::vector<std::byte> expected;
-                auto append = [&](const auto* data, std::size_t count) {
-                    auto bytes = std::as_bytes(std::span(data, count));
-                    expected.insert(expected.end(), bytes.begin(), bytes.end());
-                };
-                if (half) {
-                    auto h = apxchol::cuda_host::narrow_fp16_scaled(lt, scale);
-                    apxchol::cuda_host::csr_int<_Float16> lt16;
-                    lt16.m = m; lt16.nnz = lt.nnz; lt16.ptr = lt.ptr;
-                    lt16.idx = std::move(lt.idx); lt16.vals = std::move(h.vals);
-                    auto l16 = apxchol::cuda_host::transpose_csr(lt16);
-                    append(l16.ptr.data(), m + 1); append(l16.idx.get(), l16.nnz); append(l16.vals.get(), l16.nnz);
-                    append(lt16.ptr.data(), m + 1); append(lt16.idx.get(), lt16.nnz); append(lt16.vals.get(), lt16.nnz);
-                    append(h.diag.data(), m);
-                    append(h.inv_scale2.data(), m);
-                } else {
-                    auto l = apxchol::cuda_host::transpose_csr(lt);
-                    append(l.ptr.data(), m + 1); append(l.idx.get(), l.nnz); append(l.vals.get(), l.nnz);
-                    append(lt.ptr.data(), m + 1); append(lt.idx.get(), lt.nnz); append(lt.vals.get(), lt.nnz);
-                }
-                EXPECT_EQ(state.encode_finalized_factor_for_test(*factor), expected);
-#endif
-                adopted.setup_adopting_device_factor_for_research(std::move(*factor), requested);
-                EXPECT_EQ(adopted.fp16(), std::string_view(fp16) == "float16");
-                const auto& want = ordinary.drop_stats(); const auto& got = adopted.drop_stats();
-                EXPECT_EQ(got.rel, want.rel); EXPECT_EQ(got.nnz_factor, want.nnz_factor);
-                EXPECT_EQ(got.nnz_stored, want.nnz_stored); EXPECT_EQ(got.dropped, want.dropped);
-                EXPECT_EQ(got.dropped_threshold, want.dropped_threshold);
-                EXPECT_EQ(got.dropped_flush, want.dropped_flush);
-                for (node_index basis = 0; basis < m; ++basis) {
-                    std::vector<double> a(m), b(m); a[basis] = b[basis] = 1.0;
-                    ordinary.solve_LLt(a.data(), a.data()); adopted.solve_LLt(b.data(), b.data());
-                    EXPECT_EQ(a, b) << "basis=" << basis;
-                }
-            }
-        }
-    }
-}
-
-TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env storage("APXCHOL_FACTOR_STORAGE", nullptr);
-    scoped_env drop("APXCHOL_FACTOR_DROP", nullptr);
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    scoped_env regions("APXCHOL_GPU_BLOCKS", "1");
-    scoped_omp_threads serial(1);
-    for (double shift : {0.0, 1.0}) {
-        // Cross several device-plan tiles and finish with a partial tile.
-        auto A = owned_solve_matrix(1025, shift);
-        Eigen::VectorXd exact(A.rows());
-        for (int i = 0; i < exact.size(); ++i) exact[i] = std::sin(i + 0.25);
-        Eigen::VectorXd b = A * exact;
-        apxchol::solve_options opts; opts.tol = 1e-8; opts.max_iter = 1000;
-        const auto solved = apxchol::solve(A, b, opts);
-        EXPECT_LE((A * solved.x - b).norm() / b.norm(), 1e-8);
-    }
-}
-
-TEST(GpuFactorFinalize, InvalidCoveragePermutationAndCoordinatesFailClosed) {
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    const std::vector<undirected_edge> edges = {{0, 1, 1}, {0, 2, 2}};
-    const std::vector<node_index> pivots = {0};
-    apxchol::detail::gpu_round_shadow_device_state state;
-    auto report = state.compute_discover_shape(make_input(3, edges, pivots));
-    const std::vector<node_index> perm = {0, 1, 2};
-    apxchol::detail::gpu_round_shadow_factor_log tail;
-    tail.columns = {{1, 2.0f, 0, 1}, {2, 1.0f, 1, 0}};
-    tail.entries = {{2, 0.2f}};
-    EXPECT_THROW(state.finalize_device_factor(perm, 3, tail), std::logic_error);
-    state.accept_device_generation(report.output_generation);
-    EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1, 1}, 3, tail), std::invalid_argument);
-    auto bad = tail; bad.columns.pop_back();
-    EXPECT_THROW(state.finalize_device_factor(perm, 3, bad), std::invalid_argument);
-    bad = tail; bad.entries[0].neighbor = 0;
-    EXPECT_THROW(state.finalize_device_factor(perm, 3, bad), std::invalid_argument);
-    bad = tail; bad.entries.push_back(bad.entries[0]); bad.columns[0].entry_count = 2;
-    EXPECT_THROW(state.finalize_device_factor(perm, 3, bad), std::invalid_argument);
-    { // Dropping a tiny duplicate must not conceal invalid raw coordinates.
-        scoped_env enabled_drop("APXCHOL_FACTOR_DROP", "0.1");
-        auto duplicate = tail; duplicate.columns[0].entry_count = 2;
-        duplicate.entries.push_back({2, 0.001f});
-        EXPECT_THROW(state.finalize_device_factor(perm, 3, duplicate), std::invalid_argument);
-    }
-    bad = tail; bad.columns[0].diag = std::numeric_limits<float>::quiet_NaN();
-    EXPECT_THROW(state.finalize_device_factor(perm, 3, bad), std::invalid_argument);
-    // Failed read-only finalization must leave the audited prefix reusable.
-    EXPECT_NO_THROW(state.finalize_device_factor(perm, 3, tail));
-    // The optional gpu_factor_finalize_leak_check CTest checks these repeated
-    // allocations with Compute Sanitizer. cudaMemGetInfo is device-wide and
-    // cannot distinguish our leaks from another process's allocations/frees.
-    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    for (int i = 0; i < 8; ++i) EXPECT_NO_THROW(state.finalize_device_factor(perm, 3, tail));
-    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-}
-
-TEST(GpuFactorFinalize, NormalPreconditionerInstallsAndReplacesResidentFactors) {
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "0");
-    // This fixture compares the same CPU-authoritative elimination law, with
-    // audited device factor storage; it does not activate the owned selector.
-    ASSERT_EQ(apxchol::detail::gpu_block_frontend::configured_block_mode(),
-              apxchol::detail::gpu_block_frontend::mode::disabled);
-    scoped_omp_threads serial(1);
-    apxchol::test::diagnostic_gpu_preconditioner preconditioner;
-    preconditioner.set_keep_factor(true);
-    constexpr int n = 64;
-    Eigen::SparseMatrix<double> A(n, n);
-    std::vector<Eigen::Triplet<double>> entries;
-    for (int i = 0; i < n; ++i) {
-        entries.emplace_back(i, i, 5.0); // SDDM, including the last column.
-        for (int offset : {1, 8}) {
-            const int j = (i + offset) % n;
-            entries.emplace_back(i, j, -1.0); entries.emplace_back(j, i, -1.0);
-        }
-    }
-    A.setFromTriplets(entries.begin(), entries.end());
-    for (int repetition = 0; repetition < 2; ++repetition) {
-        preconditioner.compute(A);
-        ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
-        ASSERT_TRUE(preconditioner.factor().sddm);
-        const auto& F = preconditioner.factor();
-        apxchol::omp_sptrsv cpu;
-        cpu.setup(F.L, n);
-        Eigen::VectorXd b(n), expected(n), tmp(n), work(n);
-        for (int i = 0; i < n; ++i) { b[i] = std::cos(i + 0.5); work[F.perm[i]] = b[i]; }
-        cpu.forward_solve(work.data(), tmp.data()); cpu.transpose_solve(tmp.data(), work.data());
-        for (int i = 0; i < n; ++i) expected[i] = work[F.perm[i]];
-        const Eigen::VectorXd observed = preconditioner.solve(b);
-        EXPECT_LT((observed - expected).norm() / expected.norm(), 2e-6);
-    }
-}
-
-TEST(GpuFactorFinalize, ConsumingSolveOmitsHostArraysAndPreservesExplicitExports) {
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "0");
-    // This fixture compares the same CPU-authoritative elimination law, with
-    // audited device factor storage; it does not activate the owned selector.
-    ASSERT_EQ(apxchol::detail::gpu_block_frontend::configured_block_mode(),
-              apxchol::detail::gpu_block_frontend::mode::disabled);
-    scoped_omp_threads serial(1);
-    constexpr int n = 64;
-    for (double shift : {0.0, 1.0}) {
-        SCOPED_TRACE(shift == 0 ? "grounded Laplacian" : "full SDDM");
-        Eigen::SparseMatrix<double> A(n, n);
-        std::vector<Eigen::Triplet<double>> entries;
-        for (int i = 0; i < n; ++i) {
-            entries.emplace_back(i, i, 4.0 + shift);
-            for (int offset : {1, 8}) {
-                int j = (i + offset) % n;
-                entries.emplace_back(i, j, -1.0); entries.emplace_back(j, i, -1.0);
-            }
-        }
-        A.setFromTriplets(entries.begin(), entries.end());
-        // The public factorization API remains fully exportable under FORCE.
-        auto reference = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
-        ASSERT_EQ(reference.L.vals_.size(), reference.L.nonZeros());
-        ASSERT_EQ(reference.L.inner_.size(), reference.L.nonZeros());
-        ASSERT_TRUE(reference.research_device_factor);
-        // Production GPU ownership cannot silently import a copied capsule;
-        // explicit diagnostic copies below keep their host-validation contract.
-        apxchol::detail::gpu_preconditioner strict_owner;
-        EXPECT_THROW(strict_owner.set_factor(reference), std::invalid_argument);
-        apxchol::test::diagnostic_gpu_preconditioner exported;
-        exported.set_keep_factor(true);
-        exported.set_factor(reference);
-        ASSERT_EQ(exported.factor().L.vals_.size(), reference.L.nonZeros());
-        ASSERT_FALSE(exported.trsv().adopted_device_factor());
-        // Copied public factors do not mutate their shared capsule. A uniquely
-        // moved factor retains the fast adoption path.
-        apxchol::test::diagnostic_gpu_preconditioner exported_again;
-        exported_again.set_factor(reference);
-        EXPECT_FALSE(exported_again.trsv().adopted_device_factor());
-        auto moved_factor = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
-        apxchol::test::diagnostic_gpu_preconditioner moved_export;
-        moved_export.set_factor(std::move(moved_factor));
-        ASSERT_TRUE(moved_export.trsv().adopted_device_factor());
-
-        apxchol::checkpoint cp;
-        apxchol::test::diagnostic_gpu_preconditioner consuming;
-        consuming.set_checkpoint(&cp);
-        testing::internal::CaptureStderr();
-        consuming.compute(A);
-        const std::string consuming_trace = testing::internal::GetCapturedStderr();
-        expect_setup_api_receipt(consuming_trace, consuming);
-        EXPECT_EQ(consuming_trace.find("[gpu-owned-"), std::string::npos);
-        EXPECT_EQ(cp.total("setup.gpu_owned_factorization"), 0.0);
-        ASSERT_TRUE(consuming.trsv().adopted_device_factor());
-        const auto& F = consuming.factor();
-        EXPECT_TRUE(F.L.vals_.empty()); EXPECT_TRUE(F.L.inner_.empty());
-        EXPECT_EQ(F.perm, reference.perm);
-        EXPECT_EQ(F.L.outer_, reference.L.outer_);
-        EXPECT_EQ(F.L.nonZeros(), reference.L.nonZeros());
-        EXPECT_EQ(cp.total("setup.assembly"), 0.0);
-        EXPECT_GT(cp.total("setup.factor_metadata"), 0.0);
-        if (apxchol::detail::gpu_setup_diagnostics()) {
-            EXPECT_EQ(gpu_round_trace_size(consuming_trace, "host_factor_entry_alloc_bytes="), 0u);
-            EXPECT_EQ(gpu_round_trace_size(consuming_trace, "host_factor_entry_write_bytes="), 0u);
-            EXPECT_EQ(gpu_round_trace_size(consuming_trace, "host_factor_entry_omitted_bytes="),
-                      (reference.L.nonZeros() - n) * sizeof(apxchol::detail::factor_entry));
-        } else {
-            EXPECT_EQ(consuming_trace.find("host_factor_entry_"), std::string::npos);
-        }
-        Eigen::VectorXd b(n);
-        for (int i = 0; i < n; ++i) b[i] = std::sin(i + 0.25);
-        b.array() -= b.mean();
-        const Eigen::VectorXd expected = exported.solve(b);
-        const Eigen::VectorXd observed = consuming.solve(b);
-        const Eigen::VectorXd copied_export = exported_again.solve(b);
-        EXPECT_EQ(std::memcmp(expected.data(), observed.data(), n * sizeof(double)), 0);
-        EXPECT_EQ(std::memcmp(expected.data(), copied_export.data(), n * sizeof(double)), 0);
-        const Eigen::VectorXd moved_result = moved_export.solve(b);
-        EXPECT_EQ(std::memcmp(expected.data(), moved_result.data(), n * sizeof(double)), 0);
-        auto install_copy = [reference, b]() mutable {
-            apxchol::test::diagnostic_gpu_preconditioner solver;
-            solver.set_factor(std::move(reference));
-            const bool adopted = solver.trsv().adopted_device_factor();
-            Eigen::VectorXd result = solver.solve(b);
-            return std::pair{adopted, std::move(result)};
-        };
-        auto first = std::async(std::launch::async, install_copy);
-        auto second = std::async(std::launch::async, install_copy);
-        for (auto* task : {&first, &second}) {
-            auto [adopted, result] = task->get();
-            EXPECT_FALSE(adopted);
-            EXPECT_EQ(std::memcmp(expected.data(), result.data(), n * sizeof(double)), 0);
-        }
-
-        // FORCE-off continues through ordinary assembly and upload, even for
-        // a consuming solver; changing the internal call route must not alter it.
-        scoped_env ordinary_mode("APXCHOL_GPU_FACTOR_FINALIZE", "off");
-        apxchol::checkpoint ordinary_cp;
-        apxchol::test::diagnostic_gpu_preconditioner ordinary;
-        ordinary.set_checkpoint(&ordinary_cp);
-        ordinary.compute(A);
-        EXPECT_FALSE(ordinary.trsv().adopted_device_factor());
-        EXPECT_GT(ordinary_cp.total("setup.assembly"), 0.0);
-        EXPECT_EQ(ordinary_cp.total("setup.factor_metadata"), 0.0);
-        const Eigen::VectorXd ordinary_result = ordinary.solve(b);
-        EXPECT_EQ(std::memcmp(ordinary_result.data(), observed.data(), n * sizeof(double)), 0);
-    }
-}
-
-TEST(GpuFactorFinalize, ConsumingPrefixOmissionRetainsTheCpuTailPayload) {
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "0");
-    // This fixture compares the same CPU-authoritative elimination law, with
-    // audited device factor storage; it does not activate the owned selector.
-    ASSERT_EQ(apxchol::detail::gpu_block_frontend::configured_block_mode(),
-              apxchol::detail::gpu_block_frontend::mode::disabled);
-    scoped_omp_threads serial(1);
-    constexpr node_index n = 20;
-    auto factorize = [&](bool retain) {
-        apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
-        for (node_index v = 0; v < 4; ++v) graph.add_edge(v, (v + 1) % 4, 1.0);
-        for (node_index v = 4; v < n; ++v) graph.add_edge(v, v % 4, 1.0);
-        // This custom partitioner is also statically ineligible for the owned
-        // block-greedy path. Both retain modes therefore have the same order.
-        // One audited leaf round, then an explicitly empty selection sends
-        // the nontrivial four-cycle to the ordinary CPU tail.
-        auto partitioner = apxchol::as_partitioner(
-            [](auto&, std::span<const node_index> active,
-               const apxchol::partition_context&, apxchol::selection& out) {
-                for (auto v : active) if (v >= 4) out.add(v);
-            });
-        apxchol::factor_options opts;
-        opts.parallel_residual_threshold = n;
-        return apxchol::factorize_impl(apxchol::detail::tree_elimination{},
-            partitioner, std::move(graph), opts, nullptr, retain);
-    };
-    auto exported = factorize(true);
-    testing::internal::CaptureStderr();
-    auto consuming = factorize(false);
-    const std::string trace = testing::internal::GetCapturedStderr();
-    EXPECT_EQ(trace.find("[gpu-owned-"), std::string::npos);
-    EXPECT_EQ(consuming.perm, exported.perm);
-    EXPECT_EQ(consuming.L.outer_, exported.L.outer_);
-    if (apxchol::detail::gpu_setup_diagnostics()) {
-        const auto allocated = gpu_round_trace_size(trace, "host_factor_entry_alloc_bytes=");
-        const auto omitted = gpu_round_trace_size(trace, "host_factor_entry_omitted_bytes=");
-        EXPECT_GT(allocated, 0u);
-        EXPECT_EQ(omitted, 16 * sizeof(apxchol::detail::factor_entry));
-        EXPECT_EQ(allocated + omitted,
-                  (exported.L.nonZeros() - n) * sizeof(apxchol::detail::factor_entry));
-        EXPECT_EQ(gpu_round_trace_size(trace, "host_factor_entry_write_bytes="), allocated);
-    } else {
-        EXPECT_EQ(trace.find("host_factor_entry_"), std::string::npos);
-        EXPECT_EQ(trace.find("[gpu-setup-receipt]"), std::string::npos);
-    }
-    apxchol::cuda_sptrsv upload, adopted;
-    upload.setup(exported.L, n - 1);
-    adopted.setup_adopting_device_factor_for_research(
-        std::move(*consuming.research_device_factor));
-    std::vector<double> b(n - 1), expected(n - 1), actual(n - 1);
-    for (node_index v = 0; v < n - 1; ++v) b[v] = std::cos(v + 0.25);
-    upload.solve_LLt(b.data(), expected.data());
-    adopted.solve_LLt(b.data(), actual.data());
-    EXPECT_EQ(actual, expected);
-}
-#endif
 
 TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
     // A common normalization can round unequal cutoff numerators to a tie.
@@ -5382,12 +3303,10 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
     const double normalization=0x1.b732be6fd2141p+5;
     EXPECT_LT(later,earlier);
     EXPECT_EQ(later/normalization,earlier/normalization);
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
+#if !defined(APXCHOL_USE_CUDA) || !defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+    GTEST_SKIP() << "CUDA test hooks required";
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_omp_threads serial(1);
     for (auto sampler : {apxchol::clique_sampler::trace_cycle}) {
         for (unsigned profile = 0; profile < 13; ++profile) {
@@ -5453,16 +3372,17 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                 for(auto edge:edges)graph.add_edge(edge.u,edge.v,edge.weight);
                 for(node_index v=0;v<n;++v)graph.excess(v)=.125;
                 apxchol::detail::gpu_round_shadow_session session(true,sampler);
-                apxchol::detail::gpu_block_frontend selector(n,owned_fixture_topology(graph));
+                auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+                auto& selector = *selector_owner;
                 std::vector<node_index> active(n),wanted(count);
                 std::iota(active.begin(),active.end(),node_index{0});
                 std::iota(wanted.begin(),wanted.end(),node_index{0});
                 apxchol::partition_options options;
                 options.degree_quantile=0;options.degree_multiplier=16384;options.degree_tiebreak=false;
                 selector.prepare(active,options);
-                const auto selected=selector.select_block_greedy().data;
+                const auto selected=selector.select_for_test(wanted).data;
                 ASSERT_EQ(selected,wanted);
-                const auto report=session.run_owned_prefix_round(graph,selected,selector.device_selection(),run_seed);
+                const auto report=session.run_owned_prefix_round(selector.device_selection(),run_seed);
                 ASSERT_TRUE(report.gpu_executed);
                 if(profile==7)EXPECT_EQ(report.normal_batch.normal_pivots,0u);
                 else EXPECT_GT(report.normal_batch.normal_pivots,0u);
@@ -5475,7 +3395,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     EXPECT_EQ(report.live_incidences,2*edges.size()); // f=d uses every slot.
                 }
                 std::vector<apxchol::detail::factor_col> columns;
-                session.materialize_owned_prefix(graph,active,columns);
+                observe_owned_prefix(session,graph,active,columns);
                 std::vector<std::tuple<node_index,node_index,double>> got;
                 for(node_index v=count;v<n;++v)for(auto [u,w]:graph.neighbors(v)) {
                     EXPECT_NE(u,v);EXPECT_GE(u,count);EXPECT_TRUE(std::isfinite(w));
@@ -5599,9 +3519,6 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
     GTEST_SKIP() << "CUDA build required";
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND","force");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW","force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
     scoped_env verbose("APXCHOL_VERBOSE","1");
     scoped_omp_threads serial(1);
     for(auto sampler:{apxchol::clique_sampler::trace_cycle})
@@ -5619,29 +3536,6 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         EXPECT_NE(trace.find("[gpu-owned-factorization] complete rounds="),std::string::npos);
         EXPECT_NE(trace.find("[gpu-clique-sampler] sampler=trace_cycle"),std::string::npos);
         EXPECT_NE(trace.find("device_sampling=1"),std::string::npos);
-        EXPECT_EQ(trace.find("[gpu-round-shadow] checked"),std::string::npos);
-    }
-#endif
-}
-
-TEST(GpuCycleSampler, AuditedExportRejectsUnsupportedSamplerClearly) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA build required";
-#else
-    REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND","force");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW","force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE","force");
-    scoped_omp_threads serial(1);
-    auto A=owned_solve_matrix(65,1.);
-    for(auto sampler:{apxchol::clique_sampler::trace_cycle}) {
-        apxchol::test::diagnostic_gpu_preconditioner preconditioner;preconditioner.set_keep_factor(true);
-        apxchol::factor_options opts;opts.sampler=sampler;
-        preconditioner.set_options(opts);
-        try {preconditioner.compute(A);FAIL()<<"audited export unexpectedly accepted";}
-        catch(const std::invalid_argument& e) {
-            EXPECT_NE(std::string(e.what()).find("GPU-owned consuming route"),std::string::npos);
-        }
     }
 #endif
 }

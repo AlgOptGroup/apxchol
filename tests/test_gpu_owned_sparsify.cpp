@@ -309,31 +309,27 @@ TEST(GpuOwnedSparsify, EmptyAllKeptAndInvalidInputsPreserveOwnedContract) {
     EXPECT_THROW(apxchol::detail::gpu_sparsify_owned_residual_for_test(overflow,42), std::exception);
     RecordProperty("owned_sparsify_empty_all_kept_invalid", "pass");
 }
-#endif // APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS
-
 TEST(GpuOwnedSparsify, PreviewReplacementInvalidatesAndResetsHandbackCounts) {
     REQUIRE_OWNED_SPARSIFY_DEVICE();
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     using graph_type = apxchol::graph<apxchol::directed_vec_pool_incidence>;
     graph_type graph(5);
     std::vector<edge> edges;
-    std::vector<apxchol::detail::gpu_topology_edge> topology;
     for (node_index u = 1; u < 5; ++u)
         for (node_index v = u + 1; v < 5; ++v)
             for (unsigned duplicate = 0; duplicate < 2; ++duplicate) {
-                graph.add_edge(u, v, .5); edges.push_back({u,v,.5}); topology.push_back({u,v});
+                graph.add_edge(u, v, .5); edges.push_back({u,v,.5});
             }
     // Session outlives its borrowing selector.
     apxchol::detail::gpu_round_shadow_session session(true);
-    apxchol::detail::gpu_block_frontend selector(5, topology);
+    auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
+    auto& selector = *selector_owner;
     std::vector<node_index> active{0,1,2,3,4};
     apxchol::partition_options options; options.degree_quantile = .01;
     selector.prepare(active, options);
     const auto first = selector.select_block_greedy().data;
     ASSERT_EQ(first, (std::vector<node_index>{0}));
-    ASSERT_FALSE(session.has_owned_residual());
-    const auto initial = session.run_owned_prefix_round(graph, first, selector.device_selection(), 42);
+    ASSERT_TRUE(session.has_owned_residual());
+    const auto initial = session.run_owned_prefix_round(selector.device_selection(), 42);
     ASSERT_EQ(initial.raw_fill_edges, 0u);
     active.erase(active.begin());session.advance_selector(selector);
     ASSERT_TRUE(session.has_owned_residual());
@@ -351,17 +347,16 @@ TEST(GpuOwnedSparsify, PreviewReplacementInvalidatesAndResetsHandbackCounts) {
     EXPECT_EQ(stats.kept_edges, 5u);
     auto input = make_input(5, edges);input.active[0] = 0;
     std::fill(input.excess.begin(), input.excess.end(), 0.0);
-    auto stale_input = input;
-    stale_input.pivots = preview_vertices;
-    for (auto vertex : preview_vertices)
-        stale_input.seeds.push_back(apxchol::detail::gpu_round_shadow_pivot_seed(42, vertex));
-    apxchol::detail::round_shadow_reference_detail::validate_input(stale_input);
     auto reject_preview = [&](const char* expected_message) {
         // A fresh disposable consumer isolates each intentional failure from
         // the live owner whose newly published selection must run below.
         apxchol::detail::gpu_round_shadow_device_state rejected;
+        auto rejected_selector = rejected.initialize_owned_raw_for_test(make_input(5, edges));
+        rejected_selector->select_for_test(std::vector<node_index>{0});
+        rejected.compute_owned_round_for_test(rejected_selector->device_selection(), 42);
+        rejected.advance_selector(*rejected_selector);
         try {
-            (void)rejected.compute_discover_shape(stale_input, preview, 42);
+            (void)rejected.compute_owned_round_for_test(preview, 42);
             FAIL() << "stale sparsification preview was accepted";
         } catch (const std::invalid_argument& error) {
             EXPECT_NE(std::string(error.what()).find(expected_message),
@@ -385,19 +380,16 @@ TEST(GpuOwnedSparsify, PreviewReplacementInvalidatesAndResetsHandbackCounts) {
     const auto expected_input = apxchol::detail::make_gpu_round_shadow_input(thinned, selected, 42);
     const auto expected = apxchol::detail::reference_gpu_round_shadow(expected_input);
     ASSERT_GT(expected.raw_fill_edges, 0u); // This fixture exercises the +fill term.
-    const auto after = session.run_owned_prefix_round(graph, selected, current_selection, 42);
+    const auto after = session.run_owned_prefix_round(current_selection, 42);
     EXPECT_EQ(after.raw_fill_edges, expected.raw_fill_edges);
     EXPECT_EQ(after.live_incidences, expected.live_incidences);
     EXPECT_EQ(after.round_state_upload_bytes, 0u);
     std::erase_if(active, [&](node_index v) { return std::find(selected.begin(),selected.end(),v)!=selected.end(); });
     session.advance_selector(selector);
-    std::vector<apxchol::detail::factor_col> columns;
-    session.materialize_owned_prefix(graph, active, columns);
-    EXPECT_EQ(graph.m(), stats.kept_edges + after.raw_fill_edges);
-    ASSERT_EQ(columns.size(), 1 + selected.size());
-    EXPECT_EQ(columns.front().vertex, 0u);
-    const auto actual = apxchol::detail::fingerprint_gpu_round_shadow_input(
-        apxchol::detail::make_gpu_round_shadow_input(graph, std::span<const node_index>{}, 42));
+    const auto snapshot = session.download_owned_prefix_for_test();
+    ASSERT_EQ(snapshot.columns.size(), 1 + selected.size());
+    EXPECT_EQ(snapshot.columns.front().vertex, 0u);
+    const auto actual = apxchol::detail::fingerprint_gpu_round_shadow_input(snapshot.residual);
     EXPECT_EQ(actual.residual, expected.residual);
     EXPECT_EQ(actual.ordered_residual, expected.ordered_residual);
     EXPECT_EQ(actual.active, expected.active);
@@ -406,15 +398,13 @@ TEST(GpuOwnedSparsify, PreviewReplacementInvalidatesAndResetsHandbackCounts) {
     EXPECT_EQ(actual.live_incidences, expected.live_incidences);
     RecordProperty("owned_sparsify_preview_handback", "pass");
 }
-TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneAttemptForBothImports) {
+#endif // APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS
+
+TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
 #if defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "end-to-end GPU operator construction requires 32-bit node indices";
 #else
     REQUIRE_OWNED_SPARSIFY_DEVICE();
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    scoped_env one_region("APXCHOL_GPU_BLOCKS", "1");
     scoped_env trace_enabled("APXCHOL_GPU_BLOCK_TRACE", "1");
     scoped_env sparsify("APXCHOL_RESIDUAL_SPARSIFY", "1");
     scoped_env full_precision_factor("APXCHOL_FACTOR_STORAGE", "float32");
@@ -429,6 +419,7 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneAttemptForBothImports)
     for (int i = 0; i < n; ++i) exact[i] = .125 * (i % 7 - 3);
     const Eigen::VectorXd rhs = original * exact;
     apxchol::solve_options options;options.tol = 1e-8;options.max_iter = 1000;
+    options.backend = apxchol::solve_backend::gpu;
     options.factor_opts.parallel_residual_threshold = 1;
     options.factor_opts.omp_threshold = 0;
     options.factor_opts.partition.degree_quantile = .8;
@@ -438,63 +429,36 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneAttemptForBothImports)
         while ((at = text.find(needle,at)) != std::string::npos) { ++count;at += needle.size(); }
         return count;
     };
-    for (bool compressed : {true,false}) {
-        SCOPED_TRACE(compressed ? "direct CSC" : "generic host initial");
-        auto matrix = original;
-        if (!compressed) matrix.uncompress(); // Do this after the copy: Eigen may recompress copies.
-        ASSERT_EQ(matrix.isCompressed(), compressed);
-        ASSERT_EQ(apxchol::detail::gpu_owned_csc_supported(matrix), compressed);
-        // The public GPU route requires compatible stored CSC. Generic host
-        // import remains an explicit diagnostic here, with its device operator
-        // constructed separately from the canonical original CSC.
-        apxchol::solve_result solved;
-        testing::internal::CaptureStderr();
-        try {
-            if (compressed) {
-                solved = apxchol::solve(matrix, rhs, options);
-                EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
-            } else {
-                apxchol::test::diagnostic_gpu_preconditioner preconditioner;
-                preconditioner.set_options(options.factor_opts);
-                preconditioner.compute(matrix);
-                if (!preconditioner.trsv().adopted_device_factor())
-                    throw std::runtime_error("diagnostic factor did not adopt device storage");
-                apxchol::cuda_pcg pcg;
-                pcg.setup(original, preconditioner.factor().perm);
-                int iterations = 0;
-                pcg.solve(preconditioner, rhs, solved.x, options.tol, options.max_iter,
-                          iterations, solved.residual, false);
-                solved.iterations = iterations;
-            }
-        } catch (...) {
-            const auto failure = testing::internal::GetCapturedStderr();
-            ADD_FAILURE() << failure;
-            throw;
-        }
-        const auto trace = testing::internal::GetCapturedStderr();
-        EXPECT_EQ(occurrences(trace,"[gpu-owned-sparsify-gate]"),1u) << trace;
-        EXPECT_EQ(occurrences(trace,"[gpu-owned-sparsify]"),1u) << trace;
-        EXPECT_NE(trace.find("[gpu-owned-sparsify-gate] round=0 active=17 handoff=1 avg_distinct_degree=16 attempted=1 worthwhile=1"),std::string::npos) << trace;
-        const std::string marker = std::string("[gpu-owned-sparsify] implementation=")
-            + (compressed ? "device" : "host_initial") + " round=0 ";
-        const auto begin = trace.find(marker);ASSERT_NE(begin,std::string::npos) << trace;
-        const auto line = trace.substr(begin,trace.find('\n',begin)-begin);
-        auto number = [&](const std::string& key) {
-            const auto at = line.find(key);
-            if (at == std::string::npos) throw std::runtime_error("missing controller receipt " + key);
-            return std::stoull(line.substr(at+key.size()));
-        };
-        EXPECT_EQ(number("physical_before="),136u);EXPECT_EQ(number("distinct_before="),136u);
-        EXPECT_LT(number("kept="),136u);EXPECT_GE(number("kept="),16u);
-        EXPECT_NE(trace.find("[gpu-owned-factorization] complete"),std::string::npos) << trace;
-        if (!compressed) {
-            EXPECT_NE(trace.find("fallback=unsupported_stored_format before_device_mutation=1"),std::string::npos) << trace;
-        }
-        ASSERT_EQ(solved.x.size(),n);
-        EXPECT_TRUE(solved.x.allFinite());
-        EXPECT_LE((original*solved.x-rhs).norm()/rhs.norm(),1e-8);
-        RecordProperty(compressed ? "owned_sparsify_controller_csc" : "owned_sparsify_controller_generic",line);
+    ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(original));
+    apxchol::solve_result solved;
+    testing::internal::CaptureStderr();
+    try {
+        solved = apxchol::solve(original, rhs, options);
+        EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
+    } catch (...) {
+        const auto failure = testing::internal::GetCapturedStderr();
+        ADD_FAILURE() << failure;
+        throw;
     }
+    const auto trace = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(occurrences(trace,"[gpu-owned-sparsify-gate]"),1u) << trace;
+    EXPECT_EQ(occurrences(trace,"[gpu-owned-sparsify]"),1u) << trace;
+    EXPECT_NE(trace.find("[gpu-owned-sparsify-gate] round=0 active=17 handoff=1 avg_distinct_degree=16 attempted=1 worthwhile=1"),std::string::npos) << trace;
+    const std::string marker = "[gpu-owned-sparsify] implementation=device round=0 ";
+    const auto begin = trace.find(marker);ASSERT_NE(begin,std::string::npos) << trace;
+    const auto line = trace.substr(begin,trace.find('\n',begin)-begin);
+    auto number = [&](const std::string& key) {
+        const auto at = line.find(key);
+        if (at == std::string::npos) throw std::runtime_error("missing controller receipt " + key);
+        return std::stoull(line.substr(at+key.size()));
+    };
+    EXPECT_EQ(number("physical_before="),136u);EXPECT_EQ(number("distinct_before="),136u);
+    EXPECT_LT(number("kept="),136u);EXPECT_GE(number("kept="),16u);
+    EXPECT_NE(trace.find("[gpu-owned-factorization] complete"),std::string::npos) << trace;
+    ASSERT_EQ(solved.x.size(),n);
+    EXPECT_TRUE(solved.x.allFinite());
+    EXPECT_LE((original*solved.x-rhs).norm()/rhs.norm(),1e-8);
+    RecordProperty("owned_sparsify_controller_csc",line);
 #endif
 }
 #endif

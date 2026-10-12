@@ -20,6 +20,7 @@ add_executable(unit_tests
         test_sptrsv_transpose.cpp
         test_sptrsv_drop.cpp
         test_gpu_round_shadow.cpp
+        test_gpu_factor_finalize.cpp
         test_gpu_owned_sparsify.cpp
         test_gpu_direct_csc.cpp
         test_gpu_repair_cascade.cpp
@@ -41,8 +42,12 @@ if (APXCHOL_DEVICE STREQUAL "METAL")
     target_sources(unit_tests PRIVATE test_metal.cpp)
 endif()
 
+if (APXCHOL_DEVICE STREQUAL "CUDA")
+    target_link_libraries(unit_tests PRIVATE apxchol_test_core)
+else()
+    target_link_libraries(unit_tests PRIVATE apxchol_core)
+endif()
 target_link_libraries(unit_tests PRIVATE
-        apxchol_core
         apxchol_mtx_input
         GTest::gtest_main
 )
@@ -74,7 +79,7 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
     # The CPU route must run in a fresh process with no visible CUDA devices;
     # eligible automatic/explicit GPU requests must fail without CPU fallback.
     add_test(NAME solve_routes_no_cuda_device COMMAND unit_tests
-        --gtest_filter=SolveRoutes.ExplicitCpuIgnoresLegacyGpuStageFlagsAndDoesNotPrewarm:SolveRoutes.HiddenDeviceFailureNeverRetriesOnCpu)
+        --gtest_filter=SolveRoutes.ExplicitCpuDoesNotPrewarm:SolveRoutes.HiddenDeviceFailureNeverRetriesOnCpu)
     set_tests_properties(solve_routes_no_cuda_device PROPERTIES TIMEOUT 120
         ENVIRONMENT "OMP_NUM_THREADS=4;CUDA_VISIBLE_DEVICES=-1")
     # Device-wide free-memory accounting also sees other GPU applications.

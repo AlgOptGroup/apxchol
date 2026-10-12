@@ -85,13 +85,6 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
     }
 }
 
-[[maybe_unused]] std::vector<apxchol::detail::gpu_topology_edge> topology(const host_graph& graph) {
-    std::vector<apxchol::detail::gpu_topology_edge> result;
-    for (node_index u = 0; u < graph.n(); ++u)
-        for (const auto& edge : graph.neighbors(u))
-            if (u < edge.to) result.push_back({u, edge.to});
-    return result;
-}
 } // namespace
 
 TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
@@ -336,72 +329,61 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
     const auto A = selector_matrix();
     const auto graph = apxchol::make_graph<host_graph>(A);
     ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
     std::vector<node_index> active(graph.n()); std::iota(active.begin(),active.end(),node_index{0});
-    for (const char* regions : {"1", "7", static_cast<const char*>(nullptr)}) {
-        scoped_env blocks("APXCHOL_GPU_BLOCKS", regions);
-        for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
-            SCOPED_TRACE(regions);
-            SCOPED_TRACE(ties);
-            SCOPED_TRACE(quantile);
-            apxchol::detail::gpu_round_shadow_session owner(true);
-            std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
-            owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), direct);
-            apxchol::detail::gpu_block_frontend reference(graph.n(), topology(graph));
-            apxchol::partition_options options;
-            options.degree_quantile = quantile; options.degree_tiebreak = ties;
-            const auto got = direct->prepare(active, options);
-            const auto expected = reference.prepare(active, options);
-            EXPECT_EQ(got.average_degree, expected.average_degree);
-            const auto degrees = direct->host_active_degrees();
-            const auto want_degrees = reference.host_active_degrees();
-            EXPECT_EQ(std::vector<node_index>(degrees.begin(),degrees.end()),
-                      std::vector<node_index>(want_degrees.begin(),want_degrees.end()));
-            ASSERT_EQ(degrees.size(), active.size());
-            for (node_index v : active) EXPECT_EQ(degrees[v], graph.adj_count(v));
-            const auto candidate_view = direct->host_candidates();
-            const std::vector<node_index> candidates(candidate_view.begin(),candidate_view.end());
-            double threshold = options.degree_multiplier * expected.average_degree;
-            if (quantile > 0.0 && quantile < 1.0) {
-                std::vector<node_index> sorted(degrees.begin(), degrees.end());
-                std::sort(sorted.begin(), sorted.end());
-                threshold = sorted[static_cast<std::size_t>(quantile * (sorted.size()-1))];
-            }
-            std::vector<node_index> wanted;
-            for (node_index v : active) if (degrees[v] <= threshold) wanted.push_back(v);
-            EXPECT_EQ(candidates, wanted);
-            EXPECT_EQ(got.candidate_count, wanted.size());
-            const auto selected = direct->select_block_greedy().data;
-            ASSERT_FALSE(selected.empty());
-            EXPECT_EQ(direct->select_block_greedy().data, selected);
-            // The owned four-pass law need not finish maximality. Its exact
-            // priority/snapshot contract is checked by GpuBoundedSelection.
-            std::string receipt = std::to_string(direct->resident_region_capacity()) + ":" +
-                std::to_string(direct->selected_degree_work());
-            for (const auto vertex : selected) receipt += ":" + std::to_string(vertex);
-            RecordProperty(std::string("direct_selection_") + (regions ? regions : "auto") +
-                "_" + std::to_string(ties) + "_" + std::to_string(quantile), receipt);
-            std::vector<bool> picked(graph.n(),false);
-            std::size_t degree_work = 0;
-            for (node_index v : selected) {
-                ASSERT_LT(v,graph.n());
-                EXPECT_TRUE(std::binary_search(candidates.begin(),candidates.end(),v));
-                ASSERT_FALSE(picked[v]); picked[v]=true; degree_work+=graph.adj_count(v);
-            }
-            for (node_index v : candidates) {
-                bool neighbor_picked = false;
-                for (const auto& edge : graph.neighbors(v)) neighbor_picked |= picked[edge.to];
-                if (picked[v]) {
-                    EXPECT_FALSE(neighbor_picked);
-                }
-            }
-            EXPECT_EQ(direct->selected_degree_work(), degree_work);
-            EXPECT_EQ(direct->transfers().owned_residual_binds, 1u);
-            EXPECT_EQ(direct->transfers().host_update_bytes, 0u);
+    for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
+        SCOPED_TRACE(ties);
+        SCOPED_TRACE(quantile);
+        apxchol::detail::gpu_round_shadow_session owner(true);
+        std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
+        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), direct);
+        apxchol::partition_options options;
+        options.degree_quantile = quantile; options.degree_tiebreak = ties;
+        const auto got = direct->prepare(active, options);
+        const auto degrees = direct->host_active_degrees();
+        std::size_t degree_sum = 0;
+        for (node_index v : active) degree_sum += graph.adj_count(v);
+        EXPECT_EQ(got.average_degree, double(degree_sum) / active.size());
+        ASSERT_EQ(degrees.size(), active.size());
+        for (node_index v : active) EXPECT_EQ(degrees[v], graph.adj_count(v));
+        const auto candidate_view = direct->host_candidates();
+        const std::vector<node_index> candidates(candidate_view.begin(),candidate_view.end());
+        double threshold = options.degree_multiplier * got.average_degree;
+        if (quantile > 0.0 && quantile < 1.0) {
+            std::vector<node_index> sorted(degrees.begin(), degrees.end());
+            std::sort(sorted.begin(), sorted.end());
+            threshold = sorted[static_cast<std::size_t>(quantile * (sorted.size()-1))];
         }
+        std::vector<node_index> wanted;
+        for (node_index v : active) if (degrees[v] <= threshold) wanted.push_back(v);
+        EXPECT_EQ(candidates, wanted);
+        EXPECT_EQ(got.candidate_count, wanted.size());
+        const auto selected = direct->select_block_greedy().data;
+        ASSERT_FALSE(selected.empty());
+        EXPECT_EQ(direct->select_block_greedy().data, selected);
+        // The owned four-pass law need not finish maximality. Its exact
+        // priority/snapshot contract is checked by GpuBoundedSelection.
+        std::string receipt = std::to_string(direct->selected_degree_work());
+        for (const auto vertex : selected) receipt += ":" + std::to_string(vertex);
+        RecordProperty(std::string("direct_selection_") + std::to_string(ties) + "_" + std::to_string(quantile), receipt);
+        std::vector<bool> picked(graph.n(),false);
+        std::size_t degree_work = 0;
+        for (node_index v : selected) {
+            ASSERT_LT(v,graph.n());
+            EXPECT_TRUE(std::binary_search(candidates.begin(),candidates.end(),v));
+            ASSERT_FALSE(picked[v]); picked[v]=true; degree_work+=graph.adj_count(v);
+        }
+        for (node_index v : candidates) {
+            bool neighbor_picked = false;
+            for (const auto& edge : graph.neighbors(v)) neighbor_picked |= picked[edge.to];
+            if (picked[v]) {
+                EXPECT_FALSE(neighbor_picked);
+            }
+        }
+        EXPECT_EQ(direct->selected_degree_work(), degree_work);
+        EXPECT_EQ(direct->transfers().owned_residual_binds, 1u);
     }
 #endif
 }
@@ -412,8 +394,6 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env blocks("APXCHOL_GPU_BLOCKS", "1");
     for (int operation = 0; operation < 5; ++operation) {
         SCOPED_TRACE(operation);
         auto owner = std::make_unique<apxchol::detail::gpu_round_shadow_session>(true);
@@ -483,7 +463,6 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
         EXPECT_EQ(std::vector<node_index>(got_degrees.begin(), got_degrees.end()), degrees);
         EXPECT_EQ(direct->selected_degree_work(), expected_work);
         EXPECT_EQ(direct->transfers().owned_residual_binds, 1u);
-        EXPECT_EQ(direct->transfers().host_update_bytes, 0u);
         owner.reset();
         try {
             switch (operation) {
@@ -502,16 +481,12 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
 }
 
 TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithoutGraphHandback) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA direct CSC required";
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA operator construction required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
     scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_env finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_env frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    scoped_env blocks("APXCHOL_GPU_BLOCKS", "1");
     scoped_env fp16("APXCHOL_FACTOR_STORAGE", nullptr);
     scoped_env drop("APXCHOL_FACTOR_DROP", nullptr);
     scoped_env backend("APXCHOL_GPU_SPTRSV", nullptr);
@@ -533,8 +508,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         if (apxchol::detail::gpu_setup_diagnostics()) {
             ASSERT_NE(trace.find("[gpu-owned-csc] n=257 "),std::string::npos) << trace;
             EXPECT_NE(trace.find("host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0"),std::string::npos) << trace;
-            EXPECT_NE(trace.find("initial_snapshots=0"),std::string::npos) << trace;
-            EXPECT_NE(trace.find("residual_download_bytes=0"),std::string::npos) << trace;
+            EXPECT_NE(trace.find("factor_entry_download_bytes=0"),std::string::npos) << trace;
             EXPECT_EQ(trace.find("handback_download_bytes="),std::string::npos) << trace;
         } else {
             EXPECT_EQ(trace.find("[gpu-owned-"), std::string::npos) << trace;
@@ -548,6 +522,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         EXPECT_TRUE(preconditioner.factor().L.inner_.empty());
         EXPECT_GT(preconditioner.factor().rounds.size(),2u);
         apxchol::solve_options options; options.tol=1e-8; options.max_iter=1000;
+        options.backend = apxchol::solve_backend::gpu;
         const auto solved = apxchol::solve(A,b,options);
         ASSERT_EQ(solved.x.size(),n);
         EXPECT_LE((A*solved.x-b).norm()/b.norm(),1e-8);
