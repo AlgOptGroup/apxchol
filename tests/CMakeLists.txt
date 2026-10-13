@@ -200,11 +200,9 @@ if (APXCHOL_BUILD_TOOLS)
         apxchol_analyze_test(analyze_gpu path5_sddm 1 "GPU route requires 32-bit nodes" --backend gpu)
     else()
         apxchol_analyze_test(analyze_gpu path5_sddm 0 "backend=gpu" --backend gpu)
-        set_tests_properties(analyze_gpu PROPERTIES
-            SKIP_REGULAR_EXPRESSION "Metal backend is unavailable: no Metal device|GPU factorization requires an available CUDA device")
-        if (_analyze_auto_backend STREQUAL "gpu")
-            set_tests_properties(analyze_default_backend analyze_explicit_auto PROPERTIES
-                SKIP_REGULAR_EXPRESSION "GPU factorization requires an available CUDA device")
+        if (APXCHOL_DEVICE STREQUAL "METAL")
+            set_tests_properties(analyze_gpu PROPERTIES
+                SKIP_REGULAR_EXPRESSION "Metal backend is unavailable: no Metal device")
         endif()
     endif()
     unset(_analyze_auto_backend)
