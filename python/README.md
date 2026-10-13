@@ -1,6 +1,6 @@
 # apxchol for Python
 
-CPU approximate-Cholesky preconditioning and PCG for sparse Laplacian/SDDM
+Approximate-Cholesky preconditioning and PCG for sparse Laplacian/SDDM
 operators.
 
 ```bash
@@ -15,9 +15,14 @@ Wheels: Linux x86_64 (manylinux, x86-64-v2 CPU or newer) and macOS arm64
 wheels. Importing packages that bundle another OpenMP runtime in the same
 process can cause runtime conflicts.
 
+Linux wheels include CUDA support and macOS wheels include Metal support.
+GPU use requires a compatible device and driver; the CUDA Toolkit is not
+needed to use the Linux wheels.
+
 ```python
 import apxchol
 solver = apxchol.factorize(A)           # assembled scipy sparse operator
+solver.backend                         # resolved "cpu" or "gpu"
 res = solver.solve(b, rtol=1e-8, maxiter=500)
 res.x, res.iters, res.residual, res.converged
 z = solver.apply(r)
@@ -29,7 +34,8 @@ For adjacency input, explicitly call `apxchol.laplacian(Adj)` to form `D - Adj`
 with self-loops removed. Operator validation is shared with the C++ library.
 Positive off-diagonal pairs are lumped onto the diagonal for preconditioning;
 PCG and residual checks still use the original operator. `solver.lumped`
-counts stored positive off-diagonal entries (two per symmetric pair). Laplacian nullspaces are handled componentwise.
+counts stored positive off-diagonal entries (two per symmetric pair). A Laplacian
+RHS must sum to zero separately on each connected component.
 
 Operators, right-hand sides, initial guesses, and preconditioner inputs must
 be real. Complex dtypes raise `ValueError`, even when their imaginary parts
@@ -38,12 +44,19 @@ are zero.
 ## Options and reuse
 
 `factorize` (alias `solver`) builds once; subsequent solves reuse the factor
-and workspace. `OMP_NUM_THREADS` controls OpenMP parallelism. A solver cannot
+and workspace. `backend="auto"` selects a usable GPU when the build, input and options
+support it, otherwise CPU. Selection belongs to the common C++ solver;
+`"cpu"` and `"gpu"` request a specific backend. GPU use requires CUDA or Metal
+support in the installed build and a usable device. Explicit GPU requests fail
+when unavailable or unsupported; execution errors do not trigger a CPU retry.
+`solver.backend` reports the choice made during setup and is read-only.
+`OMP_NUM_THREADS` controls CPU parallelism. A solver cannot
 serve concurrent `solve`/`apply` calls; use separate instances or serialize.
 
 `solve` accepts `rtol` (default `1e-8`, overriding alias `tol`), `maxiter`,
 `x0`, and `out`. The latter must be writable, C-contiguous float64 of length
 `n`; it is returned as `res.x`. An already-converged guess takes zero iterations.
+GPU solves can use temporary output storage before copying into `out`.
 
 ```python
 solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
@@ -56,9 +69,9 @@ Graph storage: `vec_pool_aos`, `vec`, `bstr`.
 copy (~8 bytes/nonzero in default builds). `False` disables factor export,
 but preserves `P`, `factor_nnz`, `fill_ratio`; one-shot `solve` uses `False`.
 
-`factor_storage_dtype=np.float16` or `np.float32` selects triangular-solve storage per solver; dtype objects and the strings `"float16"`/`"float32"` also work. Read the resolved dtype through `solver.factor_storage_dtype`. The default, `None`, respects `APXCHOL_FACTOR_STORAGE=auto|float16|float32`, where `auto` means FP32 on the CPU. Invalid settings raise an error; an explicit dtype overrides the environment without changing it.
+`factor_storage_dtype=np.float16` or `np.float32` selects triangular-solve storage per solver; dtype objects and the strings `"float16"`/`"float32"` also work. Read the resolved dtype through `solver.factor_storage_dtype`. The default, `None`, respects `APXCHOL_FACTOR_STORAGE=auto|float16|float32`, where `auto` means FP32 on CPU/Metal and FP16 on CUDA. Invalid settings raise an error; an explicit dtype overrides the environment without changing it.
 
-FP16 stores scaled off-diagonals with FP32 diagonals and scales. It requires x86 AVX/F16C or Apple ARM64; an unsupported request raises an error. CPU arithmetic remains FP64; constructed factors and exports remain FP32. FP64 factor storage is not supported. See [precision and storage](../docs/precision.md).
+FP16 stores scaled off-diagonals with FP32 diagonals and scales. CPU conversion requires x86 AVX/F16C or Apple ARM64; an unsupported request raises an error. CPU arithmetic remains FP64; constructed factors and exports remain FP32. FP64 factor storage is not supported. See [precision and storage](../docs/precision.md).
 
 Advanced keywords: `degree_quantile`, `degree_multiplier`, `degree_tiebreak`,
 `exact_clique_max_degree`, `residual_peel`, `stagnation_window`.
@@ -91,8 +104,10 @@ pip install -e 'python[test]'
 pytest python/tests -v
 ```
 
-The extension directly compiles `factorization.cpp`, `operator_class.cpp`
-and `solve.cpp`. Local builds tune for the build machine; distributed wheels
+The extension uses the common C++ library. Local builds tune for the build machine; distributed wheels
 use the CPU baselines above. On macOS, install the [build dependencies](../README.md#build-and-run)
 first, then use the same pip command above.
+Select a GPU source build with `CMAKE_ARGS="-DAPXCHOL_DEVICE=CUDA"` or
+`CMAKE_ARGS="-DAPXCHOL_DEVICE=METAL"`; the corresponding core build dependencies
+are required.
 Without build isolation, install `pybind11 scikit-build-core` first. [License](../LICENSE).

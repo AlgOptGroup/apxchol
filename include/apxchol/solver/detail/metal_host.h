@@ -1,6 +1,7 @@
 #pragma once
 // Host arithmetic for Metal PCG. Error-free transforms require explicit FMA
 // and no implicit floating-point contraction or reassociation.
+#include "gpu_scaling.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -17,12 +18,8 @@ namespace apxchol::detail::metal_host { using std::fma; }
 
 namespace apxchol::detail::metal_host {
 
-// Use the stable reduction when the sum of squares is outside the normal range.
-template <class Vector>
-auto norm(const Vector& v) {
-    const auto squared = v.squaredNorm();
-    return std::isnormal(squared) ? std::sqrt(squared) : v.stableNorm();
-}
+using gpu_scaling::norm;
+using gpu_scaling::pow2_scale;
 
 /// fp64 -> double-float: hi = fp32(v), lo = fp32(v - hi). Exact for any v
 /// with at most 48 significant bits whose parts stay in the fp32 normal range.
@@ -40,14 +37,6 @@ inline factor_metadata pack_factor_metadata(float scale, float scaled_diagonal) 
     if (!(scale > 0) || !std::isfinite(scale) || diagonal == 0 || !std::isfinite(diagonal))
         throw std::domain_error("Metal FP16 factor has an invalid scale or diagonal");
     return {scale, diagonal};
-}
-
-/// A finite power-of-two scale that brings max_abs into [1, 2), except for
-/// the smallest inputs, where the scale's exponent is capped. Scaling preserves
-/// significands unless a value underflows or overflows. max_abs is finite and positive.
-inline double pow2_scale(double max_abs) {
-    const int exponent = std::min(-std::ilogb(max_abs), std::numeric_limits<double>::max_exponent - 1);
-    return std::ldexp(1.0, exponent);
 }
 
 /// fp64 value as a double-float, saturated to the largest finite fp32 (used

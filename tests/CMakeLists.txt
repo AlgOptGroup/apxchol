@@ -79,9 +79,9 @@ if (OpenMP_CXX_FOUND)
 endif()
 if (APXCHOL_DEVICE STREQUAL "CUDA")
     # The CPU route must run in a fresh process with no visible CUDA devices;
-    # eligible automatic/explicit GPU requests must fail without CPU fallback.
+    # automatic selection uses CPU; explicit GPU requests still fail.
     add_test(NAME solve_routes_no_cuda_device COMMAND unit_tests
-        --gtest_filter=SolveRoutes.ExplicitCpuDoesNotPrewarm:SolveRoutes.HiddenDeviceFailureNeverRetriesOnCpu)
+        --gtest_filter=SolveRoutes.ExplicitCpuDoesNotPrewarm:SolveRoutes.HiddenDeviceUsesCpuAutomaticallyAndRejectsExplicitGpu)
     set_tests_properties(solve_routes_no_cuda_device PROPERTIES TIMEOUT 120
         ENVIRONMENT "OMP_NUM_THREADS=4;CUDA_VISIBLE_DEVICES=-1")
     # Device-wide free-memory accounting also sees other GPU applications.

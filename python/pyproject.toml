@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "apxchol"
 version = "0.3.0"
-description = "CPU approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
+description = "Approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
@@ -51,22 +51,33 @@ skip = "*-musllinux_*"
 before-build = 'curl -fsSL --retry 3 https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.8/openmp/LICENSE.TXT -o "{package}/LICENSE.libomp.txt"'
 test-extras = ["test"]
 test-command = "python -m pytest {package}/tests -q"
-config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF", "cmake.define.CMAKE_COMPILE_WARNING_AS_ERROR" = "ON" }
+config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF", "cmake.define.CMAKE_COMPILE_WARNING_AS_ERROR" = "ON", "cmake.version" = ">=4.4" }
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
-before-all = "dnf install -y clang libomp-devel"
+before-all = '''
+set -eu
+dnf install -y clang libomp-devel dnf-plugins-core
+dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+dnf install -y cuda-nvcc-13-4 cuda-cudart-devel-13-4
+cp /usr/share/licenses/cuda-cudart-13-4/LICENSE "{package}/LICENSE.cuda.txt"
+cp /usr/share/licenses/cccl-13-4/LICENSE "{package}/LICENSE.cccl.txt"
+'''
 manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.linux.environment]
 CC = "clang"
 CXX = "clang++"
+CUDACXX = "/usr/local/cuda-13.4/bin/nvcc"
+CUDAHOSTCXX = "clang++"
+CMAKE_ARGS = "-DAPXCHOL_DEVICE=CUDA -DCMAKE_CUDA_ARCHITECTURES=all-major"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
 before-all = "brew install libomp"
 
 [tool.cibuildwheel.macos.environment]
+CMAKE_ARGS = "-DAPXCHOL_DEVICE=METAL"
 MACOSX_DEPLOYMENT_TARGET = "15.0"
 # scikit-build-core prefers this over MACOSX_DEPLOYMENT_TARGET for the wheel tag.
 _PYTHON_HOST_PLATFORM = "macosx-15.0-arm64"

@@ -1,0 +1,113 @@
+import os
+import subprocess
+import sys
+
+import numpy as np
+import pytest
+import scipy.sparse as sp
+
+import apxchol
+
+
+@pytest.fixture(scope="module")
+def operator_matrix():
+    return sp.diags([-np.ones(63), np.full(64, 4.0), -np.ones(63)],
+                    [-1, 0, 1], format="csc")
+
+
+@pytest.fixture(scope="module")
+def auto_solver(operator_matrix):
+    solver = apxchol.factorize(operator_matrix, factor_storage_dtype=np.float32)
+    if os.environ.get("APXCHOL_TEST_REQUIRE_GPU") == "1":
+        assert solver.backend == "gpu", "Native GPU validation must execute the GPU backend"
+    return solver
+
+
+def test_backend_selection_is_read_only(operator_matrix, auto_solver):
+    cpu = apxchol.factorize(operator_matrix, backend="cpu")
+    assert cpu.backend == "cpu"
+    assert auto_solver.backend in ("cpu", "gpu")
+    with pytest.raises(AttributeError):
+        auto_solver.backend = "cpu"
+    if auto_solver.backend == "cpu":
+        with pytest.raises((ValueError, RuntimeError), match="GPU|CUDA|Metal|cuda"):
+            apxchol.factorize(operator_matrix, backend="gpu")
+    else:
+        assert apxchol.factorize(operator_matrix, backend="gpu").backend == "gpu"
+
+
+@pytest.mark.parametrize("backend", ["invalid", "CUDA", None])
+def test_invalid_backend_is_rejected(operator_matrix, backend):
+    with pytest.raises(ValueError, match="backend must be auto, cpu or gpu"):
+        apxchol.factorize(operator_matrix, backend=backend)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_nonfinite_vectors_are_rejected(auto_solver, value):
+    vector = np.ones(auto_solver.shape[0])
+    vector[0] = value
+    with pytest.raises(ValueError, match="b must be finite"):
+        auto_solver.solve(vector)
+    with pytest.raises(ValueError, match="x0 must be finite"):
+        auto_solver.solve(np.ones_like(vector), x0=vector)
+    with pytest.raises(ValueError, match="r must be finite"):
+        auto_solver.apply(vector)
+
+
+@pytest.mark.parametrize("backend", ["cpu", "gpu"])
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_backend_reuses_factor_and_supports_export_warm_start_and_output(
+        operator_matrix, auto_solver, backend, dtype):
+    if backend == "gpu" and auto_solver.backend != "gpu":
+        pytest.skip("No usable GPU backend in this installation")
+    try:
+        solver = apxchol.factorize(operator_matrix, backend=backend,
+                                  factor_storage_dtype=dtype, keep_factor=True)
+    except RuntimeError as exc:
+        if (backend == "cpu" and dtype == np.float16
+                and str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64"):
+            pytest.skip("CPU lacks FP16 conversion support")
+        raise
+    assert solver.backend == backend
+    assert solver.factor_storage_dtype == dtype
+    factor = solver.chol()
+    assert factor.dtype == np.float32
+    assert factor.nnz == solver.factor_nnz
+    np.testing.assert_array_equal(np.sort(solver.P), np.arange(operator_matrix.shape[0]))
+
+    exact = np.linspace(-1.0, 1.0, operator_matrix.shape[0])
+    rhs = operator_matrix @ exact
+    out = np.empty_like(rhs)
+    result = solver.solve(rhs, rtol=1e-8, out=out, x0=np.zeros_like(rhs))
+    assert result.x is out
+    assert result.converged
+    assert np.linalg.norm(operator_matrix @ result.x - rhs) / np.linalg.norm(rhs) <= 1e-8
+
+    warm = solver.solve(rhs, rtol=1e-8, x0=exact)
+    assert warm.converged and warm.iters == 0
+    np.testing.assert_allclose(operator_matrix @ warm.x, rhs, rtol=1e-12, atol=1e-12)
+    rhs2 = operator_matrix @ np.cos(np.arange(rhs.size))
+    reused = solver.solve(rhs2, rtol=1e-8)
+    assert reused.converged
+    assert np.linalg.norm(operator_matrix @ reused.x - rhs2) / np.linalg.norm(rhs2) <= 1e-8
+    assert solver.backend == backend
+    assert np.isfinite(solver.apply(rhs)).all()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="CUDA device visibility is a Linux-wheel test")
+def test_hidden_cuda_device_selects_cpu_and_explicit_gpu_fails():
+    script = """
+import apxchol
+import scipy.sparse as sp
+A = sp.diags([-1., 4., -1.], [-1, 0, 1], shape=(64, 64), format='csc')
+assert apxchol.factorize(A).backend == 'cpu'
+try:
+    apxchol.factorize(A, backend='gpu')
+except (ValueError, RuntimeError):
+    pass
+else:
+    raise AssertionError('explicit GPU succeeded with no visible CUDA device')
+"""
+    environment = dict(os.environ, CUDA_VISIBLE_DEVICES="")
+    subprocess.run([sys.executable, "-B", "-c", script], env=environment,
+                   check=True, timeout=60)

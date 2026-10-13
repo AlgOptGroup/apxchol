@@ -20,7 +20,7 @@ def operator_matrix():
 @pytest.mark.parametrize("keep_factor", [False, True])
 def test_explicit_fp32_overrides_environment(monkeypatch, dtype, keep_factor):
     monkeypatch.setenv("APXCHOL_FACTOR_STORAGE", "float16")
-    solver = apxchol.factorize(operator_matrix(), factor_storage_dtype=dtype,
+    solver = apxchol.factorize(operator_matrix(), backend="cpu", factor_storage_dtype=dtype,
                               keep_factor=keep_factor)
     assert solver.factor_storage_dtype == np.dtype("float32")
     result = solver.solve([1.0, 0.0])
@@ -32,9 +32,9 @@ def test_explicit_fp32_overrides_environment(monkeypatch, dtype, keep_factor):
 @pytest.mark.parametrize("dtype", [np.float16, "float16", np.dtype("float16")])
 def test_fp16_and_fp32_instances_coexist(monkeypatch, dtype):
     monkeypatch.setenv("APXCHOL_FACTOR_STORAGE", "float32")
-    full = apxchol.factorize(operator_matrix(), factor_storage_dtype=np.float32)
+    full = apxchol.factorize(operator_matrix(), backend="cpu", factor_storage_dtype=np.float32)
     try:
-        half = apxchol.factorize(operator_matrix(), factor_storage_dtype=dtype)
+        half = apxchol.factorize(operator_matrix(), backend="cpu", factor_storage_dtype=dtype)
     except RuntimeError as exc:
         assert str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64"
         assert (platform.system(), platform.machine()) != ("Darwin", "arm64"), str(exc)
@@ -54,18 +54,18 @@ def test_fp16_and_fp32_instances_coexist(monkeypatch, dtype):
 def test_default_storage_uses_environment(monkeypatch, setting):
     if setting is not None:
         monkeypatch.setenv("APXCHOL_FACTOR_STORAGE", setting)
-    assert apxchol.factorize(operator_matrix()).factor_storage_dtype == np.float32
+    assert apxchol.factorize(operator_matrix(), backend="cpu").factor_storage_dtype == np.float32
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.int16, np.complex64])
 def test_unsupported_storage_dtype_is_rejected(dtype):
     with pytest.raises(ValueError, match="factor storage must be auto, float16 or float32"):
-        apxchol.factorize(operator_matrix(), factor_storage_dtype=dtype)
+        apxchol.factorize(operator_matrix(), backend="cpu", factor_storage_dtype=dtype)
 
 
 def test_invalid_environment_fails_unless_overridden(monkeypatch):
     monkeypatch.setenv("APXCHOL_FACTOR_STORAGE", "float64")
     with pytest.raises(ValueError, match="factor storage must be"):
-        apxchol.factorize(operator_matrix())
-    solver = apxchol.factorize(operator_matrix(), factor_storage_dtype="float32")
+        apxchol.factorize(operator_matrix(), backend="cpu")
+    solver = apxchol.factorize(operator_matrix(), backend="cpu", factor_storage_dtype="float32")
     assert solver.factor_storage_dtype == np.float32

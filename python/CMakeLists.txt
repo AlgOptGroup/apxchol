@@ -1,47 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
 project(apxchol_ext LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+get_filename_component(APX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+include(${APX_ROOT}/cmake/apxchol_core.cmake)
+set(PYBIND11_FINDPYTHON ON)
+find_package(pybind11 CONFIG REQUIRED)
 
-option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
-# Repo root (this CMakeLists lives in python/).
-set(APX_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
-include(${APX_ROOT}/cmake/apxchol_device.cmake)
-if (NOT APXCHOL_DEVICE STREQUAL "CPU")
-    message(FATAL_ERROR "The Python extension currently supports APXCHOL_DEVICE=CPU only")
-endif()
-include(${APX_ROOT}/cmake/apxchol_arch.cmake)
+pybind11_add_module(_apxchol src/apxchol_ext.cpp)
+apxchol_configure_core(_apxchol)
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND APXCHOL_ARCH_FLAG STREQUAL "-march=x86-64-v2")
-    # Keep module initialization runnable on older CPUs so it can report the
-    # requirement before calling the core. Both baselines use 16-byte Eigen alignment.
+    # Keep import runnable on older CPUs so it can report the core's requirement.
     set_source_files_properties(src/apxchol_ext.cpp PROPERTIES
         COMPILE_OPTIONS "-march=x86-64"
         COMPILE_DEFINITIONS APXCHOL_REQUIRE_X86_64_V2)
 endif()
-
-include(${APX_ROOT}/cmake/apxchol_eigen.cmake)
-
-include(${APX_ROOT}/cmake/apxchol_openmp.cmake)
-find_package(pybind11 CONFIG REQUIRED)
-# The core TUs depend only on Eigen + OpenMP (no fast_matrix_market, no
-# generated version.h, no CLI11/spdlog), so we compile them straight into the
-# extension. The benchmark-critical apxchol::solve in solve.cpp is reused as-is;
-# operator_class.cpp supplies the operator-contract assertion and the M-matrix
-# lumping, shared verbatim with the CLI and the Octave binding. (src/mtx_input.cpp
-# is NOT compiled here: it is the CLI's own file-interpretation layer.)
-pybind11_add_module(_apxchol
-    src/apxchol_ext.cpp
-    ${APX_ROOT}/src/factorization.cpp
-    ${APX_ROOT}/src/operator_class.cpp
-    ${APX_ROOT}/src/solve.cpp
-)
-target_include_directories(_apxchol PRIVATE ${APX_ROOT}/include ${APX_ROOT}/src)
-target_link_libraries(_apxchol PRIVATE Eigen3::Eigen OpenMP::OpenMP_CXX)
-target_compile_options(_apxchol PRIVATE -Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
-
-# Match the root library's graph-storage default.
-target_compile_definitions(_apxchol PRIVATE APXCHOL_POOL_FP32)
 
 install(TARGETS _apxchol LIBRARY DESTINATION apxchol)

@@ -62,6 +62,6 @@ void step(cudaStream_t stream, detail::gpu_pcg::operation op, std::int64_t n,
 
 // Fold partials in the fixed tree and advance the device recurrence.
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
-              unsigned mode, unsigned iteration, double bnorm);
+              unsigned mode, unsigned iteration, double bnorm, unsigned window = 0);
 
 } // namespace apxchol::pcg_cuda

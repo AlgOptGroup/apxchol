@@ -581,18 +581,21 @@ TEST_F(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
     }
 }
 
-TEST_F(MetalDevice, CommonSolverApiAndCpuDefault) {
+TEST_F(MetalDevice, CommonSolverApiSelectsGpuAutomatically) {
     const Sparse A = grid(20, 21, 0.25);
     const Eigen::VectorXd b = rhs(A.rows(), 4, false);
     apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::cpu;
     const auto cpu = apxchol::solve(A, b, options);
     EXPECT_EQ(cpu.backend, apxchol::solve_backend::cpu);
-    options.backend = apxchol::solve_backend::gpu;
-    const auto gpu = apxchol::solve(A, b, options);
-    EXPECT_EQ(gpu.backend, apxchol::solve_backend::gpu);
-    EXPECT_LT(true_residual(A, b, gpu.x), options.tol);
-    EXPECT_GT(gpu.timings.total("setup"), 0.0);
-    EXPECT_GT(gpu.timings.total("pcg"), 0.0);
+    for (const auto backend : {apxchol::solve_backend::automatic, apxchol::solve_backend::gpu}) {
+        options.backend = backend;
+        const auto gpu = apxchol::solve(A, b, options);
+        EXPECT_EQ(gpu.backend, apxchol::solve_backend::gpu);
+        EXPECT_LT(true_residual(A, b, gpu.x), options.tol);
+        EXPECT_GT(gpu.timings.total("setup"), 0.0);
+        EXPECT_GT(gpu.timings.total("pcg"), 0.0);
+    }
 }
 
 TEST(MetalOptions, UnsupportedOptionsFailBeforeDeviceSetup) {

@@ -195,7 +195,7 @@ public:
 #endif
         if constexpr (on_gpu) cuda_ctx::prewarm();
         n_ = A.rows();
-        F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, Route);
+        F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, Route, keep_factor_);
         install_factor();
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
