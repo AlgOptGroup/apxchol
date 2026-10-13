@@ -62,6 +62,7 @@ const char kKernelSource[] =
 #define APXCHOL_GPU_CODE(...) #__VA_ARGS__
 #include "apxchol/solver/detail/gpu_pcg.inc"
 #include "apxchol/solver/detail/double_float.inc"
+#include "apxchol/solver/detail/metal_factor_storage.inc"
 #include "metal_params.inc"
 #include "metal_kernels.inc"
     "\n#define APXCHOL_UNROLL _Pragma(\"unroll\")\n"
@@ -83,7 +84,7 @@ std::string describe(NSError* error) {
 struct pipelines {
     id<MTLComputePipelineState> pcg[4][2];  // operation, operator double-float
     id<MTLComputePipelineState> finalize;
-    id<MTLComputePipelineState> dataflow_solve[2], dataflow_init[2];
+    id<MTLComputePipelineState> dataflow_solve[2][2], dataflow_init[2][2];
     id<MTLComputePipelineState> probe;
 };
 
@@ -116,11 +117,12 @@ std::string run_arithmetic_probe(context& ctx) {
 
 id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> library,
                                           const char* name, bool forward, bool operator_df,
-                                          unsigned op = 0) {
+                                          unsigned op = 0, bool factor_fp16 = false) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
     [values setConstantValue:&forward type:MTLDataTypeBool atIndex:0];
     [values setConstantValue:&operator_df type:MTLDataTypeBool atIndex:1];
     [values setConstantValue:&op type:MTLDataTypeUInt atIndex:2];
+    [values setConstantValue:&factor_fp16 type:MTLDataTypeBool atIndex:3];
     NSError* err = nil;
     id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]
                                        constantValues:values
@@ -178,22 +180,23 @@ context* make_context() {
                 for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
                     p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op);
             p.finalize = make_pipeline(device, library, "finalize", false, false);
-            for (int fwd = 0; fwd < 2; ++fwd) {
-                p.dataflow_init[fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false);
-                p.dataflow_solve[fwd] = make_pipeline(device, library, "dataflow_solve", fwd != 0, false);
-            }
+            for (int half = 0; half < 2; ++half)
+                for (int fwd = 0; fwd < 2; ++fwd) {
+                    p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half);
+                    auto pipe = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, 0, half);
+                    p.dataflow_solve[half][fwd] = pipe;
+                    if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
+                        throw std::runtime_error("Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups");
+                }
             p.probe = make_pipeline(device, library, "df_probe", false, false);
-            for (auto pipe : p.dataflow_solve) {
-                if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
-                    throw std::runtime_error("Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups");
-            }
             auto threads = [](id<MTLComputePipelineState> pipe) {
                 return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
             };
             const auto tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
                                                threads(p.pcg[2][0]), threads(p.finalize)});
             st.row_threads = std::min({threads(p.pcg[unsigned(operation::direction)][0]),
-                                      threads(p.dataflow_init[0]), threads(p.dataflow_init[1])});
+                                      threads(p.dataflow_init[0][0]), threads(p.dataflow_init[0][1]),
+                                      threads(p.dataflow_init[1][0]), threads(p.dataflow_init[1][1])});
             ctx->probe_queue = [device newCommandQueue];
             if (ctx->probe_queue == nil) throw std::runtime_error("no Metal command queue");
             if (tree_threads < kTreeLanes || st.row_threads == 0)
@@ -250,13 +253,15 @@ struct prepared_tri {
     std::uint32_t levels = 0;
 };
 
-prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<float>& a, bool forward) {
+template<class Value>
+prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<Value>& a, bool forward,
+                         std::span<const float> diagonals = {}) {
     prepared_tri out;
     const auto m = static_cast<unsigned>(a.m);
     auto schedule =
-        metal_schedule::build({reinterpret_cast<const unsigned*>(a.ptr.data()), std::size_t(m) + 1},
+        metal_schedule::build<Value>({reinterpret_cast<const unsigned*>(a.ptr.data()), std::size_t(m) + 1},
                                {reinterpret_cast<const unsigned*>(a.idx.get()), std::size_t(a.nnz)},
-                               {a.vals.get(), std::size_t(a.nnz)}, !forward);
+                               {a.vals.get(), std::size_t(a.nnz)}, !forward, diagonals);
     auto &packed = schedule.tasks;
     out.tag_count = m + packed.slots;
     // Metal validates the element type even when no task reads the buffer.
@@ -267,7 +272,7 @@ prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<float>& a, bool 
     with_pool([&] {
         out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
         out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
-        out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(float), "factor values");
+        out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(Value), "factor values");
         out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
         out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
         out.segments = upload(ctx.device, packed.segments.data(),
@@ -323,14 +328,14 @@ namespace ls = detail::metal_schedule;
 namespace dm = detail::metal;
 using namespace dm;
 
-void print_banner_once(const metal_solver::statistics& st) {
+void print_banner_once(const metal_solver::statistics& st, bool factor_fp16) {
     static std::once_flag flag;
     std::call_once(flag, [&] {
         if (!std::getenv("APXCHOL_VERBOSE")) return;
         std::fprintf(stderr,
-                     "[apxchol] Metal PCG on %s: fp32 factor, "
+                     "[apxchol] Metal PCG on %s: %s factor, "
                      "double-float Krylov vectors, %s operator\n",
-                     st.device.c_str(),
+                     st.device.c_str(), factor_fp16 ? "fp16" : "fp32",
                      st.operator_double_float ? "double-float" : "fp32-exact");
     });
 }
@@ -353,7 +358,8 @@ struct metal_solver::impl {
     context* ctx = nullptr;
     id<MTLCommandQueue> queue = nil;
     Params arguments{};
-    bool operator_df = false;
+    bool operator_df = false, factor_fp16 = false;
+    id<MTLBuffer> factor_metadata = nil;
     id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
     prepared_tri fwd, bwd;
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
@@ -382,13 +388,14 @@ struct metal_solver::impl {
     void encode_tri(const prepared_tri& t, bool forward) const {
         if (!arguments.m) return;
         bind(encoder, 13, {t.ptr, t.col, t.val, t.words, t.blocks, t.segments});
+        if (factor_fp16) bind(encoder, 19, {factor_metadata});
         Params prm = arguments;
         prm.count = t.tag_count;
         const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
-        dispatch(ctx->pipes.dataflow_init[forward], prm, (t.tag_count + threads - 1) / threads, threads);
+        dispatch(ctx->pipes.dataflow_init[factor_fp16][forward], prm, (t.tag_count + threads - 1) / threads, threads);
         for (auto stage : t.stages) {
             prm.offset = stage.first;
-            dispatch(ctx->pipes.dataflow_solve[forward], prm, stage.last - stage.first, 256);
+            dispatch(ctx->pipes.dataflow_solve[factor_fp16][forward], prm, stage.last - stage.first, 256);
         }
     }
 
@@ -431,16 +438,15 @@ struct metal_solver::impl {
     explicit impl(const solve_options& options) : opts(options) {
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
-        if (detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false))
-            throw std::invalid_argument("Metal requires float32 factor storage");
+        factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
         if (!metal_solver::available())
             throw std::runtime_error("apxchol::metal_solver: the Metal backend is unavailable: " +
                                      dm::status().error);
     }
 
     void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp);
-    void prepare_device(const cuda_host::csr_int<float>& forward,
-                        const cuda_host::csr_int<float>& backward,
+    void prepare_device(cuda_host::csr_int<float> backward,
+                        const std::vector<float>& scales,
                         const std::vector<float>& hi, const std::vector<float>& lo, unsigned m);
 
     // y = A' x in fp64, each row summed in storage order; rows are split across
@@ -493,9 +499,10 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     // Keep compensated dropping in the shared FP64 host implementation.
     // Both backends consume the CSR factor without a level-permuted value copy.
     auto backward = cuda_host::build_L11_csc_int<float>(F.L, m);
-    const auto scales = cuda_host::column_scales(backward);
-    cuda_host::apply_factor_drop(backward, scales, factor_drop_rel_from_env(), false);
-    const auto forward = cuda_host::transpose_csr(backward);
+    if (!opts.keep_factor_values) F.L.release_values();
+    auto scales = cuda_host::column_scales(backward);
+    if (factor_fp16) cuda_host::normalize_fp16_scales(backward, scales);
+    cuda_host::apply_factor_drop(backward, scales, factor_drop_rel_from_env(), factor_fp16);
     if (cp) (*cp)("metal_factor_prep");
 
     Eigen::SparseMatrix<double> compressed;
@@ -525,7 +532,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::domain_error("metal_solver: an operator value is non-finite or outside [2^-100, 2^100]");
     if (cp) (*cp)("metal_operator");
 
-    prepare_device(forward, backward, hi, lo, m);
+    prepare_device(std::move(backward), scales, hi, lo, m);
     // Group four iterations on small systems to amortize command submission;
     // check large solves after each iteration.
     check_every = n > 200000 ? 1 : 4;
@@ -537,13 +544,12 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     stats.steps_backward = bwd.stages.size() + unsigned(m != 0);
     stats.operator_double_float = !exact;
     stats.device = ctx->status.name;
-    if (!opts.keep_factor_values) F.L.release_values();
     if (cp) { (*cp)("metal_upload"); cp->ascend(); }
-    print_banner_once(stats);
+    print_banner_once(stats, factor_fp16);
 }
 
-void metal_solver::impl::prepare_device(const cuda_host::csr_int<float>& forward,
-                                       const cuda_host::csr_int<float>& backward,
+void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
+                                       const std::vector<float>& scales,
                                        const std::vector<float>& hi, const std::vector<float>& lo,
                                        unsigned m) {
     context& ctx = shared();
@@ -562,8 +568,26 @@ void metal_solver::impl::prepare_device(const cuda_host::csr_int<float>& forward
         op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
         if (!lo.empty()) op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
     });
-    fwd = prepare_tri(ctx, forward, true);
-    bwd = prepare_tri(ctx, backward, false);
+    auto install = [&]<class Value>(const cuda_host::csr_int<Value>& bt, std::span<const float> diag = {}) {
+        const auto ft = cuda_host::transpose_csr(bt);
+        fwd = prepare_tri(ctx, ft, true, diag);
+        bwd = prepare_tri(ctx, bt, false, diag);
+    };
+    if (factor_fp16) {
+        auto narrow = cuda_host::narrow_fp16_scaled(backward, scales);
+        std::vector<mh::factor_metadata> metadata(m);
+        for (unsigned j = 0; j < m; ++j) {
+            metadata[j] = mh::pack_factor_metadata(scales[j], narrow.diag[j]);
+            narrow.diag[j] = metadata[j].diagonal;
+        }
+        with_pool([&] {
+            factor_metadata = upload(ctx.device, metadata.data(), metadata.size() * sizeof(metadata[0]), "factor scales");
+        });
+        cuda_host::csr_int<_Float16> half{backward.m, backward.nnz, std::move(backward.ptr),
+                                        std::move(backward.idx), std::move(narrow.vals)};
+        backward.vals.reset();
+        install(half, narrow.diag);
+    } else install(backward);
     with_pool([&] {
         id<MTLDevice> dev = ctx.device;
         x = upload(dev, nullptr, n * sizeof(df32), "solution");

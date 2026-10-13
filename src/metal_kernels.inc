@@ -13,6 +13,7 @@ static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve
 
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];
+constant bool kFactorFp16 [[function_constant(3)]];
 constant uint kOperation [[function_constant(2)]];
 
 struct pcg_math {

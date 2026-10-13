@@ -86,7 +86,7 @@ storage](precision.md).
 
 **Low-precision storage retains numerical compensation.** CPU and GPU share
 column scaling, a separate fp32 diagonal, subnormal flushing, and compensation
-for storage rounding. fp16 defaults on for GPU and off for CPU. Keeping the
+for storage rounding. fp16 defaults on for CUDA and off for CPU/Metal. Keeping the
 diagonal in fp16 increased historical iter0040 iterations from 44 to 50;
 omitting rounding compensation increased 45 to 64. A single runtime storage
 choice replaced separate binaries and GPU-only aliases. Scalar gathers won

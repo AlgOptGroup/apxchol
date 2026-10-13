@@ -6,11 +6,13 @@
 #include <cstddef>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace apxchol::detail::metal_host { using std::fma; }
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #include "double_float.inc"
+#include "metal_factor_storage.inc"
 #undef APXCHOL_GPU_CODE
 
 namespace apxchol::detail::metal_host {
@@ -32,6 +34,13 @@ inline df split(double v) {
 
 /// hi + lo in fp64: exact for a normalized double-float.
 inline double join(df v) { return static_cast<double>(v.hi) + static_cast<double>(v.lo); }
+
+inline factor_metadata pack_factor_metadata(float scale, float scaled_diagonal) {
+    const float diagonal = static_cast<float>(double(scaled_diagonal) * scale);
+    if (!(scale > 0) || !std::isfinite(scale) || diagonal == 0 || !std::isfinite(diagonal))
+        throw std::domain_error("Metal FP16 factor has an invalid scale or diagonal");
+    return {scale, diagonal};
+}
 
 /// A finite power-of-two scale that brings max_abs into [1, 2), except for
 /// the smallest inputs, where the scale's exponent is capped. Scaling preserves

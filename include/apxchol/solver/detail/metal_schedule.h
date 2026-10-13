@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numeric>
 #include <span>
+#include <type_traits>
 #include <stdexcept>
 #include <vector>
 
@@ -24,10 +25,12 @@ struct schedule {
     unsigned levels = 0;
 };
 
+template<class Value = float>
 inline schedule build(std::span<const unsigned> ptr, std::span<const unsigned> col,
-                      std::span<const float> values, bool reverse) {
+                      std::span<const std::type_identity_t<Value>> values, bool reverse, std::span<const float> diagonals = {}) {
     if (ptr.empty() || ptr.size() > gpu_dataflow::special_bit || ptr.front() != 0 ||
-        ptr.back() != col.size() || col.size() != values.size())
+        ptr.back() != col.size() || col.size() != values.size() ||
+        (!diagonals.empty() && diagonals.size() + 1 != ptr.size()))
         throw std::invalid_argument("Metal factor has invalid CSR dimensions");
     const unsigned n = ptr.size() - 1;
     std::vector<unsigned> depth(n);
@@ -37,10 +40,11 @@ inline schedule build(std::span<const unsigned> ptr, std::span<const unsigned> c
         if (ptr[row] >= ptr[row + 1] || ptr[row + 1] > col.size())
             throw std::invalid_argument("Metal factor has invalid row pointers");
         const unsigned diagonal = reverse ? ptr[row] : ptr[row + 1] - 1;
-        if (col[diagonal] != row || values[diagonal] == 0)
+        const float d = diagonals.empty() ? float(values[diagonal]) : diagonals[row];
+        if (col[diagonal] != row || d == 0)
             throw std::invalid_argument("Metal factor has a missing or zero diagonal");
         for (unsigned p = ptr[row]; p < ptr[row + 1]; ++p) {
-            if (!std::isfinite(values[p]) || (p == diagonal && !in_range(values[p])))
+            if (!std::isfinite(p == diagonal ? d : float(values[p])) || (p == diagonal && !in_range(d)))
                 throw std::domain_error("Metal factor has a non-finite value or unsupported diagonal");
             if (p == diagonal)
                 continue;

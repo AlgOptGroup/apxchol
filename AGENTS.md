@@ -387,7 +387,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   quality, setup, solve, one-RHS total, RSS and owner memory.
 - Metal's `metal_solver` uses host factorization and handles one RHS per call,
   retaining its factor, operator and workspace. `solve()` selects it only for
-  explicit GPU requests. FP16 storage and CPU requests to `metal_solver` fail.
+  explicit GPU requests. FP16 storage is opt-in; CPU requests to `metal_solver` fail.
   Check command-buffer errors and the FP64 original-system exit residual.
   Run `MetalSchedule.*`, `MetalHost.*` and `MetalDevice.*` with device/shader
   validation as described in [CONTRIBUTING.md](CONTRIBUTING.md#build-and-test).

@@ -48,7 +48,7 @@ With `-DAPXCHOL_DEVICE=METAL` (macOS), `--backend gpu` and
 `solve_options::backend = solve_backend::gpu` select the Apple GPU.
 Automatic selection stays on CPU. Use `apxchol::metal_solver` in place of
 `cpu_solver` above to reuse its host-built factor and GPU workspace.
-Metal supports FP32 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
+Metal supports FP32 and FP16 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
 
 ```bash
 pip install apxchol                 # or: pip install -e python

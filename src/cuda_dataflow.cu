@@ -53,6 +53,7 @@ template <class Value> struct dataflow_memory {
     const double *rhs64 = nullptr;
     double *out64 = nullptr;
 
+    __device__ Value value(unsigned pos, unsigned, unsigned) const { return val[pos]; }
     __device__ unsigned width(unsigned size) const {
         return 1u << min(5u, 32u - __clz((size ? size - 1 : 0) / 8));
     }

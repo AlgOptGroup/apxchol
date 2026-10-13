@@ -381,21 +381,7 @@ public:
         // scale), from the factor BEFORE the drop.
         std::vector<float> col_scale;
         if (factor_drop_rel > 0.0 || data_.fp16) col_scale = cuda_host::column_scales(LT);
-        // fp16 storage only: a column whose scale cannot be represented --
-        // fp32 1/s_j (s_j < ~3e-39) or the scaled diagonal fp32(L_jj)/s_j
-        // (off-diagonals >= ~1e38x below the diagonal) would overflow --
-        // falls back to s_j = 1 (the "no off-diagonals" convention): its
-        // off-diagonals are below anything an fp32 sweep could see next to
-        // that diagonal, and the drop/flush below removes them. Applied
-        // BEFORE the drop so the threshold and the storage agree on the
-        // scale.
-        if (data_.fp16)
-            for (int64_t j = 0; j < data_.m; ++j) {
-                const float s = col_scale[static_cast<std::size_t>(j)];
-                const float d = static_cast<float>(LT.vals[LT.ptr[static_cast<std::size_t>(j)]]);
-                if (!std::isfinite(1.0f / s) || !std::isfinite(d / s))
-                    col_scale[static_cast<std::size_t>(j)] = 1.0f;
-            }
+        if (data_.fp16) cuda_host::normalize_fp16_scales(LT, col_scale);
 
         // ── Compacting drop (factor_drop.h; see the class comment) ──
         data_.stats = cuda_host::apply_factor_drop(LT, col_scale, factor_drop_rel, data_.fp16);

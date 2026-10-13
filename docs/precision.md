@@ -12,7 +12,7 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
 | Outer CPU/CUDA PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
-| Metal triangular solves | FP32 storage and arithmetic | Shared CUDA/Metal dataflow worker |
+| Metal triangular solves | FP32 storage by default; optional scaled FP16 | Shared CUDA/Metal dataflow worker; FP32 arithmetic |
 | Metal PCG | Mixed FP32 and double-float; host FP64 exit residual | Metal has no native FP64 arithmetic; see below |
 
 `factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; C++ owns parsing and default selection.
@@ -41,17 +41,18 @@ FP16 subnormals are flushed to signed zero. The scaled diagonal remains FP32
 and absorbs the off-diagonal rounding residual. Degenerate scales fall back
 to one before dropping; invalid final diagonals/scales are rejected.
 
-Writing the scaled factor as `L D^-1`, the forward sweep returns `D y` and
+CPU and CUDA solve with the scaled factor `L D^-1`: the forward sweep returns `D y` and
 the backward sweep applies the reciprocal scale squared to its input. CPU
 arithmetic widens to FP64, GPU triangular-solve arithmetic to FP32. A stored
 FP16 factor is not an FP16 outer solve. CPU and GPU-host preparation share the
 narrowing/flush rules in `lowprec.h`; device finalization has its own CUDA
 implementation and is checked by the GPU finalization tests.
+Metal reconstructs FP32 coefficients before multiplication; each column stores an FP32 scale and compensated diagonal.
 
 ## Apple Metal PCG
 
-Metal uses host factor preparation with compensated dropping and rejects
-explicit FP16 storage. [The solver](../README.md#interfaces) handles one RHS
+Metal uses host factor preparation with compensated dropping and optional
+scaled FP16 storage. [The solver](../README.md#interfaces) handles one RHS
 per call, reusing its factor and workspace.
 
 Double-float represents a value as the sum of two FP32 numbers, giving about
@@ -75,7 +76,7 @@ host thread counts, devices, OS/compiler versions or independent factorizations.
 
 Runtime compilation uses safe math and disables contraction where supported;
 `metal_solver::available()` checks rounding, intermediate precision and FMA.
-Nonzero operator values and factor diagonals need magnitudes in [2^-100, 2^100];
+Nonzero operator values and unscaled factor diagonals need magnitudes in [2^-100, 2^100];
 factor off-diagonals must be finite (`std::domain_error` otherwise). Factor and
 operator offsets must fit signed 32-bit integers; operator inputs must have
 fewer than 2^30 stored entries (`std::length_error` otherwise).

@@ -153,6 +153,15 @@ inline std::vector<float> column_scales(const csr_int<Val>& A) {
     return s;
 }
 
+// Fall back before dropping so its threshold and FP16 storage use the same scale.
+template<class Val>
+inline void normalize_fp16_scales(const csr_int<Val>& factor, std::span<float> scales) {
+    for (int j = 0; j < factor.m; ++j) {
+        const float s = scales[j], d = static_cast<float>(factor.vals[factor.ptr[j]]);
+        if (!std::isfinite(1.0f / s) || !std::isfinite(d / s)) scales[j] = 1.0f;
+    }
+}
+
 /// The compacting factor drop (factor_drop.h -- the implementation the CPU
 /// backend runs) applied IN PLACE to the columns of `L11`, with the GPU
 /// backend's keep predicate (above): if anything is dropped the compacted

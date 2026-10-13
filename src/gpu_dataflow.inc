@@ -54,7 +54,7 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
                     const unsigned pos = p + k * g;
                     const bool ok = have && pos < end;
                     cols[k] = ok ? (t.kind == 2 ? pos : m.col[pos]) : 0;
-                    vals[k] = ok ? (t.kind == 2 ? Value(1.0f) : m.val[pos]) : Value(0.0f);
+                    vals[k] = ok ? (t.kind == 2 ? Value(1.0f) : m.value(pos, t.row, cols[k])) : Value(0.0f);
                     values[k] = 0;
                     if (ok) pending |= 1u << k;
                 }
