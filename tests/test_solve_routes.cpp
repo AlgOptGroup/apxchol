@@ -2,6 +2,9 @@
 #include "scoped_env.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
+#if defined(APXCHOL_USE_METAL)
+#include "apxchol/solver/metal_solver.h"
+#endif
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -107,14 +110,24 @@ TEST(SolveRoutes, AutoSelectsCpuForHostOnlyConfigurationsBeforeSetup) {
     }
 }
 
-TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
 #if defined(APXCHOL_USE_METAL)
-    apxchol::solve_options options;
-    options.backend = apxchol::solve_backend::gpu;
-    options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
+TEST(SolveRoutes, MetalGpuSupportsFp32AndFp16Storage) {
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
     const auto matrix = operator_matrix();
-    EXPECT_THROW(apxchol::solve(matrix, Eigen::VectorXd::Ones(matrix.rows()), options), std::invalid_argument);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    for (auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        SCOPED_TRACE(storage == apxchol::factor_storage_type::fp16 ? "float16" : "float32");
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        options.tol = 1e-10;
+        const auto result = apxchol::solve(matrix, rhs, options);
+        EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
+        expect_solution(matrix, rhs, result);
+    }
+}
 #else
+TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
 #if defined(APXCHOL_USE_CUDA)
     const bool started = apxchol::cuda_ctx::detail::state().started;
 #endif
@@ -130,8 +143,8 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
 #endif
-#endif
 }
+#endif
 
 TEST(SolveRoutes, CpuSolverRejectsExplicitGpuRequest) {
     apxchol::solve_options options;

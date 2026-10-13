@@ -132,7 +132,7 @@ TEST(MetalHost, FactorStorageRangeAndRounding) {
 
 TEST(MetalHost, Float16ScaleFallbackKeepsSmallOffDiagonalFactorsFinite) {
     namespace ch = apxchol::cuda_host;
-    for (const auto [diagonal, offdiag] : std::vector<std::pair<float, float>>{
+    for (const auto& [diagonal, offdiag] : std::vector<std::pair<float, float>>{
              {1, -1e-40f}, {1e20f, -1e-30f}, {1, -0.25f}}) {
         ch::csr_int<float> factor;
         factor.m = 2; factor.nnz = 3; factor.ptr = {0, 2, 3};
