@@ -312,7 +312,7 @@ inline void check_cuda(cudaError_t err, const char* msg) {
 /// otherwise: a factor the fp16 storage cannot represent must fail loudly,
 /// never dissolve into NaN.
 /// Device factor bytes per stored entry: 4 (colidx) + 2 (value), times two
-/// CSRs, plus 8 B/row -- vs 4 + 4 with the fp32 storage.
+/// CSRs, plus 12 B/row -- vs 4 + 4 with the fp32 storage.
 /// fp16 subnormals are always flushed to zero at storage and the drop's keep
 /// predicate also drops what fp16 flushes, exactly as on the CPU.
 class cuda_sptrsv {
