@@ -1178,7 +1178,7 @@ __global__ void merge_survivors_and_fill(
     if (local < size) {
         const auto edge = local < left_size ? survivors[left_begin + local]
             : fill[right_begin + local - left_size];
-        tile[local] = {edge.owner, edge.neighbor, edge.weight};
+        tile[local] = tile_incidence{edge.owner, edge.neighbor, edge.weight};
     }
     __syncthreads();
     unsigned long long topology = 0;
