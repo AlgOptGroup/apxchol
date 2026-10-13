@@ -8,8 +8,33 @@
 #include <cstdint>
 #include <cstring>
 #include <utility>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace apxchol::detail {
+
+// Sorted, unique CSC storage uses the lower triangle for both symmetric entries.
+// Missing partners invalidate the caller's unpublished output.
+template<class Values>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+inline auto canonical_lower_value(const int* ptr, const int* idx, Values values,
+                                  int col, int row, int p, bool& paired) {
+    if (row >= col) return values[p];
+    int lo = ptr[row], hi = ptr[row + 1];
+    while (lo < hi) {
+        const int mid = lo + (hi - lo) / 2;
+        if (idx[mid] < col) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == ptr[row + 1] || idx[lo] != col) {
+        paired = false;
+        return values[p];
+    }
+    return values[lo];
+}
 
 /// Contiguous range [lo, hi) of the n rows/columns of a compressed matrix that
 /// thread `tid` of `nt` owns when the WORK, not the index count, is split
@@ -51,6 +76,18 @@ work_balanced_range(const Offset* ptr, Index n, int tid, int nt) noexcept {
         return a;
     };
     return {bound(tid), bound(tid + 1)};
+}
+
+// Use the current OpenMP team, or the whole range in a serial translation unit.
+template<class Offset, class Index>
+static inline std::pair<Index, Index>
+work_balanced_range(const Offset* ptr, Index n) noexcept {
+#ifdef _OPENMP
+    const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
+    return work_balanced_range(ptr, n, tid, nt);
+#else
+    return work_balanced_range(ptr, n, 0, 1);
+#endif
 }
 
 /// Order-independent fingerprint of one stored off-diagonal entry, keyed by its

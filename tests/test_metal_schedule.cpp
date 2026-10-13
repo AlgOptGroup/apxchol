@@ -1,6 +1,7 @@
 #include "apxchol/solver/detail/metal_schedule.h"
 #include <array>
 #include <gtest/gtest.h>
+#include <limits>
 #include <random>
 
 namespace {
@@ -143,11 +144,43 @@ TEST(MetalSchedule, RejectsInvalidStructureAndValues) {
     }
 }
 
+TEST(MetalSchedule, OffDiagonalsOnlyRequireFiniteValues) {
+    for (bool reverse : {false, true}) {
+        auto a = make_triangle(2, reverse, 1);
+        for (float value : {0x1p-110f, -0x1p-110f, std::numeric_limits<float>::min(),
+                            -std::numeric_limits<float>::denorm_min()}) {
+            SCOPED_TRACE(::testing::Message() << "reverse=" << reverse << " value=" << value);
+            a.val[1] = value;
+            EXPECT_NO_THROW(check_schedule(a, reverse));
+        }
+        for (float value : {std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::quiet_NaN()}) {
+            SCOPED_TRACE(::testing::Message() << "reverse=" << reverse << " value=" << value);
+            a.val[1] = value;
+            EXPECT_THROW(ms::build(a.ptr, a.col, a.val, reverse), std::domain_error);
+        }
+    }
+}
+
 TEST(GpuDataflowPlan, BoundsPartialStorageForVeryLongRows) {
     const unsigned ptr[] = {0, 1, 20000001};
-    const auto plan = df::pack(ptr, {2, false}, {0, 2});
+    const auto plan = df::pack(ptr, {2, false}, std::array{0u, 2u});
     EXPECT_LE(plan.slots, 4096u);
     EXPECT_EQ(plan.segments.size(), plan.slots + 1);
     EXPECT_EQ(plan.segments.front().begin, 1u);
     EXPECT_EQ(plan.segments[plan.slots - 1].end, 20000000u);
+}
+
+TEST(MetalSchedule, Float16UsesSeparateDiagonals) {
+    const std::vector<unsigned> ptr{0, 1, 3}, col{0, 0, 1};
+    const std::vector<_Float16> values{_Float16(1e10f), _Float16(-1), _Float16(1e10f)};
+    for (float d : {1e10f, 0x1p-100f, 0x1p100f}) {
+        const std::vector<float> diagonal{d, d};
+        const auto plan = apxchol::detail::metal_schedule::build<_Float16>(ptr, col, values, false, diagonal);
+        EXPECT_EQ(plan.levels, 2u);
+    }
+    const std::vector<float> missing{1};
+    EXPECT_THROW(apxchol::detail::metal_schedule::build<_Float16>(ptr, col, values, false, missing),
+                 std::invalid_argument);
 }

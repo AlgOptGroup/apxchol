@@ -100,7 +100,7 @@ cmake --build benchmarks/build -j6 --target benchmark
 python3 benchmarks/sweep_fair.py --threads 72 --store results/cells
 ```
 
-For CUDA, use a separate build directory and add `-DAPXCHOL_USE_CUDA=ON
+For CUDA, use a separate build directory and add `-DAPXCHOL_DEVICE=CUDA
 -DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON`; sweep with `--device gpu`.
 Optional solvers require their runtimes. Julia dependencies:
 

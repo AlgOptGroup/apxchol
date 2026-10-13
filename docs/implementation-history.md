@@ -47,27 +47,16 @@ quality and cost, and requires its own correctness and performance validation.
 ## GPU solve and storage
 
 **CUDA and Metal share the dataflow worker and task format.** CUDA uses a global
-queue; Metal groups consecutive dependency levels into independent workgroups
-and orders the groups' stages through GPU dispatches. Their device adapters
-supply atomics, subgroup operations and factor storage. Task counting and
-emission use the same routine on the host and CUDA device, without downloading
-private device-owned factors. Metal no longer keeps a level-permuted value
-copy or separate light, heavy and narrow-level solve kernels.
-
-Each sweep initializes atomic FP32 words and solves roots before processing
-other tasks. Values and readiness share one word; canonical NaNs cannot match
-the pending marker. This replaces CUDA's epoch counter and last-worker reset
-protocol, and works on graph replay. RHS, diagonal and FP16 scale loads precede
-dependency polling: delaying them until publication put their latency on the
-critical path in the first prototype. Numerical tests use independent serial
-double references and repeated/grid-varied executions; old exact-reduction
-fixtures do not define the new arithmetic order.
+queue; Metal groups dependent rows into workgroups so that waiting threads
+cannot block an unscheduled dependency. Shared task packing works on host or
+device. This replaced Metal's separate row kernels and level-permuted value
+copy. FP32 values and readiness now share one atomic word, replacing CUDA's
+epoch counters; each sweep initializes that state before processing tasks.
 
 **Dataflow triangular solves replaced level launches and proprietary analysis.**
 The library uses its own persistent dataflow worker and topologically ordered
 work tickets. This avoids a kernel launch for every level and an analysis
-buffer proportional to factor nnz. The original CUDA implementation used
-epoch-tagged values.
+buffer proportional to factor nnz.
 Our library links `cudart`; benchmark competitors may independently require
 cuSPARSE/cuBLAS. Earlier records describing a selectable cuSPARSE backend are
 obsolete. The design and ordering constraints are documented in
@@ -84,8 +73,12 @@ accuracy checks, while mixed hub precision and packed-load alternatives added
 register, memory, or integer-instruction costs without a useful overall win.
 
 **GPU PCG owns its arithmetic and reductions.** Fused operator application and
-fixed reduction structure avoid proprietary solver dependencies. Outer PCG
-vectors and reductions are FP64. The triangular-solve dataflow state is FP32;
+fixed reduction structure avoid proprietary solver dependencies. CUDA and Metal
+share the driver, workspace and operation loop, with native FP64 arithmetic on
+CUDA and double-float on Metal. The shared shuffle tree replaced Metal's serial
+fold, scratch and barrier; grounded Laplacian coordinates removed per-iteration
+mean reductions. Host centering and an independent FP64 exit residual remain.
+The triangular-solve dataflow state is FP32;
 its tagged representation does not provide an FP64 triangular-solve path.
 The former untested FP64-factor-storage build choice was removed rather than
 advertised as supported. These are separate choices; see [precision and
@@ -93,7 +86,7 @@ storage](precision.md).
 
 **Low-precision storage retains numerical compensation.** CPU and GPU share
 column scaling, a separate fp32 diagonal, subnormal flushing, and compensation
-for storage rounding. fp16 defaults on for GPU and off for CPU. Keeping the
+for storage rounding. fp16 defaults on for CUDA and off for CPU/Metal. Keeping the
 diagonal in fp16 increased historical iter0040 iterations from 44 to 50;
 omitting rounding compensation increased 45 to 64. A single runtime storage
 choice replaced separate binaries and GPU-only aliases. Scalar gathers won
@@ -123,13 +116,18 @@ independent handoff and validation; no disk format or public session API is adde
 This is a contract simplification, not a claim of universal GPU speedup. The
 frontend and owned-setup measurements below retain their historical profiles.
 
+**Mixed diagnostic setup retired (2026-10-13).** CPU elimination with GPU
+selection, mirrored GPU rounds and GPU-prefix/CPU-tail handoffs were removed.
+Public factorization uses the CPU; GPU solves complete setup on the device.
+Independent CPU oracles and test-only inspection validate the owned GPU path.
+
 **The fixed-priority GPU frontend was removed.** A historical 90-record forced
 campaign produced setup ratio 1.102. An independently implemented asynchronous
 MIS variant preserved the recorded factors and iterations in 54 bracketed
 runs, but selector time was 1.057 and enclosing partition time 1.069; setup
 was near noise at 0.989. Keeping another mode was not justified.
 
-**The block frontend is explicit opt-in.** An automatic thread-count governor
+**The former hybrid block frontend was opt-in.** An automatic thread-count governor
 was removed: host-thread count must not silently choose a different algorithm.
 The historical 270-record GH200 study found single-RHS total ratios
 0.711/0.762/0.826/0.927 at T=1/2/4/8, but 1.050 at T=16 and 1.201 at T=72,
@@ -138,7 +136,7 @@ an explicit research choice, not universal GPU dominance. Batching transfers
 and reusing resident topology were useful; a tested 2D-copy alternative did
 not justify retention.
 
-**GPU-owned setup remains explicit research functionality.** The internal
+**GPU-owned setup began as research functionality.** The internal
 consuming path supports numerical rounds on device, direct CSC/operator
 preparation, bounded selection, local row batches and device factor/plan
 construction. Host metadata and validated public/export/fallback paths remain.

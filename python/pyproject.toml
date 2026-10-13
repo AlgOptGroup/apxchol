@@ -39,7 +39,7 @@ Issues = "https://github.com/AlgOptGroup/apxchol/issues"
 test = ["pytest>=7"]
 
 [tool.scikit-build]
-cmake.version = ">=3.16"
+cmake.version = ">=3.20"
 wheel.packages = ["apxchol"]
 build-dir = "build/{wheel_tag}"
 wheel.license-files = ["LICENSE*"]

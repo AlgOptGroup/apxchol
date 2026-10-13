@@ -9,6 +9,7 @@
 #include "apxchol/graph/graph.h"
 #include <Eigen/Sparse>
 #include <algorithm>
+#include <atomic>
 #include <ranges>
 #include <vector>
 
@@ -189,8 +190,8 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         for (node_index k = 0; k < outer; ++k) {
             for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
                 if (it.row() > it.col()) {
-                    __atomic_fetch_add(&incoming[it.row()], 1, __ATOMIC_RELAXED);
-                    __atomic_fetch_add(&incoming[it.col()], 1, __ATOMIC_RELAXED);
+                    std::atomic_ref(incoming[it.row()]).fetch_add(1, std::memory_order_relaxed);
+                    std::atomic_ref(incoming[it.col()]).fetch_add(1, std::memory_order_relaxed);
                 } else if (it.row() == it.col()) {
                     diag[k] = it.value();
                 }

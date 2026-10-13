@@ -19,9 +19,9 @@
 // slots hold fp16(fp32(L_ij) / s_j) (native conversion; fp16 subnormals flushed
 // to signed zero), the
 // diagonal is NOT read from its (still present, fp16) slot but from a
-// separate fp32 diag[j] = fp32(L_jj) / s_j, and inv_scale[j] = fp32(1 / s_j).
+// separate fp32 diag[j] = fp32(L_jj) / s_j, and inv_scale2[j] = fp64(fp32(1 / s_j))^2.
 // The kernels never multiply a scale back: the forward solve on L~ returns
-// y' = D y, the back solve reads its input scaled by inv_scale[j]^2 and
+// y' = D y, the back solve reads its input scaled by inv_scale2[j] and
 // solves L~^T z = D^-2 y', so the pair applies (L_s L_s^T)^-1 for the stored
 // factor L_s = L~ D. The rounding residual of every column,
 // sum_i (x_ij - widen(h_ij)) with x_ij = fp64(L_ij) / s_j, is folded into
@@ -41,14 +41,13 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "apxchol/csc_work.h"
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+#include "apxchol/solver/detail/gpu_dataflow_plan.h"
 
 namespace apxchol::cuda_host {
 
@@ -82,48 +81,37 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
                                  ") exceeds the dataflow GPU backend's 32-bit index range");
     out.m = static_cast<int>(m);
     out.ptr.assign(static_cast<std::size_t>(m) + 1, 0);
+    const node_index drop = static_cast<node_index>(n - 1);
     if (m == n) {
         for (std::int64_t j = 0; j < m; ++j)
             out.ptr[j + 1] = out.ptr[j] + static_cast<int>(Lo[j + 1] - Lo[j]);
+    } else {
+        #pragma omp parallel
+        {
+        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m);
+        for (std::int64_t j = bal_lo; j < bal_hi; ++j) {
+            int k = 0;
+            for (edge_index p = Lo[j]; p < Lo[j + 1]; ++p)
+                if (Li[p] != drop) ++k;
+            out.ptr[j + 1] = k;
+        }
+        }
+        for (std::int64_t j = 0; j < m; ++j) out.ptr[j + 1] += out.ptr[j];
+    }
+    out.nnz  = out.ptr[static_cast<std::size_t>(m)];
+    out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(out.nnz));
+    out.vals = std::make_unique_for_overwrite<Val[]>(static_cast<std::size_t>(out.nnz));
+    if (m == n) {
         const edge_index nnz = Lo[m];
-        out.nnz  = static_cast<std::int64_t>(nnz);
-        out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(nnz));
-        out.vals = std::make_unique_for_overwrite<Val[]>(static_cast<std::size_t>(nnz));
         #pragma omp parallel for schedule(static)
         for (edge_index p = 0; p < nnz; ++p) {
             out.idx[p]  = static_cast<int>(Li[p]);
             out.vals[p] = static_cast<Val>(Lv[p]);
         }
     } else {
-        const node_index drop = static_cast<node_index>(n - 1);
-        std::vector<int> kept(static_cast<std::size_t>(m));
         #pragma omp parallel
         {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m, bal_tid, bal_nt);
-        for (std::int64_t j = bal_lo; j < bal_hi; ++j) {
-            int k = 0;
-            for (edge_index p = Lo[j]; p < Lo[j + 1]; ++p)
-                if (Li[p] != drop) ++k;
-            kept[j] = k;
-        }
-        }
-        for (std::int64_t j = 0; j < m; ++j) out.ptr[j + 1] = out.ptr[j] + kept[j];
-        out.nnz  = out.ptr[static_cast<std::size_t>(m)];
-        out.idx  = std::make_unique_for_overwrite<int[]>(static_cast<std::size_t>(out.nnz));
-        out.vals = std::make_unique_for_overwrite<Val[]>(static_cast<std::size_t>(out.nnz));
-        #pragma omp parallel
-        {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m, bal_tid, bal_nt);
+        const auto [bal_lo, bal_hi] = detail::work_balanced_range(Lo, m);
         for (std::int64_t j = bal_lo; j < bal_hi; ++j) {
             int o = out.ptr[j];
             for (edge_index p = Lo[j]; p < Lo[j + 1]; ++p) {
@@ -158,16 +146,20 @@ inline std::vector<float> column_scales(const csr_int<Val>& A) {
     std::vector<float> s(static_cast<std::size_t>(A.m));
     #pragma omp parallel
     {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-    const auto [bal_lo, bal_hi] = detail::work_balanced_range(A.ptr.data(), A.m, bal_tid, bal_nt);
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(A.ptr.data(), A.m);
     for (int j = bal_lo; j < bal_hi; ++j)
         s[j] = factor_column_scale(A.vals.get(), A.ptr[j], A.ptr[j + 1]);
     }
     return s;
+}
+
+// Fall back before dropping so its threshold and FP16 storage use the same scale.
+template<class Val>
+inline void normalize_fp16_scales(const csr_int<Val>& factor, std::span<float> scales) {
+    for (int j = 0; j < factor.m; ++j) {
+        const float s = scales[j], d = static_cast<float>(factor.vals[factor.ptr[j]]);
+        if (!std::isfinite(1.0f / s) || !std::isfinite(d / s)) scales[j] = 1.0f;
+    }
 }
 
 /// The compacting factor drop (factor_drop.h -- the implementation the CPU
@@ -201,12 +193,12 @@ inline factor_drop_stats apply_factor_drop(csr_int<Val>& L11, const std::vector<
 /// The fp16 per-column-scaled storage of an int CSC (see the file header for
 /// the contract): vals = binary16 bit patterns of fp32(L_ij) / s_j (diagonal
 /// slot included, unread by the kernels), diag = fp32(L_jj) / s_j (+ the
-/// column's rounding residual, always), inv_scale = fp32(1 / s_j),
+/// column's rounding residual, always), inv_scale2 = fp64(fp32(1 / s_j))^2,
 /// plus the storage statistics over the off-diagonals.
 struct fp16_scaled_arrays {
     std::unique_ptr<_Float16[]>       vals;       // nnz
     std::vector<float>               diag;       // m
-    std::vector<float>               inv_scale;  // m
+    std::vector<double>              inv_scale2; // m; squaring in fp32 can overflow
     std::uint64_t flushed   = 0;   // stored off-diagonals with v != 0 stored as zero
     std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0: they are always flushed)
 };
@@ -216,19 +208,15 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     fp16_scaled_arrays out;
     out.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<std::size_t>(L11.nnz));
     out.diag.resize(static_cast<std::size_t>(L11.m));
-    out.inv_scale.resize(static_cast<std::size_t>(L11.m));
+    out.inv_scale2.resize(static_cast<std::size_t>(L11.m));
     std::uint64_t n_flush = 0;
     #pragma omp parallel reduction(+ : n_flush)
     {
-#ifdef _OPENMP
-    const int bal_tid = omp_get_thread_num(), bal_nt = omp_get_num_threads();
-#else
-    const int bal_tid = 0, bal_nt = 1;
-#endif
-    const auto [bal_lo, bal_hi] = detail::work_balanced_range(L11.ptr.data(), L11.m, bal_tid, bal_nt);
+    const auto [bal_lo, bal_hi] = detail::work_balanced_range(L11.ptr.data(), L11.m);
     for (int j = bal_lo; j < bal_hi; ++j) {
         const float s = col_scale[j];
-        out.inv_scale[j] = 1.0f / s;
+        const double inv = 1.0f / s;
+        out.inv_scale2[j] = inv * inv;
         assert(L11.idx[L11.ptr[j]] == j && "factor column must start with its diagonal");
         float  d     = static_cast<float>(L11.vals[L11.ptr[j]]) / s;   // stored_diag(): fp32(L_jj) / s_j
         double resid = 0.0;                                            // sum over the off-diagonals of (x - widen(stored))
@@ -296,131 +284,77 @@ inline std::string dataflow_factor_structure_check(
     if (!L_ptr || !L_idx || !LT_ptr || !LT_idx)
         return "CSR pointers must be non-null";
 
-    auto check_one = [&](const char* name, const int* ptr, const int* idx,
-                         bool lower) -> std::string {
-        if (ptr[0] != 0)
-            return std::string(name) + " rowptr[0] is not zero";
-        if (ptr[m] != nnz)
-            return std::string(name) + " rowptr[m] does not equal nnz";
-        for (int row = 0; row < m; ++row) {
-            const int beg = ptr[row], end = ptr[row + 1];
-            if (beg < 0 || end < beg || end > nnz)
-                return std::string(name) + " rowptr is not a bounded monotone prefix at row " +
-                       std::to_string(row);
-            int previous = -1;
-            int diagonals = 0;
-            for (int p = beg; p < end; ++p) {
-                const int col = idx[p];
-                if (col < 0 || col >= m)
-                    return std::string(name) + " has an out-of-range column at entry " +
-                           std::to_string(p);
-                if (col <= previous)
-                    return std::string(name) + " row " + std::to_string(row) +
-                           " is not strictly column-sorted";
-                if ((lower && col > row) || (!lower && col < row))
-                    return std::string(name) + " has an entry outside its triangular half at (" +
-                           std::to_string(row) + "," + std::to_string(col) + ")";
-                diagonals += col == row;
-                previous = col;
-            }
-            if (diagonals != 1)
-                return std::string(name) + " row " + std::to_string(row) +
-                       " does not contain exactly one diagonal";
-        }
-        return {};
-    };
+    if (L_ptr[0] != 0) return "CSR(L) rowptr[0] is not zero";
+    if (L_ptr[m] != nnz) return "CSR(L) rowptr[m] does not equal nnz";
+    if (LT_ptr[0] != 0) return "CSR(L^T) rowptr[0] is not zero";
+    if (LT_ptr[m] != nnz) return "CSR(L^T) rowptr[m] does not equal nnz";
 
-    if (std::string why = check_one("CSR(L)", L_ptr, L_idx, true); !why.empty())
-        return why;
-    if (std::string why = check_one("CSR(L^T)", LT_ptr, LT_idx, false); !why.empty())
-        return why;
-
-    // Exact structural transpose, reconstructed in the same stable source-row
-    // order as transpose_csr(). This also checks both row-pointer arrays rather
-    // than accepting an order-independent coordinate hash.
+    // Validate LT and count its transpose. An exact match to this transpose
+    // proves L is also sorted, triangular and has exactly one diagonal per row.
     std::vector<int> expected_ptr(static_cast<std::size_t>(m) + 1, 0);
-    for (std::int64_t p = 0; p < nnz; ++p)
-        ++expected_ptr[static_cast<std::size_t>(LT_idx[p]) + 1];
-    for (int row = 0; row < m; ++row)
+    for (int row = 0; row < m; ++row) {
+        const int beg = LT_ptr[row], end = LT_ptr[row + 1];
+        if (beg < 0 || end < beg || end > nnz)
+            return "CSR(L^T) rowptr is not a bounded monotone prefix at row " +
+                   std::to_string(row);
+        int previous = -1;
+        for (int p = beg; p < end; ++p) {
+            const int col = LT_idx[p];
+            if (col < 0 || col >= m)
+                return "CSR(L^T) has an out-of-range column at entry " + std::to_string(p);
+            if (col <= previous)
+                return "CSR(L^T) row " + std::to_string(row) + " is not strictly column-sorted";
+            if (col < row)
+                return "CSR(L^T) has an entry outside its triangular half at (" +
+                       std::to_string(row) + "," + std::to_string(col) + ")";
+            ++expected_ptr[static_cast<std::size_t>(col) + 1];
+            previous = col;
+        }
+        if (beg == end || LT_idx[beg] != row)
+            return "CSR(L^T) row " + std::to_string(row) + " does not contain exactly one diagonal";
+    }
+    for (int row = 0; row < m; ++row) {
         expected_ptr[static_cast<std::size_t>(row) + 1] +=
             expected_ptr[static_cast<std::size_t>(row)];
-    for (int row = 0; row <= m; ++row)
-        if (expected_ptr[static_cast<std::size_t>(row)] != L_ptr[row])
+        if (expected_ptr[static_cast<std::size_t>(row) + 1] != L_ptr[row + 1])
             return "CSR(L) row pointers are not the transpose of CSR(L^T)";
+    }
 
-    std::vector<int> cursor = expected_ptr;
-    std::vector<int> expected_idx(static_cast<std::size_t>(nnz));
+    // Consume the validated row starts as cursors in stable source-row order.
+    // Their counts bound every L_idx read without trusting the supplied L_ptr.
     for (int row = 0; row < m; ++row)
         for (int p = LT_ptr[row]; p < LT_ptr[row + 1]; ++p) {
-            const int out_row = LT_idx[p];
-            expected_idx[static_cast<std::size_t>(cursor[out_row]++)] = row;
+            const int out = expected_ptr[static_cast<std::size_t>(LT_idx[p])]++;
+            if (L_idx[out] != row)
+                return "CSR(L) column indices are not the transpose of CSR(L^T) at entry " +
+                       std::to_string(out);
         }
-    for (std::int64_t p = 0; p < nnz; ++p)
-        if (expected_idx[static_cast<std::size_t>(p)] != L_idx[p])
-            return "CSR(L) column indices are not the transpose of CSR(L^T) at entry " +
-                   std::to_string(p);
     return {};
 }
 
-inline std::vector<int> csr_row_lengths(int m, const int* rowptr) {
-    std::vector<int> len(static_cast<std::size_t>(m));
-    // O(m) and called four times per setup (both directions, lengths + stats);
-    // one element each, so an equal-count split is the right one here.
-    #pragma omp parallel for schedule(static) if(m > 16384)
-    for (int i = 0; i < m; ++i) len[i] = rowptr[i + 1] - rowptr[i];
-    return len;
-}
-
 // Row-length histograms choose the split threshold and support setup diagnostics.
-struct dataflow_len_stats {
-    static constexpr int kBuckets = 12;
-    int          m        = 0;
-    std::int64_t nnz      = 0;
-    int          max_len  = 0;
-    double       mean_len = 0.0;
-    int          base     = 0;            // C = 32 * pre, one unsplit chunk
-    std::int64_t rows_ge[kBuckets]{};     // rows with len >= base << k
-    std::int64_t nnz_ge[kBuckets]{};      // and the entries they hold
-};
-
-inline dataflow_len_stats dataflow_row_stats(int m, const int* len, int pre) {
-    dataflow_len_stats s;
-    s.m = m;
-    s.base = 32 * pre;
+inline detail::gpu_dataflow::row_stats dataflow_row_stats(std::span<const int> rowptr) {
+    using Stats = detail::gpu_dataflow::row_stats;
+    const int m = rowptr.empty() ? 0 : static_cast<int>(rowptr.size() - 1);
+    Stats s{};
     // Integer sums and a max, so the reduction order cannot change a result.
-    std::int64_t nnz = 0; int max_len = s.max_len;
-    std::int64_t rows_ge[dataflow_len_stats::kBuckets]{};
-    std::int64_t nnz_ge[dataflow_len_stats::kBuckets]{};
+    int max_len = 0;
+    auto* rows_ge = s.rows_ge;
+    auto* nnz_ge = s.nnz_ge;
     #pragma omp parallel for schedule(static) if(m > 16384) \
-        reduction(+ : nnz) reduction(max : max_len) \
-        reduction(+ : rows_ge[:dataflow_len_stats::kBuckets]) \
-        reduction(+ : nnz_ge[:dataflow_len_stats::kBuckets])
+        reduction(max : max_len) \
+        reduction(+ : rows_ge[:Stats::kBuckets], nnz_ge[:Stats::kBuckets])
     for (int i = 0; i < m; ++i) {
-        const int l = len[i];
-        nnz += l;
+        const int l = rowptr[i + 1] - rowptr[i];
         if (l > max_len) max_len = l;
-        for (int k = 0; k < dataflow_len_stats::kBuckets; ++k) {
-            if (l < (static_cast<std::int64_t>(s.base) << k)) break;
+        for (int k = 0; k < Stats::kBuckets; ++k) {
+            if (l < (static_cast<std::int64_t>(detail::gpu_dataflow::chunk_size) << k)) break;
             ++rows_ge[k];
             nnz_ge[k] += l;
         }
     }
-    s.nnz = nnz; s.max_len = max_len;
-    for (int k = 0; k < dataflow_len_stats::kBuckets; ++k) {
-        s.rows_ge[k] += rows_ge[k];
-        s.nnz_ge[k] += nnz_ge[k];
-    }
-    s.mean_len = m > 0 ? static_cast<double>(s.nnz) / static_cast<double>(m) : 0.0;
+    s.max_len = max_len;
     return s;
-}
-
-// Split after one chunk when long rows hold at least a quarter of the entries;
-// otherwise wait until three chunks. The historical trade-off is documented in
-// docs/implementation-history.md. Neither grid size nor scheduling affects it.
-inline constexpr double kDataflowSplitShare = 0.25;
-inline int dataflow_split_threshold(const dataflow_len_stats& st) {
-    const double share = st.nnz ? static_cast<double>(st.nnz_ge[0]) / static_cast<double>(st.nnz) : 0.0;
-    return share >= kDataflowSplitShare ? st.base : 3 * st.base;
 }
 
 } // namespace apxchol::cuda_host

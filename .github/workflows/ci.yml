@@ -62,7 +62,7 @@ jobs:
         run: |
           cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_C_COMPILER=gcc-14 \
-                -DAPXCHOL_NATIVE_ARCH=OFF -DAPXCHOL_USE_CUDA=OFF \
+                -DAPXCHOL_NATIVE_ARCH=OFF -DAPXCHOL_DEVICE=CPU \
                 -DBENCH_HYPRE_USE_CUDA=OFF -DBUILD_GPU_RCHOL=OFF \
                 -DAPXCHOL_RCHOL_PORTABLE_PCG=ON -DAPXCHOL_BENCH_FETCH_METIS=OFF \
                 -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
@@ -104,20 +104,22 @@ jobs:
         name: Configure + build (Release)
         run: |
           cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+                -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS:-}
           cmake --build build
       - &ctest
         name: Run unit tests
         run: ctest --test-dir build --no-tests=error --output-on-failure
 
   macos:
-    name: macOS (Apple Clang, ${{ matrix.build.name }}, build + ctest)
+    name: macOS (Apple Clang, ${{ matrix.build.name }}, ${{ matrix.device }}, build + ctest)
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         build: *build_modes
+        device: [CPU, METAL]
     env:
+      CMAKE_ARGS: -DAPXCHOL_DEVICE=${{ matrix.device }}
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4

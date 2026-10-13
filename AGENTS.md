@@ -4,6 +4,7 @@
 
 Keep this file current when builds, APIs, defaults or architecture change.
 Deliver the requested scope; prefer removing redundancy to adding modes or knobs.
+Backend design may change; compare accuracy, setup/solve cost, memory and complexity.
 Verify claims with current-session evidence; label historical results and hypotheses.
 Factor identity requires structure/value digests, not equal fill or residuals.
 The [precision contract](docs/precision.md) separates parallel factor rebuilds
@@ -15,7 +16,7 @@ an established algorithm/default; historical examples are not current verificati
 
 ## Build and tests
 
-The root project builds the library, CLI, and unit tests. The separate
+CMake 3.20+ builds the library, CLI, and unit tests. The separate
 `benchmarks/` project fetches competitor implementations.
 CI builds its CPU-only native benchmark and runs the CLI/stopping CTest
 contracts alongside the Python harness tests; these checks are not performance
@@ -140,6 +141,8 @@ choices, retired knobs, and measurements belong in
   that baseline retires.
 
 
+- `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend (default CPU).
+  GPU builds retain CPU solves. Invalid or removed boolean options fail configuration.
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
@@ -162,7 +165,7 @@ choices, retired knobs, and measurements belong in
   (`chol`, `L`, `D`) retain FP32, matching C++ factor values; CPU PCG uses FP64
   vectors and arithmetic, including with FP32 inputs.
 
-- `APXCHOL_USE_CUDA=ON`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
+- `APXCHOL_DEVICE=CUDA`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
   use C++23, requiring CUDA Toolkit 13.3+ and CMake 4.4+. The library
   links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
   competitors independently require cuSPARSE/cuBLAS; distinguish their driver
@@ -222,12 +225,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   the normal round-to-nearest environment and retains signed subnormal flushing.
   Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
   packed conversion and scalar widening workarounds stay local to conversion.
-  Portable x86 builds check AVX/F16C before selecting FP16 storage. AVX2/FMA
+  CPU FP16 is available on Apple ARM64 and on x86 after checking AVX/F16C. AVX2/FMA
   selects the optimized kernels once per level or critical tail, before the row
   loops; native builds use them directly.
   FP16 remains opt-in on the CPU; unsupported explicit requests fail at setup.
-  Setup narrows CSC once inside an F16C-targeted worker and transposes those
-  stored values. Host narrowing and the format-drop predicate share the RNE
+  Setup narrows CSC once (F16C-targeted on x86) and transposes those stored values. Host narrowing and the format-drop predicate share the RNE
   normal/subnormal boundary check, flushing before conversion to FP16.
   Release consumed input before the transpose;
   FP32 keeps transpose-before-copy ordering to retain its memory bound.
@@ -239,17 +241,17 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
   owning arrays: the existing column copy writes every retained entry before
   any read. Preserve their early release after compaction or their last use.
-- CUDA and Metal share `src/gpu_dataflow.inc` and the count/emit task packer in
-  `solver/detail/gpu_dataflow_plan.h`. CUDA builds trusted-factor tasks on device
-  and uses one global queue; Metal's `metal_schedule.h` partitions dependency
-  stages into independent workgroups. Cross-workgroup waits are forbidden on
-  Metal. Both reset atomic FP32 dependency words and solve roots before the
-  worker launch. Keep RHS/diagonal/scale loads before dependency polling.
-  Long rows use segment tasks and a fixed-order finalizer. No public scheduler
-  knob or retained reference kernel accompanies the shared implementation.
-- `solver/detail/permuted_operator.h` builds the permuted symmetric operator,
-  ordering duplicate entries by value bits. Metal retains shared host factor
-  dropping/transposition; CUDA's public route keeps device ownership.
+- CUDA and Metal share `src/gpu_dataflow.inc` and the task packer in
+  `solver/detail/gpu_dataflow_plan.h`. Metal's `metal_schedule.h` confines
+  dependencies within a dispatch to one workgroup. Initialize dependency words
+  and solve roots before launching workers; load RHS, diagonal and scale before
+  dependency polling. Long-row finalizers combine segments in a fixed order.
+- `solver/detail/gpu_pcg.h` and `.inc` share GPU iteration control and arithmetic
+  operations. Reject invalid scalar products and ratios; stop device work after
+  convergence or an exhausted budget. Metal's arithmetic requirements live in
+  [precision and storage](docs/precision.md#apple-metal-pcg).
+- Host and CUDA operator preparation share canonical lower lookup in
+  `csc_work.h`; the host fallback orders duplicate entries by value bits.
 - CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
   because NVCC does not support `_Float16` in device code. Uploads copy the
   common binary16 representation; the solve kernel widens only at accumulation.
@@ -257,12 +259,10 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   is accepted; other nonempty values are errors. `factor_options::factor_storage`
   selects per-solver storage. Its `automatic` default uses
   `APXCHOL_FACTOR_STORAGE=auto|float16|float32`.
-  `auto` selects the backend default (GPU FP16, CPU FP32). Invalid values fail.
+  `auto` selects the backend default (CUDA FP16, CPU/Metal FP32). Invalid values fail.
   Parsing and selection live in C++; Python only normalizes dtype names.
-  Scales and diagonals stay
-  fp32, while outer CPU/GPU PCG vectors and reductions stay fp64. See
-  [precision and storage](docs/precision.md). The old GPU-only alias is
-  retired.
+  [Precision and storage](docs/precision.md) defines arithmetic and scaling.
+  The old GPU-only alias is retired.
 - Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
   OpenMP SpTRSV and host PCG, even in CUDA builds. They must not initialize a
   CUDA context or consume GPU stage flags. Explicit factor adoption remains CPU.
@@ -272,17 +272,18 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   compatibility only: a CUDA build with 32-bit nodes, block-greedy/AoS, supported
   sampler options and no export selects GPU; other options select CPU before
   setup. It is not a performance predictor or a device-availability fallback.
-- GPU solves require device-owned factorization, finalization, dataflow plans,
-  operator preparation and PCG. Reject missing/nonunique device factor ownership
+- The current CUDA route uses device-owned factorization, finalization, dataflow
+  plans, operator preparation and PCG. Reject missing/nonunique device factor ownership
   before a host-factor upload. Unsupported stored formats, missing device,
   insufficient memory and runtime errors never trigger a CPU retry. The operator
   must have supported compressed, sorted, unique and fully paired CSC storage;
   callers can explicitly select CPU for other valid host layouts.
-- An explicit `detail::setup_route` threads through setup; production CPU/GPU
-  preconditioner specializations fix it at compile time. Legacy stage flags and
-  audited mixed-stage mechanisms remain low-level diagnostics, not end-to-end
-  solve modes. Explicit `cuda_sptrsv` host-factor import and copied capsule
-  validation remain independent facilities. No serialized factor API is added.
+- An explicit `detail::setup_route` selects complete CPU or GPU setup;
+  preconditioner specializations fix it at compile time. Public `factorize()`
+  uses CPU setup. GPU setup has no stage switches or CPU-tail continuation.
+  Explicit `cuda_sptrsv` host-factor import and copied capsule validation remain
+  independent facilities. Test-only owned-state inspection is compiled into
+  the CUDA test core, not the production library.
 - The internal GPU session shares one setup lifetime with benchmark native
   retries. It is not a new public owner API. GPU PCG builds its permuted operator
   on device; no host construction/upload fallback remains. Preserve canonical
@@ -328,9 +329,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   `APXCHOL_PRUNE_SKIP_TRACE=1` prints the audits.
 - `factor_options.sampler` / `--sampler` selects `gks` (default) or
   `trace_cycle`. Trace-cycle emits at most d edges from a degree-d star and
-  retains GKS for degree below three. CPU setup and full GPU-owned setup support
-  it; it rejects forced CPU-shadow/export combinations instead of silently
-  substituting a backend. The owned device sampler covers normal and oversized
+  retains GKS for degree below three. CPU and GPU-owned setup both support it.
+  The owned device sampler covers normal and oversized
   rows and retains per-session moment scratch. Trace-cycle retains positive
   subnormals; finite zero neighbors or unrepresentable numerical plans use
   input-only GKS fallback with the original seed before sampling. Invalid inputs
@@ -384,6 +384,12 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   performance acceptance: compare the default route against current main and
   the owned route against its frozen research reference, with original-system
   quality, setup, solve, one-RHS total, RSS and owner memory.
+- Metal's `metal_solver` uses host factorization and handles one RHS per call,
+  retaining its factor, operator and workspace. `solve()` selects it only for
+  explicit GPU requests. FP16 storage is opt-in; CPU requests to `metal_solver` fail.
+  Check command-buffer errors and the FP64 original-system exit residual.
+  Run `MetalSchedule.*`, `MetalHost.*` and `MetalDevice.*` with device/shader
+  validation as described in [CONTRIBUTING.md](CONTRIBUTING.md#build-and-test).
 - CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
   only after its upload has completed and no further host RHS reads remain.
 - GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`

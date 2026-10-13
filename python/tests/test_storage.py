@@ -1,4 +1,5 @@
 import os
+import platform
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -35,7 +36,8 @@ def test_fp16_and_fp32_instances_coexist(monkeypatch, dtype):
     try:
         half = apxchol.factorize(operator_matrix(), factor_storage_dtype=dtype)
     except RuntimeError as exc:
-        assert "FP16 factor storage requires an x86 CPU with AVX/F16C support" in str(exc)
+        assert str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64"
+        assert (platform.system(), platform.machine()) != ("Darwin", "arm64"), str(exc)
         pytest.skip("CPU lacks FP16 conversion support")
     assert half.factor_storage_dtype == np.dtype("float16")
     assert os.environ["APXCHOL_FACTOR_STORAGE"] == "float32"

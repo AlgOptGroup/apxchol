@@ -9,17 +9,18 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | Mutable residual graph | FP32 weights by default; optional FP64 weights | Storage/bandwidth versus rounding during factor construction |
 | Assembled factor | FP32 values | Shared factor/export representation |
 | CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
-| GPU triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
+| CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
-| Outer CPU/GPU PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
+| Outer CPU/CUDA PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
+| Metal triangular solves | FP32 storage by default; optional scaled FP16 | Shared CUDA/Metal dataflow worker; FP32 arithmetic |
+| Metal PCG | Mixed FP32 and double-float; host FP64 exit residual | Metal has no native FP64 arithmetic; see below |
 
 `factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; C++ owns parsing and default selection.
 
-The environment setting is `APXCHOL_FACTOR_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU FP32, GPU FP16). Unset or empty selects `auto`. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
+The environment setting is `APXCHOL_FACTOR_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU/Metal FP32, CUDA FP16). Unset or empty selects `auto`. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
 
-CPU FP16 is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
-checked at setup; an unsupported explicit FP16 request raises an error. Fat levels use the
-AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise.
+CPU FP16 is available on x86 CPUs with AVX/F16C and on Apple ARM64, including portable wheels. Unsupported explicit requests fail at setup.
+On x86, fat levels use the AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise; Apple ARM64 uses native conversions.
 CPU setup converts the CSC values once and copies them into CSR. Consuming
 setup releases the input before transposing; non-consuming FP16 setup retains
 that input and the stored CSC alongside the parallel transpose's scratch.
@@ -39,12 +40,45 @@ FP16 subnormals are flushed to signed zero. The scaled diagonal remains FP32
 and absorbs the off-diagonal rounding residual. Degenerate scales fall back
 to one before dropping; invalid final diagonals/scales are rejected.
 
-Writing the scaled factor as `L D^-1`, the forward sweep returns `D y` and
+CPU and CUDA solve with the scaled factor `L D^-1`: the forward sweep returns `D y` and
 the backward sweep applies the reciprocal scale squared to its input. CPU
 arithmetic widens to FP64, GPU triangular-solve arithmetic to FP32. A stored
 FP16 factor is not an FP16 outer solve. CPU and GPU-host preparation share the
 narrowing/flush rules in `lowprec.h`; device finalization has its own CUDA
 implementation and is checked by the GPU finalization tests.
+Metal reconstructs FP32 coefficients before multiplication; each column stores an FP32 scale and compensated diagonal.
+
+## Apple Metal PCG
+
+Metal uses host factor preparation with compensated dropping and optional
+scaled FP16 storage. [The solver](../README.md#interfaces) handles one RHS
+per call, reusing its factor and workspace.
+
+Double-float represents a value as the sum of two FP32 numbers, giving about
+48 significant bits but not IEEE FP64 precision or range. Metal uses it for
+x, r, A p and fixed-tree reductions. The operator uses FP32 when all values
+are exactly representable there, and double-float otherwise. Directions p,
+preconditioned residuals z, alpha and beta are FP32.
+
+Each RHS (or initial residual b - A x0) is scaled by an exact power of two,
+targeting a largest magnitude in [1, 2) within FP64's exponent range. The host
+computes `(tol ||b|| s)^2` in FP64; the device stops when its recursive squared
+residual is strictly below that threshold. Breakdown is not convergence.
+The returned residual is recomputed in FP64 against the original
+operator and unmodified RHS; it can exceed tolerance even after the recursive
+test passed, especially on ill-conditioned problems or at tight tolerances.
+
+Laplacian iterations use grounded coordinates. Host FP64 centering applies to
+the initial residual and returned solution, and to both sides of `apply`.
+Repeatability covers the same factor and execution configuration, not different
+host thread counts, devices, OS/compiler versions or independent factorizations.
+
+Runtime compilation uses safe math and disables contraction where supported;
+`metal_solver::available()` checks rounding, intermediate precision and FMA.
+Nonzero operator values and unscaled factor diagonals need magnitudes in [2^-100, 2^100];
+factor off-diagonals must be finite (`std::domain_error` otherwise). Factor and
+operator offsets must fit signed 32-bit integers; operator inputs must have
+fewer than 2^30 stored entries (`std::length_error` otherwise).
 
 ## Accuracy and configuration choice
 

@@ -17,24 +17,6 @@
 
 namespace apxchol {
 
-/// Unweighted residual-topology update consumed by the optional GPU priority
-/// front-end. The numerical edge weight remains owned by graph<> on the CPU;
-/// selection needs only the endpoints (including multiplicity).
-namespace detail {
-struct gpu_topology_edge {
-    node_index u;
-    node_index v;
-};
-
-/// A non-owning view of one elimination thread's deferred-edge buffer. The
-/// GPU front-end copies only each record's leading {u,v}; the CPU graph keeps
-/// sole ownership of the numerical weight.
-struct gpu_topology_batch {
-    const deferred_edge* data = nullptr;
-    std::size_t size = 0;
-};
-} // namespace detail
-
 struct factorize_workspace {
     struct per_thread {
         std::vector<weighted_neighbor>             neighbors;
@@ -71,11 +53,6 @@ struct factorize_workspace {
         // The owning pointer is moved out before the rest of the workspace is
         // released, keeping the allocations alive through CSC assembly.
         std::unique_ptr<std::pmr::monotonic_buffer_resource> factor_entries;
-        // Only audited rounds of an internal consuming GPU finalization may
-        // omit this duplicate CPU payload. Keep the same per-entry audit hash
-        // in worker-local scalars; ordinary/exported factors retain entries.
-        bool retain_factor_payload = true;
-        std::array<std::uint64_t, 2> streamed_factor_entries{};
     };
     std::vector<per_thread> threads;
 
@@ -102,12 +79,6 @@ struct factorize_workspace {
     /// 16 MB/round on grid_2000 and would dominate a small-IS tail round).
     std::vector<node_index> incoming;
 
-    /// Sampled clique endpoints created by the current elimination round.
-    /// Populated only when the guarded GPU setup front-end is active, so the
-    /// default CPU path pays neither the copy nor the retained allocation.
-    std::vector<detail::gpu_topology_edge> gpu_topology_updates;
-    std::vector<detail::gpu_topology_batch> gpu_topology_batches;
-
     /// Round counter, incremented by the factorize loop once per round.
     uint64_t round_index = 0;
 
@@ -115,8 +86,6 @@ struct factorize_workspace {
     /// dedup_touched).  Allocations are kept.  Call at the top of each
     /// elimination round.
     void reset_for_round() {
-        gpu_topology_updates.clear();
-        gpu_topology_batches.clear();
         degree_decrements.clear();
         degree_removed_incidence = 0;
         degree_retired_dead_incidence = 0;
@@ -127,7 +96,6 @@ struct factorize_workspace {
             t.dedup_touched.clear();
             t.degree_decrement_unique = 0;
             t.degree_decrement_ms = 0.0;
-            t.streamed_factor_entries = {};
         }
     }
 };

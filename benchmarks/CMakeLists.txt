@@ -1,5 +1,10 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(laplacian_benchmarks LANGUAGES C CXX)
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_device.cmake)
+if (APXCHOL_DEVICE STREQUAL "METAL")
+    message(FATAL_ERROR "The competitor benchmark supports CPU or CUDA; use the root project for Metal")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,16 +33,7 @@ set(PARENT_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 set(ARCHIVE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
 set(ARCHIVE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
 
-# ── Eigen ────────────────────────────────────────────
-find_package(Eigen3 3.3 CONFIG QUIET)
-if (NOT Eigen3_FOUND)
-    FetchContent_Declare(eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG        3.4.0
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(eigen)
-endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_eigen.cmake)
 
 # ── Core library (legacy v0 solver) ───────────────────
 add_library(laplacian_core STATIC
@@ -280,7 +276,7 @@ set(HYPRE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(HYPRE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(HYPRE_ENABLE_UMPIRE OFF CACHE BOOL "" FORCE)      # opt out: no system Umpire
 option(BENCH_HYPRE_USE_CUDA "Enable Hypre CUDA support (requires CUDA 13.x; needs PR #1547+)" OFF)
-if (APXCHOL_USE_CUDA AND BENCH_HYPRE_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA" AND BENCH_HYPRE_USE_CUDA)
     set(HYPRE_ENABLE_CUDA ON CACHE BOOL "" FORCE)
 endif()
 # Pre-enable CUDA language before FetchContent_MakeAvailable(hypre) so that
@@ -288,7 +284,7 @@ endif()
 # the compiler ID test, which fails with GCC 16 + CUDA 13.2 stdlib headers).
 # Also set CMAKE_CUDA_ARCHITECTURES so CMake's internal try_compile tests
 # don't fail with "CUDA_ARCHITECTURES is empty".
-if (APXCHOL_USE_CUDA OR BENCH_HYPRE_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA" OR BENCH_HYPRE_USE_CUDA)
     include(CheckLanguage)
     # Remember the requested CUDA host compiler BEFORE check_language runs. check_language()
     # executes a sub-CMake and writes `set(CMAKE_CUDA_HOST_COMPILER "<what the sub-build
@@ -539,27 +535,18 @@ endif()
 if (APXCHOL_64BIT_NODE_INDICES)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_NODE_INDICES)
 endif()
-option(APXCHOL_USE_CUDA "GPU build of apxchol_v1: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG (own SpMV / vector kernels); links cudart only" OFF)
 option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to FP64. OFF selects the FP64 reference." ON)
 if (APXCHOL_POOL_FP32)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_POOL_FP32)
 endif()
-if (APXCHOL_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA")
     enable_language(CUDA)
     find_package(CUDAToolkit 13.3 REQUIRED)
     target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_USE_CUDA)
-    # Device precision-cast kernels for the mixed-precision GPU SpTRSV
-    # (nvcc-compiled; the .cpp TUs are host-compiled and can't host __global__).
-    target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_cast.cu)
-    # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow): one
-    # persistent launch per sweep, 8 B/row of epoch-tagged state.
-    target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_dataflow.cu)
-    # Runtime-guarded GPU residual-topology + block-region front-end.
-    target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_block_frontend.cu)
-    target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_round_shadow.cu)
-    # The GPU-resident PCG's own CSR SpMV + fused vector kernels (pcg_cuda.h).
-    target_sources(apxchol_v1 PRIVATE ${PARENT_SRC}/cuda_pcg_kernels.cu)
-    # Our library uses only cudart; competitor libraries are linked separately.
+    target_sources(apxchol_v1 PRIVATE
+        ${PARENT_SRC}/cuda_dataflow.cu
+        ${PARENT_SRC}/cuda_block_frontend.cu ${PARENT_SRC}/cuda_round_shadow.cu
+        ${PARENT_SRC}/cuda_pcg_kernels.cu)
     target_link_libraries(apxchol_v1 PUBLIC CUDA::cudart)
     set_target_properties(apxchol_v1 PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
 endif()
@@ -587,7 +574,7 @@ target_compile_definitions(benchmark PRIVATE
 # dlsym for the OpenMP-runtime probe. Empty on glibc >= 2.34 (libdl merged into
 # libc); CMAKE_DL_LIBS keeps it linking on the systems where it is not.
 target_link_libraries(benchmark PRIVATE ${CMAKE_DL_LIBS})
-if (APXCHOL_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA")
     # BUILD_META's cuda_host_compiler: the host compiler nvcc was pointed at with
     # -ccbin. Empty means CMake passed no -ccbin and nvcc used its own default,
     # which the binary reports as `unset(nvcc-default)` rather than as a name we
@@ -597,7 +584,7 @@ if (APXCHOL_USE_CUDA)
 endif()
 
 # AMGCL CUDA backend adapter (uses thrust + cuSPARSE, compiled with nvcc).
-if (APXCHOL_USE_CUDA AND Boost_FOUND)
+if (APXCHOL_DEVICE STREQUAL "CUDA" AND Boost_FOUND)
     target_sources(benchmark PRIVATE src/amgcl_cuda.cu)
     # -Xcompiler=-fopenmp is REQUIRED: AMGCL builds its AMG hierarchy host-side
     # with `#pragma omp parallel for` (smoothed_aggregation coarsening, SpMV,
@@ -627,7 +614,7 @@ else()
 endif()
 target_link_libraries(benchmark PRIVATE HYPRE)
 target_compile_definitions(benchmark PRIVATE HAVE_HYPRE)
-if (APXCHOL_USE_CUDA AND BENCH_HYPRE_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA" AND BENCH_HYPRE_USE_CUDA)
     # The benchmark must not expose a CPU-only Hypre build under the GPU label.
     # This definition describes how the linked HYPRE target was configured; the
     # generic APXCHOL_USE_CUDA definition says only that our own CUDA path exists.
@@ -674,7 +661,7 @@ add_test(NAME contract_rejects_retired_storage
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_storage_rejection.cmake)
 add_test(NAME contract_v1_complete_cpu_route
     COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
-        -DUSE_CUDA=${APXCHOL_USE_CUDA} -DWIDE_NODES=${APXCHOL_64BIT_NODE_INDICES}
+        -DUSE_CUDA=$<STREQUAL:${APXCHOL_DEVICE},CUDA> -DWIDE_NODES=${APXCHOL_64BIT_NODE_INDICES}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_v1_complete_route.cmake)
 add_test(NAME contract_none_allows_input_exports
     COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
@@ -682,7 +669,7 @@ add_test(NAME contract_none_allows_input_exports
 if (NOT Boost_FOUND)
     test_solver_rejection(contract_rejects_unavailable_amgcl amgcl)
 endif()
-if (NOT APXCHOL_USE_CUDA)
+if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
     test_solver_rejection(contract_rejects_unavailable_cuda amgcl_cuda)
 endif()
 

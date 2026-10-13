@@ -23,7 +23,9 @@
 // storage-format-specific drop clause (format_flushes) has its own tests in
 // test_lowprec.cpp.
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -50,20 +52,6 @@ using apxchol::sptrsv_value_t;
 
 namespace {
 
-// RAII env override: sets one variable for one scope, restores after (unset
-// if it was unset), so the tests never leak state into each other.
-struct scoped_env {
-    std::string name, saved; bool had = false;
-    scoped_env(const char* var, const char* value) : name(var) {
-        if (const char* e = std::getenv(var)) { had = true; saved = e; }
-        if (value) setenv(var, value, 1);
-        else       unsetenv(var);
-    }
-    ~scoped_env() {
-        if (had) setenv(name.c_str(), saved.c_str(), 1);
-        else     unsetenv(name.c_str());
-    }
-};
 struct scoped_drop_env : scoped_env {
     explicit scoped_drop_env(const char* value) : scoped_env("APXCHOL_FACTOR_DROP", value) {}
 };
@@ -634,7 +622,7 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
 // APXCHOL_FACTOR_STORAGE=float16 (cuda_host.h file header): each slot is
 // binary16(fp32(v) / s_j) RNE with fp16 subnormals flushed to signed zero
 // (restated here with native _Float16 conversions), diag[j] =
-// fp32(L_jj) / s_j, inv_scale[j] = fp32(1 / s_j); with diag_comp the column's
+// fp32(L_jj) / s_j, inv_scale2[j] = fp64(fp32(1 / s_j))^2; with diag_comp the column's
 // rounding residual is folded into diag[j] so the STORED column (diag +
 // widened off-diagonals) sums to the fp32 column / s_j; the drop's fp16 keep
 // predicate additionally removes what fp16 flushes. Under the CPU FP16_SCALED
@@ -678,12 +666,13 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
         {
             const auto h16 = apxchol::cuda_host::narrow_fp16_scaled(LT, scales);
             ASSERT_EQ(h16.diag.size(), static_cast<size_t>(m));
-            ASSERT_EQ(h16.inv_scale.size(), static_cast<size_t>(m));
+            ASSERT_EQ(h16.inv_scale2.size(), static_cast<size_t>(m));
             std::uint64_t value_mismatch = 0, sub = 0;
             double worst_cs = 0.0;
             for (node_index j = 0; j < m; ++j) {
                 const float s = scales[j];
-                EXPECT_EQ(h16.inv_scale[j], 1.0f / s);
+                const double inv = 1.0f / s;
+                EXPECT_EQ(h16.inv_scale2[j], inv * inv);
                 ASSERT_EQ(LT.idx[LT.ptr[j]], static_cast<int>(j));
                 const float d0 = static_cast<float>(LT.vals[LT.ptr[j]]) / s;   // fp32(L_jj) / s_j
                 double resid = 0.0, col_x = 0.0, col_stored = 0.0;
@@ -720,15 +709,15 @@ TEST(GpuHostPrep, Fp16ScaledStorageContract) {
 // ── The dataflow backend's host side (cuda_host.h; CUDA-free) ────────────────
 //
 TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
-    const int pre = 8;                                     // C = 256
     const std::vector<int> len = {1, 2, 255, 256, 257, 512, 1024, 100000};
-    const auto st = apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), len.data(), pre);
-    EXPECT_EQ(st.base, 256);
-    EXPECT_EQ(st.m, 8);
+    std::vector<int> ptr(len.size() + 1);
+    std::partial_sum(len.begin(), len.end(), ptr.begin() + 1);
+    const auto st = apxchol::cuda_host::dataflow_row_stats(ptr);
+    EXPECT_EQ(apxchol::detail::gpu_dataflow::chunk_size, 256);
+    EXPECT_EQ(st.error, 0);
     std::int64_t total = 0; for (int l : len) total += l;
-    EXPECT_EQ(st.nnz, total);
+    EXPECT_EQ(st.split_threshold(total), 256);
     EXPECT_EQ(st.max_len, 100000);
-    EXPECT_DOUBLE_EQ(st.mean_len, static_cast<double>(total) / 8.0);
     EXPECT_EQ(st.rows_ge[0], 5);                           // 256, 257, 512, 1024, 100000
     EXPECT_EQ(st.nnz_ge[0], 256 + 257 + 512 + 1024 + 100000);
     EXPECT_EQ(st.rows_ge[1], 3);                           // >= 512
@@ -738,15 +727,16 @@ TEST(GpuHostPrep, DataflowRowStatsCountLongRowsAndTheEntriesTheyHold) {
     EXPECT_EQ(st.rows_ge[9], 0);                           // >= 131072
     EXPECT_EQ(st.nnz_ge[8], 100000);
     // Empty input: no buckets, no division by zero.
-    const auto e = apxchol::cuda_host::dataflow_row_stats(0, nullptr, pre);
-    EXPECT_EQ(e.nnz, 0); EXPECT_EQ(e.max_len, 0); EXPECT_DOUBLE_EQ(e.mean_len, 0.0);
+    const auto e = apxchol::cuda_host::dataflow_row_stats({});
+    EXPECT_EQ(e.error, 0); EXPECT_EQ(e.max_len, 0); EXPECT_EQ(e.split_threshold(0), 768);
 }
 
 TEST(GpuHostPrep, DataflowSplitThresholdFollowsTheLongRowShare) {
-    const int pre = 8, C = 32 * pre;
+    const int C = apxchol::detail::gpu_dataflow::chunk_size;
     auto threshold_for = [&](const std::vector<int>& len) {
-        return apxchol::cuda_host::dataflow_split_threshold(
-            apxchol::cuda_host::dataflow_row_stats(static_cast<int>(len.size()), len.data(), pre));
+        std::vector<int> ptr(len.size() + 1);
+        std::partial_sum(len.begin(), len.end(), ptr.begin() + 1);
+        return apxchol::cuda_host::dataflow_row_stats(ptr).split_threshold(ptr.back());
     };
     // Hub-heavy: a handful of very long rows hold nearly all the entries.
     std::vector<int> hub(10000, 4);
@@ -765,7 +755,7 @@ TEST(GpuHostPrep, DataflowSplitThresholdFollowsTheLongRowShare) {
     std::vector<int> len(1000, 1);
     len[0] = C;                                   // share = C / (C + 999)
     const double share = static_cast<double>(C) / static_cast<double>(C + 999);
-    EXPECT_EQ(threshold_for(len), share >= apxchol::cuda_host::kDataflowSplitShare ? C : 3 * C);
+    EXPECT_EQ(threshold_for(len), share >= 0.25 ? C : 3 * C);
 }
 
 TEST(GpuSptrsvAdoptionHost, CsrPairIsExactlyTheExistingUploadPair) {
@@ -791,21 +781,26 @@ TEST(GpuSptrsvAdoptionHost, CsrPairIsExactlyTheExistingUploadPair) {
             short_L_ptr.data(), L.idx.get(), LT.ptr.data(), LT.idx.get());
     EXPECT_NE(bad_extent.find("rowptr[m]"), std::string::npos) << bad_extent;
 
-    std::vector<int> bad_L_idx(
-        L.idx.get(), L.idx.get() + static_cast<std::size_t>(L.nnz));
-    std::size_t offdiag = 0;
-    while (offdiag < bad_L_idx.size() &&
-           bad_L_idx[offdiag] == static_cast<int>(
-               std::upper_bound(L.ptr.begin(), L.ptr.end(),
-                                static_cast<int>(offdiag)) -
-               L.ptr.begin() - 1))
-        ++offdiag;
-    ASSERT_LT(offdiag, bad_L_idx.size());
-    bad_L_idx[offdiag] = bad_L_idx[offdiag] + 1;
-    EXPECT_NE(apxchol::cuda_host::dataflow_factor_structure_check(
-                  static_cast<int>(m), LT.nnz,
-                  L.ptr.data(), bad_L_idx.data(), LT.ptr.data(), LT.idx.get()),
-              "");
+    // Corrupt every pointer/index position in either half, including integer
+    // extremes and valid triangular entries that cease to be exact transposes.
+    const std::array<std::vector<int>, 4> valid{{
+        {0, 1, 3, 5}, {0, 0, 1, 0, 2}, {0, 3, 4, 5}, {0, 1, 2, 1, 2}}};
+    const auto check = [](const auto& pair) {
+        return apxchol::cuda_host::dataflow_factor_structure_check(
+            3, 5, pair[0].data(), pair[1].data(), pair[2].data(), pair[3].data());
+    };
+    ASSERT_TRUE(check(valid).empty());
+    for (std::size_t array = 0; array < valid.size(); ++array)
+        for (std::size_t slot = 0; slot < valid[array].size(); ++slot)
+            for (int replacement : {-1, 0, 1, 2, 3, 4, 5, 6,
+                                    std::numeric_limits<int>::min(),
+                                    std::numeric_limits<int>::max()}) {
+                if (replacement == valid[array][slot]) continue;
+                auto malformed = valid;
+                malformed[array][slot] = replacement;
+                EXPECT_FALSE(check(malformed).empty())
+                    << "array=" << array << " slot=" << slot << " value=" << replacement;
+            }
 }
 
 #ifdef APXCHOL_USE_CUDA
@@ -986,7 +981,6 @@ struct df_factor {
     apxchol::cuda_host::csr_int<_Float16> LT16, L16;
     apxchol::cuda_host::fp16_scaled_arrays     h16;
     std::vector<double> inv_scale2;
-    std::vector<int>    lenL, lenT;
     int *d_Lp = nullptr, *d_Li = nullptr, *d_Tp = nullptr, *d_Ti = nullptr;
     float *d_Lv = nullptr, *d_Tv = nullptr, *d_diag = nullptr;
     __half *d_Lv16 = nullptr, *d_Tv16 = nullptr;
@@ -1005,11 +999,7 @@ struct df_factor {
         LT16.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<size_t>(LT.nnz));
         std::copy_n(h16.vals.get(), LT.nnz, LT16.vals.get());
         L16 = apxchol::cuda_host::transpose_csr(LT16);
-        inv_scale2.resize(static_cast<size_t>(m));
-        for (int j = 0; j < m; ++j) inv_scale2[static_cast<size_t>(j)] =
-            static_cast<double>(h16.inv_scale[static_cast<size_t>(j)]) * h16.inv_scale[static_cast<size_t>(j)];
-        lenL = apxchol::cuda_host::csr_row_lengths(m, Lc.ptr.data());
-        lenT = apxchol::cuda_host::csr_row_lengths(m, LT.ptr.data());
+        inv_scale2 = h16.inv_scale2;
         d_Lp = dev_upload(Lc.ptr.data(), static_cast<size_t>(m) + 1);
         d_Li = dev_upload(Lc.idx.get(), static_cast<size_t>(Lc.nnz));
         d_Lv = dev_upload(Lc.vals.get(), static_cast<size_t>(Lc.nnz));
@@ -1030,7 +1020,7 @@ struct df_factor {
 
     df::packed_plan plan(bool reverse, unsigned threshold) const {
         const auto& A = reverse ? LT : Lc;
-        return df::pack(A.ptr.data(), {unsigned(m), reverse}, {0, unsigned(m)},
+        return df::pack(A.ptr.data(), {unsigned(m), reverse}, std::array{0u, unsigned(m)},
                         threshold);
     }
 
@@ -1041,15 +1031,12 @@ struct df_factor {
 void run_sweep(const df_factor& F, const dev_plan& dp, bool reverse, bool fp16,
                unsigned* tag, unsigned* ctrl, int grid,
                const float* d_rhs, float* d_out) {
-    if (fp16)
-        apxchol::dataflow_solve_fp16(0, F.m, reverse,
-            reverse ? F.d_Tp : F.d_Lp, reverse ? F.d_Ti : F.d_Li, reverse ? F.d_Tv16 : F.d_Lv16,
-            F.d_diag, reverse ? F.d_is2 : nullptr,
-            dp.bs, dp.spec, dp.nb, tag, F.m + dp.slots, ctrl, grid, d_rhs, d_out);
-    else
-        apxchol::dataflow_solve(0, F.m, reverse,
-            reverse ? F.d_Tp : F.d_Lp, reverse ? F.d_Ti : F.d_Li, reverse ? F.d_Tv : F.d_Lv,
-            dp.bs, dp.spec, dp.nb, tag, F.m + dp.slots, ctrl, grid, d_rhs, d_out);
+    const void* values = fp16 ? static_cast<const void*>(reverse ? F.d_Tv16 : F.d_Lv16)
+                              : static_cast<const void*>(reverse ? F.d_Tv : F.d_Lv);
+    apxchol::dataflow_solve(0, F.m, reverse,
+        reverse ? F.d_Tp : F.d_Lp, reverse ? F.d_Ti : F.d_Li, values,
+        fp16 ? F.d_diag : nullptr, fp16 && reverse ? F.d_is2 : nullptr,
+        dp.bs, dp.spec, dp.nb, tag, F.m + dp.slots, ctrl, grid, d_rhs, d_out);
 }
 } // namespace
 
@@ -1140,11 +1127,7 @@ prepared_adoption prepare_adoption(
     }
 
     auto narrowed = apxchol::cuda_host::narrow_fp16_scaled(LT, scales);
-    std::vector<double> inv_scale2(static_cast<std::size_t>(m));
-    for (node_index j = 0; j < m; ++j) {
-        const double inv = narrowed.inv_scale[static_cast<std::size_t>(j)];
-        inv_scale2[static_cast<std::size_t>(j)] = inv * inv;
-    }
+    const auto& inv_scale2 = narrowed.inv_scale2;
     apxchol::cuda_host::csr_int<_Float16> LT16;
     LT16.m = LT.m;
     LT16.nnz = LT.nnz;
@@ -1242,8 +1225,11 @@ TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministi
         for (unsigned threshold : {0u, 1u, 256u, 2048u}) {
             SCOPED_TRACE(threshold);
             const auto plf = F.plan(false, threshold), plb = F.plan(true, threshold);
-            if (!threshold) EXPECT_TRUE(plf.segments.empty() && plb.segments.empty());
-            else if (kind) EXPECT_FALSE(plf.segments.empty());
+            if (!threshold) {
+                EXPECT_TRUE(plf.segments.empty() && plb.segments.empty());
+            } else if (kind) {
+                EXPECT_FALSE(plf.segments.empty());
+            }
             dev_plan pf = upload_plan(plf);
             dev_plan pb = upload_plan(plb);
             // ONE tag array for both directions and every sweep below (the
@@ -1476,7 +1462,6 @@ df::packed_plan download_device_plan(const apxchol::detail::dataflow_device_plan
 }
 
 TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
-    const int pre = apxchol::dataflow_prefetch_depth();
     const int choices[] = {1, 8, 9, 16, 17, 32, 33, 64, 65, 128, 129, 256, 257, 769, 2050};
     for (unsigned m : {0, 1, 31, 255, 256, 257, 513, 4097}) {
         for (bool reverse : {false, true}) {
@@ -1488,7 +1473,7 @@ TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
                     len[reverse ? m - 1 - q : q] = std::min(q + 1, requested);
                 }
                 for (unsigned row = 0; row < m; ++row) ptr[row + 1] = ptr[row] + len[row];
-                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, len.data(), pre);
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr);
                 std::vector<unsigned> blocks{0};
                 for (unsigned q = 0; q < m; q += 256) blocks.push_back(std::min(m, q + 256));
                 for (int threshold : {-1, 0, 1, 256, 768}) {
@@ -1500,17 +1485,19 @@ TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
                         m, reverse, ptr.back(), d_ptr, threshold);
                     const auto plan = download_device_plan(device, memory);
                     const auto expected = df::pack(ptr.data(), {m, reverse}, blocks,
-                        threshold < 0 ? apxchol::cuda_host::dataflow_split_threshold(stats) : threshold);
+                        threshold < 0 ? stats.split_threshold(ptr.back()) : threshold);
                     EXPECT_EQ(plan.words, expected.words);
                     EXPECT_EQ(plan.slots, expected.slots);
                     ASSERT_EQ(plan.segments.size(), expected.segments.size());
-                    if (!plan.segments.empty()) EXPECT_EQ(std::memcmp(plan.segments.data(), expected.segments.data(),
-                        plan.segments.size() * sizeof(df::segment)), 0);
-                    EXPECT_EQ(device.max_len, stats.max_len);
+                    if (!plan.segments.empty()) {
+                        EXPECT_EQ(std::memcmp(plan.segments.data(), expected.segments.data(),
+                            plan.segments.size() * sizeof(df::segment)), 0);
+                    }
+                    EXPECT_EQ(device.stats.max_len, stats.max_len);
                     EXPECT_LE(device.host_download_bytes, 256u);
-                    for (int k = 0; k < apxchol::cuda_host::dataflow_len_stats::kBuckets; ++k) {
-                        EXPECT_EQ(device.rows_ge[k], stats.rows_ge[k]);
-                        EXPECT_EQ(device.nnz_ge[k], stats.nnz_ge[k]);
+                    for (int k = 0; k < apxchol::detail::gpu_dataflow::row_stats::kBuckets; ++k) {
+                        EXPECT_EQ(device.stats.rows_ge[k], stats.rows_ge[k]);
+                        EXPECT_EQ(device.stats.nnz_ge[k], stats.nnz_ge[k]);
                     }
                 }
             }
@@ -1559,13 +1546,11 @@ TEST(GpuDataflow, GraphReplayResetsDependenciesForChangedRightHandSides) {
         ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
         const int grid = apxchol::dataflow_grid_size(fp16);
         ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), cudaSuccess);
-        if (fp16)
-            apxchol::dataflow_solve_fp16(stream, factor.m, false, factor.d_Lp, factor.d_Li,
-                factor.d_Lv16, factor.d_diag, nullptr, plan.bs, plan.spec, plan.nb,
-                tags, initial.size(), ticket, grid, input, output);
-        else
-            apxchol::dataflow_solve(stream, factor.m, false, factor.d_Lp, factor.d_Li, factor.d_Lv,
-                plan.bs, plan.spec, plan.nb, tags, initial.size(), ticket, grid, input, output);
+        const void* values = fp16 ? static_cast<const void*>(factor.d_Lv16)
+                                  : static_cast<const void*>(factor.d_Lv);
+        apxchol::dataflow_solve(stream, factor.m, false, factor.d_Lp, factor.d_Li,
+            values, fp16 ? factor.d_diag : nullptr, nullptr, plan.bs, plan.spec, plan.nb,
+            tags, initial.size(), ticket, grid, input, output);
         cudaGraph_t graph;
         cudaGraphExec_t executable;
         ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
@@ -1603,11 +1588,10 @@ TEST(GpuDataflowDevicePlan, TilePackingPreservesFp32AndFp16SweepsBitForBit) {
         for (node_index row = 0; row < m; ++row) input[row] = std::sin(row + 0.123);
         for (bool reverse : {false, true}) {
             const auto& ptr = reverse ? F.LT.ptr : F.Lc.ptr;
-            const auto& len = reverse ? F.lenT : F.lenL;
             for (int threshold : {-1, 0, 1, 256}) {
-                const auto stats = apxchol::cuda_host::dataflow_row_stats(m, len.data(), apxchol::dataflow_prefetch_depth());
+                const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr);
                 const auto reference = F.plan(reverse,
-                    threshold < 0 ? apxchol::cuda_host::dataflow_split_threshold(stats) : threshold);
+                    threshold < 0 ? stats.split_threshold(ptr.back()) : threshold);
                 test_device_allocations memory;
                 const auto device = apxchol::detail::build_dataflow_device_plan(
                     m, reverse, ptr.back(), reverse ? F.d_Tp : F.d_Lp, threshold,
