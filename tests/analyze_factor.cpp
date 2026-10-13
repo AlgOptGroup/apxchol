@@ -1,7 +1,6 @@
 #include <algorithm>
-#include <chrono>
+#include <charconv>
 #include <cmath>
-#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -28,12 +27,6 @@
 #include "apxchol/graph/conversions.h"
 #include "mtx_input.h"
 
-#if defined(APXCHOL_USE_CUDA)
-#include <cuda_runtime.h>
-#endif
-#if defined(APXCHOL_USE_METAL)
-#include "apxchol/solver/metal_solver.h"
-#endif
 
 namespace {
 
@@ -51,11 +44,9 @@ struct cli_options {
     bool profile = false;
     bool solve = false;
     bool bench_trsv = false;
-    std::string backend = "cpu";   // --solve: cpu | metal
-    long long columns = 1;         // --solve: compatible right-hand sides
-    double tol = 1e-8;             // --solve: relative residual target
-    int factor_threads = 0;        // --solve: factorization team (0 = inherit)
-    int repeat = 1;                // --solve: repetitions on one solver
+    apxchol::solve_backend backend = apxchol::solve_backend::automatic;
+    double tol = apxchol::default_tol;
+    int max_iter = apxchol::default_max_iter;
     double min_is_frac = 0.05;
     long long parallel_residual_threshold = -1;  // <0 = leave default (disabled)
     apxchol::residual_peel_strategy residual_peel = apxchol::residual_peel_strategy::natural;
@@ -69,8 +60,7 @@ struct cli_options {
                  " [--seed N]"
                  " [--min-is-frac FRACTION] [--parallel-residual-threshold N]"
                  " [--profile|--solve|--bench-trsv|--sweep-threads]"
-                 " [--backend cpu|metal] [--columns K] [--tol T] [--factor-threads N]"
-                 " [--repeat R]\n",
+                 " [--backend auto|cpu|gpu] [--tol T] [--maxiter N]\n",
                  argv0);
     std::exit(1);
 }
@@ -88,16 +78,6 @@ std::string parse_is(const std::string& s) {
     throw std::invalid_argument("unknown IS strategy: " + s);
 }
 
-
-// A whole-string decimal integer in [1, max].
-long long parse_positive(const char* flag, const std::string& value, long long max) {
-    char* end = nullptr;
-    const long long parsed = std::strtoll(value.c_str(), &end, 10);
-    if (value.empty() || *end != '\0' || parsed < 1 || parsed > max)
-        throw std::invalid_argument(std::string(flag) + " must be an integer in [1, " +
-                                    std::to_string(max) + "]: " + value);
-    return parsed;
-}
 
 cli_options parse_args(int argc, char* argv[]) {
     if (argc < 2) usage(argv[0]);
@@ -139,27 +119,22 @@ cli_options parse_args(int argc, char* argv[]) {
         } else if (arg == "--bench-trsv") {
             opts.bench_trsv = true;
         } else if (arg == "--backend") {
-            opts.backend = require_value("--backend");
-            if (opts.backend != "cpu" && opts.backend != "metal")
-                throw std::invalid_argument("unknown --backend: " + opts.backend);
-#if !defined(APXCHOL_USE_METAL)
-            if (opts.backend == "metal")
-                throw std::invalid_argument("--backend metal: this build has no Metal backend "
-                                            "(configure with -DAPXCHOL_DEVICE=METAL)");
-#endif
-        } else if (arg == "--columns") {
-            opts.columns = parse_positive("--columns", require_value("--columns"), 1LL << 31);
-        } else if (arg == "--factor-threads") {
-            opts.factor_threads = static_cast<int>(
-                parse_positive("--factor-threads", require_value("--factor-threads"), 1 << 16));
-        } else if (arg == "--repeat") {
-            opts.repeat = static_cast<int>(parse_positive("--repeat", require_value("--repeat"), 1 << 20));
+            const auto value = require_value("--backend");
+            if (value == "auto") opts.backend = apxchol::solve_backend::automatic;
+            else if (value == "cpu") opts.backend = apxchol::solve_backend::cpu;
+            else if (value == "gpu") opts.backend = apxchol::solve_backend::gpu;
+            else throw std::invalid_argument("unknown --backend: " + value);
         } else if (arg == "--tol") {
-            const std::string value = require_value("--tol");
+            const auto value = require_value("--tol");
             char* end = nullptr;
             opts.tol = std::strtod(value.c_str(), &end);
-            if (value.empty() || *end != '\0' || !std::isfinite(opts.tol) || !(opts.tol > 0.0))
+            if (value.empty() || *end != '\0' || !std::isfinite(opts.tol) || opts.tol <= 0)
                 throw std::invalid_argument("--tol must be a finite positive number: " + value);
+        } else if (arg == "--maxiter") {
+            const auto value = require_value("--maxiter");
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), opts.max_iter);
+            if (error != std::errc{} || end != value.data() + value.size() || opts.max_iter <= 0)
+                throw std::invalid_argument("--maxiter must be a positive integer: " + value);
         } else if (arg == "--min-is-frac") {
             opts.min_is_frac = std::atof(require_value("--min-is-frac").c_str());
         } else if (arg == "--parallel-residual-threshold") {
@@ -193,7 +168,7 @@ struct level_stats {
 // project component-wise for adjacency inputs, but leave connected inputs
 // byte-for-byte unchanged.
 void make_component_compatible(const Eigen::SparseMatrix<double>& A,
-                               Eigen::VectorXd& b, bool report = true) {
+                               Eigen::VectorXd& b) {
     const Eigen::Index n = A.rows();
     std::vector<Eigen::Index> component(static_cast<std::size_t>(n), -1);
     std::vector<Eigen::Index> stack;
@@ -227,22 +202,7 @@ void make_component_compatible(const Eigen::SparseMatrix<double>& A,
             component[static_cast<std::size_t>(v)]);
         b[v] -= sums[id] / static_cast<double>(counts[id]);
     }
-    if (report) std::printf("rhs_components=%zu (projected component-wise)\n", sums.size());
-}
-
-// FNV-1a over raw bytes: digests of the factor (structure and values) and of
-// the solution block, so repeated runs can be compared for bit identity.
-std::uint64_t fnv1a(const void* data, std::size_t bytes, std::uint64_t h = 1469598103934665603ull) {
-    const auto* p = static_cast<const unsigned char*>(data);
-    for (std::size_t i = 0; i < bytes; ++i) h = (h ^ p[i]) * 1099511628211ull;
-    return h;
-}
-
-std::uint64_t factor_digest(const factorization& F) {
-    std::uint64_t h = fnv1a(F.L.outer_.data(), F.L.outer_.size() * sizeof(F.L.outer_[0]));
-    h = fnv1a(F.L.inner_.data(), F.L.inner_.size() * sizeof(F.L.inner_[0]), h);
-    h = fnv1a(F.L.vals_.data(), F.L.vals_.size() * sizeof(F.L.vals_[0]), h);
-    return fnv1a(F.perm.data(), F.perm.size() * sizeof(F.perm[0]), h);
+    std::printf("rhs_components=%zu (projected component-wise)\n", sums.size());
 }
 
 level_stats analyze_forward_levels(const Eigen::SparseMatrix<double>& L11) {
@@ -414,166 +374,33 @@ int main(int argc, char* argv[]) {
             opts.parallel_residual_threshold = static_cast<size_t>(cli.parallel_residual_threshold);
         opts.residual_peel = cli.residual_peel;
 
-#if defined(APXCHOL_USE_CUDA)
-        // Keep the context prewarm for the other CUDA diagnostics. --solve
-        // selects its backend explicitly and CPU solves do not initialize CUDA.
-        if (!cli.solve)
-            if (const cudaError_t err = cudaFree(nullptr); err != cudaSuccess)
-                throw std::runtime_error(cudaGetErrorString(err));
-#endif
-
-        // Solve diagnostics share one factor across the requested right-hand sides.
+        // Use the core route selection and checkpoint accounting for one solve.
         if (cli.solve) {
             std::srand(opts.seed);
             Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
             // An assembled pure Laplacian can be disconnected too.  Project
             // it just like an adjacency input; leave SDDM/SPD operators alone.
-            const bool project = resolved_kind == apxchol::input_kind::adjacency ||
-                (input_facts.excess_rows == 0 && input_facts.deficient_rows == 0);
-            if (project) make_component_compatible(A, b);
+            if (resolved_kind == apxchol::input_kind::adjacency ||
+                (input_facts.excess_rows == 0 &&
+                 input_facts.deficient_rows == 0))
+                make_component_compatible(A, b);
             apxchol::solve_options solve_opts;
             solve_opts.tol = cli.tol;
-            solve_opts.max_iter = 500;
+            solve_opts.max_iter = cli.max_iter;
+            solve_opts.backend = cli.backend;
             solve_opts.storage = cli.storage;
             solve_opts.factor_opts = opts;
-            solve_opts.backend = cli.backend == "cpu" ? apxchol::solve_backend::cpu
-                                                       : apxchol::solve_backend::gpu;
-            if (cli.backend != "cpu" || cli.columns != 1 || cli.repeat != 1 || cli.factor_threads > 0) {
-                // K right-hand sides: column 0 is the one-RHS b above, the
-                // others continue the same random stream, each projected the
-                // same way. Residuals are recomputed here in fp64 with Eigen.
-#if defined(APXCHOL_USE_METAL)
-                if (cli.backend == "metal" && !apxchol::metal_solver::available())
-                    throw std::runtime_error("--backend metal: no usable Metal device");
-#endif
-                const Eigen::Index n = A.rows();
-                const Eigen::Index K = static_cast<Eigen::Index>(cli.columns);
-                Eigen::MatrixXd B(n, K), X(n, K);
-                B.col(0) = b;
-                for (Eigen::Index c = 1; c < K; ++c) {
-                    Eigen::VectorXd bc = apxchol::generate_test_rhs(n);
-                    if (project) make_component_compatible(A, bc, false);
-                    B.col(c) = bc;
-                }
-                std::vector<long long> iterations(static_cast<std::size_t>(K));
-                // Digest the common per-RHS report: iterations and residual.
-                std::vector<double> reported(static_cast<std::size_t>(K) * 2);
-                apxchol::checkpoint cp;
-                // One entry per pass through the RHS columns: the first, then
-                // warm solves on the same solver; every repeat must reproduce
-                // the first one's solution and report bit for bit.
-                std::vector<double> solve_ms;
-                std::uint64_t fdigest = 0, xhash = 0, rhash = 0;
-                bool repeat_identical = true;
-                using clock = std::chrono::steady_clock;
-                auto record = [&](clock::time_point t0) {
-                    solve_ms.push_back(std::chrono::duration<double, std::milli>(clock::now() - t0).count());
-                };
-                auto check_repeat = [&] {
-                    const std::uint64_t h =
-                        fnv1a(X.data(), static_cast<std::size_t>(X.size()) * sizeof(double));
-                    const std::uint64_t r = fnv1a(reported.data(), reported.size() * sizeof(double));
-                    if (solve_ms.size() == 1) { xhash = h; rhash = r; }
-                    else repeat_identical = repeat_identical && h == xhash && r == rhash;
-                };
-                // The factor is built first, optionally on its own team, so that
-                // runs at different OMP_NUM_THREADS can share one factor (factor
-                // identity is checked through factor_digest, taken before the
-                // solver adopts the factor so that its values are released as in
-                // an ordinary solve).
-                factorization F;
-                {
-#ifdef _OPENMP
-                    const int team = omp_get_max_threads();
-                    if (cli.factor_threads > 0) omp_set_num_threads(cli.factor_threads);
-#endif
-                    F = apxchol::factorize(A, cli.storage, opts, &cp);
-#ifdef _OPENMP
-                    omp_set_num_threads(team);
-#endif
-                }
-                fdigest = factor_digest(F);
-                double pack_ms = 0.0, device_ms = 0.0, exit_check_ms = 0.0;
-                auto solve_columns = [&](const auto& slv) {
-                    for (int rep = 0; rep < cli.repeat; ++rep) {
-                        pack_ms = device_ms = exit_check_ms = 0.0;
-                        const auto t0 = clock::now();
-                        for (Eigen::Index c = 0; c < K; ++c) {
-                            const Eigen::VectorXd bc = B.col(c);
-                            const apxchol::solve_result r = slv.solve(bc);
-                            X.col(c) = r.x;
-                            iterations[static_cast<std::size_t>(c)] = static_cast<long long>(r.iterations);
-                            reported[2 * static_cast<std::size_t>(c)] = static_cast<double>(r.iterations);
-                            reported[2 * static_cast<std::size_t>(c) + 1] = r.residual;
-                            pack_ms += r.timings.total("pcg.pack") * 1e3;
-                            device_ms += r.timings.total("pcg.device") * 1e3;
-                            exit_check_ms += r.timings.total("pcg.exit_check") * 1e3;
-                        }
-                        record(t0);
-                        check_repeat();
-                    }
-                };
-                if (cli.backend == "cpu") {
-                    const apxchol::cpu_solver slv(A, std::move(F), solve_opts, &cp);
-                    solve_columns(slv);
-                } else {
-#if defined(APXCHOL_USE_METAL)
-                    const apxchol::metal_solver slv(A, std::move(F), solve_opts, &cp);
-                    const auto st = slv.stats();
-                    std::printf("metal device=\"%s\" levels_fwd=%zu levels_bwd=%zu "
-                                "steps_fwd=%zu steps_bwd=%zu operator=%s\n",
-                                st.device.c_str(), st.levels_forward,
-                                st.levels_backward, st.steps_forward, st.steps_backward,
-                                st.operator_double_float ? "double-float" : "fp32-exact");
-                    solve_columns(slv);
-                    std::printf("metal_split pack_ms=%.6f device_ms=%.6f exit_check_ms=%.6f (last repetition)\n",
-                                pack_ms, device_ms, exit_check_ms);
-#endif
-                }
-                long long converged = 0;
-                double max_residual = 0.0;
-                for (Eigen::Index c = 0; c < K; ++c) {
-                    const double bnorm = B.col(c).stableNorm();
-                    const double error = (B.col(c) - A * X.col(c)).stableNorm();
-                    const double res = bnorm == 0.0 ? error : error / bnorm;
-                    converged += std::isfinite(res) && res <= solve_opts.tol;
-                    max_residual = std::isfinite(res) ? std::max(max_residual, res)
-                                                    : std::numeric_limits<double>::infinity();
-                }
-                const auto [it_min, it_max] = std::minmax_element(iterations.begin(), iterations.end());
-                std::printf(
-                    "block_result backend=%s columns=%lld tol=%g setup_ms=%.6f solve_ms=%.6f "
-                    "iterations_min=%lld iterations_max=%lld converged=%lld/%lld "
-                    "max_residual=%.17g factor_digest=%016llx solution_hash=%016llx "
-                    "report_hash=%016llx\n",
-                    cli.backend.c_str(), static_cast<long long>(K), solve_opts.tol,
-                    cp.total("setup") * 1e3, solve_ms.front(), *it_min, *it_max, converged,
-                    static_cast<long long>(K), max_residual,
-                    static_cast<unsigned long long>(fdigest),
-                    static_cast<unsigned long long>(xhash),
-                    static_cast<unsigned long long>(rhash));
-                if (solve_ms.size() > 1) {
-                    std::vector<double> warm(solve_ms.begin() + 1, solve_ms.end());
-                    std::sort(warm.begin(), warm.end());
-                    const std::size_t h = warm.size() / 2;
-                    const double median = warm.size() % 2 ? warm[h] : 0.5 * (warm[h - 1] + warm[h]);
-                    std::printf("repeat_result repeat=%d warm_solve_ms_median=%.6f warm_solve_ms_min=%.6f "
-                                "warm_solve_ms_max=%.6f repeat_identical=%d\n",
-                                cli.repeat, median, warm.front(), warm.back(),
-                                repeat_identical ? 1 : 0);
-                }
-                return converged == K && repeat_identical ? 0 : 1;
-            }
             const auto result = apxchol::solve(A, b, solve_opts);
             const double setup_ms = result.timings.total("setup") * 1e3;
             const double pcg_ms = result.timings.total("pcg") * 1e3;
             std::printf(
-                "solve_result setup_ms=%.6f pcg_ms=%.6f total_ms=%.6f "
+                "solve_result backend=%s setup_ms=%.6f pcg_ms=%.6f total_ms=%.6f "
                 "iterations=%lld residual=%.17g vram_mb=%.3f\n",
+                result.backend == apxchol::solve_backend::gpu ? "gpu" : "cpu",
                 setup_ms, pcg_ms, setup_ms + pcg_ms,
                 static_cast<long long>(result.iterations), result.residual,
                 result.solve_vram_mb);
-            return result.residual < solve_opts.tol ? 0 : 1;
+            return std::isfinite(result.residual) && result.residual <= solve_opts.tol ? 0 : 1;
         }
 
         // ── Thread scaling sweep mode ────────────────────────

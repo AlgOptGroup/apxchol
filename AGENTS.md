@@ -111,9 +111,7 @@ choices, retired knobs, and measurements belong in
 - `APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS`: ON by default. Only tests
   require GoogleTest. `APXCHOL_BUILD_TOOLS`: OFF by default, independently builds
   `build/tests/bench_setup` and `build/tests/analyze_factor`, including when tests
-  are disabled. `analyze_factor MATRIX --solve [--seed N] [--tol T]` reports setup, solve,
-  iterations and the original-system residual for a component-compatible RHS.
-  `--backend cpu|metal --columns K --repeat R` solves K right-hand sides sequentially on one reused solver, reporting residuals, timings and repeat digests. `--factor-threads N` selects the factorization team independently of the solve team.
+  are disabled. `analyze_factor MATRIX --solve [--seed N] [--tol T] [--maxiter N] [--backend auto|cpu|gpu]` reports the selected route and the core solver's setup, solve, iteration and residual diagnostics for one component-compatible RHS. Tolerance, iteration limit and automatic routing use the core defaults.
 - CMake usage requirements on `apxchol_core` and `apxchol_mtx_input` must export
   C++23 and any native architecture flag actually used by the library. Parent
   projects do not inherit directory compile options; mismatched Eigen alignment

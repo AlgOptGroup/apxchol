@@ -1,5 +1,5 @@
 execute_process(
-    COMMAND "${CLI}" "${INPUT}" --random-rhs --tol 1e-8 ${CLI_ARGS}
+    COMMAND "${CLI}" "${INPUT}" ${CLI_ARGS}
     RESULT_VARIABLE status OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
 if (NOT status STREQUAL "${EXPECT_STATUS}" OR
     NOT "${stdout}${stderr}" MATCHES "${EXPECT_OUTPUT}")

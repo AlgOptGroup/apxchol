@@ -103,14 +103,19 @@ endif()
 
 # CLI assertions check BOTH exit status and diagnostic text. CTest's
 # PASS_REGULAR_EXPRESSION alone overrides a failing solver exit status.
-function(apxchol_cli_test name fixture status output)
+function(apxchol_program_test name target fixture status output)
     add_test(NAME ${name} COMMAND "${CMAKE_COMMAND}"
-        "-DCLI=$<TARGET_FILE:apxchol>"
+        "-DCLI=$<TARGET_FILE:${target}>"
         "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${fixture}.mtx"
         "-DEXPECT_STATUS=${status}" "-DEXPECT_OUTPUT=${output}"
         "-DCLI_ARGS=${ARGN}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake")
     set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+endfunction()
+
+function(apxchol_cli_test name fixture status output)
+    apxchol_program_test("${name}" apxchol "${fixture}" "${status}" "${output}"
+        --random-rhs --tol 1e-8 ${ARGN})
 endfunction()
 
 apxchol_cli_test(cli_pattern_adjacency_converges path5_pattern 0 "ADJACENCY graph")
@@ -165,4 +170,42 @@ apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backe
 if (APXCHOL_DEVICE STREQUAL "CPU")
     apxchol_cli_test(cli_unavailable_gpu_backend_is_rejected path5_sddm 2
         "GPU route requested but GPU support is not built" --backend gpu)
+endif()
+
+if (APXCHOL_BUILD_TOOLS)
+    function(apxchol_analyze_test name fixture status output)
+        apxchol_program_test("${name}" analyze_factor "${fixture}" "${status}" "${output}"
+            --solve ${ARGN})
+    endfunction()
+    apxchol_analyze_test(analyze_cpu path5_sddm 0 "backend=cpu"
+        --backend cpu --tol 1e-7 --maxiter 20)
+    set_tests_properties(analyze_cpu PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;CUDA_VISIBLE_DEVICES=-1")
+    apxchol_analyze_test(analyze_disconnected_cpu disconnected_paths_pattern 0 "backend=cpu" --backend cpu)
+    apxchol_analyze_test(analyze_invalid_backend path5_sddm 1 "unknown --backend" --backend metal)
+    apxchol_analyze_test(analyze_invalid_tol path5_sddm 1 "--tol must be" --tol nan)
+    apxchol_analyze_test(analyze_invalid_maxiter path5_sddm 1 "--maxiter must be" --maxiter 0)
+    apxchol_analyze_test(analyze_iteration_limit path5_nearly_sddm 1 "iterations=1 "
+        --backend cpu --tol 1e-30 --maxiter 1)
+    apxchol_analyze_test(analyze_removed_repeat path5_sddm 1 "unknown argument: --repeat" --repeat 2)
+    if (APXCHOL_DEVICE STREQUAL "CUDA" AND NOT APXCHOL_64BIT_NODE_INDICES)
+        set(_analyze_auto_backend gpu)
+    else()
+        set(_analyze_auto_backend cpu)
+    endif()
+    apxchol_analyze_test(analyze_default_backend path5_sddm 0 "backend=${_analyze_auto_backend}")
+    apxchol_analyze_test(analyze_explicit_auto path5_sddm 0 "backend=${_analyze_auto_backend}" --backend auto)
+    if (APXCHOL_DEVICE STREQUAL "CPU")
+        apxchol_analyze_test(analyze_gpu path5_sddm 1 "GPU support is not built" --backend gpu)
+    elseif (APXCHOL_DEVICE STREQUAL "CUDA" AND APXCHOL_64BIT_NODE_INDICES)
+        apxchol_analyze_test(analyze_gpu path5_sddm 1 "GPU route requires 32-bit nodes" --backend gpu)
+    else()
+        apxchol_analyze_test(analyze_gpu path5_sddm 0 "backend=gpu" --backend gpu)
+        set_tests_properties(analyze_gpu PROPERTIES
+            SKIP_REGULAR_EXPRESSION "Metal backend is unavailable: no Metal device|GPU factorization requires an available CUDA device")
+        if (_analyze_auto_backend STREQUAL "gpu")
+            set_tests_properties(analyze_default_backend analyze_explicit_auto PROPERTIES
+                SKIP_REGULAR_EXPRESSION "GPU factorization requires an available CUDA device")
+        endif()
+    endif()
+    unset(_analyze_auto_backend)
 endif()
