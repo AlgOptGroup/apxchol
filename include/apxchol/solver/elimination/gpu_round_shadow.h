@@ -1,38 +1,7 @@
 #pragma once
-/// Research-only full elimination-round CUDA shadow.
-///
-/// Ordinary/exported factorization remains CPU-audited. An explicitly forced
-/// internal consuming finalizer instead executes all supported numerical rounds
-/// on the GPU. Its internal audit seam can also hand an ordered prefix back. Immediately before a selected
-/// independent set mutates the CPU graph, this sidecar snapshots the current
-/// directed-AoS residual for audit, receives the exact selected order and
-/// per-pivot seeds, and executes the same *round boundary* on CUDA:
-///
-///   gather -> raw-order degree + deterministic fp64 dedup -> factor digest
-///          -> GKS tree sample -> multigraph fill apply -> residual checksums
-///
-/// R2a retains the compact owner-major CUDA output, active mask, excess vector,
-/// and owner offsets as a generation. After the real CPU round verifies and
-/// certifies a serial/order-reproducible apply, the next CUDA round consumes
-/// that state without a state upload or state-buffer allocation. Parallel CPU
-/// apply order is schedule-dependent, so its successor performs an explicit,
-/// counted host import. An exact order-sensitive fingerprint rejects any
-/// unannounced divergence before reuse.
-///
-/// The ordinary audit returns no partner list, fill list, or residual adjacency. The host
-/// receives only canonical digests, counters, per-pivot scalar counters,
-/// stage timings, and peak allocated bytes.  Deterministic fields are compared
-/// against both the independent serial implementation in this header and the
-/// authoritative CPU round after it runs.  SDDM excess is compared to the CPU
-/// with explicit per-vertex roundoff bounds because its OpenMP atomic update
-/// order is intentionally unspecified.
-/// The owned prefix instead downloads its complete ordered weighted residual
-/// once at handback, with factor headers; factor entries remain on the device.
-///
-/// This is deliberately FORCE-only research surface.  Unset/empty/0/off does
-/// no shadow work and leaves production decisions/results unchanged.  "force"
-/// fails before the corresponding CPU round mutates when the build, runtime,
-/// input capacity, or current free device memory is unsupported.
+// CUDA-owned factor construction and its independent host reference routines.
+// Production keeps the weighted residual, factor log and numerical rounds on
+// the device. Test-only imports preserve raw incidence order and duplicates.
 
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/graph/graph.h"
@@ -77,46 +46,8 @@ namespace apxchol { class cuda_sptrsv_device_factor; }
 
 namespace apxchol::detail {
 
-inline bool gpu_factor_finalize_requested(setup_route route = setup_route::diagnostic) {
-    if (route != setup_route::diagnostic)
-        return route == setup_route::gpu;
-    const char* value = std::getenv("APXCHOL_GPU_FACTOR_FINALIZE");
-    if (!value || !*value || std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0) return false;
-    if (std::strcmp(value, "force") == 0) return true;
-    throw std::invalid_argument("APXCHOL_GPU_FACTOR_FINALIZE must be unset, 0, off, or force");
-}
-
-inline constexpr std::string_view kGpuRoundShadowEnv =
-    "APXCHOL_GPU_ROUND_SHADOW";
 inline constexpr std::string_view kGpuRoundSelectionAuditEnv =
     "APXCHOL_GPU_ROUND_SELECTION_AUDIT";
-
-inline bool gpu_round_shadow_requested(setup_route route = setup_route::diagnostic) {
-    if (route != setup_route::diagnostic)
-        return route == setup_route::gpu;
-    const char* value = std::getenv(kGpuRoundShadowEnv.data());
-    if (!value || !*value || std::strcmp(value, "0") == 0 ||
-        std::strcmp(value, "off") == 0)
-        return false;
-    if (std::strcmp(value, "force") == 0) return true;
-    throw std::invalid_argument(
-        "APXCHOL_GPU_ROUND_SHADOW must be unset, 0, off, or force");
-}
-
-/// True when the explicit route (or diagnostic environment) selects device rounds,
-/// a device finalizer, and a block frontend to select on. A CPU build can never
-/// take that route, and `gpu_block_frontend` is not even a complete type there.
-/// Callers still have to check the route's template preconditions (vec_pool_aos
-/// storage, block_greedy, a consuming solve) themselves.
-inline bool gpu_owned_setup_configured([[maybe_unused]] setup_route route = setup_route::diagnostic) {
-#if defined(APXCHOL_USE_CUDA)
-    return gpu_round_shadow_requested(route) && gpu_factor_finalize_requested(route) &&
-           gpu_block_frontend::configured_block_mode(route) !=
-               gpu_block_frontend::mode::disabled;
-#else
-    return false;
-#endif
-}
 
 /// The producer capability certifies selection independence against its
 /// content-bound topology. Production resident rounds therefore need only the
@@ -1307,8 +1238,7 @@ gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
     return comparison;
 }
 
-// Full weighted-residual handback, plus factor HEADERS only. Factor entries
-// remain in the device append log until the consuming finalizer reads them.
+// Independent test observation of a weighted residual and factor headers.
 struct gpu_owned_prefix_handback {
     gpu_round_shadow_input residual;
     gpu_round_shadow_state_fingerprint fingerprint;
@@ -1379,91 +1309,40 @@ gpu_owned_sparsify_test_output gpu_sparsify_owned_residual_for_test(
     double keep_probability = 0.25, double scale_override = -1.0);
 #endif
 
-/// CUDA-owned R2a state machine.  A produced generation is not eligible for
-/// reuse until certify_cpu_round() is called after the authoritative CPU
-/// comparison with the exact post-CPU fingerprint. cpu_order_reproducible=false
-/// keeps the generation resident for provenance, but the next compute imports
-/// the host snapshot explicitly. A certified bounded CPU excess collision may
-/// refresh only the excess array; every byte is included in the resident-state
-/// counters. An authoritative host graph replacement must be announced through
-/// invalidate_for_authoritative_host_rebuild(): its fingerprint becomes the
-/// new continuity anchor and the next compute performs a counted full import.
-/// The private session-owned prefix has separate acceptance and handback state;
-/// it never claims CPU certification for its GPU-owned generations.
+// One device owner publishes immutable residual generations to its selector.
+// Every failed mutation poisons the owner and revokes outstanding borrows.
 class gpu_round_shadow_device_state {
 public:
     explicit gpu_round_shadow_device_state(clique_sampler sampler = clique_sampler::gks);
     ~gpu_round_shadow_device_state();
     gpu_round_shadow_device_state(gpu_round_shadow_device_state&&) noexcept;
-    gpu_round_shadow_device_state& operator=(
-        gpu_round_shadow_device_state&&) noexcept;
+    gpu_round_shadow_device_state& operator=(gpu_round_shadow_device_state&&) noexcept;
     gpu_round_shadow_device_state(const gpu_round_shadow_device_state&) = delete;
-    gpu_round_shadow_device_state& operator=(
-        const gpu_round_shadow_device_state&) = delete;
+    gpu_round_shadow_device_state& operator=(const gpu_round_shadow_device_state&) = delete;
 
-#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
-    /// Compile-time-only one-shot fault seam. Normal builds contain neither
-    /// this method nor its state/branch.
-    void inject_failure_after_cuda_operation_for_test();
-    // Test-build-only byte snapshot for direct CPU/device storage parity.
-    std::vector<std::byte> encode_finalized_factor_for_test(
-        const cuda_sptrsv_device_factor& factor) const;
-#endif
-
-    gpu_round_shadow_report compute(
-        const gpu_round_shadow_input& input,
-        const gpu_round_shadow_report& expected_shape);
-    /// Execute one round without using a CPU reference to predict any
-    /// intermediate stream size.  The device/CUB counts discovered by each
-    /// stage size the following stage and are returned in the report.  This is
-    /// the first R2b production boundary; callers may compare the completed
-    /// report with an independent reference afterwards, but the reference is
-    /// not an input to device execution.
-    gpu_round_shadow_report compute_discover_shape(
-        const gpu_round_shadow_input& input);
-    /// As above, but consume the ordered selected ids from an existing CUDA
-    /// allocation. input.pivots/seeds remain the independent host audit and
-    /// must describe the same selection; they are not uploaded by this path.
-    gpu_round_shadow_report compute_discover_shape(
-        const gpu_round_shadow_input& input,
-        gpu_device_selection selected,
-        std::uint64_t run_seed);
-    /// Debug/audit materialization of the persistent factor append log. The
-    /// production R3 path will consume its device view instead.
-    gpu_round_shadow_factor_log download_factor_log() const;
-    // Finalize the resident prefix plus explicit CPU tail into two CUDA CSRs.
-    // No prefix factor values or coordinates leave the device. Host permutation
-    // and tail are uploaded; trusted adoption returns fixed-size plan statistics.
+    void advance_selector(gpu_block_frontend& frontend);
+    void reject_device_generation(std::uint64_t generation) noexcept;
     std::shared_ptr<cuda_sptrsv_device_factor> finalize_device_factor(
         std::span<const node_index> permutation, node_index m,
-        const gpu_round_shadow_factor_log& tail,
         factor_storage_type storage = factor_storage_type::automatic);
-    /// Execute the next round from the preceding CUDA generation without
-    /// consuming a host snapshot. The preceding generation must have been
-    /// explicitly accepted after its independent audit. Selection ids
-    /// must carry a live, newer immutable capability from the same producer,
-    /// CUDA device, active set and residual topology. This is an explicit R2b
-    /// research boundary; the factorization session uses it only after exact
-    /// serial CPU certification and audits the returned report independently.
-    gpu_round_shadow_report compute_resident(
-        gpu_device_selection selected,
-        std::uint64_t run_seed);
-    /// Project this accepted, CPU-certified weighted residual into the same
-    /// selector that supplied the consumed selection. No CPU ids/endpoints are
-    /// uploaded. This does not relax pending order/excess refresh requirements.
-    void advance_selector(gpu_block_frontend& frontend);
-    /// Mark the current CUDA generation consumable after its independent audit
-    /// passed. Passing any other generation fails closed.
-    void accept_device_generation(std::uint64_t generation);
-    /// Permanently poison the current generation after a failed audit. A new
-    /// gpu_round_shadow_device_state is then required.
-    void reject_device_generation(std::uint64_t generation) noexcept;
-    void certify_cpu_round(
-        bool cpu_order_reproducible,
-        const gpu_round_shadow_state_fingerprint& cpu_state,
-        bool cpu_excess_may_differ = false);
-    void invalidate_for_authoritative_host_rebuild(
-        const gpu_round_shadow_state_fingerprint& cpu_state);
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+    void inject_failure_after_cuda_operation_for_test();
+    std::vector<std::byte> encode_finalized_factor_for_test(
+        const cuda_sptrsv_device_factor& factor) const;
+    std::unique_ptr<gpu_block_frontend> initialize_owned_raw_for_test(
+        const gpu_round_shadow_input& input);
+    gpu_round_shadow_report compute_owned_round_for_test(
+            gpu_device_selection selected, std::uint64_t seed) {
+        return compute_owned_prefix(selected, seed);
+    }
+    gpu_owned_prefix_handback download_owned_prefix_for_test() {
+        return download_owned_prefix();
+    }
+    gpu_round_shadow_factor_log download_factor_log() const;
+    std::vector<gpu_round_shadow_factor_column> complete_owned_factorization_for_test() {
+        return download_owned_factor_columns();
+    }
+#endif
 
 private:
     friend class gpu_round_shadow_session;
@@ -1472,125 +1351,36 @@ private:
     gpu_owned_sparsify_stats sparsify_owned_residual(
         gpu_block_frontend& frontend, std::uint64_t seed);
     std::unique_ptr<gpu_block_frontend> initialize_owned_csc(
-        const gpu_owned_csc_buffers& input, double reg_eps, bool& sddm,
-        std::size_t& initial_edges);
+        const gpu_owned_csc_buffers& input, double reg_eps, bool& sddm);
+    gpu_round_shadow_report compute_owned_prefix(
+        gpu_device_selection selected, std::uint64_t run_seed);
+    std::vector<gpu_round_shadow_factor_column> download_owned_factor_columns(
+        std::span<node_index> permutation = {}, std::span<edge_index> raw_offsets = {});
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
     friend gpu_owned_csc_test_result gpu_initial_owned_csc_buffers_for_test(
         const gpu_owned_csc_buffers&, double);
-#endif
-    // Only the session's explicit consuming prefix enters this ownership mode.
-    gpu_round_shadow_report compute_owned_prefix(
-        const gpu_round_shadow_input* initial, gpu_device_selection selected,
-        std::uint64_t run_seed, const gpu_device_selection_content* paired_initial_content);
     gpu_owned_prefix_handback download_owned_prefix();
-    std::vector<gpu_round_shadow_factor_column> download_owned_factor_columns(
-        std::span<node_index> permutation = {}, std::span<edge_index> raw_offsets = {});
+#endif
     void reset() noexcept;
     struct impl;
     std::unique_ptr<impl> impl_;
 };
-
-gpu_round_shadow_report compute_gpu_round_shadow(
-    const gpu_round_shadow_input& input,
-    const gpu_round_shadow_report& expected_shape);
 #else
 inline bool gpu_round_shadow_runtime_available() noexcept { return false; }
-inline gpu_round_shadow_report compute_gpu_round_shadow(
-        const gpu_round_shadow_input&,
-        const gpu_round_shadow_report&) {
-    throw std::runtime_error(
-        "GPU round shadow: CUDA support was not compiled");
-}
-#endif
-
-inline gpu_round_shadow_report run_verified_gpu_round_shadow(
-        const gpu_round_shadow_input& input,
-        std::vector<gpu_round_shadow_excess_bound>* excess_bounds = nullptr) {
-    using clock = gpu_setup_diagnostic_clock;
-    const auto reference_begin = clock::now();
-    const gpu_round_shadow_report expected =
-        reference_gpu_round_shadow(input, excess_bounds);
-    const double reference_ms = 1e3 * std::chrono::duration<double>(
-        clock::now() - reference_begin).count();
-    gpu_round_shadow_report actual =
-        compute_gpu_round_shadow(input, expected);
-    if (!actual.gpu_executed)
-        throw std::runtime_error(
-            "GPU round shadow mismatch: device execution marker");
-    compare_gpu_round_shadow_reports(expected, actual);
-    actual.timings.reference_ms = reference_ms;
-    return actual;
-}
-
-#if defined(APXCHOL_USE_CUDA)
-inline gpu_round_shadow_report run_verified_gpu_round_shadow(
-        gpu_round_shadow_device_state& state,
-        const gpu_round_shadow_input& input,
-        const gpu_device_selection* selected,
-        std::uint64_t run_seed,
-        bool use_resident_selection,
-        std::vector<gpu_round_shadow_excess_bound>* excess_bounds = nullptr) {
-    using clock = gpu_setup_diagnostic_clock;
-    // The FORCE-only sidecar still validates its complete host audit input.
-    // The resident CUDA execution below does not consume that snapshot: its
-    // default selection validator is O(p), while this independent O(r log r)
-    // host work remains deliberately outside the performance claim.
-    round_shadow_reference_detail::validate_input(input);
-    // R2b deliberately executes before the independent host reference.  The
-    // reference remains a fail-closed audit, but none of its intermediate
-    // stream sizes can influence device allocation or control flow.
-    gpu_round_shadow_report actual;
-    if (selected && use_resident_selection) {
-        actual = state.compute_resident(*selected, run_seed);
-        // input_incidences describes the independently audited host snapshot;
-        // resident_input_incidences describes the stream actually consumed.
-        actual.input_incidences = input.incidences.size();
-    } else if (selected) {
-        actual = state.compute_discover_shape(input, *selected, run_seed);
-    } else {
-        actual = state.compute_discover_shape(input);
-    }
-    try {
-        const auto reference_begin = clock::now();
-        const gpu_round_shadow_report expected =
-            reference_gpu_round_shadow(input, excess_bounds);
-        const double reference_ms = 1e3 * std::chrono::duration<double>(
-            clock::now() - reference_begin).count();
-        if (!actual.gpu_executed)
-            throw std::runtime_error(
-                "GPU round shadow mismatch: device execution marker");
-        compare_gpu_round_shadow_reports(expected, actual);
-        state.accept_device_generation(actual.output_generation);
-        actual.timings.reference_ms = reference_ms;
-        return actual;
-    } catch (...) {
-        // A CUDA generation that did not pass its independent audit must never
-        // become input to compute_resident().
-        state.reject_device_generation(actual.output_generation);
-        throw;
-    }
-}
-
-inline gpu_round_shadow_report run_verified_gpu_round_shadow(
-        gpu_round_shadow_device_state& state,
-        const gpu_round_shadow_input& input,
-        std::vector<gpu_round_shadow_excess_bound>* excess_bounds = nullptr) {
-    return run_verified_gpu_round_shadow(
-        state, input, nullptr, 0, false, excess_bounds);
-}
 #endif
 
 class gpu_round_shadow_session {
 public:
     gpu_round_shadow_session() = default;
     explicit gpu_round_shadow_session(bool active,
-            clique_sampler sampler = clique_sampler::gks,
-            setup_route route = setup_route::diagnostic)
-        : active_(active), route_(route), sampler_(sampler) {
+            clique_sampler sampler = clique_sampler::gks)
+        : active_(active) {
 #if defined(APXCHOL_USE_CUDA)
         if (active_)
             device_state_ =
-                std::make_unique<gpu_round_shadow_device_state>(sampler_);
+                std::make_unique<gpu_round_shadow_device_state>(sampler);
+#else
+        (void)sampler;
 #endif
     }
 
@@ -1601,270 +1391,61 @@ public:
     gpu_round_shadow_session& operator=(
         const gpu_round_shadow_session&) = delete;
 
-    // Once ownership has transferred, the CPU continuation is an ordinary
-    // payload-retaining tail. It must not replay/certify the device prefix.
-    bool active() const noexcept { return active_ && owned_rounds_ == 0; }
-
-    template<incidence_storage Incidence>
-    void begin_round(const graph<Incidence>& residual,
-                     std::span<const node_index> pivots,
-                     std::uint64_t run_seed,
-                     std::uint64_t round_index,
-                     bool cpu_order_reproducible,
-                     const gpu_device_selection* device_selection = nullptr) {
-        if (!active()) return;
-        if (sampler_ != clique_sampler::gks)
-            throw std::invalid_argument(
-                "cycle CUDA samplers require the GPU-owned consuming route; "
-                "CPU-shadow auditing/export is unsupported (disable the GPU setup flags)");
-#if !defined(APXCHOL_USE_CUDA)
-        (void)device_selection;
-#endif
-        if (pending_)
-            throw std::logic_error(
-                "GPU round shadow: a CPU round was not verified");
-        ++attempted_rounds_;
-        const gpu_round_shadow_input input = make_gpu_round_shadow_input(
-            residual, pivots, run_seed);
-#if defined(APXCHOL_USE_CUDA)
-        const bool use_resident_selection =
-            device_selection && resident_selection_ready_;
-        resident_selection_ready_ = false;
-        pending_report_ = run_verified_gpu_round_shadow(
-            *device_state_, input, device_selection, run_seed,
-            use_resident_selection,
-            &pending_excess_bounds_);
-#else
-        pending_report_ = run_verified_gpu_round_shadow(
-            input, &pending_excess_bounds_);
-#endif
-        pending_round_index_ = round_index;
-        pending_cpu_order_reproducible_ = cpu_order_reproducible;
-        pending_ = true;
-    }
-
-    template<incidence_storage Incidence, class FactorColumns>
-    void verify_cpu_round(const graph<Incidence>& residual,
-                          const FactorColumns& columns,
-                          const gpu_round_shadow_digest* streamed_entries = nullptr) {
-        if (!active()) return;
-        if (!pending_)
-            throw std::logic_error(
-                "GPU round shadow: CPU verification has no pending round");
-        const auto cpu_comparison = compare_gpu_round_shadow_with_cpu(
-            pending_report_,
-            std::span<const gpu_round_shadow_excess_bound>(
-                pending_excess_bounds_),
-            residual, columns, streamed_entries);
-#if defined(APXCHOL_USE_CUDA)
-        const auto cpu_state = fingerprint_gpu_round_shadow_input(
-            make_gpu_round_shadow_input(
-                residual, std::span<const node_index>{}, 0));
-        device_state_->certify_cpu_round(
-            pending_cpu_order_reproducible_, cpu_state,
-            cpu_comparison.bounded_excess_vertices != 0);
-        // A host-order divergence requires a full re-import, and a bounded
-        // CPU excess divergence requires the next call to carry the host
-        // vector so it can be compared/refreshed. Only the exact serial case
-        // can safely take the host-state-free production consumer.
-        resident_selection_ready_ = pending_cpu_order_reproducible_ &&
-            cpu_comparison.bounded_excess_vertices == 0;
-#endif
-        const gpu_round_shadow_report& report = pending_report_;
-        ++checked_rounds_;
-        if (report.gpu_executed) ++device_executions_;
-        pivots_ += report.pivots.size();
-        input_incidences_ += report.input_incidences;
-        raw_fill_edges_ += report.raw_fill_edges;
-        peak_device_bytes_ = std::max(peak_device_bytes_,
-                                      report.peak_device_bytes);
-        state_imports_ = report.state_imports;
-        state_reuses_ = report.state_reuses;
-        order_reimports_ = report.order_reimports;
-        host_rebuild_invalidations_ = report.host_rebuild_invalidations;
-        host_rebuild_reimports_ = report.host_rebuild_reimports;
-        excess_refreshes_ = report.excess_refreshes;
-        state_upload_bytes_ = report.state_upload_bytes;
-        state_buffer_allocations_ = report.state_buffer_allocations;
-        state_buffer_growths_ = report.state_buffer_growths;
-        factor_log_columns_ = report.factor_log_columns;
-        factor_log_entries_ = report.factor_log_entries;
-        factor_log_allocations_ = report.factor_log_allocations;
-        factor_log_growths_ = report.factor_log_growths;
-        totals_.upload_ms += report.timings.upload_ms;
-        totals_.gather_ms += report.timings.gather_ms;
-        totals_.dedup_ms += report.timings.dedup_ms;
-        totals_.factor_ms += report.timings.factor_ms;
-        totals_.sample_ms += report.timings.sample_ms;
-        totals_.fill_materialize_ms += report.timings.fill_materialize_ms;
-        totals_.mutate_ms += report.timings.mutate_ms;
-        totals_.checksums_ms += report.timings.checksums_ms;
-        totals_.download_ms += report.timings.download_ms;
-        totals_.total_ms += report.timings.total_ms;
-        totals_.reference_ms += report.timings.reference_ms;
-
-        if (gpu_setup_diagnostics()) std::fprintf(stderr,
-            "[gpu-round-shadow] round=%llu pivots=%zu input=%llu "
-            "resident_input=%llu "
-            "gathered=%llu unique=%llu fill=%llu active=%llu "
-            "live=%llu factor=%016llx:%016llx fill_hash=%016llx:%016llx "
-            "residual=%016llx:%016llx degree=%016llx:%016llx "
-            "bounded_excess_vertices=%zu device=1 peak_bytes=%zu "
-            "state=%s generation=%llu->%llu state_upload_bytes=%zu "
-            "state_imports=%zu state_reuses=%zu order_reimports=%zu "
-            "host_rebuild_invalidations=%zu host_rebuild_reimports=%zu "
-            "excess_refreshes=%zu "
-            "state_allocations=%zu state_growths=%zu "
-            "factor_log=%zu/%zu factor_log_allocations=%zu "
-            "factor_log_growths=%zu selection=%s selection_check=%zu/%zu/%zu "
-            "stages_ms=%.6f/%.6f/%.6f/%.6f/%.6f/%.6f/%.6f/%.6f/%.6f "
-            "reference_ms=%.6f\n",
-            static_cast<unsigned long long>(pending_round_index_),
-            report.pivots.size(),
-            static_cast<unsigned long long>(report.input_incidences),
-            static_cast<unsigned long long>(
-                report.resident_input_incidences),
-            static_cast<unsigned long long>(report.gathered_incidences),
-            static_cast<unsigned long long>(report.unique_neighbors),
-            static_cast<unsigned long long>(report.raw_fill_edges),
-            static_cast<unsigned long long>(report.active_count),
-            static_cast<unsigned long long>(report.live_incidences),
-            static_cast<unsigned long long>(report.factor.xor_hash),
-            static_cast<unsigned long long>(report.factor.sum_hash),
-            static_cast<unsigned long long>(report.fill.xor_hash),
-            static_cast<unsigned long long>(report.fill.sum_hash),
-            static_cast<unsigned long long>(report.residual.xor_hash),
-            static_cast<unsigned long long>(report.residual.sum_hash),
-            static_cast<unsigned long long>(report.live_degree.xor_hash),
-            static_cast<unsigned long long>(report.live_degree.sum_hash),
-            cpu_comparison.bounded_excess_vertices,
-            report.peak_device_bytes,
-            report.resident_input_reused ? "resident" : "host-import",
-            static_cast<unsigned long long>(report.input_generation),
-            static_cast<unsigned long long>(report.output_generation),
-            report.round_state_upload_bytes,
-            report.state_imports, report.state_reuses,
-            report.order_reimports, report.host_rebuild_invalidations,
-            report.host_rebuild_reimports, report.excess_refreshes,
-            report.state_buffer_allocations,
-            report.state_buffer_growths,
-            report.factor_log_columns, report.factor_log_entries,
-            report.factor_log_allocations, report.factor_log_growths,
-            report.resident_selection_consumed ? "resident" : "snapshot",
-            report.selection_validation_pivots,
-            report.selection_audit_passes,
-            report.selection_audit_incidences,
-            report.timings.upload_ms, report.timings.gather_ms,
-            report.timings.dedup_ms, report.timings.factor_ms,
-            report.timings.sample_ms, report.timings.fill_materialize_ms,
-            report.timings.mutate_ms, report.timings.checksums_ms,
-            report.timings.download_ms, report.timings.reference_ms);
-
-        pending_ = false;
-        pending_report_ = {};
-        pending_excess_bounds_.clear();
-    }
-
-    /// Announce an authoritative host graph replacement after the preceding
-    /// CPU round was verified. Unannounced mutations remain fail-closed. The
-    /// rebuilt host fingerprint is accepted only as the next continuity anchor;
-    /// the next device round must import the complete state.
-    template<incidence_storage Incidence>
-    void authoritative_host_rebuild(const graph<Incidence>& residual) {
-        if (!active()) return;
-        if (pending_)
-            throw std::logic_error(
-                "GPU round shadow: host rebuild occurred during a pending round");
-#if defined(APXCHOL_USE_CUDA)
-        const auto cpu_state = fingerprint_gpu_round_shadow_input(
-            make_gpu_round_shadow_input(
-                residual, std::span<const node_index>{}, 0));
-        device_state_->invalidate_for_authoritative_host_rebuild(cpu_state);
-        resident_selection_ready_ = false;
-#else
-        (void)residual;
-#endif
-    }
+    bool active() const noexcept { return active_; }
 
 #if defined(APXCHOL_USE_CUDA)
     // Internal dispatch has checked gpu_owned_csc_supported on the same matrix
     // before its host adapter produces these trusted, synchronously borrowed buffers.
     bool initialize_owned_csc(const gpu_owned_csc_buffers& input,
                               std::unique_ptr<gpu_block_frontend>& frontend) {
-        if (!active_ || pending_ || checked_rounds_ || owned_rounds_ || frontend ||
-            !gpu_factor_finalize_requested(route_))
+        if (!active_ || owned_initialized_ || owned_rounds_ || frontend)
             throw std::logic_error("GPU CSC initialization is outside a fresh owning session");
         const auto& knobs = env_knobs::get();
         const double reg = knobs.ground == grounding_kind::reg ? knobs.reg_eps : 0.0;
         bool sddm = false;
         frontend = device_state_->initialize_owned_csc(
-            input, reg, sddm, owned_initial_edges_);
-        owned_initial_from_csc_ = true;
+            input, reg, sddm);
+        owned_initialized_ = true;
         return sddm;
     }
 
     bool has_owned_residual() const noexcept {
-        return owned_initial_from_csc_ || owned_rounds_ != 0;
+        return owned_initialized_;
     }
 
     double probe_owned_distinct_degree(
             std::span<const node_index> active_ids, gpu_block_frontend& frontend) {
-        if (!active_ || pending_ || owned_materialized_ || !has_owned_residual())
+        if (!active_ || owned_materialized_ || !has_owned_residual())
             throw std::logic_error("GPU residual probe requires an accepted owned boundary");
         return device_state_->probe_owned_distinct_degree(active_ids, frontend);
     }
 
     gpu_owned_sparsify_stats sparsify_owned_residual(
             gpu_block_frontend& frontend, std::uint64_t seed) {
-        if (!active_ || pending_ || owned_materialized_ || !has_owned_residual())
+        if (!active_ || owned_materialized_ || !has_owned_residual())
             throw std::logic_error("GPU sparsification requires an accepted owned boundary");
         auto stats = device_state_->sparsify_owned_residual(frontend, seed);
-        // A graph rebuild starts a new ever-added edge accounting basis, just
-        // like the directed CPU coalescer. Earlier round receipts stay intact.
-        owned_initial_edges_ = stats.kept_edges;
-        owned_fill_edges_ = 0;
         return stats;
     }
 
-    template<incidence_storage Incidence>
     gpu_round_shadow_report run_owned_prefix_round(
-            const graph<Incidence>& initial_graph,
-            std::span<const node_index> pivots,
-            gpu_device_selection selected, std::uint64_t seed,
-            bool initial_graph_is_paired = false) {
-        static_assert(std::is_same_v<Incidence, directed_vec_pool_incidence>);
-        if (!active_ || pending_ || checked_rounds_ || owned_materialized_ ||
-            !gpu_factor_finalize_requested(route_))
-            throw std::logic_error("GPU-owned prefix is outside its consuming session boundary");
-        gpu_round_shadow_input initial;
-        gpu_device_selection_content paired_content;
-        const bool use_paired_input = owned_rounds_ == 0 && !owned_initial_from_csc_ && initial_graph_is_paired;
-        if (owned_rounds_ == 0 && !owned_initial_from_csc_) {
-            if (initial_graph.num_active() != initial_graph.n())
-                throw std::invalid_argument("GPU-owned prefix requires a fresh all-active graph");
-            initial = make_gpu_round_shadow_input(initial_graph, pivots, seed);
-            owned_initial_edges_ = initial_graph.m();
-            if (use_paired_input)
-                paired_content = gpu_round_selection_content_from_paired_input(initial);
-        }
-        auto report = device_state_->compute_owned_prefix(
-            owned_rounds_ == 0 && !owned_initial_from_csc_ ? &initial : nullptr, selected, seed,
-            use_paired_input ? &paired_content : nullptr);
+            gpu_device_selection selected, std::uint64_t seed) {
+        if (!active_ || !owned_initialized_ || owned_materialized_)
+            throw std::logic_error("GPU round is outside its initialized owning session");
+        auto report = device_state_->compute_owned_prefix(selected, seed);
         ++owned_rounds_;
-        owned_fill_edges_ += report.raw_fill_edges;
         factor_log_columns_ = report.factor_log_columns;
-        factor_log_entries_ = report.factor_log_entries;
         state_imports_ = report.state_imports;
         state_reuses_ = report.state_reuses;
         state_upload_bytes_ = report.state_upload_bytes;
         if (gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-prefix] round=%zu pivots=%zu generation=%llu "
-            "state_upload_bytes=%zu cpu_replay=0 host_snapshots=%d paired_initial=%d active=%llu live=%llu "
+            "state_upload_bytes=%zu active=%llu live=%llu "
             "peak_round_bytes=%zu normal_batch=%llu/%llu/%llu/%llu/%llu "
             "oversized=%llu/%llu/%llu "
             "stages_ms=%.6f/%.6f/%.6f/%.6f/%.6f/%.6f/%.6f/%.6f/%.6f total_ms=%.6f\n",
-            owned_rounds_, pivots.size(),
+            owned_rounds_, report.selection_validation_pivots,
             static_cast<unsigned long long>(report.output_generation),
-            report.round_state_upload_bytes, owned_rounds_ == 1 && !owned_initial_from_csc_ ? 1 : 0, use_paired_input ? 1 : 0,
+            report.round_state_upload_bytes,
             static_cast<unsigned long long>(report.active_count),
             static_cast<unsigned long long>(report.live_incidences), report.peak_device_bytes,
             static_cast<unsigned long long>(report.normal_batch.normal_pivots),
@@ -1882,11 +1463,12 @@ public:
         return report;
     }
 
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
     // A complete resident run needs column metadata for the existing host
     // permutation contract, never a residual or factor-entry handback.
     template<class Columns>
     void complete_owned_factorization(Columns& columns) {
-        if (!active_ || pending_ || !owned_rounds_ || owned_materialized_ || !columns.empty())
+        if (!active_ || !owned_rounds_ || owned_materialized_ || !columns.empty())
             throw std::logic_error("GPU-owned factorization completion is out of order");
         try {
             const auto headers = device_state_->download_owned_factor_columns();
@@ -1902,12 +1484,12 @@ public:
         }
     }
 
-    // Consuming full-owned route: only the existing public permutation and
-    // raw CSC metadata are needed on the host. The columns overload above
-    // remains an independent audit seam; prefix/CPU-tail handback is unchanged.
+#endif
+
+    // Only permutation and raw CSC metadata leave the completed device owner.
     void complete_owned_factorization(std::vector<node_index>& permutation,
                                       sparse_csc& metadata) {
-        if (!active_ || pending_ || !owned_rounds_ || owned_materialized_ ||
+        if (!active_ || !owned_rounds_ || owned_materialized_ ||
             !permutation.empty() || !metadata.outer_.empty())
             throw std::logic_error("GPU-owned factorization completion is out of order");
         try {
@@ -1925,229 +1507,87 @@ public:
         }
     }
 
-    template<incidence_storage Incidence, class Columns>
-    void materialize_owned_prefix(graph<Incidence>& graph,
-                                  std::vector<node_index>& active,
-                                  Columns& columns) {
-        static_assert(std::is_same_v<Incidence, directed_vec_pool_incidence>);
-        if (!active_ || pending_ || !owned_rounds_ || owned_materialized_ || !columns.empty())
-            throw std::logic_error("GPU-owned prefix materialization is out of order");
-        try {
-            auto handback = device_state_->download_owned_prefix();
-            const auto& input = handback.residual;
-            apxchol::graph<Incidence> rebuilt(input.vertex_count);
-            std::vector<node_index> sizes(input.vertex_count);
-            std::vector<node_index> vertices(input.vertex_count);
-            std::iota(vertices.begin(), vertices.end(), node_index{0});
-            for (node_index v : vertices)
-                sizes[v] = static_cast<node_index>(input.owner_offsets[v + 1] - input.owner_offsets[v]);
-            rebuilt.adj_bulk_reserve_parallel(vertices.begin(), vertices.end(), sizes);
-            for (node_index v : vertices) {
-                for (std::size_t k = input.owner_offsets[v]; k < input.owner_offsets[v + 1]; ++k) {
-                    const auto& e = input.incidences[k];
-                    rebuilt.adj_write_reserved_directed_at(v,
-                        static_cast<node_index>(k - input.owner_offsets[v]), e.neighbor, e.weight);
-                }
-                rebuilt.adj_commit_reserved_directed(v, sizes[v]);
-                rebuilt.excess(v) = input.excess[v];
-                if (!input.active[v]) rebuilt.deactivate(v);
-            }
-            const auto ever_added = gpu_round_shadow_checked_add(
-                owned_initial_edges_, owned_fill_edges_, "owned prefix edge accounting");
-            if (ever_added > std::numeric_limits<edge_index>::max())
-                throw std::overflow_error("GPU-owned prefix edge count exceeds host index range");
-            rebuilt.record_edges_added(static_cast<edge_index>(ever_added));
-            if (fingerprint_gpu_round_shadow_input(make_gpu_round_shadow_input(
-                    rebuilt, std::span<const node_index>{}, 0)) != handback.fingerprint)
-                throw std::logic_error("GPU-owned prefix ordered host materialization mismatch");
-            // Publish only after the complete ordered-state check; no undirected
-            // add_edge, coalescing or weight reordering participates in handback.
-            columns.reserve(input.vertex_count);
-            active.reserve(input.vertex_count);
-            for (const auto& c : handback.columns)
-                columns.push_back({c.vertex, c.diag, nullptr, static_cast<node_index>(c.entry_count)});
-            active.clear();
-            for (node_index v : vertices) if (input.active[v]) active.push_back(v);
-            graph = std::move(rebuilt);
-            owned_download_bytes_ = handback.download_bytes;
-            owned_materialized_ = true;
-        } catch (...) {
-            device_state_->reject_device_generation(owned_rounds_);
-            throw;
-        }
-    }
-
     void advance_selector(gpu_block_frontend& frontend) {
-        if (!active_ || pending_ || !device_state_)
+        if (!active_ || !device_state_)
             throw std::logic_error("GPU selector handoff requires a completed accepted generation");
         device_state_->advance_selector(frontend);
     }
 
-    template<class Columns>
     std::shared_ptr<cuda_sptrsv_device_factor> finalize_device_factor(
-            const Columns& columns, std::span<const node_index> permutation,
-            node_index m, factor_storage_type storage = factor_storage_type::automatic) {
-        if (!active_ || pending_ || !device_state_ || factor_log_columns_ == 0)
-            throw std::logic_error("GPU finalizer requires a completed accepted device factor log");
-        if (owned_complete_) {
-            if (permutation.size() != factor_log_columns_ ||
-                (!columns.empty() && columns.size() != factor_log_columns_))
-                throw std::logic_error("GPU finalizer complete factor coverage mismatch");
-            // Every column and entry already belongs to the device log.
-            return device_state_->finalize_device_factor(permutation, m, {}, storage);
-        }
-        if (factor_log_columns_ > columns.size())
-            throw std::logic_error("GPU finalizer prefix exceeds CPU factor");
-        gpu_round_shadow_factor_log tail;
-        for (std::size_t i = factor_log_columns_; i < columns.size(); ++i) {
-            const auto& c = columns[i];
-            tail.columns.push_back({c.vertex, c.diag, tail.entries.size(),
-                                    static_cast<std::uint32_t>(c.entry_count)});
-            for (node_index j = 0; j < c.entry_count; ++j)
-                tail.entries.push_back({c.entries[j].neighbor, c.entries[j].value});
-        }
-        return device_state_->finalize_device_factor(permutation, m, tail, storage);
+            std::span<const node_index> permutation, node_index m,
+            factor_storage_type storage = factor_storage_type::automatic) {
+        if (!active_ || !owned_complete_ || !device_state_ ||
+            permutation.size() != factor_log_columns_)
+            throw std::logic_error("GPU finalizer requires complete owned factor coverage");
+        return device_state_->finalize_device_factor(permutation, m, storage);
     }
+
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+    void initialize_owned_raw_for_test(const gpu_round_shadow_input& input,
+            std::unique_ptr<gpu_block_frontend>& frontend) {
+        if (!active_ || owned_initialized_ || owned_rounds_ || frontend)
+            throw std::logic_error("Raw owned initialization requires a fresh test session");
+        frontend = device_state_->initialize_owned_raw_for_test(input);
+        owned_initialized_ = true;
+    }
+
+    gpu_owned_prefix_handback download_owned_prefix_for_test() {
+        return device_state_->download_owned_prefix();
+    }
+    gpu_round_shadow_factor_log download_factor_log_for_test() const {
+        return device_state_->download_factor_log();
+    }
+
+#endif
 #endif
 
     void finish() const {
         if (!active_) return;
-        if (owned_rounds_) {
-            if (!owned_materialized_)
-                throw std::logic_error("GPU-owned factorization output was not published");
-            if (owned_complete_) {
-                if (gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-factorization] complete rounds=%zu cpu_replay_rounds=0 "
-                    "cpu_tail_columns=0 initial_snapshots=%d state_imports=%zu state_reuses=%zu "
-                    "state_upload_bytes=%zu residual_download_bytes=0 "
-                    "factor_header_count=%zu factor_header_download_bytes=%zu factor_entry_download_bytes=0\n",
-                    owned_rounds_, owned_initial_from_csc_ ? 0 : 1, state_imports_, state_reuses_, state_upload_bytes_,
-                    factor_log_columns_, owned_download_bytes_);
-                return;
-            }
-            if (gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-prefix] complete rounds=%zu cpu_replay_rounds=0 "
-                "initial_snapshots=1 state_imports=%zu state_reuses=%zu "
-                "state_upload_bytes=%zu handback_download_bytes=%zu "
-                "factor_header_count=%zu factor_entry_download_bytes=0\n",
-                owned_rounds_, state_imports_, state_reuses_, state_upload_bytes_,
-                owned_download_bytes_, factor_log_columns_);
-            return;
-        }
-        if (pending_)
-            throw std::logic_error(
-                "GPU round shadow: final CPU round was not verified");
-        if (state_imports_ + state_reuses_ != checked_rounds_)
-            throw std::logic_error(
-                "GPU round shadow: resident provenance denominator mismatch");
+        if (!owned_rounds_ || !owned_complete_)
+            throw std::logic_error("GPU factorization output was not completed");
         if (gpu_setup_diagnostics()) std::fprintf(stderr,
-            "[gpu-round-shadow] checked %zu/%zu rounds "
-            "(deterministic_fields=exact excess=bounded device_executions=%zu "
-            "pivots=%zu input_incidences=%llu fill=%llu "
-            "peak_bytes=%zu state_imports=%zu state_reuses=%zu "
-            "order_reimports=%zu host_rebuild_invalidations=%zu "
-            "host_rebuild_reimports=%zu excess_refreshes=%zu "
-            "state_upload_bytes=%zu "
-            "state_allocations=%zu state_growths=%zu "
-            "factor_log=%zu/%zu factor_log_allocations=%zu "
-            "factor_log_growths=%zu "
-            "total_ms=%.6f reference_ms=%.6f)\n",
-            checked_rounds_, attempted_rounds_, device_executions_, pivots_,
-            static_cast<unsigned long long>(input_incidences_),
-            static_cast<unsigned long long>(raw_fill_edges_),
-            peak_device_bytes_, state_imports_, state_reuses_,
-            order_reimports_, host_rebuild_invalidations_,
-            host_rebuild_reimports_, excess_refreshes_, state_upload_bytes_,
-            state_buffer_allocations_, state_buffer_growths_,
-            factor_log_columns_, factor_log_entries_, factor_log_allocations_,
-            factor_log_growths_,
-            totals_.total_ms, totals_.reference_ms);
+            "[gpu-owned-factorization] complete rounds=%zu state_imports=%zu state_reuses=%zu "
+            "state_upload_bytes=%zu factor_header_count=%zu factor_header_download_bytes=%zu "
+            "factor_entry_download_bytes=0\n",
+            owned_rounds_, state_imports_, state_reuses_, state_upload_bytes_,
+            factor_log_columns_, owned_download_bytes_);
     }
 
 private:
     bool active_ = false;
-    [[maybe_unused]] setup_route route_ = setup_route::diagnostic;
-    clique_sampler sampler_ = clique_sampler::gks;
-    bool pending_ = false;
     std::size_t owned_rounds_ = 0;
-    bool owned_materialized_ = false;
     bool owned_complete_ = false;
-    bool owned_initial_from_csc_ = false;
-    [[maybe_unused]] std::size_t owned_initial_edges_ = 0;
-    [[maybe_unused]] std::size_t owned_fill_edges_ = 0;
     std::size_t owned_download_bytes_ = 0;
-    std::size_t attempted_rounds_ = 0;
-    std::size_t checked_rounds_ = 0;
-    std::size_t device_executions_ = 0;
-    std::size_t pivots_ = 0;
-    std::uint64_t input_incidences_ = 0;
-    std::uint64_t raw_fill_edges_ = 0;
-    std::size_t peak_device_bytes_ = 0;
     std::size_t state_imports_ = 0;
     std::size_t state_reuses_ = 0;
-    std::size_t order_reimports_ = 0;
-    std::size_t host_rebuild_invalidations_ = 0;
-    std::size_t host_rebuild_reimports_ = 0;
-    std::size_t excess_refreshes_ = 0;
     std::size_t state_upload_bytes_ = 0;
-    std::size_t state_buffer_allocations_ = 0;
-    std::size_t state_buffer_growths_ = 0;
     std::size_t factor_log_columns_ = 0;
-    std::size_t factor_log_entries_ = 0;
-    std::size_t factor_log_allocations_ = 0;
-    std::size_t factor_log_growths_ = 0;
-    std::uint64_t pending_round_index_ = 0;
-    bool pending_cpu_order_reproducible_ = false;
-    gpu_round_shadow_report pending_report_;
-    std::vector<gpu_round_shadow_excess_bound> pending_excess_bounds_;
-    gpu_round_shadow_timings totals_;
 #if defined(APXCHOL_USE_CUDA)
+    bool owned_initialized_ = false;
+    bool owned_materialized_ = false;
     std::unique_ptr<gpu_round_shadow_device_state> device_state_;
-    bool resident_selection_ready_ = false;
 #endif
 };
 
 template<typename Eliminator, incidence_storage Incidence>
 gpu_round_shadow_session make_gpu_round_shadow_session(
-        const Eliminator& eliminator, bool consuming_block_route = false,
-        setup_route route = setup_route::diagnostic) {
-    if (gpu_factor_finalize_requested(route) && !gpu_round_shadow_requested(route))
-        throw std::invalid_argument("GPU finalizer requires APXCHOL_GPU_ROUND_SHADOW=force");
-    if (!gpu_round_shadow_requested(route)) return {};
+        const Eliminator& eliminator, setup_route route = setup_route::cpu) {
+    if (route == setup_route::cpu) return {};
 #if !defined(APXCHOL_USE_CUDA)
-    (void)eliminator; (void)consuming_block_route;
-    throw std::runtime_error(
-        "forced GPU round shadow requires an APXCHOL_USE_CUDA build");
+    (void)eliminator;
+    throw std::runtime_error("GPU factorization requires CUDA support");
 #else
-    if constexpr (!std::is_same_v<Incidence,
-                                  directed_vec_pool_incidence>) {
+    if constexpr (!std::is_same_v<Incidence, directed_vec_pool_incidence> ||
+                  !std::is_same_v<std::remove_cvref_t<Eliminator>, tree_elimination>) {
         (void)eliminator;
-        throw std::invalid_argument(
-            "forced GPU round shadow requires vec_pool_aos storage");
-    } else if constexpr (!std::is_same_v<std::remove_cvref_t<Eliminator>,
-                                         tree_elimination>) {
-        (void)eliminator;
-        throw std::invalid_argument(
-            "forced GPU round shadow requires the built-in tree eliminator");
+        throw std::invalid_argument("GPU factorization requires vec_pool_aos and the built-in eliminator");
     } else {
-        if (eliminator.sampler != clique_sampler::gks &&
-            (!consuming_block_route || !gpu_factor_finalize_requested(route) ||
-             gpu_block_frontend::configured_block_mode(route) == gpu_block_frontend::mode::disabled))
-            throw std::invalid_argument(
-                "cycle CUDA samplers require the GPU-owned consuming route; "
-                "CPU-shadow auditing/export is unsupported (disable the GPU setup flags)");
         if (eliminator.exact_clique_max_degree != 0 || eliminator.exact_core_max_h != 0 ||
             eliminator.double_cycle_min_h != 0)
-            throw std::invalid_argument(
-                "forced GPU round shadow requires a bounded built-in sampler "
-                "(exact-clique and trace-cycle core rules are unsupported on the GPU route)");
+            throw std::invalid_argument("GPU factorization requires a bounded built-in sampler");
         if (!gpu_round_shadow_runtime_available())
-            throw std::runtime_error(
-                "forced GPU round shadow requires an available CUDA device");
-        if (gpu_setup_diagnostics()) std::fprintf(stderr,
-            "[gpu-round-shadow] enabled FORCE R2a resident research shadow; "
-            "CPU-audited unless internal consuming prefix takes ownership; "
-            "deterministic fields exact, colliding excess bounded; reimports "
-            "explicitly counted\n");
-        return gpu_round_shadow_session(true, eliminator.sampler, route);
+            throw std::runtime_error("GPU factorization requires an available CUDA device");
+        return gpu_round_shadow_session(true, eliminator.sampler);
     }
 #endif
 }

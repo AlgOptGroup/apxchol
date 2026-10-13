@@ -798,7 +798,7 @@ def main():
     if a.no_rchol:
         COMP = [c for c in COMP if c not in ("rchol","rchol_par")]
     if DEVICE == "gpu" and not os.path.exists(BIN["gpu"]):
-        sys.exit(f"GPU build not found: {BIN['gpu']} (configure with -DAPXCHOL_USE_CUDA=ON)")
+        sys.exit(f"GPU build not found: {BIN['gpu']} (configure with -DAPXCHOL_DEVICE=CUDA)")
     PROV["note"] = f"FAIR {DEVICE} run, singular L, multi-component Dirichlet pin (per-solver grounding)"
     print(f"=== fair sweep: device={DEVICE}, families={sorted(fams)}, "
           f"headline_only={a.headline_only}, store={CELLS} "

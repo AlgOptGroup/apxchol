@@ -46,10 +46,17 @@ quality and cost, and requires its own correctness and performance validation.
 
 ## GPU solve and storage
 
+**CUDA and Metal share the dataflow worker and task format.** CUDA uses a global
+queue; Metal groups dependent rows into workgroups so that waiting threads
+cannot block an unscheduled dependency. Shared task packing works on host or
+device. This replaced Metal's separate row kernels and level-permuted value
+copy. FP32 values and readiness now share one atomic word, replacing CUDA's
+epoch counters; each sweep initializes that state before processing tasks.
+
 **Dataflow triangular solves replaced level launches and proprietary analysis.**
-The library uses its own persistent dataflow kernel, with an epoch-tagged
-value per row and topologically ordered work tickets. This avoids a kernel
-launch for every level and an analysis buffer proportional to factor nnz.
+The library uses its own persistent dataflow worker and topologically ordered
+work tickets. This avoids a kernel launch for every level and an analysis
+buffer proportional to factor nnz.
 Our library links `cudart`; benchmark competitors may independently require
 cuSPARSE/cuBLAS. Earlier records describing a selectable cuSPARSE backend are
 obsolete. The design and ordering constraints are documented in
@@ -66,8 +73,12 @@ accuracy checks, while mixed hub precision and packed-load alternatives added
 register, memory, or integer-instruction costs without a useful overall win.
 
 **GPU PCG owns its arithmetic and reductions.** Fused operator application and
-fixed reduction structure avoid proprietary solver dependencies. Outer PCG
-vectors and reductions are FP64. The triangular-solve dataflow state is FP32;
+fixed reduction structure avoid proprietary solver dependencies. CUDA and Metal
+share the driver, workspace and operation loop, with native FP64 arithmetic on
+CUDA and double-float on Metal. The shared shuffle tree replaced Metal's serial
+fold, scratch and barrier; grounded Laplacian coordinates removed per-iteration
+mean reductions. Host centering and an independent FP64 exit residual remain.
+The triangular-solve dataflow state is FP32;
 its tagged representation does not provide an FP64 triangular-solve path.
 The former untested FP64-factor-storage build choice was removed rather than
 advertised as supported. These are separate choices; see [precision and
@@ -75,7 +86,7 @@ storage](precision.md).
 
 **Low-precision storage retains numerical compensation.** CPU and GPU share
 column scaling, a separate fp32 diagonal, subnormal flushing, and compensation
-for storage rounding. fp16 defaults on for GPU and off for CPU. Keeping the
+for storage rounding. fp16 defaults on for CUDA and off for CPU/Metal. Keeping the
 diagonal in fp16 increased historical iter0040 iterations from 44 to 50;
 omitting rounding compensation increased 45 to 64. A single runtime storage
 choice replaced separate binaries and GPU-only aliases. Scalar gathers won
@@ -105,13 +116,18 @@ independent handoff and validation; no disk format or public session API is adde
 This is a contract simplification, not a claim of universal GPU speedup. The
 frontend and owned-setup measurements below retain their historical profiles.
 
+**Mixed diagnostic setup retired (2026-10-13).** CPU elimination with GPU
+selection, mirrored GPU rounds and GPU-prefix/CPU-tail handoffs were removed.
+Public factorization uses the CPU; GPU solves complete setup on the device.
+Independent CPU oracles and test-only inspection validate the owned GPU path.
+
 **The fixed-priority GPU frontend was removed.** A historical 90-record forced
 campaign produced setup ratio 1.102. An independently implemented asynchronous
 MIS variant preserved the recorded factors and iterations in 54 bracketed
 runs, but selector time was 1.057 and enclosing partition time 1.069; setup
 was near noise at 0.989. Keeping another mode was not justified.
 
-**The block frontend is explicit opt-in.** An automatic thread-count governor
+**The former hybrid block frontend was opt-in.** An automatic thread-count governor
 was removed: host-thread count must not silently choose a different algorithm.
 The historical 270-record GH200 study found single-RHS total ratios
 0.711/0.762/0.826/0.927 at T=1/2/4/8, but 1.050 at T=16 and 1.201 at T=72,
@@ -120,7 +136,7 @@ an explicit research choice, not universal GPU dominance. Batching transfers
 and reusing resident topology were useful; a tested 2D-copy alternative did
 not justify retention.
 
-**GPU-owned setup remains explicit research functionality.** The internal
+**GPU-owned setup began as research functionality.** The internal
 consuming path supports numerical rounds on device, direct CSC/operator
 preparation, bounded selection, local row batches and device factor/plan
 construction. Host metadata and validated public/export/fallback paths remain.
@@ -365,44 +381,3 @@ default or fixed-storage sweeps and label new output accordingly. Historical
 forward-star measurements and their chart labels remain unchanged. This
 retirement does not establish that the surviving layouts are universally
 dominated, and it does not change the default solver or its numerical controls.
-
-## Apple Metal backend
-
-`metal_solver` ports a private downstream feasibility prototype (a Rust host
-with MSL kernels, run on exported apxchol factors). Its measurements belong to
-that project and are not reproduced here; the findings below are historical
-and qualitative, not a validation of this integration.
-
-**Precision variants.** An all-FP32 solve reached its recursive tolerance while
-the true original-system residual stalled far above 1e-8. FP64 iterative
-refinement on the CPU around restarted FP32 solves converged but cost several
-times the FP64 iteration count at 1e-10. FP32 PCG with reliable updates (FP64 on
-the CPU, or double-float on the GPU) kept the search directions but diverged at
-1e-10 on the largest case. The FP32 preconditioner with double-float Krylov
-recurrences (x, r, A p and the operator) reached 1e-10 true residuals without
-restarts at close to FP64 iteration counts; it is the only mode retained.
-
-**Inherited constants.** At most 64 right-hand sides per batch, node-major
-blocks; rows with more than 32 dependencies are heavy; runs of narrow levels
-(light rows only, at most 2048 row-column items) share one threadgroup of up to
-1024 threads; one command buffer per iteration above 200,000 rows and per four
-iterations below. None is an environment knob. The port does the host packing,
-centring and FP64 exit check in block-wide node-major passes (the prototype
-made one strided pass per column) and keeps two command buffers in flight (the
-prototype waited for each one); the inherited iterations per command buffer
-are unchanged.
-
-**Fixed while porting.** Breakdown reported as convergence (a skipped update
-left a zero r.r behind); `<=` stopping (now strict `<`); FP32 underflow of
-tol^2 ||b||^2 (now exact power-of-two scaling and a host double-float
-threshold); reductions whose order depended on the batch width (now one tree
-fixed by n, and 32 virtual lanes for heavy rows); 32-bit overflow of block
-indices (n kc < 2^32 is enforced); unchecked command-buffer errors; heavy-row
-lanes taken from another pipeline's thread limit; double-float exactness left
-to the compiler's defaults (now safe math mode, contraction off and a device
-self-test); device lookup without CoreGraphics linked. The prototype also
-applied the undropped factor; the port applies the CPU's dropped FP32 factor.
-Its other modes and their environment controls were not ported.
-
-No timing study accompanies this integration; performance relative to the CPU
-or CUDA solves is not established.

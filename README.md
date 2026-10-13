@@ -1,12 +1,12 @@
 # apxchol
 
 Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
-and SDDM systems. CPU setup and solve use OpenMP; CUDA provides an optional
-device-owned setup and GPU-resident solve; Metal provides an optional Apple-GPU block solve. C++, Python and Octave/MATLAB interfaces are included.
+and SDDM systems, with OpenMP CPU, CUDA and Apple Metal backends.
+C++, Python and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
-Requires CMake, GCC or Clang with C++23 and OpenMP, and Eigen (fetched if absent).
+Requires CMake 3.20+, GCC or Clang with C++23 and OpenMP, and Eigen (fetched if absent).
 MSVC and clang-cl are not supported.
 On x86-64, the minimum CPU requirement is x86-64-v2.
 Optional CUDA builds require CUDA Toolkit 13.3+ and CMake 4.4+ for C++23 support.
@@ -44,15 +44,11 @@ Eigen::VectorXd z = solver.apply(r);
 CPU solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
-With `-DAPXCHOL_USE_METAL=ON` (macOS), `apxchol::metal_solver` solves up to 64
-right-hand sides in lockstep on the Apple GPU, with double-float recurrences
-and the CPU's factor. Default solves are unchanged. See
-[precision and storage](docs/precision.md).
-
-```cpp
-apxchol::metal_solver gpu(L);              // host factorization, GPU solves
-auto block = gpu.solve(B, 1e-10);          // B: n x k, per-column results
-```
+With `-DAPXCHOL_DEVICE=METAL` (macOS), `--backend gpu` and
+`solve_options::backend = solve_backend::gpu` select the Apple GPU.
+Automatic selection stays on CPU. Use `apxchol::metal_solver` in place of
+`cpu_solver` above to reuse its host-built factor and GPU workspace.
+Metal supports FP32 and FP16 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
 
 ```bash
 pip install apxchol                 # or: pip install -e python
@@ -71,15 +67,14 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 
 | CMake option | Purpose |
 |---|---|
-| `APXCHOL_USE_CUDA=ON` | Device-owned setup, dataflow triangular solves and GPU PCG; core links only `cudart` |
-| `APXCHOL_USE_METAL=ON` | Apple-GPU block PCG (`metal_solver`); macOS only, exclusive with CUDA |
+| `APXCHOL_DEVICE=CPU` | Build for `CPU` (default), `CUDA`, or `METAL` (macOS). GPU builds also support CPU solves |
 | `APXCHOL_POOL_FP32=OFF` | fp64 residual-pool weights instead of default fp32 |
 | `APXCHOL_64BIT_EDGE_INDICES=ON` | Wide factor/pool offsets |
 | `APXCHOL_64BIT_NODE_INDICES=ON` | Wide vertices and offsets |
 
 `cmake -LH build` lists build options. Algorithm defaults live in
 [factor_options.h](include/apxchol/solver/factor_options.h).
-`APXCHOL_FACTOR_STORAGE=auto|float16|float32` controls triangular-solve factor storage (`auto`: GPU FP16, CPU FP32).
+`APXCHOL_FACTOR_STORAGE=auto|float16|float32` controls triangular-solve factor storage (`auto`: CUDA FP16, CPU/Metal FP32).
 FP16 narrows scaled off-diagonals, retaining FP32 diagonals; it
 does not change the outer PCG to FP16. See [precision and storage](docs/precision.md).
 `--sampler gks|trace_cycle` selects the clique sampler; GKS remains
@@ -91,12 +86,12 @@ nodes and no factor export; other configurations select CPU. This is an option
 compatibility policy, not a speed predictor or device-availability probe.
 `solve_result.backend` and the CLI report the actual route.
 
-The GPU route requires device-owned factor and operator construction. Unsupported
+The CUDA route requires device-owned factor and operator construction. Unsupported
 stored formats, unavailable devices, allocation failures and execution errors are
 reported without retrying on CPU. Use `--backend cpu` (or `solve_backend::cpu`)
 for CPU execution in a CUDA build, including lower-only or otherwise unsupported
-CSC layouts. GPU operator input must be compressed, sorted, unique and fully
-paired. Ordinary GPU solves no longer need the three per-stage environment flags;
+CSC layouts. CUDA operator input must be compressed, sorted, unique and fully
+paired. Ordinary CUDA solves no longer need the three per-stage environment flags;
 those flags remain low-level diagnostic controls. Public factorization, custom
 strategies and factor export stay available on CPU. See the
 [extension guide](docs/extending.md) for explicit factor handoff.

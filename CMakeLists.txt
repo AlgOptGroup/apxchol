@@ -1,5 +1,6 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(apxchol VERSION 0.2.2 LANGUAGES CXX)
+include(cmake/apxchol_device.cmake)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -21,42 +22,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/apxchol_arch.cmake)
 add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
 
 include(FetchContent)
-# Fetched projects must not register their own test suites in apxchol's CTest
-# tree. In particular, Eigen defaults BUILD_TESTING to ON and otherwise adds
-# hundreds of unbuilt tests. Temporarily override both its visible value and
-# cache entry while dependencies are added, then restore a parent project's
-# original state exactly below.
-if (DEFINED BUILD_TESTING)
-    set(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE TRUE)
-    set(_APXCHOL_SAVED_BUILD_TESTING_VALUE "${BUILD_TESTING}")
-else()
-    set(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE FALSE)
-endif()
-get_property(_APXCHOL_SAVED_BUILD_TESTING_TYPE
-             CACHE BUILD_TESTING PROPERTY TYPE)
-if (_APXCHOL_SAVED_BUILD_TESTING_TYPE)
-    get_property(_APXCHOL_SAVED_BUILD_TESTING_CACHE
-                 CACHE BUILD_TESTING PROPERTY VALUE)
-    get_property(_APXCHOL_SAVED_BUILD_TESTING_HELP
-                 CACHE BUILD_TESTING PROPERTY HELPSTRING)
-endif()
-# Eigen 3.4 resets CMP0077 to its legacy behavior, so a normal variable alone
-# is insufficient: temporarily pin the cache too, then restore it exactly.
-set(BUILD_TESTING OFF CACHE BOOL "Disable tests in apxchol dependencies" FORCE)
-set(BUILD_TESTING OFF)
-
-# ── Eigen ────────────────────────────────────────────
-find_package(Eigen3 3.3 CONFIG QUIET)
-if (NOT Eigen3_FOUND)
-    FetchContent_Declare(eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG        3.4.0
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(eigen)
-    set_property(TARGET eigen APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
-        "$<TARGET_PROPERTY:eigen,INTERFACE_INCLUDE_DIRECTORIES>")
-endif()
+include(cmake/apxchol_eigen.cmake)
 
 # ── CLI11 ────────────────────────────────────────────
 FetchContent_Declare(cli11
@@ -86,29 +52,10 @@ FetchContent_Declare(fast_matrix_market
 )
 FetchContent_MakeAvailable(fast_matrix_market)
 
-if (_APXCHOL_SAVED_BUILD_TESTING_TYPE)
-    set(BUILD_TESTING "${_APXCHOL_SAVED_BUILD_TESTING_CACHE}"
-        CACHE ${_APXCHOL_SAVED_BUILD_TESTING_TYPE}
-        "${_APXCHOL_SAVED_BUILD_TESTING_HELP}" FORCE)
-else()
-    unset(BUILD_TESTING CACHE)
-endif()
-if (_APXCHOL_SAVED_BUILD_TESTING_VISIBLE)
-    set(BUILD_TESTING "${_APXCHOL_SAVED_BUILD_TESTING_VALUE}")
-else()
-    unset(BUILD_TESTING)
-endif()
-unset(_APXCHOL_SAVED_BUILD_TESTING_CACHE)
-unset(_APXCHOL_SAVED_BUILD_TESTING_HELP)
-unset(_APXCHOL_SAVED_BUILD_TESTING_TYPE)
-unset(_APXCHOL_SAVED_BUILD_TESTING_VALUE)
-unset(_APXCHOL_SAVED_BUILD_TESTING_VISIBLE)
-
 # ── OpenMP ────────────────────────────────
 include(cmake/apxchol_openmp.cmake)
 
 # ── Build options ───────────────────────────────────
-option(APXCHOL_USE_CUDA "GPU build: our sync-free dataflow CUDA SpTRSV kernel + the GPU-resident PCG with our own SpMV / vector kernels; links cudart only" OFF)
 option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
 option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
 option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
@@ -116,26 +63,18 @@ option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to 
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 option(APXCHOL_BUILD_TOOLS "Build the developer analysis tools (bench_setup, analyze_factor)" OFF)
-option(APXCHOL_USE_METAL "Apple GPU block PCG (explicit apxchol::metal_solver; defaults unchanged)" OFF)
 
 if (APXCHOL_64BIT_INDICES)
     message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
     set(APXCHOL_64BIT_EDGE_INDICES ON)
 endif()
 
-if (APXCHOL_USE_METAL)
-    if (NOT APPLE)
-        message(FATAL_ERROR "APXCHOL_USE_METAL requires an Apple platform")
-    endif()
-    if (APXCHOL_USE_CUDA)
-        message(FATAL_ERROR "APXCHOL_USE_METAL and APXCHOL_USE_CUDA are mutually exclusive")
-    endif()
-    # Only src/metal_device.mm is Objective-C++; OpenMP host work stays in the
-    # C++ sources (FindOpenMP's flags apply to CXX only).
+if (APXCHOL_DEVICE STREQUAL "METAL")
+    # The Metal implementation uses Objective-C++ for its host and device owner.
     enable_language(OBJCXX)
 endif()
 
-if (APXCHOL_USE_CUDA)
+if (APXCHOL_DEVICE STREQUAL "CUDA")
     enable_language(CUDA)
     find_package(CUDAToolkit 13.3 REQUIRED)
     # Must be set before the target is created — CMAKE_CUDA_ARCHITECTURES is
@@ -164,63 +103,61 @@ configure_file(
 )
 
 # ── Core library: ApxChol preconditioner ─────────────
-add_library(apxchol_core
-    src/factorization.cpp
-    src/operator_class.cpp
-    src/solve.cpp
-    # Device precision-cast kernels for the mixed-precision GPU SpTRSV. Compiled
-    # by nvcc only on the CUDA build (the .cpp TUs are host-compiled and can't
-    # host __global__).
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_cast.cu>
-    # Sync-free dataflow SpTRSV kernel (APXCHOL_GPU_SPTRSV=dataflow), same reason.
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_dataflow.cu>
-    # GPU-resident residual topology for the opt-in block-region frontend.
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_block_frontend.cu>
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_round_shadow.cu>
-    # The GPU-resident PCG's own CSR SpMV + fused vector kernels with
-    # deterministic reductions (pcg_cuda.h; no cuSPARSE / cuBLAS).
-    $<$<BOOL:${APXCHOL_USE_CUDA}>:src/cuda_pcg_kernels.cu>
-    # Apple GPU block PCG (metal_solver.h): C++ host side and the Objective-C++
-    # device side that compiles src/metal_kernels.inc at run time.
-    $<$<BOOL:${APXCHOL_USE_METAL}>:src/metal_solver.cpp>
-    $<$<BOOL:${APXCHOL_USE_METAL}>:src/metal_device.mm>
-)
-# The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
-# solely for the CLI and analyze_factor, and is linked on those targets.
-target_link_libraries(apxchol_core PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
+function(apxchol_add_core target)
+    add_library(${target} ${ARGN}
+        src/factorization.cpp
+        src/operator_class.cpp
+        src/solve.cpp
+    )
+    # The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
+    # solely for the CLI and analyze_factor, and is linked on those targets.
+    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
 
-target_include_directories(apxchol_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_BINARY_DIR}/include
-)
+    target_include_directories(${target} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_BINARY_DIR}/include
+    )
 
-if (APXCHOL_USE_CUDA)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_CUDA)
-    # cudart only: the SpTRSV kernels, the GPU-resident PCG's SpMV / vector
-    # kernels and its reductions are all ours; no cuSPARSE or cuBLAS.
-    target_link_libraries(apxchol_core PUBLIC CUDA::cudart)
-    set_target_properties(apxchol_core PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
-endif()
+    if (APXCHOL_DEVICE STREQUAL "CUDA")
+        target_sources(${target} PRIVATE src/cuda_dataflow.cu
+            src/cuda_block_frontend.cu src/cuda_round_shadow.cu src/cuda_pcg_kernels.cu)
+        target_compile_definitions(${target} PUBLIC APXCHOL_USE_CUDA)
+        # cudart only: the SpTRSV kernels, the GPU-resident PCG's SpMV / vector
+        # kernels and its reductions are all ours; no cuSPARSE or cuBLAS.
+        target_link_libraries(${target} PUBLIC CUDA::cudart)
+        set_target_properties(${target} PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
+    endif()
 
-if (APXCHOL_USE_METAL)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_USE_METAL)
-    set_source_files_properties(src/metal_device.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
-    set_target_properties(apxchol_core PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)
-    # PUBLIC: the static library hands the framework dependencies to its
-    # consumers. CoreGraphics lets MTLCreateSystemDefaultDevice find the GPU
-    # from command-line tools.
-    target_link_libraries(apxchol_core PUBLIC "-framework Metal" "-framework Foundation"
-                          "-framework CoreGraphics")
-endif()
+    if (APXCHOL_DEVICE STREQUAL "METAL")
+        target_sources(${target} PRIVATE src/metal_solver.mm)
+        target_compile_definitions(${target} PUBLIC APXCHOL_USE_METAL)
+        set_source_files_properties(src/metal_solver.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:OBJCXX>:SHELL:${OpenMP_CXX_FLAGS}>")
+        set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)
+        # PUBLIC: the static library hands the framework dependencies to its
+        # consumers. CoreGraphics lets MTLCreateSystemDefaultDevice find the GPU
+        # from command-line tools.
+        target_link_libraries(${target} PUBLIC "-framework Metal" "-framework Foundation"
+                              "-framework CoreGraphics")
+    endif()
 
-if (APXCHOL_64BIT_EDGE_INDICES)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_64BIT_EDGE_INDICES)
-endif()
-if (APXCHOL_64BIT_NODE_INDICES)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_64BIT_NODE_INDICES)
-endif()
-if (APXCHOL_POOL_FP32)
-    target_compile_definitions(apxchol_core PUBLIC APXCHOL_POOL_FP32)
+    if (APXCHOL_64BIT_EDGE_INDICES)
+        target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_EDGE_INDICES)
+    endif()
+    if (APXCHOL_64BIT_NODE_INDICES)
+        target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_NODE_INDICES)
+    endif()
+    if (APXCHOL_POOL_FP32)
+        target_compile_definitions(${target} PUBLIC APXCHOL_POOL_FP32)
+    endif()
+endfunction()
+
+apxchol_add_core(apxchol_core)
+if (APXCHOL_BUILD_TESTS AND APXCHOL_DEVICE STREQUAL "CUDA")
+    # Test-only declarations must agree across the whole core and its consumers.
+    apxchol_add_core(apxchol_test_core STATIC)
+    target_compile_definitions(apxchol_test_core PUBLIC APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 endif()
 
 # ── CLI input interpretation ─────────────────────────
@@ -234,7 +171,10 @@ target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/
 # Directory settings do not reach targets in a parent add_subdirectory caller.
 # Public Eigen objects must use the same alignment/ISA configuration on both
 # sides of the library boundary. Export the architecture flag used by this build.
-foreach (_apxchol_target IN ITEMS apxchol_core apxchol_mtx_input)
+foreach (_apxchol_target IN ITEMS apxchol_core apxchol_test_core apxchol_mtx_input)
+    if (NOT TARGET ${_apxchol_target})
+        continue()
+    endif()
     target_compile_features(${_apxchol_target} PUBLIC cxx_std_23)
     if (APXCHOL_ARCH_FLAG)
         target_compile_options(${_apxchol_target} INTERFACE

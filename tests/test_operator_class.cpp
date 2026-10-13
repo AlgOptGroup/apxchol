@@ -13,6 +13,7 @@
 //     is the load-bearing test: PCG must keep applying the operator the caller
 //     passed, or the residual it reports is for a different system.
 #include <gtest/gtest.h>
+#include "grid_laplacian.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -46,28 +47,7 @@ using Trip   = Eigen::Triplet<double>;
 
 /// Assembled Laplacian of a rows x cols 4-neighbour grid, both triangles
 /// stored. Pure Laplacian: every row sums to zero.
-Sparse grid_laplacian(int rows, int cols, double w = 1.0) {
-    const int n = rows * cols;
-    std::vector<Trip> t;
-    std::vector<double> deg(n, 0.0);
-    auto id = [cols](int r, int c) { return r * cols + c; };
-    auto edge = [&](int a, int b) {
-        t.emplace_back(a, b, -w);
-        t.emplace_back(b, a, -w);
-        deg[a] += w;
-        deg[b] += w;
-    };
-    for (int r = 0; r < rows; ++r)
-        for (int c = 0; c < cols; ++c) {
-            if (r + 1 < rows) edge(id(r, c), id(r + 1, c));
-            if (c + 1 < cols) edge(id(r, c), id(r, c + 1));
-        }
-    for (int i = 0; i < n; ++i) t.emplace_back(i, i, deg[i]);
-    Sparse L(n, n);
-    L.setFromTriplets(t.begin(), t.end());
-    L.makeCompressed();
-    return L;
-}
+using apxchol::test::grid_laplacian;
 
 /// Grid Laplacian + a uniform diagonal excess: a genuine SDDM operator.
 Sparse grid_sddm(int rows, int cols, double shift = 0.05) {

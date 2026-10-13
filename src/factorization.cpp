@@ -100,7 +100,7 @@ static void assemble_csc(
         block_overflow[static_cast<std::size_t>(tid)] = local_overflow;
 
         #pragma omp barrier
-        #pragma omp master
+        #pragma omp masked
         {
             try {
                 if (cp) (*cp)("permutation");
@@ -259,7 +259,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                           graph_storage storage,
                                           const factor_options& opts_in,
                                           checkpoint* cp,
-                                          bool retain_host_factor, setup_route route) {
+                                          setup_route route) {
     // Assert the operator contract and lump positive off-diagonals if the
     // matrix needs it. Same `operator_view` the header's factorize() overloads
     // use — one implementation, so the CLI, the C++ API and both bindings
@@ -281,22 +281,38 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
 
     // Move the throwaway make_graph result into factorize_with_strategy's
     // by-value graph parameter — no defensive deep-copy on the dispatch path.
-    // Only this fresh make_graph result carries paired-input provenance into
-    // the internal consuming GPU route. Generic graph entry points default to
-    // full validation; no caller-provided graph receives this marker.
     auto do_factorize = [&](auto&& G) {
         if (cp) { (*cp)("make_graph"); cp->ascend(); }
         factorization F = dispatch_partitioner<factorization>(opts.is_select,
             [&]<typename P>() -> factorization {
                 P partitioner;
                 return factorize_impl(make_tree_elim(opts, route), partitioner,
-                    std::move(G), opts, cp, retain_host_factor, true, nullptr, route);
+                    std::move(G), opts, cp);
             });
         F.lumped_offdiag = op.lumped();
         return F;
     };
 
     const Eigen::SparseMatrix<double>& A = op.matrix();
+    if (route == setup_route::gpu) {
+#if defined(APXCHOL_USE_CUDA)
+        if (storage != graph_storage::vec_pool_aos || opts.is_select != "block_greedy" ||
+            opts.exact_clique_max_degree != 0 || exact_core_or_off(opts.exact_core_max_h) != 0 ||
+            opts.double_cycle_min_h != 0)
+            throw std::invalid_argument("GPU setup requires block_greedy, vec_pool_aos and a bounded sampler");
+        if (!detail::gpu_owned_csc_supported(op))
+            throw std::invalid_argument("GPU route requires a supported compressed, sorted, "
+                "paired CSC operator; request CPU explicitly");
+        if (cp) { (*cp)("gpu_csc_eligibility"); cp->ascend(); }
+        block_greedy_partitioner partitioner;
+        auto F = factorize_impl(make_tree_elim(opts, route), partitioner,
+            graph<directed_vec_pool_incidence>{}, opts, cp, &A, route);
+        F.lumped_offdiag = op.lumped();
+        return F;
+#else
+        throw std::runtime_error("GPU factorization requires a CUDA build");
+#endif
+    }
     // The scan's bit-identical-triangles proof is about the caller's matrix. It
     // transfers to A only when nothing was lumped, i.e. when A IS that matrix;
     // make_graph then skips its per-entry transpose-partner search.
@@ -310,26 +326,6 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     }
 
     case graph_storage::vec_pool_aos: {
-#if defined(APXCHOL_USE_CUDA)
-        if (!retain_host_factor && opts.is_select == "block_greedy" &&
-            opts.exact_clique_max_degree == 0 &&
-            exact_core_or_off(opts.exact_core_max_h) == 0 && opts.double_cycle_min_h == 0 &&
-            detail::gpu_round_shadow_requested(route) && detail::gpu_factor_finalize_requested(route) &&
-            detail::gpu_block_frontend::configured_block_mode(route) != detail::gpu_block_frontend::mode::disabled) {
-            if (detail::gpu_owned_csc_supported(op)) {
-                if (cp) { (*cp)("gpu_csc_eligibility"); cp->ascend(); }
-                block_greedy_partitioner partitioner;
-                auto F = factorize_impl(make_tree_elim(opts, route), partitioner,
-                    graph<directed_vec_pool_incidence>{}, opts, cp, false, false, &A, route);
-                F.lumped_offdiag = op.lumped();
-                return F;
-            }
-            if (route == setup_route::gpu)
-                throw std::invalid_argument("GPU route requires a supported compressed, sorted, "
-                    "paired CSC operator; request CPU explicitly");
-            if (detail::gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-csc] fallback=unsupported_stored_format before_device_mutation=1\n");
-        }
-#endif
         auto G = detail::make_graph_from_operator<graph<directed_vec_pool_incidence>>(
             A, triangles_bit_identical);
         return do_factorize(std::move(G));
@@ -344,11 +340,11 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     }
 }
 
-// Public factorization remains exportable, including under the research mode.
+// Public factorization returns an exportable CPU factor.
 factorization factorize(const Eigen::SparseMatrix<double>& L,
                         graph_storage storage, const factor_options& opts,
                         checkpoint* cp) {
-    return detail::factorize_for_solver(L, storage, opts, cp, true);
+    return detail::factorize_for_solver(L, storage, opts, cp);
 }
 
 } // namespace apxchol
