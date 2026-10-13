@@ -193,8 +193,8 @@ namespace detail {
 factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                   graph_storage storage,
                                   const factor_options& opts,
-                                  checkpoint* cp, bool retain_host_factor,
-                                  setup_route route = setup_route::diagnostic);
+                                  checkpoint* cp,
+                                  setup_route route = setup_route::cpu);
 
 struct factor_entry {
     node_index neighbor;

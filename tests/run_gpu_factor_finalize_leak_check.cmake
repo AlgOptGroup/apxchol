@@ -1,7 +1,7 @@
 execute_process(
         COMMAND "${SANITIZER}" --tool memcheck --leak-check full --error-exitcode 99
         "${UNIT_TESTS}"
-        --gtest_filter=GpuFactorFinalize.InvalidCoveragePermutationAndCoordinatesFailClosed
+        --gtest_filter=GpuFactorFinalize.InvalidPermutationAndExtentFailClosed
         RESULT_VARIABLE status OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
 message("${stdout}${stderr}")
 if (NOT status STREQUAL "0")

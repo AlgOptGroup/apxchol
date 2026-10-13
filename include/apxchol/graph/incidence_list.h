@@ -468,7 +468,7 @@ template<typename Value, graph_storage Tag> struct basic_vec_pool_incidence {
     /// invoke concurrently for any (v, slot) since the slot is atomically
     /// claimed.
     void atomic_push_reserved(node_index v, value_type idx) {
-        const node_index slot = __atomic_fetch_add(&count_[v], 1, __ATOMIC_RELAXED);
+        const node_index slot = std::atomic_ref(count_[v]).fetch_add(1, std::memory_order_relaxed);
         pool_[base_[v] + static_cast<size_t>(slot)] = idx;
     }
 

@@ -1275,7 +1275,7 @@ TEST(CApi, MetalBackendRoundTrip) {
     EXPECT_NEAR(info.relative_residual, res, 1e-3 * res);
     EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());
 
-    // Lockstep block: every column equals its single solve, bit for bit.
+    // Sequential block: every column equals its single solve, bit for bit.
     const std::int64_t k = 3;
     Eigen::MatrixXd B(c.n, k), X(c.n, k);
     B.col(0) = compatible_rhs(c.n, 1);

@@ -1,32 +1,7 @@
 #pragma once
-/// GPU-resident PCG loop -- our own kernels only (pcg_cuda_kernels.h): no
-/// cuSPARSE, no cuBLAS. The CUDA library build links cudart alone.
-///
-/// Operator construction and all iteration arithmetic use the device. CPU
-/// solves have their own complete host route; there is no host-operator
-/// construction fallback in this owner.
-///
-/// `cuda_pcg` keeps the input matrix A as a full-symmetric CSR on the
-/// device once, allocates all 5 PCG vectors (x, r, p, z, Ap) on device,
-/// and runs every iteration entirely on the GPU:
-///   - SpMV + p.Ap: our CSR kernel (pcg_cuda::spmv_pAp; LANES threads per
-///     row picked from the average nnz/row, fp64 or fp32-exact operator
-///     values promoted per product, fp64 accumulate)
-///   - the fused vector passes mirroring the CPU loop (src/solve.cpp):
-///     update_xr (x += alpha p, r -= alpha Ap, r.r in one pass), r.z,
-///     update_p (p = z + beta p)
-///   - precond.solve via the existing cuda_sptrsv::solve_LLt_dev
-/// Every reduction is DETERMINISTIC (fixed grid, per-block partials, fixed-
-/// order final reduce -- no floating-point atomics; see pcg_cuda_kernels.h),
-/// so on our dataflow SpTRSV kernel the whole solve is bit-
-/// identical run to run. Only the initial b is H2D'd, three 8-byte scalars
-/// per iteration (p.Ap, r.r, r.z) come back to the host, only the final x
-/// is D2H'd.
-///
-/// Env: APXCHOL_GPU_SPMV_LANES=1|2|4|8|16|32 overrides the SpMV's threads-
-/// per-row choice (A/B only; read at setup; spmv_lanes() reports it).
-/// APXCHOL_GPU_FP32_OPERATOR=0|1 overrides the operator storage precision
-/// (default AUTO: fp32 iff every value round-trips fp32).
+// GPU-owned operator and reusable PCG workspace. Kernels use native FP64,
+// fixed reductions and the shared device recurrence; only the completed state
+// is read by the host each iteration. The core links cudart alone.
 
 #include <Eigen/Sparse>
 #include <Eigen/Core>
@@ -35,6 +10,7 @@
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include <limits>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -42,6 +18,7 @@
 // check_cuda lives in apxchol/solver/sptrsv/cuda.h (already included
 // transitively via preconditioner.h).
 #include "apxchol/solver/pcg_cuda_kernels.h"
+#include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 
@@ -86,38 +63,26 @@ public:
         // Allocate the permutation before accepting device ownership. The
         // factor supplied this validated bijection; the builder checks the CSC.
         h_perm_.assign(perm.begin(), perm.begin() + n_);
-        pcg_cuda::operator_csr prepared;
         if (!pcg_cuda::try_build_permuted_operator_csr(
                 static_cast<int>(n_), static_cast<int>(L.nonZeros()),
                 L.outerIndexPtr(), L.innerIndexPtr(), L.valuePtr(),
-                reinterpret_cast<const std::uint32_t*>(perm.data()), precision, prepared))
+                reinterpret_cast<const std::uint32_t*>(perm.data()), precision, matrix_))
             throw std::invalid_argument("GPU PCG requires sorted, unique, fully paired CSC storage; request CPU explicitly");
-        d_row_ptr_ = prepared.row_ptr;
-        d_col_idx_ = prepared.col_idx;
-        d_vals_ = prepared.values_f64;
-        d_vals_f32_ = prepared.values_f32;
-        nnz_ = prepared.nnz;
-        fp32_op_ = prepared.fp32;
 
         // SpMV row mapping: threads per row from the average nnz/row
         // (pcg_cuda::spmv_lanes_for), env APXCHOL_GPU_SPMV_LANES overrides.
-        spmv_lanes_ = pcg_cuda::spmv_lanes_for(n_ > 0 ? static_cast<double>(nnz_) / static_cast<double>(n_) : 1.0);
+        spmv_lanes_ = pcg_cuda::spmv_lanes_for(n_ > 0 ? static_cast<double>(matrix_.nnz) / static_cast<double>(n_) : 1.0);
         if (const char* e = std::getenv("APXCHOL_GPU_SPMV_LANES")) {
             const int v = std::atoi(e);
             if (v == 1 || v == 2 || v == 4 || v == 8 || v == 16 || v == 32) spmv_lanes_ = v;
             else if (*e) std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPMV_LANES=%s ignored (expected 1|2|4|8|16|32); using %d\n", e, spmv_lanes_);
         }
-        spmv_blocks_ = pcg_cuda::pcg_blocks(n_ * spmv_lanes_);
-        vec_blocks_  = pcg_cuda::pcg_blocks(n_);
-
-        // PCG iterate vectors, the reduction partials (one double per block of
-        // the fixed grid) and the device / pinned-host scalar the fixed-order
-        // final reduce lands in.
-        for (double** p : {&d_b_, &d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_})
+        // Vectors, fixed reduction scratch and the completed device state.
+        for (double** p : {&vectors_.x, &vectors_.r, &vectors_.p, &vectors_.z, &vectors_.ap})
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(p, n_ * sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_part_, pcg_cuda::kMaxBlocks * sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&d_scalar_, sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&h_scalar_), sizeof(double), cudaHostAllocDefault));
+        APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&vectors_.partial, pcg_cuda::kMaxBlocks * sizeof(double)));
+        APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&vectors_.state, sizeof(pcg_cuda::solve_state)));
+        APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&h_state_), sizeof(pcg_cuda::solve_state), cudaHostAllocDefault));
 
         // Complete owned setup before returning, including direct cuda_pcg
         // callers. The input CSC storage may end immediately after this call.
@@ -160,71 +125,21 @@ public:
             return;
         }
 
-        // H2D b_perm into d_b_. d_x_ starts at 0. d_r_ = d_b_.
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(d_b_, b_perm.data(), n_ * sizeof(double),
-                                          cudaMemcpyHostToDevice));
-        APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_x_, 0, n_ * sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_r_, d_b_, n_ * sizeof(double),
-                                                cudaMemcpyDeviceToDevice, 0));
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(vectors_.r, b_perm.data(), n_ * sizeof(double), cudaMemcpyHostToDevice));
+        APXCHOL_PCG_CUDA_CHECK(cudaMemset(vectors_.x, 0, n_ * sizeof(double)));
 
-        // z = M^{-1} r ; p = z ; rz = r·z
-        // The factor was built with m = laplacian ? n-1 : n. For the Laplacian
-        // path, solve_LLt_dev only writes z[0..n-2]; z[n-1] is left untouched
-        // (would be uninitialized on first iter, stale on later iters). Zero
-        // it to keep p[n-1] = 0 throughout the loop (matches the CPU path
-        // which sets x(m)=0 inside _solve_impl).
-        precond.trsv().solve_LLt_dev(d_r_, d_z_);
+        *h_state_ = {};
+        h_state_->thr = tol;
+        h_state_->active = 1;
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(vectors_.state, h_state_, sizeof(*vectors_.state), cudaMemcpyHostToDevice));
         if (laplacian)
-            APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(d_p_, d_z_, n_ * sizeof(double),
-                                                cudaMemcpyDeviceToDevice, 0));
-        pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
-        double rz = reduce(vec_blocks_);
-
-        // x starts at zero, so its relative residual is 1 even if no PCG
-        // update runs (zero iteration budget or an immediate breakdown).
-        double rnorm = 1.0;
-        int it;
-        for (it = 0; it < max_iter; ++it) {
-            // Ap = A * p with pAp = p·Ap folded into the row loop (fp32-operator:
-            // fp32 loads promoted per product, fp64 accumulate -- Ap stays
-            // fp64-accurate either way). !(pAp > 0) catches NaN and <= 0.
-            if (fp32_op_) pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_f32_, d_p_, d_Ap_, d_part_, spmv_lanes_);
-            else          pcg_cuda::spmv_pAp(0, static_cast<int>(n_), d_row_ptr_, d_col_idx_, d_vals_,     d_p_, d_Ap_, d_part_, spmv_lanes_);
-            const double pAp = reduce(spmv_blocks_);
-            if (!(pAp > 0.0)) break;
-
-            const double alpha = rz / pAp;
-
-            // x += alpha * p ; r -= alpha * Ap ; rr = r·r  -- one pass.
-            pcg_cuda::update_xr(0, n_, d_x_, d_p_, d_r_, d_Ap_, alpha, d_part_);
-            const double rr = reduce(vec_blocks_);
-
-            // rnorm = ||r|| / bnorm. NaN propagates through the reductions;
-            // !(rnorm < tol) would re-enter the loop forever on NaN, so guard
-            // with an isfinite check. ++it before break to count the just-
-            // completed iter (matches apxchol_v1's `res.iterations = i + 1`).
-            rnorm = std::sqrt(rr) / bnorm;
-            if (!std::isfinite(rnorm)) { ++it; break; }
-            if (rnorm < tol) { ++it; break; }
-
-            // z = M^{-1} r ; rz_new = r·z
-            precond.trsv().solve_LLt_dev(d_r_, d_z_);
-            if (laplacian)
-                APXCHOL_PCG_CUDA_CHECK(cudaMemset(d_z_ + (n_ - 1), 0, sizeof(double)));
-            pcg_cuda::dot(0, n_, d_r_, d_z_, d_part_);
-            const double rz_new = reduce(vec_blocks_);
-            if (!std::isfinite(rz_new) || rz_new == 0.0) { ++it; break; }
-            const double beta = rz_new / rz;
-            rz = rz_new;
-
-            // p = z + beta * p
-            pcg_cuda::update_p(0, n_, d_p_, d_z_, beta);
-        }
+            APXCHOL_PCG_CUDA_CHECK(cudaMemset(vectors_.z + (n_ - 1), 0, sizeof(double)));
+        iteration commands{*this, precond, bnorm};
+        detail::gpu_pcg::solve(commands, std::max(max_iter, 0), 1);
 
         // The uploaded RHS is no longer needed. Reuse its touched host buffer
         // for D2H, then un-permute and (for Laplacian) re-center.
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(b_perm.data(), d_x_,
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(b_perm.data(), vectors_.x,
                                           n_ * sizeof(double),
                                           cudaMemcpyDeviceToHost));
         x_host.resize(n_);
@@ -234,76 +149,69 @@ public:
         if (laplacian)
             x_host.array() -= x_host.mean();
 
-        iters_out = it;
-        residual_out = rnorm;
+        iters_out = h_state_->iters;
+        residual_out = h_state_->iters ? std::sqrt(h_state_->rr) / bnorm : 1.0;
     }
 
     bool ready() const { return ready_; }
     int64_t n() const { return n_; }
-    int64_t nnz() const { return nnz_; }
+    int64_t nnz() const { return matrix_.nnz; }
     /// Operator storage precision resolved at setup (fp32 iff exact, or the env).
-    bool fp32_operator() const { return fp32_op_; }
+    bool fp32_operator() const { return matrix_.fp32; }
     /// Threads per row of the SpMV resolved at setup (spmv_lanes_for / env).
     int spmv_lanes() const { return spmv_lanes_; }
 
 private:
-    // Fixed-order final reduce of the first `blocks` per-block partials in
-    // d_part_ (written by the kernel that just ran on stream 0) into the device
-    // scalar, then 8 bytes back into pinned host memory. Synchronises stream 0.
-    double reduce(int blocks) const {
-        pcg_cuda::reduce_partials(0, d_part_, blocks, d_scalar_);
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(h_scalar_, d_scalar_, sizeof(double), cudaMemcpyDeviceToHost, 0));
-        APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(0));
-        return *h_scalar_;
-    }
+    template<class Precond>
+    struct iteration {
+        cuda_pcg& s;
+        const Precond& precond;
+        double bnorm;
+        void precondition() const { precond.trsv().solve_LLt_dev(s.vectors_.r, s.vectors_.z, &s.vectors_.state->active); }
+        void finalize(unsigned mode, unsigned it) const {
+            const int lanes = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_lanes_ : 1;
+            const int blocks = pcg_cuda::pcg_blocks(s.n_ * lanes);
+            pcg_cuda::finalize(0, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
+        }
+        void step(detail::gpu_pcg::operation op) const {
+            pcg_cuda::step(0, op, s.n_, s.vectors_, s.matrix_, s.spmv_lanes_);
+        }
+        template<class Record>
+        bool submit(bool, Record&& record) const {
+            record();
+            APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(s.h_state_, s.vectors_.state, sizeof(*s.vectors_.state), cudaMemcpyDeviceToHost, 0));
+            APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(0));
+            return s.h_state_->active;
+        }
+    };
 
     void destroy() {
         // A setup failure can own operator arrays before ready_ becomes true.
         // Non-null ownership, not successful completion, controls retirement.
-        for (double** p : {&d_b_, &d_x_, &d_r_, &d_p_, &d_z_, &d_Ap_, &d_part_, &d_scalar_}) {
-            if (*p) { cudaFree(*p); *p = nullptr; }
-        }
-        if (h_scalar_) { cudaFreeHost(h_scalar_); h_scalar_ = nullptr; }
-        if (d_row_ptr_) { cudaFree(d_row_ptr_); d_row_ptr_ = nullptr; }
-        if (d_col_idx_) { cudaFree(d_col_idx_); d_col_idx_ = nullptr; }
-        if (d_vals_)     { cudaFree(d_vals_);     d_vals_     = nullptr; }
-        if (d_vals_f32_) { cudaFree(d_vals_f32_); d_vals_f32_ = nullptr; }
-        fp32_op_ = false;
-        spmv_lanes_ = 1; spmv_blocks_ = vec_blocks_ = 0;
+        for (void* p : std::initializer_list<void*>{vectors_.x, vectors_.r, vectors_.ap,
+                 vectors_.p, vectors_.z, vectors_.partial, vectors_.state,
+                 matrix_.row_ptr, matrix_.col_idx, matrix_.values_f64, matrix_.values_f32})
+            if (p) cudaFree(p);
+        vectors_ = {};
+        matrix_ = {};
+        if (h_state_) { cudaFreeHost(h_state_); h_state_ = nullptr; }
+        spmv_lanes_ = 1;
         ready_ = false;
     }
 
     int64_t n_ = 0;
-    int64_t nnz_ = 0;
     bool ready_ = false;
-
-    // Device A_perm in CSR.
-    int*    d_row_ptr_ = nullptr;
-    int*    d_col_idx_ = nullptr;
-    double* d_vals_    = nullptr;
-    // fp32-operator path (APXCHOL_GPU_FP32_OPERATOR): operator values stored fp32,
-    // SpMV promotes per product (Krylov vectors stay fp64).
-    bool    fp32_op_    = false;
-    float*  d_vals_f32_ = nullptr;
-    // SpMV row mapping (threads per row) and the two fixed grids.
+    pcg_cuda::operator_csr matrix_;
+    pcg_cuda::workspace vectors_{};
+    pcg_cuda::solve_state* h_state_ = nullptr;
+    // SpMV row mapping (threads per row).
     int     spmv_lanes_  = 1;
-    int     spmv_blocks_ = 0;
-    int     vec_blocks_  = 0;
 
     // Host-side permutation map (perm.indices()) for one-time use in solve()
     // to permute b -> b_perm and x_perm -> x.
     std::vector<node_index> h_perm_;
 
-    // Device PCG vectors + reduction scratch.
-    double* d_b_  = nullptr;
-    double* d_x_  = nullptr;
-    double* d_r_  = nullptr;
-    double* d_p_  = nullptr;
-    double* d_z_  = nullptr;
-    double* d_Ap_ = nullptr;
-    double* d_part_   = nullptr;   // kMaxBlocks per-block partials
-    double* d_scalar_ = nullptr;   // the final reduce's result
-    double* h_scalar_ = nullptr;   // pinned host mirror of d_scalar_
+
 };
 
 #undef APXCHOL_PCG_CUDA_CHECK

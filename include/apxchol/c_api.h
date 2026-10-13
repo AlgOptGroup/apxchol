@@ -169,9 +169,8 @@ APXCHOL_C_API apxchol_status apxchol_solver_solve(
 
 /* k right-hand sides, column-major n*k. x0 NULL starts every column from zero.
  * The per-column outputs are nullable arrays of length k. Every column uses
- * the single-solve stopping rule; the CPU backend solves columns in order,
- * METAL advances up to 64 columns in lockstep; on both, every column is
- * bit-identical to its single solve. Returns NOT_CONVERGED if any column did
+ * the single-solve stopping rule. Both backends solve columns in order,
+ * reusing the factor and workspace. Returns NOT_CONVERGED if any column did
  * not converge. */
 APXCHOL_C_API apxchol_status apxchol_solver_solve_block(
     apxchol_solver* solver, int64_t k, const double* b, const double* x0, double* x,

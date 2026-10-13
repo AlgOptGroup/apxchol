@@ -231,7 +231,7 @@ void require_backend(apxchol_backend backend) {
 #else
     if (backend != APXCHOL_BACKEND_CPU)
         fail(APXCHOL_STATUS_UNSUPPORTED,
-             "this apxchol build has no Metal backend (configure with -DAPXCHOL_USE_METAL=ON)");
+             "this apxchol build has no Metal backend (configure with -DAPXCHOL_DEVICE=METAL)");
 #endif
 }
 
@@ -619,39 +619,6 @@ apxchol_status apxchol_solver_solve_block(apxchol_solver* solver, int64_t k, con
         const double t = solver->tol_for(tol);
         const int mi = solver->max_iter_for(max_iter);
         const thread_scope scope(solver->options.threads);
-#if defined(APXCHOL_USE_METAL)
-        if (solver->metal) {
-            // Lockstep device batches; every column is bit-identical to its
-            // single-RHS solve. B and X0 are copied (and checked) first, so
-            // aliasing with X is safe.
-            const Eigen::Index n = solver->n;
-            const Eigen::Map<const Eigen::MatrixXd> Bm(b, n, k);
-            const Eigen::MatrixXd Bc = Bm;
-            if (!Bc.allFinite()) fail(APXCHOL_STATUS_INVALID_ARGUMENT, "b contains a non-finite value");
-            Eigen::MatrixXd X0c;
-            if (x0 != nullptr) {
-                X0c = Eigen::Map<const Eigen::MatrixXd>(x0, n, k);
-                if (!X0c.allFinite()) fail(APXCHOL_STATUS_INVALID_ARGUMENT, "x0 contains a non-finite value");
-            }
-            const apxchol::metal_solver::block_cref X0r(X0c);
-            Eigen::Map<Eigen::MatrixXd> Xm(x, n, k);
-            const apxchol::metal_block_result r = solver->metal->solve(
-                apxchol::metal_solver::block_cref(Bc), Xm, t, mi, x0 != nullptr ? &X0r : nullptr);
-            bool all = true;
-            for (int64_t c = 0; c < k; ++c) {
-                const apxchol::metal_column_result& col = r.columns[static_cast<std::size_t>(c)];
-                const bool ok = col.residual < t;
-                all = all && ok;
-                if (iterations != nullptr) iterations[c] = static_cast<int64_t>(col.iterations);
-                if (relative_residuals != nullptr) relative_residuals[c] = col.residual;
-                if (converged != nullptr) converged[c] = ok ? 1 : 0;
-            }
-            if (all) return APXCHOL_STATUS_SUCCESS;
-            write_message(error_message, error_capacity,
-                          "did not converge: some column's relative residual is not below tol");
-            return APXCHOL_STATUS_NOT_CONVERGED;
-        }
-#endif
         bool all = true;
         for (int64_t c = 0; c < k; ++c) {
             const int64_t off = c * solver->n;
