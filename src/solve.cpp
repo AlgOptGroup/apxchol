@@ -841,7 +841,8 @@ struct solver::impl {
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
          checkpoint* cp, factorization* F = nullptr)
         : tol(opts.tol), max_iter(opts.max_iter) {
-        const auto route = detail::select_solve_backend(opts);
+        const auto route = F && opts.backend == solve_backend::automatic
+            ? solve_backend::cpu : detail::select_solve_backend(opts);
         if (route == solve_backend::cpu) {
             owner = F ? std::make_unique<cpu_solver>(A, std::move(*F), opts, cp)
                       : std::make_unique<cpu_solver>(A, opts, cp);

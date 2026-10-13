@@ -39,10 +39,8 @@ struct solve_result {
     // the caller passed, lumping or not. See operator_class.h.
     Eigen::Index lumped_offdiag = 0;
     checkpoint timings;
-    // Device VRAM (MB) held at solve end (operator + factor + PCG vectors still
-    // resident), via cudaMemGetInfo. -1 = unmeasured (CPU build / host PCG).
-    // Sampled inside solve() because the GPU-resident PCG frees all device state
-    // before returning -- callers can't measure it post-hoc.
+    // Device-wide VRAM usage (MB), sampled at solve end via cudaMemGetInfo.
+    // -1 = unmeasured (CPU build / host PCG).
     double solve_vram_mb = -1.0;
     solve_backend backend = solve_backend::cpu;
 };

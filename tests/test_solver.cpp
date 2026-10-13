@@ -123,6 +123,14 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     const auto reference_applied = reference.apply(rhs);
     EXPECT_TRUE(same_bytes(applied.data(), reference_applied.data(), applied.size()));
     expect_solution(matrix, rhs, owner->solve(rhs).x);
+
+    options.backend = apxchol::solve_backend::automatic;
+    options.keep_factor_values = false;
+    apxchol::solver automatic_owner(matrix, expected, options);
+    EXPECT_EQ(automatic_owner.backend(), apxchol::solve_backend::cpu);
+    EXPECT_TRUE(same_bytes(automatic_owner.apply(rhs).data(),
+                          reference_applied.data(), reference_applied.size()));
+    expect_solution(matrix, rhs, automatic_owner.solve(rhs).x);
 }
 
 TEST(Solver, CpuCallerOutputAndWarmStartsUseEachOwnersStorage) {
@@ -238,17 +246,17 @@ TEST(Solver, CudaOwnerRejectsWarmStartsAndHostFactors) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
 #else
+    const Sparse matrix = operator_matrix();
+    auto options = cpu_options();
+    const auto host_factor = apxchol::factorize(matrix, options.storage, options.factor_opts);
+    options.backend = apxchol::solve_backend::gpu;
+    EXPECT_THROW(apxchol::solver(matrix, host_factor, options), std::invalid_argument);
     int count = 0;
     const auto status = cudaGetDeviceCount(&count);
     if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
         GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
-    const Sparse matrix = operator_matrix();
-    auto options = cpu_options();
-    const auto host_factor = apxchol::factorize(matrix, options.storage, options.factor_opts);
-    options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::solver(matrix, host_factor, options), std::invalid_argument);
     apxchol::solver owner(matrix, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     const Eigen::VectorXd x0 = Eigen::VectorXd::Zero(matrix.rows());
