@@ -439,7 +439,7 @@ int main(int argc, char* argv[]) {
         char name[32];
         std::snprintf(name, sizeof(name), "rgg%d", n);
         if (!should_run(name)) continue;
-        run_all_storages(name, [n, r]<typename Incidence>() {
+        run_all_storages(name, [n = n, r = r]<typename Incidence>() {
             return make_rgg<Incidence>(n, r);
         }, mode, should_run_storage, base_opts);
     }
