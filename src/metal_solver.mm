@@ -701,7 +701,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     cp("pack");
     s.arguments.window = window;
     detail::gpu_pcg::solve(s, static_cast<std::uint32_t>(max_iter), s.check_every);
-    cp("device");
+    cp("gpu_pcg_loop");
     mh::add_unpacked({static_cast<df32*>([s.x contents]), s.n}, scale, {xp.data(), s.n});
     result.iterations = state.iters;
     finish();
