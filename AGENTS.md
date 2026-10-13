@@ -121,6 +121,8 @@ choices, retired knobs, and measurements belong in
   option OFF for portable wheels; Python optimization follows the CMake build
   type. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
   tracking without touching source files; both build helpers stop on failures.
+  Native flag probes use the build's warnings-as-errors policy; rejected flags
+  retain the existing portable fallback.
   The shared CMake architecture helper rejects MSVC and clang-cl. The compiled
   core checks the x86-64-v2 feature macros, including for native builds, without
   running a configure-time program.
