@@ -4,6 +4,7 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <vector>
+#include <memory>
 
 namespace apxchol {
 
@@ -62,9 +63,7 @@ Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 /// sptrsv_setup + spmv_lrm_build); the per-solve PCG records go into the
 /// returned solve_result::timings. The one-shot solve() passes the SAME
 /// checkpoint for both so its result carries the full setup+pcg tree.
-/// NOTE: the preconditioner's internal forward/back records during PCG also
-/// target `cp` — pass the result's checkpoint (as solve() does) or nullptr
-/// (as the bindings do), not an unrelated one.
+/// The constructor does not retain `cp`; each solve records into its result.
 class cpu_solver {
 public:
     explicit cpu_solver(const Eigen::SparseMatrix<double>& L,
@@ -135,6 +134,40 @@ private:
     Eigen::SparseMatrix<float, Eigen::RowMajor>  Lrm_f_;
     bool op_fp32_ = false;
     Eigen::Index n_ = 0;
+};
+
+/// Reusable solver owning one CPU or GPU backend, selected once at setup.
+/// Owns its input data; movable, noncopyable, and not safe for concurrent calls.
+/// CUDA uses device-owned setup and does not accept host factors or warm starts.
+class solver {
+public:
+    explicit solver(const Eigen::SparseMatrix<double>& A,
+                    const solve_options& opts = {}, checkpoint* cp = nullptr);
+    solver(const Eigen::SparseMatrix<double>& A, factorization F,
+           const solve_options& opts = {}, checkpoint* cp = nullptr);
+    ~solver();
+    solver(solver&&) noexcept;
+    solver& operator=(solver&&) noexcept;
+    solver(const solver&) = delete;
+    solver& operator=(const solver&) = delete;
+
+    solve_result solve(const Eigen::VectorXd& b, double tol = -1.0,
+                       int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
+    void solve(const Eigen::VectorXd& b, solve_result& result, double tol = -1.0,
+               int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
+    /// Write into caller storage; the returned result leaves x empty.
+    solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
+                       double tol = -1.0, int max_iter = -1,
+                       const Eigen::VectorXd* x0 = nullptr) const;
+    Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
+    const factorization& factor() const;
+    Eigen::Index rows() const;
+    solve_backend backend() const;
+    factor_storage_type factor_storage() const;
+
+private:
+    struct impl;
+    std::unique_ptr<impl> impl_;
 };
 
 /// One-shot solve: factorize L, then solve Lx = b via PCG.

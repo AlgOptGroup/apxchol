@@ -5,6 +5,7 @@
 #include "apxchol/c_api.h"
 #include "apxchol/env_knobs.h"
 #include "apxchol/solver/solve.h"
+#include "scoped_env.h"
 #if defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/metal_solver.h"
 #endif
@@ -137,8 +138,9 @@ apxchol_solve_info info_struct() {
     return info;
 }
 
-bool same_bytes(const double* a, const double* b, std::size_t n) {
-    return std::memcmp(a, b, n * sizeof(double)) == 0;
+template <class T>
+bool same_bytes(const T* a, const T* b, std::size_t n) {
+    return std::memcmp(a, b, n * sizeof(T)) == 0;
 }
 
 struct factor_handle {
@@ -192,7 +194,7 @@ void expect_same_factor_stats(const apxchol_stats& a, const apxchol_stats& b) {
 
 struct exported {
     std::vector<std::int64_t> colptr, rowval, perm;
-    std::vector<double> nzval;
+    std::vector<float> nzval;
     bool operator==(const exported& o) const {
         return colptr == o.colptr && rowval == o.rowval && perm == o.perm &&
                nzval.size() == o.nzval.size() &&
@@ -460,6 +462,8 @@ TEST(CApi, DefaultsAreTheCppDefaults) {
     EXPECT_EQ(o.exact_clique_max_degree, so.factor_opts.exact_clique_max_degree);
     EXPECT_EQ(o.omp_threshold, so.factor_opts.omp_threshold);
     EXPECT_EQ(o.omp_threshold, apxchol::factor_options{}.omp_threshold);
+    EXPECT_EQ(o.factor_storage, APXCHOL_FACTOR_STORAGE_AUTO);
+    EXPECT_EQ(so.factor_opts.factor_storage, apxchol::factor_storage_type::automatic);
 }
 
 TEST(CApi, StructSizeIsValidatedAndNothingPastTheStructIsWritten) {
@@ -494,6 +498,60 @@ TEST(CApi, StructSizeIsValidatedAndNothingPastTheStructIsWritten) {
     EXPECT_EQ(apxchol_solver_stats(h.s, &stats), APXCHOL_STATUS_UNSUPPORTED);
 }
 
+TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
+    const Sparse A = grid_laplacian(12, 11, 0.25);
+    const csc64 c = to_csc64(A);
+    std::vector<apxchol_backend> backends{APXCHOL_BACKEND_CPU};
+#if defined(APXCHOL_USE_METAL)
+    if (apxchol::metal_solver::available()) backends.push_back(APXCHOL_BACKEND_METAL);
+#endif
+    for (const auto backend : backends) {
+        auto o = defaults();
+        o.backend = backend;
+        o.threads = 1;
+        o.keep_factor_values = 1;
+        o.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT32;
+        factor_handle factor;
+        ASSERT_EQ(create_factor(c, &o, factor), APXCHOL_STATUS_SUCCESS);
+        EXPECT_EQ(stats_of(factor.f).factor_storage, APXCHOL_FACTOR_STORAGE_FLOAT32);
+        const exported native = export_of(factor.f);
+        const Eigen::VectorXd b = compatible_rhs(c.n);
+        for (const apxchol_factor_storage storage :
+             {APXCHOL_FACTOR_STORAGE_FLOAT32, APXCHOL_FACTOR_STORAGE_FLOAT16}) {
+            if (backend == APXCHOL_BACKEND_CPU && storage == APXCHOL_FACTOR_STORAGE_FLOAT16 &&
+                !apxchol::omp_sptrsv::fp16_supported())
+                continue;
+            SCOPED_TRACE(::testing::Message() << "backend=" << backend << " storage=" << storage);
+            const bool half = storage == APXCHOL_FACTOR_STORAGE_FLOAT16;
+            // An explicit per-solver option wins over a conflicting environment.
+            scoped_env conflicting("APXCHOL_FACTOR_STORAGE", half ? "float32" : "float16");
+            o.factor_storage = storage;
+            handle explicit_storage;
+            ASSERT_EQ(create(c, &o, explicit_storage), APXCHOL_STATUS_SUCCESS);
+            EXPECT_EQ(stats_of(explicit_storage.s).factor_storage, storage);
+            EXPECT_TRUE(export_of(explicit_storage.s) == native);
+            factor_handle copy;
+            ASSERT_EQ(apxchol_solver_copy_factor(explicit_storage.s, &copy.f, nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            EXPECT_EQ(stats_of(copy.f).factor_storage, APXCHOL_FACTOR_STORAGE_FLOAT32);
+            EXPECT_TRUE(export_of(copy.f) == native);
+
+            scoped_env selected("APXCHOL_FACTOR_STORAGE", half ? "float16" : "float32");
+            o.factor_storage = APXCHOL_FACTOR_STORAGE_AUTO;
+            handle automatic;
+            ASSERT_EQ(adopt(c, factor.f, &o, automatic), APXCHOL_STATUS_SUCCESS);
+            EXPECT_EQ(stats_of(automatic.s).factor_storage, storage);
+            EXPECT_TRUE(export_of(automatic.s) == native);
+            Eigen::VectorXd x(c.n);
+            auto info = info_struct();
+            ASSERT_EQ(apxchol_solver_solve(automatic.s, b.data(), nullptr, x.data(), -1.0, -1,
+                                           &info, nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            EXPECT_LT(true_residual(A, b, x), o.tol);
+        }
+    }
+}
+
 TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
     const Sparse A = grid_laplacian(30, 30);
     const csc64 c = to_csc64(A, 1);
@@ -521,7 +579,7 @@ TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
     const apxchol::factorization& F = ref.preconditioner().factor();
     const auto nnz = static_cast<std::size_t>(F.L.nonZeros());
     std::vector<std::int64_t> colptr(c.n + 1), rowval(nnz), perm(c.n);
-    std::vector<double> nzval(nnz);
+    std::vector<float> nzval(nnz);
     ASSERT_EQ(apxchol_solver_export_factor(h.s, 0, colptr.data(), rowval.data(), nzval.data(),
                                            perm.data(), nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
@@ -529,7 +587,7 @@ TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
         ASSERT_EQ(colptr[j], static_cast<std::int64_t>(F.L.outer_[j]));
     for (std::size_t p = 0; p < nnz; ++p) {
         ASSERT_EQ(rowval[p], static_cast<std::int64_t>(F.L.inner_[p]));
-        ASSERT_EQ(nzval[p], static_cast<double>(F.L.vals_[p]));
+        ASSERT_EQ(nzval[p], static_cast<float>(F.L.vals_[p]));
     }
     for (std::size_t v = 0; v < perm.size(); ++v)
         ASSERT_EQ(perm[v], static_cast<std::int64_t>(F.perm[v]));
@@ -729,7 +787,7 @@ TEST(CApi, FactorExportStructureAndRetention) {
     stats.struct_size = sizeof stats;
     ASSERT_EQ(apxchol_solver_stats(released.s, &stats), APXCHOL_STATUS_SUCCESS);
     std::vector<std::int64_t> colptr(c.n + 1), rowval(stats.factor_nnz);
-    std::vector<double> nzval(stats.factor_nnz);
+    std::vector<float> nzval(stats.factor_nnz);
     EXPECT_EQ(apxchol_solver_export_factor(released.s, 1, colptr.data(), rowval.data(), nzval.data(),
                                            nullptr, nullptr, 0),
               APXCHOL_STATUS_NO_FACTOR_VALUES);
@@ -824,6 +882,8 @@ TEST(CApi, BackendAndEnumValidation) {
     check([](apxchol_options& o) { o.sampler = 7; });
     check([](apxchol_options& o) { o.storage = 1; });
     check([](apxchol_options& o) { o.storage = 3; });
+    check([](apxchol_options& o) { o.factor_storage = 1; });
+    check([](apxchol_options& o) { o.factor_storage = 64; });
     check([](apxchol_options& o) { o.partitioner = 9; });
     check([](apxchol_options& o) { o.keep_factor_values = 2; });
     check([](apxchol_options& o) { o.max_iter = -1; });
@@ -1028,7 +1088,7 @@ TEST(CApi, FactorHandleArgumentErrors) {
     ASSERT_EQ(create_factor(c, nullptr, f), APXCHOL_STATUS_SUCCESS);  // keep_factor_values = 0
     const apxchol_stats st = stats_of(f.f);
     std::vector<std::int64_t> colptr(c.n + 1), rowval(st.factor_nnz), perm(c.n);
-    std::vector<double> nzval(st.factor_nnz);
+    std::vector<float> nzval(st.factor_nnz);
     // A factor handle always holds its values, whatever keep_factor_values said.
     EXPECT_EQ(apxchol_factor_export(f.f, 1, colptr.data(), rowval.data(), nzval.data(),
                                     perm.data(), nullptr, 0),
@@ -1216,7 +1276,7 @@ TEST(CApi, OmpThresholdReachesTheFactorization) {
         exported e;
         for (auto p : F.L.outer_) e.colptr.push_back(static_cast<std::int64_t>(p));
         for (auto r : F.L.inner_) e.rowval.push_back(static_cast<std::int64_t>(r));
-        for (auto v : F.L.vals_) e.nzval.push_back(static_cast<double>(v));
+        for (auto v : F.L.vals_) e.nzval.push_back(static_cast<float>(v));
         for (auto v : F.perm) e.perm.push_back(static_cast<std::int64_t>(v));
         return e;
     };
@@ -1318,7 +1378,7 @@ TEST(CApi, MetalBackendRoundTrip) {
     EXPECT_TRUE(z.allFinite());
     EXPECT_GT(z.dot(b), 0.0);
     std::vector<std::int64_t> colptr(c.n + 1), rowval(stats.factor_nnz), perm(c.n);
-    std::vector<double> nzval(stats.factor_nnz);
+    std::vector<float> nzval(stats.factor_nnz);
     ASSERT_EQ(apxchol_solver_export_factor(h.s, 0, colptr.data(), rowval.data(), nzval.data(),
                                            perm.data(), nullptr, 0),
               APXCHOL_STATUS_SUCCESS);

@@ -89,7 +89,14 @@ enum {
     APXCHOL_STORAGE_VEC_POOL_AOS = 4
 };
 
-/* 72 bytes. Initialize with apxchol_options_default, then override fields. */
+typedef int32_t apxchol_factor_storage;
+enum {
+    APXCHOL_FACTOR_STORAGE_AUTO = 0,
+    APXCHOL_FACTOR_STORAGE_FLOAT16 = 16,
+    APXCHOL_FACTOR_STORAGE_FLOAT32 = 32
+};
+
+/* 80 bytes. Initialize with apxchol_options_default, then override fields. */
 typedef struct apxchol_options {
     uint32_t struct_size;
     apxchol_backend backend;
@@ -110,6 +117,8 @@ typedef struct apxchol_options {
                                          OpenMP at every size, that safeguard off.
                                          A set APXCHOL_OMP_THRESHOLD overrides it,
                                          as for every apxchol entry point */
+    apxchol_factor_storage factor_storage; /* triangular-solve storage; AUTO reads
+                                              APXCHOL_FACTOR_STORAGE, then the backend default */
 } apxchol_options;
 
 /* 32 bytes; the caller sets struct_size. */
@@ -122,7 +131,7 @@ typedef struct apxchol_solve_info {
     double solve_seconds;
 } apxchol_solve_info;
 
-/* 64 bytes; the caller sets struct_size. */
+/* 72 bytes; the caller sets struct_size. */
 typedef struct apxchol_stats {
     uint32_t struct_size;
     apxchol_backend backend;
@@ -135,6 +144,7 @@ typedef struct apxchol_stats {
     int32_t sddm;                     /* the factor's class: 1 SDDM, 0 Laplacian
                                          (min-norm solutions) */
     int32_t setup_max_threads;        /* OpenMP team limit during setup; 1 if serial */
+    apxchol_factor_storage factor_storage; /* resolved solver storage; FLOAT32 for a host factor */
 } apxchol_stats;
 
 typedef struct apxchol_solver apxchol_solver;
@@ -192,14 +202,14 @@ APXCHOL_C_API apxchol_status apxchol_solver_stats(const apxchol_solver* solver,
                                                   apxchol_stats* stats);
 
 /* The lower factor L (CSC in the permuted space, diagonal first in each
- * column, fp32 values widened) and perm[v] = elimination position of vertex v,
+ * column, native fp32 values) and perm[v] = elimination position of vertex v,
  * with index_base applied to every index: A[p,p] ~= L*L^T for p = inv(perm).
  * Array lengths: colptr[n+1], rowval/nzval[factor_nnz], perm[n]. Passing
  * colptr = rowval = nzval = NULL exports perm only, which is always
  * available; L itself requires keep_factor_values = 1. */
 APXCHOL_C_API apxchol_status apxchol_solver_export_factor(
     const apxchol_solver* solver, int32_t index_base,
-    int64_t* colptr, int64_t* rowval, double* nzval, int64_t* perm,
+    int64_t* colptr, int64_t* rowval, float* nzval, int64_t* perm,
     char* error_message, size_t error_capacity);
 
 /* Factor handles: one host factorization (L, perm, statistics), always with
@@ -228,7 +238,7 @@ APXCHOL_C_API apxchol_status apxchol_factor_stats(const apxchol_factor* factor,
 /* As apxchol_solver_export_factor; L is always available. */
 APXCHOL_C_API apxchol_status apxchol_factor_export(
     const apxchol_factor* factor, int32_t index_base,
-    int64_t* colptr, int64_t* rowval, double* nzval, int64_t* perm,
+    int64_t* colptr, int64_t* rowval, float* nzval, int64_t* perm,
     char* error_message, size_t error_capacity);
 
 /* Builds a solver for A preconditioned by a copy of factor instead of
@@ -238,7 +248,7 @@ APXCHOL_C_API apxchol_status apxchol_factor_export(
  * Laplacian factor (rank n-1, centred) cannot precondition an SDDM operator
  * (INVALID_ARGUMENT); an SDDM factor may precondition a Laplacian, whose
  * solution is then not centred. backend, tol, max_iter, stagnation_window,
- * threads and keep_factor_values apply as in create; the factorization
+ * threads, keep_factor_values and factor_storage apply as in create; the factorization
  * options are validated and unused. Stats are the factor's, with this call's
  * setup_seconds and setup_max_threads. On another operator convergence
  * depends on its distance from the factor's; NOT_CONVERGED reports it. */

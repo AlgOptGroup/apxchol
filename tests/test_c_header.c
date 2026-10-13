@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
-_Static_assert(sizeof(apxchol_options) == 72, "apxchol_options layout");
+_Static_assert(sizeof(apxchol_options) == 80, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, backend) == 4, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, tol) == 8, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, max_iter) == 16, "apxchol_options layout");
@@ -21,6 +21,10 @@ _Static_assert(offsetof(apxchol_options, keep_factor_values) == 44, "apxchol_opt
 _Static_assert(offsetof(apxchol_options, degree_quantile) == 48, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, exact_clique_max_degree) == 56, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, omp_threshold) == 64, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, factor_storage) == 72, "apxchol_options layout");
+_Static_assert(APXCHOL_FACTOR_STORAGE_AUTO == 0, "automatic factor storage value");
+_Static_assert(APXCHOL_FACTOR_STORAGE_FLOAT16 == 16, "float16 factor storage value");
+_Static_assert(APXCHOL_FACTOR_STORAGE_FLOAT32 == 32, "float32 factor storage value");
 
 _Static_assert(sizeof(apxchol_solve_info) == 32, "apxchol_solve_info layout");
 _Static_assert(offsetof(apxchol_solve_info, converged) == 4, "apxchol_solve_info layout");
@@ -28,7 +32,7 @@ _Static_assert(offsetof(apxchol_solve_info, iterations) == 8, "apxchol_solve_inf
 _Static_assert(offsetof(apxchol_solve_info, relative_residual) == 16, "apxchol_solve_info layout");
 _Static_assert(offsetof(apxchol_solve_info, solve_seconds) == 24, "apxchol_solve_info layout");
 
-_Static_assert(sizeof(apxchol_stats) == 64, "apxchol_stats layout");
+_Static_assert(sizeof(apxchol_stats) == 72, "apxchol_stats layout");
 _Static_assert(offsetof(apxchol_stats, backend) == 4, "apxchol_stats layout");
 _Static_assert(offsetof(apxchol_stats, n) == 8, "apxchol_stats layout");
 _Static_assert(offsetof(apxchol_stats, factor_nnz) == 16, "apxchol_stats layout");
@@ -38,6 +42,7 @@ _Static_assert(offsetof(apxchol_stats, peak_graph_bytes) == 40, "apxchol_stats l
 _Static_assert(offsetof(apxchol_stats, setup_seconds) == 48, "apxchol_stats layout");
 _Static_assert(offsetof(apxchol_stats, sddm) == 56, "apxchol_stats layout");
 _Static_assert(offsetof(apxchol_stats, setup_max_threads) == 60, "apxchol_stats layout");
+_Static_assert(offsetof(apxchol_stats, factor_storage) == 64, "apxchol_stats layout");
 
 /* Solves the path Laplacian with solver and checks x = (1, 0, -1). */
 static int solve_path(apxchol_solver* solver, const char* what) {
@@ -69,8 +74,10 @@ int main(void) {
 
     apxchol_options options;
     if (apxchol_options_default(&options, sizeof options) != APXCHOL_STATUS_SUCCESS) return 1;
+    if (options.factor_storage != APXCHOL_FACTOR_STORAGE_AUTO) return 1;
     options.tol = 1e-10;
     options.threads = 1;
+    options.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT32;
 
     apxchol_solver* solver = NULL;
     if (apxchol_solver_create(3, colptr, rowval, nzval, 1, &options, &solver, error,
@@ -92,9 +99,10 @@ int main(void) {
     apxchol_stats stats;
     stats.struct_size = sizeof stats;
     int64_t lcolptr[4], lrowval[16], perm[3];
-    double lnzval[16];
+    float lnzval[16];
     if (apxchol_factor_stats(factor, &stats) != APXCHOL_STATUS_SUCCESS || stats.n != 3 ||
         stats.sddm != 0 || stats.factor_nnz < 3 || stats.factor_nnz > 16 ||
+        stats.factor_storage != APXCHOL_FACTOR_STORAGE_FLOAT32 ||
         apxchol_factor_export(factor, 0, lcolptr, lrowval, lnzval, perm, error,
                               sizeof error) != APXCHOL_STATUS_SUCCESS ||
         lcolptr[3] != stats.factor_nnz) {
@@ -112,6 +120,8 @@ int main(void) {
         return 1;
     }
     int failed = solve_path(solver, "create_from_factor");
+    if (apxchol_solver_stats(solver, &stats) != APXCHOL_STATUS_SUCCESS ||
+        stats.factor_storage != APXCHOL_FACTOR_STORAGE_FLOAT32) failed = 1;
     /* The solver's retained factor, copied back out into a new handle. */
     factor = NULL;
     if (apxchol_solver_copy_factor(solver, &factor, error, sizeof error) !=

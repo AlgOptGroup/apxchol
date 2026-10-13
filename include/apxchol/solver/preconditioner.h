@@ -168,7 +168,7 @@ public:
     const factor_options& options() const { return opts_; }
     void set_options(const factor_options& opts) { opts_ = opts; }
     void set_storage(graph_storage s) { storage_ = s; }
-    void set_checkpoint(checkpoint* cp) { cp_ = cp; }
+    void set_checkpoint(checkpoint* cp) const { cp_ = cp; }
     /// Keep the factor's row/value arrays alive after SpTRSV setup (they are
     /// otherwise freed to save one factor-sized copy).  Needed by callers that
     /// want to read factor().L afterwards, e.g. the Python binding's L/D/P
@@ -578,7 +578,7 @@ private:
     struct factorization F_;
     factor_options opts_;
     graph_storage storage_ = graph_storage::vec_pool_aos;
-    checkpoint* cp_ = nullptr;
+    mutable checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
     // Laplacian-path application counter of the center-k centring schedule
     // (counts _solve_impl / apply_fused calls on the Laplacian branch since

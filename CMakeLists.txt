@@ -185,10 +185,8 @@ unset(_apxchol_target)
 unset(APXCHOL_ARCH_FLAG)
 
 # Exception-safe C interface for non-C++ consumers.
-if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
-    add_library(apxchol_c src/c_api.cpp)
-    target_link_libraries(apxchol_c PUBLIC apxchol_core)
-endif()
+add_library(apxchol_c src/c_api.cpp)
+target_link_libraries(apxchol_c PUBLIC apxchol_core)
 
 # ── CLI solver ───────────────────────────────────────
 add_executable(apxchol src/main.cpp src/config.cpp)

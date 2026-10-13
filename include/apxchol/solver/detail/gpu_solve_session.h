@@ -12,7 +12,12 @@ class gpu_solve_session {
     const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
 public:
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
-                      const solve_options& opts, solve_result& res) {
+                      const solve_options& opts, solve_result& res)
+        : gpu_solve_session(L, opts, &res.timings) {
+        res.lumped_offdiag = precond.factor().lumped_offdiag;
+    }
+    gpu_solve_session(const Eigen::SparseMatrix<double>& L,
+                      const solve_options& opts, checkpoint* cp) {
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("GPU session cannot execute an explicit CPU request");
         auto required = opts;
@@ -20,20 +25,17 @@ public:
         (void)select_solve_backend(required);
         precond.set_options(opts.factor_opts);
         precond.set_storage(opts.storage);
-        if (!std::getenv("APXCHOL_NO_CHECKPOINT"))
-            precond.set_checkpoint(&res.timings);
+        if (use_cp) precond.set_checkpoint(cp);
         precond.compute(L);
         precond.set_checkpoint(nullptr);
         if (!precond.trsv().adopted_device_factor())
             throw std::runtime_error("GPU route did not produce a device-owned factor");
         // Lumping (if any) happened inside compute(), on a private copy; the
         // GPU operator below is built from L itself.
-        res.lumped_offdiag = precond.factor().lumped_offdiag;
-
-        if (use_cp) { res.timings.descend("setup"); res.timings.tick(); }
+        if (cp && use_cp) { cp->descend("setup"); cp->tick(); }
         const auto operator_setup_begin = detail::gpu_setup_diagnostic_clock::now();
         gpcg.setup(L, precond.factor().perm);
-        if (use_cp) { res.timings("gpu_pcg_setup"); res.timings.ascend(); }
+        if (cp && use_cp) { (*cp)("gpu_pcg_setup"); cp->ascend(); }
         if (detail::gpu_setup_diagnostics()) {
             const double operator_setup_wall_s = std::chrono::duration<double>(
                 detail::gpu_setup_diagnostic_clock::now() - operator_setup_begin).count();

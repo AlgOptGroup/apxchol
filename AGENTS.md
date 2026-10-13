@@ -192,21 +192,32 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
   convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
   `src/solve.cpp` provide the CPU compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
-- `include/apxchol/c_api.h` / `src/c_api.cpp` (target `apxchol_c`, not built
-  with CUDA) are the exception-safe C ABI over `cpu_solver` and `metal_solver`
-  for non-C++ consumers. Block solves loop over the single-RHS API on both
+- `apxchol::solver` owns one CPU or compiled GPU session, selected once by the
+  existing backend policy. One-shot solve and the C ABI use this owner. It may
+  outlive constructor input and its setup checkpoint; per-call timings belong
+  to the supplied solve result. CUDA rejects host-factor adoption and non-null
+  warm starts; kernels and stopping semantics remain unchanged.
+- `include/apxchol/c_api.h` / `src/c_api.cpp` (target `apxchol_c`) provide the
+  exception-safe C ABI for non-C++ consumers. CPU calls remain CPU in CUDA
+  builds; the exposed backends are CPU and METAL. Block solves loop over the single-RHS API on both
   backends, reusing the factor and workspace. Structs carry `struct_size`; defaults come from
   `solve_options{}`; NOT_CONVERGED writes outputs and is never an acceptance;
   `converged` is `residual < tol` as in the PCG loop. `threads` scopes the
   calling thread's OpenMP limit per call. n and nnz are limited to 2^31-1;
   edge-index overflow still aborts. A factor handle (`apxchol_factor_*`) is
-  an immutable host factorization that always keeps its values; solvers adopt
+  an immutable host factorization that always keeps its native FP32 values;
+  exports use `float*`. `options.factor_storage` selects per-solver SpTRSV
+  storage, and `stats.factor_storage` reports the actual format. Solvers adopt
   a copy (`apxchol_solver_create_from_factor`, CPU or METAL) for any validated
   operator of its dimension, except that a Laplacian factor refuses an SDDM
   operator by the factorization's own excess test. `apxchol_solver_copy_factor`
   needs `keep_factor_values`. Keep `tests/test_c_header.c` layout asserts in
   step with the header. `APXCHOL_C_ABI_VERSION` stays 1 until the ABI's first
   release, then bumps on every layout change.
+- `detail/csc_import.h` shares C/Python/Octave CSC layout validation and copying.
+  Sorted unique inputs use direct arrays; unsorted/duplicate input uses Eigen's
+  triplet summation. Operator and non-finite-value classification stays in the
+  operator layer; each binding validates the foreign buffers before import.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
   M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
   adjacency versus an assembled operator. Bindings must use the operator
@@ -280,7 +291,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   The old GPU-only alias is retired.
 - Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
   OpenMP SpTRSV and host PCG, even in CUDA builds. They must not initialize a
-  CUDA context or consume GPU stage flags. Explicit factor adoption remains CPU.
+  CUDA context or consume GPU stage flags. Explicit host-factor adoption is
+  supported by CPU and Metal owners, never CUDA's device-owned setup.
 - One-shot `solve` selects a complete route with `solve_options.backend`
   (`automatic`, `cpu`, `gpu`); CLI uses `--backend auto|cpu|gpu`. Report the
   selected route in `solve_result.backend` and CLI output. Auto is configuration

@@ -34,27 +34,30 @@ latter. `--input-kind` overrides detection; `--help` lists options.
 #include "apxchol.h"
 auto result = apxchol::solve(L, b, {.tol = 1e-8});
 
-apxchol::cpu_solver solver(L);       // factor once, solve many
+apxchol::solver solver(L);           // factor once, solve many
 auto r1 = solver.solve(b1);
 auto r2 = solver.solve(b2, 1e-10, 1000);
 Eigen::VectorXd z = solver.apply(r);
 ```
 
-`cpu_solver` and Eigen's `apxchol::apx_cholesky` always use CPU setup and
-CPU solves, including in CUDA builds. Singular
+`solver` selects the same backend as one-shot `solve()` and owns its factor,
+operator and workspace. `cpu_solver` and Eigen's `apxchol::apx_cholesky` always
+use CPU setup and solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
 With `-DAPXCHOL_DEVICE=METAL` (macOS), `--backend gpu` and
 `solve_options::backend = solve_backend::gpu` select the Apple GPU.
-Automatic selection stays on CPU. Use `apxchol::metal_solver` in place of
-`cpu_solver` above to reuse its host-built factor and GPU workspace.
+Automatic selection stays on CPU. Pass `{.backend = apxchol::solve_backend::gpu}`
+to `solver` to reuse a Metal factor and workspace.
 Metal supports FP32 and FP16 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
 
 The `apxchol_c` target provides an exception-safe [C ABI](include/apxchol/c_api.h)
 with reusable solver and factor handles, factor export and explicit status codes.
 It supports CPU solves and, with `APXCHOL_DEVICE=METAL`, `APXCHOL_BACKEND_METAL`.
 The block call solves columns sequentially, reusing the same factor and workspace.
-The C ABI is not built in CUDA configurations.
+CPU C ABI calls also work in CUDA builds; a C CUDA backend is not exposed.
+`options.factor_storage` selects AUTO, FLOAT16 or FLOAT32 triangular-solve storage;
+`stats.factor_storage` reports the installed format. Factor exports retain native FP32 values.
 
 ```bash
 pip install apxchol                 # or: pip install -e python
