@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/solver/detail/gpu_diagnostics.h"
+#include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/solver/detail/cuda_device_scope.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/cuda_dataflow.h"
@@ -673,14 +674,19 @@ public:
     /// Reads x_in[0..m-1] from host, writes result to x_out[0..m-1] on host.
     /// x_in and x_out may alias (ping-pong stays on GPU).
     void solve_LLt(const double* x_in, double* x_out) const {
-        // Narrow on the host into the staging buffer, ship half the bytes, solve
-        // in fp32, ship back, widen. The host casts are O(m) and dwarfed by the
-        // (now-halved) PCIe transfer they bracket.
-        for (int64_t i = 0; i < data_.m; ++i) h_stage_[i] = static_cast<cuda_value_t>(x_in[i]);
+        double max_abs = 0;
+        for (int64_t i = 0; i < data_.m; ++i) {
+            if (!std::isfinite(x_in[i]))
+                throw std::invalid_argument("CUDA preconditioner: RHS must be finite");
+            max_abs = std::max(max_abs, std::abs(x_in[i]));
+        }
+        const double scale = detail::gpu_scaling::fp32_scale(max_abs);
+        for (int64_t i = 0; i < data_.m; ++i)
+            h_stage_[i] = static_cast<cuda_value_t>(x_in[i] * scale);
         APXCHOL_CUDA_CHECK(cudaMemcpy(data_.d_x, h_stage_.data(), data_.m * sizeof(cuda_value_t), cudaMemcpyHostToDevice));
         solve_LLt_dev_impl();
         APXCHOL_CUDA_CHECK(cudaMemcpy(h_stage_.data(), data_.d_x, data_.m * sizeof(cuda_value_t), cudaMemcpyDeviceToHost));
-        for (int64_t i = 0; i < data_.m; ++i) x_out[i] = static_cast<double>(h_stage_[i]);
+        for (int64_t i = 0; i < data_.m; ++i) x_out[i] = static_cast<double>(h_stage_[i]) / scale;
     }
 
     /// GPU-resident variant: input/output are DEVICE pointers. Avoids

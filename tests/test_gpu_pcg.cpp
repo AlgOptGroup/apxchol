@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <apxchol/solver/detail/gpu_pcg.h>
+#include <apxchol/solver/detail/gpu_scaling.h>
 #include <cmath>
 #include <limits>
 
@@ -110,4 +111,42 @@ TEST(GpuPcg, DevicePredicationRespectsIterationLimitsAndConvergence) {
         EXPECT_EQ(gpu.preconditions, expected);
         EXPECT_EQ(gpu.batches, std::max(1u, (expected + width - 1) / width));
     }
+}
+
+TEST(GpuPcg, StagnationChecksOnlyAtWindowBoundaries) {
+    for (const unsigned window : {0u, 3u}) {
+        SCOPED_TRACE(window);
+        pcg::solve_state<double, double> state{};
+        state.prev = 16.0;
+        state.active = 1;
+        state = pcg::advance(recurrence_math{}, state, pcg::kFinalizeCheck, 64.0, 2, window);
+        EXPECT_EQ(state.active, 1u);
+        EXPECT_EQ(state.prev, 16.0);
+        // Halving the norm is sufficient; the recurrence stores squared norms.
+        state = pcg::advance(recurrence_math{}, state, pcg::kFinalizeCheck, 4.0, 3, window);
+        EXPECT_EQ(state.active, 1u);
+        EXPECT_EQ(state.prev, window ? 4.0 : 16.0);
+        state = pcg::advance(recurrence_math{}, state, pcg::kFinalizeCheck, 1.1, 6, window);
+        EXPECT_EQ(state.active, window ? 0u : 1u);
+        EXPECT_EQ(state.iters, 6u);
+        EXPECT_EQ(state.rr, 1.1);
+    }
+}
+
+TEST(GpuPcg, InputScalingKeepsOrdinaryValuesAndNormalizesExtremes) {
+    namespace scaling = apxchol::detail::gpu_scaling;
+    for (const double value : {0.0, 0x1p-32, 1.0, 0x1p32})
+        EXPECT_EQ(scaling::fp32_scale(value), 1.0);
+    for (const double value : {1e-100, 1e100, std::numeric_limits<double>::min(),
+                               std::numeric_limits<double>::max()}) {
+        const double scale = scaling::fp32_scale(value);
+        EXPECT_TRUE(std::isfinite(scale));
+        EXPECT_GE(value * scale, 1.0);
+        EXPECT_LT(value * scale, 2.0);
+        EXPECT_EQ((value * scale) / scale, value);
+    }
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    const double scale = scaling::fp32_scale(tiny);
+    EXPECT_TRUE(std::isnormal(float(tiny * scale)));
+    EXPECT_EQ((tiny * scale) / scale, tiny);
 }

@@ -140,6 +140,8 @@ choices, retired knobs, and measurements belong in
 
 - `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend (default CPU).
   GPU builds retain CPU solves. Invalid or removed boolean options fail configuration.
+- Root and Python builds share `cmake/apxchol_core.cmake`; keep their backend
+  sources, dependencies and compile requirements in that helper.
 - Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
   manylinux distribution package on Linux and Homebrew on macOS, targeting
   macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
@@ -152,9 +154,15 @@ choices, retired knobs, and measurements belong in
   macOS arm64 retains Apple Clang's default target.
   CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
   Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
-  `python/pyproject.toml`.
+  `python/pyproject.toml`. Linux wheels include CUDA with static cudart and
+  `all-major` device targets; macOS wheels include Metal. CUDA compiler/runtime
+  RPMs come from NVIDIA's repository and supply the bundled license files.
+  Test Linux wheels without a driver as well as on CUDA; native GPU Python tests
+  set `APXCHOL_TEST_REQUIRE_GPU=1` so unavailable devices cannot silently skip.
 
 - Python requires NumPy and SciPy and accepts SciPy sparse operators.
+  `backend="auto"|"cpu"|"gpu"` delegates selection to the C++ owner; read the
+  resolved route through `Solver.backend`.
   `factor_storage_dtype=None|np.float16|np.float32` selects per-solver SpTRSV
   storage; strings and dtype objects are accepted. Explicit selections override
   the environment without changing it; unsupported FP16 requests fail. The
@@ -164,7 +172,7 @@ choices, retired knobs, and measurements belong in
 
 - `APXCHOL_DEVICE=CUDA`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
   use C++23, requiring CUDA Toolkit 13.3+ and CMake 4.4+. The library
-  links `cudart` only. There is no cuSPARSE backend or build option. Benchmark
+  links static `cudart` only. There is no cuSPARSE backend or build option. Benchmark
   competitors independently require cuSPARSE/cuBLAS; distinguish their driver
   linkage from our library linkage.
 - `APXCHOL_POOL_FP32=ON` (default): fp32 residual-pool weights; OFF selects
@@ -191,9 +199,10 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   `src/solve.cpp` provide the CPU compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
 - `apxchol::solver` owns one CPU or compiled GPU session, selected once by the
   existing backend policy. One-shot solve and Python/Octave use this owner;
-  the bindings request CPU. It may outlive its input and setup checkpoint.
-  Per-call timings belong to the solve result. CUDA rejects host factors and
-  warm starts. `detail/csc_import.h` shares typed CSC import among bindings:
+  Octave requests CPU. It may outlive its input and setup checkpoint.
+  Per-call timings belong to the solve result. CUDA accepts warm starts and
+  retained FP32 factor exports, but rejects adoption of host factors.
+  `detail/csc_import.h` shares typed CSC import among bindings:
   sorted unique inputs copy directly; other layouts use Eigen's duplicate sum.
 - Checkpoint copies own independent timing trees; moves preserve active scopes.
   Reusing a copied or moved solve result must not retain pointers to its source.
@@ -274,16 +283,16 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   and Metal; automatic selects CPU, while explicit CUDA rejects it.
 - One-shot `solve` selects a complete route with `solve_options.backend`
   (`automatic`, `cpu`, `gpu`); CLI uses `--backend auto|cpu|gpu`. Report the
-  selected route in `solve_result.backend` and CLI output. Auto is configuration
-  compatibility only: a CUDA build with 32-bit nodes, block-greedy/AoS, supported
-  sampler options and no export selects GPU; other options select CPU before
-  setup. It is not a performance predictor or a device-availability fallback.
+  selected route in `solve_result.backend` and CLI output. Auto checks device
+  availability, options and input compatibility before setup. Explicit CPU never
+  probes GPU; explicit GPU retains setup errors. Selection is not a performance
+  predictor. Never retry a failed GPU setup or solve on CPU.
 - The current CUDA route uses device-owned factorization, finalization, dataflow
   plans, operator preparation and PCG. Reject missing/nonunique device factor ownership
   before a host-factor upload. Unsupported stored formats, missing device,
   insufficient memory and runtime errors never trigger a CPU retry. The operator
   must have supported compressed, sorted, unique and fully paired CSC storage;
-  callers can explicitly select CPU for other valid host layouts.
+  automatic selection uses CPU for other valid host layouts.
 - An explicit `detail::setup_route` selects complete CPU or GPU setup;
   preconditioner specializations fix it at compile time. Public `factorize()`
   uses CPU setup. GPU setup has no stage switches or CPU-tail continuation.
@@ -392,12 +401,15 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   quality, setup, solve, one-RHS total, RSS and owner memory.
 - Metal's `metal_solver` uses host factorization and handles one RHS per call,
   retaining its factor, operator and workspace. `solve()` selects it only for
-  explicit GPU requests. FP16 storage is opt-in; CPU requests to `metal_solver` fail.
+  compatible automatic or explicit GPU requests. FP16 storage is opt-in;
+  CPU requests to `metal_solver` fail.
   Check command-buffer errors and the FP64 original-system exit residual.
   Run `MetalSchedule.*`, `MetalHost.*` and `MetalDevice.*` with device/shader
   validation as described in [CONTRIBUTING.md](CONTRIBUTING.md#build-and-test).
 - CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
   only after its upload has completed and no further host RHS reads remain.
+  Extreme inputs use `detail/gpu_scaling.h`, shared with Metal. CUDA leaves
+  ordinary input scales unchanged; warm starts scale RHS and guess together.
 - GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`
   best-effort device switch/restore guard. Preserve each caller's enable condition
   and early no-op: disabled or pristine lifetimes must not initialize CUDA.

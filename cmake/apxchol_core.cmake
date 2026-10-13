@@ -1,0 +1,92 @@
+include_guard(GLOBAL)
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_device.cmake)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
+option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
+option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
+option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
+option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to FP64. OFF selects the FP64 reference." ON)
+if (APXCHOL_64BIT_INDICES)
+    message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
+    set(APXCHOL_64BIT_EDGE_INDICES ON)
+endif()
+
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_eigen.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake)
+
+if (APXCHOL_DEVICE STREQUAL "METAL")
+    enable_language(OBJCXX)
+elseif (APXCHOL_DEVICE STREQUAL "CUDA")
+    if (CMAKE_VERSION VERSION_LESS 4.4)
+        message(FATAL_ERROR "CUDA C++23 builds require CMake 4.4 or newer")
+    endif()
+    if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures")
+    endif()
+    set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
+    enable_language(CUDA)
+    find_package(CUDAToolkit 13.3 REQUIRED)
+endif()
+
+function(apxchol_configure_core target)
+    get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
+    target_sources(${target} PRIVATE
+        ${root}/src/factorization.cpp
+        ${root}/src/operator_class.cpp
+        ${root}/src/solve.cpp
+    )
+    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
+    target_compile_features(${target} PUBLIC cxx_std_23)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    if (APXCHOL_ARCH_FLAG)
+        target_compile_options(${target} PUBLIC "${APXCHOL_ARCH_FLAG}")
+    endif()
+
+    target_include_directories(${target} PUBLIC
+        ${root}/include
+        ${CMAKE_CURRENT_BINARY_DIR}/include
+    )
+
+    if (APXCHOL_DEVICE STREQUAL "CUDA")
+        target_sources(${target} PRIVATE ${root}/src/cuda_dataflow.cu
+            ${root}/src/cuda_block_frontend.cu ${root}/src/cuda_round_shadow.cu ${root}/src/cuda_pcg_kernels.cu)
+        target_compile_definitions(${target} PUBLIC APXCHOL_USE_CUDA)
+        # Static cudart keeps installed libraries independent of the Toolkit.
+        target_link_libraries(${target} PUBLIC CUDA::cudart_static)
+        set_target_properties(${target} PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
+        if (CMAKE_CUDA_HOST_COMPILER_ID STREQUAL "Clang")
+            # nvcc emits GNU line markers in the C++ passed to its host compiler.
+            target_compile_options(${target} PRIVATE
+                "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-gnu-line-marker>")
+        endif()
+    endif()
+
+    if (APXCHOL_DEVICE STREQUAL "METAL")
+        target_sources(${target} PRIVATE ${root}/src/metal_solver.mm)
+        target_compile_definitions(${target} PUBLIC APXCHOL_USE_METAL)
+        set_source_files_properties(${root}/src/metal_solver.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:OBJCXX>:SHELL:${OpenMP_CXX_FLAGS}>")
+        set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)
+        # PUBLIC: the static library hands the framework dependencies to its
+        # consumers. CoreGraphics lets MTLCreateSystemDefaultDevice find the GPU
+        # from command-line tools.
+        target_link_libraries(${target} PUBLIC "-framework Metal" "-framework Foundation"
+                              "-framework CoreGraphics")
+    endif()
+
+    if (APXCHOL_64BIT_EDGE_INDICES)
+        target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_EDGE_INDICES)
+    endif()
+    if (APXCHOL_64BIT_NODE_INDICES)
+        target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_NODE_INDICES)
+    endif()
+    if (APXCHOL_POOL_FP32)
+        target_compile_definitions(${target} PUBLIC APXCHOL_POOL_FP32)
+    endif()
+endfunction()
