@@ -42,7 +42,8 @@ function(apxchol_configure_core target)
     )
     target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
     target_compile_features(${target} PUBLIC cxx_std_23)
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(${target} PRIVATE
+        -Wall -Wextra "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wpedantic>")
     if (APXCHOL_ARCH_FLAG)
         target_compile_options(${target} PUBLIC "${APXCHOL_ARCH_FLAG}")
     endif()
@@ -59,11 +60,6 @@ function(apxchol_configure_core target)
         # Static cudart keeps installed libraries independent of the Toolkit.
         target_link_libraries(${target} PUBLIC CUDA::cudart_static)
         set_target_properties(${target} PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
-        if (CMAKE_CUDA_HOST_COMPILER_ID STREQUAL "Clang")
-            # nvcc emits GNU line markers in the C++ passed to its host compiler.
-            target_compile_options(${target} PRIVATE
-                "$<$<COMPILE_LANGUAGE:CUDA>:-Wno-gnu-line-marker>")
-        endif()
     endif()
 
     if (APXCHOL_DEVICE STREQUAL "METAL")
