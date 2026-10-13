@@ -62,7 +62,7 @@ function(apxchol_configure_core target)
         if (CMAKE_CUDA_HOST_COMPILER_ID STREQUAL "Clang")
             # nvcc emits GNU line markers in the C++ passed to its host compiler.
             target_compile_options(${target} PRIVATE
-                "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-gnu-line-marker>")
+                "$<$<COMPILE_LANGUAGE:CUDA>:-Wno-gnu-line-marker>")
         endif()
     endif()
 
