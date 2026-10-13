@@ -13,6 +13,7 @@ target_include_directories(gtest SYSTEM PRIVATE
 
 add_executable(unit_tests
         test_core.cpp
+        test_checkpoint.cpp
         test_residual_normalization.cpp
         test_factorize.cpp
         test_elimination.cpp

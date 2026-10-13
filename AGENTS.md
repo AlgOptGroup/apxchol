@@ -212,6 +212,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   needs `keep_factor_values`. Keep `tests/test_c_header.c` layout asserts in
   step with the header. `APXCHOL_C_ABI_VERSION` stays 1 until the ABI's first
   release, then bumps on every layout change.
+- Checkpoint copies own independent timing trees; moves preserve active scopes.
+  Reusing a copied or moved solve result must not retain pointers to its source.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
   M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
   adjacency versus an assembled operator. Bindings must use the operator
