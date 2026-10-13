@@ -166,19 +166,6 @@ factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
     });
 }
 
-/// Runtime-dispatch overload for graphs: picks partitioner by name from
-/// factor_options::is_select at runtime via dispatch_partitioner.
-template<incidence_storage Incidence>
-factorization factorize_with_strategy(graph<Incidence> G,
-                                      const factor_options& opts = {},
-                                      checkpoint* cp = nullptr);
-
-/// Runtime partitioner dispatch with a custom eliminator.
-template<eliminator E, incidence_storage Incidence>
-factorization factorize_with_strategy(graph<Incidence> G, const E& elim,
-                                      const factor_options& opts = {},
-                                      checkpoint* cp = nullptr);
-
 /// Runtime-dispatch overload: picks graph backend from graph_storage enum
 /// and partitioner by name from factor_options::is_select.
 factorization factorize(const Eigen::SparseMatrix<double>& L,

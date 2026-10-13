@@ -62,7 +62,6 @@ option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" O
 option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to FP64. OFF selects the FP64 reference." ON)
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
-option(APXCHOL_BUILD_TOOLS "Build the developer analysis tools (bench_setup, analyze_factor)" OFF)
 
 if (APXCHOL_64BIT_INDICES)
     message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
@@ -109,8 +108,6 @@ function(apxchol_add_core target)
         src/operator_class.cpp
         src/solve.cpp
     )
-    # The core uses Eigen and OpenMP. fast_matrix_market provides file I/O
-    # solely for the CLI and analyze_factor, and is linked on those targets.
     target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
 
     target_include_directories(${target} PUBLIC
@@ -198,16 +195,4 @@ endif()
 if (APXCHOL_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
-endif()
-
-# Developer tools are independent of GoogleTest and APXCHOL_BUILD_TESTS.
-# Preserve their existing build/tests/ paths for scripts and users.
-if (APXCHOL_BUILD_TOOLS)
-    add_executable(bench_setup tests/bench_setup.cpp)
-    target_link_libraries(bench_setup PRIVATE apxchol_core)
-    add_executable(analyze_factor tests/analyze_factor.cpp)
-    target_link_libraries(analyze_factor PRIVATE apxchol_core apxchol_mtx_input
-                          fast_matrix_market::fast_matrix_market)
-    set_target_properties(bench_setup analyze_factor PROPERTIES
-                          RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
 endif()
