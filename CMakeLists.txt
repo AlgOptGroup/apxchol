@@ -7,7 +7,7 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(cmake/apxchol_core.cmake)
-add_compile_options(-Wall -Wextra "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wpedantic>" ${APXCHOL_ARCH_FLAG})
+add_compile_options(-Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>" ${APXCHOL_ARCH_FLAG})
 include(FetchContent)
 
 # ── CLI11 ────────────────────────────────────────────
