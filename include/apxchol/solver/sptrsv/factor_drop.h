@@ -1,32 +1,9 @@
 #pragma once
-// The COMPACTING FACTOR DROP -- the ONE host implementation shared by every
-// SpTRSV backend (omp_sptrsv::setup on the CPU, cuda_sptrsv::setup before the
-// upload on the GPU, through cuda_host.h). What it does, why, and the
-// storage contract is documented in docs/precision.md; historical measurements
-// are in docs/implementation-history.md. In one paragraph:
-//
-//   Off-diagonal (i, j) of the factor is KEPT iff |L_ij| >= rel * s_j, s_j =
-//   column j's max |off-diagonal| (column_scale(), computed BEFORE the drop --
-//   the drop never removes the max), AND the backend's storage format does not
-//   store it as zero anyway (the `keep` predicate the backend passes in --
-//   omp_sptrsv::keep_offdiag on the CPU, cuda_host::keep_offdiag on the GPU).
-//   The diagonal is always kept (every column keeps its first entry). The
-//   dropped mass of each column is folded back into its kept off-diagonals in
-//   proportion to |v| (a uniform rescale for the all-negative M-matrix columns
-//   the elimination produces), so every column sums to what it summed to
-//   (unconditional): a Laplacian factor's zero column sums are what
-//   keep L L^T a Laplacian and the grounded L11 L11^T a reduced Laplacian with
-//   the right grounding mass -- plain removal costs iter0040 45 -> 67 PCG
-//   iterations on the Laplacian path, the compensated drop 45 -> 45 while
-//   removing 52% of the entries. O(nnz) parallel work, no atomics; the kept
-//   set is a per-entry predicate, the output order is the input order and the
-//   compensation sums each column in a fixed order: deterministic.
-//
-// Header-only, CUDA-free, OpenMP-parallel; templated on the offset / index /
-// value types so the CPU backend runs it on the factor's (edge_index,
-// node_index, factor_value_t) arrays and the GPU backend on its int32 dataflow
-// arrays -- the same code, so the two backends' compacted factors are
-// identical (tests/test_sptrsv_drop.cpp states that).
+// Compact host factor columns before storage conversion. Keep the diagonal and
+// off-diagonals accepted by the threshold/format predicate. Redistribute dropped
+// mass among retained off-diagonals to preserve each column sum; plain removal
+// can damage Laplacian grounding. Preserve entry order and ordered per-column
+// compensation. See docs/precision.md for the storage contract.
 #include "apxchol/csc_work.h"
 #include "apxchol/types.h"
 #include <algorithm>
@@ -39,34 +16,8 @@
 
 namespace apxchol {
 
-// DEFAULT relative threshold of the COMPACTING FACTOR DROP: at setup, factor
-// off-diagonal (i, j) is stored in the SpTRSV's CSR/CSC iff
-//   |L_ij| >= kFactorDropRelDefault * s_j,   s_j = column j's max |off-diagonal|,
-// the dropped mass of each column is folded back into its kept off-diagonals
-// (column sums preserved), and the diagonal is always kept. Env
-// APXCHOL_FACTOR_DROP=<rel> overrides (read at every setup): 0 (or any value
-// <= 0) disables the drop, any other value replaces the threshold.
-//
-// ON by default at 1e-4 by measurement. Branch perf/factor-drop @ fbbfd72
-// (pre-center-k base, where the IPM matrix classified as SDDM; fp32 build,
-// T=1, tol 1e-8, bg+tree[vec_pool], Iters/RelRes drop-off vs drop-on):
-// grid_500 40/40, grid_2000 50/50, iter0040 44/44 -- 0 PCG iterations change;
-// grids drop 0 entries (exact no-op), iter0040 drops 51.8% of its
-// off-diagonals (stored nnz 9063231 -> 4639013), i.e. the SpTRSV's CSR/CSC
-// bytes and per-sweep work roughly halve there. Re-measured on main
-// (center-k grounding, iter0040 is a rank-(n-1) Laplacian factor there),
-// same protocol, this port with the column-sum compensation: grid_500 40/40
-// (RelRes 8.345e-09 both), grid_2000 47/47 (8.161e-09 both), iter0040 45/45
-// (7.196e-09 -> 7.224e-09), com-Amazon 38/38 (7.977e-09 both, 0 dropped);
-// iter0040 drops 51.6% (9032674 -> 4639053). WITHOUT the compensation
-// (plain removal -- the branch's semantics, and the A/B switch
-// APXCHOL_FACTOR_DROP_COMPENSATE=0 that was removed 2026-08-20 for exactly
-// this number)
-// the same 1e-4 costs iter0040 45 -> 67 iterations on main's Laplacian path
-// (48 -> 48 with APXCHOL_GROUND=reg, i.e. on the SDDM path the branch
-// measured on, where it costs nothing either way); see docs/precision.md. With the compensation iter0040 stays at 45 up to rel=3e-3
-// (67% dropped), so 1e-4 is a conservative default, kept as the value the
-// branch measured; raising it needs the IPM ladder, not one matrix.
+// Relative to the largest off-diagonal magnitude in each column.
+// APXCHOL_FACTOR_DROP overrides this at setup; nonpositive values disable it.
 inline constexpr double kFactorDropRelDefault = 1e-4;
 
 // APXCHOL_FACTOR_DROP=<rel> resolution, read at every setup(): unset (or

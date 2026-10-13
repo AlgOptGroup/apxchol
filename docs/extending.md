@@ -126,6 +126,5 @@ exportable factor arrays; consuming solver paths may release them.
 Custom graph layouts implement `incidence_storage`. Directed pooled AoS is
 the high-level default; storage selection must not silently change the
 partitioner. The PCG recurrence, factor-column formula, and triangular-solve
-kernels are not additional template seams. Consult
-[implementation history](implementation-history.md) before reviving a retired
-mechanism; historical options are not supported APIs.
+kernels are not additional template seams. Preserve the current defaults and
+[precision contract](precision.md); retired options are not supported APIs.

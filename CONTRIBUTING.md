@@ -51,15 +51,15 @@ core is `factorization.cpp`, `operator_class.cpp` and `solve.cpp` in `src/`.
 Register new partitioners in `partitioner_list.h`; register storage backends
 in both `graph_storage` and factorization dispatch. Preserve deterministic
 neighbor ordering, sampling streams and thread-team behavior. Consult the
-rationale in `factor_options.h` and [implementation history](docs/implementation-history.md)
+rationale in `factor_options.h` and the [precision contract](docs/precision.md)
 before changing established defaults. Prefer a shared implementation over
 another mode or public tuning option.
 
 ## Performance
 
 The [benchmark suite](benchmarks/README.md) is a separate CMake project.
-Use a controlled, recorded machine; committed platform results are historical
-snapshots. Interactive laptop measurements are diagnostic.
+Use a controlled, recorded machine and keep campaign outputs outside tracked
+source. Interactive laptop measurements are diagnostic.
 Use matched, interleaved repetitions with pinned source, binaries, inputs,
 affinity and timing boundaries. Report setup and solve separately, together
 with residuals, fill, memory and control spread. Do not combine isolated

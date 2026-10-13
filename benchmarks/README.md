@@ -1,10 +1,6 @@
 # Benchmarks
 
-[Daint results](daint/) and [retired laptop results](archive/) are historical
-snapshots, bound to their recorded source revisions and measurement protocols.
-They are not measurements of the current checkout. The contract below governs
-new comparisons; it must not be applied retroactively to old timings.
-Committed CSVs carry selected results and provenance.
+This separate project compares apxchol with other sparse solvers using common inputs, stopping criteria and timing boundaries. The maintained runners write results and plots outside tracked source. Every published comparison must identify its measured revisions and protocol; it is not automatically a result for the current checkout.
 
 ## Measurement contract
 
@@ -59,11 +55,7 @@ Committed CSVs carry selected results and provenance.
 - Whole-cell deadlines may cover calibration and all repetitions: a timeout is **not**
   a lower bound on one solve. Preserve failure, nonconvergence, timeout, unsupported,
   unattempted and missing statuses. Unknown memory is not zero.
-- Pin CPU affinity; record requested/effective threads, source/binary hashes,
-  compiler/runtime, warmups and retained receipts. Report the placement with the
-  thread count: on an EPYC 7742 socket the same 16 threads take 1.00 on one NUMA
-  domain and 0.86 on four ([threads and placement](../README.md#threads-and-placement)). Never poll `nvidia-smi` inside
-  timed C++ or ParAC calls.
+- Pin CPU affinity; record requested/effective threads, placement, source/binary hashes, compiler/runtime, warmups and retained receipts. See [threads and placement](../README.md#threads-and-placement). Never poll `nvidia-smi` inside timed C++ or ParAC calls.
 
 ## Solvers
 
@@ -73,11 +65,9 @@ RCHOL/pRCHOL retain upstream factors with labelled MKL or portable PCG.
 interchange from CPU Graph/AMD algorithm preparation, while retaining required
 transformations, ordering/permutation and native factor/workspace setup. Complete
 preparation stays diagnostic; source/schema-bound caches reject old accounting.
-Physics/GPU preparation keeps its explicit complete timing contract. The corrected
-private Daint study and this maintained source port have separate provenance;
-do not subtract old overhead retrospectively or relabel historical cells.
-The bundled CPU build needs MKL; Daint's separately labelled portable implementation
-has a serial solve. Positive stored Physics off-diagonals are unsupported.
+Physics/GPU preparation keeps its explicit complete timing contract. Do not subtract overhead retrospectively or relabel historical cells.
+The bundled CPU build needs MKL; separately labelled portable implementations
+may have different threading and must record it. Positive stored Physics off-diagonals are unsupported.
 ParAC patch 0007 checks original accuracy inside each measured solve. There is
 no untimed, matrix-specific tolerance calibration before retained runs. Julia
 uses fixed tiny connected/disconnected/SDDM fixtures to warm its native closure
@@ -172,5 +162,3 @@ Compact plots show absolute times and log-log speedups; no complete T1 means no
 speedup. Full-study extracts remain separate. `stale_cells.py` checks semantic
 invalidation without deleting evidence; renderers reject stale/ambiguous cells.
 Use `benchmarks/dev/audit_series_rule.py` for the declared-series audit.
-
-[Earlier protocol detail](https://github.com/AlgOptGroup/apxchol/blob/1a526f25aec8829e8a9217b558ac2290a3840ae0/benchmarks/README.md)
