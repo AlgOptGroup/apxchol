@@ -43,7 +43,7 @@ function(apxchol_configure_core target)
     target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
     target_compile_features(${target} PUBLIC cxx_std_23)
     target_compile_options(${target} PRIVATE
-        -Wall -Wextra "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wpedantic>")
+        -Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>")
     if (APXCHOL_ARCH_FLAG)
         target_compile_options(${target} PUBLIC "${APXCHOL_ARCH_FLAG}")
     endif()
