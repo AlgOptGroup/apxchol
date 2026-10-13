@@ -15,6 +15,8 @@
 
 #if defined(APXCHOL_USE_CUDA)
 #include <cuda_runtime.h>
+#elif defined(APXCHOL_USE_METAL)
+#include "apxchol/solver/metal_solver.h"
 #endif
 
 namespace {
@@ -271,3 +273,48 @@ TEST(Solver, CudaOwnerRejectsWarmStartsAndHostFactors) {
     expect_solution(matrix, rhs, recovered.x);
 #endif
 }
+
+#if defined(APXCHOL_USE_METAL)
+TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    const scoped_omp_threads threads(1);
+    const Sparse matrix = operator_matrix();
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    for (const auto storage : {apxchol::factor_storage_type::fp32,
+                              apxchol::factor_storage_type::fp16}) {
+        SCOPED_TRACE(static_cast<int>(storage));
+        auto options = cpu_options();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        options.keep_factor_values = true;
+        std::unique_ptr<apxchol::solver> owner;
+        {
+            Sparse temporary = matrix;
+            apxchol::checkpoint setup;
+            owner = std::make_unique<apxchol::solver>(temporary, options, &setup);
+        }
+        EXPECT_EQ(owner->backend(), apxchol::solve_backend::gpu);
+        EXPECT_EQ(owner->rows(), matrix.rows());
+        EXPECT_EQ(owner->factor_storage(), storage);
+        apxchol::solver adopted(matrix, owner->factor(), options);
+        EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
+        EXPECT_EQ(adopted.factor_storage(), storage);
+        const auto result = owner->solve(rhs);
+        const auto expected = adopted.solve(rhs);
+        EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
+        expect_solution(matrix, rhs, result.x);
+        ASSERT_EQ(result.x.size(), expected.x.size());
+        EXPECT_TRUE(same_bytes(result.x.data(), expected.x.data(), result.x.size()));
+        const auto applied = owner->apply(rhs);
+        const auto reference = adopted.apply(rhs);
+        ASSERT_EQ(applied.size(), reference.size());
+        EXPECT_TRUE(same_bytes(applied.data(), reference.data(), applied.size()));
+        Eigen::VectorXd output(matrix.rows());
+        const auto warm = adopted.solve(rhs, output, options.tol, 0, &result.x);
+        EXPECT_EQ(warm.iterations, 0);
+        EXPECT_EQ(warm.x.size(), 0);
+        expect_solution(matrix, rhs, output);
+        expect_solution(matrix, -rhs, owner->solve(-rhs).x);
+    }
+}
+#endif

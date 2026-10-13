@@ -49,9 +49,11 @@ public:
     }
     const gpu_preconditioner& preconditioner() const { return precond; }
 
-    void solve(const Eigen::VectorXd& b, solve_result& res, double tol, int max_iter) {
+    void solve(const Eigen::VectorXd& b, solve_result& res, double tol, int max_iter,
+               const Eigen::VectorXd* x0 = nullptr) {
         if (b.size() != precond.rows())
             throw std::invalid_argument("GPU solve: RHS length mismatch");
+        if (x0) throw std::invalid_argument("CUDA solver does not support a warm start");
         res.backend = solve_backend::gpu;
         res.lumped_offdiag = precond.factor().lumped_offdiag;
         if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
