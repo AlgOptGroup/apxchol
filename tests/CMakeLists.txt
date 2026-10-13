@@ -81,7 +81,7 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
     # The CPU route must run in a fresh process with no visible CUDA devices;
     # automatic selection uses CPU; explicit GPU requests still fail.
     add_test(NAME solve_routes_no_cuda_device COMMAND unit_tests
-        --gtest_filter=SolveRoutes.ExplicitCpuDoesNotPrewarm:SolveRoutes.HiddenDeviceUsesCpuAutomaticallyAndRejectsExplicitGpu)
+        --gtest_filter=SolveRoutes.ExplicitCpuDoesNotPrewarm:SolveRoutes.AutomaticSelectionRespectsConfigurationAndAvailability:SolveRoutes.ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup:SolveRoutes.HiddenDeviceUsesCpuAutomaticallyAndRejectsExplicitGpu)
     set_tests_properties(solve_routes_no_cuda_device PROPERTIES TIMEOUT 120
         ENVIRONMENT "OMP_NUM_THREADS=4;CUDA_VISIBLE_DEVICES=-1")
     # Device-wide free-memory accounting also sees other GPU applications.

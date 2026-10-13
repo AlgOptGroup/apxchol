@@ -812,6 +812,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
         opts.storage == graph_storage::vec_pool_aos &&
         opts.factor_opts.is_select == "block_greedy" &&
+        opts.factor_opts.residual_peel == residual_peel_strategy::natural &&
         opts.factor_opts.exact_clique_max_degree == 0 &&
         exact_core_or_off(opts.factor_opts.exact_core_max_h) == 0 &&
         opts.factor_opts.double_cycle_min_h == 0;
@@ -828,7 +829,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
         return solve_backend::gpu;
     if (opts.backend == solve_backend::gpu)
         throw std::invalid_argument("GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
-            "and supported sampler options; request CPU explicitly");
+            "natural residual peeling and supported sampler options; request CPU explicitly");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
     if (opts.backend == solve_backend::automatic && A) {
