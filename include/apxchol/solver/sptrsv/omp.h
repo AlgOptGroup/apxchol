@@ -1381,17 +1381,6 @@ private:
     }
 
 public:
-    int num_fwd_levels() const {
-        return static_cast<int>(hybrid_active_
-            ? hybrid_fwd_level_end_ + critical_plan_.steps
-            : base_level_count<fwd_dir>());
-    }
-    int num_bck_levels() const {
-        return static_cast<int>(hybrid_active_
-            ? critical_plan_.steps +
-                  (base_level_count<bck_dir>() - hybrid_bck_level_begin_)
-            : base_level_count<bck_dir>());
-    }
     bool uses_hybrid_schedule() const { return hybrid_active_; }
     // Barriers one solve in that direction executes: one per level (thin or
     // fat) under the level-set schedule -- the critical-path length of a solve.

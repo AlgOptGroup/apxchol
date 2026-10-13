@@ -109,10 +109,7 @@ choices, retired knobs, and measurements belong in
 [implementation history](docs/implementation-history.md), not this contract.
 
 - `APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS`: ON by default. Only tests
-  require GoogleTest. `APXCHOL_BUILD_TOOLS`: OFF by default, independently builds
-  `build/tests/bench_setup` and `build/tests/analyze_factor`, including when tests
-  are disabled. `analyze_factor MATRIX --solve [--seed N]` reports setup, solve,
-  iterations and the original-system residual for a component-compatible RHS.
+  require GoogleTest.
 - CMake usage requirements on `apxchol_core` and `apxchol_mtx_input` must export
   C++23 and any native architecture flag actually used by the library. Parent
   projects do not inherit directory compile options; mismatched Eigen alignment

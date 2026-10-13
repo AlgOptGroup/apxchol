@@ -376,8 +376,8 @@ and the old `forward_star` / `fwd_star` selections are rejected. The surviving
 vec, bstr and directed-AoS enum values remain 0, 2 and 4; custom incidence
 templates and storage-independent selector choices remain supported.
 
-The setup-analysis tools now use AoS in place of their former forward-star
-default or fixed-storage sweeps and label new output accordingly. Historical
+At that point, the setup-analysis tools switched to AoS in place of their
+forward-star defaults or fixed-storage sweeps and labelled new output accordingly. Historical
 forward-star measurements and their chart labels remain unchanged. This
 retirement does not establish that the surviving layouts are universally
 dominated, and it does not change the default solver or its numerical controls.

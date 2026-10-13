@@ -2059,24 +2059,4 @@ factorization factorize(graph<Incidence> G, P part, const E& elim,
     return factorize_impl(elim, part, std::move(G), opts, cp);
 }
 
-template<incidence_storage Incidence>
-factorization factorize_with_strategy(graph<Incidence> G,
-                                      const factor_options& opts,
-                                      checkpoint* cp) {
-    return dispatch_partitioner<factorization>(opts.is_select,
-        [&]<typename P>() -> factorization {
-            return factorize_impl<P>(make_tree_elim(opts), std::move(G), opts, cp);
-        });
-}
-
-template<eliminator E, incidence_storage Incidence>
-factorization factorize_with_strategy(graph<Incidence> G, const E& elim,
-                                      const factor_options& opts,
-                                      checkpoint* cp) {
-    return dispatch_partitioner<factorization>(opts.is_select,
-        [&]<typename P>() -> factorization {
-            return factorize_impl<P>(elim, std::move(G), opts, cp);
-        });
-}
-
 } // namespace apxchol

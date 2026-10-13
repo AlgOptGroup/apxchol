@@ -243,18 +243,6 @@ void build_csc(factorization& result,
 
 } // namespace detail
 
-// Explicit instantiations for factorize_with_strategy across all storage backends.
-// Per-partitioner instantiation is no longer needed: dispatch_partitioner is a
-// function template that is inlined into factorize_with_strategy's body.
-// Definition lives in factorization_impl.h for on-demand instantiation of
-// other (including user-provided) backends.
-template factorization factorize_with_strategy<vec_incidence>(
-    graph<vec_incidence>, const factor_options&, checkpoint*);
-template factorization factorize_with_strategy<bstr_incidence>(
-    graph<bstr_incidence>, const factor_options&, checkpoint*);
-template factorization factorize_with_strategy<directed_vec_pool_incidence>(
-    graph<directed_vec_pool_incidence>, const factor_options&, checkpoint*);
-
 factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                           graph_storage storage,
                                           const factor_options& opts_in,
@@ -273,14 +261,10 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     const operator_view op(L);
     if (cp) (*cp)("operator_prepare");
 
-    // make_graph runs BEFORE factorize_with_strategy's own descend("setup") —
-    // without its own bracket, its cost (~700 ms on IPM iter40: full
-    // Eigen-sparse → graph conversion) shows up as un-accounted wall time
-    // outside the profile. Wrap it here so the bench's setup_time captures it.
+    // Include operator validation and graph construction in setup timing.
     factor_options opts = opts_in;
 
-    // Move the throwaway make_graph result into factorize_with_strategy's
-    // by-value graph parameter — no defensive deep-copy on the dispatch path.
+    // Transfer the temporary graph into factorization without copying it.
     auto do_factorize = [&](auto&& G) {
         if (cp) { (*cp)("make_graph"); cp->ascend(); }
         factorization F = dispatch_partitioner<factorization>(opts.is_select,
