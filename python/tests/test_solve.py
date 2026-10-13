@@ -1,4 +1,5 @@
 import inspect
+import platform
 import warnings
 import numpy as np
 import scipy.sparse as sp
@@ -95,7 +96,8 @@ def test_storage_dtype_preserves_original_system_accuracy(dtype):
     try:
         solver = apxchol.factorize(A, factor_storage_dtype=dtype)
     except RuntimeError as exc:
-        assert dtype == np.float16 and "AVX/F16C support" in str(exc)
+        assert dtype == np.float16 and str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64"
+        assert (platform.system(), platform.machine()) != ("Darwin", "arm64"), str(exc)
         pytest.skip("CPU lacks FP16 conversion support")
     result = solver.solve(b)
     assert result.converged

@@ -19,9 +19,8 @@ installed triangular-solve arrays, and the outer iteration. A build with
 
 The environment setting is `APXCHOL_FACTOR_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU/Metal FP32, CUDA FP16). Unset or empty selects `auto`. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
 
-CPU FP16 is available on x86 CPUs with AVX/F16C, including portable wheels. The CPU is
-checked at setup; an unsupported explicit FP16 request raises an error. Fat levels use the
-AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise.
+CPU FP16 is available on x86 CPUs with AVX/F16C and on Apple ARM64, including portable wheels. Unsupported explicit requests fail at setup.
+On x86, fat levels use the AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise; Apple ARM64 uses native conversions.
 CPU setup converts the CSC values once and copies them into CSR. Consuming
 setup releases the input before transposing; non-consuming FP16 setup retains
 that input and the stored CSC alongside the parallel transpose's scratch.

@@ -196,7 +196,7 @@ private:
 // Storage contract (derivation and historical decisions: docs/precision.md):
 //
 // * FP32 arrays by default; APXCHOL_FACTOR_STORAGE=float16 selects scaled FP16
-//   off-diagonals on CPUs with F16C, including portable builds. Arithmetic
+//   off-diagonals on x86 with AVX/F16C and on Apple ARM64, including portable builds. Arithmetic
 //   remains FP64 in both cases; only the stored preconditioner changes.
 // * Scale s_j is the pre-drop maximum absolute off-diagonal of column j, or
 //   one for an empty column. Compacting drop preserves the diagonal and
@@ -224,6 +224,8 @@ public:
     static bool fp16_supported() {
 #ifdef __x86_64__
         return __builtin_cpu_supports("avx") && __builtin_cpu_supports("f16c");
+#elif defined(__APPLE__) && defined(__aarch64__)
+        return true;
 #else
         return false;
 #endif
@@ -233,7 +235,7 @@ public:
     static bool fp16_resolved(factor_storage_type storage = factor_storage_type::automatic) {
         const bool want = detail::resolve_fp16_storage(storage, false);
         if (want && !fp16_supported())
-            throw std::runtime_error("FP16 factor storage requires an x86 CPU with AVX/F16C support");
+            throw std::runtime_error("FP16 factor storage requires AVX/F16C or Apple ARM64");
         return want;
     }
     /// Which storage the LAST setup() chose.
@@ -396,12 +398,10 @@ private:
     void setup_dispatch(const sparse_csc& L, node_index m, sparse_csc* consumed,
                         factor_storage_type storage) {
         fp16_ = fp16_resolved(storage);
-#ifdef __x86_64__
         if (fp16_) {
             setup_impl<_Float16>(L, m, consumed);
             return;
         }
-#endif
         setup_impl<float>(L, m, consumed);
     }
 
@@ -1105,12 +1105,10 @@ private:
     // setup-time CPU capability check.
     template <class Dir>
     void solve_dispatch(const double* x_in, double* y_out) const {
-#ifdef __x86_64__
         if (fp16_) {
             solve_selected<Dir, _Float16>(x_in, y_out);
             return;
         }
-#endif
         solve_selected<Dir, float>(x_in, y_out);
     }
 

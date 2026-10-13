@@ -225,12 +225,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   the normal round-to-nearest environment and retains signed subnormal flushing.
   Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
   packed conversion and scalar widening workarounds stay local to conversion.
-  Portable x86 builds check AVX/F16C before selecting FP16 storage. AVX2/FMA
+  CPU FP16 is available on Apple ARM64 and on x86 after checking AVX/F16C. AVX2/FMA
   selects the optimized kernels once per level or critical tail, before the row
   loops; native builds use them directly.
   FP16 remains opt-in on the CPU; unsupported explicit requests fail at setup.
-  Setup narrows CSC once inside an F16C-targeted worker and transposes those
-  stored values. Host narrowing and the format-drop predicate share the RNE
+  Setup narrows CSC once (F16C-targeted on x86) and transposes those stored values. Host narrowing and the format-drop predicate share the RNE
   normal/subnormal boundary check, flushing before conversion to FP16.
   Release consumed input before the transpose;
   FP32 keeps transpose-before-copy ordering to retain its memory bound.

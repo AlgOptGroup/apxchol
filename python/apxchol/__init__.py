@@ -332,7 +332,7 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
     factor_storage_dtype : numpy dtype, dtype name, or None
         ``np.float16`` or ``np.float32`` (also "float16"/"float32") selects
         triangular-solve value storage for this solver. FP16 stores scaled
-        off-diagonals with FP32 diagonals and scales; it requires x86 AVX/F16C.
+        off-diagonals with FP32 diagonals and scales; it requires x86 AVX/F16C or Apple ARM64.
         Unsupported FP16 requests raise an error. CPU arithmetic remains FP64;
         constructed factors and exports remain FP32. FP64 factor storage is
         not supported. ``None`` uses ``APXCHOL_FACTOR_STORAGE`` if set, otherwise
