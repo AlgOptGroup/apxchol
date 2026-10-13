@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "apxchol.h"
@@ -142,24 +143,21 @@ public:
 
     // M^{-1} r (one forward/back SpTRSV; reused tuned factor).
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const {
-        if (r.size() != slv_.rows())
-            throw std::invalid_argument("apply: r length mismatch");
         return slv_.apply(r);
     }
 
     py::dict solve(const Eigen::VectorXd& b, double tol, int maxiter,
                    py::object x0, py::object out_arr) const {
-        if (b.size() != slv_.rows())
-            throw std::invalid_argument("solve: b length mismatch");
+        if (tol < 0.0) tol = apxchol::default_tol;
         Eigen::VectorXd x0v;
         const Eigen::VectorXd* x0p = nullptr;
         if (!x0.is_none()) {
             x0v = x0.cast<Eigen::VectorXd>();
-            if (x0v.size() != slv_.rows())
-                throw std::invalid_argument("solve: x0 length mismatch");
             x0p = &x0v;
         }
 
+        apxchol::solve_result res;
+        py::dict out;
         // Caller-provided output memory: solve straight into the numpy array
         // (no per-solve solution allocation; the array must alias no copy).
         if (!out_arr.is_none()) {
@@ -173,18 +171,13 @@ public:
                     "of length n");
             Eigen::Map<Eigen::VectorXd> xmap(
                 static_cast<double*>(a.mutable_data()), slv_.rows());
-            const apxchol::solve_result res = slv_.solve(b, xmap, tol, maxiter, x0p);
-            py::dict out;
-            out["x"]         = a;
-            out["iters"]     = static_cast<int>(res.iterations);
-            out["residual"]  = res.residual;
-            out["converged"] = res.residual < tol;
-            return out;
+            res = slv_.solve(b, xmap, tol, maxiter, x0p);
+            out["x"] = a;
+        } else {
+            res = slv_.solve(b, tol, maxiter, x0p);
+            out["x"] = std::move(res.x);
         }
 
-        const apxchol::solve_result res = slv_.solve(b, tol, maxiter, x0p);
-        py::dict out;
-        out["x"]         = Eigen::VectorXd(res.x);
         out["iters"]     = static_cast<int>(res.iterations);
         out["residual"]  = res.residual;
         // The PCG breaks with residual < tol on convergence; every other exit

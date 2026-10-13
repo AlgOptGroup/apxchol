@@ -64,7 +64,6 @@ Eigen::SparseMatrix<double> import_csc(std::int64_t n, const Offset* outer,
         for (auto p = outer[j] - base; p < outer[j + 1] - base; ++p)
             triplets.emplace_back(static_cast<int>(inner[p] - base), j, values[p]);
     A.setFromTriplets(triplets.begin(), triplets.end());
-    A.makeCompressed();
     return A;
 }
 

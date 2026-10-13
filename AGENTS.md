@@ -195,6 +195,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   Per-call timings belong to the solve result. CUDA rejects host factors and
   warm starts. `detail/csc_import.h` shares typed CSC import among bindings:
   sorted unique inputs copy directly; other layouts use Eigen's duplicate sum.
+- Checkpoint copies own independent timing trees; moves preserve active scopes.
+  Reusing a copied or moved solve result must not retain pointers to its source.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
   M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
   adjacency versus an assembled operator. Bindings must use the operator

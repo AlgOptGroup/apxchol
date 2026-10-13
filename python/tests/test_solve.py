@@ -551,6 +551,21 @@ def test_binding_imports_csc_layouts(offset_dtype, index_dtype, layout):
         np.testing.assert_array_equal(actual, original)
 
 
+@pytest.mark.parametrize("with_output", [False, True])
+def test_binding_negative_tolerance_uses_default_for_convergence(with_output):
+    from apxchol import _apxchol
+
+    A = sp.csc_matrix([[4.0, -1.0], [-1.0, 3.0]])
+    solver = _apxchol.Solver(A.indptr, A.indices, A.data)
+    b = np.array([1.0, 2.0])
+    out = np.empty_like(b) if with_output else None
+    result = solver.solve(b, -1.0, 20, out=out)
+    assert result["converged"]
+    np.testing.assert_allclose(A @ result["x"], b, rtol=1e-12)
+    if with_output:
+        assert result["x"] is out
+
+
 def test_placeholder_column_per_component():
     """A k-component Laplacian carries k bare-diagonal placeholder columns."""
     A = sp.block_diag((grid2d_laplacian(8), grid2d_laplacian(6)), format="csr")

@@ -188,7 +188,13 @@ TEST(Solver, CpuSolveTimingsBelongToTheCurrentResult) {
     EXPECT_GT(second.timings.total("pcg.solve"), 0.0);
     EXPECT_EQ(first->timings.report(), first_before);
     EXPECT_EQ(setup.report(), setup_before);
+    auto moved = std::move(*first);
     first.reset();
+    auto copied = moved;
+    owner.solve(rhs, moved);
+    owner.solve(-rhs, copied);
+    expect_solution(matrix, rhs, moved.x);
+    expect_solution(matrix, -rhs, copied.x);
     const double second_before = second.timings.total("pcg");
     {
         apxchol::solve_result temporary;
