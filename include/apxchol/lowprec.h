@@ -40,7 +40,7 @@
 //   2^-14 of their column max would fall into fp16's SUBNORMAL range and are
 //   FLUSHED to signed zero at storage time. setup() counts the flushed and
 //   the subnormal and reports them under APXCHOL_VERBOSE. The scale is NOT
-//   multiplied back by the kernels: it is folded into the vectors
+//   multiplied back by the CPU/CUDA kernels: it is folded into the vectors
 //   (forward_solve returns D y, transpose_solve takes it and scales its input
 //   by D^-2; see docs/precision.md).
 //

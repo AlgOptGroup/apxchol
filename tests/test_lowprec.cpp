@@ -9,6 +9,7 @@
 //     (every build): stored nnz == kept entries, and the compacted SpTRSV
 //     solves like the zeroed-but-not-removed reference.
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -50,14 +51,6 @@ double rel_err(double y, double x) { return std::fabs(y - x) / std::fabs(x); }
 // factor: the compacting drop (APXCHOL_FACTOR_DROP, ON by default at 1e-4 with
 // column-sum compensation -- see omp.h) would remove / rescale the tiny
 // entries these tests seed. Restores the previous value on scope exit.
-struct scoped_env {
-    std::string name, saved; bool had = false;
-    scoped_env(const char* var, const char* value) : name(var) {
-        if (const char* e = std::getenv(var)) { had = true; saved = e; }
-        if (value) setenv(var, value, 1); else unsetenv(var);
-    }
-    ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
-};
 struct scoped_drop_off : scoped_env {
     scoped_drop_off() : scoped_env("APXCHOL_FACTOR_DROP", "0") {}
 };

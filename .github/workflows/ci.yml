@@ -62,7 +62,7 @@ jobs:
         run: |
           cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_C_COMPILER=gcc-14 \
-                -DAPXCHOL_NATIVE_ARCH=OFF -DAPXCHOL_USE_CUDA=OFF \
+                -DAPXCHOL_NATIVE_ARCH=OFF -DAPXCHOL_DEVICE=CPU \
                 -DBENCH_HYPRE_USE_CUDA=OFF -DBUILD_GPU_RCHOL=OFF \
                 -DAPXCHOL_RCHOL_PORTABLE_PCG=ON -DAPXCHOL_BENCH_FETCH_METIS=OFF \
                 -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
@@ -111,15 +111,15 @@ jobs:
         run: ctest --test-dir build --no-tests=error --output-on-failure
 
   macos:
-    name: macOS (Apple Clang, ${{ matrix.build.name }}, Metal ${{ matrix.metal }}, build + ctest)
+    name: macOS (Apple Clang, ${{ matrix.build.name }}, ${{ matrix.device }}, build + ctest)
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         build: *build_modes
-        metal: ['OFF', 'ON']
+        device: [CPU, METAL]
     env:
-      CMAKE_ARGS: -DAPXCHOL_USE_METAL=${{ matrix.metal }} -DAPXCHOL_BUILD_TOOLS=ON
+      CMAKE_ARGS: -DAPXCHOL_DEVICE=${{ matrix.device }} -DAPXCHOL_BUILD_TOOLS=ON
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4

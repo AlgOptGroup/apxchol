@@ -4,6 +4,8 @@
 #include "apxchol.h"
 #include "apxchol/solver/partitioner_helpers.h"
 #include <gtest/gtest.h>
+#include "grid_laplacian.h"
+#include "scoped_env.h"
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
@@ -14,14 +16,6 @@ namespace {
 // RAII env override: these tests state the DEFAULT (fp32) SpTRSV storage
 // contract, and the suite is also run with APXCHOL_FACTOR_STORAGE=float16 in the
 // environment, so they pin it.
-struct scoped_env {
-    std::string name, saved; bool had = false;
-    scoped_env(const char* var, const char* value) : name(var) {
-        if (const char* e = std::getenv(var)) { had = true; saved = e; }
-        if (value) setenv(var, value, 1); else unsetenv(var);
-    }
-    ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
-};
 
 
 // "Exact factor => O(1) PCG iterations" bound. An exact Cholesky factor stored
@@ -32,25 +26,7 @@ struct scoped_env {
 // precision buys. These tests run at the default fp32 storage.)
 constexpr int kExactFactorMaxIters = 3;
 
-Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
-    const int n = rows * cols;
-    std::vector<Eigen::Triplet<double>> t;
-    auto id = [cols](int i, int j) { return i * cols + j; };
-    for (int i = 0; i < rows; ++i)
-        for (int j = 0; j < cols; ++j) {
-            int deg = 0;
-            auto edge = [&](int i2, int j2) {
-                if (i2 < 0 || j2 < 0 || i2 >= rows || j2 >= cols) return;
-                t.emplace_back(id(i, j), id(i2, j2), -1.0);
-                ++deg;
-            };
-            edge(i - 1, j); edge(i + 1, j); edge(i, j - 1); edge(i, j + 1);
-            t.emplace_back(id(i, j), id(i, j), double(deg));
-        }
-    Eigen::SparseMatrix<double> L(n, n);
-    L.setFromTriplets(t.begin(), t.end());
-    return L;
-}
+using apxchol::test::grid_laplacian;
 
 // Exact Schur-complement clique: zero sampling variance, more fill.
 struct exact_clique_eliminator {

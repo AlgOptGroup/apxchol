@@ -54,8 +54,8 @@ struct cli_options {
     std::string backend = "cpu";   // --solve: cpu | metal
     long long columns = 1;         // --solve: compatible right-hand sides
     double tol = 1e-8;             // --solve: relative residual target
-    int factor_threads = 0;        // --solve K-column path: factorization team (0 = inherit)
-    int repeat = 1;                // --solve K-column path: solves of the block on one solver
+    int factor_threads = 0;        // --solve: factorization team (0 = inherit)
+    int repeat = 1;                // --solve: repetitions on one solver
     double min_is_frac = 0.05;
     long long parallel_residual_threshold = -1;  // <0 = leave default (disabled)
     apxchol::residual_peel_strategy residual_peel = apxchol::residual_peel_strategy::natural;
@@ -145,7 +145,7 @@ cli_options parse_args(int argc, char* argv[]) {
 #if !defined(APXCHOL_USE_METAL)
             if (opts.backend == "metal")
                 throw std::invalid_argument("--backend metal: this build has no Metal backend "
-                                            "(configure with -DAPXCHOL_USE_METAL=ON)");
+                                            "(configure with -DAPXCHOL_DEVICE=METAL)");
 #endif
         } else if (arg == "--columns") {
             opts.columns = parse_positive("--columns", require_value("--columns"), 1LL << 31);
@@ -415,19 +415,14 @@ int main(int argc, char* argv[]) {
         opts.residual_peel = cli.residual_peel;
 
 #if defined(APXCHOL_USE_CUDA)
-        // Analysis-only fairness: this CUDA build installs and benchmarks the
-        // GPU solve backend regardless of which setup selector is chosen. The
-        // benchmark driver prewarms the one-per-process CUDA context before
-        // timing every solver, so do the same for every arm here.
-        if (const cudaError_t err = cudaFree(nullptr); err != cudaSuccess)
-            throw std::runtime_error(cudaGetErrorString(err));
+        // Keep the context prewarm for the other CUDA diagnostics. --solve
+        // selects its backend explicitly and CPU solves do not initialize CUDA.
+        if (!cli.solve)
+            if (const cudaError_t err = cudaFree(nullptr); err != cudaSuccess)
+                throw std::runtime_error(cudaGetErrorString(err));
 #endif
 
-        // ── Warm-context one-RHS benchmark mode ─────────────
-        // The CUDA context was initialized above, outside all checkpointed
-        // solver work, exactly as in the standalone benchmark driver. This
-        // gives setup/solve measurements without pulling the competitor stack
-        // into this small diagnostic executable.
+        // Solve diagnostics share one factor across the requested right-hand sides.
         if (cli.solve) {
             std::srand(opts.seed);
             Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
@@ -441,16 +436,12 @@ int main(int argc, char* argv[]) {
             solve_opts.max_iter = 500;
             solve_opts.storage = cli.storage;
             solve_opts.factor_opts = opts;
+            solve_opts.backend = cli.backend == "cpu" ? apxchol::solve_backend::cpu
+                                                       : apxchol::solve_backend::gpu;
             if (cli.backend != "cpu" || cli.columns != 1 || cli.repeat != 1 || cli.factor_threads > 0) {
                 // K right-hand sides: column 0 is the one-RHS b above, the
                 // others continue the same random stream, each projected the
                 // same way. Residuals are recomputed here in fp64 with Eigen.
-#if defined(APXCHOL_USE_CUDA)
-                // cpu_solver runs host PCG with device triangular solves in a
-                // CUDA build, not the GPU-resident PCG of the one-RHS path.
-                throw std::runtime_error("--backend/--columns/--repeat/--factor-threads are not "
-                                         "supported in CUDA builds");
-#endif
 #if defined(APXCHOL_USE_METAL)
                 if (cli.backend == "metal" && !apxchol::metal_solver::available())
                     throw std::runtime_error("--backend metal: no usable Metal device");
@@ -465,11 +456,10 @@ int main(int argc, char* argv[]) {
                     B.col(c) = bc;
                 }
                 std::vector<long long> iterations(static_cast<std::size_t>(K));
-                // What the solver reports per column (iterations, residual and,
-                // for metal, the recursive residual and stop), digested below.
-                std::vector<double> reported(static_cast<std::size_t>(K) * 4, 0.0);
+                // Digest the common per-RHS report: iterations and residual.
+                std::vector<double> reported(static_cast<std::size_t>(K) * 2);
                 apxchol::checkpoint cp;
-                // One entry per solve of the block (--repeat): the first, then
+                // One entry per pass through the RHS columns: the first, then
                 // warm solves on the same solver; every repeat must reproduce
                 // the first one's solution and report bit for bit.
                 std::vector<double> solve_ms;
@@ -503,60 +493,52 @@ int main(int argc, char* argv[]) {
 #endif
                 }
                 fdigest = factor_digest(F);
-                if (cli.backend == "cpu") {
-                    const apxchol::cpu_solver slv(A, std::move(F), solve_opts, &cp);
+                double pack_ms = 0.0, device_ms = 0.0, exit_check_ms = 0.0;
+                auto solve_columns = [&](const auto& slv) {
                     for (int rep = 0; rep < cli.repeat; ++rep) {
+                        pack_ms = device_ms = exit_check_ms = 0.0;
                         const auto t0 = clock::now();
                         for (Eigen::Index c = 0; c < K; ++c) {
                             const Eigen::VectorXd bc = B.col(c);
                             const apxchol::solve_result r = slv.solve(bc);
                             X.col(c) = r.x;
                             iterations[static_cast<std::size_t>(c)] = static_cast<long long>(r.iterations);
-                            reported[4 * static_cast<std::size_t>(c)] = static_cast<double>(r.iterations);
-                            reported[4 * static_cast<std::size_t>(c) + 1] = r.residual;
+                            reported[2 * static_cast<std::size_t>(c)] = static_cast<double>(r.iterations);
+                            reported[2 * static_cast<std::size_t>(c) + 1] = r.residual;
+                            pack_ms += r.timings.total("pcg.pack") * 1e3;
+                            device_ms += r.timings.total("pcg.device") * 1e3;
+                            exit_check_ms += r.timings.total("pcg.exit_check") * 1e3;
                         }
                         record(t0);
                         check_repeat();
                     }
+                };
+                if (cli.backend == "cpu") {
+                    const apxchol::cpu_solver slv(A, std::move(F), solve_opts, &cp);
+                    solve_columns(slv);
                 } else {
 #if defined(APXCHOL_USE_METAL)
                     const apxchol::metal_solver slv(A, std::move(F), solve_opts, &cp);
                     const auto st = slv.stats();
-                    std::printf("metal device=\"%s\" block_columns=%d levels_fwd=%zu levels_bwd=%zu "
+                    std::printf("metal device=\"%s\" levels_fwd=%zu levels_bwd=%zu "
                                 "steps_fwd=%zu steps_bwd=%zu operator=%s\n",
-                                st.device.c_str(), st.block_columns, st.levels_forward,
+                                st.device.c_str(), st.levels_forward,
                                 st.levels_backward, st.steps_forward, st.steps_backward,
                                 st.operator_double_float ? "double-float" : "fp32-exact");
-                    double pack_ms = 0.0, device_ms = 0.0, exit_check_ms = 0.0;  // last solve
-                    for (int rep = 0; rep < cli.repeat; ++rep) {
-                        const auto t0 = clock::now();
-                        const apxchol::metal_block_result r =
-                            slv.solve(apxchol::metal_solver::block_cref(B), X);
-                        record(t0);
-                        for (Eigen::Index c = 0; c < K; ++c) {
-                            const apxchol::metal_column_result& col = r.columns[static_cast<std::size_t>(c)];
-                            iterations[static_cast<std::size_t>(c)] = static_cast<long long>(col.iterations);
-                            double* rep_c = reported.data() + 4 * static_cast<std::size_t>(c);
-                            rep_c[0] = static_cast<double>(col.iterations);
-                            rep_c[1] = col.residual;
-                            rep_c[2] = col.recursive_residual;
-                            rep_c[3] = static_cast<double>(static_cast<int>(col.stop));
-                        }
-                        check_repeat();
-                        pack_ms = r.timings.total("pcg.pack") * 1e3;
-                        device_ms = r.timings.total("pcg.device") * 1e3;
-                        exit_check_ms = r.timings.total("pcg.exit_check") * 1e3;
-                    }
-                    std::printf("metal_split pack_ms=%.6f device_ms=%.6f exit_check_ms=%.6f (last solve)\n",
+                    solve_columns(slv);
+                    std::printf("metal_split pack_ms=%.6f device_ms=%.6f exit_check_ms=%.6f (last repetition)\n",
                                 pack_ms, device_ms, exit_check_ms);
 #endif
                 }
                 long long converged = 0;
                 double max_residual = 0.0;
                 for (Eigen::Index c = 0; c < K; ++c) {
-                    const double res = (B.col(c) - A * X.col(c)).norm() / B.col(c).norm();
-                    converged += res < solve_opts.tol;
-                    max_residual = std::max(max_residual, res);
+                    const double bnorm = B.col(c).stableNorm();
+                    const double error = (B.col(c) - A * X.col(c)).stableNorm();
+                    const double res = bnorm == 0.0 ? error : error / bnorm;
+                    converged += std::isfinite(res) && res <= solve_opts.tol;
+                    max_residual = std::isfinite(res) ? std::max(max_residual, res)
+                                                    : std::numeric_limits<double>::infinity();
                 }
                 const auto [it_min, it_max] = std::minmax_element(iterations.begin(), iterations.end());
                 std::printf(

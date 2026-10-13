@@ -58,7 +58,7 @@ but preserves `P`, `factor_nnz`, `fill_ratio`; one-shot `solve` uses `False`.
 
 `factor_storage_dtype=np.float16` or `np.float32` selects triangular-solve storage per solver; dtype objects and the strings `"float16"`/`"float32"` also work. Read the resolved dtype through `solver.factor_storage_dtype`. The default, `None`, respects `APXCHOL_FACTOR_STORAGE=auto|float16|float32`, where `auto` means FP32 on the CPU. Invalid settings raise an error; an explicit dtype overrides the environment without changing it.
 
-FP16 stores scaled off-diagonals with FP32 diagonals and scales. It requires an x86 CPU with AVX/F16C; an unsupported request raises an error. CPU arithmetic remains FP64; constructed factors and exports remain FP32. FP64 factor storage is not supported. See [precision and storage](../docs/precision.md).
+FP16 stores scaled off-diagonals with FP32 diagonals and scales. It requires x86 AVX/F16C or Apple ARM64; an unsupported request raises an error. CPU arithmetic remains FP64; constructed factors and exports remain FP32. FP64 factor storage is not supported. See [precision and storage](../docs/precision.md).
 
 Advanced keywords: `degree_quantile`, `degree_multiplier`, `degree_tiebreak`,
 `exact_clique_max_degree`, `residual_peel`, `stagnation_window`.

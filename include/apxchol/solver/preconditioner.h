@@ -145,6 +145,7 @@ class basic_apx_cholesky : public Eigen::SparseSolverBase<basic_apx_cholesky<Trs
 #else
     static constexpr bool on_gpu = false;
 #endif
+    static_assert(on_gpu == (Route == setup_route::gpu));
 
 protected:
     using Base::m_isInitialized;
@@ -194,21 +195,16 @@ public:
 #endif
         if constexpr (on_gpu) cuda_ctx::prewarm();
         n_ = A.rows();
-        F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, keep_factor_, Route);
+        F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, Route);
         install_factor();
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
-            // Device adoption queues dataflow-state initialization after the last
-            // plan transfer. Complete that owned work before returning, including
-            // quiet calls. Ordinary host-built factors retain their prior behavior;
-            // complete timing boundaries belong to the common benchmark harness.
-            if (trsv_.adopted_device_factor()) {
-                const auto setup_completion = cudaDeviceSynchronize();
-                if (setup_completion != cudaSuccess)
-                    throw std::runtime_error(std::string("GPU setup completion: ") +
-                                             cudaGetErrorString(setup_completion));
-                if (cp_) { cp_->descend("setup"); (*cp_)("gpu_setup_complete"); cp_->ascend(); }
-            }
+            // Complete the adopted factor's queued setup work before returning.
+            const auto setup_completion = cudaDeviceSynchronize();
+            if (setup_completion != cudaSuccess)
+                throw std::runtime_error(std::string("GPU setup completion: ") +
+                                         cudaGetErrorString(setup_completion));
+            if (cp_) { cp_->descend("setup"); (*cp_)("gpu_setup_complete"); cp_->ascend(); }
             if (detail::gpu_setup_diagnostics()) {
                 // Host API duration; device-adopted setup additionally completed its work.
                 const double factorize_install_wall_s = std::chrono::duration<double>(
@@ -259,8 +255,7 @@ private:
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (Route == setup_route::gpu) {
             // Reject inadmissible factors before installation can initialize
-            // CUDA or upload host arrays. Only diagnostic specializations
-            // retain the explicit host-import path below.
+            // CUDA or upload host arrays.
             if (!F_.research_device_factor ||
                 F_.research_device_factor.use_count() != 1 ||
                 F_.research_device_factor->empty())
@@ -277,14 +272,13 @@ private:
             scratch2_.resize(n_);
         }
 
-        // For Laplacians (rank n-1) the last row/col is unused.
-        // For SDDM (full rank) we use the complete n×n factor.
-        const node_index factor_dim = static_cast<node_index>(F_.sddm ? n_ : n_ - 1);
         // sptrsv setup (CPU schedules / GPU dataflow preparation) is a real ~900ms
         // cost on IPM-scale matrices. Track it as part of "setup" so the
         // bench's setup_time / solve_time split is honest.
         if (cp_) { cp_->descend("setup"); cp_->tick(); }
         if constexpr (!on_gpu) {
+            // Laplacians leave the grounded last row/column unused.
+            const node_index factor_dim = static_cast<node_index>(F_.sddm ? n_ : n_ - 1);
             // Round-as-level: hand the SpTRSV the per-round IS-column boundaries so it
             // builds level sets straight off the elimination rounds (same-round IS
             // columns are mutually independent -> one level) instead of two O(nnz)
@@ -329,22 +323,9 @@ private:
             if (detail::gpu_setup_diagnostics() && std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below
                 std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                              "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
-            if constexpr (Route == setup_route::gpu) {
-                trsv_.setup_adopting_device_factor_for_research(
-                    std::move(*F_.research_device_factor), opts_.factor_storage);
-                F_.research_device_factor.reset();
-            } else if (F_.research_device_factor &&
-                       F_.research_device_factor.use_count() == 1 &&
-                       !F_.research_device_factor->empty()) {
-                trsv_.setup_adopting_device_factor_for_research(
-                    std::move(*F_.research_device_factor), opts_.factor_storage);
-                F_.research_device_factor.reset();
-            } else {
-                // Diagnostic copies must not race to move a shared capsule. Their
-                // explicit host-import path leaves the independent copy untouched.
-                F_.research_device_factor.reset();
-                trsv_.setup(F_.L, factor_dim, opts_.factor_storage);
-            }
+            trsv_.setup_adopting_device_factor_for_research(
+                std::move(*F_.research_device_factor), opts_.factor_storage);
+            F_.research_device_factor.reset();
         }
 #endif
         if (cp_) { (*cp_)("sptrsv_setup"); cp_->ascend(); }

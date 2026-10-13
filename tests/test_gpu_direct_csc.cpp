@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include "scoped_env.h"
+#include "scoped_omp_threads.h"
 #include "apxchol/graph/conversions.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
@@ -17,9 +19,6 @@
 #include <span>
 #include <string>
 #include <vector>
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace {
 using apxchol::node_index;
@@ -29,38 +28,7 @@ using apxchol::detail::gpu_round_shadow_input;
 
 // Local guards follow the existing GPU round-shadow tests; no process-wide
 // cached grounding knob is changed by this test file.
-class scoped_environment {
-public:
-    scoped_environment(const char* key, const char* value) : key_(key) {
-        if (const char* old = std::getenv(key)) { present_ = true; old_ = old; }
-        if (value) setenv(key, value, 1); else unsetenv(key);
-    }
-    ~scoped_environment() {
-        if (present_) setenv(key_.c_str(), old_.c_str(), 1);
-        else unsetenv(key_.c_str());
-    }
-private:
-    std::string key_, old_;
-    bool present_ = false;
-};
 
-class scoped_threads {
-public:
-    explicit scoped_threads(int count) {
-#ifdef _OPENMP
-        before_ = omp_get_max_threads(); omp_set_num_threads(count);
-#else
-        (void)count;
-#endif
-    }
-    ~scoped_threads() {
-#ifdef _OPENMP
-        omp_set_num_threads(before_);
-#endif
-    }
-private:
-    int before_ = 1;
-};
 
 struct weighted_edge { int u, v; double weight; };
 
@@ -117,17 +85,10 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
     }
 }
 
-[[maybe_unused]] std::vector<apxchol::detail::gpu_topology_edge> topology(const host_graph& graph) {
-    std::vector<apxchol::detail::gpu_topology_edge> result;
-    for (node_index u = 0; u < graph.n(); ++u)
-        for (const auto& edge : graph.neighbors(u))
-            if (u < edge.to) result.push_back({u, edge.to});
-    return result;
-}
 } // namespace
 
 TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     using apxchol::detail::gpu_owned_csc_supported;
     const auto valid = make_matrix(3, {{0,1,1.0},{0,2,2.0},{1,2,0.5}});
     ASSERT_TRUE(gpu_owned_csc_supported(valid));
@@ -169,7 +130,7 @@ TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
 }
 
 TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     using apxchol::detail::gpu_owned_csc_supported;
     std::vector<matrix> fixtures;
     fixtures.push_back(make_matrix(4, {{0,1,1.0},{1,2,2.0}}, 0.5));
@@ -216,7 +177,7 @@ TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
 }
 
 TEST(GpuDirectCscHost, CertifiedEligibilityRejectsDuplicateAndUnsortedZeroColumns) {
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     using apxchol::detail::gpu_owned_csc_supported;
     for (bool duplicate : {false, true}) {
         auto A = make_matrix(4, {{0,2,0.0},{0,3,0.0}}, 1.0);
@@ -234,7 +195,7 @@ TEST(GpuDirectCscHost, CertifiedEligibilityRejectsDuplicateAndUnsortedZeroColumn
 }
 
 TEST(GpuDirectCscHost, NumericalCertificateRejectsMissingTinyNonzeroMates) {
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     for (double weight : {1.0, std::numeric_limits<double>::denorm_min()}) {
         for (bool lower : {false, true}) {
             auto A = make_matrix(3, {}, 1.0);
@@ -274,7 +235,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
     signed_zero.coeffRef(1,0) = +0.0; signed_zero.coeffRef(0,1) = -0.0;
     fixtures.push_back(signed_zero);
     for (int threads : {1, 3}) {
-        scoped_threads team(threads);
+        scoped_omp_threads team(threads);
         for (std::size_t i = 0; i < fixtures.size(); ++i) {
             SCOPED_TRACE(threads);
             SCOPED_TRACE(i);
@@ -310,7 +271,7 @@ TEST(GpuDirectCsc, ExcessUsesOriginalOrderedDoublesAndStrictThresholdBeforeRegul
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     ASSERT_EQ(apxchol::detail::env_knobs::get().ground, apxchol::detail::grounding_kind::center_k);
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     constexpr double diagonal = 1e12;
     const double equal = diagonal - 1.0;
     auto A = make_matrix(6, {{0,1,equal},{2,3,std::nextafter(equal,diagonal)},
@@ -342,7 +303,7 @@ TEST(GpuDirectCsc, InvalidNumericalInputsFailWithoutPublishingAnInitialSnapshot)
     GTEST_SKIP() << "CUDA direct CSC experiment and test hooks required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial(1);
+    scoped_omp_threads serial(1);
     const auto valid = make_matrix(2, {{0,1,1.0}}, 1.0);
     for (int fault = 0; fault < 4; ++fault) {
         auto A = valid;
@@ -367,71 +328,62 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
     GTEST_SKIP() << "CUDA direct CSC required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial(1);
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
+    scoped_omp_threads serial(1);
     const auto A = selector_matrix();
     const auto graph = apxchol::make_graph<host_graph>(A);
     ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
     std::vector<node_index> active(graph.n()); std::iota(active.begin(),active.end(),node_index{0});
-    for (const char* regions : {"1", "7", static_cast<const char*>(nullptr)}) {
-        scoped_environment blocks("APXCHOL_GPU_BLOCKS", regions);
-        for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
-            SCOPED_TRACE(regions);
-            SCOPED_TRACE(ties);
-            SCOPED_TRACE(quantile);
-            apxchol::detail::gpu_round_shadow_session owner(true);
-            std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
-            owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), direct);
-            apxchol::detail::gpu_block_frontend reference(graph.n(), topology(graph));
-            apxchol::partition_options options;
-            options.degree_quantile = quantile; options.degree_tiebreak = ties;
-            const auto got = direct->prepare(active, options);
-            const auto expected = reference.prepare(active, options);
-            EXPECT_EQ(got.average_degree, expected.average_degree);
-            const auto degrees = direct->host_active_degrees();
-            const auto want_degrees = reference.host_active_degrees();
-            EXPECT_EQ(std::vector<node_index>(degrees.begin(),degrees.end()),
-                      std::vector<node_index>(want_degrees.begin(),want_degrees.end()));
-            ASSERT_EQ(degrees.size(), active.size());
-            for (node_index v : active) EXPECT_EQ(degrees[v], graph.adj_count(v));
-            const auto candidate_view = direct->host_candidates();
-            const std::vector<node_index> candidates(candidate_view.begin(),candidate_view.end());
-            double threshold = options.degree_multiplier * expected.average_degree;
-            if (quantile > 0.0 && quantile < 1.0) {
-                std::vector<node_index> sorted(degrees.begin(), degrees.end());
-                std::sort(sorted.begin(), sorted.end());
-                threshold = sorted[static_cast<std::size_t>(quantile * (sorted.size()-1))];
-            }
-            std::vector<node_index> wanted;
-            for (node_index v : active) if (degrees[v] <= threshold) wanted.push_back(v);
-            EXPECT_EQ(candidates, wanted);
-            EXPECT_EQ(got.candidate_count, wanted.size());
-            const auto selected = direct->select_block_greedy().data;
-            ASSERT_FALSE(selected.empty());
-            EXPECT_EQ(direct->select_block_greedy().data, selected);
-            // The owned four-pass law need not finish maximality. Its exact
-            // priority/snapshot contract is checked by GpuBoundedSelection.
-            std::string receipt = std::to_string(direct->resident_region_capacity()) + ":" +
-                std::to_string(direct->selected_degree_work());
-            for (const auto vertex : selected) receipt += ":" + std::to_string(vertex);
-            RecordProperty(std::string("direct_selection_") + (regions ? regions : "auto") +
-                "_" + std::to_string(ties) + "_" + std::to_string(quantile), receipt);
-            std::vector<bool> picked(graph.n(),false);
-            std::size_t degree_work = 0;
-            for (node_index v : selected) {
-                ASSERT_LT(v,graph.n());
-                EXPECT_TRUE(std::binary_search(candidates.begin(),candidates.end(),v));
-                ASSERT_FALSE(picked[v]); picked[v]=true; degree_work+=graph.adj_count(v);
-            }
-            for (node_index v : candidates) {
-                bool neighbor_picked = false;
-                for (const auto& edge : graph.neighbors(v)) neighbor_picked |= picked[edge.to];
-                if (picked[v]) EXPECT_FALSE(neighbor_picked);
-            }
-            EXPECT_EQ(direct->selected_degree_work(), degree_work);
-            EXPECT_EQ(direct->transfers().owned_residual_binds, 1u);
-            EXPECT_EQ(direct->transfers().host_update_bytes, 0u);
+    for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
+        SCOPED_TRACE(ties);
+        SCOPED_TRACE(quantile);
+        apxchol::detail::gpu_round_shadow_session owner(true);
+        std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
+        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), direct);
+        apxchol::partition_options options;
+        options.degree_quantile = quantile; options.degree_tiebreak = ties;
+        const auto got = direct->prepare(active, options);
+        const auto degrees = direct->host_active_degrees();
+        std::size_t degree_sum = 0;
+        for (node_index v : active) degree_sum += graph.adj_count(v);
+        EXPECT_EQ(got.average_degree, double(degree_sum) / active.size());
+        ASSERT_EQ(degrees.size(), active.size());
+        for (node_index v : active) EXPECT_EQ(degrees[v], graph.adj_count(v));
+        const auto candidate_view = direct->host_candidates();
+        const std::vector<node_index> candidates(candidate_view.begin(),candidate_view.end());
+        double threshold = options.degree_multiplier * got.average_degree;
+        if (quantile > 0.0 && quantile < 1.0) {
+            std::vector<node_index> sorted(degrees.begin(), degrees.end());
+            std::sort(sorted.begin(), sorted.end());
+            threshold = sorted[static_cast<std::size_t>(quantile * (sorted.size()-1))];
         }
+        std::vector<node_index> wanted;
+        for (node_index v : active) if (degrees[v] <= threshold) wanted.push_back(v);
+        EXPECT_EQ(candidates, wanted);
+        EXPECT_EQ(got.candidate_count, wanted.size());
+        const auto selected = direct->select_block_greedy().data;
+        ASSERT_FALSE(selected.empty());
+        EXPECT_EQ(direct->select_block_greedy().data, selected);
+        // The owned four-pass law need not finish maximality. Its exact
+        // priority/snapshot contract is checked by GpuBoundedSelection.
+        std::string receipt = std::to_string(direct->selected_degree_work());
+        for (const auto vertex : selected) receipt += ":" + std::to_string(vertex);
+        RecordProperty(std::string("direct_selection_") + std::to_string(ties) + "_" + std::to_string(quantile), receipt);
+        std::vector<bool> picked(graph.n(),false);
+        std::size_t degree_work = 0;
+        for (node_index v : selected) {
+            ASSERT_LT(v,graph.n());
+            EXPECT_TRUE(std::binary_search(candidates.begin(),candidates.end(),v));
+            ASSERT_FALSE(picked[v]); picked[v]=true; degree_work+=graph.adj_count(v);
+        }
+        for (node_index v : candidates) {
+            bool neighbor_picked = false;
+            for (const auto& edge : graph.neighbors(v)) neighbor_picked |= picked[edge.to];
+            if (picked[v]) {
+                EXPECT_FALSE(neighbor_picked);
+            }
+        }
+        EXPECT_EQ(direct->selected_degree_work(), degree_work);
+        EXPECT_EQ(direct->transfers().owned_residual_binds, 1u);
     }
 #endif
 }
@@ -441,9 +393,7 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
     GTEST_SKIP() << "CUDA direct CSC required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial(1);
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_environment blocks("APXCHOL_GPU_BLOCKS", "1");
+    scoped_omp_threads serial(1);
     for (int operation = 0; operation < 5; ++operation) {
         SCOPED_TRACE(operation);
         auto owner = std::make_unique<apxchol::detail::gpu_round_shadow_session>(true);
@@ -513,7 +463,6 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
         EXPECT_EQ(std::vector<node_index>(got_degrees.begin(), got_degrees.end()), degrees);
         EXPECT_EQ(direct->selected_degree_work(), expected_work);
         EXPECT_EQ(direct->transfers().owned_residual_binds, 1u);
-        EXPECT_EQ(direct->transfers().host_update_bytes, 0u);
         owner.reset();
         try {
             switch (operation) {
@@ -532,20 +481,16 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
 }
 
 TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithoutGraphHandback) {
-#if !defined(APXCHOL_USE_CUDA)
-    GTEST_SKIP() << "CUDA direct CSC required";
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA operator construction required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    scoped_threads serial(1);
-    scoped_environment setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_environment shadow("APXCHOL_GPU_ROUND_SHADOW", "force");
-    scoped_environment finalize("APXCHOL_GPU_FACTOR_FINALIZE", "force");
-    scoped_environment frontend("APXCHOL_GPU_BLOCK_FRONTEND", "force");
-    scoped_environment blocks("APXCHOL_GPU_BLOCKS", "1");
-    scoped_environment fp16("APXCHOL_FACTOR_STORAGE", nullptr);
-    scoped_environment drop("APXCHOL_FACTOR_DROP", nullptr);
-    scoped_environment backend("APXCHOL_GPU_SPTRSV", nullptr);
-    scoped_environment tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
+    scoped_omp_threads serial(1);
+    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
+    scoped_env fp16("APXCHOL_FACTOR_STORAGE", nullptr);
+    scoped_env drop("APXCHOL_FACTOR_DROP", nullptr);
+    scoped_env backend("APXCHOL_GPU_SPTRSV", nullptr);
+    scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
     constexpr int n = 257;
     std::vector<weighted_edge> edges;
     for (int u = 0; u < n; ++u) for (int offset : {1,7}) edges.push_back({u,(u+offset)%n,1.0});
@@ -563,8 +508,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         if (apxchol::detail::gpu_setup_diagnostics()) {
             ASSERT_NE(trace.find("[gpu-owned-csc] n=257 "),std::string::npos) << trace;
             EXPECT_NE(trace.find("host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0"),std::string::npos) << trace;
-            EXPECT_NE(trace.find("initial_snapshots=0"),std::string::npos) << trace;
-            EXPECT_NE(trace.find("residual_download_bytes=0"),std::string::npos) << trace;
+            EXPECT_NE(trace.find("factor_entry_download_bytes=0"),std::string::npos) << trace;
             EXPECT_EQ(trace.find("handback_download_bytes="),std::string::npos) << trace;
         } else {
             EXPECT_EQ(trace.find("[gpu-owned-"), std::string::npos) << trace;
@@ -578,6 +522,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         EXPECT_TRUE(preconditioner.factor().L.inner_.empty());
         EXPECT_GT(preconditioner.factor().rounds.size(),2u);
         apxchol::solve_options options; options.tol=1e-8; options.max_iter=1000;
+        options.backend = apxchol::solve_backend::gpu;
         const auto solved = apxchol::solve(A,b,options);
         ASSERT_EQ(solved.x.size(),n);
         EXPECT_LE((A*solved.x-b).norm()/b.norm(),1e-8);

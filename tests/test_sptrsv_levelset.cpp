@@ -17,6 +17,7 @@
 // paths, long thin runs) and a round-structured all-fat factor through
 // set_round_bounds (round-as-level path).
 #include <gtest/gtest.h>
+#include "scoped_env.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -38,15 +39,6 @@ using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
-
-struct scoped_env {
-    std::string name, saved; bool had = false;
-    scoped_env(const char* var, const char* value) : name(var) {
-        if (const char* e = std::getenv(var)) { had = true; saved = e; }
-        if (value) setenv(var, value, 1); else unsetenv(var);
-    }
-    ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
-};
 
 sparse_csc from_cols(node_index m, std::vector<std::vector<node_index>>& col_rows, std::mt19937& rng) {
     std::uniform_real_distribution<double> uval(-0.5, 0.5);

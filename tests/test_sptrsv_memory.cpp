@@ -16,6 +16,8 @@
 // accounting would not reflect the release. Linux + glibc only (skipped
 // elsewhere).
 #include <gtest/gtest.h>
+#include "grid_laplacian.h"
+#include "scoped_env.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -29,8 +31,6 @@
 #include <malloc.h>
 #endif
 
-#include "apxchol/graph/conversions.h"
-#include "apxchol/graph/graph.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/sptrsv/omp.h"
 
@@ -41,15 +41,6 @@ using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
-
-struct scoped_env {
-    std::string name, saved; bool had = false;
-    scoped_env(const char* var, const char* value) : name(var) {
-        if (const char* e = std::getenv(var)) { had = true; saved = e; }
-        if (value) setenv(var, value, 1); else unsetenv(var);
-    }
-    ~scoped_env() { if (had) setenv(name.c_str(), saved.c_str(), 1); else unsetenv(name.c_str()); }
-};
 
 [[maybe_unused]] long proc_status_kb(const char* key) {
     std::ifstream f("/proc/self/status"); std::string ln;
@@ -67,16 +58,7 @@ struct scoped_env {
     return (std::fclose(f) == 0) && ok;
 }
 
-Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
-    apxchol::graph<> G(rows * cols);
-    auto id = [cols](int r, int c) { return r * cols + c; };
-    for (int r = 0; r < rows; ++r)
-        for (int c = 0; c < cols; ++c) {
-            if (r + 1 < rows) G.add_edge(id(r, c), id(r + 1, c), 1.0);
-            if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), 1.0);
-        }
-    return apxchol::laplacian(G);
-}
+using apxchol::test::grid_laplacian;
 
 [[maybe_unused]] constexpr std::size_t MB = 1024 * 1024;
 

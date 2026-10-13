@@ -1,6 +1,10 @@
+#include "cuda_buffer.cuh"
 #include "apxchol/solver/pcg_cuda_kernels.h"
+#include "apxchol/solver/detail/gpu_pcg.h"
+#include "apxchol/csc_work.h"
 
 #include <cub/cub.cuh>
+#include <thrust/iterator/counting_iterator.h>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -15,170 +19,136 @@ namespace apxchol::pcg_cuda {
 
 namespace {
 
+using namespace apxchol::detail::gpu_pcg;
+
 constexpr int kWarps = kBlockThreads / 32;
 
-// Deterministic block sum: warp shuffle tree (fixed order) -> one value per
-// warp in shared memory -> the first warp's shuffle tree over the kWarps
-// values (fixed order). Every thread of the block must call it (full masks);
-// the result is valid in thread 0.
+template<int Lanes = 1>
+struct pcg_math {
+    using wide = double;
+    using scalar = double;
+    __device__ double add(double a, double b) const { return a + b; }
+    __device__ double shuffle_down(double value, unsigned offset, unsigned width) const {
+        return __shfl_down_sync(0xffffffffu, value, offset, width);
+    }
+    __device__ double add_product(double sum, double a, double b) const { return sum + a * b; }
+    __device__ double subtract_product(double a, double b, double c) const { return a - b * c; }
+    __device__ double direction(double z, double p, double beta) const { return z + beta * p; }
+    template<class Value>
+    __device__ double add_entry(double sum, const Value* hi, const Value*, unsigned e, double p) const {
+        return sum + double(hi[e]) * p;
+    }
+    __device__ double sum_row(double sum) const {
+        return sum_lanes<Lanes>(*this, sum);
+    }
+};
+
+// Every thread participates; the first warp folds one partial per warp.
 __device__ __forceinline__ double block_reduce_sum(double v, double* sh) {
-    #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+    v = sum_lanes<32>(pcg_math<>{}, v);
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     if (lane == 0) sh[warp] = v;
     __syncthreads();
-    double r = 0.0;
-    if (warp == 0) {
-        r = lane < kWarps ? sh[lane] : 0.0;
-        #pragma unroll
-        for (int o = 16; o > 0; o >>= 1) r += __shfl_down_sync(0xffffffffu, r, o);
+    return warp == 0 ? sum_lanes<32>(pcg_math<>{}, lane < kWarps ? sh[lane] : 0.0) : 0.0;
+}
+
+template<operation Op, int Lanes = 1, class Value = double>
+__global__ void __launch_bounds__(kBlockThreads)
+step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
+            const int* col = nullptr, const Value* val = nullptr) {
+    constexpr int rows = kBlockThreads / Lanes;
+    const pcg_work<std::int64_t> work{static_cast<std::int64_t>(blockIdx.x) * rows, n,
+        static_cast<std::int64_t>(gridDim.x) * rows, threadIdx.x / Lanes, n};
+    const double sum = detail::gpu_pcg::step<Lanes>(
+        Op, pcg_math<Lanes>{}, v, ptr, col, val, static_cast<const Value*>(nullptr),
+        work, threadIdx.x % Lanes);
+    if constexpr (Op != operation::direction) {
+        __shared__ double scratch[kWarps];
+        const double total = block_reduce_sum(sum, scratch);
+        if (threadIdx.x == 0) v.partial[blockIdx.x] = total;
     }
-    return r;
 }
 
-// y = A x with LANES threads per row; per-block partial of x.y into
-// part[blockIdx.x]. The row-group loop bound (`base < n`) is uniform over the
-// block, so every thread reaches every sub-warp shuffle (full mask, width
-// LANES) and the block reduce.
-template <class VAL, int LANES>
-__global__ void __launch_bounds__(kBlockThreads)
-spmv_pAp_kernel(int n, const int* __restrict__ rowptr, const int* __restrict__ colidx,
-                const VAL* __restrict__ vals, const double* __restrict__ x,
-                double* __restrict__ y, double* __restrict__ part) {
-    __shared__ double sh[kWarps];
-    constexpr int ROWS_PER_BLOCK = kBlockThreads / LANES;
-    const int lane      = threadIdx.x & (LANES - 1);
-    const int local_row = threadIdx.x / LANES;
-    double acc = 0.0;
-    for (int base = blockIdx.x * ROWS_PER_BLOCK; base < n; base += gridDim.x * ROWS_PER_BLOCK) {
-        const int row = base + local_row;
-        double sum = 0.0;
-        if (row < n) {
-            const int beg = rowptr[row], end = rowptr[row + 1];
-            for (int p = beg + lane; p < end; p += LANES)
-                sum += static_cast<double>(vals[p]) * x[colidx[p]];   // promote A, fp64 MAC
-        }
-        #pragma unroll
-        for (int o = LANES / 2; o > 0; o >>= 1)
-            sum += __shfl_down_sync(0xffffffffu, sum, o, LANES);
-        if (row < n && lane == 0) { y[row] = sum; acc += x[row] * sum; }
-    }
-    const double bs = block_reduce_sum(acc, sh);
-    if (threadIdx.x == 0) part[blockIdx.x] = bs;
-}
+struct recurrence_math {
+    double bnorm;
+    __device__ bool positive(double x) const { return x > 0 && isfinite(x); }
+    __device__ bool valid_residual(double x) const { return isfinite(sqrt(x) / bnorm); }
+    __device__ bool accept_ratio(double x) const { return isfinite(x); }
+    __device__ double ratio(double x, double y) const { return x / y; }
+    __device__ bool converged(double x, double threshold) const { return sqrt(x) / bnorm < threshold; }
+    __device__ bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
+};
 
 __global__ void __launch_bounds__(kBlockThreads)
-update_xr_kernel(std::int64_t n, double* __restrict__ x, const double* __restrict__ p,
-                 double* __restrict__ r, const double* __restrict__ Ap, double alpha,
-                 double* __restrict__ part) {
-    __shared__ double sh[kWarps];
-    double q = 0.0;
-    for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
-         i += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
-        x[i] += alpha * p[i];
-        const double ri = r[i] - alpha * Ap[i];
-        r[i] = ri;
-        q += ri * ri;
-    }
-    const double bs = block_reduce_sum(q, sh);
-    if (threadIdx.x == 0) part[blockIdx.x] = bs;
+finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mode,
+                unsigned iteration, double bnorm) {
+    __shared__ double scratch[kWarps];
+    const pcg_work<int> work{0, blocks, kBlockThreads, static_cast<int>(threadIdx.x), blocks};
+    const double sum = block_reduce_sum(sum_partials(pcg_math<>{}, part, work), scratch);
+    if (threadIdx.x == 0 && state->active)
+        *state = advance(recurrence_math{bnorm}, *state, mode, sum, iteration);
 }
 
-__global__ void __launch_bounds__(kBlockThreads)
-dot_kernel(std::int64_t n, const double* __restrict__ a, const double* __restrict__ b,
-           double* __restrict__ part) {
-    __shared__ double sh[kWarps];
-    double q = 0.0;
-    for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
-         i += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
-        q += a[i] * b[i];
-    const double bs = block_reduce_sum(q, sh);
-    if (threadIdx.x == 0) part[blockIdx.x] = bs;
-}
-
-__global__ void __launch_bounds__(kBlockThreads)
-update_p_kernel(std::int64_t n, double* __restrict__ p, const double* __restrict__ z, double beta) {
-    for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
-         i += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
-        p[i] = z[i] + beta * p[i];
-}
-
-// One block: thread t sums part[t], part[t + kBlockThreads], ... in order,
-// then the deterministic block tree.
-__global__ void __launch_bounds__(kBlockThreads)
-reduce_partials_kernel(const double* __restrict__ part, int blocks, double* __restrict__ out) {
-    __shared__ double sh[kWarps];
-    double s = 0.0;
-    for (int i = threadIdx.x; i < blocks; i += kBlockThreads) s += part[i];
-    const double bs = block_reduce_sum(s, sh);
-    if (threadIdx.x == 0) out[0] = bs;
-}
-
-template <class VAL>
-void spmv_pAp_impl(cudaStream_t stream, int n, const int* rowptr, const int* colidx,
-                   const VAL* vals, const double* x, double* y, double* part, int lanes) {
-    const int grid = pcg_blocks(static_cast<std::int64_t>(n) * lanes);
+template<class Value>
+void multiply(cudaStream_t stream, std::int64_t n, workspace v,
+              const operator_csr& a, const Value* values, int lanes) {
+    const int grid = pcg_blocks(n * lanes);
+    auto launch = [&]<int Lanes>() {
+        step_kernel<operation::multiply, Lanes><<<grid, kBlockThreads, 0, stream>>>(
+            n, v, a.row_ptr, a.col_idx, values);
+    };
     switch (lanes) {
-        case 1:  spmv_pAp_kernel<VAL, 1> <<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part); break;
-        case 2:  spmv_pAp_kernel<VAL, 2> <<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part); break;
-        case 4:  spmv_pAp_kernel<VAL, 4> <<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part); break;
-        case 8:  spmv_pAp_kernel<VAL, 8> <<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part); break;
-        case 16: spmv_pAp_kernel<VAL, 16><<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part); break;
-        default: spmv_pAp_kernel<VAL, 32><<<grid, kBlockThreads, 0, stream>>>(n, rowptr, colidx, vals, x, y, part); break;
+        case 1: launch.template operator()<1>(); break;
+        case 2: launch.template operator()<2>(); break;
+        case 4: launch.template operator()<4>(); break;
+        case 8: launch.template operator()<8>(); break;
+        case 16: launch.template operator()<16>(); break;
+        default: launch.template operator()<32>(); break;
     }
 }
 
 } // namespace
 
-void spmv_pAp(cudaStream_t stream, int n, const int* rowptr, const int* colidx,
-              const double* vals, const double* x, double* y, double* part, int lanes) {
-    spmv_pAp_impl(stream, n, rowptr, colidx, vals, x, y, part, lanes);
+void step(cudaStream_t stream, operation op, std::int64_t n, workspace v,
+          const operator_csr& matrix, int lanes) {
+    const int grid = pcg_blocks(n);
+    switch (op) {
+        case operation::multiply:
+            if (matrix.fp32) multiply(stream, n, v, matrix, matrix.values_f32, lanes);
+            else multiply(stream, n, v, matrix, matrix.values_f64, lanes);
+            break;
+        case operation::residual:
+            step_kernel<operation::residual><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            break;
+        case operation::dot:
+            step_kernel<operation::dot><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            break;
+        case operation::direction:
+            step_kernel<operation::direction><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            break;
+    }
 }
 
-void spmv_pAp(cudaStream_t stream, int n, const int* rowptr, const int* colidx,
-              const float* vals, const double* x, double* y, double* part, int lanes) {
-    spmv_pAp_impl(stream, n, rowptr, colidx, vals, x, y, part, lanes);
-}
-
-void update_xr(cudaStream_t stream, std::int64_t n, double* x, const double* p,
-               double* r, const double* Ap, double alpha, double* part) {
-    update_xr_kernel<<<pcg_blocks(n), kBlockThreads, 0, stream>>>(n, x, p, r, Ap, alpha, part);
-}
-
-void dot(cudaStream_t stream, std::int64_t n, const double* a, const double* b, double* part) {
-    dot_kernel<<<pcg_blocks(n), kBlockThreads, 0, stream>>>(n, a, b, part);
-}
-
-void update_p(cudaStream_t stream, std::int64_t n, double* p, const double* z, double beta) {
-    update_p_kernel<<<pcg_blocks(n), kBlockThreads, 0, stream>>>(n, p, z, beta);
-}
-
-void reduce_partials(cudaStream_t stream, const double* part, int blocks, double* out) {
-    reduce_partials_kernel<<<1, kBlockThreads, 0, stream>>>(part, blocks, out);
+void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
+              unsigned mode, unsigned iteration, double bnorm) {
+    finalize_kernel<<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, bnorm);
 }
 
 namespace {
 
-void operator_check(cudaError_t status) {
+void operator_check(cudaError_t status, const char* = nullptr) {
     if (status != cudaSuccess)
         throw std::runtime_error(std::string("GPU operator CSR: ") + cudaGetErrorString(status));
 }
 
-// Every temporary owns its allocation until the final, nonthrowing publication.
-// cudaFree also retires work using a temporary when an earlier CUDA call throws.
-template<class T> struct operator_buffer {
-    T* ptr = nullptr;
-    explicit operator_buffer(std::size_t count) {
-        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T))
+struct operator_allocation : detail::cuda_untracked_allocation {
+    static std::size_t size_bytes(std::size_t count, std::size_t width, const char*) {
+        if (count > std::numeric_limits<std::size_t>::max() / width)
             throw std::overflow_error("GPU operator CSR allocation overflow");
-        if (count) operator_check(cudaMalloc(&ptr, count * sizeof(T)));
+        return count * width;
     }
-    operator_buffer(const operator_buffer&) = delete;
-    operator_buffer& operator=(const operator_buffer&) = delete;
-    ~operator_buffer() { if (ptr) cudaFree(ptr); }
-    void reset() { if (ptr) { operator_check(cudaFree(ptr)); ptr = nullptr; } }
-    T* release() { return std::exchange(ptr, nullptr); }
 };
+template<class T> using operator_buffer = detail::cuda_buffer<T, operator_check, operator_allocation>;
 
 struct operator_status {
     // Each count is <= nnz <= INT_MAX: adding packed counts cannot carry from
@@ -230,43 +200,30 @@ operator_fill_columns(int n, const int* outer, const int* inner,
     const int lane = threadIdx.x & 31;
     const std::int64_t warp = (static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) / 32;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x / 32;
-    bool bad = false;
+    bool paired = true;
     for (std::int64_t col = warp; col < n; col += stride) {
         for (std::int64_t p = static_cast<std::int64_t>(outer[col]) + lane;
              p < outer[col + 1]; p += 32) {
             const int row = inner[p];
-            double value = input[p];
-            if (row < col) {
-                int lo = outer[row], hi = outer[row + 1];
-                while (lo < hi) {
-                    const int mid = lo + (hi - lo) / 2;
-                    if (inner[mid] < col) lo = mid + 1;
-                    else hi = mid;
-                }
-                if (lo == outer[row + 1] || inner[lo] != col) bad = true;
-                else value = input[lo];
-            }
+            const double value = input[detail::canonical_lower_value(
+                outer, inner, thrust::counting_iterator<int>{0}, col, row, p, paired)];
             // Input ordinal p is a unique fixed slot. Sorting this integer key
             // orders CSR rows and their columns without any floating arithmetic.
             keys[p] = (static_cast<std::uint64_t>(perm[col]) << 32) | perm[row];
             values[p] = value;
         }
     }
-    if (__syncthreads_or(bad) && threadIdx.x == 0) atomicOr(&status->flags, 1U);
+    if (__syncthreads_or(!paired) && threadIdx.x == 0) atomicOr(&status->flags, 1U);
 }
 
 __global__ void __launch_bounds__(kBlockThreads)
-operator_decode_columns(int nnz, const std::uint64_t* keys, int* columns) {
+operator_decode_entries(int nnz, const std::uint64_t* keys, int* columns,
+                        const double* values, float* narrow) {
     for (std::int64_t p = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         p < nnz; p += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
+         p < nnz; p += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
         columns[p] = static_cast<int>(keys[p] & 0xffffffffULL);
-}
-
-__global__ void __launch_bounds__(kBlockThreads)
-operator_narrow_values(int nnz, const double* input, float* output) {
-    for (std::int64_t p = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         p < nnz; p += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
-        output[p] = __double2float_rn(input[p]);
+        if (narrow) narrow[p] = __double2float_rn(values[p]);
+    }
 }
 
 } // namespace
@@ -284,18 +241,18 @@ bool try_build_permuted_operator_csr(
     operator_buffer<double> input(nnz);
     operator_buffer<std::uint32_t> perm(n);
     operator_buffer<operator_status> status(1);
-    operator_check(cudaMemcpy(outer.ptr, host_outer, (static_cast<std::size_t>(n) + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    operator_check(cudaMemcpy(outer.get(), host_outer, (static_cast<std::size_t>(n) + 1) * sizeof(int), cudaMemcpyHostToDevice));
     if (nnz) {
-        operator_check(cudaMemcpy(inner.ptr, host_inner, static_cast<std::size_t>(nnz) * sizeof(int), cudaMemcpyHostToDevice));
-        operator_check(cudaMemcpy(input.ptr, host_values, static_cast<std::size_t>(nnz) * sizeof(double), cudaMemcpyHostToDevice));
+        operator_check(cudaMemcpy(inner.get(), host_inner, static_cast<std::size_t>(nnz) * sizeof(int), cudaMemcpyHostToDevice));
+        operator_check(cudaMemcpy(input.get(), host_values, static_cast<std::size_t>(nnz) * sizeof(double), cudaMemcpyHostToDevice));
     }
-    if (n) operator_check(cudaMemcpy(perm.ptr, host_perm, static_cast<std::size_t>(n) * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
-    operator_check(cudaMemset(status.ptr, 0, sizeof(operator_status)));
+    if (n) operator_check(cudaMemcpy(perm.get(), host_perm, static_cast<std::size_t>(n) * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
+    operator_check(cudaMemset(status.get(), 0, sizeof(operator_status)));
     const int column_blocks = pcg_blocks(static_cast<std::int64_t>(n) * 32);
-    operator_count_columns<<<column_blocks, kBlockThreads>>>(n, nnz, outer.ptr, inner.ptr, input.ptr, perm.ptr, counts.ptr, status.ptr);
+    operator_count_columns<<<column_blocks, kBlockThreads>>>(n, nnz, outer.get(), inner.get(), input.get(), perm.get(), counts.get(), status.get());
     operator_check(cudaGetLastError());
     operator_status observed{};
-    operator_check(cudaMemcpy(&observed, status.ptr, sizeof(observed), cudaMemcpyDeviceToHost));
+    operator_check(cudaMemcpy(&observed, status.get(), sizeof(observed), cudaMemcpyDeviceToHost));
     if ((observed.flags & 1U) || (observed.triangles & 0xffffffffULL) != (observed.triangles >> 32))
         return false;
     const bool fp32 = precision == 1 || (precision == -1 && !(observed.flags & 2U));
@@ -303,9 +260,9 @@ bool try_build_permuted_operator_csr(
     operator_buffer<std::uint64_t> keys_a(nnz);
     operator_buffer<double> values_a(nnz);
     if (nnz) {
-        operator_fill_columns<<<column_blocks, kBlockThreads>>>(n, outer.ptr, inner.ptr, input.ptr, perm.ptr, keys_a.ptr, values_a.ptr, status.ptr);
+        operator_fill_columns<<<column_blocks, kBlockThreads>>>(n, outer.get(), inner.get(), input.get(), perm.get(), keys_a.get(), values_a.get(), status.get());
         operator_check(cudaGetLastError());
-        operator_check(cudaMemcpy(&observed, status.ptr, sizeof(observed), cudaMemcpyDeviceToHost));
+        operator_check(cudaMemcpy(&observed, status.get(), sizeof(observed), cudaMemcpyDeviceToHost));
         if (observed.flags & 1U) return false;
     }
     // The two completed status copies precede retirement of input storage.
@@ -314,30 +271,27 @@ bool try_build_permuted_operator_csr(
     operator_buffer<int> rows(static_cast<std::size_t>(n) + 1);
     if (n) {
         std::size_t bytes = 0;
-        operator_check(cub::DeviceScan::ExclusiveSum(nullptr, bytes, counts.ptr, rows.ptr, n));
+        operator_check(cub::DeviceScan::ExclusiveSum(nullptr, bytes, counts.get(), rows.get(), n));
         operator_buffer<unsigned char> scratch(bytes);
-        operator_check(cub::DeviceScan::ExclusiveSum(scratch.ptr, bytes, counts.ptr, rows.ptr, n));
+        operator_check(cub::DeviceScan::ExclusiveSum(scratch.get(), bytes, counts.get(), rows.get(), n));
     }
-    operator_check(cudaMemcpy(rows.ptr + n, &nnz, sizeof(int), cudaMemcpyHostToDevice));
+    operator_check(cudaMemcpy(rows.get() + n, &nnz, sizeof(int), cudaMemcpyHostToDevice));
     counts.reset();
     operator_buffer<std::uint64_t> keys_b(nnz);
     operator_buffer<double> values_b(nnz);
     if (nnz) {
         std::size_t bytes = 0;
-        operator_check(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keys_a.ptr, keys_b.ptr, values_a.ptr, values_b.ptr, nnz));
+        operator_check(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keys_a.get(), keys_b.get(), values_a.get(), values_b.get(), nnz));
         operator_buffer<unsigned char> scratch(bytes);
-        operator_check(cub::DeviceRadixSort::SortPairs(scratch.ptr, bytes, keys_a.ptr, keys_b.ptr, values_a.ptr, values_b.ptr, nnz));
+        operator_check(cub::DeviceRadixSort::SortPairs(scratch.get(), bytes, keys_a.get(), keys_b.get(), values_a.get(), values_b.get(), nnz));
     }
     keys_a.reset(); values_a.reset();
     operator_buffer<int> columns(nnz);
     operator_buffer<float> narrow(fp32 ? nnz : 0);
     if (nnz) {
-        operator_decode_columns<<<pcg_blocks(nnz), kBlockThreads>>>(nnz, keys_b.ptr, columns.ptr);
+        operator_decode_entries<<<pcg_blocks(nnz), kBlockThreads>>>(
+            nnz, keys_b.get(), columns.get(), values_b.get(), narrow.get());
         operator_check(cudaGetLastError());
-        if (fp32) {
-            operator_narrow_values<<<pcg_blocks(nnz), kBlockThreads>>>(nnz, values_b.ptr, narrow.ptr);
-            operator_check(cudaGetLastError());
-        }
         operator_check(cudaStreamSynchronize(nullptr));
     }
     // Publication cannot throw; the caller now owns exactly the final arrays.
