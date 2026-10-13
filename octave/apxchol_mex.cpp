@@ -6,8 +6,6 @@
 //   z                          = apxchol_mex('apply', h, r)         % z = M^{-1} r
 //   apxchol_mex('free', h)
 //
-// The Solver class is a thin shell over apxchol::cpu_solver and MIRRORS
-// python/src/apxchol_ext.cpp — keep the two in sync when touching either.
 // M-file wrappers (apxchol_solver.m / apxchol_solve.m) give the user-facing API;
 // nobody should call this gateway directly.
 
@@ -22,9 +20,10 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <vector>
+#include <utility>
 
 #include "apxchol.h"
+#include "apxchol/detail/csc_import.h"
 
 namespace {
 
@@ -70,13 +69,11 @@ int iteration_option(const mxArray* value) {
     return static_cast<int>(result);
 }
 
-// ── reusable solver: thin shell over apxchol::cpu_solver (mirrors the Python
-// binding) — the library's factor-once/solve-many class with the SAME
-// parallel-SpMV PCG the benchmark's one-shot solve() runs.
+// MEX marshalling around the common solver, using its CPU route.
 class Solver {
 public:
-    explicit Solver(Eigen::SparseMatrix<double> A) : slv_(A) {}
-        // default solve_options: vec_pool_aos storage + block_greedy (the library defaults)
+    explicit Solver(Eigen::SparseMatrix<double> A)
+        : slv_(A, {.backend = apxchol::solve_backend::cpu}) {}
 
     Eigen::Index rows() const { return slv_.rows(); }
 
@@ -88,8 +85,7 @@ public:
     void solve(const Eigen::VectorXd& b, double tol, int maxiter,
                Eigen::VectorXd& x, int& iters, double& rnorm, bool& converged) const {
         if (b.size() != slv_.rows()) throw std::invalid_argument("solve: b length mismatch");
-        // This binding constructs cpu_solver with default solve_options.
-        // Resolve its negative tolerance sentinel for both PCG and the flag.
+        // Resolve the default tolerance for both PCG and the convergence flag.
         if (tol < 0.0) tol = apxchol::default_tol;
         const apxchol::solve_result res = slv_.solve(b, tol, maxiter);
         x = res.x; iters = static_cast<int>(res.iterations); rnorm = res.residual;
@@ -98,7 +94,7 @@ public:
     }
 
 private:
-    apxchol::cpu_solver slv_;
+    apxchol::solver slv_;
 };
 
 // ── handle store ────────────────────────────────────────────────────────────────
@@ -133,28 +129,12 @@ Eigen::SparseMatrix<double> mx_to_eigen(const mxArray* mA) {
     const mwIndex* ir = mxGetIr(mA);
     const double*  pr = mxGetPr(mA);
     const std::uint64_t nnz = jc[nc];
-    if (nr > (std::uint64_t)std::numeric_limits<int>::max() ||
-        nnz > (std::uint64_t)std::numeric_limits<int>::max())
+    if (std::cmp_greater(nr, std::numeric_limits<int>::max()) ||
+        std::cmp_greater(nnz, std::numeric_limits<int>::max()))
         fail("apxchol:tooLarge",
              "matrix too large for 32-bit indices (n or nnz exceeds 2^31)");
 
-    std::vector<Eigen::Triplet<double>> trips;
-    trips.reserve(nnz);
-    for (mwSize j = 0; j < nc; ++j)
-        for (mwIndex p = jc[j]; p < jc[j + 1]; ++p)
-            trips.emplace_back((int)ir[p], (int)j, pr[p]);
-
-    Eigen::SparseMatrix<double> A(nr, nc);
-    A.setFromTriplets(trips.begin(), trips.end());
-    A.makeCompressed();
-    // No input-class check here: the library asserts the operator contract
-    // itself, inside the factorization, from ONE implementation shared with
-    // the CLI and the Python binding (apxchol/operator_class.h). It throws
-    // std::invalid_argument, which the catch chain in mexFunction reports as
-    // `apxchol:badInput` naming the condition that failed; an adjacency matrix
-    // is caught by the positive-diagonal condition and the message names
-    // apxchol_laplacian(A).
-    return A;
+    return apxchol::detail::import_csc(nr, jc, ir, pr);
 }
 
 Eigen::VectorXd mx_to_vec(const mxArray* mb, const char* what) {

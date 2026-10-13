@@ -11,6 +11,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -441,6 +442,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
     }
     print_sptrsv_banner<solve_backend::cpu>(precond_.trsv().fp16());
     build_operator(L, cp);
+    precond_.set_checkpoint(nullptr);
 }
 
 cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
@@ -463,6 +465,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
     precond_.set_factor(std::move(F));
     print_sptrsv_banner<solve_backend::cpu>(precond_.trsv().fp16());
     build_operator(L, cp);
+    precond_.set_checkpoint(nullptr);
 }
 
 void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
@@ -675,6 +678,11 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     // "solve" and bench's wall solve.
     const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
     if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
+    precond_.set_checkpoint(use_cp ? &res.timings : nullptr);
+    struct clear_checkpoint {
+        const apx_cholesky& preconditioner;
+        ~clear_checkpoint() { preconditioner.set_checkpoint(nullptr); }
+    } clear{precond_};
 
     // New solve: restart the center-k application counter (APXCHOL_GROUND=
     // center-k, see env_knobs.h) so the centring schedule -- every K-th
@@ -818,34 +826,121 @@ solve_backend detail::select_solve_backend(const solve_options& opts) {
 #endif
 }
 
-// One-shot solve: select once, then construct one complete setup/solve owner.
-solve_result solve(const Eigen::SparseMatrix<double>& L,
-                   const Eigen::VectorXd& b,
+struct solver::impl {
+    using owner_type = std::variant<cpu_solver
+#if defined(APXCHOL_USE_CUDA)
+        , detail::gpu_solve_session
+#elif defined(APXCHOL_USE_METAL)
+        , metal_solver
+#endif
+        >;
+    owner_type owner;
+    double tol;
+    int max_iter;
+
+    static owner_type make_owner(const Eigen::SparseMatrix<double>& A,
+                                 const solve_options& opts, checkpoint* cp,
+                                 factorization* F) {
+        const auto route = F && opts.backend == solve_backend::automatic
+            ? solve_backend::cpu : detail::select_solve_backend(opts);
+#if defined(APXCHOL_USE_CUDA)
+        if (route == solve_backend::gpu) {
+            if (F) throw std::invalid_argument("CUDA solver cannot adopt a host factor; request CPU explicitly");
+            return owner_type(std::in_place_type<detail::gpu_solve_session>, A, opts, cp);
+        }
+#elif defined(APXCHOL_USE_METAL)
+        if (route == solve_backend::gpu) {
+            if (F) return owner_type(std::in_place_type<metal_solver>, A, std::move(*F), opts, cp);
+            return owner_type(std::in_place_type<metal_solver>, A, opts, cp);
+        }
+#else
+        (void)route;
+#endif
+        if (F) return owner_type(std::in_place_type<cpu_solver>, A, std::move(*F), opts, cp);
+        return owner_type(std::in_place_type<cpu_solver>, A, opts, cp);
+    }
+
+    impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+         checkpoint* cp, factorization* F = nullptr)
+        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter) {
+#if defined(APXCHOL_USE_CUDA)
+        if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&owner))
+            print_sptrsv_banner<solve_backend::gpu>(gpu->preconditioner().trsv().fp16());
+#endif
+    }
+};
+
+solver::solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts, checkpoint* cp)
+    : impl_(std::make_unique<impl>(A, opts, cp)) {}
+solver::solver(const Eigen::SparseMatrix<double>& A, factorization F,
+               const solve_options& opts, checkpoint* cp)
+    : impl_(std::make_unique<impl>(A, opts, cp, &F)) {}
+solver::~solver() = default;
+solver::solver(solver&&) noexcept = default;
+solver& solver::operator=(solver&&) noexcept = default;
+
+void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
+                   int max_iter, const Eigen::VectorXd* x0) const {
+    if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
+    std::visit([&](auto& owner) {
+        owner.solve(b, result, tol < 0 ? impl_->tol : tol,
+                    max_iter < 0 ? impl_->max_iter : max_iter, x0);
+    }, impl_->owner);
+}
+
+solve_result solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
+                           const Eigen::VectorXd* x0) const {
+    solve_result result;
+    solve(b, result, tol, max_iter, x0);
+    return result;
+}
+
+solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
+                           double tol, int max_iter, const Eigen::VectorXd* x0) const {
+    if (b.size() != rows() || x.size() != rows())
+        throw std::invalid_argument("solver::solve: vector length mismatch");
+    if (const auto* cpu = std::get_if<cpu_solver>(&impl_->owner))
+        return cpu->solve(b, x, tol, max_iter, x0);
+    auto result = solve(b, tol, max_iter, x0);
+    x = result.x;
+    result.x.resize(0);
+    return result;
+}
+
+Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
+    if (r.size() != rows()) throw std::invalid_argument("solver::apply: RHS length mismatch");
+    return std::visit([&](auto& owner) -> Eigen::VectorXd {
+        if constexpr (requires { owner.apply(r); }) return owner.apply(r);
+        else return owner.preconditioner().solve(r);
+    }, impl_->owner);
+}
+const factorization& solver::factor() const {
+    return std::visit([](const auto& owner) -> const factorization& {
+        if constexpr (requires { owner.factor(); }) return owner.factor();
+        else return owner.preconditioner().factor();
+    }, impl_->owner);
+}
+Eigen::Index solver::rows() const { return static_cast<Eigen::Index>(factor().perm.size()); }
+solve_backend solver::backend() const {
+    return std::holds_alternative<cpu_solver>(impl_->owner)
+        ? solve_backend::cpu : solve_backend::gpu;
+}
+factor_storage_type solver::factor_storage() const {
+    return std::visit([](const auto& owner) {
+        if constexpr (requires { owner.factor_storage(); }) return owner.factor_storage();
+        else return owner.preconditioner().trsv().fp16()
+            ? factor_storage_type::fp16 : factor_storage_type::fp32;
+    }, impl_->owner);
+}
+
+solve_result solve(const Eigen::SparseMatrix<double>& L, const Eigen::VectorXd& b,
                    const solve_options& opts) {
     ensure_eigen_parallel();
-    const auto backend = detail::select_solve_backend(opts);
-    solve_result res;
-#if defined(APXCHOL_USE_CUDA)
-    if (backend == solve_backend::gpu) {
-        detail::gpu_solve_session solver(L, opts, res);
-        print_sptrsv_banner<solve_backend::gpu>(solver.preconditioner().trsv().fp16());
-        solver.solve(b, res, opts.tol, opts.max_iter);
-        return res;
-    }
-#elif defined(APXCHOL_USE_METAL)
-    if (backend == solve_backend::gpu) {
-        const metal_solver slv(L, opts,
-            std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings);
-        slv.solve(b, res);
-        return res;
-    }
-#else
-    (void)backend;
-#endif
-    const cpu_solver slv(L, opts,
-                         std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings);
-    slv.solve(b, res);
-    return res;
+    solve_result result;
+    const solver owner(L, opts,
+        std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &result.timings);
+    owner.solve(b, result);
+    return result;
 }
 
 Eigen::VectorXd generate_test_rhs(Eigen::Index n) {

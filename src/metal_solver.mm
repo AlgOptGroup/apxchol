@@ -707,6 +707,10 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     finish();
 }
 
+factor_storage_type metal_solver::factor_storage() const {
+    return impl_->factor_fp16 ? factor_storage_type::fp16 : factor_storage_type::fp32;
+}
+
 Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     impl& s = *impl_;
     if (r.size() != static_cast<Eigen::Index>(s.n))
