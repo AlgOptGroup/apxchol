@@ -1,6 +1,5 @@
 #pragma once
-// Internal shared lifetime for the public one-shot GPU solve and the benchmark's
-// native-solve retries. No change to GPU kernels, storage or native stop test.
+// Shared GPU setup lifetime for reusable solves and benchmark retries.
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/pcg_cuda.h"
 #include "apxchol/solver/detail/solve_backend.h"
@@ -10,6 +9,7 @@ class gpu_solve_session {
     gpu_preconditioner precond;
     cuda_pcg gpcg;
     const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
+    const int stagnation_window;
 public:
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
                       const solve_options& opts, solve_result& res)
@@ -17,7 +17,8 @@ public:
         res.lumped_offdiag = precond.factor().lumped_offdiag;
     }
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
-                      const solve_options& opts, checkpoint* cp) {
+                      const solve_options& opts, checkpoint* cp)
+        : stagnation_window(opts.stagnation_window) {
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("GPU session cannot execute an explicit CPU request");
         auto required = opts;
@@ -25,6 +26,7 @@ public:
         (void)select_solve_backend(required);
         precond.set_options(opts.factor_opts);
         precond.set_storage(opts.storage);
+        precond.set_keep_factor(opts.keep_factor_values);
         if (use_cp) precond.set_checkpoint(cp);
         precond.compute(L);
         precond.set_checkpoint(nullptr);
@@ -53,7 +55,8 @@ public:
                const Eigen::VectorXd* x0 = nullptr) {
         if (b.size() != precond.rows())
             throw std::invalid_argument("GPU solve: RHS length mismatch");
-        if (x0) throw std::invalid_argument("CUDA solver does not support a warm start");
+        if (x0 && (x0->size() != b.size() || !x0->allFinite()))
+            throw std::invalid_argument("GPU solve: x0 must be finite and match the RHS length");
         res.backend = solve_backend::gpu;
         res.lumped_offdiag = precond.factor().lumped_offdiag;
         if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
@@ -62,7 +65,7 @@ public:
         gpcg.solve(precond, b, res.x,
                    tol, max_iter,
                    iters, rnorm,
-                   /*laplacian=*/ !precond.factor().sddm);
+                   /*laplacian=*/ !precond.factor().sddm, x0, stagnation_window);
         if (use_cp) { res.timings("gpu_pcg_loop"); res.timings.ascend(); }
         res.iterations = iters;
         res.residual = rnorm;

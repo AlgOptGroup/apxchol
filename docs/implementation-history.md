@@ -110,11 +110,17 @@ Peak-memory diagnostics run separately from timing.
 workflow is removed. `cpu_solver` and Eigen preconditioning stay entirely on
 CPU in CUDA builds; one-shot GPU solves require device-owned setup and operator
 preparation. A single backend option selects the route before setup. Automatic
-selection considers configuration only, and a selected GPU route reports errors
+selection initially considered configuration only, and a selected GPU route reported errors
 rather than retrying on CPU. Explicit low-level factor import remains useful for
 independent handoff and validation; no disk format or public session API is added.
 This is a contract simplification, not a claim of universal GPU speedup. The
 frontend and owned-setup measurements below retain their historical profiles.
+
+**GPU wheels and reusable CUDA solves (2026-10-13).** Automatic selection now
+checks device and input compatibility before setup. Python uses the same policy.
+CUDA warm starts reuse its residual kernels; optional factor export downloads
+the device's FP32 entries into the existing CSC assembler. Neither changes
+device-owned factorization or introduces a retry on CPU after setup fails.
 
 **Mixed diagnostic setup retired (2026-10-13).** CPU elimination with GPU
 selection, mirrored GPU rounds and GPU-prefix/CPU-tail handoffs were removed.

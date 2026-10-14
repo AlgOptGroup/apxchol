@@ -48,7 +48,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "seed", "partitioner", "storage", "keep_factor", "factor_storage_dtype",
+    "backend", "seed", "partitioner", "storage", "keep_factor", "factor_storage_dtype",
     "degree_quantile", "degree_multiplier", "degree_tiebreak",
     "exact_clique_max_degree",
     "residual_peel", "stagnation_window",
@@ -72,6 +72,13 @@ apxchol::graph_storage parse_storage(const std::string& name) {
         "'; valid: vec_pool_aos, vec, bstr");
 }
 
+apxchol::solve_backend parse_backend(const std::string& name) {
+    if (name == "auto") return apxchol::solve_backend::automatic;
+    if (name == "cpu") return apxchol::solve_backend::cpu;
+    if (name == "gpu") return apxchol::solve_backend::gpu;
+    throw std::invalid_argument("backend must be auto, cpu or gpu");
+}
+
 apxchol::residual_peel_strategy parse_peel(const std::string& name) {
     if (name == "natural")    return apxchol::residual_peel_strategy::natural;
     if (name == "min_degree") return apxchol::residual_peel_strategy::min_degree;
@@ -83,13 +90,13 @@ apxchol::residual_peel_strategy parse_peel(const std::string& name) {
 
 apxchol::solve_options parse_options(const py::dict& d) {
     apxchol::solve_options so;
-    so.backend = apxchol::solve_backend::cpu;
     for (auto item : d) {
         const std::string key = py::str(item.first).cast<std::string>();
         const py::handle v = item.second;
         try {
         // solve_options
-        if      (key == "keep_factor")       so.keep_factor_values = v.cast<bool>();
+        if      (key == "backend")           so.backend = parse_backend(v.cast<std::string>());
+        else if (key == "keep_factor")       so.keep_factor_values = v.cast<bool>();
         else if (key == "storage")           so.storage = parse_storage(v.cast<std::string>());
         else if (key == "stagnation_window") so.stagnation_window = v.cast<int>();
         // factor_options
@@ -122,7 +129,7 @@ apxchol::solve_options parse_options(const py::dict& d) {
     return so;
 }
 
-// Python marshalling around the common solver, using its CPU route.
+// Python marshalling around the common solver.
 class Solver {
 public:
     Solver(py::array indptr, py::array indices, py::array data,
@@ -130,6 +137,9 @@ public:
         : slv_(csc_to_eigen(indptr, indices, data), parse_options(options)) {}
 
     Eigen::Index rows() const { return slv_.rows(); }
+    const char* backend() const {
+        return slv_.backend() == apxchol::solve_backend::cpu ? "cpu" : "gpu";
+    }
     bool sddm() const { return factor().sddm; }
     const char* factor_storage_dtype() const {
         return slv_.factor_storage() == apxchol::factor_storage_type::fp16
@@ -158,8 +168,7 @@ public:
 
         apxchol::solve_result res;
         py::dict out;
-        // Caller-provided output memory: solve straight into the numpy array
-        // (no per-solve solution allocation; the array must alias no copy).
+        // Preserve the caller's output array; GPU solves may use temporary storage.
         if (!out_arr.is_none()) {
             auto a = py::cast<py::array>(out_arr);
             const bool ok = py::isinstance<py::array_t<double>>(a) &&
@@ -244,7 +253,7 @@ PYBIND11_MODULE(_apxchol, m) {
         throw py::import_error("apxchol requires an x86-64-v2 CPU.");
     }
 #endif
-    m.doc() = "apxchol CPU approximate-Cholesky preconditioner (pybind11 binding)";
+    m.doc() = "apxchol approximate-Cholesky preconditioner (pybind11 binding)";
     py::class_<Solver>(m, "Solver")
         .def(py::init<py::array, py::array, py::array, const py::dict&>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),
@@ -253,6 +262,7 @@ PYBIND11_MODULE(_apxchol, m) {
              py::arg("x0") = py::none(), py::arg("out") = py::none())
         .def("apply", &Solver::apply, py::arg("r"))
         .def("rows", &Solver::rows)
+        .def("backend", &Solver::backend)
         .def("sddm", &Solver::sddm)
         .def("factor_storage_dtype", &Solver::factor_storage_dtype)
         .def("lumped", &Solver::lumped)

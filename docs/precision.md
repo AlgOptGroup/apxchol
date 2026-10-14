@@ -26,6 +26,9 @@ setup releases the input before transposing; non-consuming FP16 setup retains
 that input and the stored CSC alongside the parallel transpose's scratch.
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.
+CUDA rescales extreme RHS and warm-start vectors by a common power of two and
+restores the solution scale on return. Intermediate triangular-solve values
+must still fit FP32.
 
 ## Scaled FP16 contract
 

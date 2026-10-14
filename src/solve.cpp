@@ -19,6 +19,7 @@
 #include "apxchol/solver/detail/gpu_solve_session.h"
 #elif defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/metal_solver.h"
+#include "apxchol/solver/detail/metal_schedule.h"
 #endif
 
 namespace apxchol {
@@ -265,7 +266,8 @@ inline double parallel_spmv_csr(const Eigen::SparseMatrix<S, Eigen::RowMajor>& L
     const auto* inner = Lrm.innerIndexPtr();
     const S*    val   = Lrm.valuePtr();
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_spmv_threads(n, outer[n] - outer[0]);
+    #pragma omp parallel if(workers > 1) num_threads(workers)
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -314,7 +316,8 @@ inline void update_xr(double* x, const double* p, double* r, const double* Ap,
                       double alpha, Eigen::Index n, double* part,
                       double& rr, double& rs) {
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_solve_threads(n);
+    #pragma omp parallel if(workers > 1) num_threads(workers)
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -353,7 +356,8 @@ inline void update_xr(double* x, const double* p, double* r, const double* Ap,
 
 // p = z + beta*p in one parallel pass (no reduction).
 inline void update_p(double* p, const double* z, double beta, Eigen::Index n) {
-    #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_solve_threads(n);
+    #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
     for (Eigen::Index i = 0; i < n; ++i) p[i] = z[i] + beta * p[i];
 }
 
@@ -362,7 +366,8 @@ inline void update_p(double* p, const double* z, double beta, Eigen::Index n) {
 inline void init_residual(double* r, const double* b, const double* Ax0,
                           Eigen::Index n, double* part, double& rr, double& rs) {
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_solve_threads(n);
+    #pragma omp parallel if(workers > 1) num_threads(workers)
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -408,7 +413,8 @@ inline void init_residual(double* r, const double* b, const double* Ax0,
 // (detail::det_sum) + one parallel subtract pass.
 inline void center_x(double* x, Eigen::Index n, double* part) {
     const double mean = detail::det_sum(x, n, part) / static_cast<double>(n);
-    #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_solve_threads(n);
+    #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
     for (Eigen::Index i = 0; i < n; ++i) x[i] -= mean;
 }
 
@@ -800,25 +806,56 @@ solve_result cpu_solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::Vecto
     return res;
 }
 
-solve_backend detail::select_solve_backend(const solve_options& opts) {
+solve_backend detail::select_solve_backend(const solve_options& opts,
+                                          const Eigen::SparseMatrix<double>* A) {
     if (opts.backend == solve_backend::cpu) return solve_backend::cpu;
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::gpu)
         throw std::invalid_argument("invalid solve backend");
+    // Keep small solves on CPU unless it cannot honor the requested storage.
+#if defined(APXCHOL_USE_METAL)
+    constexpr Eigen::Index cpu_limit = 32 * 1024;
+#else
+    constexpr Eigen::Index cpu_limit = 1;
+#endif
+    if (opts.backend == solve_backend::automatic && A && A->rows() <= cpu_limit) {
+        if (A->rows() == 1 || omp_sptrsv::fp16_supported() ||
+            !detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false))
+            return solve_backend::cpu;
+    }
 #if defined(APXCHOL_USE_CUDA)
-    const bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
-        !opts.keep_factor_values && opts.storage == graph_storage::vec_pool_aos &&
+    bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
+        opts.storage == graph_storage::vec_pool_aos &&
         opts.factor_opts.is_select == "block_greedy" &&
+        opts.factor_opts.residual_peel == residual_peel_strategy::natural &&
         opts.factor_opts.exact_clique_max_degree == 0 &&
         exact_core_or_off(opts.factor_opts.exact_core_max_h) == 0 &&
         opts.factor_opts.double_cycle_min_h == 0;
-    if (compatible) return solve_backend::gpu;
+    if (compatible && opts.backend == solve_backend::automatic && A) {
+        std::size_t offdiagonals = 0;
+        bool zeros = false;
+        compatible = detail::gpu_owned_csc_layout_supported(*A, offdiagonals, &zeros);
+        // Numerical validation proves pairing for nonzero entries. Stored zeros
+        // also need structural mates for the device operator builder.
+        if (compatible && zeros) compatible = detail::gpu_owned_csc_paired(*A);
+    }
+    if (compatible && (opts.backend == solve_backend::gpu ||
+                       detail::gpu_round_shadow_runtime_available()))
+        return solve_backend::gpu;
     if (opts.backend == solve_backend::gpu)
         throw std::invalid_argument("GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
-            "no exported factor and supported sampler options; request CPU explicitly");
+            "natural residual peeling and supported sampler options; request CPU explicitly");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
-    // Metal is explicit opt-in until its performance policy is established.
-    return opts.backend == solve_backend::gpu ? solve_backend::gpu : solve_backend::cpu;
+    if (opts.backend == solve_backend::automatic && A) {
+        bool in_range = true;
+        #pragma omp parallel for schedule(static) reduction(&& : in_range)
+        for (Eigen::Index col = 0; col < A->outerSize(); ++col)
+            for (Eigen::SparseMatrix<double>::InnerIterator entry(*A, col); entry; ++entry)
+                in_range = in_range && detail::metal_schedule::in_range(entry.value());
+        if (!in_range) return solve_backend::cpu;
+    }
+    return opts.backend == solve_backend::gpu || metal_solver::available()
+        ? solve_backend::gpu : solve_backend::cpu;
 #else
     if (opts.backend == solve_backend::gpu)
         throw std::invalid_argument("GPU route requested but GPU support is not built");
@@ -841,8 +878,11 @@ struct solver::impl {
     static owner_type make_owner(const Eigen::SparseMatrix<double>& A,
                                  const solve_options& opts, checkpoint* cp,
                                  factorization* F) {
+        if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
+        if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
-            ? solve_backend::cpu : detail::select_solve_backend(opts);
+            ? solve_backend::cpu : detail::select_solve_backend(opts, &A);
+        if (cp) { (*cp)("backend_selection"); cp->ascend(); }
 #if defined(APXCHOL_USE_CUDA)
         if (route == solve_backend::gpu) {
             if (F) throw std::invalid_argument("CUDA solver cannot adopt a host factor; request CPU explicitly");

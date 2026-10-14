@@ -79,9 +79,9 @@ if (OpenMP_CXX_FOUND)
 endif()
 if (APXCHOL_DEVICE STREQUAL "CUDA")
     # The CPU route must run in a fresh process with no visible CUDA devices;
-    # eligible automatic/explicit GPU requests must fail without CPU fallback.
+    # automatic selection uses CPU; explicit GPU requests still fail.
     add_test(NAME solve_routes_no_cuda_device COMMAND unit_tests
-        --gtest_filter=SolveRoutes.ExplicitCpuDoesNotPrewarm:SolveRoutes.HiddenDeviceFailureNeverRetriesOnCpu)
+        --gtest_filter=SolveRoutes.ExplicitCpuDoesNotPrewarm:SolveRoutes.ScalarAutomaticUsesCpuWithoutPrewarming:SolveRoutes.AutomaticSelectionRespectsConfigurationAndAvailability:SolveRoutes.ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup:SolveRoutes.HiddenDeviceUsesCpuAutomaticallyAndRejectsExplicitGpu)
     set_tests_properties(solve_routes_no_cuda_device PROPERTIES TIMEOUT 120
         ENVIRONMENT "OMP_NUM_THREADS=4;CUDA_VISIBLE_DEVICES=-1")
     # Device-wide free-memory accounting also sees other GPU applications.
@@ -162,6 +162,7 @@ apxchol_cli_test(cli_retired_forward_star_no_append_is_rejected path5_pattern 10
 # Complete solve-route CLI contract: the CPU choice is usable in every build,
 # and CLI enum transformations must not admit numeric or unknown selectors.
 apxchol_cli_test(cli_backend_cpu_converges path5_sddm 0 "backend: +cpu" --backend cpu)
+apxchol_cli_test(cli_backend_auto_tiny_uses_cpu path5_sddm 0 "backend: +cpu")
 apxchol_cli_test(cli_numeric_backend_is_rejected path5_sddm 105 "not in" --backend 0)
 apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backend hybrid)
 if (APXCHOL_DEVICE STREQUAL "CPU")

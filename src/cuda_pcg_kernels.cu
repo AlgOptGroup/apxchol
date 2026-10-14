@@ -81,12 +81,12 @@ struct recurrence_math {
 
 __global__ void __launch_bounds__(kBlockThreads)
 finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mode,
-                unsigned iteration, double bnorm) {
+                unsigned iteration, double bnorm, unsigned window) {
     __shared__ double scratch[kWarps];
     const pcg_work<int> work{0, blocks, kBlockThreads, static_cast<int>(threadIdx.x), blocks};
     const double sum = block_reduce_sum(sum_partials(pcg_math<>{}, part, work), scratch);
     if (threadIdx.x == 0 && state->active)
-        *state = advance(recurrence_math{bnorm}, *state, mode, sum, iteration);
+        *state = advance(recurrence_math{bnorm}, *state, mode, sum, iteration, window);
 }
 
 template<class Value>
@@ -130,8 +130,8 @@ void step(cudaStream_t stream, operation op, std::int64_t n, workspace v,
 }
 
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
-              unsigned mode, unsigned iteration, double bnorm) {
-    finalize_kernel<<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, bnorm);
+              unsigned mode, unsigned iteration, double bnorm, unsigned window) {
+    finalize_kernel<<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, bnorm, window);
 }
 
 namespace {

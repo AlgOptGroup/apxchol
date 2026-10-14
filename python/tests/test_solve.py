@@ -94,7 +94,7 @@ def test_storage_dtype_preserves_original_system_accuracy(dtype):
     A = random_sddm(80, seed=9)
     b = np.random.default_rng(10).standard_normal(A.shape[0])
     try:
-        solver = apxchol.factorize(A, factor_storage_dtype=dtype)
+        solver = apxchol.factorize(A, backend="cpu", factor_storage_dtype=dtype)
     except RuntimeError as exc:
         assert dtype == np.float16 and str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64"
         assert (platform.system(), platform.machine()) != ("Darwin", "arm64"), str(exc)
@@ -579,7 +579,7 @@ def test_placeholder_column_per_component():
 def test_apply_matches_explicit_factor_solve():
     """apply(r) == P^T G^{-T} G^{-1} P r, assembled from the exported factor."""
     A = grid2d_sddm(20)
-    slv = apxchol.factorize(A, seed=11)
+    slv = apxchol.factorize(A, seed=11, factor_storage_dtype=np.float32)
     assert slv.sddm
     P = slv.P
     p = np.argsort(P)
