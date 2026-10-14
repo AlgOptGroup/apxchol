@@ -11,7 +11,7 @@ import apxchol
 
 @pytest.fixture(scope="module")
 def operator_matrix():
-    return sp.diags([-np.ones(63), np.full(64, 4.0), -np.ones(63)],
+    return sp.diags([-np.ones(64), np.full(65, 4.0), -np.ones(64)],
                     [-1, 0, 1], format="csc")
 
 
@@ -34,6 +34,19 @@ def test_backend_selection_is_read_only(operator_matrix, auto_solver):
             apxchol.factorize(operator_matrix, backend="gpu")
     else:
         assert apxchol.factorize(operator_matrix, backend="gpu").backend == "gpu"
+
+
+@pytest.mark.parametrize("n", [1, 64])
+def test_tiny_automatic_solver_uses_cpu(n, monkeypatch):
+    monkeypatch.delenv("APXCHOL_FACTOR_STORAGE", raising=False)
+    matrix = sp.diags([-1., 4., -1.], [-1, 0, 1], shape=(n, n), format="csc")
+    solver = apxchol.factorize(matrix)
+    assert solver.backend == "cpu"
+    assert solver.factor_storage_dtype == np.float32
+    rhs = np.ones(n)
+    result = solver.solve(rhs)
+    assert result.converged
+    assert np.linalg.norm(matrix @ result.x - rhs) / np.linalg.norm(rhs) <= 1e-8
 
 
 @pytest.mark.parametrize("backend", ["invalid", "CUDA", None])
@@ -99,7 +112,7 @@ def test_hidden_cuda_device_selects_cpu_and_explicit_gpu_fails():
     script = """
 import apxchol
 import scipy.sparse as sp
-A = sp.diags([-1., 4., -1.], [-1, 0, 1], shape=(64, 64), format='csc')
+A = sp.diags([-1., 4., -1.], [-1, 0, 1], shape=(65, 65), format='csc')
 assert apxchol.factorize(A).backend == 'cpu'
 try:
     apxchol.factorize(A, backend='gpu')

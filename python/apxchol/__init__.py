@@ -316,8 +316,9 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage
         PRECONDITIONER is built (see :attr:`Solver.lumped`); the PCG still
         applies `A` itself, so the residual is for the system you passed.
     backend : {"auto", "cpu", "gpu"}
-        Select the execution backend through the C++ solver. Read the resolved
-        choice from ``Solver.backend``. An explicit GPU request fails when the
+        Auto prefers CPU for at most 64 rows if it supports the requested storage;
+        otherwise it checks GPU compatibility. Read the resolved choice from
+        ``Solver.backend``. An explicit GPU request fails when the
         installed build, hardware or options cannot support it.
     seed : int
         RNG seed for the randomized clique sampling (factorization is
