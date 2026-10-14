@@ -14,7 +14,7 @@ Check the active worktree, branch and dirty state before editing. Give concurren
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j6
 ctest --test-dir build --output-on-failure
-./build/tests/unit_tests --gtest_filter='FactorizeTest/*.PermutationIsValid'
+./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'
 ./build/apxchol path/to/matrix.mtx --random-rhs --tol 1e-8
 ```
 
@@ -50,14 +50,14 @@ Metal currently factorizes on the host and retains the factor, operator and work
 
 ### Graph construction and factorization
 
-- Directed `vec_pool_aos` is the default for high-level solves and `graph<>`; vec and bstr also exist. Storage must not silently choose a selector. Preserve the supported custom incidence/eliminator seams and deterministic partitioner conflict resolution/team fallbacks.
+- Directed AoS is the sole graph layout. Keep custom partitioner and eliminator interfaces, deterministic partitioner conflict resolution and actual-team fallbacks.
 - OpenMP work uses the actual team size, including incremental-degree histograms and decrement slices. Every logical graph-copy range must execute under reduced/nested teams. A fresh graph's initial reserve must not join an unrelated caller team's collective. Pooled compaction stays inside the factorizer's collective `omp single`; independent worker decisions can diverge barriers.
 - Canonical neighbors are sorted by weight then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams. The serial `min_degree` option is a lazy heap heuristic, not exact current-minimum-degree selection or a minimum-fill guarantee.
 - Unique, sorted, fully paired symmetric CSC can construct directed incidences by column ownership using canonical lower weights. Other patterns keep the general builder. Pairing shortcuts require the unchanged validated operator, no lumping, no zero/nonfinite off-diagonals and matching triangle fingerprints. Public `make_graph` never assumes the proof. The owned SpMV copy proves pairing independently, including duplicate-run position, and falls back on any mismatch. Preserve results with and without the shortcut.
 - Caller-operator loops use `detail::work_balanced_range` based only on pointers and actual team size. Preserve ordered reductions; this rule does not apply to level-scheduled triangular solves.
 - Prune skipping is available only after AUTO declines the exact incremental-degree cache. It uses raw adjacency count above the configured multiple of the previous eligibility threshold as an upper bound; selector/eliminator must filter dead entries. Full walks audit skipped work: a clean audit doubles skipped rounds up to eight, a hidden eligible vertex resets to one. Never remove this audit or enable skipping while the cache is on/undecided or under explicit `APXCHOL_INCREMENTAL_DEGREE_SPARSE=0|1`. Preserve `APXCHOL_PRUNE_SKIP` and its trace semantics until separately retired.
 - GKS is the default sampler. Trace-cycle uses GKS below degree three and emits at most degree-many edges otherwise. Preserve positive subnormals. Finite zero neighbors or unrepresentable plans fall back to input-only GKS with the original seed before sampling; invalid input/overflow remain errors and device traces report numerical fallback.
-- Connectivity-preserving residual sparsification retains directed coalescing, the bucket/ordinal forest and conditional Bernoulli/HT law. Importance normalization uses ordered 16,384-item partials followed by an ordered fold, with one persistent team and at most six updates. Same ordered input is invariant to thread count, without matching the old serial fold. Preserve final statistics and connectivity; run `ResidualBlockedNormalization.*` and `ResidualBlockedGraph/*.*`.
+- Connectivity-preserving residual sparsification retains directed coalescing, the bucket/ordinal forest and conditional Bernoulli/HT law. Importance normalization uses ordered 16,384-item partials followed by an ordered fold, with one persistent team and at most six updates. Same ordered input is invariant to thread count, without matching the old serial fold. Preserve final statistics and connectivity; run `ResidualBlockedNormalization.*` and `ResidualBlockedGraph.*`.
 - Lazy segmented adjacency reservations request huge pages only for known PMD granularity at most 2 MiB; larger/unknown sizes use `MADV_NOHUGEPAGE`. Fully sized outputs keep their separate allocation policy. Preserve factor-buffer lifetime through assembly and release transients at their last use; vector `clear()` does not release capacity.
 
 ### Triangular solves and GPU execution

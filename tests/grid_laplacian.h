@@ -4,7 +4,7 @@
 namespace apxchol::test {
 
 inline Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
-    apxchol::graph<> G(rows * cols);
+    apxchol::graph G(rows * cols);
     auto id = [cols](int r, int c) { return r * cols + c; };
     for (int r = 0; r < rows; ++r)
         for (int c = 0; c < cols; ++c) {

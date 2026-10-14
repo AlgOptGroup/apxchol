@@ -134,22 +134,6 @@ def selected_matrices(families, only=()):
             yield mid, matrix
 
 
-def cpu_apx_configs_for(mid):
-    """Return the CPU apxchol configurations planned for one matrix.
-
-    com-Orkut is the one matrix where the exhaustive storage ablation is too
-    expensive.  Keep the declared default even when its storage spelling is new,
-    plus the AoS selector and dense ``vec`` ablations.  Testing the
-    default by equality avoids silently dropping a future headline storage when
-    this size gate is updated less often than the public default.
-    """
-    if mid != "com-Orkut":
-        return APX
-    return [(solver, config) for solver, config in APX
-            if config == APX_DEFAULT_CONFIG
-            or "[vec_pool_aos]" in config
-            or "[vec]" in config]
-
 # What the BINARY reported about the operator it assembled for each matrix
 # (`MATRIX_META ...` on stderr): kind, n/nnz, and whether the assembled operator
 # turned out to be a singular Laplacian (grounded) or full-rank (solved as-is).
@@ -452,21 +436,8 @@ def dump_mtx(mid):
 # Solver set: (solver, config)
 APX_DEFAULT_CONFIG = rc.APXCHOL_DEFAULT_CONFIG
 APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
-       ("apxchol_v1","bk+tree[vec_pool_aos]"),         # Baumann-Kyng IS (ablation only)
-       ("apxchol_v1","greedy+tree[vec_pool_aos]"),     # priority-greedy IS (ablation only)
-       # vec<vec> storage variants (ablation only) -- the dense-array incidence
-       # backend vs directed AoS. Swept on every family in the SAME run as
-       # the headline AoS backend so the storage ablation is an honest same-session A/B (the old
-       # [vec] cells were sha aeac9836 "capped first pass", cross-run-incomparable).
-       ("apxchol_v1","bg+tree[vec]"),
-       ("apxchol_v1","bk+tree[vec]"),
-       ("apxchol_v1","greedy+tree[vec]"),
-       # Full selector x storage grid for the ablation heatmap: {bg,greedy,bk} x
-       # bstr; vec and directed AoS are covered above.
-       # Historical retired-storage cells remain separate records.
-       ("apxchol_v1","bg+tree[bstr]"),
-       ("apxchol_v1","greedy+tree[bstr]"),
-       ("apxchol_v1","bk+tree[bstr]")]
+       ("apxchol_v1", "bk+tree[vec_pool_aos]"),
+       ("apxchol_v1", "greedy+tree[vec_pool_aos]")]
 # The single headline apxchol config is bg+tree.
 # CHOLMOD not included (direct solver; the suite compares preconditioned
 # iterative methods).
@@ -512,7 +483,7 @@ def planned_cell_count(matrices, device):
         raise ValueError(f"unknown device: {device}")
     total = 0
     for mid, _matrix in matrices:
-        total += len(cpu_apx_configs_for(mid)) + len(COMP)
+        total += len(APX) + len(COMP)
         total += int("hypre_boomeramg" in COMP)  # cut variant
         total += len(JULIA)
         total += 2 if RUN_PARAC else 0
@@ -667,12 +638,7 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
             run_parac(mid)
         return  # no Julia on the GPU axis
     t_apx = None
-    # com-Orkut is huge (~237M input nnz, billion-scale factor offsets);
-    # bstr has no default role but
-    # costs a lot of wall-time here, so keep the declared default plus [vec] and
-    # directed [vec_pool_aos].  cpu_apx_configs_for owns the exact spelling-sensitive gate.
-    apx_list = cpu_apx_configs_for(mid)
-    for solver,config in apx_list:
+    for solver,config in APX:
         _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
         if config == APX_DEFAULT_CONFIG and m and m.get("total_s"):
             t_apx = m["total_s"]
@@ -723,11 +689,6 @@ def main():
     ap.add_argument("--warmup", type=int, default=WARMUP, help="explicit C++ solver warmups before retained repeats")
     ap.add_argument("--store", default=CELLS,
                     help="cell-store directory (default: results/cells)")
-    ap.add_argument("--headline-only", action="store_true",
-                    help="run only the headline AoS config and indexed IS-selector "
-                         "ablations; skip the "
-                         "vec/bstr storage-ablation configs. Use for new large "
-                         "matrices that only feed the comparison charts, not the ablation.")
     ap.add_argument("--no-rchol", action="store_true",
                     help="drop RCHOL / pRCHOL from the competitor set. They blow up (high "
                          "fill, 489 iters / non-convergent) on the large social graphs, so "
@@ -782,14 +743,6 @@ def main():
     if a.no_cap: NO_CAP = True
     # CMG is serial MATLAB: it has no GPU axis, so its cells are device=cpu only.
     if a.no_cmg or DEVICE == "gpu": RUN_CMG = False
-    if a.headline_only:
-        APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
-               ("apxchol_v1","greedy+tree[vec_pool_aos]"),
-               ("apxchol_v1","bk+tree[vec_pool_aos]")]
-        # NOTE: --headline-only restricts the apxchol CONFIG list only. It no longer
-        # disables AC/AC2: leaving their cells empty silently understates coverage.
-        # Use --no-julia explicitly when you want the speed (they are slow, and hit
-        # the cap or OOM on the social giants -- recorded as timeout/failed cells).
     if DEVICE == "cpu" and JULIA:
         julia_ok, julia_reason = julia_preflight()
         if not julia_ok:
@@ -801,7 +754,7 @@ def main():
         sys.exit(f"GPU build not found: {BIN['gpu']} (configure with -DAPXCHOL_DEVICE=CUDA)")
     PROV["note"] = f"FAIR {DEVICE} run, singular L, multi-component Dirichlet pin (per-solver grounding)"
     print(f"=== fair sweep: device={DEVICE}, families={sorted(fams)}, "
-          f"headline_only={a.headline_only}, store={CELLS} "
+          f"store={CELLS} "
           f"(stale-aware resume) ===", flush=True)
     print(f"    external solvers: parac={'on' if RUN_PARAC else 'off'} "
           f"ac/ac2={'on' if JULIA else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)

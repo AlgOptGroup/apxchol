@@ -25,7 +25,6 @@ public:
         required.backend = solve_backend::gpu;
         (void)select_solve_backend(required);
         precond.set_options(opts.factor_opts);
-        precond.set_storage(opts.storage);
         precond.set_keep_factor(opts.keep_factor_values);
         if (use_cp) precond.set_checkpoint(cp);
         precond.compute(L);

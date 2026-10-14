@@ -9,7 +9,7 @@ are welcome.
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j6
 ctest --test-dir build --output-on-failure
-./build/tests/unit_tests --gtest_filter='FactorizeTest/*.PermutationIsValid'
+./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'
 ```
 
 CMake consumers should link `apxchol_core` rather than copy its compiler flags:
@@ -48,9 +48,9 @@ Use C++23, `snake_case`, namespace `apxchol`, and trailing underscores for
 private members. Public headers are under `include/apxchol/`; the CPU compiled
 core is `factorization.cpp`, `operator_class.cpp` and `solve.cpp` in `src/`.
 
-Register new partitioners in `partitioner_list.h`; register storage backends
-in both `graph_storage` and factorization dispatch. Preserve deterministic
-neighbor ordering, sampling streams and thread-team behavior. Consult the
+Register new partitioners in `partitioner_list.h`. The working graph uses
+directed AoS adjacency. Preserve deterministic neighbor ordering, sampling
+streams and thread-team behavior. Consult the
 rationale in `factor_options.h` and the [precision contract](docs/precision.md)
 before changing established defaults. Prefer a shared implementation over
 another mode or public tuning option.

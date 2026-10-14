@@ -544,28 +544,14 @@ class FairSweepSelectionTest(unittest.TestCase):
         self.assertEqual(len(sweep_fair.APX_GPU), len(set(sweep_fair.APX_GPU)))
         self.assertTrue(all(retired not in config
                             for _, config in sweep_fair.APX + sweep_fair.APX_GPU
-                            for retired in ("[vec_pool]", "[fwd_star]", "[forward_star]")))
-        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 510)
+                            for retired in ("[vec]", "[bstr]", "[vec_pool]", "[fwd_star]", "[forward_star]")))
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 351)
         self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 162)
         self.assertEqual(
             sweep_fair.planned_cell_count(selected, "cpu")
             + sweep_fair.planned_cell_count(selected, "gpu"),
-            672,
+            513,
         )
-
-    def test_orkut_size_gate_always_keeps_declared_default(self):
-        configs = [
-            ("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG),
-            ("apxchol_v1", "greedy+tree[vec_pool_aos]"),
-            ("apxchol_v1", "bg+tree[vec]"),
-            ("apxchol_v1", "bg+tree[bstr]"),
-        ]
-        with mock.patch.object(sweep_fair, "APX", configs):
-            self.assertEqual(
-                sweep_fair.cpu_apx_configs_for("com-Orkut"),
-                configs[:3],
-            )
-            self.assertIs(sweep_fair.cpu_apx_configs_for("iter0040"), configs)
 
     def test_all_registry_entries_are_selected_once(self):
         selected = list(sweep_fair.selected_matrices(
