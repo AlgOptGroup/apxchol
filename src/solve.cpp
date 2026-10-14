@@ -806,8 +806,12 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     if (opts.backend == solve_backend::cpu) return solve_backend::cpu;
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::gpu)
         throw std::invalid_argument("invalid solve backend");
-    if (opts.backend == solve_backend::automatic && A && A->rows() == 1)
-        return solve_backend::cpu;
+    // Avoid GPU overhead for tiny systems unless CPU cannot honor their storage.
+    if (opts.backend == solve_backend::automatic && A && A->rows() <= 64) {
+        if (A->rows() == 1 || omp_sptrsv::fp16_supported() ||
+            !detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false))
+            return solve_backend::cpu;
+    }
 #if defined(APXCHOL_USE_CUDA)
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
         opts.storage == graph_storage::vec_pool_aos &&

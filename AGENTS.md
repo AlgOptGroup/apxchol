@@ -286,10 +286,11 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   and Metal; automatic selects CPU, while explicit CUDA rejects it.
 - One-shot `solve` selects a complete route with `solve_options.backend`
   (`automatic`, `cpu`, `gpu`); CLI uses `--backend auto|cpu|gpu`. Report the
-  selected route in `solve_result.backend` and CLI output. Auto checks device
-  availability, options and input compatibility before setup. Explicit CPU never
-  probes GPU; explicit GPU retains setup errors. Selection is not a performance
-  predictor. Never retry a failed GPU setup or solve on CPU.
+  selected route in `solve_result.backend` and CLI output. Auto keeps systems of
+  at most 64 rows on CPU when it supports the requested storage; singletons
+  always use CPU. Otherwise it checks device, option and input compatibility.
+  Explicit CPU never probes GPU; explicit GPU retains setup errors. Never retry
+  a failed GPU setup or solve on CPU.
 - The current CUDA route uses device-owned factorization, finalization, dataflow
   plans, operator preparation and PCG. Reject missing/nonunique device factor ownership
   before a host-factor upload. Unsupported stored formats, missing device,
