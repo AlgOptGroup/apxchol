@@ -80,8 +80,9 @@ does not change the outer PCG to FP16. See [precision and storage](docs/precisio
 its default. Trace-cycle supports CPU setup and full GPU-owned setup.
 `solve_options.backend` (`solve_backend::automatic`, `cpu`, or `gpu`) and CLI
 `--backend auto|cpu|gpu` select a complete setup/solve route. The default `auto`
-selects an available GPU when the build, options and input support it, otherwise
-CPU. This does not predict which backend will be faster for a particular matrix.
+uses CPU for systems of at most 64 rows when CPU supports the requested storage;
+otherwise it selects an available, compatible GPU or CPU. Larger systems are
+selected by compatibility, not predicted performance.
 `solve_result.backend` and the CLI report the actual route.
 
 Explicit GPU requests fail if unsupported. Once selected, GPU setup or execution
