@@ -189,6 +189,14 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - Public headers are under `include/apxchol/`; `include/apxchol.h` is the
   convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
   `src/solve.cpp` provide the CPU compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
+- `apxchol::solver` owns one CPU or compiled GPU session, selected once by the
+  existing backend policy. One-shot solve and Python/Octave use this owner;
+  the bindings request CPU. It may outlive its input and setup checkpoint.
+  Per-call timings belong to the solve result. CUDA rejects host factors and
+  warm starts. `detail/csc_import.h` shares typed CSC import among bindings:
+  sorted unique inputs copy directly; other layouts use Eigen's duplicate sum.
+- Checkpoint copies own independent timing trees; moves preserve active scopes.
+  Reusing a copied or moved solve result must not retain pointers to its source.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
   M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
   adjacency versus an assembled operator. Bindings must use the operator
@@ -262,7 +270,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   The old GPU-only alias is retired.
 - Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
   OpenMP SpTRSV and host PCG, even in CUDA builds. They must not initialize a
-  CUDA context or consume GPU stage flags. Explicit factor adoption remains CPU.
+  CUDA context or consume GPU stage flags. Host-factor adoption supports CPU
+  and Metal; automatic selects CPU, while explicit CUDA rejects it.
 - One-shot `solve` selects a complete route with `solve_options.backend`
   (`automatic`, `cpu`, `gpu`); CLI uses `--backend auto|cpu|gpu`. Report the
   selected route in `solve_result.backend` and CLI output. Auto is configuration

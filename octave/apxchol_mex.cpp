@@ -6,8 +6,6 @@
 //   z                          = apxchol_mex('apply', h, r)         % z = M^{-1} r
 //   apxchol_mex('free', h)
 //
-// The Solver class is a thin shell over apxchol::cpu_solver and MIRRORS
-// python/src/apxchol_ext.cpp — keep the two in sync when touching either.
 // M-file wrappers (apxchol_solver.m / apxchol_solve.m) give the user-facing API;
 // nobody should call this gateway directly.
 
@@ -22,9 +20,10 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <vector>
+#include <utility>
 
 #include "apxchol.h"
+#include "apxchol/detail/csc_import.h"
 
 namespace {
 
@@ -70,47 +69,16 @@ int iteration_option(const mxArray* value) {
     return static_cast<int>(result);
 }
 
-// ── reusable solver: thin shell over apxchol::cpu_solver (mirrors the Python
-// binding) — the library's factor-once/solve-many class with the SAME
-// parallel-SpMV PCG the benchmark's one-shot solve() runs.
-class Solver {
-public:
-    explicit Solver(Eigen::SparseMatrix<double> A) : slv_(A) {}
-        // default solve_options: vec_pool_aos storage + block_greedy (the library defaults)
-
-    Eigen::Index rows() const { return slv_.rows(); }
-
-    Eigen::VectorXd apply(const Eigen::VectorXd& r) const {
-        if (r.size() != slv_.rows()) throw std::invalid_argument("apply: r length mismatch");
-        return slv_.apply(r);
-    }
-
-    void solve(const Eigen::VectorXd& b, double tol, int maxiter,
-               Eigen::VectorXd& x, int& iters, double& rnorm, bool& converged) const {
-        if (b.size() != slv_.rows()) throw std::invalid_argument("solve: b length mismatch");
-        // This binding constructs cpu_solver with default solve_options.
-        // Resolve its negative tolerance sentinel for both PCG and the flag.
-        if (tol < 0.0) tol = apxchol::default_tol;
-        const apxchol::solve_result res = slv_.solve(b, tol, maxiter);
-        x = res.x; iters = static_cast<int>(res.iterations); rnorm = res.residual;
-        // Preserve the strict test, including false for residual == tol == 0.
-        converged = res.residual < tol;
-    }
-
-private:
-    apxchol::cpu_solver slv_;
-};
-
 // ── handle store ────────────────────────────────────────────────────────────────
-std::map<std::uint64_t, std::unique_ptr<Solver>>& store() {
-    static std::map<std::uint64_t, std::unique_ptr<Solver>> s;
+std::map<std::uint64_t, std::unique_ptr<apxchol::solver>>& store() {
+    static std::map<std::uint64_t, std::unique_ptr<apxchol::solver>> s;
     return s;
 }
 std::uint64_t next_handle = 1;
 
 void at_exit() { store().clear(); }
 
-Solver& get_solver(const mxArray* mh) {
+apxchol::solver& get_solver(const mxArray* mh) {
     if (!mxIsUint64(mh) || mxGetNumberOfElements(mh) != 1)
         fail("apxchol:badHandle", "handle must be a uint64 scalar");
     const std::uint64_t h = *static_cast<std::uint64_t*>(mxGetData(mh));
@@ -133,28 +101,12 @@ Eigen::SparseMatrix<double> mx_to_eigen(const mxArray* mA) {
     const mwIndex* ir = mxGetIr(mA);
     const double*  pr = mxGetPr(mA);
     const std::uint64_t nnz = jc[nc];
-    if (nr > (std::uint64_t)std::numeric_limits<int>::max() ||
-        nnz > (std::uint64_t)std::numeric_limits<int>::max())
+    if (std::cmp_greater(nr, std::numeric_limits<int>::max()) ||
+        std::cmp_greater(nnz, std::numeric_limits<int>::max()))
         fail("apxchol:tooLarge",
              "matrix too large for 32-bit indices (n or nnz exceeds 2^31)");
 
-    std::vector<Eigen::Triplet<double>> trips;
-    trips.reserve(nnz);
-    for (mwSize j = 0; j < nc; ++j)
-        for (mwIndex p = jc[j]; p < jc[j + 1]; ++p)
-            trips.emplace_back((int)ir[p], (int)j, pr[p]);
-
-    Eigen::SparseMatrix<double> A(nr, nc);
-    A.setFromTriplets(trips.begin(), trips.end());
-    A.makeCompressed();
-    // No input-class check here: the library asserts the operator contract
-    // itself, inside the factorization, from ONE implementation shared with
-    // the CLI and the Python binding (apxchol/operator_class.h). It throws
-    // std::invalid_argument, which the catch chain in mexFunction reports as
-    // `apxchol:badInput` naming the condition that failed; an adjacency matrix
-    // is caught by the positive-diagonal condition and the message names
-    // apxchol_laplacian(A).
-    return A;
+    return apxchol::detail::import_csc(nr, jc, ir, pr);
 }
 
 Eigen::VectorXd mx_to_vec(const mxArray* mb, const char* what) {
@@ -187,7 +139,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         if (op == "factorize") {
             if (nrhs != 2)
                 fail("apxchol:usage", "usage: h = apxchol_mex('factorize', A)");
-            auto solver = std::make_unique<Solver>(mx_to_eigen(prhs[1]));
+            auto solver = std::make_unique<apxchol::solver>(
+                mx_to_eigen(prhs[1]), apxchol::solve_options{.backend = apxchol::solve_backend::cpu});
             const std::uint64_t h = next_handle++;
             store()[h] = std::move(solver);
             plhs[0] = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
@@ -196,20 +149,20 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             if (nrhs != 5)
                 fail("apxchol:usage",
                      "usage: [x,iters,resid,conv] = apxchol_mex('solve', h, b, tol, maxiter)");
-            Solver& s = get_solver(prhs[1]);
+            auto& s = get_solver(prhs[1]);
             const Eigen::VectorXd b = mx_to_vec(prhs[2], "b");
-            const double tol = scalar_option(prhs[3], "tol");
+            double tol = scalar_option(prhs[3], "tol");
+            if (tol < 0.0) tol = apxchol::default_tol;
             const int maxiter = iteration_option(prhs[4]);
-            Eigen::VectorXd x; int iters; double rnorm; bool conv;
-            s.solve(b, tol, maxiter, x, iters, rnorm, conv);
-            plhs[0] = vec_to_mx(x);
-            if (nlhs > 1) plhs[1] = mxCreateDoubleScalar(iters);
-            if (nlhs > 2) plhs[2] = mxCreateDoubleScalar(rnorm);
-            if (nlhs > 3) plhs[3] = mxCreateLogicalScalar(conv);
+            const auto result = s.solve(b, tol, maxiter);
+            plhs[0] = vec_to_mx(result.x);
+            if (nlhs > 1) plhs[1] = mxCreateDoubleScalar(result.iterations);
+            if (nlhs > 2) plhs[2] = mxCreateDoubleScalar(result.residual);
+            if (nlhs > 3) plhs[3] = mxCreateLogicalScalar(result.residual < tol);
         } else if (op == "apply") {
             if (nrhs != 3)
                 fail("apxchol:usage", "usage: z = apxchol_mex('apply', h, r)");
-            Solver& s = get_solver(prhs[1]);
+            auto& s = get_solver(prhs[1]);
             plhs[0] = vec_to_mx(s.apply(mx_to_vec(prhs[2], "r")));
         } else if (op == "free") {
             if (nrhs != 2)

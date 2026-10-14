@@ -33,26 +33,32 @@ struct checkpoint {
         std::map<std::string, node> children;
     };
 
-    checkpoint() : last_(Clock::now()), cur_(&root_) {}
+    checkpoint() : last_(Clock::now()) {}
+    checkpoint(const checkpoint& other) : last_(other.last_), root_(other.root_) {
+        for (const auto scope : other.scopes_) descend(scope->first);
+    }
+    checkpoint& operator=(const checkpoint& other) {
+        return *this = checkpoint(other);
+    }
+    checkpoint(checkpoint&&) noexcept = default;
+    checkpoint& operator=(checkpoint&&) noexcept = default;
 
     /// Record elapsed time since last call under `label` at the current scope.
     void operator()(const std::string& label) {
         auto now = Clock::now();
-        cur_->children[label].time +=
+        current().children[label].time +=
             std::chrono::duration<double>(now - last_).count();
         last_ = now;
     }
 
     /// Descend into a child scope.
     void descend(const std::string& name) {
-        stack_.push_back(cur_);
-        cur_ = &cur_->children[name];
+        scopes_.push_back(current().children.try_emplace(name).first);
     }
 
     /// Return to the parent scope.
     void ascend() {
-        cur_ = stack_.back();
-        stack_.pop_back();
+        scopes_.pop_back();
     }
 
     /// Reset the clock without recording.
@@ -107,6 +113,8 @@ struct checkpoint {
     }
 
 private:
+    node& current() { return scopes_.empty() ? root_ : scopes_.back()->second; }
+
     /// Compute total time in a subtree (node's own time + all descendants).
     static double subtotal(const node& n) {
         double s = n.time;
@@ -133,8 +141,8 @@ private:
 
     Clock::time_point last_;
     node root_;
-    node* cur_;
-    std::vector<node*> stack_;
+    // Map element iterators survive moves; no cursor points into this object.
+    std::vector<std::map<std::string, node>::iterator> scopes_;
 };
 
 } // namespace apxchol

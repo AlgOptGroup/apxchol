@@ -13,6 +13,7 @@ target_include_directories(gtest SYSTEM PRIVATE
 
 add_executable(unit_tests
         test_core.cpp
+        test_checkpoint.cpp
         test_residual_normalization.cpp
         test_factorize.cpp
         test_elimination.cpp
@@ -33,6 +34,7 @@ add_executable(unit_tests
         test_mtx_input.cpp
         test_operator_class.cpp
         test_solve_routes.cpp
+        test_solver.cpp
         test_cuda_device_scope.cpp
         test_permuted_operator.cpp
         test_metal_schedule.cpp

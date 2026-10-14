@@ -3,18 +3,26 @@
 #include <pybind11/eigen.h>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
-#include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "apxchol.h"
+#include "apxchol/detail/csc_import.h"
 
 namespace py = pybind11;
 
 namespace {
+
+template<class Import>
+auto with_csc_indices(const py::array& array, Import import) {
+    if (py::isinstance<py::array_t<std::int32_t>>(array))
+        return import(array.cast<py::array_t<std::int32_t, py::array::c_style>>());
+    return import(array.cast<py::array_t<std::int64_t,
+                                       py::array::c_style | py::array::forcecast>>());
+}
 
 // CSC arrays -> column-major Eigen::SparseMatrix<double>.
 Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
@@ -24,45 +32,17 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
     if (indptr.size() == 0)
         throw std::invalid_argument("CSC indptr must contain at least its initial zero");
 
-    auto ip = indptr.cast<py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>>();
-    auto ii = indices.cast<py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>>();
     auto dd = data.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
-    const std::int64_t* P = ip.data();
-    const std::int64_t* I = ii.data();
-    const double*        V = dd.data();
-    const Eigen::Index n = ip.size() - 1;
-    if (ii.size() != dd.size() || P[0] != 0 || P[n] != dd.size() ||
-        !std::is_sorted(P, P + ip.size()))
-        throw std::invalid_argument(
-            "CSC indptr must start at zero, be nondecreasing and end at the length of data and indices");
-
-    // This build uses 32-bit Eigen storage indices; matrices with n or nnz beyond
-    // 2^31 would silently truncate below. Reject them with a clear message.
-    const std::int64_t int_max = std::numeric_limits<int>::max();
-    if (n > int_max || dd.size() > int_max)
-        throw std::invalid_argument(
-            "matrix too large for 32-bit indices (n or nnz exceeds 2^31); "
-            "this CPU package build does not support 64-bit indices");
-
-    std::vector<Eigen::Triplet<double>> trips;
-    trips.reserve(static_cast<std::size_t>(dd.size()));
-    for (Eigen::Index j = 0; j < n; ++j)
-        for (std::int64_t p = P[j]; p < P[j + 1]; ++p) {
-            if (I[p] < 0 || I[p] >= n)
-                throw std::invalid_argument("CSC row index out of range");
-            trips.emplace_back(static_cast<int>(I[p]), static_cast<int>(j), V[p]);
-        }
-
-    Eigen::SparseMatrix<double> A(n, n);
-    A.setFromTriplets(trips.begin(), trips.end());
-    A.makeCompressed();
-    // No input-class check here: the library asserts the operator contract
-    // itself, inside the factorization, from ONE implementation shared with
-    // the CLI and the Octave binding (apxchol/operator_class.h). A violation
-    // arrives as std::invalid_argument -> ValueError, naming which condition
-    // failed; an adjacency matrix is caught by the positive-diagonal condition
-    // and the message names apxchol.laplacian(A).
-    return A;
+    if (indices.size() != dd.size())
+        throw std::invalid_argument("CSC data and indices must have the same length");
+    return with_csc_indices(indptr, [&](const auto& ip) {
+        const auto n = ip.size() - 1;
+        if (ip.at(n) != dd.size())
+            throw std::invalid_argument("CSC indptr must end at the length of data and indices");
+        return with_csc_indices(indices, [&](const auto& ii) {
+            return apxchol::detail::import_csc(n, ip.data(), ii.data(), dd.data());
+        });
+    });
 }
 
 // ── options dict -> solve_options ────────────────────────────────────────────
@@ -103,6 +83,7 @@ apxchol::residual_peel_strategy parse_peel(const std::string& name) {
 
 apxchol::solve_options parse_options(const py::dict& d) {
     apxchol::solve_options so;
+    so.backend = apxchol::solve_backend::cpu;
     for (auto item : d) {
         const std::string key = py::str(item.first).cast<std::string>();
         const py::handle v = item.second;
@@ -141,9 +122,7 @@ apxchol::solve_options parse_options(const py::dict& d) {
     return so;
 }
 
-// Reusable CPU solver: thin marshalling shell over apxchol::cpu_solver (the
-// library's factor-once / solve-many class — the SAME parallel-SpMV PCG the
-// benchmark's one-shot solve() runs, so package and bench numbers match).
+// Python marshalling around the common solver, using its CPU route.
 class Solver {
 public:
     Solver(py::array indptr, py::array indices, py::array data,
@@ -153,7 +132,8 @@ public:
     Eigen::Index rows() const { return slv_.rows(); }
     bool sddm() const { return factor().sddm; }
     const char* factor_storage_dtype() const {
-        return slv_.preconditioner().trsv().fp16() ? "float16" : "float32";
+        return slv_.factor_storage() == apxchol::factor_storage_type::fp16
+            ? "float16" : "float32";
     }
     // Positive off-diagonal entries M-matrix lumping moved onto the diagonal
     // while building the preconditioner; 0 for a Laplacian/SDDM operator.
@@ -163,24 +143,21 @@ public:
 
     // M^{-1} r (one forward/back SpTRSV; reused tuned factor).
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const {
-        if (r.size() != slv_.rows())
-            throw std::invalid_argument("apply: r length mismatch");
         return slv_.apply(r);
     }
 
     py::dict solve(const Eigen::VectorXd& b, double tol, int maxiter,
                    py::object x0, py::object out_arr) const {
-        if (b.size() != slv_.rows())
-            throw std::invalid_argument("solve: b length mismatch");
+        if (tol < 0.0) tol = apxchol::default_tol;
         Eigen::VectorXd x0v;
         const Eigen::VectorXd* x0p = nullptr;
         if (!x0.is_none()) {
             x0v = x0.cast<Eigen::VectorXd>();
-            if (x0v.size() != slv_.rows())
-                throw std::invalid_argument("solve: x0 length mismatch");
             x0p = &x0v;
         }
 
+        apxchol::solve_result res;
+        py::dict out;
         // Caller-provided output memory: solve straight into the numpy array
         // (no per-solve solution allocation; the array must alias no copy).
         if (!out_arr.is_none()) {
@@ -194,18 +171,13 @@ public:
                     "of length n");
             Eigen::Map<Eigen::VectorXd> xmap(
                 static_cast<double*>(a.mutable_data()), slv_.rows());
-            const apxchol::solve_result res = slv_.solve(b, xmap, tol, maxiter, x0p);
-            py::dict out;
-            out["x"]         = a;
-            out["iters"]     = static_cast<int>(res.iterations);
-            out["residual"]  = res.residual;
-            out["converged"] = res.residual < tol;
-            return out;
+            res = slv_.solve(b, xmap, tol, maxiter, x0p);
+            out["x"] = a;
+        } else {
+            res = slv_.solve(b, tol, maxiter, x0p);
+            out["x"] = std::move(res.x);
         }
 
-        const apxchol::solve_result res = slv_.solve(b, tol, maxiter, x0p);
-        py::dict out;
-        out["x"]         = Eigen::VectorXd(res.x);
         out["iters"]     = static_cast<int>(res.iterations);
         out["residual"]  = res.residual;
         // The PCG breaks with residual < tol on convergence; every other exit
@@ -258,10 +230,10 @@ public:
 
 private:
     const apxchol::factorization& factor() const {
-        return slv_.preconditioner().factor();
+        return slv_.factor();
     }
 
-    apxchol::cpu_solver slv_;
+    apxchol::solver slv_;
 };
 
 }  // namespace

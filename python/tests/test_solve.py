@@ -506,15 +506,64 @@ def test_export_supports_float32_triangular_solve():
 
 
 @pytest.mark.parametrize("field, values", [
-    ("indptr", []), ("indptr", [0, 5, 4]), ("indices", [0, 2, 0, 1]),
+    ("indptr", []), ("indptr", [0, 5, 4]), ("indptr", [1, 2, 4]),
+    ("indptr", [0, -1, 4]), ("indptr", [0, 2, 5]),
+    ("indices", [0, 2, 0, 1]), ("indices", [0, -1, 0, 1]),
+    ("indices", [0, 1, 0]),
 ])
-def test_binding_rejects_invalid_csc_bounds(field, values):
+@pytest.mark.parametrize("dtype", [np.int32, np.int64])
+def test_binding_rejects_invalid_csc_bounds(field, values, dtype):
     from apxchol import _apxchol
 
     A = sp.csc_matrix([[2.0, -1.0], [-1.0, 2.0]])
-    setattr(A, field, np.asarray(values, dtype=np.int32))
+    setattr(A, field, np.asarray(values, dtype=dtype))
     with pytest.raises(ValueError):
         _apxchol.Solver(A.indptr, A.indices, A.data)
+
+
+@pytest.mark.parametrize("offset_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("layout", ["sorted", "unsorted", "duplicates", "strided"])
+def test_binding_imports_csc_layouts(offset_dtype, index_dtype, layout):
+    from apxchol import _apxchol
+
+    A = np.array([[4.0, -1.0], [-1.0, 3.0]])
+    indptr, indices, data = [0, 2, 4], [0, 1, 0, 1], [4.0, -1.0, -1.0, 3.0]
+    if layout == "unsorted":
+        indices, data = [1, 0, 1, 0], [-1.0, 4.0, 3.0, -1.0]
+    elif layout == "duplicates":
+        indptr, indices = [0, 4, 8], [0, 0, 1, 1, 0, 0, 1, 1]
+        data = [2.0, 2.0, -0.5, -0.5, -0.5, -0.5, 1.5, 1.5]
+    inputs = (np.array(indptr, dtype=offset_dtype),
+              np.array(indices, dtype=index_dtype), np.array(data))
+    if layout == "strided":
+        inputs = tuple(np.repeat(value, 2)[::2] for value in inputs)
+    before = tuple(value.copy() for value in inputs)
+    solver = _apxchol.Solver(*inputs, {"keep_factor": True,
+                                     "factor_storage_dtype": "float32"})
+    b = np.array([1.0, 2.0])
+    result = solver.solve(b, 1e-12, 20)
+    np.testing.assert_allclose(A @ result["x"], b, rtol=1e-11, atol=1e-12)
+    assert result["converged"]
+    assert solver.factor_storage_dtype() == "float32"
+    assert solver.factor_csc()[2].dtype == np.float32
+    for actual, original in zip(inputs, before):
+        np.testing.assert_array_equal(actual, original)
+
+
+@pytest.mark.parametrize("with_output", [False, True])
+def test_binding_negative_tolerance_uses_default_for_convergence(with_output):
+    from apxchol import _apxchol
+
+    A = sp.csc_matrix([[4.0, -1.0], [-1.0, 3.0]])
+    solver = _apxchol.Solver(A.indptr, A.indices, A.data)
+    b = np.array([1.0, 2.0])
+    out = np.empty_like(b) if with_output else None
+    result = solver.solve(b, -1.0, 20, out=out)
+    assert result["converged"]
+    np.testing.assert_allclose(A @ result["x"], b, rtol=1e-12)
+    if with_output:
+        assert result["x"] is out
 
 
 def test_placeholder_column_per_component():

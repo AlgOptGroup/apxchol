@@ -56,6 +56,7 @@ public:
     /// The factorization (values released after setup unless
     /// solve_options::keep_factor_values).
     const factorization& factor() const;
+    factor_storage_type factor_storage() const;
     statistics stats() const;
     Eigen::Index rows() const;
 
