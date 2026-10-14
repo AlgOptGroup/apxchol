@@ -22,18 +22,17 @@
 namespace apxchol {
 
 namespace detail {
-template<incidence_storage Incidence>
 struct residual_coalescer;
 }
 
 // Residual-pool edge weight storage type. fp32 under -DAPXCHOL_POOL_FP32 (ON by
-// default; pass =OFF for fp64). The residual graph is a MULTIGRAPH: add_edge/write_edge_at
+// default; pass =OFF for fp64). The residual graph is a MULTIGRAPH: adjacency writes
 // APPEND new edges and weights are never re-summed in place (the per-vertex
 // dedup/weighted-degree aggregation is done transiently in fp64 at read), so each
 // stored weight is a TERMINAL write -- fp32 is safe (verified: PCG iters/residual
 // unchanged across IPM incl. high-DR, social, grid). fp32 halves the 16 B edge
 // {node_index + double, alignment-padded} to 8 B {node_index + float}, ~halving
-// edges_ (the largest setup-transient array) with no convergence cost. The
+// graph payload. The
 // main elimination remains append-only: maintaining one physical edge per
 // active endpoint pair would require a concurrent dynamic pair map, while
 // physically merging only the pivot's adjacency was measured slower than the
@@ -42,35 +41,8 @@ struct residual_coalescer;
 // distinct neighbors rather than retaining duplicate-edge multiplicity.
 /// Mutable incidence-list graph.
 ///
-/// The traditional backends store each undirected edge {u,v,w} once in a flat
-/// pool with XOR-encoded endpoints (u^v); both endpoints store its edge index.
-/// directed_vec_pool_incidence instead duplicates {neighbor, weight} inline at
-/// both endpoints, avoiding the indexed pool read during adjacency scans.
-/// The Incidence template parameter controls how per-vertex lists are stored.
-/// The traditional implementations contain edge indices (vec_incidence
-/// and bstr_incidence); directed_vec_pool_incidence
-/// contains the inline records themselves.
-template<incidence_storage Incidence = directed_vec_pool_incidence>
 class graph {
 public:
-    /// Expose the incidence backend for callers that want to specialize
-    /// (e.g. parallel make_graph picks the vec_pool fast path via this).
-    using incidence_type = Incidence;
-    static constexpr bool stores_directed_incidence = [] {
-        if constexpr (requires { typename Incidence::value_type; })
-            return std::same_as<typename Incidence::value_type,
-                                directed_pool_edge>;
-        else
-            return false;
-    }();
-
-    struct edge {
-        node_index to; pool_value_t w;   // w fp32 under -DAPXCHOL_POOL_FP32
-    private:
-        friend graph;
-        node_index traverse(node_index from) const { return to ^ from; }
-    };
-
     graph() = default;
 
     explicit graph(node_index n)
@@ -91,34 +63,18 @@ public:
     // Yields {to, w} with w PROMOTED to double, so all consumers (elimination,
     // weighted-degree, conversions) compute in fp64 regardless of pool storage.
     auto neighbors(node_index v) const {
-        if constexpr (stores_directed_incidence) {
-            return adj_[v] | std::views::transform(
-                [](const directed_pool_edge& i) {
-                    struct nbr { node_index to; double w; };
-                    return nbr{i.to, static_cast<double>(i.w)};
-                });
-        } else {
-            return adj_[v] | std::views::transform(
-                [this, v](edge_index i) {
-                    struct nbr { node_index to; double w; };
-                    return nbr{edges_[i].traverse(v),
-                               static_cast<double>(edges_[i].w)};
-                });
-        }
+        return adj_[v] | std::views::transform(
+            [](const directed_pool_edge& i) {
+                struct nbr { node_index to; double w; };
+                return nbr{i.to, static_cast<double>(i.w)};
+            });
     }
 
     // ── mutation ──
 
     void add_edge(node_index u, node_index v, double w) {
-        if constexpr (stores_directed_incidence) {
-            adj_.push(u, {v, static_cast<pool_value_t>(w)});
-            adj_.push(v, {u, static_cast<pool_value_t>(w)});
-        } else {
-            auto idx = static_cast<edge_index>(edges_.size());
-            edges_.push_back({u ^ v, static_cast<pool_value_t>(w)});
-            adj_.push(u, idx);
-            adj_.push(v, idx);
-        }
+        adj_.push(u, {v, static_cast<pool_value_t>(w)});
+        adj_.push(v, {u, static_cast<pool_value_t>(w)});
         ++m_;
     }
 
@@ -128,27 +84,15 @@ public:
         adj_.clear(v);
     }
 
-    /// Reserve edge slots for parallel writes to disjoint slots.
-    edge_index reserve_edge_pool(edge_index N) {
-        static_assert(!stores_directed_incidence,
-                      "directed incidences must be inserted directly");
-        const edge_index start = static_cast<edge_index>(edges_.size());
-        edges_.resize(start + N);
-        m_ += N;  // bookkeeping; queried via m()
-        return start;
-    }
-
     /// Directed-inline vec_pool: account for a bulk set of undirected edges
     /// whose two incidences are written directly, without an edge-pool stage.
     void record_edges_added(edge_index count) {
-        static_assert(stores_directed_incidence);
         m_ += count;
     }
 
     /// Directed-inline vec_pool: materialize one endpoint incidence directly
     /// into a slab already sized by adj_bulk_reserve_parallel().
     void adj_atomic_push_directed(node_index from, node_index to, double w) {
-        static_assert(stores_directed_incidence);
         adj_.atomic_push_reserved(
             from, directed_pool_edge{to, static_cast<pool_value_t>(w)});
     }
@@ -157,138 +101,62 @@ public:
     /// offset in the pre-reserved suffix without an atomic slot claim.
     void adj_write_reserved_directed_at(node_index from, node_index offset,
                                         node_index to, double w) {
-        static_assert(stores_directed_incidence);
         adj_.write_reserved_at(
             from, offset,
             directed_pool_edge{to, static_cast<pool_value_t>(w)});
     }
 
     /// Publish all preassigned suffix slots for one vec_pool vertex.
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     void adj_commit_reserved_directed(node_index v, node_index count) {
-        static_assert(stores_directed_incidence);
         adj_.commit_reserved(v, count);
     }
 
-    /// Pre-reserve N additional edge slots for parallel atomic claim.
-    /// Grows edges_ size by N (default-initialised — cheap, trivial type)
-    /// and resets the per-section claim counter. Must precede any
-    /// claim_edge_slot() calls. finalize_edge_pool() trims and
-    /// updates m_ after the parallel section completes.
-    void reserve_edge_pool_atomic(edge_index N) {
-        edges_pool_base_  = static_cast<edge_index>(edges_.size());
-        edges_pool_count_ = 0;
-        edges_.resize(edges_pool_base_ + N);
-    }
-
-    /// Atomic-claim a single slot from the pre-reserved range.
-    /// Returns an absolute edge_index in [base, base + N).
-    edge_index claim_edge_slot() {
-        const edge_index off = std::atomic_ref(edges_pool_count_).fetch_add(
-            1, std::memory_order_relaxed);
-        return edges_pool_base_ + off;
-    }
-
-    /// Trim edges_ to the actual claim count and update m_. Called
-    /// once per parallel section, after all claim_edge_slot() callers
-    /// have finished.
-    void finalize_edge_pool() {
-        const edge_index claimed = edges_pool_count_;
-        edges_.resize(edges_pool_base_ + claimed);
-        m_ += claimed;
-    }
-
-    /// Append an indexed incidence. The caller must exclusively own vertex v.
-    void adj_push_inline(node_index v, edge_index e_slot) {
-        adj_.push(v, e_slot);
-    }
-
-    /// Write edge data at a pre-allocated pool slot.  Lock-free; safe
-    /// to call concurrently from different threads on different slots.
-    void write_edge_at(edge_index slot, node_index u, node_index v, double w) {
-        edges_[slot] = {u ^ v, static_cast<pool_value_t>(w)};
-    }
-
-    /// vec_pool only: pre-reserve cap_[v] >= need before a parallel
+    /// pre-reserve cap_[v] >= need before a parallel
     /// adj_atomic_push_reserved phase.  NOT thread-safe.
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     void adj_reserve_for(node_index v, node_index need) {
         adj_.reserve_for(v, need);
     }
 
-    /// vec_pool only: serial compaction decision for the imminent parallel
+    /// serial compaction decision for the imminent parallel
     /// reserve. The caller provides the surrounding OpenMP single/barrier.
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     void adj_compact_for_round_if_needed(
             const std::vector<node_index>& incoming) {
         adj_.compact_for_round_if_needed(incoming);
     }
 
-    /// vec_pool only: bulk parallel reserve_for. Must be called from inside an
+    /// bulk parallel reserve_for. Must be called from inside an
     /// OpenMP parallel region after the caller's shared compaction decision;
     /// the implementation partitions touched vertices and ends with a team
     /// publication barrier.
-    template<typename I = Incidence, typename TouchedIter>
-        requires is_vec_pool_incidence_v<I>
+    template<typename TouchedIter>
     void adj_bulk_reserve_parallel(TouchedIter begin, TouchedIter end,
                                    const std::vector<node_index>& incoming) {
         adj_.bulk_reserve_parallel(begin, end, incoming);
     }
 
-    /// vec_pool only: current adjacency count for vertex v (used for
+    /// current adjacency count for vertex v (used for
     /// reserve_for pre-pass).
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     node_index adj_count(node_index v) const {
         return static_cast<node_index>(adj_[v].size());
     }
 
-    /// vec_pool only: lock-free push into v's pre-reserved slab.  Caller
-    /// must have called adj_reserve_for to ensure cap > current_count + N
-    /// for the parallel section.
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
-    void adj_atomic_push_reserved(node_index v, edge_index e_slot) {
-        static_assert(!stores_directed_incidence,
-                      "directed incidences must be inserted directly");
-        adj_.atomic_push_reserved(v, e_slot);
-    }
-
-    /// Sort vertex v's adjacency slab by the incidence layout's ordering;
-    /// directed AoS orders records by (target, weight). This restores
-    /// deterministic ordering after a parallel atomic-push phase.
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
+    /// Sort vertex v's records by (target, weight), restoring deterministic
+    /// order after a parallel atomic-push phase.
     void adj_sort_slab(node_index v) {
         adj_.sort_slab(v);
     }
 
-    /// vec_pool only: compact pool to remove abandoned slabs from doubling.
+    /// compact pool to remove abandoned slabs from doubling.
     /// Reduces memory; rebuilds with tight cap=count for all vertices.
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     void compact_adj() { adj_.compact(); }
 
-    /// vec_pool only: live fraction (1 - abandoned/pool_size).
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
+    /// live fraction (1 - abandoned/pool_size).
     double adj_live_fraction() const { return adj_.live_fraction(); }
 
-    /// vec_pool only: pool diagnostics (grow/compact counts, worst fragmentation).
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
+    /// pool diagnostics (grow/compact counts, worst fragmentation).
     size_t adj_grow_count() const { return adj_.grow_count(); }
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     size_t adj_compact_count() const { return adj_.compact_count(); }
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     double adj_min_live_fraction() const { return adj_.min_live_fraction(); }
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     void adj_note_live_fraction() { adj_.note_live_fraction(); }
 
     /// Atomically add `delta` to excess[v]; safe under data races on v.
@@ -318,10 +186,10 @@ public:
     node_index prune_and_visit(node_index v, Visitor&& visit) {
         node_index count = 0;
         adj_.filter(v, [&](const auto& idx) {
-            auto u = edge_target(idx, v);
+            auto u = idx.to;
             if (!is_active(u)) return false;
             visit(u);
-            count += edge_multiplicity(idx);
+            ++count;
             return true;
         });
         return count;
@@ -346,26 +214,8 @@ public:
     }
     node_index num_active() const { return num_active_; }
 
-    /// Raw access to adjacency list and edge pool (for tight inner loops).
+    /// Raw access to the adjacency records (for tight inner loops).
     auto adj(node_index v) const { return adj_[v]; }
-    template<typename Entry>
-    node_index edge_target(const Entry& idx, node_index from) const {
-        if constexpr (std::same_as<std::remove_cvref_t<Entry>,
-                                   directed_pool_edge>)
-            return idx.to;
-        else
-            return edges_[static_cast<edge_index>(idx)].traverse(from);
-    }
-    template<typename Entry>
-    double edge_weight(const Entry& idx) const {
-        if constexpr (std::same_as<std::remove_cvref_t<Entry>,
-                                   directed_pool_edge>)
-            return idx.w;
-        else
-            return edges_[static_cast<edge_index>(idx)].w;
-    }
-    template<typename Entry>
-    node_index edge_multiplicity(const Entry&) const { return 1; }
 
     /// Per-vertex excess diagonal (for SDDM matrices).
     /// For a pure Laplacian this is zero everywhere.
@@ -375,14 +225,12 @@ public:
 
     /// Approximate heap memory usage in bytes.
     std::size_t memory_bytes() const {
-        return edges_.capacity() * sizeof(edge)
-             + adj_.memory_bytes()
+        return adj_.memory_bytes()
              + active_.capacity() * sizeof(active_word)
              + excess_.capacity() * sizeof(double);
     }
 
 private:
-    template<incidence_storage>
     friend struct detail::residual_coalescer;
 
     struct coalesce_stats {
@@ -438,11 +286,11 @@ private:
                 const node_index u = active[s * active.size() / samples];
                 neighbors.clear();
                 for (const auto& entry : adj_[u]) {
-                    const node_index v = edge_target(entry, u);
+                    const node_index v = entry.to;
                     if (!is_active(v)) continue;
                     neighbors.emplace_back(
-                        v, static_cast<double>(edge_weight(entry)));
-                    multi_total += edge_multiplicity(entry);
+                        v, static_cast<double>(entry.w));
+                    ++multi_total;
                 }
                 std::ranges::sort(neighbors, {},
                     [](const auto& pair) { return pair.first; });
@@ -478,8 +326,6 @@ private:
     /// Parallel edges are combined first and a spanning forest is retained
     /// exactly. Off-tree weights use Bernoulli/Horvitz--Thompson estimates;
     /// degrees count distinct neighbours.
-    template<typename I = Incidence>
-        requires is_vec_pool_incidence_v<I>
     sparsify_stats sparsify_active(std::span<const node_index> active,
                                    double keep_probability,
                                    std::uint64_t seed) {
@@ -501,10 +347,10 @@ private:
         items.reserve(coalesced.distinct_edges);
         for (node_index u : active)
             for (const auto& entry : adj_[u]) {
-                const node_index v = edge_target(entry, u);
+                const node_index v = entry.to;
                 if (v > u && is_active(v))
-                    items.push_back({u, v, edge_weight(entry),
-                                     edge_multiplicity(entry), false, false});
+                    items.push_back({u, v, static_cast<double>(entry.w),
+                                     1, false, false});
             }
         const double collect_ms = std::chrono::duration<double, std::milli>(
             clock::now() - stage).count();
@@ -711,7 +557,7 @@ private:
         rebuilt.excess_ = excess_;
         std::vector<node_index> physical_degree(static_cast<std::size_t>(n_), 0);
         std::size_t kept = 0;
-        bool parallel_directed_rebuild = stores_directed_incidence;
+        bool parallel_directed_rebuild = true;
         std::size_t rebuild_threads = 1;
         std::vector<node_index> dense_of;
         std::vector<node_index> thread_offsets;
@@ -820,7 +666,7 @@ private:
                         edge.weight * inv_p);
                     const node_index u = dense_of[edge.u];
                     const node_index v = dense_of[edge.v];
-                    if constexpr (stores_directed_incidence) {
+                    {
                         rebuilt.adj_.write_reserved_at(
                             edge.u, local[u]++, {edge.v, weight});
                         rebuilt.adj_.write_reserved_at(
@@ -836,7 +682,7 @@ private:
             }
             rebuild_threads = actual_threads;
         }
-        if constexpr (stores_directed_incidence) {
+        {
             if (parallel_directed_rebuild) {
                 if (kept > std::numeric_limits<edge_index>::max())
                     edge_index_overflow("residual sparsifier rebuild");
@@ -882,8 +728,6 @@ private:
         return stats;
     }
 
-    template<typename I = Incidence>
-        requires std::same_as<I, directed_vec_pool_incidence>
     coalesce_stats coalesce_active(std::span<const node_index> active) {
         unsigned long long before_incidence = 0;
         unsigned long long after_incidence = 0;
@@ -950,8 +794,7 @@ private:
     node_index n_ = 0;          // vertex count
     edge_index m_ = 0;          // edge count (can exceed 2^31)
     node_index num_active_ = 0; // active vertex count
-    std::vector<edge> edges_;
-    Incidence adj_;
+    directed_vec_pool_incidence adj_;
     // Active status is probed randomly in nearly every residual-edge scan, so
     // keep one bit per vertex rather than one byte.  Parallel elimination can
     // clear distinct vertices that share a word; all reads and clears therefore
@@ -959,28 +802,25 @@ private:
     // needed by later graph traversals.
     std::vector<active_word> active_;
     std::vector<double> excess_;
-    edge_index edges_pool_base_  = 0;
-    edge_index edges_pool_count_ = 0;
 };
 
 namespace detail {
 
 /// Internal access seam for the one-shot late-residual rebuild. Keeping these
 /// operations here avoids growing graph's public API for one factorizer policy.
-template<incidence_storage Incidence>
 struct residual_coalescer {
-    static auto sample(const graph<Incidence>& g,
+    static auto sample(const graph& g,
                        std::span<const node_index> active,
                        std::size_t sample_vertices = 256) {
         return g.estimate_active_sparsify_sample(active, sample_vertices);
     }
 
-    static auto rebuild(graph<Incidence>& g,
+    static auto rebuild(graph& g,
                         std::span<const node_index> active) {
         return g.coalesce_active(active);
     }
 
-    static auto sparsify(graph<Incidence>& g,
+    static auto sparsify(graph& g,
                          std::span<const node_index> active,
                          double keep_probability,
                          std::uint64_t seed) {

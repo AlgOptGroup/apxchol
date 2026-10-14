@@ -39,30 +39,6 @@
 
 // ── Helpers ──────────────────────────────────────────
 
-TEST(DefaultOptions, HighLevelSolveUsesDirectedAosStorage) {
-    static_assert(std::same_as<apxchol::graph<>::incidence_type,
-                               apxchol::directed_vec_pool_incidence>);
-    const apxchol::solve_options opts;
-    EXPECT_EQ(opts.storage, apxchol::graph_storage::vec_pool_aos);
-}
-
-TEST(StorageSelection, RetiredValuesAreRejected) {
-    Eigen::SparseMatrix<double> matrix(2, 2);
-    matrix.insert(0, 0) = 2.0;
-    matrix.insert(1, 1) = 2.0;
-    matrix.insert(0, 1) = -1.0;
-    matrix.insert(1, 0) = -1.0;
-    matrix.makeCompressed();
-    static_assert(static_cast<int>(apxchol::graph_storage::vec) == 0);
-    static_assert(static_cast<int>(apxchol::graph_storage::bstr) == 2);
-    static_assert(static_cast<int>(apxchol::graph_storage::vec_pool_aos) == 4);
-    for (int retired : {1, 3}) {
-        EXPECT_THROW(apxchol::factorize(matrix,
-                         static_cast<apxchol::graph_storage>(retired)),
-                     std::invalid_argument);
-    }
-}
-
 TEST(SetupDiagnostics, WorkDistributionExposesConcentrationAndIdleWorkers) {
     const auto balanced = apxchol::detail::summarize_work_distribution(
         {9, 8, 7, 6}, 2);
@@ -102,7 +78,7 @@ TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
 }
 
 TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(12);
+    apxchol::graph graph(12);
     graph.add_edge(0, 1, 2.0);
     graph.add_edge(0, 9, 4.0);  // 1 and 9 collide modulo the 8-slot table.
     graph.add_edge(0, 1, 3.0);
@@ -113,7 +89,7 @@ TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
         std::make_unique<std::pmr::monotonic_buffer_resource>();
     apxchol::detail::factor_col first;
     apxchol::detail::process_vertex(apxchol::tree_elimination{}, graph, 0, 42,
-                                     first, scratch, true);
+                                     first, scratch);
 
     ASSERT_EQ(first.entry_count, 3u);
     EXPECT_EQ(first.entries[0].neighbor, 1u);
@@ -128,7 +104,7 @@ TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
 
     apxchol::detail::factor_col second;
     apxchol::detail::process_vertex(apxchol::tree_elimination{}, graph, 0, 42,
-                                     second, scratch, true);
+                                     second, scratch);
     ASSERT_EQ(second.entry_count, first.entry_count);
     for (std::size_t i = 0; i < first.entry_count; ++i) {
         EXPECT_EQ(second.entries[i].neighbor, first.entries[i].neighbor);
@@ -174,7 +150,7 @@ static double factor_diag(const apxchol::sparse_csc& L, int i) {
 }
 
 static Eigen::SparseMatrix<double> path_laplacian(int n) {
-    apxchol::graph<> G(n);
+    apxchol::graph G(n);
     for (int i = 0; i + 1 < n; ++i)
         G.add_edge(i, i + 1, 1.0);
     return apxchol::laplacian(G);
@@ -183,14 +159,14 @@ static Eigen::SparseMatrix<double> path_laplacian(int n) {
 using apxchol::test::grid_laplacian;
 
 static Eigen::SparseMatrix<double> star_laplacian(int n) {
-    apxchol::graph<> G(n);
+    apxchol::graph G(n);
     for (int i = 1; i < n; ++i)
         G.add_edge(0, i, 1.0);
     return apxchol::laplacian(G);
 }
 
 static Eigen::SparseMatrix<double> cycle_laplacian(int n) {
-    apxchol::graph<> G(n);
+    apxchol::graph G(n);
     for (int i = 0; i < n; ++i)
         G.add_edge(i, (i + 1) % n, 1.0);
     return apxchol::laplacian(G);
@@ -199,7 +175,7 @@ static Eigen::SparseMatrix<double> cycle_laplacian(int n) {
 static Eigen::SparseMatrix<double> weighted_grid_laplacian(int rows, int cols,
                                                            double w_horiz,
                                                            double w_vert) {
-    apxchol::graph<> G(rows * cols);
+    apxchol::graph G(rows * cols);
     auto id = [cols](int r, int c) { return r * cols + c; };
     for (int r = 0; r < rows; ++r)
         for (int c = 0; c < cols; ++c) {
@@ -269,25 +245,19 @@ TEST(PartitionerHelpers, ParallelActiveFilterIsStable) {
 
 // ── Typed test infrastructure ────────────────────────
 
-using AllStorages = ::testing::Types<
-    apxchol::vec_incidence,
-    apxchol::bstr_incidence,
-    apxchol::directed_vec_pool_incidence>;
 
 // ── Factorization structure tests ────────────────────
 
-template<typename Incidence>
 class FactorizeTest : public ::testing::Test {
 protected:
     apxchol::factorization factorize_with(
         const Eigen::SparseMatrix<double>& L, unsigned seed = 42) {
-        return apxchol::factorize(L, Incidence::tag, {.seed = seed});
+        return apxchol::factorize(L, {.seed = seed});
     }
 };
 
-TYPED_TEST_SUITE(FactorizeTest, AllStorages);
 
-TYPED_TEST(FactorizeTest, PathGraphDimensions) {
+TEST_F(FactorizeTest, PathGraphDimensions) {
     auto L = path_laplacian(10);
     auto F = this->factorize_with(L);
     EXPECT_EQ(F.L.rows(), 10);
@@ -295,14 +265,14 @@ TYPED_TEST(FactorizeTest, PathGraphDimensions) {
     EXPECT_EQ(F.perm.size(), 10);
 }
 
-TYPED_TEST(FactorizeTest, GridGraphDimensions) {
+TEST_F(FactorizeTest, GridGraphDimensions) {
     auto L = grid_laplacian(5, 5);
     auto F = this->factorize_with(L);
     EXPECT_EQ(F.L.rows(), 25);
     EXPECT_EQ(F.L.cols(), 25);
 }
 
-TYPED_TEST(FactorizeTest, PermutationIsValid) {
+TEST_F(FactorizeTest, PermutationIsValid) {
     auto L = grid_laplacian(4, 4);
     auto F = this->factorize_with(L);
 
@@ -318,7 +288,7 @@ TYPED_TEST(FactorizeTest, PermutationIsValid) {
         EXPECT_EQ(seen[i], 1) << "index " << i << " appears " << seen[i] << " times";
 }
 
-TYPED_TEST(FactorizeTest, LowerTriangular) {
+TEST_F(FactorizeTest, LowerTriangular) {
     auto L = grid_laplacian(5, 5);
     auto F = this->factorize_with(L);
 
@@ -336,7 +306,7 @@ TYPED_TEST(FactorizeTest, LowerTriangular) {
         }
 }
 
-TYPED_TEST(FactorizeTest, PositiveDiagonal) {
+TEST_F(FactorizeTest, PositiveDiagonal) {
     auto L = grid_laplacian(5, 5);
     auto F = this->factorize_with(L);
 
@@ -345,7 +315,7 @@ TYPED_TEST(FactorizeTest, PositiveDiagonal) {
         EXPECT_GT(factor_diag(F.L, i), 0.0) << "zero/negative diagonal at " << i;
 }
 
-TYPED_TEST(FactorizeTest, Deterministic) {
+TEST_F(FactorizeTest, Deterministic) {
     auto L = grid_laplacian(5, 5);
     auto F1 = this->factorize_with(L, 42);
     auto F2 = this->factorize_with(L, 42);
@@ -476,7 +446,7 @@ void expect_valid_rebuilt_laplacian_factor(
 
 template<class Partitioner>
 void expect_same_graph_selection(
-        const apxchol::graph<apxchol::directed_vec_pool_incidence>& snapshot,
+        const apxchol::graph& snapshot,
         const std::vector<apxchol::node_index>& candidates,
         const apxchol::partition_context& context,
         const Partitioner& initial) {
@@ -505,7 +475,7 @@ void expect_same_graph_selection(
         }
         for (const auto v : result) {
             for (const auto edge : graph.adj(v)) {
-                const auto u = graph.edge_target(edge, v);
+                const auto u = edge.to;
                 if (graph.is_active(u) && u != v) { EXPECT_FALSE(in_set[u]); }
             }
         }
@@ -593,9 +563,9 @@ TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
     opts.omp_threshold = 256;
 
     const auto baseline = apxchol::factorize(
-        L, apxchol::graph_storage::vec_pool_aos, opts);
+        L, opts);
     const auto repeated = apxchol::factorize(
-        L, apxchol::graph_storage::vec_pool_aos, opts);
+        L, opts);
 #if !defined(APXCHOL_POOL_FP32)
     ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, baseline));
     ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, repeated));
@@ -638,7 +608,7 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
         const scoped_env gate(
             "APXCHOL_INCREMENTAL_DEGREE_SPARSE", mode);
         return apxchol::factorize(
-            L, apxchol::graph_storage::vec_pool_aos, opts);
+            L, opts);
     };
     const auto baseline = run("0");
     const auto automatic = run(nullptr);
@@ -685,7 +655,7 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
         const scoped_env gate(
             "APXCHOL_INCREMENTAL_DEGREE_SPARSE", mode);
         return apxchol::factorize(
-            L, apxchol::graph_storage::vec_pool_aos, opts);
+            L, opts);
     };
     const auto baseline = run("0");
     const auto automatic = run(nullptr);
@@ -704,7 +674,7 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
 
 TEST(PruneAndDegrees, SkipAboveReportsTheRawCountAndLeavesTheVertexUnwalked) {
     // Hub 0 with eight neighbours, three of them already eliminated.
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(10);
+    apxchol::graph graph(10);
     for (apxchol::node_index v = 1; v <= 8; ++v) graph.add_edge(0, v, 1.0);
     graph.add_edge(8, 9, 1.0);
     for (apxchol::node_index v : {1u, 2u, 3u}) graph.deactivate(v);
@@ -738,7 +708,7 @@ TEST(PruneAndDegrees, AuditCountsTheEligibleVerticesASkipWouldHide) {
     // Hub 0 has eight raw entries but only two live neighbours left: a skip
     // at cutoff 4 would keep it away from a selector whose threshold is 3.
     // Hub 9 has six raw entries, all live: above the cutoff, rightly skipped.
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(16);
+    apxchol::graph graph(16);
     for (apxchol::node_index v = 1; v <= 8; ++v) graph.add_edge(0, v, 1.0);
     for (apxchol::node_index v = 10; v <= 15; ++v) graph.add_edge(9, v, 1.0);
     for (apxchol::node_index v = 1; v <= 6; ++v) graph.deactivate(v);
@@ -814,7 +784,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     auto round_degrees = [&](const char* factor) {
         const scoped_env gate("APXCHOL_PRUNE_SKIP", factor);
         const auto f = apxchol::factorize(
-            A, apxchol::graph_storage::vec_pool_aos, opts.factor_opts);
+            A, opts.factor_opts);
         std::vector<double> avg;
         for (const auto& round : f.rounds) avg.push_back(round.avg_deg);
         return avg;
@@ -840,7 +810,7 @@ TEST(FactorizeDeterminism, SameGraphParallelSelectionIsExact) {
     actual_threads = omp_get_num_threads();
     ASSERT_EQ(actual_threads, 16);
     constexpr apxchol::node_index n = 1024, block = n / 16;
-    apxchol::graph<apxchol::directed_vec_pool_incidence> initial(n);
+    apxchol::graph initial(n);
     for (apxchol::node_index v = 0; v < n; ++v) {
         initial.add_edge(v, (v + 1) % n, 1.0);
         // Chains cross every worker's block, exercising snapshot-based
@@ -899,13 +869,13 @@ TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
         opts.seed = 3;
         opts.omp_threshold = 256;
         opts.is_select = sel;
-        const auto ref = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
+        const auto ref = apxchol::factorize(L, opts);
         ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
 #if !defined(APXCHOL_POOL_FP32)
         ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, ref));
 #endif
         for (int rep = 1; rep <= 3; ++rep) {
-            const auto F = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
+            const auto F = apxchol::factorize(L, opts);
 #if !defined(APXCHOL_POOL_FP32)
             SCOPED_TRACE(std::string(sel) + " rep " + std::to_string(rep));
             ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, F));
@@ -925,44 +895,44 @@ TEST(FactorizeDeterminism, SingleThreadedFactorizationIsByteIdentical) {
     const auto L = grid_laplacian(60, 60);
     apxchol::factor_options opts;
     opts.seed = 11;
-    const auto a = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
-    const auto b = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, opts);
+    const auto a = apxchol::factorize(L, opts);
+    const auto b = apxchol::factorize(L, opts);
     expect_same_factor(a, b, "T=1");
 }
 
-TYPED_TEST(FactorizeTest, DifferentSeeds) {
+TEST_F(FactorizeTest, DifferentSeeds) {
     auto L = grid_laplacian(8, 8);
     auto F1 = this->factorize_with(L, 1);
     auto F2 = this->factorize_with(L, 999);
     EXPECT_EQ(F1.L.rows(), F2.L.rows());
 }
 
-TYPED_TEST(FactorizeTest, SmallPath) {
+TEST_F(FactorizeTest, SmallPath) {
     auto L = path_laplacian(3);
     auto F = this->factorize_with(L);
     EXPECT_EQ(F.L.rows(), 3);
     EXPECT_GT(F.L.nonZeros(), 0);
 }
 
-TYPED_TEST(FactorizeTest, StarGraph) {
+TEST_F(FactorizeTest, StarGraph) {
     auto L = star_laplacian(10);
     auto F = this->factorize_with(L);
     EXPECT_EQ(F.L.rows(), 10);
 }
 
-TYPED_TEST(FactorizeTest, CycleGraph) {
+TEST_F(FactorizeTest, CycleGraph) {
     auto L = cycle_laplacian(20);
     auto F = this->factorize_with(L);
     EXPECT_EQ(F.L.rows(), 20);
 }
 
-TYPED_TEST(FactorizeTest, TwoVertices) {
+TEST_F(FactorizeTest, TwoVertices) {
     auto L = path_laplacian(2);
     auto F = this->factorize_with(L);
     EXPECT_EQ(F.L.rows(), 2);
 }
 
-TYPED_TEST(FactorizeTest, NnzPositive) {
+TEST_F(FactorizeTest, NnzPositive) {
     auto L = grid_laplacian(10, 10);
     auto F = this->factorize_with(L);
     EXPECT_GT(F.L.nonZeros(), 0);
@@ -970,7 +940,6 @@ TYPED_TEST(FactorizeTest, NnzPositive) {
 
 // ── Preconditioner quality tests (PCG convergence) ───
 
-template<typename Incidence>
 class SolveTest : public ::testing::Test {
 protected:
     apxchol::solve_result solve_with(
@@ -979,56 +948,54 @@ protected:
         double tol = 1e-6, int max_iter = 500) {
         return apxchol::solve(L, b,
             {.tol = tol, .max_iter = max_iter,
-             .storage = Incidence::tag,
              .factor_opts = {.seed = 42}});
     }
 };
 
-TYPED_TEST_SUITE(SolveTest, AllStorages);
 
-TYPED_TEST(SolveTest, PathGraphConverges) {
+TEST_F(SolveTest, PathGraphConverges) {
     auto L = path_laplacian(50);
     auto b = apxchol::generate_test_rhs(50);
     auto res = this->solve_with(L, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
-TYPED_TEST(SolveTest, GridGraphConverges) {
+TEST_F(SolveTest, GridGraphConverges) {
     auto L = grid_laplacian(10, 10);
     auto b = apxchol::generate_test_rhs(100);
     auto res = this->solve_with(L, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
-TYPED_TEST(SolveTest, StarGraphConverges) {
+TEST_F(SolveTest, StarGraphConverges) {
     auto L = star_laplacian(30);
     auto b = apxchol::generate_test_rhs(30);
     auto res = this->solve_with(L, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
-TYPED_TEST(SolveTest, CycleGraphConverges) {
+TEST_F(SolveTest, CycleGraphConverges) {
     auto L = cycle_laplacian(50);
     auto b = apxchol::generate_test_rhs(50);
     auto res = this->solve_with(L, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
-TYPED_TEST(SolveTest, WeightedGridConverges) {
+TEST_F(SolveTest, WeightedGridConverges) {
     auto L = weighted_grid_laplacian(10, 10, 100.0, 1.0);
     auto b = apxchol::generate_test_rhs(100);
     auto res = this->solve_with(L, b, 1e-6, 1000);
     EXPECT_LT(res.residual, 1e-4);
 }
 
-TYPED_TEST(SolveTest, LargerGridConverges) {
+TEST_F(SolveTest, LargerGridConverges) {
     auto L = grid_laplacian(20, 20);
     auto b = apxchol::generate_test_rhs(400);
     auto res = this->solve_with(L, b, 1e-6, 1000);
     EXPECT_LT(res.residual, 1e-5);
 }
 
-TYPED_TEST(SolveTest, SolutionSatisfiesSystem) {
+TEST_F(SolveTest, SolutionSatisfiesSystem) {
     auto L = grid_laplacian(10, 10);
     auto b = apxchol::generate_test_rhs(100);
     auto res = this->solve_with(L, b, 1e-8);
@@ -1041,7 +1008,7 @@ TYPED_TEST(SolveTest, SolutionSatisfiesSystem) {
     EXPECT_LT(rel_err, 1e-5);
 }
 
-TYPED_TEST(SolveTest, DeterministicWithSameSeed) {
+TEST_F(SolveTest, DeterministicWithSameSeed) {
     auto L = grid_laplacian(8, 8);
     auto b = apxchol::generate_test_rhs(64);
 
@@ -1082,27 +1049,27 @@ static Eigen::SparseMatrix<double> sddm_grid(int rows, int cols, double excess) 
     return L;
 }
 
-TYPED_TEST(SolveTest, SDDMGridConverges) {
+TEST_F(SolveTest, SDDMGridConverges) {
     auto M = sddm_grid(10, 10, 2.0);
     Eigen::VectorXd b = Eigen::VectorXd::Random(100);
     auto res = this->solve_with(M, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
-TYPED_TEST(SolveTest, SDDMLargeExcessConverges) {
+TEST_F(SolveTest, SDDMLargeExcessConverges) {
     auto M = sddm_grid(10, 10, 100.0);
     Eigen::VectorXd b = Eigen::VectorXd::Random(100);
     auto res = this->solve_with(M, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
-TYPED_TEST(FactorizeTest, SDDMFlagSet) {
+TEST_F(FactorizeTest, SDDMFlagSet) {
     auto M = sddm_grid(5, 5, 1.0);
     auto F = this->factorize_with(M);
     EXPECT_TRUE(F.sddm);
 }
 
-TYPED_TEST(FactorizeTest, LaplacianFlagNotSet) {
+TEST_F(FactorizeTest, LaplacianFlagNotSet) {
     auto L = grid_laplacian(5, 5);
     auto F = this->factorize_with(L);
     EXPECT_FALSE(F.sddm);
@@ -1204,8 +1171,8 @@ TEST(Grounding, LaplacianSolutionIsMinNorm) {
 }
 
 // Build a weighted grid Laplacian DIRECTLY from fp64 triplets. Deliberately
-// bypasses weighted_grid_laplacian/graph<>: under APXCHOL_POOL_FP32 the graph
-// edge pool stores weights in fp32, so routing the weights through graph<>
+// bypasses weighted_grid_laplacian/graph: under APXCHOL_POOL_FP32 the graph
+// edge pool stores weights in fp32, so routing the weights through graph
 // would silently quantize them and mask the regression tested below.
 static Eigen::SparseMatrix<double> fp64_weighted_grid_laplacian(
         int rows, int cols, double w_horiz, double w_vert) {
@@ -1236,7 +1203,7 @@ static Eigen::SparseMatrix<double> fp64_weighted_grid_laplacian(
 // quantized wdeg left phantom excess ≈1e-8·diag — above the 1e-12 gate — so a
 // pure Laplacian whose weights are not fp32-representable (0.01, 2/101) was
 // misclassified as SDDM. The excess must come from the exact fp64 input.
-TYPED_TEST(FactorizeTest, NonFp32ExactWeightsLaplacianNotSDDM) {
+TEST_F(FactorizeTest, NonFp32ExactWeightsLaplacianNotSDDM) {
     auto L = fp64_weighted_grid_laplacian(10, 10, 0.01, 2.0 / 101.0);
     auto F = this->factorize_with(L);
     EXPECT_FALSE(F.sddm);
@@ -1244,14 +1211,14 @@ TYPED_TEST(FactorizeTest, NonFp32ExactWeightsLaplacianNotSDDM) {
 
 // Positive control for the regression above: with the same non-fp32-exact
 // weights, a genuinely SDDM matrix must still be detected.
-TYPED_TEST(FactorizeTest, NonFp32ExactWeightsSDDMFlagStillSet) {
+TEST_F(FactorizeTest, NonFp32ExactWeightsSDDMFlagStillSet) {
     auto L = fp64_weighted_grid_laplacian(10, 10, 0.01, 2.0 / 101.0);
     L.coeffRef(0, 0) += 0.5;
     auto F = this->factorize_with(L);
     EXPECT_TRUE(F.sddm);
 }
 
-TYPED_TEST(FactorizeTest, SDDMFullRankDiagonal) {
+TEST_F(FactorizeTest, SDDMFullRankDiagonal) {
     auto M = sddm_grid(5, 5, 1.0);
     auto F = this->factorize_with(M);
     // All n diagonal entries should be positive (including the last).
@@ -1288,7 +1255,6 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto b = apxchol::generate_test_rhs(225);
     auto res = apxchol::solve(L, b,
         {.tol = 1e-6, .max_iter = 1000,
-         .storage = apxchol::graph_storage::vec_pool_aos,
          .factor_opts = {.seed = 42, .is_select = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
@@ -1301,7 +1267,6 @@ TEST_P(StrategyConvergenceTest, SDDMConverges) {
     Eigen::VectorXd b = Eigen::VectorXd::Random(100);
     auto res = apxchol::solve(M, b,
         {.tol = 1e-6, .max_iter = 1000,
-         .storage = apxchol::graph_storage::vec_pool_aos,
          .factor_opts = {.seed = 42, .is_select = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
@@ -1344,7 +1309,7 @@ static double factor_residual(const apxchol::factorization& F,
 static apxchol::factorization factorize_tree(
         const Eigen::SparseMatrix<double>& A, unsigned seed = 42) {
     apxchol::factor_options opts{.seed = seed};
-    return apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos, opts);
+    return apxchol::factorize(A, opts);
 }
 
 TEST(FactorQualityTest, Grid20Tree) {
@@ -1359,62 +1324,6 @@ TEST(FactorQualityTest, SddmGrid20Tree) {
     EXPECT_LT(factor_residual(F, M), f1_bounds::sddm_grid20_tree);
 }
 
-// ── AtomicEdgePool tests ──────────────────────────────
-
-TEST(AtomicEdgePool, ReserveClaimFinalize) {
-    apxchol::graph<apxchol::vec_incidence> G(10);
-    const apxchol::edge_index pre_size = static_cast<apxchol::edge_index>(G.m());
-    constexpr int N = 200;
-    G.reserve_edge_pool_atomic(N);
-
-    std::vector<apxchol::edge_index> claimed(N);
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < N; ++i)
-        claimed[i] = G.claim_edge_slot();
-
-    std::sort(claimed.begin(), claimed.end());
-    for (int i = 0; i < N; ++i)
-        EXPECT_EQ(claimed[i], pre_size + i) << "slot " << i;
-
-    G.finalize_edge_pool();
-    EXPECT_EQ(static_cast<apxchol::edge_index>(G.m()), pre_size + N);
-}
-
-TEST(AtomicEdgePool, UnderClaimTrims) {
-    apxchol::graph<apxchol::vec_incidence> G(5);
-    const apxchol::edge_index pre = static_cast<apxchol::edge_index>(G.m());
-    G.reserve_edge_pool_atomic(100);
-    apxchol::edge_index s1 = G.claim_edge_slot();
-    apxchol::edge_index s2 = G.claim_edge_slot();
-    G.write_edge_at(s1, 0, 1, 1.0);
-    G.write_edge_at(s2, 2, 3, 2.0);
-    G.finalize_edge_pool();
-    EXPECT_EQ(static_cast<apxchol::edge_index>(G.m()), pre + 2);
-}
-
-// ── AtomicAdjPool tests ───────────────────────────────
-
-TEST(AtomicAdjPool, VecInlinePushSerial) {
-    apxchol::graph<apxchol::vec_incidence> G(4);
-    G.reserve_edge_pool_atomic(3);
-    apxchol::edge_index s0 = G.claim_edge_slot();
-    apxchol::edge_index s1 = G.claim_edge_slot();
-    apxchol::edge_index s2 = G.claim_edge_slot();
-    G.write_edge_at(s0, 0, 1, 1.0);
-    G.write_edge_at(s1, 1, 2, 2.0);
-    G.write_edge_at(s2, 2, 3, 3.0);
-    G.adj_push_inline(0, s0); G.adj_push_inline(1, s0);
-    G.adj_push_inline(1, s1); G.adj_push_inline(2, s1);
-    G.adj_push_inline(2, s2); G.adj_push_inline(3, s2);
-    G.finalize_edge_pool();
-
-    size_t total = 0;
-    for (apxchol::node_index v = 0; v < 4; ++v)
-        for ([[maybe_unused]] auto e : G.neighbors(v)) ++total;
-    EXPECT_EQ(total, 6u);
-}
-
-
 // ─── Exact-clique-at-low-degree option ──────────────────────────────────────
 TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     auto L = grid_laplacian(40, 40);
@@ -1424,12 +1333,10 @@ TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     opts.is_select = "block_greedy";
     auto sampled = apxchol::solve(L, b,
         {.tol = 1e-8, .max_iter = 200,
-         .storage = apxchol::graph_storage::vec,
          .factor_opts = opts});
     opts.exact_clique_max_degree = 8;
     auto exact = apxchol::solve(L, b,
         {.tol = 1e-8, .max_iter = 200,
-         .storage = apxchol::graph_storage::vec,
          .factor_opts = opts});
     EXPECT_LT(exact.residual, 1e-6);
     EXPECT_LE(exact.iterations, sampled.iterations)
@@ -1526,7 +1433,7 @@ TEST(ResidualSparsifyGate, UsesObservedTrafficAndHandoffYield) {
 TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting) {
     const scoped_threads team(4);
     constexpr apxchol::node_index n = 96;
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
+    apxchol::graph graph(n);
     for (apxchol::node_index u = 0; u < n; ++u)
         for (apxchol::node_index v = u + 1; v < n; ++v)
             for (int duplicate = 0; duplicate < 4; ++duplicate)
@@ -1620,7 +1527,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         with_loop.seed = seed;                      // then the peel takes the
         with_loop.parallel_residual_threshold = thresh;   // rest.
         const auto c = apxchol::factorize(
-            L, apxchol::graph_storage::vec_pool_aos, with_loop);
+            L, with_loop);
         ASSERT_FALSE(c.rounds.empty());
         EXPECT_EQ(c.rounds.front().active, static_cast<size_t>(n))
             << "the clique should hand the full residual to BK";
@@ -1635,7 +1542,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
 
         // Same (input, seed, thread count) => same factor, bit for bit.
         const auto c2 = apxchol::factorize(
-            L, apxchol::graph_storage::vec_pool_aos, with_loop);
+            L, with_loop);
         expect_same_factor(c, c2, "BK residual loop, seed " +
                                   std::to_string(seed));
         if (::testing::Test::HasFatalFailure()) return;
@@ -1643,7 +1550,6 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         // And it is still a usable preconditioner.
         const auto res = apxchol::solve(L, b,
             {.tol = 1e-8, .max_iter = 200,
-             .storage = apxchol::graph_storage::vec_pool_aos,
              .factor_opts = with_loop});
         EXPECT_LT(res.residual, 1e-8) << "seed " << seed;
     }
@@ -1667,8 +1573,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
 
     auto is_size = [&](double seed) {
-        auto G = apxchol::make_graph<
-            apxchol::graph<apxchol::directed_vec_pool_incidence>>(L);
+        auto G = apxchol::make_graph(L);
         apxchol::baumann_kyng_partitioner bk;
         bk.est_avg_degree = seed;                   // 0 = "work it out yourself"
         apxchol::selection sel;
@@ -1690,8 +1595,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
 
 TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     const auto L = grid_laplacian(30, 30);
-    auto G = apxchol::make_graph<
-        apxchol::graph<apxchol::directed_vec_pool_incidence>>(L);
+    auto G = apxchol::make_graph(L);
     std::vector<apxchol::node_index> active(900);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     apxchol::partition_context ctx{
@@ -1727,7 +1631,7 @@ TEST(EliminationTeamSizing, DenseSmallRoundsUseFineSchedulingChunks) {
 TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
     const scoped_threads team(4);
     constexpr apxchol::node_index n = 80;
-    apxchol::graph<apxchol::directed_vec_pool_incidence> G(n);
+    apxchol::graph G(n);
     for (apxchol::node_index v = 0; v < n; ++v) {
         G.add_edge(v, (v + 1) % n, 1.0);
         G.add_edge(v, (v + 7) % n, 1.0);
@@ -1758,7 +1662,7 @@ TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
     for (const auto v : candidates) {
         bool has_selected_neighbor = false;
         for (const auto edge : G.adj(v)) {
-            const auto u = G.edge_target(edge, v);
+            const auto u = edge.to;
             EXPECT_FALSE(in_set[v] && in_set[u]);
             has_selected_neighbor |= in_set[u] != 0;
         }
@@ -1782,7 +1686,7 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
 #endif
     constexpr apxchol::node_index leaves = 128;
     constexpr apxchol::node_index n = leaves + 2;
-    apxchol::graph<apxchol::directed_vec_pool_incidence> G(n);
+    apxchol::graph G(n);
     for (apxchol::node_index v = 0; v < leaves; ++v) {
         G.add_edge(v, leaves, 1.0);
         G.add_edge(v, leaves + 1, 1.0);
@@ -1933,7 +1837,7 @@ static void check_owned_bounded_selection(
         const apxchol::partition_options& options, std::uint64_t seed,
         std::uint64_t phase, const std::string& receipt_name,
         bool require_unfinished = false) {
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
+    apxchol::graph graph(n);
     for (const auto e : edges) graph.add_edge(e.u, e.v, 1.0);
     apxchol::detail::gpu_round_shadow_session owner(true);
     auto gpu_owner = apxchol::test::initialize_owned_selector(owner, graph);

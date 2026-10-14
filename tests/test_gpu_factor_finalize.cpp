@@ -365,7 +365,7 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
         }
         EXPECT_FALSE(reference.research_device_factor->empty());
         const auto A = solve_matrix(64, sddm ? 1.0 : 0.0);
-        const auto exported = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
+        const auto exported = apxchol::factorize(A);
         EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
         EXPECT_EQ(exported.L.inner_.size(), exported.L.nonZeros());
         EXPECT_FALSE(exported.research_device_factor);

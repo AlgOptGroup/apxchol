@@ -755,7 +755,6 @@ static BenchResult run_apxchol_v1(
     const std::string& graph_name,
     const std::string& combo_name,
     std::string is,
-    apxchol::graph_storage storage,
     double tol, int maxiter,
     bool dump_profile = false,
     size_t exact_clique_max_degree = 0,
@@ -809,7 +808,7 @@ static BenchResult run_apxchol_v1(
         fopts.partition.degree_tiebreak = std::atoi(e) != 0;
 
     apxchol::solve_options opts{.tol = tol, .max_iter = maxiter,
-        .storage = storage, .factor_opts = fopts};
+        .factor_opts = fopts};
     opts.backend = backend;
 #if defined(APXCHOL_USE_CUDA)
     // Warm the compatible runtime outside timing; input eligibility is setup work.
@@ -1146,8 +1145,7 @@ struct Args {
     int threads = 0;  // 0 = use current OMP setting
     // Optional subset filter for --solver apxchol_v1.
     // If non-empty, only configs whose label is in this set are run.
-    // Match accepts either the bare combo name ("bg+tree") to run all
-    // storage variants, or fully-qualified "bg+tree[vec]" / "bg+tree[bstr]".
+    // Labels include the storage tag to preserve historical result identities.
     std::set<std::string> v1_configs;
     std::string v1_backend = "auto";
     // De-singularization is two orthogonal axes (see resolve_desing). decompose:
@@ -1222,7 +1220,12 @@ static Args parse_args(int argc, char** argv) {
             std::istringstream ss(s);
             std::string tok;
             while (std::getline(ss, tok, ',')) {
-                for (const char* retired : {"vec_pool", "fwd_star", "forward_star"}) {
+                if (tok == "bg+tree" || tok == "bk+tree" || tok == "greedy+tree") {
+                    std::cerr << "Configuration '" << tok
+                              << "' used retired vec storage; choose an explicit AoS entry.\n";
+                    std::exit(2);
+                }
+                for (const char* retired : {"vec", "bstr", "vec_pool", "fwd_star", "forward_star"}) {
                     if (tok == retired ||
                         tok.find("[" + std::string(retired) + "]") != std::string::npos) {
                         std::cerr << "Storage '" << retired
@@ -3167,49 +3170,32 @@ int main(int argc, char** argv) {
         struct V1Combo {
             const char* name;
             std::string is;
-            apxchol::graph_storage storage;
             size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
             double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
             apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
             size_t exact_core_max_h = apxchol::exact_core_by_route;  // trace_cycle: exact clique on heavy cores with h <= this (sentinel = library default)
             size_t double_cycle_min_h = 0;      // trace_cycle: two cycles on heavy cores with h >= this
         };
-        using gs = apxchol::graph_storage;
         static const V1Combo v1_combos[] = {
-            // IS-selector x storage on the random-tree sampler (the only elim left).
-            // vec
-            {"bg+tree",   "block_greedy", gs::vec},
-            {"bk+tree",   "baumann_kyng", gs::vec},
-            {"greedy+tree", "priority_greedy", gs::vec},
-            // bstr (bit-string): remaining storage backend across
-            // All selectors -- completes the selector x storage grid
-            // (vec / bstr / vec_pool_aos x bg / bk / greedy) for
-            // the ablation heatmap. Vec uses the bare-named combos above;
-            // AoS below. Name carries the tag so --v1-configs selects it directly.
-            {.name="bg+tree[bstr]",   .is="block_greedy", .storage=gs::bstr},
-            {.name="bk+tree[bstr]",   .is="baumann_kyng", .storage=gs::bstr},
-            {.name="greedy+tree[bstr]", .is="priority_greedy", .storage=gs::bstr},
-            // Directed AoS headline/default: same slab machinery, but each
-            // endpoint stores {neighbor, weight} inline instead of an edge id.
-            {.name="bg+tree[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos},
-            {.name="bk+tree[vec_pool_aos]", .is="baumann_kyng", .storage=gs::vec_pool_aos},
-            {.name="greedy+tree[vec_pool_aos]", .is="priority_greedy", .storage=gs::vec_pool_aos},
+            {.name="bg+tree[vec_pool_aos]", .is="block_greedy"},
+            {.name="bk+tree[vec_pool_aos]", .is="baumann_kyng"},
+            {.name="greedy+tree[vec_pool_aos]", .is="priority_greedy"},
             // Cycle-core samplers on the headline storage (2026-09-18). /ec5 = exact
             // clique on heavy cores of <= 5 vertices; /dc32 = two cycles on cores of
             // >= 32 vertices; /ec5dc32 = both. See factor_options for the rationale.
-            {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+            {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy",
              .sampler=apxchol::clique_sampler::trace_cycle},
-            {.name="bg+trace_cycle/ec5[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+            {.name="bg+trace_cycle/ec5[vec_pool_aos]", .is="block_greedy",
              .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5},
-            {.name="bg+trace_cycle/dc32[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+            {.name="bg+trace_cycle/dc32[vec_pool_aos]", .is="block_greedy",
              .sampler=apxchol::clique_sampler::trace_cycle, .double_cycle_min_h=32},
-            {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos,
+            {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .is="block_greedy",
              .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5, .double_cycle_min_h=32},
             // Quality levers: exact full clique at low degree (xcN), relaxed IS degree cap (capN).
-            {.name="bg+tree/xc4[vec_pool_aos]",  .is="block_greedy", .storage=gs::vec_pool_aos, .exact_clique_max_degree=4},
-            {.name="bg+tree/xc8[vec_pool_aos]",  .is="block_greedy", .storage=gs::vec_pool_aos, .exact_clique_max_degree=8},
-            {.name="bg+tree/xc16[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos, .exact_clique_max_degree=16},
-            {.name="bg+tree/cap4[vec_pool_aos]", .is="block_greedy", .storage=gs::vec_pool_aos, .degree_mult=4.0},
+            {.name="bg+tree/xc4[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=4},
+            {.name="bg+tree/xc8[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=8},
+            {.name="bg+tree/xc16[vec_pool_aos]", .is="block_greedy", .exact_clique_max_degree=16},
+            {.name="bg+tree/cap4[vec_pool_aos]", .is="block_greedy", .degree_mult=4.0},
         };
         // Thread count: if --threads is set, use that; otherwise current OMP setting.
         int tc = args.threads;
@@ -3223,25 +3209,11 @@ int main(int argc, char** argv) {
 #ifdef _OPENMP
         omp_set_num_threads(tc);  // local re-pin in case of nested re-entry
 #endif
-        auto storage_tag = [](apxchol::graph_storage s) {
-            switch (s) {
-                case apxchol::graph_storage::vec:          return "[vec]";
-                case apxchol::graph_storage::bstr:         return "[bstr]";
-                case apxchol::graph_storage::vec_pool_aos: return "[vec_pool_aos]";
-            }
-            return "[?]";
-        };
         for (const auto& combo : v1_combos) {
-            // Subset filter: skip combo unless its bare name or its
-            // qualified name (e.g. "bk+tree[vec]") is listed.
-            if (!args.v1_configs.empty()) {
-                std::string qual = std::string(combo.name) + storage_tag(combo.storage);
-                if (!args.v1_configs.count(combo.name) &&
-                    !args.v1_configs.count(qual)) continue;
-            }
-            std::string label = std::string("v1 ") + combo.name + " "
-                + storage_tag(combo.storage)
-                + " [" + std::to_string(tc) + "t]";
+            if (!args.v1_configs.empty() && !args.v1_configs.count(combo.name)) continue;
+            // Preserve the existing CSV label, including its repeated storage tag.
+            std::string label = std::string("v1 ") + combo.name
+                + " [vec_pool_aos] [" + std::to_string(tc) + "t]";
             // apxchol via run_desing. ground is fixed at native (rank-aware mean-
             // centering -- handles disconnection intrinsically); --decompose split
             // factorizes each component independently. The single-component callable
@@ -3252,7 +3224,7 @@ int main(int argc, char** argv) {
             auto apx_single = [&combo, label, backend](const Eigen::SparseMatrix<double>& L_,
                                               const Eigen::VectorXd& b_, const std::string& nm,
                                               double tl, int mi, ground_mode) {
-                return run_apxchol_v1(L_, b_, nm, label, combo.is, combo.storage, tl, mi,
+                return run_apxchol_v1(L_, b_, nm, label, combo.is, tl, mi,
                                       false, combo.exact_clique_max_degree, combo.degree_mult,
                                       combo.sampler, combo.exact_core_max_h, combo.double_cycle_min_h, backend);
             };

@@ -86,7 +86,7 @@ CPU. This does not predict which backend will be faster for a particular matrix.
 
 ### Backend capabilities
 
-CUDA uses device-owned factorization with 32-bit vertices, `vec_pool_aos`, `block_greedy` selection and natural residual peeling. It requires compressed, sorted, unique, fully paired CSC input and supports both GKS and trace-cycle, warm starts and FP32 factor export. Exact-clique, exact-core and double-cycle overrides require CPU setup.
+CUDA uses device-owned factorization with 32-bit vertices, `block_greedy` selection and natural residual peeling. It requires compressed, sorted, unique, fully paired CSC input and supports both GKS and trace-cycle, warm starts and FP32 factor export. Exact-clique, exact-core and double-cycle overrides require CPU setup.
 
 Metal currently uses host factorization, retaining the CPU factorization choices, then solves on the GPU. It supports FP32/FP16 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
 

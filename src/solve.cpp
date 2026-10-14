@@ -428,7 +428,6 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
 
     // Build preconditioner.
     precond_.set_options(opts_.factor_opts);
-    precond_.set_storage(opts_.storage);
     precond_.set_keep_factor(opts_.keep_factor_values);
     if (cp) precond_.set_checkpoint(cp);
     const bool _pcg_trace = std::getenv("APXCHOL_PCG_TRACE") != nullptr;
@@ -810,7 +809,6 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
         return solve_backend::cpu;
 #if defined(APXCHOL_USE_CUDA)
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
-        opts.storage == graph_storage::vec_pool_aos &&
         opts.factor_opts.is_select == "block_greedy" &&
         opts.factor_opts.residual_peel == residual_peel_strategy::natural &&
         opts.factor_opts.exact_clique_max_degree == 0 &&

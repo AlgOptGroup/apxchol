@@ -56,8 +56,7 @@ struct baumann_kyng_partitioner {
     /// extra residual-graph traversal.
     size_t selected_degree_work() const { return selected_degree_work_; }
 
-    template<incidence_storage Incidence>
-    void find_partition(graph<Incidence>& G, std::span<const node_index> active,
+    void find_partition(graph& G, std::span<const node_index> active,
                         const partition_context& ctx, selection& out) {
         selected_degree_work_ = 0;
         if (active.empty()) return;

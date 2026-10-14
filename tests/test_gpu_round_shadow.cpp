@@ -200,7 +200,7 @@ void expect_factor_logs_equal(
 #endif
 
 struct checked_cpu_round {
-    apxchol::graph<apxchol::directed_vec_pool_incidence> residual;
+    apxchol::graph residual;
     apxchol::detail::gpu_round_shadow_cpu_comparison comparison;
     apxchol::detail::gpu_round_shadow_factor_log factor_log;
 };
@@ -213,7 +213,7 @@ checked_cpu_round run_authoritative_cpu_round(
     const std::size_t workers = std::max<std::size_t>(2, input.pivots.size());
     // Match the workspace's explicitly requested team before graph allocation.
     scoped_omp_threads declared_team(static_cast<int>(workers));
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(
+    apxchol::graph graph(
         input.vertex_count);
     for (const auto& edge : edges)
         graph.add_edge(edge.u, edge.v, edge.weight);
@@ -263,7 +263,7 @@ checked_cpu_round run_authoritative_cpu_round(
 }
 
 apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
-        apxchol::graph<apxchol::directed_vec_pool_incidence>& graph,
+        apxchol::graph& graph,
         const gpu_round_shadow_input& input,
         const gpu_round_shadow_report& expected,
         std::span<const gpu_round_shadow_excess_bound> excess_bounds,
@@ -299,7 +299,7 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
 // serially. The audited device path has its separate serial CPU oracle above.
 // Preserve exact comparisons: CPU/GPU summation order is part of this oracle.
 [[maybe_unused]] apxchol::detail::gpu_round_shadow_factor_log run_owned_host_oracle(
-        apxchol::graph<apxchol::directed_vec_pool_incidence>& graph,
+        apxchol::graph& graph,
         const gpu_round_shadow_input& input) {
     std::vector<std::vector<apxchol::detail::factor_entry>> entries(input.pivots.size());
     std::vector<apxchol::detail::factor_col> columns;
@@ -348,9 +348,9 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
 }
 
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
-apxchol::graph<apxchol::directed_vec_pool_incidence> graph_from_input(
+apxchol::graph graph_from_input(
         const gpu_round_shadow_input& input) {
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(input.vertex_count);
+    apxchol::graph graph(input.vertex_count);
     std::vector<node_index> vertices(input.vertex_count), counts(input.vertex_count);
     std::iota(vertices.begin(), vertices.end(), node_index{0});
     for (auto v : vertices) counts[v] = input.owner_offsets[v + 1] - input.owner_offsets[v];
@@ -368,7 +368,7 @@ apxchol::graph<apxchol::directed_vec_pool_incidence> graph_from_input(
 }
 
 void observe_owned_prefix(apxchol::detail::gpu_round_shadow_session& session,
-        apxchol::graph<apxchol::directed_vec_pool_incidence>& graph,
+        apxchol::graph& graph,
         std::vector<node_index>& active, std::vector<apxchol::detail::factor_col>& columns) {
     const auto snapshot = session.download_owned_prefix_for_test();
     graph = graph_from_input(snapshot.residual);
@@ -383,7 +383,7 @@ void observe_owned_prefix(apxchol::detail::gpu_round_shadow_session& session,
 std::uint64_t check_complete_factor_action(
         apxchol::detail::gpu_round_shadow_session& session,
         apxchol::detail::gpu_block_frontend& selector,
-        apxchol::graph<apxchol::directed_vec_pool_incidence>& oracle,
+        apxchol::graph& oracle,
         apxchol::detail::gpu_round_shadow_factor_log expected, std::uint64_t seed) {
     std::vector<node_index> active;
     for (node_index v = 0; v < oracle.n(); ++v) if (oracle.is_active(v)) active.push_back(v);
@@ -494,7 +494,7 @@ struct parallel_cpu_round_result {
 };
 
 parallel_cpu_round_result run_parallel_cpu_round(
-        apxchol::graph<apxchol::directed_vec_pool_incidence>& graph,
+        apxchol::graph& graph,
         const gpu_round_shadow_input& input,
         const gpu_round_shadow_report& expected,
         std::span<const gpu_round_shadow_excess_bound> excess_bounds) {
@@ -573,7 +573,7 @@ parallel_cpu_round_result run_parallel_cpu_round(
 }
 
 apxchol::detail::gpu_round_shadow_state_fingerprint fingerprint_graph(
-        const apxchol::graph<apxchol::directed_vec_pool_incidence>& graph) {
+        const apxchol::graph& graph) {
     return apxchol::detail::fingerprint_gpu_round_shadow_input(
         apxchol::detail::make_gpu_round_shadow_input(
             graph, std::span<const node_index>{}, 0));
@@ -583,14 +583,14 @@ constexpr node_index kResidentProvenanceFirstParallelPivot = 8;
 constexpr node_index kResidentProvenanceParallelPivotEnd = 24;
 constexpr node_index kResidentProvenanceVertexCount = 536;
 
-apxchol::graph<apxchol::directed_vec_pool_incidence>
+apxchol::graph
 make_resident_provenance_graph() {
     // run_parallel_cpu_round explicitly requests two workers. The pool sizes
     // its per-worker grow scratch at graph construction, so establish that
     // declared team before allocation even when the process starts with T=1.
     // The guard restores the surrounding test's OpenMP setting on return.
     scoped_omp_threads declared_team(kResidentProvenanceWorkers);
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(
+    apxchol::graph graph(
         kResidentProvenanceVertexCount);
     for (const auto& edge : std::vector<undirected_edge>{
         {0, 5, 1.0}, {0, 6, 4.0}, {0, 7, 2.0},
@@ -796,7 +796,7 @@ TEST(GpuRoundShadowReference, FreshPairedContentMatchesFullValidation) {
             {1, 0, -1}, {2, 1, -2}};
         if (full) { entries.emplace_back(0, 1, -7); entries.emplace_back(1, 2, -9); }
         A.setFromTriplets(entries.begin(), entries.end());
-        const auto graph = apxchol::make_graph<apxchol::graph<apxchol::directed_vec_pool_incidence>>(A);
+        const auto graph = apxchol::make_graph(A);
         const std::vector<node_index> selected = {0};
         const auto fresh = apxchol::detail::make_gpu_round_shadow_input(graph, selected, 42);
         EXPECT_EQ(apxchol::detail::gpu_round_selection_content_from_paired_input(fresh),
@@ -944,7 +944,7 @@ TEST(GpuRoundShadowReference,
 TEST(GpuRoundShadowReference,
      SerialCpuRoundMatchesTheReusableOwnerOrder) {
     constexpr std::uint64_t run_seed = 123;
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(6);
+    apxchol::graph graph(6);
     for (const auto& edge : std::vector<undirected_edge>{
         {0, 2, 1.0}, {0, 3, 4.0}, {0, 4, 2.0},
         {1, 2, 3.0}, {1, 3, 5.0}, {1, 5, 7.0},
@@ -1629,7 +1629,7 @@ namespace {
 constexpr node_index kOwnedVertices = 98;
 constexpr std::uint64_t kOwnedSeed = 123;
 
-apxchol::graph<apxchol::directed_vec_pool_incidence> make_owned_order_fixture() {
+apxchol::graph make_owned_order_fixture() {
     using arc = std::pair<node_index, double>;
     std::vector<std::vector<arc>> rows(kOwnedVertices);
     std::size_t edges = 0;
@@ -1642,7 +1642,7 @@ apxchol::graph<apxchol::directed_vec_pool_incidence> make_owned_order_fixture() 
     for (node_index v = 12; v + 1 < kOwnedVertices; ++v)
         if (v != 62 && v != 63 && v != 64) add(v, v + 1, 1.0);
     // Isolated active ids 63/64 cross the active bitmap's word boundary.
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(kOwnedVertices);
+    apxchol::graph graph(kOwnedVertices);
     std::vector<node_index> ids(kOwnedVertices), sizes(kOwnedVertices);
     std::iota(ids.begin(), ids.end(), node_index{0});
     for (node_index v : ids) {
@@ -1664,7 +1664,7 @@ apxchol::graph<apxchol::directed_vec_pool_incidence> make_owned_order_fixture() 
 }
 
 struct owned_selector_view_fixture {
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph = make_owned_order_fixture();
+    apxchol::graph graph = make_owned_order_fixture();
     std::vector<node_index> active;
     std::unique_ptr<apxchol::detail::gpu_round_shadow_session> session =
         std::make_unique<apxchol::detail::gpu_round_shadow_session>(true);
@@ -1703,7 +1703,7 @@ struct owned_selector_view_fixture {
         session->advance_selector(selector);
     }
 
-    void compare_reference(const apxchol::graph<apxchol::directed_vec_pool_incidence>& oracle) {
+    void compare_reference(const apxchol::graph& oracle) {
         ASSERT_GT(selector.transfers().owned_residual_binds, 0u);
         const auto prepared = selector.prepare(active, options);
         const auto actual_degrees = selector.host_active_degrees();
@@ -1776,7 +1776,7 @@ void expect_owned_residual_boundary(
         const apxchol::partition_options& options,
         std::size_t expected_fill, std::size_t expected_live,
         const std::string& receipt_name) {
-    apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n), oracle(n);
+    apxchol::graph graph(n), oracle(n);
     for (const auto& edge : edges) {
         graph.add_edge(edge.u, edge.v, edge.weight);
         oracle.add_edge(edge.u, edge.v, edge.weight);
@@ -1929,7 +1929,7 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
         expect_owned_residual_boundary(edges, 4, {2, 3}, options,
             2, 2 * (count + 2), "owned_residual_collision_" + std::to_string(count));
 
-        apxchol::graph<apxchol::directed_vec_pool_incidence> graph(4), oracle(4);
+        apxchol::graph graph(4), oracle(4);
         for (const auto& edge : edges) {
             graph.add_edge(edge.u, edge.v, edge.weight);
             oracle.add_edge(edge.u, edge.v, edge.weight);
@@ -2555,7 +2555,7 @@ TEST(GpuOwnedPrefix, DegreeScratchLifetimeAcrossMovesCompletionAndNewSizes) {
         // then binds an independently sized owner, including a final shrink.
         session = apxchol::detail::gpu_round_shadow_session(true);
         auto make_graph = [&] {
-            apxchol::graph<apxchol::directed_vec_pool_incidence> g(n);
+            apxchol::graph g(n);
             // Leading isolates leave the highest owner in a triangle, so
             // 2^k+1 domains really exercise the newly required owner bit.
             for (node_index v = n % 3; v + 2 < n; v += 3) {
@@ -2720,7 +2720,7 @@ TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
             }
         }
         auto make_graph = [&] {
-            apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
+            apxchol::graph graph(n);
             for (const auto& edge : edges) graph.add_edge(edge.u, edge.v, edge.weight);
             for (node_index v = 0; v < n; ++v) graph.excess(v) = 0.125;
             return graph;
@@ -2787,7 +2787,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             const node_index n = count + 3;
             const unsigned seed = mode ? std::numeric_limits<unsigned>::max() : 0;
             auto make_graph = [&] {
-                apxchol::graph<apxchol::directed_vec_pool_incidence> g(n);
+                apxchol::graph g(n);
                 for (node_index pivot = 0; pivot < count; ++pivot) {
                     for (std::size_t j = 0; j < spans[pivot]; ++j) {
                         // Shared receivers create duplicate fill and excess collisions.
@@ -2952,7 +2952,7 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
     constexpr node_index n = 4;
     constexpr unsigned seed = 42;
     auto make_graph = [&] {
-        apxchol::graph<apxchol::directed_vec_pool_incidence> g(n);
+        apxchol::graph g(n);
         // The valid fresh owned input has129 live physical slots at pivot0.
         for (unsigned j = 0; j < 129; ++j)
             g.add_edge(0, 1 + j % 3, j < 3 ? 1.0 : j % 2 ? -0.0 : 0.0);
@@ -3071,7 +3071,7 @@ TEST(GpuOwnedPrefix, ParallelEmissionMatchesSerialOrderedHandback) {
             // Per-pivot SplitMix state and its item offsets remain 64-bit.
             const std::uint64_t seed = profile ? std::numeric_limits<unsigned>::max() : 0;
             auto make_graph = [&] {
-                apxchol::graph<apxchol::directed_vec_pool_incidence> graph(degree + 1);
+                apxchol::graph graph(degree + 1);
                 // A prescribed pivot isolates emission for these complete graphs.
                 // Duplicate arcs exercise ordered deduplication before emission.
                 for (node_index u = 0; u <= degree; ++u)
@@ -3285,7 +3285,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     EXPECT_TRUE(small.trsv().adopted_device_factor());
     EXPECT_TRUE(small.factor().L.vals_.empty());
     auto A = owned_solve_matrix(64, 1.0);
-    auto exported = apxchol::factorize(A, apxchol::graph_storage::vec_pool_aos);
+    auto exported = apxchol::factorize(A);
     EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
     EXPECT_FALSE(exported.research_device_factor);
     apxchol::detail::gpu_preconditioner owner;
@@ -3368,7 +3368,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
             std::sort(expected.begin(),expected.end());
             std::vector<std::tuple<node_index,node_index,double>> previous;
             for(unsigned repeat=0;repeat<2;++repeat) {
-                apxchol::graph<apxchol::directed_vec_pool_incidence> graph(n);
+                apxchol::graph graph(n);
                 for(auto edge:edges)graph.add_edge(edge.u,edge.v,edge.weight);
                 for(node_index v=0;v<n;++v)graph.excess(v)=.125;
                 apxchol::detail::gpu_round_shadow_session session(true,sampler);

@@ -20,12 +20,6 @@ static const std::map<std::string, solve_backend> solve_backend_map = {
     {"gpu", solve_backend::gpu},
 };
 
-static const std::map<std::string, graph_storage> graph_storage_map = {
-    {"vec",          graph_storage::vec},
-    {"bstr",         graph_storage::bstr},
-    {"vec_pool_aos", graph_storage::vec_pool_aos},
-};
-
 static void setup_logging(bool quiet, bool verbose) {
     if (verbose) {
         spdlog::set_level(spdlog::level::debug);
@@ -135,11 +129,6 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--stagnation-window", cfg.solve_opts.stagnation_window,
                    "Check convergence every N iters, stop if <50% improvement (0=disable)")
         ->capture_default_str();
-
-    app.add_option("--graph-storage", cfg.solve_opts.storage,
-                   "Graph storage backend (vec_pool_aos, vec, bstr)")
-        ->default_str("vec_pool_aos")
-        ->transform(CLI::IsMember(graph_storage_map) & CLI::Transformer(graph_storage_map));
 
     app.add_option("--is", cfg.solve_opts.factor_opts.is_select,
                    "Independent set strategy (block_greedy, priority_greedy, baumann_kyng)")

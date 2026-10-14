@@ -121,7 +121,7 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
     // nnz * 8 B (~28 MB) to the peak.
     const auto L = grid_laplacian(800, 800);
     apxchol::factor_options fopts; fopts.seed = 7;
-    const auto F = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, fopts);
+    const auto F = apxchol::factorize(L, fopts);
     const node_index m = F.L.rows() - 1;                       // Laplacian path
     scoped_env drop("APXCHOL_FACTOR_DROP", "0.5");             // force a real drop
 
@@ -185,7 +185,7 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
 TEST(SpTRSVSetupMemory, SetupConsumingReleasesTheFactorAndSolvesIdentically) {
     const auto L = grid_laplacian(120, 120);
     apxchol::factor_options fopts; fopts.seed = 3;
-    auto F1 = apxchol::factorize(L, apxchol::graph_storage::vec_pool_aos, fopts);
+    auto F1 = apxchol::factorize(L, fopts);
     // Compare the setup ownership paths with the exact same input factor.
     // Re-factorizing can change parallel floating-point sums even at a fixed
     // seed/team; equal nnz alone never established factor identity here.

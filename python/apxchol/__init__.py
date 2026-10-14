@@ -117,7 +117,7 @@ class Solver:
     """
 
     def __init__(self, A, *, backend="auto", seed=42, partitioner="block_greedy",
-                 storage="vec_pool_aos", keep_factor=True,
+                 keep_factor=True,
                  factor_storage_dtype=None, **advanced):
         csc = _to_csc(A)
         self._n = int(csc.shape[0])
@@ -125,7 +125,7 @@ class Solver:
         self._keep_factor = bool(keep_factor)
         data = np.ascontiguousarray(csc.data, dtype=np.float64)
         options = dict(backend=str(backend), seed=int(seed), partitioner=str(partitioner),
-                       storage=str(storage), keep_factor=self._keep_factor)
+                       keep_factor=self._keep_factor)
         options.update(advanced)
         if factor_storage_dtype is not None:
             options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
@@ -297,7 +297,7 @@ class Solver:
         return (2 * self.factor_nnz - self._n) / self._nnz_A
 
 
-def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage="vec_pool_aos",
+def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy",
               keep_factor=True, factor_storage_dtype=None, **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
@@ -326,9 +326,6 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage
         Independent-set selector: "block_greedy" (default),
         "priority_greedy", or "baumann_kyng". Unknown names raise at
         factorization time.
-    storage : str
-        Graph backend: "vec_pool_aos" (default),
-        "vec" or "bstr".
     keep_factor : bool
         Keep the factor's row/value arrays alive so `chol()`/`L`/`D` can be
         exported. Costs one extra factor-sized copy in memory (~8 bytes per
@@ -354,7 +351,7 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage
         `degree_multiplier` only takes effect when `degree_quantile=0`
         (the quantile cap, default 0.2, replaces it).
     """
-    return Solver(A, backend=backend, seed=seed, partitioner=partitioner, storage=storage,
+    return Solver(A, backend=backend, seed=seed, partitioner=partitioner,
                   keep_factor=keep_factor, factor_storage_dtype=factor_storage_dtype,
                   **advanced)
 

@@ -180,18 +180,12 @@ TEST(ResidualBlockedNormalization, PersistentTeamZeroAndNonfiniteGuardsAreUnifor
     }
 }
 
-namespace {
-template<class Incidence>
-class ResidualBlockedGraph : public ::testing::Test {};
-using block_storages = ::testing::Types<apxchol::directed_vec_pool_incidence>;
-TYPED_TEST_SUITE(ResidualBlockedGraph, block_storages);
-}
 
-TYPED_TEST(ResidualBlockedGraph, CrossBlockSamplingIsRepeatableAndConnected) {
+TEST(ResidualBlockedGraph, CrossBlockSamplingIsRepeatableAndConnected) {
     omp_settings settings;
     constexpr apxchol::node_index n = 193; //18,528 distinct edges: two blocks.
     const auto make = [=] {
-        apxchol::graph<TypeParam> graph(n);
+        apxchol::graph graph(n);
         for (apxchol::node_index u = 0; u < n; ++u)
             for (apxchol::node_index v = u + 1; v < n; ++v)
                 graph.add_edge(u, v, u == 0 ? 1024.0 + v
@@ -205,7 +199,7 @@ TYPED_TEST(ResidualBlockedGraph, CrossBlockSamplingIsRepeatableAndConnected) {
     for (int threads : {1, 4, 72}) {
         settings.set(threads);
         auto graph = make();
-        const auto stats = apxchol::detail::residual_coalescer<TypeParam>::sparsify(
+        const auto stats = apxchol::detail::residual_coalescer::sparsify(
             graph, active, 0.25, 42);
         ASSERT_GT(stats.distinct_before, block_items);
         EXPECT_EQ(stats.backbone_edges, n - 1);
@@ -216,10 +210,10 @@ TYPED_TEST(ResidualBlockedGraph, CrossBlockSamplingIsRepeatableAndConnected) {
         for (apxchol::node_index u = 0; u < n; ++u) {
             bool has_hub = u == 0;
             for (const auto& entry : graph.adj(u)) {
-                const auto v = graph.edge_target(entry, u);
+                const auto v = entry.to;
                 has_hub |= v == 0;
-                actual.emplace_back(u, v, bits(graph.edge_weight(entry)),
-                                    graph.edge_multiplicity(entry));
+                actual.emplace_back(u, v, bits(static_cast<double>(entry.w)),
+                                    1);
             }
             EXPECT_TRUE(has_hub); //The heavy hub forest preserves connectivity.
         }

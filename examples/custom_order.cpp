@@ -20,8 +20,7 @@ struct priority_partitioner {
     /// User-supplied priority per vertex (lower = eliminated earlier).
     std::vector<double> priority;
 
-    template<apxchol::incidence_storage Incidence>
-    void find_partition(apxchol::graph<Incidence>& G,
+    void find_partition(apxchol::graph& G,
                         std::span<const apxchol::node_index> active,
                         const apxchol::partition_context& /*ctx*/,
                         apxchol::selection& out) {
@@ -33,7 +32,7 @@ struct priority_partitioner {
         for (auto v : order_) {
             bool independent = true;
             for (auto idx : G.adj(v)) {
-                auto u = G.edge_target(idx, v);
+                auto u = idx.to;
                 if (G.is_active(u) && out.contains(u)) { independent = false; break; }
             }
             if (independent) out.add(v);
