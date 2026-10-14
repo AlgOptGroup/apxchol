@@ -1190,15 +1190,17 @@ TEST(Grounding, LaplacianSolutionIsMinNorm) {
     // Warm start shifted by a constant, tightened tolerance -> PCG iterates
     // from x0; the answer is still mean-zero and still solves the system.
     Eigen::VectorXd x0 = r.x.array() + 5.0;
+    // Subtracting the offset incurs roundoff at the warm start's scale.
+    const double warm_centering_tol = 1e-14 * x0.cwiseAbs().maxCoeff();
     auto w = slv.solve(b, 1e-10, 500, &x0);
     EXPECT_GT(w.iterations, 0);
-    EXPECT_NEAR(w.x.mean(), 0.0, 1e-14 * w.x.cwiseAbs().maxCoeff());
+    EXPECT_NEAR(w.x.mean(), 0.0, warm_centering_tol);
     EXPECT_LT((L * w.x - b).norm() / b.norm(), 1e-8);
     // Already-converged warm start (loose tolerance -> 0 iterations): the
     // early exit centres too.
     auto e = slv.solve(b, 1e-6, 500, &x0);
     EXPECT_EQ(e.iterations, 0);
-    EXPECT_NEAR(e.x.mean(), 0.0, 1e-14 * e.x.cwiseAbs().maxCoeff());
+    EXPECT_NEAR(e.x.mean(), 0.0, warm_centering_tol);
     EXPECT_LT((L * e.x - b).norm() / b.norm(), 1e-6);
 }
 
