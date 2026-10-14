@@ -352,6 +352,42 @@ TEST_F(MetalDevice, SddmExactAndDoubleFloatOperators) {
     }
 }
 
+TEST_F(MetalDevice, LongOperatorRowAndPartialTile) {
+    // The hub exceeds 256 entries; the final tile contains only one row.
+    constexpr int n = 257;
+    for (const bool inexact : {false, true}) {
+        std::vector<Eigen::Triplet<double>> entries;
+        std::vector<double> diagonal(n, 0.125);
+        for (int i = 1; i < n; ++i) {
+            const double weight = 1.0 + (i % 7) / (inexact ? 3.0 : 4.0);
+            entries.emplace_back(0, i, -weight);
+            entries.emplace_back(i, 0, -weight);
+            diagonal[0] += weight;
+            diagonal[i] += weight;
+        }
+        for (int i = 0; i < n; ++i) entries.emplace_back(i, i, diagonal[i]);
+        Sparse A(n, n);
+        A.setFromTriplets(entries.begin(), entries.end());
+        A.makeCompressed();
+        for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+            SCOPED_TRACE(testing::Message() << "inexact=" << inexact << " storage=" << int(storage));
+            apxchol::solve_options options;
+            options.factor_opts.factor_storage = storage;
+            options.factor_opts.seed = 42;
+            options.stagnation_window = 0;
+            const apxchol::metal_solver solver(A, options);
+            ASSERT_EQ(solver.stats().operator_double_float, inexact);
+            Eigen::VectorXd guess;
+            for (const unsigned salt : {1u, 3u}) {
+                const auto b = rhs(n, salt, false);
+                const auto result = solver.solve(b, 1e-8, 500, guess.size() ? &guess : nullptr);
+                ASSERT_TRUE(result.x.allFinite());
+                EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+                guess = 0.5 * result.x;
+            }
+        }
+    }
+}
 
 
 TEST_F(MetalDevice, EarlyExitsTruthful) {

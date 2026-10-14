@@ -6,7 +6,8 @@ using namespace metal;
 using namespace apxchol::detail::gpu_pcg;
 using namespace apxchol::detail::metal_host;
 
-static_assert(sizeof(Params) == 32, "Params mirrors the host layout");
+static_assert(sizeof(Params) == 36, "Params mirrors the host layout");
+static_assert(__builtin_offsetof(Params, spmv_lanes) == 32, "Params mirrors the host layout");
 
 using SolveState = solve_state<df, float>;
 static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve_state");
@@ -16,6 +17,7 @@ constant bool kOperatorDf [[function_constant(1)]];
 constant bool kFactorFp16 [[function_constant(3)]];
 constant uint kOperation [[function_constant(2)]];
 
+template<unsigned Lanes = 1>
 struct pcg_math {
     using wide = df;
     using scalar = float;
@@ -31,7 +33,7 @@ struct pcg_math {
     df add_entry(df sum, device const float* hi, device const float* lo, uint e, float p) const {
         return df_add(sum, kOperatorDf ? df_mul_f(df{hi[e], lo[e]}, p) : two_prod(hi[e], p));
     }
-    df sum_row(df sum) const { return sum; }
+    df sum_row(df sum) const { return sum_lanes<Lanes>(*this, sum); }
 };
 
 // Workspace slots stay bound for the whole command batch, including SpTRSV.
@@ -48,10 +50,13 @@ kernel void pcg_step(constant Params& P [[buffer(0)]],
     const pcg_work<uint> work = op == operation::direction
         ? pcg_work<uint>{tid, P.n, P.n, 0, P.n}
         : pcg_work<uint>{group * kTreeRows, (group + 1) * kTreeRows, kTreeLanes, lane, P.n};
-    const auto sum = step<1>(op, pcg_math{}, workspace<df, float>{x, r, ap, p, z, partial, &state},
-                             ptr, col, hi, lo, work, 0);
+    const auto vectors = workspace<df, float>{x, r, ap, p, z, partial, &state};
+    const auto sum = op == operation::multiply && P.spmv_lanes == kTreeLanes
+        ? step<kTreeLanes>(op, pcg_math<kTreeLanes>{}, vectors, ptr, col, hi, lo,
+                          pcg_work<uint>{work.first, work.last, 1, 0, P.n}, lane)
+        : step<1>(op, pcg_math<>{}, vectors, ptr, col, hi, lo, work, 0);
     if (op != operation::direction) {
-        const auto total = sum_lanes<kTreeLanes>(pcg_math{}, sum);
+        const auto total = sum_lanes<kTreeLanes>(pcg_math<>{}, sum);
         if (lane == 0) partial[group] = total;
     }
 }
@@ -71,7 +76,7 @@ kernel void finalize(constant Params& P [[buffer(0)]],
                      device SolveState& state [[buffer(7)]],
                      uint l [[thread_index_in_threadgroup]]) {
     const pcg_work<uint> work{0, P.groups, kTreeLanes, l, P.groups};
-    const auto sum = sum_lanes<kTreeLanes>(pcg_math{}, sum_partials(pcg_math{}, partial, work));
+    const auto sum = sum_lanes<kTreeLanes>(pcg_math<>{}, sum_partials(pcg_math<>{}, partial, work));
     if (l == 0 && state.active)
         state = advance(recurrence_math{}, state, P.mode, sum, P.iter, P.window);
 }
