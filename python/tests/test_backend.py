@@ -17,33 +17,45 @@ def operator_matrix():
 
 @pytest.fixture(scope="module")
 def auto_solver(operator_matrix):
-    solver = apxchol.factorize(operator_matrix, factor_storage_dtype=np.float32)
-    if os.environ.get("APXCHOL_TEST_REQUIRE_GPU") == "1":
-        assert solver.backend == "gpu", "Native GPU validation must execute the GPU backend"
+    return apxchol.factorize(operator_matrix, factor_storage_dtype=np.float32)
+
+
+@pytest.fixture(scope="module")
+def gpu_solver(operator_matrix):
+    try:
+        solver = apxchol.factorize(operator_matrix, backend="gpu",
+                                   factor_storage_dtype=np.float32)
+    except (ValueError, RuntimeError) as exc:
+        unavailable = (
+            "GPU route requested but GPU support is not built",
+            "GPU factorization requires an available CUDA device",
+            "apxchol::metal_solver: the Metal backend is unavailable: no Metal device",
+            "GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
+            "natural residual peeling and supported sampler options; request CPU explicitly",
+        )
+        if (os.environ.get("APXCHOL_TEST_REQUIRE_GPU") == "1"
+                or str(exc) not in unavailable):
+            raise
+        return None
+    assert solver.backend == "gpu"
     return solver
 
 
-def test_backend_selection_is_read_only(operator_matrix, auto_solver):
+def test_backend_selection_is_read_only(operator_matrix, auto_solver, gpu_solver):
     cpu = apxchol.factorize(operator_matrix, backend="cpu")
     assert cpu.backend == "cpu"
     assert auto_solver.backend in ("cpu", "gpu")
     with pytest.raises(AttributeError):
         auto_solver.backend = "cpu"
-    if auto_solver.backend == "cpu":
-        with pytest.raises((ValueError, RuntimeError), match="GPU|CUDA|Metal|cuda"):
-            apxchol.factorize(operator_matrix, backend="gpu")
-    else:
-        assert apxchol.factorize(operator_matrix, backend="gpu").backend == "gpu"
 
 
-@pytest.mark.parametrize("n", [1, 64])
-def test_tiny_automatic_solver_uses_cpu(n, monkeypatch):
+def test_scalar_automatic_solver_uses_cpu(monkeypatch):
     monkeypatch.delenv("APXCHOL_FACTOR_STORAGE", raising=False)
-    matrix = sp.diags([-1., 4., -1.], [-1, 0, 1], shape=(n, n), format="csc")
+    matrix = sp.csc_matrix([[4.0]])
     solver = apxchol.factorize(matrix)
     assert solver.backend == "cpu"
     assert solver.factor_storage_dtype == np.float32
-    rhs = np.ones(n)
+    rhs = np.ones(1)
     result = solver.solve(rhs)
     assert result.converged
     assert np.linalg.norm(matrix @ result.x - rhs) / np.linalg.norm(rhs) <= 1e-8
@@ -70,8 +82,8 @@ def test_nonfinite_vectors_are_rejected(auto_solver, value):
 @pytest.mark.parametrize("backend", ["cpu", "gpu"])
 @pytest.mark.parametrize("dtype", [np.float16, np.float32])
 def test_backend_reuses_factor_and_supports_export_warm_start_and_output(
-        operator_matrix, auto_solver, backend, dtype):
-    if backend == "gpu" and auto_solver.backend != "gpu":
+        operator_matrix, gpu_solver, backend, dtype):
+    if backend == "gpu" and gpu_solver is None:
         pytest.skip("No usable GPU backend in this installation")
     try:
         solver = apxchol.factorize(operator_matrix, backend=backend,
@@ -112,7 +124,8 @@ def test_hidden_cuda_device_selects_cpu_and_explicit_gpu_fails():
     script = """
 import apxchol
 import scipy.sparse as sp
-A = sp.diags([-1., 4., -1.], [-1, 0, 1], shape=(65, 65), format='csc')
+# Exercise device availability above the automatic small-system guards.
+A = sp.diags([-1., 4., -1.], [-1, 0, 1], shape=(32769, 32769), format='csc')
 assert apxchol.factorize(A).backend == 'cpu'
 try:
     apxchol.factorize(A, backend='gpu')

@@ -34,9 +34,10 @@ static_assert(sizeof(df32) == 8);
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #include "metal_params.inc"
 #undef APXCHOL_GPU_CODE
-static_assert(sizeof(Params) == 32);
+static_assert(sizeof(Params) == 36);
 static_assert(offsetof(Params, mode) == 16);
 static_assert(offsetof(Params, m) == 28);
+static_assert(offsetof(Params, spmv_lanes) == 32);
 
 using solve_state = gpu_pcg::solve_state<df32, float>;
 static_assert(sizeof(solve_state) == 48);
@@ -516,6 +517,10 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::length_error("metal_solver: operators with 2^30 or more stored entries exceed the "
                                 "device's 32-bit offsets");
     op = detail::build_permuted_full_symmetric_csr(src, F.perm);
+    int max_row = 0;
+    for (std::size_t row = 0; row < n; ++row)
+        max_row = std::max(max_row, op.ptr[row + 1] - op.ptr[row]);
+    arguments.spmv_lanes = max_row > 256 ? kTreeLanes : 1;
     const bool exact = op.fp32_exact;
     const std::size_t nnz = static_cast<std::size_t>(op.ptr.back());
     std::vector<float> hi(nnz), lo(exact ? 0 : nnz);

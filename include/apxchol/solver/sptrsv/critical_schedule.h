@@ -103,7 +103,11 @@ public:
                 local[other] =
                     counters_[other].value.load(std::memory_order_acquire);
                 if (local[other] >= target) break;
+#ifdef __APPLE__
+                std::this_thread::yield();
+#else
                 cpu_relax();
+#endif
             }
         }
     }
@@ -121,6 +125,7 @@ public:
     }
 
 private:
+#ifndef __APPLE__
     static void cpu_relax() {
 #if defined(__aarch64__)
         asm volatile("yield" ::: "memory");
@@ -130,6 +135,7 @@ private:
         std::this_thread::yield();
 #endif
     }
+#endif
 
     unsigned processors_ = 0;
     unsigned stride_ = 0;

@@ -266,7 +266,8 @@ inline double parallel_spmv_csr(const Eigen::SparseMatrix<S, Eigen::RowMajor>& L
     const auto* inner = Lrm.innerIndexPtr();
     const S*    val   = Lrm.valuePtr();
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_spmv_threads(n, outer[n] - outer[0]);
+    #pragma omp parallel if(workers > 1) num_threads(workers)
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -315,7 +316,8 @@ inline void update_xr(double* x, const double* p, double* r, const double* Ap,
                       double alpha, Eigen::Index n, double* part,
                       double& rr, double& rs) {
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_solve_threads(n);
+    #pragma omp parallel if(workers > 1) num_threads(workers)
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -354,7 +356,8 @@ inline void update_xr(double* x, const double* p, double* r, const double* Ap,
 
 // p = z + beta*p in one parallel pass (no reduction).
 inline void update_p(double* p, const double* z, double beta, Eigen::Index n) {
-    #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_solve_threads(n);
+    #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
     for (Eigen::Index i = 0; i < n; ++i) p[i] = z[i] + beta * p[i];
 }
 
@@ -363,7 +366,8 @@ inline void update_p(double* p, const double* z, double beta, Eigen::Index n) {
 inline void init_residual(double* r, const double* b, const double* Ax0,
                           Eigen::Index n, double* part, double& rr, double& rs) {
     int nt_used = 1;
-    #pragma omp parallel if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_solve_threads(n);
+    #pragma omp parallel if(workers > 1) num_threads(workers)
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -409,7 +413,8 @@ inline void init_residual(double* r, const double* b, const double* Ax0,
 // (detail::det_sum) + one parallel subtract pass.
 inline void center_x(double* x, Eigen::Index n, double* part) {
     const double mean = detail::det_sum(x, n, part) / static_cast<double>(n);
-    #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
+    const int workers = detail::cpu_solve_threads(n);
+    #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
     for (Eigen::Index i = 0; i < n; ++i) x[i] -= mean;
 }
 
@@ -806,8 +811,13 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     if (opts.backend == solve_backend::cpu) return solve_backend::cpu;
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::gpu)
         throw std::invalid_argument("invalid solve backend");
-    // Avoid GPU overhead for tiny systems unless CPU cannot honor their storage.
-    if (opts.backend == solve_backend::automatic && A && A->rows() <= 64) {
+    // Keep small solves on CPU unless it cannot honor the requested storage.
+#if defined(APXCHOL_USE_METAL)
+    constexpr Eigen::Index cpu_limit = 32 * 1024;
+#else
+    constexpr Eigen::Index cpu_limit = 1;
+#endif
+    if (opts.backend == solve_backend::automatic && A && A->rows() <= cpu_limit) {
         if (A->rows() == 1 || omp_sptrsv::fp16_supported() ||
             !detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false))
             return solve_backend::cpu;

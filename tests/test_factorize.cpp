@@ -1113,10 +1113,9 @@ TYPED_TEST(FactorizeTest, LaplacianFlagNotSet) {
 // in fused passes with hand-rolled per-thread partial reductions (see the
 // detail:: scaffolding in preconditioner.h). Same factor + same b must give
 // bit-identical iterations / residual / x run to run at the thread count the
-// test process has. n = 10k is above the OpenMP engagement threshold
-// (detail::fused_omp_min() == 2000, a constant), so with OMP_NUM_THREADS > 1
-// this exercises the parallel path (a reduction() clause or any
-// completion-order sum would fail this at T > 1).
+// test process has. The fixtures are large enough to use several solve
+// workers when available (a reduction() clause or any completion-order sum
+// would fail this at T > 1).
 static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<double>& A,
                                                  const Eigen::VectorXd& b, bool laplacian) {
     apxchol::solve_options opts;
@@ -1160,13 +1159,13 @@ static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<doubl
 }
 
 TEST(PcgFusion, RepeatedSolvesBitIdenticalLaplacian) {
-    auto L = grid_laplacian(100, 100);
+    auto L = grid_laplacian(320, 320);
     auto b = apxchol::generate_test_rhs(L.rows());
     expect_repeated_solves_bit_identical(L, b, /*laplacian=*/true);
 }
 
 TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
-    auto M = sddm_grid(100, 100, 0.5);
+    auto M = sddm_grid(320, 320, 0.5);
     Eigen::VectorXd b = Eigen::VectorXd::Random(M.rows());
     expect_repeated_solves_bit_identical(M, b, /*laplacian=*/false);
 }
@@ -1179,7 +1178,7 @@ TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
 // the end -- also for a warm start, whose constant component must not leak
 // into the answer.
 TEST(Grounding, LaplacianSolutionIsMinNorm) {
-    auto L = grid_laplacian(60, 60);        // n = 3600 > detail::fused_omp_min() (2000)
+    auto L = grid_laplacian(60, 60);
     auto b = apxchol::generate_test_rhs(L.rows());
     apxchol::solve_options opts;
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;
@@ -1191,15 +1190,17 @@ TEST(Grounding, LaplacianSolutionIsMinNorm) {
     // Warm start shifted by a constant, tightened tolerance -> PCG iterates
     // from x0; the answer is still mean-zero and still solves the system.
     Eigen::VectorXd x0 = r.x.array() + 5.0;
+    // Subtracting the offset incurs roundoff at the warm start's scale.
+    const double warm_centering_tol = 1e-14 * x0.cwiseAbs().maxCoeff();
     auto w = slv.solve(b, 1e-10, 500, &x0);
     EXPECT_GT(w.iterations, 0);
-    EXPECT_NEAR(w.x.mean(), 0.0, 1e-14 * w.x.cwiseAbs().maxCoeff());
+    EXPECT_NEAR(w.x.mean(), 0.0, warm_centering_tol);
     EXPECT_LT((L * w.x - b).norm() / b.norm(), 1e-8);
     // Already-converged warm start (loose tolerance -> 0 iterations): the
     // early exit centres too.
     auto e = slv.solve(b, 1e-6, 500, &x0);
     EXPECT_EQ(e.iterations, 0);
-    EXPECT_NEAR(e.x.mean(), 0.0, 1e-14 * e.x.cwiseAbs().maxCoeff());
+    EXPECT_NEAR(e.x.mean(), 0.0, warm_centering_tol);
     EXPECT_LT((L * e.x - b).norm() / b.norm(), 1e-6);
 }
 
@@ -2063,6 +2064,7 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
     const Eigen::VectorXd b = A * exact;
     for (const unsigned seed : {0u, 42u}) {
         apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::gpu;
         options.tol = 1e-8; options.max_iter = 500; options.stagnation_window = 0;
         options.factor_opts.seed = seed;
         options.factor_opts.partition.degree_quantile = 0.5;
