@@ -15,8 +15,7 @@
 
 namespace {
 
-Eigen::SparseMatrix<double> operator_matrix() {
-    constexpr int n = 64;
+Eigen::SparseMatrix<double> operator_matrix(int n = 65) {
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
         entries.emplace_back(i, i, 5.0);
@@ -115,6 +114,35 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
         EXPECT_EQ(result.backend, expected);
         expect_solution(matrix, rhs, result);
     }
+}
+
+TEST(SolveRoutes, TinyAutomaticUsesCpuWithoutPrewarming) {
+    scoped_env storage("APXCHOL_FACTOR_STORAGE", "auto");
+#if defined(APXCHOL_USE_CUDA)
+    const bool started = apxchol::cuda_ctx::detail::state().started;
+#endif
+    for (const int n : {1, 64}) {
+        SCOPED_TRACE(n);
+        const auto matrix = operator_matrix(n);
+        const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(n);
+        apxchol::solve_options options;
+        EXPECT_EQ(apxchol::detail::select_solve_backend(options, &matrix),
+                  apxchol::solve_backend::cpu);
+        apxchol::solver owner(matrix, options);
+        EXPECT_EQ(owner.backend(), apxchol::solve_backend::cpu);
+        EXPECT_EQ(owner.factor_storage(), apxchol::factor_storage_type::fp32);
+        expect_solution(matrix, rhs, owner.solve(rhs));
+        if (apxchol::omp_sptrsv::fp16_supported()) {
+            options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
+            apxchol::solver half(matrix, options);
+            EXPECT_EQ(half.backend(), apxchol::solve_backend::cpu);
+            EXPECT_EQ(half.factor_storage(), apxchol::factor_storage_type::fp16);
+            expect_solution(matrix, rhs, half.solve(rhs));
+        }
+    }
+#if defined(APXCHOL_USE_CUDA)
+    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+#endif
 }
 
 #if defined(APXCHOL_USE_METAL)
@@ -283,7 +311,7 @@ TEST(SolveRoutes, UnsupportedStoredLayoutSelectsCpuBeforeSetup) {
 
 #if defined(APXCHOL_USE_METAL)
 TEST(SolveRoutes, OperatorOutsideMetalRangeSelectsCpuBeforeSetup) {
-    Eigen::SparseMatrix<double> matrix(2, 2);
+    Eigen::SparseMatrix<double> matrix(65, 65);
     matrix.setIdentity();
     matrix *= 0x1p104;
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
