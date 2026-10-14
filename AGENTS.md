@@ -234,8 +234,16 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - `solver/partition/` contains block-greedy, priority-greedy, and Baumann-Kyng.
   `factor_options.h` is authoritative for defaults and their rationale.
   Preserve deterministic conflict resolution and thread-team fallback rules.
-- CPU `solver/sptrsv/omp.h` supports `APXCHOL_CPU_SPTRSV=auto|levels`.
-  AUTO uses the structural critical-tail schedule when metadata permits;
+- CPU solve teams grow with problem size, up to the caller's OpenMP thread limit.
+  Vector and triangular passes use rows: 4,096 per worker on Linux, 32,768 on macOS.
+  Linux SpMV reuses that team when parallel; otherwise it uses 32,768 stored
+  entries per worker, as on macOS. Linux critical waits retain CPU pause/yield
+  hints; macOS yields to the scheduler.
+  Linux triangular teams use the full factor dimension before Laplacian grounding.
+  Small solves use the same kernels serially. `APXCHOL_CPU_SPTRSV=auto|levels`
+  selects scheduling; AUTO uses the structural critical-tail plan when metadata permits.
+  Changing the caller's limit after setup falls back to base levels when the
+  prepared critical plan requires a different team.
   `levels` is the reference. Share row arithmetic across schedules and storage.
   Research schedules on other branches are not production modes.
 - CPU FP16 storage uses `_Float16` directly; setup uses native conversion under
@@ -286,9 +294,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   and Metal; automatic selects CPU, while explicit CUDA rejects it.
 - One-shot `solve` selects a complete route with `solve_options.backend`
   (`automatic`, `cpu`, `gpu`); CLI uses `--backend auto|cpu|gpu`. Report the
-  selected route in `solve_result.backend` and CLI output. Auto keeps systems of
-  at most 64 rows on CPU when it supports the requested storage; singletons
-  always use CPU. Otherwise it checks device, option and input compatibility.
+  selected route in `solve_result.backend` and CLI output. Auto uses CPU for
+  scalar systems and for Metal inputs of at most 32,768 rows when CPU supports
+  the requested storage. Otherwise it checks device, option and input compatibility.
   Explicit CPU never probes GPU; explicit GPU retains setup errors. Never retry
   a failed GPU setup or solve on CPU.
 - The current CUDA route uses device-owned factorization, finalization, dataflow

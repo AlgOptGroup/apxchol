@@ -45,23 +45,6 @@ namespace apxchol {
 // parallel pass in the solver).
 namespace detail {
 
-/// Minimum n before a fused vector pass engages OpenMP. At or below it the
-/// SAME loop runs on the encountering thread (the `if` clause disables the
-/// team, omp_ids reports tid 0 / nt 1), so the sub-threshold path is
-/// bit-identical to a T=1 run -- one code path, no second kernel.
-///
-/// 2000, the value the passes shipped with, and a CONSTANT: the
-/// APXCHOL_FUSED_PARALLEL_MIN override was removed 2026-08-20 after raising
-/// it was REFUTED by measurement (2026-08-19, T=16, Zen 4). At n = 299k/335k
-/// (coAuthorsDBLP / com-Amazon -- the vectors are NOT cache-resident, 6 fp64
-/// n-vectors alone are ~16 MB) every gated pass is faster PARALLEL --
-/// update_xr 0.086 vs 0.396 ms/iter serialized, permute 0.089 vs 0.171,
-/// unpermute+rz 0.096 vs 0.236, spmv+pAp 0.62 vs 4.32 -- and serializing them
-/// also starves the level-set SpTRSV in between (sleeping team, forward
-/// 130 -> 226 ms). Do NOT raise it to make mid-size problems "cache-friendly
-/// serial".
-inline constexpr Eigen::Index fused_omp_min() noexcept { return 2000; }
-
 /// Per-thread stride (in doubles) of the partial-sum buffer: one cache line
 /// per thread, so the single end-of-chunk write never false-shares.
 inline constexpr int kPartStride = 8;
@@ -78,7 +61,7 @@ static_chunk(Eigen::Index n, int tid, int nt) noexcept {
 
 /// Number of doubles the partial buffer must hold: omp_get_max_threads() is,
 /// per the OpenMP spec, an upper bound on the team size of any parallel
-/// region encountered next without a num_threads clause -- so `kPartStride`
+/// region encountered next using cpu_solve_threads -- so `kPartStride`
 /// doubles per that many threads always suffices. Callers keep the buffer
 /// as reusable workspace so repeated solves stay allocation-free.
 inline std::size_t part_capacity() noexcept {
@@ -89,8 +72,7 @@ inline std::size_t part_capacity() noexcept {
     return static_cast<std::size_t>(nt) * kPartStride;
 }
 
-/// Thread id / team size inside a parallel region (0 / 1 when the `if`
-/// clause disabled the team, or without OpenMP).
+/// Thread id / team size inside a parallel region (0 / 1 for a serial team).
 inline void omp_ids(int& tid, int& nt) noexcept {
     tid = 0; nt = 1;
 #ifdef _OPENMP
@@ -109,7 +91,8 @@ inline double reduce_parts(const double* part, int nt, int slot = 0) noexcept {
 /// part_capacity() doubles. Fixed 4-way accumulator split per chunk.
 inline double det_sum(const double* v, Eigen::Index n, double* part) {
     int nt_used = 1;
-    #pragma omp parallel if(n > fused_omp_min())
+    const int workers = cpu_solve_threads(n);
+    #pragma omp parallel if(workers > 1) num_threads(workers)
     {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
@@ -454,10 +437,11 @@ private:
         // b·z products are summed in thread order (deterministic).
         const node_index* P = F_.perm.data();
         const Eigen::Index n = n_;
+        const int workers = detail::cpu_solve_threads(n);
         double* part = part_.data();
         auto gather_out = [&](const double* src, double shift) {
             int nt_used = 1;
-            #pragma omp parallel if(n > detail::fused_omp_min())
+            #pragma omp parallel if(workers > 1) num_threads(workers)
             {
                 int tid, nt; detail::omp_ids(tid, nt);
                 if (tid == 0) nt_used = nt;
@@ -489,7 +473,7 @@ private:
 
         if (F_.sddm) {
             // ── SDDM path: full-rank factor, no centering ──
-            #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
+            #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
             for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
             if (cp_) (*cp_)("permute");
 
@@ -532,11 +516,11 @@ private:
                 // Input centering fused into the permute scatter:
                 // z[P[v]] = b[v] - mean(b), mean from the caller's Σb.
                 const double b_mean = b_sum / static_cast<double>(n);
-                #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
+                #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
                 for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v] - b_mean;
             } else {
                 // Skipped application: plain scatter (b_sum unused).
-                #pragma omp parallel for schedule(static) if(n > detail::fused_omp_min())
+                #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
                 for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
             }
             if (cp_) (*cp_)("permute");

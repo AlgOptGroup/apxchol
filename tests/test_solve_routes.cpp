@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include "scoped_env.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
@@ -14,6 +15,12 @@
 #include <vector>
 
 namespace {
+
+#if defined(APXCHOL_USE_METAL)
+constexpr int cpu_guard_rows = 32 * 1024;
+#elif defined(APXCHOL_USE_CUDA)
+constexpr int cpu_guard_rows = 1;
+#endif
 
 Eigen::SparseMatrix<double> operator_matrix(int n = 65) {
     std::vector<Eigen::Triplet<double>> entries;
@@ -112,39 +119,49 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
         SCOPED_TRACE(i);
         EXPECT_EQ(apxchol::detail::select_solve_backend(cases[i]), expected);
         const auto result = apxchol::solve(matrix, rhs, cases[i]);
-        EXPECT_EQ(result.backend, expected);
+        EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
         expect_solution(matrix, rhs, result);
     }
 }
 
-TEST(SolveRoutes, TinyAutomaticUsesCpuWithoutPrewarming) {
+TEST(SolveRoutes, ScalarAutomaticUsesCpuWithoutPrewarming) {
     scoped_env storage("APXCHOL_FACTOR_STORAGE", "auto");
 #if defined(APXCHOL_USE_CUDA)
     const bool started = apxchol::cuda_ctx::detail::state().started;
 #endif
-    for (const int n : {1, 64}) {
-        SCOPED_TRACE(n);
-        const auto matrix = operator_matrix(n);
-        const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(n);
-        apxchol::solve_options options;
-        EXPECT_EQ(apxchol::detail::select_solve_backend(options, &matrix),
-                  apxchol::solve_backend::cpu);
-        apxchol::solver owner(matrix, options);
-        EXPECT_EQ(owner.backend(), apxchol::solve_backend::cpu);
-        EXPECT_EQ(owner.factor_storage(), apxchol::factor_storage_type::fp32);
-        expect_solution(matrix, rhs, owner.solve(rhs));
-        if (apxchol::omp_sptrsv::fp16_supported()) {
-            options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
-            apxchol::solver half(matrix, options);
-            EXPECT_EQ(half.backend(), apxchol::solve_backend::cpu);
-            EXPECT_EQ(half.factor_storage(), apxchol::factor_storage_type::fp16);
-            expect_solution(matrix, rhs, half.solve(rhs));
-        }
+    const auto matrix = operator_matrix(1);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(1);
+    apxchol::solve_options options;
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &matrix),
+              apxchol::solve_backend::cpu);
+    apxchol::solver owner(matrix, options);
+    EXPECT_EQ(owner.backend(), apxchol::solve_backend::cpu);
+    EXPECT_EQ(owner.factor_storage(), apxchol::factor_storage_type::fp32);
+    expect_solution(matrix, rhs, owner.solve(rhs));
+    if (apxchol::omp_sptrsv::fp16_supported()) {
+        options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
+        apxchol::solver half(matrix, options);
+        EXPECT_EQ(half.backend(), apxchol::solve_backend::cpu);
+        EXPECT_EQ(half.factor_storage(), apxchol::factor_storage_type::fp16);
+        expect_solution(matrix, rhs, half.solve(rhs));
     }
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
 #endif
 }
+
+#if defined(APXCHOL_USE_METAL) || defined(APXCHOL_USE_CUDA)
+TEST(SolveRoutes, AutomaticCpuGuardBoundary) {
+    scoped_env storage("APXCHOL_FACTOR_STORAGE", "auto");
+    const apxchol::solve_options options;
+    const auto at_boundary = operator_matrix(cpu_guard_rows);
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &at_boundary),
+              apxchol::solve_backend::cpu);
+    const auto above_boundary = operator_matrix(cpu_guard_rows + 1);
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &above_boundary),
+              apxchol::detail::select_solve_backend(options));
+}
+#endif
 
 #if defined(APXCHOL_USE_METAL)
 TEST(SolveRoutes, MetalGpuSupportsFp32AndFp16Storage) {
@@ -265,7 +282,7 @@ TEST(SolveRoutes, AutomaticAndExplicitGpuUseOwnedSetup) {
 #else
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) GTEST_SKIP() << "CUDA unavailable";
-    const auto matrix = operator_matrix();
+    const auto matrix = operator_matrix(std::max(65, cpu_guard_rows + 1));
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (const auto backend : {apxchol::solve_backend::automatic, apxchol::solve_backend::gpu}) {
         for (const auto sampler : {apxchol::clique_sampler::gks, apxchol::clique_sampler::trace_cycle}) {
@@ -291,7 +308,7 @@ TEST(SolveRoutes, UnsupportedStoredLayoutSelectsCpuBeforeSetup) {
 #else
     for (bool stored_zero : {false, true}) {
         SCOPED_TRACE(stored_zero);
-        auto matrix = operator_matrix();
+        auto matrix = operator_matrix(std::max(65, cpu_guard_rows + 1));
         if (stored_zero) {
             // Numerically symmetric, but the device builder needs stored mates.
             matrix.coeffRef(0, 2) = 0.0;
@@ -312,7 +329,7 @@ TEST(SolveRoutes, UnsupportedStoredLayoutSelectsCpuBeforeSetup) {
 
 #if defined(APXCHOL_USE_METAL)
 TEST(SolveRoutes, OperatorOutsideMetalRangeSelectsCpuBeforeSetup) {
-    Eigen::SparseMatrix<double> matrix(65, 65);
+    Eigen::SparseMatrix<double> matrix(cpu_guard_rows + 1, cpu_guard_rows + 1);
     matrix.setIdentity();
     matrix *= 0x1p104;
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
@@ -338,7 +355,7 @@ TEST(SolveRoutes, HiddenDeviceUsesCpuAutomaticallyAndRejectsExplicitGpu) {
     const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
     if (!visible || std::string(visible) != "-1")
         GTEST_SKIP() << "exercised by solve_routes_no_cuda_device in a fresh hidden-device process";
-    const auto matrix = operator_matrix();
+    const auto matrix = operator_matrix(std::max(65, cpu_guard_rows + 1));
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     apxchol::solve_options options;
     EXPECT_EQ(apxchol::detail::select_solve_backend(options), apxchol::solve_backend::cpu);

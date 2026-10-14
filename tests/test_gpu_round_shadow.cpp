@@ -3262,6 +3262,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         for (int i = 0; i < exact.size(); ++i) exact[i] = std::sin(i + 0.25);
         Eigen::VectorXd b = A * exact;
         apxchol::solve_options options; options.tol = 1e-8; options.max_iter = 1000;
+        options.backend = apxchol::solve_backend::gpu;
         options.factor_opts = factor_options;
         const auto solved = apxchol::solve(A, b, options);
         EXPECT_LE((A * solved.x - b).norm() / b.norm(), 1e-8);
@@ -3528,6 +3529,7 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         Eigen::VectorXd exact(A.rows());for(int i=0;i<exact.size();++i)exact[i]=std::sin(i+.25);
         const Eigen::VectorXd b=A*exact;
         apxchol::solve_options opts;opts.tol=1e-8;opts.max_iter=1000;
+        opts.backend=apxchol::solve_backend::gpu;
         opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
         testing::internal::CaptureStderr();
         const auto result=apxchol::solve(A,b,opts);
