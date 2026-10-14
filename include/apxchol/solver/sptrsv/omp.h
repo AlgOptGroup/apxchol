@@ -27,7 +27,7 @@
 
 namespace apxchol {
 
-// Minimum level-set size before engaging OpenMP for SpTRSV.
+// Minimum factor or level-set size before engaging OpenMP for SpTRSV.
 // Below this threshold, the thread-dispatch overhead exceeds the
 // computational benefit of parallelizing a single level's rows/cols.
 inline constexpr node_index kSpTRSVOMPThreshold = 1024;
@@ -164,7 +164,8 @@ private:
 /// forward_solve / transpose_solve are thin wrappers that branch on the
 /// storage the last setup() chose -- ONCE per solve, never per row.
 ///
-/// Levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
+/// Whole factors at or below kSpTRSVOMPThreshold run serially. Otherwise,
+/// levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
 /// `omp single` (4-way scalar kernel dot_thin); larger ("fat") levels are an
 /// `omp for schedule(static)` (plain scalar loop on fp32, SIMD dot_fat_simd
 /// on fp16 storage); one barrier per level either way (num_barriers()). A
@@ -779,7 +780,8 @@ private:
         const auto mode = detail::cpu_sptrsv_schedule_from_env();
         unsigned processors = 1;
 #ifdef _OPENMP
-        processors = static_cast<unsigned>(std::max(1, omp_get_max_threads()));
+        if (m_ > kSpTRSVOMPThreshold)
+            processors = static_cast<unsigned>(std::max(1, omp_get_max_threads()));
 #endif
         hybrid_active_ = false;
         hybrid_fwd_level_end_ = 0;
@@ -805,7 +807,7 @@ private:
     // thin levels. Preserve the established bulk level-set schedule for that
     // prefix and build a critical-parent plan only for the tail rows. Forward
     // executes prefix -> tail; backward's level sequence is reversed and executes
-    // tail -> prefix. No input-size or whole-factor mean-width gate is involved.
+    // tail -> prefix.
     template <class Mark>
     void build_hybrid_tail(unsigned processors, Mark&& mark) {
         if (processors <= 1 || !round_levels_active_ || round_level_count_ == 0)
@@ -1114,6 +1116,9 @@ private:
 
     template <class Dir, class V>
     void solve_selected(const double* x_in, double* y_out) const {
+        if (m_ <= kSpTRSVOMPThreshold)
+            return solve_levelset_range_serial<Dir, V>(
+                x_in, y_out, 0, base_level_count<Dir>());
         if (hybrid_active_)
             solve_hybrid<Dir, V>(x_in, y_out);
         else
@@ -1382,9 +1387,9 @@ private:
 
 public:
     bool uses_hybrid_schedule() const { return hybrid_active_; }
-    // Barriers one solve in that direction executes: one per level (thin or
-    // fat) under the level-set schedule -- the critical-path length of a solve.
+    // Synchronization steps in the chosen schedule; small factors run serially.
     std::size_t num_barriers(bool fwd) const {
+        if (m_ <= kSpTRSVOMPThreshold) return 0;
         if (hybrid_active_)
             return critical_plan_.steps +
                 (fwd ? hybrid_fwd_level_end_

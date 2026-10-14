@@ -353,8 +353,8 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
         EXPECT_EQ(sizes, expected_fwd);
         implicit.level_stats(false, sizes, work);
         EXPECT_EQ(sizes, expected_bck);
-        EXPECT_EQ(implicit.num_barriers(true), expected_fwd.size());
-        EXPECT_EQ(implicit.num_barriers(false), expected_bck.size());
+        EXPECT_EQ(implicit.num_barriers(true), 0u);
+        EXPECT_EQ(implicit.num_barriers(false), 0u);
         EXPECT_LT(implicit.memory_bytes(), materialized.memory_bytes());
 
         const pair_out reference = solve_pair(materialized, x);
@@ -615,12 +615,13 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
     }
 }
 
-TEST(CriticalSchedule, AutoUsesAnyThinSuffixWithRoundsAndMultipleThreads) {
+TEST(CriticalSchedule, AutoUsesThinSuffixAboveSerialThreshold) {
     scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
     scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
     scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
     std::vector<node_index> bounds;
-    const sparse_csc L = make_round(13, 8, 111, bounds);
+    const sparse_csc L = make_round(130, 8, 111, bounds);
+    ASSERT_GT(L.rows(), apxchol::kSpTRSVOMPThreshold);
 
     set_threads(4);
     apxchol::omp_sptrsv parallel;
@@ -638,4 +639,33 @@ TEST(CriticalSchedule, AutoUsesAnyThinSuffixWithRoundsAndMultipleThreads) {
     serial.setup(L, L.rows());
     EXPECT_FALSE(serial.uses_hybrid_schedule());
     set_threads(4);
+}
+
+TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+    set_threads(4);
+    for (const char* storage : {"float32", "float16"}) {
+        if (std::string_view(storage) == "float16" && !apxchol::omp_sptrsv::fp16_supported())
+            continue;
+        scoped_env storage_mode("APXCHOL_FACTOR_STORAGE", storage);
+        for (node_index n : {node_index{64}, apxchol::kSpTRSVOMPThreshold}) {
+            SCOPED_TRACE(std::string(storage) + " n=" + std::to_string(n));
+            std::vector<node_index> bounds;
+            const sparse_csc L = make_round(n / 8, 8, 112, bounds);
+            apxchol::omp_sptrsv trsv;
+            trsv.set_round_bounds(bounds);
+            trsv.setup(L, n);
+            EXPECT_FALSE(trsv.uses_hybrid_schedule());
+            EXPECT_EQ(trsv.num_barriers(true), 0u);
+            EXPECT_EQ(trsv.num_barriers(false), 0u);
+            const auto x = random_x(n, 113);
+            const auto reference = solve_pair(trsv, x);
+            if (std::string_view(storage) == "float32") expect_correct_pair(L, x, reference);
+#ifdef _OPENMP
+            expect_same_bytes(reference, solve_pair_with_forced_team_mismatch(trsv, x),
+                              "small factor in a nested team");
+#endif
+        }
+    }
 }
