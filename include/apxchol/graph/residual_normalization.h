@@ -65,9 +65,8 @@ residual_normalization_result normalize_residual_importance(
         for (double partial : partials) sum += partial;
         return sum;
     };
-    int team = 1;
 #ifdef _OPENMP
-    team = static_cast<int>(std::min(blocks,
+    const int team = static_cast<int>(std::min(blocks,
         static_cast<std::size_t>(std::max(1, omp_get_max_threads()))));
 #endif
     bool advance = false;
