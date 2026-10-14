@@ -1,4 +1,4 @@
-"""apxchol — CPU approximate-Cholesky preconditioner for Laplacian/SDDM systems.
+"""apxchol — approximate-Cholesky preconditioner for Laplacian/SDDM systems.
 
 Public API:
     apxchol.factorize(A, **opts)  ->  Solver       (alias: apxchol.solver)
@@ -116,7 +116,7 @@ class Solver:
     Options (all keyword-only) are documented on :func:`factorize`.
     """
 
-    def __init__(self, A, *, seed=42, partitioner="block_greedy",
+    def __init__(self, A, *, backend="auto", seed=42, partitioner="block_greedy",
                  storage="vec_pool_aos", keep_factor=True,
                  factor_storage_dtype=None, **advanced):
         csc = _to_csc(A)
@@ -124,7 +124,7 @@ class Solver:
         self._nnz_A = int(csc.nnz)
         self._keep_factor = bool(keep_factor)
         data = np.ascontiguousarray(csc.data, dtype=np.float64)
-        options = dict(seed=int(seed), partitioner=str(partitioner),
+        options = dict(backend=str(backend), seed=int(seed), partitioner=str(partitioner),
                        storage=str(storage), keep_factor=self._keep_factor)
         options.update(advanced)
         if factor_storage_dtype is not None:
@@ -137,6 +137,11 @@ class Solver:
     @property
     def shape(self):
         return (self._n, self._n)
+
+    @property
+    def backend(self) -> str:
+        """Backend selected at construction: ``"cpu"`` or ``"gpu"``."""
+        return self._impl.backend()
 
     @property
     def sddm(self) -> bool:
@@ -172,26 +177,29 @@ class Solver:
 
     # ── solving ──────────────────────────────────────────────────────────────
 
+    def _vector(self, value, name):
+        if np.iscomplexobj(value):
+            raise ValueError(f"{name} must be real; apxchol solves real symmetric systems")
+        value = np.ascontiguousarray(value, dtype=np.float64).ravel()
+        if value.size != self._n:
+            raise ValueError(f"{name} has length {value.size}, expected {self._n}")
+        if not np.isfinite(value).all():
+            raise ValueError(f"{name} must be finite")
+        return value
+
     def solve(self, b, tol=None, maxiter=DEFAULT_MAXITER, *, rtol=None,
               x0=None, out=None) -> SolveResult:
         """PCG-solve A x = b to relative residual `rtol` (`tol` is an alias).
 
         `x0` is an optional initial guess (an exact one returns iters == 0).
         `out`, if given, must be a writable C-contiguous float64 array of
-        length n: the solution is written into it (no per-solve allocation)
-        and returned as `SolveResult.x`.
+        length n: the solution is written into it and returned as `SolveResult.x`.
+        CPU solves reuse their workspace; GPU solves may allocate temporary output
+        storage and copy the result to this host array.
         """
-        if np.iscomplexobj(b):
-            raise ValueError("b must be real; apxchol solves real symmetric systems")
-        b = np.ascontiguousarray(b, dtype=np.float64).ravel()
-        if b.shape[0] != self._n:
-            raise ValueError(f"b has length {b.shape[0]}, expected {self._n}")
+        b = self._vector(b, "b")
         if x0 is not None:
-            if np.iscomplexobj(x0):
-                raise ValueError("x0 must be real; apxchol solves real symmetric systems")
-            x0 = np.ascontiguousarray(x0, dtype=np.float64).ravel()
-            if x0.shape[0] != self._n:
-                raise ValueError(f"x0 has length {x0.shape[0]}, expected {self._n}")
+            x0 = self._vector(x0, "x0")
         # rtol is the canonical (SciPy) name; tol is kept as a legacy alias.
         eff = rtol if rtol is not None else (tol if tol is not None else DEFAULT_TOL)
         res = self._impl.solve(b, float(eff), int(maxiter), x0, out)
@@ -201,12 +209,7 @@ class Solver:
         )
 
     def apply(self, r) -> np.ndarray:
-        if np.iscomplexobj(r):
-            raise ValueError("r must be real; apxchol solves real symmetric systems")
-        r = np.ascontiguousarray(r, dtype=np.float64).ravel()
-        if r.shape[0] != self._n:
-            raise ValueError(f"r has length {r.shape[0]}, expected {self._n}")
-        return self._impl.apply(r)
+        return self._impl.apply(self._vector(r, "r"))
 
     def aslinearoperator(self) -> LinearOperator:
         return LinearOperator(shape=self.shape, matvec=self.apply, dtype=np.float64)
@@ -294,7 +297,7 @@ class Solver:
         return (2 * self.factor_nnz - self._n) / self._nnz_A
 
 
-def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
+def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage="vec_pool_aos",
               keep_factor=True, factor_storage_dtype=None, **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
@@ -312,6 +315,11 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
         otherwise valid operator are repaired by M-matrix lumping when the
         PRECONDITIONER is built (see :attr:`Solver.lumped`); the PCG still
         applies `A` itself, so the residual is for the system you passed.
+    backend : {"auto", "cpu", "gpu"}
+        Auto prefers CPU for at most 64 rows if it supports the requested storage;
+        otherwise it checks GPU compatibility. Read the resolved choice from
+        ``Solver.backend``. An explicit GPU request fails when the
+        installed build, hardware or options cannot support it.
     seed : int
         RNG seed for the randomized clique sampling (factorization is
         deterministic per seed at one thread only).
@@ -332,11 +340,12 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
     factor_storage_dtype : numpy dtype, dtype name, or None
         ``np.float16`` or ``np.float32`` (also "float16"/"float32") selects
         triangular-solve value storage for this solver. FP16 stores scaled
-        off-diagonals with FP32 diagonals and scales; it requires x86 AVX/F16C or Apple ARM64.
+        off-diagonals with FP32 diagonals and scales; CPU conversion requires
+        x86 AVX/F16C or Apple ARM64.
         Unsupported FP16 requests raise an error. CPU arithmetic remains FP64;
         constructed factors and exports remain FP32. FP64 factor storage is
         not supported. ``None`` uses ``APXCHOL_FACTOR_STORAGE`` if set, otherwise
-        the CPU's FP32 default.
+        the backend default (CPU/Metal FP32, CUDA FP16).
         Explicit choices override the environment without changing it.
     **advanced
         Passed straight through to the core options: `degree_quantile`,
@@ -346,7 +355,7 @@ def factorize(A, *, seed=42, partitioner="block_greedy", storage="vec_pool_aos",
         `degree_multiplier` only takes effect when `degree_quantile=0`
         (the quantile cap, default 0.2, replaces it).
     """
-    return Solver(A, seed=seed, partitioner=partitioner, storage=storage,
+    return Solver(A, backend=backend, seed=seed, partitioner=partitioner, storage=storage,
                   keep_factor=keep_factor, factor_storage_dtype=factor_storage_dtype,
                   **advanced)
 

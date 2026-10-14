@@ -2,6 +2,7 @@
 #include "apxchol/types.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/big_alloc.h"
+#include "apxchol/solver/detail/cpu_parallel.h"
 #include "apxchol/solver/sptrsv/critical_schedule.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"   // the compacting drop (shared with the CUDA backend)
 #include "apxchol/solver/sptrsv/transpose.h"     // the CSC -> CSR transpose (shared with the CUDA backend)
@@ -27,7 +28,7 @@
 
 namespace apxchol {
 
-// Minimum level-set size before engaging OpenMP for SpTRSV.
+// Minimum level-set size before sharing a level among SpTRSV workers.
 // Below this threshold, the thread-dispatch overhead exceeds the
 // computational benefit of parallelizing a single level's rows/cols.
 inline constexpr node_index kSpTRSVOMPThreshold = 1024;
@@ -164,7 +165,8 @@ private:
 /// forward_solve / transpose_solve are thin wrappers that branch on the
 /// storage the last setup() chose -- ONCE per solve, never per row.
 ///
-/// Levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
+/// Small factors use the serial kernel. In a parallel solve,
+/// levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
 /// `omp single` (4-way scalar kernel dot_thin); larger ("fat") levels are an
 /// `omp for schedule(static)` (plain scalar loop on fp32, SIMD dot_fat_simd
 /// on fp16 storage); one barrier per level either way (num_barriers()). A
@@ -411,6 +413,12 @@ private:
     void setup_impl(const sparse_csc& L, node_index m, sparse_csc* consumed) {
         constexpr bool kScaled = std::is_same_v<V, _Float16>;   // narrow_value / stored_diag read s_j
         m_ = m;
+#ifdef __APPLE__
+        team_rows_ = m;
+#else
+        // Keep the outer solve team when one Laplacian row is grounded.
+        team_rows_ = m < L.rows() && L.rows() - m == 1 ? L.rows() : m;
+#endif
         const bool trace = std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
         auto now = []() {
             return std::chrono::duration<double, std::milli>(
@@ -777,10 +785,7 @@ private:
     template <class Mark>
     void build_schedule(Mark&& mark) {
         const auto mode = detail::cpu_sptrsv_schedule_from_env();
-        unsigned processors = 1;
-#ifdef _OPENMP
-        processors = static_cast<unsigned>(std::max(1, omp_get_max_threads()));
-#endif
+        const unsigned processors = detail::cpu_solve_threads(team_rows_);
         hybrid_active_ = false;
         hybrid_fwd_level_end_ = 0;
         hybrid_bck_level_begin_ = 0;
@@ -805,7 +810,7 @@ private:
     // thin levels. Preserve the established bulk level-set schedule for that
     // prefix and build a critical-parent plan only for the tail rows. Forward
     // executes prefix -> tail; backward's level sequence is reversed and executes
-    // tail -> prefix. No input-size or whole-factor mean-width gate is involved.
+    // tail -> prefix.
     template <class Mark>
     void build_hybrid_tail(unsigned processors, Mark&& mark) {
         if (processors <= 1 || !round_levels_active_ || round_level_count_ == 0)
@@ -1114,10 +1119,16 @@ private:
 
     template <class Dir, class V>
     void solve_selected(const double* x_in, double* y_out) const {
-        if (hybrid_active_)
+        const unsigned processors = detail::cpu_solve_threads(team_rows_);
+        if (processors == 1)
+            return solve_levelset_range_serial<Dir, V>(
+                x_in, y_out, 0, base_level_count<Dir>());
+        // A critical plan fixes its lane count at setup. Respect a caller's
+        // changed thread limit through the base levels instead of that plan.
+        if (hybrid_active_ && processors == critical_plan_.processors)
             solve_hybrid<Dir, V>(x_in, y_out);
         else
-            solve_levelset<Dir, V>(x_in, y_out);
+            solve_levelset<Dir, V>(x_in, y_out, processors);
     }
 
     template <class Dir, class V>
@@ -1265,17 +1276,17 @@ private:
     // order); fat level -> `omp for schedule(static)` over its rows; the
     // implicit barrier of each carries the level dependency.
     template <class Dir, class V>
-    void solve_levelset(const double* x_in, double* y_out) const {
+    void solve_levelset(const double* x_in, double* y_out, unsigned processors) const {
         solve_levelset_range<Dir, V>(
-            x_in, y_out, 0, base_level_count<Dir>());
+            x_in, y_out, 0, base_level_count<Dir>(), processors);
     }
 
     template <class Dir, class V>
     void solve_levelset_range(const double* x_in, double* y_out,
                               std::size_t first_level,
-                              std::size_t level_end) const {
+                              std::size_t level_end, unsigned processors) const {
         if (first_level == level_end) return;
-        #pragma omp parallel
+        #pragma omp parallel num_threads(processors)
         {
             solve_levelset_range_team<Dir, V>(
                 x_in, y_out, first_level, level_end);
@@ -1382,10 +1393,11 @@ private:
 
 public:
     bool uses_hybrid_schedule() const { return hybrid_active_; }
-    // Barriers one solve in that direction executes: one per level (thin or
-    // fat) under the level-set schedule -- the critical-path length of a solve.
+    // Synchronization steps in the chosen schedule; small factors run serially.
     std::size_t num_barriers(bool fwd) const {
-        if (hybrid_active_)
+        const unsigned processors = detail::cpu_solve_threads(team_rows_);
+        if (processors == 1) return 0;
+        if (hybrid_active_ && processors == critical_plan_.processors)
             return critical_plan_.steps +
                 (fwd ? hybrid_fwd_level_end_
                      : base_level_count<bck_dir>() - hybrid_bck_level_begin_);
@@ -1467,6 +1479,7 @@ public:
 
 private:
     node_index m_ = 0;
+    node_index team_rows_ = 0;
     bool ready_ = false;
     bool fp16_  = false;   // the storage the last setup() resolved
 

@@ -8,6 +8,7 @@ struct Params {
     unsigned iter;      // 1-based PCG iteration
     unsigned window;    // stagnation window, 0 = off
     unsigned m;         // factor dimension
+    unsigned spmv_lanes; // threads per operator row, 1 or kTreeLanes
 };
 enum : unsigned { kTreeRows = 256, kTreeLanes = 16 };
 )

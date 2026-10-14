@@ -11,8 +11,10 @@
 #include "apxchol/solver/sptrsv/omp.h"
 #include <cuda_runtime_api.h>
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <future>
 #include <memory>
@@ -29,9 +31,10 @@ struct edge { node_index u, v; double weight; };
 struct complete_factor {
     apxchol::detail::gpu_round_shadow_device_state state;
     apxchol::factorization reference;
+    apxchol::factorization exported;
 
     complete_factor(node_index n, std::span<const edge> edges,
-                    std::span<const node_index> order) {
+                    std::span<const node_index> order, bool keep_factor = false) {
         apxchol::detail::gpu_round_shadow_input input;
         input.vertex_count = n;
         input.active.assign(n, 1);
@@ -60,7 +63,9 @@ struct complete_factor {
         for (node_index i = 0; i < n; ++i) perm[order[i]] = i;
         EXPECT_THROW(state.finalize_device_factor(perm, n), std::logic_error);
         const auto log = state.download_factor_log();
-        const auto headers = state.complete_owned_factorization_for_test();
+        std::vector<apxchol::detail::factor_entry> retained;
+        const auto headers = state.complete_owned_factorization_for_test(
+            keep_factor ? &retained : nullptr);
         if (headers.size() != n || log.columns.size() != n)
             throw std::logic_error("owned test factor did not eliminate every vertex");
         std::vector<std::vector<apxchol::detail::factor_entry>> entries(n);
@@ -76,6 +81,13 @@ struct complete_factor {
         apxchol::detail::build_csc(reference, columns, n, nullptr);
         reference.sddm = true;
         EXPECT_EQ(reference.perm, perm);
+        if (keep_factor) {
+            columns.clear();
+            for (const auto& c : headers)
+                columns.push_back({c.vertex, c.diag,
+                    c.entry_count ? retained.data() + c.entry_begin : nullptr, c.entry_count});
+            apxchol::detail::build_csc(exported, columns, n, nullptr);
+        }
     }
 };
 
@@ -147,7 +159,16 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
         {5, 6, 0x1p-130}, {6, 7, 0x1p-129}, {7, 8, 0.00009999}, {8, 9, 0.25}};
     const std::vector<node_index> order = {0, 2, 1, 3, 4, 5, 6, 7, 8, 9};
     complete_factor fixture(n, edges, order);
+    complete_factor retained(n, edges, order, true);
     const auto& reference = fixture.reference;
+    const auto& export_reference = retained.reference;
+    ASSERT_EQ(retained.exported.L.outer_, export_reference.L.outer_);
+    ASSERT_EQ(retained.exported.L.inner_, export_reference.L.inner_);
+    ASSERT_EQ(retained.exported.perm, export_reference.perm);
+    ASSERT_EQ(retained.exported.L.vals_.size(), export_reference.L.vals_.size());
+    for (std::size_t i = 0; i < export_reference.L.vals_.size(); ++i)
+        ASSERT_EQ(std::bit_cast<std::uint32_t>(retained.exported.L.vals_[i]),
+                  std::bit_cast<std::uint32_t>(export_reference.L.vals_[i]));
     for (const char* fp16 : {"float32", "float16"}) {
         scoped_env storage("APXCHOL_FACTOR_STORAGE", fp16);
         for (const char* rel : {"0", "0.00001", "0.0001", "0.2"}) {
@@ -160,6 +181,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                     ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
                 scoped_env conflicting("APXCHOL_FACTOR_STORAGE", std::string_view(fp16) == "float16" ? "float32" : "float16");
                 auto factor = fixture.state.finalize_device_factor(reference.perm, m, requested);
+                auto retained_factor = retained.state.finalize_device_factor(reference.perm, m, requested);
                 auto lt = apxchol::cuda_host::build_L11_csc_int<float>(reference.L, m);
                 auto scale = apxchol::cuda_host::column_scales(lt);
                 const bool half = std::string_view(fp16) == "float16";
@@ -190,6 +212,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                     append(lt.ptr.data(), m + 1); append(lt.idx.get(), lt.nnz); append(lt.vals.get(), lt.nnz);
                 }
                 EXPECT_EQ(fixture.state.encode_finalized_factor_for_test(*factor), expected);
+                EXPECT_EQ(retained.state.encode_finalized_factor_for_test(*retained_factor), expected);
                 adopted.setup_adopting_device_factor_for_research(std::move(*factor), requested);
                 EXPECT_EQ(adopted.fp16(), std::string_view(fp16) == "float16");
                 const auto& want = ordinary.drop_stats(); const auto& got = adopted.drop_stats();
@@ -272,6 +295,21 @@ TEST(GpuFactorFinalize, PreconditionerInstallsAndReplacesOwnedCapsules) {
         for (int i = 0; i < 4; ++i) expected[i] = work[reference.perm[i]];
         const Eigen::VectorXd observed = preconditioner.solve(b);
         EXPECT_LT((observed - expected).norm() / expected.norm(), 2e-6);
+    }
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        apxchol::factor_options options;
+        options.factor_storage = storage;
+        preconditioner.set_options(options);
+        for (double shift : {0.0, 1.0}) {
+            preconditioner.compute(solve_matrix(64, shift));
+            ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
+            const auto& factor = preconditioner.factor();
+            ASSERT_EQ(factor.L.vals_.size(), factor.L.nonZeros());
+            ASSERT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
+            ASSERT_EQ(factor.L.rows(), 64);
+            EXPECT_EQ(preconditioner.trsv().fp16(), storage == apxchol::factor_storage_type::fp16);
+            if (!factor.sddm) EXPECT_EQ(factor.L.vals_[factor.L.outer_[63]], 1.0f);
+        }
     }
 }
 

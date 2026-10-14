@@ -4,6 +4,7 @@
 // the device. Test-only imports preserve raw incidence order and duplicates.
 
 #include "apxchol/solver/detail/gpu_diagnostics.h"
+#include "apxchol/solver/detail/factor_entry.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/solver/elimination/elimination.h"
 #include "apxchol/solver/gpu_device_selection.h"
@@ -103,16 +104,17 @@ struct gpu_owned_csc_buffers {
 #if !defined(__CUDACC__)
 // Internal eligibility, before any CUDA allocation or mutation.
 inline bool gpu_owned_csc_layout_supported(const Eigen::SparseMatrix<double>& A,
-                                           std::size_t& offdiagonals) {
+                                           std::size_t& offdiagonals,
+                                           bool* has_zero_offdiagonals = nullptr) {
     if (!A.isCompressed() || A.rows() != A.cols() || A.rows() <= 0 ||
         A.rows() >= INT_MAX || A.nonZeros() > INT_MAX) return false;
     const int n = static_cast<int>(A.rows());
     const int* ptr = A.outerIndexPtr();
     const int* idx = A.innerIndexPtr();
     if (ptr[0] != 0 || ptr[n] != A.nonZeros()) return false;
-    bool sorted = true;
+    bool sorted = true, zeros = false;
     offdiagonals = 0;
-    #pragma omp parallel for schedule(static) reduction(&& : sorted) reduction(+ : offdiagonals)
+    #pragma omp parallel for schedule(static) reduction(&& : sorted) reduction(|| : zeros) reduction(+ : offdiagonals)
     for (int v = 0; v < n; ++v) {
         if (ptr[v] < 0 || ptr[v] > ptr[v + 1] || ptr[v + 1] > A.nonZeros()) {
             sorted = false; continue;
@@ -121,8 +123,11 @@ inline bool gpu_owned_csc_layout_supported(const Eigen::SparseMatrix<double>& A,
             if (idx[p] < 0 || idx[p] >= n || (p > ptr[v] && idx[p-1] >= idx[p]))
                 sorted = false;
             offdiagonals += idx[p] != v;
+            if (has_zero_offdiagonals && idx[p] != v && A.valuePtr()[p] == 0.0)
+                zeros = true;
         }
     }
+    if (has_zero_offdiagonals) *has_zero_offdiagonals = zeros;
     return sorted;
 }
 
@@ -254,10 +259,7 @@ inline void validate_owned_factor_columns(
     }
 }
 
-struct gpu_round_shadow_factor_entry {
-    node_index neighbor = 0;
-    factor_value_t value = 0;
-};
+using gpu_round_shadow_factor_entry = factor_entry;
 
 struct gpu_round_shadow_factor_log {
     std::vector<gpu_round_shadow_factor_column> columns;
@@ -1283,7 +1285,7 @@ inline void validate_owned_prefix_handback(const gpu_owned_prefix_handback& hand
 }
 
 #if defined(APXCHOL_USE_CUDA)
-bool gpu_round_shadow_runtime_available() noexcept;
+bool gpu_round_shadow_runtime_available();
 
 struct gpu_owned_sparsify_stats {
     std::size_t physical_before = 0, distinct_before = 0;
@@ -1339,8 +1341,9 @@ public:
         return download_owned_prefix();
     }
     gpu_round_shadow_factor_log download_factor_log() const;
-    std::vector<gpu_round_shadow_factor_column> complete_owned_factorization_for_test() {
-        return download_owned_factor_columns();
+    std::vector<gpu_round_shadow_factor_column> complete_owned_factorization_for_test(
+            std::vector<factor_entry>* entries = nullptr) {
+        return download_owned_factor_columns({}, {}, entries);
     }
 #endif
 
@@ -1355,7 +1358,8 @@ private:
     gpu_round_shadow_report compute_owned_prefix(
         gpu_device_selection selected, std::uint64_t run_seed);
     std::vector<gpu_round_shadow_factor_column> download_owned_factor_columns(
-        std::span<node_index> permutation = {}, std::span<edge_index> raw_offsets = {});
+        std::span<node_index> permutation = {}, std::span<edge_index> raw_offsets = {},
+        std::vector<factor_entry>* entries = nullptr);
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
     friend gpu_owned_csc_test_result gpu_initial_owned_csc_buffers_for_test(
         const gpu_owned_csc_buffers&, double);
@@ -1366,7 +1370,7 @@ private:
     std::unique_ptr<impl> impl_;
 };
 #else
-inline bool gpu_round_shadow_runtime_available() noexcept { return false; }
+inline bool gpu_round_shadow_runtime_available() { return false; }
 #endif
 
 class gpu_round_shadow_session {
@@ -1486,9 +1490,10 @@ public:
 
 #endif
 
-    // Only permutation and raw CSC metadata leave the completed device owner.
-    void complete_owned_factorization(std::vector<node_index>& permutation,
-                                      sparse_csc& metadata) {
+    // Download entries only when the caller requests an exportable host factor.
+    std::vector<gpu_round_shadow_factor_column> complete_owned_factorization(
+            std::vector<node_index>& permutation, sparse_csc& metadata,
+            std::vector<factor_entry>* entries = nullptr) {
         if (!active_ || !owned_rounds_ || owned_materialized_ ||
             !permutation.empty() || !metadata.outer_.empty())
             throw std::logic_error("GPU-owned factorization completion is out of order");
@@ -1496,11 +1501,13 @@ public:
             permutation.resize(factor_log_columns_);
             metadata.resize(static_cast<node_index>(factor_log_columns_),
                             static_cast<node_index>(factor_log_columns_));
-            const auto headers = device_state_->download_owned_factor_columns(
-                permutation, metadata.outer_);
+            auto headers = device_state_->download_owned_factor_columns(
+                permutation, metadata.outer_, entries);
             owned_download_bytes_ = headers.size() * sizeof(gpu_round_shadow_factor_column);
+            owned_entry_download_bytes_ = entries ? entries->size() * sizeof(factor_entry) : 0;
             owned_materialized_ = true;
             owned_complete_ = true;
+            return headers;
         } catch (...) {
             device_state_->reject_device_generation(owned_rounds_);
             throw;
@@ -1548,9 +1555,9 @@ public:
         if (gpu_setup_diagnostics()) std::fprintf(stderr,
             "[gpu-owned-factorization] complete rounds=%zu state_imports=%zu state_reuses=%zu "
             "state_upload_bytes=%zu factor_header_count=%zu factor_header_download_bytes=%zu "
-            "factor_entry_download_bytes=0\n",
+            "factor_entry_download_bytes=%zu\n",
             owned_rounds_, state_imports_, state_reuses_, state_upload_bytes_,
-            factor_log_columns_, owned_download_bytes_);
+            factor_log_columns_, owned_download_bytes_, owned_entry_download_bytes_);
     }
 
 private:
@@ -1558,6 +1565,7 @@ private:
     std::size_t owned_rounds_ = 0;
     bool owned_complete_ = false;
     std::size_t owned_download_bytes_ = 0;
+    std::size_t owned_entry_download_bytes_ = 0;
     std::size_t state_imports_ = 0;
     std::size_t state_reuses_ = 0;
     std::size_t state_upload_bytes_ = 0;

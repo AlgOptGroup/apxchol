@@ -21,8 +21,8 @@ struct solve_options {
     int    stagnation_window = 50;
     graph_storage storage = graph_storage::vec_pool_aos;
     /// Keep the factor's row/value arrays alive after SpTRSV setup so
-    /// cpu_solver::preconditioner().factor().L stays readable (costs one extra
-    /// factor-sized copy in memory; the bindings' L/D/P export needs it).
+    /// solver::factor().L stays readable (costs one extra host factor copy;
+    /// the bindings' L/D/P export needs it, including in CUDA builds).
     bool keep_factor_values = false;
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
@@ -50,7 +50,7 @@ Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 
 /// Reusable CPU solver: factor + SpMV operator built ONCE, then PCG-solve any
 /// number of right-hand sides. Setup, triangular solves and PCG always run on
-/// the CPU, including in CUDA builds. Python/Octave bindings hold one per matrix.
+/// the CPU, including in CUDA builds.
 ///
 ///   cpu_solver slv(L);                       // factorize + build parallel-SpMV operator
 ///   auto r1 = slv.solve(b1);                 // tol/max_iter from opts
@@ -136,7 +136,7 @@ private:
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
 /// Owns its input data; movable, noncopyable, and not safe for concurrent calls.
-/// CUDA uses device-owned setup and does not accept host factors or warm starts.
+/// CUDA uses device-owned setup and does not accept supplied host factors.
 class solver {
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A,
@@ -169,8 +169,8 @@ private:
 };
 
 /// One-shot solve: factorize L, then solve Lx = b via PCG.
-/// Automatic selects the complete GPU route for compatible CUDA configurations,
-/// otherwise CPU (including Metal builds). Explicit GPU selects CUDA's device-owned
+/// Automatic selects GPU when the compiled backend is available and compatible,
+/// otherwise CPU. Explicit GPU selects CUDA's device-owned
 /// route or Metal's host-factor/GPU-solve route, according to the build.
 /// Unsupported inputs and execution failures are errors, never a CPU retry.
 solve_result solve(const Eigen::SparseMatrix<double>& L,

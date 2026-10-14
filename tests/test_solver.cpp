@@ -5,7 +5,9 @@
 #include "scoped_omp_threads.h"
 
 #include <Eigen/Sparse>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -250,7 +252,7 @@ TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
 #endif
 }
 
-TEST(Solver, CudaOwnerRejectsWarmStartsAndHostFactors) {
+TEST(Solver, CudaOwnerRejectsHostFactorsAndInvalidWarmStarts) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
 #else
@@ -267,16 +269,196 @@ TEST(Solver, CudaOwnerRejectsWarmStartsAndHostFactors) {
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
     apxchol::solver owner(matrix, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
-    const Eigen::VectorXd x0 = Eigen::VectorXd::Zero(matrix.rows());
+    Eigen::VectorXd x0 = Eigen::VectorXd::Zero(matrix.rows() - 1);
     EXPECT_THROW(owner.solve(rhs, -1.0, -1, &x0), std::invalid_argument);
     Eigen::VectorXd output(matrix.rows());
     EXPECT_THROW(owner.solve(rhs, output, -1.0, -1, &x0), std::invalid_argument);
     apxchol::solve_result result;
     EXPECT_THROW(owner.solve(rhs, result, -1.0, -1, &x0), std::invalid_argument);
+    x0 = Eigen::VectorXd::Zero(matrix.rows());
+    for (const double value : {std::numeric_limits<double>::infinity(),
+                               std::numeric_limits<double>::quiet_NaN()}) {
+        x0[0] = value;
+        EXPECT_THROW(owner.solve(rhs, result, -1.0, -1, &x0), std::invalid_argument);
+    }
     EXPECT_EQ(owner.backend(), apxchol::solve_backend::gpu);
     const auto recovered = owner.solve(rhs);
     EXPECT_EQ(recovered.backend, apxchol::solve_backend::gpu);
     expect_solution(matrix, rhs, recovered.x);
+#endif
+}
+
+TEST(Solver, CudaWarmStartsPreserveOriginalResidualAndIterationBudget) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    int count = 0;
+    const auto status = cudaGetDeviceCount(&count);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
+        GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+    if (count == 0) GTEST_SKIP() << "No CUDA devices";
+    const scoped_omp_threads threads(1);
+    const scoped_env checkpoints("APXCHOL_NO_CHECKPOINT", nullptr);
+    constexpr int n = 64;
+    // SDDM, connected Laplacian, then two disconnected Laplacian components.
+    for (const int kind : {0, 1, 2}) {
+        std::vector<Eigen::Triplet<double>> entries;
+        const int component_size = kind == 2 ? n / 2 : n;
+        for (int i = 0; i < n; ++i) {
+            entries.emplace_back(i, i, kind == 0 ? 5.0 : 4.0);
+            for (const int offset : {1, 7}) {
+                const int j = i / component_size * component_size
+                    + (i + offset) % component_size;
+                entries.emplace_back(i, j, -1.0);
+                entries.emplace_back(j, i, -1.0);
+            }
+        }
+        Sparse matrix(n, n);
+        matrix.setFromTriplets(entries.begin(), entries.end());
+        const Eigen::VectorXd exact = Eigen::VectorXd::LinSpaced(n, -31.5, 31.5);
+        const Eigen::VectorXd rhs = matrix * exact;
+        const Eigen::VectorXd zero = Eigen::VectorXd::Zero(n);
+        for (const auto storage : {apxchol::factor_storage_type::fp32,
+                                   apxchol::factor_storage_type::fp16}) {
+            SCOPED_TRACE(::testing::Message() << kind << ' ' << static_cast<int>(storage));
+            auto options = cpu_options();
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.factor_storage = storage;
+            apxchol::solver owner(matrix, options);
+            const double shift = kind == 0 ? 0.0 : 8.0;
+            Eigen::VectorXd x0 = exact.array() + shift;
+            auto result = owner.solve(rhs, options.tol, options.max_iter, &x0);
+            EXPECT_EQ(result.iterations, 0);
+            EXPECT_DOUBLE_EQ(result.residual, 0.0);
+            EXPECT_EQ(result.x, exact);
+            if (kind != 0) {
+                const Eigen::VectorXd incompatible = rhs.array() + 1.0;
+                result = owner.solve(incompatible, options.tol, 0, &x0);
+                EXPECT_NEAR(result.residual, std::sqrt(double(n)) / incompatible.norm(), 1e-14);
+                EXPECT_GT(result.residual, options.tol);
+            }
+
+            x0 = ((1.0 - 0x1p-20) * exact).array() + shift;
+            result = owner.solve(rhs, 0x1p-19, options.max_iter, &x0);
+            EXPECT_EQ(result.iterations, 0);
+            EXPECT_NEAR(result.residual, 0x1p-20, 1e-14);
+
+            x0 = (0.25 * exact).array() + shift;
+            result = owner.solve(rhs, options.tol, 0, &x0);
+            EXPECT_EQ(result.iterations, 0);
+            EXPECT_NEAR(result.residual, 0.75, 1e-14);
+            EXPECT_NEAR((matrix * result.x - rhs).norm() / rhs.norm(), result.residual, 1e-14);
+            EXPECT_EQ(result.x, 0.25 * exact);
+            result = owner.solve(rhs, options.tol, 1, &x0);
+            EXPECT_EQ(result.iterations, 1);
+            EXPECT_NEAR((matrix * result.x - rhs).norm() / rhs.norm(), result.residual, 1e-12);
+
+            Eigen::VectorXd output(n);
+            const auto into = owner.solve(rhs, output, options.tol, options.max_iter, &x0);
+            EXPECT_GT(into.iterations, 0);
+            EXPECT_EQ(into.x.size(), 0);
+            expect_solution(matrix, rhs, output);
+            if (kind != 0) EXPECT_NEAR(output.mean(), 0.0, 1e-12);
+            const double before = result.timings.total("pcg");
+            owner.solve(rhs, result, options.tol, options.max_iter, &x0);
+            EXPECT_GT(result.timings.total("pcg"), before);
+            expect_solution(matrix, rhs, result.x);
+
+            const auto cold = owner.solve(rhs);
+            result = owner.solve(rhs, options.tol, options.max_iter, &zero);
+            EXPECT_EQ(result.iterations, cold.iterations);
+            EXPECT_EQ(result.x, cold.x);
+            EXPECT_EQ(result.residual, cold.residual);
+            result = owner.solve(zero, options.tol, 0, &x0);
+            EXPECT_EQ(result.iterations, 0);
+            EXPECT_EQ(result.residual, 0.0);
+            EXPECT_EQ(result.x, zero);
+        }
+    }
+#endif
+}
+
+TEST(Solver, CudaOwnerHonorsStagnationWindow) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    int count = 0;
+    const auto status = cudaGetDeviceCount(&count);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
+        GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+    if (count == 0) GTEST_SKIP() << "No CUDA devices";
+    const scoped_omp_threads threads(1);
+    const Sparse matrix = operator_matrix();
+    const Eigen::VectorXd exact = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    const Eigen::VectorXd rhs = matrix * exact;
+    const Eigen::VectorXd x0 = -1e6 * exact;
+    for (const int window : {1, 0, -1}) {
+        SCOPED_TRACE(window);
+        auto options = cpu_options();
+        options.backend = apxchol::solve_backend::gpu;
+        options.stagnation_window = window;
+        apxchol::solver owner(matrix, options);
+        const auto first = owner.solve(rhs, options.tol, 1, &x0);
+        ASSERT_EQ(first.iterations, 1);
+        ASSERT_GT(first.residual, 0.5);
+        const auto next = owner.solve(rhs, options.tol, 2, &x0);
+        EXPECT_EQ(next.iterations, window > 0 ? 1 : 2);
+        if (window > 0) {
+            EXPECT_EQ(next.x, first.x);
+            EXPECT_EQ(next.residual, first.residual);
+        }
+    }
+#endif
+}
+
+TEST(Solver, CudaScalesRhsAndWarmStartsForFloatPreconditioner) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    int count = 0;
+    const auto status = cudaGetDeviceCount(&count);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
+        GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+    if (count == 0) GTEST_SKIP() << "No CUDA devices";
+    Sparse matrix(16, 16);
+    matrix.setIdentity();
+    const Eigen::VectorXd unit = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                               apxchol::factor_storage_type::fp32}) {
+        auto options = cpu_options();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        apxchol::solver owner(matrix, options);
+        for (const double magnitude : {1e-100, 1.0, 1e100}) {
+            SCOPED_TRACE(::testing::Message() << static_cast<int>(storage) << ' ' << magnitude);
+            const Eigen::VectorXd rhs = magnitude * unit;
+            const Eigen::VectorXd x0 = 0.25 * rhs;
+            const auto cold = owner.solve(rhs);
+            const auto warm = owner.solve(rhs, options.tol, options.max_iter, &x0);
+            for (const auto* result : {&cold, &warm}) {
+                EXPECT_GT(result->iterations, 0);
+                EXPECT_LT(result->residual, options.tol);
+                EXPECT_LT((matrix * result->x - rhs).stableNorm() / rhs.stableNorm(), 1e-9);
+            }
+            const auto exact = owner.solve(rhs, options.tol, 0, &rhs);
+            EXPECT_EQ(exact.iterations, 0);
+            EXPECT_EQ(exact.residual, 0.0);
+            EXPECT_EQ(exact.x, rhs);
+            const auto applied = owner.apply(rhs);
+            EXPECT_LT((applied - rhs).stableNorm() / rhs.stableNorm(), 1e-6);
+        }
+        for (const double value : {std::numeric_limits<double>::infinity(),
+                                   std::numeric_limits<double>::quiet_NaN()}) {
+            const Eigen::VectorXd invalid = Eigen::VectorXd::Constant(matrix.rows(), value);
+            EXPECT_THROW(owner.solve(invalid), std::invalid_argument);
+            EXPECT_THROW(owner.apply(invalid), std::invalid_argument);
+        }
+        const Eigen::VectorXd tiny = 1e-100 * unit, huge = 1e200 * unit;
+        EXPECT_THROW(owner.solve(tiny, options.tol, 0, &huge), std::invalid_argument);
+    }
 #endif
 }
 

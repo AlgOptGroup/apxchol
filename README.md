@@ -45,12 +45,6 @@ operator and workspace. `cpu_solver` and Eigen's `apxchol::apx_cholesky` always
 use CPU setup and solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
-With `-DAPXCHOL_DEVICE=METAL` (macOS), `--backend gpu` and
-`solve_options::backend = solve_backend::gpu` select the Apple GPU.
-Automatic selection stays on CPU. Pass `{.backend = apxchol::solve_backend::gpu}`
-to `solver` to reuse a Metal factor and workspace.
-Metal supports FP32 and FP16 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
-
 The `apxchol_c` target provides an exception-safe [C ABI](include/apxchol/c_api.h)
 with reusable solver and factor handles, factor export and explicit status codes.
 It supports CPU solves and, with `APXCHOL_DEVICE=METAL`, `APXCHOL_BACKEND_METAL`.
@@ -64,9 +58,13 @@ pip install apxchol                 # or: pip install -e python
 ```
 
 ```python
-solver = apxchol.factorize(A)
+solver = apxchol.factorize(A, backend="auto")
 result = solver.solve(b, rtol=1e-8)
 ```
+
+Linux wheels include CUDA; macOS arm64 wheels include Metal. Both retain CPU
+support. GPU use requires a compatible device and driver, but no CUDA Toolkit
+installation. `solver.backend` reports the selected backend.
 
 Bindings expect assembled operators. Use `apxchol.laplacian(Adj)` in Python
 or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
@@ -90,20 +88,16 @@ does not change the outer PCG to FP16. See [precision and storage](docs/precisio
 its default. Trace-cycle supports CPU setup and full GPU-owned setup.
 `solve_options.backend` (`solve_backend::automatic`, `cpu`, or `gpu`) and CLI
 `--backend auto|cpu|gpu` select a complete setup/solve route. The default `auto`
-selects GPU in a CUDA build for supported block-greedy/AoS options with 32-bit
-nodes and no factor export; other configurations select CPU. This is an option
-compatibility policy, not a speed predictor or device-availability probe.
+uses CPU for scalar systems and for Metal inputs of at most 32,768 rows when CPU supports the requested storage. Otherwise selection follows device availability, input and option compatibility.
 `solve_result.backend` and the CLI report the actual route.
 
-The CUDA route requires device-owned factor and operator construction. Unsupported
-stored formats, unavailable devices, allocation failures and execution errors are
-reported without retrying on CPU. Use `--backend cpu` (or `solve_backend::cpu`)
-for CPU execution in a CUDA build, including lower-only or otherwise unsupported
-CSC layouts. CUDA operator input must be compressed, sorted, unique and fully
-paired. Ordinary CUDA solves no longer need the three per-stage environment flags;
-those flags remain low-level diagnostic controls. Public factorization, custom
-strategies and factor export stay available on CPU. See the
-[extension guide](docs/extending.md) for explicit factor handoff.
+Explicit GPU requests fail if unsupported. Once selected, GPU setup or execution
+errors are reported without retrying on CPU. CUDA requires compressed, sorted,
+unique and fully paired CSC input and uses device-owned factorization. It supports
+warm starts and optionally downloads an FP32 factor for export. Metal uses host
+factorization and supports FP32/FP16 storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
+Public `factorize()` and custom CPU strategies remain available independently;
+see the [extension guide](docs/extending.md) for explicit factor handoff.
 
 ### Threads and placement
 

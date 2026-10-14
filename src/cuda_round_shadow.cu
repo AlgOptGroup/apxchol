@@ -1178,7 +1178,7 @@ __global__ void merge_survivors_and_fill(
     if (local < size) {
         const auto edge = local < left_size ? survivors[left_begin + local]
             : fill[right_begin + local - left_size];
-        tile[local] = {edge.owner, edge.neighbor, edge.weight};
+        tile[local] = tile_incidence{edge.owner, edge.neighbor, edge.weight};
     }
     __syncthreads();
     unsigned long long topology = 0;
@@ -1646,14 +1646,26 @@ void require_valid_device_selection(std::uint32_t status) {
 
 } // namespace
 
-bool gpu_round_shadow_runtime_available() noexcept {
+bool gpu_round_shadow_runtime_available() {
+    auto usable = [](cudaError_t status) {
+        switch (status) {
+        case cudaErrorNoDevice:
+        case cudaErrorInsufficientDriver:
+        case cudaErrorSystemDriverMismatch:
+        case cudaErrorInvalidDeviceFunction:
+        case cudaErrorNoKernelImageForDevice:
+        case cudaErrorUnsupportedPtxVersion:
+            cudaGetLastError();
+            return false;
+        default:
+            cuda_check(status, "query device compatibility");
+            return true;
+        }
+    };
     int count = 0;
-    const cudaError_t status = cudaGetDeviceCount(&count);
-    if (status != cudaSuccess) {
-        cudaGetLastError();
-        return false;
-    }
-    return count > 0;
+    if (!usable(cudaGetDeviceCount(&count)) || count == 0) return false;
+    cudaFuncAttributes attributes;
+    return usable(cudaFuncGetAttributes(&attributes, finalizer_counts));
 }
 
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
@@ -3111,7 +3123,8 @@ gpu_owned_prefix_handback gpu_round_shadow_device_state::download_owned_prefix()
 
 std::vector<gpu_round_shadow_factor_column>
 gpu_round_shadow_device_state::download_owned_factor_columns(
-        std::span<node_index> permutation, std::span<edge_index> raw_offsets) {
+        std::span<node_index> permutation, std::span<edge_index> raw_offsets,
+        std::vector<factor_entry>* entries) {
     impl::failed_generation_guard guard{*impl_};
     impl_->require_current_device("owned factorization completion");
     if (impl_->poisoned || impl_->owned_prefix_materialized ||
@@ -3124,6 +3137,11 @@ gpu_round_shadow_device_state::download_owned_factor_columns(
                  "download complete factor headers");
     validate_owned_factor_columns(columns, impl_->factor_entry_count,
                                  permutation, raw_offsets);
+    if (entries) {
+        entries->resize(impl_->factor_entry_count);
+        copy_to_host(entries->data(), impl_->factor_entries.get(), entries->size(),
+                     "download retained factor entries");
+    }
     // Seal output only after complete coverage; no CPU residual is constructed.
     impl_->owned_residual_epoch.reset();
     impl_->owned_prefix_materialized = true;

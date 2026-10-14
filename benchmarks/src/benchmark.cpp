@@ -811,12 +811,11 @@ static BenchResult run_apxchol_v1(
     apxchol::solve_options opts{.tol = tol, .max_iter = maxiter,
         .storage = storage, .factor_opts = fopts};
     opts.backend = backend;
-    const auto route = apxchol::detail::select_solve_backend(opts);
-    opts.backend = route; // resolve once; retries reuse the same concrete owner
 #if defined(APXCHOL_USE_CUDA)
-    if (route == apxchol::solve_backend::gpu) warm_up_cuda_once();
+    // Warm the compatible runtime outside timing; input eligibility is setup work.
+    if (apxchol::detail::select_solve_backend(opts) == apxchol::solve_backend::gpu)
+        warm_up_cuda_once();
 #endif
-    r.execution_route = route == apxchol::solve_backend::gpu ? "gpu" : "cpu";
     const bool report_fill = std::getenv("APXCHOL_REPORT_FILL") != nullptr;
     long long factor_nnz = 0, factor_rows = 0;
     std::uint64_t stored_nnz = 0, l11_nnz = 0, dropped = 0;
@@ -837,6 +836,12 @@ static BenchResult run_apxchol_v1(
 
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
     apxchol::solve_result res;
+    auto* cp = std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings;
+    if (cp) { cp->descend("setup"); cp->tick(); }
+    const auto route = apxchol::detail::select_solve_backend(opts, &L);
+    opts.backend = route; // resolve once; retries reuse the same concrete owner
+    if (cp) { (*cp)("backend_selection"); cp->ascend(); }
+    r.execution_route = route == apxchol::solve_backend::gpu ? "gpu" : "cpu";
 #if defined(APXCHOL_USE_CUDA)
     if (route == apxchol::solve_backend::gpu) {
         Eigen::initParallel();
@@ -854,8 +859,7 @@ static BenchResult run_apxchol_v1(
     } else
 #endif
     {
-        apxchol::cpu_solver solver(L, opts,
-            std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings);
+        apxchol::cpu_solver solver(L, opts, cp);
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
                 solver.solve(b, res, request, remaining, warm ? &current : nullptr);
