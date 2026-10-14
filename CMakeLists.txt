@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(apxchol VERSION 0.2.2 LANGUAGES CXX)
+project(apxchol VERSION 0.2.2 LANGUAGES C CXX)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -81,6 +81,10 @@ target_compile_features(apxchol_mtx_input PUBLIC cxx_std_23)
 if (APXCHOL_ARCH_FLAG)
     target_compile_options(apxchol_mtx_input INTERFACE "${APXCHOL_ARCH_FLAG}")
 endif()
+
+# Exception-safe C interface for non-C++ consumers.
+add_library(apxchol_c src/c_api.cpp)
+target_link_libraries(apxchol_c PUBLIC apxchol_core)
 
 # ── CLI solver ───────────────────────────────────────
 add_executable(apxchol src/main.cpp src/config.cpp)

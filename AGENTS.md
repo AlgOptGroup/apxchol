@@ -207,6 +207,23 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   retained FP32 factor exports, but rejects adoption of host factors.
   `detail/csc_import.h` shares typed CSC import among bindings:
   sorted unique inputs copy directly; other layouts use Eigen's duplicate sum.
+- `include/apxchol/c_api.h` / `src/c_api.cpp` (target `apxchol_c`) provide the
+  exception-safe C ABI for non-C++ consumers. CPU calls remain CPU in CUDA
+  builds; the exposed backends are CPU and METAL. Block solves loop over the single-RHS API on both
+  backends, reusing the factor and workspace. Structs carry `struct_size`; defaults come from
+  `solve_options{}`; NOT_CONVERGED writes outputs and is never an acceptance;
+  `converged` is `residual < tol` as in the PCG loop. `threads` scopes the
+  calling thread's OpenMP limit per call. n and nnz are limited to 2^31-1;
+  edge-index overflow still aborts. A factor handle (`apxchol_factor_*`) is
+  an immutable host factorization that always keeps its native FP32 values;
+  exports use `float*`. `options.factor_storage` selects per-solver SpTRSV
+  storage, and `stats.factor_storage` reports the actual format. Solvers adopt
+  a copy (`apxchol_solver_create_from_factor`, CPU or METAL) for any validated
+  operator of its dimension, except that a Laplacian factor refuses an SDDM
+  operator by the factorization's own excess test. `apxchol_solver_copy_factor`
+  needs `keep_factor_values`. Keep `tests/test_c_header.c` layout asserts in
+  step with the header. `APXCHOL_C_ABI_VERSION` stays 1 until the ABI's first
+  release, then bumps on every layout change.
 - Checkpoint copies own independent timing trees; moves preserve active scopes.
   Reusing a copied or moved solve result must not retain pointers to its source.
 - `operator_class.h` and `src/operator_class.cpp` own operator validation and
