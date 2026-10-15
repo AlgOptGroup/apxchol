@@ -54,8 +54,8 @@ Metal reconstructs FP32 coefficients before multiplication; each column stores a
 ## Apple Metal PCG
 
 Metal uses host factor preparation with compensated dropping and optional
-scaled FP16 storage. [The solver](../README.md#interfaces) handles one RHS
-per call, reusing its factor and workspace.
+scaled FP16 storage. [The solver](../README.md#interfaces) accepts vector or
+matrix right-hand sides, reusing its factor and workspace.
 
 Double-float represents a value as the sum of two FP32 numbers, giving about
 48 significant bits but not IEEE FP64 precision or range. Metal uses it for

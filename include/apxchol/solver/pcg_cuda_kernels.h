@@ -1,6 +1,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <array>
 #include "apxchol/solver/detail/gpu_pcg.h"
 
 // CUDA launch boundary for the common PCG kernels. Both operator storage
@@ -33,7 +34,7 @@ bool try_build_permuted_operator_csr(
 
 /// Threads per block of every kernel here, and the fixed upper bound on the
 /// grid (blocks loop grid-stride over the remaining work); the partials
-/// buffer the caller provides must hold kMaxBlocks doubles.
+/// buffer the caller provides must hold Columns * kMaxBlocks doubles.
 inline constexpr int kBlockThreads = 256;
 inline constexpr int kMaxBlocks    = 2048;
 
@@ -57,11 +58,13 @@ inline int spmv_lanes_for(double avg_nnz_per_row) {
 
 // Launch one shared vector operation; only multiply reads the operator.
 // Partials use pcg_blocks(n * lanes) for multiply, pcg_blocks(n) otherwise.
+template<unsigned Columns = 1>
 void step(cudaStream_t stream, detail::gpu_pcg::operation op, std::int64_t n,
           workspace vectors, const operator_csr& matrix, int lanes);
 
 // Fold partials in the fixed tree and advance the device recurrence.
+template<unsigned Columns = 1>
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
-              unsigned mode, unsigned iteration, double bnorm, unsigned window = 0);
+              unsigned mode, unsigned iteration, std::array<double, Columns> bnorm, unsigned window = 0);
 
 } // namespace apxchol::pcg_cuda

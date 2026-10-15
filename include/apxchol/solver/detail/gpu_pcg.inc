@@ -69,59 +69,89 @@ struct pcg_work {
     Index first, last, stride, offset, limit;
 };
 
-// Each backend specializes op before launching. The shared loop preserves its
-// row assignment and reduction order while using one vector workspace.
-template<int Lanes, class Math, class Index, class Entry, class Offset>
-APXCHOL_GPU_FUNCTION typename Math::wide step(
+template<class Value, unsigned Columns>
+struct column_sums { Value values[Columns]; };
+
+// RHS entries are adjacent; the factor/operator traversal is shared while
+// each column keeps its own recurrence state and reduction order.
+template<int Lanes, unsigned Columns, class Math, class Index, class Entry, class Offset>
+APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
     operation op, Math math, workspace<typename Math::wide, typename Math::scalar> v,
     APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
     APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const Entry) lo,
     pcg_work<Index> work, unsigned lane) {
     using Wide = typename Math::wide;
-    Wide total{};
-    if (!v.state->active) return total;
+    column_sums<Wide, Columns> total{};
+    bool active = false;
+    for (unsigned q = 0; q < Columns; ++q) active |= v.state[q].active != 0;
+    if (!active) return total;
     for (auto base = work.first; base < work.last; base += work.stride) {
         const auto row = base + work.offset;
         if (op == operation::multiply) {
-            Wide sum{};
+            Wide sum[Columns]{};
             if (row < work.limit) {
                 auto e = ptr[row];
                 e += lane;
                 const auto end = ptr[row + 1];
-                for (; e < end; e += Lanes)
-                    sum = math.add_entry(sum, hi, lo, e, v.p[col[e]]);
+                for (; e < end; e += Lanes) {
+                    const auto position = col[e] * Columns;
+                    for (unsigned q = 0; q < Columns; ++q)
+                        if (v.state[q].active)
+                            sum[q] = math.add_entry(sum[q], hi, lo, e, v.p[position + q]);
+                }
             }
-            sum = math.sum_row(sum);
-            if (row < work.limit && lane == 0) {
-                v.ap[row] = sum;
-                total = math.add_product(total, sum, v.p[row]);
+            for (unsigned q = 0; q < Columns; ++q) {
+                sum[q] = math.sum_row(sum[q]);
+                if (row < work.limit && lane == 0 && v.state[q].active) {
+                    v.ap[row * Columns + q] = sum[q];
+                    total.values[q] = math.add_product(total.values[q], sum[q], v.p[row * Columns + q]);
+                }
             }
         } else if (row < work.limit) {
-            if (op == operation::residual) {
-                v.x[row] = math.add_product(v.x[row], v.state->alpha, v.p[row]);
-                const auto value = math.subtract_product(v.r[row], v.ap[row], v.state->alpha);
-                v.r[row] = value;
-                total = math.add_product(total, value, value);
-            } else if (op == operation::dot) {
-                total = math.add_product(total, v.r[row], math.preconditioned(v.z[row]));
-            } else {
-                const auto beta = v.state->beta;
-                const auto z = math.preconditioned(v.z[row]);
-                v.p[row] = beta == 0 ? z : math.direction(z, v.p[row], beta);
+            for (unsigned q = 0; q < Columns; ++q) {
+                if (!v.state[q].active) continue;
+                const auto i = row * Columns + q;
+                if (op == operation::residual) {
+                    v.x[i] = math.add_product(v.x[i], v.state[q].alpha, v.p[i]);
+                    const auto value = math.subtract_product(v.r[i], v.ap[i], v.state[q].alpha);
+                    v.r[i] = value;
+                    total.values[q] = math.add_product(total.values[q], value, value);
+                } else if (op == operation::dot) {
+                    total.values[q] = math.add_product(total.values[q], v.r[i], math.preconditioned(v.z[i]));
+                } else {
+                    const auto beta = v.state[q].beta;
+                    const auto z = math.preconditioned(v.z[i]);
+                    v.p[i] = beta == 0 ? z : math.direction(z, v.p[i], beta);
+                }
             }
         }
     }
     return total;
 }
 
+template<int Lanes, class Math, class Index, class Entry, class Offset>
+APXCHOL_GPU_FUNCTION typename Math::wide step(
+    operation op, Math math, workspace<typename Math::wide, typename Math::scalar> v,
+    APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
+    APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const Entry) lo,
+    pcg_work<Index> work, unsigned lane) {
+    return step_columns<Lanes, 1>(op, math, v, ptr, col, hi, lo, work, lane).values[0];
+}
+
+template<unsigned Columns, class Math, class Index>
+APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> sum_partials_columns(
+    Math math, APXCHOL_GPU_BUFFER(const typename Math::wide) partial, pcg_work<Index> work) {
+    column_sums<typename Math::wide, Columns> sum{};
+    for (auto i = work.first + work.offset; i < work.last; i += work.stride)
+        for (unsigned q = 0; q < Columns; ++q)
+            sum.values[q] = math.add(sum.values[q], partial[i * Columns + q]);
+    return sum;
+}
+
 template<class Math, class Index>
 APXCHOL_GPU_FUNCTION typename Math::wide sum_partials(
     Math math, APXCHOL_GPU_BUFFER(const typename Math::wide) partial, pcg_work<Index> work) {
-    using Wide = typename Math::wide;
-    Wide sum{};
-    for (auto i = work.first + work.offset; i < work.last; i += work.stride)
-        sum = math.add(sum, partial[i]);
-    return sum;
+    return sum_partials_columns<1>(math, partial, work).values[0];
 }
 
 } } }

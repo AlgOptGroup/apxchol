@@ -42,9 +42,9 @@ except Exception:                      # not installed as a distribution
 @dataclass(frozen=True)
 class SolveResult:
     x: np.ndarray
-    iters: int
-    residual: float
-    converged: bool
+    iters: int | np.ndarray
+    residual: float | np.ndarray
+    converged: bool | np.ndarray
 
 
 def laplacian(A):
@@ -177,12 +177,12 @@ class Solver:
 
     # ── solving ──────────────────────────────────────────────────────────────
 
-    def _vector(self, value, name):
+    def _rhs(self, value, name):
         if np.iscomplexobj(value):
             raise ValueError(f"{name} must be real; apxchol solves real symmetric systems")
-        value = np.ascontiguousarray(value, dtype=np.float64).ravel()
-        if value.size != self._n:
-            raise ValueError(f"{name} has length {value.size}, expected {self._n}")
+        value = np.asarray(value, dtype=np.float64)
+        if value.ndim not in (1, 2) or value.shape[0] != self._n:
+            raise ValueError(f"{name} must have shape ({self._n},) or ({self._n}, nrhs)")
         if not np.isfinite(value).all():
             raise ValueError(f"{name} must be finite")
         return value
@@ -191,28 +191,30 @@ class Solver:
               x0=None, out=None) -> SolveResult:
         """PCG-solve A x = b to relative residual `rtol` (`tol` is an alias).
 
-        `x0` is an optional initial guess (an exact one returns iters == 0).
-        `out`, if given, must be a writable C-contiguous float64 array of
-        length n: the solution is written into it and returned as `SolveResult.x`.
-        CPU solves reuse their workspace; GPU solves may allocate temporary output
-        storage and copy the result to this host array.
+        `b` has shape `(n,)` or `(n, nrhs)`. Matrix inputs return a matrix
+        solution and per-column arrays for iterations, residuals and convergence.
+        `x0` must match `b`'s shape; an exact guess takes zero iterations.
+        `out` must have the same shape and be writable, C- or F-contiguous
+        float64; it is returned as `SolveResult.x`. CPU solves process RHS
+        panels together; GPU solves reuse their selected backend per column.
         """
-        b = self._vector(b, "b")
+        b = self._rhs(b, "b")
         if x0 is not None:
-            x0 = self._vector(x0, "x0")
+            x0 = self._rhs(x0, "x0")
+            if x0.shape != b.shape:
+                raise ValueError("x0 must have the same shape as b")
         # rtol is the canonical (SciPy) name; tol is kept as a legacy alias.
         eff = rtol if rtol is not None else (tol if tol is not None else DEFAULT_TOL)
         res = self._impl.solve(b, float(eff), int(maxiter), x0, out)
-        return SolveResult(
-            x=res["x"], iters=int(res["iters"]),
-            residual=float(res["residual"]), converged=bool(res["converged"]),
-        )
+        return SolveResult(**res)
 
     def apply(self, r) -> np.ndarray:
-        return self._impl.apply(self._vector(r, "r"))
+        """Apply the preconditioner to a vector or RHS matrix, preserving shape."""
+        return self._impl.apply(self._rhs(r, "r"))
 
     def aslinearoperator(self) -> LinearOperator:
-        return LinearOperator(shape=self.shape, matvec=self.apply, dtype=np.float64)
+        return LinearOperator(shape=self.shape, matvec=self.apply, matmat=self.apply,
+                              dtype=np.float64)
 
     def aspreconditioner(self) -> LinearOperator:
         """Alias of :meth:`aslinearoperator` (M= argument of scipy's Krylov solvers)."""
@@ -316,8 +318,8 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage
         PRECONDITIONER is built (see :attr:`Solver.lumped`); the PCG still
         applies `A` itself, so the residual is for the system you passed.
     backend : {"auto", "cpu", "gpu"}
-        Auto prefers CPU for at most 64 rows if it supports the requested storage;
-        otherwise it checks GPU compatibility. Read the resolved choice from
+        Auto chooses a compatible backend for the input, hardware and options.
+        Read the resolved choice from
         ``Solver.backend``. An explicit GPU request fails when the
         installed build, hardware or options cannot support it.
     seed : int

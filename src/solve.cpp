@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -251,171 +252,233 @@ bool copy_symmetric_csc_as_owned_csr(
 // reduction() clause). Bit-identical run-to-run for a fixed thread count.
 using detail::omp_ids;
 
-// y = Lrm * x, and returns x·y (the PCG pAp) folded into the row loop:
-// row i's dot product is finished right there, so the p·Ap reduction costs
-// one extra FMA per row instead of a second 2-stream pass over (p, Ap).
-// Templated on the operator's stored scalar S: when A is fp32-exact we hold
-// Lrm as SparseMatrix<float> (half the value bytes), and S(float) * x(double)
-// promotes to double so the accumulation -- and the PCG recurrence -- stay
-// fp64. `part` = per-thread partial buffer (detail::part_capacity() doubles).
-template<class S>
-inline double parallel_spmv_csr(const Eigen::SparseMatrix<S, Eigen::RowMajor>& Lrm,
-                                const double* xp, double* yp, double* part) {
-    const Eigen::Index n = Lrm.rows();
-    const auto* outer = Lrm.outerIndexPtr();
-    const auto* inner = Lrm.innerIndexPtr();
-    const S*    val   = Lrm.valuePtr();
+// RHS lanes are contiguous within a row. Scalar calls use the same loops with C=1.
+template <int C, class S>
+std::array<double, C> panel_spmv(const Eigen::SparseMatrix<S, Eigen::RowMajor> &A, const double *x,
+                                 double *y, double *part) {
+    const Eigen::Index n = A.rows();
+    const auto *ptr = A.outerIndexPtr();
+    const auto *col = A.innerIndexPtr();
+    const auto *val = A.valuePtr();
     int nt_used = 1;
-    const int workers = detail::cpu_spmv_threads(n, outer[n] - outer[0]);
-    #pragma omp parallel if(workers > 1) num_threads(workers)
+    const int workers = detail::cpu_spmv_threads(n, ptr[n] - ptr[0]);
+#pragma omp parallel if (workers > 1) num_threads(workers)
     {
-        int tid, nt; omp_ids(tid, nt);
-        if (tid == 0) nt_used = nt;
-        // Rows split by stored entries, not by count: a row costs its length,
-        // and with hub rows the heaviest equal-count chunk carries 2-4x the
-        // mean (see detail::work_balanced_range). The bounds depend only on
-        // the row pointers and the team size, and the partials below are still
-        // summed in thread order, so the result stays bit-identical run to run
-        // for a fixed thread count.
-        const auto [lo, hi] = detail::work_balanced_range(outer, n, tid, nt);
-        double xy = 0.0;
-        for (Eigen::Index i = lo; i < hi; ++i) {
-            // 4-way accumulator split: breaks the serial FMA dep chain into 4
-            // independent chains so the OoO core can issue ~4 FMAs/cycle
-            // overlapped with the gather loads x[inner[k]]. Compiler doesn't
-            // auto-unroll FP reductions (addition not associative); the rounding
-            // -order change here is accepted.
-            double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
-            const auto row_start = outer[i];
-            const auto row_end   = outer[i + 1];
-            auto k = row_start;
-            for (; k + 4 <= row_end; k += 4) {
-                s0 += val[k + 0] * xp[inner[k + 0]];
-                s1 += val[k + 1] * xp[inner[k + 1]];
-                s2 += val[k + 2] * xp[inner[k + 2]];
-                s3 += val[k + 3] * xp[inner[k + 3]];
+        int tid, nt;
+        detail::omp_ids(tid, nt);
+        if (tid == 0)
+            nt_used = nt;
+        const auto [lo, hi] = detail::work_balanced_range(ptr, n, tid, nt);
+        std::array<double, C> xy{};
+        for (Eigen::Index i = lo; i < hi; i++) {
+            std::array<double, C> a{}, b{}, c{}, d{};
+            auto k = ptr[i];
+            const auto end = ptr[i + 1];
+            for (; k + 4 <= end; k += 4)
+                for (int q = 0; q < C; q++) {
+                    a[q] += val[k + 0] * x[Eigen::Index(col[k + 0]) * C + q];
+                    b[q] += val[k + 1] * x[Eigen::Index(col[k + 1]) * C + q];
+                    c[q] += val[k + 2] * x[Eigen::Index(col[k + 2]) * C + q];
+                    d[q] += val[k + 3] * x[Eigen::Index(col[k + 3]) * C + q];
+                }
+            std::array<double, C> sum{};
+            for (int q = 0; q < C; q++)
+                sum[q] = (a[q] + b[q]) + (c[q] + d[q]);
+            for (; k < end; k++)
+                for (int q = 0; q < C; q++)
+                    sum[q] += val[k] * x[Eigen::Index(col[k]) * C + q];
+            for (int q = 0; q < C; q++) {
+                y[i * C + q] = sum[q];
+                xy[q] += x[i * C + q] * sum[q];
             }
-            double sum = (s0 + s1) + (s2 + s3);
-            for (; k < row_end; ++k)
-                sum += val[k] * xp[inner[k]];
-            yp[i] = sum;
-            xy += xp[i] * sum;
         }
-        part[static_cast<std::size_t>(tid) * detail::kPartStride] = xy;
+        for (int q = 0; q < C; q++)
+            part[std::size_t(tid) * detail::kPartStride + q] = xy[q];
     }
-    return detail::reduce_parts(part, nt_used);
+    std::array<double, C> xy{};
+    for (int q = 0; q < C; q++)
+        xy[q] = detail::reduce_parts(part, nt_used, q);
+    return xy;
 }
 
-// One pass over (x, p, r, Ap):  x += alpha*p ; r -= alpha*Ap ; returns
-// rr = r·r and rs = Σ r (both on the UPDATED r). rr feeds the residual norm,
-// rs feeds the Laplacian centering of the next preconditioner application
-// (apx_cholesky::apply_fused takes it, saving its own mean pass over r).
-// Two independent 4-way accumulator sets so neither reduction chain stalls
-// the streaming updates.
-inline void update_xr(double* x, const double* p, double* r, const double* Ap,
-                      double alpha, Eigen::Index n, double* part,
-                      double& rr, double& rs) {
+// Transform four rows together, then accumulate their squared norms and sums.
+// The four independent chains preserve the scalar reduction order.
+template <int C, class Entry>
+void panel_residual(Eigen::Index n, double *part, Entry entry, std::array<double, C> &rr,
+                    std::array<double, C> &rs) {
+    static_assert(C > 0 && C <= 8);
+    constexpr int stride = std::max(2 * C, detail::kPartStride);
     int nt_used = 1;
     const int workers = detail::cpu_solve_threads(n);
-    #pragma omp parallel if(workers > 1) num_threads(workers)
+#pragma omp parallel if (workers > 1) num_threads(workers) firstprivate(entry)
     {
-        int tid, nt; omp_ids(tid, nt);
-        if (tid == 0) nt_used = nt;
+        int tid, nt;
+        detail::omp_ids(tid, nt);
+        if (tid == 0)
+            nt_used = nt;
         const auto [lo, hi] = detail::static_chunk(n, tid, nt);
-        double q0 = 0.0, q1 = 0.0, q2 = 0.0, q3 = 0.0;   // r·r
-        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;   // Σ r
+        std::array<std::array<double, C>, 4> norms{}, sums{};
         Eigen::Index i = lo;
         for (; i + 4 <= hi; i += 4) {
-            x[i + 0] += alpha * p[i + 0];
-            x[i + 1] += alpha * p[i + 1];
-            x[i + 2] += alpha * p[i + 2];
-            x[i + 3] += alpha * p[i + 3];
-            const double r0 = r[i + 0] - alpha * Ap[i + 0];
-            const double r1 = r[i + 1] - alpha * Ap[i + 1];
-            const double r2 = r[i + 2] - alpha * Ap[i + 2];
-            const double r3 = r[i + 3] - alpha * Ap[i + 3];
-            r[i + 0] = r0; r[i + 1] = r1; r[i + 2] = r2; r[i + 3] = r3;
-            q0 += r0 * r0; q1 += r1 * r1; q2 += r2 * r2; q3 += r3 * r3;
-            s0 += r0;      s1 += r1;      s2 += r2;      s3 += r3;
+            const auto residuals = entry.template operator()<4>(i);
+            for (int k = 0; k < 4; k++)
+                for (int q = 0; q < C; q++) {
+                    const double r = residuals[k][q];
+                    norms[k][q] += r * r;
+                    sums[k][q] += r;
+                }
         }
-        double q = (q0 + q1) + (q2 + q3);
-        double s = (s0 + s1) + (s2 + s3);
-        for (; i < hi; ++i) {
-            x[i] += alpha * p[i];
-            const double ri = r[i] - alpha * Ap[i];
-            r[i] = ri;
-            q += ri * ri;
-            s += ri;
+        std::array<double, C> norm{}, sum{};
+        for (int q = 0; q < C; q++) {
+            norm[q] = (norms[0][q] + norms[1][q]) + (norms[2][q] + norms[3][q]);
+            sum[q] = (sums[0][q] + sums[1][q]) + (sums[2][q] + sums[3][q]);
         }
-        part[static_cast<std::size_t>(tid) * detail::kPartStride + 0] = q;
-        part[static_cast<std::size_t>(tid) * detail::kPartStride + 1] = s;
-    }
-    rr = detail::reduce_parts(part, nt_used, 0);
-    rs = detail::reduce_parts(part, nt_used, 1);
-}
-
-// p = z + beta*p in one parallel pass (no reduction).
-inline void update_p(double* p, const double* z, double beta, Eigen::Index n) {
-    const int workers = detail::cpu_solve_threads(n);
-    #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-    for (Eigen::Index i = 0; i < n; ++i) p[i] = z[i] + beta * p[i];
-}
-
-// Initial residual in one pass: r = b - Ax0 (Ax0 == nullptr -> r = b),
-// returning rr = r·r and rs = Σ r. Same deterministic scheme.
-inline void init_residual(double* r, const double* b, const double* Ax0,
-                          Eigen::Index n, double* part, double& rr, double& rs) {
-    int nt_used = 1;
-    const int workers = detail::cpu_solve_threads(n);
-    #pragma omp parallel if(workers > 1) num_threads(workers)
-    {
-        int tid, nt; omp_ids(tid, nt);
-        if (tid == 0) nt_used = nt;
-        const auto [lo, hi] = detail::static_chunk(n, tid, nt);
-        double q0 = 0.0, q1 = 0.0, q2 = 0.0, q3 = 0.0;
-        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
-        Eigen::Index i = lo;
-        if (Ax0) {
-            for (; i + 4 <= hi; i += 4) {
-                const double r0 = b[i + 0] - Ax0[i + 0];
-                const double r1 = b[i + 1] - Ax0[i + 1];
-                const double r2 = b[i + 2] - Ax0[i + 2];
-                const double r3 = b[i + 3] - Ax0[i + 3];
-                r[i + 0] = r0; r[i + 1] = r1; r[i + 2] = r2; r[i + 3] = r3;
-                q0 += r0 * r0; q1 += r1 * r1; q2 += r2 * r2; q3 += r3 * r3;
-                s0 += r0;      s1 += r1;      s2 += r2;      s3 += r3;
-            }
-        } else {
-            for (; i + 4 <= hi; i += 4) {
-                const double r0 = b[i + 0], r1 = b[i + 1], r2 = b[i + 2], r3 = b[i + 3];
-                r[i + 0] = r0; r[i + 1] = r1; r[i + 2] = r2; r[i + 3] = r3;
-                q0 += r0 * r0; q1 += r1 * r1; q2 += r2 * r2; q3 += r3 * r3;
-                s0 += r0;      s1 += r1;      s2 += r2;      s3 += r3;
+        for (; i < hi; i++) {
+            const auto residuals = entry.template operator()<1>(i);
+            for (int q = 0; q < C; q++) {
+                const double r = residuals[0][q];
+                norm[q] += r * r;
+                sum[q] += r;
             }
         }
-        double q = (q0 + q1) + (q2 + q3);
-        double s = (s0 + s1) + (s2 + s3);
-        for (; i < hi; ++i) {
-            const double ri = Ax0 ? b[i] - Ax0[i] : b[i];
-            r[i] = ri;
-            q += ri * ri;
-            s += ri;
+        for (int q = 0; q < C; q++) {
+            part[std::size_t(tid) * stride + 2 * q] = norm[q];
+            part[std::size_t(tid) * stride + 2 * q + 1] = sum[q];
         }
-        part[static_cast<std::size_t>(tid) * detail::kPartStride + 0] = q;
-        part[static_cast<std::size_t>(tid) * detail::kPartStride + 1] = s;
     }
-    rr = detail::reduce_parts(part, nt_used, 0);
-    rs = detail::reduce_parts(part, nt_used, 1);
+    for (int q = 0; q < C; q++) {
+        rr[q] = detail::reduce_parts(part, nt_used, 2 * q, stride);
+        rs[q] = detail::reduce_parts(part, nt_used, 2 * q + 1, stride);
+    }
 }
 
-// x -= mean(x): the once-per-solve min-norm centring of a Laplacian
-// solution (see cpu_solver::solve_impl). One deterministic reduction
-// (detail::det_sum) + one parallel subtract pass.
-inline void center_x(double* x, Eigen::Index n, double* part) {
-    const double mean = detail::det_sum(x, n, part) / static_cast<double>(n);
+template <int C>
+void panel_update_xr(double *x, const double *p, double *r, const double *Ap,
+                     const std::array<double, C> &alpha, const std::array<bool, C> &active,
+                     Eigen::Index n, double *part, std::array<double, C> &rr,
+                     std::array<double, C> &rs) {
+    panel_residual<C>(
+        n, part,
+        [=]<int Rows>(Eigen::Index first) {
+            for (int k = 0; k < Rows; ++k)
+                for (int c = 0; c < C; ++c)
+                    if (C == 1 || active[c]) {
+                        const auto i = (first + k) * C + c;
+                        x[i] += alpha[c] * p[i];
+                    }
+            std::array<std::array<double, C>, Rows> residuals{};
+            for (int k = 0; k < Rows; ++k)
+                for (int c = 0; c < C; ++c) {
+                    const auto i = (first + k) * C + c;
+                    residuals[k][c] = (C == 1 || active[c]) ? r[i] - alpha[c] * Ap[i] : r[i];
+                }
+            for (int k = 0; k < Rows; ++k)
+                for (int c = 0; c < C; ++c)
+                    r[(first + k) * C + c] = residuals[k][c];
+            return residuals;
+        },
+        rr, rs);
+}
+
+template <int C>
+void panel_init_residual(double *r, const double *b, const double *Ax0, Eigen::Index n,
+                         double *part, std::array<double, C> &rr, std::array<double, C> &rs) {
+    panel_residual<C>(n, part, [=]<int Rows>(Eigen::Index first) {
+        std::array<std::array<double, C>, Rows> residuals{};
+        for (int k = 0; k < Rows; ++k)
+            for (int c = 0; c < C; ++c) {
+                const auto i = (first + k) * C + c;
+                residuals[k][c] = Ax0 ? b[i] - Ax0[i] : b[i];
+            }
+        for (int k = 0; k < Rows; ++k)
+            for (int c = 0; c < C; ++c)
+                r[(first + k) * C + c] = residuals[k][c];
+        return residuals;
+    }, rr, rs);
+}
+
+template <int C>
+void panel_update_p(double *p, const double *z, const std::array<double, C> &beta,
+                    const std::array<bool, C> &active, Eigen::Index n) {
     const int workers = detail::cpu_solve_threads(n);
-    #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-    for (Eigen::Index i = 0; i < n; ++i) x[i] -= mean;
+#pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
+    for (Eigen::Index i = 0; i < n; i++)
+        for (int c = 0; c < C; c++)
+            p[i * C + c] = active[c] ? z[i * C + c] + beta[c] * p[i * C + c] : 0.0;
+}
+
+void check_matrix_views(const_matrix_view B, matrix_view X, Eigen::Index rows,
+                        const const_matrix_view *X0 = nullptr) {
+    if (B.rows() != rows || X.rows() != rows || X.cols() != B.cols() ||
+        (X0 && (X0->rows() != rows || X0->cols() != B.cols())))
+        throw std::invalid_argument("solver: RHS, output and warm-start shapes must match");
+    const auto extent = [](const auto &value) {
+        if (!value.size())
+            return std::pair<std::uintptr_t, std::uintptr_t>{0, 0};
+        const auto row = (value.rows() - 1) * value.innerStride();
+        const auto col = (value.cols() - 1) * value.outerStride();
+        const auto first =
+            value.data() + std::min<Eigen::Index>(0, row) + std::min<Eigen::Index>(0, col);
+        const auto last =
+            value.data() + std::max<Eigen::Index>(0, row) + std::max<Eigen::Index>(0, col) + 1;
+        return std::pair{reinterpret_cast<std::uintptr_t>(first),
+                         reinterpret_cast<std::uintptr_t>(last)};
+    };
+    const auto [first, last] = extent(X);
+    const auto overlaps = [&](const auto &value) {
+        const auto [lo, hi] = extent(value);
+        return first < hi && lo < last;
+    };
+    if (overlaps(B) || (X0 && overlaps(*X0)))
+        throw std::invalid_argument("solver: matrix output must not overlap RHS or warm start");
+}
+
+template <class Run>
+void for_rhs_panels(const_matrix_view B, matrix_view X, const const_matrix_view *X0,
+                    Eigen::VectorXd &input, Eigen::VectorXd &output, Run run,
+                    checkpoint *timings = nullptr) {
+    const Eigen::Index n = B.rows();
+    const int workers = detail::cpu_solve_threads(n);
+    Eigen::Index first = 0;
+    auto panel = [&]<int Columns>() {
+        if constexpr (Columns == 1) {
+            if (B.innerStride() == 1 && X.innerStride() == 1 &&
+                (!X0 || X0->innerStride() == 1)) {
+                run.template operator()<1>(first, B.col(first).data(), X.col(first).data(),
+                                           X0 ? X0->col(first).data() : nullptr);
+                ++first;
+                return;
+            }
+        }
+        input.resize(n * Columns);
+        output.resize(n * Columns);
+#pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
+        for (Eigen::Index i = 0; i < n; ++i)
+            for (int c = 0; c < Columns; ++c) {
+                input[i * Columns + c] = B(i, first + c);
+                if (X0)
+                    output[i * Columns + c] = (*X0)(i, first + c);
+            }
+        if (timings)
+            (*timings)("pack_rhs");
+        run.template operator()<Columns>(first, input.data(), output.data(),
+                                         X0 ? output.data() : nullptr);
+#pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
+        for (Eigen::Index i = 0; i < n; ++i)
+            for (int c = 0; c < Columns; ++c)
+                X(i, first + c) = output[i * Columns + c];
+        if (timings)
+            (*timings)("unpack_x");
+        first += Columns;
+    };
+    while (B.cols() - first >= 8)
+        panel.template operator()<8>();
+    if (B.cols() - first >= 4)
+        panel.template operator()<4>();
+    if (B.cols() - first >= 2)
+        panel.template operator()<2>();
+    if (B.cols() != first)
+        panel.template operator()<1>();
 }
 
 } // namespace
@@ -587,200 +650,196 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
     }
 }
 
-void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                            solve_result& res, double tol, int max_iter,
-                            const Eigen::VectorXd* x0) const {
-    if (tol < 0.0)    tol = opts_.tol;
-    if (max_iter < 0) max_iter = opts_.max_iter;
-
-    // Report what the preconditioner build had to lump. The PCG below applies
-    // Lrm_/Lrm_f_, built from the caller's matrix, so the residual it reports
-    // is against the true operator whether anything was lumped or not.
-    res.lumped_offdiag = precond_.factor().lumped_offdiag;
-    res.backend = solve_backend::cpu;
-    res.solve_vram_mb = -1.0;
-
-    // Preconditioned CG with stagnation detection.
-    const Eigen::Index n = n_;
-
-    if (x0 != nullptr && x0->size() != n)
+void cpu_solver::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd> x,
+                            solve_result &res, double tol, int max_iter,
+                            const Eigen::VectorXd *x0) const {
+    if (x0 && x0->size() != n_)
         throw std::invalid_argument("cpu_solver::solve: x0 length mismatch");
+    solve_panel<1>(b.data(), x.data(), &res, res.timings, tol, max_iter, x0 ? x0->data() : nullptr);
+}
 
-    // Reused workspace: repeated solves allocate nothing after the first call
-    // (part_ holds the per-thread partials of the deterministic reductions;
-    // sized to the current max team, which the caller may change between
-    // solves via omp_set_num_threads).
-    if (r_.size() != n) { r_.resize(n); z_.resize(n); p_.resize(n); Ap_.resize(n); }
-    { const std::size_t need = detail::part_capacity();
-      if (part_.size() < need) part_.resize(need); }
-    Eigen::VectorXd& r = r_;
-    Eigen::VectorXd& z = z_;
-    Eigen::VectorXd& p = p_;
-    Eigen::VectorXd& Ap = Ap_;
-    double* part = part_.data();
-
-    // Laplacian (rank n-1) case: the returned x is the MIN-NORM solution --
-    // mean(x) = 0 -- for every exit below (SDDM: full rank, nothing to do).
-    // Under the center-k schedule (APXCHOL_GROUND=center-k, the default) most
-    // preconditioner applications skip their output re-centring, so x
-    // accumulates a component along the null space 1 (invisible to the
-    // residual, since A·1 = 0); one deterministic mean subtraction at the end
-    // (center_x) restores exactly what per-application centring (K = 1) and
-    // a zero start would have produced. A warm start x0 gets the same
-    // treatment, so the answer never depends on x0's constant.
+template <int C>
+void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, checkpoint& timings, double tol,
+                             int max_iter, const double *x0) const {
+    static_assert(C > 0 && C <= 8);
+    if (tol < 0)
+        tol = opts_.tol;
+    if (max_iter < 0)
+        max_iter = opts_.max_iter;
+    const Eigen::Index n = n_;
+    for (int c = 0; c < C; c++) {
+        results[c].lumped_offdiag = precond_.factor().lumped_offdiag;
+        results[c].backend = solve_backend::cpu;
+        results[c].solve_vram_mb = -1;
+        results[c].iterations = 0;
+    }
+    r_.resize(n * C);
+    z_.resize(n * C);
+    p_.resize(n * C);
+    Ap_.resize(n * C);
+    const auto part_size = detail::part_capacity() * (C > 4 ? 2 : 1);
+    if (part_.size() < part_size) part_.resize(part_size);
+    double *r = r_.data(), *z = z_.data(), *p = p_.data(), *Ap = Ap_.data(), *part = part_.data();
     const bool laplacian = !precond_.factor().sddm;
-
-    // Every vector pass of the loop below is a fused, OpenMP-parallel kernel
-    // (see the anonymous namespace at the top of this file) whose reductions
-    // are deterministic for a fixed thread count. Scalars carried between
-    // passes: rr = r·r (norm), rs = Σ r (Laplacian centering inside the
-    // preconditioner), rz = r·z, pAp = p·Ap.
-    double bnorm, rr, rs;
-    if (x0 != nullptr && !x0->isZero(0.0)) {
-        bnorm = b.norm();
-        if (bnorm == 0.0) {
-            x.setZero();
-            res.iterations = 0;
-            res.residual = 0.0;
+    std::array<double, C> norm{}, rr{}, rs{}, rz{}, prev{};
+    std::array<bool, C> active{}, warm{};
+    if (x0)
+        for (Eigen::Index i = 0; i < n; i++)
+            for (int c = 0; c < C; c++)
+                warm[c] |= x0[i * C + c] != 0;
+    const bool any_warm = std::any_of(warm.begin(), warm.end(), [](bool v) { return v; });
+    if (any_warm) {
+        std::copy_n(x0, n * C, x);
+        if (op_fp32_)
+            (void)panel_spmv<C>(Lrm_f_, x, Ap, part);
+        else
+            (void)panel_spmv<C>(Lrm_, x, Ap, part);
+    }
+    panel_init_residual<C>(r, b, any_warm ? Ap : nullptr, n, part, rr, rs);
+    if (!any_warm) std::fill_n(x, n * C, 0.0);
+    using Input = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    const Eigen::Map<const Input> input(b, n, C);
+    for (int c = 0; c < C; c++) {
+        norm[c] = warm[c] ? input.col(c).norm() : std::sqrt(rr[c]);
+        if constexpr (C == 1)
+            if (warm[c])
+                norm[c] = Eigen::Map<const Eigen::VectorXd>(b, n).norm();
+        results[c].residual = norm[c] == 0 ? 0 : (warm[c] ? std::sqrt(rr[c]) / norm[c] : 1);
+        active[c] = norm[c] != 0 && !(warm[c] && results[c].residual < tol);
+        prev[c] = 1;
+        if (norm[c] == 0)
+            for (Eigen::Index i = 0; i < n; i++) {
+                x[i * C + c] = 0;
+                r[i * C + c] = 0;
+            }
+    }
+    const auto any_active = [&] {
+        return std::any_of(active.begin(), active.end(), [](bool v) { return v; });
+    };
+    const auto center = [&] {
+        if (!laplacian)
             return;
-        }
-        x = *x0;
-        // r = b - L*x0: SpMV into Ap (scratch here), then one pass forms r
-        // and its reductions. The SpMV's fused x·Ax0 is not needed.
-        if (op_fp32_) (void)parallel_spmv_csr(Lrm_f_, x.data(), Ap.data(), part);
-        else          (void)parallel_spmv_csr(Lrm_,   x.data(), Ap.data(), part);
-        init_residual(r.data(), b.data(), Ap.data(), n, part, rr, rs);
-        res.iterations = 0;
-        res.residual = std::sqrt(rr) / bnorm;
-        if (res.residual < tol) {
-            if (laplacian) center_x(x.data(), n, part);
-            return;
-        }
-    } else {
-        // r = b - L*0 = b, copied in the same pass that produces b·b (= bnorm²)
-        // and Σ b.
-        init_residual(r.data(), b.data(), nullptr, n, part, rr, rs);
-        bnorm = std::sqrt(rr);
-        if (bnorm == 0.0) {
-            x.setZero();
-            res.iterations = 0;
-            res.residual = 0.0;
-            return;
-        }
-        x.setZero();
-        // Honest pre-loop state: the relative residual of x = 0 is exactly 1.
-        // Without this, an exit before the first PCG update (max_iter = 0, or
-        // a pAp <= 0 breakdown on iteration 1) would report the field's 0.0
-        // default — i.e. claim convergence for a solve that never ran.
-        res.iterations = 0;
-        res.residual = 1.0;
+        auto mean = detail::det_sum_columns<C>(x, n, part);
+        for (double &v : mean)
+            v /= static_cast<double>(n);
+        const int workers = detail::cpu_solve_threads(n);
+#pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
+        for (Eigen::Index i = 0; i < n; i++)
+            for (int c = 0; c < C; c++)
+                x[i * C + c] -= mean[c];
+    };
+    if (!any_active()) {
+        center();
+        return;
     }
 
-    // Descend into "pcg" so all per-iter PCG stages — including the
-    // preconditioner application (which internally descends into "solve" →
-    // permute/forward/back/unpermute+rz) — are grouped under pcg.*. Without
-    // this, the bench's wall solve_time (wall - setup) included
-    // un-checkpointed PCG ops that dominated the gap between checkpoint
-    // "solve" and bench's wall solve.
     const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
-    if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
-    precond_.set_checkpoint(use_cp ? &res.timings : nullptr);
+    if (use_cp) {
+        timings.descend("pcg");
+        timings.tick();
+    }
+    precond_.set_checkpoint(use_cp ? &timings : nullptr);
     struct clear_checkpoint {
-        const apx_cholesky& preconditioner;
+        const apx_cholesky &preconditioner;
         ~clear_checkpoint() { preconditioner.set_checkpoint(nullptr); }
     } clear{precond_};
-
-    // New solve: restart the center-k application counter (APXCHOL_GROUND=
-    // center-k, see env_knobs.h) so the centring schedule -- every K-th
-    // preconditioner application centres -- is the same for every solve on
-    // this factor (repeated solves stay bit-identical).
     precond_.reset_apply_count();
-    // z = M^{-1} r with r·z fused into the pass that writes z (recorded as
-    // pcg.solve.{permute,forward,back,unpermute+rz}); p = z is one copy pass.
-    double rz = precond_.apply_fused(r.data(), rs, z.data());
-    p = z;
-    if (use_cp) res.timings("copy_p");
+    rz = precond_.apply_fused<C>(r, rs, z);
+    for (Eigen::Index i = 0; i < n; i++)
+        for (int c = 0; c < C; c++)
+            p[i * C + c] = active[c] ? z[i * C + c] : 0;
+    if (use_cp)
+        timings("copy_p");
 
-    double prev_check_residual = 1.0;
-    const int check_interval = opts_.stagnation_window;
-
-    // Per-component timing (set APXCHOL_PCG_TRACE=1). Buckets follow the
-    // fused kernels: spmv (+pAp), precond (+rz), update_xr (+norm), update_p.
-    const bool pcg_trace = std::getenv("APXCHOL_PCG_TRACE") != nullptr;
-    double t_spmv = 0, t_update_xr = 0, t_update_p = 0, t_precond = 0;
-    auto now_us = []() {
+    const bool trace = std::getenv("APXCHOL_PCG_TRACE") != nullptr;
+    const auto now = [] {
         return std::chrono::duration<double, std::micro>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
     };
-    double t_pcg_start = pcg_trace ? now_us() : 0;
-
-    for (int i = 0; i < max_iter; ++i) {
-        // Ap = L*p with pAp = p·Ap folded into the row loop.
-        double t0 = pcg_trace ? now_us() : 0;
-        double pAp;
-        if (op_fp32_) pAp = parallel_spmv_csr(Lrm_f_, p.data(), Ap.data(), part);   // fp32 operator, fp64 accumulate
-        else          pAp = parallel_spmv_csr(Lrm_,   p.data(), Ap.data(), part);
-        if (pcg_trace) t_spmv += now_us() - t0;
-        if (use_cp) res.timings("spmv+pAp");
-        if (pAp <= 0.0) break;
-        double alpha = rz / pAp;
-
-        // x += alpha*p ; r -= alpha*Ap ; rr = r·r ; rs = Σ r  -- one pass.
-        double t0a = pcg_trace ? now_us() : 0;
-        update_xr(x.data(), p.data(), r.data(), Ap.data(), alpha, n, part, rr, rs);
-        if (pcg_trace) t_update_xr += now_us() - t0a;
-        if (use_cp) res.timings("update_xr_norm");
-        double rnorm = std::sqrt(rr) / bnorm;
-        res.iterations = i + 1;
-        res.residual = rnorm;
-
-        if (rnorm < tol) break;
-
-        // Stagnation detection: if residual hasn't improved sufficiently
-        // over the last check_interval iterations, stop early.
-        if (check_interval > 0 && (i + 1) % check_interval == 0) {
-            if (rnorm > prev_check_residual * 0.5) break;
-            prev_check_residual = rnorm;
+    double t_spmv = 0, t_update_xr = 0, t_update_p = 0, t_precond = 0;
+    const double start = trace ? now() : 0;
+    int iterations = 0;
+    for (int i = 0; i < max_iter; i++) {
+        double t = trace ? now() : 0;
+        const auto pap =
+            op_fp32_ ? panel_spmv<C>(Lrm_f_, p, Ap, part) : panel_spmv<C>(Lrm_, p, Ap, part);
+        if (trace)
+            t_spmv += now() - t;
+        if (use_cp)
+            timings("spmv+pAp");
+        std::array<double, C> alpha{};
+        for (int c = 0; c < C; c++) {
+            if (active[c] && pap[c] <= 0)
+                active[c] = false;
+            if (active[c])
+                alpha[c] = rz[c] / pap[c];
         }
-
-        // z = M^{-1} r, rz_new = r·z fused into the pass that writes z
-        // (recorded as pcg.solve.{permute,forward,back,unpermute+rz}).
-        double t0p = pcg_trace ? now_us() : 0;
-        double rz_new = precond_.apply_fused(r.data(), rs, z.data());
-        if (pcg_trace) t_precond += now_us() - t0p;
-
-        double beta = rz_new / rz;
-        double t0a2 = pcg_trace ? now_us() : 0;
-        update_p(p.data(), z.data(), beta, n);      // p = z + beta*p
-        if (pcg_trace) t_update_p += now_us() - t0a2;
-        if (use_cp) res.timings("update_p");
-        rz = rz_new;
+        if (!any_active())
+            break;
+        t = trace ? now() : 0;
+        panel_update_xr<C>(x, p, r, Ap, alpha, active, n, part, rr, rs);
+        if (trace)
+            t_update_xr += now() - t;
+        if (use_cp)
+            timings("update_xr_norm");
+        iterations = i + 1;
+        for (int c = 0; c < C; c++) {
+            if (!active[c])
+                continue;
+            results[c].iterations = i + 1;
+            results[c].residual = std::sqrt(rr[c]) / norm[c];
+            if (results[c].residual < tol) {
+                active[c] = false;
+                continue;
+            }
+            if (opts_.stagnation_window > 0 && (i + 1) % opts_.stagnation_window == 0) {
+                if (results[c].residual > prev[c] * 0.5)
+                    active[c] = false;
+                prev[c] = results[c].residual;
+            }
+        }
+        if (!any_active())
+            break;
+        t = trace ? now() : 0;
+        const auto next = precond_.apply_fused<C>(r, rs, z);
+        if (trace)
+            t_precond += now() - t;
+        std::array<double, C> beta{};
+        for (int c = 0; c < C; c++)
+            if (active[c])
+                beta[c] = next[c] / rz[c];
+        t = trace ? now() : 0;
+        panel_update_p<C>(p, z, beta, active, n);
+        if (trace)
+            t_update_p += now() - t;
+        if (use_cp)
+            timings("update_p");
+        rz = next;
     }
-    // Min-norm solution for a Laplacian (see the note above the loop).
-    if (laplacian) {
-        center_x(x.data(), n, part);
-        if (use_cp) res.timings("center_x");
+    center();
+    if (use_cp) {
+        if (laplacian)
+            timings("center_x");
+        timings.ascend();
     }
-    if (use_cp) res.timings.ascend();
-
-    if (pcg_trace) {
-        const double total_us = now_us() - t_pcg_start;
-        const int nit = res.iterations;
+    if (trace) {
+        const double total = now() - start;
         std::fprintf(stderr,
-            "[pcg] iters=%d total=%.0fms\n"
-            "      spmv+pAp=%.0fms (%.1fms/iter)\n"
-            "      precond+rz=%.0fms (%.1fms/iter)\n"
-            "      update_xr+norm=%.0fms (%.1fms/iter)\n"
-            "      update_p=%.0fms (%.1fms/iter)\n"
-            "      unaccounted=%.0fms\n",
-            nit, total_us/1000,
-            t_spmv/1000, t_spmv/1000/nit,
-            t_precond/1000, t_precond/1000/nit,
-            t_update_xr/1000, t_update_xr/1000/nit,
-            t_update_p/1000, t_update_p/1000/nit,
-            (total_us - t_spmv - t_precond - t_update_xr - t_update_p)/1000);
+                     "[pcg] iters=%d total=%.0fms\n"
+                     "      spmv+pAp=%.0fms (%.1fms/iter)\n"
+                     "      precond+rz=%.0fms (%.1fms/iter)\n"
+                     "      update_xr+norm=%.0fms (%.1fms/iter)\n"
+                     "      update_p=%.0fms (%.1fms/iter)\n"
+                     "      unaccounted=%.0fms\n",
+                     iterations, total / 1000, t_spmv / 1000, t_spmv / 1000 / iterations,
+                     t_precond / 1000, t_precond / 1000 / iterations, t_update_xr / 1000,
+                     t_update_xr / 1000 / iterations, t_update_p / 1000,
+                     t_update_p / 1000 / iterations,
+                     (total - t_spmv - t_precond - t_update_xr - t_update_p) / 1000);
     }
 }
+
 
 void cpu_solver::solve(const Eigen::VectorXd& b, solve_result& res,
                        double tol, int max_iter,
@@ -804,6 +863,30 @@ solve_result cpu_solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::Vecto
     solve_result res;
     solve_impl(b, x, res, tol, max_iter, x0);
     return res;
+}
+
+batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, double tol,
+                                           int max_iter, const const_matrix_view *X0) const {
+    check_matrix_views(B, X, n_, X0);
+    batch_solve_result result;
+    result.columns.resize(B.cols());
+    const bool timing = !std::getenv("APXCHOL_NO_CHECKPOINT");
+    result.timings.tick();
+    for_rhs_panels(
+        B, X, X0, z_, panel_x_,
+        [&]<int C>(Eigen::Index first, const double *b, double *x, const double *x0) {
+            solve_panel<C>(b, x, result.columns.data() + first, result.timings, tol, max_iter, x0);
+        },
+        timing ? &result.timings : nullptr);
+    return result;
+}
+
+void cpu_solver::apply(const_matrix_view R, matrix_view Z) const {
+    check_matrix_views(R, Z, n_);
+    for_rhs_panels(R, Z, nullptr, z_, panel_x_,
+                   [&]<int C>(Eigen::Index, const double *r, double *z, const double *) {
+                       precond_.apply_columns<C>(r, z);
+                   });
 }
 
 solve_backend detail::select_solve_backend(const solve_options& opts,
@@ -954,6 +1037,58 @@ Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
         else return owner.preconditioner().solve(r);
     }, impl_->owner);
 }
+batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, double tol, int max_iter,
+                                       const const_matrix_view *X0) const {
+    check_matrix_views(B, X, rows(), X0);
+    if (const auto *cpu = std::get_if<cpu_solver>(&impl_->owner))
+        return cpu->solve(B, X, tol, max_iter, X0);
+    batch_solve_result result;
+    result.columns.reserve(B.cols());
+    const bool timing = !std::getenv("APXCHOL_NO_CHECKPOINT");
+    result.timings.tick();
+    Eigen::Index c = 0;
+    for (; c + 1 < B.cols(); c += 2) {
+        const_matrix_view rhs(B.middleCols(c, 2));
+        matrix_view output(X.middleCols(c, 2));
+        std::optional<const_matrix_view> initial;
+        if (X0)
+            initial.emplace(X0->middleCols(c, 2));
+        auto pair = std::visit([&](auto& owner) -> batch_solve_result {
+            if constexpr (requires { owner.solve_pair(rhs, output, tol, max_iter); })
+                return owner.solve_pair(rhs, output, tol < 0 ? impl_->tol : tol,
+                    max_iter < 0 ? impl_->max_iter : max_iter,
+                    initial ? &*initial : nullptr);
+            else
+                throw std::logic_error("solver: paired solve requires a GPU session");
+        }, impl_->owner);
+        for (auto& column : pair.columns)
+            result.columns.push_back(std::move(column));
+        if (timing)
+            result.timings("solve");
+    }
+    if (c < B.cols()) {
+        const Eigen::VectorXd b = B.col(c);
+        Eigen::VectorXd x0;
+        if (X0)
+            x0 = X0->col(c);
+        auto column = solve(b, tol, max_iter, X0 ? &x0 : nullptr);
+        X.col(c) = column.x;
+        column.x.resize(0);
+        result.columns.push_back(std::move(column));
+        if (timing)
+            result.timings("solve");
+    }
+    return result;
+}
+
+void solver::apply(const_matrix_view R, matrix_view Z) const {
+    check_matrix_views(R, Z, rows());
+    if (const auto *cpu = std::get_if<cpu_solver>(&impl_->owner))
+        return cpu->apply(R, Z);
+    for (Eigen::Index c = 0; c < R.cols(); ++c)
+        Z.col(c) = apply(Eigen::VectorXd(R.col(c)));
+}
+
 const factorization& solver::factor() const {
     return std::visit([](const auto& owner) -> const factorization& {
         if constexpr (requires { owner.factor(); }) return owner.factor();

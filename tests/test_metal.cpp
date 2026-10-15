@@ -230,6 +230,62 @@ TEST_F(MetalDevice, UniformOperatorScalingPreservesConvergence) {
     }
 }
 
+TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
+    enum class start { cold, zero_first, zero_second, warm_first, warm_second, no_iterations, warm_no_iterations };
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        for (const int exponent : {-90, 0, 90}) {
+            const Sparse A = grid(4, 5, 0.5, true) * std::scalbn(1.0, exponent);
+            apxchol::solve_options options;
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.seed = 17;
+            options.factor_opts.factor_storage = storage;
+            options.stagnation_window = 0;
+            const apxchol::solver owner(A, options);
+            Eigen::MatrixXd exact(A.rows(), 3);
+            for (int q = 0; q < 3; ++q)
+                exact.col(q) = rhs(A.rows(), q + 1, false) * std::scalbn(1.0, -exponent);
+            for (const int width : {2, 3}) {
+                for (const auto mode : {start::cold, start::zero_first, start::zero_second,
+                                       start::warm_first, start::warm_second, start::no_iterations,
+                                       start::warm_no_iterations}) {
+                    SCOPED_TRACE(testing::Message() << exponent << ' ' << int(storage) << ' ' << width << ' ' << int(mode));
+                    Eigen::MatrixXd B = A * exact.leftCols(width);
+                    Eigen::MatrixXd initial = Eigen::MatrixXd::Zero(A.rows(), width);
+                    if (mode == start::zero_first) B.col(0).setZero();
+                    if (mode == start::zero_second) B.col(1).setZero();
+                    if (mode == start::warm_first) initial.col(0) = exact.col(0);
+                    if (mode == start::warm_second) initial.col(1) = exact.col(1);
+                    if (mode == start::warm_no_iterations) initial = exact.leftCols(width);
+                    const bool warm = mode == start::warm_first || mode == start::warm_second ||
+                                      mode == start::warm_no_iterations;
+                    const int budget = mode == start::no_iterations || mode == start::warm_no_iterations ? 0 : 2000;
+                    const apxchol::const_matrix_view x0(initial);
+                    Eigen::MatrixXd X(A.rows(), width);
+                    const auto result = owner.solve(B, X, 1e-8, budget, warm ? &x0 : nullptr);
+                    ASSERT_EQ(result.columns.size(), std::size_t(width));
+                    for (int q = 0; q < width; ++q) {
+                        const Eigen::VectorXd b = B.col(q), guess = initial.col(q);
+                        const auto scalar = owner.solve(b, 1e-8, budget, warm ? &guess : nullptr);
+                        EXPECT_EQ(result.columns[q].backend, apxchol::solve_backend::gpu);
+                        EXPECT_EQ(result.columns[q].iterations, scalar.iterations);
+                        EXPECT_EQ(result.columns[q].x.size(), 0);
+                        ASSERT_TRUE(X.col(q).allFinite());
+                        ASSERT_TRUE(scalar.x.allFinite());
+                        EXPECT_LE((X.col(q) - scalar.x).stableNorm(),
+                                  1e-12 * std::max(scalar.x.stableNorm(), 1e-300));
+                        if (budget || warm) {
+                            EXPECT_LE((b - A * X.col(q)).stableNorm() / std::max(b.stableNorm(), 1e-300), 1e-8);
+                        }
+                        if (!budget || b.isZero(0) || (warm && !guess.isZero(0))) {
+                            EXPECT_EQ(result.columns[q].iterations, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST_F(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
     for (const double shift : {0.0, 0.5}) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");

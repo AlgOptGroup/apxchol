@@ -10,6 +10,7 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -80,16 +81,18 @@ inline void omp_ids(int& tid, int& nt) noexcept {
 #endif
 }
 
-/// Serial thread-order sum of `nt` partials at slot `slot` (< kPartStride).
-inline double reduce_parts(const double* part, int nt, int slot = 0) noexcept {
+/// Serial thread-order sum of `nt` partials at slot `slot` (< stride).
+inline double reduce_parts(const double* part, int nt, int slot = 0, int stride = kPartStride) noexcept {
     double s = 0.0;
-    for (int t = 0; t < nt; ++t) s += part[static_cast<std::size_t>(t) * kPartStride + slot];
+    for (int t = 0; t < nt; ++t) s += part[static_cast<std::size_t>(t) * stride + slot];
     return s;
 }
 
 /// Deterministic parallel Σ v[i], i in [0, n). `part` must hold
 /// part_capacity() doubles. Fixed 4-way accumulator split per chunk.
-inline double det_sum(const double* v, Eigen::Index n, double* part) {
+template<int Columns>
+std::array<double, Columns> det_sum_columns(const double* v, Eigen::Index n, double* part) {
+    static_assert(Columns > 0 && Columns <= kPartStride);
     int nt_used = 1;
     const int workers = cpu_solve_threads(n);
     #pragma omp parallel if(workers > 1) num_threads(workers)
@@ -97,16 +100,30 @@ inline double det_sum(const double* v, Eigen::Index n, double* part) {
         int tid, nt; omp_ids(tid, nt);
         if (tid == 0) nt_used = nt;
         const auto [lo, hi] = static_chunk(n, tid, nt);
-        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+        std::array<double, Columns> s0{}, s1{}, s2{}, s3{};
         Eigen::Index i = lo;
-        for (; i + 4 <= hi; i += 4) {
-            s0 += v[i + 0]; s1 += v[i + 1]; s2 += v[i + 2]; s3 += v[i + 3];
-        }
-        double s = (s0 + s1) + (s2 + s3);
-        for (; i < hi; ++i) s += v[i];
-        part[static_cast<std::size_t>(tid) * kPartStride] = s;
+        for (; i + 4 <= hi; i += 4)
+            for (int c = 0; c < Columns; ++c) {
+                s0[c] += v[(i + 0) * Columns + c];
+                s1[c] += v[(i + 1) * Columns + c];
+                s2[c] += v[(i + 2) * Columns + c];
+                s3[c] += v[(i + 3) * Columns + c];
+            }
+        std::array<double, Columns> sum{};
+        for (int c = 0; c < Columns; ++c)
+            sum[c] = (s0[c] + s1[c]) + (s2[c] + s3[c]);
+        for (; i < hi; ++i)
+            for (int c = 0; c < Columns; ++c) sum[c] += v[i * Columns + c];
+        for (int c = 0; c < Columns; ++c)
+            part[static_cast<std::size_t>(tid) * kPartStride + c] = sum[c];
     }
-    return reduce_parts(part, nt_used);
+    std::array<double, Columns> sum{};
+    for (int c = 0; c < Columns; ++c) sum[c] = reduce_parts(part, nt_used, c);
+    return sum;
+}
+
+inline double det_sum(const double* v, Eigen::Index n, double* part) {
+    return det_sum_columns<1>(v, n, part)[0];
 }
 
 } // namespace detail
@@ -371,7 +388,7 @@ public:
         // centring application (center-k schedule).
         const bool center = !F_.sddm && take_center_();
         const double b_sum = center ? detail::det_sum(bv.data(), n_, part_.data()) : 0.0;
-        apply_core(bv.data(), b_sum, center, x.data(), nullptr);
+        apply_core<1>(bv.data(), {b_sum}, {center}, x.data(), nullptr);
     }
 
     /// PCG-loop application: z = M^{-1} r, with the reductions the outer loop
@@ -390,12 +407,31 @@ public:
     /// take_center_()). Reductions are deterministic for a fixed thread count
     /// (see detail:: scaffolding at the top of the file).
     double apply_fused(const double* r, double r_sum, double* z) const {
+        return apply_fused<1>(r, {r_sum}, z)[0];
+    }
+
+    template<int Columns>
+    std::array<double, Columns> apply_fused(
+            const double* r, const std::array<double, Columns>& r_sum, double* z) const {
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
         ensure_part_();
         const bool center = !F_.sddm && take_center_();
-        double rz = 0.0;
-        apply_core(r, r_sum, center, z, &rz);
+        std::array<double, Columns> rz{};
+        std::array<bool, Columns> centers{};
+        centers.fill(center);
+        apply_core<Columns>(r, r_sum, centers, z, &rz);
         return rz;
+    }
+
+    template<int Columns>
+    void apply_columns(const double* b, double* z) const {
+        ensure_part_();
+        std::array<bool, Columns> centers{};
+        for (bool& center : centers) center = !F_.sddm && take_center_();
+        const auto sums = std::any_of(centers.begin(), centers.end(), [](bool c) { return c; })
+            ? detail::det_sum_columns<Columns>(b, n_, part_.data())
+            : std::array<double, Columns>{};
+        apply_core<Columns>(b, sums, centers, z, nullptr);
     }
 
 private:
@@ -419,144 +455,91 @@ private:
     }
 
     /// Shared body of _solve_impl / apply_fused: z = M^{-1} b.
-    /// `b_sum` = Σ b and `center` = whether this application runs the two
+    /// `b_sum` = Σ b and `centers` selects columns that need the two
     /// Laplacian mean passes (both ignored for SDDM). If `rz_out` is non-null
     /// the final unpermute gather also accumulates b·z into it.
-    void apply_core(const double* b, double b_sum, bool center,
-                    double* z, double* rz_out) const {
+    template<int Columns>
+    void apply_core(const double* b, const std::array<double, Columns>& b_sum,
+                    const std::array<bool, Columns>& centers, double* z, std::array<double, Columns>* rz_out) const {
+        static_assert(Columns > 0 && Columns <= detail::kPartStride);
+        static_assert(!on_gpu || Columns == 1);
         if (cp_) { cp_->descend("solve"); cp_->tick(); }
-
-        // Permutation as explicit gather/scatter (replaces Eigen::PermutationMatrix
-        // products). perm[v] = new position of original vertex v.
-        //   to permuted   : dst[perm[v]] = src[v]   (scatter)
-        //   from permuted : dst[v] = src[perm[v]]   (gather)
-        // Both are bijective writes -> trivially parallel. The gather is the
-        // last pass that writes z, so the b·z reduction (and, on the
-        // Laplacian path, the output re-centering) ride on it: `shift` is
-        // subtracted from every gathered value, and the per-thread partial
-        // b·z products are summed in thread order (deterministic).
         const node_index* P = F_.perm.data();
         const Eigen::Index n = n_;
         const int workers = detail::cpu_solve_threads(n);
         double* part = part_.data();
-        auto gather_out = [&](const double* src, double shift) {
-            int nt_used = 1;
-            #pragma omp parallel if(workers > 1) num_threads(workers)
-            {
-                int tid, nt; detail::omp_ids(tid, nt);
-                if (tid == 0) nt_used = nt;
-                const auto [lo, hi] = detail::static_chunk(n, tid, nt);
-                double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
-                Eigen::Index v = lo;
-                for (; v + 4 <= hi; v += 4) {
-                    const double z0 = src[P[v + 0]] - shift;
-                    const double z1 = src[P[v + 1]] - shift;
-                    const double z2 = src[P[v + 2]] - shift;
-                    const double z3 = src[P[v + 3]] - shift;
-                    z[v + 0] = z0; z[v + 1] = z1; z[v + 2] = z2; z[v + 3] = z3;
-                    s0 += b[v + 0] * z0; s1 += b[v + 1] * z1;
-                    s2 += b[v + 2] * z2; s3 += b[v + 3] * z3;
-                }
-                double s = (s0 + s1) + (s2 + s3);
-                for (; v < hi; ++v) {
-                    const double zv = src[P[v]] - shift;
-                    z[v] = zv;
-                    s += b[v] * zv;
-                }
-                part[static_cast<std::size_t>(tid) * detail::kPartStride] = s;
-            }
-            if (rz_out) *rz_out = detail::reduce_parts(part, nt_used);
-        };
-        // Label of the final pass: says whether b·z was fused in, so a
-        // profile shows which application path ran.
-        const char* unpermute_label = rz_out ? "unpermute+rz" : "unpermute";
+        scratch_.resize(n * Columns);
+        if constexpr (!on_gpu) scratch2_.resize(n * Columns);
 
-        if (F_.sddm) {
-            // ── SDDM path: full-rank factor, no centering ──
-            #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-            for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
-            if (cp_) (*cp_)("permute");
+        // perm[original] is the position in the factor; RHS columns are contiguous.
+        #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
+        for (Eigen::Index v = 0; v < n; ++v)
+            for (int c = 0; c < Columns; ++c)
+                z[P[v] * Columns + c] = b[v * Columns + c]
+                    - (centers[c] ? b_sum[c] / static_cast<double>(n) : 0.0);
+        if (cp_) (*cp_)("permute");
 
-            const double* out;
+        double* out;
 #if defined(APXCHOL_USE_CUDA)
-            if constexpr (on_gpu) {
-                // solve_LLt reads z[0..n) and writes scratch_[0..n); the gather
-                // below reads scratch_ straight (the old x = scratch_; scratch_ = x
-                // round trip was a no-op pair of serial copies).
-                trsv_.solve_LLt(z, scratch_.data());
-                if (cp_) (*cp_)("back");
-                out = scratch_.data();
-            } else
+        if constexpr (on_gpu) {
+            trsv_.solve_LLt(z, scratch_.data());
+            out = scratch_.data();
+        } else
 #endif
-            {
-                trsv_.forward_solve(z, scratch_.data());
-                if (cp_) (*cp_)("forward");
-                // The transpose solve writes scratch2_ (not z) so the unpermute
-                // below can gather straight from it — no serial staging copy.
-                trsv_.transpose_solve(scratch_.data(), scratch2_.data());
-                if (cp_) (*cp_)("back");
-                out = scratch2_.data();
-            }
-            gather_out(out, 0.0);
-            if (cp_) (*cp_)(unpermute_label);
-        } else {
-            // ── Laplacian path: rank-(n-1) factor with centering ──
-            const Eigen::Index m = n_ - 1;
-
-            // APXCHOL_GROUND=center-k (see env_knobs.h): the two mean-
-            // subtraction passes run only on centring applications (every
-            // K-th one -- `center` was decided by the caller via
-            // take_center_()); the others skip both. In exact arithmetic PCG
-            // keeps r in the centred subspace (A·1 = 0 => 1ᵀ(b − A x) = 1ᵀb
-            // = 0), so the pre-centring is a no-op there and the post-
-            // centring only removes an x-component along 1 (null space --
-            // invisible to the residual). Centring every K-th application
-            // bounds the fp drift of both; K = 1 centres every application.
-            if (center) {
-                // Input centering fused into the permute scatter:
-                // z[P[v]] = b[v] - mean(b), mean from the caller's Σb.
-                const double b_mean = b_sum / static_cast<double>(n);
-                #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-                for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v] - b_mean;
-            } else {
-                // Skipped application: plain scatter (b_sum unused).
-                #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-                for (Eigen::Index v = 0; v < n; ++v) z[P[v]] = b[v];
-            }
-            if (cp_) (*cp_)("permute");
-
-            const double* out;
-#if defined(APXCHOL_USE_CUDA)
-            if constexpr (on_gpu) {
-                // solve_LLt reads z[0..m) and writes scratch_[0..m); entry m (the
-                // grounded vertex) is 0.
-                trsv_.solve_LLt(z, scratch_.data());
-                if (cp_) (*cp_)("back");
-                scratch_(m) = 0.0;
-                out = scratch_.data();
-            } else
-#endif
-            {
-                trsv_.forward_solve(z, scratch_.data());
-                if (cp_) (*cp_)("forward");
-                trsv_.transpose_solve(scratch_.data(), scratch2_.data());
-                if (cp_) (*cp_)("back");
-                scratch2_(m) = 0.0;
-                out = scratch2_.data();
-            }
-            // Output re-centering (centring applications only): the
-            // permutation preserves the multiset, so mean(z) == mean(out) --
-            // one deterministic reduction over the permuted solve output,
-            // then the gather subtracts it while writing z (and accumulates
-            // b·z if asked). Replaces the gather + z.mean() + z -= mean
-            // triple pass. A skipped application gathers with shift 0.
-            const double z_mean = center
-                ? detail::det_sum(out, n, part) / static_cast<double>(n) : 0.0;
-            gather_out(out, z_mean);
-            if (cp_) (*cp_)(unpermute_label);
+        {
+            trsv_.template forward_solve<Columns>(z, scratch_.data());
+            if (cp_) (*cp_)("forward");
+            trsv_.template transpose_solve<Columns>(scratch_.data(), scratch2_.data());
+            out = scratch2_.data();
         }
+        if (cp_) (*cp_)("back");
+        if (!F_.sddm)
+            std::fill_n(out + (n - 1) * Columns, Columns, 0.0);
 
-        if (cp_) cp_->ascend();
+        std::array<double, Columns> shift{};
+        if (std::any_of(centers.begin(), centers.end(), [](bool c) { return c; })) {
+            shift = detail::det_sum_columns<Columns>(out, n, part);
+            for (int c = 0; c < Columns; ++c)
+                shift[c] = centers[c] ? shift[c] / static_cast<double>(n) : 0.0;
+        }
+        int nt_used = 1;
+        #pragma omp parallel if(workers > 1) num_threads(workers)
+        {
+            int tid, nt; detail::omp_ids(tid, nt);
+            if (tid == 0) nt_used = nt;
+            const auto [lo, hi] = detail::static_chunk(n, tid, nt);
+            std::array<std::array<double, Columns>, 4> sums{};
+            auto gather = [&](Eigen::Index v, auto& sum) {
+                for (int c = 0; c < Columns; ++c) {
+                    const double value = out[P[v] * Columns + c] - shift[c];
+                    z[v * Columns + c] = value;
+                    sum[c] += b[v * Columns + c] * value;
+                }
+            };
+            Eigen::Index v = lo;
+            for (; v + 4 <= hi; v += 4) {
+                std::array<std::array<double, Columns>, 4> values{};
+                for (int k = 0; k < 4; ++k)
+                    for (int c = 0; c < Columns; ++c)
+                        values[k][c] = out[P[v + k] * Columns + c] - shift[c];
+                for (int k = 0; k < 4; ++k)
+                    for (int c = 0; c < Columns; ++c)
+                        z[(v + k) * Columns + c] = values[k][c];
+                for (int k = 0; k < 4; ++k)
+                    for (int c = 0; c < Columns; ++c)
+                        sums[k][c] += b[(v + k) * Columns + c] * values[k][c];
+            }
+            std::array<double, Columns> sum{};
+            for (int c = 0; c < Columns; ++c)
+                sum[c] = (sums[0][c] + sums[1][c]) + (sums[2][c] + sums[3][c]);
+            for (; v < hi; ++v) gather(v, sum);
+            for (int c = 0; c < Columns; ++c)
+                part[static_cast<std::size_t>(tid) * detail::kPartStride + c] = sum[c];
+        }
+        if (rz_out)
+            for (int c = 0; c < Columns; ++c)
+                (*rz_out)[c] = detail::reduce_parts(part, nt_used, c);
+        if (cp_) { (*cp_)(rz_out ? "unpermute+rz" : "unpermute"); cp_->ascend(); }
     }
 
     struct factorization F_;

@@ -7,7 +7,9 @@ namespace apxchol {
 
 using sptrsv_gpu_value_t = float;
 inline constexpr int kDataflowBlock = 256;
+template<unsigned Columns>
 int dataflow_grid_size(bool fp16);
+inline int dataflow_grid_size(bool fp16) { return dataflow_grid_size<1>(fp16); }
 
 // Each sweep initializes atomic FP32 words and solves dependency-free rows,
 // then resident warps consume topologically ordered batches. A word contains
@@ -26,11 +28,21 @@ int dataflow_grid_size(bool fp16);
 // PCG may supply rhs64/out64 to fuse its vector conversions into the sweep.
 // A non-null diag selects FP16 values with compensated column scaling;
 // otherwise values are FP32. Backward RHS scaling uses FP64 before narrowing.
+template<unsigned Columns>
 void dataflow_solve(cudaStream_t stream, int m, bool reverse,
     const int* rowptr, const int* colidx, const void* vals, const float* diag, const double* scale,
     const unsigned* words, const detail::gpu_dataflow::segment* segments, unsigned batches,
-    unsigned* tags, unsigned tag_count, unsigned* ticket, int grid, const float* rhs, float* out, const unsigned* active = nullptr,
-    const double* rhs64 = nullptr, double* out64 = nullptr);
+    unsigned* tags, unsigned tag_count, unsigned* ticket, int grid, const float* rhs, float* out, const unsigned* active,
+    const double* rhs64, double* out64, unsigned active_stride);
+
+inline void dataflow_solve(cudaStream_t stream, int m, bool reverse,
+    const int* rowptr, const int* colidx, const void* vals, const float* diag, const double* scale,
+    const unsigned* words, const detail::gpu_dataflow::segment* segments, unsigned batches,
+    unsigned* tags, unsigned tag_count, unsigned* ticket, int grid, const float* rhs, float* out,
+    const unsigned* active = nullptr, const double* rhs64 = nullptr, double* out64 = nullptr) {
+    dataflow_solve<1>(stream, m, reverse, rowptr, colidx, vals, diag, scale, words, segments,
+                     batches, tags, tag_count, ticket, grid, rhs, out, active, rhs64, out64, 1);
+}
 
 namespace detail {
 // Returned allocations transfer to the caller. Only fixed-size statistics and

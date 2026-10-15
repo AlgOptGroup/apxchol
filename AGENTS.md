@@ -203,6 +203,9 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
 - `apxchol::solver` owns one CPU or compiled GPU session, selected once by the
   existing backend policy. One-shot solve and Python/Octave use this owner;
   Octave requests CPU. It may outlive its input and setup checkpoint.
+  Matrix RHS calls share traversal across bounded CPU panels or pairs of GPU
+  columns, with independent stopping and one aggregate timing tree. An odd GPU
+  column uses the scalar path.
   Per-call timings belong to the solve result. CUDA accepts warm starts and
   retained FP32 factor exports, but rejects adoption of host factors.
   `detail/csc_import.h` shares typed CSC import among bindings:
@@ -411,8 +414,8 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   performance acceptance: compare the default route against current main and
   the owned route against its frozen research reference, with original-system
   quality, setup, solve, one-RHS total, RSS and owner memory.
-- Metal's `metal_solver` uses host factorization and handles one RHS per call,
-  retaining its factor, operator and workspace. `solve()` selects it only for
+- Metal's `metal_solver` uses host factorization and retains its factor,
+  operator and workspace across solves. `solve()` selects it only for
   compatible automatic or explicit GPU requests. FP16 storage is opt-in;
   CPU requests to `metal_solver` fail.
   Check command-buffer errors and the FP64 original-system exit residual.
