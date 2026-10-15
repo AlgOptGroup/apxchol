@@ -424,10 +424,10 @@ void check_matrix_views(const_matrix_view B, matrix_view X, Eigen::Index rows,
         return std::pair{reinterpret_cast<std::uintptr_t>(first),
                          reinterpret_cast<std::uintptr_t>(last)};
     };
-    const auto [first, last] = extent(X);
+    const auto output_extent = extent(X);
     const auto overlaps = [&](const auto &value) {
         const auto [lo, hi] = extent(value);
-        return first < hi && lo < last;
+        return output_extent.first < hi && lo < output_extent.second;
     };
     if (overlaps(B) || (X0 && overlaps(*X0)))
         throw std::invalid_argument("solver: matrix output must not overlap RHS or warm start");
