@@ -1,22 +1,7 @@
 #pragma once
-/// Incidence list storage backends for graph.
-///
-/// Each backend manages per-vertex lists of one value type. Most backends store
-/// edge_index values into graph's flat undirected-edge pool. The default
-/// directed AoS stores {neighbor, weight} records inline instead.
-///
-/// Required interface:
-///   init(n)                   — set up n empty vertex lists
-///   operator[](v) const       — range of backend values for vertex v
-///   push(v, value)            — append one backend value to vertex v
-///   clear(v)                  — clear vertex v's list
-///   filter(v, pred)           — erase entries where pred is false
-///   filter(v, pred, on_keep)  — same, calling on_keep for survivors
-///   memory_bytes() const      — approximate heap usage in bytes
-///   tag                       — static constexpr graph_storage value
+// Segmented per-vertex adjacency storage for the directed AoS graph.
 
 #include "apxchol/types.h"
-#include "apxchol/trivial_char_traits.h"
 #include "apxchol/big_alloc.h"
 #include <algorithm>
 #include <atomic>
@@ -42,12 +27,6 @@
 namespace apxchol {
 
 namespace detail {
-    struct edge_pred  {
-        template<typename T> bool operator()(const T&) const;
-    };
-    struct edge_visit {
-        template<typename T> void operator()(const T&) const;
-    };
 #ifdef __linux__
     // Lazy reservations benefit from the measured 2 MiB THP granularity,
     // but a 512 MiB PMD page can populate almost an entire unused segment.
@@ -74,67 +53,6 @@ namespace detail {
 #endif
 }
 
-/// Concept for incidence list storage backends.
-template<typename T>
-concept incidence_storage = requires(T t, const T ct, node_index n, node_index v,
-                                      detail::edge_pred pred, detail::edge_visit visit) {
-    t.init(n);
-    { ct[v] } -> std::ranges::input_range;
-    t.push(v, *std::ranges::begin(ct[v]));
-    t.clear(v);
-    t.filter(v, pred);
-    t.filter(v, pred, visit);
-    { ct.memory_bytes() } -> std::convertible_to<std::size_t>;
-    { T::tag } -> std::convertible_to<const graph_storage&>;
-};
-
-// ── Contiguous storage (vector / basic_string / …) ──
-
-template<typename Container, graph_storage Tag>
-struct contiguous_incidence {
-    static constexpr graph_storage tag = Tag;
-
-    void init(node_index n) { adj_.assign(n, {}); }
-
-    std::span<const edge_index> operator[](node_index v) const {
-        return {adj_[v].data(), adj_[v].size()};
-    }
-
-    void push(node_index v, edge_index idx) { adj_[v].push_back(idx); }
-    void clear(node_index v) { adj_[v].clear(); }
-
-    /// Remove elements from v's list where pred(idx) is false.
-    /// Calls on_keep(idx) for each surviving element.
-    void filter(node_index v, auto&& pred, auto&& on_keep) {
-        auto& list = adj_[v];
-        list.erase(std::ranges::remove_if(list, std::not_fn(pred)).begin(),
-                   list.end());
-        for (auto idx : list) on_keep(idx);
-    }
-
-    void filter(node_index v, auto&& pred) {
-        filter(v, pred, [](edge_index) {});
-    }
-
-    /// Approximate memory usage in bytes (heap only).
-    std::size_t memory_bytes() const {
-        std::size_t total = adj_.capacity() * sizeof(Container);
-        for (const auto& c : adj_)
-            total += c.capacity() * sizeof(edge_index);
-        return total;
-    }
-
-private:
-    std::vector<Container> adj_;
-};
-
-using vec_incidence = contiguous_incidence<std::vector<edge_index>, graph_storage::vec>;
-
-// ── basic_string SSO storage ──
-
-using bstr_incidence = contiguous_incidence<
-    std::basic_string<edge_index>, graph_storage::bstr>;
-
 // ── vec_pool storage ──
 //
 // One logically contiguous, physically segmented arena of Value slots, with
@@ -143,7 +61,7 @@ using bstr_incidence = contiguous_incidence<
 // doubled-capacity range. Stable mmap segments keep every existing offset
 // valid while workers claim growth ranges concurrently.
 //
-// Compared to vec_incidence: same per-vertex contiguity for
+// Compared to per-vertex vectors: same per-vertex contiguity for
 // iteration, but no per-vertex std::vector wrapper (saves 3 words
 // of header per vertex). Growth maps only the segment it first touches; unused
 // claimed pages remain lazy.
@@ -400,8 +318,7 @@ private:
     std::atomic<size_t> size_{0};
 };
 
-template<typename Value, graph_storage Tag> struct basic_vec_pool_incidence {
-    static constexpr graph_storage tag = Tag;
+template<typename Value> struct basic_vec_pool_incidence {
     using value_type = Value;
 
     void init(node_index n) {
@@ -764,10 +681,7 @@ private:
 };
 
 using directed_vec_pool_incidence =
-    basic_vec_pool_incidence<directed_pool_edge, graph_storage::vec_pool_aos>;
+    basic_vec_pool_incidence<directed_pool_edge>;
 
-template <typename T>
-inline constexpr bool is_vec_pool_incidence_v =
-    std::same_as<T, directed_vec_pool_incidence>;
 
 } // namespace apxchol

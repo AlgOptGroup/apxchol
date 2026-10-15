@@ -19,7 +19,6 @@ struct solve_options {
     /// Check every N iterations whether residual improved by ≥50%.
     /// If not, declare stagnation and stop early.  0 = disabled.
     int    stagnation_window = 50;
-    graph_storage storage = graph_storage::vec_pool_aos;
     /// Keep the factor's row/value arrays alive after SpTRSV setup so
     /// solver::factor().L stays readable (costs one extra host factor copy;
     /// the bindings' L/D/P export needs it, including in CUDA builds).

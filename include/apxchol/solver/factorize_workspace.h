@@ -23,10 +23,6 @@ struct factorize_workspace {
         std::vector<detail::deferred_edge>         edge_buffer;
 
         std::vector<std::pair<node_index, double>> excess_buffer;
-        // Dedup-bucket scratch for process_vertex / merge_parallel_edges.
-        // Indexed by vertex; entries are pool indices or npos.
-        std::vector<node_index>     dedup_bucket;
-        std::vector<node_index>  dedup_touched;
         // Pooled backends deduplicate each pivot in a compact local hash table
         // instead of probing a vertex-sized table. Epoch tags avoid clearing
         // the retained allocation between pivots.
@@ -82,8 +78,7 @@ struct factorize_workspace {
     /// Round counter, incremented by the factorize loop once per round.
     uint64_t round_index = 0;
 
-    /// Clear per-round per-thread buffers (edge_buffer, excess_buffer,
-    /// dedup_touched).  Allocations are kept.  Call at the top of each
+    /// Clear per-round edge and excess buffers, retaining allocations. Call at each
     /// elimination round.
     void reset_for_round() {
         degree_decrements.clear();
@@ -93,7 +88,6 @@ struct factorize_workspace {
         for (auto& t : threads) {
             t.edge_buffer.clear();
             t.excess_buffer.clear();
-            t.dedup_touched.clear();
             t.degree_decrement_unique = 0;
             t.degree_decrement_ms = 0.0;
         }

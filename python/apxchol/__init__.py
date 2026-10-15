@@ -117,7 +117,7 @@ class Solver:
     """
 
     def __init__(self, A, *, backend="auto", seed=42, partitioner="block_greedy",
-                 storage="vec_pool_aos", keep_factor=True,
+                 keep_factor=True,
                  factor_storage_dtype=None, **advanced):
         csc = _to_csc(A)
         self._n = int(csc.shape[0])
@@ -125,7 +125,7 @@ class Solver:
         self._keep_factor = bool(keep_factor)
         data = np.ascontiguousarray(csc.data, dtype=np.float64)
         options = dict(backend=str(backend), seed=int(seed), partitioner=str(partitioner),
-                       storage=str(storage), keep_factor=self._keep_factor)
+                       keep_factor=self._keep_factor)
         options.update(advanced)
         if factor_storage_dtype is not None:
             options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
@@ -297,7 +297,7 @@ class Solver:
         return (2 * self.factor_nnz - self._n) / self._nnz_A
 
 
-def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage="vec_pool_aos",
+def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy",
               keep_factor=True, factor_storage_dtype=None, **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
@@ -316,7 +316,7 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage
         PRECONDITIONER is built (see :attr:`Solver.lumped`); the PCG still
         applies `A` itself, so the residual is for the system you passed.
     backend : {"auto", "cpu", "gpu"}
-        Auto prefers CPU for at most 64 rows if it supports the requested storage;
+        Auto may prefer CPU for small systems when it supports the requested storage;
         otherwise it checks GPU compatibility. Read the resolved choice from
         ``Solver.backend``. An explicit GPU request fails when the
         installed build, hardware or options cannot support it.
@@ -327,9 +327,6 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage
         Independent-set selector: "block_greedy" (default),
         "priority_greedy", or "baumann_kyng". Unknown names raise at
         factorization time.
-    storage : str
-        Graph backend: "vec_pool_aos" (default),
-        "vec" or "bstr".
     keep_factor : bool
         Keep the factor's row/value arrays alive so `chol()`/`L`/`D` can be
         exported. Costs one extra factor-sized copy in memory (~8 bytes per
@@ -355,7 +352,7 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy", storage
         `degree_multiplier` only takes effect when `degree_quantile=0`
         (the quantile cap, default 0.2, replaces it).
     """
-    return Solver(A, backend=backend, seed=seed, partitioner=partitioner, storage=storage,
+    return Solver(A, backend=backend, seed=seed, partitioner=partitioner,
                   keep_factor=keep_factor, factor_storage_dtype=factor_storage_dtype,
                   **advanced)
 

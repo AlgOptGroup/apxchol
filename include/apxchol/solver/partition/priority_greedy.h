@@ -24,8 +24,7 @@ struct priority_greedy_partitioner {
     uint64_t round = 0;
     int parallel_passes = detail::priority_greedy_parallel_passes();
 
-    template<incidence_storage Incidence>
-    void find_partition(graph<Incidence>& G, std::span<const node_index> candidates,
+    void find_partition(graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
         select_into_chosen_k0(G, candidates, out, ctx);
         ++round;
@@ -39,8 +38,7 @@ private:
     std::vector<char>       pick_;     // pass-1 output (separate buffer; avoids the
                                        // read/write race on status_ within a pass)
 
-    template<incidence_storage Incidence>
-    void select_into_chosen_k0(const graph<Incidence>& G,
+    void select_into_chosen_k0(const graph& G,
                                std::span<const node_index> candidates,
                                selection& out,
                                const partition_context& ctx) {
@@ -84,7 +82,7 @@ private:
                 auto v = cand_[i];
                 bool lmin = true;
                 for (auto idx : G.adj(v)) {
-                    auto u = G.edge_target(idx, v);
+                    auto u = idx.to;
                     if (G.is_active(u) && status_[u] == 0 && precedes(u, v)) {
                         lmin = false;
                         break;
@@ -102,7 +100,7 @@ private:
                 if (!pick_[v]) continue;
                 status_[v] = 1;
                 for (auto idx : G.adj(v)) {
-                    auto u = G.edge_target(idx, v);
+                    auto u = idx.to;
                     if (u != v && G.is_active(u))
                         std::atomic_ref<char>(status_[u]).store(2, std::memory_order_relaxed);
                 }
@@ -124,7 +122,7 @@ private:
                 if (status_[v] != 0) continue;
                 status_[v] = 1;
                 for (auto idx : G.adj(v)) {
-                    const auto u = G.edge_target(idx, v);
+                    const auto u = idx.to;
                     if (G.is_active(u) && status_[u] == 0) status_[u] = 2;
                 }
             }
