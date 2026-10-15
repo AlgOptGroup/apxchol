@@ -471,12 +471,16 @@ private:
         scratch_.resize(n * Columns);
         if constexpr (!on_gpu) scratch2_.resize(n * Columns);
 
+        std::array<double, Columns> mean{};
+        for (int c = 0; c < Columns; ++c)
+            if (centers[c] && n > 0)
+                mean[c] = b_sum[c] / static_cast<double>(n);
+
         // perm[original] is the position in the factor; RHS columns are contiguous.
         #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
         for (Eigen::Index v = 0; v < n; ++v)
             for (int c = 0; c < Columns; ++c)
-                z[P[v] * Columns + c] = b[v * Columns + c]
-                    - (centers[c] ? b_sum[c] / static_cast<double>(n) : 0.0);
+                z[P[v] * Columns + c] = b[v * Columns + c] - (centers[c] ? mean[c] : 0.0);
         if (cp_) (*cp_)("permute");
 
         double* out;
