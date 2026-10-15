@@ -76,7 +76,7 @@ inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
 struct gpu_round_shadow_incidence {
     node_index owner = 0;
     node_index neighbor = 0;
-    double weight = 0.0;
+    pool_value_t weight = 0;
 };
 
 struct gpu_round_shadow_input {
@@ -520,7 +520,7 @@ gpu_round_shadow_input make_gpu_round_shadow_input(
         input.incidences.reserve(incidence_count);
         for (node_index owner = 0; owner < residual.n(); ++owner) {
             for (const auto& [neighbor, weight] : residual.neighbors(owner))
-                input.incidences.push_back({owner, neighbor, weight});
+                input.incidences.push_back({owner, neighbor, static_cast<pool_value_t>(weight)});
         }
         if (input.incidences.size() != incidence_count)
             throw std::logic_error(

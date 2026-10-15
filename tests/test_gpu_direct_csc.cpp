@@ -80,8 +80,8 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
     for (std::size_t i = 0; i < got.incidences.size(); ++i) {
         EXPECT_EQ(got.incidences[i].owner, expected.incidences[i].owner) << i;
         EXPECT_EQ(got.incidences[i].neighbor, expected.incidences[i].neighbor) << i;
-        EXPECT_EQ(std::bit_cast<std::uint64_t>(got.incidences[i].weight),
-                  std::bit_cast<std::uint64_t>(expected.incidences[i].weight)) << i;
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(double(got.incidences[i].weight)),
+                  std::bit_cast<std::uint64_t>(double(expected.incidences[i].weight))) << i;
     }
 }
 
@@ -251,7 +251,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
             for (const auto& edge : got.initial.incidences) {
                 const double canonical = static_cast<double>(static_cast<apxchol::pool_value_t>(
                     -A.coeff(std::max(edge.owner,edge.neighbor),std::min(edge.owner,edge.neighbor))));
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(edge.weight), std::bit_cast<std::uint64_t>(canonical));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(double(edge.weight)), std::bit_cast<std::uint64_t>(canonical));
             }
         }
     }

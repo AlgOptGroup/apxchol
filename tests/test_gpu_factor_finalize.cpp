@@ -39,9 +39,9 @@ struct complete_factor {
         input.vertex_count = n;
         input.active.assign(n, 1);
         input.excess.assign(n, 1.0);
-        std::vector<std::vector<std::pair<node_index, double>>> adjacency(n);
+        std::vector<std::vector<std::pair<node_index, apxchol::pool_value_t>>> adjacency(n);
         for (const auto& e : edges) {
-            const double value = static_cast<apxchol::pool_value_t>(e.weight);
+            const auto value = static_cast<apxchol::pool_value_t>(e.weight);
             adjacency[e.u].emplace_back(e.v, value);
             adjacency[e.v].emplace_back(e.u, value);
         }

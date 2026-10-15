@@ -97,12 +97,11 @@ gpu_round_shadow_input make_input(
         input.seeds.push_back(
             apxchol::detail::gpu_round_shadow_pivot_seed(run_seed, pivot));
 
-    std::vector<std::vector<std::pair<node_index, double>>> adjacency(n);
+    std::vector<std::vector<std::pair<node_index, apxchol::pool_value_t>>> adjacency(n);
     for (const auto& edge : edges) {
         // A real directed-AoS graph narrows each edge once on insertion and
         // promotes it back to double when process_vertex reads the slab.
-        const double stored = static_cast<double>(
-            static_cast<apxchol::pool_value_t>(edge.weight));
+        const auto stored = static_cast<apxchol::pool_value_t>(edge.weight);
         adjacency[edge.u].push_back({edge.v, stored});
         adjacency[edge.v].push_back({edge.u, stored});
     }
@@ -463,8 +462,8 @@ gpu_round_shadow_report run_device(
         for (std::size_t p = 0; p < actual.incidences.size(); ++p) {
             EXPECT_EQ(actual.incidences[p].owner, expected.incidences[p].owner);
             EXPECT_EQ(actual.incidences[p].neighbor, expected.incidences[p].neighbor);
-            EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.incidences[p].weight),
-                      std::bit_cast<std::uint64_t>(expected.incidences[p].weight));
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(double(actual.incidences[p].weight)),
+                      std::bit_cast<std::uint64_t>(double(expected.incidences[p].weight)));
         }
     EXPECT_EQ(actual.excess.size(), expected.excess.size());
     if (actual.excess.size() == expected.excess.size())
@@ -827,6 +826,24 @@ TEST(GpuRoundShadowReference, FreshPairedInputRetainsLinearValidation) {
         EXPECT_THROW(apxchol::detail::gpu_round_selection_content_from_paired_input(input),
                      std::invalid_argument);
     }
+}
+
+TEST(GpuRoundShadowReference, PoolStorageRetainsDoubleDegreeAccumulation) {
+    const std::vector<node_index> pivots = {0};
+    const auto check_degree = [&](std::vector<undirected_edge> edges) {
+        const auto input = make_input(4, edges, pivots);
+        double expected = 0.0;
+        for (const auto& edge : edges)
+            expected += double(static_cast<apxchol::pool_value_t>(edge.weight));
+        const auto report = apxchol::detail::reference_gpu_round_shadow(input);
+        ASSERT_EQ(report.pivots.size(), 1u);
+        EXPECT_EQ(report.pivots[0].total_degree_bits,
+                  std::bit_cast<std::uint64_t>(expected > 0.0 ? expected : 1.0));
+    };
+    // A float accumulator would lose the two unit contributions.
+    check_degree({{0, 1, 0x1p24}, {0, 2, 1.0}, {0, 3, 1.0}});
+    for (double weight : {0.1, 0x1.0000000000001p0, 0x1p-150})
+        check_degree({{0, 1, weight}});
 }
 
 TEST(GpuRoundShadowReference, RawIncidenceDegreePrecedesNeighborDedup) {
@@ -1384,7 +1401,7 @@ TEST(GpuRoundShadowDevice, ProducerAndConsumerRejectTheWrongCudaDevice) {
             (void)consumer.state.compute_owned_round_for_test(
                 consumer.device_selection, kResidentSelectionSeed);
         },
-        "active CUDA device differs from resident state device");
+        "wrong CUDA device");
     ASSERT_EQ(cudaSetDevice(original_device), cudaSuccess);
     expect_exception_contains(
         [&] {
@@ -1762,7 +1779,7 @@ std::string owned_residual_boundary_receipt(
     out << ";incidences";
     for (const auto& edge : state.incidences)
         out << ':' << edge.owner << ',' << edge.neighbor << ','
-            << std::bit_cast<std::uint64_t>(edge.weight);
+            << std::bit_cast<std::uint64_t>(double(edge.weight));
     out << ";columns";
     for (const auto& column : columns)
         out << ':' << column.vertex << ','
@@ -1828,8 +1845,8 @@ void expect_owned_residual_boundary(
         SCOPED_TRACE(i);
         EXPECT_EQ(actual.incidences[i].owner, expected.incidences[i].owner);
         EXPECT_EQ(actual.incidences[i].neighbor, expected.incidences[i].neighbor);
-        EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.incidences[i].weight),
-                  std::bit_cast<std::uint64_t>(expected.incidences[i].weight));
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(double(actual.incidences[i].weight)),
+                  std::bit_cast<std::uint64_t>(double(expected.incidences[i].weight)));
     }
     EXPECT_EQ(apxchol::detail::fingerprint_gpu_round_shadow_input(actual),
               apxchol::detail::fingerprint_gpu_round_shadow_input(expected));
@@ -2687,9 +2704,9 @@ TEST(GpuOwnedPrefix, DegreeScratchHandbackPreservesEveryOrderedField) {
         for (std::size_t i = 0; i < actual.incidences.size(); ++i) {
             const auto& a = actual.incidences[i]; const auto& e = expected.incidences[i];
             EXPECT_EQ(a.owner, e.owner); EXPECT_EQ(a.neighbor, e.neighbor);
-            EXPECT_EQ(std::bit_cast<std::uint64_t>(a.weight), std::bit_cast<std::uint64_t>(e.weight));
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(double(a.weight)), std::bit_cast<std::uint64_t>(double(e.weight)));
             receipt += ":e" + std::to_string(a.owner) + ":" + std::to_string(a.neighbor)
-                + ":" + std::to_string(std::bit_cast<std::uint64_t>(a.weight));
+                + ":" + std::to_string(std::bit_cast<std::uint64_t>(double(a.weight)));
         }
 
         RecordProperty("degree_handback_rounds_" + std::to_string(rounds), receipt);
@@ -2908,8 +2925,8 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             for (std::size_t j = 0; j < actual.incidences.size(); ++j) {
                 EXPECT_EQ(actual.incidences[j].owner, expected.incidences[j].owner);
                 EXPECT_EQ(actual.incidences[j].neighbor, expected.incidences[j].neighbor);
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.incidences[j].weight),
-                          std::bit_cast<std::uint64_t>(expected.incidences[j].weight));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(double(actual.incidences[j].weight)),
+                          std::bit_cast<std::uint64_t>(double(expected.incidences[j].weight)));
             }
             for (std::size_t j = 0; j < actual.excess.size(); ++j)
                 EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.excess[j]),
@@ -3040,8 +3057,8 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
     for (std::size_t j = 0; j < actual.incidences.size(); ++j) {
         EXPECT_EQ(actual.incidences[j].owner, expected.incidences[j].owner);
         EXPECT_EQ(actual.incidences[j].neighbor, expected.incidences[j].neighbor);
-        EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.incidences[j].weight),
-                  std::bit_cast<std::uint64_t>(expected.incidences[j].weight));
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(double(actual.incidences[j].weight)),
+                  std::bit_cast<std::uint64_t>(double(expected.incidences[j].weight)));
     }
     for (std::size_t j = 0; j < actual.excess.size(); ++j)
         EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.excess[j]),
@@ -3131,9 +3148,9 @@ TEST(GpuOwnedPrefix, ParallelEmissionMatchesSerialOrderedHandback) {
                 const auto& e = expected.incidences[i];
                 EXPECT_EQ(a.owner, e.owner);
                 EXPECT_EQ(a.neighbor, e.neighbor);
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(a.weight),
-                          std::bit_cast<std::uint64_t>(e.weight));
-                fold(a.owner); fold(a.neighbor); fold(std::bit_cast<std::uint64_t>(a.weight));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(double(a.weight)),
+                          std::bit_cast<std::uint64_t>(double(e.weight)));
+                fold(a.owner); fold(a.neighbor); fold(std::bit_cast<std::uint64_t>(double(a.weight)));
             }
             for (const auto& column : columns) {
                 fold(column.vertex); fold(std::bit_cast<std::uint32_t>(column.diag));
