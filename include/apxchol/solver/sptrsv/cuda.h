@@ -887,13 +887,11 @@ private:
             if (next_tags) (void)cudaFree(next_tags);
             throw;
         }
-        // Sweeps initialize their intermediate/value words before use. Preserve
-        // old ownership until both replacements and exact-width occupancy exist.
-        (void)cudaFree(data_.d_y);
-        (void)cudaFree(data_.d_df_tag);
-        data_.d_y = next_y;
-        data_.d_df_tag = next_tags;
-        data_.factor_bytes += tags * sizeof(unsigned);
+        // Keep scalar scratch at its original addresses: replacing it can slow
+        // later scalar solves. Publish only after both pair allocations succeed.
+        data_.d_pair_y = next_y;
+        data_.d_df_pair_tag = next_tags;
+        data_.factor_bytes += 2 * tags * sizeof(unsigned);
         data_.df_pair_grid = grid;
     }
 
@@ -905,12 +903,14 @@ private:
         const int m = static_cast<int>(data_.m);
         const unsigned tag_count = unsigned(data_.m) + unsigned(data_.df_slots);
         const int grid = Columns == 1 ? data_.df_grid : data_.df_pair_grid;
+        auto* const y = Columns == 1 ? data_.d_y : data_.d_pair_y;
+        auto* const tags = Columns == 1 ? data_.d_df_tag : data_.d_df_pair_tag;
         dataflow_solve<Columns>(0, m, false, data_.L_row_ptr, data_.L_col_idx, data_.L_values, data_.diag, nullptr,
                        data_.d_fwd_words, data_.d_fwd_segments, data_.fwd_batches,
-                       data_.d_df_tag, tag_count, data_.d_df_ticket, grid, data_.d_x, data_.d_y, active, rhs64, nullptr, active_stride);
+                       tags, tag_count, data_.d_df_ticket, grid, data_.d_x, y, active, rhs64, nullptr, active_stride);
         dataflow_solve<Columns>(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, data_.LT_values, data_.diag, data_.inv_scale2,
                        data_.d_bck_words, data_.d_bck_segments, data_.bck_batches,
-                       data_.d_df_tag, tag_count, data_.d_df_ticket, grid, data_.d_y, data_.d_x, active, nullptr, out64, active_stride);
+                       tags, tag_count, data_.d_df_ticket, grid, y, data_.d_x, active, nullptr, out64, active_stride);
     }
 
     void destroy() noexcept {
@@ -921,7 +921,8 @@ private:
         data_.reset_factor();
         void* const allocations[] = {
             data_.d_df_tag, data_.d_df_ticket, data_.d_fwd_words, data_.d_bck_words,
-            data_.d_fwd_segments, data_.d_bck_segments, data_.d_x, data_.d_y};
+            data_.d_fwd_segments, data_.d_bck_segments, data_.d_x, data_.d_y,
+            data_.d_pair_y, data_.d_df_pair_tag};
         for (void* allocation : allocations)
             if (allocation) (void)cudaFree(allocation);
         data_ = {};
@@ -941,6 +942,7 @@ private:
         // Device memory (values + solve vectors at cuda_value_t width).
         cuda_value_t* d_x      = nullptr;
         cuda_value_t* d_y      = nullptr;
+        cuda_value_t* d_pair_y = nullptr;
 
         // Both directions share the reset-on-sweep value tags and ticket counter.
         unsigned* d_fwd_words = nullptr;
@@ -951,6 +953,7 @@ private:
         int           df_slots = 0;                // extra tagged words for the segment partials
         int           df_split_rows = 0;           // rows the plan split (both directions summed)
         unsigned*     d_df_tag  = nullptr;
+        unsigned*     d_df_pair_tag = nullptr;
         unsigned*     d_df_ticket       = nullptr;   // shared ticket counter
         int           df_grid         = 0;
         int           df_pair_grid    = 0;
