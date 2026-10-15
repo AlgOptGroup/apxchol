@@ -75,5 +75,35 @@ public:
           if (cudaMemGetInfo(&mf, &mt) == cudaSuccess && mt >= mf)
               res.solve_vram_mb = (mt - mf) / (1024.0 * 1024.0); }
     }
+
+    batch_solve_result solve_pair(const_matrix_view B, matrix_view X, double tol,
+                                 int max_iter, const const_matrix_view* X0 = nullptr) {
+        if (B.rows() != precond.rows() || B.cols() != 2 ||
+            X.rows() != B.rows() || X.cols() != 2 ||
+            (X0 && (X0->rows() != B.rows() || X0->cols() != 2)))
+            throw std::invalid_argument("GPU solve pair: dimensions mismatch");
+        batch_solve_result result;
+        result.columns.resize(2);
+        if (use_cp) { result.timings.descend("pcg"); result.timings.tick(); }
+        std::array<int, 2> iterations{};
+        std::array<double, 2> residuals{};
+        gpcg.solve_pair(precond, B, X, tol, max_iter, iterations, residuals,
+                        !precond.factor().sddm, X0, stagnation_window);
+        if (use_cp) { result.timings("gpu_pcg_loop"); result.timings.ascend(); }
+        double vram_mb = -1;
+        size_t free = 0, total = 0;
+        if (cudaMemGetInfo(&free, &total) == cudaSuccess && total >= free)
+            vram_mb = (total - free) / (1024.0 * 1024.0);
+        for (unsigned q = 0; q < 2; ++q) {
+            auto& column = result.columns[q];
+            column.backend = solve_backend::gpu;
+            column.lumped_offdiag = precond.factor().lumped_offdiag;
+            column.iterations = iterations[q];
+            column.residual = residuals[q];
+            column.solve_vram_mb = vram_mb;
+        }
+        return result;
+    }
+
 };
 } // namespace apxchol::detail

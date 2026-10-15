@@ -694,7 +694,15 @@ public:
     /// loops so vectors stay on device between iterations. Narrowing input and
     /// widening output are fused into the sweeps; dependencies remain FP32.
     void solve_LLt_dev(const double* d_in, double* d_out, const unsigned* active = nullptr) const {
-        solve_LLt_dev_impl(active, d_in, d_out);
+        solve_LLt_dev_impl<1>(active, d_in, d_out);
+    }
+
+    template<unsigned Columns>
+    void solve_LLt_dev(const double* d_in, double* d_out, const unsigned* active = nullptr,
+                       unsigned active_stride = 1) const {
+        static_assert(Columns == 1 || Columns == 2);
+        if constexpr (Columns == 2) reserve_pair_workspace();
+        solve_LLt_dev_impl<Columns>(active, d_in, d_out, active_stride);
     }
 
     bool ready() const { return data_.ready; }
@@ -823,7 +831,7 @@ private:
         APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_df_tag, tag_words * sizeof(unsigned)));
         APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_df_ticket, sizeof(unsigned)));
         data_.factor_bytes += tag_words * sizeof(unsigned) + sizeof(unsigned);
-        data_.df_grid = dataflow_grid_size(data_.fp16);
+        data_.df_grid = dataflow_grid_size<1>(data_.fp16);
 
         if (std::getenv("APXCHOL_GPU_MEM_DEBUG")) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
             fprintf(stderr,"[mem] SpTRSV dataflow: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
@@ -865,17 +873,44 @@ private:
 
 
 
+    void reserve_pair_workspace() const {
+        if (data_.df_pair_grid) return;
+        const int grid = dataflow_grid_size<2>(data_.fp16);
+        const std::size_t tags = static_cast<std::size_t>(data_.m) + data_.df_slots;
+        cuda_value_t* next_y = nullptr;
+        unsigned* next_tags = nullptr;
+        try {
+            APXCHOL_CUDA_CHECK(cudaMalloc(&next_y, 2 * data_.m * sizeof(cuda_value_t)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&next_tags, 2 * tags * sizeof(unsigned)));
+        } catch (...) {
+            if (next_y) (void)cudaFree(next_y);
+            if (next_tags) (void)cudaFree(next_tags);
+            throw;
+        }
+        // Keep scalar scratch at its original addresses: replacing it can slow
+        // later scalar solves. Publish only after both pair allocations succeed.
+        data_.d_pair_y = next_y;
+        data_.d_df_pair_tag = next_tags;
+        data_.factor_bytes += 2 * tags * sizeof(unsigned);
+        data_.df_pair_grid = grid;
+    }
+
+    template<unsigned Columns = 1>
     void solve_LLt_dev_impl(const unsigned* active = nullptr,
-                            const double* rhs64 = nullptr, double* out64 = nullptr) const {
+                            const double* rhs64 = nullptr, double* out64 = nullptr,
+                            unsigned active_stride = 1) const {
         // Initialize roots, then solve each direction with the shared dataflow worker.
         const int m = static_cast<int>(data_.m);
         const unsigned tag_count = unsigned(data_.m) + unsigned(data_.df_slots);
-        dataflow_solve(0, m, false, data_.L_row_ptr, data_.L_col_idx, data_.L_values, data_.diag, nullptr,
+        const int grid = Columns == 1 ? data_.df_grid : data_.df_pair_grid;
+        auto* const y = Columns == 1 ? data_.d_y : data_.d_pair_y;
+        auto* const tags = Columns == 1 ? data_.d_df_tag : data_.d_df_pair_tag;
+        dataflow_solve<Columns>(0, m, false, data_.L_row_ptr, data_.L_col_idx, data_.L_values, data_.diag, nullptr,
                        data_.d_fwd_words, data_.d_fwd_segments, data_.fwd_batches,
-                       data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_x, data_.d_y, active, rhs64, nullptr);
-        dataflow_solve(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, data_.LT_values, data_.diag, data_.inv_scale2,
+                       tags, tag_count, data_.d_df_ticket, grid, data_.d_x, y, active, rhs64, nullptr, active_stride);
+        dataflow_solve<Columns>(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, data_.LT_values, data_.diag, data_.inv_scale2,
                        data_.d_bck_words, data_.d_bck_segments, data_.bck_batches,
-                       data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_y, data_.d_x, active, nullptr, out64);
+                       tags, tag_count, data_.d_df_ticket, grid, y, data_.d_x, active, nullptr, out64, active_stride);
     }
 
     void destroy() noexcept {
@@ -886,7 +921,8 @@ private:
         data_.reset_factor();
         void* const allocations[] = {
             data_.d_df_tag, data_.d_df_ticket, data_.d_fwd_words, data_.d_bck_words,
-            data_.d_fwd_segments, data_.d_bck_segments, data_.d_x, data_.d_y};
+            data_.d_fwd_segments, data_.d_bck_segments, data_.d_x, data_.d_y,
+            data_.d_pair_y, data_.d_df_pair_tag};
         for (void* allocation : allocations)
             if (allocation) (void)cudaFree(allocation);
         data_ = {};
@@ -906,6 +942,7 @@ private:
         // Device memory (values + solve vectors at cuda_value_t width).
         cuda_value_t* d_x      = nullptr;
         cuda_value_t* d_y      = nullptr;
+        cuda_value_t* d_pair_y = nullptr;
 
         // Both directions share the reset-on-sweep value tags and ticket counter.
         unsigned* d_fwd_words = nullptr;
@@ -916,14 +953,17 @@ private:
         int           df_slots = 0;                // extra tagged words for the segment partials
         int           df_split_rows = 0;           // rows the plan split (both directions summed)
         unsigned*     d_df_tag  = nullptr;
+        unsigned*     d_df_pair_tag = nullptr;
         unsigned*     d_df_ticket       = nullptr;   // shared ticket counter
         int           df_grid         = 0;
+        int           df_pair_grid    = 0;
         // fp16 storage (APXCHOL_FACTOR_STORAGE): binary16
         // values of CSR(L~^T) and CSR(L~), the fp32 scaled diagonal and the
         // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
         // exact; fp32 overflows for tiny scales, see the class comment).
         bool          fp16           = false;
-    } data_;
+    };
+    mutable state data_;
 
     // Host staging for the fp32 host-PCG boundary (narrow/widen).
     mutable std::vector<cuda_value_t> h_stage_;

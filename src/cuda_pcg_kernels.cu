@@ -53,20 +53,22 @@ __device__ __forceinline__ double block_reduce_sum(double v, double* sh) {
     return warp == 0 ? sum_lanes<32>(pcg_math<>{}, lane < kWarps ? sh[lane] : 0.0) : 0.0;
 }
 
-template<operation Op, int Lanes = 1, class Value = double>
+template<operation Op, int Lanes = 1, unsigned Columns = 1, class Value = double>
 __global__ void __launch_bounds__(kBlockThreads)
 step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
             const int* col = nullptr, const Value* val = nullptr) {
     constexpr int rows = kBlockThreads / Lanes;
     const pcg_work<std::int64_t> work{static_cast<std::int64_t>(blockIdx.x) * rows, n,
         static_cast<std::int64_t>(gridDim.x) * rows, threadIdx.x / Lanes, n};
-    const double sum = detail::gpu_pcg::step<Lanes>(
+    const auto sums = detail::gpu_pcg::step_columns<Lanes, Columns>(
         Op, pcg_math<Lanes>{}, v, ptr, col, val, static_cast<const Value*>(nullptr),
         work, threadIdx.x % Lanes);
     if constexpr (Op != operation::direction) {
-        __shared__ double scratch[kWarps];
-        const double total = block_reduce_sum(sum, scratch);
-        if (threadIdx.x == 0) v.partial[blockIdx.x] = total;
+        __shared__ double scratch[Columns][kWarps];
+        for (unsigned q = 0; q < Columns; ++q) {
+            const double total = block_reduce_sum(sums.values[q], scratch[q]);
+            if (threadIdx.x == 0) v.partial[blockIdx.x * Columns + q] = total;
+        }
     }
 }
 
@@ -80,22 +82,29 @@ struct recurrence_math {
     __device__ bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
 };
 
+template<unsigned Columns>
 __global__ void __launch_bounds__(kBlockThreads)
 finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mode,
-                unsigned iteration, double bnorm, unsigned window) {
-    __shared__ double scratch[kWarps];
+                unsigned iteration, column_sums<double, Columns> bnorm, unsigned window) {
+    __shared__ double scratch[Columns][kWarps];
     const pcg_work<int> work{0, blocks, kBlockThreads, static_cast<int>(threadIdx.x), blocks};
-    const double sum = block_reduce_sum(sum_partials(pcg_math<>{}, part, work), scratch);
-    if (threadIdx.x == 0 && state->active)
-        *state = advance(recurrence_math{bnorm}, *state, mode, sum, iteration, window);
+    const auto sums = sum_partials_columns<Columns>(pcg_math<>{}, part, work);
+    for (unsigned q = 0; q < Columns; ++q) {
+        const double sum = block_reduce_sum(sums.values[q], scratch[q]);
+        // The iteration-zero check belongs only to warm columns. Cold columns
+        // have alpha=0 and retain the scalar entry behavior, including tol>1.
+        if (threadIdx.x == 0 && state[q].active &&
+            (mode != kFinalizeCheck || iteration != 0 || state[q].alpha != 0))
+            state[q] = advance(recurrence_math{bnorm.values[q]}, state[q], mode, sum, iteration, window);
+    }
 }
 
-template<class Value>
+template<unsigned Columns, class Value>
 void multiply(cudaStream_t stream, std::int64_t n, workspace v,
               const operator_csr& a, const Value* values, int lanes) {
     const int grid = pcg_blocks(n * lanes);
     auto launch = [&]<int Lanes>() {
-        step_kernel<operation::multiply, Lanes><<<grid, kBlockThreads, 0, stream>>>(
+        step_kernel<operation::multiply, Lanes, Columns><<<grid, kBlockThreads, 0, stream>>>(
             n, v, a.row_ptr, a.col_idx, values);
     };
     switch (lanes) {
@@ -110,30 +119,39 @@ void multiply(cudaStream_t stream, std::int64_t n, workspace v,
 
 } // namespace
 
+template<unsigned Columns>
 void step(cudaStream_t stream, operation op, std::int64_t n, workspace v,
           const operator_csr& matrix, int lanes) {
     const int grid = pcg_blocks(n);
     switch (op) {
         case operation::multiply:
-            if (matrix.fp32) multiply(stream, n, v, matrix, matrix.values_f32, lanes);
-            else multiply(stream, n, v, matrix, matrix.values_f64, lanes);
+            if (matrix.fp32) multiply<Columns>(stream, n, v, matrix, matrix.values_f32, lanes);
+            else multiply<Columns>(stream, n, v, matrix, matrix.values_f64, lanes);
             break;
         case operation::residual:
-            step_kernel<operation::residual><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            step_kernel<operation::residual, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
         case operation::dot:
-            step_kernel<operation::dot><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            step_kernel<operation::dot, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
         case operation::direction:
-            step_kernel<operation::direction><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            step_kernel<operation::direction, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
     }
 }
 
+template<unsigned Columns>
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
-              unsigned mode, unsigned iteration, double bnorm, unsigned window) {
-    finalize_kernel<<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, bnorm, window);
+              unsigned mode, unsigned iteration, std::array<double, Columns> bnorm, unsigned window) {
+    column_sums<double, Columns> norms{};
+    for (unsigned q = 0; q < Columns; ++q) norms.values[q] = bnorm[q];
+    finalize_kernel<Columns><<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, norms, window);
 }
+
+template void step<1>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
+template void step<2>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
+template void finalize<1>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 1>, unsigned);
+template void finalize<2>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 2>, unsigned);
 
 namespace {
 

@@ -1093,45 +1093,47 @@ public:
     /// expects as its input; the pair (forward_solve, transpose_solve) applies
     /// (L L^T)^-1 either way. See the file header, storage contract.
     /// Valid in place (x_in == y_out).
+    template<int Columns = 1>
     void forward_solve(const double* x_in, double* y_out) const {
-        solve_dispatch<fwd_dir>(x_in, y_out);
+        solve_dispatch<fwd_dir, Columns>(x_in, y_out);
     }
 
     /// Back solve: L^T * z = y.  Under the fp16 storage the input is the
     /// forward's y' = D y and the kernel solves L~^T z = D^-2 y' (input read
     /// scaled once per column by inv_scale_[j]^2), i.e. z = L^-T y as before;
     /// D = I on the fp32 storage. Valid in place (x_in == y_out).
+    template<int Columns = 1>
     void transpose_solve(const double* x_in, double* y_out) const {
-        solve_dispatch<bck_dir>(x_in, y_out);
+        solve_dispatch<bck_dir, Columns>(x_in, y_out);
     }
 
 private:
     // One storage branch per solve; FP16 kernels are only entered after the
     // setup-time CPU capability check.
-    template <class Dir>
+    template <class Dir, int Columns>
     void solve_dispatch(const double* x_in, double* y_out) const {
         if (fp16_) {
-            solve_selected<Dir, _Float16>(x_in, y_out);
+            solve_selected<Dir, _Float16, Columns>(x_in, y_out);
             return;
         }
-        solve_selected<Dir, float>(x_in, y_out);
+        solve_selected<Dir, float, Columns>(x_in, y_out);
     }
 
-    template <class Dir, class V>
+    template <class Dir, class V, int Columns = 1>
     void solve_selected(const double* x_in, double* y_out) const {
         const unsigned processors = detail::cpu_solve_threads(team_rows_);
         if (processors == 1)
-            return solve_levelset_range_serial<Dir, V>(
+            return solve_levelset_range_serial<Dir, V, Columns>(
                 x_in, y_out, 0, base_level_count<Dir>());
         // A critical plan fixes its lane count at setup. Respect a caller's
         // changed thread limit through the base levels instead of that plan.
         if (hybrid_active_ && processors == critical_plan_.processors)
-            solve_hybrid<Dir, V>(x_in, y_out);
+            solve_hybrid<Dir, V, Columns>(x_in, y_out);
         else
-            solve_levelset<Dir, V>(x_in, y_out, processors);
+            solve_levelset<Dir, V, Columns>(x_in, y_out, processors);
     }
 
-    template <class Dir, class V>
+    template <class Dir, class V, int Columns = 1>
     void solve_hybrid(const double* x_in, double* y_out) const {
         bool team_ok = false;
 #ifdef _OPENMP
@@ -1148,13 +1150,13 @@ private:
             team_ok = static_cast<unsigned>(omp_get_num_threads()) == processors;
             if (team_ok) {
                 if constexpr (Dir::forward) {
-                    solve_levelset_range_team<Dir, V>(
+                    solve_levelset_range_team<Dir, V, Columns>(
                         x_in, y_out, 0, hybrid_fwd_level_end_);
-                    solve_critical_team<Dir, V>(x_in, y_out);
+                    solve_critical_team<Dir, V, Columns>(x_in, y_out);
                 } else {
-                    solve_critical_team<Dir, V>(x_in, y_out);
+                    solve_critical_team<Dir, V, Columns>(x_in, y_out);
                     #pragma omp barrier
-                    solve_levelset_range_team<Dir, V>(
+                    solve_levelset_range_team<Dir, V, Columns>(
                         x_in, y_out, hybrid_bck_level_begin_,
                         base_level_count<Dir>());
                 }
@@ -1167,12 +1169,12 @@ private:
             // level's Fat template choice and row order. Natural factor order
             // is mathematically valid, but it changes the established fat-row
             // summation order and therefore breaks the byte-identity contract.
-            solve_levelset_range_serial<Dir, V>(
+            solve_levelset_range_serial<Dir, V, Columns>(
                 x_in, y_out, 0, base_level_count<Dir>());
         }
     }
 
-    template <class Dir, class V>
+    template <class Dir, class V, int Columns = 1>
     void solve_levelset_range_serial(const double* x_in, double* y_out,
                                      std::size_t first_level,
                                      std::size_t level_end) const {
@@ -1183,9 +1185,9 @@ private:
                 const node_index level_sz =
                     static_cast<node_index>(level.size());
                 if (level_sz <= kSpTRSVOMPThreshold) {
-                    solve_level_rows<Dir, V, false, false>(level, x_in, y_out);
+                    solve_level_rows<Dir, V, Columns, false, false>(level, x_in, y_out);
                 } else {
-                    solve_level_rows<Dir, V, true, false>(level, x_in, y_out);
+                    solve_level_rows<Dir, V, Columns, true, false>(level, x_in, y_out);
                 }
             }
         });
@@ -1195,32 +1197,32 @@ private:
     // stay in topological order, while cross-lane dependencies wait for the
     // staleness-2 frontier. Called collectively by the hybrid's OpenMP team.
 #ifdef __x86_64__
-    template <class Dir>
+    template <class Dir, int Columns>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
     void solve_critical_fma(const double* x_in, double* y_out) const {
-        solve_critical_team_impl<Dir, _Float16>(x_in, y_out);
+        solve_critical_team_impl<Dir, _Float16, Columns>(x_in, y_out);
     }
 
-    template <class Dir>
+    template <class Dir, int Columns>
     [[gnu::target("f16c"), gnu::flatten]]
     void solve_critical_fp16(const double* x_in, double* y_out) const {
-        solve_critical_team_impl<Dir, _Float16>(x_in, y_out);
+        solve_critical_team_impl<Dir, _Float16, Columns>(x_in, y_out);
     }
 #endif
 
-    template <class Dir, class V>
+    template <class Dir, class V, int Columns = 1>
     void solve_critical_team(const double* x_in, double* y_out) const {
 #if defined(__x86_64__) && !(defined(__AVX2__) && defined(__F16C__) && defined(__FMA__))
         if constexpr (std::is_same_v<V, _Float16>) {
             if (simd_fp16_kernel())
-                return solve_critical_fma<Dir>(x_in, y_out);
-            return solve_critical_fp16<Dir>(x_in, y_out);
+                return solve_critical_fma<Dir, Columns>(x_in, y_out);
+            return solve_critical_fp16<Dir, Columns>(x_in, y_out);
         }
 #endif
-        solve_critical_team_impl<Dir, V>(x_in, y_out);
+        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out);
     }
 
-    template <class Dir, class V>
+    template <class Dir, class V, int Columns = 1>
     void solve_critical_team_impl(const double* x_in, double* y_out) const {
 #ifdef _OPENMP
         const unsigned processor =
@@ -1239,10 +1241,10 @@ private:
                 critical_barrier_.wait(processor, 1);
             if constexpr (Dir::forward) {
                 for (std::size_t i = begin; i < end; ++i)
-                    solve_row<Dir, V, /*Fat=*/false>(rows[i], x_in, y_out);
+                    solve_row<Dir, V, Columns, /*Fat=*/false>(rows[i], x_in, y_out);
             } else {
                 for (std::size_t i = end; i-- > begin;)
-                    solve_row<Dir, V, /*Fat=*/false>(rows[i], x_in, y_out);
+                    solve_row<Dir, V, Columns, /*Fat=*/false>(rows[i], x_in, y_out);
             }
             critical_barrier_.arrive(processor);
         }
@@ -1275,20 +1277,20 @@ private:
     // Schedule: thin level -> `omp single` over its rows (one thread, level
     // order); fat level -> `omp for schedule(static)` over its rows; the
     // implicit barrier of each carries the level dependency.
-    template <class Dir, class V>
+    template <class Dir, class V, int Columns = 1>
     void solve_levelset(const double* x_in, double* y_out, unsigned processors) const {
-        solve_levelset_range<Dir, V>(
+        solve_levelset_range<Dir, V, Columns>(
             x_in, y_out, 0, base_level_count<Dir>(), processors);
     }
 
-    template <class Dir, class V>
+    template <class Dir, class V, int Columns = 1>
     void solve_levelset_range(const double* x_in, double* y_out,
                               std::size_t first_level,
                               std::size_t level_end, unsigned processors) const {
         if (first_level == level_end) return;
         #pragma omp parallel num_threads(processors)
         {
-            solve_levelset_range_team<Dir, V>(
+            solve_levelset_range_team<Dir, V, Columns>(
                 x_in, y_out, first_level, level_end);
         }
     }
@@ -1296,17 +1298,17 @@ private:
     // Called collectively from an existing OpenMP team. Keeping the range
     // body separate lets the hybrid cross from bulk levels to weak
     // supersteps without a second fork/join.
-    template <class Dir, class V>
+    template <class Dir, class V, int Columns = 1>
     void solve_levelset_range_team(const double* x_in, double* y_out,
                                    std::size_t first_level,
                                    std::size_t level_end) const {
         with_base_levels<Dir>([&](const auto& levels) {
-            solve_levelset_range_team_impl<Dir, V>(
+            solve_levelset_range_team_impl<Dir, V, Columns>(
                 x_in, y_out, levels, first_level, level_end);
         });
     }
 
-    template <class Dir, class V, class Levels>
+    template <class Dir, class V, int Columns, class Levels>
     void solve_levelset_range_team_impl(const double* x_in, double* y_out,
                                         const Levels& levels,
                                         std::size_t first_level,
@@ -1317,15 +1319,15 @@ private:
             const node_index level_sz = static_cast<node_index>(level.size());
             if (level_sz <= kSpTRSVOMPThreshold) {
                 #pragma omp single
-                solve_level_rows<Dir, V, false, false>(level, x_in, y_out);
+                solve_level_rows<Dir, V, Columns, false, false>(level, x_in, y_out);
                 // implicit barrier on omp single
             } else {
-                solve_level_rows<Dir, V, true, true>(level, x_in, y_out);
+                solve_level_rows<Dir, V, Columns, true, true>(level, x_in, y_out);
             }
         }
     }
 
-    template <class Dir, class V, bool Fat, bool Simd, bool Parallel, class Level>
+    template <class Dir, class V, int Columns, bool Fat, bool Simd, bool Parallel, class Level>
     [[gnu::always_inline]]
     void solve_level_rows_impl(const Level& level, const double* x_in, double* y_out) const {
         const node_index size = static_cast<node_index>(level.size());
@@ -1333,12 +1335,12 @@ private:
             #pragma omp for schedule(static)
             for (node_index k = 0; k < size; ++k) {
                 prefetch_ahead<Dir, V>(level, k, size);
-                solve_row<Dir, V, Fat, Simd>(level[k], x_in, y_out);
+                solve_row<Dir, V, Columns, Fat, Simd>(level[k], x_in, y_out);
             }
         } else {
             for (node_index k = 0; k < size; ++k) {
                 prefetch_ahead<Dir, V>(level, k, size);
-                solve_row<Dir, V, Fat, Simd>(level[k], x_in, y_out);
+                solve_row<Dir, V, Columns, Fat, Simd>(level[k], x_in, y_out);
             }
         }
     }
@@ -1346,33 +1348,33 @@ private:
 #ifdef __x86_64__
     // Enter the target once per level. Flatten then inlines the row arithmetic
     // and matching dot kernel, keeping calls and feature checks out of the rows.
-    template <class Dir, bool Fat, bool Parallel, class Level>
+    template <class Dir, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
     void solve_level_rows_simd(const Level& level, const double* x_in, double* y_out) const {
-        solve_level_rows_impl<Dir, _Float16, Fat, Fat, Parallel>(level, x_in, y_out);
+        solve_level_rows_impl<Dir, _Float16, Columns, Fat, Fat, Parallel>(level, x_in, y_out);
     }
 
-    template <class Dir, bool Fat, bool Parallel, class Level>
+    template <class Dir, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::target("f16c"), gnu::flatten]]
     void solve_level_rows_f16c(const Level& level, const double* x_in, double* y_out) const {
-        solve_level_rows_impl<Dir, _Float16, Fat, false, Parallel>(level, x_in, y_out);
+        solve_level_rows_impl<Dir, _Float16, Columns, Fat, false, Parallel>(level, x_in, y_out);
     }
 #endif
 
-    template <class Dir, class V, bool Fat, bool Parallel, class Level>
+    template <class Dir, class V, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::always_inline]]
     void solve_level_rows(const Level& level, const double* x_in, double* y_out) const {
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
         if constexpr (std::is_same_v<V, _Float16>)
-            return solve_level_rows_impl<Dir, V, Fat, Fat, Parallel>(level, x_in, y_out);
+            return solve_level_rows_impl<Dir, V, Columns, Fat, Fat, Parallel>(level, x_in, y_out);
 #elif defined(__x86_64__)
         if constexpr (std::is_same_v<V, _Float16>) {
             if (simd_fp16_kernel())
-                return solve_level_rows_simd<Dir, Fat, Parallel>(level, x_in, y_out);
-            return solve_level_rows_f16c<Dir, Fat, Parallel>(level, x_in, y_out);
+                return solve_level_rows_simd<Dir, Columns, Fat, Parallel>(level, x_in, y_out);
+            return solve_level_rows_f16c<Dir, Columns, Fat, Parallel>(level, x_in, y_out);
         } else
 #endif
-        solve_level_rows_impl<Dir, V, Fat, false, Parallel>(level, x_in, y_out);
+        solve_level_rows_impl<Dir, V, Columns, Fat, false, Parallel>(level, x_in, y_out);
     }
 
     // Two-stage prefetch: pull the row-pointer of the row 8 ahead (cheap ptr[]
@@ -1689,11 +1691,34 @@ private:
     // Fat: the `omp for` levels -- the SIMD kernel on 16-bit storage, else the
     // plain single-accumulator loop (instruction-identical to the pre-fold fp32
     // kernel); thin: dot_thin (4-way).
-    template <class Dir, class V, bool Fat, bool Simd = false>
+    template <class Dir, class V, int Columns, bool Fat, bool Simd = false>
     void solve_row(node_index v, const double* x_in, double* y_out) const {
         const edge_index* ptr = Dir::ptr(*this).data();
         const edge_index p0 = Dir::first(ptr, v);
         const edge_index p1 = Dir::last(ptr, v);
+        if constexpr (Columns > 1) {
+            double sum[Columns]{};
+            const auto& vals = Dir::template vals<V>(*this);
+            const auto& idx = Dir::idx(*this);
+            for (edge_index p = p0; p < p1; ++p) {
+                const double value = widen(vals[p]);
+                const auto offset = std::size_t(idx[p]) * Columns;
+                #pragma omp simd
+                for (int q = 0; q < Columns; ++q)
+                    sum[q] += value * y_out[offset + q];
+            }
+            const double diagonal = diag<Dir, V>(v);
+            double scale = 1;
+            if constexpr (!Dir::forward && std::is_same_v<V, _Float16>) {
+                const double reciprocal = inv_scale_[v];
+                scale = reciprocal * reciprocal;
+            }
+            const auto offset = std::size_t(v) * Columns;
+            #pragma omp simd
+            for (int q = 0; q < Columns; ++q)
+                y_out[offset + q] = (x_in[offset + q] * scale - sum[q]) / diagonal;
+            return;
+        }
         double sum;
 #ifdef __x86_64__
         if constexpr (std::is_same_v<V, _Float16>) {

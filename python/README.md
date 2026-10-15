@@ -54,9 +54,13 @@ when unavailable or unsupported; execution errors do not trigger a CPU retry.
 serve concurrent `solve`/`apply` calls; use separate instances or serialize.
 
 `solve` accepts `rtol` (default `1e-8`, overriding alias `tol`), `maxiter`,
-`x0`, and `out`. The latter must be writable, C-contiguous float64 of length
-`n`; it is returned as `res.x`. An already-converged guess takes zero iterations.
-GPU solves can use temporary output storage before copying into `out`.
+`x0`, and `out`. Right-hand sides may have shape `(n,)` or `(n, nrhs)`;
+`solve` and `apply` preserve that shape. For matrix inputs, `iters`, `residual`
+and `converged` are per-column arrays. CPU solves process RHS panels together;
+GPU solves share traversal across pairs, using the scalar path for an odd final column.
+`x0` and `out` must match the RHS shape. `out` must be writable, C- or
+F-contiguous float64 and is returned as `res.x`. Overlapping inputs are copied
+before writing output. An already-converged guess takes zero iterations.
 
 ```python
 solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
@@ -92,7 +96,7 @@ p = P.argsort()
 For a Laplacian with `k` components, this represents the rank-`n-k` subspace;
 each component's last column contains a placeholder diagonal.
 `fill_ratio = (2 * factor_nnz - n) / nnz(A)` counts the symmetric factor pattern.
-`chol()`, `L` and `D` return float32 values, matching the C++ factor. `solve` and `apply` accept float32 inputs, but use FP64 CPU arithmetic and return float64 vectors. Use `.astype(np.float64)` if a consumer requires double-precision factor arrays.
+`chol()`, `L` and `D` return float32 values, matching the C++ factor. `solve` and `apply` accept float32 inputs, but use FP64 CPU arithmetic and return float64 arrays. Use `.astype(np.float64)` if a consumer requires double-precision factor arrays.
 
 Matrix import uses signed 32-bit dimensions/nonzero counts; default factor
 offsets are unsigned 32-bit. The core's wide-index options are separate.
