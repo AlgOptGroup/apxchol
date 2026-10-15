@@ -6,8 +6,8 @@ using namespace metal;
 using namespace apxchol::detail::gpu_pcg;
 using namespace apxchol::detail::metal_host;
 
-static_assert(sizeof(Params) == 36, "Params mirrors the host layout");
-static_assert(__builtin_offsetof(Params, spmv_lanes) == 32, "Params mirrors the host layout");
+static_assert(sizeof(Params) == 40, "Params mirrors the host layout");
+static_assert(__builtin_offsetof(Params, preconditioner_scale) == 36, "Params mirrors the host layout");
 
 using SolveState = solve_state<df, float>;
 static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve_state");
@@ -21,6 +21,8 @@ template<unsigned Lanes = 1>
 struct pcg_math {
     using wide = df;
     using scalar = float;
+    float preconditioner_scale = 1;
+    float preconditioned(float z) const { return z * preconditioner_scale; }
     df add(df a, df b) const { return df_add(a, b); }
     df shuffle_down(df value, uint offset, uint) const {
         return {simd_shuffle_down(value.hi, offset), simd_shuffle_down(value.lo, offset)};
@@ -52,9 +54,9 @@ kernel void pcg_step(constant Params& P [[buffer(0)]],
         : pcg_work<uint>{group * kTreeRows, (group + 1) * kTreeRows, kTreeLanes, lane, P.n};
     const auto vectors = workspace<df, float>{x, r, ap, p, z, partial, &state};
     const auto sum = op == operation::multiply && P.spmv_lanes == kTreeLanes
-        ? step<kTreeLanes>(op, pcg_math<kTreeLanes>{}, vectors, ptr, col, hi, lo,
+        ? step<kTreeLanes>(op, pcg_math<kTreeLanes>{P.preconditioner_scale}, vectors, ptr, col, hi, lo,
                           pcg_work<uint>{work.first, work.last, 1, 0, P.n}, lane)
-        : step<1>(op, pcg_math<>{}, vectors, ptr, col, hi, lo, work, 0);
+        : step<1>(op, pcg_math<>{P.preconditioner_scale}, vectors, ptr, col, hi, lo, work, 0);
     if (op != operation::direction) {
         const auto total = sum_lanes<kTreeLanes>(pcg_math<>{}, sum);
         if (lane == 0) partial[group] = total;

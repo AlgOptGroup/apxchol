@@ -27,6 +27,7 @@ template<int Lanes = 1>
 struct pcg_math {
     using wide = double;
     using scalar = double;
+    __device__ double preconditioned(double z) const { return z; }
     __device__ double add(double a, double b) const { return a + b; }
     __device__ double shuffle_down(double value, unsigned offset, unsigned width) const {
         return __shfl_down_sync(0xffffffffu, value, offset, width);
