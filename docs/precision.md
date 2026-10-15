@@ -110,7 +110,5 @@ This also applies to explicit host factor construction in CUDA-enabled builds.
 Low-level import of that factor onto the GPU does not make its earlier
 construction repeatable; public CPU solvers keep the factor and solves on CPU.
 
-Historical rejected precision variants and their limits are recorded in
-[implementation history](implementation-history.md). They are not universal
-precision guarantees. The [benchmark protocol](../benchmarks/README.md) describes
-how to compare supported configurations without changing timing boundaries.
+The [benchmark protocol](../benchmarks/README.md) describes how to compare
+supported configurations without changing timing boundaries.

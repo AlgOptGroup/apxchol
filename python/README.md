@@ -50,6 +50,7 @@ support it, otherwise CPU. Selection belongs to the common C++ solver;
 support in the installed build and a usable device. Explicit GPU requests fail
 when unavailable or unsupported; execution errors do not trigger a CPU retry.
 `solver.backend` reports the choice made during setup and is read-only.
+See [backend capabilities](../README.md#backend-capabilities) for GPU option restrictions.
 `OMP_NUM_THREADS` controls CPU parallelism. A solver cannot
 serve concurrent `solve`/`apply` calls; use separate instances or serialize.
 

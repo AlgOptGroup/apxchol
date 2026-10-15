@@ -11,9 +11,7 @@ compile_commands.json
 
 # Data & results (download/generate locally)
 data/
-# Generated cell stores and plot previews stay local. The retired laptop store
-# is preserved under benchmarks/archive/laptop-20260908/cells/. Current Daint
-# extracts and their source/protocol metadata are committed under benchmarks/daint/.
+# Generated cell stores and plot previews stay local.
 results/*
 benchmarks/results/
 scripts/baselines/

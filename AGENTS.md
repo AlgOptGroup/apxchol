@@ -2,29 +2,13 @@
 
 ## Scope and evidence
 
-Keep this file current when builds, APIs, defaults or architecture change.
-Deliver the requested scope; prefer removing redundancy to adding modes or knobs.
-Backend design may change; compare accuracy, setup/solve cost, memory and complexity.
-Verify claims with current-session evidence; label historical results and hypotheses.
-Factor identity requires structure/value digests, not equal fill or residuals.
-The [precision contract](docs/precision.md) separates parallel factor rebuilds
-from exact same-graph selector and same-owned-factor solve checks. Do not infer
-whole-factor bit identity from a fixed seed or lower storage precision.
-Audits report the complete denominator, checked/total and exclusions.
-Consult [implementation history](docs/implementation-history.md) before changing
-an established algorithm/default; historical examples are not current verification.
+Keep these instructions current when builds, APIs, defaults or architecture change. Deliver the requested scope; prefer removing redundancy to adding modes or knobs. Backend design may change when accuracy, setup/solve cost, memory and complexity justify it. Defaults and their rationale live in `include/apxchol/solver/factor_options.h`.
 
-## Build and tests
+Verify claims with current-session evidence and label historical results or hypotheses. Audits state the complete denominator, checked/total and exclusions. Factor identity requires structure/value digests, not equal fill, residuals or seeds. Follow the [precision contract](docs/precision.md): deterministic same-graph selection and same-owned-factor solves do not imply identical independently rebuilt parallel factors.
 
-CMake 3.20+ builds the library, CLI, and unit tests. The separate
-`benchmarks/` project fetches competitor implementations.
-CI builds its CPU-only native benchmark and runs the CLI/stopping CTest
-contracts alongside the Python harness tests; these checks are not performance
-campaigns. Native benchmark sources, CMake files, tests and patches trigger CI.
-Root and Python builds enable `-Wall -Wextra`, plus `-Wpedantic` for C++ and
-Objective-C++ (nvcc generates nonstandard host code). CPU compiler-matrix
-and wheel CI also set `CMAKE_COMPILE_WARNING_AS_ERROR=ON`; local builds retain
-the caller's choice. Fetched Eigen and GoogleTest headers are system includes.
+Check the active worktree, branch and dirty state before editing. Give concurrent agents explicit file ownership. Preserve work and evidence before retirement; follow the user's approval requirements for destructive operations and publication. Keep private research notes, operational runbooks and campaign records outside tracked public source. Historical outcomes must retain their original source, protocol, profile labels and limitations.
+
+## Build and validation
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -34,509 +18,87 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol path/to/matrix.mtx --random-rhs --tol 1e-8
 ```
 
-CLI input requires `--rhs file.mtx` or `--random-rhs`. Input kind is detected
-and reported; `--input-kind` overrides it. Random RHS is projected separately
-on each Laplacian component. An explicitly supplied RHS is never altered.
+The root project builds the library, CLI, examples and tests; GoogleTest is required only for tests. CLI input requires `--rhs` or `--random-rhs`. Only a generated random RHS is projected on each Laplacian component; an explicit RHS is never altered. Bindings validate assembled operators; adjacency detection belongs to the CLI.
 
-## Benchmark original-system stopping
+- Root and Python builds share `cmake/apxchol_core.cmake`. Export C++23 and the actual architecture flag through `apxchol_core` and `apxchol_mtx_input`: mismatched Eigen alignment across a parent-project boundary can corrupt ownership. Validate with `tests/cmake_consumer`.
+- Retain normal compiler selection. GCC and Clang are supported; MSVC and clang-cl are rejected. OpenMP CXX is required. The Apple Clang fallback may search `brew --prefix libomp` while respecting explicit FindOpenMP inputs. Root and Python share this configuration.
+- `APXCHOL_NATIVE_ARCH` defaults ON locally and OFF in portable wheels. Native probes respect warnings-as-errors and retain the portable fallback when rejected. The compiled x86-64 core requires x86-64-v2 even for native builds. The portable Python import guard uses baseline x86-64 so it can report unsupported CPUs before entering the core. macOS arm64 keeps the compiler's default target.
+- Enable `-Wall -Wextra`, with `-Wpedantic` for C/C++/Objective-C++ rather than nvcc-generated host code. CPU matrix and wheel CI use warnings-as-errors; local builds respect the caller's choice. Fetched dependency headers are system includes.
+- `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend; CPU is the default and GPU builds retain CPU solves. Reject removed boolean device options. CUDA C++23 needs Toolkit 13.3+ and CMake 4.4+; core links static `cudart` only. cuSPARSE/cuBLAS dependencies belong to benchmark competitors.
+- `APXCHOL_POOL_FP32` selects residual-pool weight precision, not factor/export precision. Factor values stay FP32. The separate node/edge width options control indices; wide nodes imply wide edges. Do not add uses of the retired combined-index option.
+- macOS source builds require deployment target 14 for libc++ `std::pmr`; wheels target 15. Keep `std::iota` while the default macos-15 toolchain needs it. Linux-only `madvise` hints stay excluded on macOS; mmap remains.
+- Wheel configuration lives in `python/pyproject.toml` and the shared wheel workflow. Linux uses distro Clang/libomp and NVIDIA compiler/runtime RPMs, static cudart and `all-major` device targets; macOS uses Apple Clang/Homebrew libomp and Metal. Include the required runtime licenses. Test Linux installation without a driver and actual CUDA/Metal execution. Set `APXCHOL_TEST_REQUIRE_GPU=1` in native GPU Python tests so missing devices cannot silently skip.
+- Run focused regressions, then the relevant suite; repeat only for changes or unresolved failures. GPU correctness needs the matching device/build. Metal device tests also run with `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`. Check affected Python and Octave interfaces.
+- Run the CUDA `gpu_factor_finalize_leak_check` when compute-sanitizer is available. Ordinary tests or device-wide `cudaMemGetInfo` equality do not establish process leak freedom.
+- Keep timing in one lane, separate from builds and unrelated workloads. `scripts/rebuild.sh [all|core|bench]` uses dependency tracking without touching sources; build helpers stop on errors.
 
-The `original-v1` benchmark contract checks the defining operator/RHS at native
-solve exits, reuses setup for bounded retries, and keeps one total iteration
-budget (per component for split solves). Exhaustion is nonconvergence, never a
-relaxed acceptance mark. Required stopping checks and retries are included in
-Solve; `stop_check_s` is an included diagnostic, not a subtraction. At most eight
-attempts/checks prevent zero-iteration loops; no short-plateau rejection rule.
-Do not add per-iteration host checks or GPU transfers. Keep native kernels and
-first-pass requests intact except documented tolerance-basis conversions.
-The internal `detail/gpu_solve_session.h` shares the one-shot GPU setup lifetime
-with benchmark retries; it is not a new public solver API. Packed CMG exposes no
-reusable hierarchy and must charge/report each setup. ParAC patch 0007 replaces
-untimed calibration with measured original checks. Current runners reject old
-stopping receipts/caches; preserve historical results without relabelling them.
+## Interfaces and ownership
+
+Public headers live under `include/apxchol/`, with `include/apxchol.h` as the convenience entry point. The compiled CPU core is `src/factorization.cpp`, `src/operator_class.cpp` and `src/solve.cpp`. Operator validation and M-matrix lumping belong to `operator_class`; CLI interpretation belongs to `src/mtx_input.h`.
+
+`apxchol::solver` owns one CPU or compiled GPU session selected before setup. One-shot solve, Python and Octave use it; Octave requests CPU. The owner may outlive its input/setup checkpoint. Each solve result owns its timings; checkpoint copies have independent trees and moves preserve active scopes. Never retain a pointer into a previous result. `detail/csc_import.h` shares binding imports: sorted unique CSC copies directly, other layouts use Eigen's duplicate summation.
+
+Python accepts SciPy operators and requires NumPy/SciPy. `backend="auto"|"cpu"|"gpu"` delegates to C++; `Solver.backend` reports the selected route. Storage selection likewise belongs to C++; Python only normalizes dtype names. Explicit per-solver FP16/FP32 selection overrides `APXCHOL_FACTOR_STORAGE=auto|float16|float32` without changing the environment. Reject invalid or unsupported requests. Backend defaults are CUDA FP16 and CPU/Metal FP32. Exports remain FP32; storage precision does not choose PCG arithmetic. See [precision and storage](docs/precision.md).
+
+`cpu_solver`, public `factorize()` and Eigen preconditioning stay on CPU even in GPU builds; explicit CPU routes must not initialize CUDA or consume GPU stage flags. Auto uses CPU for scalar systems and for Metal inputs of at most 32,768 rows when CPU supports the requested storage. Otherwise it checks device, options and input compatibility before setup. Explicit GPU requests report unsupported configurations. Once selected, setup/runtime/memory errors never trigger a CPU retry. Report the selected route in solve results and CLI output.
+
+CUDA owns factorization, finalization, operator preparation, plans and PCG. It accepts warm starts and optional FP32 exports but rejects adopting a host factor. Its public route requires supported compressed, sorted, unique and fully paired CSC storage; auto chooses CPU for other valid host layouts. `detail::setup_route` and preconditioner specializations fix the setup route explicitly, without stage switches or CPU-tail continuation. Independent low-level host imports/capsule validation remain testable; owned-state inspection is compiled only into the CUDA test core.
+
+Metal currently factorizes on the host and retains the factor, operator and workspace for one RHS per solve. It accepts compatible auto/explicit GPU requests and FP32 or opt-in FP16 storage; `metal_solver` rejects CPU requests. Check command-buffer errors and the final FP64 original-system residual. Host-factor adoption supports CPU and Metal; automatic adoption chooses CPU.
+
+## Numerical and parallel invariants
+
+### Graph construction and factorization
+
+- Directed `vec_pool_aos` is the default for high-level solves and `graph<>`; vec and bstr also exist. Storage must not silently choose a selector. Preserve the supported custom incidence/eliminator seams and deterministic partitioner conflict resolution/team fallbacks.
+- OpenMP work uses the actual team size, including incremental-degree histograms and decrement slices. Every logical graph-copy range must execute under reduced/nested teams. A fresh graph's initial reserve must not join an unrelated caller team's collective. Pooled compaction stays inside the factorizer's collective `omp single`; independent worker decisions can diverge barriers.
+- Canonical neighbors are sorted by weight then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams. The serial `min_degree` option is a lazy heap heuristic, not exact current-minimum-degree selection or a minimum-fill guarantee.
+- Unique, sorted, fully paired symmetric CSC can construct directed incidences by column ownership using canonical lower weights. Other patterns keep the general builder. Pairing shortcuts require the unchanged validated operator, no lumping, no zero/nonfinite off-diagonals and matching triangle fingerprints. Public `make_graph` never assumes the proof. The owned SpMV copy proves pairing independently, including duplicate-run position, and falls back on any mismatch. Preserve results with and without the shortcut.
+- Caller-operator loops use `detail::work_balanced_range` based only on pointers and actual team size. Preserve ordered reductions; this rule does not apply to level-scheduled triangular solves.
+- Prune skipping is available only after AUTO declines the exact incremental-degree cache. It uses raw adjacency count above the configured multiple of the previous eligibility threshold as an upper bound; selector/eliminator must filter dead entries. Full walks audit skipped work: a clean audit doubles skipped rounds up to eight, a hidden eligible vertex resets to one. Never remove this audit or enable skipping while the cache is on/undecided or under explicit `APXCHOL_INCREMENTAL_DEGREE_SPARSE=0|1`. Preserve `APXCHOL_PRUNE_SKIP` and its trace semantics until separately retired.
+- GKS is the default sampler. Trace-cycle uses GKS below degree three and emits at most degree-many edges otherwise. Preserve positive subnormals. Finite zero neighbors or unrepresentable plans fall back to input-only GKS with the original seed before sampling; invalid input/overflow remain errors and device traces report numerical fallback.
+- Connectivity-preserving residual sparsification retains directed coalescing, the bucket/ordinal forest and conditional Bernoulli/HT law. Importance normalization uses ordered 16,384-item partials followed by an ordered fold, with one persistent team and at most six updates. Same ordered input is invariant to thread count, without matching the old serial fold. Preserve final statistics and connectivity; run `ResidualBlockedNormalization.*` and `ResidualBlockedGraph/*.*`.
+- Lazy segmented adjacency reservations request huge pages only for known PMD granularity at most 2 MiB; larger/unknown sizes use `MADV_NOHUGEPAGE`. Fully sized outputs keep their separate allocation policy. Preserve factor-buffer lifetime through assembly and release transients at their last use; vector `clear()` does not release capacity.
+
+### Triangular solves and GPU execution
+
+- CPU `APXCHOL_CPU_SPTRSV=auto|levels` uses the critical tail when metadata permits; levels is the reference. Share row arithmetic across schedules and storage. Unsupported actual thread teams must take the fallback before touching scheduled rows. CPU solve teams grow up to the caller's OpenMP limit: vector/triangular passes use 4,096 rows per worker on Linux and 32,768 on macOS. Linux SpMV reuses a parallel solve team; otherwise SpMV uses 32,768 stored entries per worker. Linux triangular sizing uses the full factor dimension before grounding. Linux critical waits retain pause/yield hints; macOS yields to the scheduler.
+- CPU FP16 uses `_Float16`, normal round-to-nearest conversion and signed subnormal flushing. Host narrowing and dropping share the RNE boundary. Narrow CSC once, then transpose stored values; release consumed FP16 input before transposing. FP32 retains transpose-before-copy ordering. x86 checks AVX/F16C; AVX2/FMA chooses optimized kernels before row loops, while native builds use them directly. Keep GCC conversion workarounds local. CUDA buffers use `__half` with the common binary16 representation.
+- Uninitialized nnz-sized CSR/CSC and L11 output buffers must be fully overwritten before first read. Writers perform first touch; pointer/diagonal/scale arrays retain initialized allocation. Preserve early release after compaction/last use.
+- CUDA and Metal share `gpu_dataflow.inc` and the task packer. Metal confines dependencies within a dispatch to one workgroup. Initialize dependency words/roots before workers, and load RHS/diagonal/scale before polling. Long-row finalizers combine segments in fixed order. GPU SpTRSV is dataflow-only; reject nonempty legacy mode values other than `dataflow`.
+- Shared GPU PCG rejects invalid scalar products/ratios and stops work after convergence or budget exhaustion. Preserve the original operator/RHS for grading. Device operator construction retains canonical lower values and lossless FP32 selection; no host construction/upload fallback is implicit.
+- The GPU selector uses degree/hash/id priority, includes quantile ties, and has at most four immutable decision/commit passes with stable unresolved compaction. It guarantees independence/progress rather than maximality or the CPU regional set. Pass seed and actual round index; generic CSR selection keeps its regional law.
+- Device elimination batches rows of at most 128 physical slots and uses stable global sorting for oversized rows. Counts publish descriptors/offsets; emissions own disjoint factor/fill slots. Preserve raw degree, ordered duplicates, canonical ordering, prefix sampling, random streams and scratch lifetimes. Include requested/retained scratch in memory preflight.
+- Large trace-cycle rows use cooperative moment/prefix scans, suffix-max CDF repair and range guards. Lane zero owns the core shuffle; direct-CDF light-parent draws follow its actual rejection consumption. Floating folds and seeded factors may differ from CPU while preserving the intended law. Oversized-only rounds use one warp per block; mixed rounds retain larger blocks.
+- The owned loop makes one sparsification decision at its first low-yield boundary under the existing traffic gate. Revoke/reprepare preview without advancing the numerical round; rebuild degrees/fingerprints/edge accounting while preserving active/excess/factor append state. Generic pre-import inputs retain the CPU coalescer. Validate `GpuOwnedSparsify.*` on device.
+- Device finalization omits host factor values only for a unique internal consuming owner. Private factors build plans on device; generic capsules retain host planning/validation and host metadata. Adopted factors and device operators complete queued setup before returning. Synchronize measured API boundaries; preserve ordinary host synchronization.
+- Reuse the CUDA host RHS buffer for solution download only after upload completes and no host RHS read remains. `detail/gpu_scaling.h` is shared with Metal; CUDA leaves ordinary scales unchanged and scales extreme RHS/warm guesses together. Preserve the best-effort device switch/restore guard and its early no-op: disabled/pristine lifetimes must not initialize CUDA.
+- Validate owned CUDA changes with bounded-selection, direct-CSC, operator-CSR, owned-prefix, finalization, audited-round/adoption and sanitizer/leak tests. Run `MetalSchedule.*`, `MetalHost.*` and `MetalDevice.*` for Metal changes. Integration correctness is not performance acceptance: compare original-system quality, setup, solve, one-RHS total, reuse, RSS and owner memory against the appropriate frozen baseline.
+
+## Benchmark contracts
+
+The separate `benchmarks/` project builds competitor implementations; `benchmarks/src/v0/` is a required frozen baseline. CI runs harness tests and native CLI/stopping contracts, not performance campaigns. Use the [benchmark guide](benchmarks/README.md) and existing harness; rendering must not run solvers.
+
+`original-v1` checks the defining operator/RHS at native solve exits, reuses setup for bounded retries, and keeps one iteration budget (per component for split solves). Exhaustion means nonconvergence. Limit attempts/checks to eight; do not add a short-plateau acceptance/rejection rule or per-iteration host checks/transfers. Keep native first-pass requests/kernels except documented tolerance-basis conversions. Required stopping checks/retries are inside Solve; `stop_check_s` is an included diagnostic. The internal GPU session shares setup with retries. Packed CMG has no reusable hierarchy and charges every setup; ParAC checks original accuracy inside measured solves instead of untimed calibration. Reject obsolete stopping receipts/caches rather than relabelling them.
+
+Explicit solver names must be compiled into the binary; reject unknown/unavailable names before loading matrices, without a CSV row. `--solver none` is only for input exports/component inspection. Publish staged Julia/CMG export caches only after success. ParAC keeps its timing-accounted adapter cache. Weighted/additional input manifests bind hashes, distributions/seeds, operator class and component backbones; changed inputs invalidate resume.
+
+Grade every retained original-system residual. Calibration failures/caps cannot become fallback retained runs. A median-total repetition selects a coherent record, never timing fields independently. Whole-cell/prerequisite deadlines are not individual-solve lower bounds. Report setup, solve, memory and reuse separately; CUDA initialization has its separate boundary. Do not poll GPU memory inside timed calls; measure peaks separately and keep missing values unknown. Preserve failures, nonconvergence and complete denominators. Balance arm order, use null controls and retain source/binary/input/runtime/affinity/raw-output provenance. Do not treat concurrent ranks as independent replicates or multiply isolated ratios into a cumulative claim.
+
+ParAC Physics rejects positive stored off-diagonals before cache lookup/fallback. Preserve Neumaier global summation, ordering, per-column sums and both ±1e-9 thresholds. CPU Graph/AMD includes required transform, ordering/permutation and explicit GC; common input reading/measured final serialization are separate. Keep reconciled finite intervals, source/schema-bound caches and Physics/GPU/native factor/workspace timing boundaries. Patch external sources before rebuilding.
+
+Native CMG is opt-in via `APXCHOL_CMG_NATIVE_BIN`; keep proprietary generated sources untracked. Label its serial core as `cmg_packed/original-operator`, retain explicit RHS and independent grading, and record effective affinity/threads. Factor fill uses `2*offdiag(L)/offdiag(A)`; preserve missing counts, solve status and rounding uncertainty.
 
 ## Remote campaign gate
 
-Platform/account/access details and job histories belong in private campaign
-plans, not this repository's user documentation. Historical benchmark pages do
-not establish current cluster availability. Follow the user's authorized host,
-connection and resource limits; do not invent an alternate authentication route.
+Platform/account/access details and job histories belong in private campaign plans. Follow authorized hosts, connection routes and resource limits. Every new or changed campaign follows these gates in order:
 
-Every new or materially changed campaign follows these gates in order:
+1. Freeze source/package bytes and the complete denominator. State hypothesis, CPU/GPU/memory/walltime ceiling, cancellation command, stopping rule and infrastructure versus scientific-rejection exit policy.
+2. Run bounded login preflight through the batch prologue. Check canonical source/dependency/input hashes, clean tracked/untracked/ignored state, fresh external outputs, exact interpreters and every entry point. Reject caches before imports. Exercise absent/empty/zero Slurm variables. Compile/link tiny probes with exact C/C++/CUDA/host compilers and flags; verify CMake cache/runtime linkage and analyzer success/failure fixtures. No heavy build or timing on login nodes.
+3. Authenticate the trust root/helpers before executing package Python. Test independent and mutually consistent tampering; hash one captured byte string instead of reopening paths. Use one independent package review, plus a repair-delta review if blocked. Turn a failed smoke into an allocation-free regression before another attempt.
+4. Submit through a package wrapper with absolute external chdir/stdout/stderr/source paths; spool paths are not source paths. Pin stage-specific tools/interpreters. Run `sbatch --test-only` with final arguments; do not confuse its number with a submitted job.
+5. Compute smoke runs exact targets, a tiny solver and observed resource/worker-affinity checks. Receipts bind every named artifact/cache/command/runtime to hashed output and scheduler evidence. Every timing entry point verifies the receipt. Login libraries do not establish compute runtime compatibility.
+6. Start authorized production only after these gates. Budget planned work <= 0.67 of walltime and watchdog >= 3 times an observed upper bound; a timeout is not a runtime estimate. Include implicit resources/nested steps/confinement. Keep submitted bytes fixed; never duplicate jobs or reuse partial namespaces.
+7. Collect/hash the complete denominator, recheck inputs/source, preserve failed evidence and reject late provenance/runtime failures before aggregates. Distinguish scientific rejection from infrastructure failure; do not kill unrelated observations or silently retry. Keep declared experimental units together in comparisons/resampling.
 
-1. Freeze immutable source/package bytes and the complete planned denominator.
-   State the hypothesis, CPU/GPU/memory/walltime ceiling, cancellation command,
-   stopping rule, and infrastructure versus scientific-rejection exit policy.
-2. Run bounded login preflight through the same prologue used by batch. Check
-   canonical source/dependency/input hashes, clean tracked/untracked/ignored
-   state, fresh external namespaces, exact target interpreters and all entry
-   points. Reject generated caches before imports. Exercise missing, empty and
-   zero Slurm variables. Compile/link tiny probes with the exact C/C++/CUDA/host
-   compilers and flags, verify CMake cache values and runtime linkage, and test
-   analyzers against success/failure fixtures. No heavy builds or timing here.
-3. Authenticate the trust root and helpers before executing package Python.
-   Test tampering with each and with a mutually consistent replacement. Hash
-   one captured byte string rather than hashing then reopening a mutable path.
-   Use one finite independent package review, plus a repair-delta review only
-   if blocked. A failed smoke becomes an allocation-free regression first.
-4. Submit through a package-owned wrapper using absolute external chdir,
-   stdout/stderr and source paths; spool paths are not source paths. Pin tools
-   and interpreters for their execution environment. Run sbatch --test-only
-   with final arguments; distinguish its number from the submitted job ID.
-5. Compute smoke builds and runs the exact targets, tiny solver paths, resource
-   and observed worker-affinity checks. Bind every named artifact, cache,
-   command and runtime identity in receipts derived from hashed output and
-   scheduler evidence. Every timing entry point requires the receipt before
-   execution. Login OS libraries are not compute-runtime equality evidence.
-6. Only after all gates pass may authorized production run. Budget from fresh
-   smoke with margin (planned work <= 0.67 of walltime, watchdog >= 3 times a
-   measured upper bound); a timeout is not a runtime estimate. Include implicit
-   resources, nested steps and actual confinement. Keep source/packages fixed
-   after submission. Never duplicate submission or reuse partial namespaces.
-7. Collect and hash the full denominator, recheck inputs/source at the end,
-   and preserve failed evidence. Reject late provenance/runtime failures before
-   publishing aggregates. Keep valid scientific rejections distinct from
-   infrastructure failure; do not kill unrelated observations or silently retry.
-
-Keep every measurement in its declared experimental unit when comparing or
-resampling. Concurrent ranks are not independent replications. Factor identity
-requires structure/value digests; equal fill, residuals or seed are insufficient.
-Required original-system checks and retries remain inside Solve. Publish neither
-private runbooks nor unaccepted performance conclusions.
-
-## Build options
-
-Current options are declared in the root `CMakeLists.txt`. Historical backend
-choices, retired knobs, and measurements belong in
-[implementation history](docs/implementation-history.md), not this contract.
-
-- `APXCHOL_BUILD_EXAMPLES` / `APXCHOL_BUILD_TESTS`: ON by default. Only tests
-  require GoogleTest.
-- CMake usage requirements on `apxchol_core` and `apxchol_mtx_input` must export
-  C++23 and any native architecture flag actually used by the library. Parent
-  projects do not inherit directory compile options; mismatched Eigen alignment
-  across the library boundary can corrupt allocation ownership. Validate with
-  the external parent fixture in `tests/cmake_consumer`.
-- `APXCHOL_NATIVE_ARCH`: ON for local builds. Root, benchmark, and local Python
-  builds share the architecture-specific compiler probe. cibuildwheel sets this
-  option OFF for portable wheels; Python optimization follows the CMake build
-  type. `scripts/rebuild.sh [all|core|bench]` uses CMake dependency
-  tracking without touching source files; both build helpers stop on failures.
-  Native flag probes use the build's warnings-as-errors policy; rejected flags
-  retain the existing portable fallback.
-  The shared CMake architecture helper rejects MSVC and clang-cl. The compiled
-  core checks the x86-64-v2 feature macros, including for native builds, without
-  running a configure-time program.
-- OpenMP: root and Python builds share `cmake/apxchol_openmp.cmake`, which
-  queries `brew --prefix libomp` for a last-resort search prefix on Apple Clang
-  while respecting explicit FindOpenMP inputs. OpenMP CXX is required; missing
-  OpenMP fails configuration instead of producing a serial build. Both targets
-  link OpenMP directly; there is no long-double reduction/libatomic probe.
-- macOS: retain normal CMake compiler selection. Install Command Line Tools,
-  CMake and libomp, then use the common build commands. libc++ `std::pmr`
-  requires a macOS 14 deployment target. Linux-only `madvise`
-  advice is compiled out; mmap remains. CI's `linux` and `macos` jobs share
-  native/portable modes and parent-consumer build/test steps through YAML anchors.
-  Linux tests GCC and Clang in both modes; macOS tests Apple Clang in both modes.
-  Keep `std::iota` for the macos-15 runner's default Xcode 16.4 toolchain until
-  that baseline retires.
-
-
-- `APXCHOL_DEVICE=CPU|CUDA|METAL` selects the build backend (default CPU).
-  GPU builds retain CPU solves. Invalid or removed boolean options fail configuration.
-- Root and Python builds share `cmake/apxchol_core.cmake`; keep their backend
-  sources, dependencies and compile requirements in that helper.
-- Linux and macOS wheels use Clang and bundle packaged LLVM libomp: the
-  manylinux distribution package on Linux and Homebrew on macOS, targeting
-  macOS 15.0. cibuildwheel fetches the pinned upstream OpenMP license before
-  building, includes it in the wheels, repairs them and runs the Python tests.
-  Linux installs the distro's Clang and uses its C++ runtime libraries.
-  Untuned x86-64 builds share the x86-64-v2 minimum, including Debug and
-  benchmarks. Native Release builds retain host tuning. The portable Linux
-  Python binding is compiled for baseline
-  x86-64 to report an import error on unsupported CPUs before entering the core.
-  macOS arm64 retains Apple Clang's default target.
-  CI and publishing reuse `wheels.yml`, building/testing CPython 3.10–3.14 for both
-  Linux x86_64 and macOS arm64. Shared cibuildwheel settings live in
-  `python/pyproject.toml`. Linux wheels include CUDA with static cudart and
-  `all-major` device targets; macOS wheels include Metal. CUDA compiler/runtime
-  RPMs come from NVIDIA's repository and supply the bundled license files.
-  Test Linux wheels without a driver as well as on CUDA; native GPU Python tests
-  set `APXCHOL_TEST_REQUIRE_GPU=1` so unavailable devices cannot silently skip.
-
-- Python requires NumPy and SciPy and accepts SciPy sparse operators.
-  `backend="auto"|"cpu"|"gpu"` delegates selection to the C++ owner; read the
-  resolved route through `Solver.backend`.
-  `factor_storage_dtype=None|np.float16|np.float32` selects per-solver SpTRSV
-  storage; strings and dtype objects are accepted. Explicit selections override
-  the environment without changing it; unsupported FP16 requests fail. The
-  resolved dtype is read-only on `Solver.factor_storage_dtype`. Factor exports
-  (`chol`, `L`, `D`) retain FP32, matching C++ factor values; CPU PCG uses FP64
-  vectors and arithmetic, including with FP32 inputs.
-
-- `APXCHOL_DEVICE=CUDA`: our dataflow SpTRSV and GPU-resident PCG. CUDA sources
-  use C++23, requiring CUDA Toolkit 13.3+ and CMake 4.4+. The library
-  links static `cudart` only. There is no cuSPARSE backend or build option. Benchmark
-  competitors independently require cuSPARSE/cuBLAS; distinguish their driver
-  linkage from our library linkage.
-- `APXCHOL_POOL_FP32=ON` (default): fp32 residual-pool weights; OFF selects
-  the fp64 residual-pool baseline. Factor values remain
-  fp32; fp16 storage is a runtime choice, not another build configuration.
-- `APXCHOL_64BIT_EDGE_INDICES=ON`: wide cumulative edge offsets.
-  `APXCHOL_64BIT_NODE_INDICES=ON` additionally widens vertices and implies
-  wide edges. Do not use the deprecated combined index option in new code.
-
-Run focused regressions, then the relevant full suite; repeat only after changes
-or unresolved failures. CUDA correctness requires the appropriate build and device.
-Do not time alongside builds or other laptop workloads.
-
-When `compute-sanitizer` is available, CUDA builds register
-`gpu_factor_finalize_leak_check`; run it with:
-`ctest --test-dir build-cuda -R '^gpu_factor_finalize_leak_check$' --output-on-failure`.
-Without it, ordinary tests do not establish leak freedom. Device-wide
-`cudaMemGetInfo` equality is not a process-leak assertion.
-
-## Architecture and contracts
-
-- Public headers are under `include/apxchol/`; `include/apxchol.h` is the
-  convenience entry point. `src/factorization.cpp`, `src/operator_class.cpp` and
-  `src/solve.cpp` provide the CPU compiled core. `benchmarks/src/v0/` is a frozen competitor baseline.
-- `apxchol::solver` owns one CPU or compiled GPU session, selected once by the
-  existing backend policy. One-shot solve and Python/Octave use this owner;
-  Octave requests CPU. It may outlive its input and setup checkpoint.
-  Per-call timings belong to the solve result. CUDA accepts warm starts and
-  retained FP32 factor exports, but rejects adoption of host factors.
-  `detail/csc_import.h` shares typed CSC import among bindings:
-  sorted unique inputs copy directly; other layouts use Eigen's duplicate sum.
-- Checkpoint copies own independent timing trees; moves preserve active scopes.
-  Reusing a copied or moved solve result must not retain pointers to its source.
-- `operator_class.h` and `src/operator_class.cpp` own operator validation and
-  M-matrix lumping. `src/mtx_input.h` owns CLI-only interpretation of graph
-  adjacency versus an assembled operator. Bindings must use the operator
-  contract, not CLI guesses.
-- `graph/` provides adjacency layouts. Directed `vec_pool_aos` is the
-  default for both high-level solves and `graph<>`; indexed `vec_pool` and
-  `forward_star` are retired. The remaining built-ins are AoS, vec and bstr. Changing storage
-  must not silently choose a different selector.
-  Incremental-degree radix histograms and decrement slices use the actual
-  OpenMP team, never unused rows from the requested team size.
-  The general pooled graph builder counts and writes logical column ranges
-  through OpenMP worksharing; every range must execute even if a nested region
-  or thread limit supplies fewer workers than requested. A fresh graph's initial
-  reserve must not join an unrelated caller team's collective or barrier.
-- `solver/elimination/` owns clique sampling and the public eliminator seam.
-  Canonical neighbors use comparison sort by weight and vertex; sampling uses
-  exact cumulative weights and `upper_bound`. Preserve estimator semantics,
-  tie ordering, and per-elimination random streams.
-- Serial residual `min_degree` currently uses a lazy degree heap, not exact
-  current-minimum-degree selection. Historical measurements retain that meaning.
-  Refreshing degree decreases changes ordering and needs fresh validation;
-  neither this heuristic nor exact minimum degree guarantees minimum fill.
-- `solver/partition/` contains block-greedy, priority-greedy, and Baumann-Kyng.
-  `factor_options.h` is authoritative for defaults and their rationale.
-  Preserve deterministic conflict resolution and thread-team fallback rules.
-- CPU solve teams grow with problem size, up to the caller's OpenMP thread limit.
-  Vector and triangular passes use rows: 4,096 per worker on Linux, 32,768 on macOS.
-  Linux SpMV reuses that team when parallel; otherwise it uses 32,768 stored
-  entries per worker, as on macOS. Linux critical waits retain CPU pause/yield
-  hints; macOS yields to the scheduler.
-  Linux triangular teams use the full factor dimension before Laplacian grounding.
-  Small solves use the same kernels serially. `APXCHOL_CPU_SPTRSV=auto|levels`
-  selects scheduling; AUTO uses the structural critical-tail plan when metadata permits.
-  Changing the caller's limit after setup falls back to base levels when the
-  prepared critical plan requires a different team.
-  `levels` is the reference. Share row arithmetic across schedules and storage.
-  Research schedules on other branches are not production modes.
-- CPU FP16 storage uses `_Float16` directly; setup uses native conversion under
-  the normal round-to-nearest environment and retains signed subnormal flushing.
-  Its AVX2 fat-row kernel uses packed double arithmetic with a four-lane accumulator; GCC's
-  packed conversion and scalar widening workarounds stay local to conversion.
-  CPU FP16 is available on Apple ARM64 and on x86 after checking AVX/F16C. AVX2/FMA
-  selects the optimized kernels once per level or critical tail, before the row
-  loops; native builds use them directly.
-  FP16 remains opt-in on the CPU; unsupported explicit requests fail at setup.
-  Setup narrows CSC once (F16C-targeted on x86) and transposes those stored values. Host narrowing and the format-drop predicate share the RNE
-  normal/subnormal boundary check, flushing before conversion to FP16.
-  Release consumed input before the transpose;
-  FP32 keeps transpose-before-copy ordering to retain its memory bound.
-- CPU SpTRSV's nnz-sized CSR/CSC index and value output buffers use
-  `big_alloc<T,32,false,false>`: the transpose/copy fully overwrites them, so
-  writer threads perform the first touch. Pointer, diagonal, scale, and other
-  allocations retain the populated, value-initialized default. Require a full
-  overwrite before first read when using the output-buffer specialization.
-- The CPU Laplacian L11 temporary index/value arrays likewise use uninitialized
-  owning arrays: the existing column copy writes every retained entry before
-  any read. Preserve their early release after compaction or their last use.
-- CUDA and Metal share `src/gpu_dataflow.inc` and the task packer in
-  `solver/detail/gpu_dataflow_plan.h`. Metal's `metal_schedule.h` confines
-  dependencies within a dispatch to one workgroup. Initialize dependency words
-  and solve roots before launching workers; load RHS, diagonal and scale before
-  dependency polling. Long-row finalizers combine segments in a fixed order.
-- `solver/detail/gpu_pcg.h` and `.inc` share GPU iteration control and arithmetic
-  operations. Reject invalid scalar products and ratios; stop device work after
-  convergence or an exhausted budget. Metal's arithmetic requirements live in
-  [precision and storage](docs/precision.md#apple-metal-pcg).
-- Host and CUDA operator preparation share canonical lower lookup in
-  `csc_work.h`; the host fallback orders duplicate entries by value bits.
-- CUDA host preparation uses `_Float16`; device buffers use CUDA `__half`
-  because NVCC does not support `_Float16` in device code. Uploads copy the
-  common binary16 representation; the solve kernel widens only at accumulation.
-- GPU SpTRSV is dataflow-only. The old `APXCHOL_GPU_SPTRSV=dataflow` spelling
-  is accepted; other nonempty values are errors. `factor_options::factor_storage`
-  selects per-solver storage. Its `automatic` default uses
-  `APXCHOL_FACTOR_STORAGE=auto|float16|float32`.
-  `auto` selects the backend default (CUDA FP16, CPU/Metal FP32). Invalid values fail.
-  Parsing and selection live in C++; Python only normalizes dtype names.
-  [Precision and storage](docs/precision.md) defines arithmetic and scaling.
-  The old GPU-only alias is retired.
-- Public `cpu_solver` and Eigen's `apx_cholesky` always use CPU factorization,
-  OpenMP SpTRSV and host PCG, even in CUDA builds. They must not initialize a
-  CUDA context or consume GPU stage flags. Host-factor adoption supports CPU
-  and Metal; automatic selects CPU, while explicit CUDA rejects it.
-- One-shot `solve` selects a complete route with `solve_options.backend`
-  (`automatic`, `cpu`, `gpu`); CLI uses `--backend auto|cpu|gpu`. Report the
-  selected route in `solve_result.backend` and CLI output. Auto uses CPU for
-  scalar systems and for Metal inputs of at most 32,768 rows when CPU supports
-  the requested storage. Otherwise it checks device, option and input compatibility.
-  Explicit CPU never probes GPU; explicit GPU retains setup errors. Never retry
-  a failed GPU setup or solve on CPU.
-- The current CUDA route uses device-owned factorization, finalization, dataflow
-  plans, operator preparation and PCG. Reject missing/nonunique device factor ownership
-  before a host-factor upload. Unsupported stored formats, missing device,
-  insufficient memory and runtime errors never trigger a CPU retry. The operator
-  must have supported compressed, sorted, unique and fully paired CSC storage;
-  automatic selection uses CPU for other valid host layouts.
-- An explicit `detail::setup_route` selects complete CPU or GPU setup;
-  preconditioner specializations fix it at compile time. Public `factorize()`
-  uses CPU setup. GPU setup has no stage switches or CPU-tail continuation.
-  Explicit `cuda_sptrsv` host-factor import and copied capsule validation remain
-  independent facilities. Test-only owned-state inspection is compiled into
-  the CUDA test core, not the production library.
-- The internal GPU session shares one setup lifetime with benchmark native
-  retries. It is not a new public owner API. GPU PCG builds its permuted operator
-  on device; no host construction/upload fallback remains. Preserve canonical
-  lower values, lossless-fp32 selection and original-system residual grading.
-- An eligible compressed, sorted, unique, fully paired symmetric CSC operator
-  initializes the owned graph directly after operator validation. Its unchanged
-  view supplies pairing proof only after strict layout checks and when stored
-  off-diagonals are nonzero. Stored zeros, lumped inputs and raw/test entry points
-  retain full structural mate checks. Diagnostic graph imports remain separate.
-- `operator_scan::triangles_bit_identical` is the proof that lets consumers of
-  the caller's operator skip the per-entry transpose-partner search (about
-  log2(column length) cache misses per entry, in the hub columns of power-law
-  and IPM operators). The scan sets it only for strictly index-sorted columns
-  with no explicit-zero or non-finite off-diagonal and equal per-triangle entry
-  fingerprints (`detail::symmetric_entry_hash`, `csc_work.h`); it then also
-  skips its own partner search, which otherwise runs unchanged as a second pass
-  with the same count and witness. `detail::make_graph_from_operator` takes the
-  proof only from `factorize_for_solver` and only when nothing was lumped;
-  public `make_graph` never assumes it. The owned SpMV copy proves it for itself
-  while copying (fingerprint includes the position in a duplicate run) and falls
-  back to the pairing loop on any difference. Results are bit-identical with and
-  without the proof; keep it that way.
-- Loops over the rows or columns of the caller's operator (SpMV, owned copy,
-  graph builder) split work with `detail::work_balanced_range`, not by index
-  count: equal-count chunks carry 2x (IPM) to 4x (as-Skitter) the mean stored
-  entries in the heaviest chunk. The bounds depend only on the pointer array and
-  team size, so thread-ordered reductions stay bit-identical run to run. The
-  level-scheduled SpTRSV deliberately does not (tried and removed 2026-08-18).
-- Prune-walk skip (block-greedy on the directed AoS pool): once AUTO has declined
-  the exact incremental-degree cache, skipping rounds report a vertex whose raw
-  adjacency count exceeds 4x the previous round's eligibility threshold at that
-  count instead of walking it (`prune_and_degrees(..., skip_above)`). Its degree
-  is then an upper bound and its dead entries wait for a later walk; that is
-  sound only because this path's selector and eliminator filter dead entries
-  themselves. A raw count only grows until the vertex is walked, so skipping
-  every round hides hubs whose neighbours died (com-Youtube under GKS: +14 %
-  iterations). Full walks therefore alternate with the skipping rounds and audit
-  the skip they replace; a clean audit doubles the skipping rounds before the
-  next one (1..8), a hidden eligible vertex resets them to 1. Do not remove the
-  audit. Never active while the cache is on or undecided, nor under
-  `APXCHOL_INCREMENTAL_DEGREE_SPARSE=0|1` (exact references).
-  `APXCHOL_PRUNE_SKIP=<factor>` overrides the factor, `0` disables the rule,
-  `APXCHOL_PRUNE_SKIP_TRACE=1` prints the audits.
-- `factor_options.sampler` / `--sampler` selects `gks` (default) or
-  `trace_cycle`. Trace-cycle emits at most d edges from a degree-d star and
-  retains GKS for degree below three. CPU and GPU-owned setup both support it.
-  The owned device sampler covers normal and oversized
-  rows and retains per-session moment scratch. Trace-cycle retains positive
-  subnormals; finite zero neighbors or unrepresentable numerical plans use
-  input-only GKS fallback with the original seed before sampling. Invalid inputs
-  and overflow remain errors. Device traces report these numerical fallbacks.
-  (`heavy_core_k2` was removed 2026-09-17: same fill and iterations within one
-  of trace-cycle, setup +4.6%, one-RHS total +2.1%, 16-RHS total -1.8% on 22
-  matrices; `benchmarks/daint/SAMPLERS.md` keeps its published measurements.)
-- GPU trace-cycle uses item-based emission for small rows; the superseded
-  per-pivot sampler and `APXCHOL_GPU_TRACE_ITEMS` opt-out are retired.
-- Trace-cycle rows with more than 128 canonical neighbors use cooperative warp
-  moment/prefix scans, cutoff reduction, parent searches and edge emission.
-  Suffix maxima repair floating CDF monotonicity. Lane zero retains the core
-  shuffle; light parents use indexed direct-CDF draws after its actual rejection
-  consumption. Intended laws are unchanged; floating folds/cutoffs and seeded
-  factors can differ from CPU. Input-only fallback and range guards remain.
-  Owned oversized-only rounds use one warp per block; mixed rounds retain larger blocks.
-- The owned selector uses degree/hash/id priority, all ties at the degree
-  quantile, and at most four immutable decision/commit passes with stable
-  unresolved-candidate compaction. It guarantees independence and progress,
-  not maximality or the CPU regional selected set. Generic CSR selection keeps
-  its regional law. Seed and actual round index reach the owned priority rule.
-- Owned elimination packs rows of at most 128 physical slots into local batches;
-  oversized rows keep the global stable-sort fallback. Counts publish batch
-  descriptors and compact offsets; one warp emits each batch into its original
-  disjoint factor/fill slots. Preserve ordered duplicate sums, raw degree,
-  canonical weight/neighbor order, prefix/upper_bound sampling and random streams.
-  Compact-owned row counts and dead-fill excess scratch reuse retain provenance
-  and lifetime checks. Requested and retained scratch enter memory preflight.
-- The owned loop makes one CPU-style sparsification decision at its first
-  low-yield selection boundary. The existing residual switch/traffic gate
-  controls directed coalescing, one bucket/ordinal forest and conditional
-  Bernoulli/HT sampling; normalization keeps full-stream ordered 16384-item
-  chunks. Revoke and reprepare the preview without advancing the numerical
-  round. Rebuild degrees/fingerprints and the handback edge-accounting basis;
-  preserve active/excess and factor append state. Generic pre-import inputs
-  retain the CPU coalescer fallback. Validate `GpuOwnedSparsify.*` on device;
-  source integration requires fresh native and performance validation.
-- Device finalization supports the existing fp16/drop contracts and omits host
-  factor values only for a unique internal consuming owner. Private finalized
-  factors build dataflow plans on device; generic capsules retain host planning
-  and validation. Host factor metadata remains. Optional GPU forest-tail thinning
-  is not included; CPU residual sparsification remains unchanged. Adopted factors
-  and device-built operators complete their queued setup work before returning.
-  Host-built setup keeps its existing synchronization boundaries; the common
-  benchmark harness synchronizes every measured API boundary. Optional receipts/events use
-  existing verbose or setup/frontend trace flags. Memory, nnz and SpTRSV statistics
-  keep their own controls. No private experiment compile definition is required.
-- Validate the owned path with `GpuBoundedSelection.*`, `GpuDirectCsc.*`,
-  `GpuOperatorCsr.*`, `GpuOwnedPrefix.*`, `GpuFactorFinalize.*`, the audited round
-  and adoption fixtures, and sanitizer/leak checks. Source integration is not
-  performance acceptance: compare the default route against current main and
-  the owned route against its frozen research reference, with original-system
-  quality, setup, solve, one-RHS total, RSS and owner memory.
-- Metal's `metal_solver` uses host factorization and handles one RHS per call,
-  retaining its factor, operator and workspace. `solve()` selects it only for
-  compatible automatic or explicit GPU requests. FP16 storage is opt-in;
-  CPU requests to `metal_solver` fail.
-  Check command-buffer errors and the FP64 original-system exit residual.
-  Run `MetalSchedule.*`, `MetalHost.*` and `MetalDevice.*` with device/shader
-  validation as described in [CONTRIBUTING.md](CONTRIBUTING.md#build-and-test).
-- CUDA PCG reuses the host RHS buffer for the solution download and unpermutation
-  only after its upload has completed and no further host RHS reads remain.
-  Extreme inputs use `detail/gpu_scaling.h`, shared with Metal. CUDA leaves
-  ordinary input scales unchanged; warm starts scale RHS and guess together.
-- GPU allocation cleanup shares the internal `detail/cuda_device_scope.h`
-  best-effort device switch/restore guard. Preserve each caller's enable condition
-  and early no-op: disabled or pristine lifetimes must not initialize CUDA.
-- Keep substantial mechanisms: compensated factor dropping, GPU long-row
-  segmentation, critical-tail solving, incremental degrees, and connectivity
-  preserving residual sparsification. Standalone residual coalescing policy
-  is retired; coalescing and multiplicity remain sparsification internals.
-- Residual importance normalization uses fixed
-  16,384-item ordered partial sums followed by an ordered block fold, with one
-  persistent OpenMP team for the initial sum and up to six updates. The same
-  ordered input gives the same normalization at every thread count; arithmetic
-  intentionally differs from the legacy global serial fold. Final statistics,
-  conditional Bernoulli/HT law and connectivity backbone remain unchanged.
-  `ResidualBlockedNormalization.*` and `ResidualBlockedGraph/*.*` check the new
-  contract. No runtime knob is added. The implementation was validated on
-  the recorded platform before integration; see [the normalization history](docs/implementation-history.md#blocked-normalization)
-  for the bounded setup improvement and the separate limits of the timing study.
-- Full symmetric CSC inputs with unique sorted indices construct directed pool
-  incidences by column ownership; upper incidences use canonical lower weights.
-  Duplicate, uncompressed, one-triangle or unpaired stored patterns retain the
-  general graph builder. No extra public builder or runtime knob is exposed.
-- Lazy segmented adjacency reservations request THPs only when the kernel's
-  reported PMD granularity is at most 2 MiB (cached once); larger or unknown
-  granularities use `MADV_NOHUGEPAGE`. This preserves the measured laptop
-  benefit while preventing Daint's 512 MiB first-touch inflation. Intermediate
-  geometries are not claimed performance-optimal. Fully sized factor/output
-  buffers retain their separate `big_alloc` policies; there is no runtime knob.
-- Pooled compaction must remain inside the factorizer's collective `omp single`:
-  moving its decision to independently arriving workers can diverge barriers.
-  Preserve factor-buffer lifetime through assembly and release transients at
-  their last use. `clear()` does not release vector capacity.
-
-## Benchmarks and experiments
-
-Committed Daint and laptop results are historical snapshots tied to their
-recorded sources, inputs and protocols. Preserve each snapshot's denominator;
-do not describe it as current-library performance or silently relabel profiles.
-Preserve historical outcomes, effective versus requested threads, and source/binary/cell hashes.
-[benchmarks/README.md](benchmarks/README.md) defines runner/solver contracts;
-use the existing harness. Rendering runs no benchmarks.
-An explicit `--solver` must name a solver compiled into that benchmark binary;
-unknown or unavailable solvers exit 2 before matrix loading, without a CSV row.
-`--solver none` is accepted only for input exports and component inspection.
-Julia/CMG operator exports share the harness's staged cache writer: only a
-successful export is published; failed or interrupted writes leave no cache.
-ParAC retains its separate timing-accounted adapter cache.
-`benchmarks/weighted_inputs.py` generates four explicit weighted graph variants;
-`sweep_fair.py --matrix-manifest` loads additional hash-bound input records.
-Each graph component receives a backbone tree. Weight distributions and seeds
-are recorded in cell metadata, and changed input identities invalidate resume.
-
-Grade **every retained original-system residual** against the common tolerance.
-Calibration failures/caps must not trigger fallback retained runs. A median
-repetition selects timing fields only. Whole-cell/prerequisite deadlines are
-not lower bounds on individual solves. Report setup, solve, memory and reuse
-separately; preserve complete timing boundaries and separate CUDA initialization.
-Do not wrap timed calls in `VramSampler`: nvidia-smi polling perturbs GH200 setup.
-Measure VRAM separately; missing peaks stay unknown.
-
-ParAC: patch0005 uses Neumaier compensation for the Physics producer global
-sum; preserve ordering, per-column sums and both ±1e-9 thresholds. External
-checkouts require patching before rebuilding. Physics inputs with positive
-stored off-diagonals are unsupported for original-operator comparison,
-**before** preparation cache hits or fallbacks.
-Patch0006 shares the Graph producer with an in-memory entry. CPU Graph/AMD charges
-required transform, ordering/permutation and explicit final GC; common input read
-and measured final serialization are separate. Require finite reconciled intervals
-and source/schema-bound caches; keep inclusive diagnostics. Physics/GPU complete
-timing and native adapter/factor/workspace charges remain unchanged.
-
-Native CMG is opt-in via `APXCHOL_CMG_NATIVE_BIN` and `benchmarks/cmg/native`.
-Keep private generated sources untracked. Its generated core is serial;
-record affinity/effective threads and the `cmg_packed/original-operator` label.
-Preserve independent returned-solution checks, explicit RHS support and the
-canonical exception in the benchmark README.
-
-Use `--warmup N`, `--repeat R` and existing thread-scaling scopes as needed.
-`--dump-rhs` exports the common RHS without solving. `render_snapshot.py`
-provides the common presentation path. Its optional `--fill-cells` consumes an
-explicit derived store with common `2*offdiag(L)/offdiag(A)` fill; preserve missing
-counts, source solve status and reported rounding uncertainty.
-
-Timing campaigns record immutable source/binary/input identities, affinity,
-repetitions, raw outputs and the entire planned denominator. Balance arm order
-and use null controls. Concurrent ranks on one node are not independent machines.
-Separate correctness, timing validity and the performance decision. Preserve
-original verdicts and valid observations when a subset fails; label later
-subset analysis retrospective. A faster solve with slower one-RHS total is a
-tradeoff. Never multiply isolated ratios into a cumulative speedup claim.
-
-## Workspace and handoff
-
-Check the active branch and dirty state before editing. The current checkout
-may be an older research branch even when `origin/main` has newer work. Give
-each editing agent explicit file/worktree ownership and keep laptop timing
-in one lane.
-
-Keep work that must survive shutdown in persistent paths, not `/tmp` clones
-or worktrees. Before handoff record each active branch/commit, dirty patch,
-result path, exact remote job ID/status, and next action in one durable local
-ledger. Confirm the checkpoint exists. An agent's assignment is not evidence
-that implementation or a cluster job started.
-
-`data/`, `results/` and `benchmarks/results/` are ignored. Committed historical
-extracts, coverage and source/protocol metadata live in `benchmarks/daint/`;
-private campaign stores, operational runbooks and coordination ledgers stay
-outside tracked source. Public results require explicit publication approval.
-`results/cells/` is a generated local store, not automatically the source of
-published Daint data. Renderers default to ignored `results/plots/` previews;
-publication requires an explicitly selected store and output.
-`thread_scaling.py --compact` renders up to three scoped matrices as absolute
-setup/solve times and log-log speedups, with separate extract names; full-study
-figures and data remain available. The retired
-laptop snapshot and its 612 legacy T16 cells are preserved in
-`benchmarks/archive/laptop-20260908/`; do not blend them into current results.
-Keep internal reports and private comparison sources outside tracked files. Do not publish them or contact collaborators
-without authorization. Preserve source and evidence before any worktree
-retirement; obey the user's destructive-operation approval requirements.
+Keep persistent handoff records of worktrees/commits, dirty patches, output paths, exact remote job IDs/status and next actions. Verify the record exists; an assignment is not evidence that work started. `data/`, `results/` and `benchmarks/results/` stay ignored. Renderers default to local previews; publish only explicitly selected, reviewed evidence, never private runbooks or unaccepted conclusions.
