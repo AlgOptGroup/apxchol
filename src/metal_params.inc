@@ -9,6 +9,7 @@ struct Params {
     unsigned window;    // stagnation window, 0 = off
     unsigned m;         // factor dimension
     unsigned spmv_lanes; // threads per operator row, 1 or kTreeLanes
+    float preconditioner_scale;
 };
 enum : unsigned { kTreeRows = 256, kTreeLanes = 16 };
 )
