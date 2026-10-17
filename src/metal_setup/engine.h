@@ -113,9 +113,10 @@ class Engine {
                 [encoder setBytes:&limit length:sizeof(limit) atIndex:3];
                 const unsigned simd_width = pipe.threadExecutionWidth;
                 // The completed degree cutoff is a hint; scalar groups handle any row length.
-                const bool small_group = (stage == stage_decide || stage == stage_commit ||
-                    stage == stage_count_stars || stage == stage_emit_stars)
-                    && s.state->threshold && s.state->threshold <= 8;
+                const bool selector = stage == stage_decide || stage == stage_commit;
+                const bool small_group = selector ? s.state->threshold <= simd_width
+                    : (stage == stage_count_stars || stage == stage_emit_stars)
+                        && s.state->threshold && s.state->threshold <= 8;
                 const unsigned width = small_group ? 1 : simd_width;
                 require(width && simd_width % width == 0, "invalid SIMD subgroup width");
                 [encoder setBytes:&width length:sizeof(width) atIndex:4];

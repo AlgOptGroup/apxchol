@@ -185,7 +185,9 @@ struct TailRound {
     Memory m;
     unsigned tid, threads, simd_width, lane;
     void stage(unsigned phase, unsigned count, unsigned limit = 0) const {
-        const unsigned width = simd_width;
+        const bool small_selector = (phase == stage_decide || phase == stage_commit)
+            && m.data.state->threshold <= simd_width;
+        const unsigned width = small_selector ? 1 : simd_width;
         const bool grouped = stage_is_grouped(phase);
         for (unsigned i = tid; i < count * (grouped ? width : 1); i += threads)
             setup_step(m, phase, i, limit, width, lane);
