@@ -6,6 +6,7 @@
 
 #include <Eigen/Sparse>
 #include <cmath>
+#include <future>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -29,8 +30,7 @@ static_assert(std::is_move_assignable_v<apxchol::solver>);
 static_assert(!std::is_copy_constructible_v<apxchol::solver>);
 static_assert(!std::is_copy_assignable_v<apxchol::solver>);
 
-Sparse operator_matrix() {
-    constexpr int n = 64;
+Sparse operator_matrix(int n = 64) {
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
         entries.emplace_back(i, i, 5.0);
@@ -506,3 +506,94 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
     }
 }
 #endif
+
+#ifdef _OPENMP
+namespace {
+template<class Owner>
+void check_thread_budget(const Sparse& matrix, int ambient, int budget,
+                         apxchol::solve_backend backend = apxchol::solve_backend::cpu) {
+    const scoped_omp_threads caller(ambient);
+    auto options = cpu_options();
+    options.backend = backend;
+    options.num_threads = budget;
+    options.keep_factor_values = true;
+    const Owner owner(matrix, options);
+    EXPECT_EQ(omp_get_max_threads(), ambient);
+    const Owner adopted(matrix, owner.factor(), options);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    for (int repetition = 0; repetition < 2; ++repetition) {
+        expect_solution(matrix, rhs, owner.solve(rhs).x);
+        expect_solution(matrix, rhs, adopted.solve(rhs).x);
+        EXPECT_EQ(omp_get_max_threads(), ambient);
+        EXPECT_TRUE(owner.apply(rhs).allFinite());
+        EXPECT_EQ(omp_get_max_threads(), ambient);
+        Eigen::VectorXd output(matrix.rows());
+        if constexpr (requires { owner.solve(rhs, Eigen::Ref<Eigen::VectorXd>(output)); }) {
+            owner.solve(rhs, Eigen::Ref<Eigen::VectorXd>(output));
+            expect_solution(matrix, rhs, output);
+        }
+        EXPECT_EQ(omp_get_max_threads(), ambient);
+    }
+    const Eigen::VectorXd wrong_guess = Eigen::VectorXd::Zero(1);
+    EXPECT_THROW(owner.solve(rhs, -1, -1, &wrong_guess), std::invalid_argument);
+    EXPECT_EQ(omp_get_max_threads(), ambient);
+    auto invalid = options;
+    invalid.factor_opts.is_select = "not_a_partitioner";
+    EXPECT_THROW(Owner(matrix, invalid), std::invalid_argument);
+    EXPECT_EQ(omp_get_max_threads(), ambient);
+}
+
+// Direct CPU owners expose their factor through the preconditioner.
+struct budget_cpu_solver : apxchol::cpu_solver {
+    using cpu_solver::cpu_solver;
+    const apxchol::factorization& factor() const { return preconditioner().factor(); }
+};
+}
+
+TEST(Solver, ThreadBudgetRestoresCallerForBothOwners) {
+    const Sparse matrix = operator_matrix();
+    for (const int budget : {0, 1, 2}) {
+        check_thread_budget<apxchol::solver>(matrix, 3, budget);
+        check_thread_budget<budget_cpu_solver>(matrix, 3, budget);
+    }
+}
+
+TEST(Solver, ThreadBudgetsAreLocalToIndependentHostThreads) {
+    const Sparse matrix = operator_matrix();
+    auto first = std::async(std::launch::async, [&] {
+        check_thread_budget<apxchol::solver>(matrix, 3, 1);
+    });
+    auto second = std::async(std::launch::async, [&] {
+        check_thread_budget<budget_cpu_solver>(matrix, 4, 2);
+    });
+    first.get();
+    second.get();
+}
+
+#ifdef APXCHOL_USE_METAL
+TEST(Solver, ThreadBudgetCoversDirectMetalOwners) {
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    check_thread_budget<apxchol::metal_solver>(operator_matrix(), 3, 2,
+                                              apxchol::solve_backend::gpu);
+}
+#endif
+
+TEST(Solver, ThreadBudgetPreservesNestedTeamFallback) {
+    const int previous = omp_get_max_active_levels();
+    omp_set_max_active_levels(1);
+    const Sparse matrix = operator_matrix(8192);
+    #pragma omp parallel num_threads(2)
+    {
+        check_thread_budget<apxchol::solver>(matrix, 3, 2);
+    }
+    omp_set_max_active_levels(previous);
+}
+#endif
+
+TEST(Solver, RejectsNegativeThreadBudget) {
+    const Sparse matrix = operator_matrix();
+    auto options = cpu_options();
+    options.num_threads = -1;
+    EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::cpu_solver(matrix, options), std::invalid_argument);
+}
