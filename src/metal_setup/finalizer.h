@@ -156,23 +156,21 @@ kernel void plan_structure(device const unsigned* round_ptr [[buffer(0)]],
                            constant unsigned& rounds [[buffer(7)]]) {
     rf::plan(PlanMemory{n,bool(reverse),rounds,round_ptr,blocks,steps,info,status});
 }
-kernel void plan_count(device const unsigned* ptr [[buffer(0)]],device const unsigned* idx [[buffer(1)]],
-                       device const unsigned* blocks [[buffer(2)]],device const rf::PlanInfo* info [[buffer(3)]],
-                       device gd::counts* counts [[buffer(4)]],device atomic_uint* status [[buffer(5)]],
-                       constant unsigned& n [[buffer(6)]],constant unsigned& reverse [[buffer(7)]],
+// Finalization has already checked triangular indices; packing only needs row pointers.
+kernel void plan_count(device const unsigned* ptr [[buffer(0)]],
+                       device const unsigned* blocks [[buffer(1)]],device const rf::PlanInfo* info [[buffer(2)]],
+                       device gd::counts* counts [[buffer(3)]],device atomic_uint* status [[buffer(4)]],
+                       constant unsigned& n [[buffer(5)]],constant unsigned& reverse [[buffer(6)]],
                        uint block [[thread_position_in_grid]]) {
     if(block<info->blocks) {
         const gd::row_order order{n,bool(reverse)};
         for(unsigned q=blocks[block];q<blocks[block+1];++q) {
-            const unsigned row=order(q),first=ptr[row],last=ptr[row+1];
-            unsigned error=first>=last ? 4u : 0u;
-            if(!error) {
-                const unsigned diagonal=reverse ? first : last-1;
-                if(idx[diagonal]!=row)error|=8u;
-                for(unsigned p=first;p<last;++p)
-                    if(p!=diagonal && (idx[p]>=n || (reverse ? idx[p]<=row : idx[p]>=row)))error|=16u;
+            const unsigned row=order(q);
+            if(ptr[row]>=ptr[row+1]) {
+                counts[block]={};
+                atomic_fetch_or_explicit(status,4u,memory_order_relaxed);
+                return;
             }
-            if(error){counts[block]={};atomic_fetch_or_explicit(status,error,memory_order_relaxed);return;}
         }
         counts[block]=gd::pack_rows<false>(ptr,order,blocks[block],blocks[block+1],gd::chunk_size);
     }
@@ -434,12 +432,12 @@ class Finalizer {
         scratch = nil;
         cursor = nil;
         scan_scratch = nil;
+        auto blocks = allocate((m + 1) * sizeof(unsigned)),
+             steps = allocate(m * sizeof(rf::Step));
+        auto info = allocate(sizeof(rf::PlanInfo)),
+             counts = allocate(std::size_t(m + 1) * sizeof(gd::counts));
         for (unsigned reverse = 0; reverse < 2; ++reverse) {
             auto &t = reverse ? out.backward : out.forward;
-            auto blocks = allocate((m + 1) * sizeof(unsigned)),
-                 steps = allocate(m * sizeof(rf::Step));
-            auto info = allocate(sizeof(rf::PlanInfo)),
-                 counts = allocate(std::size_t(m + 1) * sizeof(gd::counts));
             cb = [queue commandBuffer];
             auto enc = encoder(cb, structure, {input.arena, blocks, steps, info, status});
             [enc setBuffer:input.arena offset:input.layout.offsets[unsigned(resident_setup::Field::round_ptr)] atIndex:0];
@@ -447,9 +445,9 @@ class Finalizer {
             [enc setBytes:&reverse length:sizeof reverse atIndex:6];
             [enc setBytes:&state.round length:sizeof state.round atIndex:7];
             dispatch(enc, 1, 1);
-            enc = encoder(cb, count, {t.ptr, t.idx, blocks, info, counts, status});
-            [enc setBytes:&m length:sizeof m atIndex:6];
-            [enc setBytes:&reverse length:sizeof reverse atIndex:7];
+            enc = encoder(cb, count, {t.ptr, blocks, info, counts, status});
+            [enc setBytes:&m length:sizeof m atIndex:5];
+            [enc setBytes:&reverse length:sizeof reverse atIndex:6];
             dispatch(enc, m);
             enc = encoder(cb, prefix, {counts, info, blocks, steps});
             dispatch(enc, 1, 1);
