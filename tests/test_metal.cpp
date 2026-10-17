@@ -10,6 +10,7 @@
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "metal_device.h"
+#include "apxchol/solver/detail/solve_backend.h"
 
 #include <Eigen/Sparse>
 #include <cmath>
@@ -333,9 +334,8 @@ TEST_F(MetalDevice, ApplyAgreesWithCpuApply) {
 
 TEST_F(MetalDevice, GridLaplacianOriginalResidual) {
     const Sparse A = grid(48, 48);
-    apxchol::factorization F = apxchol::factorize(A);
-    const apxchol::cpu_solver cpu(A, apxchol::factorization(F));
-    const apxchol::metal_solver gpu(A, std::move(F));
+    const apxchol::cpu_solver cpu(A);
+    const apxchol::metal_solver gpu(A);
     const Eigen::VectorXd b = rhs(A.rows(), 2, true);
     for (const double tol : {1e-8, 1e-10}) {
         SCOPED_TRACE(tol);
@@ -717,4 +717,58 @@ TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
         F.L.vals_[0] = diagonal;
         EXPECT_THROW(apxchol::metal_solver(A, F, options), std::domain_error);
     }
+}
+
+TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::gpu;
+    const auto A = grid(4, 4, 0.25);
+    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+    options.factor_opts.sampler = apxchol::clique_sampler::gks;
+    options.factor_opts.is_select = "priority_greedy";
+    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+    options.factor_opts.is_select = "block_greedy";
+    Sparse lower = A.triangularView<Eigen::Lower>();
+    EXPECT_THROW(apxchol::solver(lower, options), std::invalid_argument);
+    Sparse missing = A;
+    missing.coeffRef(1, 0) = 0;
+    missing.prune(0.0);
+    EXPECT_THROW(apxchol::solver(missing, options), std::invalid_argument);
+    Sparse unsorted = A;
+    std::swap(unsorted.innerIndexPtr()[0], unsorted.innerIndexPtr()[1]);
+    EXPECT_THROW(apxchol::solver(unsorted, options), std::invalid_argument);
+}
+
+TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
+    const auto A = grid(17, 19, 0.25, true);
+    auto options = keep_opts();
+    apxchol::metal_solver exported(A, options);
+    const auto b = rhs(A.rows(), 3, false);
+    const auto expected = emulate_apply(exported.factor(), b);
+    EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
+    options.keep_factor_values = false;
+    apxchol::metal_solver resident(A, options);
+    EXPECT_TRUE(resident.factor().L.inner_.empty());
+    EXPECT_TRUE(resident.factor().L.vals_.empty());
+    EXPECT_GT(resident.factor().L.nonZeros(), 0);
+    for (unsigned salt : {1u, 2u, 3u}) {
+        const auto rhs_value = rhs(A.rows(), salt, false);
+        const auto result = resident.solve(rhs_value);
+        EXPECT_LT(true_residual(A, rhs_value, result.x), options.tol);
+    }
+}
+
+TEST(MetalOptions, AutomaticSelectionRejectsResidentIncompatibleOptions) {
+    Sparse A(32769, 32769);
+    A.setIdentity();
+    A.makeCompressed();
+    apxchol::solve_options options;
+    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::cpu);
+    options.factor_opts.sampler = apxchol::clique_sampler::gks;
+    A.uncompress();
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::cpu);
+    options.backend = apxchol::solve_backend::gpu;
+    EXPECT_THROW(apxchol::detail::select_solve_backend(options, &A), std::invalid_argument);
 }

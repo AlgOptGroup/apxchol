@@ -19,7 +19,7 @@
 #include "apxchol/solver/detail/gpu_solve_session.h"
 #elif defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/metal_solver.h"
-#include "apxchol/solver/detail/metal_schedule.h"
+#include "metal_setup_options.h"
 #endif
 
 namespace apxchol {
@@ -844,13 +844,17 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
             "natural residual peeling and supported sampler options; request CPU explicitly");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
-    if (opts.backend == solve_backend::automatic && A) {
-        bool in_range = true;
-        #pragma omp parallel for schedule(static) reduction(&& : in_range)
-        for (Eigen::Index col = 0; col < A->outerSize(); ++col)
-            for (Eigen::SparseMatrix<double>::InnerIterator entry(*A, col); entry; ++entry)
-                in_range = in_range && detail::metal_schedule::in_range(entry.value());
-        if (!in_range) return solve_backend::cpu;
+    if (!detail::metal_setup_regularization_supported(detail::env_knobs::get(), A)) {
+        if (opts.backend == solve_backend::gpu)
+            throw std::invalid_argument(detail::metal_regularization_error);
+        return solve_backend::cpu;
+    }
+    const bool compatible = detail::metal_setup_options_supported(opts.factor_opts) &&
+        (!A || detail::metal_setup_input_supported(*A));
+    if (!compatible) {
+        if (opts.backend == solve_backend::gpu)
+            throw std::invalid_argument("Metal GPU setup requires supported GKS options and compressed, sorted, paired CSC input");
+        return solve_backend::cpu;
     }
     return opts.backend == solve_backend::gpu || metal_solver::available()
         ? solve_backend::gpu : solve_backend::cpu;

@@ -2,6 +2,7 @@
 #include <Eigen/Core>
 
 #include "apxchol/solver/detail/metal_host.h"
+#include "../src/metal_setup_options.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 
 #include <cmath>
@@ -11,6 +12,24 @@
 #include <vector>
 
 namespace mh = apxchol::detail::metal_host;
+
+TEST(MetalHost, DegreeQuantileOptions) {
+    apxchol::factor_options options;
+    const bool defaults = apxchol::detail::metal_setup_options_supported(options);
+    for (double quantile : {apxchol::degree_quantile_by_route, 0.2, 0.5}) {
+        options.partition.degree_quantile = quantile;
+        EXPECT_EQ(apxchol::detail::metal_degree_divisor(quantile), quantile == 0.5 ? 2u : 5u);
+        EXPECT_EQ(apxchol::detail::metal_setup_options_supported(options), defaults);
+    }
+    for (double quantile : {-2.0, 0.0, 0.1, 0.3, 0.8, 1.0, double(float(0.2)),
+                            std::numeric_limits<double>::infinity(),
+                            std::numeric_limits<double>::quiet_NaN()}) {
+        options.partition.degree_quantile = quantile;
+        EXPECT_EQ(apxchol::detail::metal_degree_divisor(quantile), 0u);
+        EXPECT_FALSE(apxchol::detail::metal_setup_options_supported(options));
+    }
+    EXPECT_EQ(apxchol::degree_quantile_device_default, 0.5);
+}
 
 TEST(MetalHost, DoubleFloatSplitIsExactOrBounded) {
     std::mt19937_64 rng(7);

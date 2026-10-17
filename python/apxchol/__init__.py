@@ -350,7 +350,8 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy",
         `residual_peel` ("natural" | "min_degree" | "bk_serial"),
         `stagnation_window`. Unknown keys raise `ValueError`. Note:
         `degree_multiplier` only takes effect when `degree_quantile=0`
-        (the quantile cap, default 0.2, replaces it).
+        (the quantile cap defaults to 0.2 on CPU/Metal and 0.5 on CUDA).
+        Metal accepts only 0.2 or 0.5; its degree buckets include all ties.
     """
     return Solver(A, backend=backend, seed=seed, partitioner=partitioner,
                   keep_factor=keep_factor, factor_storage_dtype=factor_storage_dtype,
