@@ -24,7 +24,8 @@ public:
         std::string device;
     };
 
-    /// Factorizes A and prepares the device. Requires available() and the
+    /// Factorizes A on the device and prepares reusable solve storage. Requires
+    /// available() and the
     /// operator contract in operator_class.h; numerical limits are in docs/precision.md.
     explicit metal_solver(const Eigen::SparseMatrix<double>& A,
                           const solve_options& opts = {}, checkpoint* cp = nullptr);

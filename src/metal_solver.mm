@@ -8,6 +8,8 @@
 #include "apxchol/solver/detail/permuted_operator.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "metal_device.h"
+#include "metal_compile.h"
+#include "metal_setup.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -77,12 +79,6 @@ constexpr std::uint32_t kRowThreads = 256;     // threads per threadgroup of the
 
 using gpu_pcg::operation;
 
-std::string describe(NSError* error) {
-    if (error == nil) return "unknown error";
-    const char* text = [[error localizedDescription] UTF8String];
-    return text ? std::string(text) : std::string("unknown error");
-}
-
 struct pipelines {
     id<MTLComputePipelineState> pcg[4][2];  // operation, operator double-float
     id<MTLComputePipelineState> finalize;
@@ -137,28 +133,6 @@ id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> l
     return pipe;
 }
 
-id<MTLLibrary> compile(id<MTLDevice> device, bool contract_pragma, std::string& error) {
-    MTLCompileOptions* options = [MTLCompileOptions new];
-    if (@available(macOS 15.0, *)) {
-        options.mathMode = MTLMathModeSafe;
-        options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
-        options.languageVersion = MTLLanguageVersion3_2;
-    } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        options.fastMathEnabled = NO;
-#pragma clang diagnostic pop
-    }
-    std::string source = contract_pragma ? "#pragma METAL fp contract(off)\n" : "";
-    source += kKernelSource;
-    NSError* err = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()]
-                                                  options:options
-                                                    error:&err];
-    if (library == nil) error = describe(err);
-    return library;
-}
-
 context* make_context() {
     auto* ctx = new context;  // process lifetime: never destroyed
     device_status& st = ctx->status;
@@ -169,14 +143,9 @@ context* make_context() {
             if (device == nil) throw std::runtime_error("no Metal device");
             ctx->device = device;
             st.name = [[device name] UTF8String];
-            std::string error;
-            id<MTLLibrary> library = compile(device, true, error);
-            st.contract_pragma = library != nil;
-            if (library == nil) {
-                library = compile(device, false, error);
-                if (library == nil)
-                    throw std::runtime_error("Metal kernel compilation failed: " + error);
-            }
+            const auto compiled = compile_library(device, kKernelSource);
+            st.contract_pragma = compiled.contract_pragma;
+            id<MTLLibrary> library = compiled.library;
             pipelines& p = ctx->pipes;
             for (unsigned op = 0; op < 4; ++op)
                 for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
@@ -354,6 +323,7 @@ struct metal_solver::impl {
     // The permuted operator A' = P A P^T (canonical lower values) in fp64:
     // the host residuals run on it.
     detail::permuted_operator_csr op;
+    Eigen::SparseMatrix<double> original_operator;
     std::uint32_t check_every = 1;
     statistics stats;
 
@@ -446,14 +416,31 @@ struct metal_solver::impl {
                                      dm::status().error);
     }
 
-    void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp);
+    void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
+               detail::metal_setup::resident_factor* resident = nullptr);
     void prepare_device(cuda_host::csr_int<float> backward,
                         const std::vector<float>& scales,
-                        const std::vector<float>& hi, const std::vector<float>& lo, unsigned m);
+                        const std::vector<float>& hi, const std::vector<float>& lo, unsigned m,
+                        detail::metal_setup::resident_factor* resident = nullptr);
 
     // y = A' x in fp64, each row summed in storage order; rows are split across
     // threads by stored entries (detail::work_balanced_range).
     void spmv(const Eigen::VectorXd& x, Eigen::VectorXd& y) const {
+        if (original_operator.rows() != 0) {
+            const auto& A = original_operator;
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(A.outerIndexPtr(), A.rows(),
+                    omp_get_thread_num(), omp_get_num_threads());
+                for (auto row = first; row < last; ++row) {
+                    double sum = 0;
+                    for (int p = A.outerIndexPtr()[row]; p < A.outerIndexPtr()[row + 1]; ++p)
+                        sum += A.valuePtr()[p] * x[F.perm[A.innerIndexPtr()[p]]];
+                    y[F.perm[row]] = sum;
+                }
+            }
+            return;
+        }
         const int* ptr = op.ptr.data();
         const int* col = op.idx.get();
         const double* val = op.vals.get();
@@ -479,13 +466,14 @@ struct metal_solver::impl {
     void centre(Eigen::VectorXd& x) const { x.array() -= x.mean(); }
 };
 
-void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp) {
+void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
+                               detail::metal_setup::resident_factor* resident) {
     if (A.rows() != A.cols()) throw std::invalid_argument("metal_solver: the operator must be square");
     n = static_cast<std::size_t>(A.rows());
     if (n == 0) throw std::invalid_argument("metal_solver: empty operator");
     if (static_cast<std::size_t>(F.L.rows()) != n || F.perm.size() != n)
         throw std::invalid_argument("metal_solver: factorization dimension mismatch");
-    if (F.L.nonZeros() > 0 && F.L.vals_.empty())
+    if (!resident && F.L.nonZeros() > 0 && F.L.vals_.empty())
         throw std::invalid_argument(
             "metal_solver: factorization values were released; pass a freshly computed factorization");
     // Eigen's int StorageIndex keeps n and the operator's stored count within
@@ -498,66 +486,89 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::length_error("metal_solver: the factor exceeds the device's 32-bit offsets");
 
     if (cp) { cp->descend("setup"); cp->tick(); }
-    // Keep compensated dropping in the shared FP64 host implementation.
-    // Both backends consume the CSR factor without a level-permuted value copy.
-    auto backward = cuda_host::build_L11_csc_int<float>(F.L, m);
-    if (!opts.keep_factor_values) F.L.release_values();
-    auto scales = cuda_host::column_scales(backward);
-    if (factor_fp16) cuda_host::normalize_fp16_scales(backward, scales);
-    cuda_host::apply_factor_drop(backward, scales, factor_drop_rel_from_env(), factor_fp16);
-    if (cp) (*cp)("metal_factor_prep");
-
-    Eigen::SparseMatrix<double> compressed;
-    if (!A.isCompressed()) {
-        compressed = A;
-        compressed.makeCompressed();
-    }
-    const auto& src = A.isCompressed() ? A : compressed;
-    // Both triangles are stored: up to twice the stored entries of one triangle.
-    if (src.nonZeros() > std::numeric_limits<int>::max() / 2)
-        throw std::length_error("metal_solver: operators with 2^30 or more stored entries exceed the "
-                                "device's 32-bit offsets");
-    op = detail::build_permuted_full_symmetric_csr(src, F.perm);
-    int max_row = 0;
-    double min_diagonal = std::numeric_limits<double>::infinity(), max_diagonal = 0;
-    #pragma omp parallel for schedule(static) reduction(min : min_diagonal) reduction(max : max_diagonal, max_row)
-    for (std::size_t row = 0; row < n; ++row) {
-        max_row = std::max(max_row, op.ptr[row + 1] - op.ptr[row]);
-        const auto end = op.idx.get() + op.ptr[row + 1];
-        auto p = std::lower_bound(op.idx.get() + op.ptr[row], end, int(row));
-        double diagonal = 0;
-        for (; p != end && *p == int(row); ++p) diagonal += op.vals[p - op.idx.get()];
-        if (diagonal > 0) {
-            min_diagonal = std::min(min_diagonal, diagonal);
-            max_diagonal = std::max(max_diagonal, diagonal);
+    cuda_host::csr_int<float> backward;
+    std::vector<float> scales, hi, lo;
+    bool exact;
+    if (resident) {
+        original_operator = A;
+        if (!resident->operator_triangles_identical) {
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(A.outerIndexPtr(), A.rows(),
+                    omp_get_thread_num(), omp_get_num_threads());
+                bool paired = true;
+                for (auto row = first; row < last; ++row)
+                    for (int p = A.outerIndexPtr()[row]; p < A.outerIndexPtr()[row + 1]; ++p)
+                        original_operator.valuePtr()[p] = detail::canonical_lower_value(
+                            A.outerIndexPtr(), A.innerIndexPtr(), A.valuePtr(), int(row),
+                            A.innerIndexPtr()[p], p, paired);
+            }
         }
-    }
-    arguments.spmv_lanes = max_row > 256 ? kTreeLanes : 1;
-    const bool exact = op.fp32_exact;
-    const std::size_t nnz = static_cast<std::size_t>(op.ptr.back());
-    std::vector<float> hi(nnz), lo(exact ? 0 : nnz);
-    bool in_range = true;
-    #pragma omp parallel for schedule(static) reduction(&& : in_range)
-    for (std::ptrdiff_t p = 0; p < static_cast<std::ptrdiff_t>(nnz); ++p) {
-        const double v = op.vals[p];
-        in_range = in_range && ls::in_range(v);
-        const mh::df d = mh::split(v);
-        hi[p] = d.hi;
-        if (!exact) lo[p] = d.lo;
-    }
-    if (!in_range)
-        throw std::domain_error("metal_solver: an operator value is non-finite or outside [2^-100, 2^100]");
-    // A fixed positive PCG preconditioner scale preserves x while balancing
-    // rho and curvature exponents; diagonal extremes include mixed scales.
-    arguments.preconditioner_scale = 1;
-    if (max_diagonal > 0) {
-        const int exponent_sum = std::ilogb(min_diagonal) + std::ilogb(max_diagonal);
-        const int shift = static_cast<int>(std::floor(exponent_sum / 4.0));
-        arguments.preconditioner_scale = std::scalbn(1.0f, shift);
-    }
-    if (cp) (*cp)("metal_operator");
+        exact = resident->operator_exact;
+        arguments.spmv_lanes = resident->max_operator_row > 256 ? kTreeLanes : 1;
+        arguments.preconditioner_scale = resident->preconditioner_scale;
+    } else {
+        // Keep compensated dropping in the shared FP64 host implementation.
+        // Both backends consume the CSR factor without a level-permuted value copy.
+        backward = cuda_host::build_L11_csc_int<float>(F.L, m);
+        if (!opts.keep_factor_values) F.L.release_values();
+        scales = cuda_host::column_scales(backward);
+        if (factor_fp16) cuda_host::normalize_fp16_scales(backward, scales);
+        cuda_host::apply_factor_drop(backward, scales, factor_drop_rel_from_env(), factor_fp16);
+        if (cp) (*cp)("metal_factor_prep");
 
-    prepare_device(std::move(backward), scales, hi, lo, m);
+        Eigen::SparseMatrix<double> compressed;
+        if (!A.isCompressed()) {
+            compressed = A;
+            compressed.makeCompressed();
+        }
+        const auto& src = A.isCompressed() ? A : compressed;
+        // Both triangles are stored: up to twice the stored entries of one triangle.
+        if (src.nonZeros() > std::numeric_limits<int>::max() / 2)
+            throw std::length_error("metal_solver: operators with 2^30 or more stored entries exceed the "
+                                    "device's 32-bit offsets");
+        op = detail::build_permuted_full_symmetric_csr(src, F.perm);
+        int max_row = 0;
+        double min_diagonal = std::numeric_limits<double>::infinity(), max_diagonal = 0;
+        #pragma omp parallel for schedule(static) reduction(min : min_diagonal) reduction(max : max_diagonal, max_row)
+        for (std::size_t row = 0; row < n; ++row) {
+            max_row = std::max(max_row, op.ptr[row + 1] - op.ptr[row]);
+            const auto end = op.idx.get() + op.ptr[row + 1];
+            auto p = std::lower_bound(op.idx.get() + op.ptr[row], end, int(row));
+            double diagonal = 0;
+            for (; p != end && *p == int(row); ++p) diagonal += op.vals[p - op.idx.get()];
+            if (diagonal > 0) {
+                min_diagonal = std::min(min_diagonal, diagonal);
+                max_diagonal = std::max(max_diagonal, diagonal);
+            }
+        }
+        arguments.spmv_lanes = max_row > 256 ? kTreeLanes : 1;
+        exact = op.fp32_exact;
+        const std::size_t nnz = static_cast<std::size_t>(op.ptr.back());
+        hi.resize(nnz); lo.resize(exact ? 0 : nnz);
+        bool in_range = true;
+        #pragma omp parallel for schedule(static) reduction(&& : in_range)
+        for (std::ptrdiff_t p = 0; p < static_cast<std::ptrdiff_t>(nnz); ++p) {
+            const double v = op.vals[p];
+            in_range = in_range && ls::in_range(v);
+            const mh::df d = mh::split(v);
+            hi[p] = d.hi;
+            if (!exact) lo[p] = d.lo;
+        }
+        if (!in_range)
+            throw std::domain_error("metal_solver: an operator value is non-finite or outside [2^-100, 2^100]");
+        // A fixed positive PCG preconditioner scale preserves x while balancing
+        // rho and curvature exponents; diagonal extremes include mixed scales.
+        arguments.preconditioner_scale = 1;
+        if (max_diagonal > 0) {
+            const int exponent_sum = std::ilogb(min_diagonal) + std::ilogb(max_diagonal);
+            const int shift = static_cast<int>(std::floor(exponent_sum / 4.0));
+            arguments.preconditioner_scale = std::scalbn(1.0f, shift);
+        }
+        if (cp) (*cp)("metal_operator");
+
+    }
+    prepare_device(std::move(backward), scales, hi, lo, m, resident);
     // Group four iterations on small systems to amortize command submission;
     // check large solves after each iteration.
     check_every = n > 200000 ? 1 : 4;
@@ -576,23 +587,44 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
 void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
                                        const std::vector<float>& scales,
                                        const std::vector<float>& hi, const std::vector<float>& lo,
-                                       unsigned m) {
+                                       unsigned m, detail::metal_setup::resident_factor* resident) {
     context& ctx = shared();
     this->ctx = &ctx;
     arguments.n = static_cast<std::uint32_t>(n);
     arguments.m = m;
     arguments.groups = (arguments.n + kTreeRows - 1) / kTreeRows;
-    const auto nnz = op.ptr.back();
-    operator_df = !lo.empty();
+    const auto nnz = resident ? 0 : op.ptr.back();
+    operator_df = resident ? !resident->operator_exact : !lo.empty();
     with_pool([&] {
         id<MTLDevice> dev = ctx.device;
         queue = [dev newCommandQueue];
         if (queue == nil) throw std::runtime_error("Metal command queue creation failed");
+        if (resident) {
+            device_op_ptr = resident->operator_ptr;
+            device_op_col = resident->operator_idx;
+            op_hi = resident->operator_hi;
+            op_lo = resident->operator_lo;
+        } else {
         device_op_ptr = upload(dev, op.ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
         device_op_col = upload(dev, op.idx.get(), nnz * sizeof(std::uint32_t), "operator indices");
         op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
         if (!lo.empty()) op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
+
+        }
     });
+    if (resident) {
+        auto install = [](detail::metal_setup::triangle t) {
+            prepared_tri result;
+            result.ptr = t.ptr; result.col = t.idx; result.val = t.val;
+            result.words = t.words; result.blocks = t.blocks; result.segments = t.segments;
+            result.stages = std::move(t.stages);
+            result.levels = t.levels; result.tag_count = t.tag_count;
+            return result;
+        };
+        fwd = install(std::move(resident->forward));
+        bwd = install(std::move(resident->backward));
+        factor_metadata = resident->metadata;
+    } else {
     auto install = [&]<class Value>(const cuda_host::csr_int<Value>& bt, std::span<const float> diag = {}) {
         const auto ft = cuda_host::transpose_csr(bt);
         fwd = prepare_tri(ctx, ft, true, diag);
@@ -613,6 +645,7 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
         backward.vals.reset();
         install(half, narrow.diag);
     } else install(backward);
+    }
     with_pool([&] {
         id<MTLDevice> dev = ctx.device;
         x = upload(dev, nullptr, n * sizeof(df32), "solution");
@@ -631,8 +664,9 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                            checkpoint* cp)
     : impl_(new impl(opts)) {
-    impl_->F = detail::factorize_for_solver(A, opts.factor_opts, cp);
-    impl_->setup(A, cp);
+    auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp);
+    impl_->F = std::move(resident.factor);
+    impl_->setup(A, cp, &resident);
 }
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, factorization F,
