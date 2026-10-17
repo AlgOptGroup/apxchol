@@ -24,7 +24,8 @@ enum Stage : unsigned {
 };
 
 APXCHOL_GPU_FUNCTION bool stage_is_grouped(unsigned stage) {
-    return stage == stage_count_stars || stage == stage_emit_stars ||
+    return stage == stage_decide || stage == stage_commit ||
+           stage == stage_count_stars || stage == stage_emit_stars ||
            stage == stage_count_incoming || stage == stage_copy_retained ||
            stage == stage_scatter_incoming;
 }
@@ -191,20 +192,23 @@ template<class Memory> APXCHOL_GPU_FUNCTION void candidates(Memory m,unsigned v)
     if (v<s.state->nodes) s.candidates[v]=s.active[v] &&
         s.degree_bound[v]<=s.state->threshold ? 0 : 2;
 }
-template<class Memory> APXCHOL_GPU_FUNCTION void decide(Memory m,unsigned v) {
+template<class Memory,class Group> APXCHOL_GPU_FUNCTION void decide(Memory m,unsigned v,Group group) {
     auto s=m.data; if (m.failed() || v>=s.state->nodes) return;
-    bool win=s.candidates[v]==0;
-    for (unsigned at=s.begin[v];win && at<s.cursor[v];++at) {
+    unsigned blocked=s.candidates[v]!=0;
+    for (seed_type at=seed_type(s.begin[v])+group.lane;!blocked && at<s.cursor[v];at+=group.width) {
         const auto u=s.graph[s.state->slot][at].node;
-        if (s.candidates[u]==0 && precedes(m,u,v)) win=false;
+        blocked=s.candidates[u]==0 && precedes(m,u,v);
     }
-    s.winners[v]=win;
+    const bool win=!group.sum(blocked);
+    if (group.lane==0) s.winners[v]=win;
 }
-template<class Memory> APXCHOL_GPU_FUNCTION void commit(Memory m,unsigned v) {
+template<class Memory,class Group> APXCHOL_GPU_FUNCTION void commit(Memory m,unsigned v,Group group) {
     auto s=m.data; if (m.failed() || v>=s.state->nodes || s.candidates[v]!=0) return;
-    if (s.winners[v]) { s.candidates[v]=1; return; }
-    for (unsigned at=s.begin[v];at<s.cursor[v];++at)
-        if (s.winners[s.graph[s.state->slot][at].node]) { s.candidates[v]=2; return; }
+    if (s.winners[v]) { if (group.lane==0) s.candidates[v]=1; return; }
+    unsigned blocked=0;
+    for (seed_type at=seed_type(s.begin[v])+group.lane;!blocked && at<s.cursor[v];at+=group.width)
+        blocked=s.winners[s.graph[s.state->slot][at].node];
+    if (group.sum(blocked) && group.lane==0) s.candidates[v]=2;
 }
 template<class Memory> APXCHOL_GPU_FUNCTION void select(Memory m,unsigned row) {
     auto s=m.data; if (m.failed() || row>=s.state->active) return;

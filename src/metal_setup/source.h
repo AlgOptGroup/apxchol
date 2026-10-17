@@ -129,6 +129,7 @@ inline void setup_step(Memory m, unsigned stage, unsigned i, unsigned limit, uns
     if (stage != stage_initialize && (!m.data.state->active || m.failed()))
         return;
     if (stage == stage_histogram || (stage >= stage_candidates && stage <= stage_commit)) {
+        if (stage == stage_decide || stage == stage_commit) i /= width;
         if (i >= m.data.state->active)
             return;
         i = m.data.entry_offsets[i];
@@ -151,9 +152,9 @@ inline void setup_step(Memory m, unsigned stage, unsigned i, unsigned limit, uns
     if (stage == stage_candidates)
         candidates(m, i);
     if (stage == stage_decide)
-        decide(m, i);
+        decide(m, i, Group{lane % width, width, lane - lane % width});
     if (stage == stage_commit)
-        commit(m, i);
+        commit(m, i, Group{lane % width, width, lane - lane % width});
     if (stage == stage_select)
         select(m, i);
     if (stage == stage_offsets)
