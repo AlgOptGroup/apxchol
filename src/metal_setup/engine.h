@@ -273,7 +273,34 @@ class Engine {
             if (s.state->status || s.state->columns != n)
                 throw std::runtime_error("Metal factorization failed: status " + std::to_string(s.state->status) +
                     ", completed columns " + std::to_string(s.state->columns) + "/" + std::to_string(n));
-            return {arena, factor, l};
+            // Release graph and round scratch before allocating finalized storage and plans.
+            Layout compact{};
+            const auto column_bytes = std::size_t(n) * sizeof(Column);
+            const auto round_bytes = (std::size_t(s.state->round) + 1) * sizeof(unsigned);
+            compact.offsets[unsigned(Field::columns)] = (sizeof(State) + 15) & ~std::size_t(15);
+            compact.offsets[unsigned(Field::round_ptr)] =
+                (compact.offsets[unsigned(Field::columns)] + column_bytes + 15) & ~std::size_t(15);
+            compact.bytes = compact.offsets[unsigned(Field::round_ptr)] + round_bytes;
+            const auto factor_bytes = std::size_t(s.state->entries) * sizeof(Edge);
+            auto output_arena = allocate(compact.bytes), output_factor = allocate(factor_bytes);
+            command = [queue commandBuffer];
+            auto blit = [command blitCommandEncoder];
+            require(blit != nil, "Metal factor compaction encoder creation failed");
+            auto copy = [&](id<MTLBuffer> from, std::size_t source, id<MTLBuffer> to,
+                            std::size_t target, std::size_t bytes) {
+                if (bytes)
+                    [blit copyFromBuffer:from sourceOffset:source toBuffer:to
+                         destinationOffset:target size:bytes];
+            };
+            copy(arena, 0, output_arena, 0, sizeof(State));
+            copy(arena, l.offsets[unsigned(Field::columns)], output_arena,
+                 compact.offsets[unsigned(Field::columns)], column_bytes);
+            copy(arena, l.offsets[unsigned(Field::round_ptr)], output_arena,
+                 compact.offsets[unsigned(Field::round_ptr)], round_bytes);
+            copy(factor, 0, output_factor, 0, factor_bytes);
+            [blit endEncoding];
+            finish(command);
+            return {output_arena, output_factor, compact};
         }
     }
 };
