@@ -484,19 +484,34 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
         EXPECT_EQ(owner->backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(owner->rows(), matrix.rows());
         EXPECT_EQ(owner->factor_storage(), storage);
-        apxchol::solver adopted(matrix, owner->factor(), options);
+        const auto& exported = owner->factor();
+        apxchol::solver adopted(matrix, exported, options);
         EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(adopted.factor_storage(), storage);
+        const auto& retained = adopted.factor();
+        EXPECT_EQ(retained.sddm, exported.sddm);
+        EXPECT_EQ(retained.L.n_, exported.L.n_);
+        EXPECT_EQ(retained.perm, exported.perm);
+        EXPECT_EQ(retained.L.outer_, exported.L.outer_);
+        EXPECT_EQ(retained.L.inner_, exported.L.inner_);
+        ASSERT_EQ(retained.L.vals_.size(), exported.L.vals_.size());
+        EXPECT_TRUE(same_bytes(retained.L.vals_.data(), exported.L.vals_.data(),
+                               retained.L.vals_.size()));
         const auto result = owner->solve(rhs);
         const auto expected = adopted.solve(rhs);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
         expect_solution(matrix, rhs, result.x);
-        ASSERT_EQ(result.x.size(), expected.x.size());
-        EXPECT_TRUE(same_bytes(result.x.data(), expected.x.data(), result.x.size()));
-        const auto applied = owner->apply(rhs);
-        const auto reference = adopted.apply(rhs);
-        ASSERT_EQ(applied.size(), reference.size());
-        EXPECT_TRUE(same_bytes(applied.data(), reference.data(), applied.size()));
+        expect_solution(matrix, rhs, expected.x);
+        auto reference_options = options;
+        reference_options.backend = apxchol::solve_backend::cpu;
+        const apxchol::cpu_solver reference(matrix, exported, reference_options);
+        const auto reference_applied = reference.apply(rhs);
+        // Resident and host preparation can accumulate entries in different orders.
+        for (const auto* candidate : {owner.get(), &adopted}) {
+            const auto applied = candidate->apply(rhs);
+            ASSERT_EQ(applied.size(), reference_applied.size());
+            EXPECT_LT((applied - reference_applied).norm() / reference_applied.norm(), 2e-5);
+        }
         Eigen::VectorXd output(matrix.rows());
         const auto warm = adopted.solve(rhs, output, options.tol, 0, &result.x);
         EXPECT_EQ(warm.iterations, 0);

@@ -108,15 +108,10 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     const auto cases = host_only_options();
     ASSERT_EQ(cases.size(), 6u);
-#if defined(APXCHOL_USE_METAL)
-    const auto expected = apxchol::metal_solver::available()
-        ? apxchol::solve_backend::gpu : apxchol::solve_backend::cpu;
-#else
-    const auto expected = apxchol::solve_backend::cpu;
-#endif
     for (std::size_t i = 0; i < cases.size(); ++i) {
         SCOPED_TRACE(i);
-        EXPECT_EQ(apxchol::detail::select_solve_backend(cases[i]), expected);
+        EXPECT_EQ(apxchol::detail::select_solve_backend(cases[i]),
+                  apxchol::solve_backend::cpu);
         const auto result = apxchol::solve(matrix, rhs, cases[i]);
         EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
         expect_solution(matrix, rhs, result);
@@ -178,7 +173,7 @@ TEST(SolveRoutes, MetalGpuSupportsFp32AndFp16Storage) {
         expect_solution(matrix, rhs, result);
     }
 }
-#else
+#endif
 TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
 #if defined(APXCHOL_USE_CUDA)
     const bool started = apxchol::cuda_ctx::detail::state().started;
@@ -196,7 +191,6 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
     EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
 #endif
 }
-#endif
 
 TEST(SolveRoutes, CpuSolverRejectsExplicitGpuRequest) {
     apxchol::solve_options options;
