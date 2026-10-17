@@ -37,12 +37,14 @@ struct Memory {
 };
 struct Group {
     unsigned lane,width,base=0;
-    unsigned broadcast(unsigned value,unsigned owner=0) const {return simd_shuffle(value,base+owner);}
+    unsigned broadcast(unsigned value,unsigned owner=0) const {return width==1 ? value : simd_shuffle(value,base+owner);}
     sparse_round::compensated_math::wide broadcast(sparse_round::compensated_math::wide value,unsigned owner) const {
+        if (width==1) return value;
         return {simd_shuffle(value.hi,base+owner),simd_shuffle(value.lo,base+owner)};
     }
-    void barrier() const {simdgroup_barrier(mem_flags::mem_device);}
+    void barrier() const {if (width>1) simdgroup_barrier(mem_flags::mem_device);}
     unsigned prefix(unsigned value) const {
+        if (width==1) return 0;
         const unsigned scan=simd_prefix_exclusive_sum(value);
         return scan-simd_shuffle(scan,base);
     }
@@ -113,11 +115,11 @@ inline void setup_step(Memory m, unsigned stage, unsigned i, unsigned limit, uns
                        unsigned lane) {
     const sparse_round::compensated_math math;
     if (stage == stage_count_stars) {
-        group_star<false>(m, math, i / width, Group{lane, width});
+        group_star<false>(m, math, i / width, Group{lane % width, width, lane - lane % width});
         return;
     }
     if (stage == stage_emit_stars) {
-        group_star<true>(m, math, i / width, Group{lane, width});
+        group_star<true>(m, math, i / width, Group{lane % width, width, lane - lane % width});
         return;
     }
     if (stage == stage_copy_retained) {
