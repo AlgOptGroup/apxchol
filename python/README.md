@@ -51,7 +51,7 @@ support in the installed build and a usable device. Explicit GPU requests fail
 when unavailable or unsupported; execution errors do not trigger a CPU retry.
 `solver.backend` reports the choice made during setup and is read-only.
 See [backend capabilities](../README.md#backend-capabilities) for GPU option restrictions.
-`OMP_NUM_THREADS` controls CPU parallelism. A solver cannot
+`num_threads=4` bounds CPU parallelism for setup and each solve/apply. The default `0` uses the calling OpenMP task's setting, normally initialized by `OMP_NUM_THREADS`; small workloads may use fewer threads. A solver cannot
 serve concurrent `solve`/`apply` calls; use separate instances or serialize.
 
 `solve` accepts `rtol` (default `1e-8`, overriding alias `tol`), `maxiter`,
