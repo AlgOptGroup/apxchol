@@ -4,6 +4,12 @@
 #include <limits>
 #include <random>
 
+#define APXCHOL_GPU_CODE(...) __VA_ARGS__
+#define APXCHOL_GPU_FUNCTION inline
+#include "../src/metal_setup/planner.inc"
+#undef APXCHOL_GPU_FUNCTION
+#undef APXCHOL_GPU_CODE
+
 namespace {
 namespace ms = apxchol::detail::metal_schedule;
 namespace df = apxchol::detail::gpu_dataflow;
@@ -183,4 +189,59 @@ TEST(MetalSchedule, Float16UsesSeparateDiagonals) {
     const std::vector<float> missing{1};
     EXPECT_THROW(apxchol::detail::metal_schedule::build<_Float16>(ptr, col, values, false, missing),
                  std::invalid_argument);
+}
+
+TEST(MetalSchedule, CompactedBlocksDoNotRescanEmptyPrefixes) {
+    namespace rf = resident_finalize;
+    struct counted_index {
+        unsigned value;
+        unsigned* reads;
+        operator unsigned() const { ++*reads; return value; }
+    };
+    struct memory {
+        unsigned n;
+        bool reverse;
+        unsigned rounds;
+        const unsigned* round_ptr;
+        unsigned* blocks;
+        rf::Step* steps;
+        rf::PlanInfo* info;
+        void fail(unsigned) const { ADD_FAILURE() << "invalid round boundaries"; }
+    };
+    const unsigned n = 10 * rf::block_rows + 7;
+    const unsigned round_ptr[] = {0, 8 * rf::block_rows, 8 * rf::block_rows + 3, n};
+    for (bool reverse : {false, true}) for (bool empty_tail : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "reverse=" << reverse << " empty_tail=" << empty_tail);
+        unsigned reads = 0;
+        std::vector<counted_index> ptr(n + 1, {0, &reads});
+        for (unsigned row = 0; row < n; ++row) {
+            const unsigned q = reverse ? n - 1 - row : row;
+            const bool work = (q >= round_ptr[1] && q < round_ptr[2]) || (!empty_tail && q >= n - 4);
+            ptr[row + 1].value = ptr[row].value + 1 + unsigned(work);
+        }
+        std::vector<unsigned> blocks(n + 1);
+        std::vector<rf::Step> steps(n);
+        rf::PlanInfo info{};
+        memory plan{n, reverse, 3, round_ptr, blocks.data(), steps.data(), &info};
+        rf::plan(plan);
+        std::vector<df::counts> counts(info.blocks + 1);
+        for (unsigned b = 0; b < info.blocks; ++b)
+            counts[b] = df::pack_rows<false>(ptr.data(), {n, reverse}, blocks[b], blocks[b + 1], df::chunk_size);
+        rf::compact(plan, counts.data(), df::counts{});
+        ASSERT_EQ(info.blocks, empty_tail ? 1u : 2u);
+        ASSERT_GT(blocks[1], rf::block_rows);
+        if (empty_tail) EXPECT_LT(blocks[info.blocks], n);
+        else EXPECT_EQ(blocks[info.blocks], n);
+        for (unsigned b = 0; b < info.blocks; ++b) {
+            const auto expected = df::pack(ptr.data(), {n, reverse}, std::array{blocks[b], blocks[b + 1]});
+            ASSERT_TRUE(expected.segments.empty());
+            std::vector<unsigned> words(expected.words.size(), df::empty);
+            reads = 0;
+            const auto count = df::pack_rows<true>(ptr.data(), {n, reverse},
+                rf::block_begin(blocks[b], blocks[b + 1]), blocks[b + 1], df::chunk_size, {}, words.data());
+            EXPECT_LE(reads, 2u * rf::block_rows);
+            EXPECT_EQ(count.words, counts[b + 1].words - counts[b].words);
+            EXPECT_EQ(words, expected.words);
+        }
+    }
 }

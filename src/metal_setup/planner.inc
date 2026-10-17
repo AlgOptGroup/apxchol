@@ -5,6 +5,11 @@ struct Step { unsigned first, last; };
 // levels counts the independent elimination rounds before workgroup coalescing.
 struct PlanInfo { unsigned rows, blocks, stages, levels; };
 
+// Compaction can prepend empty blocks; only the final original block has work.
+APXCHOL_GPU_FUNCTION unsigned block_begin(unsigned first, unsigned last) {
+    return last - first > block_rows ? last - block_rows : first;
+}
+
 template<class Memory>
 APXCHOL_GPU_FUNCTION void plan(Memory s) {
     *s.info = {};
