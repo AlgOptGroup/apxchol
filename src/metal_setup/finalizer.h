@@ -185,7 +185,8 @@ kernel void plan_emit(device const unsigned* ptr [[buffer(0)]],device const unsi
                       device unsigned* packed_blocks [[buffer(6)]],constant unsigned& n [[buffer(7)]],
                       constant unsigned& reverse [[buffer(8)]],uint block [[thread_position_in_grid]]) {
     if(block==0)packed_blocks[0]=0;
-    if(block<info->blocks){gd::pack_rows<true>(ptr,{n,bool(reverse)},blocks[block],blocks[block+1],gd::chunk_size,counts[block],words,segments);packed_blocks[block+1]=unsigned(counts[block+1].words/gd::lanes);}
+    // Compaction can prepend empty blocks; only the final original block has work.
+    if(block<info->blocks){gd::pack_rows<true>(ptr,{n,bool(reverse)},blocks[block+1]-min(blocks[block+1]-blocks[block],unsigned(rf::block_rows)),blocks[block+1],gd::chunk_size,counts[block],words,segments);packed_blocks[block+1]=unsigned(counts[block+1].words/gd::lanes);}
 }
 kernel void scan_unsigned(device unsigned *values [[buffer(0)]],
                           device unsigned *sums [[buffer(1)]], constant unsigned &n [[buffer(2)]],
