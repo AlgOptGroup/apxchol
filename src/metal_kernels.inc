@@ -55,7 +55,7 @@ kernel void pcg_step(constant Params& P [[buffer(0)]],
     const auto vectors = workspace<df, float>{x, r, ap, p, z, partial, &state};
     const auto sum = op == operation::multiply && P.spmv_lanes == kTreeLanes
         ? step<kTreeLanes>(op, pcg_math<kTreeLanes>{P.preconditioner_scale}, vectors, ptr, col, hi, lo,
-                          pcg_work<uint>{work.first, work.last, 1, 0, P.n}, lane)
+                          pcg_work<uint>{group, P.n, P.groups, 0, P.n}, lane)
         : step<1>(op, pcg_math<>{P.preconditioner_scale}, vectors, ptr, col, hi, lo, work, 0);
     if (op != operation::direction) {
         const auto total = sum_lanes<kTreeLanes>(pcg_math<>{}, sum);
