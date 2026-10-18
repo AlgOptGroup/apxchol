@@ -53,6 +53,10 @@ struct Group {
     }
     unsigned sum(unsigned value) const {return broadcast(prefix(value)+value,width-1);}
 };
+struct CoalesceGroup {
+    unsigned lane,width;
+    void barrier() const {threadgroup_barrier(mem_flags::mem_device);}
+};
 struct SparseMemory {
     using wide = Memory::wide;
     View<wide> data;
@@ -90,11 +94,11 @@ kernel void sparsify_stage(device uchar* arena [[buffer(0)]], device Edge* facto
         constant Layout& layout [[buffer(2)]], device SparseState<Memory::wide>* sparse [[buffer(3)]],
         constant bool& initial [[buffer(4)]], uint i [[thread_position_in_grid]],
         uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]],
-        uint simd_lane [[thread_index_in_simdgroup]], uint width [[threads_per_simdgroup]]) {
+        uint threads [[threads_per_threadgroup]]) {
     SparseMemory m{view<Memory::wide>(arena, factors, layout), sparse, stage};
     const sparse_round::compensated_math math;
     if (stage == sparse_coalesce) {
-        sparse_coalesce_row(m, math, i / width, Group{simd_lane, width});
+        sparse_coalesce_row(m, math, group, CoalesceGroup{lane, threads});
     } else if (stage == sparse_partials) {
         threadgroup Memory::wide sums[256];
         if (m.failed() || !sparse->enabled || group * 16384 >= sparse->count || (!initial && !sparse->scale.advance)) return;

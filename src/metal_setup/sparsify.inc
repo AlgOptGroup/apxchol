@@ -23,10 +23,11 @@ template<class Math, class Edges> struct SparseInput {
 template<class Memory, class Math, class Group>
 APXCHOL_GPU_FUNCTION void sparse_coalesce_row(Memory m, Math math, unsigned row, Group group) {
     const auto s = m.data;
-    if (group.broadcast(group.lane == 0 ? unsigned(m.failed() || row >= s.state->active) : 0)) return;
+    if (m.failed() || row >= s.state->active) return;
     const unsigned v = s.entry_offsets[row], begin = s.begin[v], count = s.cursor[v] - begin;
     auto edges = s.graph[s.state->slot] + begin;
     group_sort(edges, count, EdgeOrder{}, group);
+    group.barrier();
     if (group.lane) return;
     unsigned out = 0, canonical = 0;
     for (unsigned at = 0; at < count;) {

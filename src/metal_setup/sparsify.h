@@ -30,7 +30,11 @@ void encode_sparsify(id<MTLComputeCommandEncoder> encoder, NSArray* pipelines,
         [encoder setBytes:&layout length:sizeof(layout) atIndex:2];
         [encoder setBuffer:state offset:0 atIndex:3];
         [encoder setBytes:&initial length:sizeof(initial) atIndex:4];
-        if (phase == sparse_coalesce) count *= pipeline.threadExecutionWidth;
+        if (phase == sparse_coalesce) {
+            [encoder dispatchThreadgroups:MTLSizeMake(std::max(count, 1u), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            return;
+        }
         if (phase == sparse_partials) count = ((count + 16383) / 16384) * 256;
         [encoder dispatchThreads:MTLSizeMake(std::max(count, 1u), 1, 1)
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
