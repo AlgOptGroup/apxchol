@@ -233,10 +233,11 @@ kernel void operator_emit(device const unsigned* ptr [[buffer(0)]],device const 
                           device unsigned* outidx [[buffer(5)]],device float* hi [[buffer(6)]],device float* lo [[buffer(7)]],
                           constant unsigned& n [[buffer(8)]],
                           constant unsigned& triangles_identical [[buffer(9)]],
-                          uint row [[thread_position_in_grid]]) {
+                          uint row [[threadgroup_position_in_grid]],
+                          uint lane [[thread_index_in_simdgroup]], uint width [[threads_per_simdgroup]]) {
     if(row>=n)return;
     const unsigned begin=outptr[perm[row]];
-    for(unsigned p=ptr[row];p<ptr[row+1];++p){
+    for(unsigned p=ptr[row]+lane;p<ptr[row+1];p+=width){
         const unsigned col=idx[p];unsigned canonical=p;
         if(!triangles_identical && col<row){unsigned first=ptr[col],last=ptr[col+1];
             while(first<last){const unsigned mid=first+(last-first)/2;if(idx[mid]<row)first=mid+1;else last=mid;}
@@ -366,7 +367,11 @@ class Finalizer {
         [enc setBytes:&n length:sizeof n atIndex:8];
         const unsigned triangles_identical = out.operator_triangles_identical;
         [enc setBytes:&triangles_identical length:sizeof triangles_identical atIndex:9];
-        dispatch(enc, n);
+        const unsigned width = operator_emit.threadExecutionWidth;
+        require(width && width <= operator_emit.maxTotalThreadsPerThreadgroup, "invalid operator SIMD width");
+        [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+        [enc endEncoding];
         finish(cb, status);
         if (out.operator_exact)
             out.operator_lo = nil;
