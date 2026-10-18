@@ -620,7 +620,10 @@ TEST_F(MetalDevice, StatisticsDescribeTheSetup) {
 }
 
 TEST_F(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
-    const Sparse A = grid(24, 31, 0.25);
+    // Ordinary elimination creates duplicate fill before the 128-vertex tail.
+    Eigen::MatrixXd dense = Eigen::MatrixXd::Constant(129, 129, -1.0);
+    dense.diagonal().setConstant(129.0);
+    const Sparse A = dense.sparseView();
     const apxchol::metal_solver solver(A, keep_opts());
     const auto ptr = solver.factor().L.outer_;
     const auto idx = solver.factor().L.inner_;
