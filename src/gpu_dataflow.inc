@@ -26,7 +26,7 @@ APXCHOL_GPU_FUNCTION void dataflow_initialize(Memory m, unsigned row) {
     } else m.reset(row);
 }
 template<class Memory>
-APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
+APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane, bool completed_real_rows = false) {
     using Value = typename Memory::stored_value;
     for (;;) {
         unsigned task = lane == 0 ? m.claim() : 0;
@@ -35,6 +35,8 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
         const unsigned word = m.words[task * 32 + lane];
         bool have = word != ~0u;
         const dataflow_task t = have ? dataflow_describe(m, word) : dataflow_task{};
+        // Finalizers still wait for partials produced by other SIMD groups.
+        const bool completed = completed_real_rows && t.kind != 2;
         const unsigned g = t.kind ? 32 : m.width(t.end - t.begin), sub = lane & (g - 1);
         unsigned p = t.begin + sub, end = t.end;
         float rhs = 0, diagonal = 1;
@@ -55,24 +57,27 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
                     const bool ok = have && pos < end;
                     cols[k] = ok ? (t.kind == 2 ? pos : m.col[pos]) : 0;
                     vals[k] = ok ? (t.kind == 2 ? Value(1.0f) : m.value(pos, t.row, cols[k])) : Value(0.0f);
-                    values[k] = 0;
-                    if (ok) pending |= 1u << k;
+                    values[k] = completed && ok ? m.as_float(m.load(cols[k])) : 0;
+                    if (!completed && ok) pending |= 1u << k;
                 }
                 reload = false;
             }
-            unsigned bits[8];
-            APXCHOL_UNROLL
-            for (unsigned k = 0; k < 8; ++k)
-                bits[k] = (pending >> k) & 1 ? m.load(cols[k]) : 0;
-            APXCHOL_UNROLL
-            for (unsigned k = 0; k < 8; ++k)
-                if (((pending >> k) & 1) && bits[k] != 0x7f800001u) {
-                    values[k] = m.as_float(bits[k]);
-                    pending &= ~(1u << k);
-                }
-            const unsigned group_mask = (0xffffffffu >> (32 - g)) << (lane & ~(g - 1));
-            const unsigned waiting = m.ballot(pending != 0);
-            const bool ready = have && !(waiting & group_mask);
+            bool ready = have;
+            if (!completed) {
+                unsigned bits[8];
+                APXCHOL_UNROLL
+                for (unsigned k = 0; k < 8; ++k)
+                    bits[k] = (pending >> k) & 1 ? m.load(cols[k]) : 0;
+                APXCHOL_UNROLL
+                for (unsigned k = 0; k < 8; ++k)
+                    if (((pending >> k) & 1) && bits[k] != 0x7f800001u) {
+                        values[k] = m.as_float(bits[k]);
+                        pending &= ~(1u << k);
+                    }
+                const unsigned group_mask = (0xffffffffu >> (32 - g)) << (lane & ~(g - 1));
+                const unsigned waiting = m.ballot(pending != 0);
+                ready = have && !(waiting & group_mask);
+            }
             if (ready) sum = dataflow_accumulate(vals, values, sum);
             float total = sum;
             for (unsigned o = 16; o; o /= 2) {

@@ -82,7 +82,8 @@ using gpu_pcg::operation;
 struct pipelines {
     id<MTLComputePipelineState> pcg[4][2];  // operation, operator double-float
     id<MTLComputePipelineState> finalize;
-    id<MTLComputePipelineState> dataflow_solve[2][2], dataflow_init[2][2];
+    id<MTLComputePipelineState> dataflow_solve[2][3]; // backward, forward, independent forward
+    id<MTLComputePipelineState> dataflow_init[2][2];
     id<MTLComputePipelineState> probe;
 };
 
@@ -115,12 +116,13 @@ std::string run_arithmetic_probe(context& ctx) {
 
 id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> library,
                                           const char* name, bool forward, bool operator_df,
-                                          unsigned op = 0, bool factor_fp16 = false) {
+                                          unsigned op = 0, bool factor_fp16 = false, bool independent = false) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
     [values setConstantValue:&forward type:MTLDataTypeBool atIndex:0];
     [values setConstantValue:&operator_df type:MTLDataTypeBool atIndex:1];
     [values setConstantValue:&op type:MTLDataTypeUInt atIndex:2];
     [values setConstantValue:&factor_fp16 type:MTLDataTypeBool atIndex:3];
+    [values setConstantValue:&independent type:MTLDataTypeBool atIndex:4];
     NSError* err = nil;
     id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]
                                        constantValues:values
@@ -151,14 +153,16 @@ context* make_context() {
                 for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
                     p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op);
             p.finalize = make_pipeline(device, library, "finalize", false, false);
-            for (int half = 0; half < 2; ++half)
-                for (int fwd = 0; fwd < 2; ++fwd) {
+            for (int half = 0; half < 2; ++half) {
+                for (int fwd = 0; fwd < 2; ++fwd)
                     p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half);
-                    auto pipe = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, 0, half);
-                    p.dataflow_solve[half][fwd] = pipe;
+                for (unsigned variant = 0; variant < 3; ++variant) {
+                    auto pipe = make_pipeline(device, library, "dataflow_solve", variant != 0, false, 0, half, variant == 2);
+                    p.dataflow_solve[half][variant] = pipe;
                     if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
                         throw std::runtime_error("Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups");
                 }
+            }
             p.probe = make_pipeline(device, library, "df_probe", false, false);
             auto threads = [](id<MTLComputePipelineState> pipe) {
                 return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
@@ -222,6 +226,7 @@ struct prepared_tri {
     std::vector<metal_schedule::step> stages;
     id<MTLBuffer> ptr = nil, col = nil, val = nil;
     std::uint32_t levels = 0;
+    bool resident_round_plan = false;
 };
 
 template<class Value>
@@ -367,7 +372,9 @@ struct metal_solver::impl {
         dispatch(ctx->pipes.dataflow_init[factor_fp16][forward], prm, (t.tag_count + threads - 1) / threads, threads);
         for (auto stage : t.stages) {
             prm.offset = stage.first;
-            dispatch(ctx->pipes.dataflow_solve[factor_fp16][forward], prm, stage.last - stage.first, 256);
+            const bool independent = forward && t.resident_round_plan && stage.last - stage.first > 1;
+            dispatch(ctx->pipes.dataflow_solve[factor_fp16][independent ? 2 : unsigned(forward)], prm,
+                     stage.last - stage.first, 256);
         }
     }
 
@@ -619,6 +626,7 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
             result.words = t.words; result.blocks = t.blocks; result.segments = t.segments;
             result.stages = std::move(t.stages);
             result.levels = t.levels; result.tag_count = t.tag_count;
+            result.resident_round_plan = true;
             return result;
         };
         fwd = install(std::move(resident->forward));

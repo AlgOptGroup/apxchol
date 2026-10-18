@@ -62,6 +62,6 @@ kernel void dataflow_solve(constant Params& P [[buffer(0)]],
     const uint block = P.offset + group;
     if (tid == 0) atomic_store_explicit(&ticket, blocks[block], memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    dataflow_run(dataflow_memory{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward}, lane);
+    dataflow_run(dataflow_memory{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward}, lane, kIndependent);
 }
 )apxchol_msl"
