@@ -39,8 +39,9 @@ APXCHOL_GPU_FUNCTION void plan(Memory s) {
             flush();
             Step stage{blocks, 0};
             const unsigned end = written + count;
+            const unsigned tile = s.reverse ? block_rows : 32u;
             while (written < end) {
-                written += end - written < block_rows ? end - written : block_rows;
+                written += end - written < tile ? end - written : tile;
                 s.blocks[++blocks] = written;
             }
             stage.last = blocks;
