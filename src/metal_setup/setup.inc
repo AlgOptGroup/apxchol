@@ -421,6 +421,132 @@ template<class Memory> APXCHOL_GPU_FUNCTION void finish(Memory m) {
     s.state->entries+=s.state->pending_entries;
     s.state->slot^=1; ++s.state->round;
 }
+APXCHOL_GPU_FUNCTION unsigned tail_column(unsigned row, unsigned size) {
+    return row * (2 * size - row - 1) / 2;
+}
+
+template<class Memory, class Group>
+APXCHOL_GPU_FUNCTION bool tail_failed(Memory m, Group group) {
+    group.barrier();
+    const bool failed = m.failed();
+    group.barrier();
+    return failed;
+}
+
+// Packed Schur columns borrow the reserved factor slots until their last read.
+template<class Memory, class Math, class Group>
+APXCHOL_GPU_FUNCTION void exact_tail(Memory m, Math math, Group group) {
+    auto s = m.data;
+    const unsigned size = s.state->active, first = s.state->entries;
+    const unsigned columns = s.state->columns, round = s.state->round;
+    const auto zero = math.from_float(0);
+    if (!size || tail_failed(m, group)) return;
+    if (size > 128 || size > s.state->nodes || !group.width || s.state->slot > 1 ||
+        columns > s.state->nodes - size || round > s.state->nodes - size ||
+        tail_column(size, size) > ~0u - first) {
+        if (!group.lane) m.fail(capacity_exceeded);
+        return;
+    }
+    for (unsigned row = group.lane; row < size; row += group.width) {
+        const unsigned v = s.entry_offsets[row];
+        if (v >= s.state->nodes || !s.active[v]) { m.fail(bad_graph); continue; }
+        for (unsigned earlier = 0; earlier < row; ++earlier)
+            if (s.entry_offsets[earlier] == v) m.fail(bad_graph);
+    }
+    if (tail_failed(m, group)) return;
+    for (unsigned row = group.lane; row < size; row += group.width)
+        s.candidates[s.entry_offsets[row]] = row;
+    for (unsigned at = group.lane; at < tail_column(size, size); at += group.width)
+        m.tail_store(first + at, zero);
+    group.barrier();
+    for (unsigned row = group.lane; row < size; row += group.width) {
+        const unsigned v = s.entry_offsets[row];
+        if (s.cursor[v] < s.begin[v] || s.cursor[v] > s.state->edge_capacity ||
+            !math.finite(s.excess[v]) || math.less(s.excess[v], zero)) {
+            m.fail(bad_graph); continue;
+        }
+        for (unsigned at = s.begin[v]; at < s.cursor[v]; ++at) {
+            const auto edge = s.graph[s.state->slot][at];
+            if (edge.node >= s.state->nodes || !s.active[edge.node] || edge.node == v ||
+                !math.finite(math.from_float(edge.value)) || edge.value < 0) {
+                m.fail(bad_graph); break;
+            }
+            const unsigned other = s.candidates[edge.node];
+            if (other >= size || s.entry_offsets[other] != edge.node) { m.fail(bad_graph); break; }
+            if (other > row) {
+                const unsigned dst = first + tail_column(row, size) + other - row - 1;
+                const auto value = math.add(m.tail_load(dst), math.from_float(edge.value));
+                if (!math.finite(value)) { m.fail(1u << sparse_round::arithmetic_range); break; }
+                m.tail_store(dst, value);
+            }
+        }
+    }
+    if (tail_failed(m, group)) return;
+    if (!group.lane) s.state->pending_entries = 0;
+    for (unsigned pivot = 0; pivot < size; ++pivot) {
+        const unsigned v = s.entry_offsets[pivot], begin = first + tail_column(pivot, size);
+        if (!group.lane) {
+            auto degree = s.excess[v];
+            for (unsigned row = pivot + 1; row < size; ++row)
+                degree = math.add(degree, m.tail_load(begin + row - pivot - 1));
+            if (!math.finite(degree) || math.less(degree, zero)) m.fail(1u << sparse_round::arithmetic_range);
+            s.prefix[0] = math.less(zero, degree) ? degree : math.from_float(1);
+        }
+        if (tail_failed(m, group)) return;
+        const auto degree = s.prefix[0];
+        for (unsigned row = pivot + 1 + group.lane; row < size; row += group.width)
+            s.prefix[row] = math.divide(m.tail_load(begin + row - pivot - 1), degree);
+        group.barrier();
+        for (unsigned row = pivot + 1 + group.lane; row < size; row += group.width) {
+            const auto weight = m.tail_load(begin + row - pivot - 1);
+            if (!math.less(zero, weight)) continue;
+            const unsigned node = s.entry_offsets[row];
+            const auto excess = math.add(s.excess[node], math.multiply_divide(weight, s.excess[v], degree));
+            if (!math.finite(excess)) m.fail(1u << sparse_round::arithmetic_range);
+            s.excess[node] = excess;
+            for (unsigned col = row + 1; col < size; ++col) {
+                const unsigned dst = first + tail_column(row, size) + col - row - 1;
+                const auto other = m.tail_load(begin + col - pivot - 1);
+                if (!math.less(zero, other)) continue;
+                const auto fill = math.less(weight, other)
+                    ? math.multiply(weight, s.prefix[col]) : math.multiply(other, s.prefix[row]);
+                const auto value = math.add(m.tail_load(dst), fill);
+                if (!math.finite(value)) m.fail(1u << sparse_round::arithmetic_range);
+                m.tail_store(dst, value);
+            }
+        }
+        if (tail_failed(m, group)) return;
+        if (!group.lane) {
+            const auto root = math.root(degree);
+            const float diagonal = math.to_float(root);
+            if (!math.finite(root) || !math.finite(math.from_float(diagonal)) || !(diagonal > 0))
+                m.fail(1u << sparse_round::arithmetic_range);
+            if (!m.failed()) {
+                const unsigned output = first + s.state->pending_entries;
+                unsigned count = 0;
+                for (unsigned row = pivot + 1; row < size; ++row) {
+                    const auto value = math.divide(m.tail_load(begin + row - pivot - 1), root);
+                    const float stored = math.to_float(value);
+                    if (!math.finite(value) || !math.finite(math.from_float(stored))) m.fail(1u << sparse_round::arithmetic_range);
+                    if (stored != 0) m.tail_factor(output + count++, s.entry_offsets[row], stored);
+                }
+                s.columns[columns + pivot] = {v, output, count, diagonal};
+                s.round_ptr[round + pivot] = columns + pivot;
+                s.state->pending_entries += count;
+                s.active[v] = 0;
+            }
+        }
+        if (tail_failed(m, group)) return;
+    }
+    if (!group.lane) {
+        s.state->entries += s.state->pending_entries;
+        s.state->columns += size; s.state->round += size;
+        s.round_ptr[s.state->round] = s.state->columns;
+        s.state->active = s.state->edges = s.state->pending_entries = s.state->pending_fills = 0;
+        s.state->selected = 1;
+    }
+}
+
 // Both the queued encoder and the one-workgroup tail use this sequence.
 template <class Dispatch>
 APXCHOL_GPU_FUNCTION void factor_round(Dispatch dispatch, unsigned bound) {

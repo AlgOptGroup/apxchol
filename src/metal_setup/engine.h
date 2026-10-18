@@ -57,7 +57,7 @@ class Engine {
         scalar_pipelines = [pipelines mutableCopy];
         for (unsigned stage : {stage_decide, stage_commit, stage_count_stars, stage_emit_stars})
             scalar_pipelines[stage] = make_setup_pipeline(stage, true);
-        for (NSString *name in @[ @"scan_blocks", @"scan_add", @"import_count", @"import_emit", @"factor_tail" ]) {
+        for (NSString *name in @[ @"scan_blocks", @"scan_add", @"import_count", @"import_emit", @"factor_tail", @"factor_exact_tail" ]) {
             auto pipe =
                 [device newComputePipelineStateWithFunction:[library newFunctionWithName:name]
                                                       error:&error];
@@ -231,7 +231,8 @@ class Engine {
                     s.state->prune_enabled = 0;
                     command = [queue commandBuffer];
                     compute = [command computeCommandEncoder];
-                    id<MTLComputePipelineState> pipe = pipelines[23];
+                    const bool exact = s.state->edges > s.state->active * (s.state->active - 1);
+                    id<MTLComputePipelineState> pipe = pipelines[23 + exact];
                     [compute setComputePipelineState:pipe];
                     [compute setBuffer:arena offset:0 atIndex:0];
                     [compute setBuffer:factor offset:0 atIndex:1];

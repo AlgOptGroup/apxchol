@@ -34,6 +34,9 @@ struct Memory {
     void count_update(unsigned node) const { atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint*>(&data.counts[data.candidates[node]].updates),1u,memory_order_relaxed); }
     unsigned reserve_edge(unsigned node) const { return atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint*>(&data.cursor[node]),1u,memory_order_relaxed); }
     unsigned reserve_update(unsigned node) const { return atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint*>(&data.update_cursor[node]),1u,memory_order_relaxed); }
+    wide tail_load(unsigned at) const { const auto x = data.factors[at]; return {as_type<float>(x.node), x.value}; }
+    void tail_store(unsigned at, wide x) const { data.factors[at] = {as_type<unsigned>(x.hi), x.lo}; }
+    void tail_factor(unsigned at, unsigned node, float value) const { data.factors[at] = {node, value}; }
 };
 struct Group {
     unsigned lane,width,base=0;
@@ -228,6 +231,18 @@ kernel void factor_tail(device uchar *arena [[buffer(0)]], device Edge *factors 
         factor_round(dispatch, m.data.state->active);
     if (i == 0 && m.data.state->active && !m.failed())
         m.fail(no_progress);
+}
+
+struct TailGroup {
+    unsigned lane, width;
+    void barrier() const { threadgroup_barrier(mem_flags::mem_device); }
+};
+kernel void factor_exact_tail(device uchar *arena [[buffer(0)]], device Edge *factors [[buffer(1)]],
+                        constant Layout &layout [[buffer(2)]],
+                        uint i [[thread_index_in_threadgroup]],
+                        uint threads [[threads_per_threadgroup]]) {
+    exact_tail(Memory{view<Memory::wide>(arena, factors, layout)},
+               sparse_round::compensated_math{}, TailGroup{i, threads});
 }
 
 Counts add_counts(Counts a,Counts b) {return {a.edges+b.edges,a.updates+b.updates};}
