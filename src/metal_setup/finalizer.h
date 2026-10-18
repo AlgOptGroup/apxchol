@@ -175,10 +175,6 @@ kernel void plan_count(device const unsigned* ptr [[buffer(0)]],
         counts[block]=gd::pack_rows<false>(ptr,order,blocks[block],blocks[block+1],gd::chunk_size);
     }
 }
-kernel void plan_prefix(device gd::counts* counts [[buffer(0)]],device rf::PlanInfo* info [[buffer(1)]],
-                        device unsigned* blocks [[buffer(2)]],device rf::Step* steps [[buffer(3)]]) {
-    rf::compact(PlanMemory{0,false,0,nullptr,blocks,steps,info,nullptr},counts,gd::counts{});
-}
 kernel void plan_emit(device const unsigned* ptr [[buffer(0)]],device const unsigned* blocks [[buffer(1)]],
                       device const rf::PlanInfo* info [[buffer(2)]],device const gd::counts* counts [[buffer(3)]],
                       device unsigned* words [[buffer(4)]],device gd::segment* segments [[buffer(5)]],
@@ -263,7 +259,7 @@ class Finalizer {
     id<MTLCommandQueue> queue;
     id<MTLLibrary> library;
     std::array<std::array<id<MTLComputePipelineState>, 6>, 2> final_pipes;
-    id<MTLComputePipelineState> structure, count, prefix, emit, scan_blocks, scan_add,
+    id<MTLComputePipelineState> structure, count, emit, scan_blocks, scan_add,
         operator_count, operator_emit;
     id<MTLBuffer> allocate(std::size_t bytes) {
         auto result = [device newBufferWithLength:std::max(bytes, std::size_t(16))
@@ -341,7 +337,6 @@ class Finalizer {
             }
         structure = pipeline(@"plan_structure");
         count = pipeline(@"plan_count");
-        prefix = pipeline(@"plan_prefix");
         emit = pipeline(@"plan_emit");
         scan_blocks = pipeline(@"scan_unsigned");
         scan_add = pipeline(@"scan_unsigned_add");
@@ -449,9 +444,13 @@ class Finalizer {
             [enc setBytes:&m length:sizeof m atIndex:5];
             [enc setBytes:&reverse length:sizeof reverse atIndex:6];
             dispatch(enc, m);
-            enc = encoder(cb, prefix, {counts, info, blocks, steps});
-            dispatch(enc, 1, 1);
             finish(cb, status);
+            // Counts are complete; compact the shared plan metadata before allocating output.
+            struct PlanMetadata { unsigned* blocks; rf::Step* steps; rf::PlanInfo* info; };
+            rf::compact(PlanMetadata{static_cast<unsigned*>(blocks.contents),
+                                     static_cast<rf::Step*>(steps.contents),
+                                     static_cast<rf::PlanInfo*>(info.contents)},
+                        static_cast<gd::counts*>(counts.contents), gd::counts{});
             const auto pi = *static_cast<rf::PlanInfo *>(info.contents);
             const auto total = static_cast<gd::counts *>(counts.contents)[pi.blocks];
             require(total.words <= ~0u && total.segments < gd::special_bit &&
