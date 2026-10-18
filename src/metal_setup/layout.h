@@ -48,8 +48,9 @@ inline Layout layout(unsigned n,unsigned e) {
     add.operator()<Update<Wide>>(updates,e);
     add.operator()<sparse_round::row_result>(rows,n);
     add.operator()<Counts>(counts,std::size_t(n)+1);
-    add.operator()<unsigned>(update_ids,e);
     add.operator()<sparse_round::neighbor<Wide>>(records,e);
+    // Star records are dead before update IDs are written; sparsification only uses IDs.
+    l.offsets[unsigned(update_ids)]=l.offsets[unsigned(records)];
     add.operator()<Wide>(prefix,e);
     add.operator()<unsigned>(histogram,33);
     add.operator()<unsigned>(degree_bound,n);
