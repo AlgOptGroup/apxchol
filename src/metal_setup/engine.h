@@ -30,17 +30,17 @@ struct Factor {
 class Engine {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
-    NSMutableArray *pipelines, *sparse;
+    NSMutableArray *pipelines, *scalar_pipelines, *sparse;
 
   public:
     Engine(id<MTLDevice> dev) : device(dev) {
         NSError *error = nil;
         require(device != nil, "No Metal device for factorization");
         auto library = metal::compile_library(device, resident_metal_source).library;
-        pipelines = [NSMutableArray new];
-        for (unsigned stage = 0; stage < 19; ++stage) {
+        auto make_setup_pipeline = [&](unsigned stage, bool scalar) {
             auto values = [MTLFunctionConstantValues new];
             [values setConstantValue:&stage type:MTLDataTypeUInt atIndex:0];
+            [values setConstantValue:&scalar type:MTLDataTypeBool atIndex:1];
             auto fn = [library newFunctionWithName:@"setup_stage"
                                     constantValues:values
                                              error:&error];
@@ -49,8 +49,14 @@ class Engine {
             auto pipe = [device newComputePipelineStateWithFunction:fn error:&error];
             if (!pipe)
                 throw std::runtime_error(describe(error));
-            [pipelines addObject:pipe];
-        }
+            return pipe;
+        };
+        pipelines = [NSMutableArray new];
+        for (unsigned stage = 0; stage < 19; ++stage)
+            [pipelines addObject:make_setup_pipeline(stage, false)];
+        scalar_pipelines = [pipelines mutableCopy];
+        for (unsigned stage : {stage_decide, stage_commit, stage_count_stars, stage_emit_stars})
+            scalar_pipelines[stage] = make_setup_pipeline(stage, true);
         for (NSString *name in @[ @"scan_blocks", @"scan_add", @"import_count", @"import_emit", @"factor_tail" ]) {
             auto pipe =
                 [device newComputePipelineStateWithFunction:[library newFunctionWithName:name]
@@ -106,7 +112,6 @@ class Engine {
             auto stage = [&](id<MTLComputeCommandEncoder> encoder, unsigned stage, unsigned count,
                              unsigned limit = 0) {
                 id<MTLComputePipelineState> pipe = pipelines[stage];
-                [encoder setComputePipelineState:pipe];
                 [encoder setBuffer:arena offset:0 atIndex:0];
                 [encoder setBuffer:factor offset:0 atIndex:1];
                 [encoder setBytes:&l length:sizeof(l) atIndex:2];
@@ -117,12 +122,14 @@ class Engine {
                 const bool small_group = selector ? s.state->threshold <= simd_width
                     : (stage == stage_count_stars || stage == stage_emit_stars)
                         && s.state->threshold && s.state->threshold <= 8;
-                const unsigned width = small_group ? 1 : simd_width;
-                require(width && simd_width % width == 0, "invalid SIMD subgroup width");
-                [encoder setBytes:&width length:sizeof(width) atIndex:4];
+                if (small_group)
+                    pipe = scalar_pipelines[stage];
+                [encoder setComputePipelineState:pipe];
+                const unsigned width = small_group ? 1 : pipe.threadExecutionWidth;
+                require(pipe.threadExecutionWidth, "invalid SIMD subgroup width");
                 const bool grouped = stage_is_grouped(stage);
                 const unsigned threads =
-                    grouped ? simd_width : std::min<unsigned>(256, pipe.maxTotalThreadsPerThreadgroup);
+                    grouped ? pipe.threadExecutionWidth : std::min<unsigned>(256, pipe.maxTotalThreadsPerThreadgroup);
                 if (grouped) {
                     require(count <= ~0u / width, "Metal grouped dispatch exceeds 32-bit thread indices");
                     count *= width;

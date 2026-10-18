@@ -82,6 +82,7 @@ struct SparseMemory {
     void count(unsigned i) const { atomic_fetch_add_explicit(atomic(&data.counts[i].edges), 1u, memory_order_relaxed); }
 };
 constant uint stage [[function_constant(0)]];
+constant bool scalar_group [[function_constant(1)]];
 kernel void sparsify_stage(device uchar* arena [[buffer(0)]], device Edge* factors [[buffer(1)]],
         constant Layout& layout [[buffer(2)]], device SparseState<Memory::wide>* sparse [[buffer(3)]],
         constant bool& initial [[buffer(4)]], uint i [[thread_position_in_grid]],
@@ -178,8 +179,11 @@ inline void setup_step(Memory m, unsigned stage, unsigned i, unsigned limit, uns
         validate_compact(m);
 }
 kernel void setup_stage(device uchar* arena [[buffer(0)]],device Edge* factors [[buffer(1)]],
-                        constant Layout& layout [[buffer(2)]], constant uint& limit [[buffer(3)]], constant uint& width [[buffer(4)]], uint i [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
-    setup_step(Memory{view<Memory::wide>(arena,factors,layout)},stage,i,limit,width,lane);
+                        constant Layout& layout [[buffer(2)]], constant uint& limit [[buffer(3)]],
+                        uint i [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+                        uint simd_width [[threads_per_simdgroup]]) {
+    setup_step(Memory{view<Memory::wide>(arena,factors,layout)},stage,i,limit,
+               scalar_group ? 1 : simd_width,lane);
 }
 struct TailRound {
     Memory m;
