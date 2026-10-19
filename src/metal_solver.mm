@@ -329,7 +329,6 @@ struct metal_solver::impl {
     // the host residuals run on it.
     detail::permuted_operator_csr op;
     Eigen::SparseMatrix<double> original_operator;
-    std::uint32_t check_every = 1;
     statistics stats;
 
     context* ctx = nullptr;
@@ -580,9 +579,6 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
 
     }
     prepare_device(std::move(backward), scales, hi, lo, m, resident);
-    // Group four iterations on small systems to amortize command submission;
-    // check large solves after each iteration.
-    check_every = n > 200000 ? 1 : 4;
 
     stats.n = static_cast<Eigen::Index>(n);
     stats.levels_forward = fwd.levels;
@@ -775,7 +771,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     state.active = 1;
     cp("pack");
     s.arguments.window = window;
-    detail::gpu_pcg::solve(s, static_cast<std::uint32_t>(max_iter), s.check_every);
+    detail::gpu_pcg::solve(s, static_cast<std::uint32_t>(max_iter), 4);
     cp("gpu_pcg_loop");
     mh::add_unpacked({static_cast<df32*>([s.x contents]), s.n}, scale, {xp.data(), s.n});
     result.iterations = state.iters;
