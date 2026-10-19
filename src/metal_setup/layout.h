@@ -44,8 +44,10 @@ inline Layout layout(unsigned n,unsigned e) {
     using Wide=apxchol::detail::metal_host::df;
     add.operator()<Wide>(excess,n);
     add.operator()<Column>(columns,n);
-    add.operator()<Fill>(fills,e);
-    add.operator()<Update<Wide>>(updates,e);
+    // Selected vertices are independent; sparsification stores each edge pair once.
+    const auto pairs = std::size_t(e) / 2 + (e & 1u);
+    add.operator()<Fill>(fills,pairs);
+    add.operator()<Update<Wide>>(updates,pairs);
     add.operator()<sparse_round::row_result>(rows,n);
     add.operator()<Counts>(counts,std::size_t(n)+1);
     add.operator()<sparse_round::neighbor<Wide>>(records,e);
