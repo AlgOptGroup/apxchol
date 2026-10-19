@@ -370,11 +370,15 @@ struct metal_solver::impl {
         prm.count = t.tag_count;
         const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
         dispatch(ctx->pipes.dataflow_init[factor_fp16][forward], prm, (t.tag_count + threads - 1) / threads, threads);
+        const unsigned dependent_threads = forward && t.resident_round_plan &&
+            [ctx->pipes.dataflow_solve[factor_fp16][1] maxTotalThreadsPerThreadgroup] >= 512 ? 512 : 256;
         for (auto stage : t.stages) {
             prm.offset = stage.first;
             const bool independent = forward && t.resident_round_plan && stage.last - stage.first > 1;
+            const unsigned stage_threads = independent
+                ? (stage.one_batch_per_block ? 32 : 256) : dependent_threads;
             dispatch(ctx->pipes.dataflow_solve[factor_fp16][independent ? 2 : unsigned(forward)], prm,
-                     stage.last - stage.first, independent && stage.one_batch_per_block ? 32 : 256);
+                     stage.last - stage.first, stage_threads);
         }
     }
 
