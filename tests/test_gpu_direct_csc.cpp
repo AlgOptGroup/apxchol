@@ -92,6 +92,18 @@ TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
     using apxchol::detail::gpu_owned_csc_supported;
     const auto valid = make_matrix(3, {{0,1,1.0},{0,2,2.0},{1,2,0.5}});
     ASSERT_TRUE(gpu_owned_csc_supported(valid));
+    auto spare_capacity = valid;
+    spare_capacity.reserve(32);
+    ASSERT_GT(spare_capacity.data().allocatedSize(), spare_capacity.data().size());
+    EXPECT_TRUE(gpu_owned_csc_supported(spare_capacity));
+    matrix resized(2, 3);
+    const std::vector<Eigen::Triplet<double>> entries{{0,0,1.0},{1,1,1.0},{0,2,1.0}};
+    resized.setFromTriplets(entries.begin(), entries.end());
+    resized.conservativeResize(2, 2);
+    ASSERT_TRUE(resized.isCompressed());
+    ASSERT_EQ(resized.nonZeros(), 2);
+    ASSERT_EQ(resized.data().size(), 3);
+    EXPECT_TRUE(gpu_owned_csc_supported(resized));
     std::vector<matrix> unsupported;
     unsupported.emplace_back(0, 0);
     unsupported.emplace_back(2, 3);
@@ -104,7 +116,7 @@ TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
         triangular.setFromTriplets(entries.begin(), entries.end());
         unsupported.push_back(std::move(triangular));
     }
-    for (int corruption = 0; corruption < 5; ++corruption) {
+    for (int corruption = 0; corruption < 8; ++corruption) {
         auto bad = valid;
         switch (corruption) {
         case 0: bad.innerIndexPtr()[1] = bad.innerIndexPtr()[0]; break; // duplicate
@@ -112,10 +124,13 @@ TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
         case 2: bad.innerIndexPtr()[1] = -1; break;
         case 3: bad.innerIndexPtr()[1] = 3; break;
         case 4: bad.outerIndexPtr()[1] = -1; break;
+        case 5: bad.outerIndexPtr()[3] = bad.data().size() + 1; break;
+        case 6: bad.outerIndexPtr()[3] = -1; break;
+        case 7: bad.outerIndexPtr()[0] = 1; break;
         }
         unsupported.push_back(std::move(bad));
     }
-    ASSERT_EQ(unsupported.size(), 10u);
+    ASSERT_EQ(unsupported.size(), 13u);
     unsupported[2].uncompress(); // Eigen copies may recompress; fix the final stored fixture.
     ASSERT_FALSE(unsupported[2].isCompressed());
     for (std::size_t i = 0; i < unsupported.size(); ++i) {

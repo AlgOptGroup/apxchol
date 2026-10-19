@@ -107,16 +107,17 @@ inline bool gpu_owned_csc_layout_supported(const Eigen::SparseMatrix<double>& A,
                                            std::size_t& offdiagonals,
                                            bool* has_zero_offdiagonals = nullptr) {
     if (!A.isCompressed() || A.rows() != A.cols() || A.rows() <= 0 ||
-        A.rows() >= INT_MAX || A.nonZeros() > INT_MAX) return false;
+        A.rows() >= INT_MAX) return false;
     const int n = static_cast<int>(A.rows());
     const int* ptr = A.outerIndexPtr();
     const int* idx = A.innerIndexPtr();
-    if (ptr[0] != 0 || ptr[n] != A.nonZeros()) return false;
+    const Eigen::Index nnz = ptr[n];
+    if (ptr[0] != 0 || nnz < 0 || nnz > A.data().size() || nnz > INT_MAX) return false;
     bool sorted = true, zeros = false;
     offdiagonals = 0;
     #pragma omp parallel for schedule(static) reduction(&& : sorted) reduction(|| : zeros) reduction(+ : offdiagonals)
     for (int v = 0; v < n; ++v) {
-        if (ptr[v] < 0 || ptr[v] > ptr[v + 1] || ptr[v + 1] > A.nonZeros()) {
+        if (ptr[v] < 0 || ptr[v] > ptr[v + 1] || ptr[v + 1] > nnz) {
             sorted = false; continue;
         }
         for (int p = ptr[v]; p < ptr[v + 1]; ++p) {
