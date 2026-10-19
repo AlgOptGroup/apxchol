@@ -411,46 +411,56 @@ TEST_F(MetalDevice, LongOperatorRowAndPartialTile) {
 
 TEST_F(MetalDevice, EarlyExitsTruthful) {
     const Sparse A = grid(12, 12);
-    const apxchol::metal_solver slv(A);
-    const Eigen::VectorXd b = rhs(A.rows(), 1, true);
-    const apxchol::solve_result none = slv.solve(b, 1e-8, 0);
-    EXPECT_EQ(none.iterations, 0);
-    EXPECT_EQ(none.residual, 1.0);
-    EXPECT_EQ(none.x.norm(), 0.0);
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        SCOPED_TRACE(int(storage));
+        apxchol::solve_options options;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::metal_solver slv(A, options);
+        const Eigen::VectorXd b = rhs(A.rows(), 1, true);
+        const apxchol::solve_result none = slv.solve(b, 1e-8, 0);
+        EXPECT_EQ(none.iterations, 0);
+        EXPECT_EQ(none.residual, 1.0);
+        EXPECT_EQ(none.x.norm(), 0.0);
 
-    const Eigen::VectorXd guess = rhs(A.rows(), 2, true);
-    const auto seeded = slv.solve(b, 1e-8, 0, &guess);
-    EXPECT_EQ(seeded.iterations, 0);
-    EXPECT_LT((seeded.x - guess).norm(), 1e-12);
-    EXPECT_NEAR(seeded.residual, true_residual(A, b, seeded.x), 1e-12);
+        const Eigen::VectorXd guess = rhs(A.rows(), 2, true);
+        const auto seeded = slv.solve(b, 1e-8, 0, &guess);
+        EXPECT_EQ(seeded.iterations, 0);
+        EXPECT_LT((seeded.x - guess).norm(), 1e-12);
+        EXPECT_NEAR(seeded.residual, true_residual(A, b, seeded.x), 1e-12);
 
-    for (int limit : {1, 4, 5}) {
-        const auto limited = slv.solve(b, 1e-30, limit);
-        EXPECT_EQ(limited.iterations, limit);
-        EXPECT_NEAR(limited.residual, true_residual(A, b, limited.x), 1e-12);
+        for (int limit : {1, 4, 5}) {
+            const auto limited = slv.solve(b, 1e-30, limit);
+            EXPECT_EQ(limited.iterations, limit);
+            EXPECT_NEAR(limited.residual, true_residual(A, b, limited.x), 1e-12);
+        }
+
+        const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());
+        const apxchol::solve_result z = slv.solve(zero);
+        EXPECT_EQ(z.iterations, 0);
+        EXPECT_EQ(z.residual, 0.0);
+        EXPECT_EQ(z.x.norm(), 0.0);
+
+        const Eigen::VectorXd short_x0 = Eigen::VectorXd::Zero(A.rows() - 1);
+        EXPECT_THROW(slv.solve(b, 1e-8, 10, &short_x0), std::invalid_argument);
+        EXPECT_THROW(slv.solve(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
+        EXPECT_THROW(slv.apply(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
     }
-
-    const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());
-    const apxchol::solve_result z = slv.solve(zero);
-    EXPECT_EQ(z.iterations, 0);
-    EXPECT_EQ(z.residual, 0.0);
-    EXPECT_EQ(z.x.norm(), 0.0);
-
-    const Eigen::VectorXd short_x0 = Eigen::VectorXd::Zero(A.rows() - 1);
-    EXPECT_THROW(slv.solve(b, 1e-8, 10, &short_x0), std::invalid_argument);
-    EXPECT_THROW(slv.solve(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
-    EXPECT_THROW(slv.apply(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
 }
 
 TEST_F(MetalDevice, BreakdownIsNotConvergence) {
-    // A constant right-hand side is orthogonal to a Laplacian's range: the
-    // centred preconditioner returns 0, p.Ap = 0 on the first iteration.
+    // Centering an incompatible constant RHS leaves zero work on the host.
+    // That early exit must still report the original-system residual.
     const Sparse A = grid(10, 10);
-    const apxchol::metal_solver slv(A);
-    const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
-    const apxchol::solve_result r = slv.solve(b, 1e-8, 50);
-    EXPECT_EQ(r.iterations, 0);
-    EXPECT_EQ(r.residual, 1.0);
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        SCOPED_TRACE(int(storage));
+        apxchol::solve_options options;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::metal_solver slv(A, options);
+        const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
+        const apxchol::solve_result r = slv.solve(b, 1e-8, 50);
+        EXPECT_EQ(r.iterations, 0);
+        EXPECT_EQ(r.residual, 1.0);
+    }
 }
 
 TEST_F(MetalDevice, UnreachableTolStopsHonestly) {
@@ -760,21 +770,26 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
 }
 
 TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
-    const auto A = grid(17, 19, 0.25, true);
-    auto options = keep_opts();
-    apxchol::metal_solver exported(A, options);
-    const auto b = rhs(A.rows(), 3, false);
-    const auto expected = emulate_apply(exported.factor(), b);
-    EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
-    options.keep_factor_values = false;
-    apxchol::metal_solver resident(A, options);
-    EXPECT_TRUE(resident.factor().L.inner_.empty());
-    EXPECT_TRUE(resident.factor().L.vals_.empty());
-    EXPECT_GT(resident.factor().L.nonZeros(), 0);
-    for (unsigned salt : {1u, 2u, 3u}) {
-        const auto rhs_value = rhs(A.rows(), salt, false);
-        const auto result = resident.solve(rhs_value);
-        EXPECT_LT(true_residual(A, rhs_value, result.x), options.tol);
+    for (const bool laplacian : {false, true}) for (const bool fp16 : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << laplacian << ' ' << fp16);
+        const auto A = grid(17, 19, laplacian ? 0.0 : 0.25, true);
+        auto options = keep_opts();
+        options.factor_opts.factor_storage = fp16 ? apxchol::factor_storage_type::fp16
+                                                 : apxchol::factor_storage_type::fp32;
+        apxchol::metal_solver exported(A, options);
+        const auto b = rhs(A.rows(), 3, laplacian);
+        const auto expected = emulate_apply(exported.factor(), b, fp16);
+        EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
+        options.keep_factor_values = false;
+        apxchol::metal_solver resident(A, options);
+        EXPECT_TRUE(resident.factor().L.inner_.empty());
+        EXPECT_TRUE(resident.factor().L.vals_.empty());
+        EXPECT_GT(resident.factor().L.nonZeros(), 0);
+        for (unsigned salt : {1u, 2u, 3u}) {
+            const auto rhs_value = rhs(A.rows(), salt, laplacian);
+            const auto result = resident.solve(rhs_value);
+            EXPECT_LT(true_residual(A, rhs_value, result.x), options.tol);
+        }
     }
 }
 

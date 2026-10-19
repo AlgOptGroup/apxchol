@@ -119,30 +119,12 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         if (cp)
             (*cp)("metal_factorize");
         const bool laplacian = !raw.data().state->has_excess;
-        const bool half = resolve_fp16_storage(options.factor_opts.factor_storage, false);
-        auto finalized = cached.finalizer.run(raw, laplacian, half, factor_drop_rel_from_env());
-        if (cp)
-            (*cp)("metal_factor_prep");
         resident_factor out;
-        out.operator_exact = input.operator_exact;
-        out.max_operator_row = input.max_operator_row;
-        out.preconditioner_scale = input.preconditioner_scale;
-        out.operator_triangles_identical = validated.scan().triangles_bit_identical;
-        out.forward = std::move(finalized.forward);
-        out.backward = std::move(finalized.backward);
-        out.metadata = finalized.metadata;
-        out.half = half;
         auto &F = out.factor;
         F.sddm = !laplacian;
         F.lumped_offdiag = validated.lumped();
         const auto data = raw.data();
         const unsigned n = data.state->nodes;
-        F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
-                      static_cast<unsigned *>(finalized.permutation.contents) + n);
-        F.L.resize(n, n);
-        for (unsigned row = 0; row < n; ++row)
-            F.L.outer_[row] = data.columns[row].begin + row;
-        F.L.outer_[n] = data.state->entries + n;
         if (options.keep_factor_values) {
             std::vector<factor_entry> entries(data.state->entries);
             for (unsigned p = 0; p < data.state->entries; ++p)
@@ -153,6 +135,26 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
                 columns[row] = {col.node, col.diagonal, entries.data() + col.begin, col.count};
             }
             build_csc(F, columns, n, nullptr);
+        }
+        const bool half = resolve_fp16_storage(options.factor_opts.factor_storage, false);
+        auto finalized = cached.finalizer.run(raw, laplacian, half, factor_drop_rel_from_env());
+        if (cp)
+            (*cp)("metal_factor_prep");
+        out.operator_exact = input.operator_exact;
+        out.max_operator_row = input.max_operator_row;
+        out.preconditioner_scale = input.preconditioner_scale;
+        out.operator_triangles_identical = validated.scan().triangles_bit_identical;
+        out.forward = std::move(finalized.forward);
+        out.backward = std::move(finalized.backward);
+        out.metadata = finalized.metadata;
+        out.half = half;
+        if (!options.keep_factor_values) {
+            F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
+                          static_cast<unsigned *>(finalized.permutation.contents) + n);
+            F.L.resize(n, n);
+            for (unsigned row = 0; row < n; ++row)
+                F.L.outer_[row] = data.columns[row].begin + row;
+            F.L.outer_[n] = data.state->entries + n;
         }
         raw = {};
         cached.finalizer.prepare_operator(input.ptr, input.idx, input.values, finalized.permutation,

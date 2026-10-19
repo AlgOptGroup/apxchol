@@ -53,9 +53,8 @@ template<class Value> struct StorageMath {
 template<class Value> struct FinalMemory {
     rf::Shape shape;bool fp16;
     device const resident_setup::Column* columns;
-    device const resident_setup::Edge* factors;
+    device resident_setup::Edge* entries;
     device unsigned* perm;
-    device resident_setup::Edge* scratch;
     device rf::Row* rows;
     device unsigned* ptr;
     device unsigned* idx;
@@ -93,24 +92,22 @@ template <class Value> void run_final(FinalMemory<Value> s, unsigned row) {
         rf::transpose_emit(s, row);
 }
 kernel void finalize_stage(device const resident_setup::Column* columns [[buffer(0)]],
-                          device const resident_setup::Edge* factors [[buffer(1)]],
+                          device resident_setup::Edge* entries [[buffer(1)]],
                           device unsigned* perm [[buffer(2)]],
-                          device resident_setup::Edge* scratch [[buffer(3)]],
-                          device rf::Row* rows [[buffer(4)]],device unsigned* ptr [[buffer(5)]],
-                          device unsigned* idx [[buffer(6)]],device uchar* val [[buffer(7)]],
-                          device rf::Metadata* metadata [[buffer(8)]],device unsigned* tptr [[buffer(9)]],
-                          device unsigned* tidx [[buffer(10)]],device uchar* tval [[buffer(11)]],
-                          device unsigned* cursor [[buffer(12)]],
-                          device atomic_uint* status [[buffer(13)]],constant rf::Shape& shape [[buffer(14)]],
+                          device rf::Row* rows [[buffer(3)]],device unsigned* ptr [[buffer(4)]],
+                          device unsigned* idx [[buffer(5)]],device uchar* val [[buffer(6)]],
+                          device rf::Metadata* metadata [[buffer(7)]],device unsigned* tptr [[buffer(8)]],
+                          device unsigned* tidx [[buffer(9)]],device uchar* tval [[buffer(10)]],
+                          device unsigned* cursor [[buffer(11)]],
+                          device atomic_uint* status [[buffer(12)]],constant rf::Shape& shape [[buffer(13)]],
                           uint row [[thread_position_in_grid]]) {
     if (half_storage)
         run_final(FinalMemory<half>{
             shape,
             true,
             columns,
-            factors,
+            entries,
             perm,
-            scratch,
             rows,
             ptr,
             idx,
@@ -127,9 +124,8 @@ kernel void finalize_stage(device const resident_setup::Column* columns [[buffer
             shape,
             false,
             columns,
-            factors,
+            entries,
             perm,
-            scratch,
             rows,
             ptr,
             idx,
@@ -376,7 +372,7 @@ class Finalizer {
         if (out.operator_exact)
             out.operator_lo = nil;
     }
-    Finalized run(const Factor &input, bool laplacian, bool half, double drop) {
+    Finalized run(Factor &input, bool laplacian, bool half, double drop) {
         require(std::isfinite(drop) && drop >= 0, "Metal factor drop tolerance must be finite and nonnegative");
         const auto state = *input.data().state;
         require(state.status == 0 && state.columns == state.nodes && state.nodes > 0,
@@ -388,8 +384,7 @@ class Finalizer {
         Finalized out;
         out.permutation = allocate(n * sizeof(unsigned));
         out.metadata = allocate(m * sizeof(rf::Metadata));
-        auto rows = allocate(m * sizeof(rf::Row)),
-             scratch = allocate(std::size_t(capacity) * sizeof(Edge));
+        auto rows = allocate(m * sizeof(rf::Row));
         auto status = allocate(sizeof(unsigned)), cursor = allocate(m * sizeof(unsigned));
         *static_cast<unsigned *>(status.contents) = 0;
         out.backward.ptr = allocate((m + 1) * sizeof(unsigned));
@@ -399,13 +394,13 @@ class Finalizer {
         auto encode = [&](id<MTLCommandBuffer> cb, unsigned phase) {
             auto enc =
                 encoder(cb, final_pipes[half][phase],
-                        {input.arena, input.factor, out.permutation, scratch, rows,
+                        {input.arena, input.factor, out.permutation, rows,
                          out.backward.ptr, out.backward.idx, out.backward.val, out.metadata,
                          out.forward.ptr, out.forward.idx, out.forward.val, cursor, status});
             [enc setBuffer:input.arena
                     offset:input.layout.offsets[unsigned(resident_setup::Field::columns)]
                    atIndex:0];
-            [enc setBytes:&shape length:sizeof shape atIndex:14];
+            [enc setBytes:&shape length:sizeof shape atIndex:13];
             dispatch(enc, n + 1);
         };
         NSMutableArray *scan_scratch = [NSMutableArray new];
@@ -429,7 +424,6 @@ class Finalizer {
         encode(cb, rf::stage_emit_transpose);
         finish(cb, status);
         rows = nil;
-        scratch = nil;
         cursor = nil;
         scan_scratch = nil;
         auto blocks = allocate((m + 1) * sizeof(unsigned)),

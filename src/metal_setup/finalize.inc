@@ -18,17 +18,17 @@ APXCHOL_GPU_FUNCTION void permutation(Memory s, unsigned row) {
     if (row < s.shape.n) s.perm[s.columns[row].node] = row;
 }
 
-// Raw append positions also reserve one diagonal per preceding column.
 // Grounding is applied before measuring scales and compensated dropping.
 template<class Memory, class Math>
 APXCHOL_GPU_FUNCTION void prepare(Memory s, Math math, unsigned row) {
     if (row >= s.shape.m) return;
     const auto col = s.columns[row];
-    auto entries = s.scratch + col.begin + row;
+    auto entries = s.entries + col.begin;
     unsigned count = 0;
     float scale = 0;
+    // Compaction writes never pass the current read position within a column.
     for (unsigned p = 0; p < col.count; ++p) {
-        const auto edge = s.factors[col.begin + p];
+        const auto edge = entries[p];
         const unsigned other = s.perm[edge.node];
         if (other >= s.shape.m) continue;
         if (other <= row) { s.fail(1); return; }
@@ -68,7 +68,7 @@ APXCHOL_GPU_FUNCTION void emit(Memory s, Math math, unsigned row) {
     if (row >= s.shape.m) return;
     const auto col = s.columns[row];
     const auto info = s.rows[row];
-    const auto entries = s.scratch + col.begin + row;
+    const auto entries = s.entries + col.begin;
     const unsigned begin = s.ptr[row];
     s.idx[begin] = row;
     s.val[begin] = math.store(info.diagonal, info.scale, s.fp16);
