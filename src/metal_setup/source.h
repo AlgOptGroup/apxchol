@@ -106,7 +106,7 @@ kernel void sparsify_stage(device uchar* arena [[buffer(0)]], device Edge* facto
         const unsigned end = min(sparse->count, (group + 1) * 16384);
         for (unsigned at = group * 16384 + lane; at < end; at += 256) {
             if (m.data.update_ids[at]) continue;
-            const auto importance = m.data.prefix[at];
+            const auto importance = m.data.prefix()[at];
             sum = math.add(sum, initial ? importance :
                 residual_sparsify::probability(math, sparse->scale.value, importance));
         }

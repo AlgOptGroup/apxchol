@@ -86,8 +86,8 @@ APXCHOL_GPU_FUNCTION void emit(Memory s, Math math, unsigned row) {
     if (s.fp16) {
         const float scaled = math.to_float(math.add(math.from_float(diagonal / info.scale), residual));
         diagonal = scaled * info.scale;
+        s.metadata[row] = {info.scale, diagonal};
     }
-    s.metadata[row] = {info.scale, diagonal};
     const float magnitude = math.absolute(diagonal);
     if (!math.finite_float(diagonal) || magnitude < 0x1p-100f || magnitude > 0x1p100f) s.fail(2);
 }

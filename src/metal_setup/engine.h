@@ -71,11 +71,12 @@ class Engine {
         queue = [device newCommandQueue];
         require(queue != nil, "Metal setup command queue creation failed");
     }
-    Factor run(unsigned n, unsigned entries, unsigned seed, id<MTLBuffer> input_ptr,
+    Factor run(unsigned n, unsigned entries, unsigned graph_entries, unsigned seed, id<MTLBuffer> input_ptr,
                id<MTLBuffer> input_idx, id<MTLBuffer> input_values, float regularization,
                unsigned triangles_identical, const factor_options& options, std::size_t residual_threshold) {
         @autoreleasepool {
-            const unsigned capacity = std::max<unsigned>(entries, 1);
+            const unsigned input_capacity = std::max(entries, 1u);
+            const unsigned capacity = std::max(graph_entries, 1u);
             const auto l = layout(n, capacity);
             auto allocate = [&](std::size_t size) {
                 auto b = [device newBufferWithLength:std::max(size, std::size_t(16))
@@ -85,7 +86,7 @@ class Engine {
             };
             auto arena = allocate(l.bytes);
             std::memset(arena.contents, 0, sizeof(State));
-            std::size_t factor_capacity = std::max<std::size_t>(4 * std::size_t(capacity), n);
+            std::size_t factor_capacity = std::max<std::size_t>(2 * std::size_t(input_capacity), n);
             auto factor = allocate(factor_capacity * sizeof(Edge));
             auto s = view<Wide>(static_cast<unsigned char *>(arena.contents),
                                 static_cast<Edge *>(factor.contents), l);

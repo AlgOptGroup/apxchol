@@ -229,6 +229,7 @@ kernel void operator_emit(device const unsigned* ptr [[buffer(0)]],device const 
                           device unsigned* outidx [[buffer(5)]],device float* hi [[buffer(6)]],device float* lo [[buffer(7)]],
                           constant unsigned& n [[buffer(8)]],
                           constant unsigned& triangles_identical [[buffer(9)]],
+                          constant unsigned& exact [[buffer(10)]],
                           uint row [[threadgroup_position_in_grid]],
                           uint lane [[thread_index_in_simdgroup]], uint width [[threads_per_simdgroup]]) {
     if(row>=n)return;
@@ -240,7 +241,8 @@ kernel void operator_emit(device const unsigned* ptr [[buffer(0)]],device const 
             canonical=first;
         }
         const unsigned target=begin+p-ptr[row];
-        outidx[target]=perm[col];hi[target]=values[canonical].hi;lo[target]=values[canonical].lo;
+        outidx[target]=perm[col];hi[target]=values[canonical].hi;
+        if(!exact)lo[target]=values[canonical].lo;
     }
 }
 )msl";
@@ -348,7 +350,7 @@ class Finalizer {
         out.operator_ptr = allocate((std::size_t(n) + 1) * sizeof(unsigned));
         out.operator_idx = allocate(std::size_t(nnz) * sizeof(unsigned));
         out.operator_hi = allocate(std::size_t(nnz) * sizeof(float));
-        out.operator_lo = allocate(std::size_t(nnz) * sizeof(float));
+        out.operator_lo = out.operator_exact ? nil : allocate(std::size_t(nnz) * sizeof(float));
         auto status = allocate(sizeof(unsigned));
         *static_cast<unsigned *>(status.contents) = 0;
         NSMutableArray *scan_scratch = [NSMutableArray new];
@@ -359,18 +361,18 @@ class Finalizer {
         scan(cb, out.operator_ptr, n + 1, scan_scratch);
         enc = encoder(cb, operator_emit,
                       {ptr, idx, values, permutation, out.operator_ptr, out.operator_idx,
-                       out.operator_hi, out.operator_lo});
+                       out.operator_hi, out.operator_exact ? out.operator_hi : out.operator_lo});
         [enc setBytes:&n length:sizeof n atIndex:8];
         const unsigned triangles_identical = out.operator_triangles_identical;
         [enc setBytes:&triangles_identical length:sizeof triangles_identical atIndex:9];
+        const unsigned exact = out.operator_exact;
+        [enc setBytes:&exact length:sizeof exact atIndex:10];
         const unsigned width = operator_emit.threadExecutionWidth;
         require(width && width <= operator_emit.maxTotalThreadsPerThreadgroup, "invalid operator SIMD width");
         [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
         [enc endEncoding];
         finish(cb, status);
-        if (out.operator_exact)
-            out.operator_lo = nil;
     }
     Finalized run(Factor &input, bool laplacian, bool half, double drop) {
         require(std::isfinite(drop) && drop >= 0, "Metal factor drop tolerance must be finite and nonnegative");
@@ -383,7 +385,7 @@ class Finalizer {
         const rf::Shape shape{n, m, float(drop), float(drop - double(float(drop)))};
         Finalized out;
         out.permutation = allocate(n * sizeof(unsigned));
-        out.metadata = allocate(m * sizeof(rf::Metadata));
+        if (half) out.metadata = allocate(m * sizeof(rf::Metadata));
         auto rows = allocate(m * sizeof(rf::Row));
         auto status = allocate(sizeof(unsigned)), cursor = allocate(m * sizeof(unsigned));
         *static_cast<unsigned *>(status.contents) = 0;
@@ -395,7 +397,7 @@ class Finalizer {
             auto enc =
                 encoder(cb, final_pipes[half][phase],
                         {input.arena, input.factor, out.permutation, rows,
-                         out.backward.ptr, out.backward.idx, out.backward.val, out.metadata,
+                         out.backward.ptr, out.backward.idx, out.backward.val, half ? out.metadata : placeholder,
                          out.forward.ptr, out.forward.idx, out.forward.val, cursor, status});
             [enc setBuffer:input.arena
                     offset:input.layout.offsets[unsigned(resident_setup::Field::columns)]

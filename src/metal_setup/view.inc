@@ -27,7 +27,6 @@ APXCHOL_GPU_FUNCTION View<Wide> view(APXCHOL_GPU_BUFFER(unsigned char) base,
     v.update_cursor=reinterpret_cast<APXCHOL_GPU_BUFFER(unsigned)>(base+l.offsets[unsigned(Field::update_cursor)]);
     v.update_ids=reinterpret_cast<APXCHOL_GPU_BUFFER(unsigned)>(base+l.offsets[unsigned(Field::update_ids)]);
     v.records=reinterpret_cast<APXCHOL_GPU_BUFFER(sparse_round::neighbor<Wide>)>(base+l.offsets[unsigned(Field::records)]);
-    v.prefix=reinterpret_cast<APXCHOL_GPU_BUFFER(Wide)>(base+l.offsets[unsigned(Field::prefix)]);
     v.histogram=reinterpret_cast<APXCHOL_GPU_BUFFER(unsigned)>(base+l.offsets[unsigned(Field::histogram)]);
     v.round_ptr=reinterpret_cast<APXCHOL_GPU_BUFFER(unsigned)>(base+l.offsets[unsigned(Field::round_ptr)]);
     v.degree_bound=reinterpret_cast<APXCHOL_GPU_BUFFER(unsigned)>(base+l.offsets[unsigned(Field::degree_bound)]);

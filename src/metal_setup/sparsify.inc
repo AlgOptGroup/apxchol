@@ -100,7 +100,7 @@ APXCHOL_GPU_FUNCTION void sparse_step(Memory m, Math math, unsigned stage, unsig
     }
     if (stage == sparse_importance && i < m.sparse->count) {
         s.update_ids[i] = 0;
-        s.prefix[i] = residual_sparsify::importance(math, math.from_float(s.fills[i].value));
+        s.prefix()[i] = residual_sparsify::importance(math, math.from_float(s.fills[i].value));
     }
     if (stage == sparse_fold && i == 0 && (initial || m.sparse->scale.advance)) {
         if (initial) {
@@ -119,7 +119,7 @@ APXCHOL_GPU_FUNCTION void sparse_step(Memory m, Math math, unsigned stage, unsig
     if (stage == sparse_sample && i < m.sparse->count) {
         const auto e = s.fills[i];
         if (s.winners[e.a] != s.winners[e.b]) { m.fail(bad_graph); return; }
-        const auto sampled = residual_sparsify::sample(math, math.from_float(e.value), s.prefix[i],
+        const auto sampled = residual_sparsify::sample(math, math.from_float(e.value), s.prefix()[i],
             m.sparse->scale.value, s.update_ids[i], e.a, e.b, s.state->seed ^ s.state->round);
         const float value = math.to_float(sampled.value);
         if (!sampled.valid || (sampled.kept && !math.finite(math.from_float(value)))) {

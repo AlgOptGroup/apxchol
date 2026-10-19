@@ -110,7 +110,8 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         const float regularization =
             environment.ground == grounding_kind::reg ? float(environment.reg_eps) : 0;
         auto raw = cached.factorizer.run(
-            unsigned(A.rows()), unsigned(validated.matrix().nonZeros()), options.factor_opts.seed,
+            unsigned(A.rows()), unsigned(validated.matrix().nonZeros()),
+            unsigned(validated.scan().offdiag_nnz - validated.lumped()), options.factor_opts.seed,
             graph.ptr, graph.idx, graph.values, regularization,
             unsigned(unchanged && validated.scan().triangles_bit_identical), options.factor_opts,
             options.factor_opts.parallel_residual_threshold == std::numeric_limits<std::size_t>::max()

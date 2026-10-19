@@ -65,8 +65,10 @@ template<class Value> struct Fixture {
     rf::Shape shape{5, 4, .25f, 0};
 
     Memory<Value> memory() {
-        return {shape, std::is_same_v<Value, _Float16>, columns, raw.data() + 1,
-                perm, ptr, idx, rows, val, metadata, &status};
+        Memory<Value> s{shape, std::is_same_v<Value, _Float16>, columns, raw.data() + 1,
+                        perm, ptr, idx, rows, val, metadata, &status};
+        if (!s.fp16) s.metadata = {};
+        return s;
     }
     void run(std::array<unsigned, 4> order) {
         auto s = memory();
@@ -107,8 +109,8 @@ TEST(MetalFinalize, InPlaceCompactionGroundingAndDropPreserveOtherRows) {
         const std::array scales{3.f, 2.f, 1.f, 1.f};
         for (unsigned row = 0; row < 4; ++row) {
             EXPECT_EQ(f.rows[row].count, f.ptr[row + 1] - f.ptr[row]);
-            EXPECT_EQ(f.metadata[row].scale, scales[row]);
-            EXPECT_EQ(f.metadata[row].diagonal, f.columns[row].diagonal);
+            EXPECT_EQ(f.rows[row].scale, scales[row]);
+            EXPECT_EQ(f.rows[row].diagonal, f.columns[row].diagonal);
         }
     }
 }

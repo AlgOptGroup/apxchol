@@ -44,7 +44,7 @@ struct State {
 enum class Field : unsigned {
     graph0, graph1, begin, active_ids, active, candidates, winners, selected,
     cursor, entry_offsets, fill_offsets, excess, columns, fills, updates,
-    rows, counts, update_ptr, update_cursor, update_ids, records, prefix, histogram, round_ptr, degree_bound, count
+    rows, counts, update_ptr, update_cursor, update_ids, records, histogram, round_ptr, degree_bound, count
 };
 struct Layout { seed_type bytes, offsets[unsigned(Field::count)]; };
 
@@ -72,7 +72,11 @@ template<class Wide> struct View {
     APXCHOL_GPU_BUFFER(unsigned) update_cursor;
     APXCHOL_GPU_BUFFER(unsigned) update_ids;
     APXCHOL_GPU_BUFFER(sparse_round::neighbor<Wide>) records;
-    APXCHOL_GPU_BUFFER(Wide) prefix;
+    // Prefixes are dead before the next graph is written. Fused tails change parity.
+    APXCHOL_GPU_FUNCTION APXCHOL_GPU_BUFFER(Wide) prefix() const {
+        static_assert(sizeof(Wide) == sizeof(Edge));
+        return reinterpret_cast<APXCHOL_GPU_BUFFER(Wide)>(graph[state->slot ^ 1]);
+    }
     APXCHOL_GPU_BUFFER(unsigned) histogram;
     APXCHOL_GPU_BUFFER(unsigned) round_ptr;
 };
@@ -269,12 +273,12 @@ APXCHOL_GPU_FUNCTION void group_star(Memory m, Math math, unsigned row, Group gr
             if (prepared.result.status)
                 m.fail(1u << prepared.result.status);
             if (prepared.result.entries)
-                s.prefix[begin] = prepared.degree;
+                s.prefix()[begin] = prepared.degree;
         }
         return;
     }
     auto reserved = s.rows[row];
-    auto degree = reserved.entries ? s.prefix[begin] : s.excess[v];
+    auto degree = reserved.entries ? s.prefix()[begin] : s.excess[v];
     if (!math.less(math.from_float(0), degree))
         degree = math.from_float(1);
     const Output<Memory> out{m, row, reserved.entries, reserved.fills, reserved.excess_updates};
@@ -288,7 +292,7 @@ APXCHOL_GPU_FUNCTION void group_star(Memory m, Math math, unsigned row, Group gr
         return;
     group_sort(rows, reserved.entries, typename Sort::ByWeight<Math>{math}, group);
     if (group.lane == 0) {
-        s.rows[row] = sparse_round::prepare_sample(math, rows, s.prefix + begin, reserved);
+        s.rows[row] = sparse_round::prepare_sample(math, rows, s.prefix() + begin, reserved);
         if (s.rows[row].status)
             m.fail(1u << s.rows[row].status);
     }
@@ -298,7 +302,7 @@ APXCHOL_GPU_FUNCTION void group_star(Memory m, Math math, unsigned row, Group gr
     reserved = s.rows[row];
     for (unsigned i = group.lane; i < reserved.entries; i += group.width) {
         const auto status = sparse_round::sample_item(
-            math, out, input, rows, s.prefix + begin,
+            math, out, input, rows, s.prefix() + begin,
             sparse_round::canonical_star<typename Math::wide>{reserved, degree}, i);
         if (status)
             m.fail(1u << status);
@@ -490,12 +494,12 @@ APXCHOL_GPU_FUNCTION void exact_tail(Memory m, Math math, Group group) {
             for (unsigned row = pivot + 1; row < size; ++row)
                 degree = math.add(degree, m.tail_load(begin + row - pivot - 1));
             if (!math.finite(degree) || math.less(degree, zero)) m.fail(1u << sparse_round::arithmetic_range);
-            s.prefix[0] = math.less(zero, degree) ? degree : math.from_float(1);
+            s.prefix()[0] = math.less(zero, degree) ? degree : math.from_float(1);
         }
         if (tail_failed(m, group)) return;
-        const auto degree = s.prefix[0];
+        const auto degree = s.prefix()[0];
         for (unsigned row = pivot + 1 + group.lane; row < size; row += group.width)
-            s.prefix[row] = math.divide(m.tail_load(begin + row - pivot - 1), degree);
+            s.prefix()[row] = math.divide(m.tail_load(begin + row - pivot - 1), degree);
         group.barrier();
         for (unsigned row = pivot + 1 + group.lane; row < size; row += group.width) {
             const auto weight = m.tail_load(begin + row - pivot - 1);
@@ -509,7 +513,7 @@ APXCHOL_GPU_FUNCTION void exact_tail(Memory m, Math math, Group group) {
                 const auto other = m.tail_load(begin + col - pivot - 1);
                 if (!math.less(zero, other)) continue;
                 const auto fill = math.less(weight, other)
-                    ? math.multiply(weight, s.prefix[col]) : math.multiply(other, s.prefix[row]);
+                    ? math.multiply(weight, s.prefix()[col]) : math.multiply(other, s.prefix()[row]);
                 const auto value = math.add(m.tail_load(dst), fill);
                 if (!math.finite(value)) m.fail(1u << sparse_round::arithmetic_range);
                 m.tail_store(dst, value);

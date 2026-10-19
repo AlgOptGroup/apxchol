@@ -791,6 +791,50 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
     EXPECT_THROW(apxchol::solver(unsorted, options), std::invalid_argument);
 }
 
+TEST_F(MetalDevice, ResidentArenaIgnoresNonGraphEntries) {
+    for (unsigned kind : {0u, 1u, 2u}) {
+        SCOPED_TRACE(kind);
+        Sparse A = grid(3, 3, 0.25);
+        if (kind == 0) A.setIdentity();
+        else if (kind == 1) A.coeffRef(0, 8) = A.coeffRef(8, 0) = 0.0;
+        else A.coeffRef(0, 1) = A.coeffRef(1, 0) = 0.125;
+        A.makeCompressed();
+        const apxchol::metal_solver solver(A);
+        if (kind == 2) EXPECT_EQ(solver.factor().lumped_offdiag, 2);
+        const auto b = rhs(A.rows(), 3, false);
+        const auto result = solver.solve(b, 1e-8, 200);
+        EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+    }
+}
+
+TEST_F(MetalDevice, NonemptyFactorGrowthPreservesExportAndSolve) {
+    // This ring enters the larger tail reservation after storing ordinary-round columns.
+    constexpr int n = 257;
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        const int next = (i + 1) % n;
+        entries.emplace_back(i, i, 2.25);
+        entries.emplace_back(i, next, -1.0);
+        entries.emplace_back(next, i, -1.0);
+    }
+    Sparse A(n, n);
+    A.setFromTriplets(entries.begin(), entries.end());
+    A.makeCompressed();
+    const auto b = rhs(n, 3, false);
+    for (const bool fp16 : {false, true}) {
+        SCOPED_TRACE(fp16);
+        auto options = keep_opts();
+        options.factor_opts.seed = 42;
+        options.factor_opts.factor_storage = fp16 ? apxchol::factor_storage_type::fp16
+                                                 : apxchol::factor_storage_type::fp32;
+        const apxchol::metal_solver solver(A, options);
+        const auto result = solver.solve(b, 1e-8, 200);
+        EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+        const auto expected = emulate_apply(solver.factor(), b, fp16);
+        EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
+    }
+}
+
 TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
     for (const bool laplacian : {false, true}) for (const bool fp16 : {false, true}) {
         SCOPED_TRACE(::testing::Message() << laplacian << ' ' << fp16);
