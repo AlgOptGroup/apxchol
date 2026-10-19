@@ -374,7 +374,7 @@ struct metal_solver::impl {
             prm.offset = stage.first;
             const bool independent = forward && t.resident_round_plan && stage.last - stage.first > 1;
             dispatch(ctx->pipes.dataflow_solve[factor_fp16][independent ? 2 : unsigned(forward)], prm,
-                     stage.last - stage.first, 256);
+                     stage.last - stage.first, independent && stage.one_batch_per_block ? 32 : 256);
         }
     }
 
@@ -671,8 +671,12 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                            checkpoint* cp)
+    : metal_solver(A, opts, cp, false) {}
+
+metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+                           checkpoint* cp, bool input_prechecked)
     : impl_(new impl(opts)) {
-    auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp);
+    auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp, input_prechecked);
     impl_->F = std::move(resident.factor);
     impl_->setup(A, cp, &resident);
 }

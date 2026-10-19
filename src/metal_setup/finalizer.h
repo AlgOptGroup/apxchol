@@ -452,12 +452,13 @@ class Finalizer {
             finish(cb, status);
             // Counts are complete; compact the shared plan metadata before allocating output.
             struct PlanMetadata { unsigned* blocks; rf::Step* steps; rf::PlanInfo* info; };
+            const auto count_data = static_cast<gd::counts*>(counts.contents);
             rf::compact(PlanMetadata{static_cast<unsigned*>(blocks.contents),
                                      static_cast<rf::Step*>(steps.contents),
                                      static_cast<rf::PlanInfo*>(info.contents)},
-                        static_cast<gd::counts*>(counts.contents), gd::counts{});
+                        count_data, gd::counts{});
             const auto pi = *static_cast<rf::PlanInfo *>(info.contents);
-            const auto total = static_cast<gd::counts *>(counts.contents)[pi.blocks];
+            const auto total = count_data[pi.blocks];
             require(total.words <= ~0u && total.segments < gd::special_bit &&
                         total.slots + m < gd::special_bit,
                     "Metal packed plan exceeds 32-bit capacity");
@@ -465,8 +466,13 @@ class Finalizer {
             t.tag_count = m + total.slots;
             const auto step_data = static_cast<rf::Step *>(steps.contents);
             t.stages.reserve(pi.stages);
-            for (unsigned i = 0; i < pi.stages; ++i)
-                t.stages.push_back({step_data[i].first, step_data[i].last});
+            for (unsigned i = 0; i < pi.stages; ++i) {
+                const auto step = step_data[i];
+                // Every retained block has at least one padded batch.
+                const auto words = count_data[step.last].words - count_data[step.first].words;
+                t.stages.push_back({step.first, step.last,
+                    words == std::uint64_t(gd::lanes) * (step.last - step.first)});
+            }
             t.words = allocate(total.words * sizeof(unsigned));
             t.blocks = allocate((pi.blocks + 1) * sizeof(unsigned));
             t.segments = allocate(total.segments * sizeof(gd::segment));

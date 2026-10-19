@@ -654,6 +654,21 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
         EXPECT_GT(result.timings.total("setup"), 0.0);
         EXPECT_GT(result.timings.total("pcg"), 0.0);
     }
+    Sparse large(32769, 32769);
+    large.setIdentity();
+    const Eigen::VectorXd large_rhs = Eigen::VectorXd::Ones(large.rows());
+    options.backend = apxchol::solve_backend::automatic;
+    apxchol::solver automatic(large, options);
+    EXPECT_EQ(automatic.backend(), apxchol::solve_backend::gpu);
+    EXPECT_LT(true_residual(large, large_rhs, automatic.solve(large_rhs).x), options.tol);
+    apxchol::metal_solver direct(large, options);
+    EXPECT_LT(true_residual(large, large_rhs, direct.solve(large_rhs).x), options.tol);
+    large.coeffRef(0, 1) = 0; // Numerically valid, but the stored zero has no mate.
+    large.makeCompressed();
+    EXPECT_THROW(apxchol::metal_solver(large, options), std::invalid_argument);
+    apxchol::solver fallback(large, options);
+    EXPECT_EQ(fallback.backend(), apxchol::solve_backend::cpu);
+    EXPECT_LT(true_residual(large, large_rhs, fallback.solve(large_rhs).x), options.tol);
 }
 
 TEST(MetalOptions, UnsupportedOptionsFailBeforeDeviceSetup) {
@@ -732,6 +747,7 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
     options.factor_opts.is_select = "priority_greedy";
     EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
     options.factor_opts.is_select = "block_greedy";
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
     Sparse lower = A.triangularView<Eigen::Lower>();
     EXPECT_THROW(apxchol::solver(lower, options), std::invalid_argument);
     Sparse missing = A;
@@ -773,5 +789,5 @@ TEST(MetalOptions, AutomaticSelectionRejectsResidentIncompatibleOptions) {
     A.uncompress();
     EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::cpu);
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::detail::select_solve_backend(options, &A), std::invalid_argument);
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::gpu);
 }

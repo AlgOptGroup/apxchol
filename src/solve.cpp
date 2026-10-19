@@ -844,16 +844,17 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
             "natural residual peeling and supported sampler options; request CPU explicitly");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
-    if (!detail::metal_setup_regularization_supported(detail::env_knobs::get(), A)) {
-        if (opts.backend == solve_backend::gpu)
-            throw std::invalid_argument(detail::metal_regularization_error);
-        return solve_backend::cpu;
-    }
     const bool compatible = detail::metal_setup_options_supported(opts.factor_opts) &&
-        (!A || detail::metal_setup_input_supported(*A));
+        (opts.backend == solve_backend::gpu || !A || detail::metal_setup_input_supported(*A));
     if (!compatible) {
         if (opts.backend == solve_backend::gpu)
             throw std::invalid_argument("Metal GPU setup requires supported GKS options and compressed, sorted, paired CSC input");
+        return solve_backend::cpu;
+    }
+    if (!detail::metal_setup_regularization_supported(detail::env_knobs::get(),
+            opts.backend == solve_backend::automatic ? A : nullptr)) {
+        if (opts.backend == solve_backend::gpu)
+            throw std::invalid_argument(detail::metal_regularization_error);
         return solve_backend::cpu;
     }
     return opts.backend == solve_backend::gpu || metal_solver::available()
@@ -893,7 +894,7 @@ struct solver::impl {
 #elif defined(APXCHOL_USE_METAL)
         if (route == solve_backend::gpu) {
             if (F) return owner_type(std::in_place_type<metal_solver>, A, std::move(*F), opts, cp);
-            return owner_type(std::in_place_type<metal_solver>, A, opts, cp);
+            return owner_type(metal_solver(A, opts, cp, opts.backend == solve_backend::automatic));
         }
 #else
         (void)route;

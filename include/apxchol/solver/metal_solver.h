@@ -62,6 +62,10 @@ public:
     Eigen::Index rows() const;
 
 private:
+    friend class solver;
+    // Automatic routing has already checked this same input when true.
+    metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+                 checkpoint* cp, bool input_prechecked);
     struct impl;
     struct impl_deleter {
         void operator()(impl*) const;

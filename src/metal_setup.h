@@ -25,6 +25,7 @@ struct resident_factor {
 };
 
 resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,
-                          const solve_options &options, checkpoint *cp);
+                          const solve_options &options, checkpoint *cp,
+                          bool input_prechecked = false);
 
 } // namespace apxchol::detail::metal_setup

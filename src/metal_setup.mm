@@ -70,16 +70,11 @@ input_buffers upload(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A)
 } // namespace
 
 resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,
-                          const solve_options &options, checkpoint *cp) {
+                          const solve_options &options, checkpoint *cp, bool input_prechecked) {
     @autoreleasepool {
-        if (!metal_setup_regularization_supported(env_knobs::get(), &A))
-            throw std::invalid_argument(metal_regularization_error);
         if (!metal_setup_options_supported(options.factor_opts))
             throw std::invalid_argument("Metal device setup currently requires FP32 graph storage "
                                         "and default block-greedy GKS options");
-        if (A.rows() != A.cols() || A.rows() <= 0 || A.rows() >= std::numeric_limits<int>::max())
-            throw std::invalid_argument(
-                "Metal device setup requires a nonempty square 32-bit operator");
         // Pipelines belong to the device context, not individual solver owners.
         struct pipelines {
             Engine factorizer;
@@ -91,11 +86,20 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
             cp->descend("setup");
             cp->tick();
         }
+        std::size_t offdiagonals = 0;
+        bool zeros = false;
+        if (!input_prechecked && !gpu_owned_csc_layout_supported(A, offdiagonals, &zeros))
+            throw std::invalid_argument(
+                "Metal device setup requires compressed, sorted, unique and paired 32-bit CSC storage");
+        if (!input_prechecked && !metal_setup_regularization_supported(env_knobs::get(), &A))
+            throw std::invalid_argument(metal_regularization_error);
         const operator_view validated(A);
         if (cp)
             (*cp)("operator_prepare");
         const bool unchanged = &validated.matrix() == &A;
-        if (!gpu_owned_csc_supported(validated) || (!unchanged && !gpu_owned_csc_supported(A)))
+        // Validation proves pairing only for the unchanged nonzero operator.
+        const bool paired = input_prechecked || (unchanged && !zeros) || gpu_owned_csc_paired(A);
+        if (!paired || (!unchanged && !gpu_owned_csc_supported(validated)))
             throw std::invalid_argument(
                 "Metal device setup requires compressed, sorted, unique and paired 32-bit CSC storage");
         const auto input = upload(device, A);
