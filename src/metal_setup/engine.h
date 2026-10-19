@@ -199,6 +199,7 @@ class Engine {
             const char* sparse_value = std::getenv("APXCHOL_RESIDUAL_SPARSIFY");
             bool sparse_attempted = sparse_value && std::strcmp(sparse_value, "0") == 0;
             id<MTLBuffer> sparse_state = nil;
+            bool coalesced = false;
             while (!s.state->status && s.state->active) {
                 require(s.state->round < n, "Metal factorization exceeded its round bound");
                 // Independent selected rows share no edge. Across a complete tail,
@@ -256,13 +257,18 @@ class Engine {
                         s.state->eligible, before, min_yield, residual_threshold, options.omp_threshold);
                 if (handoff) s.state->prune_enabled = 0;
                 const bool sparsify = handoff && !sparse_attempted;
-                if (sparsify) {
-                    sparse_attempted = true;
+                // At least half the physical incidences must be parallel entries.
+                const bool coalesce = !coalesced && std::uint64_t(s.state->edges) / 2 >=
+                    std::uint64_t(s.state->active) * (s.state->active - 1);
+                if (sparsify || coalesce) {
                     id<MTLComputePipelineState> coalesce_pipe = sparse[sparse_coalesce];
                     require(coalesce_pipe.threadExecutionWidth &&
                             s.state->active <= ~0u / coalesce_pipe.threadExecutionWidth,
                             "Metal sparsification dispatch exceeds 32-bit indices");
-                    sparse_state = allocate(sizeof(SparseState<Wide>));
+                    if (!sparse_state) sparse_state = allocate(sizeof(SparseState<Wide>));
+                }
+                if (sparsify) {
+                    sparse_attempted = true;
                     auto state = static_cast<SparseState<Wide>*>(sparse_state.contents);
                     *state = {};
                     state->threshold = unsigned(std::min<std::size_t>(residual_threshold, ~0u));
@@ -275,6 +281,10 @@ class Engine {
                         s.state->active, n, s.state->edges / 2, [&] {
                             scan(compute, arena, l.offsets[unsigned(Field::counts)], n + 1, 0);
                         });
+                else if (coalesce)
+                    SparseDispatch{compute, sparse, arena, factor, l, sparse_state}
+                        (sparse_coalesce, s.state->active);
+                coalesced |= coalesce;
                 for (unsigned round = 0; round < rounds; ++round)
                     factor_round(
                         EncoderRound{stage, scan, compute, arena, l.offsets[unsigned(Field::counts)]},

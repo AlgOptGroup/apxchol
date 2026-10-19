@@ -17,12 +17,15 @@ inline NSMutableArray* sparse_pipelines(id<MTLDevice> device, id<MTLLibrary> lib
     }
     return pipelines;
 }
-template<class Scan>
-void encode_sparsify(id<MTLComputeCommandEncoder> encoder, NSArray* pipelines,
-        id<MTLBuffer> arena, id<MTLBuffer> factor, resident_setup::Layout layout,
-        id<MTLBuffer> state, unsigned active, unsigned nodes, unsigned edge_bound, Scan scan) {
-    using namespace resident_setup;
-    auto dispatch = [&](unsigned phase, unsigned count, bool initial = false) {
+struct SparseDispatch {
+    id<MTLComputeCommandEncoder> encoder;
+    NSArray* pipelines;
+    id<MTLBuffer> arena, factor;
+    resident_setup::Layout layout;
+    id<MTLBuffer> state;
+
+    void operator()(unsigned phase, unsigned count, bool initial = false) const {
+        using namespace resident_setup;
         id<MTLComputePipelineState> pipeline = pipelines[phase];
         [encoder setComputePipelineState:pipeline];
         [encoder setBuffer:arena offset:0 atIndex:0];
@@ -38,7 +41,14 @@ void encode_sparsify(id<MTLComputeCommandEncoder> encoder, NSArray* pipelines,
         if (phase == sparse_partials) count = ((count + 16383) / 16384) * 256;
         [encoder dispatchThreads:MTLSizeMake(std::max(count, 1u), 1, 1)
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    };
+    }
+};
+template<class Scan>
+void encode_sparsify(id<MTLComputeCommandEncoder> encoder, NSArray* pipelines,
+        id<MTLBuffer> arena, id<MTLBuffer> factor, resident_setup::Layout layout,
+        id<MTLBuffer> state, unsigned active, unsigned nodes, unsigned edge_bound, Scan scan) {
+    using namespace resident_setup;
+    const SparseDispatch dispatch{encoder, pipelines, arena, factor, layout, state};
     // These arrays are round scratch. Neither factor entries, excess nor the
     // compact active frontier is overwritten while sparsification owns them.
     dispatch(sparse_initialize, nodes + 1);
