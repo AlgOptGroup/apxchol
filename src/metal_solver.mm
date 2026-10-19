@@ -433,8 +433,8 @@ struct metal_solver::impl {
                         const std::vector<float>& hi, const std::vector<float>& lo, unsigned m,
                         detail::metal_setup::resident_factor* resident = nullptr);
 
-    // y = A' x in fp64, each row summed in storage order; rows are split across
-    // threads by stored entries (detail::work_balanced_range).
+    // x follows the retained operator's ordering; y is factor-permuted.
+    // Sum each row in storage order, splitting work by stored entries.
     void spmv(const Eigen::VectorXd& x, Eigen::VectorXd& y) const {
         if (original_operator.rows() != 0) {
             const auto& A = original_operator;
@@ -445,7 +445,7 @@ struct metal_solver::impl {
                 for (auto row = first; row < last; ++row) {
                     double sum = 0;
                     for (int p = A.outerIndexPtr()[row]; p < A.outerIndexPtr()[row + 1]; ++p)
-                        sum += A.valuePtr()[p] * x[F.perm[A.innerIndexPtr()[p]]];
+                        sum += A.valuePtr()[p] * x[A.innerIndexPtr()[p]];
                     y[F.perm[row]] = sum;
                 }
             }
@@ -467,9 +467,9 @@ struct metal_solver::impl {
         }
     }
 
-    double residual_norm(const Eigen::VectorXd& bp, const Eigen::VectorXd& xp,
+    double residual_norm(const Eigen::VectorXd& bp, const Eigen::VectorXd& x,
                          Eigen::VectorXd& work) const {
-        spmv(xp, work);
+        spmv(x, work);
         return mh::norm(bp - work);
     }
 
@@ -741,8 +741,13 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     mh::scatter({b.data(), s.n}, perm, {bp.data(), s.n});
     auto finish = [&] {
         if (s.laplacian) s.centre(xp);
-        result.residual = s.residual_norm(bp, xp, work) / bnorm;
-        mh::gather({xp.data(), s.n}, perm, {work.data(), s.n});
+        if (s.original_operator.rows() != 0) {
+            mh::gather({xp.data(), s.n}, perm, {work.data(), s.n});
+            result.residual = s.residual_norm(bp, work, xp) / bnorm;
+        } else {
+            result.residual = s.residual_norm(bp, xp, work) / bnorm;
+            mh::gather({xp.data(), s.n}, perm, {work.data(), s.n});
+        }
         result.x.swap(work);
         cp("exit_check");
         cp.ascend();
@@ -750,7 +755,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
 
     if (x0 != nullptr) {
         mh::scatter({x0->data(), s.n}, perm, {xp.data(), s.n});
-        s.spmv(xp, work);
+        s.spmv(s.original_operator.rows() != 0 ? *x0 : xp, work);
         work = bp - work;
     } else {
         work = bp;

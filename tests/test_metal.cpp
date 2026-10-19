@@ -521,6 +521,28 @@ TEST_F(MetalDevice, LaplacianX0ConstantIrrelevant) {
     EXPECT_LE((r1.x - r2.x).norm() / r1.x.norm(), 1e-6);
 }
 
+TEST_F(MetalDevice, ExactWarmStartUsesTheOriginalOrdering) {
+    for (const double shift : {0.0, 0.25}) {
+        SCOPED_TRACE(shift);
+        const Sparse A = grid(9, 11, shift, true);
+        const apxchol::metal_solver resident(A, keep_opts());
+        const apxchol::metal_solver adopted(A, apxchol::factorization(resident.factor()));
+        bool permuted = false;
+        for (node_index i = 0; i < A.rows(); ++i)
+            permuted |= resident.factor().perm[i] != i;
+        ASSERT_TRUE(permuted);
+        const Eigen::VectorXd guess = rhs(A.rows(), 9, shift == 0.0);
+        const Eigen::VectorXd b = A * guess;
+        for (const auto* solver : {&resident, &adopted}) {
+            const auto result = solver->solve(b, 1e-8, 20, &guess);
+            EXPECT_EQ(result.iterations, 0);
+            const double residual = true_residual(A, b, result.x);
+            EXPECT_LT(residual, 1e-8);
+            EXPECT_NEAR(result.residual, residual, 1e-14);
+        }
+    }
+}
+
 TEST_F(MetalDevice, NonFiniteRhsRejected) {
     const Sparse A = grid(8, 8, 0.5);
     const apxchol::metal_solver slv(A);
