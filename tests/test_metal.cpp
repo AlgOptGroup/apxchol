@@ -286,6 +286,39 @@ TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
     }
 }
 
+TEST_F(MetalDevice, ScalarAndMatrixSolvesRejectOverflowWhenRestoringScale) {
+    Sparse A(4, 4);
+    A.setIdentity();
+    A *= 1e-30;
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                               apxchol::factor_storage_type::fp32}) {
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::solver owner(A, options);
+        for (const bool warm : {false, true}) {
+            SCOPED_TRACE(testing::Message() << int(storage) << ' ' << warm);
+            const Eigen::VectorXd b = Eigen::VectorXd::Constant(4, 1e275);
+            const Eigen::VectorXd guess = Eigen::VectorXd::Constant(4, 0.25e305);
+            const auto scalar = owner.solve(b, 1e-8, 100, warm ? &guess : nullptr);
+            ASSERT_TRUE(scalar.x.allFinite());
+            EXPECT_LT((b - A * scalar.x).stableNorm() / b.stableNorm(), 1e-8);
+            Eigen::MatrixXd B = b.replicate(1, 4), X(4, 4), initial = guess.replicate(1, 4);
+            const apxchol::const_matrix_view x0(initial);
+            const auto batch = owner.solve(B, X, 1e-8, 100, warm ? &x0 : nullptr);
+            ASSERT_TRUE(X.allFinite());
+            for (int c = 0; c < X.cols(); ++c) {
+                EXPECT_LT((b - A * X.col(c)).stableNorm() / b.stableNorm(), 1e-8);
+                EXPECT_LT(batch.columns[c].residual, 1e-8);
+            }
+            const Eigen::VectorXd huge = Eigen::VectorXd::Constant(4, 1e300);
+            EXPECT_THROW(owner.solve(huge, 1e-8, 100, warm ? &guess : nullptr), std::overflow_error);
+            B.col(2) = huge;
+            EXPECT_THROW(owner.solve(B, X, 1e-8, 100, warm ? &x0 : nullptr), std::overflow_error);
+        }
+    }
+}
+
 TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
     const Sparse A = hub_graph(110, 100, 4);
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {

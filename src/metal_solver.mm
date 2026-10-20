@@ -827,9 +827,13 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         auto xp = X.col(q);
         if (ran[q]) {
             const auto* packed = static_cast<const df32*>([x contents]);
-            #pragma omp parallel for schedule(static)
-            for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+            bool finite = true;
+            #pragma omp parallel for schedule(static) reduction(&& : finite)
+            for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
                 xp[i] += mh::join(packed[i * Columns + q]) / scale[q];
+                finite &= std::isfinite(xp[i]);
+            }
+            if (!finite) throw std::overflow_error("Metal solve: solution exceeds the finite range");
             results[q].iterations = states[q].iters;
         }
         if (laplacian) centre(xp);
