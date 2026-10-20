@@ -624,6 +624,30 @@ TEST_F(MetalDevice, ScaledRightHandSides) {
     }
 }
 
+TEST_F(MetalDevice, RejectsUnrepresentableSolutions) {
+    Sparse A(2, 2);
+    A.setIdentity();
+    A *= 1e-30;
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                              apxchol::factor_storage_type::fp32}) {
+        apxchol::solve_options options;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::metal_solver solver(A, options);
+        for (const bool warm : {false, true}) {
+            SCOPED_TRACE(static_cast<int>(storage));
+            SCOPED_TRACE(warm);
+            const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(2, 1e275);
+            const Eigen::VectorXd guess = Eigen::VectorXd::Constant(2, 1e304);
+            const auto result = solver.solve(rhs, 1e-8, 100, warm ? &guess : nullptr);
+            EXPECT_TRUE(result.x.allFinite());
+            EXPECT_LT((A * result.x - rhs).stableNorm() / rhs.stableNorm(), 1e-8);
+            const Eigen::VectorXd overflow = Eigen::VectorXd::Constant(2, 1e300);
+            EXPECT_THROW(solver.solve(overflow, 1e-8, 100, warm ? &guess : nullptr),
+                         std::overflow_error);
+        }
+    }
+}
+
 TEST_F(MetalDevice, TinySystems) {
     Sparse one(1, 1);
     one.insert(0, 0) = 4.0;

@@ -70,9 +70,13 @@ inline void pack(std::span<const double> w, double scale, std::span<df> out) {
 }
 
 inline void add_unpacked(std::span<const df> v, double scale, std::span<double> out) {
-    #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(v.size()); ++i)
+    bool finite = true;
+    #pragma omp parallel for schedule(static) reduction(&& : finite)
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(v.size()); ++i) {
         out[i] += join(v[i]) / scale;
+        finite = finite && std::isfinite(out[i]);
+    }
+    if (!finite) throw std::overflow_error("Metal solve: solution exceeds the finite range");
 }
 
 }  // namespace apxchol::detail::metal_host

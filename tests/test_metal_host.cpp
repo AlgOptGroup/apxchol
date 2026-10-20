@@ -120,6 +120,21 @@ TEST(MetalHost, NormAcrossMagnitudes) {
     EXPECT_TRUE(std::isnan(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::quiet_NaN(), 1.0))));
 }
 
+TEST(MetalHost, UnpackingRejectsOverflow) {
+    std::vector<mh::df> packed(64, mh::split(1.0));
+    std::vector<double> out(packed.size());
+    EXPECT_NO_THROW(mh::add_unpacked(packed, 0x1p-1000, out));
+    EXPECT_EQ(out.back(), 0x1p1000);
+
+    std::fill(out.begin(), out.end(), 0.0);
+    packed.back() = mh::split(0x1p30);
+    EXPECT_THROW(mh::add_unpacked(packed, 0x1p-1000, out), std::overflow_error);
+
+    std::fill(packed.begin(), packed.end(), mh::split(1.0));
+    std::fill(out.begin(), out.end(), std::numeric_limits<double>::max());
+    EXPECT_THROW(mh::add_unpacked(packed, 0x1p-1023, out), std::overflow_error);
+}
+
 TEST(MetalHost, FactorStorageReconstructsFiniteValues) {
     for (float scale : {0x1p-125f, 0x1p-80f, 0.25f, 1.0f, 0x1p80f}) {
         const auto metadata = mh::pack_factor_metadata(scale, 1.0f / scale);
