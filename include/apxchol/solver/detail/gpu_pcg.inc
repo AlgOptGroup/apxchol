@@ -112,7 +112,7 @@ APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
                 if (!v.state[q].active) continue;
                 const auto i = row * Columns + q;
                 if (op == operation::residual) {
-                    v.x[i] = math.add_product(v.x[i], v.state[q].alpha, v.p[i]);
+                    v.x[i] = math.update_solution(v.x[i], v.state[q].alpha, v.p[i]);
                     const auto value = math.subtract_product(v.r[i], v.ap[i], v.state[q].alpha);
                     v.r[i] = value;
                     total.values[q] = math.add_product(total.values[q], value, value);

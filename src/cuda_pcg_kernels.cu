@@ -34,6 +34,7 @@ struct pcg_math {
         return __shfl_down_sync(0xffffffffu, value, offset, width);
     }
     __device__ double add_product(double sum, double a, double b) const { return sum + a * b; }
+    __device__ double update_solution(double x, double alpha, double p) const { return add_product(x, alpha, p); }
     __device__ double subtract_product(double a, double b, double c) const { return a - b * c; }
     __device__ double direction(double z, double p, double beta) const { return z + beta * p; }
     template<class Value>

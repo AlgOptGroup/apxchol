@@ -19,6 +19,7 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -315,6 +316,53 @@ TEST_F(MetalDevice, ScalarAndMatrixSolvesRejectOverflowWhenRestoringScale) {
             EXPECT_THROW(owner.solve(huge, 1e-8, 100, warm ? &guess : nullptr), std::overflow_error);
             B.col(2) = huge;
             EXPECT_THROW(owner.solve(B, X, 1e-8, 100, warm ? &x0 : nullptr), std::overflow_error);
+        }
+    }
+}
+
+TEST_F(MetalDevice, ScaledSolutionAccumulatorsPreserveAccuracy) {
+    for (const auto& [diagonal, magnitude] : {std::pair{1e30, 1e-275}, std::pair{1e-30, 1e275},
+             std::pair{1.0, 1e308}, std::pair{1.0, 1e-320},
+             std::pair{1.0, std::numeric_limits<double>::denorm_min()}}) {
+        Sparse A(4, 4);
+        A.setIdentity();
+        A *= diagonal;
+        for (const auto storage : {apxchol::factor_storage_type::fp16,
+                                  apxchol::factor_storage_type::fp32}) {
+            apxchol::solve_options options;
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.factor_storage = storage;
+            const apxchol::solver solver(A, options);
+            for (int width : {1, 2, 4, 7}) {
+                Eigen::MatrixXd B(4, width), X(4, width);
+                for (int q = 0; q < width; ++q) B.col(q).setConstant(q % 2 ? -magnitude : magnitude);
+                for (int warm : {0, 1, 2}) {
+                    SCOPED_TRACE(testing::Message() << diagonal << ' ' << magnitude << ' '
+                                 << int(storage) << ' ' << width << ' ' << warm);
+                    Eigen::MatrixXd initial = B / diagonal;
+                    if (warm == 1) initial.row(0).setZero();
+                    std::vector<apxchol::solve_result> columns;
+                    if (width == 1) {
+                        const Eigen::VectorXd rhs = B.col(0), guess = initial.col(0);
+                        columns.push_back(solver.solve(rhs, 1e-8, 100, warm ? &guess : nullptr));
+                        X.col(0) = columns[0].x;
+                    } else {
+                        const apxchol::const_matrix_view guess(initial);
+                        columns = solver.solve(B, X, 1e-8, 100, warm ? &guess : nullptr).columns;
+                    }
+                    ASSERT_TRUE(X.allFinite());
+                    for (int q = 0; q < width; ++q) {
+                        const double scale = mh::pow2_scale(magnitude);
+                        const Eigen::VectorXd rhs = B.col(q) * scale;
+                        const double residual = ((A * X.col(q)) * scale - rhs).norm() / rhs.norm();
+                        EXPECT_LT(residual, 1e-8);
+                        EXPECT_NEAR(columns[q].residual, residual, 1e-15);
+                        if (warm == 2) {
+                            EXPECT_EQ(columns[q].iterations, 0);
+                        }
+                    }
+                }
+            }
         }
     }
 }

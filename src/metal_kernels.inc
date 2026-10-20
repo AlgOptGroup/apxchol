@@ -29,7 +29,10 @@ struct pcg_math {
     df shuffle_down(df value, uint offset, uint) const {
         return {simd_shuffle_down(value.hi, offset), simd_shuffle_down(value.lo, offset)};
     }
-    df add_product(df sum, float a, float b) const { return df_add(sum, two_prod(a, b)); }
+    // Accumulate S*x so tiny solution corrections retain their low word.
+    df update_solution(df x, float alpha, float p) const {
+        return df_add(x, two_prod(alpha * preconditioner_scale, p));
+    }
     df add_product(df sum, df a, float b) const { return df_add(sum, df_mul_f(a, b)); }
     df add_product(df sum, df a, df b) const { return df_add(sum, df_mul(a, b)); }
     df subtract_product(df a, df b, float c) const { return df_add(a, df_neg(df_mul_f(b, c))); }
