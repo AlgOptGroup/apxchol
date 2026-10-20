@@ -452,19 +452,27 @@ struct apxchol_solver {
 
     /// One solve into caller memory. b_buffer keeps the caller's b (x may
     /// alias it); the CPU route solves a power-of-two scaled copy when b's
-    /// scale needs one (rhs_scale). Metal scales its own vectors.
+    /// scale needs one (rhs_scale) and reports the original system's residual
+    /// of the x it returns. Metal scales its own vectors and already reports
+    /// the original system's residual in fp64.
     apxchol::solve_result solve_one(const double* b, const double* x0, double* x,
                                     double tol, int max_iter) {
         load_vector(b, n(), b_buffer, "b");
         if (x0 != nullptr) load_vector(x0, n(), x0_buffer, "x0");
         Eigen::Map<Eigen::VectorXd> out(x, n());
         const Eigen::VectorXd* guess = x0 != nullptr ? &x0_buffer : nullptr;
-        const double s = cpu != nullptr ? rhs_scale(b_buffer, guess) : 1.0;
-        if (s == 1.0) return owner->solve(b_buffer, out, tol, max_iter, guess);
-        scaled_buffer = s * b_buffer;
-        if (guess != nullptr) x0_buffer *= s;
-        const apxchol::solve_result r = owner->solve(scaled_buffer, out, tol, max_iter, guess);
-        out *= 1.0 / s;
+        if (cpu == nullptr) return owner->solve(b_buffer, out, tol, max_iter, guess);
+        const double s = rhs_scale(b_buffer, guess);
+        apxchol::solve_result r;
+        if (s == 1.0) {
+            r = owner->solve(b_buffer, out, tol, max_iter, guess);
+        } else {
+            scaled_buffer = s * b_buffer;
+            if (guess != nullptr) x0_buffer *= s;
+            r = owner->solve(scaled_buffer, out, tol, max_iter, guess);
+            out *= 1.0 / s;
+        }
+        r.residual = cpu->relative_residual(b_buffer, out);
         return r;
     }
 };

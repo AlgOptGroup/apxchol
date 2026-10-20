@@ -104,6 +104,14 @@ public:
     /// The same application into caller storage, allocating nothing. r and z
     /// must not overlap: the permutation scatter reads r while it writes z.
     void apply(Eigen::Ref<const Eigen::VectorXd> r, Eigen::Ref<Eigen::VectorXd> z) const;
+    /// ||b - A x|| / ||b|| in fp64 against the operator this solver's PCG
+    /// applies (the caller's matrix; fp32 only when lossless unless
+    /// APXCHOL_FP32_OPERATOR forces it), with power-of-two scaled norms that
+    /// neither underflow nor overflow. 0 when b - A x = 0; infinity for a
+    /// non-finite input or residual, or a nonzero residual of b = 0. Uses the
+    /// PCG workspace, so like solve it is not safe concurrently.
+    double relative_residual(Eigen::Ref<const Eigen::VectorXd> b,
+                             Eigen::Ref<const Eigen::VectorXd> x) const;
 
     const apx_cholesky& preconditioner() const { return precond_; }
     Eigen::Index rows() const { return n_; }
@@ -165,7 +173,7 @@ public:
     solve_backend backend() const;
     factor_storage_type factor_storage() const;
     /// The CPU owner, or nullptr on a GPU route, for the CPU-only extensions
-    /// (caller-owned apply).
+    /// (caller-owned apply, original-system residual).
     const cpu_solver* cpu() const noexcept;
 
 private:

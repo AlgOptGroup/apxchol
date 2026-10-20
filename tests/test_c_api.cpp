@@ -614,6 +614,7 @@ TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
     const apxchol::cpu_solver ref(A, so);
     const Eigen::VectorXd b = compatible_rhs(c.n);
     const apxchol::solve_result r = ref.solve(b);
+    const double certified = ref.relative_residual(b, r.x);
 #ifdef _OPENMP
     omp_set_num_threads(prior);
 #endif
@@ -640,7 +641,57 @@ TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
               APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(x.data(), r.x.data(), x.size()));
     EXPECT_EQ(info.iterations, r.iterations);
-    EXPECT_EQ(info.relative_residual, r.residual);
+    // The C ABI reports the original system's residual of x, not the PCG
+    // recursion's (r.residual), which drifts from it in the last digits.
+    EXPECT_EQ(info.relative_residual, certified);
+    EXPECT_LT(info.relative_residual, o.tol);
+}
+
+TEST(CApi, CpuResidualIsTheOriginalSystemsAndSurvivesAliasing) {
+    for (const double shift : {0.0, 0.05}) {
+        SCOPED_TRACE(::testing::Message() << "shift=" << shift);
+        const Sparse A = grid_laplacian(16, 15, shift);
+        const csc64 c = to_csc64(A);
+        auto o = defaults();
+        o.backend = APXCHOL_BACKEND_CPU;
+        handle h;
+        ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+        const Eigen::VectorXd b = compatible_rhs(c.n, 4);
+        auto independent = [&](const Eigen::VectorXd& x) {
+            return (b - A * x).stableNorm() / b.stableNorm();
+        };
+        Eigen::VectorXd x(c.n);
+        auto info = info_struct();
+        ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info,
+                                       nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        // Forming b - A x rounds by about eps * |A| |x| whatever the order of
+        // the sums, so two correct evaluations agree to that bound.
+        const double rounding = 32 * std::numeric_limits<double>::epsilon() *
+                                (A.cwiseAbs() * x.cwiseAbs()).norm() / b.norm();
+        EXPECT_NEAR(info.relative_residual, independent(x), rounding);
+        // b and x the same array: the residual is still of the caller's b.
+        Eigen::VectorXd bx = b;
+        auto aliased = info_struct();
+        ASSERT_EQ(apxchol_solver_solve(h.s, bx.data(), nullptr, bx.data(), -1.0, -1, &aliased,
+                                       nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_TRUE(same_bytes(bx.data(), x.data(), x.size()));
+        EXPECT_EQ(aliased.relative_residual, info.relative_residual);
+        // No iterations: x = 0 and the residual is exactly 1; b = 0 gives 0.
+        auto none = info_struct();
+        EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, 0, &none, nullptr,
+                                       0),
+                  APXCHOL_STATUS_NOT_CONVERGED);
+        EXPECT_EQ(none.relative_residual, 1.0);
+        const Eigen::VectorXd zero = Eigen::VectorXd::Zero(c.n);
+        auto zero_info = info_struct();
+        EXPECT_EQ(apxchol_solver_solve(h.s, zero.data(), nullptr, x.data(), -1.0, -1, &zero_info,
+                                       nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_EQ(zero_info.relative_residual, 0.0);
+        EXPECT_EQ(x.cwiseAbs().maxCoeff(), 0.0);
+    }
 }
 
 TEST(CApi, RepeatedSolvesAreBitIdenticalAndWarmStartAtTheSolutionIsFree) {
@@ -929,10 +980,14 @@ TEST(CApi, SubnormalRightHandSideIsSolvedAndAnOutOfScaleGuessIsUnsupported) {
     ASSERT_LT(b.cwiseAbs().maxCoeff(), std::numeric_limits<double>::min());
     Eigen::VectorXd x(c.n);
     auto info = info_struct();
-    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
+    // The solve runs at unit scale; the subnormal x it returns keeps ~14
+    // significant bits, which the certified residual reports honestly.
+    const apxchol_status status =
+        apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0);
+    EXPECT_EQ(status == APXCHOL_STATUS_SUCCESS, info.relative_residual < o.tol);
     EXPECT_GT(info.iterations, 0);
     EXPECT_GT(x.cwiseAbs().maxCoeff(), 0.0);
+    EXPECT_LT(info.relative_residual, 1e-3);
 
     const Eigen::VectorXd normal = compatible_rhs(c.n, 3);
     const Eigen::VectorXd huge_guess = Eigen::VectorXd::Constant(c.n, 0x1p300);

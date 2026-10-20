@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -811,6 +812,34 @@ void cpu_solver::apply(Eigen::Ref<const Eigen::VectorXd> r, Eigen::Ref<Eigen::Ve
     if (r.data() < z.data() + n_ && z.data() < r.data() + n_)
         throw std::invalid_argument("cpu_solver::apply: input and output overlap");
     precond_._solve_impl(r, z);
+}
+
+double cpu_solver::relative_residual(Eigen::Ref<const Eigen::VectorXd> b,
+                                     Eigen::Ref<const Eigen::VectorXd> x) const {
+    if (b.size() != n_ || x.size() != n_)
+        throw std::invalid_argument("cpu_solver::relative_residual: vector length mismatch");
+    constexpr double infinity = std::numeric_limits<double>::infinity();
+    if (!b.allFinite()) return infinity;
+    if (Ap_.size() != n_) Ap_.resize(n_);
+    { const std::size_t need = detail::part_capacity();
+      if (part_.size() < need) part_.resize(need); }
+    // A non-finite x makes the residual non-finite, which is checked below.
+    if (op_fp32_) (void)parallel_spmv_csr(Lrm_f_, x.data(), Ap_.data(), part_.data());
+    else          (void)parallel_spmv_csr(Lrm_,   x.data(), Ap_.data(), part_.data());
+    Ap_ = b - Ap_;
+    if (!Ap_.allFinite()) return infinity;
+    const double bmax = b.cwiseAbs().maxCoeff(), rmax = Ap_.cwiseAbs().maxCoeff();
+    if (rmax == 0.0) return 0.0;
+    if (bmax == 0.0) return infinity;
+    // Each vector is scaled by the power of two that brings its largest entry
+    // near [1, 2) (exact; the cap keeps the factor finite for subnormals), so
+    // neither sum of squares under- or overflows; the exponents are restored
+    // on the ratio.
+    const int cap = std::numeric_limits<double>::max_exponent - 1;
+    const int eb = std::min(-std::ilogb(bmax), cap), er = std::min(-std::ilogb(rmax), cap);
+    const double bn = (b * std::ldexp(1.0, eb)).squaredNorm();
+    const double rn = (Ap_ * std::ldexp(1.0, er)).squaredNorm();
+    return std::scalbn(std::sqrt(rn / bn), eb - er);
 }
 
 solve_backend detail::select_solve_backend(const solve_options& opts,

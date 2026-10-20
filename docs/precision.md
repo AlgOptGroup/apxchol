@@ -83,6 +83,24 @@ factor off-diagonals must be finite (`std::domain_error` otherwise). Factor and
 operator offsets must fit signed 32-bit integers; operator inputs must have
 fewer than 2^30 stored entries (`std::length_error` otherwise).
 
+## C API exit residual
+
+The C ABI reports `||b - A x|| / ||b||` of the x it returns, recomputed in FP64
+from the caller's operator on both backends; `converged` and NOT_CONVERGED
+follow it. Metal's solve already ends with this check. On the CPU route
+`cpu_solver::relative_residual` evaluates it after the PCG against the operator
+the PCG applies, which is the caller's matrix exactly unless
+`APXCHOL_FP32_OPERATOR` forces a lossy FP32 copy, with power-of-two scaled norms
+that neither underflow nor overflow. It costs one SpMV and a few vector passes
+inside `solve_seconds` and never adds iterations or retries. It can differ from
+the PCG recursion's residual in the last digits, so a solve whose recursion
+stopped just below tol may report NOT_CONVERGED. C++ `solver` and Python keep
+the recursion's residual.
+
+The CPU route solves a b whose largest entry lies outside [2^-256, 2^256] as the
+power-of-two scaled problem (scaled back exactly), so the PCG's unscaled sums of
+squares neither underflow nor overflow; Metal scales its own vectors.
+
 ## Accuracy and configuration choice
 
 FP16 applies to the installed triangular-solve arrays, not the mutable graph

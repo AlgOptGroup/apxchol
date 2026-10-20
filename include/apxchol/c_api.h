@@ -126,8 +126,9 @@ typedef struct apxchol_solve_info {
     uint32_t struct_size;
     int32_t converged;                /* 1 iff relative_residual < tol */
     int64_t iterations;
-    double relative_residual;         /* at exit: CPU the PCG recursion's; METAL
-                                         ||b - A x|| / ||b|| recomputed in fp64 */
+    double relative_residual;         /* ||b - A x|| / ||b|| of the returned x,
+                                         recomputed in fp64 from the original
+                                         operator on both backends */
     double solve_seconds;
 } apxchol_solve_info;
 

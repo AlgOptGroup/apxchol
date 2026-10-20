@@ -54,6 +54,8 @@ The block call solves columns sequentially, reusing the same factor and workspac
 CPU C ABI calls also work in CUDA builds; a C CUDA backend is not exposed.
 `options.factor_storage` selects AUTO, FLOAT16 or FLOAT32 triangular-solve storage;
 `stats.factor_storage` reports the installed format. Factor exports retain native FP32 values.
+Both backends report the original system's FP64 residual of the returned solution
+([C API exit residual](docs/precision.md#c-api-exit-residual)).
 
 ```bash
 pip install apxchol                 # or: pip install -e python
