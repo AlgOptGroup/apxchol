@@ -1692,6 +1692,7 @@ private:
     // plain single-accumulator loop (instruction-identical to the pre-fold fp32
     // kernel); thin: dot_thin (4-way).
     template <class Dir, class V, int Columns, bool Fat, bool Simd = false>
+    [[gnu::always_inline]]
     void solve_row(node_index v, const double* x_in, double* y_out) const {
         const edge_index* ptr = Dir::ptr(*this).data();
         const edge_index p0 = Dir::first(ptr, v);
