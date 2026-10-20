@@ -5,9 +5,11 @@
 
 #include "apxchol/operator_class.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/lowprec.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/sptrsv/omp.h"
 #include "apxchol/version.h"
 #if defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/metal_solver.h"
@@ -264,6 +266,22 @@ apxchol::solve_backend resolve_route(apxchol_backend backend,
     return apxchol::solve_backend::cpu;
 }
 
+/// Classifies the triangular-solve storage request before any setup work. An
+/// unreadable APXCHOL_FACTOR_STORAGE (read when factor_storage is AUTO) is
+/// INVALID_ARGUMENT and FP16 on a CPU route without FP16 support UNSUPPORTED;
+/// both would otherwise surface after the factorization, as other statuses.
+void require_storage(const apxchol::solve_options& so, apxchol::solve_backend route) {
+    bool fp16 = false;
+    try {
+        fp16 = apxchol::detail::resolve_fp16_storage(so.factor_opts.factor_storage, false);
+    } catch (const std::invalid_argument& e) {
+        fail(APXCHOL_STATUS_INVALID_ARGUMENT, std::string("APXCHOL_FACTOR_STORAGE: ") + e.what());
+    }
+    if (route == apxchol::solve_backend::cpu && fp16 && !apxchol::omp_sptrsv::fp16_supported())
+        fail(APXCHOL_STATUS_UNSUPPORTED,
+             "FP16 factor storage on the CPU route requires AVX/F16C or Apple ARM64");
+}
+
 Eigen::SparseMatrix<double> import_csc(std::int64_t n, const std::int64_t* colptr,
                                        const std::int64_t* rowval, const double* nzval,
                                        std::int32_t base) {
@@ -449,6 +467,7 @@ apxchol_status create_solver(int64_t n, const int64_t* colptr, const int64_t* ro
         // Resolved once here; the owner then runs exactly this route.
         so.backend = resolve_route(opt.backend, so, A, adopt);
         const bool gpu = so.backend == apxchol::solve_backend::gpu;
+        require_storage(so, so.backend);
         if (adopt) check_adoptable(factor->F, A);
         try {
             solver->owner = adopt ? std::make_unique<apxchol::solver>(A, factor->F, so)

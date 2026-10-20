@@ -59,11 +59,13 @@ typedef int32_t apxchol_status;
 enum {
     APXCHOL_STATUS_SUCCESS = 0,
     APXCHOL_STATUS_NOT_CONVERGED = 1,
-    APXCHOL_STATUS_INVALID_ARGUMENT = 2, /* pointers, sizes, CSC, option values */
+    APXCHOL_STATUS_INVALID_ARGUMENT = 2, /* pointers, sizes, CSC, option values (and an
+                                            unreadable APXCHOL_FACTOR_STORAGE) */
     APXCHOL_STATUS_INVALID_OPERATOR = 3, /* the operator contract rejected A */
     APXCHOL_STATUS_NO_FACTOR_VALUES = 4, /* factor export without keep_factor_values */
     APXCHOL_STATUS_UNSUPPORTED = 5,      /* backend not built/available; newer struct; an
-                                            operator the backend cannot represent */
+                                            operator the backend cannot represent; FP16
+                                            storage on a CPU route without FP16 support */
     APXCHOL_STATUS_OUT_OF_MEMORY = 6,    /* host or device memory */
     APXCHOL_STATUS_INTERNAL_ERROR = 7
 };

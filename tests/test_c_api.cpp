@@ -551,6 +551,49 @@ TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
     }
 }
 
+TEST(CApi, UnreadableStorageEnvironmentIsAnArgumentErrorBeforeSetup) {
+    const csc64 c = to_csc64(grid_laplacian(8, 7));
+    std::vector<apxchol_backend> backends{APXCHOL_BACKEND_CPU, APXCHOL_BACKEND_AUTO};
+#if defined(APXCHOL_USE_METAL)
+    if (apxchol::metal_solver::available()) backends.push_back(APXCHOL_BACKEND_METAL);
+#endif
+    {
+        // factor_storage AUTO reads the environment; an unreadable value is the
+        // caller's argument error on every route, before the factorization.
+        const scoped_env bad("APXCHOL_FACTOR_STORAGE", "half");
+        auto o = defaults();
+        factor_handle f;
+        ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);  // not read here
+        for (const auto backend : backends) {
+            SCOPED_TRACE(::testing::Message() << "backend=" << backend);
+            o.backend = backend;
+            handle created, adopted;
+            std::string message;
+            EXPECT_EQ(create(c, &o, created, 0, &message), APXCHOL_STATUS_INVALID_ARGUMENT);
+            EXPECT_NE(message.find("APXCHOL_FACTOR_STORAGE"), std::string::npos) << message;
+            EXPECT_EQ(adopt(c, f.f, &o, adopted), APXCHOL_STATUS_INVALID_ARGUMENT);
+        }
+        // An explicit request does not read the environment.
+        o.backend = APXCHOL_BACKEND_CPU;
+        o.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT32;
+        handle h;
+        EXPECT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+    }
+}
+
+TEST(CApi, Fp16OnACpuWithoutItIsUnsupportedBeforeSetup) {
+    const csc64 c = to_csc64(grid_laplacian(8, 7));
+    if (apxchol::omp_sptrsv::fp16_supported())
+        GTEST_SKIP() << "this CPU supports FP16 storage; UNSUPPORTED needs one without AVX/F16C";
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_CPU;
+    o.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT16;
+    handle h;
+    std::string message;
+    EXPECT_EQ(create(c, &o, h, 0, &message), APXCHOL_STATUS_UNSUPPORTED);
+    EXPECT_NE(message.find("FP16"), std::string::npos) << message;
+}
+
 TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
     const Sparse A = grid_laplacian(30, 30);
     const csc64 c = to_csc64(A, 1);
