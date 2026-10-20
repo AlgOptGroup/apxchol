@@ -508,8 +508,8 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
 
 #if defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)
 TEST(Solver, GpuScalarAndBatchedResidualsDescribeReturnedSolutions) {
-#ifdef APXCHOL_64BIT_NODE_INDICES
-    GTEST_SKIP() << "32-bit-node GPU owner required";
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
 #else
 #ifdef APXCHOL_USE_CUDA
     int devices = 0;
