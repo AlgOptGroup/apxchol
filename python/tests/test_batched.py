@@ -176,3 +176,19 @@ def test_one_shot_matrix_solve_and_vector_result_types(solver):
     assert isinstance(vector.residual, float)
     assert isinstance(vector.converged, bool)
     assert vector.x.shape == (A.shape[0],)
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_matrix_rhs_with_mixed_extreme_scales(solver, warm):
+    A, instance = solver
+    scales = np.array([1.0, 1e-200, 1e200, 1e-160, 1e160, 0.0, -1.0, -1e-200, -1e200])
+    exact = np.random.default_rng(42).standard_normal((A.shape[0], len(scales)))
+    B = (A @ exact) * scales
+    result = instance.solve(B, x0=0.25 * exact * scales if warm else None, rtol=1e-9)
+    assert result.converged.all()
+    assert np.isfinite(result.x).all()
+    nonzero = scales != 0
+    normalized_error = (A @ result.x - B)[:, nonzero] / scales[nonzero]
+    normalized_rhs = B[:, nonzero] / scales[nonzero]
+    assert (np.linalg.norm(normalized_error, axis=0) / np.linalg.norm(normalized_rhs, axis=0) < 1e-9).all()
+    assert (result.x[:, ~nonzero] == 0).all()

@@ -26,6 +26,10 @@ struct solve_options {
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
     solve_backend backend = solve_backend::automatic;
+    /// CPU thread ceiling for setup and every solve/apply. Positive values
+    /// override the calling OpenMP task's setting; 0 inherits it.
+    /// Small workloads may use fewer threads.
+    int num_threads = 0;
 };
 
 struct solve_result {
@@ -102,7 +106,8 @@ public:
                const Eigen::VectorXd* x0 = nullptr) const;
     /// Caller-provided-memory variant: writes the solution into `x` (length n,
     /// contents overwritten — pass a warm start via `x0`). Reuses the PCG
-    /// workspace, which can resize when the panel width changes.
+    /// workspace, which can resize when panel width changes. Extreme inputs
+    /// need scaled copies.
     /// The returned result's `x` member is left empty.
     /// Note: like all solve/apply paths, not safe for concurrent calls on the
     /// same cpu_solver (the reused workspace is shared state).
@@ -111,7 +116,7 @@ public:
                        const Eigen::VectorXd* x0 = nullptr) const;
 
     /// One preconditioner application: z = M^{-1} r (forward+back SpTRSV).
-    Eigen::VectorXd apply(const Eigen::VectorXd& r) const { return precond_.solve(r); }
+    Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
 
     const apx_cholesky& preconditioner() const { return precond_; }
     /// Independent RHS columns, with bounded panel workspace. Output must not

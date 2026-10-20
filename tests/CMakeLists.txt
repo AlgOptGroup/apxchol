@@ -160,3 +160,6 @@ if (APXCHOL_DEVICE STREQUAL "CPU")
     apxchol_cli_test(cli_unavailable_gpu_backend_is_rejected path5_sddm 2
         "GPU route requested but GPU support is not built" --backend gpu)
 endif()
+
+apxchol_cli_test(cli_thread_budget path5_sddm 0 "backend: +cpu" --backend cpu --threads 2)
+apxchol_cli_test(cli_negative_thread_budget path5_sddm 105 "not in range" --threads -1)

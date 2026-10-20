@@ -116,7 +116,7 @@ class Solver:
     Options (all keyword-only) are documented on :func:`factorize`.
     """
 
-    def __init__(self, A, *, backend="auto", seed=42, partitioner="block_greedy",
+    def __init__(self, A, *, backend="auto", num_threads=0, seed=42, partitioner="block_greedy",
                  keep_factor=True,
                  factor_storage_dtype=None, **advanced):
         csc = _to_csc(A)
@@ -124,7 +124,7 @@ class Solver:
         self._nnz_A = int(csc.nnz)
         self._keep_factor = bool(keep_factor)
         data = np.ascontiguousarray(csc.data, dtype=np.float64)
-        options = dict(backend=str(backend), seed=int(seed), partitioner=str(partitioner),
+        options = dict(backend=str(backend), num_threads=num_threads, seed=int(seed), partitioner=str(partitioner),
                        keep_factor=self._keep_factor)
         options.update(advanced)
         if factor_storage_dtype is not None:
@@ -298,7 +298,7 @@ class Solver:
         return (2 * self.factor_nnz - self._n) / self._nnz_A
 
 
-def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy",
+def factorize(A, *, backend="auto", num_threads=0, seed=42, partitioner="block_greedy",
               keep_factor=True, factor_storage_dtype=None, **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
@@ -321,6 +321,10 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy",
         otherwise it checks GPU compatibility. Read the resolved choice from
         ``Solver.backend``. An explicit GPU request fails when the
         installed build, hardware or options cannot support it.
+    num_threads : int
+        CPU thread ceiling for setup and every solve/apply. Positive values
+        override the calling OpenMP task's setting; zero inherits it. Small
+        workloads may use fewer threads. Each operation restores the setting.
     seed : int
         RNG seed for the randomized clique sampling (factorization is
         deterministic per seed at one thread only).
@@ -353,7 +357,7 @@ def factorize(A, *, backend="auto", seed=42, partitioner="block_greedy",
         `degree_multiplier` only takes effect when `degree_quantile=0`
         (the quantile cap, default 0.2, replaces it).
     """
-    return Solver(A, backend=backend, seed=seed, partitioner=partitioner,
+    return Solver(A, backend=backend, num_threads=num_threads, seed=seed, partitioner=partitioner,
                   keep_factor=keep_factor, factor_storage_dtype=factor_storage_dtype,
                   **advanced)
 

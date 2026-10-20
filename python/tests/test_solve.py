@@ -672,3 +672,23 @@ def test_solve_into_out_buffer():
         ro = np.zeros(n)
         ro.setflags(write=False)
         s.solve(b, out=ro)
+
+
+@pytest.mark.parametrize("num_threads", [0, 1, 2])
+def test_thread_budget(num_threads):
+    A = sp.diags([-np.ones(31), 3 * np.ones(32), -np.ones(31)], [-1, 0, 1], format="csc")
+    b = np.linspace(1, 2, 32)
+    slv = apxchol.factorize(A, backend="cpu", num_threads=num_threads)
+    for _ in range(2):
+        result = slv.solve(b)
+        assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
+        assert np.isfinite(slv.apply(b)).all()
+        B = np.column_stack([b, -b])
+        result = slv.solve(B)
+        assert np.linalg.norm(A @ result.x - B) / np.linalg.norm(B) < 1e-8
+        assert np.isfinite(slv.apply(B)).all()
+
+
+def test_negative_thread_budget():
+    with pytest.raises(ValueError, match="num_threads must be nonnegative"):
+        apxchol.factorize(sp.eye(4, format="csc"), num_threads=-1)

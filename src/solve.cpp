@@ -1,6 +1,8 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
+#include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/lower_triangle_csr.h"
+#include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/csc_work.h"
 #include <algorithm>
 #include <chrono>
@@ -490,6 +492,7 @@ void for_rhs_panels(const_matrix_view B, matrix_view X, const const_matrix_view 
 cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
+    const detail::thread_budget threads(opts_.num_threads);
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
         throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
@@ -517,6 +520,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        factorization F,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
+    const detail::thread_budget threads(opts_.num_threads);
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
         throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
@@ -652,6 +656,7 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
 void cpu_solver::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd> x,
                             solve_result &res, double tol, int max_iter,
                             const Eigen::VectorXd *x0) const {
+    const detail::thread_budget threads(opts_.num_threads);
     if (x0 && x0->size() != n_)
         throw std::invalid_argument("cpu_solver::solve: x0 length mismatch");
     solve_panel<1>(b.data(), x.data(), &res, res.timings, tol, max_iter, x0 ? x0->data() : nullptr);
@@ -704,6 +709,50 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
         if constexpr (C == 1)
             if (warm[c])
                 norm[c] = Eigen::Map<const Eigen::VectorXd>(b, n).norm();
+    }
+    // Only exceptional columns need scaling; ordinary panels reuse their workspace.
+    std::array<double, C> scales;
+    scales.fill(1.0);
+    bool scaled = false;
+    for (int c = 0; c < C; ++c) {
+        const double squared = warm[c] ? norm[c] * norm[c] : rr[c];
+        if ((std::isnormal(squared) && std::isfinite(rr[c])) || n == 0) continue;
+        const auto rhs = input.col(c);
+        if (!rhs.allFinite())
+            throw std::invalid_argument("CPU solve: RHS and initial guess must be finite");
+        const Eigen::Map<const Input> initial(x0 ? x0 : b, n, C);
+        if (x0 && !initial.col(c).allFinite())
+            throw std::invalid_argument("CPU solve: RHS and initial guess must be finite");
+        double maximum = rhs.cwiseAbs().maxCoeff();
+        if (maximum == 0) continue;
+        if (x0) maximum = std::max(maximum, initial.col(c).cwiseAbs().maxCoeff());
+        scales[c] = detail::gpu_scaling::pow2_scale(maximum);
+        if (scales[c] == 1.0 || !std::isnormal((rhs * scales[c]).squaredNorm()))
+            throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
+        scaled = true;
+    }
+    if (scaled) {
+        Input scaled_b = input, scaled_x0;
+        if (x0) scaled_x0 = Eigen::Map<const Input>(x0, n, C);
+        for (int c = 0; c < C; ++c) {
+            scaled_b.col(c) *= scales[c];
+            if (x0) scaled_x0.col(c) *= scales[c];
+        }
+        solve_panel<C>(scaled_b.data(), x, results, timings, tol, max_iter,
+                        x0 ? scaled_x0.data() : nullptr);
+        for (Eigen::Index i = 0; i < n; ++i)
+            for (int c = 0; c < C; ++c) {
+                double& value = x[i * C + c];
+                const double restored = value / scales[c];
+                if (!std::isfinite(restored))
+                    throw std::overflow_error("CPU solve: solution exceeds the finite range");
+                if (value != 0 && restored == 0)
+                    throw std::underflow_error("CPU solve: solution underflows to zero");
+                value = restored;
+            }
+        return;
+    }
+    for (int c = 0; c < C; c++) {
         results[c].residual = norm[c] == 0 ? 0 : (warm[c] ? std::sqrt(rr[c]) / norm[c] : 1);
         active[c] = norm[c] != 0 && !(warm[c] && results[c].residual < tol);
         prev[c] = 1;
@@ -844,6 +893,10 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     }
 }
 
+Eigen::VectorXd cpu_solver::apply(const Eigen::VectorXd& r) const {
+    const detail::thread_budget threads(opts_.num_threads);
+    return precond_.solve(r);
+}
 
 void cpu_solver::solve(const Eigen::VectorXd& b, solve_result& res,
                        double tol, int max_iter,
@@ -871,6 +924,7 @@ solve_result cpu_solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::Vecto
 
 batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, double tol,
                                            int max_iter, const const_matrix_view *X0) const {
+    const detail::thread_budget threads(opts_.num_threads);
     check_matrix_views(B, X, n_, X0);
     batch_solve_result result;
     result.columns.resize(B.cols());
@@ -886,6 +940,7 @@ batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, d
 }
 
 void cpu_solver::apply(const_matrix_view R, matrix_view Z) const {
+    const detail::thread_budget threads(opts_.num_threads);
     check_matrix_views(R, Z, n_);
     for_rhs_panels(R, Z, nullptr, z_, panel_x_,
                    [&]<int C>(Eigen::Index, const double *r, double *z, const double *) {
@@ -960,10 +1015,12 @@ struct solver::impl {
     owner_type owner;
     double tol;
     int max_iter;
+    int num_threads;
 
     static owner_type make_owner(const Eigen::SparseMatrix<double>& A,
                                  const solve_options& opts, checkpoint* cp,
                                  factorization* F) {
+        const detail::thread_budget threads(opts.num_threads);
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
@@ -988,7 +1045,8 @@ struct solver::impl {
 
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
          checkpoint* cp, factorization* F = nullptr)
-        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter) {
+        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter),
+          num_threads(opts.num_threads) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&owner))
             print_sptrsv_banner<solve_backend::gpu>(gpu->preconditioner().trsv().fp16());
@@ -1007,6 +1065,7 @@ solver& solver::operator=(solver&&) noexcept = default;
 
 void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
                    int max_iter, const Eigen::VectorXd* x0) const {
+    const detail::thread_budget threads(impl_->num_threads);
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     std::visit([&](auto& owner) {
         owner.solve(b, result, tol < 0 ? impl_->tol : tol,
@@ -1034,6 +1093,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
 }
 
 Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
+    const detail::thread_budget threads(impl_->num_threads);
     if (r.size() != rows()) throw std::invalid_argument("solver::apply: RHS length mismatch");
     return std::visit([&](auto& owner) -> Eigen::VectorXd {
         if constexpr (requires { owner.apply(r); }) return owner.apply(r);
@@ -1042,6 +1102,7 @@ Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
 }
 batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, double tol, int max_iter,
                                        const const_matrix_view *X0) const {
+    const detail::thread_budget threads(impl_->num_threads);
     check_matrix_views(B, X, rows(), X0);
     if (const auto *cpu = std::get_if<cpu_solver>(&impl_->owner))
         return cpu->solve(B, X, tol, max_iter, X0);
@@ -1087,6 +1148,7 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, doubl
 }
 
 void solver::apply(const_matrix_view R, matrix_view Z) const {
+    const detail::thread_budget threads(impl_->num_threads);
     check_matrix_views(R, Z, rows());
     if (const auto *cpu = std::get_if<cpu_solver>(&impl_->owner))
         return cpu->apply(R, Z);
