@@ -1,5 +1,6 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
+#include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/lower_triangle_csr.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/csc_work.h"
@@ -428,6 +429,7 @@ inline void center_x(double* x, Eigen::Index n, double* part) {
 cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
+    const detail::thread_budget threads(opts_.num_threads);
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
         throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
@@ -455,6 +457,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        factorization F,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
+    const detail::thread_budget threads(opts_.num_threads);
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
         throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
@@ -590,6 +593,7 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
 void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                             solve_result& res, double tol, int max_iter,
                             const Eigen::VectorXd* x0) const {
+    const detail::thread_budget threads(opts_.num_threads);
     if (tol < 0.0)    tol = opts_.tol;
     if (max_iter < 0) max_iter = opts_.max_iter;
 
@@ -808,6 +812,11 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     }
 }
 
+Eigen::VectorXd cpu_solver::apply(const Eigen::VectorXd& r) const {
+    const detail::thread_budget threads(opts_.num_threads);
+    return precond_.solve(r);
+}
+
 void cpu_solver::solve(const Eigen::VectorXd& b, solve_result& res,
                        double tol, int max_iter,
                        const Eigen::VectorXd* x0) const {
@@ -899,10 +908,12 @@ struct solver::impl {
     owner_type owner;
     double tol;
     int max_iter;
+    int num_threads;
 
     static owner_type make_owner(const Eigen::SparseMatrix<double>& A,
                                  const solve_options& opts, checkpoint* cp,
                                  factorization* F) {
+        const detail::thread_budget threads(opts.num_threads);
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
@@ -927,7 +938,8 @@ struct solver::impl {
 
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
          checkpoint* cp, factorization* F = nullptr)
-        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter) {
+        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter),
+          num_threads(opts.num_threads) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&owner))
             print_sptrsv_banner<solve_backend::gpu>(gpu->preconditioner().trsv().fp16());
@@ -946,6 +958,7 @@ solver& solver::operator=(solver&&) noexcept = default;
 
 void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
                    int max_iter, const Eigen::VectorXd* x0) const {
+    const detail::thread_budget threads(impl_->num_threads);
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     std::visit([&](auto& owner) {
         owner.solve(b, result, tol < 0 ? impl_->tol : tol,
@@ -973,6 +986,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
 }
 
 Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
+    const detail::thread_budget threads(impl_->num_threads);
     if (r.size() != rows()) throw std::invalid_argument("solver::apply: RHS length mismatch");
     return std::visit([&](auto& owner) -> Eigen::VectorXd {
         if constexpr (requires { owner.apply(r); }) return owner.apply(r);

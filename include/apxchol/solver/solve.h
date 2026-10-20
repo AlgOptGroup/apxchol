@@ -26,6 +26,10 @@ struct solve_options {
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
     solve_backend backend = solve_backend::automatic;
+    /// CPU thread ceiling for setup and every solve/apply. Positive values
+    /// override the calling OpenMP task's setting; 0 inherits it.
+    /// Small workloads may use fewer threads.
+    int num_threads = 0;
 };
 
 struct solve_result {
@@ -100,7 +104,7 @@ public:
                        const Eigen::VectorXd* x0 = nullptr) const;
 
     /// One preconditioner application: z = M^{-1} r (forward+back SpTRSV).
-    Eigen::VectorXd apply(const Eigen::VectorXd& r) const { return precond_.solve(r); }
+    Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
 
     const apx_cholesky& preconditioner() const { return precond_; }
     Eigen::Index rows() const { return n_; }
