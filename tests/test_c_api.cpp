@@ -864,6 +864,85 @@ TEST(CApi, BlockByteSizeOverflowIsAnArgumentError) {
     EXPECT_NE(std::string(err.data()).find("overflows"), std::string::npos) << err.data();
 }
 
+TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
+    // The CPU PCG's unscaled sums of squares underflow for |b| ~ 2^-700 (it
+    // used to report x = 0 as converged) and overflow for 2^700. Power-of-two
+    // scaling is exact, so the solution must be the scaled reference bitwise.
+    for (const double shift : {0.0, 0.05}) {
+        SCOPED_TRACE(::testing::Message() << "shift=" << shift);
+        const csc64 c = to_csc64(grid_laplacian(12, 12, shift));
+        auto o = defaults();
+        o.backend = APXCHOL_BACKEND_CPU;
+        o.threads = 1;
+        handle h;
+        ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+        const Eigen::VectorXd b = compatible_rhs(c.n, 2);
+        Eigen::VectorXd x_ref(c.n);
+        auto ref = info_struct();
+        ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x_ref.data(), -1.0, -1, &ref,
+                                       nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        for (const int e : {-700, 700}) {
+            SCOPED_TRACE(::testing::Message() << "scale=2^" << e);
+            const Eigen::VectorXd bs = b.unaryExpr([e](double v) { return std::ldexp(v, e); });
+            const Eigen::VectorXd xs = x_ref.unaryExpr([e](double v) { return std::ldexp(v, e); });
+            Eigen::VectorXd x(c.n);
+            auto info = info_struct();
+            ASSERT_EQ(apxchol_solver_solve(h.s, bs.data(), nullptr, x.data(), -1.0, -1, &info,
+                                           nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            EXPECT_TRUE(same_bytes(x.data(), xs.data(), x.size()));
+            EXPECT_EQ(info.iterations, ref.iterations);
+            EXPECT_EQ(info.relative_residual, ref.relative_residual);
+            // No iterations: the residual of x = 0 is exactly 1 at any scale.
+            info = info_struct();
+            EXPECT_EQ(apxchol_solver_solve(h.s, bs.data(), nullptr, x.data(), -1.0, 0, &info,
+                                           nullptr, 0),
+                      APXCHOL_STATUS_NOT_CONVERGED);
+            EXPECT_EQ(info.relative_residual, 1.0);
+        }
+        // Mixed scales in one block: every column is its own scaled problem.
+        Eigen::MatrixXd B(c.n, 3), X(c.n, 3);
+        B.col(0) = b.unaryExpr([](double v) { return std::ldexp(v, -700); });
+        B.col(1) = b;
+        B.col(2) = b.unaryExpr([](double v) { return std::ldexp(v, 700); });
+        ASSERT_EQ(apxchol_solver_solve_block(h.s, 3, B.data(), nullptr, X.data(), -1.0, -1,
+                                             nullptr, nullptr, nullptr, nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        for (int col = 0; col < 3; ++col) {
+            const int e = (col - 1) * 700;
+            const Eigen::VectorXd xs = x_ref.unaryExpr([e](double v) { return std::ldexp(v, e); });
+            EXPECT_TRUE(same_bytes(X.col(col).data(), xs.data(), xs.size())) << col;
+        }
+    }
+}
+
+TEST(CApi, SubnormalRightHandSideIsSolvedAndAnOutOfScaleGuessIsUnsupported) {
+    const csc64 c = to_csc64(grid_laplacian(9, 9, 0.1));
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_CPU;
+    handle h;
+    ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+    const Eigen::VectorXd b =
+        compatible_rhs(c.n, 3).unaryExpr([](double v) { return std::ldexp(v, -1060); });
+    ASSERT_GT(b.cwiseAbs().maxCoeff(), 0.0);
+    ASSERT_LT(b.cwiseAbs().maxCoeff(), std::numeric_limits<double>::min());
+    Eigen::VectorXd x(c.n);
+    auto info = info_struct();
+    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_GT(info.iterations, 0);
+    EXPECT_GT(x.cwiseAbs().maxCoeff(), 0.0);
+
+    const Eigen::VectorXd normal = compatible_rhs(c.n, 3);
+    const Eigen::VectorXd huge_guess = Eigen::VectorXd::Constant(c.n, 0x1p300);
+    std::array<char, 256> err{};
+    EXPECT_EQ(apxchol_solver_solve(h.s, normal.data(), huge_guess.data(), x.data(), -1.0, -1,
+                                   nullptr, err.data(), err.size()),
+              APXCHOL_STATUS_UNSUPPORTED);
+    EXPECT_NE(std::string(err.data()).find("x0"), std::string::npos) << err.data();
+}
+
 TEST(CApi, StatsReportLumpingSddmAndFactorSize) {
     // SDDM with one mirrored positive off-diagonal pair: lumpable.
     Sparse A = grid_laplacian(4, 4, 0.5);
@@ -1629,6 +1708,30 @@ TEST(CApi, MetalLaplacianApplyCentresEveryApplication) {
         ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z.data(), nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         EXPECT_TRUE(same_bytes(z.data(), z0.data(), z.size())) << i;
+    }
+}
+
+TEST(CApi, MetalExtremeScaleRightHandSidesConverge) {
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    // Metal scales its own vectors; the C ABI leaves them to it.
+    const csc64 c = to_csc64(grid_laplacian(14, 13));
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_METAL;
+    handle h;
+    ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+    const Eigen::VectorXd b = compatible_rhs(c.n, 2);
+    Eigen::VectorXd x_ref(c.n), x(c.n);
+    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x_ref.data(), -1.0, -1, nullptr,
+                                   nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    for (const int e : {-700, 700}) {
+        const Eigen::VectorXd bs = b.unaryExpr([e](double v) { return std::ldexp(v, e); });
+        ASSERT_EQ(apxchol_solver_solve(h.s, bs.data(), nullptr, x.data(), -1.0, -1, nullptr,
+                                       nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS)
+            << e;
+        const Eigen::VectorXd back = x.unaryExpr([e](double v) { return std::ldexp(v, -e); });
+        EXPECT_LE((back - x_ref).norm(), 1e-9 * x_ref.norm()) << e;
     }
 }
 

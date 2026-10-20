@@ -6,6 +6,7 @@
 #include "apxchol/operator_class.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/lowprec.h"
+#include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
@@ -308,6 +309,28 @@ void load_vector(const double* source, Eigen::Index n, Eigen::VectorXd& target,
     target = Eigen::Map<const Eigen::VectorXd>(source, n);
 }
 
+/// The CPU PCG forms unscaled sums of squares of b and of residuals, which
+/// underflow or overflow far from unit scale: a b whose entries are all below
+/// ~1e-162 reads as zero (x = 0 reported as converged) and one above ~1e154
+/// runs NaN iterations. Outside [2^-256, 2^256] the CPU route therefore
+/// solves with b and x0 scaled by the power of two that brings max|b| into
+/// [1, 2), as the CUDA route scales its inputs (detail/gpu_scaling.h), and
+/// scales x back. Power-of-two scaling commutes with every rounding of the
+/// solve while values stay normal, so the result is the scaled-back solution
+/// of the scaled problem, and a b inside the window is solved exactly as
+/// before (scale 1). x0 must lie within 2^256 of b's scale.
+double rhs_scale(const Eigen::VectorXd& b, const Eigen::VectorXd* x0) {
+    constexpr double lo = 0x1p-256, hi = 0x1p256;
+    const double mb = b.cwiseAbs().maxCoeff();
+    const double mx = x0 != nullptr ? x0->cwiseAbs().maxCoeff() : 0.0;
+    if (mb == 0.0 || (mb >= lo && mb <= hi && mx <= hi)) return 1.0;
+    const double s = apxchol::detail::gpu_scaling::pow2_scale(mb);
+    if (!(mx * s <= hi))
+        fail(APXCHOL_STATUS_UNSUPPORTED,
+             "x0 exceeds b's scale by more than 2^256; the CPU solve cannot represent both");
+    return s;
+}
+
 /// The factorization's own SDDM test (make_graph in graph/conversions.h): a
 /// column whose diagonal exceeds its off-diagonal weight by more than 1e-12
 /// of the diagonal, summed in the same order.
@@ -416,7 +439,7 @@ struct apxchol_solver {
     apxchol_options options{};
     std::unique_ptr<apxchol::solver> owner;
     const apxchol::cpu_solver* cpu = nullptr;  // owner's CPU route, if it is one
-    Eigen::VectorXd b_buffer, x0_buffer;
+    Eigen::VectorXd b_buffer, x0_buffer, scaled_buffer;
     double setup_seconds = 0.0;
     std::int32_t setup_max_threads = 1;
 
@@ -427,12 +450,22 @@ struct apxchol_solver {
         return max_iter < 0 ? options.max_iter : max_iter;
     }
 
+    /// One solve into caller memory. b_buffer keeps the caller's b (x may
+    /// alias it); the CPU route solves a power-of-two scaled copy when b's
+    /// scale needs one (rhs_scale). Metal scales its own vectors.
     apxchol::solve_result solve_one(const double* b, const double* x0, double* x,
                                     double tol, int max_iter) {
         load_vector(b, n(), b_buffer, "b");
         if (x0 != nullptr) load_vector(x0, n(), x0_buffer, "x0");
         Eigen::Map<Eigen::VectorXd> out(x, n());
-        return owner->solve(b_buffer, out, tol, max_iter, x0 != nullptr ? &x0_buffer : nullptr);
+        const Eigen::VectorXd* guess = x0 != nullptr ? &x0_buffer : nullptr;
+        const double s = cpu != nullptr ? rhs_scale(b_buffer, guess) : 1.0;
+        if (s == 1.0) return owner->solve(b_buffer, out, tol, max_iter, guess);
+        scaled_buffer = s * b_buffer;
+        if (guess != nullptr) x0_buffer *= s;
+        const apxchol::solve_result r = owner->solve(scaled_buffer, out, tol, max_iter, guess);
+        out *= 1.0 / s;
+        return r;
     }
 };
 

@@ -65,7 +65,8 @@ enum {
     APXCHOL_STATUS_NO_FACTOR_VALUES = 4, /* factor export without keep_factor_values */
     APXCHOL_STATUS_UNSUPPORTED = 5,      /* backend not built/available; newer struct; an
                                             operator the backend cannot represent; FP16
-                                            storage on a CPU route without FP16 support */
+                                            storage on a CPU route without FP16 support;
+                                            an x0 far beyond b's scale (CPU) */
     APXCHOL_STATUS_OUT_OF_MEMORY = 6,    /* host or device memory */
     APXCHOL_STATUS_INTERNAL_ERROR = 7
 };
@@ -170,7 +171,10 @@ APXCHOL_C_API apxchol_status apxchol_solver_create(
 APXCHOL_C_API void apxchol_solver_destroy(apxchol_solver* solver); /* NULL is a no-op */
 
 /* One right-hand side. tol < 0 / max_iter < 0 select the handle's options;
- * x0 NULL starts from zero. info is nullable. */
+ * x0 NULL starts from zero. info is nullable. The CPU route solves a b whose
+ * largest entry lies outside [2^-256, 2^256] as the exactly power-of-two
+ * scaled problem (Metal scales internally); an x0 more than 2^256 times
+ * larger than b's scale is UNSUPPORTED there. */
 APXCHOL_C_API apxchol_status apxchol_solver_solve(
     apxchol_solver* solver, const double* b, const double* x0, double* x,
     double tol, int32_t max_iter, apxchol_solve_info* info,
