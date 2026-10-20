@@ -129,15 +129,6 @@ APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
     return total;
 }
 
-template<int Lanes, class Math, class Index, class Entry, class Offset>
-APXCHOL_GPU_FUNCTION typename Math::wide step(
-    operation op, Math math, workspace<typename Math::wide, typename Math::scalar> v,
-    APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
-    APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const Entry) lo,
-    pcg_work<Index> work, unsigned lane) {
-    return step_columns<Lanes, 1>(op, math, v, ptr, col, hi, lo, work, lane).values[0];
-}
-
 template<unsigned Columns, class Math, class Index>
 APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> sum_partials_columns(
     Math math, APXCHOL_GPU_BUFFER(const typename Math::wide) partial, pcg_work<Index> work) {
@@ -146,12 +137,6 @@ APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> sum_partials_colu
         for (unsigned q = 0; q < Columns; ++q)
             sum.values[q] = math.add(sum.values[q], partial[i * Columns + q]);
     return sum;
-}
-
-template<class Math, class Index>
-APXCHOL_GPU_FUNCTION typename Math::wide sum_partials(
-    Math math, APXCHOL_GPU_BUFFER(const typename Math::wide) partial, pcg_work<Index> work) {
-    return sum_partials_columns<1>(math, partial, work).values[0];
 }
 
 } } }

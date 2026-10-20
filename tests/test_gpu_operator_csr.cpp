@@ -443,7 +443,7 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
             std::array<double, 2> residuals{};
             for (int limit : {0, 2, 100}) {
                 SCOPED_TRACE(limit);
-                solver.solve_pair(preconditioner, rhs, output, 1e-12, limit,
+                solver.solve_panel<2>(preconditioner, rhs, output, 1e-12, limit,
                                   counts, residuals, laplacian, &warm);
                 for (int q = 0; q < 2; ++q)
                     EXPECT_NEAR(residuals[q], independent_residual(a, rhs.col(q), output.col(q)), 2e-14);
@@ -487,7 +487,7 @@ TEST(GpuSolveHonesty, ResidualIncludesRoundingWhenRestoringSubnormalSolutions) {
     b.col(1).setOnes();
     std::array<int, 2> iterations{};
     std::array<double, 2> residuals{};
-    solver.solve_pair(preconditioner, b, output, 1e-12, 10, iterations, residuals, false);
+    solver.solve_panel<2>(preconditioner, b, output, 1e-12, 10, iterations, residuals, false);
     EXPECT_GT(residuals[0], 1e-3);
     for (int q = 0; q < 2; ++q)
         EXPECT_NEAR(residuals[q], independent_residual(a, b.col(q), output.col(q)), 2e-14);
@@ -547,7 +547,7 @@ TEST(GpuSolveHonesty, FinalResidualDoesNotSquareAwayTinyErrors) {
         initial.col(1).setZero();
         std::array<int, 2> counts{};
         std::array<double, 2> residuals{};
-        solver.solve_pair(preconditioner, rhs, output, 1e-250, 0, counts, residuals, false, &initial);
+        solver.solve_panel<2>(preconditioner, rhs, output, 1e-250, 0, counts, residuals, false, &initial);
         EXPECT_GT(residuals[0], 0);
         EXPECT_DOUBLE_EQ(residuals[0] / expected, 1.0);
         EXPECT_DOUBLE_EQ(residuals[1], 0.0);
@@ -584,7 +584,7 @@ TEST(GpuSolveHonesty, FinalResidualDoesNotOverflowBeforeNormalization) {
     initial.col(1).setZero();
     std::array<int, 2> counts{};
     std::array<double, 2> residuals{};
-    solver.solve_pair(preconditioner, rhs, output, 1e-8, 0, counts, residuals, false, &initial);
+    solver.solve_panel<2>(preconditioner, rhs, output, 1e-8, 0, counts, residuals, false, &initial);
     EXPECT_DOUBLE_EQ(residuals[0] / (coefficient / 2), 1.0);
     EXPECT_DOUBLE_EQ(residuals[1], 0.0);
     EXPECT_EQ(counts, (std::array<int, 2>{0, 0}));

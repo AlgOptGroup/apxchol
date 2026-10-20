@@ -118,15 +118,6 @@ public:
         residual_out = residuals[0];
     }
 
-    template<class Precond, class Input, class Output>
-    void solve_pair(const Precond& precond, const Input& b_host, Output& x_host,
-                    double tol, int max_iter, std::array<int, 2>& iterations,
-                    std::array<double, 2>& residuals, bool laplacian,
-                    const Input* x0 = nullptr, int stagnation_window = 0) {
-        solve_columns<2>(precond, b_host, x_host, tol, max_iter, iterations,
-                         residuals, laplacian, x0, stagnation_window);
-    }
-
     template<unsigned Columns, class Precond, class Input, class Output>
     void solve_panel(const Precond& precond, const Input& b_host, Output& x_host,
                     double tol, int max_iter, std::array<int, Columns>& iterations,
