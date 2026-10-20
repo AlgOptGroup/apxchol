@@ -1197,10 +1197,10 @@ private:
     // stay in topological order, while cross-lane dependencies wait for the
     // staleness-2 frontier. Called collectively by the hybrid's OpenMP team.
 #ifdef __x86_64__
-    template <class Dir, int Columns>
+    template <class Dir, class V, int Columns>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
     void solve_critical_fma(const double* x_in, double* y_out) const {
-        solve_critical_team_impl<Dir, _Float16, Columns>(x_in, y_out);
+        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out);
     }
 
     template <class Dir, int Columns>
@@ -1213,10 +1213,11 @@ private:
     template <class Dir, class V, int Columns = 1>
     void solve_critical_team(const double* x_in, double* y_out) const {
 #if defined(__x86_64__) && !(defined(__AVX2__) && defined(__F16C__) && defined(__FMA__))
-        if constexpr (std::is_same_v<V, _Float16>) {
+        if constexpr (std::is_same_v<V, _Float16> || Columns > 1) {
             if (simd_fp16_kernel())
-                return solve_critical_fma<Dir, Columns>(x_in, y_out);
-            return solve_critical_fp16<Dir, Columns>(x_in, y_out);
+                return solve_critical_fma<Dir, V, Columns>(x_in, y_out);
+            if constexpr (std::is_same_v<V, _Float16>)
+                return solve_critical_fp16<Dir, Columns>(x_in, y_out);
         }
 #endif
         solve_critical_team_impl<Dir, V, Columns>(x_in, y_out);
@@ -1348,10 +1349,10 @@ private:
 #ifdef __x86_64__
     // Enter the target once per level. Flatten then inlines the row arithmetic
     // and matching dot kernel, keeping calls and feature checks out of the rows.
-    template <class Dir, int Columns, bool Fat, bool Parallel, class Level>
+    template <class Dir, class V, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
     void solve_level_rows_simd(const Level& level, const double* x_in, double* y_out) const {
-        solve_level_rows_impl<Dir, _Float16, Columns, Fat, Fat, Parallel>(level, x_in, y_out);
+        solve_level_rows_impl<Dir, V, Columns, Fat, Fat, Parallel>(level, x_in, y_out);
     }
 
     template <class Dir, int Columns, bool Fat, bool Parallel, class Level>
@@ -1368,11 +1369,12 @@ private:
         if constexpr (std::is_same_v<V, _Float16>)
             return solve_level_rows_impl<Dir, V, Columns, Fat, Fat, Parallel>(level, x_in, y_out);
 #elif defined(__x86_64__)
-        if constexpr (std::is_same_v<V, _Float16>) {
+        if constexpr (std::is_same_v<V, _Float16> || Columns > 1) {
             if (simd_fp16_kernel())
-                return solve_level_rows_simd<Dir, Columns, Fat, Parallel>(level, x_in, y_out);
-            return solve_level_rows_f16c<Dir, Columns, Fat, Parallel>(level, x_in, y_out);
-        } else
+                return solve_level_rows_simd<Dir, V, Columns, Fat, Parallel>(level, x_in, y_out);
+            if constexpr (std::is_same_v<V, _Float16>)
+                return solve_level_rows_f16c<Dir, Columns, Fat, Parallel>(level, x_in, y_out);
+        }
 #endif
         solve_level_rows_impl<Dir, V, Columns, Fat, false, Parallel>(level, x_in, y_out);
     }
