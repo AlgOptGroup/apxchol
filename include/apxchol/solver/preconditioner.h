@@ -479,7 +479,7 @@ private:
         #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
         for (Eigen::Index v = 0; v < n; ++v)
             for (int c = 0; c < Columns; ++c)
-                z[P[v] * Columns + c] = b[v * Columns + c] - (centers[c] ? mean[c] : 0.0);
+                z[std::size_t(P[v]) * Columns + c] = b[v * Columns + c] - (centers[c] ? mean[c] : 0.0);
         if (cp_) (*cp_)("permute");
 
         double* out;
@@ -514,7 +514,7 @@ private:
             std::array<std::array<double, Columns>, 4> sums{};
             auto gather = [&](Eigen::Index v, auto& sum) {
                 for (int c = 0; c < Columns; ++c) {
-                    const double value = out[P[v] * Columns + c] - shift[c];
+                    const double value = out[std::size_t(P[v]) * Columns + c] - shift[c];
                     z[v * Columns + c] = value;
                     sum[c] += b[v * Columns + c] * value;
                 }
@@ -524,7 +524,7 @@ private:
                 std::array<std::array<double, Columns>, 4> values{};
                 for (int k = 0; k < 4; ++k)
                     for (int c = 0; c < Columns; ++c)
-                        values[k][c] = out[P[v + k] * Columns + c] - shift[c];
+                        values[k][c] = out[std::size_t(P[v + k]) * Columns + c] - shift[c];
                 for (int k = 0; k < 4; ++k)
                     for (int c = 0; c < Columns; ++c)
                         z[(v + k) * Columns + c] = values[k][c];
