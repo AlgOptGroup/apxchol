@@ -21,6 +21,8 @@ _Static_assert(offsetof(apxchol_options, degree_quantile) == 48, "apxchol_option
 _Static_assert(offsetof(apxchol_options, exact_clique_max_degree) == 56, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, omp_threshold) == 64, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, factor_storage) == 72, "apxchol_options layout");
+_Static_assert(APXCHOL_BACKEND_CPU == 0 && APXCHOL_BACKEND_METAL == 1 && APXCHOL_BACKEND_AUTO == 2,
+               "backend values");
 _Static_assert(APXCHOL_FACTOR_STORAGE_AUTO == 0, "automatic factor storage value");
 _Static_assert(APXCHOL_FACTOR_STORAGE_FLOAT16 == 16, "float16 factor storage value");
 _Static_assert(APXCHOL_FACTOR_STORAGE_FLOAT32 == 32, "float32 factor storage value");
@@ -73,7 +75,8 @@ int main(void) {
 
     apxchol_options options;
     if (apxchol_options_default(&options, sizeof options) != APXCHOL_STATUS_SUCCESS) return 1;
-    if (options.factor_storage != APXCHOL_FACTOR_STORAGE_AUTO) return 1;
+    if (options.factor_storage != APXCHOL_FACTOR_STORAGE_AUTO ||
+        options.backend != APXCHOL_BACKEND_AUTO) return 1;
     options.tol = 1e-10;
     options.threads = 1;
     options.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT32;

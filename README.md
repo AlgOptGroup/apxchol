@@ -47,7 +47,9 @@ Laplacians use their compatible subspace; SDDM operators retain a full factor.
 
 The `apxchol_c` target provides an exception-safe [C ABI](include/apxchol/c_api.h)
 with reusable solver and factor handles, factor export and explicit status codes.
-It supports CPU solves and, with `APXCHOL_DEVICE=METAL`, `APXCHOL_BACKEND_METAL`.
+It supports CPU solves and, with `APXCHOL_DEVICE=METAL`, `APXCHOL_BACKEND_METAL`;
+the default `APXCHOL_BACKEND_AUTO` chooses the route as `apxchol::solver` does and
+`stats.backend` reports it.
 The block call solves columns sequentially, reusing the same factor and workspace.
 CPU C ABI calls also work in CUDA builds; a C CUDA backend is not exposed.
 `options.factor_storage` selects AUTO, FLOAT16 or FLOAT32 triangular-solve storage;

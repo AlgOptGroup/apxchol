@@ -5,6 +5,7 @@
 
 #include "apxchol/operator_class.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/version.h"
@@ -150,7 +151,9 @@ apxchol_options default_options() {
     const apxchol::solve_options so;
     apxchol_options o{};
     o.struct_size = sizeof(apxchol_options);
-    o.backend = APXCHOL_BACKEND_CPU;
+    o.backend = so.backend == apxchol::solve_backend::cpu ? APXCHOL_BACKEND_CPU
+              : so.backend == apxchol::solve_backend::gpu ? APXCHOL_BACKEND_METAL
+                                                            : APXCHOL_BACKEND_AUTO;
     o.tol = so.tol;
     o.max_iter = so.max_iter;
     o.stagnation_window = so.stagnation_window;
@@ -181,8 +184,9 @@ apxchol_options read_options(const apxchol_options* options) {
 /// during create can only come from the operator contract.
 apxchol::solve_options to_solve_options(const apxchol_options& o) {
     require_struct_size(o.struct_size, sizeof(apxchol_options), "options");
-    require(o.backend == APXCHOL_BACKEND_CPU || o.backend == APXCHOL_BACKEND_METAL,
-            "options.backend must be APXCHOL_BACKEND_CPU or APXCHOL_BACKEND_METAL");
+    require(o.backend == APXCHOL_BACKEND_CPU || o.backend == APXCHOL_BACKEND_METAL ||
+                o.backend == APXCHOL_BACKEND_AUTO,
+            "options.backend must be APXCHOL_BACKEND_CPU, METAL or AUTO");
     require(std::isfinite(o.tol) && o.tol > 0.0, "options.tol must be finite and positive");
     require(o.max_iter >= 0, "options.max_iter must be non-negative");
     require(o.stagnation_window >= 0, "options.stagnation_window must be non-negative");
@@ -207,8 +211,9 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
                 o.factor_storage == APXCHOL_FACTOR_STORAGE_FLOAT32,
             "options.factor_storage must be AUTO, FLOAT16 or FLOAT32");
     apxchol::solve_options so;
-    so.backend = o.backend == APXCHOL_BACKEND_CPU
-        ? apxchol::solve_backend::cpu : apxchol::solve_backend::gpu;
+    so.backend = o.backend == APXCHOL_BACKEND_CPU ? apxchol::solve_backend::cpu
+               : o.backend == APXCHOL_BACKEND_METAL ? apxchol::solve_backend::gpu
+                                                    : apxchol::solve_backend::automatic;
     so.factor_opts.factor_storage = o.factor_storage == APXCHOL_FACTOR_STORAGE_AUTO
         ? apxchol::factor_storage_type::automatic
         : o.factor_storage == APXCHOL_FACTOR_STORAGE_FLOAT16
@@ -230,6 +235,7 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
 
 /// UNSUPPORTED unless this build has the backend and (for METAL) a device.
 void require_backend(apxchol_backend backend) {
+    if (backend == APXCHOL_BACKEND_AUTO) return;
 #if defined(APXCHOL_USE_METAL)
     if (backend == APXCHOL_BACKEND_METAL && !apxchol::metal_solver::available())
         fail(APXCHOL_STATUS_UNSUPPORTED, "no usable Metal device for APXCHOL_BACKEND_METAL");
@@ -238,6 +244,24 @@ void require_backend(apxchol_backend backend) {
         fail(APXCHOL_STATUS_UNSUPPORTED,
              "this apxchol build has no Metal backend (configure with -DAPXCHOL_DEVICE=METAL)");
 #endif
+}
+
+/// The route of a new solver handle. AUTO follows apxchol::solver: CPU when
+/// adopting a host factor, otherwise detail::select_solve_backend in Metal
+/// builds. The C ABI exposes no CUDA route, so other builds resolve to CPU.
+apxchol::solve_backend resolve_route(apxchol_backend backend,
+                                     const apxchol::solve_options& so,
+                                     const Eigen::SparseMatrix<double>& A, bool adopt) {
+    if (backend == APXCHOL_BACKEND_CPU) return apxchol::solve_backend::cpu;
+    if (backend == APXCHOL_BACKEND_METAL) return apxchol::solve_backend::gpu;
+#if defined(APXCHOL_USE_METAL)
+    if (!adopt) return apxchol::detail::select_solve_backend(so, &A);
+#else
+    (void)so;
+    (void)A;
+#endif
+    (void)adopt;
+    return apxchol::solve_backend::cpu;
 }
 
 Eigen::SparseMatrix<double> import_csc(std::int64_t n, const std::int64_t* colptr,
@@ -410,7 +434,7 @@ apxchol_status create_solver(int64_t n, const int64_t* colptr, const int64_t* ro
         require(out_solver != nullptr, "out_solver is NULL");
         require(!adopt || factor != nullptr, "factor is NULL");
         const apxchol_options opt = read_options(options);
-        const apxchol::solve_options so = to_solve_options(opt);
+        apxchol::solve_options so = to_solve_options(opt);
         require_backend(opt.backend);
         const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
         if (adopt)
@@ -422,15 +446,18 @@ apxchol_status create_solver(int64_t n, const int64_t* colptr, const int64_t* ro
         const thread_scope scope(opt.threads);
         solver->setup_max_threads = max_threads();
         const auto start = clock_type::now();
+        // Resolved once here; the owner then runs exactly this route.
+        so.backend = resolve_route(opt.backend, so, A, adopt);
+        const bool gpu = so.backend == apxchol::solve_backend::gpu;
         if (adopt) check_adoptable(factor->F, A);
         try {
             solver->owner = adopt ? std::make_unique<apxchol::solver>(A, factor->F, so)
                                   : std::make_unique<apxchol::solver>(A, so);
         } catch (const std::domain_error& e) {
-            if (opt.backend == APXCHOL_BACKEND_METAL) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+            if (gpu) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
             throw;
         } catch (const std::length_error& e) {
-            if (opt.backend == APXCHOL_BACKEND_METAL) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+            if (gpu) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
             throw;
         }
         solver->setup_seconds = seconds_since(start);
@@ -458,7 +485,7 @@ int32_t apxchol_openmp_enabled(void) {
 int32_t apxchol_get_max_threads(void) { return max_threads(); }
 
 int32_t apxchol_backend_available(apxchol_backend backend) {
-    if (backend == APXCHOL_BACKEND_CPU) return 1;
+    if (backend == APXCHOL_BACKEND_CPU || backend == APXCHOL_BACKEND_AUTO) return 1;
 #if defined(APXCHOL_USE_METAL)
     if (backend == APXCHOL_BACKEND_METAL) return apxchol::metal_solver::available() ? 1 : 0;
 #endif
@@ -581,8 +608,10 @@ apxchol_status apxchol_solver_stats(const apxchol_solver* solver, apxchol_stats*
     const apxchol_status s = begin_stats(stats);
     if (s != APXCHOL_STATUS_SUCCESS) return s;
     if (solver == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
-    write_stats(solver->factor(), solver->options.backend, solver->n(), solver->setup_seconds,
-                solver->setup_max_threads, stats);
+    write_stats(solver->factor(),
+                solver->owner->backend() == apxchol::solve_backend::cpu ? APXCHOL_BACKEND_CPU
+                                                                         : APXCHOL_BACKEND_METAL,
+                solver->n(), solver->setup_seconds, solver->setup_max_threads, stats);
     stats->factor_storage = solver->owner->factor_storage() == apxchol::factor_storage_type::fp16
         ? APXCHOL_FACTOR_STORAGE_FLOAT16 : APXCHOL_FACTOR_STORAGE_FLOAT32;
     return APXCHOL_STATUS_SUCCESS;

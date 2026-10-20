@@ -69,7 +69,13 @@ enum {
 };
 
 typedef int32_t apxchol_backend;
-enum { APXCHOL_BACKEND_CPU = 0, APXCHOL_BACKEND_METAL = 1 };
+/* AUTO (the default) chooses a route as apxchol::solver does: CPU for inputs
+ * of at most 32,768 rows (when CPU supports the requested factor storage) and
+ * when adopting a factor, otherwise METAL when the
+ * build has it, a device is available and A is within its value range. Builds
+ * without Metal resolve AUTO to CPU (the C ABI exposes no CUDA route).
+ * stats.backend reports the route chosen, never AUTO. */
+enum { APXCHOL_BACKEND_CPU = 0, APXCHOL_BACKEND_METAL = 1, APXCHOL_BACKEND_AUTO = 2 };
 
 typedef int32_t apxchol_sampler;
 enum { APXCHOL_SAMPLER_GKS = 0, APXCHOL_SAMPLER_TRACE_CYCLE = 1 };
@@ -125,7 +131,7 @@ typedef struct apxchol_solve_info {
 /* 72 bytes; the caller sets struct_size. */
 typedef struct apxchol_stats {
     uint32_t struct_size;
-    apxchol_backend backend;
+    apxchol_backend backend;          /* the route chosen: CPU or METAL */
     int64_t n;
     int64_t factor_nnz;               /* stored entries of L, diagonal included */
     int64_t lumped_offdiag;           /* positive off-diagonals lumped (2 per pair) */
@@ -146,7 +152,7 @@ APXCHOL_C_API int32_t apxchol_c_abi_version(void);
 APXCHOL_C_API int32_t apxchol_openmp_enabled(void);
 /* omp_get_max_threads() of the calling thread; 1 in a serial build. */
 APXCHOL_C_API int32_t apxchol_get_max_threads(void);
-/* 1 if this build has the backend and (for METAL) a usable device. */
+/* 1 if this build has the backend and (for METAL) a usable device; AUTO: 1. */
 APXCHOL_C_API int32_t apxchol_backend_available(apxchol_backend backend);
 
 /* Writes the library defaults (those of apxchol::solve_options) and sets

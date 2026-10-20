@@ -447,7 +447,8 @@ TEST(CApi, DefaultsAreTheCppDefaults) {
     const apxchol::solve_options so;
     const auto o = defaults();
     EXPECT_EQ(o.struct_size, sizeof(apxchol_options));
-    EXPECT_EQ(o.backend, APXCHOL_BACKEND_CPU);
+    EXPECT_EQ(o.backend, APXCHOL_BACKEND_AUTO);
+    EXPECT_EQ(so.backend, apxchol::solve_backend::automatic);
     EXPECT_EQ(o.tol, so.tol);
     EXPECT_EQ(o.max_iter, so.max_iter);
     EXPECT_EQ(o.stagnation_window, so.stagnation_window);
@@ -855,6 +856,7 @@ TEST(CApi, AdjacencyIsAnOperatorError) {
 TEST(CApi, BackendAndEnumValidation) {
     const csc64 c = to_csc64(grid_laplacian(4, 4));
     EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_CPU), 1);
+    EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_AUTO), 1);
     EXPECT_EQ(apxchol_backend_available(42), 0);
 #ifndef APXCHOL_USE_METAL
     EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_METAL), 0);
@@ -877,6 +879,7 @@ TEST(CApi, BackendAndEnumValidation) {
         EXPECT_EQ(create(c, &o, h), APXCHOL_STATUS_INVALID_ARGUMENT);
     };
     check([](apxchol_options& o) { o.backend = 9; });
+    check([](apxchol_options& o) { o.backend = 3; });
     check([](apxchol_options& o) { o.sampler = 7; });
     check([](apxchol_options& o) { o.factor_storage = 1; });
     check([](apxchol_options& o) { o.factor_storage = 64; });
@@ -904,6 +907,40 @@ TEST(CApi, BackendAndEnumValidation) {
                                            nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
         }
+}
+
+TEST(CApi, AutoBackendSmallInputsAndAdoptionRunOnCpu) {
+    // Below the 32,768-row limit, AUTO is the CPU route: same stats, same
+    // factor and bitwise the same solution as an explicit CPU request.
+    const csc64 c = to_csc64(grid_laplacian(12, 11, 0.05), 1);
+    auto o = defaults();
+    o.threads = 1;
+    o.keep_factor_values = 1;
+    handle automatic;
+    ASSERT_EQ(o.backend, APXCHOL_BACKEND_AUTO);
+    ASSERT_EQ(create(c, &o, automatic, 1), APXCHOL_STATUS_SUCCESS);
+    o.backend = APXCHOL_BACKEND_CPU;
+    handle cpu;
+    ASSERT_EQ(create(c, &o, cpu, 1), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(stats_of(automatic.s).backend, APXCHOL_BACKEND_CPU);
+    EXPECT_TRUE(export_of(automatic.s) == export_of(cpu.s));
+    const Eigen::VectorXd b = compatible_rhs(c.n, 4);
+    Eigen::VectorXd xa(c.n), xc(c.n);
+    ASSERT_EQ(apxchol_solver_solve(automatic.s, b.data(), nullptr, xa.data(), -1.0, -1, nullptr,
+                                   nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    ASSERT_EQ(apxchol_solver_solve(cpu.s, b.data(), nullptr, xc.data(), -1.0, -1, nullptr,
+                                   nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_TRUE(same_bytes(xa.data(), xc.data(), xa.size()));
+
+    // Adopting a host factor under AUTO always runs on CPU.
+    factor_handle f;
+    ASSERT_EQ(apxchol_solver_copy_factor(cpu.s, &f.f, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    o.backend = APXCHOL_BACKEND_AUTO;
+    handle adopted;
+    ASSERT_EQ(adopt(c, f.f, &o, adopted, 1), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(stats_of(adopted.s).backend, APXCHOL_BACKEND_CPU);
 }
 
 TEST(CApi, FactorHandleExportEqualsTheSolversBytewise) {
@@ -1418,6 +1455,40 @@ TEST(CApi, MetalUnrepresentableOperatorIsUnsupported) {
     o.backend = APXCHOL_BACKEND_CPU;
     handle cpu;
     EXPECT_EQ(create(c, &o, cpu), APXCHOL_STATUS_SUCCESS);
+}
+
+TEST(CApi, MetalAutoBackendChoosesTheDeviceAboveTheCpuLimit) {
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    // 182 x 182 = 33,124 rows, above AUTO's 32,768-row CPU limit.
+    Sparse A = grid_laplacian(182, 182);
+    const csc64 c = to_csc64(A);
+    handle h;
+    std::string message;
+    ASSERT_EQ(create(c, nullptr, h, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
+    EXPECT_EQ(stats_of(h.s).backend, APXCHOL_BACKEND_METAL);
+    const Eigen::VectorXd b = compatible_rhs(c.n, 5);
+    Eigen::VectorXd x(c.n);
+    auto info = info_struct();
+    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+
+    // A host factor adopted under AUTO runs on CPU whatever the size.
+    factor_handle f;
+    ASSERT_EQ(create_factor(c, nullptr, f), APXCHOL_STATUS_SUCCESS);
+    handle adopted;
+    ASSERT_EQ(adopt(c, f.f, nullptr, adopted), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(stats_of(adopted.s).backend, APXCHOL_BACKEND_CPU);
+
+    // An operator outside Metal's value range resolves to CPU and solves.
+    A.coeffRef(1, 0) = -1e-35;
+    A.coeffRef(0, 1) = -1e-35;
+    const csc64 tiny = to_csc64(A);
+    handle cpu;
+    ASSERT_EQ(create(tiny, nullptr, cpu, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
+    EXPECT_EQ(stats_of(cpu.s).backend, APXCHOL_BACKEND_CPU);
+    EXPECT_EQ(apxchol_solver_solve(cpu.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr, nullptr,
+                                   0),
+              APXCHOL_STATUS_SUCCESS);
 }
 
 TEST(CApi, MetalLaplacianApplyCentresEveryApplication) {
