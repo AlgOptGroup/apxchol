@@ -48,7 +48,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "backend", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
+    "backend", "num_threads", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
     "degree_quantile", "degree_multiplier", "degree_tiebreak",
     "exact_clique_max_degree",
     "residual_peel", "stagnation_window",
@@ -87,6 +87,7 @@ apxchol::solve_options parse_options(const py::dict& d) {
         try {
         // solve_options
         if      (key == "backend")           so.backend = parse_backend(v.cast<std::string>());
+        else if (key == "num_threads")       so.num_threads = v.cast<int>();
         else if (key == "keep_factor")       so.keep_factor_values = v.cast<bool>();
         else if (key == "stagnation_window") so.stagnation_window = v.cast<int>();
         // factor_options

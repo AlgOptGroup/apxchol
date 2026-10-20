@@ -6,7 +6,7 @@
 #include "apxchol/operator_class.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/lowprec.h"
-#include "apxchol/solver/detail/gpu_scaling.h"
+#include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
@@ -97,34 +97,6 @@ apxchol_status guarded(char* message, std::size_t capacity, bool creating,
     }
 }
 
-/// Applies a positive `threads` to the calling thread's OpenMP team limit
-/// for the duration of one call and restores the previous limit.
-class thread_scope {
-public:
-    explicit thread_scope(std::int32_t threads) noexcept {
-#ifdef _OPENMP
-        if (threads > 0) {
-            previous_ = omp_get_max_threads();
-            omp_set_num_threads(threads);
-            restore_ = true;
-        }
-#else
-        (void)threads;
-#endif
-    }
-    ~thread_scope() {
-#ifdef _OPENMP
-        if (restore_) omp_set_num_threads(previous_);
-#endif
-    }
-    thread_scope(const thread_scope&) = delete;
-    thread_scope& operator=(const thread_scope&) = delete;
-
-private:
-    int previous_ = 1;
-    bool restore_ = false;
-};
-
 int max_threads() noexcept {
 #ifdef _OPENMP
     return omp_get_max_threads();
@@ -162,7 +134,7 @@ apxchol_options default_options() {
     o.max_iter = so.max_iter;
     o.stagnation_window = so.stagnation_window;
     o.seed = so.factor_opts.seed;
-    o.threads = 0;
+    o.threads = so.num_threads;
     o.sampler = so.factor_opts.sampler == apxchol::clique_sampler::trace_cycle
         ? APXCHOL_SAMPLER_TRACE_CYCLE : APXCHOL_SAMPLER_GKS;
     o.partitioner = APXCHOL_PARTITIONER_BLOCK_GREEDY;
@@ -309,28 +281,6 @@ void load_vector(const double* source, Eigen::Index n, Eigen::VectorXd& target,
     target = Eigen::Map<const Eigen::VectorXd>(source, n);
 }
 
-/// The CPU PCG forms unscaled sums of squares of b and of residuals, which
-/// underflow or overflow far from unit scale: a b whose entries are all below
-/// ~1e-162 reads as zero (x = 0 reported as converged) and one above ~1e154
-/// runs NaN iterations. Outside [2^-256, 2^256] the CPU route therefore
-/// solves with b and x0 scaled by the power of two that brings max|b| into
-/// [1, 2), as the CUDA route scales its inputs (detail/gpu_scaling.h), and
-/// scales x back. Power-of-two scaling commutes with every rounding of the
-/// solve while values stay normal, so the result is the scaled-back solution
-/// of the scaled problem, and a b inside the window is solved exactly as
-/// before (scale 1). x0 must lie within 2^256 of b's scale.
-double rhs_scale(const Eigen::VectorXd& b, const Eigen::VectorXd* x0) {
-    constexpr double lo = 0x1p-256, hi = 0x1p256;
-    const double mb = b.cwiseAbs().maxCoeff();
-    const double mx = x0 != nullptr ? x0->cwiseAbs().maxCoeff() : 0.0;
-    if (mb == 0.0 || (mb >= lo && mb <= hi && mx <= hi)) return 1.0;
-    const double s = apxchol::detail::gpu_scaling::pow2_scale(mb);
-    if (!(mx * s <= hi))
-        fail(APXCHOL_STATUS_UNSUPPORTED,
-             "x0 exceeds b's scale by more than 2^256; the CPU solve cannot represent both");
-    return s;
-}
-
 /// The factorization's own SDDM test (make_graph in graph/conversions.h): a
 /// column whose diagonal exceeds its off-diagonal weight by more than 1e-12
 /// of the diagonal, summed in the same order.
@@ -439,7 +389,7 @@ struct apxchol_solver {
     apxchol_options options{};
     std::unique_ptr<apxchol::solver> owner;
     const apxchol::cpu_solver* cpu = nullptr;  // owner's CPU route, if it is one
-    Eigen::VectorXd b_buffer, x0_buffer, scaled_buffer;
+    Eigen::VectorXd b_buffer, x0_buffer;
     double setup_seconds = 0.0;
     std::int32_t setup_max_threads = 1;
 
@@ -450,29 +400,15 @@ struct apxchol_solver {
         return max_iter < 0 ? options.max_iter : max_iter;
     }
 
-    /// One solve into caller memory. b_buffer keeps the caller's b (x may
-    /// alias it); the CPU route solves a power-of-two scaled copy when b's
-    /// scale needs one (rhs_scale) and reports the original system's residual
-    /// of the x it returns. Metal scales its own vectors and already reports
-    /// the original system's residual in fp64.
+    // Retain b for aliased output and the CPU original-system exit check.
     apxchol::solve_result solve_one(const double* b, const double* x0, double* x,
                                     double tol, int max_iter) {
         load_vector(b, n(), b_buffer, "b");
         if (x0 != nullptr) load_vector(x0, n(), x0_buffer, "x0");
         Eigen::Map<Eigen::VectorXd> out(x, n());
         const Eigen::VectorXd* guess = x0 != nullptr ? &x0_buffer : nullptr;
-        if (cpu == nullptr) return owner->solve(b_buffer, out, tol, max_iter, guess);
-        const double s = rhs_scale(b_buffer, guess);
-        apxchol::solve_result r;
-        if (s == 1.0) {
-            r = owner->solve(b_buffer, out, tol, max_iter, guess);
-        } else {
-            scaled_buffer = s * b_buffer;
-            if (guess != nullptr) x0_buffer *= s;
-            r = owner->solve(scaled_buffer, out, tol, max_iter, guess);
-            out *= 1.0 / s;
-        }
-        r.residual = cpu->relative_residual(b_buffer, out);
+        auto r = owner->solve(b_buffer, out, tol, max_iter, guess);
+        if (cpu != nullptr) r.residual = cpu->relative_residual(b_buffer, out);
         return r;
     }
 };
@@ -506,7 +442,7 @@ apxchol_status create_solver(int64_t n, const int64_t* colptr, const int64_t* ro
 
         auto solver = std::make_unique<apxchol_solver>();
         solver->options = opt;
-        const thread_scope scope(opt.threads);
+        const apxchol::detail::thread_budget scope(opt.threads);
         solver->setup_max_threads = max_threads();
         const auto start = clock_type::now();
         // Resolved once here; the owner then runs exactly this route.
@@ -607,7 +543,7 @@ apxchol_status apxchol_solver_solve(apxchol_solver* solver, const double* b, con
         require(solver != nullptr && b != nullptr && x != nullptr, "solver, b or x is NULL");
         check_call_tolerances(tol, max_iter);
         const double t = solver->tol_for(tol);
-        const thread_scope scope(solver->options.threads);
+        const apxchol::detail::thread_budget scope(solver->options.threads);
         const auto start = clock_type::now();
         const apxchol::solve_result r =
             solver->solve_one(b, x0, x, t, solver->max_iter_for(max_iter));
@@ -645,7 +581,7 @@ apxchol_status apxchol_solver_solve_block(apxchol_solver* solver, int64_t k, con
         if (x0 != nullptr) require_finite(x0, n * k, "x0");
         const double t = solver->tol_for(tol);
         const int mi = solver->max_iter_for(max_iter);
-        const thread_scope scope(solver->options.threads);
+        const apxchol::detail::thread_budget scope(solver->options.threads);
         bool all = true;
         for (int64_t c = 0; c < k; ++c) {
             const int64_t off = c * n;
@@ -668,7 +604,7 @@ apxchol_status apxchol_solver_apply(apxchol_solver* solver, const double* r, dou
                                     char* error_message, size_t error_capacity) {
     return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
         require(solver != nullptr && r != nullptr && z != nullptr, "solver, r or z is NULL");
-        const thread_scope scope(solver->options.threads);
+        const apxchol::detail::thread_budget scope(solver->options.threads);
         const Eigen::Index n = solver->n();
         Eigen::Map<Eigen::VectorXd> out(z, n);
         if (solver->cpu != nullptr && r != z) {
@@ -737,7 +673,7 @@ apxchol_status apxchol_factor_create(int64_t n, const int64_t* colptr, const int
         const apxchol::solve_options so = to_solve_options(opt);
         const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
         auto factor = std::make_unique<apxchol_factor>();
-        const thread_scope scope(opt.threads);
+        const apxchol::detail::thread_budget scope(opt.threads);
         factor->setup_max_threads = max_threads();
         const auto start = clock_type::now();
         // Public factorization retains native FP32 values on every build.

@@ -105,7 +105,7 @@ Automatic selection uses CPU when a configuration is incompatible with the avail
 
 ### Threads and placement
 
-Set `OMP_NUM_THREADS` to control CPU parallelism. More threads are not always faster: memory bandwidth, NUMA placement and matrix structure affect scaling. Benchmark the intended workload on the target machine, including both setup and solve.
+Set `solve_options.num_threads`, Python `num_threads`, or CLI `--threads` to bound CPU parallelism for one solver. A positive value overrides the calling OpenMP task's setting; zero inherits it, normally from `OMP_NUM_THREADS`. Small workloads may use fewer threads; each operation restores the caller's setting. More threads are not always faster: memory bandwidth, NUMA placement and matrix structure affect scaling. Benchmark the intended workload on the target machine, including both setup and solve.
 
 The library does not change affinity. `OMP_PLACES=cores` and `OMP_PROC_BIND=spread` provide an explicit placement to compare with your system default; use a restricted CPU set when testing one socket or NUMA node.
 

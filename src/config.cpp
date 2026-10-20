@@ -107,6 +107,9 @@ run_config parse_args(int argc, char* argv[]) {
         ->transform(CLI::IsMember(solve_backend_map) & CLI::Transformer(solve_backend_map));
 
     // ── solver parameters ──
+    app.add_option("--threads", cfg.solve_opts.num_threads,
+                   "CPU thread ceiling (0 = OpenMP default; small work may use fewer)")
+        ->check(CLI::NonNegativeNumber)->capture_default_str();
     app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")
         ->capture_default_str();
     app.add_option("--maxiter", cfg.solve_opts.max_iter, "Maximum PCG iterations")

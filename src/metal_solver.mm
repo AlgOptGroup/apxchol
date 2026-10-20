@@ -3,6 +3,7 @@
 #import <Metal/Metal.h>
 #include "apxchol/solver/metal_solver.h"
 #include "apxchol/solver/detail/metal_host.h"
+#include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/metal_schedule.h"
 #include "apxchol/solver/detail/permuted_operator.h"
@@ -629,15 +630,17 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
 }
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
-                           checkpoint* cp)
-    : impl_(new impl(opts)) {
+                           checkpoint* cp) {
+    const detail::thread_budget threads(opts.num_threads);
+    impl_.reset(new impl(opts));
     impl_->F = detail::factorize_for_solver(A, opts.factor_opts, cp);
     impl_->setup(A, cp);
 }
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, factorization F,
-                           const solve_options& opts, checkpoint* cp)
-    : impl_(new impl(opts)) {
+                           const solve_options& opts, checkpoint* cp) {
+    const detail::thread_budget threads(opts.num_threads);
+    impl_.reset(new impl(opts));
     impl_->F = std::move(F);
     impl_->setup(A, cp);
 }
@@ -663,6 +666,7 @@ solve_result metal_solver::solve(const Eigen::VectorXd& b, double tol, int max_i
 
 void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
                          int max_iter, const Eigen::VectorXd* x0) const {
+    const detail::thread_budget threads(impl_->opts.num_threads);
     impl& s = *impl_;
     if (b.size() != rows()) throw std::invalid_argument("metal_solver::solve: RHS length mismatch");
     if (x0 != nullptr && x0->size() != rows())
@@ -737,6 +741,7 @@ factor_storage_type metal_solver::factor_storage() const {
 }
 
 Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
+    const detail::thread_budget threads(impl_->opts.num_threads);
     impl& s = *impl_;
     if (r.size() != static_cast<Eigen::Index>(s.n))
         throw std::invalid_argument("metal_solver::apply: r length mismatch");

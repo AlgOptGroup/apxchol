@@ -97,9 +97,8 @@ the PCG recursion's residual in the last digits, so a solve whose recursion
 stopped just below tol may report NOT_CONVERGED. C++ `solver` and Python keep
 the recursion's residual.
 
-The CPU route solves a b whose largest entry lies outside [2^-256, 2^256] as the
-power-of-two scaled problem (scaled back exactly), so the PCG's unscaled sums of
-squares neither underflow nor overflow; Metal scales its own vectors.
+The C API uses the core solver's power-of-two rescaling for extreme RHS and
+warm-start magnitudes.
 
 ## Accuracy and configuration choice
 

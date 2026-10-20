@@ -968,8 +968,9 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
     }
 }
 
-TEST(CApi, SubnormalRightHandSideIsSolvedAndAnOutOfScaleGuessIsUnsupported) {
-    const csc64 c = to_csc64(grid_laplacian(9, 9, 0.1));
+TEST(CApi, SubnormalRightHandSideAndWarmStartRange) {
+    const Sparse A = grid_laplacian(9, 9, 0.1);
+    const csc64 c = to_csc64(A);
     auto o = defaults();
     o.backend = APXCHOL_BACKEND_CPU;
     handle h;
@@ -992,10 +993,21 @@ TEST(CApi, SubnormalRightHandSideIsSolvedAndAnOutOfScaleGuessIsUnsupported) {
     const Eigen::VectorXd normal = compatible_rhs(c.n, 3);
     const Eigen::VectorXd huge_guess = Eigen::VectorXd::Constant(c.n, 0x1p300);
     std::array<char, 256> err{};
-    EXPECT_EQ(apxchol_solver_solve(h.s, normal.data(), huge_guess.data(), x.data(), -1.0, -1,
-                                   nullptr, err.data(), err.size()),
-              APXCHOL_STATUS_UNSUPPORTED);
-    EXPECT_NE(std::string(err.data()).find("x0"), std::string::npos) << err.data();
+    info = info_struct();
+    const auto warm_status = apxchol_solver_solve(h.s, normal.data(), huge_guess.data(), x.data(),
+                                                 -1.0, -1, &info, err.data(), err.size());
+    EXPECT_EQ(warm_status, info.relative_residual < o.tol ? APXCHOL_STATUS_SUCCESS
+                                                         : APXCHOL_STATUS_NOT_CONVERGED);
+    EXPECT_TRUE(x.allFinite());
+    const double independent = true_residual(A, normal, x);
+    EXPECT_NEAR(info.relative_residual, independent, independent * 1e-12);
+
+    const Eigen::VectorXd tiny = 1e-200 * normal;
+    const Eigen::VectorXd unscalable_guess = 1e200 * normal;
+    EXPECT_EQ(apxchol_solver_solve(h.s, tiny.data(), unscalable_guess.data(), x.data(), -1.0,
+                                   -1, nullptr, err.data(), err.size()),
+              APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_NE(std::string(err.data()).find("scaling range"), std::string::npos) << err.data();
 }
 
 TEST(CApi, StatsReportLumpingSddmAndFactorSize) {

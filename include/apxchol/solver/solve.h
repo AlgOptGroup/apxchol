@@ -26,6 +26,10 @@ struct solve_options {
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
     solve_backend backend = solve_backend::automatic;
+    /// CPU thread ceiling for setup and every solve/apply. Positive values
+    /// override the calling OpenMP task's setting; 0 inherits it.
+    /// Small workloads may use fewer threads.
+    int num_threads = 0;
 };
 
 struct solve_result {
@@ -90,9 +94,9 @@ public:
                double tol = -1.0, int max_iter = -1,
                const Eigen::VectorXd* x0 = nullptr) const;
     /// Caller-provided-memory variant: writes the solution into `x` (length n,
-    /// contents overwritten — pass a warm start via `x0`) and allocates
-    /// nothing per call beyond the first (the PCG workspace is reused across
-    /// calls). The returned result's `x` member is left empty.
+    /// contents overwritten — pass a warm start via `x0`). Ordinary repeated
+    /// solves reuse the PCG workspace; extreme inputs need scaled copies.
+    /// The returned result's `x` member is left empty.
     /// Note: like all solve/apply paths, not safe for concurrent calls on the
     /// same cpu_solver (the reused workspace is shared state).
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
@@ -100,7 +104,7 @@ public:
                        const Eigen::VectorXd* x0 = nullptr) const;
 
     /// One preconditioner application: z = M^{-1} r (forward+back SpTRSV).
-    Eigen::VectorXd apply(const Eigen::VectorXd& r) const { return precond_.solve(r); }
+    Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
     /// The same application into caller storage, allocating nothing. r and z
     /// must not overlap: the permutation scatter reads r while it writes z.
     void apply(Eigen::Ref<const Eigen::VectorXd> r, Eigen::Ref<Eigen::VectorXd> z) const;
