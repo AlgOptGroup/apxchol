@@ -321,9 +321,9 @@ def factorize(A, *, backend="auto", num_threads=0, seed=42, partitioner="block_g
         ``Solver.backend``. An explicit GPU request fails when the
         installed build, hardware or options cannot support it.
     num_threads : int
-        CPU thread ceiling for setup and every solve/apply. Zero uses the calling
-        OpenMP task's default; small workloads may use fewer threads. The caller's
-        thread setting is restored after each operation.
+        CPU thread ceiling for setup and every solve/apply. Positive values
+        override the calling OpenMP task's setting; zero inherits it. Small
+        workloads may use fewer threads. Each operation restores the setting.
     seed : int
         RNG seed for the randomized clique sampling (factorization is
         deterministic per seed at one thread only).

@@ -26,8 +26,9 @@ struct solve_options {
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
     solve_backend backend = solve_backend::automatic;
-    /// CPU thread ceiling for setup and every solve/apply; 0 uses the calling
-    /// OpenMP task's default. Small workloads may use fewer threads.
+    /// CPU thread ceiling for setup and every solve/apply. Positive values
+    /// override the calling OpenMP task's setting; 0 inherits it.
+    /// Small workloads may use fewer threads.
     int num_threads = 0;
 };
 
