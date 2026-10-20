@@ -407,7 +407,14 @@ struct apxchol_solver {
         if (x0 != nullptr) load_vector(x0, n(), x0_buffer, "x0");
         Eigen::Map<Eigen::VectorXd> out(x, n());
         const Eigen::VectorXd* guess = x0 != nullptr ? &x0_buffer : nullptr;
-        auto r = owner->solve(b_buffer, out, tol, max_iter, guess);
+        apxchol::solve_result r;
+        try {
+            r = owner->solve(b_buffer, out, tol, max_iter, guess);
+        } catch (const std::overflow_error& e) {
+            fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+        } catch (const std::underflow_error& e) {
+            fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+        }
         if (cpu != nullptr) r.residual = cpu->relative_residual(b_buffer, out);
         return r;
     }

@@ -1012,6 +1012,42 @@ TEST(CApi, SubnormalRightHandSideAndWarmStartRange) {
     EXPECT_NE(std::string(err.data()).find("scaling range"), std::string::npos) << err.data();
 }
 
+TEST(CApi, UnrepresentableSolutionsAreUnsupported) {
+    for (const double diagonal : {1e-30, 1e30}) {
+        SCOPED_TRACE(diagonal);
+        Sparse A(4, 4);
+        A.setIdentity();
+        A *= diagonal;
+        const csc64 c = to_csc64(A);
+        auto o = defaults();
+        o.backend = APXCHOL_BACKEND_CPU;
+        handle h;
+        ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+        const Eigen::VectorXd b = Eigen::VectorXd::Constant(4, diagonal < 1 ? 1e300 : 1e-300);
+        Eigen::VectorXd x(4);
+        auto info = info_struct();
+        std::array<char, 256> err{};
+        EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1,
+                                       &info, err.data(), err.size()),
+                  APXCHOL_STATUS_UNSUPPORTED);
+        EXPECT_EQ(info.converged, 0);
+        EXPECT_EQ(info.iterations, 0);
+        EXPECT_GT(std::strlen(err.data()), 0u);
+
+        Eigen::MatrixXd B(4, 2), X(4, 2);
+        B.col(0).setConstant(diagonal);
+        B.col(1) = b;
+        EXPECT_EQ(apxchol_solver_solve_block(h.s, 2, B.data(), nullptr, X.data(), -1.0, -1,
+                                             nullptr, nullptr, nullptr, err.data(), err.size()),
+                  APXCHOL_STATUS_UNSUPPORTED);
+        EXPECT_GT(std::strlen(err.data()), 0u);
+        ASSERT_EQ(apxchol_solver_solve(h.s, B.col(0).data(), nullptr, x.data(), -1.0, -1,
+                                       &info, err.data(), err.size()),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_TRUE(x.isApprox(Eigen::VectorXd::Ones(4), o.tol));
+    }
+}
+
 TEST(CApi, StatsReportLumpingSddmAndFactorSize) {
     // SDDM with one mirrored positive off-diagonal pair: lumpable.
     Sparse A = grid_laplacian(4, 4, 0.5);

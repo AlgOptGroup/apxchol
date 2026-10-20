@@ -173,7 +173,8 @@ APXCHOL_C_API void apxchol_solver_destroy(apxchol_solver* solver); /* NULL is a 
 /* One right-hand side. tol < 0 / max_iter < 0 select the handle's options;
  * x0 NULL starts from zero. info is nullable. The backend rescales extreme
  * inputs internally; CPU inputs that cannot share a usable scale are
- * INVALID_ARGUMENT. */
+ * INVALID_ARGUMENT. A solution outside the representable range is UNSUPPORTED;
+ * its output values are unspecified. */
 APXCHOL_C_API apxchol_status apxchol_solver_solve(
     apxchol_solver* solver, const double* b, const double* x0, double* x,
     double tol, int32_t max_iter, apxchol_solve_info* info,
