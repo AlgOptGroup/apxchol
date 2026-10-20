@@ -683,10 +683,12 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     const bool laplacian = !precond_.factor().sddm;
     std::array<double, C> norm{}, rr{}, rs{}, rz{}, prev{};
     std::array<bool, C> active{}, warm{};
-    if (x0)
-        for (Eigen::Index i = 0; i < n; i++)
-            for (int c = 0; c < C; c++)
-                warm[c] |= x0[i * C + c] != 0;
+    using Input = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    if (x0) {
+        const Eigen::Map<const Input> initial(x0, n, C);
+        for (int c = 0; c < C; c++)
+            warm[c] = !initial.col(c).isZero(0.0);
+    }
     const bool any_warm = std::any_of(warm.begin(), warm.end(), [](bool v) { return v; });
     if (any_warm) {
         std::copy_n(x0, n * C, x);
@@ -697,7 +699,6 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     }
     panel_init_residual<C>(r, b, any_warm ? Ap : nullptr, n, part, rr, rs);
     if (!any_warm) std::fill_n(x, n * C, 0.0);
-    using Input = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     const Eigen::Map<const Input> input(b, n, C);
     for (int c = 0; c < C; c++) {
         norm[c] = warm[c] ? input.col(c).norm() : std::sqrt(rr[c]);
@@ -745,9 +746,13 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     } clear{precond_};
     precond_.reset_apply_count();
     rz = precond_.apply_fused<C>(r, rs, z);
-    for (Eigen::Index i = 0; i < n; i++)
-        for (int c = 0; c < C; c++)
-            p[i * C + c] = active[c] ? z[i * C + c] : 0;
+    if constexpr (C == 1) {
+        p_ = z_;
+    } else {
+        for (Eigen::Index i = 0; i < n; i++)
+            for (int c = 0; c < C; c++)
+                p[i * C + c] = active[c] ? z[i * C + c] : 0;
+    }
     if (use_cp)
         timings("copy_p");
 

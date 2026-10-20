@@ -574,6 +574,33 @@ TEST(Solver, CpuMatrixRhsRejectsAliasingAndAcceptsEmptyBatches) {
     EXPECT_NO_THROW(owner.apply(empty, output));
 }
 
+TEST(Solver, CpuMatrixRhsKeepsConvergedColumnsWhileOtherColumnsContinue) {
+    const scoped_omp_threads threads(1);
+    constexpr int n = 17;
+    Sparse identity(n, n);
+    identity.setIdentity();
+    Sparse matrix = identity;
+    matrix.diagonal() = Eigen::VectorXd::LinSpaced(n, 1.0, double(n));
+    apxchol::cpu_solver owner(matrix, apxchol::factorize(identity), cpu_options());
+    Eigen::MatrixXd rhs = Eigen::MatrixXd::Zero(n, 4), guess = rhs, x(n, 4);
+    guess(n - 1, 0) = 1;
+    rhs.col(0) = matrix * guess.col(0);
+    rhs(0, 2) = 1;
+    rhs.col(3).setOnes();
+    const apxchol::const_matrix_view initial(guess);
+    const auto result = owner.solve(rhs, x, 1e-10, 200, &initial);
+    ASSERT_EQ(result.columns.size(), 4u);
+    EXPECT_EQ(result.columns[0].iterations, 0);
+    EXPECT_EQ(result.columns[1].iterations, 0);
+    EXPECT_EQ(result.columns[2].iterations, 1);
+    EXPECT_GT(result.columns[3].iterations, 1);
+    EXPECT_TRUE(x.col(0).isApprox(guess.col(0), 0.0));
+    EXPECT_TRUE(x.col(1).isZero(0.0));
+    EXPECT_TRUE(x.col(2).isApprox(rhs.col(2), 0.0));
+    for (int c : {0, 2, 3})
+        expect_solution(matrix, rhs.col(c), x.col(c));
+}
+
 TEST(Solver, CpuSingletonPanelsRespectStridesWarmStartsAndBudgets) {
     const scoped_omp_threads threads(2);
     const Sparse matrix = operator_matrix();

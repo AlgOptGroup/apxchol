@@ -102,9 +102,9 @@ public:
                double tol = -1.0, int max_iter = -1,
                const Eigen::VectorXd* x0 = nullptr) const;
     /// Caller-provided-memory variant: writes the solution into `x` (length n,
-    /// contents overwritten — pass a warm start via `x0`) and allocates
-    /// nothing per call beyond the first (the PCG workspace is reused across
-    /// calls). The returned result's `x` member is left empty.
+    /// contents overwritten — pass a warm start via `x0`). Reuses the PCG
+    /// workspace, which can resize when the panel width changes.
+    /// The returned result's `x` member is left empty.
     /// Note: like all solve/apply paths, not safe for concurrent calls on the
     /// same cpu_solver (the reused workspace is shared state).
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
@@ -154,8 +154,8 @@ private:
 
     solve_options opts_;
     apx_cholesky precond_;
-    // Reused PCG workspace (lazily sized). Makes repeated solves allocation-
-    // free; shared state — concurrent solves on one cpu_solver are a race.
+    // Reused PCG workspace, resized when the panel width changes.
+    // Concurrent solves on one cpu_solver are a race.
     mutable Eigen::VectorXd r_, z_, p_, Ap_, panel_x_;
     // Per-thread partial sums of the fused PCG kernels' deterministic
     // reductions (one cache line per thread; sized to the max team on use).
