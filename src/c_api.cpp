@@ -19,6 +19,7 @@
 #include <Eigen/Sparse>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -293,16 +294,18 @@ Eigen::SparseMatrix<double> import_csc(std::int64_t n, const std::int64_t* colpt
     }
 }
 
+/// Rejects non-finite entries of a caller array of `count` values.
+void require_finite(const double* source, Eigen::Index count, const char* what) {
+    if (!Eigen::Map<const Eigen::VectorXd>(source, count).allFinite())
+        fail(APXCHOL_STATUS_INVALID_ARGUMENT, std::string(what) + " contains a non-finite value");
+}
+
 /// Copies a vector argument into reusable storage (which makes aliasing with
 /// the output safe) and rejects non-finite entries.
 void load_vector(const double* source, Eigen::Index n, Eigen::VectorXd& target,
                  const char* what) {
-    target.resize(n);
-    for (Eigen::Index i = 0; i < n; ++i) {
-        if (!std::isfinite(source[i]))
-            fail(APXCHOL_STATUS_INVALID_ARGUMENT, std::string(what) + " contains a non-finite value");
-        target[i] = source[i];
-    }
+    require_finite(source, n, what);
+    target = Eigen::Map<const Eigen::VectorXd>(source, n);
 }
 
 /// The factorization's own SDDM test (make_graph in graph/conversions.h): a
@@ -412,6 +415,7 @@ struct apxchol_factor {
 struct apxchol_solver {
     apxchol_options options{};
     std::unique_ptr<apxchol::solver> owner;
+    const apxchol::cpu_solver* cpu = nullptr;  // owner's CPU route, if it is one
     Eigen::VectorXd b_buffer, x0_buffer;
     double setup_seconds = 0.0;
     std::int32_t setup_max_threads = 1;
@@ -479,6 +483,7 @@ apxchol_status create_solver(int64_t n, const int64_t* colptr, const int64_t* ro
             if (gpu) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
             throw;
         }
+        solver->cpu = solver->owner->cpu();
         solver->setup_seconds = seconds_since(start);
         *out_solver = solver.release();
         return APXCHOL_STATUS_SUCCESS;
@@ -589,14 +594,20 @@ apxchol_status apxchol_solver_solve_block(apxchol_solver* solver, int64_t k, con
         require(k >= 0, "k must be non-negative");
         if (k == 0) return APXCHOL_STATUS_SUCCESS;
         require(b != nullptr && x != nullptr, "b or x is NULL");
-        require(k <= std::numeric_limits<int64_t>::max() / solver->n(), "n*k overflows");
+        const int64_t n = solver->n();
+        require(k <= std::numeric_limits<std::ptrdiff_t>::max() /
+                         static_cast<int64_t>(sizeof(double)) / n,
+                "n * k * sizeof(double) overflows");
         check_call_tolerances(tol, max_iter);
+        // Every column is validated before the first is solved.
+        require_finite(b, n * k, "b");
+        if (x0 != nullptr) require_finite(x0, n * k, "x0");
         const double t = solver->tol_for(tol);
         const int mi = solver->max_iter_for(max_iter);
         const thread_scope scope(solver->options.threads);
         bool all = true;
         for (int64_t c = 0; c < k; ++c) {
-            const int64_t off = c * solver->n();
+            const int64_t off = c * n;
             const apxchol::solve_result r = solver->solve_one(
                 b + off, x0 != nullptr ? x0 + off : nullptr, x + off, t, mi);
             const bool ok = r.residual < t;
@@ -617,8 +628,16 @@ apxchol_status apxchol_solver_apply(apxchol_solver* solver, const double* r, dou
     return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
         require(solver != nullptr && r != nullptr && z != nullptr, "solver, r or z is NULL");
         const thread_scope scope(solver->options.threads);
-        load_vector(r, solver->n(), solver->b_buffer, "r");
-        Eigen::Map<Eigen::VectorXd>(z, solver->n()) = solver->owner->apply(solver->b_buffer);
+        const Eigen::Index n = solver->n();
+        Eigen::Map<Eigen::VectorXd> out(z, n);
+        if (solver->cpu != nullptr && r != z) {
+            // Straight from the caller's r into z: no copy, no allocation.
+            require_finite(r, n, "r");
+            solver->cpu->apply(Eigen::Map<const Eigen::VectorXd>(r, n), out);
+        } else {
+            load_vector(r, n, solver->b_buffer, "r");
+            out = solver->owner->apply(solver->b_buffer);
+        }
         return APXCHOL_STATUS_SUCCESS;
     });
 }

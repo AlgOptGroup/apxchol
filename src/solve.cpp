@@ -805,6 +805,14 @@ solve_result cpu_solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::Vecto
     return res;
 }
 
+void cpu_solver::apply(Eigen::Ref<const Eigen::VectorXd> r, Eigen::Ref<Eigen::VectorXd> z) const {
+    if (r.size() != n_ || z.size() != n_)
+        throw std::invalid_argument("cpu_solver::apply: vector length mismatch");
+    if (r.data() < z.data() + n_ && z.data() < r.data() + n_)
+        throw std::invalid_argument("cpu_solver::apply: input and output overlap");
+    precond_._solve_impl(r, z);
+}
+
 solve_backend detail::select_solve_backend(const solve_options& opts,
                                           const Eigen::SparseMatrix<double>* A) {
     if (opts.backend == solve_backend::cpu) return solve_backend::cpu;
@@ -963,6 +971,7 @@ solve_backend solver::backend() const {
     return std::holds_alternative<cpu_solver>(impl_->owner)
         ? solve_backend::cpu : solve_backend::gpu;
 }
+const cpu_solver* solver::cpu() const noexcept { return std::get_if<cpu_solver>(&impl_->owner); }
 factor_storage_type solver::factor_storage() const {
     return std::visit([](const auto& owner) {
         if constexpr (requires { owner.factor_storage(); }) return owner.factor_storage();

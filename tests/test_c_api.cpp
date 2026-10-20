@@ -784,6 +784,86 @@ TEST(CApi, ApplyMatchesCppApply) {
     EXPECT_TRUE(same_bytes(z.data(), z_ref.data(), z.size()));
 }
 
+TEST(CApi, ApplyInPlaceEqualsOutOfPlaceAndPartialOverlapIsRejected) {
+    // An SDDM factor's application is a fixed map, so in-place and
+    // out-of-place applications must agree bitwise on every route.
+    const csc64 c = to_csc64(grid_laplacian(11, 9, 0.1));
+    std::vector<apxchol_backend> backends{APXCHOL_BACKEND_CPU};
+#if defined(APXCHOL_USE_METAL)
+    if (apxchol::metal_solver::available()) backends.push_back(APXCHOL_BACKEND_METAL);
+#endif
+    const Eigen::VectorXd r = compatible_rhs(c.n, 6);
+    for (const auto backend : backends) {
+        SCOPED_TRACE(::testing::Message() << "backend=" << backend);
+        auto o = defaults();
+        o.backend = backend;
+        handle h;
+        ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+        Eigen::VectorXd out(c.n), in_place = r;
+        ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), out.data(), nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        ASSERT_EQ(apxchol_solver_apply(h.s, in_place.data(), in_place.data(), nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_TRUE(same_bytes(out.data(), in_place.data(), out.size()));
+    }
+    // The CPU route writes straight into z, so it refuses overlapping storage.
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_CPU;
+    handle h;
+    ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+    Eigen::VectorXd shifted(c.n + 1);
+    shifted.head(c.n) = r;
+    std::array<char, 256> err{};
+    EXPECT_EQ(apxchol_solver_apply(h.s, shifted.data(), shifted.data() + 1, err.data(), err.size()),
+              APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_NE(std::string(err.data()).find("overlap"), std::string::npos) << err.data();
+}
+
+TEST(CApi, BlockValidatesEveryColumnBeforeSolvingAny) {
+    const csc64 c = to_csc64(grid_laplacian(10, 10));
+    handle h;
+    ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
+    const std::int64_t k = 3;
+    Eigen::MatrixXd B(c.n, k);
+    for (std::int64_t col = 0; col < k; ++col)
+        B.col(col) = compatible_rhs(c.n, static_cast<unsigned>(col + 1));
+    const Eigen::MatrixXd X0 = Eigen::MatrixXd::Zero(c.n, k);
+    std::array<std::int64_t, 3> iters{};
+    auto untouched = [&](const Eigen::MatrixXd& X) {
+        return (X.array() == 7.0).all() && iters == std::array<std::int64_t, 3>{-5, -5, -5};
+    };
+    for (const bool in_guess : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "nan in " << (in_guess ? "x0" : "b"));
+        Eigen::MatrixXd b = B, x0 = X0;
+        (in_guess ? x0 : b)(c.n - 1, k - 1) = std::numeric_limits<double>::quiet_NaN();
+        Eigen::MatrixXd X = Eigen::MatrixXd::Constant(c.n, k, 7.0);
+        iters.fill(-5);
+        std::array<char, 256> err{};
+        EXPECT_EQ(apxchol_solver_solve_block(h.s, k, b.data(), x0.data(), X.data(), -1.0, -1,
+                                             iters.data(), nullptr, nullptr, err.data(),
+                                             err.size()),
+                  APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_NE(std::string(err.data()).find("non-finite"), std::string::npos) << err.data();
+        EXPECT_TRUE(untouched(X));
+    }
+}
+
+TEST(CApi, BlockByteSizeOverflowIsAnArgumentError) {
+    const csc64 c = to_csc64(grid_laplacian(4, 4));
+    handle h;
+    ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
+    // n * k fits int64 but n * k * sizeof(double) does not fit ptrdiff_t; the
+    // arrays are never read.
+    const std::int64_t k = std::numeric_limits<std::ptrdiff_t>::max() /
+                               static_cast<std::int64_t>(sizeof(double)) / c.n + 1;
+    std::array<double, 16> dummy{};
+    std::array<char, 256> err{};
+    EXPECT_EQ(apxchol_solver_solve_block(h.s, k, dummy.data(), nullptr, dummy.data(), -1.0, -1,
+                                         nullptr, nullptr, nullptr, err.data(), err.size()),
+              APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_NE(std::string(err.data()).find("overflows"), std::string::npos) << err.data();
+}
+
 TEST(CApi, StatsReportLumpingSddmAndFactorSize) {
     // SDDM with one mirrored positive off-diagonal pair: lumpable.
     Sparse A = grid_laplacian(4, 4, 0.5);

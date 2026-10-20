@@ -101,6 +101,9 @@ public:
 
     /// One preconditioner application: z = M^{-1} r (forward+back SpTRSV).
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const { return precond_.solve(r); }
+    /// The same application into caller storage, allocating nothing. r and z
+    /// must not overlap: the permutation scatter reads r while it writes z.
+    void apply(Eigen::Ref<const Eigen::VectorXd> r, Eigen::Ref<Eigen::VectorXd> z) const;
 
     const apx_cholesky& preconditioner() const { return precond_; }
     Eigen::Index rows() const { return n_; }
@@ -161,6 +164,9 @@ public:
     Eigen::Index rows() const;
     solve_backend backend() const;
     factor_storage_type factor_storage() const;
+    /// The CPU owner, or nullptr on a GPU route, for the CPU-only extensions
+    /// (caller-owned apply).
+    const cpu_solver* cpu() const noexcept;
 
 private:
     struct impl;
