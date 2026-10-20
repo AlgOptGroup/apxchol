@@ -351,6 +351,43 @@ TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
     }
 }
 
+TEST_F(MetalDevice, MatrixResidualsSurviveOverflowingRhsNorms) {
+    Sparse A(16, 16);
+    A.setIdentity();
+    const double magnitudes[]{1e308, 1.0, 1e200, 1e-200};
+    Eigen::MatrixXd B(16, 4), X(16, 4);
+    for (int q = 0; q < 4; ++q) B.col(q).setConstant(magnitudes[q]);
+    Eigen::MatrixXd initial = B;
+    initial.row(0).setZero();
+    const apxchol::const_matrix_view guess(initial);
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                              apxchol::factor_storage_type::fp32}) {
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::solver solver(A, options);
+        for (bool warm : {false, true}) {
+            for (int budget : {0, 100}) {
+                const auto result = solver.solve(B, X, 1e-8, budget, warm ? &guess : nullptr);
+                ASSERT_TRUE(X.allFinite());
+                for (int q = 0; q < 4; ++q) {
+                    const double scale = apxchol::detail::metal_host::pow2_scale(magnitudes[q]);
+                    const Eigen::VectorXd rhs = B.col(q) * scale;
+                    const double residual = (X.col(q) * scale - rhs).norm() / rhs.norm();
+                    EXPECT_NEAR(result.columns[q].residual, residual, 1e-15);
+                    if (budget == 0) {
+                        EXPECT_DOUBLE_EQ(residual, warm ? 0.25 : 1.0);
+                        EXPECT_EQ(result.columns[q].iterations, 0);
+                    } else {
+                        EXPECT_LT(residual, 1e-8);
+                        EXPECT_GT(result.columns[q].iterations, 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST_F(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
     for (const double shift : {0.0, 0.5}) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");
@@ -702,6 +739,33 @@ TEST_F(MetalDevice, ScaledRightHandSides) {
         EXPECT_LT(residual, 1e-10);
         EXPECT_NEAR(result.residual, residual, 1e-15);
         EXPECT_LT((applied - b).stableNorm() / b.stableNorm(), 1e-6);
+    }
+}
+
+TEST_F(MetalDevice, RelativeResidualSurvivesOverflowingRhsNorm) {
+    Sparse A(16, 16);
+    A.setIdentity();
+    const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(16, 1e308);
+    Eigen::VectorXd guess = rhs;
+    guess[0] = 0;
+    const double scale = 0x1p-1023;
+    const Eigen::VectorXd scaled_rhs = rhs * scale;
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                              apxchol::factor_storage_type::fp32}) {
+        apxchol::solve_options options;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::metal_solver solver(A, options);
+        for (bool warm : {false, true}) {
+            const auto stopped = solver.solve(rhs, 1e-8, 0, warm ? &guess : nullptr);
+            EXPECT_DOUBLE_EQ(stopped.residual, warm ? 0.25 : 1.0);
+            EXPECT_EQ(stopped.iterations, 0);
+            const auto solved = solver.solve(rhs, 1e-8, 100, warm ? &guess : nullptr);
+            ASSERT_TRUE(solved.x.allFinite());
+            const double residual = (solved.x * scale - scaled_rhs).norm() / scaled_rhs.norm();
+            EXPECT_LT(residual, 1e-8);
+            EXPECT_NEAR(solved.residual, residual, 1e-15);
+            EXPECT_GT(solved.iterations, 0);
+        }
     }
 }
 

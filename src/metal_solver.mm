@@ -547,10 +547,10 @@ struct metal_solver::impl {
     }
 
     template<class Vector>
-    double residual_norm(const Eigen::VectorXd& bp, const Vector& xp,
-                         Eigen::VectorXd& work) const {
+    double relative_residual(const Eigen::VectorXd& bp, const Vector& xp,
+                             Eigen::VectorXd& work, const mh::norm_reference& bnorm) const {
         spmv(xp, work);
-        return mh::norm(bp - work);
+        return bnorm.relative(bp - work);
     }
 
     template<class Vector>
@@ -769,7 +769,8 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
     X.setZero();
     std::array<Eigen::VectorXd, Columns> bp;
     Eigen::VectorXd work;
-    std::array<double, Columns> bnorm{}, scale{};
+    std::array<mh::norm_reference, Columns> bnorm;
+    std::array<double, Columns> scale{};
     std::array<bool, Columns> check{}, ran{};
     bool active = false;
     for (unsigned q = 0; q < Columns; ++q) {
@@ -778,8 +779,8 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         result.residual = 0.0;
         result.backend = solve_backend::gpu;
         result.lumped_offdiag = F.lumped_offdiag;
-        bnorm[q] = mh::norm(B.col(q));
-        if (bnorm[q] == 0.0) continue;
+        bnorm[q] = mh::norm_reference(B.col(q));
+        if (bnorm[q].value == 0.0) continue;
         if (max_iter == 0 && (X0 == nullptr || X0->col(q).isZero(0.0))) {
             result.residual = 1.0;
             continue;
@@ -797,7 +798,7 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
             spmv(xp, work);
             work = bp[q] - work;
         } else work = bp[q];
-        const double initial = X0 ? mh::norm(work) / bnorm[q] : 1.0;
+        const double initial = X0 ? bnorm[q].relative(work) : 1.0;
         if (initial < tol || max_iter == 0) continue;
         if (laplacian) centre(work);
         const double max_abs = work.cwiseAbs().maxCoeff();
@@ -807,7 +808,7 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         #pragma omp parallel for schedule(static)
         for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
             packed[i * Columns + q] = mh::split(scale[q] * work[i]);
-        const double reference = bnorm[q] * scale[q];
+        const double reference = bnorm[q].scaled(scale[q]);
         const double threshold = tol * reference;
         states[q].thr = mh::split_saturated(threshold * threshold);
         states[q].prev = mh::split_saturated(reference * reference);
@@ -837,7 +838,7 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
             results[q].iterations = states[q].iters;
         }
         if (laplacian) centre(xp);
-        results[q].residual = residual_norm(bp[q], xp, work) / bnorm[q];
+        results[q].residual = relative_residual(bp[q], xp, work, bnorm[q]);
         // Gather through work so arbitrary output strides remain supported.
         #pragma omp parallel for schedule(static)
         for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)

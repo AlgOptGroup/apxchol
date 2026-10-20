@@ -21,6 +21,27 @@ namespace apxchol::detail::metal_host {
 using gpu_scaling::norm;
 using gpu_scaling::pow2_scale;
 
+// Keep ratios and scaled norms representable even when the true norm overflows.
+struct norm_reference {
+    double value = 0, scale = 1;
+
+    norm_reference() = default;
+    template<class Vector>
+    explicit norm_reference(const Vector& v) : value(norm(v)) {
+        if (std::isinf(value)) {
+            scale = pow2_scale(v.cwiseAbs().maxCoeff());
+            value = norm(v * scale);
+        }
+    }
+    template<class Vector>
+    double relative(const Vector& v) const {
+        return scale == 1 ? norm(v) / value : norm(v * scale) / value;
+    }
+    double scaled(double factor) const {
+        return scale == 1 ? value * factor : value * (factor / scale);
+    }
+};
+
 /// fp64 -> double-float: hi = fp32(v), lo = fp32(v - hi). Exact for any v
 /// with at most 48 significant bits whose parts stay in the fp32 normal range.
 inline df split(double v) {
