@@ -26,9 +26,18 @@ setup releases the input before transposing; non-consuming FP16 setup retains
 that input and the stored CSC alongside the parallel transpose's scratch.
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.
+An explicit `APXCHOL_GPU_FP32_OPERATOR=1` request fails if narrowing would change
+the canonical lower-triangle or diagonal coefficients.
 CUDA rescales extreme RHS and warm-start vectors by a common power of two and
 restores the solution scale on return. Intermediate triangular-solve values
 must still fit FP32.
+
+Both GPU backends recompute the returned solution's relative residual in FP64:
+CUDA on the device, Metal on the host. This uses the full symmetric operator
+(canonical lower-triangle coefficients), before any preconditioner lumping,
+and the unmodified RHS. The reported residual can exceed tolerance after the
+recursive stopping test passes; verification does not add retries or iterations.
+CUDA retains one extra FP64 RHS vector per allocated panel column for this check.
 
 ## Scaled FP16 contract
 
@@ -67,9 +76,7 @@ Each RHS (or initial residual b - A x0) is scaled by an exact power of two,
 targeting a largest magnitude in [1, 2) within FP64's exponent range. The host
 computes `(tol ||b|| s)^2` in FP64; the device stops when its recursive squared
 residual is strictly below that threshold. Breakdown is not convergence.
-The returned residual is recomputed in FP64 against the original
-operator and unmodified RHS; it can exceed tolerance even after the recursive
-test passed, especially on ill-conditioned problems or at tight tolerances.
+The FP64 exit check described above also covers early exits and breakdown.
 
 Laplacian iterations use grounded coordinates. Host FP64 centering applies to
 the initial residual and returned solution, and to both sides of `apply`.

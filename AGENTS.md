@@ -314,6 +314,7 @@ Without it, ordinary tests do not establish leak freedom. Device-wide
   Explicit `cuda_sptrsv` host-factor import and copied capsule validation remain
   independent facilities. Test-only owned-state inspection is compiled into
   the CUDA test core, not the production library.
+- CUDA and Metal report a recomputed FP64 residual for the returned solution and the full canonical symmetric operator, including early exits and stopped panel columns. CUDA retains the RHS and verifies on device after centering/restoring the solution; Metal checks on the host. Verification adds no retries or iterations. Reject forced inexact FP32 operator storage; keep exit checks inside Solve timing.
 - The internal GPU session shares one setup lifetime with benchmark native
   retries. It is not a new public owner API. GPU PCG builds its permuted operator
   on device; no host construction/upload fallback remains. Preserve canonical

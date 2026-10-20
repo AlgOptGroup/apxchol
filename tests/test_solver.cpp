@@ -29,8 +29,7 @@ static_assert(std::is_move_assignable_v<apxchol::solver>);
 static_assert(!std::is_copy_constructible_v<apxchol::solver>);
 static_assert(!std::is_copy_assignable_v<apxchol::solver>);
 
-Sparse operator_matrix() {
-    constexpr int n = 64;
+Sparse operator_matrix(int n = 64) {
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
         entries.emplace_back(i, i, 5.0);
@@ -504,6 +503,99 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
         expect_solution(matrix, rhs, output);
         expect_solution(matrix, -rhs, owner->solve(-rhs).x);
     }
+}
+#endif
+
+#if defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)
+TEST(Solver, GpuScalarAndBatchedResidualsDescribeReturnedSolutions) {
+#ifdef APXCHOL_64BIT_NODE_INDICES
+    GTEST_SKIP() << "32-bit-node GPU owner required";
+#else
+#ifdef APXCHOL_USE_CUDA
+    int devices = 0;
+    const auto status = cudaGetDeviceCount(&devices);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
+        GTEST_SKIP() << cudaGetErrorString(status);
+    ASSERT_EQ(status, cudaSuccess);
+    if (!devices) GTEST_SKIP() << "No CUDA devices";
+#else
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "No usable Metal device";
+#endif
+    const scoped_omp_threads threads(2);
+    for (const bool laplacian : {false, true}) {
+        Sparse matrix = operator_matrix(65);
+        if (laplacian)
+            for (int i = 0; i < matrix.rows(); ++i) matrix.coeffRef(i, i) -= 1.0;
+        matrix *= 1.1;
+        Eigen::MatrixXd exact(matrix.rows(), 5);
+        const double magnitudes[] = {1.0, 0.0, 1e-100, 1e100, -1.0};
+        for (int q = 0; q < exact.cols(); ++q)
+            exact.col(q) = magnitudes[q] *
+                Eigen::VectorXd::LinSpaced(matrix.rows(), -1.0, 1.0);
+        const Eigen::MatrixXd rhs = matrix * exact;
+        Eigen::MatrixXd guess = 0.25 * exact, output(matrix.rows(), exact.cols());
+        guess.col(0) = exact.col(0);
+        guess.col(1).setOnes();
+        const apxchol::const_matrix_view initial(guess);
+        for (const auto storage : {apxchol::factor_storage_type::fp16,
+                                   apxchol::factor_storage_type::fp32}) {
+            auto options = cpu_options();
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.factor_storage = storage;
+            const apxchol::solver owner(matrix, options);
+            for (const bool warm : {false, true}) {
+                for (const int budget : {0, 1, 200}) {
+                    SCOPED_TRACE(::testing::Message() << laplacian << ' '
+                        << int(storage) << ' ' << warm << ' ' << budget);
+                    const auto batch = owner.solve(rhs, output, 1e-8, budget,
+                                                   warm ? &initial : nullptr);
+                    ASSERT_EQ(batch.columns.size(), 5u);
+                    for (int q = 0; q < rhs.cols(); ++q) {
+                        const Eigen::VectorXd b = rhs.col(q), x0 = guess.col(q);
+                        const auto scalar = owner.solve(b, 1e-8, budget, warm ? &x0 : nullptr);
+                        const auto check = [&](const apxchol::solve_result& result,
+                                               const Eigen::VectorXd& x) {
+                            ASSERT_TRUE(x.allFinite());
+                            const double norm = b.stableNorm();
+                            const double measured = norm ? (b - matrix * x).stableNorm() / norm : 0;
+                            if (!norm) EXPECT_TRUE(x.isZero(0.0));
+                            EXPECT_LE(result.iterations, budget);
+                            EXPECT_NEAR(result.residual, measured, 1e-12 * (1 + measured));
+                        };
+                        check(batch.columns[q], output.col(q));
+                        check(scalar, scalar.x);
+                    }
+                }
+            }
+        }
+    }
+    // Small components still contribute to the reported residual beside a
+    // much larger component that the initial guess already solves exactly.
+    Sparse identity(101, 101);
+    identity.setIdentity();
+    Eigen::MatrixXd rhs = Eigen::MatrixXd::Zero(101, 2), guess = rhs, output = rhs;
+    rhs(0, 0) = 2;
+    rhs.col(0).segment(1, 4).setConstant(std::numeric_limits<double>::denorm_min());
+    rhs(0, 1) = 1e100;
+    rhs.col(1).tail(100).setConstant(1e-224);
+    guess.row(0) = rhs.row(0);
+    const apxchol::const_matrix_view initial(guess);
+    auto options = cpu_options();
+    options.backend = apxchol::solve_backend::gpu;
+    const apxchol::solver owner(identity, options);
+    const auto batch = owner.solve(rhs, output, 1e-8, 0, &initial);
+    ASSERT_EQ(batch.columns.size(), 2u);
+    for (int q = 0; q < rhs.cols(); ++q) {
+        const Eigen::VectorXd b = rhs.col(q), x0 = guess.col(q);
+        const auto scalar = owner.solve(b, 1e-8, 0, &x0);
+        const double expected = (b - x0).stableNorm() / b.stableNorm();
+        ASSERT_GT(expected, 0);
+        EXPECT_EQ(batch.columns[q].residual, expected);
+        EXPECT_EQ(scalar.residual, expected);
+        EXPECT_TRUE(output.col(q).isApprox(x0, 0));
+        EXPECT_TRUE(scalar.x.isApprox(x0, 0));
+    }
+#endif
 }
 #endif
 
