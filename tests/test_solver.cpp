@@ -285,7 +285,9 @@ TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
                     } else {
                         const double residual = (b - matrix * output.col(c)).stableNorm() / b.stableNorm();
                         EXPECT_NEAR(batch.columns[c].residual, residual, 1e-12);
-                        if (budget == 200) EXPECT_LT(residual, 1e-8);
+                        if (budget == 200) {
+                            EXPECT_LT(residual, 1e-8);
+                        }
                     }
                 }
             }
