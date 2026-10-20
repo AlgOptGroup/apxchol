@@ -1,6 +1,7 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/detail/lower_triangle_csr.h"
+#include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/csc_work.h"
 #include <algorithm>
 #include <chrono>
@@ -618,6 +619,24 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     Eigen::VectorXd& Ap = Ap_;
     double* part = part_.data();
 
+    // Retry exceptional RHS magnitudes in a safe range for the PCG reductions.
+    const auto rescale = [&](double squared_norm) {
+        if (std::isnormal(squared_norm) || b.size() == 0) return false;
+        if (!b.allFinite() || (x0 && !x0->allFinite()))
+            throw std::invalid_argument("CPU solve: RHS and initial guess must be finite");
+        double maximum = b.cwiseAbs().maxCoeff();
+        if (maximum == 0) return false;
+        if (x0) maximum = std::max(maximum, x0->cwiseAbs().maxCoeff());
+        const double scale = detail::gpu_scaling::pow2_scale(maximum);
+        const Eigen::VectorXd scaled_b = b * scale;
+        if (scale == 1.0 || !std::isnormal(scaled_b.squaredNorm()))
+            throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
+        const Eigen::VectorXd scaled_x0 = x0 ? (*x0 * scale).eval() : Eigen::VectorXd{};
+        solve_impl(scaled_b, x, res, tol, max_iter, x0 ? &scaled_x0 : nullptr);
+        x /= scale;
+        return true;
+    };
+
     // Laplacian (rank n-1) case: the returned x is the MIN-NORM solution --
     // mean(x) = 0 -- for every exit below (SDDM: full rank, nothing to do).
     // Under the center-k schedule (APXCHOL_GROUND=center-k, the default) most
@@ -637,6 +656,7 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     double bnorm, rr, rs;
     if (x0 != nullptr && !x0->isZero(0.0)) {
         bnorm = b.norm();
+        if (rescale(bnorm * bnorm)) return;
         if (bnorm == 0.0) {
             x.setZero();
             res.iterations = 0;
@@ -649,6 +669,7 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
         if (op_fp32_) (void)parallel_spmv_csr(Lrm_f_, x.data(), Ap.data(), part);
         else          (void)parallel_spmv_csr(Lrm_,   x.data(), Ap.data(), part);
         init_residual(r.data(), b.data(), Ap.data(), n, part, rr, rs);
+        if (!std::isfinite(rr) && rescale(rr)) return;
         res.iterations = 0;
         res.residual = std::sqrt(rr) / bnorm;
         if (res.residual < tol) {
@@ -659,6 +680,7 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
         // r = b - L*0 = b, copied in the same pass that produces b·b (= bnorm²)
         // and Σ b.
         init_residual(r.data(), b.data(), nullptr, n, part, rr, rs);
+        if (rescale(rr)) return;
         bnorm = std::sqrt(rr);
         if (bnorm == 0.0) {
             x.setZero();

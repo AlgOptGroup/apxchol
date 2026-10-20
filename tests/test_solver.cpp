@@ -210,6 +210,46 @@ TEST(Solver, CpuSolveTimingsBelongToTheCurrentResult) {
     expect_solution(matrix, rhs, second.x);
 }
 
+TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
+    const scoped_omp_threads threads(1);
+    Sparse matrix(16, 16);
+    matrix.setIdentity();
+    const Eigen::VectorXd unit = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    for (const auto storage : {apxchol::factor_storage_type::fp32,
+                               apxchol::factor_storage_type::fp16}) {
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::omp_sptrsv::fp16_supported())
+            continue;
+        auto options = cpu_options();
+        options.factor_opts.factor_storage = storage;
+        apxchol::solver owner(matrix, options);
+        for (const double magnitude : {1e-200, 1e-160, 1.0, 1e160, 1e200}) {
+            SCOPED_TRACE(::testing::Message() << static_cast<int>(storage) << ' ' << magnitude);
+            const Eigen::VectorXd rhs = magnitude * unit;
+            const Eigen::VectorXd x0 = 0.25 * rhs;
+            for (const Eigen::VectorXd* guess : {static_cast<const Eigen::VectorXd*>(nullptr), &x0}) {
+                const auto result = owner.solve(rhs, options.tol, options.max_iter, guess);
+                EXPECT_TRUE(result.x.allFinite());
+                EXPECT_LT(result.residual, options.tol);
+                EXPECT_LT((result.x - rhs).stableNorm() / rhs.stableNorm(), options.tol);
+            }
+            Eigen::VectorXd output(matrix.rows());
+            const auto exact = owner.solve(rhs, output, options.tol, 0, &rhs);
+            EXPECT_EQ(exact.iterations, 0);
+            EXPECT_EQ(exact.residual, 0.0);
+            EXPECT_EQ(output, rhs);
+            const auto stopped = owner.solve(rhs, options.tol, 0);
+            EXPECT_EQ(stopped.iterations, 0);
+            EXPECT_EQ(stopped.residual, 1.0);
+            EXPECT_TRUE(stopped.x.isZero(0.0));
+        }
+        const auto zero = owner.solve(Eigen::VectorXd::Zero(matrix.rows()));
+        EXPECT_EQ(zero.residual, 0.0);
+        EXPECT_TRUE(zero.x.isZero(0.0));
+        const Eigen::VectorXd tiny = 1e-200 * unit, huge = 1e200 * unit;
+        EXPECT_THROW(owner.solve(tiny, options.tol, 0, &huge), std::invalid_argument);
+    }
+}
+
 TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
