@@ -90,9 +90,9 @@ public:
                double tol = -1.0, int max_iter = -1,
                const Eigen::VectorXd* x0 = nullptr) const;
     /// Caller-provided-memory variant: writes the solution into `x` (length n,
-    /// contents overwritten — pass a warm start via `x0`) and allocates
-    /// nothing per call beyond the first (the PCG workspace is reused across
-    /// calls). The returned result's `x` member is left empty.
+    /// contents overwritten — pass a warm start via `x0`). Ordinary repeated
+    /// solves reuse the PCG workspace; extreme inputs need scaled copies.
+    /// The returned result's `x` member is left empty.
     /// Note: like all solve/apply paths, not safe for concurrent calls on the
     /// same cpu_solver (the reused workspace is shared state).
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,

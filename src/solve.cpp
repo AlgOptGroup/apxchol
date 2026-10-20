@@ -606,10 +606,8 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     if (x0 != nullptr && x0->size() != n)
         throw std::invalid_argument("cpu_solver::solve: x0 length mismatch");
 
-    // Reused workspace: repeated solves allocate nothing after the first call
-    // (part_ holds the per-thread partials of the deterministic reductions;
-    // sized to the current max team, which the caller may change between
-    // solves via omp_set_num_threads).
+    // Ordinary solves reuse these buffers; extreme inputs need scaled copies.
+    // Reduction scratch follows the caller's current maximum thread count.
     if (r_.size() != n) { r_.resize(n); z_.resize(n); p_.resize(n); Ap_.resize(n); }
     { const std::size_t need = detail::part_capacity();
       if (part_.size() < need) part_.resize(need); }
@@ -633,7 +631,14 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
             throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
         const Eigen::VectorXd scaled_x0 = x0 ? (*x0 * scale).eval() : Eigen::VectorXd{};
         solve_impl(scaled_b, x, res, tol, max_iter, x0 ? &scaled_x0 : nullptr);
-        x /= scale;
+        for (double& value : x) {
+            const double restored = value / scale;
+            if (!std::isfinite(restored))
+                throw std::overflow_error("CPU solve: solution exceeds the finite range");
+            if (value != 0 && restored == 0)
+                throw std::underflow_error("CPU solve: solution underflows to zero");
+            value = restored;
+        }
         return true;
     };
 

@@ -250,6 +250,30 @@ TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
     }
 }
 
+TEST(Solver, CpuRejectsUnrepresentableSolutions) {
+    const scoped_omp_threads threads(1);
+    const auto options = cpu_options();
+    for (const double diagonal : {1e-30, 1e30}) {
+        Sparse matrix(4, 4);
+        matrix.setIdentity();
+        matrix *= diagonal;
+        apxchol::solver owner(matrix, options);
+        const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(4, diagonal < 1 ? 1e275 : 1e-275);
+        const auto finite = owner.solve(rhs);
+        ASSERT_TRUE(finite.x.allFinite());
+        EXPECT_LT((matrix * finite.x - rhs).stableNorm() / rhs.stableNorm(), options.tol);
+        const Eigen::VectorXd outside_range = Eigen::VectorXd::Constant(4, diagonal < 1 ? 1e300 : 1e-300);
+        if (diagonal < 1) {
+            EXPECT_THROW(owner.solve(outside_range), std::overflow_error);
+        } else {
+            EXPECT_THROW(owner.solve(outside_range), std::underflow_error);
+            matrix.coeffRef(0, 0) = 1;
+            apxchol::solver mixed(matrix, options);
+            EXPECT_THROW(mixed.solve(outside_range), std::underflow_error);
+        }
+    }
+}
+
 TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
