@@ -1000,6 +1000,8 @@ TEST(CApi, SubnormalRightHandSideAndWarmStartRange) {
                                                          : APXCHOL_STATUS_NOT_CONVERGED);
     EXPECT_TRUE(x.allFinite());
     const double independent = true_residual(A, normal, x);
+    ASSERT_TRUE(std::isfinite(independent));
+    EXPECT_TRUE(std::isfinite(info.relative_residual));
     EXPECT_NEAR(info.relative_residual, independent, independent * 1e-12);
 
     const Eigen::VectorXd tiny = 1e-200 * normal;
