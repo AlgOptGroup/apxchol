@@ -9,7 +9,7 @@ class thread_budget {
 public:
     explicit thread_budget(int threads) {
         if (threads < 0) throw std::invalid_argument("num_threads must be nonnegative");
-        if (threads > 0 && threads != omp_get_max_threads()) {
+        if (threads > 0) {
             previous_ = omp_get_max_threads();
             omp_set_num_threads(threads);
         }

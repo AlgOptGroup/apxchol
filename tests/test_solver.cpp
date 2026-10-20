@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/thread_budget.h"
 #include "scoped_env.h"
 #include "scoped_omp_threads.h"
 
@@ -550,9 +551,26 @@ struct budget_cpu_solver : apxchol::cpu_solver {
 };
 }
 
+TEST(Solver, ThreadBudgetRestoresCallerAfterSettingChanges) {
+    const scoped_omp_threads caller(3);
+    for (const int budget : {2, 3, 4}) {
+        for (const bool fail : {false, true}) {
+            const auto operation = [&] {
+                const apxchol::detail::thread_budget threads(budget);
+                EXPECT_EQ(omp_get_max_threads(), budget);
+                omp_set_num_threads(1);
+                if (fail) throw std::runtime_error("operation failed");
+            };
+            if (fail) EXPECT_THROW(operation(), std::runtime_error);
+            else operation();
+            EXPECT_EQ(omp_get_max_threads(), 3);
+        }
+    }
+}
+
 TEST(Solver, ThreadBudgetRestoresCallerForBothOwners) {
     const Sparse matrix = operator_matrix();
-    for (const int budget : {0, 1, 2}) {
+    for (const int budget : {0, 1, 2, 3, 4}) {
         check_thread_budget<apxchol::solver>(matrix, 3, budget);
         check_thread_budget<budget_cpu_solver>(matrix, 3, budget);
     }
