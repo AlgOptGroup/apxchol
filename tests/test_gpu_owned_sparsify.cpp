@@ -26,7 +26,7 @@ using apxchol::detail::gpu_round_shadow_incidence;
 using apxchol::detail::gpu_round_shadow_input;
 using edge = gpu_round_shadow_incidence;
 constexpr std::size_t block_size = 16384;
-double pool(double x) { return static_cast<double>(static_cast<pool_value_t>(x)); }
+pool_value_t pool(double x) { return static_cast<pool_value_t>(x); }
 
 gpu_round_shadow_input make_input(node_index n, const std::vector<edge>& edges) {
     gpu_round_shadow_input result;
@@ -104,7 +104,7 @@ oracle_output reference(const gpu_round_shadow_input& input, std::uint64_t seed,
         for (auto& c : component) if (c == b) c = a;
     }
     std::vector<double> importance(n);
-    for (std::size_t i = 0; i < n; ++i) importance[i] = std::sqrt(out.canonical[i].weight);
+    for (std::size_t i = 0; i < n; ++i) importance[i] = std::sqrt(double(out.canonical[i].weight));
     out.blocks = (n + block_size - 1) / block_size;
     auto folded = [&](bool initial) {
         double total = 0;
@@ -139,7 +139,7 @@ oracle_output reference(const gpu_round_shadow_input& input, std::uint64_t seed,
         if (!out.kept[i]) continue;
         // Match the specified two-operation HT rule, not a substituted w/p.
         const double inverse = 1.0 / p;
-        const double weight = pool(e.weight * inverse);
+        const auto weight = pool(e.weight * inverse);
         out.paired.push_back({e.owner, e.neighbor, weight});
         out.paired.push_back({e.neighbor, e.owner, weight});
     }
@@ -205,7 +205,7 @@ void check(const gpu_round_shadow_input& input, const Output& actual,
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuOwnedSparsify, CanonicalBucketsAndCoalescingMatchCpuLaw) {
     REQUIRE_OWNED_SPARSIFY_DEVICE();
-    const double one_next = static_cast<double>(std::nextafter(pool_value_t{1}, pool_value_t{2}));
+    const auto one_next = std::nextafter(pool_value_t{1}, pool_value_t{2});
     auto ties = make_input(3, {{1,2,one_next},{0,2,one_next},{0,1,1}});
     auto mixed = make_input(8, {{2,3,4},{0,2,0.25},{0,1,-0.0},{0,1,-0.0},
         {0,2,1},{0,2,0.5},{1,2,1},{0,3,2},{1,3,1},{4,5,4},{5,6,1},{4,6,0.0}});
@@ -253,7 +253,7 @@ TEST(GpuOwnedSparsify, NormalizationUsesFullCanonicalBlockBoundaries) {
         for (node_index u = 0; u < vertices && edges.size() < count; ++u)
             for (node_index v = u + 1; v < vertices && edges.size() < count; ++v) {
                 const auto i = edges.size();
-                edges.push_back({u, v, std::ldexp(1.0, 2 * static_cast<int>(i % 4))});
+                edges.push_back({u, v, pool(std::ldexp(1.0, 2 * static_cast<int>(i % 4)))});
             }
         // One late canonical edge is mandatory in the strict maximum-weight
         // forest, so full-stream chunk boundaries cannot be replaced by an
@@ -311,7 +311,7 @@ TEST(GpuOwnedSparsify, EmptyAllKeptAndInvalidInputsPreserveOwnedContract) {
 }
 TEST(GpuOwnedSparsify, PreviewReplacementInvalidatesAndResetsHandbackCounts) {
     REQUIRE_OWNED_SPARSIFY_DEVICE();
-    using graph_type = apxchol::graph<apxchol::directed_vec_pool_incidence>;
+    using graph_type = apxchol::graph;
     graph_type graph(5);
     std::vector<edge> edges;
     for (node_index u = 1; u < 5; ++u)

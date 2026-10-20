@@ -236,8 +236,7 @@ void parallel_stable_active_filter(std::vector<node_index>& active,
 /// at most `audit_eligible`, i.e. vertices such a skip keeps hiding from the
 /// selector. A hidden vertex stays hidden until it is walked, so a periodic
 /// audit cannot miss one.
-template<incidence_storage Incidence>
-double prune_and_degrees(graph<Incidence>& G,
+inline double prune_and_degrees(graph& G,
                          std::span<const node_index> active,
                          std::vector<node_index>& degrees,
                          std::size_t omp_threshold,
@@ -252,7 +251,7 @@ double prune_and_degrees(graph<Incidence>& G,
     #pragma omp parallel for reduction(+:total_degree,hidden) schedule(dynamic, 256) \
         if(active.size() > omp_threshold)
     for (size_t i = 0; i < active.size(); ++i) {
-        if constexpr (requires { G.adj_count(active[i]); }) {
+        {
             if (skip_above > 0 || audit_above > 0) {
                 const node_index raw = G.adj_count(active[i]);
                 if (skip_above > 0 && raw > skip_above) {
@@ -284,101 +283,6 @@ inline int factorize_thread_num() {
 #else
     return 0;
 #endif
-}
-
-/// Bulk-apply deferred edges from ws.threads[*].edge_buffer to G.
-///
-/// Pooled AoS reserves endpoint slabs before parallel writes; other backends
-/// apply deferred edges serially through G.add_edge.
-///
-/// All per-thread edge_buffers are cleared after apply.
-template<incidence_storage Incidence>
-void apply_deferred_edges(graph<Incidence>& G,
-                          factorize_workspace& ws,
-                          checkpoint* cp = nullptr) {
-    const int num_threads = static_cast<int>(ws.threads.size());
-
-    if constexpr (is_vec_pool_incidence_v<Incidence>) {
-        // vec_pool: serial pre-pass counts per-vertex incoming edges and
-        // grows each slab to fit; parallel apply then uses atomic_push_reserved
-        // for lock-free slot claim into the pre-sized slabs.
-        std::vector<size_t> e_offsets(num_threads + 1, 0);
-        for (int t = 0; t < num_threads; ++t)
-            e_offsets[t + 1] = e_offsets[t] + ws.threads[t].edge_buffer.size();
-        const size_t N_edges = e_offsets[num_threads];
-        if (N_edges == 0) {
-            if (cp) (*cp)("apply_edges");
-            return;
-        }
-
-        // Step 1: count per-vertex incoming edges (each edge contributes to both endpoints).
-        std::vector<node_index> incoming(static_cast<size_t>(G.n()), 0);
-        for (int t = 0; t < num_threads; ++t)
-            for (const auto& e : ws.threads[t].edge_buffer) {
-                incoming[e.u]++;
-                incoming[e.v]++;
-            }
-
-        // Step 2: pre-grow each slab so cap >= current_count + incoming.
-        for (node_index v = 0; v < G.n(); ++v)
-            if (incoming[v] > 0)
-                G.adj_reserve_for(v, G.adj_count(v) + incoming[v]);
-
-        // Step 3: account for directed edges (or reserve generic edge slots),
-        // then atomic-claim endpoint-incidence slots in parallel.
-        edge_index e_start = 0;
-        if constexpr (graph<Incidence>::stores_directed_incidence)
-            G.record_edges_added(static_cast<edge_index>(N_edges));
-        else
-            e_start = G.reserve_edge_pool(static_cast<edge_index>(N_edges));
-
-        #pragma omp parallel
-        {
-            const int tid = factorize_thread_num();
-            if (tid < num_threads) {
-                const size_t base = e_offsets[tid];
-                const auto& ebuf = ws.threads[tid].edge_buffer;
-                for (size_t i = 0; i < ebuf.size(); ++i) {
-                    auto [u, v, w] = ebuf[i];
-                    const edge_index es = e_start + static_cast<edge_index>(base + i);
-                    if constexpr (graph<Incidence>::stores_directed_incidence) {
-                        G.adj_atomic_push_directed(u, v, w);
-                        G.adj_atomic_push_directed(v, u, w);
-                    } else {
-                        G.write_edge_at(es, u, v, w);
-                        G.adj_atomic_push_reserved(u, es);
-                        G.adj_atomic_push_reserved(v, es);
-                    }
-                }
-            }
-        }
-        for (auto& t : ws.threads) t.edge_buffer.clear();
-    } else {
-        // Legacy backends (vec/bstr): serial G.add_edge. Tried two
-        // parallel schemes (per-(src,dst) shard relay + vertex-range scan);
-        // both regress 30-60% on grid + IPM at T=8/16 vs serial. The bottleneck
-        // is adj_[v].push_back() — per-vertex std::vector reallocs/memcpy
-        // serialize on heap-allocator state under multi-thread pressure.
-        for (auto& t : ws.threads) {
-            for (auto [u, v, w] : t.edge_buffer)
-                G.add_edge(u, v, w);
-            t.edge_buffer.clear();
-        }
-    }
-    if (cp) (*cp)("apply_edges");
-}
-
-/// Bulk-apply deferred excess updates from ws.threads[*].excess_buffer to G.
-template<incidence_storage Incidence>
-void apply_deferred_excess(graph<Incidence>& G,
-                           factorize_workspace& ws,
-                           checkpoint* cp = nullptr) {
-    for (auto& t : ws.threads) {
-        for (auto [u, delta] : t.excess_buffer)
-            G.excess(u) += delta;
-        t.excess_buffer.clear();
-    }
-    if (cp) (*cp)("apply_excess");
 }
 
 } // namespace detail

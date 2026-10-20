@@ -23,7 +23,7 @@
 namespace {
 using apxchol::node_index;
 using matrix = Eigen::SparseMatrix<double>;
-using host_graph = apxchol::graph<apxchol::directed_vec_pool_incidence>;
+using host_graph = apxchol::graph;
 using apxchol::detail::gpu_round_shadow_input;
 
 // Local guards follow the existing GPU round-shadow tests; no process-wide
@@ -57,7 +57,7 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
 }
 
 [[maybe_unused]] gpu_round_shadow_input host_snapshot(const matrix& A, double reg_eps = 0.0) {
-    auto graph = apxchol::make_graph<host_graph>(A);
+    auto graph = apxchol::make_graph(A);
     if (reg_eps > 0.0)
         for (node_index v = 0; v < graph.n(); ++v)
             graph.excess(v) = std::max(graph.excess(v), reg_eps * A.coeff(v, v));
@@ -80,8 +80,8 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
     for (std::size_t i = 0; i < got.incidences.size(); ++i) {
         EXPECT_EQ(got.incidences[i].owner, expected.incidences[i].owner) << i;
         EXPECT_EQ(got.incidences[i].neighbor, expected.incidences[i].neighbor) << i;
-        EXPECT_EQ(std::bit_cast<std::uint64_t>(got.incidences[i].weight),
-                  std::bit_cast<std::uint64_t>(expected.incidences[i].weight)) << i;
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(double(got.incidences[i].weight)),
+                  std::bit_cast<std::uint64_t>(double(expected.incidences[i].weight))) << i;
     }
 }
 
@@ -251,7 +251,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
             for (const auto& edge : got.initial.incidences) {
                 const double canonical = static_cast<double>(static_cast<apxchol::pool_value_t>(
                     -A.coeff(std::max(edge.owner,edge.neighbor),std::min(edge.owner,edge.neighbor))));
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(edge.weight), std::bit_cast<std::uint64_t>(canonical));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(double(edge.weight)), std::bit_cast<std::uint64_t>(canonical));
             }
         }
     }
@@ -330,7 +330,7 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
     const auto A = selector_matrix();
-    const auto graph = apxchol::make_graph<host_graph>(A);
+    const auto graph = apxchol::make_graph(A);
     ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
     std::vector<node_index> active(graph.n()); std::iota(active.begin(),active.end(),node_index{0});
     for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
@@ -399,7 +399,7 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
         auto owner = std::make_unique<apxchol::detail::gpu_round_shadow_session>(true);
         std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
         const auto original = selector_matrix();
-        const auto graph = apxchol::make_graph<host_graph>(original);
+        const auto graph = apxchol::make_graph(original);
         {
             auto temporary = original;
             ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(temporary));

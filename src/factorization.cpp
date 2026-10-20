@@ -244,7 +244,6 @@ void build_csc(factorization& result,
 } // namespace detail
 
 factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
-                                          graph_storage storage,
                                           const factor_options& opts_in,
                                           checkpoint* cp,
                                           setup_route route,
@@ -281,7 +280,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     const Eigen::SparseMatrix<double>& A = op.matrix();
     if (route == setup_route::gpu) {
 #if defined(APXCHOL_USE_CUDA)
-        if (storage != graph_storage::vec_pool_aos || opts.is_select != "block_greedy" ||
+        if (opts.is_select != "block_greedy" ||
             opts.exact_clique_max_degree != 0 || exact_core_or_off(opts.exact_core_max_h) != 0 ||
             opts.double_cycle_min_h != 0)
             throw std::invalid_argument("GPU setup requires block_greedy, vec_pool_aos and a bounded sampler");
@@ -291,7 +290,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
         if (cp) { (*cp)("gpu_csc_eligibility"); cp->ascend(); }
         block_greedy_partitioner partitioner;
         auto F = factorize_impl(make_tree_elim(opts, route), partitioner,
-            graph<directed_vec_pool_incidence>{}, opts, cp, &A, route, keep_factor);
+            graph{}, opts, cp, &A, route, keep_factor);
         F.lumped_offdiag = op.lumped();
         return F;
 #else
@@ -303,33 +302,15 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     // make_graph then skips its per-entry transpose-partner search.
     const bool triangles_bit_identical =
         &A == &L && op.scan().triangles_bit_identical;
-    switch (storage) {
-    case graph_storage::bstr: {
-        auto G = detail::make_graph_from_operator<graph<bstr_incidence>>(
-            A, triangles_bit_identical);
-        return do_factorize(std::move(G));
-    }
-
-    case graph_storage::vec_pool_aos: {
-        auto G = detail::make_graph_from_operator<graph<directed_vec_pool_incidence>>(
-            A, triangles_bit_identical);
-        return do_factorize(std::move(G));
-    }
-    case graph_storage::vec: {
-        auto G = detail::make_graph_from_operator<graph<vec_incidence>>(
-            A, triangles_bit_identical);
-        return do_factorize(std::move(G));
-    }
-    default:
-        throw std::invalid_argument("unsupported graph storage");
-    }
+    auto G = detail::make_graph_from_operator(A, triangles_bit_identical);
+    return do_factorize(std::move(G));
 }
 
 // Public factorization returns an exportable CPU factor.
 factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        graph_storage storage, const factor_options& opts,
+                        const factor_options& opts,
                         checkpoint* cp) {
-    return detail::factorize_for_solver(L, storage, opts, cp);
+    return detail::factorize_for_solver(L, opts, cp);
 }
 
 } // namespace apxchol

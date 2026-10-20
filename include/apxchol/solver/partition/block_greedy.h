@@ -32,8 +32,7 @@ struct block_greedy_partitioner {
     static constexpr size_t residual_handoff_threshold = 500;
     static constexpr bool degree_prepass = true;
 
-    template<incidence_storage Incidence>
-    void find_partition(graph<Incidence>& G, std::span<const node_index> candidates,
+    void find_partition(graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
         select_into_chosen(G, candidates, out, ctx);
     }
@@ -73,8 +72,7 @@ private:
     // freed, so the repair is skipped without an extra barrier.
     size_t total_drop_ = 0;
 
-    template<incidence_storage Incidence>
-    void select_into_chosen(const graph<Incidence>& G,
+    void select_into_chosen(const graph& G,
                             std::span<const node_index> candidates,
                             selection& out,
                             const partition_context& ctx) {
@@ -146,7 +144,7 @@ private:
                     bool ok = true;
                     bool boundary = false;
                     for (auto idx : G.adj(v)) {
-                        auto u = G.edge_target(idx, v);
+                        auto u = idx.to;
                         if (!G.is_active(u)) continue;
                         if (block_of[u] == tid) {
                             if (ok && out.contains(u)) ok = false;
@@ -204,7 +202,7 @@ private:
                     const node_index v = my_boundary[bi];
                     const int mb = block_of[v];
                     for (auto idx : G.adj(v)) {
-                        auto u = G.edge_target(idx, v);
+                        auto u = idx.to;
                         if (G.is_active(u) && out.contains(u) && u_beats_v(u, v) && block_of[u] != mb) {
                             my_boundary[ndrop++] = v;   // ndrop <= bi: never clobbers unread entries
                             break;
@@ -294,7 +292,7 @@ private:
                         const node_index d = my_boundary[i];
                         if (!mark_[d]) { mark_[d] = 1; front.push_back(d); }
                         for (auto idx : G.adj(d)) {
-                            const auto u = G.edge_target(idx, d);
+                            const auto u = idx.to;
                             if (!G.is_active(u) || cand_stamp_[u] != round_stamp_) continue;
                             const int ow = block_of[u];
                             if (ow == tid) {
@@ -321,7 +319,7 @@ private:
                             if (out.contains(v)) { mark_[v] = 0; continue; }
                             bool free_v = true;
                             for (auto idx : G.adj(v)) {
-                                const auto u = G.edge_target(idx, v);
+                                const auto u = idx.to;
                                 if (G.is_active(u) && out.contains(u)) { free_v = false; break; }
                             }
                             if (free_v) { mark_[v] = 2; front[k++] = v; }
@@ -336,7 +334,7 @@ private:
                         for (const node_index v : front) {
                             bool win = true;
                             for (auto idx : G.adj(v)) {
-                                const auto u = G.edge_target(idx, v);
+                                const auto u = idx.to;
                                 if (G.is_active(u) && mark_[u] == 2 && u_beats_v(u, v)) {
                                     win = false; break;
                                 }
@@ -378,7 +376,7 @@ private:
             for (auto v : candidates) {
                 bool ok = true;
                 for (auto idx : G.adj(v)) {
-                    auto u = G.edge_target(idx, v);
+                    auto u = idx.to;
                     if (G.is_active(u) && out.contains(u)) { ok = false; break; }
                 }
                 if (ok) out.add(v);

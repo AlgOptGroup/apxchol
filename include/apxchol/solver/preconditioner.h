@@ -167,7 +167,6 @@ public:
     const factorization& factor() const { return F_; }
     const factor_options& options() const { return opts_; }
     void set_options(const factor_options& opts) { opts_ = opts; }
-    void set_storage(graph_storage s) { storage_ = s; }
     void set_checkpoint(checkpoint* cp) const { cp_ = cp; }
     /// Keep the factor's row/value arrays alive after SpTRSV setup (they are
     /// otherwise freed to save one factor-sized copy).  Needed by callers that
@@ -195,7 +194,7 @@ public:
 #endif
         if constexpr (on_gpu) cuda_ctx::prewarm();
         n_ = A.rows();
-        F_ = detail::factorize_for_solver(A, storage_, opts_, cp_, Route, keep_factor_);
+        F_ = detail::factorize_for_solver(A, opts_, cp_, Route, keep_factor_);
         install_factor();
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
@@ -548,7 +547,6 @@ private:
 
     struct factorization F_;
     factor_options opts_;
-    graph_storage storage_ = graph_storage::vec_pool_aos;
     mutable checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
     // Laplacian-path application counter of the center-k centring schedule

@@ -9,11 +9,9 @@ import pytest
 import apxchol
 
 
-def test_public_factorization_defaults_to_directed_aos_storage():
-    assert inspect.signature(apxchol.factorize).parameters["storage"].default \
-        == "vec_pool_aos"
-    assert inspect.signature(apxchol.Solver).parameters["storage"].default \
-        == "vec_pool_aos"
+def test_graph_storage_is_not_a_public_option():
+    assert "storage" not in inspect.signature(apxchol.factorize).parameters
+    assert "storage" not in inspect.signature(apxchol.Solver).parameters
 
 
 def grid2d_laplacian(m):
@@ -51,19 +49,17 @@ def random_sddm(n, seed=0):
     return L.tocsr()
 
 
-@pytest.mark.parametrize("storage", ["vec_pool_aos", "vec", "bstr"])
-def test_remaining_storage_options_solve_original_system(storage):
+def test_default_graph_storage_solves_original_system():
     L = grid2d_sddm(5)
     b = np.linspace(-1.0, 1.0, L.shape[0])
-    result = apxchol.solve(L, b, storage=storage, tol=1e-8, maxiter=200)
+    result = apxchol.solve(L, b, tol=1e-8, maxiter=200)
     assert result.converged
     assert np.linalg.norm(L @ result.x - b) / np.linalg.norm(b) <= 1e-7
 
 
-@pytest.mark.parametrize("storage", ["vec_pool", "forward_star", "fwd_star"])
-def test_retired_storage_is_rejected(storage):
-    with pytest.raises(ValueError, match=f"unknown storage '{storage}'"):
-        apxchol.factorize(grid2d_sddm(3), storage=storage)
+def test_retired_storage_is_rejected():
+    with pytest.raises(ValueError, match="unknown option 'storage'"):
+        apxchol.factorize(grid2d_sddm(3), storage="vec_pool_aos")
 
 
 def test_laplacian_solve_converges():

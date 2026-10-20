@@ -104,7 +104,7 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     const Sparse matrix = operator_matrix();
     auto options = cpu_options();
     options.keep_factor_values = true;
-    const auto expected = apxchol::factorize(matrix, options.storage, options.factor_opts);
+    const auto expected = apxchol::factorize(matrix, options.factor_opts);
     std::unique_ptr<apxchol::solver> owner;
     {
         Sparse temporary = matrix;
@@ -257,7 +257,7 @@ TEST(Solver, CudaOwnerRejectsHostFactorsAndInvalidWarmStarts) {
 #else
     const Sparse matrix = operator_matrix();
     auto options = cpu_options();
-    const auto host_factor = apxchol::factorize(matrix, options.storage, options.factor_opts);
+    const auto host_factor = apxchol::factorize(matrix, options.factor_opts);
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_THROW(apxchol::solver(matrix, host_factor, options), std::invalid_argument);
     int count = 0;

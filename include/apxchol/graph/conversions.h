@@ -2,7 +2,7 @@
 /// Conversions between Eigen sparse matrices and graphs.
 ///
 ///   laplacian(g)     — graph → Eigen Laplacian
-///   make_graph<G>(L) — Eigen Laplacian → G
+///   make_graph(L) — Eigen Laplacian → graph
 
 #include "apxchol/csc_work.h"
 #include "apxchol/env_knobs.h"
@@ -51,13 +51,11 @@ namespace detail {
 /// length) cache misses per entry, landing in the hub columns of power-law and
 /// IPM operators. Pass false whenever that proof is not at hand; the result is
 /// identical either way, only the work differs.
-template<typename G>
-G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
+inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                            bool triangles_bit_identical) {
-    using Incidence = typename G::incidence_type;
     const auto n = static_cast<node_index>(L.rows());
     const auto outer = static_cast<node_index>(L.outerSize());
-    G g(n);
+    graph g(n);
 
     std::vector<double> diag(n, 0.0);
 
@@ -78,7 +76,7 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     // The general path below remains authoritative for uncompressed storage,
     // duplicate indices, and one-triangle/asymmetric stored patterns.
     bool built_from_columns = false;
-    if constexpr (G::stores_directed_incidence && is_vec_pool_incidence_v<Incidence>) {
+    {
         if (L.isCompressed() && L.rows() == L.cols()) {
             const int* ptr = L.outerIndexPtr();
             const int* idx = L.innerIndexPtr();
@@ -155,31 +153,23 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                 } else {
                     // The speculative slabs have never escaped this call.
                     // Rebuild from the lower triangle under the old contract.
-                    g = G(n);
+                    g = graph(n);
                 }
             }
         }
     }
     if (!built_from_columns) {
-    if constexpr (is_vec_pool_incidence_v<Incidence>) {
+    {
         // ── Parallel build for vec_pool — O(n + nt) memory ────────
         // incoming[] is one shared array of size n (atomic increments in
         // PASS 1 to count per-vertex degree). PASS 2 consumes fixed logical
         // column ranges [col_bs[t], col_bs[t+1]), including on reduced teams.
         // Directed AoS writes both endpoint records into adjacency slabs
         // using atomic claims, then sorts each touched slab after the writes.
-        // Generic incidences use per-thread offsets for flat edge slots.
-        // The offset array is O(nt) integers rather than O(nt × n).
         // Column boundaries and counts are deterministic. Final slab sorting
         // restores neighbor order regardless of the arrival order of writes;
         // it does not require a particular runtime assignment of the ranges.
-        const int nt = std::max(1,
-#ifdef _OPENMP
-            omp_get_max_threads()
-#else
-            1
-#endif
-        );
+        const int nt = std::max(1, omp_get_max_threads());
         std::vector<node_index> incoming(static_cast<size_t>(n), 0);
         std::vector<node_index> col_bs(nt + 1, 0);
         for (int t = 0; t < nt; ++t)
@@ -231,42 +221,19 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
             // incoming[] (n counts) is consumed by the reserve; the edge pass
             // below reads only the matrix. Free it here, not at return.
             std::vector<node_index>().swap(incoming);
-            edge_index e_start = 0;
-            if constexpr (G::stores_directed_incidence)
-                g.record_edges_added(off_diag_nnz);
-            else
-                e_start = g.reserve_edge_pool(off_diag_nnz);
-
-            // Per-thread off-diag count (pre-pass for deterministic slot assignment).
-            std::vector<edge_index> per_thread_edges(nt + 1, 0);
-            #pragma omp parallel for schedule(static)
-            for (int t = 0; t < nt; ++t) {
-                edge_index cnt = 0;
-                for (node_index k = col_bs[t]; k < col_bs[t + 1]; ++k)
-                    for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
-                        if (it.row() > it.col()) ++cnt;
-                per_thread_edges[t + 1] = cnt;
-            }
-            for (int t = 0; t < nt; ++t)
-                per_thread_edges[t + 1] += per_thread_edges[t];
+            g.record_edges_added(off_diag_nnz);
 
             // PASS 2: consume every pre-counted range, even on a reduced team.
             #pragma omp parallel for num_threads(nt) schedule(static)
             for (int t = 0; t < nt; ++t) {
-                edge_index local_slot = per_thread_edges[t];
                 for (node_index k = col_bs[t]; k < col_bs[t + 1]; ++k)
                     for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
                         if (it.row() > it.col()) {
-                            const edge_index es = e_start + local_slot++;
                             const auto u = static_cast<node_index>(it.row());
                             const auto v = static_cast<node_index>(it.col());
-                            if constexpr (G::stores_directed_incidence) {
+                            {
                                 g.adj_atomic_push_directed(u, v, -it.value());
                                 g.adj_atomic_push_directed(v, u, -it.value());
-                            } else {
-                                g.write_edge_at(es, u, v, -it.value());
-                                g.adj_atomic_push_reserved(u, es);
-                                g.adj_atomic_push_reserved(v, es);
                             }
                         }
                     }
@@ -277,8 +244,9 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
             for (std::size_t i = 0; i < touched.size(); ++i)
                 g.adj_sort_slab(touched[i]);
         }
-    } else
-#endif
+    }
+    } // !built_from_columns
+#else
     {
         // Phase 1 (serial): extract edges and diagonal.
         for (node_index k = 0; k < outer; ++k)
@@ -292,8 +260,6 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
             }
     }
 
-#ifdef _OPENMP
-    } // !built_from_columns
 #endif
 
     // Phase 2: excess = diag − weighted degree.  Zero for pure Laplacians.
@@ -345,9 +311,8 @@ G make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
 /// Off-diagonal entries become weighted edges (negated).
 /// Any excess diagonal (row sum > 0, i.e. SDDM) is stored
 /// per-vertex in graph::excess() for use during factorization.
-template<typename G = graph<>>
-G make_graph(const Eigen::SparseMatrix<double>& L) {
-    return detail::make_graph_from_operator<G>(L, /*triangles_bit_identical=*/false);
+inline graph make_graph(const Eigen::SparseMatrix<double>& L) {
+    return detail::make_graph_from_operator(L, /*triangles_bit_identical=*/false);
 }
 
 } // namespace apxchol

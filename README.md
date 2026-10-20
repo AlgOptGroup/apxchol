@@ -83,38 +83,24 @@ its default. Trace-cycle supports CPU setup and full GPU-owned setup.
 uses CPU for scalar systems and for Metal inputs of at most 32,768 rows when CPU supports the requested storage. Otherwise selection follows device availability, input and option compatibility.
 `solve_result.backend` and the CLI report the actual route.
 
-Explicit GPU requests fail if unsupported. Once selected, GPU setup or execution
-errors are reported without retrying on CPU. CUDA requires compressed, sorted,
-unique and fully paired CSC input and uses device-owned factorization. It supports
-warm starts and optionally downloads an FP32 factor for export. Metal uses host
-factorization and supports FP32/FP16 storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
-Public `factorize()` and custom CPU strategies remain available independently;
-see the [extension guide](docs/extending.md) for explicit factor handoff.
+### Backend capabilities
+
+CUDA uses device-owned factorization with 32-bit vertices, `block_greedy` selection and natural residual peeling. It requires compressed, sorted, unique, fully paired CSC input and supports both GKS and trace-cycle, warm starts and FP32 factor export. Exact-clique, exact-core and double-cycle overrides require CPU setup.
+
+Metal currently uses host factorization, retaining the CPU factorization choices, then solves on the GPU. It supports FP32/FP16 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
+
+Automatic selection uses CPU when a configuration is incompatible with the available GPU backend. Explicit GPU requests fail if unsupported. Once selected, GPU setup or execution errors are reported without retrying on CPU. Public `factorize()` and custom CPU strategies remain available independently; see the [extension guide](docs/extending.md) for explicit factor handoff.
 
 ### Threads and placement
 
-The CPU solver is limited by memory traffic rather than core count, so where the
-threads sit matters more than how many there are. One 64-core EPYC 7742 socket
-(four NUMA domains, two memory channels each), 8 matrices, both samplers,
-geometric mean of the one-RHS total (Euler, 2026-09-18):
+Set `OMP_NUM_THREADS` to control CPU parallelism. More threads are not always faster: memory bandwidth, NUMA placement and matrix structure affect scaling. Benchmark the intended workload on the target machine, including both setup and solve.
 
-| Threads × NUMA domains | 16 × 1 | 16 × 4 | 32 × 4 | 64 × 4 |
-|---|---:|---:|---:|---:|
-| Relative time | 1.00 | 0.86 | **0.77** | 0.83 |
-
-Spread the threads over the memory domains of one socket and stop near eight per
-domain: all 64 cores were slower than 32, and slower than the compact 16 on
-social graphs; spreading 16 threads over both sockets was slower than one
-domain on three of four matrices. The library never changes affinity. Pin
-explicitly, one place per chosen core (`lscpu -p=CPU,CORE,NODE` lists them):
-`OMP_PROC_BIND=close OMP_PLACES="{0},{1},{16},{17},..."`.
+The library does not change affinity. `OMP_PLACES=cores` and `OMP_PROC_BIND=spread` provide an explicit placement to compare with your system default; use a restricted CPU set when testing one socket or NUMA node.
 
 ## Further reading
 
-- [Historical Daint results](benchmarks/daint/) and [benchmark protocol](benchmarks/README.md).
-  Laptop measurements are [historical](benchmarks/archive/).
-- [Examples](examples/), [extending the algorithm](docs/extending.md),
-  [contributing](CONTRIBUTING.md), [implementation history](docs/implementation-history.md).
+- [Benchmark protocol and reproduction](benchmarks/README.md).
+- [Examples](examples/), [extending the algorithm](docs/extending.md), and [contributing](CONTRIBUTING.md).
 - Kyng–Sachdeva ([2016](https://arxiv.org/abs/1605.02353)),
   Gao–Kyng–Spielman ([2023](https://arxiv.org/abs/2303.00709)),
   Baumann–Kyng ([2024](https://dl.acm.org/doi/10.1145/3626183.3659987)).

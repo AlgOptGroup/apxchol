@@ -682,7 +682,7 @@ void metal_solver::impl::allocate_workspace(unsigned count) {
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                            checkpoint* cp)
     : impl_(new impl(opts)) {
-    impl_->F = detail::factorize_for_solver(A, opts.storage, opts.factor_opts, cp);
+    impl_->F = detail::factorize_for_solver(A, opts.factor_opts, cp);
     impl_->setup(A, cp);
 }
 

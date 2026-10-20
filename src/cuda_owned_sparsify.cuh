@@ -51,7 +51,7 @@ __global__ void owned_sparsify_coalesce(
         sum = __dadd_rn(sum, sorted[j].weight);
     const pool_value_t stored = static_cast<pool_value_t>(sum);
     if (!isfinite(sum) || !isfinite(double(stored))) atomicExch(error, 1U);
-    folded[i] = {e.owner, e.neighbor, double(stored)};
+    folded[i] = {e.owner, e.neighbor, stored};
 }
 
 __device__ std::uint64_t owned_sparsify_priority(double weight, unsigned id) {
@@ -241,8 +241,8 @@ __global__ void owned_sparsify_expand(const gpu_round_shadow_incidence* edges,
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i >= count) return;
     const auto j = ids[i]; auto e = edges[j];
-    if (!backbone[j]) e.weight = double(static_cast<pool_value_t>(
-        __dmul_rn(e.weight, __ddiv_rn(1.0, probabilities[j]))));
+    if (!backbone[j]) e.weight = static_cast<pool_value_t>(
+        __dmul_rn(e.weight, __ddiv_rn(1.0, probabilities[j])));
     output[2 * i] = e; output[2 * i + 1] = {e.neighbor, e.owner, e.weight};
 }
 
