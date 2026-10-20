@@ -76,7 +76,7 @@ inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
 struct gpu_round_shadow_incidence {
     node_index owner = 0;
     node_index neighbor = 0;
-    double weight = 0.0;
+    pool_value_t weight = 0;
 };
 
 struct gpu_round_shadow_input {
@@ -484,16 +484,11 @@ inline void gpu_round_shadow_validate_capacity(
         input.vertex_count, input.incidences.size(), input.pivots.size(), shape);
 }
 
-template<incidence_storage Incidence>
-gpu_round_shadow_input make_gpu_round_shadow_input(
-        const graph<Incidence>& residual,
+inline gpu_round_shadow_input make_gpu_round_shadow_input(
+        const graph& residual,
         std::span<const node_index> pivots,
         std::uint64_t run_seed) {
-    if constexpr (!std::is_same_v<Incidence,
-                                  directed_vec_pool_incidence>) {
-        throw std::invalid_argument(
-            "GPU round shadow requires directed vec_pool_aos storage");
-    } else {
+    {
         gpu_round_shadow_input input;
         input.vertex_count = residual.n();
         input.owner_offsets.resize(
@@ -520,7 +515,7 @@ gpu_round_shadow_input make_gpu_round_shadow_input(
         input.incidences.reserve(incidence_count);
         for (node_index owner = 0; owner < residual.n(); ++owner) {
             for (const auto& [neighbor, weight] : residual.neighbors(owner))
-                input.incidences.push_back({owner, neighbor, weight});
+                input.incidences.push_back({owner, neighbor, static_cast<pool_value_t>(weight)});
         }
         if (input.incidences.size() != incidence_count)
             throw std::logic_error(
@@ -947,7 +942,7 @@ inline gpu_round_shadow_report reference_gpu_round_shadow(
     report.raw_fill_edges = fills.size();
     report.excess_updates = excess_updates.size();
 
-    // graph<directed_vec_pool_incidence> is an append-only multigraph.  Every
+    // graph is an append-only multigraph.  Every
     // sampled fill is stored separately and narrowed separately to pool_value_t;
     // colliding endpoint pairs must not be coalesced in fp64 here.
     for (const auto& edge : fills)
@@ -1118,11 +1113,11 @@ struct gpu_round_shadow_cpu_comparison {
 /// incidence endpoints/stored weight bits, and raw incidence degrees are exact.
 /// Only a vertex receiving two or more excess updates gets a roundoff bound:
 /// OpenMP atomics serialize those additions in an unspecified order.
-template<incidence_storage Incidence, class FactorColumns>
+template<class FactorColumns>
 gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
         const gpu_round_shadow_report& expected,
         std::span<const gpu_round_shadow_excess_bound> excess_bounds,
-        const graph<Incidence>& residual,
+        const graph& residual,
         const FactorColumns& columns,
         const gpu_round_shadow_digest* streamed_entries = nullptr) {
     auto mismatch = [](const std::string& field) {
@@ -1577,7 +1572,7 @@ private:
 #endif
 };
 
-template<typename Eliminator, incidence_storage Incidence>
+template<typename Eliminator>
 gpu_round_shadow_session make_gpu_round_shadow_session(
         const Eliminator& eliminator, setup_route route = setup_route::cpu) {
     if (route == setup_route::cpu) return {};
@@ -1585,8 +1580,7 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
     (void)eliminator;
     throw std::runtime_error("GPU factorization requires CUDA support");
 #else
-    if constexpr (!std::is_same_v<Incidence, directed_vec_pool_incidence> ||
-                  !std::is_same_v<std::remove_cvref_t<Eliminator>, tree_elimination>) {
+    if constexpr (!std::is_same_v<std::remove_cvref_t<Eliminator>, tree_elimination>) {
         (void)eliminator;
         throw std::invalid_argument("GPU factorization requires vec_pool_aos and the built-in eliminator");
     } else {

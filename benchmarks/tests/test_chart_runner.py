@@ -13,8 +13,6 @@ sys.path.insert(0, str(BENCH))
 import fair_charts as cpu  # noqa: E402
 import chart_cells  # noqa: E402
 import combined_charts as combined  # noqa: E402
-sys.path.insert(0, str(BENCH / "daint"))
-import render_campaign as daint_campaign  # noqa: E402
 import fill_chart  # noqa: E402
 import fill_pass  # noqa: E402
 import gpu_charts as gpu  # noqa: E402
@@ -546,28 +544,14 @@ class FairSweepSelectionTest(unittest.TestCase):
         self.assertEqual(len(sweep_fair.APX_GPU), len(set(sweep_fair.APX_GPU)))
         self.assertTrue(all(retired not in config
                             for _, config in sweep_fair.APX + sweep_fair.APX_GPU
-                            for retired in ("[vec_pool]", "[fwd_star]", "[forward_star]")))
-        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 510)
+                            for retired in ("[vec]", "[bstr]", "[vec_pool]", "[fwd_star]", "[forward_star]")))
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 351)
         self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 162)
         self.assertEqual(
             sweep_fair.planned_cell_count(selected, "cpu")
             + sweep_fair.planned_cell_count(selected, "gpu"),
-            672,
+            513,
         )
-
-    def test_orkut_size_gate_always_keeps_declared_default(self):
-        configs = [
-            ("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG),
-            ("apxchol_v1", "greedy+tree[vec_pool_aos]"),
-            ("apxchol_v1", "bg+tree[vec]"),
-            ("apxchol_v1", "bg+tree[bstr]"),
-        ]
-        with mock.patch.object(sweep_fair, "APX", configs):
-            self.assertEqual(
-                sweep_fair.cpu_apx_configs_for("com-Orkut"),
-                configs[:3],
-            )
-            self.assertIs(sweep_fair.cpu_apx_configs_for("iter0040"), configs)
 
     def test_all_registry_entries_are_selected_once(self):
         selected = list(sweep_fair.selected_matrices(
@@ -619,85 +603,6 @@ class JuliaPreflightTest(unittest.TestCase):
         self.assertIn("root cause", reason)
 
 
-class DaintCampaignRendererTest(unittest.TestCase):
-    def test_committed_csv_extracts_are_typed_reproduction_inputs(self):
-        scaling, baseline, pivots = daint_campaign.load_csv_inputs(BENCH / "daint")
-        self.assertEqual(len(scaling), daint_campaign.SCALING_RECORDS)
-        self.assertEqual(len(baseline), daint_campaign.BASELINE_RECORDS)
-        self.assertEqual(len(pivots), daint_campaign.PIVOT_RECORDS)
-        self.assertIsInstance(scaling[0]["threads"], int)
-        self.assertIsInstance(scaling[0]["setup_ms"], float)
-        self.assertIsInstance(baseline[0]["seed"], int)
-        self.assertIsInstance(pivots[0]["worst_parallel_lpt"], float)
-
-    def test_scaling_validator_enforces_189_record_grid_and_timing_identity(self):
-        scaling, _baseline, _pivots = daint_campaign.load_csv_inputs(BENCH / "daint")
-        max_delta = daint_campaign.validate_scaling_records(scaling)
-        self.assertLessEqual(max_delta, daint_campaign.SCALING_TOTAL_ABS_TOL_MS)
-
-        with self.assertRaisesRegex(RuntimeError, "checked 188/189"):
-            daint_campaign.validate_scaling_records(scaling[:-1])
-
-        inconsistent = [dict(row) for row in scaling]
-        inconsistent[0]["total_ms"] += 0.01
-        with self.assertRaisesRegex(RuntimeError, r"setup\+pcg=total"):
-            daint_campaign.validate_scaling_records(inconsistent)
-
-    def test_scaling_fixture_renders_three_panel_png(self):
-        scaling, _baseline, _pivots = daint_campaign.load_csv_inputs(BENCH / "daint")
-        daint_campaign.validate_scaling_records(scaling)
-        medians = daint_campaign.scaling_medians(scaling)
-        self.assertEqual(
-            daint_campaign.SCALING_PANELS,
-            (("total_ms", "Total"), ("pcg_ms", "PCG / solve"),
-             ("setup_ms", "Setup")),
-        )
-        with tempfile.TemporaryDirectory() as output, \
-             mock.patch.object(daint_campaign.plt, "subplots",
-                               wraps=daint_campaign.plt.subplots) as subplots:
-            path = pathlib.Path(output) / "scaling.png"
-            daint_campaign.render_scaling_figure(path, medians)
-            self.assertEqual(subplots.call_args.args, (1, 3))
-            self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
-            self.assertGreater(path.stat().st_size, 10_000)
-
-    def test_incomplete_scaling_fails_before_rendering(self):
-        scaling, baseline, pivots = daint_campaign.load_csv_inputs(BENCH / "daint")
-        with tempfile.TemporaryDirectory() as output, \
-             mock.patch.object(daint_campaign, "load_csv_inputs",
-                               return_value=(scaling[:-1], baseline, pivots)), \
-             mock.patch.object(daint_campaign, "render_scaling_figure") as scaling_fig, \
-             mock.patch.object(daint_campaign, "render_baseline_figure") as baseline_fig, \
-             mock.patch.object(daint_campaign, "render_breakdown_figure") as breakdown_fig:
-            with self.assertRaisesRegex(RuntimeError, "checked 188/189"):
-                daint_campaign.main([
-                    "--csv-input", str(BENCH / "daint"), "--output", output,
-                ])
-        scaling_fig.assert_not_called()
-        baseline_fig.assert_not_called()
-        breakdown_fig.assert_not_called()
-
-    def test_csv_reproduction_bypasses_raw_logs_and_does_not_rewrite_extracts(self):
-        with tempfile.TemporaryDirectory() as output, \
-             mock.patch.object(daint_campaign, "parse_scaling") as parse_scaling, \
-             mock.patch.object(daint_campaign, "parse_baseline") as parse_baseline, \
-             mock.patch.object(daint_campaign, "parse_structure") as parse_structure, \
-             mock.patch.object(daint_campaign, "write_csv") as write_csv, \
-             mock.patch.object(daint_campaign, "render_scaling_figure") as scaling_fig, \
-             mock.patch.object(daint_campaign, "render_baseline_figure") as baseline_fig, \
-             mock.patch.object(daint_campaign, "render_breakdown_figure") as breakdown_fig, \
-             mock.patch.object(daint_campaign, "write_summary") as write_summary:
-            daint_campaign.main([
-                "--csv-input", str(BENCH / "daint"), "--output", output,
-            ])
-        parse_scaling.assert_not_called()
-        parse_baseline.assert_not_called()
-        parse_structure.assert_not_called()
-        write_csv.assert_not_called()
-        scaling_fig.assert_called_once()
-        baseline_fig.assert_called_once()
-        breakdown_fig.assert_called_once()
-        write_summary.assert_called_once()
 
 
 class HeatmapColorScaleTest(unittest.TestCase):

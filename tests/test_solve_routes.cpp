@@ -45,16 +45,15 @@ void expect_solution(const Eigen::SparseMatrix<double>& matrix,
 }
 
 std::vector<apxchol::solve_options> host_only_options() {
-    std::vector<apxchol::solve_options> options(7);
-    options[0].storage = apxchol::graph_storage::vec;
-    options[1].factor_opts.is_select = "priority_greedy";
-    options[2].factor_opts.exact_clique_max_degree = 3;
+    std::vector<apxchol::solve_options> options(6);
+    options[0].factor_opts.is_select = "priority_greedy";
+    options[1].factor_opts.exact_clique_max_degree = 3;
+    options[2].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    options[2].factor_opts.exact_core_max_h = 3;
     options[3].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    options[3].factor_opts.exact_core_max_h = 3;
-    options[4].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    options[4].factor_opts.double_cycle_min_h = 4;
-    options[5].factor_opts.residual_peel = apxchol::residual_peel_strategy::min_degree;
-    options[6].factor_opts.residual_peel = apxchol::residual_peel_strategy::bk_serial;
+    options[3].factor_opts.double_cycle_min_h = 4;
+    options[4].factor_opts.residual_peel = apxchol::residual_peel_strategy::min_degree;
+    options[5].factor_opts.residual_peel = apxchol::residual_peel_strategy::bk_serial;
     return options;
 }
 } // namespace
@@ -88,7 +87,7 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     const auto reused = reusable.solve(rhs, 1e-10);
     EXPECT_EQ(reused.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, reused);
-    const auto factor = apxchol::factorize(matrix, apxchol::graph_storage::vec_pool_aos);
+    const auto factor = apxchol::factorize(matrix);
     EXPECT_EQ(factor.L.vals_.size(), factor.L.nonZeros());
     EXPECT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
     EXPECT_EQ(factor.perm.size(), static_cast<std::size_t>(matrix.rows()));
@@ -108,7 +107,7 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     const auto cases = host_only_options();
-    ASSERT_EQ(cases.size(), 7u);
+    ASSERT_EQ(cases.size(), 6u);
 #if defined(APXCHOL_USE_METAL)
     const auto expected = apxchol::metal_solver::available()
         ? apxchol::solve_backend::gpu : apxchol::solve_backend::cpu;
@@ -187,7 +186,7 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     auto cases = host_only_options();
-    ASSERT_EQ(cases.size(), 7u);
+    ASSERT_EQ(cases.size(), 6u);
     for (auto& options : cases) {
         options.backend = apxchol::solve_backend::gpu;
         EXPECT_THROW(apxchol::detail::select_solve_backend(options), std::invalid_argument);

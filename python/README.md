@@ -50,6 +50,7 @@ support it, otherwise CPU. Selection belongs to the common C++ solver;
 support in the installed build and a usable device. Explicit GPU requests fail
 when unavailable or unsupported; execution errors do not trigger a CPU retry.
 `solver.backend` reports the choice made during setup and is read-only.
+See [backend capabilities](../README.md#backend-capabilities) for GPU option restrictions.
 `OMP_NUM_THREADS` controls CPU parallelism. A solver cannot
 serve concurrent `solve`/`apply` calls; use separate instances or serialize.
 
@@ -60,11 +61,10 @@ GPU solves can use temporary output storage before copying into `out`.
 
 ```python
 solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
-                           storage="vec_pool_aos", keep_factor=False)
+                           keep_factor=False)
 ```
 
 Partitioners: `block_greedy`, `priority_greedy`, `baumann_kyng`.
-Graph storage: `vec_pool_aos`, `vec`, `bstr`.
 `keep_factor=True` is the reusable API default and retains an extra factor
 copy (~8 bytes/nonzero in default builds). `False` disables factor export,
 but preserves `P`, `factor_nnz`, `fill_ratio`; one-shot `solve` uses `False`.

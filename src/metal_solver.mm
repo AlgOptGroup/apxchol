@@ -34,10 +34,11 @@ static_assert(sizeof(df32) == 8);
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #include "metal_params.inc"
 #undef APXCHOL_GPU_CODE
-static_assert(sizeof(Params) == 36);
+static_assert(sizeof(Params) == 40);
 static_assert(offsetof(Params, mode) == 16);
 static_assert(offsetof(Params, m) == 28);
 static_assert(offsetof(Params, spmv_lanes) == 32);
+static_assert(offsetof(Params, preconditioner_scale) == 36);
 
 using solve_state = gpu_pcg::solve_state<df32, float>;
 static_assert(sizeof(solve_state) == 48);
@@ -518,8 +519,19 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
                                 "device's 32-bit offsets");
     op = detail::build_permuted_full_symmetric_csr(src, F.perm);
     int max_row = 0;
-    for (std::size_t row = 0; row < n; ++row)
+    double min_diagonal = std::numeric_limits<double>::infinity(), max_diagonal = 0;
+    #pragma omp parallel for schedule(static) reduction(min : min_diagonal) reduction(max : max_diagonal, max_row)
+    for (std::size_t row = 0; row < n; ++row) {
         max_row = std::max(max_row, op.ptr[row + 1] - op.ptr[row]);
+        const auto end = op.idx.get() + op.ptr[row + 1];
+        auto p = std::lower_bound(op.idx.get() + op.ptr[row], end, int(row));
+        double diagonal = 0;
+        for (; p != end && *p == int(row); ++p) diagonal += op.vals[p - op.idx.get()];
+        if (diagonal > 0) {
+            min_diagonal = std::min(min_diagonal, diagonal);
+            max_diagonal = std::max(max_diagonal, diagonal);
+        }
+    }
     arguments.spmv_lanes = max_row > 256 ? kTreeLanes : 1;
     const bool exact = op.fp32_exact;
     const std::size_t nnz = static_cast<std::size_t>(op.ptr.back());
@@ -535,6 +547,14 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     }
     if (!in_range)
         throw std::domain_error("metal_solver: an operator value is non-finite or outside [2^-100, 2^100]");
+    // A fixed positive PCG preconditioner scale preserves x while balancing
+    // rho and curvature exponents; diagonal extremes include mixed scales.
+    arguments.preconditioner_scale = 1;
+    if (max_diagonal > 0) {
+        const int exponent_sum = std::ilogb(min_diagonal) + std::ilogb(max_diagonal);
+        const int shift = static_cast<int>(std::floor(exponent_sum / 4.0));
+        arguments.preconditioner_scale = std::scalbn(1.0f, shift);
+    }
     if (cp) (*cp)("metal_operator");
 
     prepare_device(std::move(backward), scales, hi, lo, m);
@@ -611,7 +631,7 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                            checkpoint* cp)
     : impl_(new impl(opts)) {
-    impl_->F = detail::factorize_for_solver(A, opts.storage, opts.factor_opts, cp);
+    impl_->F = detail::factorize_for_solver(A, opts.factor_opts, cp);
     impl_->setup(A, cp);
 }
 

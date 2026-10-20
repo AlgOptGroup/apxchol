@@ -161,7 +161,6 @@ apxchol_options default_options() {
     o.partitioner = APXCHOL_PARTITIONER_BLOCK_GREEDY;
     for (int p = 0; p < 3; ++p)
         if (so.factor_opts.is_select == kPartitionerNames[p]) o.partitioner = p;
-    o.storage = static_cast<apxchol_storage>(so.storage);
     o.keep_factor_values = so.keep_factor_values ? 1 : 0;
     o.degree_quantile = so.factor_opts.partition.degree_quantile;
     o.exact_clique_max_degree = so.factor_opts.exact_clique_max_degree;
@@ -192,9 +191,6 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
             "options.sampler must be APXCHOL_SAMPLER_GKS or APXCHOL_SAMPLER_TRACE_CYCLE");
     require(o.partitioner >= 0 && o.partitioner < 3,
             "options.partitioner is not an apxchol_partitioner value");
-    require(o.storage == APXCHOL_STORAGE_VEC || o.storage == APXCHOL_STORAGE_BSTR ||
-                o.storage == APXCHOL_STORAGE_VEC_POOL_AOS,
-            "options.storage must be VEC, BSTR or VEC_POOL_AOS");
     require(o.keep_factor_values == 0 || o.keep_factor_values == 1,
             "options.keep_factor_values must be 0 or 1");
     require(std::isfinite(o.degree_quantile) && o.degree_quantile <= 1.0,
@@ -220,7 +216,6 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
     so.tol = o.tol;
     so.max_iter = o.max_iter;
     so.stagnation_window = o.stagnation_window;
-    so.storage = static_cast<apxchol::graph_storage>(o.storage);
     so.keep_factor_values = o.keep_factor_values != 0;
     so.factor_opts.seed = o.seed;
     so.factor_opts.is_select = kPartitionerNames[o.partitioner];
@@ -638,7 +633,7 @@ apxchol_status apxchol_factor_create(int64_t n, const int64_t* colptr, const int
         factor->setup_max_threads = max_threads();
         const auto start = clock_type::now();
         // Public factorization retains native FP32 values on every build.
-        factor->F = apxchol::factorize(A, so.storage, so.factor_opts);
+        factor->F = apxchol::factorize(A, so.factor_opts);
         factor->setup_seconds = seconds_since(start);
         *out_factor = factor.release();
         return APXCHOL_STATUS_SUCCESS;

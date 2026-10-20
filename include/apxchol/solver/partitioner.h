@@ -12,8 +12,7 @@
 ///       static constexpr std::string_view name = "mine";  // dispatch string
 ///       static constexpr bool degree_prepass = true;      // optional trait
 ///
-///       template<incidence_storage I>
-///       void find_partition(graph<I>& G,
+///       void find_partition(graph& G,
 ///                           std::span<const node_index> candidates,
 ///                           const partition_context& ctx, selection& out);
 ///   };
@@ -88,9 +87,8 @@
 /// `G` is non-const only so the pruning helpers can run. Queries
 /// (see graph/graph.h):
 ///   G.n(), G.m()            — vertex / edge counts
-///   G.adj(v)                — incidence slots of v (may still contain edges
-///                             to eliminated vertices until pruned)
-///   G.edge_target(idx, v)   — the neighbor of v across incidence slot idx
+///   G.adj(v)                — {to, w} adjacency records (may still contain
+///                             eliminated vertices until pruned)
 ///   G.is_active(u)          — u not yet eliminated?
 ///   G.prune_and_degree(v)   — drop v's dead edges, return its live degree
 ///   G.prune_and_visit(v, f) — same, calling f(u) for each live neighbor
@@ -246,7 +244,7 @@ inline constexpr size_t partitioner_residual_handoff_v = [] {
 template<typename T>
 concept partitioner =
     requires { { T::name } -> std::convertible_to<std::string_view>; } &&
-    requires(T t, graph<directed_vec_pool_incidence>& G,
+    requires(T t, graph& G,
              std::span<const node_index> candidates,
              const partition_context& ctx, selection& out) {
         t.find_partition(G, candidates, ctx, out);
@@ -264,8 +262,7 @@ struct callable_partitioner {
     explicit callable_partitioner(F f) : fn(std::move(f)) {}
     F fn;
 
-    template<incidence_storage Incidence>
-    void find_partition(graph<Incidence>& G,
+    void find_partition(graph& G,
                         std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
         fn(G, candidates, ctx, out);

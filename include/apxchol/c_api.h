@@ -81,14 +81,6 @@ enum {
     APXCHOL_PARTITIONER_BAUMANN_KYNG = 2
 };
 
-/* Values of apxchol::graph_storage; the retired values 1 and 3 are rejected. */
-typedef int32_t apxchol_storage;
-enum {
-    APXCHOL_STORAGE_VEC = 0,
-    APXCHOL_STORAGE_BSTR = 2,
-    APXCHOL_STORAGE_VEC_POOL_AOS = 4
-};
-
 typedef int32_t apxchol_factor_storage;
 enum {
     APXCHOL_FACTOR_STORAGE_AUTO = 0,
@@ -107,7 +99,6 @@ typedef struct apxchol_options {
     int32_t threads;                  /* > 0: call-scoped OpenMP team; 0: inherit */
     apxchol_sampler sampler;
     apxchol_partitioner partitioner;
-    apxchol_storage storage;
     int32_t keep_factor_values;       /* 0/1; factor value export requires 1 */
     double degree_quantile;           /* < 0: chosen by route (factor_options.h) */
     uint64_t exact_clique_max_degree;
@@ -220,7 +211,7 @@ APXCHOL_C_API apxchol_status apxchol_solver_export_factor(
 
 /* Factorizes A without building a solver: the same validation, lumping and
  * call-scoped threads as apxchol_solver_create, with the factorization
- * options (seed, sampler, partitioner, storage, degree_quantile,
+ * options (seed, sampler, partitioner, degree_quantile,
  * exact_clique_max_degree, omp_threshold). The other options are validated
  * and unused; keep_factor_values is ignored. options NULL = defaults. */
 APXCHOL_C_API apxchol_status apxchol_factor_create(

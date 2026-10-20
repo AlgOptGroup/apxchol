@@ -74,8 +74,8 @@ struct factorization {
 /// Defaults to block_greedy_partitioner; callers can substitute any
 /// partitioner from partitioner_list.h at compile time:
 ///   auto F = factorize<priority_greedy_partitioner>(G, opts);
-template<typename Partitioner = block_greedy_partitioner, incidence_storage Incidence>
-factorization factorize(graph<Incidence> G,
+template<typename Partitioner = block_greedy_partitioner>
+factorization factorize(graph G,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
 
@@ -89,33 +89,22 @@ namespace detail {
 /// `L` itself is never modified — a lumped input is factorized from a private
 /// copy — which is what keeps the operator PCG applies bit-identical to the
 /// one the caller passed.
-template<typename Graph, typename Build>
+template<typename Build>
 factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
                                  Build&& build) {
     const operator_view op(L);
-    factorization F = build(make_graph<Graph>(op.matrix()));
+    factorization F = build(make_graph(op.matrix()));
     F.lumped_offdiag = op.lumped();
     return F;
 }
 
 } // namespace detail
 
-/// Factorize from a Laplacian matrix, building a Graph internally.
-template<typename Graph = graph<>>
-factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr) {
-    return detail::factorize_operator<Graph>(L, [&](auto&& G) {
-        return factorize(std::move(G), opts, cp);
-    });
-}
-
 /// Custom-eliminator overload: substitute your own star-vertex elimination
 /// rule (see elimination/elimination.h for the `eliminator` contract).
 /// The default overloads build the tree_elimination rule from `opts`.
-template<typename Partitioner = block_greedy_partitioner, eliminator E,
-         incidence_storage Incidence>
-factorization factorize(graph<Incidence> G, const E& elim,
+template<typename Partitioner = block_greedy_partitioner, eliminator E>
+factorization factorize(graph G, const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
 
@@ -125,52 +114,49 @@ factorization factorize(graph<Incidence> G, const E& elim,
 /// The instance is taken by value; state mutated during the run is not
 /// observable afterwards — reference it through a member pointer if you need
 /// to inspect it post-run.
-template<partitioner P, incidence_storage Incidence>
-factorization factorize(graph<Incidence> G, P part,
+template<partitioner P>
+factorization factorize(graph G, P part,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
 
-template<partitioner P, eliminator E, incidence_storage Incidence>
-factorization factorize(graph<Incidence> G, P part, const E& elim,
+template<partitioner P, eliminator E>
+factorization factorize(graph G, P part, const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
 
 /// Matrix-level conveniences for the custom seams: build the graph internally
 /// (default storage) and forward. Equivalent to
-/// factorize(make_graph<Graph>(L), ...).
-template<typename Partitioner = block_greedy_partitioner, eliminator E,
-         typename Graph = graph<>>
+/// factorize(make_graph(L), ...).
+template<typename Partitioner = block_greedy_partitioner, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return detail::factorize_operator<Graph>(L, [&](auto&& G) {
+    return detail::factorize_operator(L, [&](auto&& G) {
         return factorize<Partitioner>(std::move(G), elim, opts, cp);
     });
 }
 
-template<partitioner P, typename Graph = graph<>>
+template<partitioner P>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return detail::factorize_operator<Graph>(L, [&](auto&& G) {
+    return detail::factorize_operator(L, [&](auto&& G) {
         return factorize(std::move(G), std::move(part), opts, cp);
     });
 }
 
-template<partitioner P, eliminator E, typename Graph = graph<>>
+template<partitioner P, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return detail::factorize_operator<Graph>(L, [&](auto&& G) {
+    return detail::factorize_operator(L, [&](auto&& G) {
         return factorize(std::move(G), std::move(part), elim, opts, cp);
     });
 }
 
-/// Runtime-dispatch overload: picks graph backend from graph_storage enum
-/// and partitioner by name from factor_options::is_select.
+/// Matrix-level factorization using the built-in AoS graph and named partitioner.
 factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        graph_storage storage,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
 
@@ -179,7 +165,6 @@ namespace detail {
 // Internal consuming route used only by the preconditioner. Public factorize()
 // always retains exportable host arrays; the resident solve may omit them.
 factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
-                                  graph_storage storage,
                                   const factor_options& opts,
                                   checkpoint* cp,
                                   setup_route route = setup_route::cpu,

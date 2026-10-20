@@ -2,8 +2,7 @@
 """Shared harness for the benchmark runners.
 
 One canonical copy of the pieces that were duplicated (with drift) across
-sweep_fair.py / parac_runner.py / thread_scaling.py / fill_pass.py /
-level_stats.py:
+sweep_fair.py / parac_runner.py / thread_scaling.py / fill_pass.py:
 
   - sh()           hardened subprocess harness: process-group kill on timeout
                    (the orphan-on-timeout bug fix, 2026-06-11), optional env and
@@ -19,8 +18,7 @@ level_stats.py:
                    by the compute-process name to match.
   - ParAC constants + the AMD-reorder cache path helper.
 
-All runners (sweep_fair, thread_scaling, fill_pass, level_stats,
-selector_levels) import these helpers rather than carrying their own copies.
+All runners (sweep_fair, thread_scaling, fill_pass, selector_levels) import these helpers rather than carrying their own copies.
 """
 import hashlib, json, math, os, re, shlex, signal, subprocess, tempfile, threading
 from pathlib import Path

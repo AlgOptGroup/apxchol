@@ -61,8 +61,7 @@ struct my_partitioner {
     static constexpr std::string_view name = "mine";
     static constexpr bool degree_prepass = true;
 
-    template<apxchol::incidence_storage I>
-    void find_partition(apxchol::graph<I>& G,
+        void find_partition(apxchol::graph& G,
                         std::span<const apxchol::node_index> candidates,
                         const apxchol::partition_context& ctx,
                         apxchol::selection& out);
@@ -123,9 +122,7 @@ operator kind, and round metadata. Preserve these conventions. Enable
 `set_keep_factor(true)` before installation if the preconditioner must retain
 exportable factor arrays; consuming solver paths may release them.
 
-Custom graph layouts implement `incidence_storage`. Directed pooled AoS is
-the high-level default; storage selection must not silently change the
-partitioner. The PCG recurrence, factor-column formula, and triangular-solve
-kernels are not additional template seams. Consult
-[implementation history](implementation-history.md) before reviving a retired
-mechanism; historical options are not supported APIs.
+Graph storage is the directed AoS pool. Custom partitioners and eliminators
+operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve
+kernels are not additional template seams. Preserve the current defaults and
+[precision contract](precision.md); retired options are not supported APIs.

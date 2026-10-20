@@ -103,10 +103,11 @@ APXCHOL_GPU_FUNCTION typename Math::wide step(
                 v.r[row] = value;
                 total = math.add_product(total, value, value);
             } else if (op == operation::dot) {
-                total = math.add_product(total, v.r[row], v.z[row]);
+                total = math.add_product(total, v.r[row], math.preconditioned(v.z[row]));
             } else {
                 const auto beta = v.state->beta;
-                v.p[row] = beta == 0 ? v.z[row] : math.direction(v.z[row], v.p[row], beta);
+                const auto z = math.preconditioned(v.z[row]);
+                v.p[row] = beta == 0 ? z : math.direction(z, v.p[row], beta);
             }
         }
     }

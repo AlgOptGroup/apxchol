@@ -19,6 +19,7 @@
 #include "apxchol/csc_work.h"
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
+#include "reference_graph.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -26,16 +27,10 @@
 
 // ── Typed test fixture ───────────────────────────────
 
-using AllStorages = ::testing::Types<
-    apxchol::vec_incidence,
-    apxchol::bstr_incidence,
-    apxchol::directed_vec_pool_incidence
->;
 
-template<typename Incidence>
 class GraphTest : public ::testing::Test {
 protected:
-    using Graph = apxchol::graph<Incidence>;
+    using Graph = apxchol::graph;
 
     static Graph make_path(int n) {
         Graph G(n);
@@ -56,13 +51,12 @@ protected:
     }
 };
 
-TYPED_TEST_SUITE(GraphTest, AllStorages);
 
 // ── Graph tests ──────────────────────────────────────
 
 TEST(ActiveState, ParallelClearsSharingWordsDoNotLoseUpdates) {
     constexpr apxchol::node_index n = 4096;
-    apxchol::graph<apxchol::directed_vec_pool_incidence> G(n);
+    apxchol::graph G(n);
 
 #pragma omp parallel for schedule(static, 1)
     for (apxchol::node_index v = 0; v < n; ++v)
@@ -75,7 +69,7 @@ TEST(ActiveState, ParallelClearsSharingWordsDoNotLoseUpdates) {
 }
 
 TEST(ActiveState, RepeatedDeactivateDoesNotDoubleCount) {
-    apxchol::graph<apxchol::directed_vec_pool_incidence> G(65);
+    apxchol::graph G(65);
     G.deactivate(64);
     G.deactivate(64);
     EXPECT_EQ(G.num_active(), 64u);
@@ -101,8 +95,7 @@ struct assignment_counted_slot {
 } // namespace
 
 TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
-    using Incidence = apxchol::basic_vec_pool_incidence<assignment_counted_slot,
-                                                        apxchol::graph_storage::vec_pool_aos>;
+    using Incidence = apxchol::basic_vec_pool_incidence<assignment_counted_slot>;
     Incidence adj;
     adj.init(1);
     for (int value : {1, 2, 3, 4})
@@ -162,8 +155,8 @@ TEST(SegmentedPool, ParallelClaimsAreDisjoint) {
     }
 }
 
-TYPED_TEST(GraphTest, BasicConstruction) {
-    using Graph = typename TestFixture::Graph;
+TEST_F(GraphTest, BasicConstruction) {
+    using Graph = apxchol::graph;
     Graph G(5);
     G.add_edge(0, 1, 2.0);
     G.add_edge(1, 2, 3.0);
@@ -171,8 +164,8 @@ TYPED_TEST(GraphTest, BasicConstruction) {
     EXPECT_EQ(G.m(), 2);
 }
 
-TYPED_TEST(GraphTest, DeactivateAndPrune) {
-    using Graph = typename TestFixture::Graph;
+TEST_F(GraphTest, DeactivateAndPrune) {
+    using Graph = apxchol::graph;
     Graph G(4);
     G.add_edge(0, 1, 1.0);
     G.add_edge(0, 2, 2.0);
@@ -192,16 +185,16 @@ TYPED_TEST(GraphTest, DeactivateAndPrune) {
     EXPECT_EQ(count, 1);  // only vertex 3
 }
 
-TYPED_TEST(GraphTest, ForNeighbors) {
-    auto G = TestFixture::make_path(4);  // 0-1-2-3
+TEST_F(GraphTest, ForNeighbors) {
+    auto G = this->make_path(4);  // 0-1-2-3
     std::vector<std::pair<int, double>> nbrs;
     for (const auto& e : G.neighbors(1))
         nbrs.push_back({e.to, e.w});
     EXPECT_EQ(nbrs.size(), 2u);
 }
 
-TYPED_TEST(GraphTest, WeightedDegree) {
-    using Graph = typename TestFixture::Graph;
+TEST_F(GraphTest, WeightedDegree) {
+    using Graph = apxchol::graph;
     Graph G(3);
     G.add_edge(0, 1, 2.0);
     G.add_edge(0, 2, 5.0);
@@ -218,17 +211,11 @@ TYPED_TEST(GraphTest, WeightedDegree) {
 
 namespace {
 
-using SparsifyStorages = ::testing::Types<
-    apxchol::directed_vec_pool_incidence>;
 
-template<typename Incidence>
-class ResidualSparsifyTest : public ::testing::Test {};
 
-TYPED_TEST_SUITE(ResidualSparsifyTest, SparsifyStorages);
 
-template<typename Incidence>
-apxchol::graph<Incidence> make_sparsify_graph() {
-    apxchol::graph<Incidence> G(8);
+apxchol::graph make_sparsify_graph() {
+    apxchol::graph G(8);
     // Two connected components, both with many off-tree alternatives. Distinct
     // weights make the coarse maximum-weight forest deterministic.
     for (const auto& [u, v, w] : std::vector<std::tuple<int, int, double>>{
@@ -240,8 +227,7 @@ apxchol::graph<Incidence> make_sparsify_graph() {
     return G;
 }
 
-template<typename Incidence>
-auto canonical_edges(const apxchol::graph<Incidence>& G) {
+auto canonical_edges(const apxchol::graph& G) {
     std::vector<std::tuple<apxchol::node_index,
                            apxchol::node_index, double>> result;
     for (apxchol::node_index u = 0; u < G.n(); ++u)
@@ -252,8 +238,7 @@ auto canonical_edges(const apxchol::graph<Incidence>& G) {
     return result;
 }
 
-template<typename Incidence>
-bool reachable_within(const apxchol::graph<Incidence>& G,
+bool reachable_within(const apxchol::graph& G,
                       apxchol::node_index first,
                       apxchol::node_index last) {
     std::vector<unsigned char> seen(G.n(), 0);
@@ -273,8 +258,7 @@ bool reachable_within(const apxchol::graph<Incidence>& G,
     return true;
 }
 
-template<typename Incidence>
-auto adjacency_records(const apxchol::graph<Incidence>& G) {
+auto adjacency_records(const apxchol::graph& G) {
     std::vector<std::tuple<apxchol::node_index,
                            apxchol::node_index, double>> result;
     for (apxchol::node_index u = 0; u < G.n(); ++u)
@@ -291,19 +275,18 @@ TEST(ResidualSparsifyTest,
     const int previous_threads = omp_get_max_threads();
     omp_set_num_threads(4);
 #endif
-    using Incidence = apxchol::directed_vec_pool_incidence;
     constexpr apxchol::node_index n = 16;
     std::vector<apxchol::node_index> active(n);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     auto make_dense = [=] {
-        apxchol::graph<Incidence> G(n);
+        apxchol::graph G(n);
         for (apxchol::node_index u = 0; u < n; ++u)
             for (apxchol::node_index v = u + 1; v < n; ++v)
                 G.add_edge(u, v, 1000.0 - 17.0 * u - v);
         return G;
     };
     auto run = [&](auto& G) {
-        return apxchol::detail::residual_coalescer<Incidence>::sparsify(
+        return apxchol::detail::residual_coalescer::sparsify(
             G, active, 0.35, 0x123456789abcdef0ULL);
     };
 
@@ -337,14 +320,14 @@ TEST(ResidualSparsifyTest,
     EXPECT_EQ(adjacency_records(serial), adjacency_records(parallel));
 }
 
-TYPED_TEST(ResidualSparsifyTest,
+TEST(ResidualSparsifyTest,
            BackbonePreservesEveryComponentAndTheRealizationIsDeterministic) {
     const std::vector<apxchol::node_index> active = {0, 1, 2, 3, 4, 5, 6, 7};
-    auto A = make_sparsify_graph<TypeParam>();
-    auto B = make_sparsify_graph<TypeParam>();
-    const auto a = apxchol::detail::residual_coalescer<TypeParam>::sparsify(
+    auto A = make_sparsify_graph();
+    auto B = make_sparsify_graph();
+    const auto a = apxchol::detail::residual_coalescer::sparsify(
         A, active, 1e-6, 0x123456789abcdef0ULL);
-    const auto b = apxchol::detail::residual_coalescer<TypeParam>::sparsify(
+    const auto b = apxchol::detail::residual_coalescer::sparsify(
         B, active, 1e-6, 0x123456789abcdef0ULL);
 
     EXPECT_EQ(a.backbone_edges, 6u);
@@ -364,29 +347,28 @@ TYPED_TEST(ResidualSparsifyTest,
             << expected.first << "-" << expected.second;
 }
 
-TYPED_TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
-    using Incidence = TypeParam;
+TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
     const std::vector<apxchol::node_index> active = {0, 1, 2};
     constexpr int trials = 4096;
     constexpr double keep_probability = 0.30;
     double weight_sum = 0.0;
     int retained = 0;
     for (int seed = 0; seed < trials; ++seed) {
-        apxchol::graph<Incidence> G(3);
+        apxchol::graph G(3);
         G.add_edge(0, 1, 10.0);
         G.add_edge(1, 2, 9.0);
         // Coalesces to one off-tree edge of weight 1 and multiplicity 2.
         G.add_edge(0, 2, 0.25);
         G.add_edge(0, 2, 0.75);
         const auto stats =
-            apxchol::detail::residual_coalescer<Incidence>::sparsify(
+            apxchol::detail::residual_coalescer::sparsify(
                 G, active, keep_probability, static_cast<std::uint64_t>(seed));
         EXPECT_NEAR(stats.expected_kept_edges,
                     2.0 + keep_probability, 1e-12);
         for (const auto idx : G.adj(0)) {
-            if (G.edge_target(idx, 0) != 2) continue;
+            if (idx.to != 2) continue;
             ++retained;
-            const double weight = G.edge_weight(idx);
+            const double weight = static_cast<double>(idx.w);
             weight_sum += weight;
             EXPECT_NEAR(weight, 1.0 / keep_probability, 1e-6);
 
@@ -401,15 +383,15 @@ TYPED_TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
 
 // ── Laplacian tests (storage-independent) ────────────
 
-static apxchol::graph<> make_path_vec(int n) {
-    apxchol::graph<> G(n);
+static apxchol::graph make_path_vec(int n) {
+    apxchol::graph G(n);
     for (int i = 0; i + 1 < n; ++i)
         G.add_edge(i, i + 1, 1.0);
     return G;
 }
 
-static apxchol::graph<> make_grid_vec(int rows, int cols) {
-    apxchol::graph<> G(rows * cols);
+static apxchol::graph make_grid_vec(int rows, int cols) {
+    apxchol::graph G(rows * cols);
     auto id = [cols](int r, int c) { return r * cols + c; };
     for (int r = 0; r < rows; ++r)
         for (int c = 0; c < cols; ++c) {
@@ -457,11 +439,9 @@ TEST(Laplacian, PathGraph) {
 }
 
 namespace {
-template<class Incidence = apxchol::directed_vec_pool_incidence>
 void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
-    const auto reference = apxchol::make_graph<
-        apxchol::graph<apxchol::vec_incidence>>(L);
-    const auto candidate = apxchol::make_graph<apxchol::graph<Incidence>>(L);
+    const auto reference = reference_graph(L);
+    const auto candidate = apxchol::make_graph(L);
     ASSERT_EQ(reference.n(), candidate.n());
     ASSERT_EQ(reference.m(), candidate.m());
     for (apxchol::node_index v = 0; v < reference.n(); ++v) {
@@ -520,7 +500,7 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
     omp_set_max_active_levels(1);
     auto L = apxchol::laplacian(make_grid_vec(20, 20));
     for (int v = 0; v < L.rows(); ++v) L.coeffRef(v,v) += 0.125;
-    const auto reference = apxchol::make_graph<apxchol::graph<>>(L);
+    const auto reference = apxchol::make_graph(L);
     int observed_outer = 0, observed_inner = 0;
     #pragma omp parallel num_threads(2)
     {
@@ -533,8 +513,8 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
                 #pragma omp single
                 observed_inner = omp_get_num_threads();
             }
-            const auto check = [&]<class Incidence>() {
-                const auto candidate = apxchol::make_graph<apxchol::graph<Incidence>>(L);
+            const auto check = [&]() {
+                const auto candidate = apxchol::make_graph(L);
                 ASSERT_EQ(candidate.n(), reference.n());
                 ASSERT_EQ(candidate.m(), reference.m());
                 for (apxchol::node_index v = 0; v < reference.n(); ++v) {
@@ -549,11 +529,9 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
             };
             // Vector storage always takes the general path; uncompressed directed
             // storage forces that path instead of the full-column shortcut.
-            check.template operator()<apxchol::vec_incidence>();
-            check.template operator()<apxchol::directed_vec_pool_incidence>();
+            check();
             L.uncompress();
-            check.template operator()<apxchol::vec_incidence>();
-            check.template operator()<apxchol::directed_vec_pool_incidence>();
+            check();
         }
     }
     omp_set_max_active_levels(prior_levels);
@@ -590,10 +568,10 @@ TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
     L.setFromTriplets(entries.begin(), entries.end());
     L.makeCompressed();
 
-    using G = apxchol::graph<apxchol::directed_vec_pool_incidence>;
+    using G = apxchol::graph;
     auto same_graph = [&] {
-        const G searched = apxchol::make_graph<G>(L);
-        const G proven = apxchol::detail::make_graph_from_operator<G>(L, true);
+        const G searched = apxchol::make_graph(L);
+        const G proven = apxchol::detail::make_graph_from_operator(L, true);
         ASSERT_EQ(searched.n(), proven.n());
         ASSERT_EQ(searched.m(), proven.m());
         for (apxchol::node_index v = 0; v < searched.n(); ++v) {
@@ -702,13 +680,6 @@ TEST(DirectedCscGraph, EmptyAndDiagonalOnlyInputs) {
     diagonal.insert(2,2)=2;
     diagonal.makeCompressed();
     expect_directed_csc_matches_general(diagonal);
-}
-
-TEST(DirectedCscGraph, DerivedStorageKeepsTheGenericIncidenceContract) {
-    struct custom_directed : apxchol::directed_vec_pool_incidence {};
-    static_assert(apxchol::incidence_storage<custom_directed>);
-    static_assert(!apxchol::is_vec_pool_incidence_v<custom_directed>);
-    expect_directed_csc_matches_general<custom_directed>(csc_edge_fixture());
 }
 
 TEST(SegmentedPool, SmallTouchDoesNotPopulateGiantSegmentPages) {

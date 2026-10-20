@@ -1104,13 +1104,12 @@ __global__ void append_raw_fill(
     if (i >= fill_count) return;
     const auto edge = fill[i];
     const pool_value_t stored = static_cast<pool_value_t>(edge.value);
-    const double materialized = static_cast<double>(stored);
     residual[base + 2 * i] = {
         static_cast<node_index>(edge.a),
-        static_cast<node_index>(edge.b), materialized};
+        static_cast<node_index>(edge.b), stored};
     residual[base + 2 * i + 1] = {
         static_cast<node_index>(edge.b),
-        static_cast<node_index>(edge.a), materialized};
+        static_cast<node_index>(edge.a), stored};
 }
 
 template<bool Audit>
@@ -1163,7 +1162,7 @@ __global__ void merge_survivors_and_fill(
     const std::size_t end = begin + kBlock < total ? begin + kBlock : total;
     __shared__ std::size_t left_begin, right_begin, left_size;
     // No default member initializers: shared storage needs no construction.
-    struct tile_incidence { node_index owner, neighbor; double weight; };
+    struct tile_incidence { node_index owner, neighbor; pool_value_t weight; };
     __shared__ tile_incidence tile[kBlock];
     if (!threadIdx.x) {
         left_begin = survivor_merge_rank(
@@ -1484,8 +1483,7 @@ __global__ void csc_initial_incidences_warp(
             if (!paired) atomicOr(status, 2u);
             else {
 #ifdef APXCHOL_POOL_FP32
-                const double weight =
-                    static_cast<double>(__double2float_rn(original));
+                const pool_value_t weight = __double2float_rn(original);
 #else
                 const double weight = original;
 #endif

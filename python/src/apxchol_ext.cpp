@@ -48,7 +48,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "backend", "seed", "partitioner", "storage", "keep_factor", "factor_storage_dtype",
+    "backend", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
     "degree_quantile", "degree_multiplier", "degree_tiebreak",
     "exact_clique_max_degree",
     "residual_peel", "stagnation_window",
@@ -61,15 +61,6 @@ std::string join(const char* const* items, std::size_t count) {
         out += items[i];
     }
     return out;
-}
-
-apxchol::graph_storage parse_storage(const std::string& name) {
-    if (name == "vec_pool_aos") return apxchol::graph_storage::vec_pool_aos;
-    if (name == "vec")          return apxchol::graph_storage::vec;
-    if (name == "bstr")         return apxchol::graph_storage::bstr;
-    throw std::invalid_argument(
-        "unknown storage '" + name +
-        "'; valid: vec_pool_aos, vec, bstr");
 }
 
 apxchol::solve_backend parse_backend(const std::string& name) {
@@ -97,7 +88,6 @@ apxchol::solve_options parse_options(const py::dict& d) {
         // solve_options
         if      (key == "backend")           so.backend = parse_backend(v.cast<std::string>());
         else if (key == "keep_factor")       so.keep_factor_values = v.cast<bool>();
-        else if (key == "storage")           so.storage = parse_storage(v.cast<std::string>());
         else if (key == "stagnation_window") so.stagnation_window = v.cast<int>();
         // factor_options
         else if (key == "seed")               so.factor_opts.seed = v.cast<unsigned>();

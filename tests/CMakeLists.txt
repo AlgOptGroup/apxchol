@@ -155,17 +155,8 @@ apxchol_cli_test(cli_forced_wrong_kind_is_refused path5_pattern 2 "Condition FAI
 # Enum transformations must not widen the CLI to accept raw numeric values.
 apxchol_cli_test(cli_numeric_input_kind_is_rejected path5_pattern 105 "not in"
     --input-kind 0)
-apxchol_cli_test(cli_numeric_storage_is_rejected path5_pattern 105 "not in"
-    --graph-storage 0)
-apxchol_cli_test(cli_retired_indexed_storage_is_rejected path5_pattern 105 "not in"
-    --graph-storage vec_pool)
-
-apxchol_cli_test(cli_retired_forward_star_storage_is_rejected path5_pattern 105 "not in"
-    --graph-storage forward_star)
-apxchol_cli_test(cli_retired_fwd_star_storage_is_rejected path5_pattern 105 "not in"
-    --graph-storage fwd_star)
-apxchol_cli_test(cli_retired_forward_star_numeric_value_is_rejected path5_pattern 105 "not in"
-    --graph-storage 1)
+apxchol_cli_test(cli_graph_storage_option_is_rejected path5_pattern 109 "not expected"
+    --graph-storage vec_pool_aos)
 apxchol_cli_test(cli_retired_forward_star_compaction_is_rejected path5_pattern 109 "not expected"
     --fs-compact 0.75)
 apxchol_cli_test(cli_retired_forward_star_append_is_rejected path5_pattern 109 "not expected"

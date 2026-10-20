@@ -211,6 +211,25 @@ TEST_F(MetalDevice, DoubleFloatProbeExact) {
                 in.size() / 4);
 }
 
+TEST_F(MetalDevice, UniformOperatorScalingPreservesConvergence) {
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        for (const int exponent : {-90, 0, 90}) {
+            SCOPED_TRACE(exponent);
+            const Sparse A = grid(4, 5, 0.5, true) * std::scalbn(1.0, exponent);
+            apxchol::solve_options options;
+            options.factor_opts.seed = 17;
+            options.factor_opts.factor_storage = storage;
+            options.stagnation_window = 0;
+            const apxchol::metal_solver solver(A, options);
+            for (unsigned salt : {1u, 4u}) {
+                const auto b = rhs(A.rows(), salt, false);
+                const auto result = solver.solve(b, 1e-8, 2000);
+                EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+            }
+        }
+    }
+}
+
 TEST_F(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
     for (const double shift : {0.0, 0.5}) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");

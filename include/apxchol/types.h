@@ -93,10 +93,4 @@ struct directed_pool_edge {
     std::abort();
 }
 
-/// graph_storage enumerates the available incidence list backends
-/// for runtime dispatch (CLI, factor_options).
-// Preserve serialized values; retired forward-star (1) and indexed pool (3)
-// are rejected by runtime dispatch rather than reassigned.
-enum class graph_storage { vec = 0, bstr = 2, vec_pool_aos = 4 };
-
 } // namespace apxchol

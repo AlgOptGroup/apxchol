@@ -1,11 +1,7 @@
 #pragma once
 /// Template implementation of the Kyng-Sachdeva approximate Cholesky factorization.
 ///
-/// Included from factorization.h so that third-party code can use custom
-/// incidence_storage backends without modifying our explicit-instantiation list.
-/// The built-in backends (vec, bstr, directed AoS) are
-/// pre-instantiated in factorization.cpp; any other backend will be
-/// instantiated on demand when the user includes <apxchol/solver/factorization.h>.
+/// Included from factorization.h for custom partitioners and eliminators.
 
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/elimination/elimination.h"
@@ -289,8 +285,7 @@ inline work_distribution summarize_work_distribution(
     return result;
 }
 
-template<incidence_storage Incidence>
-void trace_candidate_regions(graph<Incidence>& G,
+inline void trace_candidate_regions(graph& G,
                              std::span<const node_index> active,
                              std::span<const node_index> candidates,
                              uint64_t round_index, size_t workers) {
@@ -323,7 +318,7 @@ void trace_candidate_regions(graph<Incidence>& G,
             stack.pop_back();
             ++vertices;
             for (auto idx : G.adj(v)) {
-                const node_index u = G.edge_target(idx, v);
+                const node_index u = idx.to;
                 if (!G.is_active(u)) continue;
                 ++work;
                 if (state[u] != 0) {
@@ -377,15 +372,14 @@ void trace_candidate_regions(graph<Incidence>& G,
 #ifndef NDEBUG
 // Debug-only: verify the partitioner's contract — selected vertices must be
 // pairwise non-adjacent (they are eliminated independently in parallel).
-template<typename Incidence>
-void assert_partition_independent(graph<Incidence>& G,
+inline void assert_partition_independent(graph& G,
                                   const partition_result& part) {
     static thread_local std::vector<char> in_part;
     if (in_part.size() < size_t(G.n())) in_part.assign(G.n(), 0);
     for (auto v : part.data) in_part[v] = 1;
     for (auto v : part.data)
         for (auto idx : G.adj(v)) {
-            auto u = G.edge_target(idx, v);
+            auto u = idx.to;
             assert(!(G.is_active(u) && in_part[u]) &&
                    "partitioner contract violation: selected vertices are "
                    "adjacent (the partition must be an independent set)");
@@ -396,20 +390,19 @@ void assert_partition_independent(graph<Incidence>& G,
 
 // Core per-vertex elimination: gather neighbors, build L-column, sample
 // clique edges via the given Eliminator strategy.
-// Caller must merge parallel edges for v before calling this.
+// Neighbors are deduplicated while gathering, preserving first-seen order.
 //
 // For SDDM matrices, the excess diagonal (self-loop to ground) is
 // included in the degree used for the L-column entries.  Excess is
 // propagated to each neighbor proportionally: Δexcess[u] = w_u · e_v / d_total.
 // The caller must apply the returned excess updates (deferred for thread safety).
-template<typename Eliminator, typename Incidence>
+template<typename Eliminator>
 void process_vertex(const Eliminator& elim,
-                    graph<Incidence>& G,
+                    graph& G,
                     node_index v,
                     std::uint64_t run_seed,
                     factor_col& col,
                     factorize_workspace::per_thread& ws,
-                    bool dedup_inline = false,
                     std::span<node_index> degree_decrements = {}) {
     auto& nbrs       = ws.neighbors;
     auto& excess_out = ws.excess_buffer;
@@ -418,75 +411,44 @@ void process_vertex(const Eliminator& elim,
     nbrs.clear();
     std::size_t decrement_pos = 0;
     double edge_deg = 0.0;
-    if (dedup_inline) {
-        if constexpr (is_vec_pool_incidence_v<Incidence>) {
-            // Pooled slabs expose their raw size in O(1), so deduplicate in a
-            // pivot-sized contiguous hash table. The old vertex-indexed table
-            // was one random access into an n-entry array per incidence and
-            // one such array per worker; it became a cache/TLB and RSS cost on
-            // large graphs. Preserve first-seen neighbor order exactly.
-            const size_t raw_count = G.adj(v).size();
-            const size_t table_size = std::bit_ceil(
-                std::max<size_t>(8, 2 * raw_count));
-            if (ws.dedup_hash.size() < table_size) {
-                ws.dedup_hash.assign(table_size, {});
-                ws.dedup_hash_epoch = 1;
-            } else if (++ws.dedup_hash_epoch == 0) {
-                for (auto& entry : ws.dedup_hash) entry.stamp = 0;
-                ws.dedup_hash_epoch = 1;
-            }
-            const size_t mask = table_size - 1;
-            const std::uint32_t epoch = ws.dedup_hash_epoch;
-            for (auto [u, w] : G.neighbors(v)) {
-                if (!G.is_active(u)) continue;
-                if (!degree_decrements.empty()) {
-                    assert(decrement_pos < degree_decrements.size());
-                    degree_decrements[decrement_pos++] = u;
-                }
-                size_t slot = (static_cast<std::uint64_t>(u) *
-                               0x9e3779b97f4a7c15ULL) & mask;
-                while (ws.dedup_hash[slot].stamp == epoch &&
-                       ws.dedup_hash[slot].key != u)
-                    slot = (slot + 1) & mask;
-                auto& entry = ws.dedup_hash[slot];
-                if (entry.stamp != epoch) {
-                    entry.stamp = epoch;
-                    entry.key = u;
-                    entry.value = static_cast<node_index>(nbrs.size());
-                    nbrs.emplace_back(u, w);
-                } else {
-                    nbrs[entry.value].weight += w;
-                }
-                edge_deg += w;
-            }
-        } else {
-            static constexpr node_index npos = node_index(-1);
-            auto& first   = ws.dedup_bucket;
-            auto& touched = ws.dedup_touched;
-            if (first.size() < size_t(G.n())) first.assign(G.n(), npos);
-            touched.clear();
-            for (auto [u, w] : G.neighbors(v)) {
-                if (!G.is_active(u)) continue;
-                if (!degree_decrements.empty()) {
-                    assert(decrement_pos < degree_decrements.size());
-                    degree_decrements[decrement_pos++] = u;
-                }
-                if (first[u] == npos) {
-                    first[u] = static_cast<node_index>(nbrs.size());
-                    touched.push_back(u);
-                    nbrs.emplace_back(u, w);
-                } else {
-                    nbrs[first[u]].weight += w;
-                }
-                edge_deg += w;
-            }
-            for (auto t : touched) first[t] = npos;
+    // Pooled slabs expose their raw size in O(1), so deduplicate in a
+    // pivot-sized contiguous hash table. The old vertex-indexed table
+    // was one random access into an n-entry array per incidence and
+    // one such array per worker; it became a cache/TLB and RSS cost on
+    // large graphs. Preserve first-seen neighbor order exactly.
+    const size_t raw_count = G.adj(v).size();
+    const size_t table_size = std::bit_ceil(
+        std::max<size_t>(8, 2 * raw_count));
+    if (ws.dedup_hash.size() < table_size) {
+        ws.dedup_hash.assign(table_size, {});
+        ws.dedup_hash_epoch = 1;
+    } else if (++ws.dedup_hash_epoch == 0) {
+        for (auto& entry : ws.dedup_hash) entry.stamp = 0;
+        ws.dedup_hash_epoch = 1;
+    }
+    const size_t mask = table_size - 1;
+    const std::uint32_t epoch = ws.dedup_hash_epoch;
+    for (auto [u, w] : G.neighbors(v)) {
+        if (!G.is_active(u)) continue;
+        if (!degree_decrements.empty()) {
+            assert(decrement_pos < degree_decrements.size());
+            degree_decrements[decrement_pos++] = u;
         }
-    } else {
-        for (auto [u, w] : G.neighbors(v)) {
+        size_t slot = (static_cast<std::uint64_t>(u) *
+                       0x9e3779b97f4a7c15ULL) & mask;
+        while (ws.dedup_hash[slot].stamp == epoch &&
+               ws.dedup_hash[slot].key != u)
+            slot = (slot + 1) & mask;
+        auto& entry = ws.dedup_hash[slot];
+        if (entry.stamp != epoch) {
+            entry.stamp = epoch;
+            entry.key = u;
+            entry.value = static_cast<node_index>(nbrs.size());
             nbrs.emplace_back(u, w);
-            edge_deg += w;
+        } else {
+            nbrs[entry.value].weight += w;
         }
+        edge_deg += w;
     }
 
     assert(degree_decrements.empty() ||
@@ -521,7 +483,7 @@ void process_vertex(const Eliminator& elim,
     }
 
     // Sample the clique edges into ws.edge_buffer (consumed by
-    // apply_deferred_edges) through the append-only emitter. The seed is a
+    // endpoint publication) through the append-only emitter. The seed is a
     // pure function of (run seed, vertex): draws are identical at any thread
     // count and schedule.
     const std::uint64_t vseed =
@@ -530,9 +492,9 @@ void process_vertex(const Eliminator& elim,
                        edge_emitter(ws.edge_buffer));
 }
 
-template<typename Eliminator, incidence_storage Incidence>
+template<typename Eliminator>
 void eliminate_partition_singleton(const Eliminator& elim,
-                                   graph<Incidence>& G,
+                                   graph& G,
                                    const partition_result& part,
                                    std::vector<factor_col>& factor_cols,
                                    factorize_workspace& ws,
@@ -557,7 +519,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
         offsets[0] = 0;
         for (std::size_t k = 0; k < n_verts; ++k) {
             const std::size_t degree = (*live_degrees)[part.data[k]];
-            if constexpr (is_vec_pool_incidence_v<Incidence>) {
+            {
                 const std::size_t physical = G.adj_count(part.data[k]);
                 assert(physical >= degree);
                 ws.degree_retired_dead_incidence += physical - degree;
@@ -603,23 +565,17 @@ void eliminate_partition_singleton(const Eliminator& elim,
         const int compute_chunk =
             elimination_compute_chunk(n_verts, opts.omp_threshold);
         // The fused paths use exactly the work-sized team selected above.
-        if constexpr (is_vec_pool_incidence_v<Incidence>) {
-            // Mega-fused for vec_pool: compute + apply pre-pass + parallel
-            // atomic push + deactivate all in ONE parallel region. Saves
-            // the fork-join overhead of the legacy 2-region pattern
-            // (~10us × num_threads per round). The omp single section does
-            // the pooled-adjacency work: prefix-sum of thread edge counts,
-            // edge accounting, per-vertex incoming count, and
-            // serial reserve_for grow (reserve_for is NOT thread-safe).
-            // The actual atomic_push_reserved phase is parallel and lock-free.
+        {
+            // Compute, reserve, publish edges and deactivate pivots in one
+            // parallel region. Histogram claims assign disjoint endpoint slots;
+            // the single section accounts for edges and starts bulk reserve.
             const int num_threads = team_threads;
-            std::vector<size_t> e_offsets(num_threads + 1, 0);
+            size_t edge_count = 0;
             // Persistent all-zero histogram (see factorize_workspace::incoming);
             // sized once, reset per round over the touched entries only.
             if (ws.incoming.size() < static_cast<size_t>(G.n()))
                 ws.incoming.assign(static_cast<size_t>(G.n()), 0);
             std::vector<node_index>& incoming = ws.incoming;
-            edge_index e_start = 0;
             if (live_degrees) {
                 const std::size_t total = ws.degree_decrements.size();
                 if (ws.degree_decrement_scratch.capacity() < total) {
@@ -643,7 +599,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 for (size_t k = 0; k < n_verts; ++k)
                     process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
                                    ws.threads[tid],
-                                   /*dedup_inline=*/true,
                                    decrement_slice(k));
                 // implicit barrier — edge_buffers populated before pre-pass
 
@@ -704,7 +659,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     auto& my_touched = ws.threads[tid].touched_buffer;
                     my_touched.clear();
                     const auto& my_buf = ws.threads[tid].edge_buffer;
-                    if constexpr (graph<Incidence>::stores_directed_incidence) {
+                    {
                         auto& offsets = ws.threads[tid].endpoint_offsets;
                         offsets.resize(2 * my_buf.size());
                         for (size_t i = 0; i < my_buf.size(); ++i) {
@@ -718,33 +673,21 @@ void eliminate_partition_singleton(const Eliminator& elim,
                             if (offsets[2 * i + 1] == 0)
                                 my_touched.push_back(e.v);
                         }
-                    } else {
-                        for (const auto& e : my_buf) {
-                            if (std::atomic_ref(incoming[e.u]).fetch_add(
-                                    1, std::memory_order_relaxed) == 0)
-                                my_touched.push_back(e.u);
-                            if (std::atomic_ref(incoming[e.v]).fetch_add(
-                                    1, std::memory_order_relaxed) == 0)
-                                my_touched.push_back(e.v);
-                        }
                     }
                 }
                 #pragma omp barrier  // incoming[] complete before reserve_for
 
-                // Single: prefix-sum thread edge offsets, account for the
-                // appended edges, and concatenate touched buffers for
+                // Account for appended edges and concatenate touched buffers for
                 // the adjacency bulk reserve below.
                 #pragma omp single
                 {
+                    edge_count = 0;
                     for (int t = 0; t < num_threads; ++t)
-                        e_offsets[t + 1] = e_offsets[t] + ws.threads[t].edge_buffer.size();
-                    const size_t N_edges = e_offsets[num_threads];
+                        edge_count += ws.threads[t].edge_buffer.size();
+                    const size_t N_edges = edge_count;
                     if (live_degrees) ws.degree_fill_edges = N_edges;
                     if (N_edges > 0) {
-                        if constexpr (graph<Incidence>::stores_directed_incidence)
-                            G.record_edges_added(static_cast<edge_index>(N_edges));
-                        else
-                            e_start = G.reserve_edge_pool(static_cast<edge_index>(N_edges));
+                        G.record_edges_added(static_cast<edge_index>(N_edges));
                     }
                     ws.touched_concat.clear();
                     for (int t = 0; t < num_threads; ++t)
@@ -755,7 +698,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     if (N_edges > 0)
                         G.adj_compact_for_round_if_needed(incoming);
                 }
-                // The implicit barrier after single publishes e_start,
+                // The implicit barrier after single publishes the edge count,
                 // touched_concat, and any rebuilt adjacency pool. Keeping the
                 // compaction predicate inside single prevents late workers
                 // from observing its reset state and skipping a team barrier.
@@ -768,19 +711,17 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 // paired-A/B confirms ~5% total bench win on IPM iter40,
                 // neutral on grid_2000 (small-slab workloads see the parallel-
                 // for overhead match the saved copy work).
-                if (e_offsets[num_threads] > 0) {
+                if (edge_count > 0) {
                     G.adj_bulk_reserve_parallel(
                         ws.touched_concat.begin(),
                         ws.touched_concat.end(),
                         incoming);
                 }
 
-                // Apply phase: directed AoS uses histogram-assigned slots;
-                // other incidences claim their reserved slots here.
+                // Apply edges into histogram-assigned endpoint slots.
                 {
-                    const size_t base = e_offsets[tid];
                     const auto& ebuf = ws.threads[tid].edge_buffer;
-                    if constexpr (graph<Incidence>::stores_directed_incidence) {
+                    {
                         const auto& offsets = ws.threads[tid].endpoint_offsets;
                         for (size_t i = 0; i < ebuf.size(); ++i) {
                             const auto& [u, v, w] = ebuf[i];
@@ -788,15 +729,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                 u, offsets[2 * i], v, w);
                             G.adj_write_reserved_directed_at(
                                 v, offsets[2 * i + 1], u, w);
-                        }
-                    } else {
-                        for (size_t i = 0; i < ebuf.size(); ++i) {
-                            auto [u, v, w] = ebuf[i];
-                            const edge_index es = e_start +
-                                static_cast<edge_index>(base + i);
-                            G.write_edge_at(es, u, v, w);
-                            G.adj_atomic_push_reserved(u, es);
-                            G.adj_atomic_push_reserved(v, es);
                         }
                     }
                     ws.threads[tid].edge_buffer.clear();
@@ -806,7 +738,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     ws.threads[tid].excess_buffer.clear();
                 }
 
-                if constexpr (graph<Incidence>::stores_directed_incidence) {
+                {
                     // Direct writers left count_[v] unchanged. Publish each
                     // completed suffix once, after every writer is done.
                     #pragma omp barrier
@@ -818,13 +750,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         G.adj_commit_reserved_directed(v, incoming[v]);
                         incoming[v] = 0;
                     }
-                } else {
-                    // Restore the all-zero invariant over exactly the touched
-                    // vertices. bulk_reserve_parallel's trailing barrier has
-                    // ended, so no reader of incoming[] remains.
-                    #pragma omp for schedule(static) nowait
-                    for (size_t i = 0; i < ws.touched_concat.size(); ++i)
-                        incoming[ws.touched_concat[i]] = 0;
                 }
 
 #pragma omp for schedule(static) nowait
@@ -834,36 +759,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
             G.bulk_decrement_active(static_cast<node_index>(n_verts));
 
             if (cp) (*cp)("compute+apply_fused");
-        } else {
-            // Legacy backends (vec/bstr): separate parallel compute +
-            // serial apply (apply_deferred_edges has no fast path for these).
-            // Skip the explicit merge_parallel_edges pass: process_vertex
-            // does inline dedup + dead-edge filter, saving a full
-            // adjacency traversal per IS vertex per round.
-            // Team: the OpenMP default (as before).
-            #pragma omp parallel num_threads(team_threads)
-            {
-                int tid = omp_get_thread_num();
-
-                // Clear per-thread buffers for this round.
-                ws.threads[tid].edge_buffer.clear();
-                ws.threads[tid].excess_buffer.clear();
-
-                #pragma omp for schedule(dynamic, compute_chunk) nowait
-                for (size_t k = 0; k < n_verts; ++k)
-                    process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
-                                   ws.threads[tid],
-                                   /*dedup_inline=*/true,
-                                   {});
-            }
-            if (cp) { (*cp)("merge_is"); (*cp)("compute"); }
-
-            // Apply phase via helpers (replaces previous inline serial apply).
-            detail::apply_deferred_edges(G, ws, cp);
-            detail::apply_deferred_excess(G, ws, cp);
-
-            for (size_t k = 0; k < n_verts; ++k)
-                G.deactivate(part.data[k]);
         }
     } else
     #endif
@@ -875,7 +770,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
             wt.edge_buffer.clear();
             wt.excess_buffer.clear();
             process_vertex(elim, G, part.data[k], opts.seed, output_col(k), wt,
-                           /*dedup_inline=*/true,
                            decrement_slice(k));
             if (live_degrees) {
                 for (node_index u : decrement_slice(k)) {
@@ -903,9 +797,9 @@ void eliminate_partition_singleton(const Eliminator& elim,
 
 // All surviving partitioners emit singleton regions (one vertex each), so
 // elimination always takes the singleton path.
-template<typename Eliminator, incidence_storage Incidence>
+template<typename Eliminator>
 void eliminate_partition(const Eliminator& elim,
-                         graph<Incidence>& G,
+                         graph& G,
                          const partition_result& part,
                          std::vector<factor_col>& factor_cols,
                          factorize_workspace& ws,
@@ -994,9 +888,9 @@ void eliminate_partition(const Eliminator& elim,
 // along, and stopping it early to feed this function more columns is a measured
 // loss on both fill and setup — see the residual-loop comment in
 // factorize_impl.
-template<typename Eliminator, typename Incidence>
+template<typename Eliminator>
 void eliminate_remaining(const Eliminator& elim,
-                         graph<Incidence>& G,
+                         graph& G,
                          std::vector<node_index>& active,
                          std::vector<factor_col>& factor_cols,
                          factorize_workspace& ws,
@@ -1007,8 +901,7 @@ void eliminate_remaining(const Eliminator& elim,
     auto peel_one = [&](node_index v) {
         wt.edge_buffer.clear();
         wt.excess_buffer.clear();
-        process_vertex(elim, G, v, opts.seed, col, wt,
-                       /*dedup_inline=*/true);
+        process_vertex(elim, G, v, opts.seed, col, wt);
         factor_cols.push_back(std::move(col));
         for (auto [a, b, w] : wt.edge_buffer)
             G.add_edge(a, b, w);
@@ -1090,10 +983,10 @@ void eliminate_remaining(const Eliminator& elim,
 // which builds a throwaway via make_graph) move into the parameter for free;
 // callers that pass an lvalue (and want to keep their graph) copy once here —
 // same cost as the old defensive `graph work(G)`.
-template<typename Partitioner, typename Eliminator, incidence_storage Incidence>
+template<typename Partitioner, typename Eliminator>
 factorization factorize_impl(const Eliminator& elim,
                              Partitioner& partitioner,
-                             graph<Incidence> G,
+                             graph G,
                              const factor_options& opts_in,
                              checkpoint* cp,
                              const Eigen::SparseMatrix<double>* initial_csc = nullptr,
@@ -1128,10 +1021,10 @@ factorization factorize_impl(const Eliminator& elim,
 
     factorization result;
     if (cp) cp->tick();
-    graph<Incidence> work(std::move(G));
+    graph work(std::move(G));
     if (cp) (*cp)("graph_copy");
     auto gpu_round_shadow =
-        detail::make_gpu_round_shadow_session<Eliminator, Incidence>(elim,
+        detail::make_gpu_round_shadow_session<Eliminator>(elim,
             route);
 
     // Detect SDDM: any vertex with positive excess means the matrix
@@ -1174,7 +1067,6 @@ factorization factorize_impl(const Eliminator& elim,
     if (gpu_owned_setup_route) {
         constexpr bool eligible =
             std::is_same_v<Partitioner, block_greedy_partitioner> &&
-            std::is_same_v<Incidence, directed_vec_pool_incidence> &&
             std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
         if constexpr (!eligible) {
             throw std::invalid_argument("GPU setup requires block_greedy, vec_pool_aos and the built-in sampler");
@@ -1302,7 +1194,6 @@ factorization factorize_impl(const Eliminator& elim,
         *incremental_degree_value && !incremental_degree_disabled &&
         std::strcmp(incremental_degree_value, "auto") != 0;
     const bool incremental_degree_capable =
-        std::is_same_v<Incidence, directed_vec_pool_incidence> &&
         std::is_same_v<Partitioner, block_greedy_partitioner> &&
         !incremental_degree_disabled;
     const bool incremental_degree_auto = incremental_degree_capable &&
@@ -1352,7 +1243,7 @@ factorization factorize_impl(const Eliminator& elim,
     double last_avg_degree = 0.0;
     size_t last_candidate_count = 0;
     bool last_candidates_host_resident = false;
-    auto run_partitioner = [&](auto& p, graph<Incidence>& g,
+    auto run_partitioner = [&](auto& p, graph& g,
                                std::span<const node_index> act)
         -> const partition_result& {
         using P = std::remove_reference_t<decltype(p)>;
@@ -1696,8 +1587,7 @@ factorization factorize_impl(const Eliminator& elim,
         // vec_pool: pool defrag happens inside vec_pool's bulk_reserve_parallel
         // (built in, always on). Here we only sample the worst fragmentation
         // seen, for the APXCHOL_MEM_DUMP diagnostic.
-        if constexpr (is_vec_pool_incidence_v<Incidence>)
-            work.adj_note_live_fraction();
+        work.adj_note_live_fraction();
     }
 
     // Before the BK residual loop, sparsify once only when the observed
@@ -1708,11 +1598,11 @@ factorization factorize_impl(const Eliminator& elim,
         !residual_sparsify_enabled_value ||
         !*residual_sparsify_enabled_value ||
         std::strcmp(residual_sparsify_enabled_value, "0") != 0;
-    if constexpr (std::same_as<Incidence, directed_vec_pool_incidence>) {
+    {
         if (residual_sparsify_enabled && active.size() > residual_thresh &&
             handoff_vertices != 0) {
             const auto sample =
-                detail::residual_coalescer<Incidence>::sample(work, active);
+                detail::residual_coalescer::sample(work, active);
             const bool worthwhile = detail::residual_sparsify_worthwhile(
                 active.size(), residual_thresh, handoff_vertices,
                 sample.avg_distinct_degree);
@@ -1728,7 +1618,7 @@ factorization factorize_impl(const Eliminator& elim,
                     worthwhile ? "sparsify" : "keep");
             if (worthwhile) {
                 const auto stats =
-                    detail::residual_coalescer<Incidence>::sparsify(
+                    detail::residual_coalescer::sparsify(
                         work, active,
                         detail::kResidualSparsifyKeepProbability,
                         opts.seed ^ ws.round_index);
@@ -1912,17 +1802,15 @@ factorization factorize_impl(const Eliminator& elim,
         const double MB = 1.0 / (1024.0 * 1024.0);
         size_t nnz = gpu_owned_setup_route ? result.L.nonZeros() : factor_cols.size();
         for (const auto& c : factor_cols) nnz += c.entry_count;
-        double live_frac = -1.0;
-        if constexpr (is_vec_pool_incidence_v<Incidence>)
-            live_frac = work.adj_live_fraction();
+        const double live_frac = work.adj_live_fraction();
         std::fprintf(stderr,
             "[mem] peak_graph=%.0f MB  factor_nnz=%zu (inner=%.0f MB)  "
             "pool_live_frac=%.3f  (1/live_frac=%.2fx)\n",
             result.peak_graph_bytes * MB, nnz, nnz * sizeof(node_index) * MB,
             live_frac, live_frac > 0 ? 1.0 / live_frac : 0.0);
-        if constexpr (is_vec_pool_incidence_v<Incidence>) {
+        {
             const size_t tot_edges = static_cast<size_t>(work.m());
-            if constexpr (graph<Incidence>::stores_directed_incidence) {
+            {
                 std::fprintf(stderr,
                     "[mem] vec_pool_aos: grows=%zu  compactions=%zu  "
                     "min_live_frac=%.3f  undirected_edges_added=%zu  "
@@ -1930,14 +1818,6 @@ factorization factorize_impl(const Eliminator& elim,
                     work.adj_grow_count(), work.adj_compact_count(),
                     work.adj_min_live_fraction(), tot_edges,
                     2.0 * tot_edges * sizeof(directed_pool_edge) * MB);
-            } else {
-                std::fprintf(stderr,
-                    "[mem] vec_pool: grows=%zu  compactions=%zu  "
-                    "min_live_frac=%.3f  edge_pool_entries=%zu (~%.0f MB)\n",
-                    work.adj_grow_count(), work.adj_compact_count(),
-                    work.adj_min_live_fraction(), tot_edges,
-                    tot_edges * sizeof(
-                        typename std::remove_cvref_t<decltype(work)>::edge) * MB);
             }
         }
     }
@@ -1956,7 +1836,7 @@ factorization factorize_impl(const Eliminator& elim,
     factor_entry_resources.reserve(ws.threads.size());
     for (auto& t : ws.threads)
         factor_entry_resources.push_back(std::move(t.factor_entries));
-    work = graph<Incidence>();
+    work = graph();
     ws   = factorize_workspace();
     sel  = selection();
     std::vector<node_index>().swap(active);
@@ -2031,9 +1911,9 @@ inline detail::tree_elimination make_tree_elim(const factor_options& opts,
 }
 
 // Default-construct-the-partitioner convenience layer.
-template<typename Partitioner, typename Eliminator, incidence_storage Incidence>
+template<typename Partitioner, typename Eliminator>
 factorization factorize_impl(const Eliminator& elim,
-                             graph<Incidence> G,
+                             graph G,
                              const factor_options& opts,
                              checkpoint* cp) {
     Partitioner partitioner;
@@ -2042,29 +1922,29 @@ factorization factorize_impl(const Eliminator& elim,
 
 // All factorize entry points take the graph by value (sink) and move it down
 // the chain into factorize_impl's working copy — a throwaway caller pays no copy.
-template<typename Partitioner, incidence_storage Incidence>
-factorization factorize(graph<Incidence> G,
+template<typename Partitioner>
+factorization factorize(graph G,
                         const factor_options& opts,
                         checkpoint* cp) {
     return factorize_impl<Partitioner>(make_tree_elim(opts), std::move(G), opts, cp);
 }
 
-template<typename Partitioner, eliminator E, incidence_storage Incidence>
-factorization factorize(graph<Incidence> G, const E& elim,
+template<typename Partitioner, eliminator E>
+factorization factorize(graph G, const E& elim,
                         const factor_options& opts,
                         checkpoint* cp) {
     return factorize_impl<Partitioner>(elim, std::move(G), opts, cp);
 }
 
-template<partitioner P, incidence_storage Incidence>
-factorization factorize(graph<Incidence> G, P part,
+template<partitioner P>
+factorization factorize(graph G, P part,
                         const factor_options& opts,
                         checkpoint* cp) {
     return factorize_impl(make_tree_elim(opts), part, std::move(G), opts, cp);
 }
 
-template<partitioner P, eliminator E, incidence_storage Incidence>
-factorization factorize(graph<Incidence> G, P part, const E& elim,
+template<partitioner P, eliminator E>
+factorization factorize(graph G, P part, const E& elim,
                         const factor_options& opts,
                         checkpoint* cp) {
     return factorize_impl(elim, part, std::move(G), opts, cp);

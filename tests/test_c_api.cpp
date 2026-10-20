@@ -455,8 +455,6 @@ TEST(CApi, DefaultsAreTheCppDefaults) {
     EXPECT_EQ(o.threads, 0);
     EXPECT_EQ(o.sampler, APXCHOL_SAMPLER_GKS);
     EXPECT_EQ(o.partitioner, APXCHOL_PARTITIONER_BLOCK_GREEDY);
-    EXPECT_EQ(o.storage, static_cast<apxchol_storage>(so.storage));
-    EXPECT_EQ(o.storage, APXCHOL_STORAGE_VEC_POOL_AOS);
     EXPECT_EQ(o.keep_factor_values, so.keep_factor_values ? 1 : 0);
     EXPECT_EQ(o.degree_quantile, so.factor_opts.partition.degree_quantile);
     EXPECT_EQ(o.exact_clique_max_degree, so.factor_opts.exact_clique_max_degree);
@@ -880,8 +878,6 @@ TEST(CApi, BackendAndEnumValidation) {
     };
     check([](apxchol_options& o) { o.backend = 9; });
     check([](apxchol_options& o) { o.sampler = 7; });
-    check([](apxchol_options& o) { o.storage = 1; });
-    check([](apxchol_options& o) { o.storage = 3; });
     check([](apxchol_options& o) { o.factor_storage = 1; });
     check([](apxchol_options& o) { o.factor_storage = 64; });
     check([](apxchol_options& o) { o.partitioner = 9; });
@@ -890,27 +886,24 @@ TEST(CApi, BackendAndEnumValidation) {
     check([](apxchol_options& o) { o.threads = -1; });
     check([](apxchol_options& o) { o.degree_quantile = 1.5; });
 
-    for (const apxchol_storage storage :
-         {APXCHOL_STORAGE_VEC, APXCHOL_STORAGE_BSTR, APXCHOL_STORAGE_VEC_POOL_AOS})
-        for (const apxchol_partitioner partitioner :
-             {APXCHOL_PARTITIONER_BLOCK_GREEDY, APXCHOL_PARTITIONER_PRIORITY_GREEDY,
-              APXCHOL_PARTITIONER_BAUMANN_KYNG})
-            for (const apxchol_sampler sampler :
-                 {APXCHOL_SAMPLER_GKS, APXCHOL_SAMPLER_TRACE_CYCLE}) {
-                auto o = defaults();
-                o.storage = storage;
-                o.partitioner = partitioner;
-                o.sampler = sampler;
-                handle h;
-                std::string message;
-                ASSERT_EQ(create(c, &o, h, 0, &message), APXCHOL_STATUS_SUCCESS)
-                    << storage << " " << partitioner << " " << sampler << ": " << message;
-                const Eigen::VectorXd b = compatible_rhs(c.n);
-                Eigen::VectorXd x(c.n);
-                EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr,
-                                               nullptr, 0),
-                          APXCHOL_STATUS_SUCCESS);
-            }
+    for (const apxchol_partitioner partitioner :
+         {APXCHOL_PARTITIONER_BLOCK_GREEDY, APXCHOL_PARTITIONER_PRIORITY_GREEDY,
+          APXCHOL_PARTITIONER_BAUMANN_KYNG})
+        for (const apxchol_sampler sampler :
+             {APXCHOL_SAMPLER_GKS, APXCHOL_SAMPLER_TRACE_CYCLE}) {
+            auto o = defaults();
+            o.partitioner = partitioner;
+            o.sampler = sampler;
+            handle h;
+            std::string message;
+            ASSERT_EQ(create(c, &o, h, 0, &message), APXCHOL_STATUS_SUCCESS)
+                << partitioner << " " << sampler << ": " << message;
+            const Eigen::VectorXd b = compatible_rhs(c.n);
+            Eigen::VectorXd x(c.n);
+            EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr,
+                                           nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+        }
 }
 
 TEST(CApi, FactorHandleExportEqualsTheSolversBytewise) {
@@ -1269,7 +1262,7 @@ TEST(CApi, OmpThresholdReachesTheFactorization) {
         omp_set_num_threads(1);
 #endif
         const apxchol::factorization F =
-            apxchol::factorize(A, apxchol::solve_options{}.storage, fo);
+            apxchol::factorize(A, fo);
 #ifdef _OPENMP
         omp_set_num_threads(prior);
 #endif

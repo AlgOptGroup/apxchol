@@ -49,8 +49,7 @@ struct priority_partitioner {
     /// User-supplied priority per vertex (lower = eliminated earlier).
     std::vector<double> priority;
 
-    template<apxchol::incidence_storage Incidence>
-    void find_partition(apxchol::graph<Incidence>& G,
+    void find_partition(apxchol::graph& G,
                         std::span<const apxchol::node_index> active,
                         const apxchol::partition_context& /*ctx*/,
                         apxchol::selection& out) {
@@ -62,7 +61,7 @@ struct priority_partitioner {
         for (auto v : order_) {
             bool independent = true;
             for (auto idx : G.adj(v)) {
-                auto u = G.edge_target(idx, v);
+                auto u = idx.to;
                 if (G.is_active(u) && out.contains(u)) { independent = false; break; }
             }
             if (independent) out.add(v);
@@ -74,7 +73,7 @@ private:
 };
 static_assert(apxchol::partitioner<priority_partitioner>);
 
-using vp_graph = apxchol::graph<apxchol::directed_vec_pool_incidence>;
+using vp_graph = apxchol::graph;
 
 TEST(CustomEliminator, ExactCliqueConverges) {
     auto L = grid_laplacian(20, 20);
@@ -120,7 +119,7 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     auto A = grid_laplacian(8, 8);
     auto b = apxchol::generate_test_rhs(A.rows());
     auto solve_once = [&] {
-        auto G = apxchol::make_graph<vp_graph>(A);
+        auto G = apxchol::make_graph(A);
         auto F = apxchol::factorize(std::move(G), exact_clique_eliminator{});
         apxchol::cpu_solver slv(A, std::move(F));
         return slv.solve(b, 1e-12, 50);
@@ -180,7 +179,7 @@ TEST(CustomPartitioner, LambdaViaAsPartitioner) {
             for (auto v : active) {
                 bool ok = true;
                 for (auto idx : G.adj(v)) {
-                    auto u = G.edge_target(idx, v);
+                    auto u = idx.to;
                     if (G.is_active(u) && out.contains(u)) { ok = false; break; }
                 }
                 if (ok) out.add(v);
@@ -197,7 +196,7 @@ TEST(SetFactor, ExternalFactorizationInPreconditioner) {
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::generate_test_rhs(L.rows());
 
-    auto G = apxchol::make_graph<vp_graph>(L);
+    auto G = apxchol::make_graph(L);
     auto F = apxchol::factorize(std::move(G));
 
     apxchol::apx_cholesky M;
