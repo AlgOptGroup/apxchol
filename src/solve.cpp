@@ -1050,22 +1050,24 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, doubl
     const bool timing = !std::getenv("APXCHOL_NO_CHECKPOINT");
     result.timings.tick();
     Eigen::Index c = 0;
-    for (; c + 1 < B.cols(); c += 2) {
-        const_matrix_view rhs(B.middleCols(c, 2));
-        matrix_view output(X.middleCols(c, 2));
+    while (c + 1 < B.cols()) {
+        const unsigned width = B.cols() - c >= 4 ? 4 : 2;
+        const_matrix_view rhs(B.middleCols(c, width));
+        matrix_view output(X.middleCols(c, width));
         std::optional<const_matrix_view> initial;
         if (X0)
-            initial.emplace(X0->middleCols(c, 2));
-        auto pair = std::visit([&](auto& owner) -> batch_solve_result {
-            if constexpr (requires { owner.solve_pair(rhs, output, tol, max_iter); })
-                return owner.solve_pair(rhs, output, tol < 0 ? impl_->tol : tol,
+            initial.emplace(X0->middleCols(c, width));
+        auto panel = std::visit([&](auto& owner) -> batch_solve_result {
+            if constexpr (requires { owner.solve_panel(rhs, output, tol, max_iter); })
+                return owner.solve_panel(rhs, output, tol < 0 ? impl_->tol : tol,
                     max_iter < 0 ? impl_->max_iter : max_iter,
                     initial ? &*initial : nullptr);
             else
-                throw std::logic_error("solver: paired solve requires a GPU session");
+                throw std::logic_error("solver: panel solve requires a GPU session");
         }, impl_->owner);
-        for (auto& column : pair.columns)
+        for (auto& column : panel.columns)
             result.columns.push_back(std::move(column));
+        c += width;
         if (timing)
             result.timings("solve");
     }

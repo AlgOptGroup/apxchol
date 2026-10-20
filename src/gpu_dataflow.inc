@@ -28,30 +28,44 @@ APXCHOL_GPU_FUNCTION void dataflow_initialize(Memory m, unsigned row) {
         } else m.reset(row, q);
     }
 }
-template<unsigned Columns = 1, class Memory>
+template<unsigned Columns = 1, unsigned RhsLanes = 1, class Memory>
 APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
+    static_assert(RhsLanes && RhsLanes <= 32 && !(RhsLanes & (RhsLanes - 1)));
+    static_assert(Columns % RhsLanes == 0);
+    constexpr unsigned SparseLanes = 32 / RhsLanes, LocalColumns = Columns / RhsLanes;
+    const unsigned sparse_lane = lane / RhsLanes, first_column = lane % RhsLanes;
     using Value = typename Memory::stored_value;
-    bool enabled[Columns], active = false;
-    for (unsigned q = 0; q < Columns; ++q) active |= enabled[q] = m.enabled(q);
-    if (!active) return;
+    bool enabled[LocalColumns], active = false;
+    for (unsigned q = 0; q < LocalColumns; ++q)
+        active |= enabled[q] = m.enabled(first_column + q * RhsLanes);
+    if (RhsLanes == 1) {
+        if (!active) return;
+    } else if (!m.any(active)) return;
     for (;;) {
         unsigned task = lane == 0 ? m.claim() : 0;
         task = m.broadcast(task);
         if (task >= m.batches) break;
-        const unsigned word = m.words[task * 32 + lane];
+        const unsigned word = m.words[task * SparseLanes + sparse_lane];
         bool have = word != ~0u;
         const dataflow_task t = have ? dataflow_describe(m, word) : dataflow_task{};
-        const unsigned g = t.kind ? 32 : m.width(t.end - t.begin), sub = lane & (g - 1);
+        unsigned g;
+        if (RhsLanes == 1)
+            g = t.kind ? 32 : m.width(t.end - t.begin);
+        else {
+            const unsigned width = m.width(t.end - t.begin);
+            g = t.kind || width > SparseLanes ? SparseLanes : width;
+        }
+        const unsigned sub = sparse_lane & (g - 1);
         unsigned p = t.begin + sub, end = t.end;
-        float rhs[Columns]{}, diagonal[Columns]{}, sum[Columns]{};
+        float rhs[LocalColumns]{}, diagonal[LocalColumns]{}, sum[LocalColumns]{};
         if (have && t.kind != 1)
-            for (unsigned q = 0; q < Columns; ++q)
-                if (enabled[q]) m.prepare(t.row, q, rhs[q], diagonal[q]);
+            for (unsigned q = 0; q < LocalColumns; ++q)
+                if (enabled[q]) m.prepare(t.row, first_column + q * RhsLanes, rhs[q], diagonal[q]);
         bool reload = have;
-        unsigned pending[Columns]{};
+        unsigned pending[LocalColumns]{};
         unsigned cols[8];
         Value vals[8];
-        float values[Columns][8];
+        float values[LocalColumns][8];
         while (m.any(have)) {
             if (reload) {
                 unsigned mask = 0;
@@ -61,18 +75,18 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
                     const bool ok = have && pos < end;
                     cols[k] = ok ? (t.kind == 2 ? pos : m.col[pos]) : 0;
                     vals[k] = ok ? (t.kind == 2 ? Value(1.0f) : m.value(pos, t.row, cols[k])) : Value(0.0f);
-                    for (unsigned q = 0; q < Columns; ++q) values[q][k] = 0;
+                    for (unsigned q = 0; q < LocalColumns; ++q) values[q][k] = 0;
                     if (ok) mask |= 1u << k;
                 }
-                for (unsigned q = 0; q < Columns; ++q) pending[q] = enabled[q] ? mask : 0;
+                for (unsigned q = 0; q < LocalColumns; ++q) pending[q] = enabled[q] ? mask : 0;
                 reload = false;
             }
             unsigned pending_any = 0;
-            for (unsigned q = 0; q < Columns; ++q) {
+            for (unsigned q = 0; q < LocalColumns; ++q) {
                 unsigned bits[8];
                 APXCHOL_UNROLL
                 for (unsigned k = 0; k < 8; ++k)
-                    bits[k] = (pending[q] >> k) & 1 ? m.load(cols[k], q) : 0;
+                    bits[k] = (pending[q] >> k) & 1 ? m.load(cols[k], first_column + q * RhsLanes) : 0;
                 APXCHOL_UNROLL
                 for (unsigned k = 0; k < 8; ++k)
                     if (((pending[q] >> k) & 1) && bits[k] != 0x7f800001u) {
@@ -81,15 +95,17 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
                     }
                 pending_any |= pending[q];
             }
-            const unsigned group_mask = (0xffffffffu >> (32 - g)) << (lane & ~(g - 1));
+            const unsigned physical_width = g * RhsLanes;
+            const unsigned group_mask =
+                (0xffffffffu >> (32 - physical_width)) << (lane & ~(physical_width - 1));
             const unsigned waiting = m.ballot(pending_any != 0);
             const bool ready = have && !(waiting & group_mask);
-            float total[Columns];
-            for (unsigned q = 0; q < Columns; ++q) {
+            float total[LocalColumns];
+            for (unsigned q = 0; q < LocalColumns; ++q) {
                 if (ready && enabled[q]) sum[q] = dataflow_accumulate(vals, values[q], sum[q]);
                 total[q] = sum[q];
-                for (unsigned o = 16; o; o /= 2) {
-                    const float other = m.shuffle(total[q], o);
+                for (unsigned o = SparseLanes / 2; o; o /= 2) {
+                    const float other = m.shuffle(total[q], o * RhsLanes);
                     if (o < g) total[q] += other;
                 }
             }
@@ -98,8 +114,8 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
                 if (p - sub < end) reload = true;
                 else {
                     if (sub == 0)
-                        for (unsigned q = 0; q < Columns; ++q)
-                            if (enabled[q]) m.publish(t.output, q,
+                        for (unsigned q = 0; q < LocalColumns; ++q)
+                            if (enabled[q]) m.publish(t.output, first_column + q * RhsLanes,
                                 t.kind == 1 ? total[q] : m.finish(rhs[q], diagonal[q], total[q]));
                     have = false;
                 }

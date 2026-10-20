@@ -49,7 +49,9 @@ kernel void dataflow_init(constant Params& P [[buffer(0)]],
                         device const SolveState* state [[buffer(7)]], device atomic_uint* tags [[buffer(12)]],
                         uint row [[thread_position_in_grid]]) {
     if (row >= P.count) return;
-    if (kPair)
+    if (kColumns == 4)
+        dataflow_initialize<4>(dataflow_memory<4>{ptr, nullptr, val, metadata, nullptr, tags, nullptr, r, z, 0, nullptr, P.m, !kForward, state}, row);
+    else if (kColumns == 2)
         dataflow_initialize<2>(dataflow_memory<2>{ptr, nullptr, val, metadata, nullptr, tags, nullptr, r, z, 0, nullptr, P.m, !kForward, state}, row);
     else
         dataflow_initialize<1>(dataflow_memory<1>{ptr, nullptr, val, metadata, nullptr, tags, nullptr, r, z, 0, nullptr, P.m, !kForward, state}, row);
@@ -62,12 +64,16 @@ kernel void dataflow_solve(constant Params& P [[buffer(0)]],
                         device const uint* words [[buffer(16)]], device atomic_uint* tags [[buffer(12)]],
                         device const uint* blocks [[buffer(17)]], device const dataflow_segment* segments [[buffer(18)]], uint group [[threadgroup_position_in_grid]],
                         uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-    if (!state[0].active && !(kPair && state[1].active)) return;
+    bool active = false;
+    for (unsigned q = 0; q < kColumns; ++q) active |= state[q].active != 0;
+    if (!active) return;
     threadgroup atomic_uint ticket;
     const uint block = P.offset + group;
     if (tid == 0) atomic_store_explicit(&ticket, blocks[block], memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (kPair)
+    if (kColumns == 4)
+        dataflow_run<4, 4>(dataflow_memory<4>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane);
+    else if (kColumns == 2)
         dataflow_run<2>(dataflow_memory<2>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane);
     else
         dataflow_run<1>(dataflow_memory<1>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane);

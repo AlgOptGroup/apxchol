@@ -79,7 +79,7 @@ public:
             if (v == 1 || v == 2 || v == 4 || v == 8 || v == 16 || v == 32) spmv_lanes_ = v;
             else if (*e) std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPMV_LANES=%s ignored (expected 1|2|4|8|16|32); using %d\n", e, spmv_lanes_);
         }
-        // Scalar-only sessions retain one column of storage. The first pair
+        // Scalar-only sessions retain one column of storage. The first panel
         // grows this same workspace transactionally, then reuses it.
         reserve_columns(1);
 
@@ -127,6 +127,15 @@ public:
                          residuals, laplacian, x0, stagnation_window);
     }
 
+    template<unsigned Columns, class Precond, class Input, class Output>
+    void solve_panel(const Precond& precond, const Input& b_host, Output& x_host,
+                    double tol, int max_iter, std::array<int, Columns>& iterations,
+                    std::array<double, Columns>& residuals, bool laplacian,
+                    const Input* x0 = nullptr, int stagnation_window = 0) {
+        solve_columns<Columns>(precond, b_host, x_host, tol, max_iter, iterations,
+                               residuals, laplacian, x0, stagnation_window);
+    }
+
     bool ready() const { return ready_; }
     int64_t n() const { return n_; }
     int64_t nnz() const { return matrix_.nnz; }
@@ -141,7 +150,9 @@ private:
                        double tol, int max_iter, std::array<int, Columns>& iterations,
                        std::array<double, Columns>& residuals, bool laplacian,
                        const Input* x0, int stagnation_window) {
-        static_assert(Columns == 1 || Columns == 2);
+        static_assert(Columns == 1 || Columns == 2 || Columns == 4);
+        if (std::uint64_t(n_) > std::numeric_limits<unsigned>::max() / Columns)
+            throw std::overflow_error("GPU RHS panel exceeds packed index range");
         if (!ready_) throw std::runtime_error("cuda_pcg::solve: setup() not called");
         if (b_host.rows() != n_ || b_host.cols() != Columns ||
             x_host.rows() != n_ || x_host.cols() != Columns ||

@@ -17,7 +17,7 @@ constant bool kOperatorDf [[function_constant(1)]];
 constant bool kFactorFp16 [[function_constant(3)]];
 constant uint kOperation [[function_constant(2)]];
 // Distinct compiled pipelines: the scalar specialization has one accumulator.
-constant bool kPair [[function_constant(4)]];
+constant uint kColumns [[function_constant(4)]];
 
 template<unsigned Lanes = 1>
 struct pcg_math {
@@ -72,7 +72,8 @@ kernel void pcg_step(constant Params& P [[buffer(0)]],
                      uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]],
                      uint tid [[thread_position_in_grid]]) {
     const auto vectors = workspace<df, float>{x, r, ap, p, z, partial, state};
-    if (kPair) pcg_step_columns<2>(P, vectors, ptr, col, hi, lo, lane, group, tid);
+    if (kColumns == 4) pcg_step_columns<4>(P, vectors, ptr, col, hi, lo, lane, group, tid);
+    else if (kColumns == 2) pcg_step_columns<2>(P, vectors, ptr, col, hi, lo, lane, group, tid);
     else pcg_step_columns<1>(P, vectors, ptr, col, hi, lo, lane, group, tid);
 }
 
@@ -102,7 +103,8 @@ kernel void finalize(constant Params& P [[buffer(0)]],
                      device const df* partial [[buffer(6)]],
                      device SolveState* state [[buffer(7)]],
                      uint l [[thread_index_in_threadgroup]]) {
-    if (kPair) finalize_columns<2>(P, partial, state, l);
+    if (kColumns == 4) finalize_columns<4>(P, partial, state, l);
+    else if (kColumns == 2) finalize_columns<2>(P, partial, state, l);
     else finalize_columns<1>(P, partial, state, l);
 }
 

@@ -62,7 +62,7 @@ public:
 
 private:
     friend class solver;
-    batch_solve_result solve_pair(const_matrix_view B, matrix_view X, double tol,
+    batch_solve_result solve_panel(const_matrix_view B, matrix_view X, double tol,
                                   int max_iter, const const_matrix_view* X0 = nullptr) const;
     struct impl;
     struct impl_deleter {

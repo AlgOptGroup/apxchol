@@ -25,7 +25,7 @@ struct schedule {
     unsigned levels = 0;
 };
 
-template<class Value = float>
+template<class Value = float, unsigned SparseLanes = 32>
 inline schedule build(std::span<const unsigned> ptr, std::span<const unsigned> col,
                       std::span<const std::type_identity_t<Value>> values, bool reverse, std::span<const float> diagonals = {}) {
     if (ptr.empty() || ptr.size() > gpu_dataflow::special_bit || ptr.front() != 0 ||
@@ -148,7 +148,7 @@ inline schedule build(std::span<const unsigned> ptr, std::span<const unsigned> c
                 rows[cursor[find(row)]++] = row;
         }
     }
-    return {gpu_dataflow::pack(ptr.data(), {n, reverse, rows.data()}, block_ptr),
+    return {gpu_dataflow::pack<SparseLanes>(ptr.data(), {n, reverse, rows.data()}, block_ptr),
             std::move(stages), height};
 }
 } // namespace apxchol::detail::metal_schedule

@@ -38,7 +38,7 @@ Public headers live under `include/apxchol/`, with `include/apxchol.h` as the co
 
 `apxchol::solver` owns one CPU or compiled GPU session selected before setup. One-shot solve, Python and Octave use it; Octave requests CPU. The owner may outlive its input/setup checkpoint. Each solve result owns its timings; checkpoint copies have independent trees and moves preserve active scopes. Never retain a pointer into a previous result. `detail/csc_import.h` shares binding imports: sorted unique CSC copies directly, other layouts use Eigen's duplicate summation.
 
-Matrix RHS solves share operator and factor traversal in bounded CPU panels and GPU pairs. Each column keeps its own stopping state and result metadata; width-one calls use the scalar path. Panel workspace may resize when the width changes. Preserve stride handling, unequal convergence and warm starts.
+Matrix RHS solves share operator and factor traversal in bounded CPU panels and GPU panels of up to four columns. Each column keeps its own stopping state and result metadata; width-one calls use the scalar path. Panel workspace may resize when the width changes. Preserve stride handling, unequal convergence and warm starts.
 
 Python accepts SciPy operators and requires NumPy/SciPy. `backend="auto"|"cpu"|"gpu"` delegates to C++; `Solver.backend` reports the selected route. Storage selection likewise belongs to C++; Python only normalizes dtype names. Explicit per-solver FP16/FP32 selection overrides `APXCHOL_FACTOR_STORAGE=auto|float16|float32` without changing the environment. Reject invalid or unsupported requests. Backend defaults are CUDA FP16 and CPU/Metal FP32. Exports remain FP32; storage precision does not choose PCG arithmetic. See [precision and storage](docs/precision.md).
 

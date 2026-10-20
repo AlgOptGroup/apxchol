@@ -241,10 +241,10 @@ TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
             options.factor_opts.factor_storage = storage;
             options.stagnation_window = 0;
             const apxchol::solver owner(A, options);
-            Eigen::MatrixXd exact(A.rows(), 3);
-            for (int q = 0; q < 3; ++q)
+            Eigen::MatrixXd exact(A.rows(), 7);
+            for (int q = 0; q < 7; ++q)
                 exact.col(q) = rhs(A.rows(), q + 1, false) * std::scalbn(1.0, -exponent);
-            for (const int width : {2, 3}) {
+            for (const int width : {2, 3, 4, 5, 7}) {
                 for (const auto mode : {start::cold, start::zero_first, start::zero_second,
                                        start::warm_first, start::warm_second, start::no_iterations,
                                        start::warm_no_iterations}) {
@@ -281,6 +281,38 @@ TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
+    const Sparse A = hub_graph(110, 100, 4);
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        auto options = keep_opts();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.seed = 17;
+        options.factor_opts.factor_storage = storage;
+        options.stagnation_window = 0;
+        const apxchol::solver owner(A, options);
+        std::vector<unsigned> row_sizes(A.rows());
+        for (auto row : owner.factor().L.inner_)
+            if (row + 1 < row_sizes.size()) ++row_sizes[row];
+        ASSERT_GT(*std::max_element(row_sizes.begin(), row_sizes.end()), 64u);
+        for (const int width : {4, 5}) {
+            SCOPED_TRACE(testing::Message() << int(storage) << ' ' << width);
+            Eigen::MatrixXd B(A.rows(), width), X(A.rows(), width);
+            for (int q = 0; q < width; ++q) B.col(q) = rhs(A.rows(), q + 1, true);
+            const auto batch = owner.solve(B, X, 1e-8, 2000);
+            ASSERT_EQ(batch.columns.size(), std::size_t(width));
+            for (int q = 0; q < width; ++q) {
+                const Eigen::VectorXd b = B.col(q);
+                const auto scalar = owner.solve(b, 1e-8, 2000);
+                ASSERT_TRUE(X.col(q).allFinite());
+                ASSERT_TRUE(scalar.x.allFinite());
+                EXPECT_LE(true_residual(A, b, X.col(q)), 1e-8);
+                EXPECT_LE(true_residual(A, b, scalar.x), 1e-8);
+                EXPECT_LE((X.col(q) - scalar.x).norm(), 1e-5 * scalar.x.norm());
             }
         }
     }

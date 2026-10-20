@@ -10,6 +10,7 @@
 #include "metal_device.h"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -97,9 +98,8 @@ struct context {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> probe_queue = nil;
     id<MTLLibrary> library = nil;
-    pipelines pipes;
-    pipelines pair_pipes;
-    std::once_flag pair_once;
+    std::array<pipelines, 3> pipes;
+    std::array<std::once_flag, 3> pipeline_once;
 };
 
 std::vector<float> run_probe(context& ctx, const std::vector<float>& inputs);
@@ -125,13 +125,13 @@ std::string run_arithmetic_probe(context& ctx) {
 id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> library,
                                           const char* name, bool forward, bool operator_df,
                                           unsigned op = 0, bool factor_fp16 = false,
-                                          bool pair = false) {
+                                          unsigned columns = 1) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
     [values setConstantValue:&forward type:MTLDataTypeBool atIndex:0];
     [values setConstantValue:&operator_df type:MTLDataTypeBool atIndex:1];
     [values setConstantValue:&op type:MTLDataTypeUInt atIndex:2];
     [values setConstantValue:&factor_fp16 type:MTLDataTypeBool atIndex:3];
-    [values setConstantValue:&pair type:MTLDataTypeBool atIndex:4];
+    [values setConstantValue:&columns type:MTLDataTypeUInt atIndex:4];
     NSError* err = nil;
     id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]
                                        constantValues:values
@@ -144,16 +144,16 @@ id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> l
     return pipe;
 }
 
-pipelines make_pipelines(id<MTLDevice> device, id<MTLLibrary> library, bool pair) {
+pipelines make_pipelines(id<MTLDevice> device, id<MTLLibrary> library, unsigned columns) {
     pipelines p{};
     for (unsigned op = 0; op < 4; ++op)
         for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
-            p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op, false, pair);
-    p.finalize = make_pipeline(device, library, "finalize", false, false, 0, false, pair);
+            p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op, false, columns);
+    p.finalize = make_pipeline(device, library, "finalize", false, false, 0, false, columns);
     for (int half = 0; half < 2; ++half)
         for (int fwd = 0; fwd < 2; ++fwd) {
-            p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half, pair);
-            auto pipe = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, 0, half, pair);
+            p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half, columns);
+            auto pipe = make_pipeline(device, library, "dataflow_solve", fwd != 0, false, 0, half, columns);
             p.dataflow_solve[half][fwd] = pipe;
             if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
                 throw std::runtime_error("Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups");
@@ -212,8 +212,8 @@ context* make_context() {
                     throw std::runtime_error("Metal kernel compilation failed: " + error);
             }
             ctx->library = library;
-            ctx->pipes = make_pipelines(device, library, false);
-            pipelines& p = ctx->pipes;
+            ctx->pipes[0] = make_pipelines(device, library, 1);
+            pipelines& p = ctx->pipes[0];
             p.probe = make_pipeline(device, library, "df_probe", false, false);
             st.row_threads = p.row_threads;
             ctx->probe_queue = [device newCommandQueue];
@@ -270,6 +270,23 @@ struct prepared_tri {
     std::uint32_t levels = 0;
 };
 
+void install_schedule(context& ctx, prepared_tri& out, metal_schedule::schedule schedule,
+                       unsigned m) {
+    auto& packed = schedule.tasks;
+    out.tag_count = m + packed.slots;
+    // Metal validates the element type even when no task reads the buffer.
+    if (packed.segments.empty())
+        packed.segments.push_back({});
+    out.stages = std::move(schedule.stages);
+    out.levels = schedule.levels;
+    with_pool([&] {
+        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
+        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
+        out.segments = upload(ctx.device, packed.segments.data(),
+                              packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
+    });
+}
+
 template<class Value>
 prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<Value>& a, bool forward,
                          std::span<const float> diagonals = {}) {
@@ -279,22 +296,24 @@ prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<Value>& a, bool 
         metal_schedule::build<Value>({reinterpret_cast<const unsigned*>(a.ptr.data()), std::size_t(m) + 1},
                                {reinterpret_cast<const unsigned*>(a.idx.get()), std::size_t(a.nnz)},
                                {a.vals.get(), std::size_t(a.nnz)}, !forward, diagonals);
-    auto &packed = schedule.tasks;
-    out.tag_count = m + packed.slots;
-    // Metal validates the element type even when no task reads the buffer.
-    if (packed.segments.empty())
-        packed.segments.push_back({});
-    out.stages = std::move(schedule.stages);
-    out.levels = schedule.levels;
+    install_schedule(ctx, out, std::move(schedule), m);
     with_pool([&] {
         out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
         out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
         out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(Value), "factor values");
-        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
-        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
-        out.segments = upload(ctx.device, packed.segments.data(),
-                              packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
     });
+    return out;
+}
+
+template<class Value>
+prepared_tri prepare_lane_tri(context& ctx, const prepared_tri& base, unsigned m,
+                               bool forward, std::span<const float> diagonals) {
+    prepared_tri out = base;
+    const auto* ptr = static_cast<const unsigned*>([base.ptr contents]);
+    install_schedule(ctx, out, metal_schedule::build<Value, 8>(
+        {ptr, std::size_t(m) + 1},
+        {static_cast<const unsigned*>([base.col contents]), ptr[m]},
+        {static_cast<const Value*>([base.val contents]), ptr[m]}, !forward, diagonals), m);
     return out;
 }
 
@@ -312,7 +331,7 @@ std::vector<float> run_probe(context& ctx, const std::vector<float>& inputs) {
         id<MTLCommandBuffer> cb = [ctx.probe_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         if (enc == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
-        [enc setComputePipelineState:ctx.pipes.probe];
+        [enc setComputePipelineState:ctx.pipes[0].probe];
         [enc setBuffer:in offset:0 atIndex:0];
         [enc setBuffer:res offset:0 atIndex:1];
         [enc setBytes:&count length:sizeof count atIndex:2];
@@ -380,7 +399,7 @@ struct metal_solver::impl {
     bool operator_df = false, factor_fp16 = false;
     id<MTLBuffer> factor_metadata = nil;
     id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
-    prepared_tri fwd, bwd;
+    prepared_tri fwd, bwd, lane_fwd, lane_bwd;
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
     id<MTLBuffer> tags = nil;
 
@@ -419,8 +438,8 @@ struct metal_solver::impl {
     }
 
     void precondition() const {
-        encode_tri(fwd, true);
-        encode_tri(bwd, false);
+        encode_tri(columns == 4 ? lane_fwd : fwd, true);
+        encode_tri(columns == 4 ? lane_bwd : bwd, false);
     }
 
     void step(operation op) const {
@@ -472,14 +491,30 @@ struct metal_solver::impl {
                         const std::vector<float>& hi, const std::vector<float>& lo, unsigned m);
     void allocate_workspace(unsigned count);
     void select_columns(unsigned count) {
-        if (count == 2) {
-            std::call_once(ctx->pair_once, [&] {
-                with_pool([&] { ctx->pair_pipes = make_pipelines(ctx->device, ctx->library, true); });
+        const auto index = std::countr_zero(count);
+        if (count != 1) {
+            std::call_once(ctx->pipeline_once[index], [&] {
+                with_pool([&] { ctx->pipes[index] = make_pipelines(ctx->device, ctx->library, count); });
             });
+        }
+        if (count == 4 && lane_fwd.ptr == nil) {
+            std::vector<float> diagonal(factor_fp16 ? arguments.m : 0);
+            if (factor_fp16) {
+                const auto* metadata = static_cast<const mh::factor_metadata*>([factor_metadata contents]);
+                for (unsigned i = 0; i < arguments.m; ++i) diagonal[i] = metadata[i].diagonal;
+            }
+            auto prepare = [&](const prepared_tri& base, bool forward) {
+                return factor_fp16 ? prepare_lane_tri<_Float16>(*ctx, base, arguments.m, forward, diagonal)
+                                   : prepare_lane_tri<float>(*ctx, base, arguments.m, forward, diagonal);
+            };
+            auto next_fwd = prepare(fwd, true);
+            auto next_bwd = prepare(bwd, false);
+            lane_fwd = std::move(next_fwd);
+            lane_bwd = std::move(next_bwd);
         }
         if (count > workspace_columns) allocate_workspace(count);
         columns = count;
-        pipes = count == 2 ? &ctx->pair_pipes : &ctx->pipes;
+        pipes = &ctx->pipes[index];
         // A previous width used a different packed position for this ground.
         // apply(false) needs this too: triangular sweeps only write rows < m.
         auto* applied = static_cast<float*>([z contents]);
@@ -656,25 +691,30 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
         install(half, narrow.diag);
     } else install(backward);
     allocate_workspace(1);
-    pipes = &ctx.pipes;
+    pipes = &ctx.pipes[0];
 }
 
 void metal_solver::impl::allocate_workspace(unsigned count) {
+    const auto tag_rows = std::max({n, std::size_t(fwd.tag_count), std::size_t(bwd.tag_count),
+                                   std::size_t(lane_fwd.tag_count), std::size_t(lane_bwd.tag_count)});
+    if (tag_rows > std::numeric_limits<unsigned>::max() / count)
+        throw std::overflow_error("Metal RHS panel exceeds packed index range");
     with_pool([&] {
         id<MTLDevice> dev = ctx->device;
         // Install only after every allocation succeeds; scalar use survives a
         // failed attempt to grow the reusable workspace.
         auto next_x = upload(dev, nullptr, n * count * sizeof(df32), "solution");
         auto next_r = upload(dev, nullptr, n * count * sizeof(df32), "residual");
-        auto next_ap = upload(dev, nullptr, n * count * sizeof(df32), "operator product");
+        // Tags are reset per sweep; ap is live only from multiply to residual.
+        // Their bindings must stay in separate kernels.
+        auto next_ap = upload(dev, nullptr, count * std::max(n * sizeof(df32), tag_rows * sizeof(std::uint32_t)),
+                              "operator product and dataflow tags");
         auto next_p = upload(dev, nullptr, n * count * sizeof(float), "search direction");
         auto next_z = upload(dev, nullptr, n * count * sizeof(float), "preconditioner result");
         auto next_partial = upload(dev, nullptr, std::size_t(arguments.groups) * count * sizeof(df32), "partial sums");
         auto next_state = upload(dev, nullptr, count * sizeof(solve_state), "solve state");
-        auto next_tags = upload(dev, nullptr, std::max({n, std::size_t(fwd.tag_count),
-            std::size_t(bwd.tag_count)}) * count * sizeof(std::uint32_t), "dataflow tags");
         x = next_x; r = next_r; ap = next_ap; p = next_p; z = next_z;
-        partial = next_partial; state_buffer = next_state; tags = next_tags;
+        partial = next_partial; state_buffer = next_state; tags = next_ap;
         workspace_columns = count;
     });
 }
@@ -724,7 +764,8 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
     auto* states = static_cast<solve_state*>([state_buffer contents]);
     std::fill_n(states, Columns, solve_state{});
     X.setZero();
-    std::array<Eigen::VectorXd, Columns> bp, work;
+    std::array<Eigen::VectorXd, Columns> bp;
+    Eigen::VectorXd work;
     std::array<double, Columns> bnorm{}, scale{};
     std::array<bool, Columns> check{}, ran{};
     bool active = false;
@@ -742,7 +783,7 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         }
         check[q] = true;
         bp[q].resize(n);
-        work[q].resize(n);
+        work.resize(n);
         auto xp = X.col(q);
         #pragma omp parallel for schedule(static)
         for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
@@ -750,19 +791,19 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
             if (X0) xp[F.perm[i]] = (*X0)(i, q);
         }
         if (X0) {
-            spmv(xp, work[q]);
-            work[q] = bp[q] - work[q];
-        } else work[q] = bp[q];
-        const double initial = X0 ? mh::norm(work[q]) / bnorm[q] : 1.0;
+            spmv(xp, work);
+            work = bp[q] - work;
+        } else work = bp[q];
+        const double initial = X0 ? mh::norm(work) / bnorm[q] : 1.0;
         if (initial < tol || max_iter == 0) continue;
-        if (laplacian) centre(work[q]);
-        const double max_abs = work[q].cwiseAbs().maxCoeff();
+        if (laplacian) centre(work);
+        const double max_abs = work.cwiseAbs().maxCoeff();
         if (max_abs == 0.0) continue;
         scale[q] = mh::pow2_scale(max_abs);
         auto* packed = static_cast<df32*>([r contents]);
         #pragma omp parallel for schedule(static)
         for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
-            packed[i * Columns + q] = mh::split(scale[q] * work[q][i]);
+            packed[i * Columns + q] = mh::split(scale[q] * work[i]);
         const double reference = bnorm[q] * scale[q];
         const double threshold = tol * reference;
         states[q].thr = mh::split_saturated(threshold * threshold);
@@ -789,12 +830,12 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
             results[q].iterations = states[q].iters;
         }
         if (laplacian) centre(xp);
-        results[q].residual = residual_norm(bp[q], xp, work[q]) / bnorm[q];
+        results[q].residual = residual_norm(bp[q], xp, work) / bnorm[q];
         // Gather through work so arbitrary output strides remain supported.
         #pragma omp parallel for schedule(static)
         for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
-            work[q][i] = xp[F.perm[i]];
-        xp = work[q];
+            work[i] = xp[F.perm[i]];
+        xp = work;
     }
     if (checked) cp("exit_check");
     cp.ascend();
@@ -813,16 +854,20 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
                            tol, max_iter, x0 ? &initial : nullptr);
 }
 
-batch_solve_result metal_solver::solve_pair(const_matrix_view B, matrix_view X, double tol,
+batch_solve_result metal_solver::solve_panel(const_matrix_view B, matrix_view X, double tol,
                                             int max_iter, const const_matrix_view* X0) const {
-    if (B.rows() != rows() || B.cols() != 2 || X.rows() != rows() || X.cols() != 2 ||
-        (X0 && (X0->rows() != rows() || X0->cols() != 2)))
-        throw std::invalid_argument("metal_solver::solve_pair: matrix shape mismatch");
+    if (B.rows() != rows() || (B.cols() != 2 && B.cols() != 4) ||
+        X.rows() != rows() || X.cols() != B.cols() ||
+        (X0 && (X0->rows() != rows() || X0->cols() != B.cols())))
+        throw std::invalid_argument("metal_solver::solve_panel: matrix shape mismatch");
     if (!B.allFinite() || (X0 && !X0->allFinite()))
-        throw std::invalid_argument("metal_solver::solve_pair: non-finite RHS or initial guess");
+        throw std::invalid_argument("metal_solver::solve_panel: non-finite RHS or initial guess");
     batch_solve_result result;
-    result.columns.resize(2);
-    impl_->solve_columns<2>(B, X, result.columns, result.timings, tol, max_iter, X0);
+    result.columns.resize(B.cols());
+    if (B.cols() == 4)
+        impl_->solve_columns<4>(B, X, result.columns, result.timings, tol, max_iter, X0);
+    else
+        impl_->solve_columns<2>(B, X, result.columns, result.timings, tol, max_iter, X0);
     return result;
 }
 
