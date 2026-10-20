@@ -844,8 +844,11 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
             "natural residual peeling and supported sampler options; request CPU explicitly");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
-    const bool compatible = detail::metal_setup_options_supported(opts.factor_opts) &&
-        (opts.backend == solve_backend::gpu || !A || detail::metal_setup_input_supported(*A));
+    bool compatible = detail::metal_setup_options_supported(opts.factor_opts);
+    if (compatible && opts.backend == solve_backend::automatic) {
+        if (!metal_solver::available()) return solve_backend::cpu;
+        compatible = !A || detail::metal_setup_input_supported(*A);
+    }
     if (!compatible) {
         if (opts.backend == solve_backend::gpu)
             throw std::invalid_argument("Metal GPU setup requires supported GKS options and compressed, sorted, paired CSC input");
@@ -857,8 +860,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
             throw std::invalid_argument(detail::metal_regularization_error);
         return solve_backend::cpu;
     }
-    return opts.backend == solve_backend::gpu || metal_solver::available()
-        ? solve_backend::gpu : solve_backend::cpu;
+    return solve_backend::gpu;
 #else
     if (opts.backend == solve_backend::gpu)
         throw std::invalid_argument("GPU route requested but GPU support is not built");

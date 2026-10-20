@@ -24,9 +24,9 @@ public:
         std::string device;
     };
 
-    /// Factorizes A on the device and prepares reusable solve storage. Requires
-    /// available() and the
-    /// operator contract in operator_class.h; numerical limits are in docs/precision.md.
+    /// Factorizes A on the device. Requires available(), supported GKS options
+    /// and compressed, sorted, paired CSC input satisfying operator_class.h.
+    /// Numerical limits are in docs/precision.md.
     explicit metal_solver(const Eigen::SparseMatrix<double>& A,
                           const solve_options& opts = {}, checkpoint* cp = nullptr);
     /// Adopts an externally computed factorization of A (values retained).

@@ -56,8 +56,8 @@ input_buffers upload(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A)
         }
     }
     if (!valid)
-        throw std::invalid_argument("Metal device setup requires finite entries with nonzero "
-                                    "magnitudes in [2^-100, 2^100]");
+        throw std::domain_error("Metal device setup requires finite entries with nonzero "
+                                "magnitudes in [2^-100, 2^100]");
     out.operator_exact = exact;
     out.max_operator_row = max_row;
     if (max_diagonal > 0) {
@@ -156,6 +156,12 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
             for (unsigned row = 0; row < n; ++row)
                 F.L.outer_[row] = data.columns[row].begin + row;
             F.L.outer_[n] = data.state->entries + n;
+        }
+        F.rounds.reserve(data.state->round);
+        for (unsigned r = 0; r < data.state->round; ++r) {
+            const unsigned first = data.round_ptr[r], last = data.round_ptr[r + 1];
+            F.rounds.push_back({n - first, last - first, std::numeric_limits<double>::quiet_NaN(),
+                F.L.outer_[last] - F.L.outer_[first], F.L.outer_[last]});
         }
         raw = {};
         cached.finalizer.prepare_operator(input.ptr, input.idx, input.values, finalized.permutation,

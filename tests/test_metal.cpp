@@ -559,10 +559,18 @@ TEST_F(MetalDevice, NonFiniteRhsRejected) {
 }
 
 TEST_F(MetalDevice, OutOfRangeOperatorIsADomainError) {
-    Sparse A = grid(6, 6, 0.5);
-    A.coeffRef(0, 0) = 1e40;
-    apxchol::factorization F = apxchol::factorize(grid(6, 6, 0.5));
-    EXPECT_THROW(apxchol::metal_solver(A, std::move(F)), std::domain_error);
+    Sparse A(3, 3);
+    A.setIdentity();
+    const auto F = apxchol::factorize(A);
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::gpu;
+    for (double value : {0x1p-101, 0x1p101}) {
+        SCOPED_TRACE(value);
+        A.diagonal().setConstant(value);
+        EXPECT_THROW(apxchol::metal_solver(A, F), std::domain_error);
+        EXPECT_THROW(apxchol::metal_solver{A}, std::domain_error);
+        EXPECT_THROW(apxchol::solver(A, options), std::domain_error);
+    }
 }
 
 TEST_F(MetalDevice, TinyFactorOffDiagonalsRemainUsable) {
@@ -856,6 +864,47 @@ TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
             const auto result = resident.solve(rhs_value);
             EXPECT_LT(true_residual(A, rhs_value, result.x), options.tol);
         }
+    }
+}
+
+TEST_F(MetalDevice, ExportedRoundsAreIndependentCpuLevels) {
+    for (unsigned kind : {0u, 1u, 2u}) {
+        SCOPED_TRACE(kind);
+        Sparse A = grid(17, 19, kind == 0 ? 0.0 : 0.25);
+        if (kind == 2) {
+            Eigen::MatrixXd dense = Eigen::MatrixXd::Constant(129, 129, -1.0);
+            dense.diagonal().setConstant(129.0);
+            A = dense.sparseView();
+        }
+        const apxchol::metal_solver exported(A, keep_opts());
+        const auto& F = exported.factor();
+        ASSERT_FALSE(F.rounds.empty());
+        std::vector<unsigned> levels(A.rows());
+        std::size_t first = 0;
+        for (unsigned r = 0; r < F.rounds.size(); ++r) {
+            const auto& round = F.rounds[r];
+            const auto last = first + round.is_size;
+            ASSERT_LE(last, levels.size());
+            EXPECT_EQ(round.active, levels.size() - first);
+            EXPECT_TRUE(std::isnan(round.avg_deg));
+            EXPECT_EQ(round.nnz_added, F.L.outer_[last] - F.L.outer_[first]);
+            EXPECT_EQ(round.nnz_total, F.L.outer_[last]);
+            std::fill(levels.begin() + first, levels.begin() + last, r);
+            first = last;
+        }
+        ASSERT_EQ(first, levels.size());
+        for (std::size_t col = 0; col < levels.size(); ++col)
+            for (auto p = F.L.outer_[col] + 1; p < F.L.outer_[col + 1]; ++p)
+                EXPECT_GT(levels[F.L.inner_[p]], levels[col]);
+
+        const apxchol::cpu_solver grouped(A, F);
+        auto ungrouped = F;
+        ungrouped.rounds.clear();
+        const apxchol::cpu_solver reference(A, std::move(ungrouped));
+        const auto b = rhs(A.rows(), 3, kind == 0);
+        const auto expected = reference.apply(b);
+        EXPECT_LT((grouped.apply(b) - expected).norm() / expected.norm(), 1e-12);
+        EXPECT_LT(true_residual(A, b, grouped.solve(b, 1e-8, 500).x), 1e-8);
     }
 }
 
