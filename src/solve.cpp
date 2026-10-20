@@ -1,6 +1,8 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
+#include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/lower_triangle_csr.h"
+#include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/csc_work.h"
 #include <algorithm>
 #include <chrono>
@@ -427,6 +429,7 @@ inline void center_x(double* x, Eigen::Index n, double* part) {
 cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
+    const detail::thread_budget threads(opts_.num_threads);
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
         throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
@@ -454,6 +457,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        factorization F,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
+    const detail::thread_budget threads(opts_.num_threads);
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
         throw std::invalid_argument("cpu_solver requires the CPU backend");
     ensure_eigen_parallel();
@@ -589,6 +593,7 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
 void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                             solve_result& res, double tol, int max_iter,
                             const Eigen::VectorXd* x0) const {
+    const detail::thread_budget threads(opts_.num_threads);
     if (tol < 0.0)    tol = opts_.tol;
     if (max_iter < 0) max_iter = opts_.max_iter;
 
@@ -605,10 +610,8 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     if (x0 != nullptr && x0->size() != n)
         throw std::invalid_argument("cpu_solver::solve: x0 length mismatch");
 
-    // Reused workspace: repeated solves allocate nothing after the first call
-    // (part_ holds the per-thread partials of the deterministic reductions;
-    // sized to the current max team, which the caller may change between
-    // solves via omp_set_num_threads).
+    // Ordinary solves reuse these buffers; extreme inputs need scaled copies.
+    // Reduction scratch follows the caller's current maximum thread count.
     if (r_.size() != n) { r_.resize(n); z_.resize(n); p_.resize(n); Ap_.resize(n); }
     { const std::size_t need = detail::part_capacity();
       if (part_.size() < need) part_.resize(need); }
@@ -617,6 +620,31 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     Eigen::VectorXd& p = p_;
     Eigen::VectorXd& Ap = Ap_;
     double* part = part_.data();
+
+    // Retry exceptional RHS magnitudes in a safe range for the PCG reductions.
+    const auto rescale = [&](double squared_norm) {
+        if (std::isnormal(squared_norm) || b.size() == 0) return false;
+        if (!b.allFinite() || (x0 && !x0->allFinite()))
+            throw std::invalid_argument("CPU solve: RHS and initial guess must be finite");
+        double maximum = b.cwiseAbs().maxCoeff();
+        if (maximum == 0) return false;
+        if (x0) maximum = std::max(maximum, x0->cwiseAbs().maxCoeff());
+        const double scale = detail::gpu_scaling::pow2_scale(maximum);
+        const Eigen::VectorXd scaled_b = b * scale;
+        if (scale == 1.0 || !std::isnormal(scaled_b.squaredNorm()))
+            throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
+        const Eigen::VectorXd scaled_x0 = x0 ? (*x0 * scale).eval() : Eigen::VectorXd{};
+        solve_impl(scaled_b, x, res, tol, max_iter, x0 ? &scaled_x0 : nullptr);
+        for (double& value : x) {
+            const double restored = value / scale;
+            if (!std::isfinite(restored))
+                throw std::overflow_error("CPU solve: solution exceeds the finite range");
+            if (value != 0 && restored == 0)
+                throw std::underflow_error("CPU solve: solution underflows to zero");
+            value = restored;
+        }
+        return true;
+    };
 
     // Laplacian (rank n-1) case: the returned x is the MIN-NORM solution --
     // mean(x) = 0 -- for every exit below (SDDM: full rank, nothing to do).
@@ -637,6 +665,7 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     double bnorm, rr, rs;
     if (x0 != nullptr && !x0->isZero(0.0)) {
         bnorm = b.norm();
+        if (rescale(bnorm * bnorm)) return;
         if (bnorm == 0.0) {
             x.setZero();
             res.iterations = 0;
@@ -649,6 +678,7 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
         if (op_fp32_) (void)parallel_spmv_csr(Lrm_f_, x.data(), Ap.data(), part);
         else          (void)parallel_spmv_csr(Lrm_,   x.data(), Ap.data(), part);
         init_residual(r.data(), b.data(), Ap.data(), n, part, rr, rs);
+        if (!std::isfinite(rr) && rescale(rr)) return;
         res.iterations = 0;
         res.residual = std::sqrt(rr) / bnorm;
         if (res.residual < tol) {
@@ -659,6 +689,7 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
         // r = b - L*0 = b, copied in the same pass that produces b·b (= bnorm²)
         // and Σ b.
         init_residual(r.data(), b.data(), nullptr, n, part, rr, rs);
+        if (rescale(rr)) return;
         bnorm = std::sqrt(rr);
         if (bnorm == 0.0) {
             x.setZero();
@@ -781,6 +812,11 @@ void cpu_solver::solve_impl(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd
     }
 }
 
+Eigen::VectorXd cpu_solver::apply(const Eigen::VectorXd& r) const {
+    const detail::thread_budget threads(opts_.num_threads);
+    return precond_.solve(r);
+}
+
 void cpu_solver::solve(const Eigen::VectorXd& b, solve_result& res,
                        double tol, int max_iter,
                        const Eigen::VectorXd* x0) const {
@@ -879,10 +915,12 @@ struct solver::impl {
     owner_type owner;
     double tol;
     int max_iter;
+    int num_threads;
 
     static owner_type make_owner(const Eigen::SparseMatrix<double>& A,
                                  const solve_options& opts, checkpoint* cp,
                                  factorization* F) {
+        const detail::thread_budget threads(opts.num_threads);
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
@@ -907,7 +945,8 @@ struct solver::impl {
 
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
          checkpoint* cp, factorization* F = nullptr)
-        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter) {
+        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter),
+          num_threads(opts.num_threads) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&owner))
             print_sptrsv_banner<solve_backend::gpu>(gpu->preconditioner().trsv().fp16());
@@ -926,6 +965,7 @@ solver& solver::operator=(solver&&) noexcept = default;
 
 void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
                    int max_iter, const Eigen::VectorXd* x0) const {
+    const detail::thread_budget threads(impl_->num_threads);
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     std::visit([&](auto& owner) {
         owner.solve(b, result, tol < 0 ? impl_->tol : tol,
@@ -953,6 +993,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
 }
 
 Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
+    const detail::thread_budget threads(impl_->num_threads);
     if (r.size() != rows()) throw std::invalid_argument("solver::apply: RHS length mismatch");
     return std::visit([&](auto& owner) -> Eigen::VectorXd {
         if constexpr (requires { owner.apply(r); }) return owner.apply(r);
