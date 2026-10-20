@@ -632,7 +632,7 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                            checkpoint* cp) {
     const detail::thread_budget threads(opts.num_threads);
-    impl_ = std::make_unique<impl>(opts);
+    impl_.reset(new impl(opts));
     impl_->F = detail::factorize_for_solver(A, opts.factor_opts, cp);
     impl_->setup(A, cp);
 }
@@ -640,7 +640,7 @@ metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_opt
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, factorization F,
                            const solve_options& opts, checkpoint* cp) {
     const detail::thread_budget threads(opts.num_threads);
-    impl_ = std::make_unique<impl>(opts);
+    impl_.reset(new impl(opts));
     impl_->F = std::move(F);
     impl_->setup(A, cp);
 }
