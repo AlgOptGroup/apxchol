@@ -135,6 +135,19 @@ TEST(MetalHost, UnpackingRejectsOverflow) {
     EXPECT_THROW(mh::add_unpacked(packed, 0x1p-1023, out), std::overflow_error);
 }
 
+TEST(MetalHost, RelativeNormSurvivesOverflowingVectorNorm) {
+    for (double magnitude : {1.0, 1e-200, 1e200, 1e308}) {
+        const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(16, magnitude);
+        Eigen::VectorXd residual = Eigen::VectorXd::Zero(16);
+        residual[0] = magnitude;
+        const mh::norm_reference reference(rhs);
+        EXPECT_DOUBLE_EQ(reference.relative(residual), 0.25);
+        const double scale = mh::pow2_scale(magnitude);
+        EXPECT_DOUBLE_EQ(reference.scaled(scale), mh::norm(rhs * scale));
+        EXPECT_TRUE(std::isfinite(reference.scaled(scale)));
+    }
+}
+
 TEST(MetalHost, FactorStorageReconstructsFiniteValues) {
     for (float scale : {0x1p-125f, 0x1p-80f, 0.25f, 1.0f, 0x1p80f}) {
         const auto metadata = mh::pack_factor_metadata(scale, 1.0f / scale);

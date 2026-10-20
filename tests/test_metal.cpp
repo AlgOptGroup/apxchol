@@ -648,6 +648,33 @@ TEST_F(MetalDevice, RejectsUnrepresentableSolutions) {
     }
 }
 
+TEST_F(MetalDevice, RelativeResidualSurvivesOverflowingRhsNorm) {
+    Sparse A(16, 16);
+    A.setIdentity();
+    const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(16, 1e308);
+    Eigen::VectorXd guess = rhs;
+    guess[0] = 0;
+    const double scale = 0x1p-1023;
+    const Eigen::VectorXd scaled_rhs = rhs * scale;
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                              apxchol::factor_storage_type::fp32}) {
+        apxchol::solve_options options;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::metal_solver solver(A, options);
+        for (bool warm : {false, true}) {
+            const auto stopped = solver.solve(rhs, 1e-8, 0, warm ? &guess : nullptr);
+            EXPECT_DOUBLE_EQ(stopped.residual, warm ? 0.25 : 1.0);
+            EXPECT_EQ(stopped.iterations, 0);
+            const auto solved = solver.solve(rhs, 1e-8, 100, warm ? &guess : nullptr);
+            ASSERT_TRUE(solved.x.allFinite());
+            const double residual = (solved.x * scale - scaled_rhs).norm() / scaled_rhs.norm();
+            EXPECT_LT(residual, 1e-8);
+            EXPECT_NEAR(solved.residual, residual, 1e-15);
+            EXPECT_GT(solved.iterations, 0);
+        }
+    }
+}
+
 TEST_F(MetalDevice, TinySystems) {
     Sparse one(1, 1);
     one.insert(0, 0) = 4.0;

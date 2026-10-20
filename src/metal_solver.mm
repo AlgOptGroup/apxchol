@@ -468,10 +468,10 @@ struct metal_solver::impl {
         }
     }
 
-    double residual_norm(const Eigen::VectorXd& bp, const Eigen::VectorXd& x,
-                         Eigen::VectorXd& work) const {
+    double relative_residual(const Eigen::VectorXd& bp, const Eigen::VectorXd& x,
+                             Eigen::VectorXd& work, const mh::norm_reference& bnorm) const {
         spmv(x, work);
-        return mh::norm(bp - work);
+        return bnorm.relative(bp - work);
     }
 
     void centre(Eigen::VectorXd& x) const { x.array() -= x.mean(); }
@@ -731,8 +731,8 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     checkpoint& cp = result.timings;
     cp.descend("pcg");
     cp.tick();
-    const double bnorm = mh::norm(b);
-    if (bnorm == 0.0) { cp.ascend(); return; }
+    const mh::norm_reference bnorm(b);
+    if (bnorm.value == 0.0) { cp.ascend(); return; }
     if (max_iter == 0 && (x0 == nullptr || x0->isZero(0.0))) {
         result.residual = 1.0;
         cp.ascend();
@@ -747,9 +747,9 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
         if (s.laplacian) s.centre(xp);
         if (s.original_operator.rows() != 0) {
             mh::gather({xp.data(), s.n}, perm, {work.data(), s.n});
-            result.residual = s.residual_norm(bp, work, xp) / bnorm;
+            result.residual = s.relative_residual(bp, work, xp, bnorm);
         } else {
-            result.residual = s.residual_norm(bp, xp, work) / bnorm;
+            result.residual = s.relative_residual(bp, xp, work, bnorm);
             mh::gather({xp.data(), s.n}, perm, {work.data(), s.n});
         }
         result.x.swap(work);
@@ -764,7 +764,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     } else {
         work = bp;
     }
-    const double initial = x0 ? mh::norm(work) / bnorm : 1.0;
+    const double initial = x0 ? bnorm.relative(work) : 1.0;
     if (initial < tol || max_iter == 0) { finish(); return; }
     if (s.laplacian) s.centre(work);
     const double max_abs = work.cwiseAbs().maxCoeff();
@@ -773,7 +773,7 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     mh::pack({work.data(), s.n}, scale, {static_cast<df32*>([s.r contents]), s.n});
     auto& state = *static_cast<solve_state*>([s.state_buffer contents]);
     state = {};
-    const double reference = bnorm * scale;
+    const double reference = bnorm.scaled(scale);
     const double threshold = tol * reference;
     state.thr = mh::split_saturated(threshold * threshold);
     state.prev = mh::split_saturated(reference * reference);
