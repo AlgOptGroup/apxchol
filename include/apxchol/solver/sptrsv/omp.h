@@ -168,8 +168,9 @@ private:
 /// Small factors use the serial kernel. In a parallel solve,
 /// levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
 /// `omp single` (4-way scalar kernel dot_thin); larger ("fat") levels are an
-/// `omp for schedule(static)` (plain scalar loop on fp32, SIMD dot_fat_simd
-/// on fp16 storage); one barrier per level either way (num_barriers()). A
+/// `omp for schedule(static)`. Single-RHS kernels use scalar FP32 or SIMD
+/// FP16 dots; matrix solves vectorize across RHS columns. There is one
+/// barrier per level either way (num_barriers()). A
 /// solve is a pure gather -- each row's arithmetic is independent of which
 /// thread runs it and when -- so both sweeps return the SAME BYTES at every
 /// thread count (tests/test_sptrsv_levelset.cpp).
@@ -212,7 +213,7 @@ private:
 // * Degenerate scales fall back to one before dropping; setup rejects invalid
 //   final diagonals or reciprocal scales rather than propagating NaNs.
 // * Thin levels use scalar accumulation. FP16 fat levels use F16C conversion
-//   with scalar gathers on AVX2/FMA targets; FP32 uses the scalar kernel.
+//   with scalar gathers on AVX2/FMA targets; single-RHS FP32 uses the scalar kernel.
 //   Their different accumulation orders need not produce identical bits.
 // * drop_stats()/lowprec_stats() retain the counts and memory diagnostics.
 //   Reporting does not change these numerical/storage rules.
