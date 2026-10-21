@@ -166,34 +166,17 @@ private:
 /// storage the last setup() chose -- ONCE per solve, never per row.
 ///
 /// Small factors use the serial kernel. In a parallel solve,
-/// levels of size <= kSpTRSVOMPThreshold ("thin") run on one thread inside
-/// `omp single` (4-way scalar kernel dot_thin); larger ("fat") levels are an
-/// `omp for schedule(static)`. Single-RHS kernels use scalar FP32 or SIMD
-/// FP16 dots; matrix solves vectorize across RHS columns. There is one
-/// barrier per level either way (num_barriers()). A
+/// consecutive levels of size <= kSpTRSVOMPThreshold ("thin") run in order
+/// inside one `omp single`; larger ("fat") levels use `omp for schedule(static)`.
+/// Single-RHS kernels use scalar FP32 or SIMD FP16 dots; matrix solves vectorize
+/// across RHS columns. Each thin run or fat level ends with one barrier
+/// (num_barriers()). A
 /// solve is a pure gather -- each row's arithmetic is independent of which
 /// thread runs it and when -- so both sweeps return the SAME BYTES at every
 /// thread count (tests/test_sptrsv_levelset.cpp).
 ///
-/// Earlier schedule experiments were tried and REMOVED 2026-08-18 as negative
-/// results (none preserved useful processor-local dependency chains; all were
-/// bit-identical to it): APXCHOL_SPTRSV_BALANCE=nnz (fat levels split into
-/// per-thread contiguous row ranges of equal stored-entry counts, cached per
-/// team size, instead of `omp for schedule(static)` by row count -- the
-/// motivation was `schedule(dynamic, 64)`'s -20% SpTRSV on IPM at +23% on
-/// grids) and APXCHOL_SPTRSV_AGGLOMERATE=<K> (runs of consecutive thin levels
-/// as one barrier-free `omp single` superstep -- iter0040 has 60-94 thin
-/// levels per direction in ONE contiguous run, grid_2000 54-61, so this
-/// removed most of a solve's barriers: iter0040 ~37-42 instead of ~100-130).
-/// Same verdict as the sync-free (Liu/Smelyanskiy/Chow 2016) back solve that
-/// used to sit behind APXCHOL_BCK_SCHED=syncfree, removed before them: paired
-/// A/B across the suite never showed it winning on any factor the
-/// elimination produces (power-law factors have a tiny AVERAGE level size,
-/// but a few very fat early levels carry nearly all the work), and the
-/// point-to-point experiment showed that barrier COUNT alone is not what the
-/// wall time is made of. The fused tail differs: it keeps same-processor
-/// dependencies in topological order and uses a staleness-2 weak barrier for
-/// cross-processor dependencies, while leaving the parallel fat prefix alone.
+/// The critical-tail path preserves same-processor dependencies in topological
+/// order and uses a staleness-2 weak barrier for cross-processor dependencies.
 /// APXCHOL_LEVEL_DUMP=1 prints both the level census and the resolved tail plan.
 
 // Storage contract (derivation and historical decisions: docs/precision.md):
@@ -1045,7 +1028,7 @@ private:
                 base_level_count<bck_dir>(), bck_max,
                 top1, tiny);
             // Thin-level structure: per direction, the number of levels of size
-            // <= kSpTRSVOMPThreshold (each an `omp single` + barrier), and the
+            // <= kSpTRSVOMPThreshold (one `omp single` + barrier per run), and the
             // length distribution of the RUNS of consecutive thin levels (the
             // single-thread tail of a solve), as "len:count" pairs.
             const auto dump_shape = [&]<class Dir>(const char* name) {
@@ -1271,14 +1254,10 @@ private:
     // omp parallel for` per level costs ~10us per fork-join at T=16, which
     // dominates when a factor has many levels (~240 levels x 50 PCG iters x 2
     // solves = 24k fork-joins per solve on IPM iter40). Spawning the team once
-    // and iterating levels inside it -- an `omp for` (fat) or `omp single`
-    // (thin) per level, whose implicit barrier carries the level-dependency
-    // guarantee that level k+1 reads y_out written by level k -- collapses
-    // that to one fork-join per solve.
-    //
-    // Schedule: thin level -> `omp single` over its rows (one thread, level
-    // order); fat level -> `omp for schedule(static)` over its rows; the
-    // implicit barrier of each carries the level dependency.
+    // and iterating levels inside it collapses that to one fork-join per solve.
+    // Consecutive thin levels run serially in one `omp single`, preserving
+    // level and row order. Fat levels use `omp for schedule(static)`. Their
+    // implicit barriers publish each group's outputs before the next group.
     template <class Dir, class V, int Columns = 1>
     void solve_levelset(const double* x_in, double* y_out, unsigned processors) const {
         solve_levelset_range<Dir, V, Columns>(
@@ -1310,22 +1289,34 @@ private:
         });
     }
 
+    template <class Levels>
+    static std::size_t level_group_end(const Levels& levels, std::size_t first, std::size_t end) {
+        std::size_t next = first + 1;
+        if (levels[first].size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold))
+            while (next < end && levels[next].size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold))
+                ++next;
+        return next;
+    }
+
     template <class Dir, class V, int Columns, class Levels>
     void solve_levelset_range_team_impl(const double* x_in, double* y_out,
                                         const Levels& levels,
                                         std::size_t first_level,
                                         std::size_t level_end) const {
         assert(level_end <= levels.size());
-        for (std::size_t l = first_level; l < level_end; ++l) {
+        for (std::size_t l = first_level; l < level_end;) {
             const auto& level = levels[l];
-            const node_index level_sz = static_cast<node_index>(level.size());
-            if (level_sz <= kSpTRSVOMPThreshold) {
+            const auto next = level_group_end(levels, l, level_end);
+            if (level.size() <= static_cast<std::size_t>(kSpTRSVOMPThreshold)) {
                 #pragma omp single
-                solve_level_rows<Dir, V, Columns, false, false>(level, x_in, y_out);
-                // implicit barrier on omp single
+                {
+                    for (std::size_t k = l; k < next; ++k)
+                        solve_level_rows<Dir, V, Columns, false, false>(levels[k], x_in, y_out);
+                }
             } else {
                 solve_level_rows<Dir, V, Columns, true, true>(level, x_in, y_out);
             }
+            l = next;
         }
     }
 
@@ -1402,12 +1393,18 @@ public:
     std::size_t num_barriers(bool fwd) const {
         const unsigned processors = detail::cpu_solve_threads(team_rows_);
         if (processors == 1) return 0;
-        if (hybrid_active_ && processors == critical_plan_.processors)
-            return critical_plan_.steps +
-                (fwd ? hybrid_fwd_level_end_
-                     : base_level_count<bck_dir>() - hybrid_bck_level_begin_);
-        return fwd ? base_level_count<fwd_dir>()
-                   : base_level_count<bck_dir>();
+        const bool hybrid = hybrid_active_ && processors == critical_plan_.processors;
+        const auto count = [&]<class Dir>() {
+            std::size_t result = hybrid ? critical_plan_.steps : 0;
+            const auto first = hybrid && !Dir::forward ? hybrid_bck_level_begin_ : 0;
+            const auto end = hybrid && Dir::forward ? hybrid_fwd_level_end_ : base_level_count<Dir>();
+            with_base_levels<Dir>([&](const auto& levels) {
+                for (std::size_t l = first; l < end; l = level_group_end(levels, l, end))
+                    ++result;
+            });
+            return result;
+        };
+        return fwd ? count.template operator()<fwd_dir>() : count.template operator()<bck_dir>();
     }
 
     // Diagnostics: per-level row/col counts and per-level off-diagonal nnz.
