@@ -43,18 +43,20 @@ triangle make_triangle(unsigned n, bool reverse, unsigned pattern) {
     return a;
 }
 
+template<unsigned Lanes = 32>
 void check_schedule(const triangle &a, bool reverse) {
+    SCOPED_TRACE(::testing::Message() << "lanes=" << Lanes);
     const unsigned n = a.ptr.size() - 1;
-    const auto s = ms::build(a.ptr, a.col, a.val, reverse);
+    const auto s = ms::build<float, Lanes>(a.ptr, a.col, a.val, reverse);
     const auto &p = s.tasks;
     std::vector<int> stage(n, -1), block(n, -1);
     std::vector<unsigned> position(n);
     std::vector<unsigned> row_count(n), finalizers(n);
     std::vector<std::vector<std::pair<unsigned, unsigned>>> slices(n);
-    ASSERT_EQ(p.words.size() % 32, 0u);
+    ASSERT_EQ(p.words.size() % Lanes, 0u);
     for (unsigned st = 0; st < s.stages.size(); ++st) {
         for (unsigned b = s.stages[st].first; b < s.stages[st].last; ++b) {
-            for (unsigned w = p.blocks[b] * 32; w < p.blocks[b + 1] * 32;) {
+            for (unsigned w = p.blocks[b] * Lanes; w < p.blocks[b + 1] * Lanes;) {
                 const unsigned word = p.words[w];
                 if (word == df::empty) {
                     ++w;
@@ -65,7 +67,7 @@ void check_schedule(const triangle &a, bool reverse) {
                     ASSERT_LT(word & ~df::special_bit, p.segments.size());
                     const auto t = p.segments[word & ~df::special_bit];
                     row = t.row & ~df::special_bit;
-                    width = 32;
+                    width = Lanes;
                     if (t.row & df::special_bit) {
                         ++finalizers[row];
                         EXPECT_EQ(t.output, row);
@@ -79,7 +81,7 @@ void check_schedule(const triangle &a, bool reverse) {
                 } else {
                     row = word;
                     width = 1;
-                    while (width < 32 && width * 8 < a.ptr[row + 1] - a.ptr[row] - 1)
+                    while (width < Lanes && width * 8 < a.ptr[row + 1] - a.ptr[row] - 1)
                         width *= 2;
                     ++row_count[row];
                 }
@@ -122,7 +124,9 @@ TEST(MetalSchedule, TasksCoverRowsAndConfineEveryDependencyToItsProgressScope) {
         for (bool reverse : {false, true})
             for (unsigned pattern = 0; pattern < 4; ++pattern) {
                 SCOPED_TRACE(::testing::Message() << n << " reverse=" << reverse << " pattern=" << pattern);
-                check_schedule(make_triangle(n, reverse, pattern), reverse);
+                const auto triangle = make_triangle(n, reverse, pattern);
+                check_schedule<8>(triangle, reverse);
+                check_schedule<32>(triangle, reverse);
             }
 }
 
