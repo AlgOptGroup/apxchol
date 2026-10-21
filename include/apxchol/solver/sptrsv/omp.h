@@ -1359,7 +1359,7 @@ private:
     void solve_level_rows(const Level& level, const double* x_in, double* y_out) const {
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
         if constexpr (std::is_same_v<V, _Float16>)
-            return solve_level_rows_impl<Dir, V, Columns, Fat, Fat, Parallel>(level, x_in, y_out);
+            return solve_level_rows_simd<Dir, V, Columns, Fat, Parallel>(level, x_in, y_out);
 #elif defined(__x86_64__)
         if constexpr (std::is_same_v<V, _Float16> || Columns > 1) {
             if (simd_fp16_kernel())
