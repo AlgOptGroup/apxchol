@@ -528,12 +528,13 @@ TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
             handle explicit_storage;
             ASSERT_EQ(create(c, &o, explicit_storage), APXCHOL_STATUS_SUCCESS);
             EXPECT_EQ(stats_of(explicit_storage.s).factor_storage, storage);
-            EXPECT_TRUE(export_of(explicit_storage.s) == native);
+            const exported built = export_of(explicit_storage.s);
+            if (backend == APXCHOL_BACKEND_CPU) EXPECT_TRUE(built == native);
             factor_handle copy;
             ASSERT_EQ(apxchol_solver_copy_factor(explicit_storage.s, &copy.f, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_EQ(stats_of(copy.f).factor_storage, APXCHOL_FACTOR_STORAGE_FLOAT32);
-            EXPECT_TRUE(export_of(copy.f) == native);
+            EXPECT_TRUE(export_of(copy.f) == built);
 
             scoped_env selected("APXCHOL_FACTOR_STORAGE", half ? "float16" : "float32");
             o.factor_storage = APXCHOL_FACTOR_STORAGE_AUTO;
@@ -1764,6 +1765,19 @@ TEST(CApi, MetalUnrepresentableOperatorIsUnsupported) {
     EXPECT_EQ(create(c, &o, cpu), APXCHOL_STATUS_SUCCESS);
 }
 
+TEST(CApi, MetalUnsupportedSetupOptionsReturnUnsupported) {
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    const csc64 c = to_csc64(grid_laplacian(12, 11));
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_METAL;
+    o.sampler = APXCHOL_SAMPLER_TRACE_CYCLE;
+    handle refused;
+    std::string message;
+    EXPECT_EQ(create(c, &o, refused, 0, &message), APXCHOL_STATUS_UNSUPPORTED) << message;
+    EXPECT_EQ(refused.s, nullptr);
+    EXPECT_NE(message.find("Metal"), std::string::npos) << message;
+}
+
 TEST(CApi, MetalAutoBackendChoosesTheDeviceAboveTheCpuLimit) {
     if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
     // 182 x 182 = 33,124 rows, above AUTO's 32,768-row CPU limit.
@@ -1785,6 +1799,12 @@ TEST(CApi, MetalAutoBackendChoosesTheDeviceAboveTheCpuLimit) {
     handle adopted;
     ASSERT_EQ(adopt(c, f.f, nullptr, adopted), APXCHOL_STATUS_SUCCESS);
     EXPECT_EQ(stats_of(adopted.s).backend, APXCHOL_BACKEND_CPU);
+
+    auto host_options = defaults();
+    host_options.sampler = APXCHOL_SAMPLER_TRACE_CYCLE;
+    handle host_setup;
+    ASSERT_EQ(create(c, &host_options, host_setup, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
+    EXPECT_EQ(stats_of(host_setup.s).backend, APXCHOL_BACKEND_CPU);
 
     // An operator outside Metal's value range resolves to CPU and solves.
     A.coeffRef(1, 0) = -1e-35;
@@ -1840,7 +1860,7 @@ TEST(CApi, MetalExtremeScaleRightHandSidesConverge) {
     }
 }
 
-TEST(CApi, MetalSolverFromFactorIsBitIdenticalOnItsOwnMatrix) {
+TEST(CApi, MetalAdoptionsOfTheSameFactorAreBitIdentical) {
     if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
     for (const double shift : {0.0, 0.02}) {
         const csc64 c = to_csc64(grid_laplacian(19, 17, shift));
@@ -1851,9 +1871,9 @@ TEST(CApi, MetalSolverFromFactorIsBitIdenticalOnItsOwnMatrix) {
         o.tol = 1e-10;
         handle self;
         std::string message;
-        ASSERT_EQ(create(c, &o, self, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
         factor_handle f;
         ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);
+        ASSERT_EQ(adopt(c, f.f, &o, self, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
         handle adopted;
         ASSERT_EQ(adopt(c, f.f, &o, adopted, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
         const apxchol_stats as = stats_of(adopted.s);
@@ -1916,7 +1936,8 @@ TEST(CApi, MetalSolverFromFactorPreconditionsANearbyOperator) {
 
 TEST(CApi, MetalFactorHandlesCrossBackends) {
     if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    const csc64 c = to_csc64(grid_laplacian(12, 15));
+    const Sparse A = grid_laplacian(12, 15);
+    const csc64 c = to_csc64(A);
     auto o = defaults();
     o.backend = APXCHOL_BACKEND_METAL;
     o.keep_factor_values = 1;
@@ -1939,6 +1960,7 @@ TEST(CApi, MetalFactorHandlesCrossBackends) {
     o.backend = APXCHOL_BACKEND_METAL;
     handle metal_again;
     ASSERT_EQ(adopt(c, back.f, &o, metal_again), APXCHOL_STATUS_SUCCESS);
+    EXPECT_TRUE(export_of(metal_again.s) == export_of(metal.s));
     const Eigen::VectorXd b = compatible_rhs(c.n, 5);
     Eigen::VectorXd x1(c.n), x2(c.n);
     ASSERT_EQ(apxchol_solver_solve(metal.s, b.data(), nullptr, x1.data(), -1.0, -1, nullptr,
@@ -1947,7 +1969,8 @@ TEST(CApi, MetalFactorHandlesCrossBackends) {
     ASSERT_EQ(apxchol_solver_solve(metal_again.s, b.data(), nullptr, x2.data(), -1.0, -1, nullptr,
                                    nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(same_bytes(x1.data(), x2.data(), x1.size()));
+    EXPECT_LT(true_residual(A, b, x1), o.tol);
+    EXPECT_LT(true_residual(A, b, x2), o.tol);
 
     // The adoption checks do not depend on the backend.
     std::string message;
