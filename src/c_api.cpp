@@ -229,15 +229,23 @@ apxchol::solve_backend resolve_route(apxchol_backend backend,
                                      const apxchol::solve_options& so,
                                      const Eigen::SparseMatrix<double>& A, bool adopt) {
     if (backend == APXCHOL_BACKEND_CPU) return apxchol::solve_backend::cpu;
-    if (backend == APXCHOL_BACKEND_METAL) return apxchol::solve_backend::gpu;
 #if defined(APXCHOL_USE_METAL)
-    if (!adopt) return apxchol::detail::select_solve_backend(so, &A);
+    if (!adopt) {
+        try {
+            return apxchol::detail::select_solve_backend(so, &A);
+        } catch (const std::invalid_argument& error) {
+            if (backend == APXCHOL_BACKEND_METAL)
+                fail(APXCHOL_STATUS_UNSUPPORTED, error.what());
+            throw;
+        }
+    }
 #else
     (void)so;
     (void)A;
 #endif
     (void)adopt;
-    return apxchol::solve_backend::cpu;
+    return backend == APXCHOL_BACKEND_METAL ? apxchol::solve_backend::gpu
+                                          : apxchol::solve_backend::cpu;
 }
 
 /// Classifies the triangular-solve storage request before any setup work. An

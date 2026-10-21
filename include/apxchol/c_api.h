@@ -219,8 +219,8 @@ APXCHOL_C_API apxchol_status apxchol_solver_export_factor(
 /* Factor handles: one host factorization (L, perm, statistics), always with
  * its values, that any number of solvers can adopt. A solver adopts a copy,
  * so the factor and its solvers may be destroyed in any order.
- * apxchol_solver_create is apxchol_factor_create followed by
- * apxchol_solver_create_from_factor on the same matrix and options. */
+ * apxchol_factor_create builds on the CPU; apxchol_solver_create builds on
+ * the selected backend. */
 
 /* Factorizes A without building a solver: the same validation, lumping and
  * call-scoped threads as apxchol_solver_create, with the factorization
