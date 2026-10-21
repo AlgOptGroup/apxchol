@@ -9,8 +9,9 @@ namespace apxchol::detail::metal_setup {
 struct triangle {
     id<MTLBuffer> ptr = nil, idx = nil, val = nil;
     id<MTLBuffer> words = nil, blocks = nil, segments = nil;
-    std::vector<metal_schedule::step> stages;
+    std::vector<metal_schedule::step> stages{};
     unsigned levels = 0, tag_count = 0;
+    bool resident_round_plan = false;
 };
 
 struct resident_factor {

@@ -479,6 +479,7 @@ class Finalizer {
             [enc setBytes:&reverse length:sizeof reverse atIndex:8];
             dispatch(enc, std::max(pi.blocks, 1u));
             finish(cb, status);
+            t.resident_round_plan = true;
         }
         return out;
     }

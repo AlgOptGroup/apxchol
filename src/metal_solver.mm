@@ -237,14 +237,7 @@ void finish(id<MTLCommandBuffer> cb) {
         throw std::runtime_error("Metal command buffer failed: " + describe([cb error]));
 }
 
-struct prepared_tri {
-    id<MTLBuffer> words = nil, blocks = nil, segments = nil;
-    unsigned tag_count = 0;
-    std::vector<metal_schedule::step> stages;
-    id<MTLBuffer> ptr = nil, col = nil, val = nil;
-    std::uint32_t levels = 0;
-    bool resident_round_plan = false;
-};
+using prepared_tri = metal_setup::triangle;
 
 void install_schedule(context& ctx, prepared_tri& out, metal_schedule::schedule schedule,
                        unsigned m) {
@@ -275,7 +268,7 @@ prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<Value>& a, bool 
     install_schedule(ctx, out, std::move(schedule), m);
     with_pool([&] {
         out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
-        out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
+        out.idx = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
         out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(Value), "factor values");
     });
     return out;
@@ -284,12 +277,11 @@ prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<Value>& a, bool 
 template<class Value>
 prepared_tri prepare_lane_tri(context& ctx, const prepared_tri& base, unsigned m,
                                bool forward, std::span<const float> diagonals) {
-    prepared_tri out = base;
-    out.resident_round_plan = false;
+    prepared_tri out{.ptr = base.ptr, .idx = base.idx, .val = base.val};
     const auto* ptr = static_cast<const unsigned*>([base.ptr contents]);
     install_schedule(ctx, out, metal_schedule::build<Value, 8>(
         {ptr, std::size_t(m) + 1},
-        {static_cast<const unsigned*>([base.col contents]), ptr[m]},
+        {static_cast<const unsigned*>([base.idx contents]), ptr[m]},
         {static_cast<const Value*>([base.val contents]), ptr[m]}, !forward, diagonals), m);
     return out;
 }
@@ -402,7 +394,7 @@ struct metal_solver::impl {
 
     void encode_tri(const prepared_tri& t, bool forward) const {
         if (!arguments.m) return;
-        bind(encoder, 13, {t.ptr, t.col, t.val, t.words, t.blocks, t.segments});
+        bind(encoder, 13, {t.ptr, t.idx, t.val, t.words, t.blocks, t.segments});
         if (factor_fp16) bind(encoder, 19, {factor_metadata});
         Params prm = arguments;
         prm.count = t.tag_count;
@@ -685,17 +677,8 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
         }
     });
     if (resident) {
-        auto install = [](detail::metal_setup::triangle t) {
-            prepared_tri result;
-            result.ptr = t.ptr; result.col = t.idx; result.val = t.val;
-            result.words = t.words; result.blocks = t.blocks; result.segments = t.segments;
-            result.stages = std::move(t.stages);
-            result.levels = t.levels; result.tag_count = t.tag_count;
-            result.resident_round_plan = true;
-            return result;
-        };
-        fwd = install(std::move(resident->forward));
-        bwd = install(std::move(resident->backward));
+        fwd = std::move(resident->forward);
+        bwd = std::move(resident->backward);
         factor_metadata = resident->metadata;
     } else {
     auto install = [&]<class Value>(const cuda_host::csr_int<Value>& bt, std::span<const float> diag = {}) {
