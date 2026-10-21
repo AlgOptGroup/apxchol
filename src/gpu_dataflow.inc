@@ -100,11 +100,12 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
                 (0xffffffffu >> (32 - physical_width)) << (lane & ~(physical_width - 1));
             const unsigned waiting = m.ballot(pending_any != 0);
             const bool ready = have && !(waiting & group_mask);
+            const bool reduce = m.any(ready && g > 1 && p + g * 8 - sub >= end);
             float total[LocalColumns];
             for (unsigned q = 0; q < LocalColumns; ++q) {
                 if (ready && enabled[q]) sum[q] = dataflow_accumulate(vals, values[q], sum[q]);
                 total[q] = sum[q];
-                for (unsigned o = SparseLanes / 2; o; o /= 2) {
+                for (unsigned o = reduce ? SparseLanes / 2 : 0; o; o /= 2) {
                     const float other = m.shuffle(total[q], o * RhsLanes);
                     if (o < g) total[q] += other;
                 }

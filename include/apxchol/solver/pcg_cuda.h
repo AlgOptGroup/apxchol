@@ -155,9 +155,9 @@ private:
         host_panel packed(n_, Columns);
         std::array<double, Columns> scales{}, bnorm{}, max_b{}, max_x0{};
         bool any_active = false, any_warm = false;
-        for (unsigned q = 0; q < Columns; ++q) {
-            h_state_[q] = {};
-            for (int64_t v = 0; v < n_; ++v) {
+        std::fill_n(h_state_, Columns, pcg_cuda::solve_state{});
+        for (int64_t v = 0; v < n_; ++v) {
+            for (unsigned q = 0; q < Columns; ++q) {
                 const double rhs = b_host(v, q);
                 if (!std::isfinite(rhs))
                     throw std::invalid_argument("cuda_pcg::solve: RHS must be finite");
@@ -170,8 +170,8 @@ private:
                     max_x0[q] = std::max(max_x0[q], std::abs(guess));
                 }
             }
-            any_active |= max_b[q] != 0;
         }
+        for (double maximum : max_b) any_active |= maximum != 0;
         if (!any_active) {
             x_host.setZero();
             iterations.fill(0);
@@ -209,13 +209,12 @@ private:
         iteration<Precond, Columns> commands{*this, precond, bnorm,
             static_cast<unsigned>(std::max(stagnation_window, 0))};
         if (any_warm) {
-            packed.setZero();
-            for (unsigned q = 0; q < Columns; ++q) {
-                if (!h_state_[q].alpha) continue;
-                for (int64_t v = 0; v < n_; ++v)
-                    packed(h_perm_[v], q) = (*x0)(v, q) * scales[q];
-                if (laplacian) packed.col(q).array() -= packed.col(q).mean();
-            }
+            for (int64_t v = 0; v < n_; ++v)
+                for (unsigned q = 0; q < Columns; ++q)
+                    packed(h_perm_[v], q) = h_state_[q].alpha ? (*x0)(v, q) * scales[q] : 0;
+            if (laplacian)
+                for (unsigned q = 0; q < Columns; ++q)
+                    if (h_state_[q].alpha) packed.col(q).array() -= packed.col(q).mean();
             APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(vectors_.p, packed.data(), vector_bytes, cudaMemcpyHostToDevice));
             // alpha=1 only for warm columns; cold p=0 and alpha=0. Their
             // iteration-zero convergence check is suppressed by finalize.
@@ -234,9 +233,10 @@ private:
             if (h_state_[q].active & pcg_cuda::kSolutionUnderflow)
                 throw std::underflow_error("CUDA solve: solution underflows to zero");
         }
+        for (int64_t v = 0; v < n_; ++v)
+            for (unsigned q = 0; q < Columns; ++q)
+                x_host(v, q) = packed(h_perm_[v], q);
         for (unsigned q = 0; q < Columns; ++q) {
-            auto column = x_host.col(q);
-            for (int64_t v = 0; v < n_; ++v) column[v] = packed(h_perm_[v], q);
             iterations[q] = h_state_[q].iters;
             residuals[q] = h_state_[q].rr;
         }
