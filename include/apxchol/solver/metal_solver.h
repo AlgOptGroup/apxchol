@@ -1,5 +1,5 @@
 #pragma once
-// Single-RHS Metal PCG with reusable factor, operator and workspace.
+// Metal PCG with reusable factor, operator and workspace.
 // Concurrent calls on one instance are unsupported; see docs/precision.md.
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/factorization.h"
@@ -66,6 +66,8 @@ private:
     // Automatic routing has already checked this same input when true.
     metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                  checkpoint* cp, bool input_prechecked);
+    batch_solve_result solve_panel(const_matrix_view B, matrix_view X, double tol,
+                                  int max_iter, const const_matrix_view* X0 = nullptr) const;
     struct impl;
     struct impl_deleter {
         void operator()(impl*) const;

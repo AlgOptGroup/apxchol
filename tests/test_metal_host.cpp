@@ -76,27 +76,6 @@ TEST(MetalHost, ScalingRemainsFiniteAtFloatingPointLimits) {
     }
 }
 
-TEST(MetalHost, VectorPackingRoundTrip) {
-    const std::size_t n = 50001;
-    std::vector<double> v(n), permuted(n), back(n), out(n);
-    std::vector<std::uint32_t> perm(n);
-    std::vector<mh::df> packed(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        v[i] = std::sin(0.3 * static_cast<double>(i)) * std::ldexp(1.0, static_cast<int>(i % 40) - 20);
-        perm[i] = static_cast<std::uint32_t>((i * 7919) % n);
-    }
-    mh::scatter(v, perm, permuted);
-    mh::pack(permuted, 0.25, packed);
-    mh::add_unpacked(packed, 0.25, back);
-    mh::gather(back, perm, out);
-    for (std::size_t i = 0; i < n; ++i)
-        EXPECT_LE(std::fabs(out[i] - v[i]), std::ldexp(std::fabs(v[i]), -47));
-    mh::add_unpacked(packed, 0.25, back);
-    mh::gather(back, perm, out);
-    for (std::size_t i = 0; i < n; ++i)
-        EXPECT_LE(std::fabs(out[i] - 2 * v[i]), std::ldexp(std::fabs(v[i]), -46));
-}
-
 TEST(MetalHost, NormAcrossMagnitudes) {
     for (const double scale : {0.0, std::numeric_limits<double>::denorm_min(),
                                0x1p-530, 1e-200, 1.0, 1e200,
@@ -118,21 +97,6 @@ TEST(MetalHost, NormAcrossMagnitudes) {
     EXPECT_EQ(mh::norm(Eigen::VectorXd{}), 0.0);
     EXPECT_TRUE(std::isinf(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::infinity(), 1.0))));
     EXPECT_TRUE(std::isnan(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::quiet_NaN(), 1.0))));
-}
-
-TEST(MetalHost, UnpackingRejectsOverflow) {
-    std::vector<mh::df> packed(64, mh::split(1.0));
-    std::vector<double> out(packed.size());
-    EXPECT_NO_THROW(mh::add_unpacked(packed, 0x1p-1000, out));
-    EXPECT_EQ(out.back(), 0x1p1000);
-
-    std::fill(out.begin(), out.end(), 0.0);
-    packed.back() = mh::split(0x1p30);
-    EXPECT_THROW(mh::add_unpacked(packed, 0x1p-1000, out), std::overflow_error);
-
-    std::fill(packed.begin(), packed.end(), mh::split(1.0));
-    std::fill(out.begin(), out.end(), std::numeric_limits<double>::max());
-    EXPECT_THROW(mh::add_unpacked(packed, 0x1p-1023, out), std::overflow_error);
 }
 
 TEST(MetalHost, RelativeNormSurvivesOverflowingVectorNorm) {

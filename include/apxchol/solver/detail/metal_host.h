@@ -4,11 +4,8 @@
 #include "gpu_scaling.h"
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
 #include <limits>
-#include <span>
 #include <stdexcept>
-#include <vector>
 
 namespace apxchol::detail::metal_host { using std::fma; }
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
@@ -65,39 +62,6 @@ inline factor_metadata pack_factor_metadata(float scale, float scaled_diagonal) 
 inline df split_saturated(double v) {
     constexpr double kMax = static_cast<double>(std::numeric_limits<float>::max());
     return split(std::min(v, kMax));
-}
-
-// Permutation and vector packing.
-
-/// To the factor's permuted space: out[perm[v]] = v_in[v].
-template <class Index>
-void scatter(std::span<const double> v_in, const std::vector<Index>& perm, std::span<double> out) {
-    #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(v_in.size()); ++v) out[perm[v]] = v_in[v];
-}
-
-/// Back from the permuted space: out[v] = v_perm[perm[v]].
-template <class Index>
-void gather(std::span<const double> v_perm, const std::vector<Index>& perm, std::span<double> out) {
-    #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t v = 0; v < static_cast<std::ptrdiff_t>(v_perm.size()); ++v) out[v] = v_perm[perm[v]];
-}
-
-inline void pack(std::span<const double> w, double scale, std::span<df> out) {
-    #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(w.size()); ++i) {
-        out[i] = split(scale * w[i]);
-    }
-}
-
-inline void add_unpacked(std::span<const df> v, double scale, std::span<double> out) {
-    bool finite = true;
-    #pragma omp parallel for schedule(static) reduction(&& : finite)
-    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(v.size()); ++i) {
-        out[i] += join(v[i]) / scale;
-        finite = finite && std::isfinite(out[i]);
-    }
-    if (!finite) throw std::overflow_error("Metal solve: solution exceeds the finite range");
 }
 
 }  // namespace apxchol::detail::metal_host

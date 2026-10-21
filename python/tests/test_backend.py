@@ -137,3 +137,23 @@ else:
     environment = dict(os.environ, CUDA_VISIBLE_DEVICES="")
     subprocess.run([sys.executable, "-B", "-c", script], env=environment,
                    check=True, timeout=60)
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_gpu_matrix_rhs_preserves_backend(operator_matrix, gpu_solver, dtype):
+    if gpu_solver is None:
+        pytest.skip("No usable GPU backend in this installation")
+    solver = apxchol.factorize(operator_matrix, backend="gpu", factor_storage_dtype=dtype)
+    exact = np.random.default_rng(5).standard_normal((operator_matrix.shape[0], 3))
+    exact[:, 0] = 0
+    rhs = operator_matrix @ exact
+    out = np.empty_like(rhs, order="F")
+    result = solver.solve(rhs, x0=exact, out=out)
+    assert result.x is out and result.converged.all()
+    assert (result.iters == 0).all()
+    np.testing.assert_allclose(operator_matrix @ result.x, rhs, rtol=1e-12, atol=1e-12)
+    cold = solver.solve(rhs)
+    assert cold.converged.all()
+    expected = np.column_stack([solver.apply(column) for column in rhs.T])
+    np.testing.assert_allclose(solver.apply(rhs), expected, rtol=1e-12, atol=1e-12)
+    assert solver.backend == "gpu"

@@ -12,6 +12,8 @@
 #include "metal_compile.h"
 #include "metal_setup.h"
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -86,13 +88,16 @@ struct pipelines {
     id<MTLComputePipelineState> dataflow_solve[2][3]; // backward, forward, independent forward
     id<MTLComputePipelineState> dataflow_init[2][2];
     id<MTLComputePipelineState> probe;
+    std::uint32_t row_threads = 0;
 };
 
 struct context {
     device_status status;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> probe_queue = nil;
-    pipelines pipes;
+    id<MTLLibrary> library = nil;
+    std::array<pipelines, 3> pipes;
+    std::array<std::once_flag, 3> pipeline_once;
 };
 
 std::vector<float> run_probe(context& ctx, const std::vector<float>& inputs);
@@ -117,13 +122,15 @@ std::string run_arithmetic_probe(context& ctx) {
 
 id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> library,
                                           const char* name, bool forward, bool operator_df,
-                                          unsigned op = 0, bool factor_fp16 = false, bool independent = false) {
+                                          unsigned op = 0, bool factor_fp16 = false,
+                                          unsigned columns = 1, bool independent = false) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
     [values setConstantValue:&forward type:MTLDataTypeBool atIndex:0];
     [values setConstantValue:&operator_df type:MTLDataTypeBool atIndex:1];
     [values setConstantValue:&op type:MTLDataTypeUInt atIndex:2];
     [values setConstantValue:&factor_fp16 type:MTLDataTypeBool atIndex:3];
-    [values setConstantValue:&independent type:MTLDataTypeBool atIndex:4];
+    [values setConstantValue:&columns type:MTLDataTypeUInt atIndex:4];
+    [values setConstantValue:&independent type:MTLDataTypeBool atIndex:5];
     NSError* err = nil;
     id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]
                                        constantValues:values
@@ -134,6 +141,35 @@ id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> l
     if (pipe == nil)
         throw std::runtime_error(std::string("Metal pipeline ") + name + ": " + describe(err));
     return pipe;
+}
+
+pipelines make_pipelines(id<MTLDevice> device, id<MTLLibrary> library, unsigned columns) {
+    pipelines p{};
+    for (unsigned op = 0; op < 4; ++op)
+        for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
+            p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op, false, columns);
+    p.finalize = make_pipeline(device, library, "finalize", false, false, 0, false, columns);
+    for (int half = 0; half < 2; ++half) {
+        for (int fwd = 0; fwd < 2; ++fwd)
+            p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half, columns);
+        for (unsigned variant = 0; variant < (columns == 4 ? 2u : 3u); ++variant) {
+            auto pipe = make_pipeline(device, library, "dataflow_solve", variant != 0, false, 0, half, columns, variant == 2);
+            p.dataflow_solve[half][variant] = pipe;
+            if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
+                throw std::runtime_error("Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups");
+        }
+    }
+    auto threads = [](id<MTLComputePipelineState> pipe) {
+        return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
+    };
+    const auto tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
+                                       threads(p.pcg[2][0]), threads(p.finalize)});
+    p.row_threads = std::min({threads(p.pcg[unsigned(operation::direction)][0]),
+                             threads(p.dataflow_init[0][0]), threads(p.dataflow_init[0][1]),
+                             threads(p.dataflow_init[1][0]), threads(p.dataflow_init[1][1])});
+    if (tree_threads < kTreeLanes || p.row_threads == 0)
+        throw std::runtime_error("Metal pipeline thread limits are insufficient");
+    return p;
 }
 
 context* make_context() {
@@ -149,34 +185,13 @@ context* make_context() {
             const auto compiled = compile_library(device, kKernelSource);
             st.contract_pragma = compiled.contract_pragma;
             id<MTLLibrary> library = compiled.library;
-            pipelines& p = ctx->pipes;
-            for (unsigned op = 0; op < 4; ++op)
-                for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
-                    p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op);
-            p.finalize = make_pipeline(device, library, "finalize", false, false);
-            for (int half = 0; half < 2; ++half) {
-                for (int fwd = 0; fwd < 2; ++fwd)
-                    p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half);
-                for (unsigned variant = 0; variant < 3; ++variant) {
-                    auto pipe = make_pipeline(device, library, "dataflow_solve", variant != 0, false, 0, half, variant == 2);
-                    p.dataflow_solve[half][variant] = pipe;
-                    if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
-                        throw std::runtime_error("Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups");
-                }
-            }
+            ctx->library = library;
+            ctx->pipes[0] = make_pipelines(device, library, 1);
+            pipelines& p = ctx->pipes[0];
             p.probe = make_pipeline(device, library, "df_probe", false, false);
-            auto threads = [](id<MTLComputePipelineState> pipe) {
-                return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
-            };
-            const auto tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
-                                               threads(p.pcg[2][0]), threads(p.finalize)});
-            st.row_threads = std::min({threads(p.pcg[unsigned(operation::direction)][0]),
-                                      threads(p.dataflow_init[0][0]), threads(p.dataflow_init[0][1]),
-                                      threads(p.dataflow_init[1][0]), threads(p.dataflow_init[1][1])});
+            st.row_threads = p.row_threads;
             ctx->probe_queue = [device newCommandQueue];
             if (ctx->probe_queue == nil) throw std::runtime_error("no Metal command queue");
-            if (tree_threads < kTreeLanes || st.row_threads == 0)
-                throw std::runtime_error("Metal pipeline thread limits are insufficient");
             st.error = run_arithmetic_probe(*ctx);
             st.ok = st.error.empty();
         } catch (const std::exception& e) {
@@ -230,6 +245,23 @@ struct prepared_tri {
     bool resident_round_plan = false;
 };
 
+void install_schedule(context& ctx, prepared_tri& out, metal_schedule::schedule schedule,
+                       unsigned m) {
+    auto& packed = schedule.tasks;
+    out.tag_count = m + packed.slots;
+    // Metal validates the element type even when no task reads the buffer.
+    if (packed.segments.empty())
+        packed.segments.push_back({});
+    out.stages = std::move(schedule.stages);
+    out.levels = schedule.levels;
+    with_pool([&] {
+        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
+        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
+        out.segments = upload(ctx.device, packed.segments.data(),
+                              packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
+    });
+}
+
 template<class Value>
 prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<Value>& a, bool forward,
                          std::span<const float> diagonals = {}) {
@@ -239,22 +271,25 @@ prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<Value>& a, bool 
         metal_schedule::build<Value>({reinterpret_cast<const unsigned*>(a.ptr.data()), std::size_t(m) + 1},
                                {reinterpret_cast<const unsigned*>(a.idx.get()), std::size_t(a.nnz)},
                                {a.vals.get(), std::size_t(a.nnz)}, !forward, diagonals);
-    auto &packed = schedule.tasks;
-    out.tag_count = m + packed.slots;
-    // Metal validates the element type even when no task reads the buffer.
-    if (packed.segments.empty())
-        packed.segments.push_back({});
-    out.stages = std::move(schedule.stages);
-    out.levels = schedule.levels;
+    install_schedule(ctx, out, std::move(schedule), m);
     with_pool([&] {
         out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
         out.col = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
         out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(Value), "factor values");
-        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
-        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
-        out.segments = upload(ctx.device, packed.segments.data(),
-                              packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
     });
+    return out;
+}
+
+template<class Value>
+prepared_tri prepare_lane_tri(context& ctx, const prepared_tri& base, unsigned m,
+                               bool forward, std::span<const float> diagonals) {
+    prepared_tri out = base;
+    out.resident_round_plan = false;
+    const auto* ptr = static_cast<const unsigned*>([base.ptr contents]);
+    install_schedule(ctx, out, metal_schedule::build<Value, 8>(
+        {ptr, std::size_t(m) + 1},
+        {static_cast<const unsigned*>([base.col contents]), ptr[m]},
+        {static_cast<const Value*>([base.val contents]), ptr[m]}, !forward, diagonals), m);
     return out;
 }
 
@@ -272,7 +307,7 @@ std::vector<float> run_probe(context& ctx, const std::vector<float>& inputs) {
         id<MTLCommandBuffer> cb = [ctx.probe_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         if (enc == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
-        [enc setComputePipelineState:ctx.pipes.probe];
+        [enc setComputePipelineState:ctx.pipes[0].probe];
         [enc setBuffer:in offset:0 atIndex:0];
         [enc setBuffer:res offset:0 atIndex:1];
         [enc setBytes:&count length:sizeof count atIndex:2];
@@ -333,12 +368,14 @@ struct metal_solver::impl {
     statistics stats;
 
     context* ctx = nullptr;
+    const pipelines* pipes = nullptr;
+    unsigned columns = 1, workspace_columns = 0;
     id<MTLCommandQueue> queue = nil;
     Params arguments{};
     bool operator_df = false, factor_fp16 = false;
     id<MTLBuffer> factor_metadata = nil;
     id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
-    prepared_tri fwd, bwd;
+    prepared_tri fwd, bwd, lane_fwd, lane_bwd;
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
     id<MTLBuffer> tags = nil;
 
@@ -359,7 +396,7 @@ struct metal_solver::impl {
         Params prm = arguments;
         prm.mode = mode;
         prm.iter = it;
-        dispatch(ctx->pipes.finalize, prm, 1, kTreeLanes);
+        dispatch(pipes->finalize, prm, 1, kTreeLanes);
     }
 
     void encode_tri(const prepared_tri& t, bool forward) const {
@@ -368,29 +405,29 @@ struct metal_solver::impl {
         if (factor_fp16) bind(encoder, 19, {factor_metadata});
         Params prm = arguments;
         prm.count = t.tag_count;
-        const unsigned threads = std::min(kRowThreads, ctx->status.row_threads);
-        dispatch(ctx->pipes.dataflow_init[factor_fp16][forward], prm, (t.tag_count + threads - 1) / threads, threads);
+        const unsigned threads = std::min(kRowThreads, pipes->row_threads);
+        dispatch(pipes->dataflow_init[factor_fp16][forward], prm, (t.tag_count + threads - 1) / threads, threads);
         const unsigned dependent_threads = forward && t.resident_round_plan &&
-            [ctx->pipes.dataflow_solve[factor_fp16][1] maxTotalThreadsPerThreadgroup] >= 512 ? 512 : 256;
+            [pipes->dataflow_solve[factor_fp16][1] maxTotalThreadsPerThreadgroup] >= 512 ? 512 : 256;
         for (auto stage : t.stages) {
             prm.offset = stage.first;
             const bool independent = forward && t.resident_round_plan && stage.last - stage.first > 1;
             const unsigned stage_threads = independent
                 ? (stage.one_batch_per_block ? 32 : 256) : dependent_threads;
-            dispatch(ctx->pipes.dataflow_solve[factor_fp16][independent ? 2 : unsigned(forward)], prm,
+            dispatch(pipes->dataflow_solve[factor_fp16][independent ? 2 : unsigned(forward)], prm,
                      stage.last - stage.first, stage_threads);
         }
     }
 
     void precondition() const {
-        encode_tri(fwd, true);
-        encode_tri(bwd, false);
+        encode_tri(columns == 4 ? lane_fwd : fwd, true);
+        encode_tri(columns == 4 ? lane_bwd : bwd, false);
     }
 
     void step(operation op) const {
-        const auto pipe = ctx->pipes.pcg[unsigned(op)][op == operation::multiply && operator_df];
+        const auto pipe = pipes->pcg[unsigned(op)][op == operation::multiply && operator_df];
         const bool direction = op == operation::direction;
-        const unsigned threads = direction ? std::min(kRowThreads, ctx->status.row_threads) : unsigned(kTreeLanes);
+        const unsigned threads = direction ? std::min(kRowThreads, pipes->row_threads) : unsigned(kTreeLanes);
         dispatch(pipe, arguments, direction ? (arguments.n + threads - 1) / threads : arguments.groups, threads);
     }
 
@@ -403,7 +440,7 @@ struct metal_solver::impl {
             if (first) {
                 id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
                 if (blit == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
-                [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(arguments.n) * sizeof(df32)) value:0];
+                [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(arguments.n) * columns * sizeof(df32)) value:0];
                 [blit endEncoding];
             }
             encoder = [cb computeCommandEncoder];
@@ -415,7 +452,10 @@ struct metal_solver::impl {
             encoder = nil;
             finish(cb);
         });
-        return static_cast<const solve_state*>([state_buffer contents])->active != 0;
+        const auto* state = static_cast<const solve_state*>([state_buffer contents]);
+        bool active = false;
+        for (unsigned q = 0; q < columns; ++q) active |= state[q].active != 0;
+        return active;
     }
 
     explicit impl(const solve_options& options) : opts(options) {
@@ -434,9 +474,46 @@ struct metal_solver::impl {
                         const std::vector<float>& hi, const std::vector<float>& lo, unsigned m,
                         detail::metal_setup::resident_factor* resident = nullptr);
 
+    void allocate_workspace(unsigned count);
+    void select_columns(unsigned count) {
+        const auto index = std::countr_zero(count);
+        if (count != 1) {
+            std::call_once(ctx->pipeline_once[index], [&] {
+                with_pool([&] { ctx->pipes[index] = make_pipelines(ctx->device, ctx->library, count); });
+            });
+        }
+        if (count == 4 && lane_fwd.ptr == nil) {
+            std::vector<float> diagonal(factor_fp16 ? arguments.m : 0);
+            if (factor_fp16) {
+                const auto* metadata = static_cast<const mh::factor_metadata*>([factor_metadata contents]);
+                for (unsigned i = 0; i < arguments.m; ++i) diagonal[i] = metadata[i].diagonal;
+            }
+            auto prepare = [&](const prepared_tri& base, bool forward) {
+                return factor_fp16 ? prepare_lane_tri<_Float16>(*ctx, base, arguments.m, forward, diagonal)
+                                   : prepare_lane_tri<float>(*ctx, base, arguments.m, forward, diagonal);
+            };
+            auto next_fwd = prepare(fwd, true);
+            auto next_bwd = prepare(bwd, false);
+            lane_fwd = std::move(next_fwd);
+            lane_bwd = std::move(next_bwd);
+        }
+        if (count > workspace_columns) allocate_workspace(count);
+        columns = count;
+        pipes = &ctx->pipes[index];
+        // A previous width used a different packed position for this ground.
+        // apply(false) needs this too: triangular sweeps only write rows < m.
+        auto* applied = static_cast<float*>([z contents]);
+        std::fill(applied + std::size_t(arguments.m) * count, applied + n * count, 0.0f);
+    }
+
+    template<unsigned Columns>
+    void solve_columns(const_matrix_view B, matrix_view X, std::span<solve_result> results,
+                       checkpoint& cp, double tol, int max_iter, const const_matrix_view* X0);
+
     // x follows the retained operator's ordering; y is factor-permuted.
     // Sum each row in storage order, splitting work by stored entries.
-    void spmv(const Eigen::VectorXd& x, Eigen::VectorXd& y) const {
+    template<class Vector>
+    void spmv(const Vector& x, Eigen::VectorXd& y) const {
         if (original_operator.rows() != 0) {
             const auto& A = original_operator;
             #pragma omp parallel
@@ -468,13 +545,15 @@ struct metal_solver::impl {
         }
     }
 
-    double relative_residual(const Eigen::VectorXd& bp, const Eigen::VectorXd& x,
+    template<class Vector>
+    double relative_residual(const Eigen::VectorXd& bp, const Vector& xp,
                              Eigen::VectorXd& work, const mh::norm_reference& bnorm) const {
-        spmv(x, work);
+        spmv(xp, work);
         return bnorm.relative(bp - work);
     }
 
-    void centre(Eigen::VectorXd& x) const { x.array() -= x.mean(); }
+    template<class Vector>
+    void centre(Vector& x) const { x.array() -= x.mean(); }
 };
 
 void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
@@ -655,18 +734,32 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
         install(half, narrow.diag);
     } else install(backward);
     }
+    allocate_workspace(1);
+    pipes = &ctx.pipes[0];
+}
+
+void metal_solver::impl::allocate_workspace(unsigned count) {
+    const auto tag_rows = std::max({n, std::size_t(fwd.tag_count), std::size_t(bwd.tag_count),
+                                   std::size_t(lane_fwd.tag_count), std::size_t(lane_bwd.tag_count)});
+    if (tag_rows > std::numeric_limits<unsigned>::max() / count)
+        throw std::overflow_error("Metal RHS panel exceeds packed index range");
     with_pool([&] {
-        id<MTLDevice> dev = ctx.device;
-        x = upload(dev, nullptr, n * sizeof(df32), "solution");
-        r = upload(dev, nullptr, n * sizeof(df32), "residual");
-        ap = upload(dev, nullptr, n * sizeof(df32), "operator product");
-        p = upload(dev, nullptr, n * sizeof(float), "search direction");
-        // Sweeps write rows < m; the extra Laplacian coordinate stays zero.
-        z = upload(dev, nullptr, n * sizeof(float), "preconditioner result");
-        partial = upload(dev, nullptr, static_cast<std::size_t>(arguments.groups) * sizeof(df32), "partial sums");
-        state_buffer = upload(dev, nullptr, sizeof(solve_state), "solve state");
-        tags = upload(dev, nullptr, std::max({n, std::size_t(fwd.tag_count),
-            std::size_t(bwd.tag_count)}) * sizeof(std::uint32_t), "dataflow tags");
+        id<MTLDevice> dev = ctx->device;
+        // Install only after every allocation succeeds; scalar use survives a
+        // failed attempt to grow the reusable workspace.
+        auto next_x = upload(dev, nullptr, n * count * sizeof(df32), "solution");
+        auto next_r = upload(dev, nullptr, n * count * sizeof(df32), "residual");
+        // Tags are reset per sweep; ap is live only from multiply to residual.
+        // Their bindings must stay in separate kernels.
+        auto next_ap = upload(dev, nullptr, count * std::max(n * sizeof(df32), tag_rows * sizeof(std::uint32_t)),
+                              "operator product and dataflow tags");
+        auto next_p = upload(dev, nullptr, n * count * sizeof(float), "search direction");
+        auto next_z = upload(dev, nullptr, n * count * sizeof(float), "preconditioner result");
+        auto next_partial = upload(dev, nullptr, std::size_t(arguments.groups) * count * sizeof(df32), "partial sums");
+        auto next_state = upload(dev, nullptr, count * sizeof(solve_state), "solve state");
+        x = next_x; r = next_r; ap = next_ap; p = next_p; z = next_z;
+        partial = next_partial; state_buffer = next_state; tags = next_ap;
+        workspace_columns = count;
     });
 }
 
@@ -710,81 +803,135 @@ solve_result metal_solver::solve(const Eigen::VectorXd& b, double tol, int max_i
     return result;
 }
 
+template<unsigned Columns>
+void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
+                                       std::span<solve_result> results, checkpoint& cp,
+                                       double tol, int max_iter, const const_matrix_view* X0) {
+    if (tol < 0.0) tol = opts.tol;
+    if (max_iter < 0) max_iter = opts.max_iter;
+    cp.descend("pcg");
+    cp.tick();
+    select_columns(Columns);
+    auto* states = static_cast<solve_state*>([state_buffer contents]);
+    std::fill_n(states, Columns, solve_state{});
+    X.setZero();
+    const bool permuted = original_operator.rows() == 0;
+    std::array<Eigen::VectorXd, Columns> bp;
+    Eigen::VectorXd work;
+    std::array<mh::norm_reference, Columns> bnorm;
+    std::array<double, Columns> scale{};
+    std::array<bool, Columns> check{}, ran{};
+    bool active = false;
+    for (unsigned q = 0; q < Columns; ++q) {
+        auto& result = results[q];
+        result.iterations = 0;
+        result.residual = 0.0;
+        result.backend = solve_backend::gpu;
+        result.lumped_offdiag = F.lumped_offdiag;
+        bnorm[q] = mh::norm_reference(B.col(q));
+        if (bnorm[q].value == 0.0) continue;
+        if (max_iter == 0 && (X0 == nullptr || X0->col(q).isZero(0.0))) {
+            result.residual = 1.0;
+            continue;
+        }
+        check[q] = true;
+        bp[q].resize(n);
+        work.resize(n);
+        auto xp = X.col(q);
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
+            bp[q][F.perm[i]] = B(i, q);
+            if (X0) xp[permuted ? F.perm[i] : i] = (*X0)(i, q);
+        }
+        if (X0) {
+            spmv(xp, work);
+            work = bp[q] - work;
+        } else work = bp[q];
+        const double initial = X0 ? bnorm[q].relative(work) : 1.0;
+        if (initial < tol || max_iter == 0) continue;
+        if (laplacian) centre(work);
+        const double max_abs = work.cwiseAbs().maxCoeff();
+        if (max_abs == 0.0) continue;
+        scale[q] = mh::pow2_scale(max_abs);
+        auto* packed = static_cast<df32*>([r contents]);
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+            packed[i * Columns + q] = mh::split(scale[q] * work[i]);
+        const double reference = bnorm[q].scaled(scale[q]);
+        const double threshold = tol * reference;
+        states[q].thr = mh::split_saturated(threshold * threshold);
+        states[q].prev = mh::split_saturated(reference * reference);
+        states[q].active = 1;
+        ran[q] = active = true;
+    }
+    if (active) {
+        cp("pack");
+        arguments.window = static_cast<std::uint32_t>(std::max(0, opts.stagnation_window));
+        detail::gpu_pcg::solve(*this, static_cast<std::uint32_t>(max_iter), 4);
+        cp("gpu_pcg_loop");
+    }
+    bool checked = false;
+    for (unsigned q = 0; q < Columns; ++q) {
+        if (!check[q]) continue;
+        checked = true;
+        auto xp = X.col(q);
+        if (ran[q]) {
+            const auto* packed = static_cast<const df32*>([x contents]);
+            bool finite = true;
+            // The device stores S*x; undo S and RHS scaling separately to avoid overflow.
+            #pragma omp parallel for schedule(static) reduction(&& : finite)
+            for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
+                const auto row = permuted ? i : F.perm[i];
+                xp[i] += mh::join(packed[row * Columns + q]) / arguments.preconditioner_scale / scale[q];
+                finite &= std::isfinite(xp[i]);
+            }
+            if (!finite) throw std::overflow_error("Metal solve: solution exceeds the finite range");
+            results[q].iterations = states[q].iters;
+        }
+        if (laplacian) centre(xp);
+        results[q].residual = relative_residual(bp[q], xp, work, bnorm[q]);
+        if (permuted) {
+            // Gather through work so arbitrary output strides remain supported.
+            #pragma omp parallel for schedule(static)
+            for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+                work[i] = xp[F.perm[i]];
+            xp = work;
+        }
+    }
+    if (checked) cp("exit_check");
+    cp.ascend();
+}
+
 void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
                          int max_iter, const Eigen::VectorXd* x0) const {
     const detail::thread_budget threads(impl_->opts.num_threads);
-    impl& s = *impl_;
     if (b.size() != rows()) throw std::invalid_argument("metal_solver::solve: RHS length mismatch");
     if (x0 != nullptr && x0->size() != rows())
         throw std::invalid_argument("metal_solver::solve: x0 length mismatch");
     if (!b.allFinite() || (x0 != nullptr && !x0->allFinite()))
         throw std::invalid_argument("metal_solver::solve: non-finite RHS or initial guess");
-    if (tol < 0.0) tol = s.opts.tol;
-    if (max_iter < 0) max_iter = s.opts.max_iter;
-    const auto window = static_cast<std::uint32_t>(std::max(0, s.opts.stagnation_window));
+    result.x.resize(rows());
+    const const_matrix_view initial(x0 ? *x0 : b);
+    impl_->solve_columns<1>(b, result.x, {&result, 1}, result.timings,
+                           tol, max_iter, x0 ? &initial : nullptr);
+}
 
-    result.iterations = 0;
-    result.residual = 0.0;
-    result.backend = solve_backend::gpu;
-    result.lumped_offdiag = s.F.lumped_offdiag;
-    result.x = Eigen::VectorXd::Zero(rows());
-    checkpoint& cp = result.timings;
-    cp.descend("pcg");
-    cp.tick();
-    const mh::norm_reference bnorm(b);
-    if (bnorm.value == 0.0) { cp.ascend(); return; }
-    if (max_iter == 0 && (x0 == nullptr || x0->isZero(0.0))) {
-        result.residual = 1.0;
-        cp.ascend();
-        return;
-    }
-
-    const auto& perm = s.F.perm;
-    Eigen::VectorXd bp(s.n), work(s.n);
-    auto& xp = result.x;
-    mh::scatter({b.data(), s.n}, perm, {bp.data(), s.n});
-    auto finish = [&] {
-        if (s.laplacian) s.centre(xp);
-        if (s.original_operator.rows() != 0) {
-            mh::gather({xp.data(), s.n}, perm, {work.data(), s.n});
-            result.residual = s.relative_residual(bp, work, xp, bnorm);
-        } else {
-            result.residual = s.relative_residual(bp, xp, work, bnorm);
-            mh::gather({xp.data(), s.n}, perm, {work.data(), s.n});
-        }
-        result.x.swap(work);
-        cp("exit_check");
-        cp.ascend();
-    };
-
-    if (x0 != nullptr) {
-        mh::scatter({x0->data(), s.n}, perm, {xp.data(), s.n});
-        s.spmv(s.original_operator.rows() != 0 ? *x0 : xp, work);
-        work = bp - work;
-    } else {
-        work = bp;
-    }
-    const double initial = x0 ? bnorm.relative(work) : 1.0;
-    if (initial < tol || max_iter == 0) { finish(); return; }
-    if (s.laplacian) s.centre(work);
-    const double max_abs = work.cwiseAbs().maxCoeff();
-    if (max_abs == 0.0) { finish(); return; }
-    const double scale = mh::pow2_scale(max_abs);
-    mh::pack({work.data(), s.n}, scale, {static_cast<df32*>([s.r contents]), s.n});
-    auto& state = *static_cast<solve_state*>([s.state_buffer contents]);
-    state = {};
-    const double reference = bnorm.scaled(scale);
-    const double threshold = tol * reference;
-    state.thr = mh::split_saturated(threshold * threshold);
-    state.prev = mh::split_saturated(reference * reference);
-    state.active = 1;
-    cp("pack");
-    s.arguments.window = window;
-    detail::gpu_pcg::solve(s, static_cast<std::uint32_t>(max_iter), 4);
-    cp("gpu_pcg_loop");
-    mh::add_unpacked({static_cast<df32*>([s.x contents]), s.n}, scale, {xp.data(), s.n});
-    result.iterations = state.iters;
-    finish();
+batch_solve_result metal_solver::solve_panel(const_matrix_view B, matrix_view X, double tol,
+                                            int max_iter, const const_matrix_view* X0) const {
+    const detail::thread_budget threads(impl_->opts.num_threads);
+    if (B.rows() != rows() || (B.cols() != 2 && B.cols() != 4) ||
+        X.rows() != rows() || X.cols() != B.cols() ||
+        (X0 && (X0->rows() != rows() || X0->cols() != B.cols())))
+        throw std::invalid_argument("metal_solver::solve_panel: matrix shape mismatch");
+    if (!B.allFinite() || (X0 && !X0->allFinite()))
+        throw std::invalid_argument("metal_solver::solve_panel: non-finite RHS or initial guess");
+    batch_solve_result result;
+    result.columns.resize(B.cols());
+    if (B.cols() == 4)
+        impl_->solve_columns<4>(B, X, result.columns, result.timings, tol, max_iter, X0);
+    else
+        impl_->solve_columns<2>(B, X, result.columns, result.timings, tol, max_iter, X0);
+    return result;
 }
 
 factor_storage_type metal_solver::factor_storage() const {
@@ -797,6 +944,7 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     if (r.size() != static_cast<Eigen::Index>(s.n))
         throw std::invalid_argument("metal_solver::apply: r length mismatch");
     if (!r.allFinite()) throw std::invalid_argument("metal_solver::apply: r contains a non-finite value");
+    s.select_columns(1);
     const auto& perm = s.F.perm;
     const double mean = s.laplacian ? r.mean() : 0;
     const double max_abs = (r.array() - mean).abs().maxCoeff();

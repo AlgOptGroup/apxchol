@@ -25,10 +25,11 @@ struct row_order {
 
 // Count and emit use the same walk on CPU and GPU. Each invocation closes its
 // last batch, so independent tiles/workgroups can be packed with prefix sums.
-template <bool Emit, class Pointer>
+template <bool Emit, unsigned PlanLanes = lanes, class Pointer>
 APXCHOL_GPU_FUNCTION counts pack_rows(APXCHOL_GPU_BUFFER(const Pointer) ptr, row_order order, unsigned first, unsigned last,
                                        unsigned split_min, counts base = {}, APXCHOL_GPU_BUFFER(unsigned) words = nullptr,
                                        APXCHOL_GPU_BUFFER(segment) segments = nullptr) {
+    static_assert(PlanLanes && PlanLanes <= lanes && !(PlanLanes & (PlanLanes - 1)));
     counts c;
     auto pad = [&](unsigned alignment) {
         const auto padding = (-c.words) & (alignment - 1);
@@ -38,14 +39,14 @@ APXCHOL_GPU_FUNCTION counts pack_rows(APXCHOL_GPU_BUFFER(const Pointer) ptr, row
         c.words += padding;
     };
     auto special = [&](segment s) {
-        pad(lanes);
+        pad(PlanLanes);
         if (Emit) {
             segments[base.segments + c.segments] = s;
-            for (unsigned i = 0; i < lanes; ++i)
+            for (unsigned i = 0; i < PlanLanes; ++i)
                 words[base.words + c.words + i] = special_bit | unsigned(base.segments + c.segments);
         }
         ++c.segments;
-        c.words += lanes;
+        c.words += PlanLanes;
     };
     for (unsigned q = first; q < last; ++q) {
         const unsigned row = order(q);
@@ -70,7 +71,7 @@ APXCHOL_GPU_FUNCTION counts pack_rows(APXCHOL_GPU_BUFFER(const Pointer) ptr, row
             special({row | special_bit, first_slot, order.n + unsigned(base.slots + c.slots), row});
         } else {
             unsigned group = 1;
-            while (group < lanes && group * prefetch < size)
+            while (group < PlanLanes && group * prefetch < size)
                 group *= 2;
             pad(group);
             if (Emit)
@@ -79,7 +80,7 @@ APXCHOL_GPU_FUNCTION counts pack_rows(APXCHOL_GPU_BUFFER(const Pointer) ptr, row
             c.words += group;
         }
     }
-    pad(lanes);
+    pad(PlanLanes);
     return c;
 }
 

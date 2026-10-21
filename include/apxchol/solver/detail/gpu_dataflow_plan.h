@@ -41,12 +41,12 @@ struct packed_plan {
     unsigned slots = 0;
 };
 
-template <class Pointer>
+template <unsigned PlanLanes = lanes, class Pointer>
 inline packed_plan pack(const Pointer *ptr, row_order order, std::span<const unsigned> blocks,
                         unsigned split_min = chunk_size) {
     std::vector<counts> prefix(blocks.size());
     for (std::size_t b = 1; b < blocks.size(); ++b) {
-        auto c = pack_rows<false>(ptr, order, blocks[b - 1], blocks[b], split_min);
+        auto c = pack_rows<false, PlanLanes>(ptr, order, blocks[b - 1], blocks[b], split_min);
         auto p = prefix[b - 1];
         prefix[b] = {p.words + c.words, p.segments + c.segments, p.slots + c.slots};
     }
@@ -59,9 +59,9 @@ inline packed_plan pack(const Pointer *ptr, row_order order, std::span<const uns
     out.segments.resize(total.segments);
     out.slots = unsigned(total.slots);
     for (std::size_t b = 1; b < blocks.size(); ++b) {
-        pack_rows<true>(ptr, order, blocks[b - 1], blocks[b], split_min, prefix[b - 1], out.words.data(),
+        pack_rows<true, PlanLanes>(ptr, order, blocks[b - 1], blocks[b], split_min, prefix[b - 1], out.words.data(),
                         out.segments.data());
-        out.blocks.push_back(unsigned(prefix[b].words / lanes));
+        out.blocks.push_back(unsigned(prefix[b].words / PlanLanes));
     }
     return out;
 }

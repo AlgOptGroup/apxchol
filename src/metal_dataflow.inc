@@ -1,5 +1,5 @@
 R"apxchol_msl(
-struct dataflow_memory {
+template<unsigned Columns = 1> struct dataflow_memory {
     using stored_value = float;
     device const uint* ptr;
     device const uint* col;
@@ -14,6 +14,8 @@ struct dataflow_memory {
     device const dataflow_segment* segments;
     uint n;
     bool reverse;
+    device const SolveState* state;
+    bool enabled(uint q) const { return state[q].active != 0; }
     float value(uint p, uint row, uint col) const {
         if (kFactorFp16)
             return float(reinterpret_cast<device const half*>(val)[p]) * metadata[kForward ? col : row].scale;
@@ -25,43 +27,55 @@ struct dataflow_memory {
     uint broadcast(uint x) const { return simd_broadcast(x, 0); }
     bool any(bool x) const { return simd_any(x); }
     float shuffle(float x, uint o) const { return simd_shuffle_xor(x, o); }
-    uint load(uint row) const { return atomic_load_explicit(tags + row, memory_order_relaxed); }
+    uint load(uint row, uint q) const { return atomic_load_explicit(tags + row * Columns + q, memory_order_relaxed); }
     float as_float(uint x) const { return as_type<float>(x); }
-    void reset(uint row) const { atomic_store_explicit(tags + row, 0x7f800001u, memory_order_relaxed); }
-    void prepare(uint row, thread float& rhs, thread float& diagonal) const {
-        rhs = kForward ? r[row].hi : z[row];
+    void reset(uint row, uint q) const { atomic_store_explicit(tags + row * Columns + q, 0x7f800001u, memory_order_relaxed); }
+    void prepare(uint row, uint q, thread float& rhs, thread float& diagonal) const {
+        rhs = kForward ? r[row * Columns + q].hi : z[row * Columns + q];
         diagonal = kFactorFp16 ? metadata[row].diagonal : val[kForward ? ptr[row + 1] - 1 : ptr[row]];
     }
     float finish(float rhs, float diagonal, float sum) const {
         return precise::divide(rhs - sum, diagonal);
     }
-    void publish(uint row, float x) const {
-        if (row < n) z[row] = x;
-        atomic_store_explicit(tags + row, isnan(x) ? 0x7fc00000u : as_type<uint>(x), memory_order_relaxed);
+    void publish(uint row, uint q, float x) const {
+        if (row < n) z[row * Columns + q] = x;
+        atomic_store_explicit(tags + row * Columns + q, isnan(x) ? 0x7fc00000u : as_type<uint>(x), memory_order_relaxed);
     }
 };
 kernel void dataflow_init(constant Params& P [[buffer(0)]],
                         device const uint* ptr [[buffer(13)]], device const float* val [[buffer(15)]],
                         device const factor_metadata* metadata [[buffer(19)]],
                         device const df* r [[buffer(2)]], device float* z [[buffer(5)]],
-                        device const SolveState& state [[buffer(7)]], device atomic_uint* tags [[buffer(12)]],
+                        device const SolveState* state [[buffer(7)]], device atomic_uint* tags [[buffer(12)]],
                         uint row [[thread_position_in_grid]]) {
-    if (row >= P.count || !state.active) return;
-    dataflow_initialize(dataflow_memory{ptr, nullptr, val, metadata, nullptr, tags, nullptr, r, z, 0, nullptr, P.m, !kForward}, row);
+    if (row >= P.count) return;
+    if (kColumns == 4)
+        dataflow_initialize<4>(dataflow_memory<4>{ptr, nullptr, val, metadata, nullptr, tags, nullptr, r, z, 0, nullptr, P.m, !kForward, state}, row);
+    else if (kColumns == 2)
+        dataflow_initialize<2>(dataflow_memory<2>{ptr, nullptr, val, metadata, nullptr, tags, nullptr, r, z, 0, nullptr, P.m, !kForward, state}, row);
+    else
+        dataflow_initialize<1>(dataflow_memory<1>{ptr, nullptr, val, metadata, nullptr, tags, nullptr, r, z, 0, nullptr, P.m, !kForward, state}, row);
 }
 kernel void dataflow_solve(constant Params& P [[buffer(0)]],
                         device const uint* ptr [[buffer(13)]], device const uint* col [[buffer(14)]],
                         device const float* val [[buffer(15)]], device const factor_metadata* metadata [[buffer(19)]],
                         device const df* r [[buffer(2)]],
-                        device float* z [[buffer(5)]], device const SolveState& state [[buffer(7)]],
+                        device float* z [[buffer(5)]], device const SolveState* state [[buffer(7)]],
                         device const uint* words [[buffer(16)]], device atomic_uint* tags [[buffer(12)]],
                         device const uint* blocks [[buffer(17)]], device const dataflow_segment* segments [[buffer(18)]], uint group [[threadgroup_position_in_grid]],
                         uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-    if (!state.active) return;
+    bool active = false;
+    for (unsigned q = 0; q < kColumns; ++q) active |= state[q].active != 0;
+    if (!active) return;
     threadgroup atomic_uint ticket;
     const uint block = P.offset + group;
     if (tid == 0) atomic_store_explicit(&ticket, blocks[block], memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    dataflow_run(dataflow_memory{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward}, lane, kIndependent);
+    if (kColumns == 4)
+        dataflow_run<4, 4>(dataflow_memory<4>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane, kIndependent);
+    else if (kColumns == 2)
+        dataflow_run<2>(dataflow_memory<2>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane, kIndependent);
+    else
+        dataflow_run<1>(dataflow_memory<1>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane, kIndependent);
 }
 )apxchol_msl"

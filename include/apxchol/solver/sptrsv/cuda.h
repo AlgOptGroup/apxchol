@@ -694,7 +694,17 @@ public:
     /// loops so vectors stay on device between iterations. Narrowing input and
     /// widening output are fused into the sweeps; dependencies remain FP32.
     void solve_LLt_dev(const double* d_in, double* d_out, const unsigned* active = nullptr) const {
-        solve_LLt_dev_impl(active, d_in, d_out);
+        solve_LLt_dev_impl<1>(active, d_in, d_out);
+    }
+
+    template<unsigned Columns>
+    void solve_LLt_dev(const double* d_in, double* d_out, const unsigned* active = nullptr,
+                       unsigned active_stride = 1) const {
+        static_assert(Columns == 1 || Columns == 2 || Columns == 4);
+        constexpr unsigned RhsLanes = Columns == 4 ? 4 : 1;
+        if constexpr (Columns > 1) reserve_panel_workspace<Columns>();
+        if constexpr (RhsLanes == 4) reserve_lane_plan();
+        solve_LLt_dev_impl<Columns, RhsLanes>(active, d_in, d_out, active_stride);
     }
 
     bool ready() const { return data_.ready; }
@@ -773,6 +783,7 @@ private:
             const auto ptr = reverse ? LT_ptr : L_ptr;
             const auto stats = cuda_host::dataflow_row_stats(ptr);
             const unsigned split = dataflow_split_threshold_for(stats);
+            data_.df_split_min[reverse] = split;
             const auto plan = df::pack(ptr.data(), {unsigned(mi), reverse}, blocks, split);
             const int batches = plan.words.size() / df::lanes;
             const int splits = plan.segments.size() - plan.slots;
@@ -801,6 +812,8 @@ private:
                 reverse ? factor.data_.LT_row_ptr : factor.data_.L_row_ptr, split_min,
                 !reverse && data_.fp16 ? factor.data_.diag : nullptr,
                 !reverse && data_.fp16 ? factor.data_.inv_scale2 : nullptr);
+            data_.df_split_min[reverse] = split_min >= 0
+                ? unsigned(split_min) : plan.stats.split_threshold(data_.nnz);
             // Consume allocations immediately, before any operation can throw.
             // The outer setup catch then owns every partial plan via destroy().
             (reverse ? data_.d_bck_words : data_.d_fwd_words) = plan.words;
@@ -823,7 +836,7 @@ private:
         APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_df_tag, tag_words * sizeof(unsigned)));
         APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_df_ticket, sizeof(unsigned)));
         data_.factor_bytes += tag_words * sizeof(unsigned) + sizeof(unsigned);
-        data_.df_grid = dataflow_grid_size(data_.fp16);
+        data_.df_grid = dataflow_grid_size<1, 1>(data_.fp16);
 
         if (std::getenv("APXCHOL_GPU_MEM_DEBUG")) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
             fprintf(stderr,"[mem] SpTRSV dataflow: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
@@ -865,17 +878,83 @@ private:
 
 
 
+    template<unsigned Columns>
+    void reserve_panel_workspace() const {
+        if constexpr (Columns == 2)
+            if (!data_.df_pair_grid) data_.df_pair_grid = dataflow_grid_size<2, 1>(data_.fp16);
+        if (Columns <= data_.panel_capacity) return;
+        const std::size_t tags = static_cast<std::size_t>(data_.m) + data_.df_slots;
+        if (tags > std::numeric_limits<unsigned>::max() / Columns)
+            throw std::overflow_error("GPU RHS panel exceeds packed tag range");
+        cuda_value_t* next_y = nullptr;
+        unsigned* next_tags = nullptr;
+        try {
+            APXCHOL_CUDA_CHECK(cudaMalloc(&next_y, Columns * data_.m * sizeof(cuda_value_t)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&next_tags, Columns * tags * sizeof(unsigned)));
+        } catch (...) {
+            if (next_y) (void)cudaFree(next_y);
+            if (next_tags) (void)cudaFree(next_tags);
+            throw;
+        }
+        // Keep scalar scratch at its original addresses: replacing it can slow
+        // later scalar solves. Publish only after both panel allocations succeed.
+        if (data_.d_panel_y) (void)cudaFree(data_.d_panel_y);
+        if (data_.d_df_panel_tag) (void)cudaFree(data_.d_df_panel_tag);
+        data_.d_panel_y = next_y;
+        data_.d_df_panel_tag = next_tags;
+        data_.factor_bytes += (Columns - data_.panel_capacity) * tags * sizeof(unsigned);
+        data_.panel_capacity = Columns;
+    }
+
+    void reserve_lane_plan() const {
+        if (data_.df_lane_grid) return;
+        const int grid = dataflow_grid_size<4, 4>(data_.fp16);
+        std::array<detail::dataflow_device_plan, 2> next{};
+        try {
+            for (unsigned reverse = 0; reverse < 2; ++reverse) {
+                next[reverse] = detail::build_dataflow_device_plan(
+                    static_cast<int>(data_.m), reverse, static_cast<int>(data_.nnz),
+                    reverse ? data_.LT_row_ptr : data_.L_row_ptr, data_.df_split_min[reverse],
+                    nullptr, nullptr, 8);
+                if (next[reverse].n_slots > data_.df_slots)
+                    throw std::logic_error("GPU RHS-lane plan changed segment storage");
+            }
+        } catch (...) {
+            for (auto& plan : next) {
+                if (plan.words) (void)cudaFree(plan.words);
+                if (plan.segments) (void)cudaFree(plan.segments);
+            }
+            throw;
+        }
+        data_.lane_plans = next;
+        for (const auto& plan : next) {
+            data_.factor_bytes += plan.bytes;
+            data_.adoption_host_download_bytes += plan.host_download_bytes;
+        }
+        data_.df_lane_grid = grid;
+    }
+
+    template<unsigned Columns = 1, unsigned RhsLanes = 1>
     void solve_LLt_dev_impl(const unsigned* active = nullptr,
-                            const double* rhs64 = nullptr, double* out64 = nullptr) const {
+                            const double* rhs64 = nullptr, double* out64 = nullptr,
+                            unsigned active_stride = 1) const {
         // Initialize roots, then solve each direction with the shared dataflow worker.
         const int m = static_cast<int>(data_.m);
         const unsigned tag_count = unsigned(data_.m) + unsigned(data_.df_slots);
-        dataflow_solve(0, m, false, data_.L_row_ptr, data_.L_col_idx, data_.L_values, data_.diag, nullptr,
-                       data_.d_fwd_words, data_.d_fwd_segments, data_.fwd_batches,
-                       data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_x, data_.d_y, active, rhs64, nullptr);
-        dataflow_solve(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, data_.LT_values, data_.diag, data_.inv_scale2,
-                       data_.d_bck_words, data_.d_bck_segments, data_.bck_batches,
-                       data_.d_df_tag, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_y, data_.d_x, active, nullptr, out64);
+        const int grid = RhsLanes == 4 ? data_.df_lane_grid : Columns == 1 ? data_.df_grid
+            : data_.df_pair_grid;
+        auto* const y = Columns == 1 ? data_.d_y : data_.d_panel_y;
+        auto* const tags = Columns == 1 ? data_.d_df_tag : data_.d_df_panel_tag;
+        dataflow_solve<Columns, RhsLanes>(0, m, false, data_.L_row_ptr, data_.L_col_idx, data_.L_values, data_.diag, nullptr,
+                       RhsLanes == 1 ? data_.d_fwd_words : data_.lane_plans[0].words,
+                       RhsLanes == 1 ? data_.d_fwd_segments : data_.lane_plans[0].segments,
+                       RhsLanes == 1 ? data_.fwd_batches : data_.lane_plans[0].n_batches,
+                       tags, tag_count, data_.d_df_ticket, grid, data_.d_x, y, active, rhs64, nullptr, active_stride);
+        dataflow_solve<Columns, RhsLanes>(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, data_.LT_values, data_.diag, data_.inv_scale2,
+                       RhsLanes == 1 ? data_.d_bck_words : data_.lane_plans[1].words,
+                       RhsLanes == 1 ? data_.d_bck_segments : data_.lane_plans[1].segments,
+                       RhsLanes == 1 ? data_.bck_batches : data_.lane_plans[1].n_batches,
+                       tags, tag_count, data_.d_df_ticket, grid, y, data_.d_x, active, nullptr, out64, active_stride);
     }
 
     void destroy() noexcept {
@@ -886,7 +965,10 @@ private:
         data_.reset_factor();
         void* const allocations[] = {
             data_.d_df_tag, data_.d_df_ticket, data_.d_fwd_words, data_.d_bck_words,
-            data_.d_fwd_segments, data_.d_bck_segments, data_.d_x, data_.d_y};
+            data_.d_fwd_segments, data_.d_bck_segments, data_.d_x, data_.d_y,
+            data_.d_panel_y, data_.d_df_panel_tag,
+            data_.lane_plans[0].words, data_.lane_plans[0].segments,
+            data_.lane_plans[1].words, data_.lane_plans[1].segments};
         for (void* allocation : allocations)
             if (allocation) (void)cudaFree(allocation);
         data_ = {};
@@ -906,6 +988,7 @@ private:
         // Device memory (values + solve vectors at cuda_value_t width).
         cuda_value_t* d_x      = nullptr;
         cuda_value_t* d_y      = nullptr;
+        cuda_value_t* d_panel_y = nullptr;
 
         // Both directions share the reset-on-sweep value tags and ticket counter.
         unsigned* d_fwd_words = nullptr;
@@ -916,14 +999,21 @@ private:
         int           df_slots = 0;                // extra tagged words for the segment partials
         int           df_split_rows = 0;           // rows the plan split (both directions summed)
         unsigned*     d_df_tag  = nullptr;
+        unsigned*     d_df_panel_tag = nullptr;
         unsigned*     d_df_ticket       = nullptr;   // shared ticket counter
         int           df_grid         = 0;
+        int df_pair_grid = 0;
+        std::array<unsigned, 2> df_split_min{};
+        std::array<detail::dataflow_device_plan, 2> lane_plans{};
+        int df_lane_grid = 0;
+        unsigned panel_capacity = 0;
         // fp16 storage (APXCHOL_FACTOR_STORAGE): binary16
         // values of CSR(L~^T) and CSR(L~), the fp32 scaled diagonal and the
         // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
         // exact; fp32 overflows for tiny scales, see the class comment).
         bool          fp16           = false;
-    } data_;
+    };
+    mutable state data_;
 
     // Host staging for the fp32 host-PCG boundary (narrow/widen).
     mutable std::vector<cuda_value_t> h_stage_;

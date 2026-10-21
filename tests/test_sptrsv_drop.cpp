@@ -1296,7 +1296,7 @@ TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministi
     }
 }
 
-TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
+TEST(GpuDataflow, ScalarAndPanelsMatchCpuReferenceAndAreDeterministic) {
     const node_index n = 60001, m = n - 1;
     scoped_drop_env env("1e-4");
     for (int kind = 0; kind < 2; ++kind) {
@@ -1320,15 +1320,12 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
                 SCOPED_TRACE(std::string("APXCHOL_GPU_DF_SPLIT=") + seg + (fp16 ? " fp16" : " fp32"));
                 scoped_env f16("APXCHOL_FACTOR_STORAGE", fp16 ? "float16" : "float32");
                 scoped_env sg("APXCHOL_GPU_DF_SPLIT", seg);
-                {
-                    scoped_env be("APXCHOL_GPU_SPTRSV", "dataflow");
-                    apxchol::cuda_sptrsv t; t.setup(L, m);
-                    ASSERT_STREQ(t.backend_name(), "dataflow");
-                    EXPECT_EQ(t.fp16(), fp16);
-                    EXPECT_GE(t.dataflow_grid(), 1);
-                    t.solve_LLt(x.data(), y_df.data());
-                    t.solve_LLt(x.data(), y_df2.data());
-                }
+                apxchol::cuda_sptrsv t; t.setup(L, m);
+                ASSERT_STREQ(t.backend_name(), "dataflow");
+                EXPECT_EQ(t.fp16(), fp16);
+                EXPECT_GE(t.dataflow_grid(), 1);
+                t.solve_LLt(x.data(), y_df.data());
+                t.solve_LLt(x.data(), y_df2.data());
                 double maxabs = 0, maxdiff = 0; std::size_t nd = 0, nd2 = 0;
                 for (node_index i = 0; i < m; ++i) {
                     ASSERT_TRUE(std::isfinite(y_cpu[i]) && std::isfinite(y_df[i])) << i;
@@ -1341,6 +1338,42 @@ TEST(GpuDataflow, PairThroughCudaSptrsvMatchesTheCpuPairAndIsDeterministic) {
                     << "L L^T pair: GPU dataflow vs CPU omp_sptrsv";
                 EXPECT_GT(nd, 0u);
                 EXPECT_EQ(nd2, 0u) << "dataflow pair not bit-identical run to run";
+                for (unsigned columns : {2, 4}) {
+                    SCOPED_TRACE(columns);
+                    std::vector<double> panel(m * columns), sentinel(m * columns, 123.0);
+                    for (node_index row = 0; row < m; ++row)
+                        for (unsigned q = 0; q < columns; ++q)
+                            panel[row * columns + q] = std::ldexp(x[row], q);
+                    test_device_allocations memory;
+                    auto* rhs = memory.upload(panel.data(), panel.size());
+                    auto* output = memory.upload(sentinel.data(), sentinel.size());
+                    for (bool partial : {false, true}) {
+                        SCOPED_TRACE(partial);
+                        const unsigned active[] = {1, 0, unsigned(!partial), 0, 1, 0, unsigned(!partial), 0};
+                        auto* mask = memory.upload(active, std::size(active));
+                        ASSERT_EQ(cudaMemcpy(output, sentinel.data(), sentinel.size() * sizeof(double),
+                                             cudaMemcpyHostToDevice), cudaSuccess);
+                        auto solve = [&] {
+                            if (columns == 2) t.solve_LLt_dev<2>(rhs, output, mask, 2);
+                            else t.solve_LLt_dev<4>(rhs, output, mask, 2);
+                        };
+                        solve();
+                        const auto actual = dev_download(output, panel.size());
+                        for (unsigned q = 0; q < columns; ++q) {
+                            double error = 0;
+                            for (node_index row = 0; row < m; ++row) {
+                                const auto k = row * columns + q;
+                                ASSERT_TRUE(std::isfinite(actual[k]));
+                                if (!active[2 * q]) EXPECT_EQ(actual[k], sentinel[k]);
+                                else error = std::max(error, std::abs(actual[k] - std::ldexp(y_cpu[row], q)));
+                            }
+                            if (active[2 * q])
+                                EXPECT_LT(error / std::ldexp(maxabs, q), fp16 ? kPairTolFp16 : kPairTolFp32);
+                        }
+                        solve();
+                        EXPECT_EQ(actual, dev_download(output, panel.size()));
+                    }
+                }
                 std::fprintf(stderr, "[GpuDataflow] %s split=%s %s pair: max rel diff vs the CPU pair %.3e\n",
                              kind ? "hub" : "plain", seg, fp16 ? "fp16" : "fp32", maxdiff / maxabs);
             }
@@ -1450,10 +1483,10 @@ TEST(GpuSptrsvAdoptionDevice, InvalidStructureRollsBackOwnershipAndDestination) 
 
 namespace {
 df::packed_plan download_device_plan(const apxchol::detail::dataflow_device_plan& device,
-        test_device_allocations& memory) {
+        test_device_allocations& memory, unsigned lanes = df::lanes) {
     memory.pointers.insert(memory.pointers.end(), {device.words, device.segments});
     df::packed_plan host;
-    if (device.n_batches) host.words = dev_download(device.words, std::size_t(device.n_batches) * df::lanes);
+    if (device.n_batches) host.words = dev_download(device.words, std::size_t(device.n_batches) * lanes);
     const auto segments = std::size_t(device.n_slots) + device.n_split;
     if (segments) host.segments = dev_download(device.segments, segments);
     host.slots = device.n_slots;
@@ -1476,28 +1509,32 @@ TEST(GpuDataflowDevicePlan, HostAndDevicePackTheSameTasks) {
                 const auto stats = apxchol::cuda_host::dataflow_row_stats(ptr);
                 std::vector<unsigned> blocks{0};
                 for (unsigned q = 0; q < m; q += 256) blocks.push_back(std::min(m, q + 256));
-                for (int threshold : {-1, 0, 1, 256, 768}) {
-                    SCOPED_TRACE(::testing::Message() << "m=" << m << " reverse=" << reverse
-                        << " pattern=" << pattern << " threshold=" << threshold);
-                    test_device_allocations memory;
-                    auto* d_ptr = memory.upload(ptr.data(), ptr.size());
-                    const auto device = apxchol::detail::build_dataflow_device_plan(
-                        m, reverse, ptr.back(), d_ptr, threshold);
-                    const auto plan = download_device_plan(device, memory);
-                    const auto expected = df::pack(ptr.data(), {m, reverse}, blocks,
-                        threshold < 0 ? stats.split_threshold(ptr.back()) : threshold);
-                    EXPECT_EQ(plan.words, expected.words);
-                    EXPECT_EQ(plan.slots, expected.slots);
-                    ASSERT_EQ(plan.segments.size(), expected.segments.size());
-                    if (!plan.segments.empty()) {
-                        EXPECT_EQ(std::memcmp(plan.segments.data(), expected.segments.data(),
-                            plan.segments.size() * sizeof(df::segment)), 0);
-                    }
-                    EXPECT_EQ(device.stats.max_len, stats.max_len);
-                    EXPECT_LE(device.host_download_bytes, 256u);
-                    for (int k = 0; k < apxchol::detail::gpu_dataflow::row_stats::kBuckets; ++k) {
-                        EXPECT_EQ(device.stats.rows_ge[k], stats.rows_ge[k]);
-                        EXPECT_EQ(device.stats.nnz_ge[k], stats.nnz_ge[k]);
+                for (unsigned lanes : {8, 32}) {
+                    for (int threshold : {-1, 0, 1, 256, 768}) {
+                        SCOPED_TRACE(::testing::Message() << "m=" << m << " reverse=" << reverse
+                            << " pattern=" << pattern << " threshold=" << threshold << " lanes=" << lanes);
+                        test_device_allocations memory;
+                        auto* d_ptr = memory.upload(ptr.data(), ptr.size());
+                        const auto device = apxchol::detail::build_dataflow_device_plan(
+                            m, reverse, ptr.back(), d_ptr, threshold, nullptr, nullptr, lanes);
+                        const auto plan = download_device_plan(device, memory, lanes);
+                        const unsigned split = threshold < 0 ? stats.split_threshold(ptr.back()) : threshold;
+                        const auto expected = lanes == 8
+                            ? df::pack<8>(ptr.data(), {m, reverse}, blocks, split)
+                            : df::pack<32>(ptr.data(), {m, reverse}, blocks, split);
+                        EXPECT_EQ(plan.words, expected.words);
+                        EXPECT_EQ(plan.slots, expected.slots);
+                        ASSERT_EQ(plan.segments.size(), expected.segments.size());
+                        if (!plan.segments.empty()) {
+                            EXPECT_EQ(std::memcmp(plan.segments.data(), expected.segments.data(),
+                                plan.segments.size() * sizeof(df::segment)), 0);
+                        }
+                        EXPECT_EQ(device.stats.max_len, stats.max_len);
+                        EXPECT_LE(device.host_download_bytes, 256u);
+                        for (int k = 0; k < apxchol::detail::gpu_dataflow::row_stats::kBuckets; ++k) {
+                            EXPECT_EQ(device.stats.rows_ge[k], stats.rows_ge[k]);
+                            EXPECT_EQ(device.stats.nnz_ge[k], stats.nnz_ge[k]);
+                        }
                     }
                 }
             }

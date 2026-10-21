@@ -48,6 +48,17 @@ struct solve_result {
     solve_backend backend = solve_backend::cpu;
 };
 
+using matrix_view = Eigen::Ref<Eigen::MatrixXd, 0,
+    Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>>;
+using const_matrix_view = Eigen::Ref<const Eigen::MatrixXd, 0,
+    Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>>;
+
+struct batch_solve_result {
+    // Solutions are written to caller storage; each column's x remains empty.
+    std::vector<solve_result> columns;
+    checkpoint timings;
+};
+
 /// Generate a random zero-mean unit RHS vector.
 Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 
@@ -94,8 +105,9 @@ public:
                double tol = -1.0, int max_iter = -1,
                const Eigen::VectorXd* x0 = nullptr) const;
     /// Caller-provided-memory variant: writes the solution into `x` (length n,
-    /// contents overwritten — pass a warm start via `x0`). Ordinary repeated
-    /// solves reuse the PCG workspace; extreme inputs need scaled copies.
+    /// contents overwritten — pass a warm start via `x0`). Reuses the PCG
+    /// workspace, which can resize when panel width changes. Extreme inputs
+    /// need scaled copies.
     /// The returned result's `x` member is left empty.
     /// Note: like all solve/apply paths, not safe for concurrent calls on the
     /// same cpu_solver (the reused workspace is shared state).
@@ -107,9 +119,29 @@ public:
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
 
     const apx_cholesky& preconditioner() const { return precond_; }
+    /// Independent RHS columns, with bounded panel workspace. Output must not
+    /// overlap the RHS or warm start. tol/max_iter apply to each column.
+    template<class Input, class Output>
+        requires (Input::ColsAtCompileTime != 1
+            && (Input::Flags & Eigen::DirectAccessBit) != 0
+            && (Output::Flags & Eigen::DirectAccessBit) != 0)
+    batch_solve_result solve(const Eigen::MatrixBase<Input>& B, Eigen::MatrixBase<Output>& X,
+                             double tol = -1, int max_iter = -1,
+                             const const_matrix_view* X0 = nullptr) const {
+        using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+        const Eigen::Map<const Eigen::MatrixXd, 0, Stride> rhs(B.derived().data(),
+            B.rows(), B.cols(), Stride(B.colStride(), B.rowStride()));
+        Eigen::Map<Eigen::MatrixXd, 0, Stride> out(X.derived().data(),
+            X.rows(), X.cols(), Stride(X.colStride(), X.rowStride()));
+        return solve_batch(const_matrix_view(rhs), matrix_view(out), tol, max_iter, X0);
+    }
+    void apply(const_matrix_view R, matrix_view Z) const;
+
     Eigen::Index rows() const { return n_; }
 
 private:
+    batch_solve_result solve_batch(const_matrix_view B, matrix_view X, double tol,
+                                   int max_iter, const const_matrix_view* X0) const;
     /// Shared ctor tail: builds the owned row-major full-symmetric SpMV
     /// operator (fp32 when lossless) once the preconditioner is ready. A full
     /// symmetric CSC is copied in its already-compatible CSR array layout;
@@ -120,11 +152,15 @@ private:
                     solve_result& res, double tol, int max_iter,
                     const Eigen::VectorXd* x0) const;
 
+    template<int Columns>
+    void solve_panel(const double* b, double* x, solve_result* results, checkpoint& timings,
+                     double tol, int max_iter, const double* x0) const;
+
     solve_options opts_;
     apx_cholesky precond_;
-    // Reused PCG workspace (lazily sized). Makes repeated solves allocation-
-    // free; shared state — concurrent solves on one cpu_solver are a race.
-    mutable Eigen::VectorXd r_, z_, p_, Ap_;
+    // Reused PCG workspace, resized when the panel width changes.
+    // Concurrent solves on one cpu_solver are a race.
+    mutable Eigen::VectorXd r_, z_, p_, Ap_, panel_x_;
     // Per-thread partial sums of the fused PCG kernels' deterministic
     // reductions (one cache line per thread; sized to the max team on use).
     mutable std::vector<double> part_;
@@ -161,12 +197,32 @@ public:
                        double tol = -1.0, int max_iter = -1,
                        const Eigen::VectorXd* x0 = nullptr) const;
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
+    /// Independent RHS columns, with bounded panel workspace. Output must not
+    /// overlap the RHS or warm start. tol/max_iter apply to each column.
+    template<class Input, class Output>
+        requires (Input::ColsAtCompileTime != 1
+            && (Input::Flags & Eigen::DirectAccessBit) != 0
+            && (Output::Flags & Eigen::DirectAccessBit) != 0)
+    batch_solve_result solve(const Eigen::MatrixBase<Input>& B, Eigen::MatrixBase<Output>& X,
+                             double tol = -1, int max_iter = -1,
+                             const const_matrix_view* X0 = nullptr) const {
+        using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+        const Eigen::Map<const Eigen::MatrixXd, 0, Stride> rhs(B.derived().data(),
+            B.rows(), B.cols(), Stride(B.colStride(), B.rowStride()));
+        Eigen::Map<Eigen::MatrixXd, 0, Stride> out(X.derived().data(),
+            X.rows(), X.cols(), Stride(X.colStride(), X.rowStride()));
+        return solve_batch(const_matrix_view(rhs), matrix_view(out), tol, max_iter, X0);
+    }
+    void apply(const_matrix_view R, matrix_view Z) const;
+
     const factorization& factor() const;
     Eigen::Index rows() const;
     solve_backend backend() const;
     factor_storage_type factor_storage() const;
 
 private:
+    batch_solve_result solve_batch(const_matrix_view B, matrix_view X, double tol,
+                                   int max_iter, const const_matrix_view* X0) const;
     struct impl;
     std::unique_ptr<impl> impl_;
 };

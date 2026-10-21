@@ -20,6 +20,7 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -130,7 +131,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     }
     const auto forward = apxchol::cuda_host::transpose_csr(backward);
     std::vector<double> rp(n);
-    mh::scatter({r.data(), n}, F.perm, rp);
+    for (std::size_t v = 0; v < n; ++v) rp[F.perm[v]] = r[v];
     if (lap) {
         const double mean = std::accumulate(rp.begin(), rp.end(), 0.0) / n;
         for (auto& value : rp) value -= mean;
@@ -159,7 +160,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
         for (auto& value : rp) value -= mean;
     }
     Eigen::VectorXd out(r.size());
-    mh::gather(rp, F.perm, {out.data(), n});
+    for (std::size_t v = 0; v < n; ++v) out[v] = rp[F.perm[v]];
     return out;
 }
 
@@ -226,6 +227,211 @@ TEST_F(MetalDevice, UniformOperatorScalingPreservesConvergence) {
                 const auto b = rhs(A.rows(), salt, false);
                 const auto result = solver.solve(b, 1e-8, 2000);
                 EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+            }
+        }
+    }
+}
+
+TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
+    enum class start { cold, zero_first, zero_second, warm_first, warm_second, no_iterations, warm_no_iterations };
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        for (const int exponent : {-90, 0, 90}) {
+            const Sparse A = grid(4, 5, 0.5, true) * std::scalbn(1.0, exponent);
+            apxchol::solve_options options;
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.seed = 17;
+            options.factor_opts.factor_storage = storage;
+            options.stagnation_window = 0;
+            const apxchol::solver owner(A, options);
+            Eigen::MatrixXd exact(A.rows(), 7);
+            for (int q = 0; q < 7; ++q)
+                exact.col(q) = rhs(A.rows(), q + 1, false) * std::scalbn(1.0, -exponent);
+            for (const int width : {2, 3, 4, 5, 7}) {
+                for (const auto mode : {start::cold, start::zero_first, start::zero_second,
+                                       start::warm_first, start::warm_second, start::no_iterations,
+                                       start::warm_no_iterations}) {
+                    SCOPED_TRACE(testing::Message() << exponent << ' ' << int(storage) << ' ' << width << ' ' << int(mode));
+                    Eigen::MatrixXd B = A * exact.leftCols(width);
+                    Eigen::MatrixXd initial = Eigen::MatrixXd::Zero(A.rows(), width);
+                    if (mode == start::zero_first) B.col(0).setZero();
+                    if (mode == start::zero_second) B.col(1).setZero();
+                    if (mode == start::warm_first) initial.col(0) = exact.col(0);
+                    if (mode == start::warm_second) initial.col(1) = exact.col(1);
+                    if (mode == start::warm_no_iterations) initial = exact.leftCols(width);
+                    const bool warm = mode == start::warm_first || mode == start::warm_second ||
+                                      mode == start::warm_no_iterations;
+                    const int budget = mode == start::no_iterations || mode == start::warm_no_iterations ? 0 : 2000;
+                    const apxchol::const_matrix_view x0(initial);
+                    Eigen::MatrixXd X(A.rows(), width);
+                    const auto result = owner.solve(B, X, 1e-8, budget, warm ? &x0 : nullptr);
+                    ASSERT_EQ(result.columns.size(), std::size_t(width));
+                    for (int q = 0; q < width; ++q) {
+                        const Eigen::VectorXd b = B.col(q), guess = initial.col(q);
+                        const auto scalar = owner.solve(b, 1e-8, budget, warm ? &guess : nullptr);
+                        EXPECT_EQ(result.columns[q].backend, apxchol::solve_backend::gpu);
+                        EXPECT_EQ(result.columns[q].iterations, scalar.iterations);
+                        EXPECT_EQ(result.columns[q].x.size(), 0);
+                        ASSERT_TRUE(X.col(q).allFinite());
+                        ASSERT_TRUE(scalar.x.allFinite());
+                        EXPECT_LE((X.col(q) - scalar.x).stableNorm(),
+                                  1e-12 * std::max(scalar.x.stableNorm(), 1e-300));
+                        if (budget || warm) {
+                            EXPECT_LE((b - A * X.col(q)).stableNorm() / std::max(b.stableNorm(), 1e-300), 1e-8);
+                        }
+                        if (!budget || b.isZero(0) || (warm && !guess.isZero(0))) {
+                            EXPECT_EQ(result.columns[q].iterations, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MetalDevice, ScalarAndMatrixSolvesRejectOverflowWhenRestoringScale) {
+    Sparse A(4, 4);
+    A.setIdentity();
+    A *= 1e-30;
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                               apxchol::factor_storage_type::fp32}) {
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::solver owner(A, options);
+        for (const bool warm : {false, true}) {
+            SCOPED_TRACE(testing::Message() << int(storage) << ' ' << warm);
+            const Eigen::VectorXd b = Eigen::VectorXd::Constant(4, 1e275);
+            const Eigen::VectorXd guess = Eigen::VectorXd::Constant(4, 0.25e305);
+            const auto scalar = owner.solve(b, 1e-8, 100, warm ? &guess : nullptr);
+            ASSERT_TRUE(scalar.x.allFinite());
+            EXPECT_LT((b - A * scalar.x).stableNorm() / b.stableNorm(), 1e-8);
+            Eigen::MatrixXd B = b.replicate(1, 4), X(4, 4), initial = guess.replicate(1, 4);
+            const apxchol::const_matrix_view x0(initial);
+            const auto batch = owner.solve(B, X, 1e-8, 100, warm ? &x0 : nullptr);
+            ASSERT_TRUE(X.allFinite());
+            for (int c = 0; c < X.cols(); ++c) {
+                EXPECT_LT((b - A * X.col(c)).stableNorm() / b.stableNorm(), 1e-8);
+                EXPECT_LT(batch.columns[c].residual, 1e-8);
+            }
+            const Eigen::VectorXd huge = Eigen::VectorXd::Constant(4, 1e300);
+            EXPECT_THROW(owner.solve(huge, 1e-8, 100, warm ? &guess : nullptr), std::overflow_error);
+            B.col(2) = huge;
+            EXPECT_THROW(owner.solve(B, X, 1e-8, 100, warm ? &x0 : nullptr), std::overflow_error);
+        }
+    }
+}
+
+TEST_F(MetalDevice, ScaledSolutionAccumulatorsPreserveAccuracy) {
+    for (const auto& [diagonal, magnitude] : {std::pair{1e30, 1e-275}, std::pair{1e-30, 1e275},
+             std::pair{1.0, 1e308}, std::pair{1.0, 1e-320},
+             std::pair{1.0, std::numeric_limits<double>::denorm_min()}}) {
+        Sparse A(4, 4);
+        A.setIdentity();
+        A *= diagonal;
+        for (const auto storage : {apxchol::factor_storage_type::fp16,
+                                  apxchol::factor_storage_type::fp32}) {
+            apxchol::solve_options options;
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.factor_storage = storage;
+            const apxchol::solver solver(A, options);
+            for (int width : {1, 2, 4, 7}) {
+                Eigen::MatrixXd B(4, width), X(4, width);
+                for (int q = 0; q < width; ++q) B.col(q).setConstant(q % 2 ? -magnitude : magnitude);
+                for (int warm : {0, 1, 2}) {
+                    SCOPED_TRACE(testing::Message() << diagonal << ' ' << magnitude << ' '
+                                 << int(storage) << ' ' << width << ' ' << warm);
+                    Eigen::MatrixXd initial = B / diagonal;
+                    if (warm == 1) initial.row(0).setZero();
+                    std::vector<apxchol::solve_result> columns;
+                    if (width == 1) {
+                        const Eigen::VectorXd rhs = B.col(0), guess = initial.col(0);
+                        columns.push_back(solver.solve(rhs, 1e-8, 100, warm ? &guess : nullptr));
+                        X.col(0) = columns[0].x;
+                    } else {
+                        const apxchol::const_matrix_view guess(initial);
+                        columns = solver.solve(B, X, 1e-8, 100, warm ? &guess : nullptr).columns;
+                    }
+                    ASSERT_TRUE(X.allFinite());
+                    for (int q = 0; q < width; ++q) {
+                        const double scale = mh::pow2_scale(magnitude);
+                        const Eigen::VectorXd rhs = B.col(q) * scale;
+                        const double residual = ((A * X.col(q)) * scale - rhs).norm() / rhs.norm();
+                        EXPECT_LT(residual, 1e-8);
+                        EXPECT_NEAR(columns[q].residual, residual, 1e-15);
+                        if (warm == 2) {
+                            EXPECT_EQ(columns[q].iterations, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
+    const Sparse A = hub_graph(110, 100, 4);
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        auto options = keep_opts();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.seed = 17;
+        options.factor_opts.factor_storage = storage;
+        options.stagnation_window = 0;
+        const apxchol::solver owner(A, options);
+        std::vector<unsigned> row_sizes(A.rows());
+        for (auto row : owner.factor().L.inner_)
+            if (row + 1 < row_sizes.size()) ++row_sizes[row];
+        ASSERT_GT(*std::max_element(row_sizes.begin(), row_sizes.end()), 64u);
+        for (const int width : {4, 5}) {
+            SCOPED_TRACE(testing::Message() << int(storage) << ' ' << width);
+            Eigen::MatrixXd B(A.rows(), width), X(A.rows(), width);
+            for (int q = 0; q < width; ++q) B.col(q) = rhs(A.rows(), q + 1, true);
+            const auto batch = owner.solve(B, X, 1e-8, 2000);
+            ASSERT_EQ(batch.columns.size(), std::size_t(width));
+            for (int q = 0; q < width; ++q) {
+                const Eigen::VectorXd b = B.col(q);
+                const auto scalar = owner.solve(b, 1e-8, 2000);
+                ASSERT_TRUE(X.col(q).allFinite());
+                ASSERT_TRUE(scalar.x.allFinite());
+                EXPECT_LE(true_residual(A, b, X.col(q)), 1e-8);
+                EXPECT_LE(true_residual(A, b, scalar.x), 1e-8);
+                EXPECT_LE((X.col(q) - scalar.x).norm(), 1e-5 * scalar.x.norm());
+            }
+        }
+    }
+}
+
+TEST_F(MetalDevice, MatrixResidualsSurviveOverflowingRhsNorms) {
+    Sparse A(16, 16);
+    A.setIdentity();
+    const double magnitudes[]{1e308, 1.0, 1e200, 1e-200};
+    Eigen::MatrixXd B(16, 4), X(16, 4);
+    for (int q = 0; q < 4; ++q) B.col(q).setConstant(magnitudes[q]);
+    Eigen::MatrixXd initial = B;
+    initial.row(0).setZero();
+    const apxchol::const_matrix_view guess(initial);
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                              apxchol::factor_storage_type::fp32}) {
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::solver solver(A, options);
+        for (bool warm : {false, true}) {
+            for (int budget : {0, 100}) {
+                const auto result = solver.solve(B, X, 1e-8, budget, warm ? &guess : nullptr);
+                ASSERT_TRUE(X.allFinite());
+                for (int q = 0; q < 4; ++q) {
+                    const double scale = apxchol::detail::metal_host::pow2_scale(magnitudes[q]);
+                    const Eigen::VectorXd rhs = B.col(q) * scale;
+                    const double residual = (X.col(q) * scale - rhs).norm() / rhs.norm();
+                    EXPECT_NEAR(result.columns[q].residual, residual, 1e-15);
+                    if (budget == 0) {
+                        EXPECT_DOUBLE_EQ(residual, warm ? 0.25 : 1.0);
+                        EXPECT_EQ(result.columns[q].iterations, 0);
+                    } else {
+                        EXPECT_LT(residual, 1e-8);
+                        EXPECT_GT(result.columns[q].iterations, 0);
+                    }
+                }
             }
         }
     }
@@ -621,30 +827,6 @@ TEST_F(MetalDevice, ScaledRightHandSides) {
         EXPECT_LT(residual, 1e-10);
         EXPECT_NEAR(result.residual, residual, 1e-15);
         EXPECT_LT((applied - b).stableNorm() / b.stableNorm(), 1e-6);
-    }
-}
-
-TEST_F(MetalDevice, RejectsUnrepresentableSolutions) {
-    Sparse A(2, 2);
-    A.setIdentity();
-    A *= 1e-30;
-    for (const auto storage : {apxchol::factor_storage_type::fp16,
-                              apxchol::factor_storage_type::fp32}) {
-        apxchol::solve_options options;
-        options.factor_opts.factor_storage = storage;
-        const apxchol::metal_solver solver(A, options);
-        for (const bool warm : {false, true}) {
-            SCOPED_TRACE(static_cast<int>(storage));
-            SCOPED_TRACE(warm);
-            const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(2, 1e275);
-            const Eigen::VectorXd guess = Eigen::VectorXd::Constant(2, 1e304);
-            const auto result = solver.solve(rhs, 1e-8, 100, warm ? &guess : nullptr);
-            EXPECT_TRUE(result.x.allFinite());
-            EXPECT_LT((A * result.x - rhs).stableNorm() / rhs.stableNorm(), 1e-8);
-            const Eigen::VectorXd overflow = Eigen::VectorXd::Constant(2, 1e300);
-            EXPECT_THROW(solver.solve(overflow, 1e-8, 100, warm ? &guess : nullptr),
-                         std::overflow_error);
-        }
     }
 }
 
