@@ -415,7 +415,7 @@ class Finalizer {
         require(nnz <= capacity, "Metal finalized factor exceeds allocated capacity");
         out.backward.idx = allocate(nnz * sizeof(unsigned));
         out.forward.idx = allocate(nnz * sizeof(unsigned));
-        const unsigned bytes = half ? sizeof(_Float16) : sizeof(float);
+        const auto bytes = half ? sizeof(_Float16) : sizeof(float);
         out.backward.val = allocate(nnz * bytes);
         out.forward.val = allocate(nnz * bytes);
         cb = [queue commandBuffer];
