@@ -829,6 +829,7 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         if (ran[q]) {
             const auto* packed = static_cast<const df32*>([x contents]);
             bool finite = true;
+            // The device stores S*x; undo S and RHS scaling separately to avoid overflow.
             #pragma omp parallel for schedule(static) reduction(&& : finite)
             for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
                 xp[i] += mh::join(packed[i * Columns + q]) / arguments.preconditioner_scale / scale[q];
