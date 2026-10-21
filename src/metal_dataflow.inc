@@ -72,10 +72,10 @@ kernel void dataflow_solve(constant Params& P [[buffer(0)]],
     if (tid == 0) atomic_store_explicit(&ticket, blocks[block], memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (kColumns == 4)
-        dataflow_run<4, 4>(dataflow_memory<4>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane);
+        dataflow_run<4, 4>(dataflow_memory<4>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane, kIndependent);
     else if (kColumns == 2)
-        dataflow_run<2>(dataflow_memory<2>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane);
+        dataflow_run<2>(dataflow_memory<2>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane, kIndependent);
     else
-        dataflow_run<1>(dataflow_memory<1>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane);
+        dataflow_run<1>(dataflow_memory<1>{ptr, col, val, metadata, words, tags, &ticket, r, z, blocks[block + 1], segments, P.m, !kForward, state}, lane, kIndependent);
 }
 )apxchol_msl"

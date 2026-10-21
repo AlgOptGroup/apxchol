@@ -56,21 +56,18 @@ CPU and CUDA solve with the scaled factor `L D^-1`: the forward sweep returns `D
 the backward sweep applies the reciprocal scale squared to its input. CPU
 arithmetic widens to FP64, GPU triangular-solve arithmetic to FP32. A stored
 FP16 factor is not an FP16 outer solve. CPU and GPU-host preparation share the
-narrowing/flush rules in `lowprec.h`; device finalization has its own CUDA
-implementation and is checked by the GPU finalization tests.
+narrowing/flush rules in `lowprec.h`; CUDA and Metal finalize device-owned factors on the device.
 Metal reconstructs FP32 coefficients before multiplication; each column stores an FP32 scale and compensated diagonal.
 
 ## Apple Metal PCG
 
-Metal uses host factor preparation with compensated dropping and optional
-scaled FP16 storage. [The solver](../README.md#interfaces) accepts vector or
-matrix right-hand sides, reusing its factor and workspace.
+Metal factorizes [supported inputs](../README.md#backend-capabilities) on the device and prepares FP32 or scaled FP16 solve storage with compensated dropping. [The solver](../README.md#interfaces) accepts vector or matrix right-hand sides, reusing its factor and workspace.
 
 Double-float represents a value as the sum of two FP32 numbers, giving about
 48 significant bits but not IEEE FP64 precision or range. Metal uses it for
 x, r, A p and fixed-tree reductions. The operator uses FP32 when all values
 are exactly representable there, and double-float otherwise. Directions p,
-preconditioned residuals z, alpha and beta are FP32.
+preconditioned residuals z, alpha and beta are FP32. Setup accumulates degrees and diagonal excess in double-float; graph weights and exported factor values are FP32.
 
 Each RHS (or initial residual b - A x0) is scaled by an exact power of two,
 targeting a largest magnitude in [1, 2) within FP64's exponent range. The host
@@ -86,9 +83,7 @@ host thread counts, devices, OS/compiler versions or independent factorizations.
 Runtime compilation uses safe math and disables contraction where supported;
 `metal_solver::available()` checks rounding, intermediate precision and FMA.
 Nonzero operator values and unscaled factor diagonals need magnitudes in [2^-100, 2^100];
-factor off-diagonals must be finite (`std::domain_error` otherwise). Factor and
-operator offsets must fit signed 32-bit integers; operator inputs must have
-fewer than 2^30 stored entries (`std::length_error` otherwise).
+factor off-diagonals must be finite. Factor and operator offsets must fit signed 32-bit integers; operator inputs must have fewer than 2^30 stored entries. Unsupported ranges are rejected. Device setup with regularization additionally requires `APXCHOL_REG_EPS` in [2^-100, 2^100] and normal positive FP32 products with the operator diagonal.
 
 ## C API exit residual
 

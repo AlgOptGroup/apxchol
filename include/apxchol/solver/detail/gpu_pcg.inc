@@ -74,12 +74,13 @@ struct column_sums { Value values[Columns]; };
 
 // RHS entries are adjacent; the factor/operator traversal is shared while
 // each column keeps its own recurrence state and reduction order.
+// row_map maps stored operator rows to vector rows during multiplication.
 template<int Lanes, unsigned Columns, class Math, class Index, class Entry, class Offset>
 APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
     operation op, Math math, workspace<typename Math::wide, typename Math::scalar> v,
     APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
     APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const Entry) lo,
-    pcg_work<Index> work, unsigned lane) {
+    pcg_work<Index> work, unsigned lane, APXCHOL_GPU_BUFFER(const Offset) row_map = nullptr) {
     using Wide = typename Math::wide;
     column_sums<Wide, Columns> total{};
     bool active = false;
@@ -103,8 +104,9 @@ APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
             for (unsigned q = 0; q < Columns; ++q) {
                 sum[q] = math.sum_row(sum[q]);
                 if (row < work.limit && lane == 0 && v.state[q].active) {
-                    v.ap[row * Columns + q] = sum[q];
-                    total.values[q] = math.add_product(total.values[q], sum[q], v.p[row * Columns + q]);
+                    const auto output = (row_map ? row_map[row] : row) * Columns + q;
+                    v.ap[output] = sum[q];
+                    total.values[q] = math.add_product(total.values[q], sum[q], v.p[output]);
                 }
             }
         } else if (row < work.limit) {

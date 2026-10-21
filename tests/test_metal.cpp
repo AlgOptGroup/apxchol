@@ -10,8 +10,10 @@
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "metal_device.h"
+#include "apxchol/solver/detail/solve_backend.h"
 
 #include <Eigen/Sparse>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -367,6 +369,49 @@ TEST_F(MetalDevice, ScaledSolutionAccumulatorsPreserveAccuracy) {
     }
 }
 
+TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
+    const auto A = grid(40, 41, 0.25, true);
+    Eigen::MatrixXd exact(A.rows(), 4);
+    for (int q = 0; q < 4; ++q) exact.col(q) = rhs(A.rows(), q + 1, false);
+    const Eigen::MatrixXd B = A * exact;
+    const Eigen::VectorXd first_rhs = B.col(0);
+    Eigen::MatrixXd initial = 0.25 * exact;
+    initial.col(0) = exact.col(0);
+    const apxchol::const_matrix_view warm(initial);
+    auto check = [&](const apxchol::solver& owner) {
+        for (unsigned pass = 0; pass < 3; ++pass) {
+            SCOPED_TRACE(pass);
+            const auto scalar = owner.solve(first_rhs, 1e-8, 1000);
+            EXPECT_LE(true_residual(A, first_rhs, scalar.x), 1e-8);
+            Eigen::MatrixXd X(A.rows(), 4);
+            const auto result = owner.solve(B, X, 1e-8, 1000, pass == 2 ? &warm : nullptr);
+            ASSERT_EQ(result.columns.size(), 4u);
+            if (pass == 2) EXPECT_EQ(result.columns[0].iterations, 0);
+            for (unsigned q = 0; q < 4; ++q) {
+                EXPECT_LE(result.columns[q].residual, 1e-8);
+                EXPECT_LE(true_residual(A, B.col(q), X.col(q)), 1e-8);
+            }
+        }
+    };
+    for (const auto storage : {apxchol::factor_storage_type::fp16, apxchol::factor_storage_type::fp32}) {
+        SCOPED_TRACE(int(storage));
+        auto options = keep_opts();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::solver resident(A, options);
+        std::vector<unsigned> row_sizes(A.rows());
+        for (auto row : resident.factor().L.inner_) ++row_sizes[row];
+        ASSERT_TRUE(std::ranges::any_of(resident.factor().rounds, [&](const auto& round) {
+            const auto first = row_sizes.begin() + A.rows() - round.active;
+            return round.is_size > 128 &&
+                std::count_if(first, first + round.is_size, [](unsigned size) { return size > 1; }) > 32;
+        }));
+        check(resident);
+        const apxchol::solver adopted(A, resident.factor(), options);
+        check(adopted);
+    }
+}
+
 TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
     const Sparse A = hub_graph(110, 100, 4);
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
@@ -539,9 +584,8 @@ TEST_F(MetalDevice, ApplyAgreesWithCpuApply) {
 
 TEST_F(MetalDevice, GridLaplacianOriginalResidual) {
     const Sparse A = grid(48, 48);
-    apxchol::factorization F = apxchol::factorize(A);
-    const apxchol::cpu_solver cpu(A, apxchol::factorization(F));
-    const apxchol::metal_solver gpu(A, std::move(F));
+    const apxchol::cpu_solver cpu(A);
+    const apxchol::metal_solver gpu(A);
     const Eigen::VectorXd b = rhs(A.rows(), 2, true);
     for (const double tol : {1e-8, 1e-10}) {
         SCOPED_TRACE(tol);
@@ -617,46 +661,56 @@ TEST_F(MetalDevice, LongOperatorRowAndPartialTile) {
 
 TEST_F(MetalDevice, EarlyExitsTruthful) {
     const Sparse A = grid(12, 12);
-    const apxchol::metal_solver slv(A);
-    const Eigen::VectorXd b = rhs(A.rows(), 1, true);
-    const apxchol::solve_result none = slv.solve(b, 1e-8, 0);
-    EXPECT_EQ(none.iterations, 0);
-    EXPECT_EQ(none.residual, 1.0);
-    EXPECT_EQ(none.x.norm(), 0.0);
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        SCOPED_TRACE(int(storage));
+        apxchol::solve_options options;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::metal_solver slv(A, options);
+        const Eigen::VectorXd b = rhs(A.rows(), 1, true);
+        const apxchol::solve_result none = slv.solve(b, 1e-8, 0);
+        EXPECT_EQ(none.iterations, 0);
+        EXPECT_EQ(none.residual, 1.0);
+        EXPECT_EQ(none.x.norm(), 0.0);
 
-    const Eigen::VectorXd guess = rhs(A.rows(), 2, true);
-    const auto seeded = slv.solve(b, 1e-8, 0, &guess);
-    EXPECT_EQ(seeded.iterations, 0);
-    EXPECT_LT((seeded.x - guess).norm(), 1e-12);
-    EXPECT_NEAR(seeded.residual, true_residual(A, b, seeded.x), 1e-12);
+        const Eigen::VectorXd guess = rhs(A.rows(), 2, true);
+        const auto seeded = slv.solve(b, 1e-8, 0, &guess);
+        EXPECT_EQ(seeded.iterations, 0);
+        EXPECT_LT((seeded.x - guess).norm(), 1e-12);
+        EXPECT_NEAR(seeded.residual, true_residual(A, b, seeded.x), 1e-12);
 
-    for (int limit : {1, 4, 5}) {
-        const auto limited = slv.solve(b, 1e-30, limit);
-        EXPECT_EQ(limited.iterations, limit);
-        EXPECT_NEAR(limited.residual, true_residual(A, b, limited.x), 1e-12);
+        for (int limit : {1, 4, 5}) {
+            const auto limited = slv.solve(b, 1e-30, limit);
+            EXPECT_EQ(limited.iterations, limit);
+            EXPECT_NEAR(limited.residual, true_residual(A, b, limited.x), 1e-12);
+        }
+
+        const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());
+        const apxchol::solve_result z = slv.solve(zero);
+        EXPECT_EQ(z.iterations, 0);
+        EXPECT_EQ(z.residual, 0.0);
+        EXPECT_EQ(z.x.norm(), 0.0);
+
+        const Eigen::VectorXd short_x0 = Eigen::VectorXd::Zero(A.rows() - 1);
+        EXPECT_THROW(slv.solve(b, 1e-8, 10, &short_x0), std::invalid_argument);
+        EXPECT_THROW(slv.solve(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
+        EXPECT_THROW(slv.apply(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
     }
-
-    const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());
-    const apxchol::solve_result z = slv.solve(zero);
-    EXPECT_EQ(z.iterations, 0);
-    EXPECT_EQ(z.residual, 0.0);
-    EXPECT_EQ(z.x.norm(), 0.0);
-
-    const Eigen::VectorXd short_x0 = Eigen::VectorXd::Zero(A.rows() - 1);
-    EXPECT_THROW(slv.solve(b, 1e-8, 10, &short_x0), std::invalid_argument);
-    EXPECT_THROW(slv.solve(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
-    EXPECT_THROW(slv.apply(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
 }
 
 TEST_F(MetalDevice, BreakdownIsNotConvergence) {
-    // A constant right-hand side is orthogonal to a Laplacian's range: the
-    // centred preconditioner returns 0, p.Ap = 0 on the first iteration.
+    // Centering an incompatible constant RHS leaves zero work on the host.
+    // That early exit must still report the original-system residual.
     const Sparse A = grid(10, 10);
-    const apxchol::metal_solver slv(A);
-    const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
-    const apxchol::solve_result r = slv.solve(b, 1e-8, 50);
-    EXPECT_EQ(r.iterations, 0);
-    EXPECT_EQ(r.residual, 1.0);
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        SCOPED_TRACE(int(storage));
+        apxchol::solve_options options;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::metal_solver slv(A, options);
+        const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
+        const apxchol::solve_result r = slv.solve(b, 1e-8, 50);
+        EXPECT_EQ(r.iterations, 0);
+        EXPECT_EQ(r.residual, 1.0);
+    }
 }
 
 TEST_F(MetalDevice, UnreachableTolStopsHonestly) {
@@ -717,6 +771,28 @@ TEST_F(MetalDevice, LaplacianX0ConstantIrrelevant) {
     EXPECT_LE((r1.x - r2.x).norm() / r1.x.norm(), 1e-6);
 }
 
+TEST_F(MetalDevice, ExactWarmStartUsesTheOriginalOrdering) {
+    for (const double shift : {0.0, 0.25}) {
+        SCOPED_TRACE(shift);
+        const Sparse A = grid(9, 11, shift, true);
+        const apxchol::metal_solver resident(A, keep_opts());
+        const apxchol::metal_solver adopted(A, apxchol::factorization(resident.factor()));
+        bool permuted = false;
+        for (node_index i = 0; i < A.rows(); ++i)
+            permuted |= resident.factor().perm[i] != i;
+        ASSERT_TRUE(permuted);
+        const Eigen::VectorXd guess = rhs(A.rows(), 9, shift == 0.0);
+        const Eigen::VectorXd b = A * guess;
+        for (const auto* solver : {&resident, &adopted}) {
+            const auto result = solver->solve(b, 1e-8, 20, &guess);
+            EXPECT_EQ(result.iterations, 0);
+            const double residual = true_residual(A, b, result.x);
+            EXPECT_LT(residual, 1e-8);
+            EXPECT_NEAR(result.residual, residual, 1e-14);
+        }
+    }
+}
+
 TEST_F(MetalDevice, NonFiniteRhsRejected) {
     const Sparse A = grid(8, 8, 0.5);
     const apxchol::metal_solver slv(A);
@@ -733,10 +809,18 @@ TEST_F(MetalDevice, NonFiniteRhsRejected) {
 }
 
 TEST_F(MetalDevice, OutOfRangeOperatorIsADomainError) {
-    Sparse A = grid(6, 6, 0.5);
-    A.coeffRef(0, 0) = 1e40;
-    apxchol::factorization F = apxchol::factorize(grid(6, 6, 0.5));
-    EXPECT_THROW(apxchol::metal_solver(A, std::move(F)), std::domain_error);
+    Sparse A(3, 3);
+    A.setIdentity();
+    const auto F = apxchol::factorize(A);
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::gpu;
+    for (double value : {0x1p-101, 0x1p101}) {
+        SCOPED_TRACE(value);
+        A.diagonal().setConstant(value);
+        EXPECT_THROW(apxchol::metal_solver(A, F), std::domain_error);
+        EXPECT_THROW(apxchol::metal_solver{A}, std::domain_error);
+        EXPECT_THROW(apxchol::solver(A, options), std::domain_error);
+    }
 }
 
 TEST_F(MetalDevice, TinyFactorOffDiagonalsRemainUsable) {
@@ -853,7 +937,10 @@ TEST_F(MetalDevice, StatisticsDescribeTheSetup) {
 }
 
 TEST_F(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
-    const Sparse A = grid(24, 31, 0.25);
+    // Ordinary elimination creates duplicate fill before the 128-vertex tail.
+    Eigen::MatrixXd dense = Eigen::MatrixXd::Constant(129, 129, -1.0);
+    dense.diagonal().setConstant(129.0);
+    const Sparse A = dense.sparseView();
     const apxchol::metal_solver solver(A, keep_opts());
     const auto ptr = solver.factor().L.outer_;
     const auto idx = solver.factor().L.inner_;
@@ -884,6 +971,49 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
         EXPECT_GT(result.timings.total("setup"), 0.0);
         EXPECT_GT(result.timings.total("pcg"), 0.0);
     }
+    Sparse large(32769, 32769);
+    large.setIdentity();
+    const Eigen::VectorXd large_rhs = Eigen::VectorXd::Ones(large.rows());
+    options.backend = apxchol::solve_backend::automatic;
+    apxchol::solver automatic(large, options);
+    EXPECT_EQ(automatic.backend(), apxchol::solve_backend::gpu);
+    EXPECT_LT(true_residual(large, large_rhs, automatic.solve(large_rhs).x), options.tol);
+    apxchol::metal_solver direct(large, options);
+    EXPECT_LT(true_residual(large, large_rhs, direct.solve(large_rhs).x), options.tol);
+    large.coeffRef(0, 1) = 0; // Numerically valid, but the stored zero has no mate.
+    large.makeCompressed();
+    EXPECT_THROW(apxchol::metal_solver(large, options), std::invalid_argument);
+    apxchol::solver fallback(large, options);
+    EXPECT_EQ(fallback.backend(), apxchol::solve_backend::cpu);
+    EXPECT_LT(true_residual(large, large_rhs, fallback.solve(large_rhs).x), options.tol);
+}
+
+TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
+    const Sparse A = grid(9, 11, 0.25, true);
+    auto options = keep_opts();
+    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    const auto F = apxchol::factorize(A, options.factor_opts);
+    options.backend = apxchol::solve_backend::gpu;
+    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+    const apxchol::solver adopted(A, F, options);
+    EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
+    Eigen::MatrixXd B(A.rows(), 4), X(A.rows(), 4);
+    for (int q = 0; q < B.cols(); ++q) B.col(q) = rhs(A.rows(), q + 1, false);
+    const auto batch = adopted.solve(B, X, 1e-8, 1000);
+    ASSERT_EQ(batch.columns.size(), 4u);
+    for (int q = 0; q < B.cols(); ++q) {
+        const Eigen::VectorXd b = B.col(q);
+        const auto scalar = adopted.solve(b, 1e-8, 1000);
+        EXPECT_EQ(scalar.backend, apxchol::solve_backend::gpu);
+        EXPECT_EQ(batch.columns[q].backend, apxchol::solve_backend::gpu);
+        EXPECT_LE(true_residual(A, b, scalar.x), 1e-8);
+        EXPECT_LE(true_residual(A, b, X.col(q)), 1e-8);
+    }
+    EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
+    options.backend = apxchol::solve_backend::automatic;
+    EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
+    options.backend = static_cast<apxchol::solve_backend>(-1);
+    EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
 }
 
 TEST(MetalOptions, UnsupportedOptionsFailBeforeDeviceSetup) {
@@ -950,4 +1080,166 @@ TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
         F.L.vals_[0] = diagonal;
         EXPECT_THROW(apxchol::metal_solver(A, F, options), std::domain_error);
     }
+}
+
+TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::gpu;
+    const auto A = grid(4, 4, 0.25);
+    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+    options.factor_opts.sampler = apxchol::clique_sampler::gks;
+    options.factor_opts.is_select = "priority_greedy";
+    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+    options.factor_opts.is_select = "block_greedy";
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    Sparse lower = A.triangularView<Eigen::Lower>();
+    EXPECT_THROW(apxchol::solver(lower, options), std::invalid_argument);
+    Sparse missing = A;
+    missing.coeffRef(1, 0) = 0;
+    missing.prune(0.0);
+    EXPECT_THROW(apxchol::solver(missing, options), std::invalid_argument);
+    Sparse unsorted = A;
+    std::swap(unsorted.innerIndexPtr()[0], unsorted.innerIndexPtr()[1]);
+    EXPECT_THROW(apxchol::solver(unsorted, options), std::invalid_argument);
+}
+
+TEST_F(MetalDevice, ResidentSetupAcceptsIntermediateDegreeQuantiles) {
+    const auto A = grid(17, 19, 0.25, true);
+    const auto b = rhs(A.rows(), 3, false);
+    for (const auto storage : {apxchol::factor_storage_type::fp16, apxchol::factor_storage_type::fp32}) {
+        for (double quantile : {0.1, 0.3, 0.75, 0.9}) {
+            SCOPED_TRACE(testing::Message() << int(storage) << ' ' << quantile);
+            auto options = keep_opts();
+            options.factor_opts.factor_storage = storage;
+            options.factor_opts.partition.degree_quantile = quantile;
+            const apxchol::metal_solver solver(A, options);
+            const auto result = solver.solve(b, 1e-8, 300);
+            EXPECT_LE(result.residual, 1e-8);
+            EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+        }
+    }
+}
+
+TEST_F(MetalDevice, ResidentArenaIgnoresNonGraphEntries) {
+    for (unsigned kind : {0u, 1u, 2u}) {
+        SCOPED_TRACE(kind);
+        Sparse A = grid(3, 3, 0.25);
+        if (kind == 0) A.setIdentity();
+        else if (kind == 1) A.coeffRef(0, 8) = A.coeffRef(8, 0) = 0.0;
+        else A.coeffRef(0, 1) = A.coeffRef(1, 0) = 0.125;
+        A.makeCompressed();
+        const apxchol::metal_solver solver(A);
+        if (kind == 2) EXPECT_EQ(solver.factor().lumped_offdiag, 2);
+        const auto b = rhs(A.rows(), 3, false);
+        const auto result = solver.solve(b, 1e-8, 200);
+        EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+    }
+}
+
+TEST_F(MetalDevice, NonemptyFactorGrowthPreservesExportAndSolve) {
+    // This ring enters the larger tail reservation after storing ordinary-round columns.
+    constexpr int n = 257;
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        const int next = (i + 1) % n;
+        entries.emplace_back(i, i, 2.25);
+        entries.emplace_back(i, next, -1.0);
+        entries.emplace_back(next, i, -1.0);
+    }
+    Sparse A(n, n);
+    A.setFromTriplets(entries.begin(), entries.end());
+    A.makeCompressed();
+    const auto b = rhs(n, 3, false);
+    for (const bool fp16 : {false, true}) {
+        SCOPED_TRACE(fp16);
+        auto options = keep_opts();
+        options.factor_opts.seed = 42;
+        options.factor_opts.factor_storage = fp16 ? apxchol::factor_storage_type::fp16
+                                                 : apxchol::factor_storage_type::fp32;
+        const apxchol::metal_solver solver(A, options);
+        const auto result = solver.solve(b, 1e-8, 200);
+        EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+        const auto expected = emulate_apply(solver.factor(), b, fp16);
+        EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
+    }
+}
+
+TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
+    for (const bool laplacian : {false, true}) for (const bool fp16 : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << laplacian << ' ' << fp16);
+        const auto A = grid(17, 19, laplacian ? 0.0 : 0.25, true);
+        auto options = keep_opts();
+        options.factor_opts.factor_storage = fp16 ? apxchol::factor_storage_type::fp16
+                                                 : apxchol::factor_storage_type::fp32;
+        apxchol::metal_solver exported(A, options);
+        const auto b = rhs(A.rows(), 3, laplacian);
+        const auto expected = emulate_apply(exported.factor(), b, fp16);
+        EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
+        options.keep_factor_values = false;
+        apxchol::metal_solver resident(A, options);
+        EXPECT_TRUE(resident.factor().L.inner_.empty());
+        EXPECT_TRUE(resident.factor().L.vals_.empty());
+        EXPECT_GT(resident.factor().L.nonZeros(), 0);
+        for (unsigned salt : {1u, 2u, 3u}) {
+            const auto rhs_value = rhs(A.rows(), salt, laplacian);
+            const auto result = resident.solve(rhs_value);
+            EXPECT_LT(true_residual(A, rhs_value, result.x), options.tol);
+        }
+    }
+}
+
+TEST_F(MetalDevice, ExportedRoundsAreIndependentCpuLevels) {
+    for (unsigned kind : {0u, 1u, 2u}) {
+        SCOPED_TRACE(kind);
+        Sparse A = grid(17, 19, kind == 0 ? 0.0 : 0.25);
+        if (kind == 2) {
+            Eigen::MatrixXd dense = Eigen::MatrixXd::Constant(129, 129, -1.0);
+            dense.diagonal().setConstant(129.0);
+            A = dense.sparseView();
+        }
+        const apxchol::metal_solver exported(A, keep_opts());
+        const auto& F = exported.factor();
+        ASSERT_FALSE(F.rounds.empty());
+        std::vector<unsigned> levels(A.rows());
+        std::size_t first = 0;
+        for (unsigned r = 0; r < F.rounds.size(); ++r) {
+            const auto& round = F.rounds[r];
+            const auto last = first + round.is_size;
+            ASSERT_LE(last, levels.size());
+            EXPECT_EQ(round.active, levels.size() - first);
+            EXPECT_TRUE(std::isnan(round.avg_deg));
+            EXPECT_EQ(round.nnz_added, F.L.outer_[last] - F.L.outer_[first]);
+            EXPECT_EQ(round.nnz_total, F.L.outer_[last]);
+            std::fill(levels.begin() + first, levels.begin() + last, r);
+            first = last;
+        }
+        ASSERT_EQ(first, levels.size());
+        for (std::size_t col = 0; col < levels.size(); ++col)
+            for (auto p = F.L.outer_[col] + 1; p < F.L.outer_[col + 1]; ++p)
+                EXPECT_GT(levels[F.L.inner_[p]], levels[col]);
+
+        const apxchol::cpu_solver grouped(A, F);
+        auto ungrouped = F;
+        ungrouped.rounds.clear();
+        const apxchol::cpu_solver reference(A, std::move(ungrouped));
+        const auto b = rhs(A.rows(), 3, kind == 0);
+        const auto expected = reference.apply(b);
+        EXPECT_LT((grouped.apply(b) - expected).norm() / expected.norm(), 1e-12);
+        EXPECT_LT(true_residual(A, b, grouped.solve(b, 1e-8, 500).x), 1e-8);
+    }
+}
+
+TEST(MetalOptions, AutomaticSelectionRejectsResidentIncompatibleOptions) {
+    Sparse A(32769, 32769);
+    A.setIdentity();
+    A.makeCompressed();
+    apxchol::solve_options options;
+    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::cpu);
+    options.factor_opts.sampler = apxchol::clique_sampler::gks;
+    A.uncompress();
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::cpu);
+    options.backend = apxchol::solve_backend::gpu;
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::gpu);
 }

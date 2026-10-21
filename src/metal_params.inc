@@ -10,6 +10,7 @@ struct Params {
     unsigned m;         // factor dimension
     unsigned spmv_lanes; // threads per operator row, 1 or kTreeLanes
     float preconditioner_scale;
+    unsigned mapped_rows; // operator rows retain input order
 };
 enum : unsigned { kTreeRows = 256, kTreeLanes = 16 };
 )
