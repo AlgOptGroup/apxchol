@@ -988,6 +988,34 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
     EXPECT_LT(true_residual(large, large_rhs, fallback.solve(large_rhs).x), options.tol);
 }
 
+TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
+    const Sparse A = grid(9, 11, 0.25, true);
+    auto options = keep_opts();
+    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    const auto F = apxchol::factorize(A, options.factor_opts);
+    options.backend = apxchol::solve_backend::gpu;
+    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+    const apxchol::solver adopted(A, F, options);
+    EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
+    Eigen::MatrixXd B(A.rows(), 4), X(A.rows(), 4);
+    for (int q = 0; q < B.cols(); ++q) B.col(q) = rhs(A.rows(), q + 1, false);
+    const auto batch = adopted.solve(B, X, 1e-8, 1000);
+    ASSERT_EQ(batch.columns.size(), 4u);
+    for (int q = 0; q < B.cols(); ++q) {
+        const Eigen::VectorXd b = B.col(q);
+        const auto scalar = adopted.solve(b, 1e-8, 1000);
+        EXPECT_EQ(scalar.backend, apxchol::solve_backend::gpu);
+        EXPECT_EQ(batch.columns[q].backend, apxchol::solve_backend::gpu);
+        EXPECT_LE(true_residual(A, b, scalar.x), 1e-8);
+        EXPECT_LE(true_residual(A, b, X.col(q)), 1e-8);
+    }
+    EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
+    options.backend = apxchol::solve_backend::automatic;
+    EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
+    options.backend = static_cast<apxchol::solve_backend>(-1);
+    EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
+}
+
 TEST(MetalOptions, UnsupportedOptionsFailBeforeDeviceSetup) {
     const Sparse A = grid(4, 4, 0.25);
     apxchol::solve_options options;

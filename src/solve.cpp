@@ -1021,7 +1021,11 @@ struct solver::impl {
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
-            ? solve_backend::cpu : detail::select_solve_backend(opts, &A);
+            ? solve_backend::cpu
+#if defined(APXCHOL_USE_METAL)
+            : F && opts.backend == solve_backend::gpu ? solve_backend::gpu
+#endif
+            : detail::select_solve_backend(opts, &A);
         if (cp) { (*cp)("backend_selection"); cp->ascend(); }
 #if defined(APXCHOL_USE_CUDA)
         if (route == solve_backend::gpu) {
