@@ -3,6 +3,7 @@
 #include "engine.h"
 #include "../metal_setup.h"
 #include <array>
+#include <mutex>
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #define APXCHOL_GPU_FUNCTION inline
 #include "finalize.inc"
@@ -152,6 +153,7 @@ kernel void plan_structure(device const unsigned* round_ptr [[buffer(0)]],
                            constant unsigned& rounds [[buffer(7)]]) {
     rf::plan(PlanMemory{n,bool(reverse),rounds,round_ptr,blocks,steps,info,status});
 }
+constant unsigned plan_lanes [[function_constant(2)]];
 // Finalization has already checked triangular indices; packing only needs row pointers.
 kernel void plan_count(device const unsigned* ptr [[buffer(0)]],
                        device const unsigned* blocks [[buffer(1)]],device const rf::PlanInfo* info [[buffer(2)]],
@@ -168,7 +170,9 @@ kernel void plan_count(device const unsigned* ptr [[buffer(0)]],
                 return;
             }
         }
-        counts[block]=gd::pack_rows<false>(ptr,order,blocks[block],blocks[block+1],gd::chunk_size);
+        counts[block] = plan_lanes == 8
+            ? gd::pack_rows<false, 8>(ptr,order,blocks[block],blocks[block+1],gd::chunk_size)
+            : gd::pack_rows<false>(ptr,order,blocks[block],blocks[block+1],gd::chunk_size);
     }
 }
 kernel void plan_emit(device const unsigned* ptr [[buffer(0)]],device const unsigned* blocks [[buffer(1)]],
@@ -177,7 +181,13 @@ kernel void plan_emit(device const unsigned* ptr [[buffer(0)]],device const unsi
                       device unsigned* packed_blocks [[buffer(6)]],constant unsigned& n [[buffer(7)]],
                       constant unsigned& reverse [[buffer(8)]],uint block [[thread_position_in_grid]]) {
     if(block==0)packed_blocks[0]=0;
-    if(block<info->blocks){gd::pack_rows<true>(ptr,{n,bool(reverse)},rf::block_begin(blocks[block],blocks[block+1]),blocks[block+1],gd::chunk_size,counts[block],words,segments);packed_blocks[block+1]=unsigned(counts[block+1].words/gd::lanes);}
+    if (block >= info->blocks) return;
+    const auto first = rf::block_begin(blocks[block], blocks[block+1]), last = blocks[block+1];
+    if (plan_lanes == 8)
+        gd::pack_rows<true, 8>(ptr,{n,bool(reverse)},first,last,gd::chunk_size,counts[block],words,segments);
+    else
+        gd::pack_rows<true>(ptr,{n,bool(reverse)},first,last,gd::chunk_size,counts[block],words,segments);
+    packed_blocks[block+1] = unsigned(counts[block+1].words / plan_lanes);
 }
 kernel void scan_unsigned(device unsigned *values [[buffer(0)]],
                           device unsigned *sums [[buffer(1)]], constant unsigned &n [[buffer(2)]],
@@ -258,8 +268,20 @@ class Finalizer {
     id<MTLCommandQueue> queue;
     id<MTLLibrary> library;
     std::array<std::array<id<MTLComputePipelineState>, 6>, 2> final_pipes;
-    id<MTLComputePipelineState> structure, count, emit, scan_blocks, scan_add,
-        operator_count, operator_emit;
+    id<MTLComputePipelineState> structure, scan_blocks, scan_add, operator_count, operator_emit;
+    std::array<id<MTLComputePipelineState>, 2> count{}, emit{};
+    std::once_flag lane_plan_once;
+    id<MTLComputePipelineState> pipeline(NSString *name, unsigned lanes = 0) {
+        NSError *error = nil;
+        auto constants = [MTLFunctionConstantValues new];
+        if (lanes) [constants setConstantValue:&lanes type:MTLDataTypeUInt atIndex:2];
+        auto function = lanes ? [library newFunctionWithName:name constantValues:constants error:&error]
+                              : [library newFunctionWithName:name];
+        if (!function) throw std::runtime_error(describe(error));
+        auto result = [device newComputePipelineStateWithFunction:function error:&error];
+        if (!result) throw std::runtime_error(describe(error));
+        return result;
+    }
     id<MTLBuffer> allocate(std::size_t bytes) {
         auto result = [device newBufferWithLength:std::max(bytes, std::size_t(16))
                                           options:MTLResourceStorageModeShared];
@@ -311,13 +333,6 @@ class Finalizer {
     Finalizer(id<MTLDevice> dev) : device(dev) {
         NSError *error = nil;
         library = metal::compile_library(device, finalizer_source).library;
-        auto pipeline = [&](NSString *name) {
-            auto p = [device newComputePipelineStateWithFunction:[library newFunctionWithName:name]
-                                                           error:&error];
-            if (!p)
-                throw std::runtime_error(describe(error));
-            return p;
-        };
         for (unsigned half = 0; half < 2; ++half)
             for (unsigned stage = 0; stage < 6; ++stage) {
                 const bool h = half;
@@ -335,14 +350,80 @@ class Finalizer {
                     throw std::runtime_error(describe(error));
             }
         structure = pipeline(@"plan_structure");
-        count = pipeline(@"plan_count");
-        emit = pipeline(@"plan_emit");
+        count[0] = pipeline(@"plan_count", gd::lanes);
+        emit[0] = pipeline(@"plan_emit", gd::lanes);
         scan_blocks = pipeline(@"scan_unsigned");
         scan_add = pipeline(@"scan_unsigned_add");
         operator_count = pipeline(@"operator_count");
         operator_emit = pipeline(@"operator_emit");
         queue = [device newCommandQueue];
         require(queue != nil, "Metal factor preparation command queue creation failed");
+    }
+    template<unsigned PlanLanes>
+    void prepare_plans(triangle& forward, triangle& backward, unsigned m,
+                       id<MTLBuffer> round_ptr, std::size_t round_offset, unsigned rounds,
+                       id<MTLBuffer> status) {
+        static_assert(PlanLanes == 8 || PlanLanes == gd::lanes);
+        constexpr unsigned index = PlanLanes == 8;
+        if constexpr (index) {
+            std::call_once(lane_plan_once, [&] {
+                count[1] = pipeline(@"plan_count", 8);
+                emit[1] = pipeline(@"plan_emit", 8);
+            });
+        }
+        auto blocks = allocate((m + 1) * sizeof(unsigned)),
+             steps = allocate(m * sizeof(rf::Step));
+        auto info = allocate(sizeof(rf::PlanInfo)),
+             counts = allocate(std::size_t(m + 1) * sizeof(gd::counts));
+        for (unsigned reverse = 0; reverse < 2; ++reverse) {
+            auto &t = reverse ? backward : forward;
+            auto cb = [queue commandBuffer];
+            auto enc = encoder(cb, structure, {round_ptr, blocks, steps, info, status});
+            [enc setBuffer:round_ptr offset:round_offset atIndex:0];
+            [enc setBytes:&m length:sizeof m atIndex:5];
+            [enc setBytes:&reverse length:sizeof reverse atIndex:6];
+            [enc setBytes:&rounds length:sizeof rounds atIndex:7];
+            dispatch(enc, 1, 1);
+            enc = encoder(cb, count[index], {t.ptr, blocks, info, counts, status});
+            [enc setBytes:&m length:sizeof m atIndex:5];
+            [enc setBytes:&reverse length:sizeof reverse atIndex:6];
+            dispatch(enc, m);
+            finish(cb, status);
+            // Counts are complete; compact the shared plan metadata before allocating output.
+            struct PlanMetadata { unsigned* blocks; rf::Step* steps; rf::PlanInfo* info; };
+            const auto count_data = static_cast<gd::counts*>(counts.contents);
+            rf::compact(PlanMetadata{static_cast<unsigned*>(blocks.contents),
+                                     static_cast<rf::Step*>(steps.contents),
+                                     static_cast<rf::PlanInfo*>(info.contents)},
+                        count_data, gd::counts{});
+            const auto pi = *static_cast<rf::PlanInfo *>(info.contents);
+            const auto total = count_data[pi.blocks];
+            require(total.words <= ~0u && total.segments < gd::special_bit &&
+                        total.slots + m < gd::special_bit,
+                    "Metal packed plan exceeds 32-bit capacity");
+            t.levels = pi.levels;
+            t.tag_count = m + total.slots;
+            const auto step_data = static_cast<rf::Step *>(steps.contents);
+            t.stages.reserve(pi.stages);
+            for (unsigned i = 0; i < pi.stages; ++i) {
+                const auto step = step_data[i];
+                // Every retained block has at least one padded batch.
+                const auto words = count_data[step.last].words - count_data[step.first].words;
+                t.stages.push_back({step.first, step.last,
+                    words == std::uint64_t(PlanLanes) * (step.last - step.first)});
+            }
+            t.words = allocate(total.words * sizeof(unsigned));
+            t.blocks = allocate((pi.blocks + 1) * sizeof(unsigned));
+            t.segments = allocate(total.segments * sizeof(gd::segment));
+            cb = [queue commandBuffer];
+            enc = encoder(cb, emit[index],
+                          {t.ptr, blocks, info, counts, t.words, t.segments, t.blocks});
+            [enc setBytes:&m length:sizeof m atIndex:7];
+            [enc setBytes:&reverse length:sizeof reverse atIndex:8];
+            dispatch(enc, std::max(pi.blocks, 1u));
+            finish(cb, status);
+            t.resident_round_plan = true;
+        }
     }
     void prepare_operator(id<MTLBuffer> ptr, id<MTLBuffer> idx, id<MTLBuffer> values,
                           id<MTLBuffer> permutation, unsigned n, unsigned nnz,
@@ -428,59 +509,8 @@ class Finalizer {
         rows = nil;
         cursor = nil;
         scan_scratch = nil;
-        auto blocks = allocate((m + 1) * sizeof(unsigned)),
-             steps = allocate(m * sizeof(rf::Step));
-        auto info = allocate(sizeof(rf::PlanInfo)),
-             counts = allocate(std::size_t(m + 1) * sizeof(gd::counts));
-        for (unsigned reverse = 0; reverse < 2; ++reverse) {
-            auto &t = reverse ? out.backward : out.forward;
-            cb = [queue commandBuffer];
-            auto enc = encoder(cb, structure, {input.arena, blocks, steps, info, status});
-            [enc setBuffer:input.arena offset:input.layout.offsets[unsigned(resident_setup::Field::round_ptr)] atIndex:0];
-            [enc setBytes:&m length:sizeof m atIndex:5];
-            [enc setBytes:&reverse length:sizeof reverse atIndex:6];
-            [enc setBytes:&state.round length:sizeof state.round atIndex:7];
-            dispatch(enc, 1, 1);
-            enc = encoder(cb, count, {t.ptr, blocks, info, counts, status});
-            [enc setBytes:&m length:sizeof m atIndex:5];
-            [enc setBytes:&reverse length:sizeof reverse atIndex:6];
-            dispatch(enc, m);
-            finish(cb, status);
-            // Counts are complete; compact the shared plan metadata before allocating output.
-            struct PlanMetadata { unsigned* blocks; rf::Step* steps; rf::PlanInfo* info; };
-            const auto count_data = static_cast<gd::counts*>(counts.contents);
-            rf::compact(PlanMetadata{static_cast<unsigned*>(blocks.contents),
-                                     static_cast<rf::Step*>(steps.contents),
-                                     static_cast<rf::PlanInfo*>(info.contents)},
-                        count_data, gd::counts{});
-            const auto pi = *static_cast<rf::PlanInfo *>(info.contents);
-            const auto total = count_data[pi.blocks];
-            require(total.words <= ~0u && total.segments < gd::special_bit &&
-                        total.slots + m < gd::special_bit,
-                    "Metal packed plan exceeds 32-bit capacity");
-            t.levels = pi.levels;
-            t.tag_count = m + total.slots;
-            const auto step_data = static_cast<rf::Step *>(steps.contents);
-            t.stages.reserve(pi.stages);
-            for (unsigned i = 0; i < pi.stages; ++i) {
-                const auto step = step_data[i];
-                // Every retained block has at least one padded batch.
-                const auto words = count_data[step.last].words - count_data[step.first].words;
-                t.stages.push_back({step.first, step.last,
-                    words == std::uint64_t(gd::lanes) * (step.last - step.first)});
-            }
-            t.words = allocate(total.words * sizeof(unsigned));
-            t.blocks = allocate((pi.blocks + 1) * sizeof(unsigned));
-            t.segments = allocate(total.segments * sizeof(gd::segment));
-            cb = [queue commandBuffer];
-            enc = encoder(cb, emit,
-                          {t.ptr, blocks, info, counts, t.words, t.segments, t.blocks});
-            [enc setBytes:&m length:sizeof m atIndex:7];
-            [enc setBytes:&reverse length:sizeof reverse atIndex:8];
-            dispatch(enc, std::max(pi.blocks, 1u));
-            finish(cb, status);
-            t.resident_round_plan = true;
-        }
+        prepare_plans<gd::lanes>(out.forward, out.backward, m, input.arena,
+            input.layout.offsets[unsigned(resident_setup::Field::round_ptr)], state.round, status);
         return out;
     }
 };

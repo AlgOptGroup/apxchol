@@ -67,7 +67,37 @@ input_buffers upload(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A)
     return out;
 }
 
+// Pipelines belong to the device context, not individual solver owners.
+struct pipelines {
+    Engine factorizer;
+    Finalizer finalizer;
+    explicit pipelines(id<MTLDevice> dev) : factorizer(dev), finalizer(dev) {}
+};
+pipelines& pipelines_for(id<MTLDevice> device) {
+    static pipelines cached(device);
+    return cached;
+}
+
 } // namespace
+
+void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
+                        triangle& forward, triangle& backward) {
+    const unsigned n = factor.perm.size();
+    auto rounds = buffer(device, (factor.rounds.size() + 1) * sizeof(unsigned));
+    auto* bounds = static_cast<unsigned*>(rounds.contents);
+    bounds[0] = 0;
+    for (std::size_t r = 0; r < factor.rounds.size(); ++r) {
+        const auto& round = factor.rounds[r];
+        require(round.active == n - bounds[r] && round.is_size <= round.active,
+                "invalid resident Metal round boundaries");
+        bounds[r + 1] = bounds[r] + unsigned(round.is_size);
+    }
+    require(bounds[factor.rounds.size()] == n, "incomplete resident Metal rounds");
+    auto status = buffer(device, sizeof(unsigned));
+    *static_cast<unsigned*>(status.contents) = 0;
+    pipelines_for(device).finalizer.prepare_plans<8>(forward, backward, n - !factor.sddm,
+        rounds, 0, unsigned(factor.rounds.size()), status);
+}
 
 resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,
                           const solve_options &options, checkpoint *cp, bool input_prechecked) {
@@ -75,13 +105,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         if (!metal_setup_options_supported(options.factor_opts))
             throw std::invalid_argument("Metal device setup currently requires FP32 graph storage "
                                         "and default block-greedy GKS options");
-        // Pipelines belong to the device context, not individual solver owners.
-        struct pipelines {
-            Engine factorizer;
-            Finalizer finalizer;
-            explicit pipelines(id<MTLDevice> dev) : factorizer(dev), finalizer(dev) {}
-        };
-        static pipelines cached(device);
+        auto& cached = pipelines_for(device);
         if (cp) {
             cp->descend("setup");
             cp->tick();

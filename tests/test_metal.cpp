@@ -13,6 +13,7 @@
 #include "apxchol/solver/detail/solve_backend.h"
 
 #include <Eigen/Sparse>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -365,6 +366,49 @@ TEST_F(MetalDevice, ScaledSolutionAccumulatorsPreserveAccuracy) {
                 }
             }
         }
+    }
+}
+
+TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
+    const auto A = grid(40, 41, 0.25, true);
+    Eigen::MatrixXd exact(A.rows(), 4);
+    for (int q = 0; q < 4; ++q) exact.col(q) = rhs(A.rows(), q + 1, false);
+    const Eigen::MatrixXd B = A * exact;
+    const Eigen::VectorXd first_rhs = B.col(0);
+    Eigen::MatrixXd initial = 0.25 * exact;
+    initial.col(0) = exact.col(0);
+    const apxchol::const_matrix_view warm(initial);
+    auto check = [&](const apxchol::solver& owner) {
+        for (unsigned pass = 0; pass < 3; ++pass) {
+            SCOPED_TRACE(pass);
+            const auto scalar = owner.solve(first_rhs, 1e-8, 1000);
+            EXPECT_LE(true_residual(A, first_rhs, scalar.x), 1e-8);
+            Eigen::MatrixXd X(A.rows(), 4);
+            const auto result = owner.solve(B, X, 1e-8, 1000, pass == 2 ? &warm : nullptr);
+            ASSERT_EQ(result.columns.size(), 4u);
+            if (pass == 2) EXPECT_EQ(result.columns[0].iterations, 0);
+            for (unsigned q = 0; q < 4; ++q) {
+                EXPECT_LE(result.columns[q].residual, 1e-8);
+                EXPECT_LE(true_residual(A, B.col(q), X.col(q)), 1e-8);
+            }
+        }
+    };
+    for (const auto storage : {apxchol::factor_storage_type::fp16, apxchol::factor_storage_type::fp32}) {
+        SCOPED_TRACE(int(storage));
+        auto options = keep_opts();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::solver resident(A, options);
+        std::vector<unsigned> row_sizes(A.rows());
+        for (auto row : resident.factor().L.inner_) ++row_sizes[row];
+        ASSERT_TRUE(std::ranges::any_of(resident.factor().rounds, [&](const auto& round) {
+            const auto first = row_sizes.begin() + A.rows() - round.active;
+            return round.is_size > 128 &&
+                std::count_if(first, first + round.is_size, [](unsigned size) { return size > 1; }) > 32;
+        }));
+        check(resident);
+        const apxchol::solver adopted(A, resident.factor(), options);
+        check(adopted);
     }
 }
 

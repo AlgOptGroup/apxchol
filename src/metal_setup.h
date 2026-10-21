@@ -25,6 +25,9 @@ struct resident_factor {
     float preconditioner_scale = 1;
 };
 
+void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
+                        triangle& forward, triangle& backward);
+
 resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,
                           const solve_options &options, checkpoint *cp,
                           bool input_prechecked = false);

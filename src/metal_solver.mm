@@ -153,7 +153,7 @@ pipelines make_pipelines(id<MTLDevice> device, id<MTLLibrary> library, unsigned 
     for (int half = 0; half < 2; ++half) {
         for (int fwd = 0; fwd < 2; ++fwd)
             p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half, columns);
-        for (unsigned variant = 0; variant < (columns == 4 ? 2u : 3u); ++variant) {
+        for (unsigned variant = 0; variant < 3; ++variant) {
             auto pipe = make_pipeline(device, library, "dataflow_solve", variant != 0, false, 0, half, columns, variant == 2);
             p.dataflow_solve[half][variant] = pipe;
             if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
@@ -476,17 +476,26 @@ struct metal_solver::impl {
             });
         }
         if (count == 4 && lane_fwd.ptr == nil) {
-            std::vector<float> diagonal(factor_fp16 ? arguments.m : 0);
-            if (factor_fp16) {
-                const auto* metadata = static_cast<const mh::factor_metadata*>([factor_metadata contents]);
-                for (unsigned i = 0; i < arguments.m; ++i) diagonal[i] = metadata[i].diagonal;
+            prepared_tri next_fwd, next_bwd;
+            if (fwd.resident_round_plan) {
+                next_fwd = {.ptr = fwd.ptr, .idx = fwd.idx, .val = fwd.val};
+                next_bwd = {.ptr = bwd.ptr, .idx = bwd.idx, .val = bwd.val};
+                with_pool([&] {
+                    detail::metal_setup::prepare_lane_plans(ctx->device, F, next_fwd, next_bwd);
+                });
+            } else {
+                std::vector<float> diagonal(factor_fp16 ? arguments.m : 0);
+                if (factor_fp16) {
+                    const auto* metadata = static_cast<const mh::factor_metadata*>([factor_metadata contents]);
+                    for (unsigned i = 0; i < arguments.m; ++i) diagonal[i] = metadata[i].diagonal;
+                }
+                auto prepare = [&](const prepared_tri& base, bool forward) {
+                    return factor_fp16 ? prepare_lane_tri<_Float16>(*ctx, base, arguments.m, forward, diagonal)
+                                       : prepare_lane_tri<float>(*ctx, base, arguments.m, forward, diagonal);
+                };
+                next_fwd = prepare(fwd, true);
+                next_bwd = prepare(bwd, false);
             }
-            auto prepare = [&](const prepared_tri& base, bool forward) {
-                return factor_fp16 ? prepare_lane_tri<_Float16>(*ctx, base, arguments.m, forward, diagonal)
-                                   : prepare_lane_tri<float>(*ctx, base, arguments.m, forward, diagonal);
-            };
-            auto next_fwd = prepare(fwd, true);
-            auto next_bwd = prepare(bwd, false);
             lane_fwd = std::move(next_fwd);
             lane_bwd = std::move(next_bwd);
         }
