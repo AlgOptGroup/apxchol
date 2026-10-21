@@ -38,7 +38,8 @@ struct Counts { unsigned edges, updates; };
 struct State {
     unsigned nodes, edges, active, selected, columns, entries, round, slot, status;
     unsigned pending_entries, pending_fills, threshold, edge_capacity, has_excess, eligible;
-    unsigned prune_gap, prune_streak, prune_hidden, prune_enabled, degree_divisor;
+    unsigned prune_gap, prune_streak, prune_hidden, prune_enabled;
+    float degree_quantile;
     seed_type seed;
 };
 enum class Field : unsigned {
@@ -185,7 +186,11 @@ template<class Memory> APXCHOL_GPU_FUNCTION void threshold(Memory m) {
             s.state->prune_streak=0;
         }
     }
-    const unsigned rank=(s.state->active-1)/s.state->degree_divisor;
+    const unsigned last = s.state->active - 1;
+    const float quantile = s.state->degree_quantile;
+    // A valid double quantile can round to one in the device state.
+    const unsigned rounded = quantile >= 1 ? last : unsigned(float(last) * quantile);
+    const unsigned rank = rounded < last ? rounded : last;
     unsigned cumulative=0,b=0;
     while (b<32 && cumulative+s.histogram[b]<=rank) cumulative+=s.histogram[b++];
     s.state->threshold=b==32 ? ~0u : (1u<<b)-1;

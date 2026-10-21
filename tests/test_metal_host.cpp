@@ -3,6 +3,7 @@
 
 #include "apxchol/solver/detail/metal_host.h"
 #include "../src/metal_setup_options.h"
+#include "../src/metal_setup/layout.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 
 #include <cmath>
@@ -16,19 +17,57 @@ namespace mh = apxchol::detail::metal_host;
 TEST(MetalHost, DegreeQuantileOptions) {
     apxchol::factor_options options;
     const bool defaults = apxchol::detail::metal_setup_options_supported(options);
-    for (double quantile : {apxchol::degree_quantile_by_route, 0.2, 0.5}) {
+    for (double quantile : {apxchol::degree_quantile_by_route, 0.1, 0.2, 0.3, 0.5, 0.8,
+                            double(float(0.2)), std::nextafter(0.0, 1.0), std::nextafter(1.0, 0.0)}) {
+        SCOPED_TRACE(quantile);
         options.partition.degree_quantile = quantile;
-        EXPECT_EQ(apxchol::detail::metal_degree_divisor(quantile), quantile == 0.5 ? 2u : 5u);
+        EXPECT_EQ(apxchol::detail::metal_degree_quantile(quantile),
+                  quantile == apxchol::degree_quantile_by_route ? 0.2 : quantile);
         EXPECT_EQ(apxchol::detail::metal_setup_options_supported(options), defaults);
     }
-    for (double quantile : {-2.0, 0.0, 0.1, 0.3, 0.8, 1.0, double(float(0.2)),
+    for (double quantile : {-2.0, -0.1, 0.0, 1.0, 2.0,
+                            -std::numeric_limits<double>::infinity(),
                             std::numeric_limits<double>::infinity(),
                             std::numeric_limits<double>::quiet_NaN()}) {
+        SCOPED_TRACE(quantile);
         options.partition.degree_quantile = quantile;
-        EXPECT_EQ(apxchol::detail::metal_degree_divisor(quantile), 0u);
         EXPECT_FALSE(apxchol::detail::metal_setup_options_supported(options));
     }
     EXPECT_EQ(apxchol::degree_quantile_device_default, 0.5);
+}
+
+TEST(MetalHost, DegreeQuantileThresholdBounds) {
+    resident_setup::State state{};
+    unsigned histogram[33]{};
+    struct Memory {
+        resident_setup::View<mh::df> data{};
+        bool failed() const { return false; }
+    } memory;
+    memory.data.state = &state;
+    memory.data.histogram = histogram;
+    for (unsigned active : {1u, 2u, 17u, (1u << 24) + 2, ~0u}) {
+        SCOPED_TRACE(active);
+        state.active = active;
+        histogram[0] = 1;
+        histogram[1] = active - 1;
+        for (double quantile : {std::nextafter(0.0, 1.0), std::nextafter(1.0, 0.0)}) {
+            state.degree_quantile = float(quantile);
+            resident_setup::threshold(memory);
+            const bool first_bucket = quantile < 0.5 || active == 1;
+            EXPECT_EQ(state.threshold, first_bucket ? 0u : 1u);
+            EXPECT_EQ(state.eligible, first_bucket ? 1u : active);
+        }
+    }
+    state.active = 10;
+    histogram[0] = 2;
+    histogram[1] = 3;
+    histogram[2] = 5;
+    for (auto [quantile, cutoff] : {std::pair{0.1f, 0u}, {0.2f, 0u}, {0.3f, 1u},
+                                    {0.5f, 1u}, {0.8f, 3u}}) {
+        state.degree_quantile = quantile;
+        resident_setup::threshold(memory);
+        EXPECT_EQ(state.threshold, cutoff);
+    }
 }
 
 TEST(MetalHost, DoubleFloatSplitIsExactOrBounded) {

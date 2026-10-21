@@ -96,7 +96,7 @@ class Engine {
             s.state->active = n;
             s.state->seed = seed;
             s.state->prune_gap = s.state->prune_enabled = 1;
-            s.state->degree_divisor = metal_degree_divisor(options.partition.degree_quantile);
+            s.state->degree_quantile = float(metal_degree_quantile(options.partition.degree_quantile));
             NSMutableArray *scratch = [NSMutableArray new];
             for (unsigned count = n + 1;;) {
                 count = (count + 255) / 256;

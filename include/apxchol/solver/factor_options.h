@@ -83,7 +83,7 @@ struct partition_options {
     /// 1.20-1.32 while 0.5 costs 1.02-1.11. 0.8 ties 0.5 on the mean but is
     /// 2.1-2.5x worse on kron_g500-logn16, so 0.5 is the bounded-risk choice.
     /// CPU/CUDA honor explicit values, including 0 (= disabled). Metal supports
-    /// 0.2 and 0.5, rounding the cutoff up to its degree bucket's upper bound.
+    /// values in (0,1), rounding the cutoff up to its degree bucket's upper bound.
     double degree_quantile = degree_quantile_by_route;
 
     /// Fallback IS degree cap when degree_quantile == 0:

@@ -26,9 +26,8 @@ inline bool metal_setup_regularization_supported(const env_knobs& environment = 
     return true;
 }
 
-inline unsigned metal_degree_divisor(double quantile) {
-    if (quantile == degree_quantile_by_route || quantile == 0.2) return 5;
-    return quantile == 0.5 ? 2 : 0;
+inline double metal_degree_quantile(double quantile) {
+    return quantile == degree_quantile_by_route ? 0.2 : quantile;
 }
 
 inline bool metal_setup_options_supported(const factor_options &options) {
@@ -36,12 +35,13 @@ inline bool metal_setup_options_supported(const factor_options &options) {
     (void)options;
     return false;
 #else
+    const double quantile = metal_degree_quantile(options.partition.degree_quantile);
     return sizeof(node_index) == sizeof(std::uint32_t) && options.is_select == "block_greedy" &&
            options.sampler == clique_sampler::gks && options.exact_clique_max_degree == 0 &&
            exact_core_or_off(options.exact_core_max_h) == 0 && options.double_cycle_min_h == 0 &&
            options.partition.degree_tiebreak &&
            options.residual_peel == residual_peel_strategy::natural &&
-           metal_degree_divisor(options.partition.degree_quantile) != 0;
+           quantile > 0 && quantile < 1;
 #endif
 }
 
