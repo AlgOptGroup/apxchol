@@ -5,26 +5,23 @@
 #include <stdexcept>
 #include <vector>
 
+#define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #ifdef __CUDACC__
-#define APXCHOL_PLAN_FUNCTION __host__ __device__
+#define APXCHOL_GPU_FUNCTION __host__ __device__
 #else
-#define APXCHOL_PLAN_FUNCTION
+#define APXCHOL_GPU_FUNCTION
 #endif
+#define APXCHOL_GPU_BUFFER(T) T*
+#define APXCHOL_GPU_UINT64 std::uint64_t
+#define APXCHOL_GPU_CONSTANT inline constexpr
+#include "gpu_dataflow_pack.inc"
+#undef APXCHOL_GPU_CONSTANT
+#undef APXCHOL_GPU_UINT64
+#undef APXCHOL_GPU_BUFFER
+#undef APXCHOL_GPU_FUNCTION
+#undef APXCHOL_GPU_CODE
 
 namespace apxchol::detail::gpu_dataflow {
-
-inline constexpr unsigned lanes = 32, prefetch = 8, chunk_size = lanes * prefetch;
-inline constexpr unsigned special_bit = 1u << 31, empty = ~0u;
-
-// A special task computes a row segment, or folds partials when row's high bit
-// is set. Normal tasks carry the row directly. Both retain 31-bit row indices.
-struct alignas(16) segment {
-    unsigned row, begin, end, output;
-};
-static_assert(sizeof(segment) == 16);
-struct counts {
-    std::uint64_t words = 0, segments = 0, slots = 0;
-};
 
 // Shared host/device histogram; CUDA adds validation errors in the same row pass.
 struct row_stats {
@@ -37,76 +34,6 @@ struct row_stats {
         return nnz && nnz_ge[0] * 4 >= nnz ? chunk_size : 3 * chunk_size;
     }
 };
-
-struct row_order {
-    unsigned n;
-    bool reverse;
-    const unsigned *rows = nullptr;
-    APXCHOL_PLAN_FUNCTION unsigned operator()(unsigned q) const {
-        return rows ? rows[q] : reverse ? n - 1 - q : q;
-    }
-};
-
-// Count and emit use the same walk on CPU and CUDA. Each invocation closes its
-// last batch, so independent tiles/workgroups can be packed with prefix sums.
-template <bool Emit, unsigned PlanLanes = lanes, class Pointer>
-APXCHOL_PLAN_FUNCTION counts pack_rows(const Pointer *ptr, row_order order, unsigned first, unsigned last,
-                                       unsigned split_min, counts base = {}, unsigned *words = nullptr,
-                                       segment *segments = nullptr) {
-    static_assert(PlanLanes && PlanLanes <= lanes && !(PlanLanes & (PlanLanes - 1)));
-    counts c;
-    auto pad = [&](unsigned alignment) {
-        while (c.words % alignment) {
-            if constexpr (Emit)
-                words[base.words + c.words] = empty;
-            ++c.words;
-        }
-    };
-    auto special = [&](segment s) {
-        pad(PlanLanes);
-        if constexpr (Emit) {
-            segments[base.segments + c.segments] = s;
-            for (unsigned i = 0; i < PlanLanes; ++i)
-                words[base.words + c.words + i] = special_bit | unsigned(base.segments + c.segments);
-        }
-        ++c.segments;
-        c.words += PlanLanes;
-    };
-    for (unsigned q = first; q < last; ++q) {
-        const unsigned row = order(q);
-        const unsigned begin = ptr[row] + unsigned(order.reverse);
-        const unsigned end = ptr[row + 1] - unsigned(!order.reverse);
-        const unsigned size = end - begin;
-        if (!size)
-            continue; // Initialization solves dependency-free rows.
-        if (split_min && size > split_min) {
-            // Cap partials for a single row, retaining the existing memory bound.
-            const unsigned pieces = (size + chunk_size - 1) / chunk_size;
-            const unsigned bounded = pieces < 4096 ? pieces : 4096;
-            const unsigned width =
-                ((size + bounded - 1) / bounded + chunk_size - 1) / chunk_size * chunk_size;
-            const unsigned first_slot = order.n + unsigned(base.slots + c.slots);
-            for (unsigned p = begin; p < end;) {
-                const unsigned next = end - p < width ? end : p + width;
-                special({row, p, next, order.n + unsigned(base.slots + c.slots)});
-                ++c.slots;
-                p = next;
-            }
-            special({row | special_bit, first_slot, order.n + unsigned(base.slots + c.slots), row});
-        } else {
-            unsigned group = 1;
-            while (group < PlanLanes && group * prefetch < size)
-                group *= 2;
-            pad(group);
-            if constexpr (Emit)
-                for (unsigned i = 0; i < group; ++i)
-                    words[base.words + c.words + i] = row;
-            c.words += group;
-        }
-    }
-    pad(PlanLanes);
-    return c;
-}
 
 struct packed_plan {
     std::vector<unsigned> words, blocks{0};
@@ -139,5 +66,3 @@ inline packed_plan pack(const Pointer *ptr, row_order order, std::span<const uns
     return out;
 }
 } // namespace apxchol::detail::gpu_dataflow
-
-#undef APXCHOL_PLAN_FUNCTION

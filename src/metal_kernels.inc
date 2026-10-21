@@ -6,7 +6,7 @@ using namespace metal;
 using namespace apxchol::detail::gpu_pcg;
 using namespace apxchol::detail::metal_host;
 
-static_assert(sizeof(Params) == 40, "Params mirrors the host layout");
+static_assert(sizeof(Params) == 44, "Params mirrors the host layout");
 static_assert(__builtin_offsetof(Params, preconditioner_scale) == 36, "Params mirrors the host layout");
 
 using SolveState = solve_state<df, float>;
@@ -15,6 +15,7 @@ static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];
 constant bool kFactorFp16 [[function_constant(3)]];
+constant bool kIndependent [[function_constant(5)]];
 constant uint kOperation [[function_constant(2)]];
 // Distinct compiled pipelines: the scalar specialization has one accumulator.
 constant uint kColumns [[function_constant(4)]];
@@ -47,6 +48,7 @@ template<unsigned Columns>
 inline void pcg_step_columns(constant Params& P, workspace<df, float> vectors,
                             device const uint* ptr, device const uint* col,
                             device const float* hi, device const float* lo,
+                            device const uint* row_map,
                             uint lane, uint group, uint tid) {
     const operation op = operation(kOperation);
     const pcg_work<uint> work = op == operation::direction
@@ -54,8 +56,9 @@ inline void pcg_step_columns(constant Params& P, workspace<df, float> vectors,
         : pcg_work<uint>{group * kTreeRows, (group + 1) * kTreeRows, kTreeLanes, lane, P.n};
     const auto sum = op == operation::multiply && P.spmv_lanes == kTreeLanes
         ? step_columns<kTreeLanes, Columns>(op, pcg_math<kTreeLanes>{P.preconditioner_scale}, vectors, ptr, col, hi, lo,
-                          pcg_work<uint>{work.first, work.last, 1, 0, P.n}, lane)
-        : step_columns<1, Columns>(op, pcg_math<>{P.preconditioner_scale}, vectors, ptr, col, hi, lo, work, 0);
+                          pcg_work<uint>{group, P.n, P.groups, 0, P.n}, lane, P.mapped_rows ? row_map : nullptr)
+        : step_columns<1, Columns>(op, pcg_math<>{P.preconditioner_scale}, vectors, ptr, col, hi, lo, work, 0,
+                                   P.mapped_rows ? row_map : nullptr);
     if (op != operation::direction) {
         for (unsigned q = 0; q < Columns; ++q) {
             const auto total = sum_lanes<kTreeLanes>(pcg_math<>{}, sum.values[q]);
@@ -72,12 +75,13 @@ kernel void pcg_step(constant Params& P [[buffer(0)]],
                      device SolveState* state [[buffer(7)]],
                      device const uint* ptr [[buffer(8)]], device const uint* col [[buffer(9)]],
                      device const float* hi [[buffer(10)]], device const float* lo [[buffer(11)]],
+                     device const uint* row_map [[buffer(20)]],
                      uint lane [[thread_index_in_threadgroup]], uint group [[threadgroup_position_in_grid]],
                      uint tid [[thread_position_in_grid]]) {
     const auto vectors = workspace<df, float>{x, r, ap, p, z, partial, state};
-    if (kColumns == 4) pcg_step_columns<4>(P, vectors, ptr, col, hi, lo, lane, group, tid);
-    else if (kColumns == 2) pcg_step_columns<2>(P, vectors, ptr, col, hi, lo, lane, group, tid);
-    else pcg_step_columns<1>(P, vectors, ptr, col, hi, lo, lane, group, tid);
+    if (kColumns == 4) pcg_step_columns<4>(P, vectors, ptr, col, hi, lo, row_map, lane, group, tid);
+    else if (kColumns == 2) pcg_step_columns<2>(P, vectors, ptr, col, hi, lo, row_map, lane, group, tid);
+    else pcg_step_columns<1>(P, vectors, ptr, col, hi, lo, row_map, lane, group, tid);
 }
 
 struct recurrence_math {

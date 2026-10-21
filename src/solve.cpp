@@ -4,6 +4,7 @@
 #include "apxchol/solver/detail/lower_triangle_csr.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/csc_work.h"
+#include "host_spmv.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -22,7 +23,7 @@
 #include "apxchol/solver/detail/gpu_solve_session.h"
 #elif defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/metal_solver.h"
-#include "apxchol/solver/detail/metal_schedule.h"
+#include "metal_setup_options.h"
 #endif
 
 namespace apxchol {
@@ -273,22 +274,8 @@ std::array<double, C> panel_spmv(const Eigen::SparseMatrix<S, Eigen::RowMajor> &
         const auto [lo, hi] = detail::work_balanced_range(ptr, n, tid, nt);
         std::array<double, C> xy{};
         for (Eigen::Index i = lo; i < hi; i++) {
-            std::array<double, C> a{}, b{}, c{}, d{};
-            auto k = ptr[i];
-            const auto end = ptr[i + 1];
-            for (; k + 4 <= end; k += 4)
-                for (int q = 0; q < C; q++) {
-                    a[q] += val[k + 0] * x[Eigen::Index(col[k + 0]) * C + q];
-                    b[q] += val[k + 1] * x[Eigen::Index(col[k + 1]) * C + q];
-                    c[q] += val[k + 2] * x[Eigen::Index(col[k + 2]) * C + q];
-                    d[q] += val[k + 3] * x[Eigen::Index(col[k + 3]) * C + q];
-                }
-            std::array<double, C> sum{};
-            for (int q = 0; q < C; q++)
-                sum[q] = (a[q] + b[q]) + (c[q] + d[q]);
-            for (; k < end; k++)
-                for (int q = 0; q < C; q++)
-                    sum[q] += val[k] * x[Eigen::Index(col[k]) * C + q];
+            const auto sum = detail::sparse_row_product<C>(col, val, ptr[i], ptr[i + 1],
+                [x](int row, int q) { return x[Eigen::Index(row) * C + q]; });
             for (int q = 0; q < C; q++) {
                 y[i * C + q] = sum[q];
                 xy[q] += x[i * C + q] * sum[q];
@@ -990,16 +977,23 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
             "natural residual peeling and supported sampler options; request CPU explicitly");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
-    if (opts.backend == solve_backend::automatic && A) {
-        bool in_range = true;
-        #pragma omp parallel for schedule(static) reduction(&& : in_range)
-        for (Eigen::Index col = 0; col < A->outerSize(); ++col)
-            for (Eigen::SparseMatrix<double>::InnerIterator entry(*A, col); entry; ++entry)
-                in_range = in_range && detail::metal_schedule::in_range(entry.value());
-        if (!in_range) return solve_backend::cpu;
+    bool compatible = detail::metal_setup_options_supported(opts.factor_opts);
+    if (compatible && opts.backend == solve_backend::automatic) {
+        if (!metal_solver::available()) return solve_backend::cpu;
+        compatible = !A || detail::metal_setup_input_supported(*A);
     }
-    return opts.backend == solve_backend::gpu || metal_solver::available()
-        ? solve_backend::gpu : solve_backend::cpu;
+    if (!compatible) {
+        if (opts.backend == solve_backend::gpu)
+            throw std::invalid_argument("Metal GPU setup requires supported GKS options and compressed, sorted, paired CSC input");
+        return solve_backend::cpu;
+    }
+    if (!detail::metal_setup_regularization_supported(detail::env_knobs::get(),
+            opts.backend == solve_backend::automatic ? A : nullptr)) {
+        if (opts.backend == solve_backend::gpu)
+            throw std::invalid_argument(detail::metal_regularization_error);
+        return solve_backend::cpu;
+    }
+    return solve_backend::gpu;
 #else
     if (opts.backend == solve_backend::gpu)
         throw std::invalid_argument("GPU route requested but GPU support is not built");
@@ -1027,7 +1021,11 @@ struct solver::impl {
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
-            ? solve_backend::cpu : detail::select_solve_backend(opts, &A);
+            ? solve_backend::cpu
+#if defined(APXCHOL_USE_METAL)
+            : F && opts.backend == solve_backend::gpu ? solve_backend::gpu
+#endif
+            : detail::select_solve_backend(opts, &A);
         if (cp) { (*cp)("backend_selection"); cp->ascend(); }
 #if defined(APXCHOL_USE_CUDA)
         if (route == solve_backend::gpu) {
@@ -1037,7 +1035,7 @@ struct solver::impl {
 #elif defined(APXCHOL_USE_METAL)
         if (route == solve_backend::gpu) {
             if (F) return owner_type(std::in_place_type<metal_solver>, A, std::move(*F), opts, cp);
-            return owner_type(std::in_place_type<metal_solver>, A, opts, cp);
+            return owner_type(metal_solver(A, opts, cp, opts.backend == solve_backend::automatic));
         }
 #else
         (void)route;

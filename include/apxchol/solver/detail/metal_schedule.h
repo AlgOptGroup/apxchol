@@ -17,6 +17,7 @@ inline bool in_range(double value) {
 
 struct step {
     unsigned first, last;
+    bool one_batch_per_block = false;
 };
 
 struct schedule {

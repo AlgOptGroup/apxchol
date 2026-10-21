@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include <apxchol/solver/detail/gpu_pcg.h>
 #include <apxchol/solver/detail/gpu_scaling.h>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace pcg = apxchol::detail::gpu_pcg;
@@ -14,6 +16,20 @@ struct recurrence_math {
     double ratio(double x, double y) const { return x / y; }
     bool converged(double x, double threshold) const { return x < threshold; }
     bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
+};
+
+struct step_math {
+    using wide = double;
+    using scalar = double;
+    double preconditioned(double z) const { return z; }
+    double add_product(double sum, double a, double b) const { return sum + a * b; }
+    double update_solution(double x, double alpha, double p) const { return x + alpha * p; }
+    double subtract_product(double a, double b, double c) const { return a - b * c; }
+    double direction(double z, double p, double beta) const { return z + beta * p; }
+    double add_entry(double sum, const double* hi, const double*, unsigned e, double p) const {
+        return sum + hi[e] * p;
+    }
+    double sum_row(double sum) const { return sum; }
 };
 
 struct commands {
@@ -39,6 +55,75 @@ struct commands {
     }
 };
 } // namespace
+
+TEST(GpuPcg, MappedMultiplyPreservesOutputAndDotProduct) {
+    auto check = []<unsigned Columns, class Offset>() {
+        const std::array<Offset, 3> perm{2, 0, 1};
+        constexpr double A[3][3]{{4, -1, 0}, {-1, 5, -2}, {0, -2, 6}};
+        for (bool mapped : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << Columns << " mapped=" << mapped);
+            std::array<Offset, 4> ptr{};
+            std::array<Offset, 9> col{};
+            std::array<double, 9> values{};
+            for (unsigned row = 0; row < 3; ++row) {
+                unsigned original = row;
+                if (!mapped)
+                    while (perm[original] != Offset(row)) original = (original + 1) % 3;
+                ptr[row + 1] = ptr[row];
+                for (unsigned other = 0; other < 3; ++other) if (A[original][other] != 0) {
+                    const auto e = ptr[row + 1]++;
+                    col[e] = perm[other];
+                    values[e] = A[original][other];
+                }
+            }
+            std::array<double, 3 * Columns> x{}, r{}, ap{}, p{}, z{}, expected{};
+            std::array<pcg::solve_state<double, double>, Columns> state{};
+            for (unsigned q = 0; q < Columns; ++q) {
+                state[q].active = q != 1;
+                state[q].alpha = 0.25;
+                for (unsigned row = 0; row < 3; ++row)
+                    p[perm[row] * Columns + q] = 1 + row + 0.5 * q;
+                for (unsigned row = 0; row < 3; ++row)
+                    for (unsigned other = 0; other < 3; ++other)
+                        expected[perm[row] * Columns + q] += A[row][other] * p[perm[other] * Columns + q];
+            }
+            ap.fill(-77);
+            r.fill(1);
+            const pcg::workspace<double, double> work{x.data(), r.data(), ap.data(), p.data(), z.data(), nullptr, state.data()};
+            pcg::column_sums<double, Columns> total{};
+            for (int offset = 0; offset < 2; ++offset) {
+                const pcg::pcg_work<std::int64_t> range{0, 4, 2, offset, 3};
+                const auto sum = mapped
+                    ? pcg::step_columns<1, Columns>(pcg::operation::multiply, step_math{}, work,
+                          ptr.data(), col.data(), values.data(), static_cast<const double*>(nullptr), range, 0, perm.data())
+                    : pcg::step_columns<1, Columns>(pcg::operation::multiply, step_math{}, work,
+                          ptr.data(), col.data(), values.data(), static_cast<const double*>(nullptr), range, 0);
+                for (unsigned q = 0; q < Columns; ++q) total.values[q] += sum.values[q];
+            }
+            for (unsigned q = 0; q < Columns; ++q) {
+                double expected_dot = 0;
+                for (unsigned row = 0; row < 3; ++row) {
+                    const auto i = row * Columns + q;
+                    EXPECT_EQ(ap[i], state[q].active ? expected[i] : -77);
+                    expected_dot += expected[i] * p[i];
+                }
+                EXPECT_EQ(total.values[q], state[q].active ? expected_dot : 0);
+            }
+            pcg::step_columns<1, Columns>(pcg::operation::residual, step_math{}, work,
+                ptr.data(), col.data(), values.data(), static_cast<const double*>(nullptr),
+                pcg::pcg_work<std::int64_t>{0, 3, 1, 0, 3}, 0, perm.data());
+            for (unsigned row = 0; row < 3; ++row) for (unsigned q = 0; q < Columns; ++q) {
+                const auto i = row * Columns + q;
+                EXPECT_EQ(x[i], state[q].active ? 0.25 * p[i] : 0);
+                EXPECT_EQ(r[i], state[q].active ? 1 - 0.25 * expected[i] : 1);
+            }
+        }
+    };
+    check.operator()<1, int>();
+    check.operator()<4, int>();
+    check.operator()<1, unsigned>();
+    check.operator()<4, unsigned>();
+}
 
 TEST(GpuPcg, ProductsRequireFinitePositiveValues) {
     const double inf = std::numeric_limits<double>::infinity();

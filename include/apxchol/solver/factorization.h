@@ -55,9 +55,9 @@ struct factorization {
     // from carries the lumping.
     Eigen::Index lumped_offdiag = 0;
 
-    // Per-round statistics. active/is_size/avg_deg are always populated;
-    // nnz_added/nnz_total only when a checkpoint is provided (they need an
-    // extra factor_cols scan). is_size drives the SpTRSV round-as-level path.
+    // Per-round statistics. active/is_size are always populated; Metal leaves
+    // avg_deg as NaN when unavailable. nnz_added/nnz_total may be zero without
+    // a checkpoint. is_size drives the SpTRSV round-as-level path.
     struct round_stats {
         size_t active;     // active vertices at start of round
         size_t is_size;    // IS size chosen (== num_regions for singleton partitions)

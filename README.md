@@ -77,7 +77,7 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 FP16 narrows scaled off-diagonals, retaining FP32 diagonals; it
 does not change the outer PCG to FP16. See [precision and storage](docs/precision.md).
 `--sampler gks|trace_cycle` selects the clique sampler; GKS remains
-its default. Trace-cycle supports CPU setup and full GPU-owned setup.
+its default. Trace-cycle supports CPU and CUDA setup.
 `solve_options.backend` (`solve_backend::automatic`, `cpu`, or `gpu`) and CLI
 `--backend auto|cpu|gpu` select a complete setup/solve route. The default `auto`
 uses CPU for scalar systems and for Metal inputs of at most 32,768 rows when CPU supports the requested storage. Otherwise selection follows device availability, input and option compatibility.
@@ -87,7 +87,7 @@ uses CPU for scalar systems and for Metal inputs of at most 32,768 rows when CPU
 
 CUDA uses device-owned factorization with 32-bit vertices, `block_greedy` selection and natural residual peeling. It requires compressed, sorted, unique, fully paired CSC input and supports both GKS and trace-cycle, warm starts and FP32 factor export. Exact-clique, exact-core and double-cycle overrides require CPU setup.
 
-Metal currently uses host factorization, retaining the CPU factorization choices, then solves on the GPU. It supports FP32/FP16 factor storage; see its [precision limits](docs/precision.md#apple-metal-pcg).
+Metal uses device-owned factorization for default `block_greedy` GKS options with FP32 graph weights and 32-bit vertices. It requires the same CSC layout as CUDA and supports FP32/FP16 solve storage, warm starts and optional FP32 factor export. Explicit host-factor adoption remains available through `metal_solver`; see its [precision limits](docs/precision.md#apple-metal-pcg).
 
 Automatic selection uses CPU when a configuration is incompatible with the available GPU backend. Explicit GPU requests fail if unsupported. Once selected, GPU setup or execution errors are reported without retrying on CPU. Public `factorize()` and custom CPU strategies remain available independently; see the [extension guide](docs/extending.md) for explicit factor handoff.
 

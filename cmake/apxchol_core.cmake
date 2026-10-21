@@ -63,9 +63,9 @@ function(apxchol_configure_core target)
     endif()
 
     if (APXCHOL_DEVICE STREQUAL "METAL")
-        target_sources(${target} PRIVATE ${root}/src/metal_solver.mm)
+        target_sources(${target} PRIVATE ${root}/src/metal_solver.mm ${root}/src/metal_setup.mm)
         target_compile_definitions(${target} PUBLIC APXCHOL_USE_METAL)
-        set_source_files_properties(${root}/src/metal_solver.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+        set_source_files_properties(${root}/src/metal_solver.mm ${root}/src/metal_setup.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
         target_compile_options(${target} PRIVATE
             "$<$<COMPILE_LANGUAGE:OBJCXX>:SHELL:${OpenMP_CXX_FLAGS}>")
         set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)

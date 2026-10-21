@@ -39,6 +39,7 @@ add_executable(unit_tests
         test_permuted_operator.cpp
         test_metal_schedule.cpp
         test_metal_host.cpp
+        test_metal_finalize.cpp
 )
 if (APXCHOL_DEVICE STREQUAL "METAL")
     target_sources(unit_tests PRIVATE test_metal.cpp)

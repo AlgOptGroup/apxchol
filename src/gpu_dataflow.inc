@@ -29,7 +29,7 @@ APXCHOL_GPU_FUNCTION void dataflow_initialize(Memory m, unsigned row) {
     }
 }
 template<unsigned Columns = 1, unsigned RhsLanes = 1, class Memory>
-APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
+APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane, bool completed_real_rows = false) {
     static_assert(RhsLanes && RhsLanes <= 32 && !(RhsLanes & (RhsLanes - 1)));
     static_assert(Columns % RhsLanes == 0);
     constexpr unsigned SparseLanes = 32 / RhsLanes, LocalColumns = Columns / RhsLanes;
@@ -48,6 +48,8 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
         const unsigned word = m.words[task * SparseLanes + sparse_lane];
         bool have = word != ~0u;
         const dataflow_task t = have ? dataflow_describe(m, word) : dataflow_task{};
+        // Finalizers still wait for partials produced by other SIMD groups.
+        const bool completed = completed_real_rows && t.kind != 2;
         unsigned g;
         if (RhsLanes == 1)
             g = t.kind ? 32 : m.width(t.end - t.begin);
@@ -75,31 +77,36 @@ APXCHOL_GPU_FUNCTION void dataflow_run(Memory m, unsigned lane) {
                     const bool ok = have && pos < end;
                     cols[k] = ok ? (t.kind == 2 ? pos : m.col[pos]) : 0;
                     vals[k] = ok ? (t.kind == 2 ? Value(1.0f) : m.value(pos, t.row, cols[k])) : Value(0.0f);
-                    for (unsigned q = 0; q < LocalColumns; ++q) values[q][k] = 0;
-                    if (ok) mask |= 1u << k;
+                    for (unsigned q = 0; q < LocalColumns; ++q)
+                        values[q][k] = completed && ok && enabled[q]
+                            ? m.as_float(m.load(cols[k], first_column + q * RhsLanes)) : 0;
+                    if (!completed && ok) mask |= 1u << k;
                 }
                 for (unsigned q = 0; q < LocalColumns; ++q) pending[q] = enabled[q] ? mask : 0;
                 reload = false;
             }
-            unsigned pending_any = 0;
-            for (unsigned q = 0; q < LocalColumns; ++q) {
-                unsigned bits[8];
-                APXCHOL_UNROLL
-                for (unsigned k = 0; k < 8; ++k)
-                    bits[k] = (pending[q] >> k) & 1 ? m.load(cols[k], first_column + q * RhsLanes) : 0;
-                APXCHOL_UNROLL
-                for (unsigned k = 0; k < 8; ++k)
-                    if (((pending[q] >> k) & 1) && bits[k] != 0x7f800001u) {
-                        values[q][k] = m.as_float(bits[k]);
-                        pending[q] &= ~(1u << k);
-                    }
-                pending_any |= pending[q];
+            bool ready = have;
+            if (!completed) {
+                unsigned pending_any = 0;
+                for (unsigned q = 0; q < LocalColumns; ++q) {
+                    unsigned bits[8];
+                    APXCHOL_UNROLL
+                    for (unsigned k = 0; k < 8; ++k)
+                        bits[k] = (pending[q] >> k) & 1 ? m.load(cols[k], first_column + q * RhsLanes) : 0;
+                    APXCHOL_UNROLL
+                    for (unsigned k = 0; k < 8; ++k)
+                        if (((pending[q] >> k) & 1) && bits[k] != 0x7f800001u) {
+                            values[q][k] = m.as_float(bits[k]);
+                            pending[q] &= ~(1u << k);
+                        }
+                    pending_any |= pending[q];
+                }
+                const unsigned physical_width = g * RhsLanes;
+                const unsigned group_mask =
+                    (0xffffffffu >> (32 - physical_width)) << (lane & ~(physical_width - 1));
+                const unsigned waiting = m.ballot(pending_any != 0);
+                ready = have && !(waiting & group_mask);
             }
-            const unsigned physical_width = g * RhsLanes;
-            const unsigned group_mask =
-                (0xffffffffu >> (32 - physical_width)) << (lane & ~(physical_width - 1));
-            const unsigned waiting = m.ballot(pending_any != 0);
-            const bool ready = have && !(waiting & group_mask);
             const bool reduce = m.any(ready && g > 1 && p + g * 8 - sub >= end);
             float total[LocalColumns];
             for (unsigned q = 0; q < LocalColumns; ++q) {

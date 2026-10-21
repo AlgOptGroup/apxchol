@@ -2,9 +2,54 @@
 // anonymous namespace. Input is paired active CSR; output is a distinct spare.
 // The forest priority is the CPU's (high 12 complemented pool bits, ordinal),
 // not exact-weight Kruskal. Normalization preserves its full-stream partition.
-struct owned_sparsify_scale {
-    double value = 0.0, target = 0.0;
-    unsigned passes = 0, advance = 0;
+#define APXCHOL_GPU_CODE(...) __VA_ARGS__
+#define APXCHOL_GPU_FUNCTION __device__ inline
+#define APXCHOL_GPU_UINT64 std::uint64_t
+#include "apxchol/solver/detail/residual_sparsify.inc"
+#undef APXCHOL_GPU_UINT64
+#undef APXCHOL_GPU_FUNCTION
+#undef APXCHOL_GPU_CODE
+using owned_sparsify_scale = residual_sparsify::Scale<double>;
+struct owned_sparsify_math {
+    using wide = double;
+    __device__ double from_float(float x) const { return x; }
+    __device__ double add(double a, double b) const { return __dadd_rn(a, b); }
+    __device__ double multiply(double a, double b) const { return __dmul_rn(a, b); }
+    __device__ double divide(double a, double b) const { return __ddiv_rn(a, b); }
+    __device__ double root(double x) const { return __dsqrt_rn(x); }
+    __device__ bool less(double a, double b) const { return a < b; }
+    __device__ bool finite(double x) const { return isfinite(x); }
+    __device__ double uniform(std::uint64_t bits) const { return __dmul_rn(double(bits), 0x1p-53); }
+    __device__ double reweight(double weight, double p) const { return __dmul_rn(weight, __ddiv_rn(1.0, p)); }
+};
+struct owned_sparsify_input {
+    const gpu_round_shadow_incidence* edges;
+    __device__ double weight(unsigned i) const { return edges[i].weight; }
+    __device__ bool same(unsigned a, unsigned b) const {
+        return edges[a].owner == edges[b].owner && edges[a].neighbor == edges[b].neighbor;
+    }
+};
+struct owned_sparsify_forest {
+    const gpu_round_shadow_incidence* edges;
+    const unsigned* labels;
+    unsigned long long* best;
+    unsigned *parents = nullptr, *backbone = nullptr, *counts = nullptr;
+    struct Edge { unsigned a, b; double value; };
+    __device__ Edge edge(unsigned i) const { const auto e = edges[i]; return {unsigned(e.owner), unsigned(e.neighbor), e.weight}; }
+    __device__ unsigned label(unsigned i) const { return labels[i]; }
+    __device__ unsigned bucket(double weight) const {
+        if constexpr (sizeof(pool_value_t) == 4)
+            return residual_sparsify::bucket(__float_as_uint(float(weight)));
+        else return residual_sparsify::bucket(std::uint64_t(__double_as_longlong(weight)));
+    }
+    __device__ void offer(unsigned i, unsigned bucket, unsigned ordinal) const {
+        atomicMin(best + i, static_cast<unsigned long long>(residual_sparsify::priority(bucket, ordinal)));
+    }
+    __device__ unsigned choice(unsigned i) const { return unsigned(best[i]); }
+    __device__ unsigned parent(unsigned i) const { return atomicAdd(parents + i, 0u); }
+    __device__ bool link(unsigned high, unsigned low) const { return atomicCAS(parents + high, high, low) == high; }
+    __device__ void mark(unsigned i) const { if (!atomicExch(backbone + i, 1u)) atomicAdd(counts + 1, 1u); }
+    __device__ void joined() const { atomicAdd(counts, 1u); }
 };
 
 __global__ void owned_sparsify_canonical_flags(
@@ -45,21 +90,11 @@ __global__ void owned_sparsify_coalesce(
         sorted[i - 1].neighbor != e.neighbor;
     folded[i] = e; // CUB may load every item before applying its flag.
     if (!flags[i]) return;
-    double sum = 0.0;
-    for (auto j = i; j < count && sorted[j].owner == e.owner &&
-         sorted[j].neighbor == e.neighbor; ++j)
-        sum = __dadd_rn(sum, sorted[j].weight);
+    const double sum = residual_sparsify::coalesce(owned_sparsify_math{},
+        owned_sparsify_input{sorted}, unsigned(i), unsigned(count)).value;
     const pool_value_t stored = static_cast<pool_value_t>(sum);
     if (!isfinite(sum) || !isfinite(double(stored))) atomicExch(error, 1U);
     folded[i] = {e.owner, e.neighbor, stored};
-}
-
-__device__ std::uint64_t owned_sparsify_priority(double weight, unsigned id) {
-    std::uint64_t bucket;
-    if constexpr (sizeof(pool_value_t) == 4)
-        bucket = (std::uint64_t(~__float_as_uint(static_cast<float>(weight))) >> 20) & 4095ULL;
-    else bucket = (~std::uint64_t(__double_as_longlong(weight)) >> 52) & 4095ULL;
-    return (bucket << 32) | id;
 }
 
 __global__ void owned_sparsify_initialize(node_index n,
@@ -72,35 +107,16 @@ __global__ void owned_sparsify_best(const gpu_round_shadow_incidence* edges,
         std::size_t count, const std::uint32_t* labels,
         unsigned long long* best) {
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i >= count) return;
-    const auto e = edges[i]; const auto u = labels[e.owner], v = labels[e.neighbor];
-    if (u == v) return;
-    const auto priority = static_cast<unsigned long long>(owned_sparsify_priority(e.weight, unsigned(i)));
-    atomicMin(best + u, priority); atomicMin(best + v, priority);
-}
-
-__device__ unsigned owned_sparsify_root(unsigned v, unsigned* parent) {
-    for (;;) { const auto p = atomicAdd(parent + v, 0U); if (p == v) return v; v = p; }
+    if (i < count) residual_sparsify::choose(owned_sparsify_forest{edges, labels, best}, unsigned(i));
 }
 
 __global__ void owned_sparsify_contract(node_index n,
         const gpu_round_shadow_incidence* edges, const std::uint32_t* labels,
-        const unsigned long long* best, std::uint32_t* parent,
+        unsigned long long* best, std::uint32_t* parent,
         unsigned* backbone, unsigned* counts) {
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i >= n || labels[i] != i || best[i] == ~0ULL) return;
-    const auto id = static_cast<unsigned>(best[i]); const auto e = edges[id];
-    if (atomicExch(backbone + id, 1U) == 0) atomicAdd(counts + 1, 1U);
-    // Unique strict priorities imply an acyclic Boruvka choice set and the
-    // same unique forest as ordered Kruskal. Monotone parent IDs prevent races
-    // from introducing parent cycles; every chosen edge is actually united.
-    for (;;) {
-        const auto u = owned_sparsify_root(unsigned(e.owner), parent);
-        const auto v = owned_sparsify_root(unsigned(e.neighbor), parent);
-        if (u == v) return;
-        const auto high = u > v ? u : v, low = u > v ? v : u;
-        if (atomicCAS(parent + high, high, low) == high) { atomicAdd(counts, 1U); return; }
-    }
+    if (i < n) residual_sparsify::contract(
+        owned_sparsify_forest{edges, labels, best, parent, backbone, counts}, unsigned(i));
 }
 
 __global__ void owned_sparsify_labels(node_index n,
@@ -113,7 +129,7 @@ __global__ void owned_sparsify_labels(node_index n,
 __global__ void owned_sparsify_importance(const gpu_round_shadow_incidence* edges,
         std::size_t count, double* importance) {
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i < count) importance[i] = __dsqrt_rn(edges[i].weight);
+    if (i < count) importance[i] = residual_sparsify::importance(owned_sparsify_math{}, edges[i].weight);
 }
 
 /// One BLOCK per 16384-item chunk, mirroring owned_sparsify_statistics_partials
@@ -134,7 +150,7 @@ __global__ void owned_sparsify_partials(std::size_t count,
     double sum = 0.0;
     for (auto i = begin + lane; i < end; i += kBlock) {
         if (backbone[i]) continue; // Literal skip; never compact off-tree items.
-        const double term = initial ? importance[i] : fmin(1.0, __dmul_rn(scale->value, importance[i]));
+        const double term = initial ? importance[i] : residual_sparsify::probability(owned_sparsify_math{}, scale->value, importance[i]);
         sum = __dadd_rn(sum, term);
     }
     sums[lane] = sum;
@@ -151,21 +167,7 @@ __global__ void owned_sparsify_fold(std::size_t blocks, const double* partials,
     if (blockIdx.x || threadIdx.x || (!initial && !scale->advance)) return;
     double sum = 0.0;
     for (std::size_t i = 0; i < blocks; ++i) sum = __dadd_rn(sum, partials[i]);
-    if (initial) scale->value = scale->target > 0.0 && sum > 0.0 ? __ddiv_rn(scale->target, sum) : 0.0;
-    else {
-        ++scale->passes;
-        if (sum <= 0.0) { scale->advance = 0; return; }
-        scale->value = __dmul_rn(scale->value, __ddiv_rn(scale->target, sum));
-    }
-    scale->advance = scale->value > 0.0;
-}
-
-__device__ double owned_sparsify_draw(node_index u, node_index v, std::uint64_t seed) {
-    auto z = seed ^ (std::uint64_t(u) * 0x9E3779B97F4A7C15ULL) ^
-        (std::uint64_t(v) * 0xBF58476D1CE4E5B9ULL);
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL; z ^= z >> 31;
-    return __dmul_rn(double(z >> 11), 0x1.0p-53);
+    residual_sparsify::normalize(owned_sparsify_math{}, scale, sum, initial);
 }
 
 __global__ void owned_sparsify_sample(const gpu_round_shadow_incidence* edges,
@@ -175,13 +177,12 @@ __global__ void owned_sparsify_sample(const gpu_round_shadow_incidence* edges,
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i >= count) return;
     const auto e = edges[i]; const double lambda = override_scale >= 0.0 ? override_scale : scale->value;
-    const double p = backbone[i] ? 1.0 : fmin(1.0, __dmul_rn(lambda, importance_probability[i]));
-    importance_probability[i] = p;
-    kept[i] = p >= 1.0 || owned_sparsify_draw(e.owner, e.neighbor, seed) < p;
-    if (!isfinite(lambda) || !isfinite(p) || p < 0.0) atomicExch(error, 1U);
-    if (!kept[i]) return; // p==0 never divides, including an exactly-zero draw.
-    const double value = backbone[i] ? e.weight : __dmul_rn(e.weight, __ddiv_rn(1.0, p));
-    if (!isfinite(value) || !isfinite(double(static_cast<pool_value_t>(value)))) atomicExch(error, 1U);
+    const auto sampled = residual_sparsify::sample(owned_sparsify_math{}, e.weight,
+        importance_probability[i], lambda, backbone[i], unsigned(e.owner), unsigned(e.neighbor), seed);
+    importance_probability[i] = sampled.probability;
+    kept[i] = sampled.kept;
+    if (!sampled.valid || (sampled.kept && !isfinite(double(static_cast<pool_value_t>(sampled.value)))))
+        atomicExch(error, 1U);
 }
 
 struct owned_sparsify_diagnostic_partial {
