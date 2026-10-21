@@ -40,11 +40,12 @@ static_assert(sizeof(df32) == 8);
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #include "metal_params.inc"
 #undef APXCHOL_GPU_CODE
-static_assert(sizeof(Params) == 40);
+static_assert(sizeof(Params) == 44);
 static_assert(offsetof(Params, mode) == 16);
 static_assert(offsetof(Params, m) == 28);
 static_assert(offsetof(Params, spmv_lanes) == 32);
 static_assert(offsetof(Params, preconditioner_scale) == 36);
+static_assert(offsetof(Params, mapped_rows) == 40);
 
 using solve_state = gpu_pcg::solve_state<df32, float>;
 static_assert(sizeof(solve_state) == 48);
@@ -368,6 +369,7 @@ struct metal_solver::impl {
     bool operator_df = false, factor_fp16 = false;
     id<MTLBuffer> factor_metadata = nil;
     id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
+    id<MTLBuffer> operator_row_map = nil;
     prepared_tri fwd, bwd, lane_fwd, lane_bwd;
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
     id<MTLBuffer> tags = nil;
@@ -440,6 +442,7 @@ struct metal_solver::impl {
             if (encoder == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
             bind(encoder, 1, {x, r, ap, p, z, partial, state_buffer, device_op_ptr, device_op_col, op_hi,
                               op_lo != nil ? op_lo : op_hi, tags});
+            bind(encoder, 20, {operator_row_map != nil ? operator_row_map : device_op_ptr});
             record();
             [encoder endEncoding];
             encoder = nil;
@@ -675,6 +678,7 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
         if (resident) {
             device_op_ptr = resident->operator_ptr;
             device_op_col = resident->operator_idx;
+            operator_row_map = resident->operator_row_map;
             op_hi = resident->operator_hi;
             op_lo = resident->operator_lo;
         } else {
@@ -685,6 +689,7 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
 
         }
     });
+    arguments.mapped_rows = operator_row_map != nil;
     if (resident) {
         fwd = std::move(resident->forward);
         bwd = std::move(resident->backward);

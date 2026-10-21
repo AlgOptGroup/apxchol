@@ -18,6 +18,7 @@ struct resident_factor {
     triangle forward, backward;
     id<MTLBuffer> metadata = nil;
     id<MTLBuffer> operator_ptr = nil, operator_idx = nil;
+    id<MTLBuffer> operator_row_map = nil;
     id<MTLBuffer> operator_hi = nil, operator_lo = nil;
     factorization factor;
     bool half = false, operator_exact = true, operator_triangles_identical = false;

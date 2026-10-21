@@ -227,32 +227,24 @@ kernel void scan_unsigned_add(device unsigned *values [[buffer(0)]],
     if (i < n)
         values[i] += sums[i / 256];
 }
-kernel void operator_count(device const unsigned* ptr [[buffer(0)]],device const unsigned* perm [[buffer(1)]],
-                           device unsigned* out [[buffer(2)]],constant unsigned& n [[buffer(3)]],
-                           uint row [[thread_position_in_grid]]) {
-    if(row<n)out[perm[row]]=ptr[row+1]-ptr[row];
-    if(row==n)out[n]=0;
-}
 kernel void operator_emit(device const unsigned* ptr [[buffer(0)]],device const unsigned* idx [[buffer(1)]],
                           device const apxchol::detail::metal_host::df* values [[buffer(2)]],
-                          device const unsigned* perm [[buffer(3)]],device const unsigned* outptr [[buffer(4)]],
-                          device unsigned* outidx [[buffer(5)]],device float* hi [[buffer(6)]],device float* lo [[buffer(7)]],
-                          constant unsigned& n [[buffer(8)]],
-                          constant unsigned& triangles_identical [[buffer(9)]],
-                          constant unsigned& exact [[buffer(10)]],
+                          device const unsigned* perm [[buffer(3)]],
+                          device unsigned* outidx [[buffer(4)]],device float* hi [[buffer(5)]],device float* lo [[buffer(6)]],
+                          constant unsigned& n [[buffer(7)]],
+                          constant unsigned& triangles_identical [[buffer(8)]],
+                          constant unsigned& exact [[buffer(9)]],
                           uint row [[threadgroup_position_in_grid]],
                           uint lane [[thread_index_in_simdgroup]], uint width [[threads_per_simdgroup]]) {
     if(row>=n)return;
-    const unsigned begin=outptr[perm[row]];
     for(unsigned p=ptr[row]+lane;p<ptr[row+1];p+=width){
         const unsigned col=idx[p];unsigned canonical=p;
         if(!triangles_identical && col<row){unsigned first=ptr[col],last=ptr[col+1];
             while(first<last){const unsigned mid=first+(last-first)/2;if(idx[mid]<row)first=mid+1;else last=mid;}
             canonical=first;
         }
-        const unsigned target=begin+p-ptr[row];
-        outidx[target]=perm[col];hi[target]=values[canonical].hi;
-        if(!exact)lo[target]=values[canonical].lo;
+        outidx[p]=perm[col];hi[p]=values[canonical].hi;
+        if(!exact)lo[p]=values[canonical].lo;
     }
 }
 )msl";
@@ -268,7 +260,7 @@ class Finalizer {
     id<MTLCommandQueue> queue;
     id<MTLLibrary> library;
     std::array<std::array<id<MTLComputePipelineState>, 6>, 2> final_pipes;
-    id<MTLComputePipelineState> structure, scan_blocks, scan_add, operator_count, operator_emit;
+    id<MTLComputePipelineState> structure, scan_blocks, scan_add, operator_emit;
     std::array<id<MTLComputePipelineState>, 2> count{}, emit{};
     std::once_flag lane_plan_once;
     id<MTLComputePipelineState> pipeline(NSString *name, unsigned lanes = 0) {
@@ -288,12 +280,12 @@ class Finalizer {
         require(result != nil, "Metal factor preparation buffer allocation failed");
         return result;
     }
-    void finish(id<MTLCommandBuffer> cb, id<MTLBuffer> status) {
+    void finish(id<MTLCommandBuffer> cb, id<MTLBuffer> status = nil) {
         [cb commit];
         [cb waitUntilCompleted];
         if (cb.status != MTLCommandBufferStatusCompleted)
             throw std::runtime_error("Metal factor preparation command buffer failed: " + describe(cb.error));
-        const auto failure = *static_cast<unsigned *>(status.contents);
+        const auto failure = status ? *static_cast<unsigned *>(status.contents) : 0u;
         if (failure)
             throw std::runtime_error("Metal factor preparation failed: status " + std::to_string(failure));
     }
@@ -354,7 +346,6 @@ class Finalizer {
         emit[0] = pipeline(@"plan_emit", gd::lanes);
         scan_blocks = pipeline(@"scan_unsigned");
         scan_add = pipeline(@"scan_unsigned_add");
-        operator_count = pipeline(@"operator_count");
         operator_emit = pipeline(@"operator_emit");
         queue = [device newCommandQueue];
         require(queue != nil, "Metal factor preparation command queue creation failed");
@@ -428,32 +419,27 @@ class Finalizer {
     void prepare_operator(id<MTLBuffer> ptr, id<MTLBuffer> idx, id<MTLBuffer> values,
                           id<MTLBuffer> permutation, unsigned n, unsigned nnz,
                           resident_factor &out) {
-        out.operator_ptr = allocate((std::size_t(n) + 1) * sizeof(unsigned));
+        // Keep input row order; columns and vector outputs use this permutation.
+        out.operator_ptr = ptr;
+        out.operator_row_map = permutation;
         out.operator_idx = allocate(std::size_t(nnz) * sizeof(unsigned));
         out.operator_hi = allocate(std::size_t(nnz) * sizeof(float));
         out.operator_lo = out.operator_exact ? nil : allocate(std::size_t(nnz) * sizeof(float));
-        auto status = allocate(sizeof(unsigned));
-        *static_cast<unsigned *>(status.contents) = 0;
-        NSMutableArray *scan_scratch = [NSMutableArray new];
         auto cb = [queue commandBuffer];
-        auto enc = encoder(cb, operator_count, {ptr, permutation, out.operator_ptr});
-        [enc setBytes:&n length:sizeof n atIndex:3];
-        dispatch(enc, n + 1);
-        scan(cb, out.operator_ptr, n + 1, scan_scratch);
-        enc = encoder(cb, operator_emit,
-                      {ptr, idx, values, permutation, out.operator_ptr, out.operator_idx,
+        auto enc = encoder(cb, operator_emit,
+                      {ptr, idx, values, permutation, out.operator_idx,
                        out.operator_hi, out.operator_exact ? out.operator_hi : out.operator_lo});
-        [enc setBytes:&n length:sizeof n atIndex:8];
+        [enc setBytes:&n length:sizeof n atIndex:7];
         const unsigned triangles_identical = out.operator_triangles_identical;
-        [enc setBytes:&triangles_identical length:sizeof triangles_identical atIndex:9];
+        [enc setBytes:&triangles_identical length:sizeof triangles_identical atIndex:8];
         const unsigned exact = out.operator_exact;
-        [enc setBytes:&exact length:sizeof exact atIndex:10];
+        [enc setBytes:&exact length:sizeof exact atIndex:9];
         const unsigned width = operator_emit.threadExecutionWidth;
         require(width && width <= operator_emit.maxTotalThreadsPerThreadgroup, "invalid operator SIMD width");
         [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
         [enc endEncoding];
-        finish(cb, status);
+        finish(cb);
     }
     Finalized run(Factor &input, bool laplacian, bool half, double drop) {
         require(std::isfinite(drop) && drop >= 0, "Metal factor drop tolerance must be finite and nonnegative");
