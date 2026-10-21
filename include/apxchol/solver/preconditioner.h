@@ -122,10 +122,6 @@ std::array<double, Columns> det_sum_columns(const double* v, Eigen::Index n, dou
     return sum;
 }
 
-inline double det_sum(const double* v, Eigen::Index n, double* part) {
-    return det_sum_columns<1>(v, n, part)[0];
-}
-
 } // namespace detail
 
 /// Eigen-compatible preconditioner using approximate Cholesky factorization.
@@ -382,12 +378,7 @@ public:
     void _solve_impl(const auto& b, auto& x) const {
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
         const Eigen::Ref<const Eigen::VectorXd> bv(b);
-        ensure_part_();
-        // Σb feeds the Laplacian input centring, so it is only computed on a
-        // centring application (center-k schedule).
-        const bool center = !F_.sddm && take_center_();
-        const double b_sum = center ? detail::det_sum(bv.data(), n_, part_.data()) : 0.0;
-        apply_core<1>(bv.data(), {b_sum}, {center}, x.data(), nullptr);
+        apply_columns<1>(bv.data(), x.data());
     }
 
     /// PCG-loop application: z = M^{-1} r, with the reductions the outer loop
