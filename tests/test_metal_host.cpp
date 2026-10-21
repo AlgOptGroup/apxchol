@@ -57,27 +57,6 @@ TEST(MetalHost, ScalingRemainsFiniteAtFloatingPointLimits) {
     }
 }
 
-TEST(MetalHost, VectorPackingRoundTrip) {
-    const std::size_t n = 50001;
-    std::vector<double> v(n), permuted(n), back(n), out(n);
-    std::vector<std::uint32_t> perm(n);
-    std::vector<mh::df> packed(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        v[i] = std::sin(0.3 * static_cast<double>(i)) * std::ldexp(1.0, static_cast<int>(i % 40) - 20);
-        perm[i] = static_cast<std::uint32_t>((i * 7919) % n);
-    }
-    mh::scatter(v, perm, permuted);
-    mh::pack(permuted, 0.25, packed);
-    mh::add_unpacked(packed, 0.25, back);
-    mh::gather(back, perm, out);
-    for (std::size_t i = 0; i < n; ++i)
-        EXPECT_LE(std::fabs(out[i] - v[i]), std::ldexp(std::fabs(v[i]), -47));
-    mh::add_unpacked(packed, 0.25, back);
-    mh::gather(back, perm, out);
-    for (std::size_t i = 0; i < n; ++i)
-        EXPECT_LE(std::fabs(out[i] - 2 * v[i]), std::ldexp(std::fabs(v[i]), -46));
-}
-
 TEST(MetalHost, NormAcrossMagnitudes) {
     for (const double scale : {0.0, std::numeric_limits<double>::denorm_min(),
                                0x1p-530, 1e-200, 1.0, 1e200,

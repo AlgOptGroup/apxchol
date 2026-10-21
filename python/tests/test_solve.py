@@ -135,6 +135,21 @@ def test_apply_shape_and_finiteness():
     assert np.linalg.norm(z) > 0.0     # non-trivial preconditioner action
 
 
+def test_apply_vector_owns_result_after_solver_destruction():
+    slv = apxchol.solver(grid2d_sddm(7), backend="cpu")
+    r = np.random.default_rng(6).standard_normal(slv.shape[0])
+    z = slv.apply(r)
+    expected = z.copy()
+    slv.apply(-r)
+    r.fill(0)
+    del slv
+    assert z.dtype == np.float64 and z.flags.writeable
+    np.testing.assert_array_equal(z, expected)
+    z[0] += 1
+    expected[0] += 1
+    np.testing.assert_array_equal(z, expected)
+
+
 def test_non_square_raises():
     A = sp.csr_matrix(np.ones((3, 4)))
     with pytest.raises(ValueError):

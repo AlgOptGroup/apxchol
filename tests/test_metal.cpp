@@ -130,7 +130,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     }
     const auto forward = apxchol::cuda_host::transpose_csr(backward);
     std::vector<double> rp(n);
-    mh::scatter({r.data(), n}, F.perm, rp);
+    for (std::size_t v = 0; v < n; ++v) rp[F.perm[v]] = r[v];
     if (lap) {
         const double mean = std::accumulate(rp.begin(), rp.end(), 0.0) / n;
         for (auto& value : rp) value -= mean;
@@ -159,7 +159,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
         for (auto& value : rp) value -= mean;
     }
     Eigen::VectorXd out(r.size());
-    mh::gather(rp, F.perm, {out.data(), n});
+    for (std::size_t v = 0; v < n; ++v) out[v] = rp[F.perm[v]];
     return out;
 }
 

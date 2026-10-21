@@ -930,6 +930,7 @@ batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, d
     result.columns.resize(B.cols());
     const bool timing = !std::getenv("APXCHOL_NO_CHECKPOINT");
     result.timings.tick();
+    // Packed RHS values in z_ are consumed before the first preconditioner application overwrites them.
     for_rhs_panels(
         B, X, X0, z_, panel_x_,
         [&]<int C>(Eigen::Index first, const double *b, double *x, const double *x0) {

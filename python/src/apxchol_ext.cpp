@@ -146,15 +146,12 @@ public:
     using Array = py::array_t<double, py::array::forcecast>;
     using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
 
-    Array apply(Array r) const {
+    py::object apply(Array r) const {
         r = checked_rhs(r);
+        if (r.ndim() == 1)
+            return py::cast(slv_.apply(r.cast<Eigen::VectorXd>()));
         auto out = output_array(r, py::none());
-        if (r.ndim() == 1) {
-            Eigen::Map<Eigen::VectorXd>(out.mutable_data(), rows()) =
-                slv_.apply(r.cast<Eigen::VectorXd>());
-        } else {
-            slv_.apply(matrix(r), mutable_matrix(out));
-        }
+        slv_.apply(matrix(r), mutable_matrix(out));
         return out;
     }
 

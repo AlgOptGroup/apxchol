@@ -57,8 +57,8 @@ serve concurrent `solve`/`apply` calls; use separate instances or serialize.
 `solve` accepts `rtol` (default `1e-8`, overriding alias `tol`), `maxiter`,
 `x0`, and `out`. Right-hand sides may have shape `(n,)` or `(n, nrhs)`;
 `solve` and `apply` preserve that shape. For matrix inputs, `iters`, `residual`
-and `converged` are per-column arrays. CPU solves process RHS panels together;
-GPU solves share traversal across pairs, using the scalar path for an odd final column.
+and `converged` are per-column arrays. CPU and GPU solves share traversal across
+bounded RHS panels; width-one calls use the scalar path.
 `x0` and `out` must match the RHS shape. `out` must be writable, C- or
 F-contiguous float64 and is returned as `res.x`. Overlapping inputs are copied
 before writing output. An already-converged guess takes zero iterations.
