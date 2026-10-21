@@ -705,10 +705,12 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     if (!any_warm) std::fill_n(x, n * C, 0.0);
     const Eigen::Map<const Input> input(b, n, C);
     for (int c = 0; c < C; c++) {
-        norm[c] = warm[c] ? input.col(c).norm() : std::sqrt(rr[c]);
-        if constexpr (C == 1)
-            if (warm[c])
-                norm[c] = Eigen::Map<const Eigen::VectorXd>(b, n).norm();
+        if (!warm[c])
+            norm[c] = std::sqrt(rr[c]);
+        else if constexpr (C == 1)
+            norm[c] = Eigen::Map<const Eigen::VectorXd>(b, n).norm();
+        else
+            norm[c] = input.col(c).norm();
     }
     // Only exceptional columns need scaling; ordinary panels reuse their workspace.
     std::array<double, C> scales;
