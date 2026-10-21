@@ -1032,6 +1032,23 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
     EXPECT_THROW(apxchol::solver(unsorted, options), std::invalid_argument);
 }
 
+TEST_F(MetalDevice, ResidentSetupAcceptsIntermediateDegreeQuantiles) {
+    const auto A = grid(17, 19, 0.25, true);
+    const auto b = rhs(A.rows(), 3, false);
+    for (const auto storage : {apxchol::factor_storage_type::fp16, apxchol::factor_storage_type::fp32}) {
+        for (double quantile : {0.1, 0.3, 0.75, 0.9}) {
+            SCOPED_TRACE(testing::Message() << int(storage) << ' ' << quantile);
+            auto options = keep_opts();
+            options.factor_opts.factor_storage = storage;
+            options.factor_opts.partition.degree_quantile = quantile;
+            const apxchol::metal_solver solver(A, options);
+            const auto result = solver.solve(b, 1e-8, 300);
+            EXPECT_LE(result.residual, 1e-8);
+            EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+        }
+    }
+}
+
 TEST_F(MetalDevice, ResidentArenaIgnoresNonGraphEntries) {
     for (unsigned kind : {0u, 1u, 2u}) {
         SCOPED_TRACE(kind);
