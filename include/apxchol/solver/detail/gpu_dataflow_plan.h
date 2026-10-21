@@ -49,10 +49,11 @@ struct row_order {
 
 // Count and emit use the same walk on CPU and CUDA. Each invocation closes its
 // last batch, so independent tiles/workgroups can be packed with prefix sums.
-template <bool Emit, class Pointer>
+template <bool Emit, unsigned PlanLanes = lanes, class Pointer>
 APXCHOL_PLAN_FUNCTION counts pack_rows(const Pointer *ptr, row_order order, unsigned first, unsigned last,
                                        unsigned split_min, counts base = {}, unsigned *words = nullptr,
                                        segment *segments = nullptr) {
+    static_assert(PlanLanes && PlanLanes <= lanes && !(PlanLanes & (PlanLanes - 1)));
     counts c;
     auto pad = [&](unsigned alignment) {
         while (c.words % alignment) {
@@ -62,14 +63,14 @@ APXCHOL_PLAN_FUNCTION counts pack_rows(const Pointer *ptr, row_order order, unsi
         }
     };
     auto special = [&](segment s) {
-        pad(lanes);
+        pad(PlanLanes);
         if constexpr (Emit) {
             segments[base.segments + c.segments] = s;
-            for (unsigned i = 0; i < lanes; ++i)
+            for (unsigned i = 0; i < PlanLanes; ++i)
                 words[base.words + c.words + i] = special_bit | unsigned(base.segments + c.segments);
         }
         ++c.segments;
-        c.words += lanes;
+        c.words += PlanLanes;
     };
     for (unsigned q = first; q < last; ++q) {
         const unsigned row = order(q);
@@ -94,7 +95,7 @@ APXCHOL_PLAN_FUNCTION counts pack_rows(const Pointer *ptr, row_order order, unsi
             special({row | special_bit, first_slot, order.n + unsigned(base.slots + c.slots), row});
         } else {
             unsigned group = 1;
-            while (group < lanes && group * prefetch < size)
+            while (group < PlanLanes && group * prefetch < size)
                 group *= 2;
             pad(group);
             if constexpr (Emit)
@@ -103,7 +104,7 @@ APXCHOL_PLAN_FUNCTION counts pack_rows(const Pointer *ptr, row_order order, unsi
             c.words += group;
         }
     }
-    pad(lanes);
+    pad(PlanLanes);
     return c;
 }
 
@@ -113,12 +114,12 @@ struct packed_plan {
     unsigned slots = 0;
 };
 
-template <class Pointer>
+template <unsigned PlanLanes = lanes, class Pointer>
 inline packed_plan pack(const Pointer *ptr, row_order order, std::span<const unsigned> blocks,
                         unsigned split_min = chunk_size) {
     std::vector<counts> prefix(blocks.size());
     for (std::size_t b = 1; b < blocks.size(); ++b) {
-        auto c = pack_rows<false>(ptr, order, blocks[b - 1], blocks[b], split_min);
+        auto c = pack_rows<false, PlanLanes>(ptr, order, blocks[b - 1], blocks[b], split_min);
         auto p = prefix[b - 1];
         prefix[b] = {p.words + c.words, p.segments + c.segments, p.slots + c.slots};
     }
@@ -131,9 +132,9 @@ inline packed_plan pack(const Pointer *ptr, row_order order, std::span<const uns
     out.segments.resize(total.segments);
     out.slots = unsigned(total.slots);
     for (std::size_t b = 1; b < blocks.size(); ++b) {
-        pack_rows<true>(ptr, order, blocks[b - 1], blocks[b], split_min, prefix[b - 1], out.words.data(),
+        pack_rows<true, PlanLanes>(ptr, order, blocks[b - 1], blocks[b], split_min, prefix[b - 1], out.words.data(),
                         out.segments.data());
-        out.blocks.push_back(unsigned(prefix[b].words / lanes));
+        out.blocks.push_back(unsigned(prefix[b].words / PlanLanes));
     }
     return out;
 }

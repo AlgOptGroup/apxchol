@@ -116,6 +116,14 @@ void expect_output(const operator_csr& output,const Reference& ref,int precision
 }
 void compare(const HostCsc& input,const std::vector<std::uint32_t>& perm,int precision) {
     const auto wanted=reference(input,perm);DeviceOwner result;
+    if (precision == 1 && !wanted.exact_fp32) {
+        EXPECT_THROW(try_build_permuted_operator_csr(input.n,static_cast<int>(input.values.size()),
+            input.outer.data(),input.inner.data(),input.values.data(),perm.data(),precision,result.output),
+            std::invalid_argument);
+        EXPECT_EQ(result.output.row_ptr, nullptr);
+        EXPECT_EQ(result.output.values_f32, nullptr);
+        return;
+    }
     ASSERT_TRUE(try_build_permuted_operator_csr(input.n,static_cast<int>(input.values.size()),
         input.outer.data(),input.inner.data(),input.values.data(),perm.data(),precision,result.output));
     expect_output(result.output,wanted,precision);
@@ -156,6 +164,34 @@ HostCsc precision_input(bool inexact) {
         if (i%2) entries.push_back({static_cast<int>(i+1),static_cast<int>(i+1),-0.0});
     }
     return from_entries(static_cast<int>(values.size()+1),entries);
+}
+
+struct TestPreconditioner {
+    int n;
+    bool breakdown = false;
+    const auto& trsv() const { return *this; }
+    template<unsigned Columns>
+    void solve_LLt_dev(const double* input, double* output, const unsigned*, unsigned) const {
+        const auto bytes = n * Columns * sizeof(double);
+        const auto status = breakdown ? cudaMemset(output, 0, bytes)
+            : cudaMemcpy(output, input, bytes, cudaMemcpyDeviceToDevice);
+        if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
+    }
+};
+
+double independent_residual(const Eigen::SparseMatrix<double>& a,
+                            const Eigen::VectorXd& b, const Eigen::VectorXd& x) {
+    std::vector<long double> residual(b.size());
+    for (int i = 0; i < b.size(); ++i) residual[i] = b[i];
+    for (int col = 0; col < a.outerSize(); ++col)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(a, col); it; ++it)
+            residual[it.row()] -= static_cast<long double>(it.value()) * x[col];
+    long double rnorm = 0, bnorm = 0;
+    for (int i = 0; i < b.size(); ++i) {
+        rnorm = std::hypot(rnorm, residual[i]);
+        bnorm = std::hypot(bnorm, static_cast<long double>(b[i]));
+    }
+    return static_cast<double>(bnorm == 0 ? rnorm : rnorm / bnorm);
 }
 }
 #endif
@@ -356,8 +392,202 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
             EXPECT_GT(iterations,0);
             EXPECT_LE((A*result-b).norm()/b.norm(),1e-8);
             EXPECT_TRUE(std::isfinite(reported));
+            EXPECT_NEAR(reported, independent_residual(A, b, result), 2e-14);
         }
     }
+#endif
+}
+
+TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "CUDA solve required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    constexpr int n = 33;
+    for (bool laplacian : {false, true}) for (const char* precision : {"0", "1"}) {
+        SCOPED_TRACE(::testing::Message() << laplacian << ' ' << precision);
+        scoped_env op_precision("APXCHOL_GPU_FP32_OPERATOR", precision);
+        std::vector<Eigen::Triplet<double>> entries;
+        for (int i = 0; i < n; ++i) {
+            entries.emplace_back(i, i, laplacian ? 2.0 : 4.0);
+            entries.emplace_back(i, (i + 1) % n, -1.0);
+            entries.emplace_back((i + 1) % n, i, -1.0);
+        }
+        Eigen::SparseMatrix<double> a(n, n);
+        a.setFromTriplets(entries.begin(), entries.end());
+        std::vector<apxchol::node_index> perm(n);
+        for (int i = 0; i < n; ++i) perm[i] = n - 1 - i;
+        apxchol::cuda_pcg solver;
+        solver.setup(a, perm);
+        TestPreconditioner preconditioner{n};
+        Eigen::VectorXd exact(n);
+        for (int i = 0; i < n; ++i) exact[i] = std::sin(i + 0.25);
+        const Eigen::VectorXd base = a * exact;
+        for (double magnitude : {1.0, 1e-300, 1e300}) {
+            SCOPED_TRACE(magnitude);
+            const Eigen::VectorXd b = base * magnitude;
+            Eigen::VectorXd x;
+            int iterations = 0;
+            double reported = 0;
+            solver.solve(preconditioner, b, x, 1e-12, 100, iterations, reported, laplacian);
+            EXPECT_GT(iterations, 0);
+            EXPECT_NEAR(reported, independent_residual(a, b, x), 2e-14);
+            EXPECT_LT(reported, 1e-10);
+
+            Eigen::MatrixXd rhs(n, 2), output(n, 2), warm(n, 2);
+            rhs.col(0) = b;
+            rhs.col(1).setZero();
+            warm.col(0) = 0.25 * x;
+            warm.col(1).setZero();
+            std::array<int, 2> counts{};
+            std::array<double, 2> residuals{};
+            for (int limit : {0, 2, 100}) {
+                SCOPED_TRACE(limit);
+                solver.solve_panel<2>(preconditioner, rhs, output, 1e-12, limit,
+                                  counts, residuals, laplacian, &warm);
+                for (int q = 0; q < 2; ++q)
+                    EXPECT_NEAR(residuals[q], independent_residual(a, rhs.col(q), output.col(q)), 2e-14);
+                EXPECT_LE(counts[0], limit);
+                EXPECT_EQ(counts[1], 0);
+                EXPECT_EQ(residuals[1], 0);
+            }
+            // Shrinking the logical width must not inherit the pair's layout.
+            solver.solve(preconditioner, b, x, 1e-12, 0, iterations, reported, laplacian);
+            EXPECT_EQ(iterations, 0);
+            EXPECT_NEAR(reported, 1.0, 2e-15);
+        }
+        preconditioner.breakdown = true;
+        const Eigen::VectorXd warm = 0.25 * exact;
+        Eigen::VectorXd output;
+        int iterations;
+        double reported;
+        solver.solve(preconditioner, base, output, 1e-12, 10, iterations, reported, laplacian, &warm);
+        EXPECT_EQ(iterations, 0);
+        EXPECT_NEAR(reported, independent_residual(a, base, output), 2e-14);
+    }
+#endif
+}
+
+TEST(GpuSolveHonesty, ResidualIncludesRoundingWhenRestoringSubnormalSolutions) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "CUDA solve required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    constexpr int n = 3;
+    Eigen::SparseMatrix<double> a(n, n);
+    for (int i = 0; i < n; ++i) a.insert(i, i) = 3.25;
+    a.makeCompressed();
+    const std::vector<apxchol::node_index> perm{2, 0, 1};
+    apxchol::cuda_pcg solver;
+    solver.setup(a, perm);
+    TestPreconditioner preconditioner{n};
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    Eigen::MatrixXd b(n, 2), output(n, 2);
+    b.col(0).setConstant(100 * tiny);
+    b.col(1).setOnes();
+    std::array<int, 2> iterations{};
+    std::array<double, 2> residuals{};
+    solver.solve_panel<2>(preconditioner, b, output, 1e-12, 10, iterations, residuals, false);
+    EXPECT_GT(residuals[0], 1e-3);
+    for (int q = 0; q < 2; ++q)
+        EXPECT_NEAR(residuals[q], independent_residual(a, b.col(q), output.col(q)), 2e-14);
+
+    Eigen::VectorXd x;
+    int count;
+    double residual;
+    const Eigen::VectorXd underflow = Eigen::VectorXd::Constant(n, tiny);
+    EXPECT_THROW(solver.solve(preconditioner, underflow, x, 1e-12, 10, count, residual, false),
+                 std::underflow_error);
+    const Eigen::VectorXd ordinary = Eigen::VectorXd::Ones(n);
+    solver.solve(preconditioner, ordinary, x, 1e-12, 10, count, residual, false);
+    EXPECT_NEAR(residual, independent_residual(a, ordinary, x), 2e-14);
+
+    a *= 1.0 / 13.0; // 0.25 I: the restored solution exceeds the finite range.
+    solver.setup(a, perm);
+    const Eigen::VectorXd overflow = Eigen::VectorXd::Constant(n, std::numeric_limits<double>::max() / 2);
+    EXPECT_THROW(solver.solve(preconditioner, overflow, x, 1e-12, 10, count, residual, false),
+                 std::overflow_error);
+#endif
+}
+
+TEST(GpuSolveHonesty, FinalResidualDoesNotSquareAwayTinyErrors) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "CUDA solve required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    struct Case { int n; double leading, tail, residual; };
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    for (const auto test : {Case{2, 1, 1e-200, 1e-200}, Case{5, 2, tiny, tiny},
+                           Case{101, 1e100, 1e-224, 1e-323}}) {
+        const int n = test.n;
+        SCOPED_TRACE(n);
+        Eigen::SparseMatrix<double> a(n, n);
+        a.setIdentity();
+        std::vector<apxchol::node_index> perm(n);
+        std::iota(perm.begin(), perm.end(), 0);
+        apxchol::cuda_pcg solver;
+        solver.setup(a, perm);
+        TestPreconditioner preconditioner{n};
+        const double expected = test.residual;
+        Eigen::VectorXd b = Eigen::VectorXd::Constant(n, test.tail);
+        b[0] = test.leading;
+        Eigen::VectorXd warm = Eigen::VectorXd::Zero(n);
+        warm[0] = b[0];
+        Eigen::VectorXd x;
+        int iterations;
+        double residual;
+        solver.solve(preconditioner, b, x, 1e-250, 0, iterations, residual, false, &warm);
+        EXPECT_GT(residual, 0);
+        EXPECT_DOUBLE_EQ(residual / expected, 1.0);
+        EXPECT_EQ(iterations, 0);
+        Eigen::MatrixXd rhs(n, 2), initial(n, 2), output(n, 2);
+        rhs.col(0) = b;
+        rhs.col(1).setZero();
+        initial.col(0) = warm;
+        initial.col(1).setZero();
+        std::array<int, 2> counts{};
+        std::array<double, 2> residuals{};
+        solver.solve_panel<2>(preconditioner, rhs, output, 1e-250, 0, counts, residuals, false, &initial);
+        EXPECT_GT(residuals[0], 0);
+        EXPECT_DOUBLE_EQ(residuals[0] / expected, 1.0);
+        EXPECT_DOUBLE_EQ(residuals[1], 0.0);
+        EXPECT_EQ(counts, (std::array<int, 2>{0, 0}));
+    }
+#endif
+}
+
+TEST(GpuSolveHonesty, FinalResidualDoesNotOverflowBeforeNormalization) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "CUDA solve required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    constexpr int n = 5;
+    const double coefficient = std::numeric_limits<double>::max() / 2;
+    Eigen::SparseMatrix<double> a(n, n);
+    for (int i = 0; i < n; ++i) a.insert(i, i) = coefficient;
+    a.makeCompressed();
+    apxchol::cuda_pcg solver;
+    solver.setup(a, {0, 1, 2, 3, 4});
+    TestPreconditioner preconditioner{n};
+    const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, 2);
+    const Eigen::VectorXd warm = Eigen::VectorXd::Ones(n);
+    Eigen::VectorXd x;
+    int iterations;
+    double residual;
+    solver.solve(preconditioner, b, x, 1e-8, 0, iterations, residual, false, &warm);
+    EXPECT_DOUBLE_EQ(residual / (coefficient / 2), 1.0);
+    EXPECT_EQ(iterations, 0);
+    Eigen::MatrixXd rhs(n, 2), initial(n, 2), output(n, 2);
+    rhs.col(0) = b;
+    rhs.col(1).setZero();
+    initial.col(0) = warm;
+    initial.col(1).setZero();
+    std::array<int, 2> counts{};
+    std::array<double, 2> residuals{};
+    solver.solve_panel<2>(preconditioner, rhs, output, 1e-8, 0, counts, residuals, false, &initial);
+    EXPECT_DOUBLE_EQ(residuals[0] / (coefficient / 2), 1.0);
+    EXPECT_DOUBLE_EQ(residuals[1], 0.0);
+    EXPECT_EQ(counts, (std::array<int, 2>{0, 0}));
 #endif
 }
 
@@ -446,7 +676,7 @@ TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
         ASSERT_EQ(result.x.size(), n);
         EXPECT_TRUE(result.x.isZero(0.0));
         EXPECT_EQ(result.iterations, 0);
-        EXPECT_EQ(result.residual, 1.0);
+        EXPECT_NEAR(result.residual, 1.0, 2e-15);
         EXPECT_DOUBLE_EQ((A * result.x - b).norm() / b.norm(), result.residual);
     }
 #endif
@@ -484,7 +714,7 @@ TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
         ASSERT_EQ(result.x.size(), n);
         EXPECT_TRUE(result.x.isZero(0.0));
         EXPECT_EQ(result.iterations, 0);
-        EXPECT_EQ(result.residual, scale == 0.0 ? 0.0 : 1.0);
+        EXPECT_NEAR(result.residual, scale == 0.0 ? 0.0 : 1.0, 2e-15);
         const double denominator = b.norm() > 0.0 ? b.norm() : 1.0;
         EXPECT_DOUBLE_EQ((A * result.x - b).norm() / denominator, result.residual);
     }

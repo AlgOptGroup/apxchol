@@ -251,6 +251,53 @@ TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
     }
 }
 
+TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
+    const scoped_omp_threads threads(2);
+    const Sparse matrix = operator_matrix(65);
+    Eigen::MatrixXd rhs(matrix.rows(), 15), guess = rhs, output = rhs;
+    const double magnitudes[] = {1.0, 1e-200, 1e200, 0.0, 1e-160, 1e160};
+    for (int c = 0; c < rhs.cols(); ++c) {
+        const Eigen::VectorXd exact = magnitudes[c % 6] *
+            Eigen::VectorXd::LinSpaced(matrix.rows(), -1.0, 1.0);
+        rhs.col(c) = matrix * exact;
+        guess.col(c) = 0.25 * exact;
+    }
+    const apxchol::const_matrix_view initial(guess);
+    for (const auto storage : {apxchol::factor_storage_type::fp32,
+                               apxchol::factor_storage_type::fp16}) {
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::omp_sptrsv::fp16_supported())
+            continue;
+        auto options = cpu_options();
+        options.factor_opts.factor_storage = storage;
+        const apxchol::solver owner(matrix, options);
+        for (const bool warm : {false, true})
+            for (const int budget : {0, 1, 200}) {
+                SCOPED_TRACE(::testing::Message() << int(storage) << ' ' << warm << ' ' << budget);
+                const auto batch = owner.solve(rhs, output, 1e-8, budget, warm ? &initial : nullptr);
+                for (int c = 0; c < rhs.cols(); ++c) {
+                    const Eigen::VectorXd b = rhs.col(c), x0 = guess.col(c);
+                    const auto scalar = owner.solve(b, 1e-8, budget, warm ? &x0 : nullptr);
+                    ASSERT_TRUE(output.col(c).allFinite());
+                    EXPECT_EQ(batch.columns[c].iterations, scalar.iterations);
+                    EXPECT_NEAR(batch.columns[c].residual, scalar.residual, 1e-12);
+                    if (b.isZero(0.0)) {
+                        EXPECT_TRUE(output.col(c).isZero(0.0));
+                    } else {
+                        const double residual = (b - matrix * output.col(c)).stableNorm() / b.stableNorm();
+                        EXPECT_NEAR(batch.columns[c].residual, residual, 1e-12);
+                        if (budget == 200) {
+                            EXPECT_LT(residual, 1e-8);
+                        }
+                    }
+                }
+            }
+        Eigen::MatrixXd bad_guess = guess;
+        bad_guess.col(1).setConstant(1e200);
+        const apxchol::const_matrix_view incompatible(bad_guess);
+        EXPECT_THROW(owner.solve(rhs, output, 1e-8, 0, &incompatible), std::invalid_argument);
+    }
+}
+
 TEST(Solver, CpuRejectsUnrepresentableSolutions) {
     const scoped_omp_threads threads(1);
     const auto options = cpu_options();
@@ -264,9 +311,16 @@ TEST(Solver, CpuRejectsUnrepresentableSolutions) {
         ASSERT_TRUE(finite.x.allFinite());
         EXPECT_LT((matrix * finite.x - rhs).stableNorm() / rhs.stableNorm(), options.tol);
         const Eigen::VectorXd outside_range = Eigen::VectorXd::Constant(4, diagonal < 1 ? 1e300 : 1e-300);
+        Eigen::MatrixXd panel(matrix.rows(), 4), output(matrix.rows(), 4);
+        panel.col(0) = rhs;
+        panel.col(1).setZero();
+        panel.col(2) = outside_range;
+        panel.col(3) = rhs;
         if (diagonal < 1) {
             EXPECT_THROW(owner.solve(outside_range), std::overflow_error);
+            EXPECT_THROW(owner.solve(panel, output), std::overflow_error);
         } else {
+            EXPECT_THROW(owner.solve(panel, output), std::underflow_error);
             EXPECT_THROW(owner.solve(outside_range), std::underflow_error);
             matrix.coeffRef(0, 0) = 1;
             apxchol::solver mixed(matrix, options);
@@ -572,6 +626,250 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
 }
 #endif
 
+#if defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)
+TEST(Solver, GpuScalarAndBatchedResidualsDescribeReturnedSolutions) {
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+#ifdef APXCHOL_USE_CUDA
+    int devices = 0;
+    const auto status = cudaGetDeviceCount(&devices);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
+        GTEST_SKIP() << cudaGetErrorString(status);
+    ASSERT_EQ(status, cudaSuccess);
+    if (!devices) GTEST_SKIP() << "No CUDA devices";
+#else
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "No usable Metal device";
+#endif
+    const scoped_omp_threads threads(2);
+    for (const bool laplacian : {false, true}) {
+        Sparse matrix = operator_matrix(65);
+        if (laplacian)
+            for (int i = 0; i < matrix.rows(); ++i) matrix.coeffRef(i, i) -= 1.0;
+        matrix *= 1.1;
+        Eigen::MatrixXd exact(matrix.rows(), 5);
+        const double magnitudes[] = {1.0, 0.0, 1e-200, 1e200, -1.0};
+        for (int q = 0; q < exact.cols(); ++q)
+            exact.col(q) = magnitudes[q] *
+                Eigen::VectorXd::LinSpaced(matrix.rows(), -1.0, 1.0);
+        const Eigen::MatrixXd rhs = matrix * exact;
+        Eigen::MatrixXd guess = 0.25 * exact, output(matrix.rows(), exact.cols());
+        guess.col(0) = exact.col(0);
+        guess.col(1).setOnes();
+        const apxchol::const_matrix_view initial(guess);
+        for (const auto storage : {apxchol::factor_storage_type::fp16,
+                                   apxchol::factor_storage_type::fp32}) {
+            auto options = cpu_options();
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.factor_storage = storage;
+            const apxchol::solver owner(matrix, options);
+            for (const bool warm : {false, true}) {
+                for (const int budget : {0, 1, 200}) {
+                    SCOPED_TRACE(::testing::Message() << laplacian << ' '
+                        << int(storage) << ' ' << warm << ' ' << budget);
+                    const auto batch = owner.solve(rhs, output, 1e-8, budget,
+                                                   warm ? &initial : nullptr);
+                    ASSERT_EQ(batch.columns.size(), 5u);
+                    for (int q = 0; q < rhs.cols(); ++q) {
+                        const Eigen::VectorXd b = rhs.col(q), x0 = guess.col(q);
+                        const auto scalar = owner.solve(b, 1e-8, budget, warm ? &x0 : nullptr);
+                        const auto check = [&](const apxchol::solve_result& result,
+                                               const Eigen::VectorXd& x) {
+                            ASSERT_TRUE(x.allFinite());
+                            const double norm = b.stableNorm();
+                            const double measured = norm ? (b - matrix * x).stableNorm() / norm : 0;
+                            if (!norm) EXPECT_TRUE(x.isZero(0.0));
+                            EXPECT_LE(result.iterations, budget);
+                            EXPECT_NEAR(result.residual, measured, 1e-12 * (1 + measured));
+                        };
+                        check(batch.columns[q], output.col(q));
+                        check(scalar, scalar.x);
+                    }
+                }
+            }
+        }
+    }
+    // Small components still contribute to the reported residual beside a
+    // much larger component that the initial guess already solves exactly.
+    Sparse identity(101, 101);
+    identity.setIdentity();
+    Eigen::MatrixXd rhs = Eigen::MatrixXd::Zero(101, 2), guess = rhs, output = rhs;
+    rhs(0, 0) = 2;
+    rhs.col(0).segment(1, 4).setConstant(std::numeric_limits<double>::denorm_min());
+    rhs(0, 1) = 1e100;
+    rhs.col(1).tail(100).setConstant(1e-224);
+    guess.row(0) = rhs.row(0);
+    const apxchol::const_matrix_view initial(guess);
+    auto options = cpu_options();
+    options.backend = apxchol::solve_backend::gpu;
+    const apxchol::solver owner(identity, options);
+    const auto batch = owner.solve(rhs, output, 1e-8, 0, &initial);
+    ASSERT_EQ(batch.columns.size(), 2u);
+    for (int q = 0; q < rhs.cols(); ++q) {
+        const Eigen::VectorXd b = rhs.col(q), x0 = guess.col(q);
+        const auto scalar = owner.solve(b, 1e-8, 0, &x0);
+        const double expected = (b - x0).stableNorm() / b.stableNorm();
+        ASSERT_GT(expected, 0);
+        EXPECT_EQ(batch.columns[q].residual, expected);
+        EXPECT_EQ(scalar.residual, expected);
+        EXPECT_TRUE(output.col(q).isApprox(x0, 0));
+        EXPECT_TRUE(scalar.x.isApprox(x0, 0));
+    }
+#endif
+}
+#endif
+
+TEST(Solver, CpuMatrixRhsUsesIndependentStopsAndOneTimingTree) {
+    const scoped_omp_threads threads(2);
+    const scoped_env checkpoints("APXCHOL_NO_CHECKPOINT", nullptr);
+    constexpr int side = 96, n = side * side;
+    std::vector<Eigen::Triplet<double>> entries;
+    std::vector<double> diagonal(n);
+    auto edge = [&](int a, int b) {
+        entries.emplace_back(a, b, -1.0);
+        entries.emplace_back(b, a, -1.0);
+        ++diagonal[a]; ++diagonal[b];
+    };
+    for (int i = 0; i < n; ++i) {
+        if (i % side) edge(i - 1, i);
+        if (i >= side) edge(i - side, i);
+    }
+    for (int i = 0; i < n; ++i) entries.emplace_back(i, i, diagonal[i]);
+    Sparse matrix(n, n);
+    matrix.setFromTriplets(entries.begin(), entries.end());
+    auto options = cpu_options();
+    apxchol::solver owner(matrix, options);
+    Eigen::MatrixXd rhs(n, 10), x0 = Eigen::MatrixXd::Zero(n, 10), x(n, 10);
+    for (int c = 0; c < rhs.cols(); ++c) {
+        for (int i = 0; i < n; ++i) rhs(i, c) = std::sin(double(i + 1) * (c + 1));
+        rhs.col(c).array() -= rhs.col(c).mean();
+    }
+    rhs.col(0).setZero();
+    x0.col(0).setOnes();
+    x0.col(1) = Eigen::VectorXd::LinSpaced(n, -1.0, 1.0);
+    rhs.col(1) = matrix * x0.col(1);
+    const apxchol::const_matrix_view initial(x0);
+    const auto batch = owner.solve(rhs, x, 1e-10, 200, &initial);
+    ASSERT_EQ(batch.columns.size(), 10u);
+    EXPECT_EQ(batch.columns[0].iterations, 0);
+    EXPECT_EQ(batch.columns[1].iterations, 0);
+    EXPECT_TRUE(x.col(0).isZero(0.0));
+    EXPECT_GT(batch.timings.total("pcg"), 0.0);
+    for (int c = 0; c < rhs.cols(); ++c) {
+        EXPECT_EQ(batch.columns[c].x.size(), 0);
+        EXPECT_DOUBLE_EQ(batch.columns[c].timings.total("pcg"), 0.0);
+        EXPECT_EQ(batch.columns[c].backend, apxchol::solve_backend::cpu);
+        if (c > 0) expect_solution(matrix, rhs.col(c), x.col(c), 1e-9);
+        const Eigen::VectorXd b = rhs.col(c), guess = x0.col(c);
+        const auto scalar = owner.solve(b, 1e-10, 200, &guess);
+        EXPECT_LE((x.col(c) - scalar.x).norm(), 1e-7 * std::max(1.0, scalar.x.norm()));
+    }
+    const auto exhausted = owner.solve(rhs, x, 1e-10, 0);
+    for (int c = 0; c < rhs.cols(); ++c) {
+        EXPECT_EQ(exhausted.columns[c].iterations, 0);
+        EXPECT_DOUBLE_EQ(exhausted.columns[c].residual, c ? 1.0 : 0.0);
+    }
+}
+
+TEST(Solver, CpuMatrixRhsRejectsAliasingAndAcceptsEmptyBatches) {
+    const scoped_omp_threads threads(1);
+    apxchol::solver owner(operator_matrix(), cpu_options());
+    Eigen::MatrixXd rhs = Eigen::MatrixXd::Ones(owner.rows(), 3);
+    EXPECT_THROW(owner.solve(rhs, rhs), std::invalid_argument);
+    EXPECT_THROW(owner.apply(rhs, rhs), std::invalid_argument);
+    Eigen::MatrixXd wrong(owner.rows() - 1, 3);
+    EXPECT_THROW(owner.solve(rhs, wrong), std::invalid_argument);
+    Eigen::MatrixXd empty(owner.rows(), 0), output(owner.rows(), 0);
+    const auto result = owner.solve(empty, output);
+    EXPECT_TRUE(result.columns.empty());
+    EXPECT_DOUBLE_EQ(result.timings.total("pcg"), 0.0);
+    EXPECT_NO_THROW(owner.apply(empty, output));
+}
+
+TEST(Solver, CpuMatrixRhsKeepsConvergedColumnsWhileOtherColumnsContinue) {
+    const scoped_omp_threads threads(1);
+    constexpr int n = 17;
+    Sparse identity(n, n);
+    identity.setIdentity();
+    Sparse matrix = identity;
+    matrix.diagonal() = Eigen::VectorXd::LinSpaced(n, 1.0, double(n));
+    apxchol::cpu_solver owner(matrix, apxchol::factorize(identity), cpu_options());
+    Eigen::MatrixXd rhs = Eigen::MatrixXd::Zero(n, 4), guess = rhs, x(n, 4);
+    guess(n - 1, 0) = 1;
+    rhs.col(0) = matrix * guess.col(0);
+    rhs(0, 2) = 1;
+    rhs.col(3).setOnes();
+    const apxchol::const_matrix_view initial(guess);
+    const auto result = owner.solve(rhs, x, 1e-10, 200, &initial);
+    ASSERT_EQ(result.columns.size(), 4u);
+    EXPECT_EQ(result.columns[0].iterations, 0);
+    EXPECT_EQ(result.columns[1].iterations, 0);
+    EXPECT_EQ(result.columns[2].iterations, 1);
+    EXPECT_GT(result.columns[3].iterations, 1);
+    EXPECT_TRUE(x.col(0).isApprox(guess.col(0), 0.0));
+    EXPECT_TRUE(x.col(1).isZero(0.0));
+    EXPECT_TRUE(x.col(2).isApprox(rhs.col(2), 0.0));
+    for (int c : {0, 2, 3})
+        expect_solution(matrix, rhs.col(c), x.col(c));
+}
+
+TEST(Solver, CpuSingletonPanelsRespectStridesWarmStartsAndBudgets) {
+    const scoped_omp_threads threads(2);
+    const Sparse matrix = operator_matrix();
+    apxchol::solver owner(matrix, cpu_options());
+    const Eigen::Index n = owner.rows();
+    using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+    using View = Eigen::Map<Eigen::MatrixXd, 0, Stride>;
+    for (int columns : {1, 9}) {
+        Eigen::MatrixXd rhs(n, columns), guess = Eigen::MatrixXd::Ones(n, columns);
+        for (int c = 0; c < columns; ++c)
+            for (Eigen::Index i = 0; i < n; ++i)
+                rhs(i, c) = std::sin(double(i + 1) * (c + 1));
+        rhs.col(columns - 1) = matrix * guess.col(columns - 1);
+        if (columns > 1) rhs.col(0).setZero();
+        const apxchol::const_matrix_view initial(guess);
+        for (int row_stride : {2, -2}) {
+            Eigen::MatrixXd stored_rhs = Eigen::MatrixXd::Constant(2 * n, columns, 91.0);
+            Eigen::MatrixXd stored_guess = stored_rhs, stored_x = stored_rhs;
+            const Eigen::Index offset = row_stride < 0 ? 2 * n - 2 : 0;
+            const Stride stride(2 * n, row_stride);
+            View strided_rhs(stored_rhs.data() + offset, n, columns, stride);
+            View strided_guess(stored_guess.data() + offset, n, columns, stride);
+            View strided_x(stored_x.data() + offset, n, columns, stride);
+            strided_rhs = rhs;
+            strided_guess = guess;
+            const apxchol::const_matrix_view strided_initial(strided_guess);
+            for (bool warm : {false, true})
+                for (int budget : {0, 1, 200}) {
+                    Eigen::MatrixXd x(n, columns);
+                    const auto direct = owner.solve(rhs, x, 1e-10, budget,
+                                                     warm ? &initial : nullptr);
+                    const auto packed = owner.solve(strided_rhs, strided_x, 1e-10, budget,
+                                                     warm ? &strided_initial : nullptr);
+                    for (int c = 0; c < columns; ++c) {
+                        EXPECT_EQ(direct.columns[c].iterations, packed.columns[c].iterations);
+                        EXPECT_DOUBLE_EQ(direct.columns[c].residual, packed.columns[c].residual);
+                        EXPECT_LE((x.col(c) - strided_x.col(c)).norm(),
+                                  1e-12 * std::max(1.0, x.col(c).norm()));
+                        if (budget == 0 || (warm && c == columns - 1)) {
+                            EXPECT_EQ(direct.columns[c].iterations, 0);
+                        }
+                        if (budget == 200 && !rhs.col(c).isZero(0))
+                            expect_solution(matrix, rhs.col(c), x.col(c));
+                    }
+                }
+            Eigen::MatrixXd applied(n, columns);
+            owner.apply(rhs, applied);
+            owner.apply(strided_rhs, strided_x);
+            EXPECT_LE((applied - strided_x).norm(), 1e-12 * std::max(1.0, applied.norm()));
+            for (Eigen::Index i = 1; i < 2 * n; i += 2)
+                EXPECT_TRUE(stored_x.row(i).isConstant(91.0));
+        }
+        EXPECT_THROW(owner.solve(rhs, rhs), std::invalid_argument);
+        EXPECT_THROW(owner.solve(rhs, guess, 1e-10, 200, &initial), std::invalid_argument);
+    }
+}
+
 #ifdef _OPENMP
 namespace {
 template<class Owner>
@@ -597,6 +895,18 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
             owner.solve(rhs, Eigen::Ref<Eigen::VectorXd>(output));
             expect_solution(matrix, rhs, output);
         }
+        EXPECT_EQ(omp_get_max_threads(), ambient);
+    }
+    Eigen::MatrixXd rhs_panel = rhs.replicate(1, 5), output(matrix.rows(), 5);
+    if constexpr (requires { owner.solve(rhs_panel, output); owner.apply(rhs_panel, output); }) {
+        const auto batch = owner.solve(rhs_panel, output);
+        EXPECT_EQ(omp_get_max_threads(), ambient);
+        EXPECT_EQ(batch.columns.size(), 5u);
+        for (int c = 0; c < output.cols(); ++c) expect_solution(matrix, rhs, output.col(c));
+        owner.apply(rhs_panel, output);
+        EXPECT_TRUE(output.allFinite());
+        EXPECT_EQ(omp_get_max_threads(), ambient);
+        EXPECT_THROW(owner.solve(rhs_panel, rhs_panel), std::invalid_argument);
         EXPECT_EQ(omp_get_max_threads(), ambient);
     }
     const Eigen::VectorXd wrong_guess = Eigen::VectorXd::Zero(1);

@@ -34,8 +34,10 @@ __device__ __forceinline__ float dataflow_accumulate(__half *values, float *x, f
 #undef APXCHOL_GPU_FUNCTION
 #undef APXCHOL_UNROLL
 
-template <class Value> struct dataflow_memory {
+template <class Value, unsigned Columns = 1, unsigned RhsLanes = 1> struct dataflow_memory {
     using stored_value = Value;
+    static constexpr unsigned columns = Columns;
+    static constexpr unsigned rhs_lanes = RhsLanes;
     const int *__restrict__ ptr;
     const int *__restrict__ col;
     const Value *__restrict__ val;
@@ -53,9 +55,14 @@ template <class Value> struct dataflow_memory {
     const double *rhs64 = nullptr;
     double *out64 = nullptr;
 
+    unsigned active_stride = 1;
+    __device__ bool enabled(unsigned q) const { return !active || active[q * active_stride]; }
     __device__ Value value(unsigned pos, unsigned, unsigned) const { return val[pos]; }
     __device__ unsigned width(unsigned size) const {
-        return 1u << min(5u, 32u - __clz((size ? size - 1 : 0) / 8));
+        if constexpr (RhsLanes == 1)
+            return 1u << min(5u, 32u - __clz((size ? size - 1 : 0) / 8));
+        else
+            return min(32u / RhsLanes, 1u << min(5u, 32u - __clz((size ? size - 1 : 0) / 8)));
     }
     __device__ unsigned claim() const { return atomicAdd(ticket, 1); }
     __device__ unsigned broadcast(unsigned x) const { return __shfl_sync(0xffffffffu, x, 0); }
@@ -64,14 +71,14 @@ template <class Value> struct dataflow_memory {
     __device__ float shuffle(float x, unsigned offset) const {
         return __shfl_xor_sync(0xffffffffu, x, offset);
     }
-    __device__ unsigned load(unsigned row) const {
-        return cuda::atomic_ref<unsigned, cuda::thread_scope_device>(tags[row]).load(
+    __device__ unsigned load(unsigned row, unsigned q) const {
+        return cuda::atomic_ref<unsigned, cuda::thread_scope_device>(tags[row * Columns + q]).load(
             cuda::memory_order_relaxed);
     }
     __device__ float as_float(unsigned x) const { return __uint_as_float(x); }
-    __device__ void reset(unsigned row) const { tags[row] = 0x7f800001u; }
-    __device__ void prepare(unsigned row, float &b, float &d) const {
-        const float input = rhs64 ? float(rhs64[row]) : rhs[row];
+    __device__ void reset(unsigned row, unsigned q) const { tags[row * Columns + q] = 0x7f800001u; }
+    __device__ void prepare(unsigned row, unsigned q, float &b, float &d) const {
+        const float input = rhs64 ? float(rhs64[row * Columns + q]) : rhs[row * Columns + q];
         b = scale ? float(double(input) * scale[row]) : input;
         if constexpr (std::is_same_v<Value, __half>)
             d = diag[row];
@@ -79,34 +86,36 @@ template <class Value> struct dataflow_memory {
             d = val[reverse ? ptr[row] : ptr[row + 1] - 1];
     }
     __device__ float finish(float b, float d, float sum) const { return (b - sum) / d; }
-    __device__ void publish(unsigned row, float x) const {
+    __device__ void publish(unsigned row, unsigned q, float x) const {
         if (row < n) {
-            if (out64) out64[row] = x;
-            else out[row] = x;
+            if (out64) out64[row * Columns + q] = x;
+            else out[row * Columns + q] = x;
         }
         // Ready and value share one atomic word. Canonicalize NaNs so a failed
         // numerical solve cannot turn into an endless wait on the pending marker.
-        cuda::atomic_ref<unsigned, cuda::thread_scope_device>(tags[row]).store(
+        cuda::atomic_ref<unsigned, cuda::thread_scope_device>(tags[row * Columns + q]).store(
             isnan(x) ? 0x7fc00000u : __float_as_uint(x), cuda::memory_order_relaxed);
     }
 };
 
 template <class Memory> __global__ void initialize(Memory m, unsigned count) {
-    if (m.active && !*m.active) return;
+    bool active = false;
+    for (unsigned q = 0; q < Memory::columns; ++q) active |= m.enabled(q);
+    if (!active) return;
     const unsigned row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row == 0)
         *m.ticket = 0;
     if (row >= count)
         return;
-    dataflow_initialize(m, row);
+    dataflow_initialize<Memory::columns>(m, row);
 }
 
 template <class Memory> __global__ void __launch_bounds__(kDataflowBlock) solve_dataflow(Memory m) {
-    if (!m.active || *m.active) dataflow_run(m, threadIdx.x % 32);
+    dataflow_run<Memory::columns, Memory::rhs_lanes>(m, threadIdx.x % 32);
 }
 
-template <class Value>
-void launch(cudaStream_t stream, dataflow_memory<Value> memory, unsigned count, int grid) {
+template <class Value, unsigned Columns, unsigned RhsLanes>
+void launch(cudaStream_t stream, dataflow_memory<Value, Columns, RhsLanes> memory, unsigned count, int grid) {
     if (!memory.n)
         return;
     initialize<<<(count + 255) / 256, 256, 0, stream>>>(memory, count);
@@ -117,37 +126,45 @@ void launch(cudaStream_t stream, dataflow_memory<Value> memory, unsigned count, 
 } // namespace
 
 
+template<unsigned Columns, unsigned RhsLanes>
 int dataflow_grid_size(bool fp16) {
     int device, sms, resident;
     dataflow_check(cudaGetDevice(&device), "query device");
     dataflow_check(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device), "query SM count");
     if (fp16)
         dataflow_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                           &resident, solve_dataflow<dataflow_memory<__half>>, kDataflowBlock, 0),
+                           &resident, solve_dataflow<dataflow_memory<__half, Columns, RhsLanes>>, kDataflowBlock, 0),
                        "query FP16 occupancy");
     else
         dataflow_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                           &resident, solve_dataflow<dataflow_memory<float>>, kDataflowBlock, 0),
+                           &resident, solve_dataflow<dataflow_memory<float, Columns, RhsLanes>>, kDataflowBlock, 0),
                        "query FP32 occupancy");
     const char *requested = std::getenv("APXCHOL_GPU_DATAFLOW_BLOCKS");
     return std::max(1, std::min(sms * resident, requested ? std::atoi(requested) : sms));
 }
 
+template<unsigned Columns, unsigned RhsLanes>
 void dataflow_solve(cudaStream_t stream, int m, bool reverse, const int *ptr, const int *col,
                     const void *val, const float *diag, const double *scale,
                     const unsigned *words, const detail::gpu_dataflow::segment *segments,
                     unsigned batches, unsigned *tags, unsigned tag_count, unsigned *ticket, int grid,
                     const float *rhs, float *out, const unsigned *active,
-                    const double *rhs64, double *out64) {
+                    const double *rhs64, double *out64, unsigned active_stride) {
     auto run = [&]<class Value>(const Value* values) {
         launch(stream,
-               dataflow_memory<Value>{ptr, col, values, words, segments, tags, ticket, rhs, out,
-                                      unsigned(m), batches, reverse, diag, scale, active, rhs64, out64},
+               dataflow_memory<Value, Columns, RhsLanes>{ptr, col, values, words, segments, tags, ticket, rhs, out,
+                                      unsigned(m), batches, reverse, diag, scale, active, rhs64, out64, active_stride},
                tag_count, grid);
     };
     if (diag) run(static_cast<const __half*>(val));
     else run(static_cast<const float*>(val));
 }
+template int dataflow_grid_size<1, 1>(bool);
+template int dataflow_grid_size<2, 1>(bool);
+template int dataflow_grid_size<4, 4>(bool);
+template void dataflow_solve<1, 1>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
+template void dataflow_solve<2, 1>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
+template void dataflow_solve<4, 4>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
 } // namespace apxchol
 
 namespace apxchol::detail {
@@ -201,7 +218,7 @@ struct add_plan_counts {
     }
 };
 
-template <bool Emit>
+template <bool Emit, unsigned PlanLanes = 32>
 __global__ void pack_chunks(unsigned m, bool reverse, const int *ptr, unsigned split_min, unsigned chunks,
                             plan_counts *counts, const plan_counts *prefix, unsigned *words,
                             gpu_dataflow::segment *segments) {
@@ -209,7 +226,7 @@ __global__ void pack_chunks(unsigned m, bool reverse, const int *ptr, unsigned s
     if (chunk > chunks || (Emit && chunk == chunks))
         return;
     const unsigned first = min(m, chunk * kPlanChunk), last = min(m, first + kPlanChunk);
-    const auto c = gpu_dataflow::pack_rows<Emit>(ptr, {m, reverse}, first, last, split_min,
+    const auto c = gpu_dataflow::pack_rows<Emit, PlanLanes>(ptr, {m, reverse}, first, last, split_min,
                                                  Emit ? prefix[chunk] : plan_counts{}, words, segments);
     if constexpr (!Emit)
         counts[chunk] = c;
@@ -219,9 +236,10 @@ __global__ void pack_chunks(unsigned m, bool reverse, const int *ptr, unsigned s
 
 dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, const int *rowptr,
                                                 int split_min, const float *__restrict__ diag,
-                                                const double *inv_scale2) {
+                                                const double *inv_scale2, unsigned plan_lanes) {
     if (m < 0 || m == INT_MAX || nnz < m || !rowptr || split_min < -1 ||
-        static_cast<bool>(diag) != static_cast<bool>(inv_scale2))
+        static_cast<bool>(diag) != static_cast<bool>(inv_scale2) ||
+        (plan_lanes != 8 && plan_lanes != 32))
         throw std::invalid_argument("GPU dataflow plan: invalid dimensions or metadata");
     dataflow_device_plan result;
     // Preserve the temporary cudaFree order while allocating at first use.
@@ -249,8 +267,12 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
     const int chunks = m / kPlanChunk + (m % kPlanChunk != 0);
     counts_by_chunk.allocate(2 * static_cast<std::size_t>(chunks + 1), "allocate tile counts and prefixes");
     plan_counts *prefix = counts_by_chunk.get() + chunks + 1;
-    pack_chunks<false><<<(chunks + 128) / 128, 128>>>(m, reverse, rowptr, split_min, chunks,
-                                                      counts_by_chunk.get(), nullptr, nullptr, nullptr);
+    auto count = [&]<unsigned Lanes>() {
+        pack_chunks<false, Lanes><<<(chunks + 128) / 128, 128>>>(m, reverse, rowptr, split_min, chunks,
+                                                             counts_by_chunk.get(), nullptr, nullptr, nullptr);
+    };
+    if (plan_lanes == 8) count.template operator()<8>();
+    else count.template operator()<32>();
     dataflow_check(cudaGetLastError(), "tile count launch");
     std::size_t scratch_bytes = 0;
     dataflow_check(cub::DeviceScan::ExclusiveScan(nullptr, scratch_bytes, counts_by_chunk.get(), prefix,
@@ -267,15 +289,19 @@ dataflow_device_plan build_dataflow_device_plan(int m, bool reverse, int nnz, co
     if (counts.words > UINT_MAX || counts.segments >= gpu_dataflow::special_bit ||
         counts.slots + static_cast<unsigned long long>(m) >= gpu_dataflow::special_bit)
         throw std::overflow_error("GPU dataflow plan exceeds 32-bit capacity");
-    result.n_batches = static_cast<int>(counts.words / gpu_dataflow::lanes);
+    result.n_batches = static_cast<int>(counts.words / plan_lanes);
     result.n_slots = static_cast<int>(counts.slots);
     result.n_split = static_cast<int>(counts.segments - counts.slots);
     cuda_buffer<unsigned, dataflow_check> words;
     cuda_buffer<gpu_dataflow::segment, dataflow_check> segments;
     words.allocate(counts.words, "allocate tasks");
     segments.allocate(counts.segments, "allocate segments");
-    pack_chunks<true><<<(chunks + 127) / 128, 128>>>(m, reverse, rowptr, split_min, chunks, nullptr,
-                                                     prefix, words.get(), segments.get());
+    auto emit = [&]<unsigned Lanes>() {
+        pack_chunks<true, Lanes><<<(chunks + 127) / 128, 128>>>(m, reverse, rowptr, split_min, chunks, nullptr,
+                                                            prefix, words.get(), segments.get());
+    };
+    if (plan_lanes == 8) emit.template operator()<8>();
+    else emit.template operator()<32>();
     dataflow_check(cudaGetLastError(), "emit chunk plans");
     dataflow_check(cudaDeviceSynchronize(), "finish device plan");
     result.bytes = words.bytes() + segments.bytes();

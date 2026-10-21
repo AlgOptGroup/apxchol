@@ -8,6 +8,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 // The GPU-resident PCG's own kernels (see pcg_cuda_kernels.h for the contract):
@@ -33,6 +34,7 @@ struct pcg_math {
         return __shfl_down_sync(0xffffffffu, value, offset, width);
     }
     __device__ double add_product(double sum, double a, double b) const { return sum + a * b; }
+    __device__ double update_solution(double x, double alpha, double p) const { return add_product(x, alpha, p); }
     __device__ double subtract_product(double a, double b, double c) const { return a - b * c; }
     __device__ double direction(double z, double p, double beta) const { return z + beta * p; }
     template<class Value>
@@ -45,28 +47,31 @@ struct pcg_math {
 };
 
 // Every thread participates; the first warp folds one partial per warp.
-__device__ __forceinline__ double block_reduce_sum(double v, double* sh) {
-    v = sum_lanes<32>(pcg_math<>{}, v);
+template<class Math = pcg_math<>>
+__device__ __forceinline__ double block_reduce_sum(double v, double* sh, Math math = {}) {
+    v = sum_lanes<32>(math, v);
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     if (lane == 0) sh[warp] = v;
     __syncthreads();
-    return warp == 0 ? sum_lanes<32>(pcg_math<>{}, lane < kWarps ? sh[lane] : 0.0) : 0.0;
+    return warp == 0 ? sum_lanes<32>(math, lane < kWarps ? sh[lane] : 0.0) : 0.0;
 }
 
-template<operation Op, int Lanes = 1, class Value = double>
+template<operation Op, int Lanes = 1, unsigned Columns = 1, class Value = double>
 __global__ void __launch_bounds__(kBlockThreads)
 step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
             const int* col = nullptr, const Value* val = nullptr) {
     constexpr int rows = kBlockThreads / Lanes;
     const pcg_work<std::int64_t> work{static_cast<std::int64_t>(blockIdx.x) * rows, n,
         static_cast<std::int64_t>(gridDim.x) * rows, threadIdx.x / Lanes, n};
-    const double sum = detail::gpu_pcg::step<Lanes>(
+    const auto sums = detail::gpu_pcg::step_columns<Lanes, Columns>(
         Op, pcg_math<Lanes>{}, v, ptr, col, val, static_cast<const Value*>(nullptr),
         work, threadIdx.x % Lanes);
     if constexpr (Op != operation::direction) {
-        __shared__ double scratch[kWarps];
-        const double total = block_reduce_sum(sum, scratch);
-        if (threadIdx.x == 0) v.partial[blockIdx.x] = total;
+        __shared__ double scratch[Columns][kWarps];
+        for (unsigned q = 0; q < Columns; ++q) {
+            const double total = block_reduce_sum(sums.values[q], scratch[q]);
+            if (threadIdx.x == 0) v.partial[blockIdx.x * Columns + q] = total;
+        }
     }
 }
 
@@ -80,22 +85,29 @@ struct recurrence_math {
     __device__ bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
 };
 
+template<unsigned Columns>
 __global__ void __launch_bounds__(kBlockThreads)
 finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mode,
-                unsigned iteration, double bnorm, unsigned window) {
-    __shared__ double scratch[kWarps];
+                unsigned iteration, column_sums<double, Columns> bnorm, unsigned window) {
+    __shared__ double scratch[Columns][kWarps];
     const pcg_work<int> work{0, blocks, kBlockThreads, static_cast<int>(threadIdx.x), blocks};
-    const double sum = block_reduce_sum(sum_partials(pcg_math<>{}, part, work), scratch);
-    if (threadIdx.x == 0 && state->active)
-        *state = advance(recurrence_math{bnorm}, *state, mode, sum, iteration, window);
+    const auto sums = sum_partials_columns<Columns>(pcg_math<>{}, part, work);
+    for (unsigned q = 0; q < Columns; ++q) {
+        const double sum = block_reduce_sum(sums.values[q], scratch[q]);
+        // The iteration-zero check belongs only to warm columns. Cold columns
+        // have alpha=0 and retain the scalar entry behavior, including tol>1.
+        if (threadIdx.x == 0 && state[q].active &&
+            (mode != kFinalizeCheck || iteration != 0 || state[q].alpha != 0))
+            state[q] = advance(recurrence_math{bnorm.values[q]}, state[q], mode, sum, iteration, window);
+    }
 }
 
-template<class Value>
+template<unsigned Columns, class Value>
 void multiply(cudaStream_t stream, std::int64_t n, workspace v,
               const operator_csr& a, const Value* values, int lanes) {
     const int grid = pcg_blocks(n * lanes);
     auto launch = [&]<int Lanes>() {
-        step_kernel<operation::multiply, Lanes><<<grid, kBlockThreads, 0, stream>>>(
+        step_kernel<operation::multiply, Lanes, Columns><<<grid, kBlockThreads, 0, stream>>>(
             n, v, a.row_ptr, a.col_idx, values);
     };
     switch (lanes) {
@@ -108,32 +120,176 @@ void multiply(cudaStream_t stream, std::int64_t n, workspace v,
     }
 }
 
+enum class exit_operation { center, maximum, norm };
+
+template<unsigned Columns>
+__global__ void __launch_bounds__(kBlockThreads)
+initialize_kernel(std::int64_t n, workspace v, column_sums<double, Columns> scales) {
+    for (std::int64_t row = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < n; row += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
+        for (unsigned q = 0; q < Columns; ++q) {
+            const auto i = row * Columns + q;
+            v.r[i] = v.rhs[i] * scales.values[q];
+            v.x[i] = 0;
+        }
+    }
+}
+
+struct maximum_math : pcg_math<> {
+    __device__ double add(double a, double b) const {
+        return isfinite(a) && isfinite(b) ? fmax(a, b) : INFINITY;
+    }
+};
+
+template<exit_operation Op, unsigned Columns>
+__global__ void __launch_bounds__(kBlockThreads)
+exit_partials_kernel(std::int64_t n, workspace v, column_sums<double, Columns> scales) {
+    const std::conditional_t<Op == exit_operation::maximum, maximum_math, pcg_math<>> math{};
+    double sum[Columns]{};
+    for (std::int64_t row = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < n; row += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
+        for (unsigned q = 0; q < Columns; ++q) {
+            const auto i = row * Columns + q;
+            if constexpr (Op == exit_operation::center) sum[q] += v.x[i] / double(n);
+            else if constexpr (Op == exit_operation::maximum) {
+                v.r[i] = v.rhs[i] * fmax(1.0, scales.values[q]) - v.ap[i];
+                sum[q] = math.add(sum[q], fabs(v.r[i]));
+            } else {
+                const double maximum = v.state[q].beta;
+                const double normalized = maximum > 0 ? v.r[i] / maximum : 0;
+                sum[q] += normalized * normalized;
+            }
+        }
+    }
+    __shared__ double scratch[Columns][kWarps];
+    for (unsigned q = 0; q < Columns; ++q) {
+        const double total = block_reduce_sum(sum[q], scratch[q], math);
+        if (threadIdx.x == 0) v.partial[blockIdx.x * Columns + q] = total;
+    }
+}
+
+template<exit_operation Op, unsigned Columns>
+__global__ void __launch_bounds__(kBlockThreads)
+exit_reduce_kernel(workspace v, int blocks, column_sums<double, Columns> bnorm,
+                   column_sums<double, Columns> scales) {
+    const std::conditional_t<Op == exit_operation::maximum, maximum_math, pcg_math<>> math{};
+    __shared__ double scratch[Columns][kWarps];
+    const pcg_work<int> work{0, blocks, kBlockThreads, static_cast<int>(threadIdx.x), blocks};
+    const auto sums = sum_partials_columns<Columns>(math, v.partial, work);
+    for (unsigned q = 0; q < Columns; ++q) {
+        const double sum = block_reduce_sum(sums.values[q], scratch[q], math);
+        if (threadIdx.x == 0) {
+            if constexpr (Op == exit_operation::center) {
+                v.state[q].beta = sum;
+                v.state[q].active = kVerifySolution; // Include stopped columns.
+            } else if constexpr (Op == exit_operation::maximum) v.state[q].beta = sum;
+            else {
+                const double maximum = v.state[q].beta;
+                if (!isfinite(maximum)) v.state[q].rr = INFINITY;
+                else {
+                    int exponent;
+                    const double mantissa = frexp(maximum, &exponent);
+                    // solve_scale / verification_scale is min(1, solve_scale).
+                    if (scales.values[q] < 1) exponent += ilogb(scales.values[q]);
+                    v.state[q].rr = scalbn(mantissa * (sqrt(sum) / bnorm.values[q]), exponent);
+                }
+            }
+        }
+    }
+}
+
+template<unsigned Columns>
+__global__ void __launch_bounds__(kBlockThreads)
+restore_solution_kernel(std::int64_t n, workspace v, column_sums<double, Columns> scales) {
+    unsigned errors[Columns]{};
+    for (std::int64_t row = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < n; row += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
+        for (unsigned q = 0; q < Columns; ++q) {
+            const auto i = row * Columns + q;
+            const double centered = v.x[i] - v.state[q].beta;
+            const double output = centered / scales.values[q];
+            if (!isfinite(output)) errors[q] |= kSolutionOverflow;
+            if (centered != 0 && output == 0) errors[q] |= kSolutionUnderflow;
+            v.x[i] = output;
+            v.p[i] = output * fmax(1.0, scales.values[q]);
+        }
+    }
+    for (unsigned q = 0; q < Columns; ++q)
+        if (errors[q]) atomicOr(&v.state[q].active, errors[q]);
+}
+
 } // namespace
 
+template<unsigned Columns>
+void initialize(cudaStream_t stream, std::int64_t n, workspace v,
+                std::array<double, Columns> scales) {
+    column_sums<double, Columns> scaling{};
+    for (unsigned q = 0; q < Columns; ++q) scaling.values[q] = scales[q];
+    initialize_kernel<Columns><<<pcg_blocks(n), kBlockThreads, 0, stream>>>(n, v, scaling);
+}
+
+template<unsigned Columns>
 void step(cudaStream_t stream, operation op, std::int64_t n, workspace v,
           const operator_csr& matrix, int lanes) {
     const int grid = pcg_blocks(n);
     switch (op) {
         case operation::multiply:
-            if (matrix.fp32) multiply(stream, n, v, matrix, matrix.values_f32, lanes);
-            else multiply(stream, n, v, matrix, matrix.values_f64, lanes);
+            if (matrix.fp32) multiply<Columns>(stream, n, v, matrix, matrix.values_f32, lanes);
+            else multiply<Columns>(stream, n, v, matrix, matrix.values_f64, lanes);
             break;
         case operation::residual:
-            step_kernel<operation::residual><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            step_kernel<operation::residual, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
         case operation::dot:
-            step_kernel<operation::dot><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            step_kernel<operation::dot, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
         case operation::direction:
-            step_kernel<operation::direction><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            step_kernel<operation::direction, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
     }
 }
 
+template<unsigned Columns>
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
-              unsigned mode, unsigned iteration, double bnorm, unsigned window) {
-    finalize_kernel<<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, bnorm, window);
+              unsigned mode, unsigned iteration, std::array<double, Columns> bnorm, unsigned window) {
+    column_sums<double, Columns> norms{};
+    for (unsigned q = 0; q < Columns; ++q) norms.values[q] = bnorm[q];
+    finalize_kernel<Columns><<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, norms, window);
 }
+
+template<unsigned Columns>
+void finish(cudaStream_t stream, std::int64_t n, workspace v,
+            const operator_csr& matrix, int lanes, bool laplacian,
+            std::array<double, Columns> scales, std::array<double, Columns> bnorm) {
+    column_sums<double, Columns> norms{}, scaling{};
+    for (unsigned q = 0; q < Columns; ++q) {
+        norms.values[q] = bnorm[q];
+        scaling.values[q] = scales[q];
+    }
+    const int blocks = pcg_blocks(n);
+    if (laplacian)
+        exit_partials_kernel<exit_operation::center, Columns><<<blocks, kBlockThreads, 0, stream>>>(n, v, scaling);
+    exit_reduce_kernel<exit_operation::center, Columns><<<1, kBlockThreads, 0, stream>>>(v, laplacian ? blocks : 0, norms, scaling);
+    restore_solution_kernel<Columns><<<blocks, kBlockThreads, 0, stream>>>(n, v, scaling);
+    step<Columns>(stream, operation::multiply, n, v, matrix, lanes);
+    exit_partials_kernel<exit_operation::maximum, Columns><<<blocks, kBlockThreads, 0, stream>>>(n, v, scaling);
+    exit_reduce_kernel<exit_operation::maximum, Columns><<<1, kBlockThreads, 0, stream>>>(v, blocks, norms, scaling);
+    exit_partials_kernel<exit_operation::norm, Columns><<<blocks, kBlockThreads, 0, stream>>>(n, v, scaling);
+    exit_reduce_kernel<exit_operation::norm, Columns><<<1, kBlockThreads, 0, stream>>>(v, blocks, norms, scaling);
+}
+
+template void initialize<1>(cudaStream_t, std::int64_t, workspace, std::array<double, 1>);
+template void initialize<2>(cudaStream_t, std::int64_t, workspace, std::array<double, 2>);
+template void initialize<4>(cudaStream_t, std::int64_t, workspace, std::array<double, 4>);
+template void step<1>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
+template void step<2>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
+template void step<4>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
+template void finalize<1>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 1>, unsigned);
+template void finalize<2>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 2>, unsigned);
+template void finalize<4>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 4>, unsigned);
+template void finish<1>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 1>, std::array<double, 1>);
+template void finish<2>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 2>, std::array<double, 2>);
+template void finish<4>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 4>, std::array<double, 4>);
 
 namespace {
 
@@ -256,6 +412,8 @@ bool try_build_permuted_operator_csr(
     operator_check(cudaMemcpy(&observed, status.get(), sizeof(observed), cudaMemcpyDeviceToHost));
     if ((observed.flags & 1U) || (observed.triangles & 0xffffffffULL) != (observed.triangles >> 32))
         return false;
+    if (precision == 1 && (observed.flags & 2U))
+        throw std::invalid_argument("FP32 operator storage requires exactly representable coefficients");
     const bool fp32 = precision == 1 || (precision == -1 && !(observed.flags & 2U));
 
     operator_buffer<std::uint64_t> keys_a(nnz);

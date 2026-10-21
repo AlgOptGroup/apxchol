@@ -3,6 +3,7 @@
 #include <pybind11/eigen.h>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -142,48 +143,74 @@ public:
         return static_cast<std::int64_t>(factor().lumped_offdiag);
     }
 
-    // M^{-1} r (one forward/back SpTRSV; reused tuned factor).
-    Eigen::VectorXd apply(const Eigen::VectorXd& r) const {
-        return slv_.apply(r);
+    using Array = py::array_t<double, py::array::forcecast>;
+    using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+
+    py::object apply(Array r) const {
+        r = checked_rhs(r);
+        if (r.ndim() == 1)
+            return py::cast(slv_.apply(r.cast<Eigen::VectorXd>()));
+        auto out = output_array(r, py::none());
+        slv_.apply(matrix(r), mutable_matrix(out));
+        return out;
     }
 
-    py::dict solve(const Eigen::VectorXd& b, double tol, int maxiter,
+    py::dict solve(Array b, double tol, int maxiter,
                    py::object x0, py::object out_arr) const {
         if (tol < 0.0) tol = apxchol::default_tol;
-        Eigen::VectorXd x0v;
-        const Eigen::VectorXd* x0p = nullptr;
+        b = checked_rhs(b);
+        auto output = output_array(b, out_arr);
+        auto copy_alias = [&](Array input) {
+            if (out_arr.is_none()) return input;
+            if (py::cast<bool>(py::module_::import("numpy").attr("may_share_memory")(
+                    input, output)))
+                return input.attr("copy")().cast<Array>();
+            return input;
+        };
+        b = copy_alias(b);
+        Array guess;
         if (!x0.is_none()) {
-            x0v = x0.cast<Eigen::VectorXd>();
-            x0p = &x0v;
+            guess = x0.cast<Array>();
+            guess = checked_rhs(guess);
+            if (!same_shape(b, guess))
+                throw std::invalid_argument("x0 must have the same shape as b");
+            guess = copy_alias(guess);
         }
 
-        apxchol::solve_result res;
         py::dict out;
-        // Preserve the caller's output array; GPU solves may use temporary storage.
-        if (!out_arr.is_none()) {
-            auto a = py::cast<py::array>(out_arr);
-            const bool ok = py::isinstance<py::array_t<double>>(a) &&
-                            a.ndim() == 1 && a.shape(0) == slv_.rows() &&
-                            (a.flags() & py::array::c_style) && a.writeable();
-            if (!ok)
-                throw std::invalid_argument(
-                    "solve: out must be a writable C-contiguous float64 array "
-                    "of length n");
-            Eigen::Map<Eigen::VectorXd> xmap(
-                static_cast<double*>(a.mutable_data()), slv_.rows());
-            res = slv_.solve(b, xmap, tol, maxiter, x0p);
-            out["x"] = a;
+        out["x"] = output;
+        if (b.ndim() == 1) {
+            Eigen::VectorXd x0v;
+            if (!x0.is_none()) x0v = guess.cast<Eigen::VectorXd>();
+            Eigen::Map<Eigen::VectorXd> x(output.mutable_data(), rows());
+            const auto res = slv_.solve(b.cast<Eigen::VectorXd>(), x, tol, maxiter,
+                                       x0.is_none() ? nullptr : &x0v);
+            out["iters"] = static_cast<int>(res.iterations);
+            out["residual"] = res.residual;
+            out["converged"] = res.residual < tol;
         } else {
-            res = slv_.solve(b, tol, maxiter, x0p);
-            out["x"] = std::move(res.x);
+            apxchol::batch_solve_result res;
+            auto x = mutable_matrix(output);
+            if (x0.is_none()) {
+                res = slv_.solve(matrix(b), x, tol, maxiter);
+            } else {
+                apxchol::const_matrix_view x0m = matrix(guess);
+                res = slv_.solve(matrix(b), x, tol, maxiter, &x0m);
+            }
+            const auto count = b.shape(1);
+            py::array_t<int> iters(count);
+            py::array_t<double> residual(count);
+            py::array_t<bool> converged(count);
+            for (py::ssize_t j = 0; j < count; ++j) {
+                const auto& column = res.columns[static_cast<std::size_t>(j)];
+                iters.mutable_data()[j] = static_cast<int>(column.iterations);
+                residual.mutable_data()[j] = column.residual;
+                converged.mutable_data()[j] = column.residual < tol;
+            }
+            out["iters"] = iters;
+            out["residual"] = residual;
+            out["converged"] = converged;
         }
-
-        out["iters"]     = static_cast<int>(res.iterations);
-        out["residual"]  = res.residual;
-        // The PCG breaks with residual < tol on convergence; every other exit
-        // (maxiter, stagnation, indefinite pAp, zero-b shortcut) leaves it >= tol
-        // except b == 0, where residual 0 < tol is correct (x = 0 is exact).
-        out["converged"] = res.residual < tol;
         return out;
     }
 
@@ -229,6 +256,50 @@ public:
     }
 
 private:
+    static bool same_shape(const py::array& a, const py::array& b) {
+        return a.ndim() == b.ndim() && std::equal(a.shape(), a.shape() + a.ndim(), b.shape());
+    }
+
+    Array checked_rhs(Array a) const {
+        if ((a.ndim() != 1 && a.ndim() != 2) || a.shape(0) != rows())
+            throw std::invalid_argument("RHS must have shape (n,) or (n, nrhs)");
+        for (py::ssize_t d = 0; d < a.ndim(); ++d) {
+            if (a.strides(d) % py::ssize_t(sizeof(double)) != 0)
+                throw std::invalid_argument("RHS strides must be multiples of float64 item size");
+            // Eigen::Ref interprets a zero stride as contiguous, not broadcast.
+            if (a.size() && a.shape(d) > 1 && a.strides(d) == 0)
+                return a.attr("copy")().cast<Array>();
+        }
+        return a;
+    }
+
+    static Array output_array(const Array& rhs, const py::object& out) {
+        if (out.is_none())
+            return Array(std::vector<py::ssize_t>(rhs.shape(), rhs.shape() + rhs.ndim()));
+        if (!py::isinstance<py::array_t<double>>(out))
+            throw std::invalid_argument("out must be a float64 NumPy array");
+        auto a = out.cast<Array>();
+        if (!same_shape(a, rhs) || !a.writeable() ||
+            !(a.flags() & (py::array::c_style | py::array::f_style)))
+            throw std::invalid_argument(
+                "out must be writable, C- or F-contiguous, and have the same shape as b");
+        return a;
+    }
+
+    static Eigen::Map<const Eigen::MatrixXd, Eigen::Unaligned, Stride>
+    matrix(const Array& a) {
+        return Eigen::Map<const Eigen::MatrixXd, Eigen::Unaligned, Stride>(
+            a.data(), a.shape(0), a.shape(1),
+            Stride(a.strides(1) / py::ssize_t(sizeof(double)), a.strides(0) / py::ssize_t(sizeof(double))));
+    }
+
+    static Eigen::Map<Eigen::MatrixXd, Eigen::Unaligned, Stride>
+    mutable_matrix(Array& a) {
+        return Eigen::Map<Eigen::MatrixXd, Eigen::Unaligned, Stride>(
+            a.mutable_data(), a.shape(0), a.shape(1),
+            Stride(a.strides(1) / py::ssize_t(sizeof(double)), a.strides(0) / py::ssize_t(sizeof(double))));
+    }
+
     const apxchol::factorization& factor() const {
         return slv_.factor();
     }

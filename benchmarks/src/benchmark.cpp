@@ -890,16 +890,9 @@ static BenchResult run_apxchol_v1(
                                          // PCG frees all device state before returning);
                                          // -1 on CPU builds / host-PCG paths.
     r.iterations = static_cast<int>(res.iterations);
-    // Grade OURSELVES exactly as every competitor row is graded: the harness
-    // recomputes ||b - L x|| / ||b|| against the operator the cell declares,
-    // rather than trusting the solver's own number. `res.residual` is apxchol's
-    // PCG RECURRENCE residual (src/solve.cpp:606 CPU, :722 GPU). It is a
-    // residual of the right operator -- PCG applies the true A, see
-    // operator_class.h -- but it is not the same measurement the competitors
-    // get, and a recurrence residual drifts optimistic as it accumulates. That
-    // drift is precisely what we caught ParAC on (it reported 8.80e-09 while
-    // the true residual was 3.12e-03); keeping it for our own row was the
-    // mirror image of that defect. See benchmarks/README.md, THE GRADING RULE.
+    // Grade every solver against the same original operator and RHS. CPU reports
+    // its recursive residual; GPU reports a recomputed final residual. The harness
+    // independently checks the returned solution in both cases.
     {
         Eigen::VectorXd xg = res.x;
         center_if_laplacian(xg);

@@ -1,6 +1,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <array>
 #include "apxchol/solver/detail/gpu_pcg.h"
 
 // CUDA launch boundary for the common PCG kernels. Both operator storage
@@ -9,15 +10,21 @@
 namespace apxchol::pcg_cuda {
 
 using solve_state = detail::gpu_pcg::solve_state<double, double>;
-using workspace = detail::gpu_pcg::workspace<double, double>;
+struct workspace : detail::gpu_pcg::workspace<double, double> {
+    double* rhs = nullptr;
+};
+enum exit_flag : unsigned {
+    kVerifySolution = 1, kSolutionOverflow = 2, kSolutionUnderflow = 4
+};
 
 // Private experiment ABI. Input arrays are valid borrowed host arrays of
 // lengths n+1,nnz,nnz,n; permutation is the factor's validated bijection.
 // Accept only unique sorted fully paired CSC. Canonical LOWER values and
 // sorted permuted rows match the existing host constructor, including zeros.
-// precision: -1=AUTO exact-fp32,0=fp64,1=forced-fp32. Unsupported input returns
-// false without publishing output. CUDA/allocation errors throw after freeing
-// temporary allocations. Success transfers cudaFree ownership to the caller.
+// precision: -1=AUTO exact-fp32,0=fp64,1=require-exact-fp32. Layout failures return
+// false without publishing output. Requiring FP32 with inexact values throws
+// std::invalid_argument. CUDA/allocation errors also throw; temporary allocations
+// are freed on failure. Success transfers cudaFree ownership to the caller.
 struct operator_csr {
     int* row_ptr = nullptr;
     int* col_idx = nullptr;
@@ -33,7 +40,7 @@ bool try_build_permuted_operator_csr(
 
 /// Threads per block of every kernel here, and the fixed upper bound on the
 /// grid (blocks loop grid-stride over the remaining work); the partials
-/// buffer the caller provides must hold kMaxBlocks doubles.
+/// buffer the caller provides must hold Columns * kMaxBlocks doubles.
 inline constexpr int kBlockThreads = 256;
 inline constexpr int kMaxBlocks    = 2048;
 
@@ -55,13 +62,28 @@ inline int spmv_lanes_for(double avg_nnz_per_row) {
     return L;
 }
 
+// Keep the uploaded RHS intact; initialize the scaled recurrence and zero x.
+template<unsigned Columns = 1>
+void initialize(cudaStream_t stream, std::int64_t n, workspace vectors,
+                std::array<double, Columns> scales);
+
 // Launch one shared vector operation; only multiply reads the operator.
 // Partials use pcg_blocks(n * lanes) for multiply, pcg_blocks(n) otherwise.
+template<unsigned Columns = 1>
 void step(cudaStream_t stream, detail::gpu_pcg::operation op, std::int64_t n,
           workspace vectors, const operator_csr& matrix, int lanes);
 
 // Fold partials in the fixed tree and advance the device recurrence.
+template<unsigned Columns = 1>
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
-              unsigned mode, unsigned iteration, double bnorm, unsigned window = 0);
+              unsigned mode, unsigned iteration, std::array<double, Columns> bnorm, unsigned window = 0);
+
+// Restore the returned solution on device and check the original system,
+// independently of the recurrence's exit reason. Reuses the dead PCG scratch.
+// rr receives the relative residual; active stores exit_flag bits.
+template<unsigned Columns = 1>
+void finish(cudaStream_t stream, std::int64_t n, workspace vectors,
+            const operator_csr& matrix, int lanes, bool laplacian,
+            std::array<double, Columns> scales, std::array<double, Columns> bnorm);
 
 } // namespace apxchol::pcg_cuda

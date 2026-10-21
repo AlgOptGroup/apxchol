@@ -5,8 +5,8 @@
 //     transpose_solve return the SAME BYTES at every thread count (in place
 //     and out of place) -- the thin `omp single` path, the fat `omp for` path
 //     and the fat SIMD path (16-bit storage) included;
-//   * one barrier per level (num_barriers() == the level count, both
-//     directions);
+//   * one barrier per consecutive thin run or fat level (num_barriers(),
+//     both directions);
 //   * anchored to a correct solve: the T=1 result satisfies
 //     the stored factor's triangular system to double roundoff (so the chain
 //     of identities above is a chain of correct solves), stated through the
@@ -234,14 +234,17 @@ void expect_correct_pair(const sparse_csc& L, const std::vector<double>& x, cons
     EXPECT_LT(ez, 1e-10 * sz) << "back: L_s^T z = R y'";
 }
 
-struct level_shape { std::size_t levels = 0, thin = 0, fat = 0, longest_thin_run = 0; };
+struct level_shape { std::size_t levels = 0, thin = 0, fat = 0, thin_runs = 0, longest_thin_run = 0; };
 level_shape shape(const apxchol::omp_sptrsv& t, bool fwd) {
     std::vector<int> sizes; std::vector<long long> work;
     t.level_stats(fwd, sizes, work);
     level_shape s; s.levels = sizes.size();
     std::size_t run = 0;
     for (int sz : sizes) {
-        if (sz <= static_cast<int>(apxchol::kSpTRSVOMPThreshold)) { ++s.thin; ++run; s.longest_thin_run = std::max(s.longest_thin_run, run); }
+        if (sz <= static_cast<int>(apxchol::kSpTRSVOMPThreshold)) {
+            if (run == 0) ++s.thin_runs;
+            ++s.thin; ++run; s.longest_thin_run = std::max(s.longest_thin_run, run);
+        }
         else { ++s.fat; run = 0; }
     }
     return s;
@@ -456,7 +459,7 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
             ASSERT_GT(s.fat, 3u) << "fwd=" << fwd;                 // both kernel paths run
             ASSERT_GT(s.thin, 100u) << "fwd=" << fwd;
             ASSERT_GT(s.longest_thin_run, 50u) << "fwd=" << fwd;   // a long single-thread tail of `omp single` levels
-            EXPECT_EQ(trsv.num_barriers(fwd), s.levels);           // one barrier per level
+            EXPECT_EQ(trsv.num_barriers(fwd), s.fat + s.thin_runs);
         }
         const auto x = random_x(m, 1);
         set_threads(1);
@@ -521,8 +524,10 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
     EXPECT_TRUE(apxchol::detail::critical_assignments_are_valid(
         assignment, L.rows(), hybrid.csr_row_ptr().data(),
         hybrid.csr_col_idx().data(), first_tail_row));
-    EXPECT_LT(hybrid.num_barriers(true), levels.num_barriers(true));
-    EXPECT_LT(hybrid.num_barriers(false), levels.num_barriers(false));
+    EXPECT_EQ(levels.num_barriers(true), 5u);
+    EXPECT_EQ(levels.num_barriers(false), 5u);
+    EXPECT_EQ(hybrid.num_barriers(true), assignment.steps + 4);
+    EXPECT_EQ(hybrid.num_barriers(false), assignment.steps + 4);
     const pair_out reference = solve_pair(levels, x);
     expect_same_bytes(reference, solve_pair(hybrid, x), "hybrid vs levels");
     for (int threads : {1, 2, 4}) {
@@ -622,7 +627,10 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
             hybrid.setup(L, L.rows());
         }
         ASSERT_TRUE(hybrid.uses_hybrid_schedule());
-        EXPECT_LT(hybrid.num_barriers(true), levels.num_barriers(true));
+        EXPECT_EQ(levels.num_barriers(true), 1u);
+        const auto assignment = apxchol::detail::assign_critical_schedule(
+            L.rows(), hybrid.csr_row_ptr().data(), hybrid.csr_col_idx().data(), 4, 0);
+        EXPECT_EQ(hybrid.num_barriers(true), assignment.steps);
         expect_same_bytes(solve_pair(levels, x), solve_pair(hybrid, x),
                           "all-thin hybrid limit");
     }
@@ -710,10 +718,7 @@ TEST(SpTRSVLevelset, GroundingPreservesOuterTeamAndHonorsChangedLimit) {
     expect_correct_pair(L11, x, reference);
 
     set_threads(2);
-    std::vector<int> sizes;
-    std::vector<long long> work;
-    trsv.level_stats(true, sizes, work);
-    EXPECT_EQ(trsv.num_barriers(true), sizes.size());
+    EXPECT_EQ(trsv.num_barriers(true), 1u);
     expect_same_bytes(reference, solve_pair(trsv, x), "changed thread limit");
     set_threads(1);
     EXPECT_EQ(trsv.num_barriers(true), 0u);
@@ -721,3 +726,50 @@ TEST(SpTRSVLevelset, GroundingPreservesOuterTeamAndHonorsChangedLimit) {
     set_threads(4);
 }
 #endif
+
+TEST(CriticalSchedule, HybridGroupsInteriorThinRounds) {
+    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
+    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    const std::vector<node_index> widths = {65536, 8, 8, 8, 65536, 8, 8, 8};
+    std::vector<node_index> bounds{0};
+    for (const auto width : widths) bounds.push_back(bounds.back() + width);
+    std::vector<std::vector<node_index>> columns(bounds.back());
+    for (node_index row = 0; row < bounds.back(); ++row) columns[row].push_back(row);
+    for (std::size_t level = 1; level < widths.size(); ++level)
+        for (node_index row = bounds[level]; row < bounds[level + 1]; ++row)
+            columns[bounds[level - 1] + (row - bounds[level]) % widths[level - 1]].push_back(row);
+    std::mt19937 rng(559);
+    const sparse_csc L = from_cols(bounds.back(), columns, rng);
+    const auto x = random_x(L.rows(), 560);
+    set_threads(4);
+    apxchol::omp_sptrsv levels, hybrid;
+    {
+        scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+        levels.set_round_bounds(bounds);
+        levels.setup(L, L.rows());
+    }
+    {
+        scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+        hybrid.set_round_bounds(bounds);
+        hybrid.setup(L, L.rows());
+    }
+    ASSERT_TRUE(hybrid.uses_hybrid_schedule());
+    const auto assignment = apxchol::detail::assign_critical_schedule(
+        L.rows(), hybrid.csr_row_ptr().data(), hybrid.csr_col_idx().data(), 4, bounds[5]);
+    for (const bool forward : {true, false}) {
+        EXPECT_EQ(levels.num_barriers(forward), 4u);
+        EXPECT_EQ(hybrid.num_barriers(forward), assignment.steps + 3);
+    }
+    set_threads(1);
+    const pair_out reference = solve_pair(levels, x);
+    expect_correct_pair(L, x, reference);
+    for (const int threads : {1, 2, 4}) {
+        set_threads(threads);
+        expect_same_bytes(reference, solve_pair(levels, x), "interior thin rounds, levels");
+        expect_same_bytes(reference, solve_pair(hybrid, x), "interior thin rounds, hybrid");
+    }
+#ifdef _OPENMP
+    expect_same_bytes(reference, solve_pair_with_forced_team_mismatch(hybrid, x),
+                      "interior thin rounds after runtime team mismatch");
+#endif
+}
