@@ -4,6 +4,7 @@
 #include "apxchol/solver/detail/lower_triangle_csr.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/csc_work.h"
+#include "host_spmv.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -273,22 +274,8 @@ std::array<double, C> panel_spmv(const Eigen::SparseMatrix<S, Eigen::RowMajor> &
         const auto [lo, hi] = detail::work_balanced_range(ptr, n, tid, nt);
         std::array<double, C> xy{};
         for (Eigen::Index i = lo; i < hi; i++) {
-            std::array<double, C> a{}, b{}, c{}, d{};
-            auto k = ptr[i];
-            const auto end = ptr[i + 1];
-            for (; k + 4 <= end; k += 4)
-                for (int q = 0; q < C; q++) {
-                    a[q] += val[k + 0] * x[Eigen::Index(col[k + 0]) * C + q];
-                    b[q] += val[k + 1] * x[Eigen::Index(col[k + 1]) * C + q];
-                    c[q] += val[k + 2] * x[Eigen::Index(col[k + 2]) * C + q];
-                    d[q] += val[k + 3] * x[Eigen::Index(col[k + 3]) * C + q];
-                }
-            std::array<double, C> sum{};
-            for (int q = 0; q < C; q++)
-                sum[q] = (a[q] + b[q]) + (c[q] + d[q]);
-            for (; k < end; k++)
-                for (int q = 0; q < C; q++)
-                    sum[q] += val[k] * x[Eigen::Index(col[k]) * C + q];
+            const auto sum = detail::sparse_row_product<C>(col, val, ptr[i], ptr[i + 1],
+                [x](int row, int q) { return x[Eigen::Index(row) * C + q]; });
             for (int q = 0; q < C; q++) {
                 y[i * C + q] = sum[q];
                 xy[q] += x[i * C + q] * sum[q];

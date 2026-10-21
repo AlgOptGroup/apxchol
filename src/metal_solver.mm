@@ -11,6 +11,7 @@
 #include "metal_device.h"
 #include "metal_compile.h"
 #include "metal_setup.h"
+#include "host_spmv.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -511,36 +512,20 @@ struct metal_solver::impl {
                        checkpoint& cp, double tol, int max_iter, const const_matrix_view* X0);
 
     // x follows the retained operator's ordering; y is factor-permuted.
-    // Sum each row in storage order, splitting work by stored entries.
     template<class Vector>
     void spmv(const Vector& x, Eigen::VectorXd& y) const {
-        if (original_operator.rows() != 0) {
-            const auto& A = original_operator;
-            #pragma omp parallel
-            {
-                const auto [first, last] = detail::work_balanced_range(A.outerIndexPtr(), A.rows(),
-                    omp_get_thread_num(), omp_get_num_threads());
-                for (auto row = first; row < last; ++row) {
-                    double sum = 0;
-                    for (int p = A.outerIndexPtr()[row]; p < A.outerIndexPtr()[row + 1]; ++p)
-                        sum += A.valuePtr()[p] * x[A.innerIndexPtr()[p]];
-                    y[F.perm[row]] = sum;
-                }
-            }
-            return;
-        }
-        const int* ptr = op.ptr.data();
-        const int* col = op.idx.get();
-        const double* val = op.vals.get();
+        const bool original = original_operator.rows() != 0;
+        const int* ptr = original ? original_operator.outerIndexPtr() : op.ptr.data();
+        const int* col = original ? original_operator.innerIndexPtr() : op.idx.get();
+        const double* val = original ? original_operator.valuePtr() : op.vals.get();
         const std::ptrdiff_t rows = static_cast<std::ptrdiff_t>(n);
         #pragma omp parallel
         {
             const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
             const auto [lo, hi] = detail::work_balanced_range(ptr, rows, tid, nt);
             for (std::ptrdiff_t i = lo; i < hi; ++i) {
-                double acc = 0.0;
-                for (int p = ptr[i]; p < ptr[i + 1]; ++p) acc += val[p] * x[col[p]];
-                y[i] = acc;
+                y[original ? F.perm[i] : i] = detail::sparse_row_product<1>(
+                    col, val, ptr[i], ptr[i + 1], [&](int row, int) { return x[row]; })[0];
             }
         }
     }
