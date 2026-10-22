@@ -1,11 +1,10 @@
 #pragma once
 // GPU-owned operator and reusable PCG workspace. Kernels use native FP64,
 // fixed reductions and the shared device recurrence; only the completed state
-// is read by the host once per batch of iterations. The core links cudart alone.
+// is read by the host each iteration. The core links cudart alone.
 
 #include <Eigen/Sparse>
 #include <Eigen/Core>
-#include <algorithm>
 #include <cmath>
 #include <array>
 #include <cstdint>
@@ -23,7 +22,6 @@
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
-#include "apxchol/solver/detail/cpu_parallel.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol {
@@ -158,45 +156,21 @@ private:
         std::array<double, Columns> scales{}, bnorm{}, max_b{}, max_x0{};
         bool any_active = false, any_warm = false;
         std::fill_n(h_state_, Columns, pcg_cuda::solve_state{});
-        // Host permutation passes are parallel scatters/gathers of distinct
-        // rows. Maxima are order independent, and the first non-finite entry
-        // in (row, column, RHS before x0) order selects the reported error.
-        const int host_workers = detail::cpu_solve_threads(
-            static_cast<std::size_t>(n_) * Columns);
-        constexpr std::uint64_t no_failure = std::numeric_limits<std::uint64_t>::max();
-        std::uint64_t first_failure = no_failure;
-#pragma omp parallel if (host_workers > 1) num_threads(host_workers)
-        {
-            std::array<double, Columns> local_b{}, local_x0{};
-            std::uint64_t local_failure = no_failure;
-#pragma omp for schedule(static) nowait
-            for (int64_t v = 0; v < n_; ++v) {
-                for (unsigned q = 0; q < Columns; ++q) {
-                    const std::uint64_t position = (std::uint64_t(v) * Columns + q) * 2;
-                    const double rhs = b_host(v, q);
-                    if (!std::isfinite(rhs)) local_failure = std::min(local_failure, position);
-                    packed(h_perm_[v], q) = rhs;
-                    local_b[q] = std::max(local_b[q], std::abs(rhs));
-                    if (x0) {
-                        const double guess = (*x0)(v, q);
-                        if (!std::isfinite(guess))
-                            local_failure = std::min(local_failure, position + 1);
-                        local_x0[q] = std::max(local_x0[q], std::abs(guess));
-                    }
-                }
-            }
-#pragma omp critical(apxchol_cuda_pcg_pack)
-            {
-                first_failure = std::min(first_failure, local_failure);
-                for (unsigned q = 0; q < Columns; ++q) {
-                    max_b[q] = std::max(max_b[q], local_b[q]);
-                    max_x0[q] = std::max(max_x0[q], local_x0[q]);
+        for (int64_t v = 0; v < n_; ++v) {
+            for (unsigned q = 0; q < Columns; ++q) {
+                const double rhs = b_host(v, q);
+                if (!std::isfinite(rhs))
+                    throw std::invalid_argument("cuda_pcg::solve: RHS must be finite");
+                packed(h_perm_[v], q) = rhs;
+                max_b[q] = std::max(max_b[q], std::abs(rhs));
+                if (x0) {
+                    const double guess = (*x0)(v, q);
+                    if (!std::isfinite(guess))
+                        throw std::invalid_argument("cuda_pcg::solve: x0 must be finite");
+                    max_x0[q] = std::max(max_x0[q], std::abs(guess));
                 }
             }
         }
-        if (first_failure != no_failure)
-            throw std::invalid_argument(first_failure % 2
-                ? "cuda_pcg::solve: x0 must be finite" : "cuda_pcg::solve: RHS must be finite");
         for (double maximum : max_b) any_active |= maximum != 0;
         if (!any_active) {
             x_host.setZero();
@@ -235,7 +209,6 @@ private:
         iteration<Precond, Columns> commands{*this, precond, bnorm,
             static_cast<unsigned>(std::max(stagnation_window, 0))};
         if (any_warm) {
-#pragma omp parallel for schedule(static) if (host_workers > 1) num_threads(host_workers)
             for (int64_t v = 0; v < n_; ++v)
                 for (unsigned q = 0; q < Columns; ++q)
                     packed(h_perm_[v], q) = h_state_[q].alpha ? (*x0)(v, q) * scales[q] : 0;
@@ -249,10 +222,7 @@ private:
             commands.step(detail::gpu_pcg::operation::residual);
             commands.finalize(detail::gpu_pcg::kFinalizeCheck, 0);
         }
-        // The device recurrence predicates every kernel on its stop state, so
-        // iterations queued after convergence do no work; the host reads the
-        // state once per batch.
-        detail::gpu_pcg::solve(commands, std::max(max_iter, 0), kIterationsPerHostCheck);
+        detail::gpu_pcg::solve(commands, std::max(max_iter, 0), 1);
         pcg_cuda::finish<Columns>(0, n_, vectors_, matrix_, spmv_lanes_, laplacian, scales, bnorm);
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(h_state_, vectors_.state,
             Columns * sizeof(*vectors_.state), cudaMemcpyDeviceToHost, 0));
@@ -263,7 +233,6 @@ private:
             if (h_state_[q].active & pcg_cuda::kSolutionUnderflow)
                 throw std::underflow_error("CUDA solve: solution underflows to zero");
         }
-#pragma omp parallel for schedule(static) if (host_workers > 1) num_threads(host_workers)
         for (int64_t v = 0; v < n_; ++v)
             for (unsigned q = 0; q < Columns; ++q)
                 x_host(v, q) = packed(h_perm_[v], q);
@@ -272,8 +241,6 @@ private:
             residuals[q] = h_state_[q].rr;
         }
     }
-
-    static constexpr unsigned kIterationsPerHostCheck = 4;
 
     template<class Precond, unsigned Columns>
     struct iteration {
