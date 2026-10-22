@@ -4,8 +4,7 @@ representative matrices, then emit total/setup/solve speedup charts and a
 portable CSV. Cells go to results/scaling_cells/ (separate from the fair cells).
 Run from repo root, ALONE: python3 benchmarks/thread_scaling.py
 """
-import argparse, csv, json, math, os, re, subprocess, time
-import chart_cells
+import argparse, csv, json, math, os, pathlib, re, subprocess, time
 
 from sweep_fair import UNKNOWN_TOOLCHAIN
 import parac_runner as parac
@@ -113,26 +112,32 @@ def done(mid, solver, config, t):
 
 
 def _scaling_records():
-    """Load only records that satisfy the current publication schema."""
-    entries, _ = chart_cells.load_current_entries(
-        CELLS,
-        pattern="*.json",
-        include=lambda record: (record.get("cell", {}).get("device", "cpu") == DEVICE
-            and (not SCOPE_FILTER or (record.get("cell", {}).get("matrix_id") in {m[0] for m in MATS}
-                 and (record.get("cell", {}).get("solver"), record.get("cell", {}).get("config", ""))
-                 in {(solver, config) for _, solver, config in CPP + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])}))),
-        stale_policy="reject",
-        source="thread_scaling render/export input",
-    )
+    """Load the selected records; every one must meet the current contract and
+    the scaling schema, since this path has an exact expected denominator."""
+    wanted = {(solver, config) for _, solver, config in
+              CPP + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])}
+    matrices = {m[0] for m in MATS}
     records = []
-    for entry in entries:
-        filename, record = str(entry.path), entry.record
+    for path in sorted(pathlib.Path(CELLS).glob("*.json")):
+        filename = str(path)
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"invalid JSON cell {filename}: {error}") from error
+        if not isinstance(record, dict) or "cell" not in record or "status" not in record:
+            continue
+        cell = record.get("cell", {})
+        if cell.get("device", "cpu") != DEVICE:
+            continue
+        if SCOPE_FILTER and (cell.get("matrix_id") not in matrices or
+                             (cell.get("solver"), cell.get("config", "")) not in wanted):
+            continue
+        if not rc.cell_meets_contract(record):
+            raise RuntimeError(f"cell {filename} does not meet the current measurement contract")
         if record.get("schema") != SCALING_SCHEMA:
             raise RuntimeError(
                 f"stale scaling schema in {filename}: "
                 f"{record.get('schema')!r} != {SCALING_SCHEMA}")
-        if record.get("status") == "timeout" and not record.get("timeout_cap_s"):
-            raise RuntimeError(f"timeout without exact cap in {filename}")
         records.append((filename, record))
     return records
 

@@ -239,5 +239,47 @@ class OriginalStoppingReceiptTest(unittest.TestCase):
         status, _ = rc.classify(row, 1e-8)
         self.assertEqual(status, "not_converged")
 
+class CellReuseTest(unittest.TestCase):
+    SHA = "a" * 40
+
+    def cell(self, **overrides):
+        record = {"cell": {"solver": "apxchol_v1", "device": "cpu", "matrix_id": "grid"},
+                  "status": "complete",
+                  "metrics": {"stop_contract": "original-v1", "total_s": 1.0,
+                              "execution_route": "cpu"},
+                  "provenance": {"git_sha": self.SHA}}
+        record.update(overrides)
+        return record
+
+    def test_current_cell_is_reused(self):
+        self.assertTrue(rc.cell_is_current(self.cell(), self.SHA))
+
+    def test_other_revision_is_rerun(self):
+        self.assertFalse(rc.cell_is_current(self.cell(), "b" * 40))
+        self.assertFalse(rc.cell_is_current(self.cell(), ""))
+        # The contract alone still holds for rendering stored observations.
+        self.assertTrue(rc.cell_meets_contract(self.cell()))
+
+    def test_old_stop_contract_is_rejected(self):
+        old = self.cell(metrics={"total_s": 1.0, "execution_route": "cpu"})
+        self.assertFalse(rc.cell_meets_contract(old))
+        self.assertFalse(rc.cell_is_current(old, self.SHA))
+
+    def test_route_mismatch_is_rejected(self):
+        mismatch = self.cell(metrics={"stop_contract": "original-v1", "total_s": 1.0,
+                                      "execution_route": "gpu"})
+        self.assertFalse(rc.cell_meets_contract(mismatch))
+
+    def test_timeout_needs_a_recorded_cap(self):
+        self.assertFalse(rc.cell_meets_contract(self.cell(status="timeout", metrics={})))
+        self.assertTrue(rc.cell_meets_contract(
+            self.cell(status="timeout", metrics={}, timeout_cap_s=600)))
+
+    def test_malformed_records_are_rejected(self):
+        for record in (None, [], {"status": "complete"}, {"cell": "x", "status": "complete"}):
+            self.assertFalse(rc.cell_meets_contract(record))
+            self.assertFalse(rc.cell_is_current(record, self.SHA))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
 """Shared harness for the benchmark runners.
 
 One canonical copy of the pieces that were duplicated (with drift) across
-sweep_fair.py / parac_runner.py / thread_scaling.py / fill_pass.py:
+sweep_fair.py / parac_runner.py / thread_scaling.py:
 
   - sh()           hardened subprocess harness: process-group kill on timeout
                    (the orphan-on-timeout bug fix, 2026-06-11), optional env and
@@ -18,7 +18,7 @@ sweep_fair.py / parac_runner.py / thread_scaling.py / fill_pass.py:
                    by the compute-process name to match.
   - ParAC constants + the AMD-reorder cache path helper.
 
-All runners (sweep_fair, thread_scaling, fill_pass, selector_levels) import these helpers rather than carrying their own copies.
+All runners (sweep_fair, thread_scaling, parac_runner) import these helpers rather than carrying their own copies.
 """
 import hashlib, json, math, os, re, shlex, signal, subprocess, tempfile, threading
 from pathlib import Path
@@ -115,6 +115,37 @@ def sh(cmd, timeout=1800, env=None, mem_cap_gb=None):
 # ── provenance ──────────────────────────────────────────────────────────────────
 def git_sha():
     return sh(f"git -C {ROOT} rev-parse HEAD", timeout=30).stdout.strip()
+
+
+def cell_meets_contract(cell):
+    """Whether a stored cell satisfies the current measurement contract:
+    original-v1 stopping, a matching complete-route receipt for apxchol timings,
+    and a recorded cap for timeouts."""
+    if not isinstance(cell, dict) or not isinstance(cell.get("cell"), dict):
+        return False
+    status, metrics = cell.get("status"), cell.get("metrics") or {}
+    if status == "timeout":
+        return timeout_cap({"timeout_cap_s": cell.get("timeout_cap_s")}) is not None
+    if status in {"complete", "not_converged"}:
+        if metrics.get("stop_contract") != "original-v1":
+            return False
+        identity = cell["cell"]
+        if (identity.get("solver") == "apxchol_v1" and "total_s" in metrics
+                and metrics.get("execution_route") != identity.get("device")):
+            return False
+    return True
+
+
+def cell_is_current(cell, head_sha):
+    """Whether a stored cell may be reused at revision ``head_sha`` on resume.
+
+    Fails closed: only cells produced at this exact revision that meet the
+    current contract are reused; anything else is re-run and replaced after its
+    runner returns.
+    """
+    return (bool(head_sha) and isinstance(cell, dict)
+            and (cell.get("provenance") or {}).get("git_sha") == head_sha
+            and cell_meets_contract(cell))
 
 def boost_state():
     try:

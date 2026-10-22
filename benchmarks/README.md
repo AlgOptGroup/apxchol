@@ -74,14 +74,7 @@ no untimed, matrix-specific tolerance calibration before retained runs. Julia
 uses fixed tiny connected/disconnected/SDDM fixtures to warm its native closure
 types before timing; these fixtures do not depend on the measured matrix.
 
-Canonical MATLAB CMG is unavailable on ARM64. The separate `cmg_packed` port is
-serial, uses private generated source, and is not canonical MATLAB CMG: even
-terminal hierarchy behavior can differ. Its default normalized `b=A*g` uses NumPy
-PCG64 seed 42; an explicit `rhs_path` avoids cross-language RNG differences.
-Original-operator grading is independent. Setup charges CSC conversion; solve
-includes generated hierarchy destruction. Build `benchmarks/cmg/native` with
-`CMG_GENERATED_DIR`, `FMM_SOURCE_DIR`, optionally `EIGEN_INCLUDE_DIR`; set
-`APXCHOL_CMG_NATIVE_BIN`. Do not distribute generated proprietary sources.
+Canonical MATLAB CMG is unavailable on ARM64.
 
 ## Build and run
 
@@ -142,24 +135,17 @@ without a class. Select its family with `--families`. The supplier must establis
 that a proposed PageRank formulation meets the solver's symmetric operator
 contract; an arbitrary directed PageRank matrix must not be relabelled as SDDM.
 
-## Render selected results
+## Thread-scaling plots
 
-Rendering does not run solvers. Defaults write ignored `results/plots` previews.
-Publication requires an explicitly selected, audited store:
+Rendering does not run solvers and writes ignored `results/plots` previews by
+default. Every selected cell must meet the current measurement contract.
 
 ```sh
-PYTHONPATH=benchmarks python3 benchmarks/render_snapshot.py \
-  --cells STORE --out OUTPUT --threads N --platform NAME --sampler-comparison
 PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compact \
   --store SCALING_STORE --matrices grid_2000,iter0040,as-Skitter \
   --series 'apxchol bg+tree,apxchol trace-cycle,AMGCL,BoomerAMG,ParAC' \
   --thread-counts 1,2,4,8,16 --out results/plots
 ```
 
-Add `--fill-cells FILL_STORE` to include the explicit factor-fill observations.
-The timing heatmaps use an uncapped logarithmic colour scale.
-
 Compact plots show absolute times and log-log speedups; no complete T1 means no
-speedup. Full-study extracts remain separate. `stale_cells.py` checks semantic
-invalidation without deleting evidence; renderers reject stale/ambiguous cells.
-Use `benchmarks/dev/audit_series_rule.py` for the declared-series audit.
+speedup. The fair-sweep renderers live in the research archive.

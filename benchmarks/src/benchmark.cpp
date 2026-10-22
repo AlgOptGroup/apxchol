@@ -72,8 +72,6 @@
 #include <Eigen/OrderingMethods>
 
 #include "graphs.h"
-#include "solver.h"
-#include "simple_solver.h"
 #include "mmio.h"
 
 // The operator class apxchol is defined on: scan_operator / require_operator /
@@ -436,48 +434,6 @@ static Eigen::VectorXd& center_if_laplacian(Eigen::VectorXd& v) {
     return v;
 }
 
-// ──────────────────── apxchol preconditioner adaptor ────────────────────
-class apx_preconditioner {
-public:
-    using Scalar = double;
-    using RealScalar = double;
-    using StorageIndex = int;
-
-    apx_preconditioner() = default;
-    explicit apx_preconditioner(lap_solver& s) : s_(&s) {}
-
-    template <class MatrixType>
-    apx_preconditioner& compute(const MatrixType& A) {
-        n_ = A.rows();
-        info_ = (s_ != nullptr) ? Eigen::Success : Eigen::NumericalIssue;
-        return *this;
-    }
-
-    Eigen::Index rows() const { return n_; }
-    Eigen::Index cols() const { return n_; }
-    Eigen::ComputationInfo info() const { return info_; }
-
-    template <class Rhs>
-    Eigen::VectorXd solve(const Rhs& b) const {
-        Eigen::VectorXd bb = b;
-        center_if_laplacian(bb);
-        std::vector<double> bv(bb.data(), bb.data() + bb.size());
-        auto xv = s_->solve(bv);
-        Eigen::VectorXd x = Eigen::Map<Eigen::VectorXd>(xv.data(), xv.size());
-        center_if_laplacian(x);
-        return x;
-    }
-
-private:
-    lap_solver* s_ = nullptr;
-    Eigen::Index n_ = 0;
-    Eigen::ComputationInfo info_ = Eigen::Success;
-};
-
-namespace Eigen { namespace internal {
-    template <> struct traits<apx_preconditioner> : traits<Eigen::SparseMatrix<double>> {};
-}}
-
 // ──────────────────── benchmark result ────────────────────
 #include "bench_result.h"
 #include "original_stop.h"
@@ -697,56 +653,6 @@ static BenchResult median_run(Fn&& fn, int repeats) {
 }
 
 // ──────────────────── solver runners ────────────────────
-
-static BenchResult run_apxchol(
-    const std::vector<std::vector<Edge>>& adj,
-    const Eigen::SparseMatrix<double>& L,
-    const Eigen::VectorXd& b,
-    const std::string& graph_name,
-    double tol, int maxiter)
-{
-    BenchResult r;
-    r.solver_name = "ApxChol+PCG [Kyng16]";
-    r.graph_name = graph_name;
-    r.n = static_cast<int>(L.rows());
-    r.nnz = static_cast<int>(L.nonZeros());
-
-    Timer t;
-    t.start();
-    simple_solver solver(adj);
-    r.setup_time = t.elapsed();
-
-    apx_preconditioner M(solver);
-    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>,
-                             Eigen::Lower | Eigen::Upper,
-                             apx_preconditioner> cg;
-    cg.setMaxIterations(maxiter);
-    cg.setTolerance(tol);
-    cg.preconditioner() = M;
-
-    t.start();
-    cg.compute(L);
-    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
-        [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
-            cg.setTolerance(request); cg.setMaxIterations(remaining);
-            if (warm) current = cg.solveWithGuess(b, current).eval();
-            else current = cg.solve(b);
-            return b.isZero(0.0) ? 0 : std::min(remaining, static_cast<int>(cg.iterations()) + 1);
-        });
-    r.solve_time = t.elapsed();
-
-    r.total_time = r.setup_time + r.solve_time;
-    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-
-    center_if_laplacian(x);
-    Eigen::VectorXd res = b - L * x;
-    center_if_laplacian(res);
-    double bnorm = b.norm();
-    r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
-    r.fillin = solver.num_nonzeros() * 2.0 / r.nnz;
-    r.us_per_nnz = r.total_time / r.nnz * 1e6;
-    return r;
-}
 
 #ifdef HAVE_APXCHOL_V1
 static BenchResult run_apxchol_v1(
@@ -1253,7 +1159,7 @@ static Args parse_args(int argc, char** argv) {
     }
     // An explicitly requested, compiled-out solver must not produce a successful
     // header-only CSV. Validate before loading a matrix or initializing runtimes.
-    const std::set<std::string> default_solvers = {"apxchol", "cg", "ldlt"
+    const std::set<std::string> default_solvers = {"cg", "ldlt"
 #ifdef HAVE_APXCHOL_V1
             , "apxchol_v1"
 #endif
@@ -2793,8 +2699,7 @@ int main(int argc, char** argv) {
             if (kind == matrix_kind::op) {
                 // Declared an assembled operator: read it as published —
                 // diagonal included, signs untouched — and solve THAT. No
-                // adjacency exists for this path (see the `adj.empty()` gate on
-                // the v0 solver).
+                // adjacency exists for this path.
                 auto res = load_mtx_as_operator(args.mtx_path);
                 published = std::move(res.A);
             } else {
@@ -3126,36 +3031,14 @@ int main(int argc, char** argv) {
         return single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
     };
 
-    if (args.solvers.count("apxchol")) {
-        // The v0 reference builds its preconditioner from an ADJACENCY LIST, so
-        // it can only ever solve L = D - A. On a published operator there is no
-        // adjacency to hand it (its diagonal excess has nowhere to go), and
-        // feeding it the off-diagonals would mean scoring it on a different
-        // system than every other solver in the same cell. Honest n/a instead.
-        if (adj.empty() && n > 0) {
-            std::cerr << "[n/a] apxchol (v0 reference) takes a graph adjacency; "
-                         "the matrix was declared kind=operator\n";
-            print(make_na("ApxChol+PCG [Kyng16]"));
-        } else {
-            print(median_run([&]() {
-                std::streambuf* old = std::cout.rdbuf();
-                std::ostringstream devnull;
-                std::cout.rdbuf(devnull.rdbuf());
-                auto r = run_apxchol(adj, L, b, graph_name, args.tol, args.maxiter);
-                std::cout.rdbuf(old);
-                return r;
-            }, R));
-        }
-    }
-
     // No solver below this point consumes the graph-adjacency staging form;
     // every one of them uses the assembled Eigen operator L.  Keeping `adj`
     // alive was harmless on the ordinary suite but retained one separately
     // allocated Edge vector per vertex on procedural giant grids.  At
     // grid2d-11500 / grid3d-480 that pushed AMGCL's process RSS to the GH200
     // module-local memory boundary even though its measured hierarchy fits.
-    // Release both the inner allocations and the outer vector capacity after
-    // the optional v0 arm has had its only opportunity to use them.
+    // Release both the inner allocations and the outer vector capacity once
+    // the operator has been assembled.
     std::vector<std::vector<Edge>>().swap(adj);
 
 #ifdef HAVE_APXCHOL_V1

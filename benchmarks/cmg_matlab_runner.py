@@ -2,8 +2,8 @@
 """CMG (Koutis combinatorial multigrid) runner via the canonical MATLAB R2026a.
 
 Runs the canonical MATLAB CMG (Koutis original) inside the mathworks/matlab-deps
-container; the CMG MEX is recompiled for R2026a once via
-benchmarks/cmg/Dockerfile.matlab + makeCMG (mx_*.mexa64).
+container; the CMG MEX is recompiled for R2026a once with makeCMG (mx_*.mexa64).
+The container recipe lives in the research archive.
 
 Per matrix: dump the operator the sweep's own solvers were given (--dump-mtx, the
 one seam every external solver goes through), run bench_cmg.m in the container,
@@ -58,7 +58,7 @@ PROV = {"boost": "on", "git_sha": rc.git_sha(),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
 # CMG's compiled part is the MEX that MATLAB's `mex` built inside the container
-# (benchmarks/cmg/Dockerfile.matlab), so the toolchain is read off that .mexa64
+# (see the research archive for its recipe), so the toolchain is read off that .mexa64
 # rather than off this host's compiler — the container's gcc is not this
 # machine's, and the file is the only thing that knows which one built it. The
 # rest of CMG is MATLAB m-code run by the R2026a interpreter (see the note).
@@ -91,9 +91,6 @@ def available():
 
     Probed ONCE by the sweep, so a machine without MATLAB says so in one loud
     line instead of failing 27 times or, worse, leaving 27 silent gaps."""
-    native = rc.external_path("APXCHOL_CMG_NATIVE_BIN", "CMG_NATIVE_BIN")
-    if native:
-        return (True, "") if os.path.isfile(native) and os.access(native, os.X_OK) else (False, f"native CMG binary is not executable: {native}")
     for val, what in ((MATLAB, "the MATLAB R2026a install tree "
                                "($APXCHOL_MATLAB_ROOT / paths_local.MATLAB)"),
                       (CMG_SOLVER, "the cmg-solver checkout "
@@ -108,7 +105,7 @@ def available():
         return False, f"docker is not usable here ({e})"
     if cp.returncode != 0:
         return False, (f"the container image {IMAGE} is missing — build it from "
-                       f"benchmarks/cmg/Dockerfile.matlab")
+                       f"the recipe in the research archive")
     return True, ""
 
 
@@ -138,9 +135,6 @@ def _run_matlab_cmg(mtx_basename, as_operator):
 
 
 def run_one(mid):
-    if rc.external_path("APXCHOL_CMG_NATIVE_BIN", "CMG_NATIVE_BIN"):
-        import cmg_native_runner
-        return cmg_native_runner.run_one(mid, THREADS)
     fam = rc.MATRICES[mid]["family"]
     if rc.cell_done(fam, mid, "cmg", "", THREADS, "cpu", terminal=TERMINAL):
         return "skip(done)"

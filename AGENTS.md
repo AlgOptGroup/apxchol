@@ -23,7 +23,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Algorithm defaults and their rationale: `include/apxchol/solver/factor_options.h`. Build options: root `CMakeLists.txt` and `cmake/apxchol_core.cmake`, which the root, Python and benchmark projects share.
 - Precision and storage contract: `docs/precision.md`. Extension seams: `docs/extending.md`. Supported environment variables: README; every other `APXCHOL_*` variable is an unsupported diagnostic.
 - Operator validation and M-matrix lumping: `operator_class`. Adjacency detection belongs to the CLI (`src/mtx_input.h`); bindings accept assembled operators only.
-- Measurement contracts: `benchmarks/README.md`. `benchmarks/src/v0/` is a frozen baseline.
+- Measurement contracts: `benchmarks/README.md`.
 
 ## Route invariants
 

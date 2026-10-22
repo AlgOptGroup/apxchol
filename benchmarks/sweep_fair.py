@@ -2,9 +2,9 @@
 """Single fair runner for ALL matrix families (grids + SuiteSparse + IPM), on
 either device (--device cpu | gpu). Both write the SAME per-cell JSON store
 (results/cells/<family>/<mid>__<solver>__<cfg>__t16__<device>.json) and are
-RESUME-SAFE: a reusable terminal cell is skipped, while a terminal cell invalidated
-by the current stale rules is re-run and replaced only after its runner finishes.
-fair_charts.py / gpu_charts.py / combined_charts.py all read this one store.
+RESUME-SAFE: a terminal cell from this revision under the current contract is
+skipped; any other cell is re-run and replaced only after its runner finishes
+(runner_common.cell_is_current).
 
 Every matrix DECLARES how it is to be read (runner_common: kind=graph|operator),
 and the binary requires that declaration on the command line — nothing here
@@ -46,10 +46,9 @@ CSV parse, VRAM sidecar) lives in runner_common.py. Schema-2 timeout cells persi
 the exact wall-clock cap as `timeout_cap_s`; the charting pipeline never reconstructs
 that lower bound from later timings.
 """
-import argparse, contextlib, json, os, re, shlex, shutil, subprocess, sys, time
+import argparse, contextlib, functools, json, os, re, shlex, shutil, subprocess, sys, time
 
 import runner_common as rc
-import stale_cells
 import parac_runner
 import cmg_matlab_runner
 from runner_common import BIN, CELLS, matrix_args, sh
@@ -522,6 +521,11 @@ def _stored_cell(family, mid, solver, config, threads, device):
     return cell
 
 
+@functools.cache
+def _head_sha():
+    return rc.git_sha()
+
+
 def stored_cell_done(family, mid, solver, config, threads, device,
                      terminal=rc.DEFAULT_TERMINAL, *, rerun_timeouts=False):
     """Whether one stored cell is terminal, well-formed, and still reusable."""
@@ -535,7 +539,7 @@ def stored_cell_done(family, mid, solver, config, threads, device,
         return False
     if st not in terminal:
         return False
-    return not stale_cells.cell_is_stale(cell)
+    return rc.cell_is_current(cell, _head_sha())
 
 
 def cell_done(family, mid, solver, config):
@@ -547,7 +551,7 @@ def cell_done(family, mid, solver, config):
 
 @contextlib.contextmanager
 def _stale_aware_embedded_resume():
-    """Give direct-emitting embedded runners the same stale-aware done check.
+    """Give direct-emitting embedded runners the same reuse check.
 
     ParAC and CMG call ``runner_common.cell_done`` internally. Patch that read-only
     decision only while a fair sweep is running, and always restore it afterward;
@@ -590,7 +594,7 @@ def gpu_apx_total(family, mid):
     cell = _stored_cell(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG,
                         THREADS, "gpu")
     if (cell is not None and cell.get("status") == "complete"
-            and not stale_cells.cell_is_stale(cell)):
+            and rc.cell_is_current(cell, _head_sha())):
         return cell.get("metrics", {}).get("total_s")
     return None
 
