@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(apxchol VERSION 0.2.2 LANGUAGES CXX)
+project(apxchol VERSION 0.3.0 LANGUAGES CXX)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -7,7 +7,6 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(cmake/apxchol_core.cmake)
-add_compile_options(-Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>" ${APXCHOL_ARCH_FLAG})
 include(FetchContent)
 
 # ── CLI11 ────────────────────────────────────────────
@@ -69,6 +68,12 @@ if (APXCHOL_BUILD_TESTS AND APXCHOL_DEVICE STREQUAL "CUDA")
     target_compile_definitions(apxchol_test_core PUBLIC APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 endif()
 
+# Warnings for the remaining first-party targets created below (CLI, examples,
+# tests). The core sets its own; fetched dependencies above are not affected.
+# The architecture flag reaches every consumer through apxchol_core's PUBLIC
+# options rather than a directory-wide flag.
+add_compile_options(-Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>")
+
 # ── CLI input interpretation ─────────────────────────
 # Laplacian-vs-adjacency detection for the CLI's .mtx input. Its own target so
 # the unit tests can link it without pulling in CLI11/spdlog; Eigen-only, no
@@ -79,7 +84,7 @@ target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/
 
 target_compile_features(apxchol_mtx_input PUBLIC cxx_std_23)
 if (APXCHOL_ARCH_FLAG)
-    target_compile_options(apxchol_mtx_input INTERFACE "${APXCHOL_ARCH_FLAG}")
+    target_compile_options(apxchol_mtx_input PUBLIC "${APXCHOL_ARCH_FLAG}")
 endif()
 
 # ── CLI solver ───────────────────────────────────────
