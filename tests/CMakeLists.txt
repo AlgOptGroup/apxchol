@@ -47,6 +47,15 @@ endif()
 
 if (APXCHOL_DEVICE STREQUAL "CUDA")
     target_link_libraries(unit_tests PRIVATE apxchol_test_core)
+    # GCC 15.3 IPA-CP clones gpu_pcg::solve for the file's test preconditioner
+    # with the iteration loop removed, although callers pass max_iter 0, 10 and
+    # 100; scalar GpuSolveHonesty solves then stop at iteration zero.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15 AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+        set_source_files_properties(test_gpu_operator_csr.cpp PROPERTIES
+            COMPILE_OPTIONS -fno-ipa-cp)
+    endif()
 else()
     target_link_libraries(unit_tests PRIVATE apxchol_core)
 endif()
@@ -154,7 +163,12 @@ apxchol_cli_test(cli_retired_forward_star_no_append_is_rejected path5_pattern 10
 # Complete solve-route CLI contract: the CPU choice is usable in every build,
 # and CLI enum transformations must not admit numeric or unknown selectors.
 apxchol_cli_test(cli_backend_cpu_converges path5_sddm 0 "backend: +cpu" --backend cpu)
-apxchol_cli_test(cli_backend_auto_tiny_uses_cpu path5_sddm 0 "backend: +cpu")
+# Auto keeps scalar systems on CPU in every build. CUDA builds with a visible
+# device route larger inputs, including path5, to the GPU.
+apxchol_cli_test(cli_backend_auto_scalar_uses_cpu scalar_sddm 0 "backend: +cpu")
+if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
+    apxchol_cli_test(cli_backend_auto_tiny_uses_cpu path5_sddm 0 "backend: +cpu")
+endif()
 apxchol_cli_test(cli_numeric_backend_is_rejected path5_sddm 105 "not in" --backend 0)
 apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backend hybrid)
 if (APXCHOL_DEVICE STREQUAL "CPU")
