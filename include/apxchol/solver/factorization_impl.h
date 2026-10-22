@@ -749,14 +749,9 @@ factorization factorize_impl(const Eliminator& elim,
 
     const bool gpu_owned_setup_route = route == detail::setup_route::gpu;
 
-    // APXCHOL_OMP_THRESHOLD (experiment knob, see env_knobs.h) overrides
-    // factor_options::omp_threshold for this factorization -- it flows from
-    // here into the partitioner context, the degree prepass and the per-round
-    // serial/parallel elimination gate. Unset = opts_in unchanged.
+    // Resolve the by-route sentinels for this factorization.
     const factor_options opts = [&] {
         factor_options o = opts_in;
-        const long ov = detail::env_knobs::get().omp_threshold;
-        if (ov >= 0) o.omp_threshold = static_cast<size_t>(ov);
         if (o.partition.degree_quantile < 0.0)
             o.partition.degree_quantile = gpu_owned_setup_route
                                               ? degree_quantile_device_default

@@ -3,7 +3,7 @@
 // cuda_host::transpose_csr (the GPU backend's host prep: CSR of L from CSR of
 // L^T, int32 arrays, plain value copy).
 //
-// The blocked counting-sort transpose (APXCHOL_PAR_TRANSPOSE, engaged for
+// The blocked counting-sort transpose (engaged for
 // m > kParTransposeMinRows = 50000) must produce a CSR that is byte-identical
 // to the classic serial count/prefix/scatter transpose — same row pointers,
 // same column indices (ascending column order within every row), same value
@@ -133,8 +133,7 @@ void expect_byte_identical(const apxchol::omp_sptrsv& trsv, const ref_csr& R,
 
 } // namespace
 
-// m > 50000 engages the parallel transpose (APXCHOL_PAR_TRANSPOSE defaults
-// on). The output must be byte-identical to the serial reference at every
+// m > 50000 engages the parallel transpose. The output must be byte-identical to the serial reference at every
 // thread count — including T=1, and thread counts that do not divide m.
 TEST(SpTRSVTranspose, ByteIdenticalToSerialReferenceAcrossThreadCounts) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite

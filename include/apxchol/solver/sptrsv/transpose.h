@@ -8,8 +8,7 @@
 // stored-value types. CPU and GPU host preparation both transpose values
 // after conversion; tests compare both callers with a serial reference.
 //
-// Blocked counting-sort parallel transpose (APXCHOL_PAR_TRANSPOSE, default on
-// for m > kParTransposeMinRows): O(nnz) TOTAL work. It replaced the row-range
+// Blocked counting-sort parallel transpose (for m > kParTransposeMinRows): O(nnz) TOTAL work. It replaced the row-range
 // rescan scheme on the CPU, where every thread scanned ALL nnz twice filtering
 // to its own row range -- O(threads*nnz) total work, so the stage's wall time
 // was flat in thread count (71-76% of sptrsv_setup at T=16) -- and the plain
@@ -75,23 +74,13 @@ namespace apxchol {
 /// scatter wins: thread dispatch overhead exceeds the work).
 inline constexpr std::int64_t kParTransposeMinRows = 50000;
 
-/// APXCHOL_PAR_TRANSPOSE (env, read once per process): 0 disables the
-/// parallel path everywhere (A/B only); unset / anything else = on.
-inline bool par_transpose_enabled() {
-    static const bool v = [] {
-        const char* e = std::getenv("APXCHOL_PAR_TRANSPOSE");
-        return e ? std::atoi(e) != 0 : true;
-    }();
-    return v;
-}
-
-/// The rule both backends apply: the parallel path iff enabled, m >
+/// The rule both backends apply: the parallel path iff m >
 /// kParTransposeMinRows and more than one OpenMP thread is available (at one
 /// thread the plain serial scatter is faster -- two passes and no bucket vs
 /// the blocked sort's three; both are byte-identical anyway).
 inline bool use_parallel_transpose(std::int64_t m) {
 #ifdef _OPENMP
-    return par_transpose_enabled() && m > kParTransposeMinRows && omp_get_max_threads() > 1;
+    return m > kParTransposeMinRows && omp_get_max_threads() > 1;
 #else
     (void)m;
     return false;

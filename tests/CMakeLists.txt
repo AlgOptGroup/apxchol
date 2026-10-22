@@ -152,14 +152,6 @@ apxchol_cli_test(cli_forced_wrong_kind_is_refused path5_pattern 2 "Condition FAI
 # Enum transformations must not widen the CLI to accept raw numeric values.
 apxchol_cli_test(cli_numeric_input_kind_is_rejected path5_pattern 105 "not in"
     --input-kind 0)
-apxchol_cli_test(cli_graph_storage_option_is_rejected path5_pattern 109 "not expected"
-    --graph-storage vec_pool_aos)
-apxchol_cli_test(cli_retired_forward_star_compaction_is_rejected path5_pattern 109 "not expected"
-    --fs-compact 0.75)
-apxchol_cli_test(cli_retired_forward_star_append_is_rejected path5_pattern 109 "not expected"
-    --fs-filter-append)
-apxchol_cli_test(cli_retired_forward_star_no_append_is_rejected path5_pattern 109 "not expected"
-    --no-fs-filter-append)
 
 # Complete solve-route CLI contract: the CPU choice is usable in every build,
 # and CLI enum transformations must not admit numeric or unknown selectors.

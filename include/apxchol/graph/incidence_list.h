@@ -74,33 +74,11 @@ namespace detail {
 //                                  or different v's. count_[v] is the atomic
 //                                  counter.
 //
-// Runtime tunables (env-var driven, evaluated once at first init).
-//   APXCHOL_VEC_POOL_INITIAL_CAP     (int)  -- first slab cap (slots).
-//                                              Default 4. Try 6, 8, 12 to
-//                                              capture typical post-fill degree
-//                                              on grids.
-//   APXCHOL_VEC_POOL_GROWTH_NUM/DENOM       -- grow cap by num/denom each grow.
-//                                              Default 2/1 (doubling). Try 3/2
-//                                              for 1.5× to reduce overshoot.
+// Slab geometry (vec_pool_config): initial cap 4, doubling growth.
 struct vec_pool_config {
-    node_index initial_cap;
-    int     growth_num;
-    int     growth_denom;
-
-    static const vec_pool_config& get() {
-        static const vec_pool_config c = []() {
-            vec_pool_config x;
-            auto env_int = [](const char* k, int def) {
-                const char* v = std::getenv(k);
-                return v ? std::atoi(v) : def;
-            };
-            x.initial_cap      = env_int("APXCHOL_VEC_POOL_INITIAL_CAP", 4);
-            x.growth_num       = env_int("APXCHOL_VEC_POOL_GROWTH_NUM",   2);
-            x.growth_denom     = env_int("APXCHOL_VEC_POOL_GROWTH_DENOM", 1);
-            return x;
-        }();
-        return c;
-    }
+    node_index initial_cap = 4;   // first slab cap (slots)
+    int growth_num = 2;           // grow cap by growth_num / growth_denom
+    int growth_denom = 1;
 };
 
 // Stable-address, segmented pool. Slabs never straddle a segment, so their
@@ -362,7 +340,7 @@ template<typename Value> struct basic_vec_pool_incidence {
         if (cap_[v] >= need)
             return;
         abandoned_ += cap_[v];
-        const auto& cfg = vec_pool_config::get();
+        constexpr vec_pool_config cfg{};
         // Geometric over-allocation: at least `need`, but try cap * growth.
         node_index new_cap = need;
         if (cap_[v] > 0) {
@@ -499,7 +477,7 @@ template<typename Value> struct basic_vec_pool_incidence {
     ///   round_incoming : per-vertex fill counts for the imminent round (or
     ///   null).
     void compact(const std::vector<node_index>* round_incoming = nullptr) {
-        const auto& cfg = vec_pool_config::get();
+        constexpr vec_pool_config cfg{};
         auto target_cap = [&](node_index v) -> node_index {
             const node_index cnt = count_[v];
             if (cnt == 0)
@@ -557,7 +535,7 @@ template<typename Value> struct basic_vec_pool_incidence {
         const size_t touched_n = static_cast<size_t>(touched_end - touched_begin);
         const size_t begin = touched_n * static_cast<size_t>(tid) / static_cast<size_t>(team);
         const size_t end = touched_n * static_cast<size_t>(tid + 1) / static_cast<size_t>(team);
-        const auto& cfg = vec_pool_config::get();
+        constexpr vec_pool_config cfg{};
         auto& grows = bulk_thread_grows_[static_cast<size_t>(tid)];
         grows.clear();
         size_t local_abandoned = 0;
@@ -625,7 +603,7 @@ private:
         // Account for the slab we are about to abandon.
         abandoned_ += cap_[v];
         ++grow_count_;
-        const auto& cfg = vec_pool_config::get();
+        constexpr vec_pool_config cfg{};
         node_index new_cap;
         if (cap_[v] == 0) {
             new_cap = cfg.initial_cap;

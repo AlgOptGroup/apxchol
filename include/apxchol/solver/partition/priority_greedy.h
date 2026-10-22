@@ -10,7 +10,6 @@
 
 #include "apxchol/solver/partitioner.h"
 #include "apxchol/solver/partitioner_helpers.h"
-#include "apxchol/solver/partition/priority_greedy_config.h"
 #include <algorithm>
 #include <atomic>
 
@@ -22,7 +21,8 @@ struct priority_greedy_partitioner {
     static constexpr bool degree_prepass = true;
 
     uint64_t round = 0;
-    int parallel_passes = detail::priority_greedy_parallel_passes();
+    /// Parallel fixed-priority passes before the exact serial fallback.
+    int parallel_passes = 16;
 
     void find_partition(graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {

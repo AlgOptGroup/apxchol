@@ -840,9 +840,6 @@ TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
 #ifndef _OPENMP
     GTEST_SKIP() << "serial build: there is no parallel selection path";
 #else
-    if (const char* e = std::getenv("APXCHOL_OMP_THRESHOLD"); e && *e)
-        GTEST_SKIP() << "APXCHOL_OMP_THRESHOLD=" << e
-                     << " overrides the omp_threshold this test sets";
     // 14400 candidates against a 256-vertex OpenMP gate: most of the ~45
     // elimination rounds take the parallel branch. 16 threads whatever the box
     // has -- oversubscription is welcome here, it widens the window the

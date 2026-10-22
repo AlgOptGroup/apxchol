@@ -360,8 +360,8 @@ public:
     ///
     /// Laplacian path (rank n-1): center → P → L^{-1} → L^{-T} → P^{-1} → center,
     ///   where the two centring passes run on every K-th application only
-    ///   (APXCHOL_GROUND=center-k, K = APXCHOL_CENTER_K, default 10; see
-    ///   env_knobs.h and take_center_()). K = 1 centres every application.
+    ///   (APXCHOL_GROUND=center-k, K = 10; see env_knobs.h and
+    ///   take_center_()). APXCHOL_GROUND=center centres every application.
     /// SDDM path     (rank n):   P → L^{-1} → L^{-T} → P^{-1}.
     ///
     /// `b` may be any dense column expression (a plain VectorXd binds without a

@@ -549,13 +549,8 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
         // Operator A storage precision: fp32 when every caller value
         // round-trips fp32 (lossless), else fp64. Resolve this BEFORE building
         // so the direct path writes the final scalar width and never creates a
-        // transient fp64 Lrm merely to cast it. APXCHOL_FP32_OPERATOR
-        // overrides: "0" forces fp64, any other value forces fp32 (may floor
-        // if inexact).
-        { const char* e = std::getenv("APXCHOL_FP32_OPERATOR");
-          if (e && std::string(e) == "0")   op_fp32_ = false;
-          else if (e && *e != '\0')         op_fp32_ = true;
-          else                              op_fp32_ = storage.fp32_exact; }
+        // transient fp64 Lrm merely to cast it.
+        op_fp32_ = storage.fp32_exact;
 
         // Lrm conversion is one-time SETUP work for the parallel SpMV;
         // checkpoint it under "setup" so bench's setup_time/solve_time
