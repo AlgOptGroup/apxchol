@@ -10,6 +10,7 @@ endif()
 # index/pool options and, for CUDA, static cudart. apxchol_v1 below is built by
 # the same apxchol_configure_core() as the root library and Python module.
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_core.cmake)
+set(CMAKE_CXX_STANDARD 17) # The apxchol targets request C++23 explicitly.
 
 # Competitors get the same machine-tuning flag as the core. It is recorded into
 # the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
@@ -223,10 +224,7 @@ if (HAVE_METIS)
     target_compile_definitions(rchol_lib PUBLIC HAVE_METIS)
     target_include_directories(rchol_lib PUBLIC ${METIS_INCLUDE})
     target_link_libraries(rchol_lib PUBLIC ${METIS_LIB})
-    find_package(OpenMP QUIET)
-    if (OpenMP_CXX_FOUND)
-        target_link_libraries(rchol_lib PUBLIC OpenMP::OpenMP_CXX)
-    endif()
+    target_link_libraries(rchol_lib PUBLIC OpenMP::OpenMP_CXX)
 endif()
 if (HAVE_MKL AND NOT APXCHOL_RCHOL_PORTABLE_PCG)
     target_compile_definitions(rchol_lib PUBLIC HAVE_MKL HAVE_RCHOL_PCG)
@@ -350,8 +348,6 @@ if (BUILD_GPU_RCHOL)
         FetchContent_Populate(fast_matrix_market)
     endif()
 
-    find_package(OpenMP QUIET)
-
     # A SOURCE_DIR override skips FetchContent's PATCH_COMMAND. Fail closed rather
     # than build a driver whose partial timers our parser would silently accept.
     file(READ "${gpu_rchol_SOURCE_DIR}/experiment/driver_local.cpp" _parac_cpu_driver)
@@ -377,7 +373,7 @@ if (BUILD_GPU_RCHOL)
 
     # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
     # this driver uses MKL's default 32-bit MKL_INT, so it must NOT get the ILP64 layer.
-    if (OpenMP_CXX_FOUND AND HAVE_MKL AND MKL_LP64)
+    if (HAVE_MKL AND MKL_LP64)
         add_executable(gpu_rchol_cpu_driver
             ${gpu_rchol_SOURCE_DIR}/experiment/driver_local.cpp
         )
@@ -399,7 +395,7 @@ if (BUILD_GPU_RCHOL)
             -O3 -w "SHELL:-include climits" "SHELL:-include cstdint")
         message(STATUS "GPU RCHOL CPU driver enabled (experiment/driver_local.cpp)")
     else()
-        message(STATUS "GPU RCHOL CPU driver needs OpenMP + MKL (LP64) — skipped")
+        message(STATUS "GPU RCHOL CPU driver needs MKL (LP64) — skipped")
     endif()
 
     # GPU driver (needs CUDA). The convergence test remains upstream: the runner
@@ -457,9 +453,7 @@ if (BUILD_GPU_RCHOL)
         target_link_libraries(gpu_rchol_gpu_driver PRIVATE
             cusparse cublas
         )
-        if (OpenMP_CXX_FOUND)
-            target_link_libraries(gpu_rchol_gpu_driver PRIVATE OpenMP::OpenMP_CXX)
-        endif()
+        target_link_libraries(gpu_rchol_gpu_driver PRIVATE OpenMP::OpenMP_CXX)
         target_compile_options(gpu_rchol_gpu_driver PRIVATE -O3 -w)
         message(STATUS "GPU RCHOL GPU driver enabled (gpu_implementation/driver.cu)")
 
@@ -478,9 +472,7 @@ if (BUILD_GPU_RCHOL)
             ${fast_matrix_market_SOURCE_DIR}/include
         )
         target_link_libraries(gpu_rchol_gpu_driver_physics PRIVATE cusparse cublas)
-        if (OpenMP_CXX_FOUND)
-            target_link_libraries(gpu_rchol_gpu_driver_physics PRIVATE OpenMP::OpenMP_CXX)
-        endif()
+        target_link_libraries(gpu_rchol_gpu_driver_physics PRIVATE OpenMP::OpenMP_CXX)
         target_compile_options(gpu_rchol_gpu_driver_physics PRIVATE -O3 -w)
         message(STATUS "GPU RCHOL GPU physics driver enabled (gpu_implementation/driver_physics.cu)")
     else()

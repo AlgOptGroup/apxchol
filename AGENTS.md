@@ -35,7 +35,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 
 - Canonical neighbors sort by weight, then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams.
 - OpenMP work uses the actual team size, never the requested one; every logical range must execute under reduced or nested teams. Caller-operator loops split work with `detail::work_balanced_range`; reductions stay thread-ordered.
-- Partitioner conflict resolution is deterministic for a given graph, context and team size. Shortcuts (symmetric-input pairing proof, prune skipping with its audit) must give bit-identical results to the reference path.
+- Partitioner conflict resolution is deterministic for a given graph, context and team size. Symmetric-input pairing shortcuts must preserve results bit for bit. Prune skipping must retain its full-walk audit for hidden eligible vertices; it need not reproduce the same factor as full pruning.
 - Residual importance normalization uses fixed ordered 16,384-item partials, invariant to thread count. Same-graph selection and same-factor solves are deterministic; independently rebuilt parallel factors need not be identical (see `docs/precision.md`).
 - GPU selection guarantees independence and progress, not the CPU's selected set; GPU floating folds may differ from CPU while preserving the sampling law.
 

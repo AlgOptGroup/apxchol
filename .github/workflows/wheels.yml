@@ -2,11 +2,6 @@ name: wheels
 
 on:
   workflow_call:
-    inputs:
-      build:
-        description: cibuildwheel build selector; empty uses python/pyproject.toml
-        type: string
-        default: ''
 
 permissions:
   contents: read
@@ -25,11 +20,9 @@ jobs:
             runner: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Restrict Python versions
-        if: inputs.build != ''
-        env:
-          CIBW_BUILD_SELECTOR: ${{ inputs.build }}
-        run: echo "CIBW_BUILD=$CIBW_BUILD_SELECTOR" >> "$GITHUB_ENV"
+      - name: Test oldest and newest Python on pull requests
+        if: github.event_name == 'pull_request'
+        run: printf '%s\n' 'CIBW_BUILD=cp310-* cp314-*' >> "$GITHUB_ENV"
       - name: Build wheels and run tests
         uses: pypa/cibuildwheel@v4.2.1
         with:
