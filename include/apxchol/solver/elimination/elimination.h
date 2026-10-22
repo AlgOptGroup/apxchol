@@ -254,7 +254,9 @@ struct tree_elimination {
                                                   : a.vertex < b.vertex;
                   });
 
-        if (sampler == clique_sampler::trace_cycle && d >= 3) {
+        if (sampler != clique_sampler::gks && d >= 3) {
+            if (sampler != clique_sampler::trace_cycle)
+                throw std::invalid_argument("unknown clique sampler");
             detail::sample_cycle_clique(neighbors, deg, seed, out,
                                         exact_core_max_h, double_cycle_min_h);
             return;
