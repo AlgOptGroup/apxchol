@@ -1635,7 +1635,7 @@ private:
     using half_vector [[gnu::vector_size(dot_lanes * sizeof(_Float16))]] = _Float16;
 
     [[gnu::target("avx2,f16c,fma"), gnu::always_inline]]
-    static inline dot_vector widen_vector(half_vector h) {
+    static dot_vector widen_vector(half_vector h) {
 #ifdef __clang__
         return __builtin_convertvector(h, dot_vector);
 #else

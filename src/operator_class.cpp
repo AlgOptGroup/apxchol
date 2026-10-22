@@ -46,8 +46,9 @@ struct col_range {
 /// added up in thread order over the fixed `schedule(static)` partition (no
 /// `reduction(+:)` on a double anywhere — libgomp combines those in thread
 /// COMPLETION order, which varies run to run; same rule as the fused PCG
-/// passes in preconditioner.h).
-struct witness {
+/// passes in preconditioner.h). One cache line per thread: the per-column
+/// writes would otherwise false-share across the whole scan.
+struct alignas(64) witness {
     double abs_mass = 0.0;
     double pos_mass = 0.0;
     Eigen::Index bad_diag = -1;
@@ -57,9 +58,6 @@ struct witness {
     double asym_a = 0.0, asym_b = 0.0;
     double row_sum = 0.0;
     Eigen::Index row = -1;
-    // One cache line per thread: the per-column writes below would otherwise
-    // false-share across the whole scan.
-    char pad[64];
 };
 
 col_range column(const Eigen::SparseMatrix<double>& A, Eigen::Index k) {

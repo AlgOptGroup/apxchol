@@ -1,10 +1,13 @@
 #include "config.h"
+#include "apxchol/solver/partitioner_list.h"
 #include "apxchol/version.h"
 #include <CLI/CLI.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <tuple>
+#include <vector>
 
 namespace apxchol {
 
@@ -19,6 +22,12 @@ static const std::map<std::string, solve_backend> solve_backend_map = {
     {"cpu", solve_backend::cpu},
     {"gpu", solve_backend::gpu},
 };
+
+static std::vector<std::string> partitioner_names() {
+    return []<typename... Ps>(std::tuple<Ps...>*) {
+        return std::vector<std::string>{std::string(Ps::name)...};
+    }(static_cast<partitioner_list*>(nullptr));
+}
 
 static void setup_logging(bool quiet, bool verbose) {
     if (verbose) {
@@ -133,11 +142,14 @@ run_config parse_args(int argc, char* argv[]) {
                    "Check convergence every N iters, stop if <50% improvement (0=disable)")
         ->capture_default_str();
 
-    app.add_option("--is", cfg.solve_opts.factor_opts.is_select,
-                   "Independent set strategy (block_greedy, priority_greedy, baumann_kyng)")
+    const std::vector<std::string> partitioners = partitioner_names();
+    std::string partitioner_help = "Independent set strategy (";
+    for (std::size_t i = 0; i < partitioners.size(); ++i)
+        partitioner_help += (i ? ", " : "") + partitioners[i];
+    partitioner_help += ")";
+    app.add_option("--is", cfg.solve_opts.factor_opts.is_select, partitioner_help)
         ->capture_default_str()
-        ->check(CLI::IsMember(
-            {"block_greedy", "priority_greedy", "baumann_kyng"}));
+        ->check(CLI::IsMember(partitioners));
 
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");

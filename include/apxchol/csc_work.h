@@ -82,7 +82,7 @@ work_balanced_range(const Offset* ptr, Index n, int tid, int nt) noexcept {
 
 // Use the current OpenMP team, or the whole range in a serial translation unit.
 template<class Offset, class Index>
-static inline std::pair<Index, Index>
+inline std::pair<Index, Index>
 work_balanced_range(const Offset* ptr, Index n) noexcept {
 #ifdef _OPENMP
     const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
