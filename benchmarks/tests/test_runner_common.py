@@ -279,6 +279,10 @@ class CellReuseTest(unittest.TestCase):
         for record in (None, [], {"status": "complete"}, {"cell": "x", "status": "complete"}):
             self.assertFalse(rc.cell_meets_contract(record))
             self.assertFalse(rc.cell_is_current(record, self.SHA))
+        for field in ("provenance", "metrics"):
+            for value in (None, [], ["x"], "x", 1, True):
+                with self.subTest(field=field, value=value):
+                    self.assertFalse(rc.cell_is_current(self.cell(**{field: value}), self.SHA))
 
 
 if __name__ == "__main__":

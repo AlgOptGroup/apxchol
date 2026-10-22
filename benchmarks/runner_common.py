@@ -124,6 +124,8 @@ def cell_meets_contract(cell):
     if not isinstance(cell, dict) or not isinstance(cell.get("cell"), dict):
         return False
     status, metrics = cell.get("status"), cell.get("metrics") or {}
+    if not isinstance(metrics, dict):
+        return False
     if status == "timeout":
         return timeout_cap({"timeout_cap_s": cell.get("timeout_cap_s")}) is not None
     if status in {"complete", "not_converged"}:
@@ -144,7 +146,8 @@ def cell_is_current(cell, head_sha):
     runner returns.
     """
     return (bool(head_sha) and isinstance(cell, dict)
-            and (cell.get("provenance") or {}).get("git_sha") == head_sha
+            and isinstance(cell.get("provenance"), dict)
+            and cell["provenance"].get("git_sha") == head_sha
             and cell_meets_contract(cell))
 
 def boost_state():
