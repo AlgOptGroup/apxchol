@@ -330,12 +330,9 @@ template<typename Value> struct basic_vec_pool_incidence {
     /// invoking atomic_push_reserved in parallel — grow() reallocates the
     /// vertex's slab and is NOT thread-safe.
     ///
-    /// Grows geometrically (configurable growth ratio, default 2x doubling)
-    /// just like std::vector::reserve. On dense matrices (IPM), this
-    /// dramatically reduces the number of grows over successive rounds.
-    /// Earlier "tight" reserve_for (cap = need exactly) caused every round
-    /// to trigger a grow + std::copy on touched vertices, making vec_pool
-    /// 80% slower than vec on IPM bg+tree/x2/ps1.
+    /// Grows geometrically (2x doubling) like std::vector::reserve, so a
+    /// vertex touched in successive rounds is not regrown and copied every
+    /// round.
     void reserve_for(node_index v, node_index need) {
         if (cap_[v] >= need)
             return;
@@ -389,7 +386,7 @@ template<typename Value> struct basic_vec_pool_incidence {
         std::sort(p, p + count_[v]);
     }
 
-    /// Directed-inline diagnostic: discard inactive endpoints and combine all
+    /// Residual coalescing: discard inactive endpoints and combine all
     /// parallel records with the same target into one fp32 record. Sorting by
     /// (target,weight) gives both endpoint slabs the same deterministic fp64
     /// accumulation order.

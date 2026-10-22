@@ -259,9 +259,8 @@ private:
             scratch2_.resize(n_);
         }
 
-        // sptrsv setup (CPU schedules / GPU dataflow preparation) is a real ~900ms
-        // cost on IPM-scale matrices. Track it as part of "setup" so the
-        // bench's setup_time / solve_time split is honest.
+        // SpTRSV setup (CPU schedules / GPU dataflow preparation) is setup work:
+        // record it under "setup" so the setup/solve split stays complete.
         if (cp_) { cp_->descend("setup"); cp_->tick(); }
         if constexpr (!on_gpu) {
             // Laplacians leave the grounded last row/column unused.
@@ -271,8 +270,8 @@ private:
             // columns are mutually independent -> one level) instead of two O(nnz)
             // topological depth scans. Each region is one factor column placed in round
             // order; trailing residual-peel columns get sequential levels inside the
-            // SpTRSV. The backend uses these by default (round-as-level is a -6..-18%
-            // solve win); APXCHOL_ROUND_LEVELS=0 forces the topological scan instead.
+            // SpTRSV. The backend uses these by default; APXCHOL_ROUND_LEVELS=0
+            // forces the topological scan instead.
             if (!F_.rounds.empty()) {
                 std::vector<node_index> bounds;
                 bounds.reserve(F_.rounds.size() + 1);
@@ -296,15 +295,9 @@ private:
 #if defined(APXCHOL_USE_CUDA)
         else {
             // Device init, on its OWN checkpoint label. CUDA creates the primary
-            // context lazily inside the first CUDA call, which is trsv_.setup()
-            // below: until 2026-08-20 that fixed per-process cost (~100-135 ms on
-            // an RTX 4090 Laptop, ~715 ms on a GH200) was silently counted as
-            // sptrsv_setup, inflating every published GPU setup number -- worst at
-            // small n, where it was the majority of the reported time. Now
-            // factorize() prewarms it on a helper thread and we pay only the
-            // REMAINING wait here, under "cuda_init"; sptrsv_setup below reports
-            // its own work only. NOTE: this changes the meaning of published GPU
-            // setup numbers -- the benchmark cells need regenerating.
+            // context lazily inside the first CUDA call. factorize() prewarms it
+            // on a helper thread; pay only the REMAINING wait here, under
+            // "cuda_init", so sptrsv_setup below reports its own work only.
             const double cuda_init_s = cuda_ctx::ensure_context();
             if (cp_) (*cp_)("cuda_init");
             if (detail::gpu_setup_diagnostics() && std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below

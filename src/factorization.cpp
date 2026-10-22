@@ -272,7 +272,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
         if (opts.is_select != "block_greedy" ||
             opts.exact_clique_max_degree != 0 || exact_core_or_off(opts.exact_core_max_h) != 0 ||
             opts.double_cycle_min_h != 0)
-            throw std::invalid_argument("GPU setup requires block_greedy, vec_pool_aos and a bounded sampler");
+            throw std::invalid_argument("GPU setup requires block_greedy and a bounded sampler");
         if (!detail::gpu_owned_csc_supported(op))
             throw std::invalid_argument("GPU route requires a supported compressed, sorted, "
                 "paired CSC operator; request CPU explicitly");

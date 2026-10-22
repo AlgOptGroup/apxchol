@@ -28,17 +28,6 @@ namespace apxchol {
 
 namespace {
 
-// (APXCHOL_FTZ=1 -- setting the x86 MXCSR FTZ + DAZ bits on the master and on
-// every OpenMP team thread at PCG entry -- lived here until 2026-08-20. It
-// was REFUTED end to end: no subnormal ever enters this computation, so the
-// bits are a no-op that costs one extra fork-join per solve. Evidence, T=1
-// so the whole pipeline is deterministic: FTZ on vs off gives a BYTE-IDENTICAL
-// solution vector on iter0040 (same md5, residual 8.074599861229295e-09 to
-// all 16 digits, 57 iterations) and identical iterations/residual on
-// grid_2000 (49, 7.813e-09) -- a flushed or treated-as-zero subnormal would
-// have to change a bit. The factor census agrees: factor_subnormal = 0 of
-// 4.6M / 21.9M stored fp32 values on the two. See "Retired knobs" in
-// AGENTS.md for the timing A/B.)
 // Eigen's parallel SpMV requires Eigen::initParallel() to be called
 // once per process before any threaded operation.  Calling it from a
 // function-local static keeps it lazy and thread-safe.
@@ -56,16 +45,6 @@ void print_sptrsv_banner(bool fp16) {
                      fp16 ? std::size_t(2) : sizeof(sptrsv_value_t));
 }
 
-// Parallel symmetric SpMV: y = L * x where L is stored as a row-major
-// FULL symmetric matrix (NOT just lower triangle). Each thread owns a
-// row range and computes y[i] = Σ_k val[k] * x[col[k]] without races.
-//
-// Required because Eigen's selfadjointView * x and plain (L * x) for
-// sparse L are SEQUENTIAL — neither path uses Eigen::nbThreads() for
-// the SpMV kernel even when EIGEN_HAS_OPENMP is defined. Empirical
-// on a 7.9M-nnz LP-IPM matrix:
-//   Eigen selfadjoint SpMV:   6.4 ms @ any T  (10 GB/s)
-//   This parallel CSR SpMV:   2.4 ms @ T=16   (26 GB/s, 2.7x faster)
 // One O(nnz) parallel storage scan resolves both direct-copy prerequisites.
 // Besides the fp32 test, explicitly check the nondecreasing-inner-index
 // property used by equal_range below. Eigen's normal insertion paths preserve

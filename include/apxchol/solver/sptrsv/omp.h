@@ -1466,14 +1466,9 @@ private:
     bool ready_ = false;
     bool fp16_  = false;   // the storage the last setup() resolved
 
-    // SpTRSV's CSR/CSC arrays are read by the inner forward/back loops at
-    // ~50 GB/s effective on T=16. With default 4 KB pages and ~32 MB per
-    // array, the L2 dTLB (3072 entries × 4 KB = 12 MB coverage) gets blown
-    // out on every level-set sweep — measured dTLB miss rate is 19% on
-    // IPM iter40. big_alloc (mmap + MADV_HUGEPAGE + MADV_POPULATE_WRITE)
-    // backs each array with 2 MB hugepages, dropping dTLB pressure from
-    // ~16384 pages/array to ~16. Expected -5-10% PCG solve win on
-    // bandwidth-bound IPM workloads.
+    // The CSR/CSC arrays are streamed on every level-set sweep and are far
+    // larger than the dTLB reach of 4 KB pages. big_alloc (mmap +
+    // MADV_HUGEPAGE + MADV_POPULATE_WRITE) backs each array with 2 MB pages.
     template<typename T>
     using big_vec = std::vector<T, util::big_alloc<T>>;
     // Index/value output arrays are overwritten in full by the immediately
@@ -1591,7 +1586,7 @@ private:
     }
 
     // sum over q in [p, end) of widen(vals[q]) * y[idx[q]] -- the thin-level
-    // kernel: scalar, 4-way accumulators (see solve.cpp:31 for the rationale).
+    // kernel: scalar, 4-way accumulators.
     template <class V>
     static double dot_thin(const V* __restrict vals, const node_index* __restrict idx,
                            edge_index p, edge_index end, const double* __restrict y) {
