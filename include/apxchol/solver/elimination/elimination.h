@@ -114,10 +114,7 @@ struct random_stream {
     std::uint64_t state;
 
     std::uint64_t next() {
-        std::uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        return z ^ (z >> 31);
+        return detail::splitmix64_mix(state += 0x9E3779B97F4A7C15ULL);
     }
     /// Uniform double in [0, 1).
     double next_unit() { return double(next() >> 11) * 0x1.0p-53; }

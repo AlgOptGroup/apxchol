@@ -270,4 +270,20 @@ callable_partitioner<std::decay_t<F>, true> as_prepass_partitioner(F&& fn) {
     return callable_partitioner<std::decay_t<F>, true>(std::forward<F>(fn));
 }
 
+namespace detail {
+
+/// Per-round seed and vertex priority hash shared by the built-in hash-priority
+/// partitioners (priority_greedy, baumann_kyng).
+inline std::uint64_t partition_round_seed(std::uint64_t seed,
+                                          std::uint64_t round) noexcept {
+    return seed ^ (round * 6364136223846793005ULL + 1442695040888963407ULL);
+}
+
+inline std::uint64_t fibonacci_vertex_hash(node_index v,
+                                           std::uint64_t round_seed) noexcept {
+    return (std::uint64_t(v) ^ round_seed) * 0x9E3779B97F4A7C15ULL;
+}
+
+} // namespace detail
+
 } // namespace apxchol

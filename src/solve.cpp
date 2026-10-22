@@ -447,6 +447,13 @@ void for_rhs_panels(const_matrix_view B, matrix_view X, const const_matrix_view 
         panel.template operator()<1>();
 }
 
+// Shared constructor preamble of both cpu_solver constructors.
+void prepare_cpu_solver(const solve_options& opts) {
+    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
+        throw std::invalid_argument("cpu_solver requires the CPU backend");
+    ensure_eigen_parallel();
+}
+
 } // namespace
 
 // ── cpu_solver: factor + operator built once, PCG-solve many b ──────────────────
@@ -457,9 +464,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
     const detail::thread_budget threads(opts_.num_threads);
-    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
-        throw std::invalid_argument("cpu_solver requires the CPU backend");
-    ensure_eigen_parallel();
+    prepare_cpu_solver(opts_);
 
     // Build preconditioner.
     precond_.set_options(opts_.factor_opts);
@@ -485,9 +490,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
     const detail::thread_budget threads(opts_.num_threads);
-    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
-        throw std::invalid_argument("cpu_solver requires the CPU backend");
-    ensure_eigen_parallel();
+    prepare_cpu_solver(opts_);
 
     if (static_cast<Eigen::Index>(F.L.rows()) != n_)
         throw std::invalid_argument("cpu_solver: factorization dimension mismatch");

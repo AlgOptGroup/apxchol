@@ -5,6 +5,8 @@
 /// (graph/conversions.h), the owned SpMV operator copy and the PCG SpMV
 /// (src/solve.cpp). Not part of the public API.
 
+#include "apxchol/types.h"
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <utility>
@@ -102,14 +104,11 @@ inline std::uint64_t symmetric_entry_hash(std::uint64_t smaller,
                                           std::uint64_t larger,
                                           std::uint64_t run_position,
                                           double value) noexcept {
-    std::uint64_t bits;
-    std::memcpy(&bits, &value, sizeof bits);
+    const auto bits = std::bit_cast<std::uint64_t>(value);
     std::uint64_t z = (smaller << 32) ^ larger;
     z = (z ^ (bits * 0x9E3779B97F4A7C15ull))
       + 0x9E3779B97F4A7C15ull * (run_position + 1);
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    return z ^ (z >> 31);
+    return splitmix64_mix(z);
 }
 
 } // namespace apxchol::detail

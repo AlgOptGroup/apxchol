@@ -1203,8 +1203,7 @@ private:
         for (std::size_t step = 0; step < steps; ++step) {
             const std::size_t stored_step = Dir::forward
                 ? step : steps - 1 - step;
-            const std::size_t slot =
-                static_cast<std::size_t>(processor) * steps + stored_step;
+            const std::size_t slot = critical_plan_.slot(processor, stored_step);
             const std::size_t begin = ptr[slot];
             const std::size_t end = ptr[slot + 1];
             if (begin != end)

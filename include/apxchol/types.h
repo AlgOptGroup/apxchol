@@ -71,6 +71,18 @@ struct directed_pool_edge {
     }
 };
 
+namespace detail {
+
+/// splitmix64 output finalizer (Steele, Lea & Flood 2014), shared by the
+/// counter-based random streams and the entry/pair hashes.
+inline constexpr std::uint64_t splitmix64_mix(std::uint64_t z) noexcept {
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+} // namespace detail
+
 // (No `index_t` alias: every use is now explicitly node_index or edge_index so
 //  the node/edge width distinction is type-checked, not by-convention.)
 

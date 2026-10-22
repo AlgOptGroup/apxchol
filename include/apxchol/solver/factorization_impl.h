@@ -795,6 +795,11 @@ factorization factorize_impl(const Eliminator& elim,
     // with its default Xcode 16.4 toolchain, whose libc++ lacks it.
     std::iota(active.begin(), active.end(), node_index{0});
     std::vector<node_index> active_scratch;
+    // APXCHOL_RESIDUAL_SPARSIFY=0 disables the one-shot residual sparsification.
+    const bool residual_sparsify_enabled = [] {
+        const char* value = std::getenv("APXCHOL_RESIDUAL_SPARSIFY");
+        return !value || !*value || std::strcmp(value, "0") != 0;
+    }();
 
 #if defined(APXCHOL_USE_CUDA)
     if (gpu_owned_setup_route) {
@@ -812,9 +817,6 @@ factorization factorize_impl(const Eliminator& elim,
             if (cp) (*cp)("gpu_csc_initialize");
             std::size_t previous_nnz = 0;
             bool sparsification_attempted = false;
-            const char* sparse_value = std::getenv("APXCHOL_RESIDUAL_SPARSIFY");
-            const bool sparse_enabled = !sparse_value || !*sparse_value ||
-                std::strcmp(sparse_value, "0") != 0;
             result.peak_graph_bytes = std::max(result.peak_graph_bytes, work.memory_bytes());
             while (!active.empty()) {
                 const auto prep = gpu_frontend->prepare(active, opts.partition
@@ -825,7 +827,7 @@ factorization factorize_impl(const Eliminator& elim,
                     throw std::runtime_error("GPU-owned factorization selection made no progress");
                 const double min_yield = detail::adaptive_is_yield_fraction(
                     opts.min_is_fraction, active.size(), prep.average_degree, residual_thresh);
-                if (sparse_enabled && !sparsification_attempted &&
+                if (residual_sparsify_enabled && !sparsification_attempted &&
                     detail::selection_should_handoff(part.num_regions(), part.num_regions(),
                         prep.candidate_count, active.size(), min_yield, residual_thresh,
                         opts.omp_threshold)) {
@@ -1120,6 +1122,39 @@ factorization factorize_impl(const Eliminator& elim,
     size_t consecutive_empty = 0;
     size_t handoff_vertices = 0;
     constexpr size_t kMaxEmptyRounds = 64;
+    // An empty sampled round: true when the retry budget is spent (hand the
+    // residual to the peel), else advance the round index for the retry.
+    auto retry_budget_spent = [&](size_t& empty_rounds) {
+        if (++empty_rounds >= kMaxEmptyRounds) return true;
+        ++ws.round_index;              // keep retry rounds distinguishable
+        return false;
+    };
+    // Shared round epilogue: per-round nnz tally (only when the caller wants
+    // the stats), peak graph memory, the stable active filter and the round
+    // index.
+    auto finish_round = [&](size_t cols_before) {
+        if (cp) {
+            size_t round_nnz = 0;
+            for (size_t ci = cols_before; ci < factor_cols.size(); ++ci)
+                round_nnz += factor_cols[ci].entry_count + 1;
+            result.rounds.back().nnz_added = round_nnz;
+            result.rounds.back().nnz_total =
+                (result.rounds.size() >= 2
+                    ? result.rounds[result.rounds.size() - 2].nnz_total : 0)
+                + round_nnz;
+        }
+        result.peak_graph_bytes = std::max(result.peak_graph_bytes,
+                                           work.memory_bytes());
+        if (active.size() > opts.omp_threshold) {
+            parallel_stable_active_filter(
+                active, active_scratch, pre_filter_offsets,
+                [&](node_index v) { return work.is_active(v); });
+        } else {
+            std::erase_if(active,
+                          [&](node_index v) { return !work.is_active(v); });
+        }
+        ++ws.round_index;
+    };
 
     while (active.size() > 1) {
         ws.reset_for_round();
@@ -1169,9 +1204,8 @@ factorization factorize_impl(const Eliminator& elim,
             }
         } else {
             if (part.num_regions() == 0) {
-                if (++consecutive_empty >= kMaxEmptyRounds)
+                if (retry_budget_spent(consecutive_empty))
                     break;                     // hand the residual to the peel
-                ++ws.round_index;              // keep retry rounds distinguishable
                 continue;                      // whiffed sample round: retry
             }
             consecutive_empty = 0;
@@ -1267,31 +1301,7 @@ factorization factorize_impl(const Eliminator& elim,
             incremental_dead_incidence -= retired_dead;
             incremental_dead_incidence += removed;
         }
-        // Tally nnz added this round (only when caller wants the stats).
-        if (cp) {
-            size_t round_nnz = 0;
-            for (size_t ci = cols_before; ci < factor_cols.size(); ++ci)
-                round_nnz += factor_cols[ci].entry_count + 1;
-            result.rounds.back().nnz_added = round_nnz;
-            result.rounds.back().nnz_total =
-                (result.rounds.size() >= 2
-                    ? result.rounds[result.rounds.size() - 2].nnz_total : 0)
-                + round_nnz;
-        }
-
-        result.peak_graph_bytes = std::max(result.peak_graph_bytes,
-                                           work.memory_bytes());
-
-        if (active.size() > opts.omp_threshold) {
-            parallel_stable_active_filter(
-                active, active_scratch, pre_filter_offsets,
-                [&](node_index v) { return work.is_active(v); });
-        } else {
-            std::erase_if(active,
-                          [&](node_index v) { return !work.is_active(v); });
-        }
-
-        ++ws.round_index;
+        finish_round(cols_before);
 
         // vec_pool: pool defrag happens inside vec_pool's bulk_reserve_parallel
         // (built in, always on). Here we only sample the worst fragmentation
@@ -1301,12 +1311,6 @@ factorization factorize_impl(const Eliminator& elim,
 
     // Before the BK residual loop, sparsify once only when the observed
     // handoff yield predicts enough future edge traffic to repay the rebuild.
-    const char* residual_sparsify_enabled_value =
-        std::getenv("APXCHOL_RESIDUAL_SPARSIFY");
-    const bool residual_sparsify_enabled =
-        !residual_sparsify_enabled_value ||
-        !*residual_sparsify_enabled_value ||
-        std::strcmp(residual_sparsify_enabled_value, "0") != 0;
     {
         if (residual_sparsify_enabled && active.size() > residual_thresh &&
             handoff_vertices != 0) {
@@ -1400,9 +1404,8 @@ factorization factorize_impl(const Eliminator& elim,
             ws.reset_for_round();
             const auto& bk_part = run_partitioner(bk, work, active);
             if (bk_part.num_regions() == 0) {
-                if (++bk_consecutive_empty >= kMaxEmptyRounds)
+                if (retry_budget_spent(bk_consecutive_empty))
                     break;                     // hand the residual to the peel
-                ++ws.round_index;              // keep retry rounds distinguishable
                 continue;                      // whiffed sample round: retry
             }
             bk_consecutive_empty = 0;
@@ -1413,27 +1416,7 @@ factorization factorize_impl(const Eliminator& elim,
             detail::eliminate_partition(
                 elim, work, bk_part, factor_cols, ws, opts, cp,
                 bk.selected_degree_work());
-            if (cp) {
-                size_t bk_round_nnz = 0;
-                for (size_t ci = cols_before_bk; ci < factor_cols.size(); ++ci)
-                    bk_round_nnz += factor_cols[ci].entry_count + 1;
-                result.rounds.back().nnz_added = bk_round_nnz;
-                result.rounds.back().nnz_total =
-                    (result.rounds.size() >= 2
-                        ? result.rounds[result.rounds.size() - 2].nnz_total : 0)
-                    + bk_round_nnz;
-            }
-            result.peak_graph_bytes = std::max(result.peak_graph_bytes,
-                                               work.memory_bytes());
-            if (active.size() > opts.omp_threshold) {
-                parallel_stable_active_filter(
-                    active, active_scratch, pre_filter_offsets,
-                    [&](node_index v) { return work.is_active(v); });
-            } else {
-                std::erase_if(active,
-                              [&](node_index v) { return !work.is_active(v); });
-            }
-            ++ws.round_index;
+            finish_round(cols_before_bk);
         }
     }
     if (!active.empty()) {

@@ -45,8 +45,7 @@ private:
         // Pick all local minima, exclude their neighbors, and repeat. Immutable
         // priorities make this a parallel execution of one greedy order, not
         // textbook Luby (which redraws priorities between passes).
-        uint64_t round_seed = ctx.seed
-            ^ (round * 6364136223846793005ULL + 1442695040888963407ULL);
+        const uint64_t round_seed = detail::partition_round_seed(ctx.seed, round);
         // Degree-aware priority (degree_tiebreak): compare degree first, then
         // the full hash and vertex id. The local-min IS prefers low-degree
         // candidates (parallel min-degree) without the overflow/collision risk
@@ -54,7 +53,7 @@ private:
         const bool tiebreak = ctx.options.degree_tiebreak;
         const auto degrees  = ctx.degrees;
         auto hash = [&](node_index v) -> uint64_t {
-            return (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
+            return detail::fibonacci_vertex_hash(v, round_seed);
         };
         auto precedes = [&](node_index a, node_index b) {
             if (tiebreak && degrees[a] != degrees[b])

@@ -69,10 +69,9 @@ struct baumann_kyng_partitioner {
         uint64_t hash_thresh = (p >= 1.0) ? UINT64_MAX
                              : uint64_t(p * double(UINT64_MAX));
 
-        uint64_t round_seed = ctx.seed
-            ^ (round * 6364136223846793005ULL + 1442695040888963407ULL);
+        const uint64_t round_seed = detail::partition_round_seed(ctx.seed, round);
         auto prio = [round_seed](node_index v) -> uint64_t {
-            return (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
+            return detail::fibonacci_vertex_hash(v, round_seed);
         };
 
         const int nt = omp_get_max_threads();
@@ -155,7 +154,7 @@ struct baumann_kyng_partitioner {
             // (higher degree) never block eligible low-degree ones, and low-degree
             // wins, giving a min-degree-like elimination order.
             auto prio2 = [&](node_index v) -> uint64_t {
-                const uint64_t h = (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
+                const uint64_t h = prio(v);
                 if (!tiebreak) return h;
                 return (uint64_t(deg_by_vertex_[v]) << 40) | (h >> 24);
             };
