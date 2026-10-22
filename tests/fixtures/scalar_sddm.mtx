@@ -1,0 +1,4 @@
+%%MatrixMarket matrix coordinate real symmetric
+% A 1x1 SDDM system: automatic routing keeps scalar systems on CPU.
+1 1 1
+1 1 2.0

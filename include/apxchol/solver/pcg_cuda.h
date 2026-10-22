@@ -308,7 +308,7 @@ private:
         // A failed setup may own arrays before ready_ becomes true.
         release_workspace(vectors_, h_state_);
         for (void* pointer : std::initializer_list<void*>{matrix_.row_ptr, matrix_.col_idx,
-                matrix_.values_f64, matrix_.values_f32})
+                matrix_.values_f64, matrix_.values_f32, matrix_.row_map})
             if (pointer) (void)cudaFree(pointer);
         matrix_ = {};
         capacity_ = 0;
