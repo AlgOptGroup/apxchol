@@ -6,17 +6,14 @@ if (APXCHOL_DEVICE STREQUAL "METAL")
     message(FATAL_ERROR "The competitor benchmark supports CPU or CUDA; use the root project for Metal")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+# The shipped core configuration: C++23, Eigen, OpenMP, the architecture flag,
+# index/pool options and, for CUDA, static cudart. apxchol_v1 below is built by
+# the same apxchol_configure_core() as the root library and Python module.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_core.cmake)
 
-# The machine-tuning flags actually put on the command line below. Recorded into
+# Competitors get the same machine-tuning flag as the core. It is recorded into
 # the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
 # cell records the native tuning or portable baseline used by that build.
-set(APXCHOL_BENCH_ARCH_FLAGS "")
-option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
-
-include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_arch.cmake)
 add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
 set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_ARCH_FLAG}")
 
@@ -25,15 +22,9 @@ include(FetchContent)
 # ── Path to benchmark sources ────────────────────────
 set(BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# ── Shared sources from parent project ───────────────
-set(PARENT_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-set(PARENT_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
-
 # ── Legacy v0 baseline sources (graphs, simple_solver, mmio) ──
 set(ARCHIVE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
 set(ARCHIVE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
-
-include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_eigen.cmake)
 
 # ── Core library (legacy v0 solver) ───────────────────
 add_library(laplacian_core STATIC
@@ -147,8 +138,7 @@ endif()
 # ── RCHOL (FetchContent — replaces former git submodule) ─
 FetchContent_Declare(rchol
     GIT_REPOSITORY https://github.com/ut-padas/rchol.git
-    GIT_TAG        master
-    GIT_SHALLOW    TRUE
+    GIT_TAG        cff22c967562c43047a19ee68f3f7e6bbb1779f1  # master as of 2026-10
 )
 FetchContent_GetProperties(rchol)
 if (NOT rchol_POPULATED)
@@ -348,7 +338,7 @@ if (BUILD_GPU_RCHOL)
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
-        GIT_TAG        main
+        GIT_TAG        v1.7.6  # same release as the root project
         GIT_SHALLOW    TRUE
     )
     FetchContent_GetProperties(gpu_rchol)
@@ -501,55 +491,9 @@ endif()
 # ══════════════════════════════════════════════════════
 # ApxChol v1 (C++23 solver — multiple IS × elimination combos)
 # ══════════════════════════════════════════════════════
-find_package(OpenMP QUIET)
+add_library(apxchol_v1 STATIC)
+apxchol_configure_core(apxchol_v1)
 
-add_library(apxchol_v1 STATIC
-    ${PARENT_SRC}/factorization.cpp
-    # The operator class the factorization asserts its input against
-    # (include/apxchol/operator_class.h). factorization.cpp constructs an
-    # operator_view, and benchmark.cpp calls require_operator/describe_operator
-    # directly for --kind operator, so both need this translation unit.
-    ${PARENT_SRC}/operator_class.cpp
-    ${PARENT_SRC}/solve.cpp
-)
-target_compile_features(apxchol_v1 PUBLIC cxx_std_23)
-target_link_libraries(apxchol_v1 PUBLIC Eigen3::Eigen)
-target_include_directories(apxchol_v1 PUBLIC ${PARENT_INCLUDE})
-if (OpenMP_CXX_FOUND)
-    target_link_libraries(apxchol_v1 PUBLIC OpenMP::OpenMP_CXX)
-endif()
-# Match the root project's two unsigned index-width knobs. The default uint32
-# edge_index already handles com-Orkut's roughly 2.15e9-entry raw factor; widen
-# only when a factor or residual pool can exceed 2^32-1 entries. Definitions are
-# PUBLIC so benchmark.cpp and the linked library always agree on their ABI.
-option(APXCHOL_64BIT_EDGE_INDICES "64-bit apxchol edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
-option(APXCHOL_64BIT_NODE_INDICES "64-bit apxchol vertex indices (implies 64-bit edge indices)" OFF)
-option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
-if (APXCHOL_64BIT_INDICES)
-    message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
-    set(APXCHOL_64BIT_EDGE_INDICES ON)
-endif()
-if (APXCHOL_64BIT_EDGE_INDICES)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_EDGE_INDICES)
-endif()
-if (APXCHOL_64BIT_NODE_INDICES)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_NODE_INDICES)
-endif()
-option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to FP64. OFF selects the FP64 reference." ON)
-if (APXCHOL_POOL_FP32)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_POOL_FP32)
-endif()
-if (APXCHOL_DEVICE STREQUAL "CUDA")
-    enable_language(CUDA)
-    find_package(CUDAToolkit 13.3 REQUIRED)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_USE_CUDA)
-    target_sources(apxchol_v1 PRIVATE
-        ${PARENT_SRC}/cuda_dataflow.cu
-        ${PARENT_SRC}/cuda_block_frontend.cu ${PARENT_SRC}/cuda_round_shadow.cu
-        ${PARENT_SRC}/cuda_pcg_kernels.cu)
-    target_link_libraries(apxchol_v1 PUBLIC CUDA::cudart)
-    set_target_properties(apxchol_v1 PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
-endif()
 # Boost headers are needed only by AMGCL (HAVE_AMGCL gate below); the apxchol
 # core itself is Boost-free.
 find_package(Boost CONFIG QUIET)
@@ -590,8 +534,8 @@ if (APXCHOL_DEVICE STREQUAL "CUDA" AND Boost_FOUND)
     # with `#pragma omp parallel for` (smoothed_aggregation coarsening, SpMV,
     # transpose). Without -fopenmp in THIS nvcc TU those pragmas are no-ops and
     # the setup runs single-threaded — which made amgcl_cuda's setup 2-10x slower
-    # than BoomerAMG-GPU (e.g. G3_circuit 2.1s vs 0.5s). libgomp is already linked
-    # transitively via apxchol_v1.
+    # than BoomerAMG-GPU (e.g. G3_circuit 2.1s vs 0.5s). The OpenMP runtime is
+    # already linked transitively via apxchol_v1.
     set_source_files_properties(src/amgcl_cuda.cu PROPERTIES
         LANGUAGE CUDA
         COMPILE_OPTIONS "--extended-lambda;--expt-relaxed-constexpr;-Xcompiler=-fopenmp")
@@ -599,8 +543,8 @@ if (APXCHOL_DEVICE STREQUAL "CUDA" AND Boost_FOUND)
         CUDA_STANDARD 23
         CUDA_STANDARD_REQUIRED ON)
     # AMGCL uses cuSPARSE. This dependency belongs to the competitor driver;
-    # our apxchol library links cudart only.
-    target_link_libraries(benchmark PRIVATE CUDA::cudart CUDA::cusparse)
+    # our apxchol library links static cudart only, which also serves AMGCL.
+    target_link_libraries(benchmark PRIVATE CUDA::cusparse)
 endif()
 
 if (Boost_FOUND)
