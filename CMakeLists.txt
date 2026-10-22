@@ -87,6 +87,10 @@ add_executable(apxchol src/main.cpp src/config.cpp)
 target_link_libraries(apxchol PRIVATE apxchol_core apxchol_mtx_input CLI11::CLI11
                       spdlog::spdlog fast_matrix_market::fast_matrix_market)
 
+if (APXCHOL_BUILD_EXAMPLES OR APXCHOL_BUILD_TESTS)
+    enable_testing()
+endif()
+
 # ── Examples ─────────────────────────────────────────
 if (APXCHOL_BUILD_EXAMPLES)
     add_subdirectory(examples)
@@ -94,6 +98,5 @@ endif()
 
 # ── Tests ────────────────────────────────────────────
 if (APXCHOL_BUILD_TESTS)
-    enable_testing()
     add_subdirectory(tests)
 endif()
