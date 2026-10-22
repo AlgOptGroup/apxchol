@@ -9,13 +9,10 @@ Build and run the suite as in the [README](README.md#build-and-run); `ctest`
 also runs the examples. Run one test while iterating with
 `./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'`.
 
-CI builds `tests/cmake_consumer`, an outer project that checks the
-[CMake consumer](README.md#use-from-cmake) requirements, with warnings as errors on GCC 14 and
-15, Clang 18 and 22, and Apple Clang (CPU and Metal), plus one build with
-64-bit node indices and the FP64 residual pool. Only one Linux and one macOS
-job use native tuning. CUDA is compiled but not run, because hosted runners
-have no GPU. The Linux and macOS jobs share their configure/build and CTest
-steps through YAML anchors.
+CI builds `tests/cmake_consumer` to check the
+[CMake consumer](README.md#use-from-cmake) requirements with warnings as errors.
+The [workflow](.github/workflows/ci.yml) defines compiler and backend coverage;
+CUDA is compiled but not run because hosted runners have no GPU.
 
 Use focused regressions for changed behavior, then the relevant suite. CUDA
 changes require a local CUDA build and device run. Metal changes require an
