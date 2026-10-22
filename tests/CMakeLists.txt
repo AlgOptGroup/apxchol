@@ -47,14 +47,14 @@ endif()
 
 if (APXCHOL_DEVICE STREQUAL "CUDA")
     target_link_libraries(unit_tests PRIVATE apxchol_test_core)
-    # GCC 15.3 IPA-CP clones gpu_pcg::solve for the file's test preconditioner
-    # with the iteration loop removed, although callers pass max_iter 0, 10 and
-    # 100; scalar GpuSolveHonesty solves then stop at iteration zero.
+    # GCC 15 and later (through trunk as of 2026-10) propagate wrong known bits
+    # through std::max(max_iter, 0) into gpu_pcg::solve for this file's test
+    # preconditioner and delete its iteration loop; scalar GpuSolveHonesty
+    # solves then stop at iteration zero. GCC 14 and Clang are correct.
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15 AND
-        CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
         set_source_files_properties(test_gpu_operator_csr.cpp PROPERTIES
-            COMPILE_OPTIONS -fno-ipa-cp)
+            COMPILE_OPTIONS -fno-ipa-bit-cp)
     endif()
 else()
     target_link_libraries(unit_tests PRIVATE apxchol_core)
