@@ -59,13 +59,14 @@ __device__ __forceinline__ double block_reduce_sum(double v, double* sh, Math ma
 template<operation Op, int Lanes = 1, unsigned Columns = 1, class Value = double>
 __global__ void __launch_bounds__(kBlockThreads)
 step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
-            const int* col = nullptr, const Value* val = nullptr) {
+            const int* col = nullptr, const Value* val = nullptr,
+            const int* row_map = nullptr) {
     constexpr int rows = kBlockThreads / Lanes;
     const pcg_work<std::int64_t> work{static_cast<std::int64_t>(blockIdx.x) * rows, n,
         static_cast<std::int64_t>(gridDim.x) * rows, threadIdx.x / Lanes, n};
     const auto sums = detail::gpu_pcg::step_columns<Lanes, Columns>(
         Op, pcg_math<Lanes>{}, v, ptr, col, val, static_cast<const Value*>(nullptr),
-        work, threadIdx.x % Lanes);
+        work, threadIdx.x % Lanes, row_map);
     if constexpr (Op != operation::direction) {
         __shared__ double scratch[Columns][kWarps];
         for (unsigned q = 0; q < Columns; ++q) {
@@ -108,7 +109,7 @@ void multiply(cudaStream_t stream, std::int64_t n, workspace v,
     const int grid = pcg_blocks(n * lanes);
     auto launch = [&]<int Lanes>() {
         step_kernel<operation::multiply, Lanes, Columns><<<grid, kBlockThreads, 0, stream>>>(
-            n, v, a.row_ptr, a.col_idx, values);
+            n, v, a.row_ptr, a.col_idx, values, a.row_map);
     };
     switch (lanes) {
         case 1: launch.template operator()<1>(); break;
@@ -316,8 +317,7 @@ struct operator_status {
 
 __global__ void __launch_bounds__(kBlockThreads)
 operator_count_columns(int n, int nnz, const int* outer, const int* inner,
-                       const double* values, const std::uint32_t* perm,
-                       int* counts, operator_status* status) {
+                       const double* values, operator_status* status) {
     const int lane = threadIdx.x & 31;
     const std::int64_t warp = (static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) / 32;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x / 32;
@@ -326,7 +326,6 @@ operator_count_columns(int n, int nnz, const int* outer, const int* inner,
     for (std::int64_t col = warp; col < n; col += stride) {
         const int begin = outer[col], end = outer[col + 1];
         if (begin < 0 || end < begin || end > nnz) { bad = true; continue; }
-        if (lane == 0) counts[perm[col]] = end - begin;
         for (std::int64_t p = static_cast<std::int64_t>(begin) + lane; p < end; p += 32) {
             const int row = inner[p];
             if (row < 0 || row >= n || (p > begin && inner[p - 1] >= row)) bad = true;
@@ -350,37 +349,31 @@ operator_count_columns(int n, int nnz, const int* outer, const int* inner,
     }
 }
 
+// Rows stay in input order: the symmetric CSC arrays already are its CSR, so
+// only columns are renumbered into factor order. multiply() maps each stored
+// row to its factor-order vector row through row_map (= perm).
 __global__ void __launch_bounds__(kBlockThreads)
 operator_fill_columns(int n, const int* outer, const int* inner,
                       const double* input, const std::uint32_t* perm,
-                      std::uint64_t* keys, double* values, operator_status* status) {
+                      int* columns, double* wide, float* narrow,
+                      int* row_map, operator_status* status) {
     const int lane = threadIdx.x & 31;
     const std::int64_t warp = (static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) / 32;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x / 32;
     bool paired = true;
     for (std::int64_t col = warp; col < n; col += stride) {
+        if (lane == 0) row_map[col] = static_cast<int>(perm[col]);
         for (std::int64_t p = static_cast<std::int64_t>(outer[col]) + lane;
              p < outer[col + 1]; p += 32) {
             const int row = inner[p];
             const double value = input[detail::canonical_lower_value(
                 outer, inner, thrust::counting_iterator<int>{0}, col, row, p, paired)];
-            // Input ordinal p is a unique fixed slot. Sorting this integer key
-            // orders CSR rows and their columns without any floating arithmetic.
-            keys[p] = (static_cast<std::uint64_t>(perm[col]) << 32) | perm[row];
-            values[p] = value;
+            columns[p] = static_cast<int>(perm[row]);
+            if (narrow) narrow[p] = __double2float_rn(value);
+            else wide[p] = value;
         }
     }
     if (__syncthreads_or(!paired) && threadIdx.x == 0) atomicOr(&status->flags, 1U);
-}
-
-__global__ void __launch_bounds__(kBlockThreads)
-operator_decode_entries(int nnz, const std::uint64_t* keys, int* columns,
-                        const double* values, float* narrow) {
-    for (std::int64_t p = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         p < nnz; p += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
-        columns[p] = static_cast<int>(keys[p] & 0xffffffffULL);
-        if (narrow) narrow[p] = __double2float_rn(values[p]);
-    }
 }
 
 } // namespace
@@ -392,9 +385,9 @@ bool try_build_permuted_operator_csr(
     if (n < 0 || nnz < 0 || precision < -1 || precision > 1 ||
         !host_outer || (nnz && (!host_inner || !host_values)) || (n && !host_perm))
         return false;
-    if (output.row_ptr || output.col_idx || output.values_f64 || output.values_f32)
+    if (output.row_ptr || output.col_idx || output.values_f64 || output.values_f32 || output.row_map)
         throw std::invalid_argument("GPU operator CSR output must not own allocations");
-    operator_buffer<int> outer(static_cast<std::size_t>(n) + 1), inner(nnz), counts(n);
+    operator_buffer<int> outer(static_cast<std::size_t>(n) + 1), inner(nnz);
     operator_buffer<double> input(nnz);
     operator_buffer<std::uint32_t> perm(n);
     operator_buffer<operator_status> status(1);
@@ -406,7 +399,7 @@ bool try_build_permuted_operator_csr(
     if (n) operator_check(cudaMemcpy(perm.get(), host_perm, static_cast<std::size_t>(n) * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
     operator_check(cudaMemset(status.get(), 0, sizeof(operator_status)));
     const int column_blocks = pcg_blocks(static_cast<std::int64_t>(n) * 32);
-    operator_count_columns<<<column_blocks, kBlockThreads>>>(n, nnz, outer.get(), inner.get(), input.get(), perm.get(), counts.get(), status.get());
+    operator_count_columns<<<column_blocks, kBlockThreads>>>(n, nnz, outer.get(), inner.get(), input.get(), status.get());
     operator_check(cudaGetLastError());
     operator_status observed{};
     operator_check(cudaMemcpy(&observed, status.get(), sizeof(observed), cudaMemcpyDeviceToHost));
@@ -416,48 +409,22 @@ bool try_build_permuted_operator_csr(
         throw std::invalid_argument("FP32 operator storage requires exactly representable coefficients");
     const bool fp32 = precision == 1 || (precision == -1 && !(observed.flags & 2U));
 
-    operator_buffer<std::uint64_t> keys_a(nnz);
-    operator_buffer<double> values_a(nnz);
-    if (nnz) {
-        operator_fill_columns<<<column_blocks, kBlockThreads>>>(n, outer.get(), inner.get(), input.get(), perm.get(), keys_a.get(), values_a.get(), status.get());
+    operator_buffer<int> columns(nnz), row_map(n);
+    operator_buffer<double> wide(fp32 ? 0 : nnz);
+    operator_buffer<float> narrow(fp32 ? nnz : 0);
+    if (n) {
+        operator_fill_columns<<<column_blocks, kBlockThreads>>>(n, outer.get(), inner.get(), input.get(), perm.get(),
+            columns.get(), wide.get(), narrow.get(), row_map.get(), status.get());
         operator_check(cudaGetLastError());
         operator_check(cudaMemcpy(&observed, status.get(), sizeof(observed), cudaMemcpyDeviceToHost));
         if (observed.flags & 1U) return false;
     }
-    // The two completed status copies precede retirement of input storage.
-    // Do not overlap the full CSC input with both radix-sort key/value buffers.
-    outer.reset(); inner.reset(); input.reset(); perm.reset(); status.reset();
-    operator_buffer<int> rows(static_cast<std::size_t>(n) + 1);
-    if (n) {
-        std::size_t bytes = 0;
-        operator_check(cub::DeviceScan::ExclusiveSum(nullptr, bytes, counts.get(), rows.get(), n));
-        operator_buffer<unsigned char> scratch(bytes);
-        operator_check(cub::DeviceScan::ExclusiveSum(scratch.get(), bytes, counts.get(), rows.get(), n));
-    }
-    operator_check(cudaMemcpy(rows.get() + n, &nnz, sizeof(int), cudaMemcpyHostToDevice));
-    counts.reset();
-    operator_buffer<std::uint64_t> keys_b(nnz);
-    operator_buffer<double> values_b(nnz);
-    if (nnz) {
-        std::size_t bytes = 0;
-        operator_check(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keys_a.get(), keys_b.get(), values_a.get(), values_b.get(), nnz));
-        operator_buffer<unsigned char> scratch(bytes);
-        operator_check(cub::DeviceRadixSort::SortPairs(scratch.get(), bytes, keys_a.get(), keys_b.get(), values_a.get(), values_b.get(), nnz));
-    }
-    keys_a.reset(); values_a.reset();
-    operator_buffer<int> columns(nnz);
-    operator_buffer<float> narrow(fp32 ? nnz : 0);
-    if (nnz) {
-        operator_decode_entries<<<pcg_blocks(nnz), kBlockThreads>>>(
-            nnz, keys_b.get(), columns.get(), values_b.get(), narrow.get());
-        operator_check(cudaGetLastError());
-        operator_check(cudaStreamSynchronize(nullptr));
-    }
     // Publication cannot throw; the caller now owns exactly the final arrays.
-    output.row_ptr = rows.release();
+    output.row_ptr = outer.release();
     output.col_idx = columns.release();
+    output.row_map = row_map.release();
     if (fp32) output.values_f32 = narrow.release();
-    else output.values_f64 = values_b.release();
+    else output.values_f64 = wide.release();
     output.nnz = nnz;
     output.fp32 = fp32;
     return true;

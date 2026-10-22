@@ -74,6 +74,7 @@ struct DeviceOwner {
         if (output.col_idx) cudaFree(output.col_idx);
         if (output.values_f64) cudaFree(output.values_f64);
         if (output.values_f32) cudaFree(output.values_f32);
+        if (output.row_map) cudaFree(output.row_map);
     }
 };
 bool runtime_available() { int count=0;return cudaGetDeviceCount(&count)==cudaSuccess && count>0; }
@@ -86,20 +87,45 @@ template<class T> std::vector<T> download(const T* device,std::size_t count) {
     }
     return host;
 }
+// Stored rows keep input order; reassemble them into factor-order rows with
+// row_map before comparing against the sorted permuted reference.
+template<class T>
+std::vector<T> by_vector_row(const operator_csr& output,const std::vector<int>& ptr,
+                             const std::vector<int>& map,const std::vector<T>& stored,
+                             const Reference& ref,std::vector<int>* index=nullptr) {
+    const int n=static_cast<int>(ptr.size())-1;
+    std::vector<std::vector<std::pair<int,T>>> rows(n);
+    const auto col=download(output.col_idx,ref.index.size());
+    for (int r=0;r<n;++r) for (int k=ptr[r];k<ptr[r+1];++k) rows.at(map.at(r)).emplace_back(col[k],stored[k]);
+    std::vector<T> values;
+    for (auto& row : rows) {
+        std::sort(row.begin(),row.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+        for (auto [c,v] : row) { if (index) index->push_back(c); values.push_back(v); }
+    }
+    return values;
+}
 void expect_output(const operator_csr& output,const Reference& ref,int precision) {
     ASSERT_EQ(output.nnz,static_cast<int>(ref.values.size()));
     const bool fp32=precision==1 || (precision==-1 && ref.exact_fp32);
     ASSERT_EQ(output.fp32,fp32);
-    EXPECT_EQ(download(output.row_ptr,ref.ptr.size()),ref.ptr);
-    EXPECT_EQ(download(output.col_idx,ref.index.size()),ref.index);
+    const std::size_t n=ref.ptr.size()-1;
+    const auto ptr=download(output.row_ptr,ref.ptr.size());
+    const auto map=download(output.row_map,n);
+    std::vector<int> sorted_map=map;std::sort(sorted_map.begin(),sorted_map.end());
+    std::vector<int> identity(n);std::iota(identity.begin(),identity.end(),0);
+    ASSERT_EQ(sorted_map,identity);
+    std::vector<int> counts(n);
+    for (std::size_t r=0;r<n;++r) counts.at(map[r])=ptr[r+1]-ptr[r];
+    for (std::size_t r=0;r<n;++r) EXPECT_EQ(counts[r],ref.ptr[r+1]-ref.ptr[r]) << r;
     if (ref.index.empty()) {
         EXPECT_EQ(output.col_idx,nullptr);
         EXPECT_EQ(output.values_f64,nullptr);
         EXPECT_EQ(output.values_f32,nullptr);
     }
+    std::vector<int> index;
     if (fp32) {
         EXPECT_EQ(output.values_f64,nullptr);
-        const auto values=download(output.values_f32,ref.values.size());
+        const auto values=by_vector_row(output,ptr,map,download(output.values_f32,ref.values.size()),ref,&index);
         for (std::size_t i=0;i<values.size();++i) {
             SCOPED_TRACE(i);
             EXPECT_EQ(std::bit_cast<std::uint32_t>(values[i]),
@@ -107,12 +133,13 @@ void expect_output(const operator_csr& output,const Reference& ref,int precision
         }
     } else {
         EXPECT_EQ(output.values_f32,nullptr);
-        const auto values=download(output.values_f64,ref.values.size());
+        const auto values=by_vector_row(output,ptr,map,download(output.values_f64,ref.values.size()),ref,&index);
         for (std::size_t i=0;i<values.size();++i) {
             SCOPED_TRACE(i);
             EXPECT_EQ(std::bit_cast<std::uint64_t>(values[i]),std::bit_cast<std::uint64_t>(ref.values[i]));
         }
     }
+    EXPECT_EQ(index,ref.index);
 }
 void compare(const HostCsc& input,const std::vector<std::uint32_t>& perm,int precision) {
     const auto wanted=reference(input,perm);DeviceOwner result;
@@ -293,12 +320,14 @@ TEST(GpuOperatorCsr, UnsupportedLayoutsLeaveOutputUnpublished) {
                 x.outer.data(),x.inner.data(),x.values.data(),perm.data(),precision,output));
             EXPECT_EQ(output.row_ptr,nullptr);EXPECT_EQ(output.col_idx,nullptr);
             EXPECT_EQ(output.values_f64,nullptr);EXPECT_EQ(output.values_f32,nullptr);
+            EXPECT_EQ(output.row_map,nullptr);
             EXPECT_EQ(output.nnz,73);EXPECT_TRUE(output.fp32);
             // If a broken implementation publishes buffers, still reap them.
             if(output.row_ptr)cudaFree(output.row_ptr);
             if(output.col_idx)cudaFree(output.col_idx);
             if(output.values_f64)cudaFree(output.values_f64);
             if(output.values_f32)cudaFree(output.values_f32);
+            if(output.row_map)cudaFree(output.row_map);
         }
     }
 #endif
@@ -327,6 +356,7 @@ TEST(GpuOperatorCsr, NonemptyOutputOwnerIsRejectedWithoutModification) {
     EXPECT_EQ(owner.output.col_idx, before.col_idx);
     EXPECT_EQ(owner.output.values_f64, before.values_f64);
     EXPECT_EQ(owner.output.values_f32, before.values_f32);
+    EXPECT_EQ(owner.output.row_map, before.row_map);
     EXPECT_EQ(owner.output.nnz, before.nnz);
     EXPECT_EQ(owner.output.fp32, before.fp32);
     expect_output(owner.output, reference(valid, perm), -1);
