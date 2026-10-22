@@ -432,13 +432,17 @@ private:
             const factor_value_t* L_vals = L.valuePtr();
             const node_index drop_row = L.rows() - 1;
             // PASS 1 (parallel): per-column count of entries with row < m.
+            // Both passes split columns by stored entries.
             std::vector<node_index> col_kept(m_, 0);
-            #pragma omp parallel for schedule(static)
-            for (node_index j = 0; j < m_; ++j) {
-                node_index kept = 0;
-                for (edge_index p = L_outer[j]; p < L_outer[j + 1]; ++p)
-                    if (L_inner[p] != drop_row) ++kept;
-                col_kept[j] = kept;
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(L_outer, m_);
+                for (node_index j = first; j < last; ++j) {
+                    node_index kept = 0;
+                    for (edge_index p = L_outer[j]; p < L_outer[j + 1]; ++p)
+                        if (L_inner[p] != drop_row) ++kept;
+                    col_kept[j] = kept;
+                }
             }
             // Prefix sum (serial, m_+1 entries — sub-ms).
             L11_outer_local.resize(static_cast<size_t>(m_) + 1);
@@ -452,14 +456,17 @@ private:
             L11_inner_local = std::make_unique_for_overwrite<node_index[]>(static_cast<size_t>(nnz));
             L11_vals_local = std::make_unique_for_overwrite<factor_value_t[]>(static_cast<size_t>(nnz));
             // PASS 2 (parallel): scatter entries to compacted positions.
-            #pragma omp parallel for schedule(static)
-            for (node_index j = 0; j < m_; ++j) {
-                edge_index out = L11_outer_local[j];
-                for (edge_index p = L_outer[j]; p < L_outer[j + 1]; ++p) {
-                    if (L_inner[p] == drop_row) continue;
-                    L11_inner_local[out] = L_inner[p];
-                    L11_vals_local[out]  = L_vals[p];
-                    ++out;
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(L_outer, m_);
+                for (node_index j = first; j < last; ++j) {
+                    edge_index out = L11_outer_local[j];
+                    for (edge_index p = L_outer[j]; p < L_outer[j + 1]; ++p) {
+                        if (L_inner[p] == drop_row) continue;
+                        L11_inner_local[out] = L_inner[p];
+                        L11_vals_local[out]  = L_vals[p];
+                        ++out;
+                    }
                 }
             }
             L11_outer = L11_outer_local.data();
@@ -495,9 +502,12 @@ private:
             need_scale = factor_drop_rel > 0.0;
         }
         if (need_scale) {
-            #pragma omp parallel for schedule(static)
-            for (node_index j = 0; j < m_; ++j)
-                col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(L11_outer, m_);
+                for (node_index j = first; j < last; ++j)
+                    col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
+            }
             mark("col_scale");
         }
         if constexpr (kScaled) {

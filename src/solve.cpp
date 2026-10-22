@@ -62,17 +62,23 @@ inline operator_storage_properties scan_operator_storage(
     const int* inner = L.innerIndexPtr();
     bool exact = true;
     bool sorted = true;
-    #pragma omp parallel for schedule(static) reduction(&& : exact, sorted)
-    for (Eigen::Index col = 0; col < L.outerSize(); ++col) {
-        const int begin = outer[col];
-        const int end = L.isCompressed()
-            ? outer[col + 1]
-            : begin + L.innerNonZeroPtr()[col];
-        for (int p = begin; p < end; ++p) {
-            if (static_cast<double>(static_cast<float>(v[p])) != v[p])
-                exact = false;
-            if (p > begin && inner[p - 1] > inner[p])
-                sorted = false;
+    const Eigen::Index n = L.outerSize();
+    #pragma omp parallel reduction(&& : exact, sorted)
+    {
+        // An uncompressed matrix has slack inside its column ranges, so the
+        // outer pointers still bound (over-estimate) each column's work.
+        const auto [lo, hi] = detail::work_balanced_range(outer, n);
+        for (Eigen::Index col = lo; col < hi; ++col) {
+            const int begin = outer[col];
+            const int end = L.isCompressed()
+                ? outer[col + 1]
+                : begin + L.innerNonZeroPtr()[col];
+            for (int p = begin; p < end; ++p) {
+                if (static_cast<double>(static_cast<float>(v[p])) != v[p])
+                    exact = false;
+                if (p > begin && inner[p - 1] > inner[p])
+                    sorted = false;
+            }
         }
     }
     return {exact, sorted};
@@ -163,51 +169,54 @@ bool copy_symmetric_csc_as_owned_csr(
     Eigen::Index lower_nnz = 0;
     Eigen::Index upper_nnz = 0;
     bool upper_is_paired = true;
-    #pragma omp parallel for schedule(static) \
-        reduction(+ : lower_nnz, upper_nnz) reduction(&& : upper_is_paired)
-    for (Eigen::Index col = 0; col < n; ++col) {
-        dst_outer[col] = src_outer[col];
-        const int col_i = static_cast<int>(col);
-        for (int p = src_outer[col]; p < src_outer[col + 1];) {
-            const int row = src_inner[p];
-            int run_end = p + 1;
-            while (run_end < src_outer[col + 1] &&
-                   src_inner[run_end] == row)
-                ++run_end;
-            const int run_size = run_end - p;
+    #pragma omp parallel reduction(+ : lower_nnz, upper_nnz) \
+        reduction(&& : upper_is_paired)
+    {
+        const auto [lo, hi] = detail::work_balanced_range(src_outer, n);
+        for (Eigen::Index col = lo; col < hi; ++col) {
+            dst_outer[col] = src_outer[col];
+            const int col_i = static_cast<int>(col);
+            for (int p = src_outer[col]; p < src_outer[col + 1];) {
+                const int row = src_inner[p];
+                int run_end = p + 1;
+                while (run_end < src_outer[col + 1] &&
+                       src_inner[run_end] == row)
+                    ++run_end;
+                const int run_size = run_end - p;
 
-            for (int q = p; q < run_end; ++q) {
-                dst_inner[q] = row;
-                dst_vals[q] = static_cast<S>(src_vals[q]);
-            }
-            if (row < col_i) {
-                upper_nnz += run_size;
-                // Destination CSR(row=col, col=row) must use the canonical
-                // lower values L(col,row), found in source CSC column `row`.
-                // Compressed Eigen matrices may contain duplicate sorted
-                // inner indices, so require and copy the whole partner run
-                // one-for-one. A mere lower_bound hit plus globally balanced
-                // triangle counts can accept opposite multiplicity errors on
-                // two coordinates and silently change the operator.
-                const int begin = src_outer[row];
-                const int end = src_outer[row + 1];
-                const auto partners = std::equal_range(
-                    src_inner + begin, src_inner + end, col_i);
-                const int partner_begin = static_cast<int>(
-                    partners.first - src_inner);
-                const int partner_size = static_cast<int>(
-                    partners.second - partners.first);
-                if (partner_size == run_size) {
-                    for (int offset = 0; offset < run_size; ++offset)
-                        dst_vals[p + offset] = static_cast<S>(
-                            src_vals[partner_begin + offset]);
-                } else {
-                    upper_is_paired = false;
+                for (int q = p; q < run_end; ++q) {
+                    dst_inner[q] = row;
+                    dst_vals[q] = static_cast<S>(src_vals[q]);
                 }
-            } else if (row > col_i) {
-                lower_nnz += run_size;
+                if (row < col_i) {
+                    upper_nnz += run_size;
+                    // Destination CSR(row=col, col=row) must use the canonical
+                    // lower values L(col,row), found in source CSC column `row`.
+                    // Compressed Eigen matrices may contain duplicate sorted
+                    // inner indices, so require and copy the whole partner run
+                    // one-for-one. A mere lower_bound hit plus globally balanced
+                    // triangle counts can accept opposite multiplicity errors on
+                    // two coordinates and silently change the operator.
+                    const int begin = src_outer[row];
+                    const int end = src_outer[row + 1];
+                    const auto partners = std::equal_range(
+                        src_inner + begin, src_inner + end, col_i);
+                    const int partner_begin = static_cast<int>(
+                        partners.first - src_inner);
+                    const int partner_size = static_cast<int>(
+                        partners.second - partners.first);
+                    if (partner_size == run_size) {
+                        for (int offset = 0; offset < run_size; ++offset)
+                            dst_vals[p + offset] = static_cast<S>(
+                                src_vals[partner_begin + offset]);
+                    } else {
+                        upper_is_paired = false;
+                    }
+                } else if (row > col_i) {
+                    lower_nnz += run_size;
+                }
+                p = run_end;
             }
-            p = run_end;
         }
     }
     dst_outer[n] = src_outer[n];
