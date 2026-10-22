@@ -529,7 +529,9 @@ TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
             ASSERT_EQ(create(c, &o, explicit_storage), APXCHOL_STATUS_SUCCESS);
             EXPECT_EQ(stats_of(explicit_storage.s).factor_storage, storage);
             const exported built = export_of(explicit_storage.s);
-            if (backend == APXCHOL_BACKEND_CPU) EXPECT_TRUE(built == native);
+            if (backend == APXCHOL_BACKEND_CPU) {
+                EXPECT_TRUE(built == native);
+            }
             factor_handle copy;
             ASSERT_EQ(apxchol_solver_copy_factor(explicit_storage.s, &copy.f, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
