@@ -560,7 +560,7 @@ TEST(FactorRegularization, RejectsUnrepresentableExcess) {
     for (int n : {3, 16385}) {
         SCOPED_TRACE(n);
         const auto L = path_laplacian(n);
-        for (const auto [scale, regularization] :
+        for (const auto& [scale, regularization] :
              {std::pair{1e10, 1e300}, std::pair{1e-30, 1e-300}}) {
             const Eigen::SparseMatrix<double> A = scale * L;
             apxchol::factor_options opts;
