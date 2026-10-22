@@ -196,7 +196,7 @@ private:
 // * Thin levels use scalar accumulation. FP16 fat levels use F16C conversion
 //   with scalar gathers on AVX2/FMA targets; single-RHS FP32 uses the scalar kernel.
 //   Their different accumulation orders need not produce identical bits.
-// * drop_stats()/lowprec_stats() retain the counts and memory diagnostics.
+// * drop_stats() retains the counts and memory diagnostics.
 //   Reporting does not change these numerical/storage rules.
 
 class omp_sptrsv {
@@ -316,12 +316,6 @@ public:
         }
     }
 
-    // APXCHOL_FACTOR_DROP=<rel> resolution, read at every setup(): unset (or
-    // empty) -> kFactorDropRelDefault; set -> its value, where anything <= 0
-    // (including "0" and unparsable text, which atof reads as 0) turns the
-    // drop OFF.
-    static double factor_drop_rel_from_env() { return apxchol::factor_drop_rel_from_env(); }
-
     // Statistics of the last setup() (see the file header): what the
     // compacting drop did to L11 = L.topLeftCorner(m, m) (rel / nnz_factor /
     // nnz_stored / dropped*) and what the storage format did to
@@ -348,9 +342,6 @@ public:
         std::uint64_t scale_fallback    = 0;
         std::uint64_t diag_below_scale  = 0;
     };
-    const lowprec_statistics& lowprec_stats() const { return stats_; }
-    // The same record under the name the drop-only callers use:
-    // rel / nnz_factor / nnz_stored / dropped are its drop half.
     const lowprec_statistics& drop_stats() const { return stats_; }
     // nnz held by the SpTRSV's CSR / CSC (each) after the last setup().
     std::uint64_t stored_nnz() const { return stats_.nnz_stored; }

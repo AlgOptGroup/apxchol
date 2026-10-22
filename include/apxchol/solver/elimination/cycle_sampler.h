@@ -217,11 +217,9 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
     out(std::span<const deferred_edge>(staged));
 }
 inline void sample_cycle_clique(std::span<weighted_neighbor> n, double pivot,
-                               std::uint64_t seed, edge_emitter out, clique_sampler sampler,
-                               std::size_t exact_core_max_h,
-                               std::size_t double_cycle_min_h) {
-    if (sampler != clique_sampler::trace_cycle)
-        throw std::invalid_argument("unknown clique sampler");
+                                std::uint64_t seed, edge_emitter out,
+                                std::size_t exact_core_max_h,
+                                std::size_t double_cycle_min_h) {
     if (!cycle_inputs_eligible(n, pivot)) {
         sample_cycle_gks_fallback(n, pivot, seed, out);
         return;

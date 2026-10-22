@@ -39,20 +39,6 @@
 
 // ── Helpers ──────────────────────────────────────────
 
-TEST(SetupDiagnostics, WorkDistributionExposesConcentrationAndIdleWorkers) {
-    const auto balanced = apxchol::detail::summarize_work_distribution(
-        {9, 8, 7, 6}, 2);
-    EXPECT_EQ(balanced.total, 30u);
-    EXPECT_EQ(balanced.maximum, 9u);
-    EXPECT_DOUBLE_EQ(balanced.lpt_efficiency, 1.0);
-
-    const auto singleton = apxchol::detail::summarize_work_distribution(
-        {10}, 4);
-    EXPECT_EQ(singleton.total, 10u);
-    EXPECT_EQ(singleton.maximum, 10u);
-    EXPECT_DOUBLE_EQ(singleton.lpt_efficiency, 0.25);
-}
-
 TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
     std::mt19937_64 rng(1234567);
     std::vector<apxchol::node_index> values(20000);

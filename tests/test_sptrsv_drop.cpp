@@ -380,13 +380,13 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
 // too), and rel = 0 / negative / junk / empty resolve as documented.
 TEST(SpTRSVDrop, EnvContract) {
     EXPECT_EQ(apxchol::kFactorDropRelDefault, 1e-4);
-    { scoped_drop_env env(nullptr); EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 1e-4); }
-    { scoped_drop_env env("");      EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 1e-4); }
-    { scoped_drop_env env("0");     EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 0.0); }
-    { scoped_drop_env env("-1");    EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 0.0); }
-    { scoped_drop_env env("abc");   EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 0.0); }
-    { scoped_drop_env env("3e-4");  EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 3e-4); }
-    { scoped_drop_env env("2");     EXPECT_EQ(apxchol::omp_sptrsv::factor_drop_rel_from_env(), 2.0); }
+    { scoped_drop_env env(nullptr); EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 1e-4); }
+    { scoped_drop_env env("");      EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 1e-4); }
+    { scoped_drop_env env("0");     EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 0.0); }
+    { scoped_drop_env env("-1");    EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 0.0); }
+    { scoped_drop_env env("abc");   EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 0.0); }
+    { scoped_drop_env env("3e-4");  EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 3e-4); }
+    { scoped_drop_env env("2");     EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 2.0); }
 }
 
 // rel = 0 / negative / junk = off; a rel below every entry drops nothing (and

@@ -160,111 +160,6 @@ inline void parallel_radix_sort_node_indices(
     assert(source == values.data());
 }
 
-struct work_distribution {
-    size_t total = 0;
-    size_t maximum = 0;
-    double lpt_efficiency = 1.0;
-};
-
-// Diagnostic-only lower bound on how well independent work items could occupy
-// a fixed team. LPT is deterministic and cheap enough for opt-in traces; the
-// production scheduler does not call this routine.
-inline work_distribution summarize_work_distribution(
-        std::vector<size_t> work, size_t workers) {
-    work_distribution result;
-    for (size_t w : work) {
-        result.total += w;
-        result.maximum = std::max(result.maximum, w);
-    }
-    if (work.empty() || workers == 0 || result.total == 0) return result;
-
-    std::sort(work.begin(), work.end(), std::greater<size_t>{});
-    std::vector<size_t> loads(std::min(workers, work.size()), 0);
-    for (size_t w : work) {
-        auto dst = std::min_element(loads.begin(), loads.end());
-        *dst += w;
-    }
-    const size_t makespan = *std::max_element(loads.begin(), loads.end());
-    result.lpt_efficiency = static_cast<double>(result.total) /
-        (static_cast<double>(workers) * static_cast<double>(makespan));
-    return result;
-}
-
-inline void trace_candidate_regions(graph& G,
-                             std::span<const node_index> active,
-                             std::span<const node_index> candidates,
-                             uint64_t round_index, size_t workers) {
-    // Any connected component of G[candidates] is independent of every other
-    // such component; active minus candidates is therefore a vertex separator.
-    // This probe measures whether that free region decomposition has enough
-    // balanced work to justify restoring multi-vertex region elimination.
-    std::vector<unsigned char> state(static_cast<size_t>(G.n()), 0);
-    for (node_index v : candidates) state[v] = 1;
-
-    std::vector<node_index> stack;
-    stack.reserve(candidates.size());
-    std::vector<size_t> component_work;
-    component_work.reserve(candidates.size());
-    size_t singleton_components = 0;
-    size_t largest_vertices = 0;
-    size_t internal_incidence = 0;
-    size_t boundary_incidence = 0;
-
-    for (node_index root : candidates) {
-        if (state[root] != 1) continue;
-        state[root] = 2;
-        stack.clear();
-        stack.push_back(root);
-        size_t vertices = 0;
-        size_t work = 0;
-
-        while (!stack.empty()) {
-            const node_index v = stack.back();
-            stack.pop_back();
-            ++vertices;
-            for (auto idx : G.adj(v)) {
-                const node_index u = idx.to;
-                if (!G.is_active(u)) continue;
-                ++work;
-                if (state[u] != 0) {
-                    ++internal_incidence;
-                    if (state[u] == 1) {
-                        state[u] = 2;
-                        stack.push_back(u);
-                    }
-                } else {
-                    ++boundary_incidence;
-                }
-            }
-        }
-        component_work.push_back(work);
-        singleton_components += vertices == 1;
-        largest_vertices = std::max(largest_vertices, vertices);
-    }
-
-    const work_distribution dist =
-        summarize_work_distribution(component_work, workers);
-    const double separator_fraction = active.empty() ? 0.0 :
-        1.0 - static_cast<double>(candidates.size()) /
-                  static_cast<double>(active.size());
-    const double largest_work_fraction = dist.total == 0 ? 0.0 :
-        static_cast<double>(dist.maximum) / static_cast<double>(dist.total);
-    const size_t edge_incidence = internal_incidence + boundary_incidence;
-    const double boundary_fraction = edge_incidence == 0 ? 0.0 :
-        static_cast<double>(boundary_incidence) /
-        static_cast<double>(edge_incidence);
-    std::fprintf(stderr,
-        "[region-probe] round=%llu active=%zu candidates=%zu separator_frac=%.6f "
-        "regions=%zu singletons=%zu largest_vertices=%zu work=%zu max_work=%zu "
-        "max_work_frac=%.6f lpt_efficiency_p%zu=%.6f internal_edges=%zu "
-        "boundary_incidence=%zu boundary_frac=%.6f\n",
-        static_cast<unsigned long long>(round_index), active.size(),
-        candidates.size(), separator_fraction, component_work.size(),
-        singleton_components, largest_vertices, dist.total, dist.maximum,
-        largest_work_fraction, workers, dist.lpt_efficiency,
-        internal_incidence / 2, boundary_incidence, boundary_fraction);
-}
-
 // Eliminate vertices in the partition: record L-columns, add clique edges.
 // Partition vertices across regions are pairwise non-adjacent (for singleton
 // regions, every vertex is its own region — same constraint as the old IS).
@@ -407,7 +302,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                    checkpoint* cp = nullptr,
                                    size_t work_hint = 0,
                                    std::vector<node_index>* live_degrees = nullptr) {
-    const size_t n_verts = part.num_vertices();
+    const size_t n_verts = part.num_regions();
     // n_verts > 0 guaranteed by the dispatcher; early-exit not needed here.
     // The final column array is reserved to n before any round. Grow it once
     // here, then let each iteration write its own column directly. This avoids
@@ -707,20 +602,11 @@ void eliminate_partition(const Eliminator& elim,
                          size_t work_hint = 0,
                          std::vector<node_index>* live_degrees = nullptr) {
     if (cp) { cp->descend("eliminate"); cp->tick(); }
-    const size_t n_verts = part.num_vertices();
-    // Diagnostic only: work_hint is the selected vertices' live-degree sum,
-    // already computed by the caller for the elimination gate. Keeping it on
-    // the existing opt-in round trace makes work-gated rounds auditable without
-    // another graph traversal or any default-path output.
-    const bool trace_round = std::getenv("APXCHOL_ROUND_TRACE") != nullptr;
-    if (trace_round)
-        std::fprintf(stderr, "[round] n_verts=%zu adjacency_work=%zu\n",
-                     n_verts, work_hint);
+    const size_t n_verts = part.num_regions();
     if (n_verts == 0) {
         if (cp) cp->ascend();
         return;
     }
-    const size_t factor_base = factor_cols.size();
     eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp,
                                   work_hint, live_degrees);
     if (live_degrees && std::getenv("APXCHOL_INCREMENTAL_DEGREE_TRACE")) {
@@ -736,40 +622,6 @@ void eliminate_partition(const Eliminator& elim,
             "unique_worker_endpoints=%zu max_reduce_ms=%.6f\n",
             static_cast<unsigned long long>(ws.round_index), raw, unique,
             maximum_ms);
-    }
-    if (trace_round) {
-        std::vector<size_t> pivot_work;
-        pivot_work.reserve(n_verts);
-        std::vector<size_t> pivot_sort_work;
-        pivot_sort_work.reserve(n_verts);
-        for (size_t k = 0; k < n_verts; ++k) {
-            const size_t d = factor_cols[factor_base + k].entry_count;
-            pivot_work.push_back(d);
-            pivot_sort_work.push_back(d < 2 ? d : static_cast<size_t>(
-                std::ceil(static_cast<double>(d) * std::log2(
-                    static_cast<double>(d)))));
-        }
-        const size_t team = elimination_round_team_size(
-            n_verts, work_hint, opts.omp_threshold, ws.threads.size());
-        const work_distribution linear =
-            summarize_work_distribution(std::move(pivot_work), team);
-        const work_distribution sorting =
-            summarize_work_distribution(std::move(pivot_sort_work), team);
-        const double max_linear_fraction = linear.total == 0 ? 0.0 :
-            static_cast<double>(linear.maximum) /
-                static_cast<double>(linear.total);
-        const double max_sort_fraction = sorting.total == 0 ? 0.0 :
-            static_cast<double>(sorting.maximum) /
-                static_cast<double>(sorting.total);
-        std::fprintf(stderr,
-            "[pivot-probe] round=%llu pivots=%zu team=%zu neighbors=%zu "
-            "max_neighbors=%zu max_neighbor_frac=%.6f lpt_linear=%.6f "
-            "sort_work=%zu max_sort_work=%zu max_sort_frac=%.6f "
-            "lpt_sort=%.6f\n",
-            static_cast<unsigned long long>(ws.round_index), n_verts, team,
-            linear.total, linear.maximum, max_linear_fraction,
-            linear.lpt_efficiency, sorting.total, sorting.maximum,
-            max_sort_fraction, sorting.lpt_efficiency);
     }
     if (cp) cp->ascend();
 }
@@ -963,7 +815,7 @@ factorization factorize_impl(const Eliminator& elim,
     if (gpu_owned_setup_route) {
         constexpr bool eligible =
             std::is_same_v<Partitioner, block_greedy_partitioner> &&
-            std::is_same_v<std::remove_cvref_t<Eliminator>, detail::tree_elimination>;
+            std::is_same_v<std::remove_cvref_t<Eliminator>, tree_elimination>;
         if constexpr (!eligible) {
             throw std::invalid_argument("GPU setup requires block_greedy, vec_pool_aos and the built-in sampler");
         } else {
@@ -989,13 +841,13 @@ factorization factorize_impl(const Eliminator& elim,
                 const double min_yield = detail::adaptive_is_yield_fraction(
                     opts.min_is_fraction, active.size(), prep.average_degree, residual_thresh);
                 if (sparse_enabled && !sparsification_attempted &&
-                    detail::selection_should_handoff(part.num_regions(), part.num_vertices(),
+                    detail::selection_should_handoff(part.num_regions(), part.num_regions(),
                         prep.candidate_count, active.size(), min_yield, residual_thresh,
                         opts.omp_threshold)) {
                     // This is a preview, not an eliminated/countable round.
                     // Capture its gate inputs before changing the residual.
                     sparsification_attempted = true;
-                    const auto handoff = part.num_vertices();
+                    const auto handoff = part.num_regions();
                     part.clear();
                     double distinct_degree = 0.0;
                     bool worthwhile = false;
@@ -1286,25 +1138,6 @@ factorization factorize_impl(const Eliminator& elim,
     size_t consecutive_empty = 0;
     size_t handoff_vertices = 0;
     constexpr size_t kMaxEmptyRounds = 64;
-    const bool region_probe_enabled =
-        std::getenv("APXCHOL_REGION_PROBE") != nullptr;
-    size_t next_region_probe_active = active.size();
-    size_t last_region_probe_active = std::numeric_limits<size_t>::max();
-    auto trace_regions = [&](bool force) {
-        if constexpr (partitioner_degree_prepass_v<Partitioner>) {
-            if (!region_probe_enabled || !last_candidates_host_resident ||
-                last_region_probe_active == active.size() ||
-                (!force && active.size() > next_region_probe_active))
-                return;
-            detail::trace_candidate_regions(
-                work, active,
-                std::span<const node_index>(pre_eligible.data(),
-                                            last_candidate_count),
-                ws.round_index, static_cast<size_t>(num_threads_factorize));
-            last_region_probe_active = active.size();
-            next_region_probe_active = active.size() / 2;
-        }
-    };
 
     while (active.size() > 1) {
         ws.reset_for_round();
@@ -1312,7 +1145,6 @@ factorization factorize_impl(const Eliminator& elim,
 #ifndef NDEBUG
         detail::assert_partition_independent(work, part);
 #endif
-        trace_regions(false);
 
         // If partition is too small, the partitioning overhead exceeds the
         // benefit of batch elimination.  Fall back to sequential elimination
@@ -1335,11 +1167,10 @@ factorization factorize_impl(const Eliminator& elim,
             // the parallel elimination path; the yield rule is for small
             // selections whose scan cost is no longer amortized.
             if (detail::selection_should_handoff(
-                    part.num_regions(), part.num_vertices(),
+                    part.num_regions(), part.num_regions(),
                     last_candidate_count, active.size(), min_yield,
                     residual_thresh, opts.omp_threshold)) {
-                handoff_vertices = part.num_vertices();
-                trace_regions(true);
+                handoff_vertices = part.num_regions();
                 if (std::getenv("APXCHOL_VERBOSE"))
                     std::fprintf(stderr,
                         "[apxchol] selector handoff: active=%zu candidates=%zu "
@@ -1391,7 +1222,7 @@ factorization factorize_impl(const Eliminator& elim,
             ? 0.0L : prune_work /
                 static_cast<long double>(elimination_work_hint);
         const size_t incremental_workers = detail::elimination_round_team_size(
-            part.num_vertices(), elimination_work_hint, opts.omp_threshold,
+            part.num_regions(), elimination_work_hint, opts.omp_threshold,
             static_cast<size_t>(num_threads_factorize));
         // Every ordinary prepass is an exact decision sample. Across the
         // nine-graph screen the measured
@@ -1429,7 +1260,7 @@ factorization factorize_impl(const Eliminator& elim,
                 "workers=%zu work_per_worker=%zu "
                 "prune_to_update=%.6Lf active=%d decided=%d\n",
                 static_cast<unsigned long long>(ws.round_index), active.size(),
-                last_candidate_count, part.num_vertices(), last_avg_degree,
+                last_candidate_count, part.num_regions(), last_avg_degree,
                 elimination_work_hint, incremental_workers,
                 incremental_workers == 0
                     ? 0 : elimination_work_hint / incremental_workers,
@@ -1775,14 +1606,6 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<std::unique_ptr<std::pmr::monotonic_buffer_resource>>().swap(
         factor_entry_resources);
 
-    // Optional debugging hook: print final nnz(L) when env var is set.
-    // Useful for comparing factor fill across option settings without touching
-    // the caller.
-    if (const char* e = std::getenv("APXCHOL_DUMP_NNZ"); e && *e) {
-        std::fprintf(stderr, "[apxchol] nnz(L) = %zu\n",
-                     static_cast<size_t>(result.L.nonZeros()));
-    }
-
     if (cp) cp->ascend();
 
     return result;
@@ -1793,13 +1616,13 @@ factorization factorize_impl(const Eliminator& elim,
 // the place the by-route exact-core sentinel has to be resolved, since the
 // eliminator is built here, before factorize_impl sees the options, and the
 // GPU round shadow inspects the ELIMINATOR's copy of the knob.
-inline detail::tree_elimination make_tree_elim(const factor_options& opts,
+inline tree_elimination make_tree_elim(const factor_options& opts,
         detail::setup_route route = detail::setup_route::cpu) {
     const std::size_t exact_core =
         opts.exact_core_max_h == exact_core_by_route
             ? (route == detail::setup_route::gpu ? 0u : exact_core_host_default)
             : opts.exact_core_max_h;
-    return detail::tree_elimination{
+    return tree_elimination{
         .exact_clique_max_degree = opts.exact_clique_max_degree,
         .exact_core_max_h = exact_core,
         .double_cycle_min_h = opts.double_cycle_min_h,

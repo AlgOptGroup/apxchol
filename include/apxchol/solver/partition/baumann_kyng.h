@@ -12,8 +12,6 @@
 #include "apxchol/solver/partitioner.h"
 #include <algorithm>
 #include <vector>
-#include <cstdio>
-#include <cstdlib>
 
 #include <omp.h>
 
@@ -27,7 +25,7 @@ struct baumann_kyng_partitioner {
     /// The measured single default avoids making the factor depend on the
     /// caller's thread count.  c=0.1 wins from 2 through 72 threads while
     /// remaining neutral at one thread; c=0.05 is faster in some tails but has
-    /// a weaker iteration-count margin.  See AGENTS.md for the campaign ledger.
+    /// a weaker iteration-count margin.
     double sampling_constant = 0.1;
 
     uint64_t round = 0;
@@ -188,13 +186,6 @@ struct baumann_kyng_partitioner {
         if (sample_count > 0)
             est_avg_degree = sample_degree_sum / double(sample_count);
         selected_degree_work_ = selected_degree_work;
-
-        // Work trace: per-round iteration cost (active = the O(|active|) full scan) and
-        // edge-visit cost (sample_deg = Σ deg over sampled vertices). Sum over rounds to
-        // compare total IS-finding work vs m (settles the O(m) vs O(m·d) amortization Q).
-        if (std::getenv("APXCHOL_WORK_TRACE"))
-            std::fprintf(stderr, "[bkwork] active=%zu sampled=%lld sample_deg=%.0f\n",
-                         active.size(), sample_count, sample_degree_sum);
 
         ++round;
     }
