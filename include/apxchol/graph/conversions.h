@@ -13,9 +13,7 @@
 #include <ranges>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -59,7 +57,6 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
 
     std::vector<double> diag(n, 0.0);
 
-#ifdef _OPENMP
     // This builder owns a fresh graph. A caller may already be in an unrelated
     // OpenMP team; do not join that team's collective reserve or its barrier.
     const auto reserve_initial = [&](auto begin, auto end, const auto& incoming) {
@@ -246,21 +243,6 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         }
     }
     } // !built_from_columns
-#else
-    {
-        // Phase 1 (serial): extract edges and diagonal.
-        for (node_index k = 0; k < outer; ++k)
-            for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
-                if (it.row() > it.col())
-                    g.add_edge(static_cast<node_index>(it.row()),
-                               static_cast<node_index>(it.col()),
-                               -it.value());
-                else if (it.row() == it.col())
-                    diag[k] = it.value();
-            }
-    }
-
-#endif
 
     // Phase 2: excess = diag − weighted degree.  Zero for pure Laplacians.
     //

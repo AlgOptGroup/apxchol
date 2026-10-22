@@ -21,9 +21,7 @@
 #include <cstdint>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -90,7 +88,6 @@ private:
             return du < dv || (du == dv && u < v);
         };
 
-        #ifdef _OPENMP
         if (omp_get_max_threads() > 1 && candidates.size() > ctx.omp_threshold) {
             const size_t nt = static_cast<size_t>(omp_get_max_threads());
             if (per_thread_boundary_.size() < nt)
@@ -368,7 +365,6 @@ private:
                 }
             }
         } else
-        #endif
         {
             // Serial greedy. No blocks, so no cross-block drops and nothing to
             // repair: a candidate goes unpicked only when a neighbor is chosen,

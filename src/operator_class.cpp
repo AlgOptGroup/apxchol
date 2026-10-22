@@ -12,9 +12,7 @@
 #include <string>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 namespace {
@@ -99,10 +97,7 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     // is the same on every run and at every thread count. No critical section
     // anywhere: G3_circuit has 665k rows that break dominance, and one
     // critical entry each would serialize the whole scan.
-    int nt = 1;
-#ifdef _OPENMP
-    nt = omp_get_max_threads();
-#endif
+    const int nt = omp_get_max_threads();
     std::vector<witness> wit(static_cast<std::size_t>(nt));
 
     Eigen::Index stored = 0, nonfinite = 0, offdiag = 0, offpos = 0;
@@ -133,10 +128,7 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
                       hash_lower, hash_upper) \
         reduction(&& : ordered)
     for (Eigen::Index k = 0; k < s.cols; ++k) {
-        int tid = 0;
-#ifdef _OPENMP
-        tid = omp_get_thread_num();
-#endif
+        const int tid = omp_get_thread_num();
         witness& w = wit[static_cast<std::size_t>(tid)];
         const col_range c = column(A, k);
         double colsum = 0.0, diag = 0.0;
@@ -200,10 +192,7 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
         // above, and the witness tie-break does not depend on the schedule.
         #pragma omp parallel for schedule(static) reduction(+ : asym)
         for (Eigen::Index k = 0; k < s.cols; ++k) {
-            int tid = 0;
-#ifdef _OPENMP
-            tid = omp_get_thread_num();
-#endif
+            const int tid = omp_get_thread_num();
             witness& w = wit[static_cast<std::size_t>(tid)];
             const col_range c = column(A, k);
             for (Eigen::Index p = c.begin; p < c.end; ++p) {

@@ -15,9 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -79,10 +77,7 @@ struct baumann_kyng_partitioner {
             return (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
         };
 
-        int nt = 1;
-        #ifdef _OPENMP
-        nt = omp_get_max_threads();
-        #endif
+        const int nt = omp_get_max_threads();
 
         // Resolve the by-route sentinel here too: this partitioner can be driven
         // directly, without factorize() having normalised the options first.
@@ -104,10 +99,8 @@ struct baumann_kyng_partitioner {
             #pragma omp parallel reduction(+:sample_degree_sum, sample_count, selected_degree_work) \
                 if(active.size() > ctx.omp_threshold)
             {
-                int tid = 0, nthreads = 1;
-                #ifdef _OPENMP
-                tid = omp_get_thread_num(); nthreads = omp_get_num_threads();
-                #endif
+                const int tid = omp_get_thread_num();
+                const int nthreads = omp_get_num_threads();
                 size_t bs = active.size() * size_t(tid) / nthreads;
                 size_t be = active.size() * size_t(tid + 1) / nthreads;
                 for (size_t i = bs; i < be; ++i) {
@@ -131,10 +124,8 @@ struct baumann_kyng_partitioner {
             #pragma omp parallel reduction(+:sample_degree_sum, sample_count) \
                 if(active.size() > ctx.omp_threshold)
             {
-                int tid = 0, nthreads = 1;
-                #ifdef _OPENMP
-                tid = omp_get_thread_num(); nthreads = omp_get_num_threads();
-                #endif
+                const int tid = omp_get_thread_num();
+                const int nthreads = omp_get_num_threads();
                 size_t bs = active.size() * size_t(tid) / nthreads;
                 size_t be = active.size() * size_t(tid + 1) / nthreads;
                 auto& my_s = local_sampled_[tid];

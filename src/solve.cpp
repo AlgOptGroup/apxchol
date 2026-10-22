@@ -16,9 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <variant>
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/detail/gpu_solve_session.h"
 #elif defined(APXCHOL_USE_METAL)

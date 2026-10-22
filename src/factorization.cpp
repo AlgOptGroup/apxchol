@@ -21,9 +21,7 @@
 #include <stdexcept>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -45,11 +43,7 @@ static void assemble_csc(
     const std::uint64_t edge_max =
         static_cast<std::uint64_t>(sparse_csc::kEdgeMax);
     const std::uint64_t nc = factor_cols.size();
-#ifdef _OPENMP
     const int max_threads = omp_get_max_threads();
-#else
-    const int max_threads = 1;
-#endif
     std::vector<std::uint64_t> block_total(
         static_cast<std::size_t>(max_threads), 0);
     std::vector<unsigned char> block_overflow(
@@ -66,13 +60,8 @@ static void assemble_csc(
 
     #pragma omp parallel
     {
-#ifdef _OPENMP
         const int tid = omp_get_thread_num();
         const int team = omp_get_num_threads();
-#else
-        const int tid = 0;
-        const int team = 1;
-#endif
         const std::uint64_t begin =
             nc * static_cast<std::uint64_t>(tid) /
             static_cast<std::uint64_t>(team);

@@ -129,9 +129,7 @@
 #include <utility>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -182,10 +180,7 @@ public:
     // ── Orchestrator side ──
     void reset(node_index n) {
         if (mask_.size() < static_cast<size_t>(n)) mask_.assign(n, 0);
-        int nt = 1;
-#ifdef _OPENMP
-        nt = omp_get_max_threads();
-#endif
+        const int nt = omp_get_max_threads();
         if (per_thread_.size() < static_cast<size_t>(nt)) per_thread_.resize(nt);
         for (auto& l : per_thread_) l.clear();
         result_.clear();
@@ -204,11 +199,7 @@ public:
 
 private:
     static int thread_id() {
-#ifdef _OPENMP
         return omp_get_thread_num();
-#else
-        return 0;
-#endif
     }
     std::vector<char> mask_;
     std::vector<std::vector<node_index>> per_thread_;

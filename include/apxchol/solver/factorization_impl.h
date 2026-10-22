@@ -35,9 +35,7 @@
 #include <string>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -453,7 +451,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
         return {ws.degree_decrements.data() + offsets[k], count};
     };
 
-    #ifdef _OPENMP
     // Size a small round's team by both independent pivots and selected live
     // adjacency work. This differs from the retired APXCHOL_TAIL_THREADS
     // experiment: that rule gave every small tail the full team by vertex
@@ -521,9 +518,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     const std::size_t end = decrements.size() *
                         static_cast<std::size_t>(tid + 1) /
                         static_cast<std::size_t>(degree_workers);
-#ifdef _OPENMP
                     const double decrement_start = omp_get_wtime();
-#endif
                     parallel_radix_sort_node_indices(
                         decrements, ws.degree_decrement_scratch,
                         ws.degree_decrement_histograms, tid, degree_workers);
@@ -549,10 +544,8 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         i = j;
                     }
                     ws.threads[tid].degree_decrement_unique = unique;
-#ifdef _OPENMP
                     ws.threads[tid].degree_decrement_ms =
                         1000.0 * (omp_get_wtime() - decrement_start);
-#endif
                 }
 
                 // Parallel atomic histogram of incoming edges per vertex.
@@ -668,7 +661,6 @@ void eliminate_partition_singleton(const Eliminator& elim,
             if (cp) (*cp)("compute+apply_fused");
         }
     } else
-    #endif
     {
         // Serial path: per-vertex inline application for cache locality.
         // Inline dedup in process_vertex replaces merge_parallel_edges.
@@ -943,10 +935,7 @@ factorization factorize_impl(const Eliminator& elim,
     }
     if (cp) (*cp)("sddm_scan");
 
-    int num_threads_factorize = 1;
-#ifdef _OPENMP
-    num_threads_factorize = omp_get_max_threads();
-#endif
+    const int num_threads_factorize = omp_get_max_threads();
     factorize_workspace ws;
     {
         ws.threads.resize(num_threads_factorize);

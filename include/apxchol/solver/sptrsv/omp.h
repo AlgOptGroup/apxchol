@@ -19,9 +19,7 @@
 #include <type_traits>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 #ifdef __x86_64__
 #include <immintrin.h>
 #endif
@@ -1119,10 +1117,8 @@ private:
 
     template <class Dir, class V, int Columns = 1>
     void solve_hybrid(const double* x_in, double* y_out) const {
-        bool team_ok = false;
-#ifdef _OPENMP
         const unsigned processors = critical_plan_.processors;
-        team_ok = true;
+        bool team_ok = true;
         // Keep both phases in one team. The last level-set workshare already
         // barriers before the critical tail in the forward direction. The
         // reverse direction needs one explicit phase barrier because a lane
@@ -1146,7 +1142,6 @@ private:
                 }
             }
         }
-#endif
         if (!team_ok) {
             // No row was touched unless the setup-time team materialized.
             // Replay the snapshotted base levels serially, retaining each
@@ -1209,7 +1204,6 @@ private:
 
     template <class Dir, class V, int Columns = 1>
     void solve_critical_team_impl(const double* x_in, double* y_out) const {
-#ifdef _OPENMP
         const unsigned processor =
             static_cast<unsigned>(omp_get_thread_num());
         const std::size_t steps = critical_plan_.steps;
@@ -1233,10 +1227,6 @@ private:
             }
             critical_barrier_.arrive(processor);
         }
-#else
-        (void)x_in;
-        (void)y_out;
-#endif
     }
 
     // ── THE level-set kernel (both directions, both storages) ──────────

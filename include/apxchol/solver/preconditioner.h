@@ -22,9 +22,7 @@
 #include "apxchol/solver/sptrsv/cuda.h"
 #endif
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -66,19 +64,13 @@ static_chunk(Eigen::Index n, int tid, int nt) noexcept {
 /// doubles per that many threads always suffices. Callers keep the buffer
 /// as reusable workspace so repeated solves stay allocation-free.
 inline std::size_t part_capacity() noexcept {
-    int nt = 1;
-#ifdef _OPENMP
-    nt = omp_get_max_threads();
-#endif
-    return static_cast<std::size_t>(nt) * kPartStride;
+    return static_cast<std::size_t>(omp_get_max_threads()) * kPartStride;
 }
 
 /// Thread id / team size inside a parallel region (0 / 1 for a serial team).
 inline void omp_ids(int& tid, int& nt) noexcept {
-    tid = 0; nt = 1;
-#ifdef _OPENMP
-    tid = omp_get_thread_num(); nt = omp_get_num_threads();
-#endif
+    tid = omp_get_thread_num();
+    nt = omp_get_num_threads();
 }
 
 /// Serial thread-order sum of `nt` partials at slot `slot` (< stride).
