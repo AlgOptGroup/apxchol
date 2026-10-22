@@ -19,8 +19,9 @@ enum exit_flag : unsigned {
 
 // Private experiment ABI. Input arrays are valid borrowed host arrays of
 // lengths n+1,nnz,nnz,n; permutation is the factor's validated bijection.
-// Accept only unique sorted fully paired CSC. Canonical LOWER values and
-// sorted permuted rows match the existing host constructor, including zeros.
+// Accept only unique sorted fully paired CSC. Canonical LOWER values match the
+// existing host constructor, including zeros. Stored rows keep input order and
+// columns are permuted; stored row r is vector row row_map[r] (= perm[r]).
 // precision: -1=AUTO exact-fp32,0=fp64,1=require-exact-fp32. Layout failures return
 // false without publishing output. Requiring FP32 with inexact values throws
 // std::invalid_argument. CUDA/allocation errors also throw; temporary allocations
@@ -30,6 +31,7 @@ struct operator_csr {
     int* col_idx = nullptr;
     double* values_f64 = nullptr;
     float* values_f32 = nullptr;
+    int* row_map = nullptr;
     int nnz = 0;
     bool fp32 = false;
 };
