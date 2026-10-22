@@ -5,33 +5,20 @@ are welcome.
 
 ## Build and test
 
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j6
-ctest --test-dir build --output-on-failure
-./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'
-```
+Build and run the suite as in the [README](README.md#build-and-run); `ctest`
+also runs the examples. Run one test while iterating with
+`./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'`.
 
-CMake consumers should link `apxchol_core` rather than copy its compiler flags:
-
-```cmake
-add_subdirectory(path/to/apxchol)
-target_link_libraries(my_program PRIVATE apxchol_core)
-```
-
-The target supplies C++23 and the native architecture flag used by the library.
-Matching architecture settings matter because Eigen objects cross the library
-boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds. The CI library
-build uses `tests/cmake_consumer` as an outer project to test these requirements
-alongside the ordinary suite.
-
-On macOS, follow the [build dependencies in the README](README.md#build-and-run).
-The `linux` and `macos` CI jobs share their parent-consumer configure/build and
-CTest steps through YAML anchors. The macOS job uses the runner's default Apple
-Clang and Homebrew libomp, and checks OpenMP linkage.
+CI builds `tests/cmake_consumer`, an outer project that checks the
+[CMake consumer](README.md#use-from-cmake) requirements, with warnings as errors on GCC 14 and
+15, Clang 18 and 22, and Apple Clang (CPU and Metal), plus one build with
+64-bit node indices and the FP64 residual pool. Only one Linux and one macOS
+job use native tuning. CUDA is compiled but not run, because hosted runners
+have no GPU. The Linux and macOS jobs share their configure/build and CTest
+steps through YAML anchors.
 
 Use focused regressions for changed behavior, then the relevant suite. CUDA
-changes require a CUDA build and device. Metal changes require an
+changes require a local CUDA build and device run. Metal changes require an
 `-DAPXCHOL_DEVICE=METAL` build on an Apple-silicon Mac; also run the device
 tests under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`. Python and Octave
 compile the core sources independently; check affected binding interfaces too:
