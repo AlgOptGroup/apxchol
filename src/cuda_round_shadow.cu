@@ -2157,10 +2157,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     ensure_state_buffer(keys_a, g, "allocate radix keys A", "grow radix keys A");
     ensure_state_buffer(keys_b, g, "allocate radix keys B", "grow radix keys B");
     first.allocate(sort_g, "allocate sorted gathered records");
-    device_buffer<work_record> unique(tracker);
-    device_buffer<work_record> scratch(tracker);
+    device_buffer<work_record> candidates(tracker);
     flags.allocate(sort_g, "allocate dedup flags");
-    scratch.allocate(sort_g, "allocate dedup candidates");
+    candidates.allocate(sort_g, "allocate dedup candidates");
     oversized_unique.allocate(sort_g, "allocate oversized unique neighbors");
 
     report.timings.dedup_ms = timer.measure_ms([&] {
@@ -2170,10 +2169,10 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             cub.sort_pairs(keys_a.get(), keys_b.get(), second.get(), first.get(),
                            sort_g, "stable sort gathered neighbors");
             reduce_equal_pairs<<<blocks_for(sort_g), kBlock>>>(
-                first.get(), sort_g, scratch.get(), flags.get());
+                first.get(), sort_g, candidates.get(), flags.get());
             cuda_check(cudaGetLastError(), "launch deterministic neighbor dedup");
         }
-        const int unique_count = cub.select(scratch.get(), flags.get(), oversized_unique.get(),
+        const int unique_count = cub.select(candidates.get(), flags.get(), oversized_unique.get(),
                                             sort_g, "select unique neighbors");
         oversized_u = static_cast<std::size_t>(unique_count);
         u = gpu_round_shadow_checked_add(oversized_u,
@@ -2191,24 +2190,16 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     });
     second.reset("release gathered records");
     first.reset("release sorted gathered records");
-    scratch.reset("release dedup candidates");
+    candidates.reset("release dedup candidates");
     const std::size_t factor_column_base = factor_column_count;
     const std::size_t factor_entry_base = factor_entry_count;
     const std::size_t factor_entry_required = gpu_round_shadow_checked_add(
         factor_entry_base, u, "factor append entries");
-    require_fit(sum({bytes_of(std::max<std::size_t>(u, 1), sizeof(work_record)),
-                     factor_entries.count() < factor_entry_required
-                         ? bytes_of(geometric_capacity(factor_entry_required),
-                                    sizeof(gpu_round_shadow_factor_entry))
-                         : std::size_t{0}}),
+    require_fit(factor_entries.count() < factor_entry_required
+                    ? bytes_of(geometric_capacity(factor_entry_required),
+                               sizeof(gpu_round_shadow_factor_entry))
+                    : std::size_t{0},
                 "factor append");
-    unique.allocate(std::max<std::size_t>(u, 1), "allocate combined canonical neighbors");
-    if (oversized_u) {
-        scatter_oversized_unique<<<blocks_for(oversized_u), kBlock>>>(
-            oversized_unique.get(), oversized_u, oversized_starts.get(), pivot_offsets.get(), unique.get());
-        cuda_check(cudaGetLastError(), "scatter neighbor-ordered oversized rows");
-    }
-
     if (factor_entries.count() < factor_entry_required) {
         const bool growth = factor_entries.count() != 0;
         factor_entries.grow_preserve(
@@ -2222,23 +2213,18 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         throw std::logic_error(
             "GPU round shadow: factor-log growth exceeded the preflight plan");
 
-    report.timings.factor_ms = timer.measure_ms([&] {
-        if (p) {
-            prepare_factor<<<blocks_for(p), kBlock>>>(
-                unique.get(), pivot_offsets.get(), device_input.get(),
-                active.get(), pivots.get(), p,
-                excess.get(), total_degree.get(),
-                factor_columns.get(), factor_column_base,
-                factor_entries.get(), factor_entry_base);
-            cuda_check(cudaGetLastError(),
-                       "launch factor-column append");
-        }
-    });
-
+    // Canonical neighbors and their sampling scratch share one lifetime and
+    // one allocation, carved at 256-byte boundaries; compact raw fill outlives
+    // them through mutation and keeps its own buffer.
+    const auto aligned = [](std::size_t bytes) {
+        return gpu_round_shadow_checked_add(bytes, 255, "canonical block alignment") & ~std::size_t{255};
+    };
+    const std::size_t unique_bytes = aligned(bytes_of(std::max<std::size_t>(u, 1), sizeof(work_record)));
+    const std::size_t record_bytes = aligned(bytes_of(u, sizeof(work_record)));
+    const std::size_t canonical_bytes = sum({unique_bytes, record_bytes, record_bytes,
+                                            bytes_of(u, sizeof(double))});
     {
-        std::size_t sample_bytes = sum({
-            bytes_of(u, sizeof(work_record)), bytes_of(u, sizeof(double)),
-            bytes_of(u, sizeof(work_record)),
+        std::size_t sample_bytes = sum({canonical_bytes,
             bytes_of(std::max<std::size_t>(u, 1), sizeof(work_record))});
         if (sampler_components)
             sample_bytes = sum({sample_bytes,
@@ -2248,14 +2234,36 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 growth(cycle_status, 2)});
         require_fit(sample_bytes, "fill sampling");
     }
-    scratch.allocate(u, "allocate canonical-neighbor scratch");
+    device_buffer<std::byte> canonical(tracker);
+    canonical.allocate(canonical_bytes, "allocate canonical neighbors and sampling scratch");
+    auto* const unique = reinterpret_cast<work_record*>(canonical.get());
+    auto* const scratch = reinterpret_cast<work_record*>(canonical.get() + unique_bytes);
+    auto* const fill_candidates = reinterpret_cast<work_record*>(
+        canonical.get() + unique_bytes + record_bytes);
+    auto* const prefix = reinterpret_cast<double*>(
+        canonical.get() + unique_bytes + 2 * record_bytes);
+    if (oversized_u) {
+        scatter_oversized_unique<<<blocks_for(oversized_u), kBlock>>>(
+            oversized_unique.get(), oversized_u, oversized_starts.get(), pivot_offsets.get(), unique);
+        cuda_check(cudaGetLastError(), "scatter neighbor-ordered oversized rows");
+    }
+
+    report.timings.factor_ms = timer.measure_ms([&] {
+        if (p) {
+            prepare_factor<<<blocks_for(p), kBlock>>>(
+                unique, pivot_offsets.get(), device_input.get(),
+                active.get(), pivots.get(), p,
+                excess.get(), total_degree.get(),
+                factor_columns.get(), factor_column_base,
+                factor_entries.get(), factor_entry_base);
+            cuda_check(cudaGetLastError(),
+                       "launch factor-column append");
+        }
+    });
+
     // unique <= gathered, so the existing key capacity already covers this
     // stage and its excess-update sorts without another allocation.
-    device_buffer<double> prefix(tracker);
-    device_buffer<work_record> fill_candidates(tracker);
     device_buffer<work_record> fills(tracker);
-    prefix.allocate(u, "allocate GKS prefix sums");
-    fill_candidates.allocate(u, "allocate raw fill candidates");
     flags.allocate(u, "allocate sample flags");
     if (sampler_components) {
         ensure_state_buffer(cycle_workspace, gpu_round_shadow_checked_mul(u, sampler_components,
@@ -2279,17 +2287,17 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                     sort_input, canonical_sort_count, keys_a.get());
                 cuda_check(cudaGetLastError(), "launch weight-key construction");
                 cub.sort_pairs(keys_a.get(), keys_b.get(), sort_input,
-                               scratch.get(), canonical_sort_count,
+                               scratch, canonical_sort_count,
                                "stable sort unique neighbors by weight");
                 build_first_keys<<<blocks_for(canonical_sort_count), kBlock>>>(
-                    scratch.get(), canonical_sort_count, keys_a.get());
+                    scratch, canonical_sort_count, keys_a.get());
                 cuda_check(cudaGetLastError(), "launch pivot-key construction");
-                cub.sort_pairs(keys_a.get(), keys_b.get(), scratch.get(),
+                cub.sort_pairs(keys_a.get(), keys_b.get(), scratch,
                                sort_input, canonical_sort_count,
                                "stable regroup canonical neighbors by pivot");
                 scatter_oversized_unique<<<blocks_for(oversized_u), kBlock>>>(
                     oversized_unique.get(), oversized_u, oversized_starts.get(),
-                    pivot_offsets.get(), unique.get());
+                    pivot_offsets.get(), unique);
                 cuda_check(cudaGetLastError(), "scatter canonical oversized rows");
             }
             cuda_check(cudaMemset(flags.get(), 0, u), "clear fill candidate flags");
@@ -2305,23 +2313,23 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                         pivot_counts.get(), pivot_offsets.get(), nullptr,
                         excess.get(), total_degree.get(), factor_columns.get(),
                         factor_column_base, factor_entries.get(), factor_entry_base,
-                        unique.get(), fill_candidates.get(), flags.get());
+                        unique, fill_candidates, flags.get());
                     cuda_check(cudaGetLastError(), "emit normal cycle-sampler factor batches");
                 }
 
                 // Serial plan per pivot, then one thread per neighbour slot.
                 prepare_trace_plan<<<blocks_for(p), kBlock>>>(
-                    unique.get(), pivot_offsets.get(), pivots.get(), p,
-                    total_degree.get(), prefix.get(), cycle_workspace.get(),
-                    fill_candidates.get(), flags.get(),
+                    unique, pivot_offsets.get(), pivots.get(), p,
+                    total_degree.get(), prefix, cycle_workspace.get(),
+                    fill_candidates, flags.get(),
                     cycle_plan_cut.get(), cycle_plan_state.get(), cycle_status.get());
                 cuda_check(cudaGetLastError(), "plan cycle-core rows on device");
                 if (u)
                     sample_trace_items<<<blocks_for(u), kBlock>>>(
-                        unique.get(), u, pivot_offsets.get(),
-                        total_degree.get(), prefix.get(), cycle_workspace.get(),
+                        unique, u, pivot_offsets.get(),
+                        total_degree.get(), prefix, cycle_workspace.get(),
                         cycle_plan_cut.get(), cycle_plan_state.get(),
-                        fill_candidates.get(), flags.get(), cycle_status.get());
+                        fill_candidates, flags.get(), cycle_status.get());
                 cuda_check(cudaGetLastError(), "sample cycle-core items on device");
 
                 if (report.normal_batch.oversized_pivots) {
@@ -2333,9 +2341,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                     const auto trace_blocks = blocks_for(gpu_round_shadow_checked_mul(
                         p, 32, "cooperative trace row launch"), trace_block);
                     sample_large_trace_rows<<<trace_blocks, trace_block>>>(
-                        unique.get(), pivot_offsets.get(), pivots.get(), p,
-                        total_degree.get(), prefix.get(), cycle_workspace.get(),
-                        fill_candidates.get(), flags.get(), cycle_status.get());
+                        unique, pivot_offsets.get(), pivots.get(), p,
+                        total_degree.get(), prefix, cycle_workspace.get(),
+                        fill_candidates, flags.get(), cycle_status.get());
                     cuda_check(cudaGetLastError(), "sample large trace rows cooperatively");
                 }
                 std::uint32_t status[2]{};
@@ -2359,23 +2367,23 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                         pivot_counts.get(), pivot_offsets.get(), nullptr,
                         excess.get(), total_degree.get(), factor_columns.get(),
                         factor_column_base, factor_entries.get(), factor_entry_base,
-                        unique.get(), fill_candidates.get(), flags.get());
+                        unique, fill_candidates, flags.get());
                     cuda_check(cudaGetLastError(), "emit normal factor/fill batches");
                 }
                 if (oversized_u) {
                     prepare_gks_prefix<<<blocks_for(p), kBlock>>>(
-                        unique.get(), pivot_offsets.get(), p, prefix.get(), pivots.get());
+                        unique, pivot_offsets.get(), p, prefix, pivots.get());
                     cuda_check(cudaGetLastError(), "launch oversized ordered prefixes");
                     sample_gks_items<<<blocks_for(u), kBlock>>>(
-                        unique.get(), u, pivot_offsets.get(), pivots.get(),
-                        total_degree.get(), prefix.get(), fill_candidates.get(), flags.get());
+                        unique, u, pivot_offsets.get(), pivots.get(),
+                        total_degree.get(), prefix, fill_candidates, flags.get());
                     cuda_check(cudaGetLastError(), "launch oversized GKS emission");
                 }
             }
         }
         oversized_unique.reset("release oversized canonical neighbors");
         const int raw_fill = cub.select(
-            fill_candidates.get(), flags.get(), fills.get(), u,
+            fill_candidates, flags.get(), fills.get(), u,
             "compact raw GKS fill");
         if (raw_fill < 0) throw std::runtime_error("GPU round returned a negative sampling count");
         f = static_cast<std::size_t>(raw_fill);
@@ -2386,46 +2394,43 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         // atomics, so colliding updates are repeatable.
         if (u) {
             make_excess_updates<<<blocks_for(u), kBlock>>>(
-                unique.get(), u, pivots.get(), total_degree.get(), excess.get(),
-                scratch.get(), flags.get());
+                unique, u, pivots.get(), total_degree.get(), excess.get(),
+                scratch, flags.get());
             cuda_check(cudaGetLastError(), "launch excess-update construction");
         }
         // Raw fill was already compacted into the separate fills buffer.
         // Its candidate storage fits e<=u excess updates.
         const int excess_count = cub.select(
-            scratch.get(), flags.get(), fill_candidates.get(), u,
+            scratch, flags.get(), fill_candidates, u,
             "compact excess updates");
         if (excess_count < 0) throw std::runtime_error("GPU round returned a negative excess update construction count");
         e = static_cast<std::size_t>(excess_count);
         report.excess_updates = e;
         if (e) {
             build_first_keys<<<blocks_for(e), kBlock>>>(
-                fill_candidates.get(), e, keys_a.get());
+                fill_candidates, e, keys_a.get());
             cuda_check(cudaGetLastError(), "launch excess target keys");
-            cub.sort_pairs(keys_a.get(), keys_b.get(), fill_candidates.get(),
-                           unique.get(), e, "stable sort excess updates");
+            cub.sort_pairs(keys_a.get(), keys_b.get(), fill_candidates,
+                           unique, e, "stable sort excess updates");
             reduce_equal_pairs<<<blocks_for(e), kBlock>>>(
-                unique.get(), e, scratch.get(), flags.get());
+                unique, e, scratch, flags.get());
             cuda_check(cudaGetLastError(), "launch deterministic excess reduce");
         }
         // The sorted input now lives in unique, and its reduction in scratch.
         // The same dead candidate storage fits q<=e<=u without in/out aliasing.
         const int reduced_count = cub.select(
-            scratch.get(), flags.get(), fill_candidates.get(), e,
+            scratch, flags.get(), fill_candidates, e,
             "compact reduced excess updates");
         if (reduced_count < 0) throw std::runtime_error("GPU round returned a negative excess reduction count");
         q = static_cast<std::size_t>(reduced_count);
         report.excess_targets = q;
         if (q) {
             apply_excess_updates<<<blocks_for(q), kBlock>>>(
-                fill_candidates.get(), q, excess.get());
+                fill_candidates, q, excess.get());
             cuda_check(cudaGetLastError(), "launch reduced excess apply");
         }
     });
-    prefix.reset("release GKS prefix sums");
-    fill_candidates.reset("release raw fill candidates");
-    unique.reset("release canonical neighbors");
-    scratch.reset("release canonical scratch");
+    canonical.reset("release canonical neighbors and sampling scratch");
 
     device_buffer<gpu_round_shadow_incidence> residual(tracker);
     auto& degrees = owned_degrees;
