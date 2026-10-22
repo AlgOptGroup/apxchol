@@ -2573,11 +2573,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     report.state_buffer_growths = state_buffer_growths;
     report.factor_log_columns = factor_column_count + p;
     report.factor_log_entries = factor_entry_count + u;
-    report.factor_log_allocations = factor_log_allocations;
     report.factor_log_growths = factor_log_growths;
-    report.peak_device_bytes = tracker.peak;
     report.gpu_executed = true;
-    if (report.peak_device_bytes > preflight.planned())
+    if (tracker.peak > preflight.planned())
         throw std::logic_error(
             "GPU round shadow: actual peak exceeded the preflight plan");
 
@@ -2604,12 +2602,21 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         cycle_status.reset("release completed cycle sampler status");
         // The exact copy is optional: keep the grown log if it does not fit.
         const std::size_t exact_entries = factor_entry_count + u;
-        if (exact_entries < factor_entries.count() && preflight.fits(
-                bytes_of(exact_entries, sizeof(gpu_round_shadow_factor_entry))))
+        const std::size_t exact_bytes = bytes_of(
+            exact_entries, sizeof(gpu_round_shadow_factor_entry));
+        if (exact_entries < factor_entries.count() && preflight.fits(exact_bytes)) {
+            preflight.require(exact_bytes, "final factor-log compaction");
             factor_entries.shrink_preserve(exact_entries,
                 "allocate final factor-entry log", "copy final factor-entry log",
                 "release grown factor-entry log");
+            if (exact_entries) ++factor_log_allocations;
+        }
     }
+    report.factor_log_allocations = factor_log_allocations;
+    report.peak_device_bytes = tracker.peak;
+    if (report.peak_device_bytes > preflight.planned())
+        throw std::logic_error(
+            "GPU round shadow: final log compaction exceeded the preflight plan");
 
     factor_column_count += p;
     factor_entry_count += u;

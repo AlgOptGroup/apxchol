@@ -443,8 +443,8 @@ inline std::size_t gpu_round_shadow_checked_mul(
 }
 
 /// Validate the scalar capacities consumed by CUB and by packed 32-bit device
-/// keys.  This function is intentionally separate and unit-testable: no CUDA
-/// allocation is attempted until every count and the free-memory fit pass.
+/// keys. Device allocations are checked separately as each stage discovers
+/// its required sizes.
 inline void gpu_round_shadow_validate_capacity_counts(
         node_index vertex_count, std::size_t incidence_count,
         std::size_t pivot_count, const gpu_round_shadow_report& shape) {

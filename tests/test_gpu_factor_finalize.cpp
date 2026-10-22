@@ -268,6 +268,12 @@ TEST(GpuFactorFinalize, InvalidPermutationAndExtentFailClosed) {
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     for (int i = 0; i < 8; ++i) EXPECT_NO_THROW(state.finalize_device_factor(perm, 3));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto factor = state.finalize_device_factor(
+        perm, 3, apxchol::factor_storage_type::fp32, true);
+    ASSERT_FALSE(factor->empty());
+    EXPECT_THROW(state.finalize_device_factor(perm, 3), std::logic_error);
+    EXPECT_THROW(state.download_factor_log(), std::logic_error);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 }
 
 TEST(GpuFactorFinalize, PreconditionerInstallsAndReplacesOwnedCapsules) {
