@@ -7,7 +7,6 @@
 // fat-level (`omp for`, SIMD on 16-bit storage) kernels, both gather flavours.
 
 #include <gtest/gtest.h>
-#include "scoped_env.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -28,22 +27,9 @@ using apxchol::sparse_csc;
 using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
-namespace {
-
-// RAII env override for tests that state a STORAGE contract on the un-dropped
-// factor: the compacting drop (APXCHOL_FACTOR_DROP, ON by default at 1e-4 with
-// column-sum compensation -- see omp.h) would remove / rescale the tiny
-// entries these tests seed. Restores the previous value on scope exit.
-struct scoped_drop_off : scoped_env {
-    scoped_drop_off() : scoped_env("APXCHOL_FACTOR_DROP", "0") {}
-};
-
-} // namespace
-
 // The DEFAULT storage width is fp32, and value_name / value_bytes (what the
-// APXCHOL_VERBOSE banner prints) report what the last setup() resolved --
-// fp32 unset, fp16 under APXCHOL_FACTOR_STORAGE=float16 where the CPU has F16C.
-TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
+// verbose banner prints) report what the last setup() resolved.
+TEST(SpTRSVKernels, StorageWidthFollowsTheExplicitOption) {
     EXPECT_EQ(sizeof(sptrsv_value_t), 4u);
     EXPECT_TRUE((std::is_same_v<sptrsv_value_t, factor_value_t>));
     EXPECT_TRUE((std::is_same_v<factor_value_t, float>));
@@ -54,7 +40,6 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
 
     sparse_csc L; L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
     {
-        scoped_env off("APXCHOL_FACTOR_STORAGE", "float32");
         apxchol::omp_sptrsv t; t.setup(L, 2);
         EXPECT_FALSE(t.fp16());
         EXPECT_EQ(t.value_bytes(), 4u);
@@ -63,17 +48,17 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheRuntimeSwitch) {
         EXPECT_EQ(t.csc_vals16().size(), 0u);
     }
     {
-        scoped_env on("APXCHOL_FACTOR_STORAGE", "float16");
+        const apxchol::factor_options options{.factor_storage = apxchol::factor_storage_type::fp16};
         apxchol::omp_sptrsv t;
         if (apxchol::omp_sptrsv::fp16_supported()) {
-            t.setup(L, 2);
+            t.setup(L, 2, options);
             EXPECT_TRUE(t.fp16());
             EXPECT_EQ(t.value_bytes(), 2u);
             EXPECT_STREQ(t.value_name(), "fp16 (per-column scaled)");
             EXPECT_EQ(t.csc_vals16().size(), 3u);
             EXPECT_EQ(t.csc_vals().size(), 0u);
         } else {
-            EXPECT_THROW(t.setup(L, 2), std::runtime_error);
+            EXPECT_THROW(t.setup(L, 2, options), std::runtime_error);
             EXPECT_FALSE(t.ready());
         }
     }
@@ -223,11 +208,13 @@ void run_kernel_precision_check() {
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose path */}) {
         const bool fp16 = std::string_view(env) == "float16";
         if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
-        SCOPED_TRACE("m=" + std::to_string(m) + " APXCHOL_FACTOR_STORAGE=" + env);
-        scoped_env storage("APXCHOL_FACTOR_STORAGE", env);
+        SCOPED_TRACE("m=" + std::to_string(m) + " factor_storage=" + env);
+        const apxchol::factor_options options{
+            .factor_storage = fp16 ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32,
+            .drop_tolerance = 0};
         sparse_csc L = make_random_lower(m, 4.0, 99);
         apxchol::omp_sptrsv trsv;
-        trsv.setup(L, m);
+        trsv.setup(L, m, options);
         ASSERT_EQ(trsv.fp16(), fp16);
         std::mt19937 rng(7);
         std::uniform_real_distribution<double> ux(-1.0, 1.0);
@@ -267,7 +254,6 @@ void run_kernel_precision_check() {
 } // namespace
 
 TEST(SpTRSVKernels, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
-    scoped_drop_off drop_off;   // storage contract on the un-dropped factor
     run_kernel_precision_check();
 }
 
@@ -278,7 +264,7 @@ TEST(SpTRSVKernels, SpTRSVKernelsComputeInDoubleFromWidenedStorage) {
 // run -- on 16-bit storage the SIMD ones (simd_fp16_kernel()): four-lane
 // widening and arithmetic, then a scalar tail. CSR row lengths span 0..48 so
 // every path (full vectors and tails of 0..3) is exercised. Run at BOTH
-// storages (APXCHOL_FACTOR_STORAGE=float32|float16) and checked exactly like the thin-level
+// storages (factor_storage=float32|float16) and checked exactly like the thin-level
 // kernels: the pair contract at roundoff against L~ / R and against the
 // serial reference on L_s.
 namespace {
@@ -330,7 +316,6 @@ sparse_csc make_round_structured_lower(node_index R, node_index B, unsigned seed
 } // namespace
 
 TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
-    scoped_drop_off drop_off;   // storage contract on the un-dropped factor
     const node_index R = 8, B = 2 * apxchol::kSpTRSVOMPThreshold;   // 8 fat levels of 2048
     std::vector<node_index> bounds;
     const sparse_csc L = make_round_structured_lower(R, B, 4321, bounds);
@@ -353,13 +338,15 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
     for (const char* env : {"float32", "float16"}) {
         const bool fp16 = std::string_view(env) == "float16";
         if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
-        SCOPED_TRACE(std::string("APXCHOL_FACTOR_STORAGE=") + env);
-        scoped_env storage("APXCHOL_FACTOR_STORAGE", env);
+        SCOPED_TRACE(std::string("factor_storage=") + env);
+        const apxchol::factor_options options{
+            .factor_storage = fp16 ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32,
+            .drop_tolerance = 0};
         std::vector<double> y_ref, z_ref;
         reference_pair(L, x, y_ref, z_ref, fp16);
         apxchol::omp_sptrsv trsv;
         trsv.set_round_bounds(bounds);
-        trsv.setup(L, m);
+        trsv.setup(L, m, options);
         ASSERT_EQ(trsv.fp16(), fp16);
 #ifdef __x86_64__
         const bool simd = __builtin_cpu_supports("avx") && __builtin_cpu_supports("f16c")

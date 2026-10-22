@@ -3,6 +3,7 @@
 #import <Metal/Metal.h>
 #include "apxchol/solver/metal_solver.h"
 #include "apxchol/solver/detail/metal_host.h"
+#include "apxchol/solver/detail/factor_validation.h"
 #include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/metal_schedule.h"
@@ -334,16 +335,12 @@ namespace ls = detail::metal_schedule;
 namespace dm = detail::metal;
 using namespace dm;
 
-void print_banner_once(const metal_solver::statistics& st, bool factor_fp16) {
-    static std::once_flag flag;
-    std::call_once(flag, [&] {
-        if (!std::getenv("APXCHOL_VERBOSE")) return;
-        std::fprintf(stderr,
-                     "[apxchol] Metal PCG on %s: %s factor, "
-                     "double-float Krylov vectors, %s operator\n",
-                     st.device.c_str(), factor_fp16 ? "fp16" : "fp32",
-                     st.operator_double_float ? "double-float" : "fp32-exact");
-    });
+void print_banner(const metal_solver::statistics& st, bool factor_fp16) {
+    std::fprintf(stderr,
+                 "[apxchol] Metal PCG on %s: %s factor, "
+                 "double-float Krylov vectors, %s operator\n",
+                 st.device.c_str(), factor_fp16 ? "fp16" : "fp32",
+                 st.operator_double_float ? "double-float" : "fp32-exact");
 }
 
 }  // namespace
@@ -455,8 +452,11 @@ struct metal_solver::impl {
     }
 
     explicit impl(const solve_options& options) : opts(options) {
+        detail::validate_solve_options(opts);
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
+        if (opts.factor_opts.cpu_schedule != cpu_sptrsv_schedule::automatic)
+            throw std::invalid_argument("Metal cannot use a CPU triangular-solve schedule");
         factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
         if (!metal_solver::available())
             throw std::runtime_error("apxchol::metal_solver: the Metal backend is unavailable: " +
@@ -552,9 +552,6 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     if (n == 0) throw std::invalid_argument("metal_solver: empty operator");
     if (static_cast<std::size_t>(F.L.rows()) != n || F.perm.size() != n)
         throw std::invalid_argument("metal_solver: factorization dimension mismatch");
-    if (!resident && F.L.nonZeros() > 0 && F.L.vals_.empty())
-        throw std::invalid_argument(
-            "metal_solver: factorization values were released; pass a freshly computed factorization");
     // Eigen's int StorageIndex keeps n and the operator's stored count within
     // the device's 32-bit indices; the factor and the two-triangle permuted
     // operator are checked here.
@@ -593,7 +590,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         if (!opts.keep_factor_values) F.L.release_values();
         scales = cuda_host::column_scales(backward);
         if (factor_fp16) cuda_host::normalize_fp16_scales(backward, scales);
-        cuda_host::apply_factor_drop(backward, scales, factor_drop_rel_from_env(), factor_fp16);
+        cuda_host::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
         if (cp) (*cp)("metal_factor_prep");
 
         Eigen::SparseMatrix<double> compressed;
@@ -657,7 +654,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     stats.operator_double_float = !exact;
     stats.device = ctx->status.name;
     if (cp) { (*cp)("metal_upload"); cp->ascend(); }
-    print_banner_once(stats, factor_fp16);
+    if (opts.factor_opts.verbose) print_banner(stats, factor_fp16);
 }
 
 void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
@@ -753,6 +750,7 @@ metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_opt
                            checkpoint* cp, bool input_prechecked) {
     const detail::thread_budget threads(opts.num_threads);
     impl_.reset(new impl(opts));
+    if (!opts.collect_timings) cp = nullptr;
     auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp, input_prechecked);
     impl_->F = std::move(resident.factor);
     impl_->setup(A, cp, &resident);
@@ -760,8 +758,10 @@ metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_opt
 
 metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, factorization F,
                            const solve_options& opts, checkpoint* cp) {
+    detail::validate_adopted_factor(F);
     const detail::thread_budget threads(opts.num_threads);
     impl_.reset(new impl(opts));
+    if (!opts.collect_timings) cp = nullptr;
     impl_->F = std::move(F);
     impl_->setup(A, cp);
 }
@@ -789,10 +789,8 @@ template<unsigned Columns>
 void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
                                        std::span<solve_result> results, checkpoint& cp,
                                        double tol, int max_iter, const const_matrix_view* X0) {
-    if (tol < 0.0) tol = opts.tol;
-    if (max_iter < 0) max_iter = opts.max_iter;
-    cp.descend("pcg");
-    cp.tick();
+    detail::resolve_solve_parameters(tol, max_iter, opts.tol, opts.max_iter);
+    if (opts.collect_timings) { cp.descend("pcg"); cp.tick(); }
     select_columns(Columns);
     auto* states = static_cast<solve_state*>([state_buffer contents]);
     std::fill_n(states, Columns, solve_state{});
@@ -847,10 +845,10 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         ran[q] = active = true;
     }
     if (active) {
-        cp("pack");
+        if (opts.collect_timings) cp("pack");
         arguments.window = static_cast<std::uint32_t>(std::max(0, opts.stagnation_window));
         detail::gpu_pcg::solve(*this, static_cast<std::uint32_t>(max_iter), 4);
-        cp("gpu_pcg_loop");
+        if (opts.collect_timings) cp("gpu_pcg_loop");
     }
     bool checked = false;
     for (unsigned q = 0; q < Columns; ++q) {
@@ -880,8 +878,11 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
             xp = work;
         }
     }
-    if (checked) cp("exit_check");
-    cp.ascend();
+    for (auto& result : results) result.converged = result.residual < tol;
+    if (opts.collect_timings) {
+        if (checked) cp("exit_check");
+        cp.ascend();
+    }
 }
 
 void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
@@ -890,8 +891,11 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
     if (b.size() != rows()) throw std::invalid_argument("metal_solver::solve: RHS length mismatch");
     if (x0 != nullptr && x0->size() != rows())
         throw std::invalid_argument("metal_solver::solve: x0 length mismatch");
+    if (&b == &result.x || x0 == &result.x)
+        throw std::invalid_argument("solver: output must not overlap RHS or warm start");
     if (!b.allFinite() || (x0 != nullptr && !x0->allFinite()))
         throw std::invalid_argument("metal_solver::solve: non-finite RHS or initial guess");
+    detail::resolve_solve_parameters(tol, max_iter, impl_->opts.tol, impl_->opts.max_iter);
     result.x.resize(rows());
     const const_matrix_view initial(x0 ? *x0 : b);
     impl_->solve_columns<1>(b, result.x, {&result, 1}, result.timings,
@@ -901,10 +905,9 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
 batch_solve_result metal_solver::solve_panel(const_matrix_view B, matrix_view X, double tol,
                                             int max_iter, const const_matrix_view* X0) const {
     const detail::thread_budget threads(impl_->opts.num_threads);
-    if (B.rows() != rows() || (B.cols() != 2 && B.cols() != 4) ||
-        X.rows() != rows() || X.cols() != B.cols() ||
-        (X0 && (X0->rows() != rows() || X0->cols() != B.cols())))
-        throw std::invalid_argument("metal_solver::solve_panel: matrix shape mismatch");
+    detail::check_matrix_views(B, X, rows(), X0);
+    if (B.cols() != 2 && B.cols() != 4)
+        throw std::invalid_argument("metal_solver::solve_panel requires two or four RHS columns");
     if (!B.allFinite() || (X0 && !X0->allFinite()))
         throw std::invalid_argument("metal_solver::solve_panel: non-finite RHS or initial guess");
     batch_solve_result result;

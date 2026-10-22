@@ -132,18 +132,6 @@ apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern
 apxchol_cli_test(cli_laplacian_converges path5_laplacian 0 "LAPLACIAN/SDDM operator")
 apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
 apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
-# Disabling lumping deliberately admits negative graph weights for the legacy
-# CPU diagnostic. The complete GPU route must reject those weights instead.
-apxchol_cli_test(cli_lumping_disabled_warns path5_nearly_sddm 0
-    "M-matrix lumping is disabled" --backend cpu)
-set_tests_properties(cli_lumping_disabled_warns PROPERTIES
-    ENVIRONMENT "OMP_NUM_THREADS=4;APXCHOL_LUMP=0")
-if (APXCHOL_DEVICE STREQUAL "CUDA" AND NOT APXCHOL_64BIT_NODE_INDICES)
-    apxchol_cli_test(cli_gpu_lumping_disabled_is_rejected path5_nearly_sddm 2
-        "GPU direct CSC initialization rejected values or layout" --backend gpu)
-    set_tests_properties(cli_gpu_lumping_disabled_is_rejected PROPERTIES
-        ENVIRONMENT "OMP_NUM_THREADS=4;APXCHOL_LUMP=0")
-endif()
 apxchol_cli_test(cli_explicit_adjacency_on_laplacian path5_laplacian 0 "ADJACENCY graph"
     --input-kind adjacency)
 apxchol_cli_test(cli_ambiguous_input_is_rejected ambiguous 2 "cannot tell whether this matrix is")
@@ -171,3 +159,16 @@ endif()
 
 apxchol_cli_test(cli_thread_budget path5_sddm 0 "backend: +cpu" --backend cpu --threads 2)
 apxchol_cli_test(cli_negative_thread_budget path5_sddm 105 "not in range" --threads -1)
+apxchol_cli_test(cli_zero_iteration_budget path5_sddm 1
+    "did not reach tol .* in 0 iterations" --backend cpu --maxiter 0)
+apxchol_cli_test(cli_output_failure path5_sddm 2
+    "cannot write solution to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}")
+apxchol_cli_test(cli_output_success path5_sddm 0
+    "solution written to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}/cli-solution.mtx")
+if (APXCHOL_DEVICE STREQUAL "CPU")
+    set(cli_backend_label omp)
+else()
+    string(TOLOWER "${APXCHOL_DEVICE}" cli_backend_label)
+endif()
+apxchol_cli_test(cli_build_backend path5_sddm 0
+    "SpTRSV backend: ${cli_backend_label}" --version)

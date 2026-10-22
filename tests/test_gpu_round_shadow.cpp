@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include "scoped_env.h"
 #include "scoped_omp_threads.h"
 #include "apxchol/solver/solve.h"
 #include "gpu_preconditioner_fixture.h"
@@ -413,10 +412,12 @@ std::uint64_t check_complete_factor_action(
     session.complete_owned_factorization(metadata.perm, metadata.L);
     EXPECT_EQ(metadata.perm, reference.perm);
     EXPECT_EQ(metadata.L.outer_, reference.L.outer_);
+    const apxchol::factor_options factor_options{
+        .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     apxchol::cuda_sptrsv expected_trsv, actual_trsv;
-    expected_trsv.setup(reference.L, n);
-    auto factor = session.finalize_device_factor(metadata.perm, n);
-    actual_trsv.setup_adopting_device_factor_for_research(std::move(*factor));
+    expected_trsv.setup(reference.L, n, factor_options);
+    auto factor = session.finalize_device_factor(metadata.perm, n, factor_options.factor_storage, 0);
+    actual_trsv.setup_adopting_device_factor_for_research(std::move(*factor), factor_options);
     std::uint64_t digest = 14695981039346656037ULL;
     for (node_index basis = 0; basis < n; ++basis) {
         std::vector<double> wanted(n), actual(n);
@@ -636,12 +637,10 @@ std::size_t gpu_round_trace_size(const std::string& line,
 void expect_setup_api_receipt(const std::string& trace,
                               const apxchol::detail::gpu_preconditioner& solver) {
     const auto begin = trace.find("[gpu-setup-receipt] ");
-    if (apxchol::detail::gpu_setup_diagnostics()) {
+    if (solver.options().verbose) {
         ASSERT_NE(begin, std::string::npos) << trace;
         EXPECT_EQ(trace.find("[gpu-setup-receipt] ", begin + 1), std::string::npos);
         const auto line = trace.substr(begin, trace.find('\n', begin) - begin);
-        EXPECT_EQ(gpu_round_trace_field(line, "diagnostics="),
-                  "enabled");
         const double wall = std::stod(gpu_round_trace_field(line, "factorize_install_wall_s="));
         EXPECT_TRUE(std::isfinite(wall));
         EXPECT_GT(wall, 0.0);
@@ -760,20 +759,10 @@ void expect_exception_contains(F&& operation, std::string_view needle) {
 
 } // namespace
 
-TEST(GpuRoundShadowReference, SetupDiagnosticsFollowExistingRuntimeSwitches) {
-    scoped_env verbose("APXCHOL_VERBOSE", nullptr);
-    scoped_env stage("APXCHOL_SPTRSV_SETUP_TRACE", nullptr);
-    scoped_env block("APXCHOL_GPU_BLOCK_TRACE", nullptr);
-    EXPECT_FALSE(apxchol::detail::gpu_setup_diagnostics());
-    { scoped_env enabled("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-      EXPECT_TRUE(apxchol::detail::gpu_setup_diagnostics()); }
-    { scoped_env enabled("APXCHOL_VERBOSE", "");
-      EXPECT_TRUE(apxchol::detail::gpu_setup_diagnostics()); }
-    { scoped_env disabled("APXCHOL_GPU_BLOCK_TRACE", "0");
-      EXPECT_FALSE(apxchol::detail::gpu_setup_diagnostics()); }
-    { scoped_env enabled("APXCHOL_GPU_BLOCK_TRACE", "1");
-      EXPECT_TRUE(apxchol::detail::gpu_setup_diagnostics()); }
-    EXPECT_FALSE(apxchol::detail::gpu_setup_diagnostics());
+TEST(GpuRoundShadowReference, SetupDiagnosticClockIsExplicit) {
+    using clock = apxchol::detail::gpu_setup_diagnostic_clock;
+    EXPECT_EQ(clock::now(false), clock::time_point{});
+    EXPECT_NE(clock::now(true), clock::time_point{});
 }
 
 TEST(GpuRoundShadowReference, FreshPairedContentMatchesFullValidation) {
@@ -1111,28 +1100,6 @@ TEST(GpuRoundShadowValidation, NonOwnerMajorInputIsRejected) {
                  std::invalid_argument);
 }
 
-TEST(GpuRoundShadowEnvironment,
-     SelectionCertificateAuditRequiresAnExplicitValidValue) {
-    {
-        scoped_env env("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "off");
-        EXPECT_FALSE(apxchol::detail::gpu_round_selection_audit_requested());
-    }
-    {
-        scoped_env env("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "on");
-        EXPECT_TRUE(apxchol::detail::gpu_round_selection_audit_requested());
-    }
-    {
-        scoped_env env("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "force");
-        EXPECT_TRUE(apxchol::detail::gpu_round_selection_audit_requested());
-    }
-    {
-        scoped_env env("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "maybe");
-        EXPECT_THROW(apxchol::detail::gpu_round_selection_audit_requested(),
-                     std::invalid_argument);
-    }
-}
-
-
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuRoundShadowDevice, ProvenanceAndExecutionMarker) {
     establish_r2a_openmp_affinity_if_requested();
@@ -1188,8 +1155,8 @@ TEST(GpuRoundShadowDevice, ConsumesBlockFrontendSelectionWithoutReupload) {
 
 TEST(GpuRoundShadowDevice, ResidentSelectionAuditAddsExactlyOneIncidenceScan) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env audit("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "1");
     auto boundary = make_resident_selection_boundary();
+    boundary.state.set_selection_audit_for_test(true);
     const auto input = resident_selection_round_input(boundary.selected);
     const auto expected = apxchol::detail::reference_gpu_round_shadow(input);
     const auto actual = boundary.state.compute_owned_round_for_test(
@@ -1297,12 +1264,8 @@ TEST(GpuRoundShadowDevice,
                 },
                 expected_message);
         };
-        if (kind == corruption::adjacent) {
-            scoped_env audit("APXCHOL_GPU_ROUND_SELECTION_AUDIT", "1");
-            reject_malformed();
-        } else {
-            reject_malformed();
-        }
+        boundary.state.set_selection_audit_for_test(kind == corruption::adjacent);
+        reject_malformed();
         expect_exception_contains(
             [&] {
                 (void)boundary.state.compute_owned_round_for_test(
@@ -1911,9 +1874,6 @@ TEST(GpuOwnedPrefix, ResidualFillSortPreservesSurvivorOrder) {
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
     scoped_omp_threads serial(1);
     apxchol::partition_options options;
     options.degree_quantile = 0.0;
@@ -2024,11 +1984,13 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
         ASSERT_GT(reference_factor.L.nonZeros(), 0u);
         ASSERT_EQ(reference_factor.L.inner_.size(), reference_factor.L.nonZeros());
         ASSERT_EQ(reference_factor.L.vals_.size(), reference_factor.L.nonZeros());
+        const apxchol::factor_options factor_options{
+            .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
         apxchol::cuda_sptrsv reference_trsv, actual_trsv;
-        reference_trsv.setup(reference_factor.L, 4);
-        auto device_factor = session.finalize_device_factor(reference_factor.perm, 4);
+        reference_trsv.setup(reference_factor.L, 4, factor_options);
+        auto device_factor = session.finalize_device_factor(reference_factor.perm, 4, factor_options.factor_storage, 0);
         ASSERT_NE(device_factor, nullptr);
-        actual_trsv.setup_adopting_device_factor_for_research(std::move(*device_factor));
+        actual_trsv.setup_adopting_device_factor_for_research(std::move(*device_factor), factor_options);
         std::ostringstream receipt;
         for (const auto& selected : sequence) {
             receipt << "selected";
@@ -2090,8 +2052,6 @@ TEST(GpuOwnedPrefix, GenericGraphStillRejectsUnpairedStoredArcs) {
 
 TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_omp_threads serial(1);
     auto graph = make_owned_order_fixture();
     auto oracle = make_owned_order_fixture();
@@ -2452,12 +2412,11 @@ TEST(GpuOwnedPrefix, CompleteMetadataMatchesHeaderConstruction) {
 
 TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidual) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
     scoped_omp_threads serial(1);
     auto graph = make_owned_order_fixture();
     auto oracle = make_owned_order_fixture();
     const auto initial = fingerprint_graph(graph);
-    apxchol::detail::gpu_round_shadow_session session(true);
+    apxchol::detail::gpu_round_shadow_session session(true, apxchol::clique_sampler::gks, true);
     auto selector_owner = apxchol::test::initialize_owned_selector(session, graph);
     auto& selector = *selector_owner;
     std::vector<node_index> active(graph.n());
@@ -2522,8 +2481,6 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     // Compare the complete GPU factor's action against independently built
     // CPU factor columns. This checks all entries after audit-only per-round
     // hashes have been removed, including the isolated tail and duplicate arcs.
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     std::vector<std::vector<apxchol::detail::factor_entry>> reference_entries(columns.size());
     std::vector<apxchol::detail::factor_col> reference_columns;
     for (std::size_t i = 0; i < columns.size(); ++i) {
@@ -2537,10 +2494,12 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     }
     apxchol::factorization reference_factor;
     apxchol::detail::build_csc(reference_factor, reference_columns, kOwnedVertices, nullptr);
+    const apxchol::factor_options factor_options{
+        .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     apxchol::cuda_sptrsv expected_trsv, owned_trsv;
-    expected_trsv.setup(reference_factor.L, kOwnedVertices);
-    auto device_factor = session.finalize_device_factor(reference_factor.perm, kOwnedVertices);
-    owned_trsv.setup_adopting_device_factor_for_research(std::move(*device_factor));
+    expected_trsv.setup(reference_factor.L, kOwnedVertices, factor_options);
+    auto device_factor = session.finalize_device_factor(reference_factor.perm, kOwnedVertices, factor_options.factor_storage, 0);
+    owned_trsv.setup_adopting_device_factor_for_research(std::move(*device_factor), factor_options);
     // Basis vectors exercise the full inverse operator, not just one RHS.
     for (std::size_t basis = 0; basis < kOwnedVertices; ++basis) {
         std::vector<double> expected_x(kOwnedVertices), owned_x(kOwnedVertices);
@@ -2551,11 +2510,7 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     }
     testing::internal::CaptureStderr(); session.finish();
     const auto trace = testing::internal::GetCapturedStderr();
-    if (apxchol::detail::gpu_setup_diagnostics()) {
-        EXPECT_NE(trace.find("[gpu-owned-factorization] complete"), std::string::npos);
-    } else {
-        EXPECT_TRUE(trace.empty()) << trace;
-    }
+    EXPECT_NE(trace.find("[gpu-owned-factorization] complete"), std::string::npos);
     EXPECT_THROW(session.complete_owned_factorization(columns), std::logic_error);
 }
 
@@ -2715,8 +2670,6 @@ TEST(GpuOwnedPrefix, DegreeScratchHandbackPreservesEveryOrderedField) {
 
 TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_omp_threads serial(1);
     constexpr node_index degrees[] = {0, 1, 2, 31, 32, 33, 63, 64, 65, 255, 256, 257};
     constexpr double weights[] = {0.0, -0.0, 0x1p-20, 0.25, 1.0, 0x1p20, 0x1p52};
@@ -2780,8 +2733,6 @@ TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
 
 TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_omp_threads serial(1);
     const std::vector<std::vector<std::size_t>> profiles = {
         {127, 128, 129},             // Both dispatch paths in the same round.
@@ -3225,12 +3176,12 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     GTEST_SKIP() << "CUDA build required";
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     scoped_omp_threads serial(1);
     const int n = 256; // Includes the under-occupied tail, without CPU handoff.
     apxchol::factor_options factor_options;
+    factor_options.factor_storage = apxchol::factor_storage_type::fp32;
+    factor_options.drop_tolerance = 0;
+    factor_options.verbose = true;
     factor_options.partition.degree_quantile = 0.0;
     factor_options.partition.degree_multiplier = 100.0;
     factor_options.min_is_fraction = 0.0;
@@ -3244,16 +3195,10 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         testing::internal::CaptureStderr();
         preconditioner.compute(A);
         const std::string trace = testing::internal::GetCapturedStderr();
-        if (apxchol::detail::gpu_setup_diagnostics()) {
-            ASSERT_NE(trace.find("[gpu-owned-factorization] complete rounds="), std::string::npos) << trace;
-            EXPECT_GT(gpu_round_trace_size(trace, "rounds="), 2u);
-            EXPECT_NE(trace.find("[gpu-owned-csc] n="), std::string::npos);
-            EXPECT_NE(trace.find("factor_entry_download_bytes=0"), std::string::npos);
-            } else {
-            EXPECT_EQ(trace.find("[gpu-setup-receipt]"), std::string::npos) << trace;
-            EXPECT_EQ(trace.find("[gpu-owned-"), std::string::npos) << trace;
-            EXPECT_EQ(trace.find("[gpu-round-shadow]"), std::string::npos) << trace;
-        }
+        ASSERT_NE(trace.find("[gpu-owned-factorization] complete rounds="), std::string::npos) << trace;
+        EXPECT_GT(gpu_round_trace_size(trace, "rounds="), 2u);
+        EXPECT_NE(trace.find("[gpu-owned-csc] n="), std::string::npos);
+        EXPECT_NE(trace.find("factor_entry_download_bytes=0"), std::string::npos);
         expect_setup_api_receipt(trace, preconditioner);
         EXPECT_GT(owned_cp.total("setup.gpu_owned_factorization"), 0.0);
         EXPECT_EQ(owned_cp.total("setup.factor_metadata"), 0.0);
@@ -3266,9 +3211,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
             remaining -= round.is_size;
         }
         EXPECT_EQ(remaining, 0u);
-        if (apxchol::detail::gpu_setup_diagnostics()) {
-            EXPECT_EQ(gpu_round_trace_size(trace, "factor_header_count="), factor.perm.size());
-        }
+        EXPECT_EQ(gpu_round_trace_size(trace, "factor_header_count="), factor.perm.size());
         auto permutation = factor.perm;
         std::sort(permutation.begin(), permutation.end());
         for (std::size_t i = 0; i < permutation.size(); ++i) EXPECT_EQ(permutation[i], i);
@@ -3292,23 +3235,26 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     GTEST_SKIP() << "CUDA build required";
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     Eigen::SparseMatrix<double> tiny(2, 2);
     const std::vector<Eigen::Triplet<double>> entries{{0,0,2},{1,1,2},{0,1,-1},{1,0,-1}};
     tiny.setFromTriplets(entries.begin(), entries.end());
+    const apxchol::factor_options factor_options{
+        .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     apxchol::detail::gpu_preconditioner small;
+    small.set_options(factor_options);
     small.compute(tiny);
     EXPECT_EQ(small.factor().perm.size(), 2u);
     EXPECT_TRUE(small.trsv().adopted_device_factor());
     EXPECT_TRUE(small.factor().L.vals_.empty());
     auto A = owned_solve_matrix(64, 1.0);
-    auto exported = apxchol::factorize(A);
+    auto exported = apxchol::factorize(A, factor_options);
     EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
     EXPECT_FALSE(exported.research_device_factor);
     apxchol::detail::gpu_preconditioner owner;
+    owner.set_options(factor_options);
     EXPECT_THROW(owner.set_factor(exported), std::invalid_argument);
     apxchol::apx_cholesky host;
+    host.set_options(factor_options);
     EXPECT_NO_THROW(host.set_factor(exported));
 #endif
 }
@@ -3537,7 +3483,6 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
     GTEST_SKIP() << "CUDA build required";
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    scoped_env verbose("APXCHOL_VERBOSE","1");
     scoped_omp_threads serial(1);
     for(auto sampler:{apxchol::clique_sampler::trace_cycle})
     for(double shift:{0.,1.}) {
@@ -3547,6 +3492,7 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         const Eigen::VectorXd b=A*exact;
         apxchol::solve_options opts;opts.tol=1e-8;opts.max_iter=1000;
         opts.backend=apxchol::solve_backend::gpu;
+        opts.factor_opts.verbose = true;
         opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
         testing::internal::CaptureStderr();
         const auto result=apxchol::solve(A,b,opts);

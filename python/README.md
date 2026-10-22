@@ -26,7 +26,7 @@ solver.backend                         # resolved "cpu" or "gpu"
 res = solver.solve(b, rtol=1e-8, maxiter=500)
 res.x, res.iters, res.residual, res.converged
 z = solver.apply(r)
-M = solver.aspreconditioner()           # scipy.sparse.linalg.cg(..., M=M)
+M = solver.aslinearoperator()           # scipy.sparse.linalg.cg(..., M=M)
 res = apxchol.solve(A, b)               # one-shot
 ```
 
@@ -43,7 +43,7 @@ are zero.
 
 ## Options and reuse
 
-`factorize` (alias `solver`) builds once; subsequent solves reuse the factor
+`factorize` builds once; subsequent solves reuse the factor
 and workspace. `backend="auto"` selects a usable GPU when the build, input and options
 support it, otherwise CPU. Selection belongs to the common C++ solver;
 `"cpu"` and `"gpu"` request a specific backend. GPU use requires CUDA or Metal
@@ -54,8 +54,10 @@ See [backend capabilities](../README.md#backend-capabilities) for GPU option res
 `num_threads=4` bounds CPU parallelism for setup and each solve/apply, overriding the calling OpenMP task's setting. The default `0` inherits that setting, normally initialized by `OMP_NUM_THREADS`; small workloads may use fewer threads. A solver cannot
 serve concurrent `solve`/`apply` calls; use separate instances or serialize.
 
-`solve` accepts `rtol` (default `1e-8`, overriding alias `tol`), `maxiter`,
-`x0`, and `out`. Right-hand sides may have shape `(n,)` or `(n, nrhs)`;
+`solve` accepts `rtol`, `maxiter`, `x0`, and `out`. Omitted tolerance and
+iteration limits use the C++ defaults (`1e-8` and `200`). Tolerance must be
+finite and positive; the iteration limit must be a nonnegative integer.
+Right-hand sides may have shape `(n,)` or `(n, nrhs)`;
 `solve` and `apply` preserve that shape. For matrix inputs, `iters`, `residual`
 and `converged` are per-column arrays. CPU and GPU solves share traversal across
 bounded RHS panels; width-one calls use the scalar path.
@@ -73,12 +75,16 @@ Partitioners: `block_greedy`, `priority_greedy`, `baumann_kyng`.
 copy (~8 bytes/nonzero in default builds). `False` disables factor export,
 but preserves `P`, `factor_nnz`, `fill_ratio`; one-shot `solve` uses `False`.
 
-`factor_storage_dtype=np.float16` or `np.float32` selects triangular-solve storage per solver; dtype objects and the strings `"float16"`/`"float32"` also work. Read the resolved dtype through `solver.factor_storage_dtype`. The default, `None`, respects `APXCHOL_FACTOR_STORAGE=auto|float16|float32`, where `auto` means FP32 on CPU/Metal and FP16 on CUDA. Invalid settings raise an error; an explicit dtype overrides the environment without changing it.
+`factor_storage_dtype=np.float16` or `np.float32` selects triangular-solve storage per solver; dtype objects and the strings `"float16"`/`"float32"` also work. Read the resolved dtype through `solver.factor_storage_dtype`. The default, `None`, selects FP32 on CPU/Metal and FP16 on CUDA. Invalid dtypes raise an error.
 
 FP16 stores scaled off-diagonals with FP32 diagonals and scales. CPU conversion requires x86 AVX/F16C or Apple ARM64; an unsupported request raises an error. CPU arithmetic remains FP64; constructed factors and exports remain FP32. FP64 factor storage is not supported. See [precision and storage](../docs/precision.md).
 
 Advanced keywords: `degree_quantile`, `degree_multiplier`, `degree_tiebreak`,
-`exact_clique_max_degree`, `residual_peel`, `stagnation_window`.
+`exact_clique_max_degree`, `residual_peel`, `stagnation_window`,
+`cpu_schedule` (`"auto"` or `"levels"`), `drop_tolerance` (nonnegative;
+0 disables), `regularization` (nonnegative diagonal fraction; 0 disables),
+`lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals), and
+`verbose` (default False).
 `degree_multiplier` applies only when `degree_quantile=0`; unknown keywords
 raise `ValueError`. See [core defaults](../include/apxchol/solver/factor_options.h).
 

@@ -1,6 +1,6 @@
 #pragma once
 #include "apxchol/types.h"
-#include "apxchol/lowprec.h"   // storage conversions and the APXCHOL_FACTOR_STORAGE reader
+#include "apxchol/lowprec.h"
 #include <vector>
 #include <cstddef>
 #include <limits>
@@ -21,7 +21,7 @@ namespace apxchol {
 //     setup on the consuming path.
 //   - sptrsv_value_t : the DEFAULT width of the SpTRSV kernels' CSR/CSC value
 //     arrays (and of the GPU backend's d_vals): fp32. Both backends can narrow
-//     those arrays to fp16 at RUNTIME instead (APXCHOL_FACTOR_STORAGE=float16,
+//     those arrays to fp16 at setup instead (factor_options.factor_storage,
 //     lowprec.h) -- that is a per-setup choice of storage type, never a
 //     compile-time typedef.
 using factor_value_t = float;

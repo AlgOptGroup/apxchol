@@ -1,9 +1,9 @@
 #pragma once
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
-#include "apxchol/env_knobs.h"
 #include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/factorization.h"
+#include "apxchol/solver/detail/factor_validation.h"
 #include "apxchol/solver/detail/setup_route.h"
 #include "apxchol/solver/sptrsv/omp.h"
 #include <type_traits>
@@ -25,6 +25,8 @@
 #include <omp.h>
 
 namespace apxchol {
+
+class cpu_solver;
 
 // ── Deterministic parallel-reduction scaffolding ─────────────────────────────
 // Shared by the fused vector passes of the preconditioner (below) and of the
@@ -178,7 +180,7 @@ public:
         // factorization and Eigen/CPU callers never touch its context, even in
         // a CUDA-enabled build. Preserve the device setup's existing prewarm.
 #if defined(APXCHOL_USE_CUDA)
-        [[maybe_unused]] const auto factorize_install_begin = detail::gpu_setup_diagnostic_clock::now();
+        [[maybe_unused]] const auto factorize_install_begin = detail::gpu_setup_diagnostic_clock::now(opts_.verbose);
 #endif
         if constexpr (on_gpu) cuda_ctx::prewarm();
         n_ = A.rows();
@@ -192,17 +194,16 @@ public:
                 throw std::runtime_error(std::string("GPU setup completion: ") +
                                          cudaGetErrorString(setup_completion));
             if (cp_) { cp_->descend("setup"); (*cp_)("gpu_setup_complete"); cp_->ascend(); }
-            if (detail::gpu_setup_diagnostics()) {
+            if (opts_.verbose) {
                 // Host API duration; device-adopted setup additionally completed its work.
                 const double factorize_install_wall_s = std::chrono::duration<double>(
-                    detail::gpu_setup_diagnostic_clock::now() - factorize_install_begin).count();
+                    detail::gpu_setup_diagnostic_clock::now(opts_.verbose) - factorize_install_begin).count();
                 const auto& drop = trsv_.drop_stats();
                 std::fprintf(stderr,
-                    "[gpu-setup-receipt] diagnostics=%s factorize_install_wall_s=%.17g "
+                    "[gpu-setup-receipt] factorize_install_wall_s=%.17g "
                     "n=%lld rounds=%zu raw_factor_nnz=%zu stored_nnz=%llu adopted=%d "
                     "fp16=%d host_factor_array_bytes=%zu adoption_download_bytes=%zu "
                     "factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu\n",
-                    detail::gpu_setup_diagnostics() ? "enabled" : "disabled",
                     factorize_install_wall_s, static_cast<long long>(n_), F_.rounds.size(),
                     static_cast<std::size_t>(F_.L.nonZeros()),
                     static_cast<unsigned long long>(trsv_.stored_nnz()),
@@ -224,10 +225,9 @@ public:
     /// back from a default-configured solver has had them released (see
     /// set_keep_factor); pass a freshly computed factorization instead.
     basic_apx_cholesky& set_factor(factorization F) {
-        if (F.L.nonZeros() > 0 && F.L.vals_.empty())
-            throw std::invalid_argument(
-                "apx_cholesky::set_factor: factorization values were released; "
-                "pass a freshly computed factorization");
+        if constexpr (!on_gpu) detail::validate_adopted_factor(F);
+        else if (F.L.nonZeros() > 0 && F.L.vals_.empty())
+            throw std::invalid_argument("apx_cholesky::set_factor: factorization values were released");
         n_ = static_cast<Eigen::Index>(F.L.rows());
         F_ = std::move(F);
         m_analysisIsOk = true;
@@ -270,8 +270,7 @@ private:
             // columns are mutually independent -> one level) instead of two O(nnz)
             // topological depth scans. Each region is one factor column placed in round
             // order; trailing residual-peel columns get sequential levels inside the
-            // SpTRSV. The backend uses these by default; APXCHOL_ROUND_LEVELS=0
-            // forces the topological scan instead.
+            // SpTRSV. Missing or invalid round metadata uses the topological scan.
             if (!F_.rounds.empty()) {
                 std::vector<node_index> bounds;
                 bounds.reserve(F_.rounds.size() + 1);
@@ -289,8 +288,8 @@ private:
             // point it no longer reads them (Laplacian path: right after its L11
             // copy), so its setup transient does not sit on a dead copy of the
             // factor. The release below then finds nothing left to free.
-            if (keep_factor_) trsv_.setup(F_.L, factor_dim, opts_.factor_storage);
-            else              trsv_.setup_consuming(F_.L, factor_dim, opts_.factor_storage);
+            if (keep_factor_) trsv_.setup(F_.L, factor_dim, opts_);
+            else              trsv_.setup_consuming(F_.L, factor_dim, opts_);
         }
 #if defined(APXCHOL_USE_CUDA)
         else {
@@ -300,11 +299,11 @@ private:
             // "cuda_init", so sptrsv_setup below reports its own work only.
             const double cuda_init_s = cuda_ctx::ensure_context();
             if (cp_) (*cp_)("cuda_init");
-            if (detail::gpu_setup_diagnostics() && std::getenv("APXCHOL_SPTRSV_SETUP_TRACE"))   // same knob as the stage trace below
+            if (opts_.verbose)
                 std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                              "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
             trsv_.setup_adopting_device_factor_for_research(
-                std::move(*F_.research_device_factor), opts_.factor_storage);
+                std::move(*F_.research_device_factor), opts_);
             F_.research_device_factor.reset();
         }
 #endif
@@ -333,14 +332,6 @@ public:
         return *this;
     }
 
-    /// Restart the per-solve application counter of the center-k centring
-    /// schedule (APXCHOL_GROUND=center-k, the default; see env_knobs.h). Call
-    /// at the start of each PCG solve so the schedule (every K-th application
-    /// centres) is identical for every solve on this factor -- repeated
-    /// solves then reproduce bit-identical results. Irrelevant for K = 1
-    /// (every application centres) and on the SDDM path.
-    void reset_apply_count() const noexcept { apply_count_ = 0; }
-
     Eigen::Index rows() const { return n_; }
     Eigen::Index cols() const { return n_; }
     Eigen::ComputationInfo info() const { return m_info; }
@@ -351,10 +342,8 @@ public:
     /// Apply M^{-1} to rhs via approximate Cholesky (Eigen entry point; also
     /// what apply()/Eigen::ConjugateGradient hit).
     ///
-    /// Laplacian path (rank n-1): center → P → L^{-1} → L^{-T} → P^{-1} → center,
-    ///   where the two centring passes run on every K-th application only
-    ///   (APXCHOL_GROUND=center-k, K = 10; see env_knobs.h and
-    ///   take_center_()). APXCHOL_GROUND=center centres every application.
+    /// Laplacian path (rank n-1): center → P → L^{-1} → L^{-T} → P^{-1} → center.
+    /// Public applications always center, independently of prior calls.
     /// SDDM path     (rank n):   P → L^{-1} → L^{-T} → P^{-1}.
     ///
     /// `b` may be any dense column expression (a plain VectorXd binds without a
@@ -366,25 +355,13 @@ public:
         apply_columns<1>(bv.data(), x.data());
     }
 
-    /// PCG-loop application: z = M^{-1} r, with the reductions the outer loop
-    /// needs FUSED into the passes that already stream the vectors:
-    ///   * r·z is accumulated in the final unpermute gather (the pass that
-    ///     writes z) -- returned;
-    ///   * Laplacian path only: the input centering uses `r_sum` (= Σ r,
-    ///     which the PCG update pass produces for free) instead of a mean
-    ///     pass over r, and the output re-centering is one deterministic
-    ///     reduction over the permuted solve output followed by the same
-    ///     gather (subtract-mean + write z + r·z in one pass) -- so z is the
-    ///     centered vector exactly as _solve_impl produces it.
-    /// `r_sum` is ignored on the SDDM path and on the Laplacian path's
-    /// non-centring applications (center-k schedule: only every K-th
-    /// application of a solve centres, the others skip both mean passes; see
-    /// take_center_()). Reductions are deterministic for a fixed thread count
-    /// (see detail:: scaffolding at the top of the file).
-    double apply_fused(const double* r, double r_sum, double* z) const {
-        return apply_fused<1>(r, {r_sum}, z)[0];
-    }
+private:
+    friend class ::apxchol::cpu_solver;
 
+    void reset_apply_count() const noexcept { apply_count_ = 0; }
+
+    // PCG reuses r_sum for centering and gathers r·z with the result. Only
+    // this internal path uses periodic drift correction on Laplacians.
     template<int Columns>
     std::array<double, Columns> apply_fused(
             const double* r, const std::array<double, Columns>& r_sum, double* z) const {
@@ -402,31 +379,22 @@ public:
     void apply_columns(const double* b, double* z) const {
         ensure_part_();
         std::array<bool, Columns> centers{};
-        for (bool& center : centers) center = !F_.sddm && take_center_();
+        centers.fill(!F_.sddm);
         const auto sums = std::any_of(centers.begin(), centers.end(), [](bool c) { return c; })
             ? detail::det_sum_columns<Columns>(b, n_, part_.data())
             : std::array<double, Columns>{};
         apply_core<Columns>(b, sums, centers, z, nullptr);
     }
 
-private:
     void ensure_part_() const {
         const std::size_t need = detail::part_capacity();
         if (part_.size() < need) part_.resize(need);
     }
 
-    /// Laplacian-path centring schedule (APXCHOL_GROUND=center-k, see
-    /// env_knobs.h): advances the per-solve application counter and returns
-    /// whether THIS application centres -- applications K, 2K, ... (1-based
-    /// since the last reset_apply_count()) do, the others skip both mean
-    /// passes; K = 1 centres every application. In any other grounding mode
-    /// (reg: make_graph grounds the matrix, so it classifies SDDM and never
-    /// reaches this path) a factor that is nevertheless Laplacian centres on
-    /// every application. Call exactly once per Laplacian-path application.
+    // PCG stays in the centered subspace in exact arithmetic; correct drift
+    // every ten preconditioner applications.
     bool take_center_() const noexcept {
-        const auto& k = detail::env_knobs::get();
-        if (k.ground != detail::grounding_kind::center_k) return true;
-        return (++apply_count_ % static_cast<std::uint64_t>(k.center_k)) == 0;
+        return (++apply_count_ % 10) == 0;
     }
 
     /// Shared body of _solve_impl / apply_fused: z = M^{-1} b.
@@ -525,9 +493,7 @@ private:
     factor_options opts_;
     mutable checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
-    // Laplacian-path application counter of the center-k centring schedule
-    // (counts _solve_impl / apply_fused calls on the Laplacian branch since
-    // the last reset_apply_count(); see take_center_()).
+    // Internal PCG applications since the last reset; public apply is stateless.
     mutable std::uint64_t apply_count_ = 0;
     mutable Eigen::VectorXd scratch_;
     // Per-thread partial sums for the deterministic reductions in apply_core

@@ -1,7 +1,6 @@
 #include "apxchol/operator_class.h"
 
 #include "apxchol/csc_work.h"
-#include "apxchol/env_knobs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -253,7 +252,8 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     return s;
 }
 
-operator_scan require_operator(const Eigen::SparseMatrix<double>& A) {
+operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump_max_mass) {
+    detail::validate_lump_max_mass(lump_max_mass);
     const std::string kContract =
         "apxchol solves symmetric SDDM / Laplacian operators (A = A^T, "
         "a_ii > 0, a_ij <= 0 for i != j). ";
@@ -314,39 +314,14 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A) {
     // by M-matrix lumping. It only fails past the ceiling, where lumping would
     // delete more of the operator than it preserves.
     if (s.offdiag_pos > 0) {
-        const auto& k = detail::env_knobs::get();
         const double rho = s.positive_mass_fraction();
-        const double ceiling = k.lump_max_mass > 0.0 ? k.lump_max_mass
-                                                     : kDefaultLumpMassCeiling;
-        if (k.lump && rho > ceiling)
+        if (lump_max_mass == 0 || rho > lump_max_mass)
             throw std::invalid_argument(
                 kContract + "Condition FAILED: non-positive off-diagonals. " +
                 count_of(s.offdiag_pos, s.offdiag_nnz, "off-diagonal entries") +
                 " are positive, carrying " + num(100.0 * rho) +
-                "% of the off-diagonal mass. apxchol repairs a nearly-SDDM "
-                "operator by lumping positive off-diagonals onto the diagonal "
-                "(row sums preserved, the preconditioner only — PCG keeps "
-                "applying the matrix you passed), but past " +
-                num(100.0 * ceiling) +
-                "% of the mass that deletes more of the operator than it "
-                "keeps and the factorization stops paying for itself. Raise "
-                "the ceiling with APXCHOL_LUMP_MAX=<fraction> if you want it "
-                "anyway.");
-        // APXCHOL_LUMP=0 exists so the two arms of an A/B can both RUN, so it
-        // lets the violation through rather than refusing -- but loudly, and
-        // not only under APXCHOL_VERBOSE: the factorization is about to be
-        // handed negative edge weights, which is a preconditioner-quality
-        // failure with no other symptom than a bad residual at the end.
-        if (!k.lump)
-            std::fprintf(stderr,
-                "[apxchol] WARNING: M-matrix lumping is disabled "
-                "(APXCHOL_LUMP=0) and %lld of %lld off-diagonal entries are "
-                "positive (%s%% of the off-diagonal mass). They become "
-                "NEGATIVE edge weights, which breaks the clique sampler's "
-                "prefix distribution -- expect a poor preconditioner.\n",
-                static_cast<long long>(s.offdiag_pos),
-                static_cast<long long>(s.offdiag_nnz),
-                num(100.0 * rho).c_str());
+                "% of the off-diagonal mass; lump_max_mass permits at most " +
+                num(100.0 * lump_max_mass) + "%.");
     }
 
     return s;
@@ -395,18 +370,14 @@ Eigen::Index lump_positive_offdiagonals(Eigen::SparseMatrix<double>& A) {
     return removed;
 }
 
-operator_view::operator_view(const Eigen::SparseMatrix<double>& A)
-    : src_(&A), scan_(require_operator(A)) {
-    const auto& knobs = detail::env_knobs::get();
-    if (scan_.offdiag_pos > 0 && knobs.lump) {
+operator_view::operator_view(const Eigen::SparseMatrix<double>& A, double lump_max_mass)
+    : src_(&A), scan_(require_operator(A, lump_max_mass)) {
+    if (scan_.offdiag_pos > 0) {
         // Only here does a copy happen: a Laplacian or SDDM operator (nothing
         // positive off the diagonal) is handed straight through.
         lumped_ = A;
         lumped_entries_ = lump_positive_offdiagonals(lumped_);
     }
-    if (std::getenv("APXCHOL_VERBOSE"))
-        std::fprintf(stderr, "[apxchol] %s\n",
-                     describe_operator(scan_, lumped_entries_).c_str());
 }
 
 std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
@@ -425,7 +396,7 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
                "only, PCG applies the operator as given";
     else if (s.offdiag_pos > 0)
         out += "; " + std::to_string(s.offdiag_pos) +
-               " positive off-diagonal entries left in place (APXCHOL_LUMP=0)";
+               " positive off-diagonal entries";
     if (s.deficient_rows > 0)
         out += "; " + count_of(s.deficient_rows, s.rows, "rows") +
                " break diagonal dominance (worst row sum " +

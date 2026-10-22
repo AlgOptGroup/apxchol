@@ -139,8 +139,7 @@ int dataflow_grid_size(bool fp16) {
         dataflow_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                            &resident, solve_dataflow<dataflow_memory<float, Columns, RhsLanes>>, kDataflowBlock, 0),
                        "query FP32 occupancy");
-    const char *requested = std::getenv("APXCHOL_GPU_DATAFLOW_BLOCKS");
-    return std::max(1, std::min(sms * resident, requested ? std::atoi(requested) : sms));
+    return std::max(1, std::min(sms * resident, sms));
 }
 
 template<unsigned Columns, unsigned RhsLanes>

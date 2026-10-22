@@ -73,7 +73,7 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 
 `cmake -LH build` lists build options. Algorithm defaults live in
 [factor_options.h](include/apxchol/solver/factor_options.h).
-`APXCHOL_FACTOR_STORAGE=auto|float16|float32` controls triangular-solve factor storage (`auto`: CUDA FP16, CPU/Metal FP32).
+`factor_options::factor_storage` selects triangular-solve storage (`automatic`, `fp16`, or `fp32`); the default is CUDA FP16 and CPU/Metal FP32.
 FP16 narrows scaled off-diagonals, retaining FP32 diagonals; it
 does not change the outer PCG to FP16. See [precision and storage](docs/precision.md).
 `--sampler gks|trace_cycle` selects the clique sampler; GKS remains

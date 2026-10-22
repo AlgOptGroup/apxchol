@@ -8,7 +8,7 @@ namespace apxchol::detail {
 class gpu_solve_session {
     gpu_preconditioner precond;
     cuda_pcg gpcg;
-    const bool use_cp = !std::getenv("APXCHOL_NO_CHECKPOINT");
+    const bool use_cp;
     const int stagnation_window;
 public:
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
@@ -18,7 +18,8 @@ public:
     }
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
                       const solve_options& opts, checkpoint* cp)
-        : stagnation_window(opts.stagnation_window) {
+        : use_cp(opts.collect_timings), stagnation_window(opts.stagnation_window) {
+        validate_solve_options(opts);
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("GPU session cannot execute an explicit CPU request");
         auto required = opts;
@@ -34,24 +35,25 @@ public:
         // Lumping (if any) happened inside compute(), on a private copy; the
         // GPU operator below is built from L itself.
         if (cp && use_cp) { cp->descend("setup"); cp->tick(); }
-        const auto operator_setup_begin = detail::gpu_setup_diagnostic_clock::now();
-        gpcg.setup(L, precond.factor().perm);
+        const auto operator_setup_begin = detail::gpu_setup_diagnostic_clock::now(opts.factor_opts.verbose);
+        gpcg.setup(L, precond.factor().perm, opts.factor_opts.verbose);
         if (cp && use_cp) { (*cp)("gpu_pcg_setup"); cp->ascend(); }
-        if (detail::gpu_setup_diagnostics()) {
+        if (opts.factor_opts.verbose) {
             const double operator_setup_wall_s = std::chrono::duration<double>(
-                detail::gpu_setup_diagnostic_clock::now() - operator_setup_begin).count();
+                detail::gpu_setup_diagnostic_clock::now(opts.factor_opts.verbose) - operator_setup_begin).count();
             // Host API interval, disjoint from factorize/install. The device
             // builder completes inside setup. Common benchmark timing adds its
             // own completion boundary.
             std::fprintf(stderr,
-                "[gpu-operator-setup-receipt] diagnostics=%s operator_setup_wall_s=%.17g\n",
-                detail::gpu_setup_diagnostics() ? "enabled" : "disabled", operator_setup_wall_s);
+                "[gpu-operator-setup-receipt] operator_setup_wall_s=%.17g\n",
+                operator_setup_wall_s);
         }
     }
     const gpu_preconditioner& preconditioner() const { return precond; }
 
     void solve(const Eigen::VectorXd& b, solve_result& res, double tol, int max_iter,
                const Eigen::VectorXd* x0 = nullptr) {
+        validate_solve_parameters(tol, max_iter);
         if (b.size() != precond.rows())
             throw std::invalid_argument("GPU solve: RHS length mismatch");
         if (x0 && (x0->size() != b.size() || !x0->allFinite()))
@@ -68,6 +70,7 @@ public:
         if (use_cp) { res.timings("gpu_pcg_loop"); res.timings.ascend(); }
         res.iterations = iters;
         res.residual = rnorm;
+        res.converged = rnorm < tol;
         // Solve-held device VRAM (gpcg's operator+vectors + the SpTRSV factor are
         // still resident here; everything is freed when gpcg/precond destruct).
         { size_t mf = 0, mt = 0;
@@ -77,6 +80,7 @@ public:
 
     batch_solve_result solve_panel(const_matrix_view B, matrix_view X, double tol,
                                  int max_iter, const const_matrix_view* X0 = nullptr) {
+        validate_solve_parameters(tol, max_iter);
         if (B.rows() != precond.rows() || (B.cols() != 2 && B.cols() != 4) ||
             X.rows() != B.rows() || X.cols() != B.cols() ||
             (X0 && (X0->rows() != B.rows() || X0->cols() != B.cols())))
@@ -92,6 +96,7 @@ public:
             for (unsigned q = 0; q < Columns; ++q) {
                 result.columns[q].iterations = iterations[q];
                 result.columns[q].residual = residuals[q];
+                result.columns[q].converged = residuals[q] < tol;
             }
         };
         if (B.cols() == 4) run.template operator()<4>();

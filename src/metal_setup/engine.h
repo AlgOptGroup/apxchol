@@ -197,8 +197,7 @@ class Engine {
             stage(compute, stage_initialize, n);
             [compute endEncoding];
             finish(command);
-            const char* sparse_value = std::getenv("APXCHOL_RESIDUAL_SPARSIFY");
-            bool sparse_attempted = sparse_value && std::strcmp(sparse_value, "0") == 0;
+            bool sparse_attempted = false;
             id<MTLBuffer> sparse_state = nil;
             bool coalesced = false;
             while (!s.state->status && s.state->active) {

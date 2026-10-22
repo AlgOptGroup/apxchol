@@ -52,7 +52,7 @@ def random_sddm(n, seed=0):
 def test_default_graph_storage_solves_original_system():
     L = grid2d_sddm(5)
     b = np.linspace(-1.0, 1.0, L.shape[0])
-    result = apxchol.solve(L, b, tol=1e-8, maxiter=200)
+    result = apxchol.solve(L, b, rtol=1e-8, maxiter=200)
     assert result.converged
     assert np.linalg.norm(L @ result.x - b) / np.linalg.norm(b) <= 1e-7
 
@@ -67,7 +67,7 @@ def test_laplacian_solve_converges():
     rng = np.random.default_rng(1)
     b = rng.standard_normal(L.shape[0])
     b -= b.mean()                        # consistent RHS for a singular Laplacian
-    res = apxchol.solve(L, b, tol=1e-8, maxiter=500)
+    res = apxchol.solve(L, b, rtol=1e-8, maxiter=500)
     assert res.converged
     assert res.residual <= 1e-8
     # x recovered up to an additive constant (null space = constants)
@@ -79,7 +79,7 @@ def test_sddm_solve_converges():
     L = random_sddm(400, seed=2)
     rng = np.random.default_rng(3)
     b = rng.standard_normal(L.shape[0])
-    res = apxchol.solve(L, b, tol=1e-8, maxiter=500)
+    res = apxchol.solve(L, b, rtol=1e-8, maxiter=500)
     assert res.converged
     assert res.residual <= 1e-8
     assert np.linalg.norm(L @ res.x - b) / np.linalg.norm(b) <= 1e-7
@@ -104,11 +104,11 @@ def test_storage_dtype_preserves_original_system_accuracy(dtype):
 
 def test_factor_reused_across_many_b():
     L = grid2d_laplacian(40)
-    solver = apxchol.solver(L)           # factor built ONCE
+    solver = apxchol.factorize(L)        # factor built ONCE
     rng = np.random.default_rng(4)
     for _ in range(5):
         b = rng.standard_normal(L.shape[0]); b -= b.mean()
-        res = solver.solve(b, tol=1e-8, maxiter=500)
+        res = solver.solve(b, rtol=1e-8, maxiter=500)
         assert res.converged
         assert res.residual <= 1e-8
 
@@ -117,7 +117,7 @@ def test_aslinearoperator_helps_scipy_cg():
     L = grid2d_laplacian(40)
     rng = np.random.default_rng(5)
     b = rng.standard_normal(L.shape[0]); b -= b.mean()
-    M = apxchol.solver(L).aspreconditioner()
+    M = apxchol.factorize(L).aslinearoperator()
     _, info_pre = cg(L, b, M=M, rtol=1e-6, maxiter=2000)
     _, info_un = cg(L, b, rtol=1e-6, maxiter=50)     # unpreconditioned, capped low
     # Preconditioned converges (info==0); the capped unpreconditioned run does not.
@@ -127,7 +127,7 @@ def test_aslinearoperator_helps_scipy_cg():
 
 def test_apply_shape_and_finiteness():
     L = grid2d_laplacian(20)
-    solver = apxchol.solver(L)
+    solver = apxchol.factorize(L)
     r = np.random.default_rng(6).standard_normal(L.shape[0])
     z = solver.apply(r)
     assert z.shape == (L.shape[0],)
@@ -136,7 +136,7 @@ def test_apply_shape_and_finiteness():
 
 
 def test_apply_vector_owns_result_after_solver_destruction():
-    slv = apxchol.solver(grid2d_sddm(7), backend="cpu")
+    slv = apxchol.factorize(grid2d_sddm(7), backend="cpu")
     r = np.random.default_rng(6).standard_normal(slv.shape[0])
     z = slv.apply(r)
     expected = z.copy()
@@ -153,17 +153,17 @@ def test_apply_vector_owns_result_after_solver_destruction():
 def test_non_square_raises():
     A = sp.csr_matrix(np.ones((3, 4)))
     with pytest.raises(ValueError):
-        apxchol.solver(A)
+        apxchol.factorize(A)
 
 
 def test_b_length_mismatch_raises():
     L = grid2d_laplacian(10)
-    solver = apxchol.solver(L)
+    solver = apxchol.factorize(L)
     with pytest.raises(ValueError):
         solver.solve(np.ones(L.shape[0] + 1))
 
 
-@pytest.mark.parametrize("entry", ["Solver", "factorize", "solver", "solve"])
+@pytest.mark.parametrize("entry", ["Solver", "factorize", "solve"])
 @pytest.mark.parametrize("imaginary", [0.0, 0.5])
 def test_complex_operator_is_rejected_before_cast(entry, imaginary):
     # For nonzero imaginary parts, discarding them changes this Hermitian system.
@@ -199,7 +199,7 @@ def test_complex_solve_input_is_rejected_before_cast(route, argument, imaginary)
                 slv.solve(b, **kwargs)
 
 
-@pytest.mark.parametrize("entry", ["apply", "aslinearoperator", "aspreconditioner"])
+@pytest.mark.parametrize("entry", ["apply", "aslinearoperator"])
 @pytest.mark.parametrize("imaginary", [0.0, 0.5])
 def test_complex_apply_input_is_rejected_before_cast(entry, imaginary):
     slv = apxchol.factorize(sp.csr_matrix([[2.0, -1.0], [-1.0, 2.0]]))
@@ -224,8 +224,7 @@ def test_supported_real_dtypes_preserve_solve_and_apply(dtype):
         assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) <= 1e-9
 
     expected = slv.apply(b.astype(np.float64))
-    for result in (slv.apply(b), slv.aslinearoperator() @ b,
-                   slv.aspreconditioner() @ b):
+    for result in (slv.apply(b), slv.aslinearoperator() @ b):
         assert result.dtype == np.float64
         assert np.all(np.isfinite(result))
         np.testing.assert_allclose(result, expected, rtol=1e-12, atol=0.0)
@@ -248,7 +247,7 @@ def test_adjacency_input_raises_with_a_diagnosis():
     violation -- with the explicit conversion named."""
     A = grid2d_adjacency(10)
     with pytest.raises(ValueError) as exc:
-        apxchol.solver(A)
+        apxchol.factorize(A)
     msg = str(exc.value)
     # (a) which condition failed, with counts
     assert "Condition FAILED: positive diagonal" in msg
@@ -264,7 +263,7 @@ def test_adjacency_input_raises_with_a_diagnosis():
 def test_every_public_entry_rejects_an_adjacency_matrix():
     A = grid2d_adjacency(8)
     b = np.ones(A.shape[0])
-    for call in (lambda: apxchol.solver(A),
+    for call in (lambda: apxchol.factorize(A),
                  lambda: apxchol.factorize(A),
                  lambda: apxchol.Solver(A),
                  lambda: apxchol.solve(A, b)):
@@ -305,7 +304,7 @@ def test_positive_offdiagonals_on_a_positive_diagonal_are_lumped_not_rejected():
     assert (A != before).nnz == 0
 
     b = np.ones(A.shape[0])
-    res = s.solve(b, tol=1e-8, maxiter=500)
+    res = s.solve(b, rtol=1e-8, maxiter=500)
     assert res.converged
     # ... and the residual is against the TRUE operator, not the lumped one
     assert np.linalg.norm(b - A @ res.x) / np.linalg.norm(b) < 1e-7
@@ -562,19 +561,73 @@ def test_binding_imports_csc_layouts(offset_dtype, index_dtype, layout):
         np.testing.assert_array_equal(actual, original)
 
 
-@pytest.mark.parametrize("with_output", [False, True])
-def test_binding_negative_tolerance_uses_default_for_convergence(with_output):
+@pytest.mark.parametrize("value", [-1.0, 0.0, np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("batched", [False, True])
+def test_invalid_tolerance_rejected(value, batched):
+    A = sp.csc_matrix([[4.0, -1.0], [-1.0, 3.0]])
+    solver = apxchol.factorize(A)
+    b = np.ones((2, 2)) if batched else np.ones(2)
+    with pytest.raises(ValueError, match="tol"):
+        solver.solve(b, rtol=value)
+
+
+@pytest.mark.parametrize("value", [1.5, np.float64(2), "2"])
+def test_iteration_limit_requires_integer(value):
+    solver = apxchol.factorize(sp.eye(2, format="csc"))
+    with pytest.raises(TypeError):
+        solver.solve(np.ones(2), maxiter=value)
+
+
+@pytest.mark.parametrize("name", ["seed", "num_threads", "stagnation_window", "exact_clique_max_degree"])
+def test_integer_setup_options_do_not_truncate(name):
+    with pytest.raises(TypeError):
+        apxchol.factorize(sp.eye(2, format="csc"), **{name: 1.5})
+
+
+def test_omitted_solver_defaults_match_compiled_defaults():
     from apxchol import _apxchol
 
-    A = sp.csc_matrix([[4.0, -1.0], [-1.0, 3.0]])
-    solver = _apxchol.Solver(A.indptr, A.indices, A.data)
-    b = np.array([1.0, 2.0])
-    out = np.empty_like(b) if with_output else None
-    result = solver.solve(b, -1.0, 20, out=out)
-    assert result["converged"]
-    np.testing.assert_allclose(A @ result["x"], b, rtol=1e-12)
-    if with_output:
-        assert result["x"] is out
+    solver = apxchol.factorize(grid2d_sddm(8), num_threads=1)
+    b = np.ones(solver.shape[0])
+    implicit = solver.solve(b)
+    explicit = solver.solve(b, rtol=_apxchol.DEFAULT_TOL, maxiter=np.int64(_apxchol.DEFAULT_MAXITER))
+    np.testing.assert_array_equal(implicit.x, explicit.x)
+    assert (implicit.iters, implicit.residual, implicit.converged) == (explicit.iters, explicit.residual, explicit.converged)
+
+
+@pytest.mark.parametrize("cpu_schedule", ["auto", "levels"])
+def test_explicit_factor_settings(cpu_schedule):
+    A = grid2d_sddm(6)
+    solver = apxchol.factorize(A, backend="cpu", num_threads=1, cpu_schedule=cpu_schedule,
+                               drop_tolerance=0, regularization=0, lump_max_mass=0.25,
+                               verbose=False)
+    b = np.ones(A.shape[0])
+    result = solver.solve(b)
+    assert result.converged
+    assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
+
+
+@pytest.mark.parametrize("option,value", [("cpu_schedule", "unknown"), ("drop_tolerance", -1),
+                                         ("regularization", -1), ("lump_max_mass", -0.1),
+                                         ("lump_max_mass", 1.1)])
+def test_invalid_factor_settings_rejected(option, value):
+    with pytest.raises(ValueError):
+        apxchol.factorize(sp.eye(2, format="csc"), **{option: value})
+
+
+def test_factor_settings_are_per_instance():
+    A = sp.csc_matrix([[1.0, -1.0], [-1.0, 1.0]])
+    b = np.array([1.0, -1.0])
+    plain = apxchol.factorize(A, backend="cpu", num_threads=1, regularization=0,
+                             lump_max_mass=0, cpu_schedule="auto")
+    before = plain.solve(b)
+    regularized = apxchol.factorize(A, backend="cpu", num_threads=1,
+                                   regularization=0.25, cpu_schedule="levels")
+    assert not plain.sddm and regularized.sddm
+    assert regularized.solve(b).converged
+    after = plain.solve(b)
+    np.testing.assert_array_equal(after.x, before.x)
+    assert after.residual == before.residual
 
 
 def test_placeholder_column_per_component():
@@ -657,15 +710,13 @@ def test_x0_warm_start_needs_no_iterations():
     assert warm.converged
 
 
-def test_rtol_takes_precedence_over_tol():
-    L = grid2d_laplacian(20)
-    slv = apxchol.factorize(L)
-    rng = np.random.default_rng(16)
-    b = rng.standard_normal(L.shape[0]); b -= b.mean()
-    loose = slv.solve(b, tol=1e-12, rtol=1e-3)
-    tight = slv.solve(b, rtol=1e-10)
-    assert loose.iters < tight.iters
-    assert loose.residual <= 1e-3
+def test_removed_tolerance_alias_is_rejected():
+    A = grid2d_sddm(3)
+    solver = apxchol.factorize(A)
+    with pytest.raises(TypeError, match="tol"):
+        solver.solve(np.ones(A.shape[0]), **{"tol": 1e-8})
+    with pytest.raises(ValueError, match="unknown option 'tol'"):
+        apxchol.solve(A, np.ones(A.shape[0]), **{"tol": 1e-8})
 
 
 def test_solve_into_out_buffer():

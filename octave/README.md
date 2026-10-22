@@ -5,6 +5,8 @@ CPU approximate-Cholesky preconditioning and PCG. Factor once, solve many:
 ```matlab
 addpath('/path/to/apxchol/octave');
 s = apxchol_solver(A);
+% Optional setup controls; num_threads is a ceiling.
+s = apxchol_solver(A, struct('num_threads', 4, 'factor_storage', 'float32'));
 res = s.solve(b);                 % x, iters, residual, converged
 res = s.solve(b2, 1e-10, 1000);
 z = s.apply(r);
@@ -17,7 +19,17 @@ Supply an assembled operator. For adjacency input, explicitly use
 Validation is shared with C++; positive off-diagonal pairs are lumped onto
 the diagonal for preconditioning, while PCG and residual checks retain the
 original operator. Laplacian nullspaces are handled componentwise.
-The binding exposes default settings; GPU and wide indices are unavailable.
+Omitted solve arguments use the C++ defaults (relative tolerance 1e-8 and
+200 iterations). Tolerance must be finite and positive; the iteration limit
+must be a nonnegative integer. `[]` selects either default.
+
+The optional setup struct accepts `num_threads`, `seed`, `factor_storage`
+(`auto`, `float16`, `float32`), `cpu_schedule` (`auto`, `levels`),
+`drop_tolerance` (nonnegative; 0 disables), `regularization` (nonnegative
+diagonal fraction; 0 disables), `lump_max_mass` (fraction in [0, 1]; 0
+rejects positive off-diagonals), and
+`verbose` (logical). Unspecified fields use C++ defaults. GPU and wide
+indices are unavailable in this binding.
 
 ## Octave build
 

@@ -151,6 +151,22 @@ TEST(MetalHost, RelativeNormSurvivesOverflowingVectorNorm) {
     }
 }
 
+TEST(MetalHost, RelativeNormDoesNotUnderflowBeforeReduction) {
+    Eigen::VectorXd rhs = Eigen::VectorXd::Constant(101, 2e-16);
+    rhs.head(4).setConstant(1e308);
+    Eigen::VectorXd residual = rhs;
+    residual.head(4).setZero();
+    const mh::norm_reference reference(rhs);
+    // sqrt(97) * 2e-16 / 2e308 rounds to two binary64 subnormal units.
+    EXPECT_EQ(reference.relative(residual), 2 * std::numeric_limits<double>::denorm_min());
+}
+
+TEST(MetalHost, RelativeNormHandlesOverflowingResidualNorm) {
+    const Eigen::Vector4d rhs = Eigen::Vector4d::Constant(5e307);
+    const Eigen::Vector4d residual = Eigen::Vector4d::Constant(1e308);
+    EXPECT_DOUBLE_EQ(mh::norm_reference(rhs).relative(residual), 2.0);
+}
+
 TEST(MetalHost, FactorStorageReconstructsFiniteValues) {
     for (float scale : {0x1p-125f, 0x1p-80f, 0.25f, 1.0f, 0x1p80f}) {
         const auto metadata = mh::pack_factor_metadata(scale, 1.0f / scale);

@@ -91,9 +91,15 @@ namespace detail {
 /// one the caller passed.
 template<typename Build>
 factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
-                                 Build&& build) {
-    const operator_view op(L);
-    factorization F = build(make_graph(op.matrix()));
+                                 const factor_options& options, Build&& build) {
+    validate_factor_options(options);
+    const operator_view op(L, options.lump_max_mass);
+    // The graph builder applies these matrix-only options.
+    auto graph_options = options;
+    graph_options.regularization = 0;
+    graph_options.lump_max_mass = kDefaultLumpMassCeiling;
+    factorization F = build(make_graph_from_operator(op.matrix(),
+        &op.matrix() == &L && op.scan().triangles_bit_identical, options.regularization), graph_options);
     F.lumped_offdiag = op.lumped();
     return F;
 }
@@ -131,8 +137,8 @@ template<typename Partitioner = block_greedy_partitioner, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return detail::factorize_operator(L, [&](auto&& G) {
-        return factorize<Partitioner>(std::move(G), elim, opts, cp);
+    return detail::factorize_operator(L, opts, [&](auto&& G, const auto& graph_options) {
+        return factorize<Partitioner>(std::move(G), elim, graph_options, cp);
     });
 }
 
@@ -140,8 +146,8 @@ template<partitioner P>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return detail::factorize_operator(L, [&](auto&& G) {
-        return factorize(std::move(G), std::move(part), opts, cp);
+    return detail::factorize_operator(L, opts, [&](auto&& G, const auto& graph_options) {
+        return factorize(std::move(G), std::move(part), graph_options, cp);
     });
 }
 
@@ -150,8 +156,8 @@ factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr) {
-    return detail::factorize_operator(L, [&](auto&& G) {
-        return factorize(std::move(G), std::move(part), elim, opts, cp);
+    return detail::factorize_operator(L, opts, [&](auto&& G, const auto& graph_options) {
+        return factorize(std::move(G), std::move(part), elim, graph_options, cp);
     });
 }
 

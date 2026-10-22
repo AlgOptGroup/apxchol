@@ -49,8 +49,7 @@ def test_backend_selection_is_read_only(operator_matrix, auto_solver, gpu_solver
         auto_solver.backend = "cpu"
 
 
-def test_scalar_automatic_solver_uses_cpu(monkeypatch):
-    monkeypatch.delenv("APXCHOL_FACTOR_STORAGE", raising=False)
+def test_scalar_automatic_solver_uses_cpu():
     matrix = sp.csc_matrix([[4.0]])
     solver = apxchol.factorize(matrix)
     assert solver.backend == "cpu"
@@ -63,7 +62,7 @@ def test_scalar_automatic_solver_uses_cpu(monkeypatch):
 
 @pytest.mark.parametrize("backend", ["invalid", "CUDA", None])
 def test_invalid_backend_is_rejected(operator_matrix, backend):
-    with pytest.raises(ValueError, match="backend must be auto, cpu or gpu"):
+    with pytest.raises(ValueError, match="backend"):
         apxchol.factorize(operator_matrix, backend=backend)
 
 

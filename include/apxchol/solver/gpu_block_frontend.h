@@ -86,7 +86,7 @@ private:
     friend class gpu_round_shadow_device_state;
     struct owned_initialization_tag {};
     gpu_block_frontend(node_index n, std::size_t undirected_edges,
-                       owned_initialization_tag);
+                       owned_initialization_tag, bool verbose);
     // Owning generations borrow the numerical CSR instead of projecting it.
     // The private epoch is revoked before mutation, failure, or destruction.
     void bind_owned_residual(const gpu_round_shadow_incidence* incidences,

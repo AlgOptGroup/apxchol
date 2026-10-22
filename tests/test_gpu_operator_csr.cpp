@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include "scoped_env.h"
 #include "scoped_omp_threads.h"
 #include "apxchol/solver/solve.h"
 #include <algorithm>
@@ -389,10 +388,6 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
 #else
     if (!runtime_available()) GTEST_SKIP()<<"CUDA unavailable";
     scoped_omp_threads serial(1);
-    scoped_env fp16("APXCHOL_FACTOR_STORAGE",nullptr);
-    scoped_env drop("APXCHOL_FACTOR_DROP",nullptr);
-    scoped_env backend("APXCHOL_GPU_SPTRSV",nullptr);
-    scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY","0");
     constexpr int n=65;
     for (double shift : {0.0,1.0}) {
         SCOPED_TRACE(shift);
@@ -411,19 +406,16 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         EXPECT_TRUE(preconditioner.trsv().fp16());
         EXPECT_GT(preconditioner.trsv().drop_stats().rel,0.0);
-        for(const char* precision : {static_cast<const char*>(nullptr),"0"}) {
-            scoped_env op_precision("APXCHOL_GPU_FP32_OPERATOR",precision);
-            apxchol::cuda_pcg solver;
-            solver.setup(A,preconditioner.factor().perm);
-            EXPECT_EQ(solver.fp32_operator(),precision==nullptr);
-            Eigen::VectorXd result;int iterations=0;double reported=0;
-            solver.solve(preconditioner,b,result,1e-8,1000,iterations,reported,shift==0.0);
-            ASSERT_EQ(result.size(),n);
-            EXPECT_GT(iterations,0);
-            EXPECT_LE((A*result-b).norm()/b.norm(),1e-8);
-            EXPECT_TRUE(std::isfinite(reported));
-            EXPECT_NEAR(reported, independent_residual(A, b, result), 2e-14);
-        }
+        apxchol::cuda_pcg solver;
+        solver.setup(A,preconditioner.factor().perm);
+        EXPECT_TRUE(solver.fp32_operator());
+        Eigen::VectorXd result;int iterations=0;double reported=0;
+        solver.solve(preconditioner,b,result,1e-8,1000,iterations,reported,shift==0.0);
+        ASSERT_EQ(result.size(),n);
+        EXPECT_GT(iterations,0);
+        EXPECT_LE((A*result-b).norm()/b.norm(),1e-8);
+        EXPECT_TRUE(std::isfinite(reported));
+        EXPECT_NEAR(reported, independent_residual(A, b, result), 2e-14);
     }
 #endif
 }
@@ -434,14 +426,14 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
 #else
     if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     constexpr int n = 33;
-    for (bool laplacian : {false, true}) for (const char* precision : {"0", "1"}) {
-        SCOPED_TRACE(::testing::Message() << laplacian << ' ' << precision);
-        scoped_env op_precision("APXCHOL_GPU_FP32_OPERATOR", precision);
+    for (bool laplacian : {false, true}) for (bool fp32 : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << laplacian << ' ' << fp32);
+        const double weight = fp32 ? 1.0 : std::nextafter(1.0, 2.0);
         std::vector<Eigen::Triplet<double>> entries;
         for (int i = 0; i < n; ++i) {
-            entries.emplace_back(i, i, laplacian ? 2.0 : 4.0);
-            entries.emplace_back(i, (i + 1) % n, -1.0);
-            entries.emplace_back((i + 1) % n, i, -1.0);
+            entries.emplace_back(i, i, (laplacian ? 2.0 : 4.0) * weight);
+            entries.emplace_back(i, (i + 1) % n, -weight);
+            entries.emplace_back((i + 1) % n, i, -weight);
         }
         Eigen::SparseMatrix<double> a(n, n);
         a.setFromTriplets(entries.begin(), entries.end());
@@ -449,6 +441,7 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
         for (int i = 0; i < n; ++i) perm[i] = n - 1 - i;
         apxchol::cuda_pcg solver;
         solver.setup(a, perm);
+        EXPECT_EQ(solver.fp32_operator(), fp32);
         TestPreconditioner preconditioner{n};
         Eigen::VectorXd exact(n);
         for (int i = 0; i < n; ++i) exact[i] = std::sin(i + 0.25);
@@ -642,9 +635,8 @@ TEST(GpuOperatorCsr, DeviceSetupRejectsUnsupportedStorage) {
     preconditioner.compute(A);
     ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
     apxchol::cuda_pcg solver;
-    scoped_env trace("APXCHOL_VERBOSE", "1");
     testing::internal::CaptureStderr();
-    solver.setup(A, preconditioner.factor().perm);
+    solver.setup(A, preconditioner.factor().perm, true);
     const auto diagnostic = testing::internal::GetCapturedStderr();
     EXPECT_NE(diagnostic.find("[gpu-operator-builder] route=device completion_wait=1"),
               std::string::npos);

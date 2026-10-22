@@ -40,7 +40,7 @@
 ///   * parabolic_fem (33% of entries, 0.00016% of the mass): 44 -> 42.
 ///   * bcsstk13 (44% of entries, 39.7% of the mass) is DESTROYED: unrepaired
 ///     it runs 500 iterations to a residual of NaN. Lumped (past the default
-///     ceiling, so this needs APXCHOL_LUMP_MAX) it stagnates at 29.4 instead
+///     ceiling, so this needs a larger lump_max_mass) it stagnates at 29.4 instead
 ///     -- finite, still useless. That is the ceiling's whole point.
 ///
 /// Lumping restores the class before the preconditioner is built. For every
@@ -75,6 +75,7 @@
 ///
 /// Everything here depends on Eigen only.
 
+#include "apxchol/detail/operator_options.h"
 #include <Eigen/Sparse>
 #include <string>
 
@@ -158,10 +159,11 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A);
 /// also names the explicit conversion on every surface.
 ///
 /// Diagonal dominance is reported in the census but never enforced.
-operator_scan require_operator(const Eigen::SparseMatrix<double>& A);
+operator_scan require_operator(const Eigen::SparseMatrix<double>& A,
+                               double lump_max_mass = kDefaultLumpMassCeiling);
 
 /// Ceiling on `operator_scan::positive_mass_fraction()` above which lumping is
-/// refused rather than applied silently. Override with APXCHOL_LUMP_MAX.
+/// refused rather than applied silently; factor_options::lump_max_mass controls it.
 ///
 /// 0.25, and the basis is measured:
 ///   * the two populations in the suite are four decades apart. Everything
@@ -180,7 +182,7 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A);
 ///   * confirmed on the real adversarial pair: at rho = 0.397 bcsstk13 needs
 ///     1272 PCG iterations with the exact lumped preconditioner (Jacobi 1515),
 ///     and at rho = 0.939 bcsstk01 needs 44 (Jacobi 48).
-inline constexpr double kDefaultLumpMassCeiling = 0.25;
+
 
 /// Apply the M-matrix lumping to `A` in place; returns the number of stored
 /// positive off-diagonal ENTRIES removed (two per pair, both triangles).
@@ -194,7 +196,7 @@ Eigen::Index lump_positive_offdiagonals(Eigen::SparseMatrix<double>& A);
 /// Validated, factorization-ready view of a caller's operator.
 ///
 /// Construction asserts the operator contract and, when the matrix carries
-/// positive off-diagonals (and lumping is enabled and under the ceiling),
+/// positive off-diagonals below the requested mass ceiling,
 /// holds the LUMPED copy. `matrix()` is what the preconditioner must be built
 /// from; the caller's matrix is never touched, which is what keeps the true
 /// operator PCG applies bit-identical.
@@ -203,7 +205,8 @@ Eigen::Index lump_positive_offdiagonals(Eigen::SparseMatrix<double>& A);
 /// is made and `matrix()` is a reference to the caller's own matrix.
 class operator_view {
 public:
-    explicit operator_view(const Eigen::SparseMatrix<double>& A);
+    explicit operator_view(const Eigen::SparseMatrix<double>& A,
+                           double lump_max_mass = kDefaultLumpMassCeiling);
 
     const Eigen::SparseMatrix<double>& matrix() const {
         return lumped_.rows() > 0 ? lumped_ : *src_;
@@ -219,7 +222,7 @@ private:
     Eigen::Index lumped_entries_ = 0;
 };
 
-/// The one-line summary `APXCHOL_VERBOSE` prints for a scanned operator:
+/// A one-line summary of a scanned operator:
 /// how it was classified, what was lumped, and any dominance violations.
 std::string describe_operator(const operator_scan& s, Eigen::Index lumped);
 

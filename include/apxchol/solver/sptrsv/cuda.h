@@ -6,6 +6,7 @@
 #include "apxchol/solver/sptrsv/cuda_dataflow.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
+#include "apxchol/solver/factor_options.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <array>
@@ -14,7 +15,6 @@
 #include <limits>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <functional>
 #include <span>
 #include <stdexcept>
@@ -266,8 +266,7 @@ inline void check_cuda(cudaError_t err, const char* msg) {
 
 /// GPU sparse triangular solve using our persistent dataflow kernel.
 /// The CUDA library links cudart only. There is no cuSPARSE backend or
-/// backend-selection policy. APXCHOL_GPU_SPTRSV=dataflow is accepted for
-/// compatibility; any other nonempty value is rejected before setup.
+/// backend-selection policy.
 ///
 /// CSR of L and L^T, packed task tables and atomic FP32 dependency values
 /// support an initialization launch followed by one persistent solve launch,
@@ -277,8 +276,8 @@ inline void check_cuda(cudaError_t err, const char* msg) {
 ///
 /// COMPACTING FACTOR DROP: setup runs THE compacting drop
 /// (factor_drop.h -- the very implementation omp_sptrsv::setup runs on the
-/// CPU; same env knob, same default: APXCHOL_FACTOR_DROP=<rel>, default 1e-4,
-/// <= 0 = off; the column-sum compensation is unconditional) on the HOST
+/// CPU; same drop_tolerance, default 1e-4, zero = off;
+/// column-sum compensation is unconditional) on the HOST
 /// L11 arrays before anything is uploaded: off-diagonals below rel * (column
 /// max |off-diagonal|) are removed, the diagonal always kept, each column's
 /// dropped mass folded back into its kept off-diagonals so column sums are
@@ -289,8 +288,7 @@ inline void check_cuda(cudaError_t err, const char* msg) {
 /// stored_nnz= on this backend too); the CPU unit tests state that the
 /// arrays this backend uploads are the arrays omp_sptrsv stores.
 ///
-/// FP16 STORAGE (env APXCHOL_FACTOR_STORAGE, shared with the CPU backend --
-/// lowprec.h; default ON on the GPU): the storage is the
+/// FP16 STORAGE (factor_storage, default ON on the GPU): the storage is the
 /// CPU's FP16_SCALED contract (cuda_host.h file header; omp.h "FOLDED INTO
 /// THE VECTORS"): the off-diagonals hold binary16 of the column-scaled L~ =
 /// L D^-1 (s_j = column max |off-diagonal|), the diagonal is a separate fp32
@@ -340,23 +338,17 @@ public:
     static bool fp16_resolved(factor_storage_type storage = factor_storage_type::automatic) {
         return detail::resolve_fp16_storage(storage, true);
     }
-    /// Setup: build L11 on the host, run the compacting drop, (fp16: narrow),
-    /// copy to device, build the dataflow tables. Env APXCHOL_SPTRSV_SETUP_TRACE=1 (the
-    /// CPU backend's knob, same name) prints the per-stage wall times of one
-    /// setup to stderr (diagnostic). Since 2026-08-20 the per-process CUDA
-    /// context creation is NOT part of any stage here: the caller establishes
-    /// it before this call and reports it as "cuda_init"
-    /// (solver/cuda_context.h, apx_cholesky::install_factor); it used to be
-    /// charged to "build_L11", ~100-135 ms on this machine, ~715 ms on GH200.
+    /// Build and compact L11 on the host, upload it, and build dataflow tables.
+    /// verbose reports setup stages; the caller establishes the CUDA context.
     void setup(const sparse_csc& L, node_index m,
-               factor_storage_type storage = factor_storage_type::automatic) {
-        validate_backend_env();
-        const bool fp16 = fp16_resolved(storage);
+               const factor_options& options = {}) {
+        validate_options(options);
+        const bool fp16 = fp16_resolved(options.factor_storage);
         destroy();
+        data_.verbose = options.verbose;
         data_.m = static_cast<int64_t>(m);
-        const bool trace = detail::gpu_setup_diagnostics() &&
-            std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
-        auto t_prev = detail::gpu_setup_diagnostic_clock::now();
+        const bool trace = data_.verbose;
+        auto t_prev = detail::gpu_setup_diagnostic_clock::now(data_.verbose);
         auto mark = [&](const char* what) {
             if (!trace) return;
             cudaDeviceSynchronize();
@@ -367,10 +359,10 @@ public:
         };
 
         data_.fp16 = fp16;
-        if (detail::gpu_setup_diagnostics() && std::getenv("APXCHOL_VERBOSE"))
+        if (data_.verbose)
             std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s (%s storage)\n",
                          backend_name(), data_.fp16 ? "fp16" : "fp32");
-        const double factor_drop_rel = factor_drop_rel_from_env();
+        const double factor_drop_rel = options.drop_tolerance;
 
         // Build L11 = top-left m×m block of the factor in CSC, with checked
         // 32-bit indices for the dataflow kernels.
@@ -431,7 +423,7 @@ public:
                     throw std::runtime_error(
                         "apxchol cuda_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                         " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(h16.inv_scale2[j]) +
-                        "); set APXCHOL_FACTOR_STORAGE=float32");
+                        "); select factor_storage=fp32");
             upload_factor(data_.LT_values, h16.vals.get(), data_.nnz);
             upload_factor(data_.diag, h16.diag.data(), data_.m);
             upload_factor(data_.inv_scale2, h16.inv_scale2.data(), data_.m);
@@ -452,7 +444,7 @@ public:
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_after, &total));
         data_.device_delta_bytes = free_before >= free_after ? free_before - free_after : 0;
 
-        if (std::getenv("APXCHOL_VERBOSE") || std::getenv("APXCHOL_GPU_MEM_DEBUG")) {
+        if (data_.verbose) {
             const std::uint64_t off = data_.stats.nnz_stored - static_cast<std::uint64_t>(data_.m);
             const std::uint64_t off0 = off + data_.stats.dropped;
             std::fprintf(stderr,
@@ -465,7 +457,7 @@ public:
                 data_.factor_bytes / 1e6, data_.device_delta_bytes / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
             if (data_.stats.rel > 0.0)
                 std::fprintf(stderr,
-                    "[apxchol] factor drop (APXCHOL_FACTOR_DROP=%g, column sums preserved): dropped=%llu"
+                    "[apxchol] factor drop (drop_tolerance=%g, column sums preserved): dropped=%llu"
                     " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
                     " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
                     data_.stats.rel,
@@ -502,11 +494,12 @@ public:
     /// route downloads factor values or uploads a factor CSR again.
     void setup_adopting_device_factor_for_research(
             cuda_sptrsv_device_factor factor,
-            factor_storage_type storage = factor_storage_type::automatic) {
+            const factor_options& options = {}) {
         // A prior failed ordinary setup may have left partial allocations. The
         // ordinary setup calls destroy() before reuse too; make the fresh-state
         // precondition concrete before adopting another owner.
         destroy();
+        validate_options(options);
         if (factor.empty())
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: factor ownership capsule is empty");
@@ -516,17 +509,17 @@ public:
         if (current_device != factor.data_.cuda_device)
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: active CUDA device differs from the factor owner");
-        validate_backend_env();
-        const bool requested_fp16 = fp16_resolved(storage);
+        const bool requested_fp16 = fp16_resolved(options.factor_storage);
+        data_.verbose = options.verbose;
         const bool factor_fp16 =
             factor.data_.format == cuda_sptrsv_device_factor::storage::fp16_scaled;
         if (requested_fp16 != factor_fp16)
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: device storage does not match requested factor storage");
-        const double requested_drop = factor_drop_rel_from_env();
+        const double requested_drop = options.drop_tolerance;
         if (factor.data_.stats.rel != requested_drop)
             throw std::invalid_argument(
-                "apxchol cuda_sptrsv adoption: preprocessed drop provenance does not match APXCHOL_FACTOR_DROP");
+                "apxchol cuda_sptrsv adoption: preprocessed drop provenance does not match drop_tolerance");
 
         const int m = static_cast<int>(factor.data_.m);
         const std::size_t rows = static_cast<std::size_t>(m);
@@ -562,9 +555,8 @@ public:
             account(factor.data_.inv_scale2, rows * sizeof(double), "fp16 inverse scale squared");
         }
 
-        const bool trace = detail::gpu_setup_diagnostics() &&
-            std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
-        auto t_prev = detail::gpu_setup_diagnostic_clock::now();
+        const bool trace = data_.verbose;
+        auto t_prev = detail::gpu_setup_diagnostic_clock::now(data_.verbose);
         auto mark = [&](const char* what) {
             if (!trace) return;
             APXCHOL_CUDA_CHECK(cudaDeviceSynchronize());
@@ -651,8 +643,7 @@ public:
             factor.clear();
             data_.ready = true;
 
-            if (std::getenv("APXCHOL_VERBOSE") ||
-                std::getenv("APXCHOL_GPU_MEM_DEBUG"))
+            if (data_.verbose)
                 std::fprintf(stderr,
                     "[apxchol] sptrsv storage GPU/dataflow adopted %s: "
                     "stored_nnz=%llu factor_device_bytes=%.1f MB "
@@ -734,12 +725,10 @@ public:
         return data_.adoption_host_download_bytes;
     }
 private:
-    static void validate_backend_env() {
-        const char* value = std::getenv("APXCHOL_GPU_SPTRSV");
-        if (value && *value && std::string(value) != "dataflow")
-            throw std::invalid_argument(
-                std::string("APXCHOL_GPU_SPTRSV='") + value +
-                "' is unsupported; the GPU backend is dataflow");
+    static void validate_options(const factor_options& options) {
+        detail::validate_factor_options(options);
+        if (options.cpu_schedule != cpu_sptrsv_schedule::automatic)
+            throw std::invalid_argument("CPU triangular-solve schedules are unavailable on CUDA");
     }
 
     static void validate_device_allocation(
@@ -794,7 +783,7 @@ private:
                 upload_factor(reverse ? data_.d_bck_words : data_.d_fwd_words, plan.words.data(), plan.words.size());
             if (!plan.segments.empty())
                 upload_factor(reverse ? data_.d_bck_segments : data_.d_fwd_segments, plan.segments.data(), plan.segments.size());
-            if (std::getenv("APXCHOL_GPU_SPTRSV_STATS"))
+            if (data_.verbose)
                 dataflow_print_direction_stats(stats, split, reverse, batches, plan.slots, splits);
         }
         initialize_dataflow_state();
@@ -803,17 +792,14 @@ private:
     // Only the private finalizer supplies sorted triangular CSR ownership.
     // Generic capsules must retain full structure validation in the host route.
     void setup_device_kernel_backend(const cuda_sptrsv_device_factor& factor) {
-        const char* e = std::getenv("APXCHOL_GPU_DF_SPLIT");
-        const int split_min = e ? std::max(0, std::atoi(e)) : -1;
         for (int direction = 0; direction < 2; ++direction) {
             const bool reverse = direction != 0;
             const auto plan = detail::build_dataflow_device_plan(
                 static_cast<int>(data_.m), reverse, static_cast<int>(data_.nnz),
-                reverse ? factor.data_.LT_row_ptr : factor.data_.L_row_ptr, split_min,
+                reverse ? factor.data_.LT_row_ptr : factor.data_.L_row_ptr, -1,
                 !reverse && data_.fp16 ? factor.data_.diag : nullptr,
                 !reverse && data_.fp16 ? factor.data_.inv_scale2 : nullptr);
-            data_.df_split_min[reverse] = split_min >= 0
-                ? unsigned(split_min) : plan.stats.split_threshold(data_.nnz);
+            data_.df_split_min[reverse] = plan.stats.split_threshold(data_.nnz);
             // Consume allocations immediately, before any operation can throw.
             // The outer setup catch then owns every partial plan via destroy().
             (reverse ? data_.d_bck_words : data_.d_fwd_words) = plan.words;
@@ -823,7 +809,7 @@ private:
             data_.df_split_rows += plan.n_split;
             data_.factor_bytes += plan.bytes;
             data_.adoption_host_download_bytes += plan.host_download_bytes;
-            if (std::getenv("APXCHOL_GPU_SPTRSV_STATS")) {
+            if (data_.verbose) {
                 dataflow_print_direction_stats(plan.stats, dataflow_split_threshold_for(plan.stats),
                     reverse, plan.n_batches, plan.n_slots, plan.n_split);
             }
@@ -838,7 +824,7 @@ private:
         data_.factor_bytes += tag_words * sizeof(unsigned) + sizeof(unsigned);
         data_.df_grid = dataflow_grid_size<1, 1>(data_.fp16);
 
-        if (std::getenv("APXCHOL_GPU_MEM_DEBUG")) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
+        if (data_.verbose) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
             fprintf(stderr,"[mem] SpTRSV dataflow: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
                     "fwd_batches=%d bck_batches=%d grid=%dx%d tag=%.1fMB slots=%d split_rows=%d | GPU free=%.2f/%.2f GB\n",
                     2.0*data_.nnz*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
@@ -847,8 +833,7 @@ private:
     }
 
     unsigned dataflow_split_threshold_for(const detail::gpu_dataflow::row_stats& stats) const {
-        const char* value = std::getenv("APXCHOL_GPU_DF_SPLIT");
-        return value ? std::max(0, std::atoi(value)) : stats.split_threshold(data_.nnz);
+        return stats.split_threshold(data_.nnz);
     }
 
     void dataflow_print_direction_stats(const detail::gpu_dataflow::row_stats& st,
@@ -976,6 +961,7 @@ private:
 
     struct state : cuda_sptrsv_device_factor::factor_state {
         bool ready = false;
+        bool verbose = false;
         bool cleanup_needed = false;
 
         // What the compacting drop did (factor_drop.h) and the device footprint.
@@ -1007,7 +993,7 @@ private:
         std::array<detail::dataflow_device_plan, 2> lane_plans{};
         int df_lane_grid = 0;
         unsigned panel_capacity = 0;
-        // fp16 storage (APXCHOL_FACTOR_STORAGE): binary16
+        // fp16 storage: binary16
         // values of CSR(L~^T) and CSR(L~), the fp32 scaled diagonal and the
         // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
         // exact; fp32 overflows for tiny scales, see the class comment).

@@ -1,21 +1,21 @@
 """apxchol — approximate-Cholesky preconditioner for Laplacian/SDDM systems.
 
 Public API:
-    apxchol.factorize(A, **opts)  ->  Solver       (alias: apxchol.solver)
-    apxchol.solve(A, b, tol=None, maxiter=500, *, rtol=None, **opts)
+    apxchol.factorize(A, **opts)  ->  Solver
+    apxchol.solve(A, b, rtol=None, maxiter=None, **opts)
                                      ->  SolveResult
     apxchol.laplacian(A)             ->  scipy.sparse.csc_matrix  (L = D - A)
-    Solver.solve(b, tol=None, maxiter=500, *, rtol=None, x0=None, out=None)
+    Solver.solve(b, rtol=None, maxiter=None, *, x0=None, out=None)
                                      ->  SolveResult
     Solver.apply(r)                  ->  numpy.ndarray   (M^{-1} r)
     Solver.lumped                    ->  int  (positive off-diagonals lumped)
     Solver.aslinearoperator()        ->  scipy LinearOperator
-    Solver.aspreconditioner()        ->  alias of aslinearoperator()
     Solver.P / Solver.chol() / Solver.L / Solver.D   ->  factor export
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from operator import index
 
 import numpy as np
 import scipy.sparse as sp
@@ -24,12 +24,12 @@ from scipy.sparse.linalg import LinearOperator
 from . import _apxchol
 
 __all__ = [
-    "factorize", "solver", "solve", "laplacian",
+    "factorize", "solve", "laplacian",
     "Solver", "SolveResult", "__version__",
 ]
 
-DEFAULT_TOL = 1e-8
-DEFAULT_MAXITER = 500
+DEFAULT_TOL = _apxchol.DEFAULT_TOL
+DEFAULT_MAXITER = _apxchol.DEFAULT_MAXITER
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -124,9 +124,12 @@ class Solver:
         self._nnz_A = int(csc.nnz)
         self._keep_factor = bool(keep_factor)
         data = np.ascontiguousarray(csc.data, dtype=np.float64)
-        options = dict(backend=str(backend), num_threads=num_threads, seed=int(seed), partitioner=str(partitioner),
+        options = dict(backend=backend, num_threads=index(num_threads), seed=index(seed), partitioner=partitioner,
                        keep_factor=self._keep_factor)
         options.update(advanced)
+        for key in ("stagnation_window", "exact_clique_max_degree"):
+            if key in options:
+                options[key] = index(options[key])
         if factor_storage_dtype is not None:
             options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
         self._impl = _apxchol.Solver(csc.indptr, csc.indices, data, options)
@@ -187,9 +190,9 @@ class Solver:
             raise ValueError(f"{name} must be finite")
         return value
 
-    def solve(self, b, tol=None, maxiter=DEFAULT_MAXITER, *, rtol=None,
+    def solve(self, b, rtol=None, maxiter=None, *,
               x0=None, out=None) -> SolveResult:
-        """PCG-solve A x = b to relative residual `rtol` (`tol` is an alias).
+        """PCG-solve A x = b to relative residual `rtol`.
 
         `b` has shape `(n,)` or `(n, nrhs)`. Matrix inputs return a matrix
         solution and per-column arrays for iterations, residuals and convergence.
@@ -202,9 +205,9 @@ class Solver:
             x0 = self._rhs(x0, "x0")
             if x0.shape != b.shape:
                 raise ValueError("x0 must have the same shape as b")
-        # rtol is the canonical (SciPy) name; tol is kept as a legacy alias.
-        eff = rtol if rtol is not None else (tol if tol is not None else DEFAULT_TOL)
-        res = self._impl.solve(b, float(eff), int(maxiter), x0, out)
+        rtol = DEFAULT_TOL if rtol is None else float(rtol)
+        maxiter = DEFAULT_MAXITER if maxiter is None else index(maxiter)
+        res = self._impl.solve(b, rtol, maxiter, x0, out)
         return SolveResult(**res)
 
     def apply(self, r) -> np.ndarray:
@@ -214,10 +217,6 @@ class Solver:
     def aslinearoperator(self) -> LinearOperator:
         return LinearOperator(shape=self.shape, matvec=self.apply, matmat=self.apply,
                               dtype=np.float64)
-
-    def aspreconditioner(self) -> LinearOperator:
-        """Alias of :meth:`aslinearoperator` (M= argument of scipy's Krylov solvers)."""
-        return self.aslinearoperator()
 
     # ── factor export ────────────────────────────────────────────────────────
     # Convention: P[original_vertex] = position in the elimination order, so
@@ -346,14 +345,17 @@ def factorize(A, *, backend="auto", num_threads=0, seed=42, partitioner="block_g
         x86 AVX/F16C or Apple ARM64.
         Unsupported FP16 requests raise an error. CPU arithmetic remains FP64;
         constructed factors and exports remain FP32. FP64 factor storage is
-        not supported. ``None`` uses ``APXCHOL_FACTOR_STORAGE`` if set, otherwise
-        the backend default (CPU/Metal FP32, CUDA FP16).
-        Explicit choices override the environment without changing it.
+        not supported. ``None`` uses the backend default (CPU/Metal FP32, CUDA FP16).
     **advanced
         Passed straight through to the core options: `degree_quantile`,
         `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,
         `residual_peel` ("natural" | "min_degree" | "bk_serial"),
-        `stagnation_window`. Unknown keys raise `ValueError`. Note:
+        `stagnation_window`, `cpu_schedule` ("auto" | "levels"),
+        `drop_tolerance` (nonnegative; 0 disables dropping),
+        `regularization` (nonnegative diagonal fraction; 0 disables),
+        `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),
+        and `verbose` (default False).
+        Unknown keys raise `ValueError`. Note:
         `degree_multiplier` only takes effect when `degree_quantile=0`
         (the quantile cap defaults to 0.2 on CPU/Metal and 0.5 on CUDA).
         Metal accepts values in (0,1); its degree buckets include all ties.
@@ -363,11 +365,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=42, partitioner="block_g
                   **advanced)
 
 
-# `solver` is the conversational alias for `factorize` (factor once, reuse).
-solver = factorize
-
-
-def solve(A, b, tol=None, maxiter=DEFAULT_MAXITER, *, rtol=None,
+def solve(A, b, rtol=None, maxiter=None,
           **opts) -> SolveResult:
     """One-shot convenience: factorize A, then solve A x = b.
 
@@ -375,4 +373,4 @@ def solve(A, b, tol=None, maxiter=DEFAULT_MAXITER, *, rtol=None,
     (no factor export) unless overridden.
     """
     opts.setdefault("keep_factor", False)
-    return factorize(A, **opts).solve(b, tol=tol, maxiter=maxiter, rtol=rtol)
+    return factorize(A, **opts).solve(b, rtol=rtol, maxiter=maxiter)

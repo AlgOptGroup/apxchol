@@ -4,14 +4,15 @@
 // the device. Test-only imports preserve raw incidence order and duplicates.
 
 #include "apxchol/solver/detail/gpu_diagnostics.h"
+#include "apxchol/detail/operator_options.h"
 #include "apxchol/solver/detail/factor_entry.h"
+#include "apxchol/solver/factor_options.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/solver/elimination/elimination.h"
 #include "apxchol/solver/gpu_device_selection.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/lowprec.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
-#include "apxchol/env_knobs.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/gpu_block_frontend.h"
 #endif
@@ -46,26 +47,6 @@
 namespace apxchol { class cuda_sptrsv_device_factor; }
 
 namespace apxchol::detail {
-
-inline constexpr std::string_view kGpuRoundSelectionAuditEnv =
-    "APXCHOL_GPU_ROUND_SELECTION_AUDIT";
-
-/// The producer capability certifies selection independence against its
-/// content-bound topology. Production resident rounds therefore need only the
-/// mandatory O(p) range/active/duplicate validator. This knob additionally
-/// scans the complete residual O(r) to audit that certificate.
-inline bool gpu_round_selection_audit_requested() {
-    const char* value = std::getenv(kGpuRoundSelectionAuditEnv.data());
-    if (!value || !*value || std::strcmp(value, "0") == 0 ||
-        std::strcmp(value, "off") == 0)
-        return false;
-    if (std::strcmp(value, "1") == 0 ||
-        std::strcmp(value, "on") == 0 ||
-        std::strcmp(value, "force") == 0)
-        return true;
-    throw std::invalid_argument(
-        "APXCHOL_GPU_ROUND_SELECTION_AUDIT must be unset, 0, off, 1, on, or force");
-}
 
 inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
         std::uint64_t run_seed, node_index pivot) noexcept {
@@ -269,7 +250,7 @@ struct gpu_round_shadow_factor_log {
 
 struct gpu_round_shadow_timings {
     // False means all optional stage intervals are unavailable, not zero time.
-    bool enabled = gpu_setup_diagnostics();
+    bool enabled = false;
     double upload_ms = 0.0;
     double gather_ms = 0.0;
     double dedup_ms = 0.0;
@@ -1311,7 +1292,8 @@ gpu_owned_sparsify_test_output gpu_sparsify_owned_residual_for_test(
 // Every failed mutation poisons the owner and revokes outstanding borrows.
 class gpu_round_shadow_device_state {
 public:
-    explicit gpu_round_shadow_device_state(clique_sampler sampler = clique_sampler::gks);
+    explicit gpu_round_shadow_device_state(clique_sampler sampler = clique_sampler::gks,
+                                          bool verbose = false);
     ~gpu_round_shadow_device_state();
     gpu_round_shadow_device_state(gpu_round_shadow_device_state&&) noexcept;
     gpu_round_shadow_device_state& operator=(gpu_round_shadow_device_state&&) noexcept;
@@ -1322,9 +1304,11 @@ public:
     void reject_device_generation(std::uint64_t generation) noexcept;
     std::shared_ptr<cuda_sptrsv_device_factor> finalize_device_factor(
         std::span<const node_index> permutation, node_index m,
-        factor_storage_type storage = factor_storage_type::automatic);
+        factor_storage_type storage = factor_storage_type::automatic,
+        double drop_tolerance = factor_options{}.drop_tolerance);
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
     void inject_failure_after_cuda_operation_for_test();
+    void set_selection_audit_for_test(bool enabled);
     std::vector<std::byte> encode_finalized_factor_for_test(
         const cuda_sptrsv_device_factor& factor) const;
     std::unique_ptr<gpu_block_frontend> initialize_owned_raw_for_test(
@@ -1373,12 +1357,12 @@ class gpu_round_shadow_session {
 public:
     gpu_round_shadow_session() = default;
     explicit gpu_round_shadow_session(bool active,
-            clique_sampler sampler = clique_sampler::gks)
-        : active_(active) {
+            clique_sampler sampler = clique_sampler::gks, bool verbose = false)
+        : active_(active), verbose_(verbose) {
 #if defined(APXCHOL_USE_CUDA)
         if (active_)
             device_state_ =
-                std::make_unique<gpu_round_shadow_device_state>(sampler);
+                std::make_unique<gpu_round_shadow_device_state>(sampler, verbose);
 #else
         (void)sampler;
 #endif
@@ -1397,14 +1381,13 @@ public:
     // Internal dispatch has checked gpu_owned_csc_supported on the same matrix
     // before its host adapter produces these trusted, synchronously borrowed buffers.
     bool initialize_owned_csc(const gpu_owned_csc_buffers& input,
-                              std::unique_ptr<gpu_block_frontend>& frontend) {
+                              std::unique_ptr<gpu_block_frontend>& frontend, double regularization = 0) {
+        validate_regularization(regularization);
         if (!active_ || owned_initialized_ || owned_rounds_ || frontend)
             throw std::logic_error("GPU CSC initialization is outside a fresh owning session");
-        const auto& knobs = env_knobs::get();
-        const double reg = knobs.ground == grounding_kind::reg ? knobs.reg_eps : 0.0;
         bool sddm = false;
         frontend = device_state_->initialize_owned_csc(
-            input, reg, sddm);
+            input, regularization, sddm);
         owned_initialized_ = true;
         return sddm;
     }
@@ -1438,7 +1421,7 @@ public:
         state_imports_ = report.state_imports;
         state_reuses_ = report.state_reuses;
         state_upload_bytes_ = report.state_upload_bytes;
-        if (gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-prefix] round=%zu pivots=%zu generation=%llu "
+        if (verbose_) std::fprintf(stderr, "[gpu-owned-prefix] round=%zu pivots=%zu generation=%llu "
             "state_upload_bytes=%zu active=%llu live=%llu "
             "peak_round_bytes=%zu normal_batch=%llu/%llu/%llu/%llu/%llu "
             "oversized=%llu/%llu/%llu "
@@ -1518,11 +1501,12 @@ public:
 
     std::shared_ptr<cuda_sptrsv_device_factor> finalize_device_factor(
             std::span<const node_index> permutation, node_index m,
-            factor_storage_type storage = factor_storage_type::automatic) {
+            factor_storage_type storage = factor_storage_type::automatic,
+            double drop_tolerance = factor_options{}.drop_tolerance) {
         if (!active_ || !owned_complete_ || !device_state_ ||
             permutation.size() != factor_log_columns_)
             throw std::logic_error("GPU finalizer requires complete owned factor coverage");
-        return device_state_->finalize_device_factor(permutation, m, storage);
+        return device_state_->finalize_device_factor(permutation, m, storage, drop_tolerance);
     }
 
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
@@ -1548,7 +1532,7 @@ public:
         if (!active_) return;
         if (!owned_rounds_ || !owned_complete_)
             throw std::logic_error("GPU factorization output was not completed");
-        if (gpu_setup_diagnostics()) std::fprintf(stderr,
+        if (verbose_) std::fprintf(stderr,
             "[gpu-owned-factorization] complete rounds=%zu state_imports=%zu state_reuses=%zu "
             "state_upload_bytes=%zu factor_header_count=%zu factor_header_download_bytes=%zu "
             "factor_entry_download_bytes=%zu\n",
@@ -1558,6 +1542,7 @@ public:
 
 private:
     bool active_ = false;
+    bool verbose_ = false;
     std::size_t owned_rounds_ = 0;
     bool owned_complete_ = false;
     std::size_t owned_download_bytes_ = 0;
@@ -1575,10 +1560,12 @@ private:
 
 template<typename Eliminator>
 gpu_round_shadow_session make_gpu_round_shadow_session(
-        const Eliminator& eliminator, setup_route route = setup_route::cpu) {
+        const Eliminator& eliminator, setup_route route = setup_route::cpu,
+        bool verbose = false) {
     if (route == setup_route::cpu) return {};
 #if !defined(APXCHOL_USE_CUDA)
     (void)eliminator;
+    (void)verbose;
     throw std::runtime_error("GPU factorization requires CUDA support");
 #else
     if constexpr (!std::is_same_v<std::remove_cvref_t<Eliminator>, tree_elimination>) {
@@ -1590,7 +1577,7 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
             throw std::invalid_argument("GPU factorization requires a bounded built-in sampler");
         if (!gpu_round_shadow_runtime_available())
             throw std::runtime_error("GPU factorization requires an available CUDA device");
-        return gpu_round_shadow_session(true, eliminator.sampler);
+        return gpu_round_shadow_session(true, eliminator.sampler, verbose);
     }
 #endif
 }

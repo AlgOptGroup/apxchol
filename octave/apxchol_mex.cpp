@@ -58,15 +58,52 @@ double scalar_option(const mxArray* value, const char* name) {
     return result;
 }
 
-int iteration_option(const mxArray* value) {
-    const double result = scalar_option(value, "maxiter");
+template<class Integer>
+Integer integer_option(const mxArray* value, const char* name) {
+    const double result = scalar_option(value, name);
     if (std::trunc(result) != result ||
-        result < std::numeric_limits<int>::min() ||
-        result > std::numeric_limits<int>::max())
-        fail("apxchol:badInput", "maxiter must be an integer in [" +
-             std::to_string(std::numeric_limits<int>::min()) + ", " +
-             std::to_string(std::numeric_limits<int>::max()) + "]");
-    return static_cast<int>(result);
+        static_cast<long double>(result) < std::numeric_limits<Integer>::lowest() ||
+        static_cast<long double>(result) > std::numeric_limits<Integer>::max())
+        fail("apxchol:badInput", std::string(name) + " must be an integer in range");
+    return static_cast<Integer>(result);
+}
+
+std::string string_option(const mxArray* value, const char* name) {
+    if (!mxIsChar(value) || mxGetM(value) != 1)
+        fail("apxchol:badInput", std::string(name) + " must be a character row vector");
+    std::string result(mxGetNumberOfElements(value) + 1, '\0');
+    mxGetString(value, result.data(), result.size());
+    result.resize(result.size() - 1);
+    return result;
+}
+
+apxchol::solve_options setup_options(const mxArray* options) {
+    apxchol::solve_options result{.backend = apxchol::solve_backend::cpu};
+    if (options != nullptr) {
+        if (!mxIsStruct(options) || mxGetNumberOfElements(options) != 1)
+            fail("apxchol:badInput", "options must be a scalar struct");
+        for (int field = 0; field < mxGetNumberOfFields(options); ++field) {
+            const std::string name = mxGetFieldNameByNumber(options, field);
+            const mxArray* value = mxGetFieldByNumber(options, 0, field);
+            if (value == nullptr) fail("apxchol:badInput", "option '" + name + "' is empty");
+            if (name == "num_threads") result.num_threads = integer_option<int>(value, name.c_str());
+            else if (name == "seed") result.factor_opts.seed = integer_option<unsigned>(value, name.c_str());
+            else if (name == "cpu_schedule")
+                result.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(string_option(value, name.c_str()));
+            else if (name == "factor_storage")
+                result.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(string_option(value, name.c_str()));
+            else if (name == "drop_tolerance") result.factor_opts.drop_tolerance = scalar_option(value, name.c_str());
+            else if (name == "regularization") result.factor_opts.regularization = scalar_option(value, name.c_str());
+            else if (name == "lump_max_mass") result.factor_opts.lump_max_mass = scalar_option(value, name.c_str());
+            else if (name == "verbose") {
+                const double flag = scalar_option(value, name.c_str());
+                if (flag != 0 && flag != 1) fail("apxchol:badInput", "verbose must be logical or 0/1");
+                result.factor_opts.verbose = flag != 0;
+            } else fail("apxchol:badInput", "unknown option '" + name + "'");
+        }
+    }
+    apxchol::detail::validate_solve_options(result);
+    return result;
 }
 
 // ── handle store ────────────────────────────────────────────────────────────────
@@ -113,6 +150,8 @@ Eigen::VectorXd mx_to_vec(const mxArray* mb, const char* what) {
     if (!mxIsDouble(mb) || mxIsComplex(mb) || mxIsSparse(mb))
         fail("apxchol:badVector",
              std::string(what) + " must be a dense real double vector");
+    if (mxGetNumberOfDimensions(mb) != 2 || (mxGetM(mb) != 1 && mxGetN(mb) != 1))
+        fail("apxchol:badVector", std::string(what) + " must be a vector");
     const mwSize n = mxGetNumberOfElements(mb);
     return Eigen::Map<const Eigen::VectorXd>(mxGetPr(mb), n);
 }
@@ -137,10 +176,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
     try {
         if (op == "factorize") {
-            if (nrhs != 2)
-                fail("apxchol:usage", "usage: h = apxchol_mex('factorize', A)");
+            if (nrhs != 2 && nrhs != 3)
+                fail("apxchol:usage", "usage: h = apxchol_mex('factorize', A, options)");
             auto solver = std::make_unique<apxchol::solver>(
-                mx_to_eigen(prhs[1]), apxchol::solve_options{.backend = apxchol::solve_backend::cpu});
+                mx_to_eigen(prhs[1]), setup_options(nrhs == 3 ? prhs[2] : nullptr));
             const std::uint64_t h = next_handle++;
             store()[h] = std::move(solver);
             plhs[0] = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
@@ -151,14 +190,16 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                      "usage: [x,iters,resid,conv] = apxchol_mex('solve', h, b, tol, maxiter)");
             auto& s = get_solver(prhs[1]);
             const Eigen::VectorXd b = mx_to_vec(prhs[2], "b");
-            double tol = scalar_option(prhs[3], "tol");
-            if (tol < 0.0) tol = apxchol::default_tol;
-            const int maxiter = iteration_option(prhs[4]);
+            const double tol = mxIsDouble(prhs[3]) && mxIsEmpty(prhs[3])
+                ? apxchol::default_tol : scalar_option(prhs[3], "rtol");
+            const int maxiter = mxIsDouble(prhs[4]) && mxIsEmpty(prhs[4])
+                ? apxchol::default_max_iter : integer_option<int>(prhs[4], "maxiter");
+            apxchol::detail::validate_solve_parameters(tol, maxiter);
             const auto result = s.solve(b, tol, maxiter);
             plhs[0] = vec_to_mx(result.x);
             if (nlhs > 1) plhs[1] = mxCreateDoubleScalar(result.iterations);
             if (nlhs > 2) plhs[2] = mxCreateDoubleScalar(result.residual);
-            if (nlhs > 3) plhs[3] = mxCreateLogicalScalar(result.residual < tol);
+            if (nlhs > 3) plhs[3] = mxCreateLogicalScalar(result.converged);
         } else if (op == "apply") {
             if (nrhs != 3)
                 fail("apxchol:usage", "usage: z = apxchol_mex('apply', h, r)");

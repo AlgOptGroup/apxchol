@@ -1,5 +1,4 @@
-// The compacting factor drop of omp_sptrsv::setup (APXCHOL_FACTOR_DROP=<rel>,
-// default kFactorDropRelDefault = 1e-4; include/apxchol/solver/sptrsv/omp.h):
+// The compacting factor drop of omp_sptrsv::setup (drop_tolerance, default 1e-4):
 //   * stored nnz == the number of kept entries (the predicate |v| >= rel * s_j
 //     restated here independently of omp_sptrsv::keep_offdiag), the diagonal
 //     is always kept (first in every CSC column, last in every CSR row), no
@@ -12,8 +11,8 @@
 //     (the column-sum compensation is unconditional; the reference is the
 //     zeroed factor (a stored zero and an absent entry solve identically);
 //   * the CSR/CSC the drop produces are byte-identical across thread counts;
-//   * the env contract: unset = default ON at 1e-4, "0" / negative / junk =
-//     off, any positive value overrides (rel > 1 keeps only the diagonal).
+//   * zero disables threshold dropping; negative or nonfinite values are invalid;
+//     rel > 1 keeps only the diagonal.
 // Under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED (sptrsv_value_t narrower than the
 // factor's factor_value_t; it stores L_ij / s_j with s_j the PRE-drop column
 // max) the drop and the compensation run on the fp32 factor
@@ -23,7 +22,6 @@
 // storage-format-specific drop clause (format_flushes) has its own tests in
 // test_lowprec.cpp.
 #include <gtest/gtest.h>
-#include "scoped_env.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -32,6 +30,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <random>
 #include <string>
 #include <type_traits>
@@ -49,10 +48,6 @@ using apxchol::factor_value_t;
 using apxchol::sptrsv_value_t;
 
 namespace {
-
-struct scoped_drop_env : scoped_env {
-    explicit scoped_drop_env(const char* value) : scoped_env("APXCHOL_FACTOR_DROP", value) {}
-};
 
 // Random lower-triangular factor: every column gets a diagonal entry (first,
 // positive) plus `avg_offdiag` random strictly-lower entries on average
@@ -199,7 +194,7 @@ sparse_csc make_wide_magnitude_lower(node_index n) {
 
 } // namespace
 
-// APXCHOL_FACTOR_DROP=<rel>: off-diagonals with |v| < rel * s_j are REMOVED
+// drop_tolerance=rel: off-diagonals with |v| < rel * s_j are REMOVED
 // before the CSR/CSC are built: stored nnz == the number of kept entries, the
 // diagonal is always kept (first in every CSC column, last in every CSR row),
 // the statistics say what was dropped, the column sums are preserved (default
@@ -209,9 +204,6 @@ sparse_csc make_wide_magnitude_lower(node_index n) {
 // alias path (m == n) and the Laplacian copy path (m == n-1), serial and
 // parallel transpose (m > 50000).
 TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     struct cfg { node_index n; bool laplacian; };
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
@@ -224,12 +216,12 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         ASSERT_GT(ref.zeroed, ref.kept / 4);   // the test has teeth: a big chunk goes
         const std::uint64_t L11_nnz = L11_nnz_of(L, m);
 
-        // Compacted (explicit env for this setup only).
+        // Compacted with the explicit threshold.
         apxchol::omp_sptrsv trsv;
-        { scoped_drop_env env("1e-4"); trsv.setup(L, m); }
+        trsv.setup(L, m, {.drop_tolerance = 1e-4});
         // Reference: dense drop, drop OFF.
         apxchol::omp_sptrsv rf;
-        { scoped_drop_env env("0"); rf.setup(ref.Lz, m); }
+        rf.setup(ref.Lz, m, {.drop_tolerance = 0});
 
         // Counts.
         const auto& st = trsv.drop_stats();
@@ -355,46 +347,44 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             EXPECT_LT(worst, 1e-11);
         }
 
-        // The env is read at every setup: unset = the default, which IS 1e-4
-        // (same result as the explicit "1e-4" above); "0" = nothing dropped.
+        // Default setup uses the same 1e-4 threshold; zero disables dropping.
         {
             apxchol::omp_sptrsv dflt;
-            { scoped_drop_env env(nullptr); dflt.setup(L, m); }
-            EXPECT_EQ(dflt.drop_stats().rel, apxchol::kFactorDropRelDefault);
+            dflt.setup(L, m);
+            EXPECT_EQ(dflt.drop_stats().rel, apxchol::factor_options{}.drop_tolerance);
             EXPECT_EQ(dflt.stored_nnz(), ref.kept);
             EXPECT_EQ(dflt.drop_stats().dropped, ref.zeroed);
             EXPECT_EQ(0, std::memcmp(dflt.csc_vals().data(), trsv.csc_vals().data(),
                                      ref.kept * sizeof(sptrsv_value_t)));
             apxchol::omp_sptrsv off;
-            { scoped_drop_env env("0"); off.setup(L, m); }
+            off.setup(L, m, {.drop_tolerance = 0});
             EXPECT_EQ(off.drop_stats().dropped, 0u);
             EXPECT_EQ(off.stored_nnz(), L11_nnz);
         }
     }
 }
 
-// The default is ON at kFactorDropRelDefault (documented as 1e-4 -- the
-// measured value; a change of the constant must be a deliberate change here
-// too), and rel = 0 / negative / junk / empty resolve as documented.
-TEST(SpTRSVDrop, EnvContract) {
-    EXPECT_EQ(apxchol::kFactorDropRelDefault, 1e-4);
-    { scoped_drop_env env(nullptr); EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 1e-4); }
-    { scoped_drop_env env("");      EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 1e-4); }
-    { scoped_drop_env env("0");     EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 0.0); }
-    { scoped_drop_env env("-1");    EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 0.0); }
-    { scoped_drop_env env("abc");   EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 0.0); }
-    { scoped_drop_env env("3e-4");  EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 3e-4); }
-    { scoped_drop_env env("2");     EXPECT_EQ(apxchol::factor_drop_rel_from_env(), 2.0); }
+TEST(SpTRSVDrop, ExplicitThresholdValidation) {
+    const auto L = make_random_lower(3, 1, 3);
+    EXPECT_EQ(apxchol::factor_options{}.drop_tolerance, 1e-4);
+    for (double rel : {0.0, 3e-4, 2.0}) {
+        apxchol::omp_sptrsv trsv;
+        trsv.setup(L, L.rows(), {.drop_tolerance = rel});
+        EXPECT_EQ(trsv.drop_stats().rel, rel);
+    }
+    for (double rel : {-1.0, std::numeric_limits<double>::infinity(),
+                       std::numeric_limits<double>::quiet_NaN()}) {
+        apxchol::omp_sptrsv trsv;
+        EXPECT_THROW(trsv.setup(L, L.rows(), {.drop_tolerance = rel}),
+                     std::invalid_argument);
+    }
 }
 
-// rel = 0 / negative / junk = off; a rel below every entry drops nothing (and
+// rel = 0 disables threshold dropping; a rel below every entry drops nothing (and
 // makes no copy: stored nnz == factor nnz); the diagonal survives ANY rel
 // (even > 1, which drops every off-diagonal); the compacted factor solves as
 // a diagonal one then (y = x / diag).
 TEST(SpTRSVDrop, EdgeCases) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     const node_index m = 2000;
     sparse_csc L = make_random_lower(m, 4.0, 31, 0.0, 1.0);
@@ -414,18 +404,17 @@ TEST(SpTRSVDrop, EdgeCases) {
         for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p)
             fmt_zero += apxchol::omp_sptrsv::format_flushes(L.vals_[p], static_cast<float>(s_pre[j]));
     ASSERT_EQ(fmt_zero, 0u);
-    for (const char* rel : {"0", "-1", "abc"}) {
-        SCOPED_TRACE(std::string("APXCHOL_FACTOR_DROP=") + rel);
-        scoped_drop_env env(rel);
-        apxchol::omp_sptrsv t; t.setup(L, m);
+    {
+        apxchol::omp_sptrsv t;
+        t.setup(L, m, {.drop_tolerance = 0});
         EXPECT_EQ(t.drop_stats().rel, 0.0);
         EXPECT_EQ(t.drop_stats().dropped, 0u);
         EXPECT_EQ(t.stored_nnz(), nnz);
         EXPECT_EQ(t.csc_vals().size(), nnz);
     }
     {
-        scoped_drop_env env("1e-30");   // below everything: nothing goes (but the format zeros)
-        apxchol::omp_sptrsv t; t.setup(L, m);
+        // Below everything: only storage-format zeros are dropped.
+        apxchol::omp_sptrsv t; t.setup(L, m, {.drop_tolerance = 1e-30});
         EXPECT_EQ(t.drop_stats().rel, 1e-30);
         EXPECT_EQ(t.drop_stats().dropped, fmt_zero);
         EXPECT_EQ(t.drop_stats().dropped_threshold, 0u);
@@ -445,8 +434,8 @@ TEST(SpTRSVDrop, EdgeCases) {
         }
     }
     {
-        scoped_drop_env env("2");        // > 1: every off-diagonal goes, diagonal stays
-        apxchol::omp_sptrsv t; t.setup(L, m);
+        // Above one: every off-diagonal goes, the diagonal stays.
+        apxchol::omp_sptrsv t; t.setup(L, m, {.drop_tolerance = 2});
         EXPECT_EQ(t.drop_stats().dropped, offdiag);
         EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(m));
         for (node_index j = 0; j < m; ++j) {
@@ -482,7 +471,6 @@ TEST(SpTRSVDrop, CompactedArraysAreByteIdenticalAcrossThreadCounts) {
     const node_index n = 70001;                       // Laplacian path, m > 50000
     const node_index m = n - 1;
     const sparse_csc L = make_wide_magnitude_lower(n);
-    scoped_drop_env env("1e-4");
     apxchol::omp_sptrsv ref;
     const int max_threads = omp_get_max_threads();
     omp_set_num_threads(1);
@@ -531,24 +519,19 @@ TEST(SpTRSVDrop, CompactedArraysAreByteIdenticalAcrossThreadCounts) {
 #include "apxchol/solver/sptrsv/cuda_host.h"
 
 TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
 
     struct cfg { node_index n; bool laplacian; };
-    for (const char* rel_env : {"1e-4", static_cast<const char*>(nullptr), "0"})
+    for (double rel : {1e-4, 0.0})
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60001, true}}) {
         const node_index m = c.laplacian ? c.n - 1 : c.n;
         SCOPED_TRACE("n=" + std::to_string(c.n) + (c.laplacian ? " (Laplacian m=n-1)" : " (SDDM m=n)") +
-                     " APXCHOL_FACTOR_DROP=" + (rel_env ? rel_env : "<unset>"));
-        scoped_drop_env env(rel_env);
+                     " drop_tolerance=" + std::to_string(rel));
         const sparse_csc L = make_wide_magnitude_lower(c.n);
         // CPU backend.
         apxchol::omp_sptrsv trsv;
-        trsv.setup(L, m);
+        trsv.setup(L, m, {.drop_tolerance = rel});
         // GPU backend's host side, exactly as cuda_sptrsv::setup does it (fp32
         // storage: keep predicate = |v| >= rel * s_j and v != 0).
-        const double rel = apxchol::factor_drop_rel_from_env();
         auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
         const std::vector<float> scales = apxchol::cuda_host::column_scales(LT);
         const std::uint64_t L11_nnz = L11_nnz_of(L, m);
@@ -564,8 +547,8 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
         EXPECT_EQ(st.dropped_threshold, cs.dropped_threshold);
         EXPECT_EQ(st.dropped_flush, cs.dropped_flush);
         EXPECT_EQ(static_cast<std::uint64_t>(LT.nnz), trsv.stored_nnz());
-        if (rel_env && std::string(rel_env) == "1e-4") { ASSERT_GT(st.dropped, L11_nnz / 4); }   // teeth
-        if (rel_env && std::string(rel_env) == "0")    { ASSERT_EQ(st.dropped, 0u); }
+        if (rel == 1e-4) { ASSERT_GT(st.dropped, L11_nnz / 4); }   // teeth
+        if (rel == 0)    { ASSERT_EQ(st.dropped, 0u); }
         // ... same structure ...
         ASSERT_EQ(trsv.csc_col_ptr().size(), static_cast<size_t>(m) + 1);
         for (node_index j = 0; j <= m; ++j)
@@ -609,7 +592,7 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
 }
 
 // The fp16 per-column-scaled storage the dataflow backend uploads under
-// APXCHOL_FACTOR_STORAGE=float16 (cuda_host.h file header): each slot is
+// FP16 factor storage (cuda_host.h file header): each slot is
 // binary16(fp32(v) / s_j) RNE with fp16 subnormals flushed to signed zero
 // (restated here with native _Float16 conversions), diag[j] =
 // fp32(L_jj) / s_j, inv_scale2[j] = fp64(fp32(1 / s_j))^2; with diag_comp the column's
@@ -1195,7 +1178,6 @@ void expect_drop_stats_equal(const apxchol::factor_drop_stats& a,
 // thousands of segment items is also the deadlock torture).
 TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministic) {
     const node_index n = 60001, m = n - 1;
-    scoped_drop_env env("1e-4");
     const int resident = apxchol::dataflow_grid_size(false);
     ASSERT_GE(resident, 1);
     for (int kind = 0; kind < 2; ++kind) {
@@ -1288,7 +1270,6 @@ TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministi
 
 TEST(GpuDataflow, ScalarAndPanelsMatchCpuReferenceAndAreDeterministic) {
     const node_index n = 60001, m = n - 1;
-    scoped_drop_env env("1e-4");
     for (int kind = 0; kind < 2; ++kind) {
         SCOPED_TRACE(kind ? "hub-tail factor" : "no-hub factor");
         const sparse_csc L = kind ? make_hub_tail_lower(n) : make_dominant_lower(n);
@@ -1296,77 +1277,74 @@ TEST(GpuDataflow, ScalarAndPanelsMatchCpuReferenceAndAreDeterministic) {
         { std::mt19937 rng(11); std::uniform_real_distribution<double> u(-1.0, 1.0); for (auto& v : x) v = u(rng); }
         // The CPU reference pair (fp32 storage, fp64 accumulation) -- one
         // setup, every GPU variant is compared against it. The storage is
-        // pinned: the suite is also run with APXCHOL_FACTOR_STORAGE=float16 in the
-        // environment, and the tolerances are stated against the fp32 pair.
+        // explicit, and the tolerances are stated against the fp32 pair.
         {
-            scoped_env cpu32("APXCHOL_FACTOR_STORAGE", "float32");
             apxchol::omp_sptrsv c; c.setup(L, m);
             std::vector<double> t(m);
             c.forward_solve(x.data(), t.data());
             c.transpose_solve(t.data(), y_cpu.data());
         }
-        for (const char* seg : {"0", "256"}) {
-            for (bool fp16 : {false, true}) {
-                SCOPED_TRACE(std::string("APXCHOL_GPU_DF_SPLIT=") + seg + (fp16 ? " fp16" : " fp32"));
-                scoped_env f16("APXCHOL_FACTOR_STORAGE", fp16 ? "float16" : "float32");
-                scoped_env sg("APXCHOL_GPU_DF_SPLIT", seg);
-                apxchol::cuda_sptrsv t; t.setup(L, m);
-                ASSERT_STREQ(t.backend_name(), "dataflow");
-                EXPECT_EQ(t.fp16(), fp16);
-                EXPECT_GE(t.dataflow_grid(), 1);
-                t.solve_LLt(x.data(), y_df.data());
-                t.solve_LLt(x.data(), y_df2.data());
-                double maxabs = 0, maxdiff = 0; std::size_t nd = 0, nd2 = 0;
-                for (node_index i = 0; i < m; ++i) {
-                    ASSERT_TRUE(std::isfinite(y_cpu[i]) && std::isfinite(y_df[i])) << i;
-                    maxabs = std::max(maxabs, std::fabs(y_cpu[i]));
-                    maxdiff = std::max(maxdiff, std::fabs(y_cpu[i] - y_df[i]));
-                    nd  += y_cpu[i] != y_df[i];
-                    nd2 += y_df[i] != y_df2[i];
-                }
-                EXPECT_LT(maxdiff / maxabs, fp16 ? kPairTolFp16 : kPairTolFp32)
-                    << "L L^T pair: GPU dataflow vs CPU omp_sptrsv";
-                EXPECT_GT(nd, 0u);
-                EXPECT_EQ(nd2, 0u) << "dataflow pair not bit-identical run to run";
-                for (unsigned columns : {2, 4}) {
-                    SCOPED_TRACE(columns);
-                    std::vector<double> panel(m * columns), sentinel(m * columns, 123.0);
-                    for (node_index row = 0; row < m; ++row)
-                        for (unsigned q = 0; q < columns; ++q)
-                            panel[row * columns + q] = std::ldexp(x[row], q);
-                    test_device_allocations memory;
-                    auto* rhs = memory.upload(panel.data(), panel.size());
-                    auto* output = memory.upload(sentinel.data(), sentinel.size());
-                    for (bool partial : {false, true}) {
-                        SCOPED_TRACE(partial);
-                        const unsigned active[] = {1, 0, unsigned(!partial), 0, 1, 0, unsigned(!partial), 0};
-                        auto* mask = memory.upload(active, std::size(active));
-                        ASSERT_EQ(cudaMemcpy(output, sentinel.data(), sentinel.size() * sizeof(double),
-                                             cudaMemcpyHostToDevice), cudaSuccess);
-                        auto solve = [&] {
-                            if (columns == 2) t.solve_LLt_dev<2>(rhs, output, mask, 2);
-                            else t.solve_LLt_dev<4>(rhs, output, mask, 2);
-                        };
-                        solve();
-                        const auto actual = dev_download(output, panel.size());
-                        for (unsigned q = 0; q < columns; ++q) {
-                            double error = 0;
-                            for (node_index row = 0; row < m; ++row) {
-                                const auto k = row * columns + q;
-                                ASSERT_TRUE(std::isfinite(actual[k]));
-                                if (!active[2 * q]) EXPECT_EQ(actual[k], sentinel[k]);
-                                else error = std::max(error, std::abs(actual[k] - std::ldexp(y_cpu[row], q)));
-                            }
-                            if (active[2 * q])
-                                EXPECT_LT(error / std::ldexp(maxabs, q), fp16 ? kPairTolFp16 : kPairTolFp32);
-                        }
-                        solve();
-                        EXPECT_EQ(actual, dev_download(output, panel.size()));
-                    }
-                }
-                std::fprintf(stderr, "[GpuDataflow] %s split=%s %s pair: max rel diff vs the CPU pair %.3e\n",
-                             kind ? "hub" : "plain", seg, fp16 ? "fp16" : "fp32", maxdiff / maxabs);
+        for (bool fp16 : {false, true}) {
+            SCOPED_TRACE(fp16 ? "fp16" : "fp32");
+            const apxchol::factor_options options{.factor_storage = fp16
+                ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32};
+            apxchol::cuda_sptrsv t; t.setup(L, m, options);
+            ASSERT_STREQ(t.backend_name(), "dataflow");
+            EXPECT_EQ(t.fp16(), fp16);
+            EXPECT_GE(t.dataflow_grid(), 1);
+            t.solve_LLt(x.data(), y_df.data());
+            t.solve_LLt(x.data(), y_df2.data());
+            double maxabs = 0, maxdiff = 0; std::size_t nd = 0, nd2 = 0;
+            for (node_index i = 0; i < m; ++i) {
+                ASSERT_TRUE(std::isfinite(y_cpu[i]) && std::isfinite(y_df[i])) << i;
+                maxabs = std::max(maxabs, std::fabs(y_cpu[i]));
+                maxdiff = std::max(maxdiff, std::fabs(y_cpu[i] - y_df[i]));
+                nd  += y_cpu[i] != y_df[i];
+                nd2 += y_df[i] != y_df2[i];
             }
+            EXPECT_LT(maxdiff / maxabs, fp16 ? kPairTolFp16 : kPairTolFp32)
+                << "L L^T pair: GPU dataflow vs CPU omp_sptrsv";
+            EXPECT_GT(nd, 0u);
+            EXPECT_EQ(nd2, 0u) << "dataflow pair not bit-identical run to run";
+            for (unsigned columns : {2, 4}) {
+                SCOPED_TRACE(columns);
+                std::vector<double> panel(m * columns), sentinel(m * columns, 123.0);
+                for (node_index row = 0; row < m; ++row)
+                    for (unsigned q = 0; q < columns; ++q)
+                        panel[row * columns + q] = std::ldexp(x[row], q);
+                test_device_allocations memory;
+                auto* rhs = memory.upload(panel.data(), panel.size());
+                auto* output = memory.upload(sentinel.data(), sentinel.size());
+                for (bool partial : {false, true}) {
+                    SCOPED_TRACE(partial);
+                    const unsigned active[] = {1, 0, unsigned(!partial), 0, 1, 0, unsigned(!partial), 0};
+                    auto* mask = memory.upload(active, std::size(active));
+                    ASSERT_EQ(cudaMemcpy(output, sentinel.data(), sentinel.size() * sizeof(double),
+                                         cudaMemcpyHostToDevice), cudaSuccess);
+                    auto solve = [&] {
+                        if (columns == 2) t.solve_LLt_dev<2>(rhs, output, mask, 2);
+                        else t.solve_LLt_dev<4>(rhs, output, mask, 2);
+                    };
+                    solve();
+                    const auto actual = dev_download(output, panel.size());
+                    for (unsigned q = 0; q < columns; ++q) {
+                        double error = 0;
+                        for (node_index row = 0; row < m; ++row) {
+                            const auto k = row * columns + q;
+                            ASSERT_TRUE(std::isfinite(actual[k]));
+                            if (!active[2 * q]) { EXPECT_EQ(actual[k], sentinel[k]); }
+                            else error = std::max(error, std::abs(actual[k] - std::ldexp(y_cpu[row], q)));
+                        }
+                        if (active[2 * q]) {
+                            EXPECT_LT(error / std::ldexp(maxabs, q), fp16 ? kPairTolFp16 : kPairTolFp32);
+                        }
+                    }
+                    solve();
+                    EXPECT_EQ(actual, dev_download(output, panel.size()));
+                }
+            }
+            std::fprintf(stderr, "[GpuDataflow] %s %s pair: max rel diff vs the CPU pair %.3e\n",
+                         kind ? "hub" : "plain", fp16 ? "fp16" : "fp32", maxdiff / maxabs);
         }
     }
 }
@@ -1381,14 +1359,12 @@ TEST(GpuSptrsvAdoptionDevice, Fp32AndFp16MatchTheExistingUploadPathBitForBit) {
         for (double& item : input) item = value(rng);
     }
 
-    scoped_drop_env drop("1e-4");
-    scoped_env backend("APXCHOL_GPU_SPTRSV", "dataflow");
-    scoped_env split("APXCHOL_GPU_DF_SPLIT", "256");
     for (bool fp16 : {false, true}) {
         SCOPED_TRACE(fp16 ? "fp16" : "fp32");
-        scoped_env storage("APXCHOL_FACTOR_STORAGE", fp16 ? "float16" : "float32");
+        const apxchol::factor_options options{.factor_storage = fp16
+            ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32};
         apxchol::cuda_sptrsv uploaded;
-        uploaded.setup(factor, m);
+        uploaded.setup(factor, m, options);
         ASSERT_FALSE(uploaded.adopted_device_factor());
         ASSERT_EQ(uploaded.adoption_host_download_bytes(), 0u);
 
@@ -1401,7 +1377,7 @@ TEST(GpuSptrsvAdoptionDevice, Fp32AndFp16MatchTheExistingUploadPathBitForBit) {
         {
             apxchol::cuda_sptrsv adopted;
             adopted.setup_adopting_device_factor_for_research(
-                std::move(prepared.factor));
+                std::move(prepared.factor), options);
             EXPECT_TRUE(prepared.factor.empty());
             ASSERT_TRUE(adopted.ready());
             EXPECT_TRUE(adopted.adopted_device_factor());
@@ -1435,9 +1411,7 @@ TEST(GpuSptrsvAdoptionDevice, Fp32AndFp16MatchTheExistingUploadPathBitForBit) {
 TEST(GpuSptrsvAdoptionDevice, InvalidStructureRollsBackOwnershipAndDestination) {
     const node_index n = 1025, m = n - 1;
     const sparse_csc factor = make_dominant_lower(n);
-    scoped_drop_env drop("1e-4");
-    scoped_env backend("APXCHOL_GPU_SPTRSV", "dataflow");
-    scoped_env storage("APXCHOL_FACTOR_STORAGE", "float32");
+    const apxchol::factor_options options{.factor_storage = apxchol::factor_storage_type::fp32};
 
     apxchol::cuda_sptrsv destination;
     prepared_adoption malformed =
@@ -1447,7 +1421,7 @@ TEST(GpuSptrsvAdoptionDevice, InvalidStructureRollsBackOwnershipAndDestination) 
     ASSERT_TRUE(live_device_allocation(failed_probe));
     try {
         destination.setup_adopting_device_factor_for_research(
-            std::move(malformed.factor));
+            std::move(malformed.factor), options);
         FAIL() << "malformed adopted structure was accepted";
     } catch (const std::invalid_argument& error) {
         EXPECT_NE(std::string(error.what()).find("rowptr[m]"),
@@ -1465,7 +1439,7 @@ TEST(GpuSptrsvAdoptionDevice, InvalidStructureRollsBackOwnershipAndDestination) 
     prepared_adoption valid = prepare_adoption(factor, m, /*fp16=*/false);
     const void* success_probe = valid.lifetime_probe;
     destination.setup_adopting_device_factor_for_research(
-        std::move(valid.factor));
+        std::move(valid.factor), options);
     EXPECT_TRUE(destination.ready());
     EXPECT_TRUE(destination.adopted_device_factor());
     EXPECT_TRUE(live_device_allocation(success_probe));
