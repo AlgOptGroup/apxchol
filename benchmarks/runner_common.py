@@ -123,8 +123,8 @@ def cell_meets_contract(cell):
     and a recorded cap for timeouts."""
     if not isinstance(cell, dict) or not isinstance(cell.get("cell"), dict):
         return False
-    status, metrics = cell.get("status"), cell.get("metrics") or {}
-    if not isinstance(metrics, dict):
+    status, metrics = cell.get("status"), cell.get("metrics", {})
+    if not isinstance(status, str) or not isinstance(metrics, dict):
         return False
     if status == "timeout":
         return timeout_cap({"timeout_cap_s": cell.get("timeout_cap_s")}) is not None

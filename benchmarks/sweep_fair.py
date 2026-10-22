@@ -537,7 +537,7 @@ def stored_cell_done(family, mid, solver, config, threads, device,
     # uncapped for an honest wall time. complete/oom/failed stay terminal (no point).
     if rerun_timeouts and st == "timeout":
         return False
-    if st not in terminal:
+    if not isinstance(st, str) or st not in terminal:
         return False
     return rc.cell_is_current(cell, _head_sha())
 

@@ -284,6 +284,13 @@ class CellReuseTest(unittest.TestCase):
                 with self.subTest(field=field, value=value):
                     self.assertFalse(rc.cell_is_current(self.cell(**{field: value}), self.SHA))
 
+    def test_malformed_status_is_rejected(self):
+        for status in (None, [], {}, 0, True):
+            with self.subTest(status=status):
+                cell = self.cell(status=status)
+                self.assertFalse(rc.cell_meets_contract(cell))
+                self.assertFalse(rc.cell_is_current(cell, self.SHA))
+
 
 if __name__ == "__main__":
     unittest.main()

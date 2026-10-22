@@ -16,8 +16,7 @@ This separate project compares apxchol with other sparse solvers using common in
   residual-evaluation time **within** Solve; do not subtract it for comparisons.
   `solve_passes` (or ParAC's `stop_checks`) explains additional work. No new
   host check/transfer is inserted into every GPU iteration. Independent final
-  grading remains outside timing. Factors/hierarchies are retained; the packed
-  CMG API is the exception and reports/charges every repeated setup explicitly.
+  grading remains outside timing. Factors/hierarchies are retained through retries.
 - CPU apxchol, Eigen CG, AMGCL and Hypre warm-start native retries. GPU apxchol
   and RCHOL reuse setup with cold native restarts. Julia AC/AC2 reuse their native
   solver closures; Julia CG, regularized ICC and direct methods can use residual
@@ -75,6 +74,15 @@ uses fixed tiny connected/disconnected/SDDM fixtures to warm its native closure
 types before timing; these fixtures do not depend on the measured matrix.
 
 Canonical MATLAB CMG is unavailable on ARM64.
+Its Linux container recipe remains in [cmg/Dockerfile.matlab](cmg/Dockerfile.matlab):
+
+```sh
+docker build -t apxchol-matlab-cmg:r2026a -f benchmarks/cmg/Dockerfile.matlab benchmarks/cmg
+```
+
+Set `APXCHOL_MATLAB_ROOT` to a licensed MATLAB R2026a installation and
+`APXCHOL_CMG_SOLVER` to a CMG checkout whose MEX files were built with `makeCMG`
+for that MATLAB version. The runner mounts both installations into the container.
 
 ## Build and run
 
@@ -90,6 +98,7 @@ Optional solvers require their runtimes. Julia dependencies:
 
 ```sh
 julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()'
+julia --project=benchmarks/julia benchmarks/julia/test_original_stop.jl
 ```
 
 Runner controls include `--only`, `--threads`, `--repeat`, `--store`.

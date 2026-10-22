@@ -89,23 +89,21 @@ def emit(mid, family, lab, solver, config, t, m, status, prov=None):
 def done(mid, solver, config, t):
     tag = _cell_tag(solver, config)
     p = f"{CELLS}/{mid}__{tag}__t{t}{'__gpu' if DEVICE == 'gpu' else ''}.json"
-    if not os.path.exists(p):
+    try:
+        with open(p) as handle:
+            record = json.load(handle)
+    except (OSError, json.JSONDecodeError):
         return False
-    with open(p) as handle:
-        record = json.load(handle)
-    if record.get("schema") != SCALING_SCHEMA:
+    if (not rc.cell_is_current(record, PROV.get("git_sha"))
+            or record.get("schema") != SCALING_SCHEMA):
         return False
-    provenance = record.get("provenance", {})
+    provenance = record["provenance"]
     if any(provenance.get(key) != PROV.get(key) for key in
-           ("git_sha", "repeat", "warmup", "timing_protocol")):
+           ("repeat", "warmup", "timing_protocol")):
         return False
-    status = record.get("status")
-    if status in {"complete", "not_converged"} and (record.get("metrics") or {}).get("stop_contract") != "original-v1":
-        return False
+    status = record["status"]
     if (solver == "apxchol_v1" and status in {"complete", "not_converged"}
-            and (record.get("metrics") or {}).get("execution_route") != DEVICE):
-        return False
-    if status == "timeout" and not record.get("timeout_cap_s"):
+            and record["metrics"].get("execution_route") != DEVICE):
         return False
     return status not in RERUN_STATUSES and status in (
         "complete", "not_converged", "timeout", "failed", "oom", "n/a")
@@ -127,6 +125,8 @@ def _scaling_records():
         if not isinstance(record, dict) or "cell" not in record or "status" not in record:
             continue
         cell = record.get("cell", {})
+        if not isinstance(cell, dict):
+            raise RuntimeError(f"invalid cell identity in {filename}")
         if cell.get("device", "cpu") != DEVICE:
             continue
         if SCOPE_FILTER and (cell.get("matrix_id") not in matrices or

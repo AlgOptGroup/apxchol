@@ -2,8 +2,8 @@
 """CMG (Koutis combinatorial multigrid) runner via the canonical MATLAB R2026a.
 
 Runs the canonical MATLAB CMG (Koutis original) inside the mathworks/matlab-deps
-container; the CMG MEX is recompiled for R2026a once with makeCMG (mx_*.mexa64).
-The container recipe lives in the research archive.
+container built from benchmarks/cmg/Dockerfile.matlab; the CMG MEX is recompiled
+for R2026a once with makeCMG (mx_*.mexa64).
 
 Per matrix: dump the operator the sweep's own solvers were given (--dump-mtx, the
 one seam every external solver goes through), run bench_cmg.m in the container,
@@ -58,7 +58,7 @@ PROV = {"boost": "on", "git_sha": rc.git_sha(),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
 # CMG's compiled part is the MEX that MATLAB's `mex` built inside the container
-# (see the research archive for its recipe), so the toolchain is read off that .mexa64
+# (benchmarks/cmg/Dockerfile.matlab), so the toolchain is read off that .mexa64
 # rather than off this host's compiler — the container's gcc is not this
 # machine's, and the file is the only thing that knows which one built it. The
 # rest of CMG is MATLAB m-code run by the R2026a interpreter (see the note).
@@ -104,8 +104,8 @@ def available():
     except Exception as e:                                  # docker missing / not usable
         return False, f"docker is not usable here ({e})"
     if cp.returncode != 0:
-        return False, (f"the container image {IMAGE} is missing — build it from "
-                       f"the recipe in the research archive")
+        return False, (f"the container image {IMAGE} is missing — run "
+                       f"docker build -t {IMAGE} -f benchmarks/cmg/Dockerfile.matlab benchmarks/cmg")
     return True, ""
 
 
