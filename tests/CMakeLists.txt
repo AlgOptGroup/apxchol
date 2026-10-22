@@ -51,6 +51,7 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
     # through std::max(max_iter, 0) into gpu_pcg::solve for this file's test
     # preconditioner and delete its iteration loop; scalar GpuSolveHonesty
     # solves then stop at iteration zero. GCC 14 and Clang are correct.
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=128092
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
         set_source_files_properties(test_gpu_operator_csr.cpp PROPERTIES
