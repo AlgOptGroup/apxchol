@@ -16,9 +16,7 @@
 #include <cstring>
 #include <random>
 #include <vector>
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
@@ -145,7 +143,6 @@ TEST(SpTRSVTranspose, ByteIdenticalToSerialReferenceAcrossThreadCounts) {
     const ref_csr R = reference_transpose(L);
     ASSERT_GT(L.nonZeros(), edge_index(4) * m);   // sanity: dense enough
 
-#ifdef _OPENMP
     const int max_threads = omp_get_max_threads();
     // 1..4 under the ctest OMP_NUM_THREADS=4 cap; max_threads additionally
     // covers the full machine when the binary is run standalone.
@@ -156,11 +153,6 @@ TEST(SpTRSVTranspose, ByteIdenticalToSerialReferenceAcrossThreadCounts) {
         expect_byte_identical(trsv, R, threads);
     }
     omp_set_num_threads(max_threads);
-#else
-    apxchol::omp_sptrsv trsv;
-    trsv.setup(L, m);
-    expect_byte_identical(trsv, R, 1);
-#endif
 }
 
 // Ascending-column order within each row is what the solve kernels rely on
@@ -250,7 +242,6 @@ TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThre
     const auto R16 = reference_transpose_int(LT16);
     ASSERT_GT(LT.nnz, static_cast<std::int64_t>(4) * m);
 
-#ifdef _OPENMP
     const int max_threads = omp_get_max_threads();
     for (int threads : {1, 2, 3, 4, max_threads}) {
         omp_set_num_threads(threads);
@@ -258,10 +249,6 @@ TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThre
         expect_gpu_transpose_identical(LT16, R16, threads);
     }
     omp_set_num_threads(max_threads);
-#else
-    expect_gpu_transpose_identical(LT, R, 1);
-    expect_gpu_transpose_identical(LT16, R16, 1);
-#endif
     // And it IS the CPU backend's CSR of L11 (same shared code, same input):
     // row pointers, column indices, values (fp32 storage: a plain cast).
     apxchol::omp_sptrsv trsv;

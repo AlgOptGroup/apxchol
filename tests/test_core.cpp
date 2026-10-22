@@ -21,9 +21,7 @@
 #include "apxchol/graph/graph.h"
 #include "reference_graph.h"
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 // ── Typed test fixture ───────────────────────────────
 
@@ -267,10 +265,8 @@ auto adjacency_records(const apxchol::graph& G) {
 
 TEST(ResidualSparsifyTest,
      ParallelForestAndDirectedRebuildAreByteEquivalentToSerial) {
-#ifdef _OPENMP
     const int previous_threads = omp_get_max_threads();
     omp_set_num_threads(4);
-#endif
     constexpr apxchol::node_index n = 16;
     std::vector<apxchol::node_index> active(n);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
@@ -286,28 +282,17 @@ TEST(ResidualSparsifyTest,
             G, active, 0.35, 0x123456789abcdef0ULL);
     };
 
-#ifdef _OPENMP
     omp_set_num_threads(1);
-#endif
     auto serial = make_dense();
     const auto serial_stats = run(serial);
-#ifdef _OPENMP
     omp_set_num_threads(4);
-#endif
     auto parallel = make_dense();
     const auto parallel_stats = run(parallel);
-#ifdef _OPENMP
     omp_set_num_threads(previous_threads);
-#endif
-#ifdef _OPENMP
     ASSERT_GT(parallel_stats.forest_shards, 1u);
     ASSERT_LT(parallel_stats.forest_candidates,
               parallel_stats.distinct_before);
     ASSERT_GT(parallel_stats.rebuild_threads, 1u);
-#else
-    EXPECT_EQ(parallel_stats.forest_shards, 1u);
-    EXPECT_EQ(parallel_stats.rebuild_threads, 1u);
-#endif
     EXPECT_EQ(serial_stats.physical_before, parallel_stats.physical_before);
     EXPECT_EQ(serial_stats.distinct_before, parallel_stats.distinct_before);
     EXPECT_EQ(serial_stats.kept_edges, parallel_stats.kept_edges);
@@ -476,22 +461,15 @@ Eigen::SparseMatrix<double> csc_edge_fixture() {
 
 TEST(DirectedCscGraph, FullColumnsKeepCanonicalWeightsZerosAndIsolatedVertices) {
     const auto L = csc_edge_fixture();
-#ifdef _OPENMP
     const int prior = omp_get_max_threads();
     for (int t : {1, 4, 16}) {
         omp_set_num_threads(t);
         expect_directed_csc_matches_general(L);
     }
     omp_set_num_threads(prior);
-#else
-    expect_directed_csc_matches_general(L);
-#endif
 }
 
 TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
-#ifndef _OPENMP
-    GTEST_SKIP() << "requires OpenMP team reduction";
-#else
     const int prior_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(1);
     auto L = apxchol::laplacian(make_grid_vec(20, 20));
@@ -533,7 +511,6 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
     omp_set_max_active_levels(prior_levels);
     ASSERT_EQ(observed_inner,1);
     if (observed_outer != 2) GTEST_SKIP() << "outer team unavailable";
-#endif
 }
 
 TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
@@ -582,16 +559,12 @@ TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
                       std::bit_cast<std::uint64_t>(proven.excess(v)));
         }
     };
-#ifdef _OPENMP
     const int prior = omp_get_max_threads();
     for (int t : {1, 3, 16}) {
         omp_set_num_threads(t);
         same_graph();
     }
     omp_set_num_threads(prior);
-#else
-    same_graph();
-#endif
 }
 
 TEST(CscWork, WorkBalancedRangesPartitionTheRowsAndBoundEveryChunk) {

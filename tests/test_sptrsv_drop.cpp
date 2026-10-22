@@ -37,9 +37,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/omp.h"
@@ -486,10 +484,8 @@ TEST(SpTRSVDrop, CompactedArraysAreByteIdenticalAcrossThreadCounts) {
     const sparse_csc L = make_wide_magnitude_lower(n);
     scoped_drop_env env("1e-4");
     apxchol::omp_sptrsv ref;
-#ifdef _OPENMP
     const int max_threads = omp_get_max_threads();
     omp_set_num_threads(1);
-#endif
     ref.setup(L, m);
     ASSERT_GT(ref.drop_stats().dropped, static_cast<std::uint64_t>(m));   // teeth
     ASSERT_EQ(ref.drop_stats().dropped, reference_dense_drop(L, m, 1e-4).zeroed);
@@ -512,7 +508,6 @@ TEST(SpTRSVDrop, CompactedArraysAreByteIdenticalAcrossThreadCounts) {
         EXPECT_EQ(0, std::memcmp(t.csc_vals().data(), ref.csc_vals().data(),
                                  ref.csc_vals().size() * sizeof(sptrsv_value_t)));
     };
-#ifdef _OPENMP
     for (int threads : {2, 3, 4, max_threads}) {
         SCOPED_TRACE("threads=" + std::to_string(threads));
         omp_set_num_threads(threads);
@@ -521,11 +516,6 @@ TEST(SpTRSVDrop, CompactedArraysAreByteIdenticalAcrossThreadCounts) {
         same(t);
     }
     omp_set_num_threads(max_threads);
-#else
-    apxchol::omp_sptrsv t;
-    t.setup(L, m);
-    same(t);
-#endif
 }
 
 // ── GPU backend host preparation (cuda_host.h; CUDA-free, so stated here on
