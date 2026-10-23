@@ -1,32 +1,9 @@
 #!/usr/bin/env python3
-"""CMG (Koutis combinatorial multigrid) runner via the canonical MATLAB R2026a.
+"""Retained MATLAB CMG adapter, unavailable for current comparisons.
 
-Runs the canonical MATLAB CMG (Koutis original) inside the mathworks/matlab-deps
-container; the CMG MEX is recompiled for R2026a once via
-benchmarks/cmg/Dockerfile.matlab + makeCMG (mx_*.mexa64).
-
-Per matrix: dump the operator the sweep's own solvers were given (--dump-mtx, the
-one seam every external solver goes through), run bench_cmg.m in the container,
-parse the CSV, emit a cell. CMG's hierarchy setup is O(n), so the giants are
-capped out. Resume-safe.
-
-The matrix reaches CMG the way its declared kind says it should:
-
-  kind=graph     the dumped L, re-derived from |off-diagonal| (which for a graph
-                 dump reproduces exactly the L that was written), shifted by
-                 reg_rel=1e-6*mean|diag| — CMG is the lone reg-rel solver and is
-                 scored on L+eps*I, per the Protocol.
-  kind=operator  the dumped matrix read AS AN OPERATOR — diagonal included — and
-                 solved unpinned and unshifted, so CMG is measured on the same
-                 published operator as everything else in the cell. (The
-                 Laplacian reading rebuilds the diagonal as the degree, which for
-                 an SDDM operator silently discards its diagonal excess.)
-
-sweep_fair.py runs this in-process, so a normal sweep fills the cmg cells; it can
-also be driven on its own:
-
-  python3 benchmarks/cmg_matlab_runner.py            # all chart matrices (grids/ipm/ss)
-  python3 benchmarks/cmg_matlab_runner.py G3_circuit grid_2000   # a subset
+This legacy path generates its own RHS and shifts graph Laplacians. Keep its
+source and licensed-runtime container recipe for reference; availability stays
+false until a validated shared original-operator/RHS adapter replaces it.
 """
 import os, re, subprocess, sys, time
 
@@ -87,29 +64,9 @@ def _dump(mid):
 
 
 def available():
-    """(ok, reason) — is CMG runnable on this machine at all?
-
-    Probed ONCE by the sweep, so a machine without MATLAB says so in one loud
-    line instead of failing 27 times or, worse, leaving 27 silent gaps."""
-    native = rc.external_path("APXCHOL_CMG_NATIVE_BIN", "CMG_NATIVE_BIN")
-    if native:
-        return (True, "") if os.path.isfile(native) and os.access(native, os.X_OK) else (False, f"native CMG binary is not executable: {native}")
-    for val, what in ((MATLAB, "the MATLAB R2026a install tree "
-                               "($APXCHOL_MATLAB_ROOT / paths_local.MATLAB)"),
-                      (CMG_SOLVER, "the cmg-solver checkout "
-                                   "($APXCHOL_CMG_SOLVER / paths_local.CMG_SOLVER)")):
-        if not val:
-            return False, f"{what} is not configured"
-        if not os.path.exists(val):
-            return False, f"{what} is not at {val}"
-    try:
-        cp = sh(f"docker image inspect {IMAGE}", timeout=120)
-    except Exception as e:                                  # docker missing / not usable
-        return False, f"docker is not usable here ({e})"
-    if cp.returncode != 0:
-        return False, (f"the container image {IMAGE} is missing — build it from "
-                       f"benchmarks/cmg/Dockerfile.matlab")
-    return True, ""
+    """The retained adapter cannot produce a current shared-input comparison."""
+    return False, ("the retained MATLAB adapter generates a local RHS and shifts "
+                   "Laplacians; a shared original-operator/RHS adapter is required")
 
 
 def _run_matlab_cmg(mtx_basename, as_operator):
@@ -138,9 +95,9 @@ def _run_matlab_cmg(mtx_basename, as_operator):
 
 
 def run_one(mid):
-    if rc.external_path("APXCHOL_CMG_NATIVE_BIN", "CMG_NATIVE_BIN"):
-        import cmg_native_runner
-        return cmg_native_runner.run_one(mid, THREADS)
+    ready, reason = available()
+    if not ready:
+        return f"UNAVAILABLE: {reason}"
     fam = rc.MATRICES[mid]["family"]
     if rc.cell_done(fam, mid, "cmg", "", THREADS, "cpu", terminal=TERMINAL):
         return "skip(done)"
@@ -189,6 +146,9 @@ CHART_MATS = [m for m, meta in rc.MATRICES.items()
               if meta["family"] in ("grids", "ipm", "suitesparse")]
 
 if __name__ == "__main__":
+    ready, reason = available()
+    if not ready:
+        sys.exit(f"CMG unavailable: {reason}")
     mats = sys.argv[1:] or CHART_MATS
     for mid in mats:
         print(f"[cmg] {mid:18} {run_one(mid)}", flush=True)

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Regression tests for the retained benchmark runners and scaling plots."""
 import json
 import pathlib
 import subprocess
@@ -10,15 +11,7 @@ from unittest import mock
 BENCH = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BENCH))
 
-import fair_charts as cpu  # noqa: E402
-import chart_cells  # noqa: E402
-import combined_charts as combined  # noqa: E402
-import fill_chart  # noqa: E402
-import fill_pass  # noqa: E402
-import gpu_charts as gpu  # noqa: E402
 import runner_common as rc  # noqa: E402
-import selector_levels  # noqa: E402
-import stale_cells  # noqa: E402
 import sweep_fair  # noqa: E402
 import thread_scaling  # noqa: E402
 
@@ -27,8 +20,10 @@ def record(status, total, *, threads=16, cap=None, solver="amgcl", config=""):
     out = {
         "cell": {"family": "audit", "matrix_id": "m", "solver": solver,
                  "config": config, "threads": threads, "device": "cpu"},
-        "metrics": {} if total is None else {"total_s": total},
+        "metrics": {} if total is None else {
+            "total_s": total, "stop_contract": "original-v1"},
         "status": status,
+        "provenance": {"git_sha": rc.git_sha()},
     }
     if cap is not None:
         out["timeout_cap_s"] = cap
@@ -85,16 +80,6 @@ class CompleteRouteRunnerTest(unittest.TestCase):
                 self.assertEqual(status, "complete" if actual == device else "failed")
                 self.assertEqual("route_failure" in metrics, actual != device)
 
-    def test_fill_consumer_sums_all_actual_component_owners(self):
-        stdout = "v1,m,4,8,1,2,3,2,1e-9,3,1,original-v1,1,0.1,cpu\n"
-        receipt = "BENCH_REPEAT phase=retained index=1 execution_route=cpu\n"
-        first = "FILL v1 Lnnz=5 offdiag=3 adj_nnz=2 stored_nnz=4 execution_route=cpu source=measured_owner\n"
-        second = "FILL v1 Lnnz=9 offdiag=7 adj_nnz=4 stored_nnz=8 execution_route=cpu source=measured_owner\n"
-        self.assertEqual(fill_pass.parse_apxchol_fill(stdout, first + second + receipt), (4, 6, 10))
-        for bad in (first.replace("source=measured_owner", "source=refactorized") + receipt,
-                    first + receipt.replace("route=cpu", "route=gpu"), receipt):
-            with self.assertRaises(ValueError):
-                fill_pass.parse_apxchol_fill(stdout, bad)
 
     def test_gpu_plan_contains_no_host_selector_ablations(self):
         self.assertEqual(sweep_fair.APX_GPU, [("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG)])
@@ -151,198 +136,108 @@ class JuliaDriverPathTest(unittest.TestCase):
         self.assertIn(f"{rc.ROOT}/benchmarks/julia/bench_laplacians.jl", command)
 
 
-class SeriesRuleTest(unittest.TestCase):
-    def test_gpu_thread_scope_does_not_mix_t16_with_t72(self):
-        with tempfile.TemporaryDirectory() as directory, \
-             mock.patch.object(chart_cells, "_sha_contains", return_value=True):
-            for threads in (16, 72):
-                cell = record("complete", float(threads), threads=threads,
-                              solver="amgcl_cuda")
-                cell["cell"]["device"] = "gpu"
-                (pathlib.Path(directory) / f"m_t{threads}__gpu.json").write_text(json.dumps(cell))
-            rows = gpu.load(directory, threads=72)
-            self.assertEqual(rows[("audit", "m")]["AMGCL (GPU)"]["total"], 72)
-
-    def test_label_maps_are_injective(self):
-        rc.require_injective_labels(cpu.LABELS, "CPU")
-        rc.require_injective_labels(gpu.LABELS, "GPU")
-        with self.assertRaises(RuntimeError):
-            rc.require_injective_labels({("a", "x"): "same", ("a", "y"): "same"},
-                                        "broken")
-
-    def test_thread_choice_is_declared_not_status_ranked(self):
-        complete_t1 = record("complete", 1.0, threads=1)
-        timeout_t16 = record("timeout", None, threads=16, cap=60)
-        self.assertIs(cpu._pick([complete_t1, timeout_t16], "audit", "m", "AMGCL"),
-                      timeout_t16)
-
-    def test_duplicate_same_series_is_rejected_not_ranked(self):
-        with self.assertRaises(RuntimeError):
-            cpu._pick([record("complete", 1.0), record("timeout", None, cap=60)],
-                      "audit", "m", "AMGCL")
-
-    def test_legacy_gpu_csv_is_rejected(self):
-        with tempfile.NamedTemporaryFile(suffix=".csv") as handle:
-            with self.assertRaises(ValueError):
-                gpu.load(handle.name)
-
-    def test_current_greedy_cell_wins_over_legacy_luby_regardless_of_order(self):
-        legacy = record("complete", 1.0, solver="apxchol_v1",
-                        config="luby+tree[vec_pool]")
-        current = record("complete", 2.0, solver="apxchol_v1",
-                         config="greedy+tree[vec_pool]")
-        for records in ([legacy, current], [current, legacy]):
-            data = cpu._cpu_selector_data(records, family="audit",
-                                           storage="vec_pool")
-            self.assertEqual(data[("greedy", "vec_pool")]["m"]["total_s"], 2.0)
-
-    def test_terminal_chart_markers_keep_na_and_nonconvergence_distinct(self):
-        self.assertEqual(combined._terminal_marker("n/a"), "n/a")
-        self.assertEqual(combined._terminal_marker("not_converged"), "not_converged")
-        self.assertEqual(combined._terminal_marker("failed"), "failed")
-        self.assertIsNone(combined._terminal_marker("complete"))
-        self.assertIsNone(combined._terminal_marker(None))
-
-    def test_nonmemory_heatmaps_retain_declared_missing_and_na_rows(self):
-        absent = dict(vals=[float("nan")], is_mem=False, timeouts=[False],
-                      oom=[False], failed=[False], nconv=[False], na=[False])
-        self.assertTrue(combined._keep_heatmap_row(**absent))
-        self.assertTrue(combined._keep_heatmap_row(**dict(absent, na=[True])))
-        self.assertFalse(combined._keep_heatmap_row(
-            **dict(absent, is_mem=True, na=[True])))
-
-
-class CurrentChartCellTest(unittest.TestCase):
-    @staticmethod
-    def _apx_record(sha, total):
-        return {
-            "cell": {"family": "audit", "matrix_id": "com-Amazon",
-                     "solver": "apxchol_v1",
-                     "config": rc.APXCHOL_DEFAULT_CONFIG,
-                     "threads": 16, "device": "cpu"},
-            "matrix_meta": {"kind": "graph"},
-            "metrics": {"total_s": total},
-            "status": "complete",
-            "provenance": {"git_sha": sha},
-        }
-
-    def test_current_chart_filters_invalidated_cell_from_mixed_store(self):
-        with tempfile.TemporaryDirectory() as store:
-            root = pathlib.Path(store)
-            (root / "old.json").write_text(json.dumps(self._apx_record("old", 1.0)))
-            (root / "fresh.json").write_text(json.dumps(self._apx_record("fresh", 2.0)))
-            with mock.patch.object(
-                    chart_cells, "_sha_contains",
-                    side_effect=lambda sha, _commit: sha == "fresh"):
-                records = cpu.load(store)
-        self.assertEqual([r["provenance"]["git_sha"] for r in records], ["fresh"])
-
-    def test_exact_denominator_path_rejects_stale_cell(self):
-        with tempfile.TemporaryDirectory() as store:
-            path = pathlib.Path(store) / "old.json"
-            path.write_text(json.dumps(self._apx_record("old", 1.0)))
-            with mock.patch.object(chart_cells, "_sha_contains", return_value=False):
-                with self.assertRaisesRegex(chart_cells.StaleCellError,
-                                            "checked 1/1 selected cells"):
-                    chart_cells.load_current_entries(
-                        store, stale_policy="reject", announce=False)
-
-    def test_timeout_without_persisted_cap_is_filtered_without_git_rule(self):
-        timeout = record("timeout", None, solver="unscoped_solver")
-        with tempfile.TemporaryDirectory() as store:
-            (pathlib.Path(store) / "timeout.json").write_text(json.dumps(timeout))
-            records, report = chart_cells.load_current_records(
-                store, announce=False)
-        self.assertEqual(records, [])
-        self.assertEqual((report.selected, report.current, report.stale), (1, 0, 1))
-
-    def test_fill_chart_rejects_legacy_records_without_provenance(self):
-        legacy = {"family": "audit", "matrix_id": "m",
-                  "solver": "apxchol_bg", "fill": 1.0}
-        with tempfile.TemporaryDirectory() as store:
-            (pathlib.Path(store) / "legacy.json").write_text(json.dumps(legacy))
-            with self.assertRaisesRegex(chart_cells.CellStoreError,
-                                        "rerun fill_pass.py"):
-                fill_chart.load(store)
-
-    def test_fill_chart_loads_current_schema_after_stale_gate(self):
-        fill = {
-            "schema": fill_pass.FILL_SCHEMA,
-            "cell": {"family": "audit", "matrix_id": "com-Amazon",
-                     "solver": "apxchol_v1", "config": "bg+tree[vec_pool]",
-                     "threads": 16, "device": "cpu"},
-            "matrix_meta": {"kind": "graph"},
-            "metrics": {"fill": 1.25}, "status": "complete",
-            "provenance": {"git_sha": "fresh"}, "series": "apxchol_bg",
-        }
-        with tempfile.TemporaryDirectory() as store:
-            (pathlib.Path(store) / "fill.json").write_text(json.dumps(fill))
-            with mock.patch.object(chart_cells, "_sha_contains", return_value=True):
-                rows = fill_chart.load(store)
-        self.assertEqual(rows[("audit", "com-Amazon")]["apxchol_bg"], 1.25)
-
-    def test_fill_pass_emits_stale_cells_compatible_provenance(self):
-        with tempfile.TemporaryDirectory() as store, \
-             mock.patch.object(fill_pass, "OUT", store), \
-             mock.patch.object(fill_pass, "git_sha", return_value="fresh"), \
-             mock.patch.object(fill_pass.rc, "kind_of", return_value="graph"):
-            fill_pass.emit("m", "audit", "apxchol_bg_aos", 4, 8, 6)
-            record = json.loads(
-                (pathlib.Path(store) / "m__apxchol_bg_aos.json").read_text())
-        self.assertEqual(record["schema"], fill_pass.FILL_SCHEMA)
-        self.assertEqual(record["cell"]["solver"], "apxchol_v1")
-        self.assertEqual(record["cell"]["config"], "bg+tree[vec_pool_aos]")
-        self.assertEqual(record["provenance"]["git_sha"], "fresh")
-        self.assertEqual(record["series"], "apxchol_bg_aos")
-
-    def test_selector_level_plot_only_rejects_legacy_csv_row(self):
-        legacy = {"matrix_id": "grid_2000", "family": "g", "selector": "bg",
-                  "fwd_lvls": "10", "bck_lvls": "10"}
-        with self.assertRaisesRegex(chart_cells.CellStoreError,
-                                    "rerun selector_levels.py"):
-            selector_levels.validate_rows([legacy])
-
-    def test_selector_level_current_row_passes_stale_gate(self):
-        row = {"schema": selector_levels.LEVEL_SCHEMA,
-               "matrix_id": "grid_2000", "family": "g", "selector": "bg",
-               "config": "bg+tree[vec_pool_aos]", "device": "cpu",
-               "git_sha": "fresh", "fwd_lvls": "10", "bck_lvls": "10"}
-        with mock.patch.object(chart_cells, "_sha_contains", return_value=True):
-            selector_levels.validate_rows([row])
-
-    def test_fill_resume_distinguishes_storage_and_preserves_historical_file(self):
-        with tempfile.TemporaryDirectory() as store, \
-             mock.patch.object(fill_pass, "OUT", store), \
-             mock.patch.object(fill_pass, "git_sha", return_value="fresh"), \
-             mock.patch.object(fill_pass.rc, "kind_of", return_value="graph"), \
-             mock.patch.object(chart_cells, "stale_reasons", return_value=[]):
-            old = pathlib.Path(store) / "m__apxchol_bg.json"
-            old.write_text("historical bytes")
-            self.assertFalse(fill_pass.done("m", "apxchol_bg_aos"))
-            fill_pass.emit("m", "audit", "apxchol_bg_aos", 4, 8, 6)
-            self.assertEqual(old.read_text(), "historical bytes")
-            self.assertTrue(fill_pass.done("m", "apxchol_bg_aos"))
-            current = pathlib.Path(store) / "m__apxchol_bg_aos.json"
-            row = json.loads(current.read_text())
-            row["cell"]["config"] = "bg+tree[vec_pool]"
-            current.write_text(json.dumps(row))
-            self.assertFalse(fill_pass.done("m", "apxchol_bg_aos"))
-
-    def test_selector_levels_rejects_historical_storage_under_current_title(self):
-        row = {"schema": selector_levels.LEVEL_SCHEMA, "matrix_id": "grid_2000",
-               "family": "g", "selector": "bg", "config": "bg+tree[vec_pool]",
-               "device": "cpu", "git_sha": "fresh", "fwd_lvls": 10, "bck_lvls": 10}
-        with mock.patch.object(chart_cells, "stale_reasons", return_value=[]):
-            with self.assertRaisesRegex(chart_cells.CellStoreError, "matching CPU AoS"):
-                selector_levels.validate_rows([row])
-
-    def test_fill_chart_keeps_indexed_and_aos_series_distinct(self):
-        labels = dict((key, label) for key, label, _ in fill_chart.SOLVERS)
-        self.assertIn("historical indexed", labels["apxchol_bg"])
-        self.assertIn("AoS", labels["apxchol_bg_aos"])
-
-
 class ThreadScalingStoreTest(unittest.TestCase):
+    def test_resume_checks_the_stored_identity_not_only_the_filename(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store):
+            thread_scaling.emit("m", "audit", "A", "amgcl", "cfg", 4,
+                                {"total_s": 1, "stop_contract": "original-v1"}, "complete")
+            path = pathlib.Path(store) / "m__amgcl_cfg__t4.json"
+            cell = json.loads(path.read_text())
+            for field, value in (("matrix_id", "other"), ("solver", "other"),
+                                 ("config", "other"), ("threads", 8), ("device", "gpu")):
+                with self.subTest(field=field):
+                    changed = {**cell, "cell": {**cell["cell"], field: value}}
+                    path.write_text(json.dumps(changed))
+                    self.assertFalse(thread_scaling.done("m", "amgcl", "cfg", 4))
+
+    def test_render_requires_the_explicitly_selected_source_revision(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store):
+            thread_scaling.emit("m", "audit", "A", "solver", "cfg", 4,
+                                {"total_s": 1, "stop_contract": "original-v1"}, "complete")
+            path = pathlib.Path(store) / "m__solver_cfg__t4.json"
+            cell = json.loads(path.read_text())
+            cell["provenance"]["git_sha"] = "b" * 40
+            path.write_text(json.dumps(cell))
+            self.assertFalse(thread_scaling.done("m", "solver", "cfg", 4))
+            with self.assertRaisesRegex(RuntimeError, "source revision"):
+                thread_scaling._scaling_records()
+            with mock.patch.dict(thread_scaling.PROV, {"git_sha": "b" * 40}):
+                self.assertEqual(thread_scaling._scaling_records(), [(str(path), cell)])
+            cell.pop("provenance")
+            path.write_text(json.dumps(cell))
+            with self.assertRaisesRegex(RuntimeError, "measurement contract"):
+                thread_scaling._scaling_records()
+
+    def test_resume_rejects_malformed_records(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store):
+            thread_scaling.emit("m", "audit", "A", "solver", "cfg", 4,
+                                {"total_s": 1, "stop_contract": "original-v1"}, "complete")
+            path = pathlib.Path(store) / "m__solver_cfg__t4.json"
+            cell = json.loads(path.read_text())
+            self.assertTrue(thread_scaling.done("m", "solver", "cfg", 4))
+            malformed = [None, [], {}, "x", 1, True]
+            for field in ("cell", "provenance", "metrics"):
+                malformed.extend({**cell, field: value} for value in (None, [], ["x"], "x", 1, True))
+            for value in malformed:
+                with self.subTest(record=value):
+                    path.write_text(json.dumps(value))
+                    self.assertFalse(thread_scaling.done("m", "solver", "cfg", 4))
+            path.write_text("{invalid JSON")
+            self.assertFalse(thread_scaling.done("m", "solver", "cfg", 4))
+            with mock.patch("builtins.open", side_effect=OSError("unreadable")):
+                self.assertFalse(thread_scaling.done("m", "solver", "cfg", 4))
+
+    def test_resume_preserves_scaling_and_device_checks(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store), \
+             mock.patch.object(thread_scaling, "DEVICE", "cpu"):
+            thread_scaling.emit("m", "audit", "A", "apxchol_v1", "cfg", 4,
+                                {"total_s": 1, "stop_contract": "original-v1",
+                                 "execution_route": "cpu"}, "complete")
+            path = pathlib.Path(store) / "m__apxchol_v1_cfg__t4.json"
+            cell = json.loads(path.read_text())
+            self.assertTrue(thread_scaling.done("m", "apxchol_v1", "cfg", 4))
+            for field in ("git_sha", "repeat", "warmup", "timing_protocol"):
+                changed = {**cell, "provenance": {**cell["provenance"], field: None}}
+                path.write_text(json.dumps(changed))
+                self.assertFalse(thread_scaling.done("m", "apxchol_v1", "cfg", 4))
+            for status in ("complete", "not_converged"):
+                for total in (True, False):
+                    changed = json.loads(json.dumps(cell))
+                    changed["status"] = status
+                    changed["cell"]["device"] = "gpu"
+                    changed["metrics"]["execution_route"] = "gpu"
+                    if not total:
+                        changed["metrics"].pop("total_s")
+                    path.write_text(json.dumps(changed))
+                    self.assertFalse(thread_scaling.done("m", "apxchol_v1", "cfg", 4))
+
+    def test_malformed_status_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store):
+            thread_scaling.emit("m", "audit", "A", "solver", "cfg", 4,
+                                {}, "failed")
+            path = pathlib.Path(store) / "m__solver_cfg__t4.json"
+            cell = json.loads(path.read_text())
+            for status in (None, [], {}, 0, True):
+                with self.subTest(status=status):
+                    cell["status"] = status
+                    path.write_text(json.dumps(cell))
+                    self.assertFalse(thread_scaling.done("m", "solver", "cfg", 4))
+                    with self.assertRaisesRegex(RuntimeError, "measurement contract"):
+                        thread_scaling._scaling_records()
+
+    def test_malformed_identity_is_reported(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store):
+            path = pathlib.Path(store) / "malformed.json"
+            path.write_text(json.dumps({"cell": [], "status": "complete"}))
+            with self.assertRaisesRegex(RuntimeError, "invalid cell identity"):
+                thread_scaling._scaling_records()
+
     def test_failed_no_csv_cell_does_not_abort_later_cells(self):
         with tempfile.TemporaryDirectory() as store, \
              mock.patch.object(thread_scaling, "CELLS", store), \
@@ -375,7 +270,7 @@ class ThreadScalingStoreTest(unittest.TestCase):
             self.assertEqual(record["schema"], thread_scaling.SCALING_SCHEMA)
             self.assertEqual(record["timeout_cap_s"], 123)
             self.assertIsNone(rc.timeout_cap(record))
-            self.assertFalse(stale_cells.timeout_cap_is_stale(record))
+            self.assertTrue(rc.cell_meets_contract(record))
             self.assertTrue(thread_scaling.done("m", "solver", "cfg", 4))
 
             record.pop("schema")
@@ -406,7 +301,8 @@ class ThreadScalingStoreTest(unittest.TestCase):
                 "cell": {"matrix_id": "m", "family": "audit", "label": "A",
                          "solver": "solver", "config": "cfg", "threads": 1,
                          "device": "cpu"},
-                "metrics": {"total_s": 1.0}, "status": "complete",
+                "metrics": {"total_s": 1.0, "stop_contract": "original-v1"},
+                "status": "complete",
                 "provenance": {"git_sha": thread_scaling.git_sha()},
             }
             path = pathlib.Path(store) / "m__solver_cfg__t1.json"
@@ -458,6 +354,47 @@ class ThreadScalingStoreTest(unittest.TestCase):
 
 
 class CellSchemaTest(unittest.TestCase):
+    def test_stale_cell_is_preserved_until_replacement_returns(self):
+        old = record("complete", 3.0)
+        old["provenance"]["git_sha"] = "b" * 40
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(rc, "CELLS", store), \
+             mock.patch.object(sweep_fair, "THREADS", 16), \
+             mock.patch.object(sweep_fair, "DEVICE", "cpu"), \
+             mock.patch.object(sweep_fair, "build_toolchain", return_value={}), \
+             mock.patch.object(rc, "benchmark_openmp_provenance", return_value={}):
+            path = pathlib.Path(rc.cell_path("audit", "m", "amgcl", "", 16, "cpu"))
+            path.parent.mkdir(parents=True)
+            old_text = json.dumps(old)
+            path.write_text(old_text)
+
+            def failed_runner():
+                self.assertEqual(path.read_text(), old_text)
+                raise RuntimeError("interrupted runner")
+
+            with self.assertRaisesRegex(RuntimeError, "interrupted runner"):
+                sweep_fair.step("audit", "m", "amgcl", "", failed_runner, "AMGCL")
+            self.assertEqual(path.read_text(), old_text)
+
+            def completed_runner():
+                self.assertEqual(path.read_text(), old_text)
+                return "complete", {"total_s": 1.0, "stop_contract": "original-v1"}
+
+            sweep_fair.step("audit", "m", "amgcl", "", completed_runner, "AMGCL")
+            self.assertEqual(json.loads(path.read_text())["metrics"]["total_s"], 1.0)
+            self.assertTrue(sweep_fair.cell_done("audit", "m", "amgcl", ""))
+
+    def test_malformed_status_reruns_fair_sweep(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(rc, "CELLS", store):
+            path = pathlib.Path(rc.cell_path("audit", "m", "amgcl", "", 16, "cpu"))
+            path.parent.mkdir(parents=True)
+            for status in (None, [], {}, 0, True):
+                with self.subTest(status=status):
+                    path.write_text(json.dumps(record(status, 1.0)))
+                    self.assertFalse(rc.cell_done(
+                        "audit", "m", "amgcl", "", 16, "cpu"))
+
     def test_cuda_init_is_parsed_as_separate_seconds(self):
         stderr = ("noise\n[bench] cuda_init (once, before any timed solver): "
                   "629.6 ms\nmore noise\n")
@@ -482,9 +419,9 @@ class CellSchemaTest(unittest.TestCase):
                 rc.emit_cell("audit", "m", "solver", "", "complete", {}, 16, "cpu",
                              {}, timeout_cap_s=60)
 
-    def test_old_timeout_is_stale_and_not_terminal_for_sweep(self):
+    def test_timeout_without_cap_is_not_terminal_for_sweep(self):
         old = record("timeout", None)
-        self.assertTrue(stale_cells.timeout_cap_is_stale(old))
+        self.assertFalse(rc.cell_meets_contract(old))
         with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):
             path = pathlib.Path(rc.cell_path("audit", "m", "amgcl", "", 16, "cpu"))
             path.parent.mkdir(parents=True)
@@ -492,18 +429,6 @@ class CellSchemaTest(unittest.TestCase):
             with mock.patch.object(sweep_fair, "DEVICE", "cpu"):
                 self.assertFalse(sweep_fair.cell_done("audit", "m", "amgcl", ""))
 
-    def test_accounting_stale_rules_are_device_and_solver_scoped(self):
-        def commits(solver, matrix, device):
-            return {commit for commit, _reason in stale_cells.matching_rules(
-                solver, matrix, "graph", device)}
-
-        self.assertIn("5a18d14", commits("amgcl_cuda", "com-Amazon", "gpu"))
-        self.assertNotIn("5a18d14", commits("amgcl", "com-Amazon", "cpu"))
-        self.assertIn("a4938af", commits("apxchol_v1", "com-Amazon", "cpu"))
-        self.assertIn("a4938af", commits("parac", "com-Amazon", "cpu"))
-        self.assertIn("a4938af", commits("amgcl", "as-Skitter", "cpu"))
-        self.assertNotIn("a4938af", commits("amgcl", "com-Amazon", "cpu"))
-        self.assertNotIn("a4938af", commits("cmg", "as-Skitter", "cpu"))
 
     def test_new_timeout_is_terminal_for_sweep(self):
         new = record("timeout", None, cap=60)
@@ -584,6 +509,42 @@ class FairSweepSelectionTest(unittest.TestCase):
         self.assertEqual(dispatched["iter0010"][0], "ipm")
 
 
+class CmgAvailabilityTest(unittest.TestCase):
+    def test_legacy_adapter_stops_before_export_or_solver_execution(self):
+        cmg = sweep_fair.cmg_matlab_runner
+        with mock.patch.object(cmg, "_dump") as export, \
+             mock.patch.object(cmg, "sh") as run, \
+             mock.patch.object(rc, "emit_cell") as emit:
+            ready, reason = cmg.available()
+            self.assertFalse(ready)
+            self.assertIn("local RHS", reason)
+            self.assertEqual(cmg.run_one("grid_500"), "UNAVAILABLE: " + reason)
+        export.assert_not_called()
+        run.assert_not_called()
+        emit.assert_not_called()
+
+    def test_sweep_reports_unavailable_cmg_once_before_first_matrix(self):
+        state = {"probed": False, "ok": False, "why": ""}
+        def matrix(mid, *_args):
+            self.assertTrue(state["probed"])
+            sweep_fair.run_cmg(mid)
+            sweep_fair.run_cmg(mid)
+        argv = ["sweep_fair.py", "--only", "grid_500", "--no-julia", "--no-parac"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(sweep_fair, "_CMG_STATE", state), \
+             mock.patch.object(sweep_fair, "RUN_CMG", True), \
+             mock.patch.object(sweep_fair, "JULIA", []), \
+             mock.patch.object(sweep_fair, "RUN_PARAC", False), \
+             mock.patch.object(sweep_fair, "do_matrix", side_effect=matrix), \
+             mock.patch.object(sweep_fair.cmg_matlab_runner, "run_one") as run, \
+             mock.patch("builtins.print") as output:
+            sweep_fair.main()
+        unavailable = [call for call in output.call_args_list
+                       if "UNAVAILABLE" in str(call.args[0])]
+        self.assertEqual(len(unavailable), 1)
+        run.assert_not_called()
+
+
 class JuliaPreflightTest(unittest.TestCase):
     def test_missing_ignored_manifest_fails_before_cells_run(self):
         with mock.patch.object(sweep_fair.os.path, "isfile", return_value=False):
@@ -601,34 +562,6 @@ class JuliaPreflightTest(unittest.TestCase):
             ready, reason = sweep_fair.julia_preflight()
         self.assertFalse(ready)
         self.assertIn("root cause", reason)
-
-
-
-
-class HeatmapColorScaleTest(unittest.TestCase):
-    def test_log_ramp_and_ticks_cover_small_and_large_observed_ratios(self):
-        from matplotlib.colors import LogNorm
-        from matplotlib.figure import Figure
-        captured = []
-        def capture(fig, filename, **kwargs):
-            image = fig.axes[0].images[0]
-            captured.append((image.norm, image.colorbar.get_ticks()))
-        with tempfile.TemporaryDirectory() as directory, \
-             mock.patch.object(Figure, "savefig", capture):
-            for largest in [1.0, 1.4, 1.6, 360.0]:
-                gpu.value_heatmap(["grid_500"], ["fast", "slow"], [[1], [largest]],
-                                  pathlib.Path(directory)/"test.png", title="TEST ONLY")
-        for largest, (norm, ticks) in zip([1.0, 1.4, 1.6, 360.0], captured):
-            self.assertIsInstance(norm, LogNorm)
-            self.assertEqual(norm.vmin, 1.0)
-            self.assertGreaterEqual(norm.vmax, largest)
-            self.assertTrue(all(norm.vmin <= tick <= norm.vmax for tick in ticks))
-            self.assertEqual(ticks[0], norm.vmin)
-            self.assertEqual(ticks[-1], norm.vmax)
-        norm = captured[-1][0]
-        self.assertEqual(norm.vmax, 360.0)
-        self.assertLess(norm(16.0), norm(100.0))
-        self.assertLess(norm(100.0), norm(360.0))
 
 
 class CompactScalingPlotTest(unittest.TestCase):
@@ -711,181 +644,6 @@ class CompactScalingPlotTest(unittest.TestCase):
              mock.patch.object(thread_scaling, "MATS", [(str(i),) for i in range(4)]):
             with self.assertRaisesRegex(ValueError, "at most three"):
                 thread_scaling.charts(compact=True)
-
-
-class SamplerProfileTest(unittest.TestCase):
-    def setUp(self):
-        from contextlib import ExitStack
-        self.context = ExitStack()
-        self.addCleanup(self.context.close)
-        for module, names in [(cpu, ("ORDER", "APX_SERIES", "POSTER_SOLVERS", "COLORS")),
-                              (gpu, ("ORDER", "APX_SERIES", "APX_DEFAULT", "COLORS")),
-                              (combined, ("SOLVERS", "ENC"))]:
-            for name in names:
-                value = getattr(module, name)
-                self.context.enter_context(mock.patch.object(
-                    module, name, value.copy() if isinstance(value, (list, dict)) else value))
-
-    @staticmethod
-    def series():
-        return {(device, solver, config)
-                for device, module in [("cpu", cpu), ("gpu", gpu)]
-                for (solver, config), label in module.LABELS.items() if label in module.ORDER}
-
-    def test_twenty_declared_rows_keep_packed_cmg_and_fifteen_competitors(self):
-        historical = self.series()
-        self.assertEqual(len(historical), 18)
-        combined.select_sampler_comparison()
-        current = self.series()
-        self.assertEqual(len(current), 20)
-        self.assertEqual(len(rc.MATRICES), 27)
-        self.assertEqual({row for row in historical if row[1] not in {"apxchol_v1", "cmg"}},
-                         {row for row in current if row[1] != "apxchol_v1"})
-        self.assertNotIn(("gpu", "apxchol_v1", "bg+tree[vec_pool_aos]"), current)
-        self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]"), current)
-        self.assertIn(("gpu", "apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]"), current)
-        self.assertIn(("gpu", "apxchol_v1", "bg+trace_cycle/gpu-owned-q08[vec_pool_aos]"), current)
-        self.assertEqual(gpu.LABELS[("apxchol_v1", "bg+tree/gpu-owned-q02[vec_pool_aos]")],
-                         "apxchol/GKS q=0.2 (GPU)")
-        self.assertEqual(gpu.LABELS[("apxchol_v1", "bg+tree/gpu-owned-q08[vec_pool_aos]")],
-                         "apxchol/GKS q=0.8 (GPU)")
-        q08 = next(row for row in combined.SOLVERS if row[0] == "apxchol/GKS q=0.8")
-        self.assertIsNone(q08[2])
-        self.assertEqual(q08[3], "apxchol/GKS q=0.8 (GPU)")
-        self.assertNotIn(("cpu", "cmg", ""), current)
-        self.assertIn(("cpu", "cmg_packed", "original-operator"), current)
-        self.assertIn(("cmg", ""), cpu.LABELS)
-        self.assertNotIn("CMG (MATLAB)†", cpu.POSTER_SOLVERS)
-        self.assertNotIn("CMG (MATLAB)†", {row[0] for row in combined.SOLVERS})
-        self.assertNotIn(("cpu", "apxchol_v1", "bg+heavy_core_k2[vec_pool_aos]"), current)
-        rc.require_injective_labels(cpu.LABELS, "CPU")
-        rc.require_injective_labels(gpu.LABELS, "GPU")
-
-    def test_gpu_trace_fill_is_distinct_from_both_gks_quantiles(self):
-        rows = {("grids", "grid_500"): {"apxchol_gpu_q08": 2.0,
-                "apxchol_gpu_q02": 2.5, "apxchol_gpu_trace_q08": 3.0}}
-        with mock.patch.object(gpu, "value_heatmap") as plot:
-            self.assertTrue(fill_chart.heatmap(rows, "grids", "TEST-ONLY.png"))
-        labels, values = plot.call_args.args[1:3]
-        self.assertEqual(len(labels), 13)
-        for label, value in [("apxchol GPU GKS q=0.8", 2.0),
-                             ("apxchol GPU GKS q=0.2", 2.5),
-                             ("apxchol GPU trace-cycle q=0.8", 3.0)]:
-            self.assertEqual(values[labels.index(label), 0], value)
-
-    def test_sequential_sampler_then_historical_render_restores_profile(self):
-        import render_snapshot
-        r = record("complete", 2, threads=72, solver="apxchol_v1")
-        r["cell"].update(matrix_id=next(iter(rc.MATRICES)), config="bg+tree[vec_pool_aos]")
-        historical = self.series()
-        old_solvers, old_encoding = list(combined.SOLVERS), combined.ENC
-        with tempfile.TemporaryDirectory() as directory, \
-             mock.patch.object(chart_cells, "load_current_records", return_value=([r], {})), \
-             mock.patch.object(render_snapshot.subprocess, "run"):
-            root = pathlib.Path(directory)
-            render_snapshot.render(root, root / "samplers", 72, "TEST ONLY", sampler_comparison=True)
-            render_snapshot.render(root, root / "historical", 72, "TEST ONLY", sampler_comparison=False)
-            current = json.loads((root / "samplers/coverage.json").read_text())
-            restored = json.loads((root / "historical/coverage.json").read_text())
-        self.assertEqual((current["series_profile"], current["expected_headline_cells"]),
-                         ("sampler-comparison", 540))
-        self.assertEqual((restored["series_profile"], restored["expected_headline_cells"]),
-                         ("historical-default", 486))
-        self.assertEqual(self.series(), historical)
-        self.assertEqual(gpu.APX_DEFAULT, "apxchol/bg (GPU)")
-        combined.select_sampler_comparison(True)
-        combined.select_sampler_comparison(True)
-        self.assertEqual(combined.ENC.count("apxchol GPU bars"), 1)
-        combined.select_sampler_comparison(False)
-        self.assertEqual(combined.SOLVERS, old_solvers)
-        self.assertEqual(combined.ENC, old_encoding)
-
-    def test_owned_label_requires_completed_adoption_evidence(self):
-        r = record("complete", 2, solver="apxchol_v1")
-        r["cell"].update(device="gpu", config="bg+trace_cycle/gpu-owned-q08[vec_pool_aos]")
-        for value in [None, False]:
-            r["metrics"]["actual_device_factor_adopted"] = value
-            with self.assertRaisesRegex(ValueError, "actual device-factor adoption"):
-                gpu.validate_owned_route(r)
-        r["metrics"]["actual_device_factor_adopted"] = True
-        gpu.validate_owned_route(r)
-        for status in ["failed", "oom", "timeout", "not_converged", "n/a"]:
-            r["status"] = status
-            r["metrics"] = {}
-            gpu.validate_owned_route(r)
-
-    def test_snapshot_keeps_failures_metadata_without_matlab_cmg_or_bridge_substitution(self):
-        import csv
-        import render_snapshot
-        mats = list(rc.MATRICES)
-        records = []
-        for index, status in enumerate(["complete", "failed", "timeout", "not_converged", "oom", "n/a"]):
-            r = record(status, 2 if status == "complete" else None,
-                       threads=72, solver="apxchol_v1")
-            r["cell"].update(matrix_id=mats[index], device="gpu",
-                config="bg+tree/gpu-owned-q02[vec_pool_aos]")
-            r["provenance"] = dict(git_sha="TEST-ONLY-SOURCE", binary_sha256="TEST-ONLY-BINARY",
-                sampler="gks", setup_route="owned_gpu_q02", degree_quantile=0.2,
-                source_manifest_sha256="TEST-ONLY-MANIFEST", timing_protocol="TEST-ONLY")
-            if status == "complete":
-                r["metrics"].update(actual_device_factor_adopted=True, fp16=True,
-                    factor_drop_rel=0.0001, stored_factor_nnz=12,
-                    phase_observations={"setup_s": [1, 1.1, 1.2]},
-                    timing_stability_warning=True)
-            if status == "timeout":
-                r["timeout_cap_s"] = 50
-                r["matrix_meta"] = {"timeout_scope": "logical_cell"}
-            records.append(r)
-        bridge = record("complete", 0.001, threads=72, solver="apxchol_v1")
-        bridge["cell"].update(matrix_id=mats[6], device="gpu", config="bg+tree[vec_pool_aos]")
-        records.append(bridge)
-        matlab_cmg = record("complete", 0.001, threads=72, solver="cmg")
-        matlab_cmg["cell"].update(matrix_id=mats[0])
-        records.append(matlab_cmg)
-        with tempfile.TemporaryDirectory() as path, \
-             mock.patch.object(chart_cells, "load_current_records", return_value=(records, {})), \
-             mock.patch.object(render_snapshot.subprocess, "run") as run:
-            out = pathlib.Path(path)
-            (out / "figures").mkdir()
-            image_names = [f"combined_{metric}{device}_{family}.png"
-                           for family in ("grids", "ipm", "suitesparse")
-                           for metric in ("setup", "solve", "overview")
-                           for device in ("_cpu", "_gpu", "")]
-            image_names += ["combined_iters_grids.png", "combined_rss_peak_ipm.png",
-                            "threads_cpu_representative_setup_speedup.png",
-                            "threads_gpu_solve_speedup.png"]
-            image_names += [f"fill_heatmap_{family}.png" for family in ("grids", "ipm", "suitesparse")]
-            for name in image_names:
-                (out / "figures" / name).touch()
-            render_snapshot.render(out / "TEST-ONLY-CELLS", out, 72, "TEST ONLY",
-                                   sampler_comparison=True, fill_cells=out / "TEST-ONLY-FILL")
-            readme = (out / "README.md").read_text()
-            for name in image_names:
-                self.assertIn(f"](figures/{name})", readme)
-            self.assertEqual(readme.count("!["), len(image_names))
-            self.assertTrue(all(line.startswith("|") for line in readme.splitlines() if "![" in line))
-            coverage = json.loads((out / "coverage.json").read_text())
-            with (out / "results.csv").open() as handle:
-                rows = list(csv.DictReader(handle))
-        self.assertEqual(coverage["expected_headline_cells"], 540)
-        self.assertEqual(coverage["present"], 6)
-        self.assertEqual(len(coverage["missing"]), 534)
-        self.assertEqual(sum(row["solver"] == "cmg" for row in coverage["missing"]), 0)
-        self.assertEqual({row["status"] for row in rows},
-                         {"complete", "failed", "timeout", "not_converged", "oom", "n/a"})
-        measured = next(row for row in rows if row["status"] == "complete")
-        self.assertEqual(measured["actual_device_factor_adopted"], "True")
-        self.assertEqual(measured["setup_route"], "owned_gpu_q02")
-        self.assertEqual(measured["sampler"], "gks")
-        self.assertEqual(measured["source_manifest_sha256"], "TEST-ONLY-MANIFEST")
-        self.assertEqual(json.loads(measured["phase_observations"]), {"setup_s": [1, 1.1, 1.2]})
-        self.assertEqual(measured["timing_stability_warning"], "True")
-        self.assertEqual(run.call_count, 4)
-        self.assertTrue(all("--sampler-comparison" in call.args[0] for call in run.call_args_list[:3]))
-        fill_command = run.call_args_list[3].args[0]
-        self.assertTrue(fill_command[1].endswith("fill_chart.py"))
-        self.assertEqual(fill_command[2:], ["--cells", str(out / "TEST-ONLY-FILL"),
-                                          "--out", str(out / "figures")])
 
 
 if __name__ == "__main__":

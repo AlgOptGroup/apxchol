@@ -62,6 +62,19 @@ Bindings expect assembled operators. Use `apxchol.laplacian(Adj)` in Python
 or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 [Python](python/README.md) and [Octave/MATLAB](octave/README.md) guides.
 
+### Use from CMake
+
+Link `apxchol_core` rather than copying its compiler flags:
+
+```cmake
+add_subdirectory(path/to/apxchol)
+target_link_libraries(my_program PRIVATE apxchol_core)
+```
+
+The target supplies C++23 and the architecture flag used by the library.
+Matching architecture settings matter because Eigen objects cross the library
+boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds.
+
 ## Configuration
 
 | CMake option | Purpose |

@@ -1467,11 +1467,11 @@ TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
     // Relative yield does not discard a selection already large enough for
     // parallel elimination. Zero progress still hands off unconditionally.
     EXPECT_FALSE(selection_should_handoff(
-        3700, 3700, 37375, 173224, 0.10, 500, 2000));
+        3700, 37375, 173224, 0.10, 500, 2000));
     EXPECT_TRUE(selection_should_handoff(
-        1900, 1900, 20000, 100000, 0.10, 500, 2000));
+        1900, 20000, 100000, 0.10, 500, 2000));
     EXPECT_TRUE(selection_should_handoff(
-        0, 0, 20000, 100000, 0.10, 500, 2000));
+        0, 20000, 100000, 0.10, 500, 2000));
 }
 
 TEST(ResidualSparsifyGate, UsesObservedTrafficAndHandoffYield) {

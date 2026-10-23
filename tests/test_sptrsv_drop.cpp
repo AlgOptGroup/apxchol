@@ -1332,8 +1332,11 @@ TEST(GpuDataflow, ScalarAndPanelsMatchCpuReferenceAndAreDeterministic) {
                         for (node_index row = 0; row < m; ++row) {
                             const auto k = row * columns + q;
                             ASSERT_TRUE(std::isfinite(actual[k]));
-                            if (!active[2 * q]) { EXPECT_EQ(actual[k], sentinel[k]); }
-                            else error = std::max(error, std::abs(actual[k] - std::ldexp(y_cpu[row], q)));
+                            if (!active[2 * q]) {
+                                EXPECT_EQ(actual[k], sentinel[k]);
+                            } else {
+                                error = std::max(error, std::abs(actual[k] - std::ldexp(y_cpu[row], q)));
+                            }
                         }
                         if (active[2 * q]) {
                             EXPECT_LT(error / std::ldexp(maxabs, q), fp16 ? kPairTolFp16 : kPairTolFp32);

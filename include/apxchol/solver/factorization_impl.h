@@ -833,7 +833,7 @@ factorization factorize_impl(const Eliminator& elim,
                 const double min_yield = detail::adaptive_is_yield_fraction(
                     opts.min_is_fraction, active.size(), prep.average_degree, residual_thresh);
                 if (controls.residual_sparsify && !sparsification_attempted &&
-                    detail::selection_should_handoff(part.num_regions(), part.num_regions(),
+                    detail::selection_should_handoff(part.num_regions(),
                         prep.candidate_count, active.size(), min_yield, residual_thresh,
                         opts.omp_threshold)) {
                     // This is a preview, not an eliminated/countable round.
@@ -1171,7 +1171,7 @@ factorization factorize_impl(const Eliminator& elim,
             // the parallel elimination path; the yield rule is for small
             // selections whose scan cost is no longer amortized.
             if (detail::selection_should_handoff(
-                    part.num_regions(), part.num_regions(),
+                    part.num_regions(),
                     last_candidate_count, active.size(), min_yield,
                     residual_thresh, opts.omp_threshold)) {
                 handoff_vertices = part.num_regions();

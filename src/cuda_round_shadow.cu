@@ -1399,7 +1399,7 @@ std::size_t planned_peak_bytes(std::size_t n, std::size_t r, std::size_t p,
     auto phase = [&](std::initializer_list<std::pair<std::size_t,
                                                       std::size_t>> arrays) {
         std::size_t bytes = common;
-        for (const auto [count, size] : arrays)
+        for (const auto& [count, size] : arrays)
             bytes = add_bytes(bytes, count, size, "phase allocation");
         return bytes;
     };
