@@ -961,12 +961,10 @@ factorization factorize_impl(const Eliminator& elim,
     // average (0 = not measured, for partitioners without the prepass).
     double last_avg_degree = 0.0;
     size_t last_candidate_count = 0;
-    bool last_candidates_host_resident = false;
     auto run_partitioner = [&](auto& p, graph& g,
                                std::span<const node_index> act)
         -> const partition_result& {
         using P = std::remove_reference_t<decltype(p)>;
-        last_candidates_host_resident = false;
         sel.reset(g.n());
         last_avg_degree = 0.0;
         last_candidate_count = act.size();
@@ -1084,7 +1082,6 @@ factorization factorize_impl(const Eliminator& elim,
             }
             last_candidate_count = eligible_count;
             last_avg_degree = avg_deg;
-            last_candidates_host_resident = true;
             if (incremental_for_this_partitioner &&
                 incremental_degree_capable)
                 incremental_degree_ready = true;
@@ -1237,8 +1234,7 @@ factorization factorize_impl(const Eliminator& elim,
         // updates keep the cache exact and the choice is permanently ON for
         // the rest of the main-selector phase.
         if (incremental_degree_auto && !incremental_degree_auto_decided &&
-            incremental_degree_ready && last_candidates_host_resident &&
-            std::is_same_v<Partitioner, block_greedy_partitioner>) {
+            incremental_degree_ready) {
             const bool traffic_worthwhile =
                 detail::incremental_degree_traffic_worthwhile(
                     active.size(), last_avg_degree, elimination_work_hint);

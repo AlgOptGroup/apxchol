@@ -39,14 +39,9 @@ struct col_range {
     Eigen::Index begin, end;
 };
 
-/// Per-thread accumulator for the scan below. Merged serially in thread order,
-/// so both the fp sums and the reported witnesses are schedule-independent:
-/// the witnesses tie-break on the smallest index, and the two mass sums are
-/// added up in thread order over the fixed `schedule(static)` partition (no
-/// `reduction(+:)` on a double anywhere — libgomp combines those in thread
-/// COMPLETION order, which varies run to run; same rule as the fused PCG
-/// passes in preconditioner.h). One cache line per thread: the per-column
-/// writes would otherwise false-share across the whole scan.
+/// Merge sums in thread order for reproducibility at a fixed team size.
+/// Witnesses use deterministic tie-breaking. Align per-thread storage to
+/// cache-line boundaries to avoid false sharing during the scan.
 struct alignas(64) witness {
     double abs_mass = 0.0;
     double pos_mass = 0.0;
