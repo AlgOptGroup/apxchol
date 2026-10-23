@@ -6,10 +6,10 @@
  * NOT_CONVERGED (1) both write every requested output: NOT_CONVERGED means the
  * solution and info were written but the relative residual is not below tol.
  * It is never a relaxed acceptance. Every other status is an error: a call
- * that returns a new handle sets it to NULL, an info or stats output whose
- * struct_size matches is zeroed except struct_size (one whose struct_size
- * does not match is left untouched and decides the status), and other
- * outputs are unspecified. When error_message is non-NULL and
+ * that returns a new handle sets it to NULL. A mismatched info_size leaves
+ * the whole info array untouched. Validated info and stats outputs are zeroed
+ * on later errors (stats keeps struct_size). Other outputs are unspecified.
+ * When error_message is non-NULL and
  * error_capacity > 0, a NUL-terminated (possibly truncated) message is
  * written ("" on SUCCESS).
  *
@@ -26,17 +26,17 @@
  * build: n <= 2^31-1 and nnz <= 2^31-1.
  *
  * Laplacian systems return the min-norm solution (unless an SDDM factor is
- * adopted, see apxchol_solver_create_from_factor); the right-hand side must be
+ * adopted, see apxchol_solver_create); the right-hand side must be
  * compatible with every connected component (it is not projected).
  *
  * A solver handle is not safe for overlapping calls; distinct handles may be
  * used concurrently from different threads. A factor handle is immutable: the
  * calls that read it may overlap, but destroy must not overlap any of them.
- * b, x0 and x (and r, z) may be the same pointer; partial overlap is
- * undefined.
+ * For solve, x must not overlap b or x0; for apply, z must not overlap r.
+ * Exact and partial overlap both return INVALID_ARGUMENT. b and x0 may overlap.
  *
- * Versioning: every struct carries struct_size, which the caller sets to
- * sizeof(struct) from the header it compiled against. This library accepts
+ * Versioning: options and stats carry struct_size; solve takes info_size.
+ * The caller supplies sizeof(struct) from its header. This library accepts
  * the sizes of its own header; a larger (newer) size returns UNSUPPORTED and a
  * smaller one INVALID_ARGUMENT. */
 
@@ -53,7 +53,7 @@
 extern "C" {
 #endif
 
-#define APXCHOL_C_ABI_VERSION 1
+#define APXCHOL_C_ABI_VERSION 2
 
 typedef int32_t apxchol_status;
 enum {
@@ -70,13 +70,12 @@ enum {
 };
 
 typedef int32_t apxchol_backend;
-/* AUTO (the default) chooses a route as apxchol::solver does: CPU for inputs
- * of at most 32,768 rows (when CPU supports the requested factor storage) and
- * when adopting a factor, otherwise METAL when the
- * build has it, a device is available and A is within its value range. Builds
- * without Metal resolve AUTO to CPU (the C ABI exposes no CUDA route).
+/* GPU means the device backend compiled into the library (CUDA or Metal).
+ * AUTO follows apxchol::solver's input, option and device compatibility policy;
+ * adopting a factor with AUTO selects CPU. Explicit GPU requests never retry
+ * on CPU. CUDA cannot adopt a host factor and returns UNSUPPORTED.
  * stats.backend reports the route chosen, never AUTO. */
-enum { APXCHOL_BACKEND_CPU = 0, APXCHOL_BACKEND_METAL = 1, APXCHOL_BACKEND_AUTO = 2 };
+enum { APXCHOL_BACKEND_CPU = 0, APXCHOL_BACKEND_GPU = 1, APXCHOL_BACKEND_AUTO = 2 };
 
 typedef int32_t apxchol_sampler;
 enum { APXCHOL_SAMPLER_GKS = 0, APXCHOL_SAMPLER_TRACE_CYCLE = 1 };
@@ -95,7 +94,7 @@ enum {
     APXCHOL_FACTOR_STORAGE_FLOAT32 = 32
 };
 
-/* 80 bytes. Initialize with apxchol_options_default, then override fields. */
+/* 64 bytes. Initialize with apxchol_options_default, then override fields. */
 typedef struct apxchol_options {
     uint32_t struct_size;
     apxchol_backend backend;
@@ -108,39 +107,28 @@ typedef struct apxchol_options {
     apxchol_partitioner partitioner;
     int32_t keep_factor_values;       /* 0/1; factor value export requires 1 */
     double degree_quantile;           /* -1: chosen by route; otherwise [0, 1) */
-    uint64_t exact_clique_max_degree;
-    uint64_t omp_threshold;           /* min active vertices before the factorization
-                                         engages OpenMP, and the selection size kept
-                                         whatever its yield (factor_options.h); 0:
-                                         OpenMP at every size, that safeguard off */
     apxchol_factor_storage factor_storage; /* triangular-solve storage;
                                               AUTO uses the backend default */
 } apxchol_options;
 
-/* 32 bytes; the caller sets struct_size. */
+/* 24 bytes; pass sizeof(apxchol_solve_info) as info_size to solve. */
 typedef struct apxchol_solve_info {
-    uint32_t struct_size;
-    int32_t converged;                /* 1 iff relative_residual < tol */
     int64_t iterations;
     double relative_residual;         /* ||b - A x|| / ||b|| of the returned x,
                                          recomputed in fp64 from the original
-                                         operator on both backends */
-    double solve_seconds;
+                                         operator on every backend */
+    int32_t converged;                /* 1 iff relative_residual < tol */
 } apxchol_solve_info;
 
-/* 72 bytes; the caller sets struct_size. */
+/* 40 bytes; the caller sets struct_size. */
 typedef struct apxchol_stats {
     uint32_t struct_size;
-    apxchol_backend backend;          /* the route chosen: CPU or METAL */
+    apxchol_backend backend;          /* the route chosen: CPU or GPU */
     int64_t n;
     int64_t factor_nnz;               /* stored entries of L, diagonal included */
     int64_t lumped_offdiag;           /* positive off-diagonals lumped (2 per pair) */
-    int64_t rounds;
-    int64_t peak_graph_bytes;
-    double setup_seconds;             /* wall time of the call that created the handle */
     int32_t sddm;                     /* the factor's class: 1 SDDM, 0 Laplacian
                                          (min-norm solutions) */
-    int32_t setup_max_threads;        /* OpenMP team limit during setup; 1 if serial */
     apxchol_factor_storage factor_storage; /* resolved solver storage; FLOAT32 for a host factor */
 } apxchol_stats;
 
@@ -149,10 +137,7 @@ typedef struct apxchol_factor apxchol_factor;
 
 APXCHOL_C_API const char* apxchol_version(void); /* static "<version>+<git sha>" */
 APXCHOL_C_API int32_t apxchol_c_abi_version(void);
-APXCHOL_C_API int32_t apxchol_openmp_enabled(void);
-/* omp_get_max_threads() of the calling thread; 1 in a serial build. */
-APXCHOL_C_API int32_t apxchol_get_max_threads(void);
-/* 1 if this build has the backend and (for METAL) a usable device; AUTO: 1. */
+/* 1 if this build has the backend and (for GPU) a usable device; AUTO: 1. */
 APXCHOL_C_API int32_t apxchol_backend_available(apxchol_backend backend);
 
 /* Writes the library defaults (those of apxchol::solve_options) and sets
@@ -160,39 +145,40 @@ APXCHOL_C_API int32_t apxchol_backend_available(apxchol_backend backend);
 APXCHOL_C_API apxchol_status apxchol_options_default(apxchol_options* options,
                                                      size_t struct_size);
 
-/* Factorizes A and builds the reusable solver. options NULL = defaults. */
+/* Builds a reusable solver. factor NULL factorizes A; otherwise the solver
+ * adopts its own copy of factor, which may come from a different operator.
+ * The dimension must match. A Laplacian factor cannot precondition an SDDM
+ * operator (INVALID_ARGUMENT); an SDDM factor may precondition a Laplacian,
+ * whose solution is then not centred. Adopted factorization options are
+ * validated but unused. options NULL selects defaults. */
 APXCHOL_C_API apxchol_status apxchol_solver_create(
     int64_t n, const int64_t* colptr, const int64_t* rowval, const double* nzval,
-    int32_t index_base, const apxchol_options* options,
+    int32_t index_base, const apxchol_factor* factor, const apxchol_options* options,
     apxchol_solver** out_solver, char* error_message, size_t error_capacity);
 APXCHOL_C_API void apxchol_solver_destroy(apxchol_solver* solver); /* NULL is a no-op */
 
-/* One right-hand side. Finite tol < 0 / max_iter < 0 select the handle's options;
- * x0 NULL starts from zero. info is nullable. The backend rescales extreme
+/* nrhs right-hand sides, column-major n*nrhs. nrhs = 0 is a no-op requiring
+ * a valid solver; dense-array and info pointers are optional and info_size is
+ * ignored. Negative or overflowing dimensions are INVALID_ARGUMENT.
+ * Finite tol < 0 / max_iter < 0
+ * select the handle's options. x0 NULL starts from zero. info is NULL or an
+ * array of nrhs structs, one per column. info_size is ignored when info is NULL.
+ * Native bounded-panel solves reuse
+ * the factor and workspace; one column uses the native scalar kernels.
+ * All b and x0 values are checked before x is written. Returns
+ * NOT_CONVERGED if any column did not converge. The backend rescales extreme
  * inputs internally; CPU inputs that cannot share a usable scale are
- * INVALID_ARGUMENT. A solution outside the representable range is UNSUPPORTED;
- * its output values are unspecified. */
+ * INVALID_ARGUMENT. A solution outside the representable range is UNSUPPORTED. */
 APXCHOL_C_API apxchol_status apxchol_solver_solve(
-    apxchol_solver* solver, const double* b, const double* x0, double* x,
-    double tol, int32_t max_iter, apxchol_solve_info* info,
+    apxchol_solver* solver, int64_t nrhs, const double* b, const double* x0, double* x,
+    double tol, int32_t max_iter, apxchol_solve_info* info, size_t info_size,
     char* error_message, size_t error_capacity);
 
-/* k right-hand sides, column-major n*k. x0 NULL starts every column from zero.
- * The per-column outputs are nullable arrays of length k. Every column uses
- * the single-solve stopping rule. Both backends solve columns in order,
- * reusing the factor and workspace; b and x0 are validated in full before the
- * first column is solved, so a non-finite entry leaves x untouched. Returns
- * NOT_CONVERGED if any column did not converge. */
-APXCHOL_C_API apxchol_status apxchol_solver_solve_block(
-    apxchol_solver* solver, int64_t k, const double* b, const double* x0, double* x,
-    double tol, int32_t max_iter, int64_t* iterations, double* relative_residuals,
-    int32_t* converged, char* error_message, size_t error_capacity);
-
-/* One preconditioner application z = M^{-1} r. It is a fixed linear map;
- * with a Laplacian factor both backends centre input and output on every
- * application, so the same r gives the same z independently of earlier calls. */
+/* Apply z = M^{-1} r to nrhs columns, with the same layout and dimension rules
+ * as solve. All r values are checked before any output is written. It is a
+ * fixed linear map; Laplacian input and output are centred on every call. */
 APXCHOL_C_API apxchol_status apxchol_solver_apply(
-    apxchol_solver* solver, const double* r, double* z,
+    apxchol_solver* solver, int64_t nrhs, const double* r, double* z,
     char* error_message, size_t error_capacity);
 
 APXCHOL_C_API apxchol_status apxchol_solver_stats(const apxchol_solver* solver,
@@ -217,8 +203,7 @@ APXCHOL_C_API apxchol_status apxchol_solver_export_factor(
 
 /* Factorizes A without building a solver: the same validation, lumping and
  * call-scoped threads as apxchol_solver_create, with the factorization
- * options (seed, sampler, partitioner, degree_quantile,
- * exact_clique_max_degree, omp_threshold). The other options are validated
+ * options (seed, sampler, partitioner, degree_quantile). The other options are validated
  * and unused; keep_factor_values is ignored. options NULL = defaults. */
 APXCHOL_C_API apxchol_status apxchol_factor_create(
     int64_t n, const int64_t* colptr, const int64_t* rowval, const double* nzval,
@@ -227,8 +212,7 @@ APXCHOL_C_API apxchol_status apxchol_factor_create(
 APXCHOL_C_API void apxchol_factor_destroy(apxchol_factor* factor); /* NULL is a no-op */
 
 /* The factor's statistics (lumped_offdiag: of the matrix it was built from)
- * with backend APXCHOL_BACKEND_CPU. setup_seconds and setup_max_threads are
- * those of apxchol_factor_create, or of the solver it was copied from. */
+ * with backend APXCHOL_BACKEND_CPU. */
 APXCHOL_C_API apxchol_status apxchol_factor_stats(const apxchol_factor* factor,
                                                   apxchol_stats* stats);
 
@@ -237,22 +221,6 @@ APXCHOL_C_API apxchol_status apxchol_factor_export(
     const apxchol_factor* factor, int32_t index_base,
     int64_t* colptr, int64_t* rowval, float* nzval, int64_t* perm,
     char* error_message, size_t error_capacity);
-
-/* Builds a solver for A preconditioned by a copy of factor instead of
- * factorizing. A is validated as in apxchol_solver_create and may differ
- * from the matrix the factor was built from (a stale factor for a nearby
- * operator), but must have its dimension (INVALID_ARGUMENT otherwise). A
- * Laplacian factor (rank n-1, centred) cannot precondition an SDDM operator
- * (INVALID_ARGUMENT); an SDDM factor may precondition a Laplacian, whose
- * solution is then not centred. backend, tol, max_iter, stagnation_window,
- * threads, keep_factor_values and factor_storage apply as in create; the factorization
- * options are validated and unused. Stats are the factor's, with this call's
- * setup_seconds and setup_max_threads. On another operator convergence
- * depends on its distance from the factor's; NOT_CONVERGED reports it. */
-APXCHOL_C_API apxchol_status apxchol_solver_create_from_factor(
-    int64_t n, const int64_t* colptr, const int64_t* rowval, const double* nzval,
-    int32_t index_base, const apxchol_factor* factor, const apxchol_options* options,
-    apxchol_solver** out_solver, char* error_message, size_t error_capacity);
 
 /* Copies the solver's factor into a new factor handle. Requires
  * keep_factor_values = 1 (NO_FACTOR_VALUES otherwise). */

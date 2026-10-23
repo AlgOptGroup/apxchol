@@ -48,7 +48,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 
 ## C interface
 
-`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target for CPU and Metal; CUDA is not exposed. Keep defaults aligned with `solve_options` and struct layouts aligned with `tests/test_c_header.c`. ABI version 1 remains unreleased; bump it for layout changes after release. `NOT_CONVERGED` still writes outputs and never means acceptance. Check the returned solution against the original operator in FP64 inside Solve timing, as specified in `docs/precision.md`. Factor handles own immutable FP32 values; solver adoption copies them. Thread limits are call-scoped ceilings and must restore the caller's setting.
+`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target. Scalar and batched calls delegate to the shared CPU/CUDA/Metal owner; dense outputs must not overlap inputs. Keep defaults aligned with `solve_options` and ABI layouts aligned with `tests/test_c_header.c`. ABI 2 replaces the unreleased prototype; incompatible signatures or layouts require a version bump. `NOT_CONVERGED` writes outputs without relaxing acceptance. Factor handles own immutable FP32 values; adoption copies them and is unsupported on CUDA. Thread ceilings restore the caller's setting.
 
 ## Test map
 

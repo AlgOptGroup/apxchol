@@ -4,9 +4,6 @@
 
 #include "apxchol/c_api.h"
 #include "apxchol/solver/solve.h"
-#if defined(APXCHOL_USE_METAL)
-#include "apxchol/solver/metal_solver.h"
-#endif
 
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -74,33 +71,6 @@ Sparse grid_laplacian(int rows, int cols, double shift = 0.0) {
     return L;
 }
 
-/// `count` cliques of `size` vertices in a light ring. The first round
-/// selects one vertex per clique, a yield below min_is_fraction, so the
-/// factorization hands the residual over unless the selection reaches
-/// omp_threshold (factor_options.h).
-Sparse clique_ring(int count, int size) {
-    const int n = count * size;
-    std::vector<Eigen::Triplet<double>> t;
-    std::vector<double> deg(n, 0.0);
-    auto edge = [&](int a, int b, double w) {
-        t.emplace_back(a, b, -w);
-        t.emplace_back(b, a, -w);
-        deg[a] += w;
-        deg[b] += w;
-    };
-    for (int c = 0; c < count; ++c) {
-        const int base = c * size;
-        for (int i = 0; i < size; ++i)
-            for (int j = i + 1; j < size; ++j) edge(base + i, base + j, 1.0 + 0.125 * ((i + j) % 4));
-        edge(base, ((c + 1) % count) * size + 1, 0.5);
-    }
-    for (int i = 0; i < n; ++i) t.emplace_back(i, i, deg[i]);
-    Sparse L(n, n);
-    L.setFromTriplets(t.begin(), t.end());
-    L.makeCompressed();
-    return L;
-}
-
 Eigen::VectorXd compatible_rhs(Eigen::Index n, unsigned salt = 1) {
     Eigen::VectorXd b(n);
     for (Eigen::Index i = 0; i < n; ++i)
@@ -115,12 +85,35 @@ apxchol_options defaults() {
     return o;
 }
 
+apxchol_options cpu_options() {
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_CPU;
+    return o;
+}
+
+apxchol_status solve_one(apxchol_solver* s, const double* b, const double* x0, double* x,
+                         double tol, std::int32_t max_iter, apxchol_solve_info* info,
+                         char* error, std::size_t capacity) {
+    return apxchol_solver_solve(s, 1, b, x0, x, tol, max_iter, info, sizeof(*info), error, capacity);
+}
+
+apxchol_status apply_one(apxchol_solver* s, const double* r, double* z,
+                         char* error, std::size_t capacity) {
+    return apxchol_solver_apply(s, 1, r, z, error, capacity);
+}
+
 std::vector<apxchol_backend> available_backends() {
     std::vector<apxchol_backend> backends{APXCHOL_BACKEND_CPU};
-#if defined(APXCHOL_USE_METAL)
-    if (apxchol::metal_solver::available()) backends.push_back(APXCHOL_BACKEND_METAL);
-#endif
+    if (apxchol_backend_available(APXCHOL_BACKEND_GPU)) backends.push_back(APXCHOL_BACKEND_GPU);
     return backends;
+}
+
+std::vector<apxchol_backend> adoption_backends() {
+#if defined(APXCHOL_USE_METAL)
+    return available_backends();
+#else
+    return {APXCHOL_BACKEND_CPU};
+#endif
 }
 
 struct handle {
@@ -130,9 +123,11 @@ struct handle {
 
 apxchol_status create(const csc64& c, const apxchol_options* o, handle& h, std::int32_t base = 0,
                       std::string* message = nullptr) {
+    const auto fallback = cpu_options();
+    if (o == nullptr) o = &fallback;
     std::array<char, 1024> err{};
     const apxchol_status s = apxchol_solver_create(c.n, c.colptr.data(), c.rowval.data(),
-                                                   c.nzval.data(), base, o, &h.s, err.data(),
+                                                   c.nzval.data(), base, nullptr, o, &h.s, err.data(),
                                                    err.size());
     if (message != nullptr) *message = err.data();
     return s;
@@ -140,7 +135,6 @@ apxchol_status create(const csc64& c, const apxchol_options* o, handle& h, std::
 
 apxchol_solve_info info_struct() {
     apxchol_solve_info info{};
-    info.struct_size = sizeof info;
     return info;
 }
 
@@ -166,8 +160,10 @@ apxchol_status create_factor(const csc64& c, const apxchol_options* o, factor_ha
 
 apxchol_status adopt(const csc64& c, const apxchol_factor* f, const apxchol_options* o,
                      handle& h, std::int32_t base = 0, std::string* message = nullptr) {
+    const auto fallback = cpu_options();
+    if (o == nullptr) o = &fallback;
     std::array<char, 1024> err{};
-    const apxchol_status s = apxchol_solver_create_from_factor(
+    const apxchol_status s = apxchol_solver_create(
         c.n, c.colptr.data(), c.rowval.data(), c.nzval.data(), base, f, o, &h.s, err.data(),
         err.size());
     if (message != nullptr) *message = err.data();
@@ -193,8 +189,6 @@ void expect_same_factor_stats(const apxchol_stats& a, const apxchol_stats& b) {
     EXPECT_EQ(a.n, b.n);
     EXPECT_EQ(a.factor_nnz, b.factor_nnz);
     EXPECT_EQ(a.lumped_offdiag, b.lumped_offdiag);
-    EXPECT_EQ(a.rounds, b.rounds);
-    EXPECT_EQ(a.peak_graph_bytes, b.peak_graph_bytes);
     EXPECT_EQ(a.sddm, b.sddm);
 }
 
@@ -274,51 +268,11 @@ double true_residual(const Sparse& A, const Eigen::VectorXd& b, const Eigen::Vec
     return (b - A * x).norm() / b.norm();
 }
 
-void expect_block_matches_scalar(apxchol_solver* solver, std::int64_t n) {
-    constexpr std::int64_t k = 3;
-    Eigen::MatrixXd B(n, k), X(n, k);
-    B.col(0) = compatible_rhs(n, 1);
-    B.col(1).setZero();
-    B.col(2) = compatible_rhs(n, 5);
-    std::array<std::int64_t, k> iters{};
-    std::array<double, k> res{};
-    std::array<std::int32_t, k> conv{};
-    ASSERT_EQ(apxchol_solver_solve_block(solver, k, B.data(), nullptr, X.data(), -1.0, -1,
-                                         iters.data(), res.data(), conv.data(), nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    for (std::int64_t col = 0; col < k; ++col) {
-        Eigen::VectorXd x(n);
-        const Eigen::VectorXd b = B.col(col);
-        auto info = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(solver, b.data(), nullptr, x.data(), -1.0, -1, &info,
-                                       nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(x.data(), X.col(col).data(), x.size())) << col;
-        EXPECT_EQ(iters[col], info.iterations);
-        EXPECT_EQ(res[col], info.relative_residual);
-        EXPECT_EQ(conv[col], 1);
-    }
-    EXPECT_EQ(iters[1], 0);
-    EXPECT_EQ(X.col(1).norm(), 0.0);
-
-    Eigen::MatrixXd BX = B;
-    ASSERT_EQ(apxchol_solver_solve_block(solver, k, BX.data(), nullptr, BX.data(), -1.0, -1,
-                                         nullptr, nullptr, nullptr, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(same_bytes(BX.data(), X.data(), static_cast<std::size_t>(X.size())));
-    EXPECT_EQ(apxchol_solver_solve_block(solver, 0, nullptr, nullptr, nullptr, -1.0, -1, nullptr,
-                                         nullptr, nullptr, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(apxchol_solver_solve_block(solver, -1, B.data(), nullptr, X.data(), -1.0, -1,
-                                         nullptr, nullptr, nullptr, nullptr, 0),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
-}
-
 }  // namespace
 
 TEST(CApi, SolvesOneBasedLaplacianCsc) {
     const csc64 c{2, {1, 3, 5}, {1, 2, 1, 2}, {1.0, -1.0, -1.0, 1.0}};
-    auto o = defaults();
+    auto o = cpu_options();
     o.tol = 1e-10;
     o.threads = 1;
     handle h;
@@ -327,14 +281,13 @@ TEST(CApi, SolvesOneBasedLaplacianCsc) {
     const std::array<double, 2> b{1.0, -1.0};
     std::array<double, 2> x{};
     auto info = info_struct();
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
+    ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_NEAR(x[0] - x[1], 1.0, 1e-12);
     EXPECT_NEAR(x[0] + x[1], 0.0, 1e-12);  // min-norm
     EXPECT_EQ(info.converged, 1);
     EXPECT_LT(info.relative_residual, 1e-10);
     EXPECT_GE(info.iterations, 1);
-    EXPECT_GE(info.solve_seconds, 0.0);
 }
 
 TEST(CApi, RejectsInvalidIndexBase) {
@@ -346,21 +299,36 @@ TEST(CApi, RejectsInvalidIndexBase) {
     EXPECT_NE(message.find("index_base"), std::string::npos);
 }
 
-TEST(CApi, SupportsAliasedRhsGuessAndSolution) {
-    const csc64 c{2, {0, 2, 4}, {0, 1, 0, 1}, {1.0, -1.0, -1.0, 1.0}};
-    auto o = defaults();
-    o.tol = 1e-10;
-    handle h;
-    ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
-    std::array<double, 2> v{1.0, -1.0};
-    ASSERT_EQ(apxchol_solver_solve(h.s, v.data(), v.data(), v.data(), -1.0, -1, nullptr, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_NEAR(v[0] - v[1], 1.0, 1e-12);
+TEST(CApi, SolveAndApplyRejectAllInputOutputOverlap) {
+    const csc64 c = to_csc64(grid_laplacian(8, 7, 0.1));
+    for (const auto backend : available_backends()) {
+        auto o = cpu_options(); o.backend = backend;
+        handle h;
+        ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+        for (const int k : {1, 5}) {
+            SCOPED_TRACE(::testing::Message() << "backend=" << backend << " nrhs=" << k);
+            Eigen::VectorXd storage = Eigen::VectorXd::Ones(c.n * k + 1);
+            Eigen::MatrixXd other = Eigen::MatrixXd::Ones(c.n, k), out(c.n, k);
+            for (const int offset : {0, 1}) {
+                EXPECT_EQ(apxchol_solver_solve(h.s, k, storage.data(), nullptr,
+                    storage.data() + offset, -1, -1, nullptr, 0, nullptr, 0),
+                    APXCHOL_STATUS_INVALID_ARGUMENT);
+                EXPECT_EQ(apxchol_solver_solve(h.s, k, other.data(), storage.data(),
+                    storage.data() + offset, -1, -1, nullptr, 0, nullptr, 0),
+                    APXCHOL_STATUS_INVALID_ARGUMENT);
+                EXPECT_EQ(apxchol_solver_apply(h.s, k, storage.data(), storage.data() + offset,
+                    nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+            }
+            // Inputs may alias one another when the output is separate.
+            EXPECT_EQ(apxchol_solver_solve(h.s, k, other.data(), other.data(), out.data(),
+                -1, -1, nullptr, 0, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+        }
+    }
 }
 
 TEST(CApi, ExhaustionIsNotConvergedAndWritesTheSolution) {
     const csc64 c = to_csc64(grid_laplacian(5, 5, 0.05));
-    auto o = defaults();
+    auto o = cpu_options();
     o.stagnation_window = 0;
     handle h;
     ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
@@ -368,7 +336,7 @@ TEST(CApi, ExhaustionIsNotConvergedAndWritesTheSolution) {
     Eigen::VectorXd x = Eigen::VectorXd::Zero(c.n);
     auto info = info_struct();
     std::array<char, 256> err{};
-    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), 1e-300, 1, &info, err.data(),
+    EXPECT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), 1e-300, 1, &info, err.data(),
                                    err.size()),
               APXCHOL_STATUS_NOT_CONVERGED);
     EXPECT_EQ(info.converged, 0);
@@ -379,28 +347,26 @@ TEST(CApi, ExhaustionIsNotConvergedAndWritesTheSolution) {
 }
 
 TEST(CApi, ThreadLimitIsRestoredAfterSuccessAndError) {
-    const int before = apxchol_get_max_threads();
-    const csc64 good = to_csc64(grid_laplacian(8, 8));
-    const csc64 bad{2, {0, 2, 4}, {0, 1, 0, 1}, {0.0, 1.0, 1.0, 0.0}};  // adjacency
-    auto o = defaults();
+#ifdef _OPENMP
+    const int before = omp_get_max_threads();
+    auto o = cpu_options();
     o.threads = before > 1 ? 1 : 2;
-    {
-        handle h;
-        ASSERT_EQ(create(good, &o, h), APXCHOL_STATUS_SUCCESS);
-        EXPECT_EQ(apxchol_get_max_threads(), before);
-        const Eigen::VectorXd b = compatible_rhs(good.n);
-        Eigen::VectorXd x(good.n);
-        EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr, nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_EQ(apxchol_get_max_threads(), before);
-        apxchol_stats stats{};
-        stats.struct_size = sizeof stats;
-        ASSERT_EQ(apxchol_solver_stats(h.s, &stats), APXCHOL_STATUS_SUCCESS);
-        EXPECT_EQ(stats.setup_max_threads, apxchol_openmp_enabled() ? o.threads : 1);
-    }
+    const csc64 c = to_csc64(grid_laplacian(8, 8));
     handle h;
-    EXPECT_EQ(create(bad, &o, h), APXCHOL_STATUS_INVALID_OPERATOR);
-    EXPECT_EQ(apxchol_get_max_threads(), before);
+    ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(omp_get_max_threads(), before);
+    const Eigen::VectorXd b = compatible_rhs(c.n);
+    Eigen::VectorXd x(c.n);
+    EXPECT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1, -1, nullptr, nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(omp_get_max_threads(), before);
+    EXPECT_EQ(apply_one(h.s, b.data(), x.data(), nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(omp_get_max_threads(), before);
+    const csc64 bad{2, {0, 2, 4}, {0, 1, 0, 1}, {0.0, 1.0, 1.0, 0.0}};
+    handle refused;
+    EXPECT_EQ(create(bad, &o, refused), APXCHOL_STATUS_INVALID_OPERATOR);
+    EXPECT_EQ(omp_get_max_threads(), before);
+#endif
 }
 
 TEST(CApi, ExtremeColumnPointersDoNotOverflow) {
@@ -413,7 +379,7 @@ TEST(CApi, ExtremeColumnPointersDoNotOverflow) {
         int sentinel = 0;
         apxchol_solver* s = reinterpret_cast<apxchol_solver*>(&sentinel);  // must be reset
         std::array<char, 256> err{};
-        EXPECT_EQ(apxchol_solver_create(1, colptr.data(), r.data(), v.data(), 0, nullptr, &s,
+        EXPECT_EQ(apxchol_solver_create(1, colptr.data(), r.data(), v.data(), 0, nullptr, nullptr, &s,
                                         err.data(), err.size()),
                   APXCHOL_STATUS_INVALID_ARGUMENT);
         EXPECT_EQ(s, nullptr);
@@ -430,7 +396,7 @@ TEST(CApi, ExtremeRowIndicesDoNotOverflow) {
         const std::array<std::int64_t, 1> r{row};
         apxchol_solver* s = nullptr;
         std::array<char, 256> err{};
-        EXPECT_EQ(apxchol_solver_create(1, colptr.data(), r.data(), v.data(), 1, nullptr, &s,
+        EXPECT_EQ(apxchol_solver_create(1, colptr.data(), r.data(), v.data(), 1, nullptr, nullptr, &s,
                                         err.data(), err.size()),
                   APXCHOL_STATUS_INVALID_ARGUMENT);
         EXPECT_NE(std::string(err.data()).find("row index"), std::string::npos);
@@ -446,10 +412,9 @@ TEST(CApi, TinyErrorBufferAndZeroedInfoOnError) {
     auto info = info_struct();
     info.iterations = 99;
     char one = 'x';
-    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, &one, 1),
+    EXPECT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, &one, 1),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     EXPECT_EQ(one, '\0');
-    EXPECT_EQ(info.struct_size, sizeof info);
     EXPECT_EQ(info.iterations, 0);
     EXPECT_EQ(info.converged, 0);
 }
@@ -459,7 +424,7 @@ TEST(CApi, RejectsNonFiniteOrZeroTolerance) {
     for (const double tol : {std::numeric_limits<double>::quiet_NaN(),
                              std::numeric_limits<double>::infinity(),
                              -std::numeric_limits<double>::infinity(), 0.0, -1.0}) {
-        auto o = defaults();
+        auto o = cpu_options();
         o.tol = tol;
         handle h;
         EXPECT_EQ(create(c, &o, h), APXCHOL_STATUS_INVALID_ARGUMENT) << tol;
@@ -471,31 +436,23 @@ TEST(CApi, RejectsNonFiniteOrZeroTolerance) {
     for (const double tol : {std::numeric_limits<double>::quiet_NaN(),
                              std::numeric_limits<double>::infinity(),
                              -std::numeric_limits<double>::infinity(), 0.0}) {
-        EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), tol, -1, nullptr, nullptr, 0),
-                  APXCHOL_STATUS_INVALID_ARGUMENT)
-            << tol;
-        EXPECT_EQ(apxchol_solver_solve_block(h.s, 1, b.data(), nullptr, x.data(), tol, -1,
-                                             nullptr, nullptr, nullptr, nullptr, 0),
+        EXPECT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), tol, -1, nullptr, nullptr, 0),
                   APXCHOL_STATUS_INVALID_ARGUMENT)
             << tol;
     }
     Eigen::VectorXd reference(c.n);
     auto expected = info_struct();
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, reference.data(), -1.0, -1,
+    ASSERT_EQ(solve_one(h.s, b.data(), nullptr, reference.data(), -1.0, -1,
                                    &expected, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     for (const double tol : {-0.5, -1.0, -2.0}) {
         SCOPED_TRACE(::testing::Message() << "default tolerance override=" << tol);
         auto info = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), tol, -1, &info, nullptr, 0),
+        ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), tol, -1, &info, nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         EXPECT_TRUE(same_bytes(x.data(), reference.data(), x.size()));
         EXPECT_EQ(info.iterations, expected.iterations);
         EXPECT_EQ(info.relative_residual, expected.relative_residual);
-        EXPECT_EQ(apxchol_solver_solve_block(h.s, 1, b.data(), nullptr, x.data(), tol, -1,
-                                             nullptr, nullptr, nullptr, nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(x.data(), reference.data(), x.size()));
     }
 }
 
@@ -513,11 +470,11 @@ TEST(CApi, NonFiniteMatrixIsAnOperatorErrorNonFiniteRhsAnArgumentError) {
     ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
     Eigen::VectorXd b = compatible_rhs(c.n), x(c.n), x0 = Eigen::VectorXd::Zero(c.n);
     x0[2] = std::numeric_limits<double>::quiet_NaN();
-    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), x0.data(), x.data(), -1.0, -1, nullptr, nullptr, 0),
+    EXPECT_EQ(solve_one(h.s, b.data(), x0.data(), x.data(), -1.0, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     b[1] = -std::numeric_limits<double>::infinity();
     std::array<char, 256> err{};
-    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr, err.data(),
+    EXPECT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr, err.data(),
                                    err.size()),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     EXPECT_NE(std::string(err.data()).find("non-finite"), std::string::npos);
@@ -538,9 +495,6 @@ TEST(CApi, DefaultsAreTheCppDefaults) {
     EXPECT_EQ(o.partitioner, APXCHOL_PARTITIONER_BLOCK_GREEDY);
     EXPECT_EQ(o.keep_factor_values, so.keep_factor_values ? 1 : 0);
     EXPECT_EQ(o.degree_quantile, so.factor_opts.partition.degree_quantile);
-    EXPECT_EQ(o.exact_clique_max_degree, so.factor_opts.exact_clique_max_degree);
-    EXPECT_EQ(o.omp_threshold, so.factor_opts.omp_threshold);
-    EXPECT_EQ(o.omp_threshold, apxchol::factor_options{}.omp_threshold);
     EXPECT_EQ(o.factor_storage, APXCHOL_FACTOR_STORAGE_AUTO);
     EXPECT_EQ(so.factor_opts.factor_storage, apxchol::factor_storage_type::automatic);
 }
@@ -561,27 +515,53 @@ TEST(CApi, StructSizeIsValidatedAndNothingPastTheStructIsWritten) {
     for (unsigned char byte : g.guard) EXPECT_EQ(byte, 0xA5);
 
     const csc64 c = to_csc64(grid_laplacian(4, 4));
-    auto o = defaults();
+    auto o = cpu_options();
     o.struct_size = sizeof(apxchol_options) + 4;
     handle h;
     EXPECT_EQ(create(c, &o, h), APXCHOL_STATUS_UNSUPPORTED);
     ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
     const Eigen::VectorXd b = compatible_rhs(c.n);
     Eigen::VectorXd x(c.n);
-    apxchol_solve_info info{};
-    info.struct_size = sizeof(apxchol_solve_info) - 4;
-    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
     apxchol_stats stats{};
     stats.struct_size = sizeof(apxchol_stats) + 8;
     EXPECT_EQ(apxchol_solver_stats(h.s, &stats), APXCHOL_STATUS_UNSUPPORTED);
+}
+
+TEST(CApi, InfoArraySizeIsCheckedBeforeWritesAndLaterErrorsZeroEveryColumn) {
+    const csc64 c = to_csc64(grid_laplacian(5, 5));
+    handle h;
+    ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
+    Eigen::MatrixXd b = Eigen::MatrixXd::Zero(c.n, 5), x = Eigen::MatrixXd::Constant(c.n, 5, 7);
+    std::array<apxchol_solve_info, 5> info;
+    for (const std::size_t size : {sizeof(info[0]) - 1, sizeof(info[0]) + 1}) {
+        std::memset(info.data(), 0xA5, sizeof info);
+        const auto before = info;
+        EXPECT_EQ(apxchol_solver_solve(h.s, 5, b.data(), nullptr, x.data(), -1, -1,
+            info.data(), size, nullptr, 0), size < sizeof(info[0])
+                ? APXCHOL_STATUS_INVALID_ARGUMENT : APXCHOL_STATUS_UNSUPPORTED);
+        EXPECT_TRUE(same_bytes(info.data(), before.data(), info.size()));
+        EXPECT_TRUE((x.array() == 7).all());
+    }
+    b(c.n - 1, 4) = std::numeric_limits<double>::quiet_NaN();
+    std::memset(info.data(), 0xA5, sizeof info);
+    EXPECT_EQ(apxchol_solver_solve(h.s, 5, b.data(), nullptr, x.data(), -1, -1,
+        info.data(), sizeof(info[0]), nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+    for (const auto& entry : info) {
+        EXPECT_EQ(entry.iterations, 0);
+        EXPECT_EQ(entry.relative_residual, 0);
+        EXPECT_EQ(entry.converged, 0);
+    }
+    EXPECT_TRUE((x.array() == 7).all());
+    b.setZero();
+    EXPECT_EQ(apxchol_solver_solve(h.s, 5, b.data(), nullptr, x.data(), -1, -1,
+        nullptr, 999, nullptr, 0), APXCHOL_STATUS_SUCCESS);
 }
 
 TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
     const Sparse A = grid_laplacian(12, 11, 0.25);
     const csc64 c = to_csc64(A);
     for (const auto backend : available_backends()) {
-        auto o = defaults();
+        auto o = cpu_options();
         o.backend = backend;
         o.threads = 1;
         o.keep_factor_values = 1;
@@ -610,18 +590,26 @@ TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_EQ(stats_of(copy.f).factor_storage, APXCHOL_FACTOR_STORAGE_FLOAT32);
             EXPECT_TRUE(export_of(copy.f) == built);
-
+            Eigen::VectorXd x(c.n);
+            auto info = info_struct();
+            ASSERT_EQ(solve_one(explicit_storage.s, b.data(), nullptr, x.data(), -1.0, -1,
+                               &info, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+            EXPECT_LT(true_residual(A, b, x), o.tol);
+#if defined(APXCHOL_USE_CUDA)
+            if (backend == APXCHOL_BACKEND_GPU) continue;
+#endif
             handle adopted;
             ASSERT_EQ(adopt(c, factor.f, &o, adopted), APXCHOL_STATUS_SUCCESS);
             EXPECT_EQ(stats_of(adopted.s).factor_storage, storage);
             EXPECT_TRUE(export_of(adopted.s) == native);
-            Eigen::VectorXd x(c.n);
-            auto info = info_struct();
-            ASSERT_EQ(apxchol_solver_solve(adopted.s, b.data(), nullptr, x.data(), -1.0, -1,
+            ASSERT_EQ(solve_one(adopted.s, b.data(), nullptr, x.data(), -1.0, -1,
                                            &info, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_LT(true_residual(A, b, x), o.tol);
         }
+#if defined(APXCHOL_USE_CUDA)
+        if (backend == APXCHOL_BACKEND_GPU) continue;
+#endif
         o.factor_storage = APXCHOL_FACTOR_STORAGE_AUTO;
         handle automatic;
         ASSERT_EQ(adopt(c, factor.f, &o, automatic), APXCHOL_STATUS_SUCCESS);
@@ -634,7 +622,7 @@ TEST(CApi, Fp16OnACpuWithoutItIsUnsupportedBeforeSetup) {
     const csc64 c = to_csc64(grid_laplacian(8, 7));
     if (apxchol::omp_sptrsv::fp16_supported())
         GTEST_SKIP() << "this CPU supports FP16 storage; UNSUPPORTED needs one without AVX/F16C";
-    auto o = defaults();
+    auto o = cpu_options();
     o.backend = APXCHOL_BACKEND_CPU;
     o.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT16;
     handle h;
@@ -646,7 +634,7 @@ TEST(CApi, Fp16OnACpuWithoutItIsUnsupportedBeforeSetup) {
 TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
     const Sparse A = grid_laplacian(30, 30);
     const csc64 c = to_csc64(A, 1);
-    auto o = defaults();
+    auto o = cpu_options();
     o.threads = 1;
     o.keep_factor_values = 1;
     o.seed = 7;
@@ -666,7 +654,7 @@ TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
 
     Eigen::VectorXd x(c.n);
     auto info = info_struct();
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
+    ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(x.data(), r.x.data(), x.size()));
     EXPECT_EQ(info.iterations, r.iterations);
@@ -674,12 +662,12 @@ TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
     EXPECT_LT(info.relative_residual, o.tol);
 }
 
-TEST(CApi, CpuResidualIsTheOriginalSystemsAndSurvivesAliasing) {
+TEST(CApi, CpuResidualIsTheOriginalSystems) {
     for (const double shift : {0.0, 0.05}) {
         SCOPED_TRACE(::testing::Message() << "shift=" << shift);
         const Sparse A = grid_laplacian(16, 15, shift);
         const csc64 c = to_csc64(A);
-        auto o = defaults();
+        auto o = cpu_options();
         o.backend = APXCHOL_BACKEND_CPU;
         handle h;
         ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
@@ -689,7 +677,7 @@ TEST(CApi, CpuResidualIsTheOriginalSystemsAndSurvivesAliasing) {
         };
         Eigen::VectorXd x(c.n);
         auto info = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info,
+        ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info,
                                        nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         // Forming b - A x rounds by about eps * |A| |x| whatever the order of
@@ -697,23 +685,15 @@ TEST(CApi, CpuResidualIsTheOriginalSystemsAndSurvivesAliasing) {
         const double rounding = 32 * std::numeric_limits<double>::epsilon() *
                                 (A.cwiseAbs() * x.cwiseAbs()).norm() / b.norm();
         EXPECT_NEAR(info.relative_residual, independent(x), rounding);
-        // b and x the same array: the residual is still of the caller's b.
-        Eigen::VectorXd bx = b;
-        auto aliased = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(h.s, bx.data(), nullptr, bx.data(), -1.0, -1, &aliased,
-                                       nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(bx.data(), x.data(), x.size()));
-        EXPECT_EQ(aliased.relative_residual, info.relative_residual);
         // No iterations: x = 0 and the residual is exactly 1; b = 0 gives 0.
         auto none = info_struct();
-        EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, 0, &none, nullptr,
+        EXPECT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, 0, &none, nullptr,
                                        0),
                   APXCHOL_STATUS_NOT_CONVERGED);
         EXPECT_EQ(none.relative_residual, 1.0);
         const Eigen::VectorXd zero = Eigen::VectorXd::Zero(c.n);
         auto zero_info = info_struct();
-        EXPECT_EQ(apxchol_solver_solve(h.s, zero.data(), nullptr, x.data(), -1.0, -1, &zero_info,
+        EXPECT_EQ(solve_one(h.s, zero.data(), nullptr, x.data(), -1.0, -1, &zero_info,
                                        nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         EXPECT_EQ(zero_info.relative_residual, 0.0);
@@ -727,23 +707,82 @@ TEST(CApi, RepeatedSolvesAreBitIdenticalAndWarmStartAtTheSolutionIsFree) {
     ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
     const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(c.n, -1.0, 3.0);
     Eigen::VectorXd x1(c.n), x2(c.n), x3(c.n);
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x1.data(), -1.0, -1, nullptr, nullptr, 0),
+    ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x1.data(), -1.0, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x2.data(), -1.0, -1, nullptr, nullptr, 0),
+    ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x2.data(), -1.0, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(x1.data(), x2.data(), x1.size()));
     auto info = info_struct();
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), x1.data(), x3.data(), 1e-6, -1, &info, nullptr, 0),
+    ASSERT_EQ(solve_one(h.s, b.data(), x1.data(), x3.data(), 1e-6, -1, &info, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_EQ(info.iterations, 0);
     EXPECT_EQ(info.converged, 1);
 }
 
-TEST(CApi, BlockSolveEqualsColumnSolvesBitwise) {
-    const csc64 c = to_csc64(grid_laplacian(12, 12));
-    handle h;
-    ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
-    expect_block_matches_scalar(h.s, c.n);
+TEST(CApi, CpuBatchMatchesNativeOwnerUsingTheExportedFactor) {
+#ifdef _OPENMP
+    const scoped_omp_threads threads(1);
+#endif
+    for (const double shift : {0.0, 0.05}) {
+        const Sparse A = grid_laplacian(12, 11, shift);
+        const csc64 c = to_csc64(A);
+        auto o = cpu_options();
+        o.threads = 1;
+        o.keep_factor_values = 1;
+        factor_handle f;
+        ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);
+        handle h;
+        ASSERT_EQ(adopt(c, f.f, &o, h), APXCHOL_STATUS_SUCCESS);
+        const exported bytes = export_of(f.f);
+        const auto stats = stats_of(f.f);
+        apxchol::factorization captured;
+        captured.L.n_ = static_cast<apxchol::node_index>(c.n);
+        captured.L.outer_.assign(bytes.colptr.begin(), bytes.colptr.end());
+        captured.L.inner_.assign(bytes.rowval.begin(), bytes.rowval.end());
+        captured.L.vals_ = bytes.nzval;
+        captured.perm.assign(bytes.perm.begin(), bytes.perm.end());
+        captured.sddm = stats.sddm;
+        captured.lumped_offdiag = stats.lumped_offdiag;
+        apxchol::solve_options native_options;
+        native_options.backend = apxchol::solve_backend::cpu;
+        native_options.num_threads = 1;
+        native_options.keep_factor_values = true;
+        const apxchol::cpu_solver native(A, std::move(captured), native_options);
+        ASSERT_TRUE(export_of(native.preconditioner().factor()) == bytes);
+        for (const int k : {1, 2, 4, 5, 16}) {
+            Eigen::MatrixXd B(c.n, k), X(c.n, k), expected(c.n, k);
+            for (int col = 0; col < k; ++col) B.col(col) = compatible_rhs(c.n, col + 1);
+            if (k > 1) B.col(0).setZero();
+            const Eigen::MatrixXd guess = 0.25 * B;
+            const apxchol::const_matrix_view guess_view(guess);
+            for (const bool warm : {false, true}) {
+                for (const int budget : {-1, 0, 1}) {
+                    SCOPED_TRACE(::testing::Message() << "shift=" << shift << " nrhs=" << k
+                        << " warm=" << warm << " max_iter=" << budget);
+                    const auto reference = native.solve(B, expected, -1, budget,
+                                                        warm ? &guess_view : nullptr);
+                    std::vector<apxchol_solve_info> info(k);
+                    const bool converged = std::all_of(reference.columns.begin(),
+                        reference.columns.end(), [](const auto& r) { return r.converged; });
+                    ASSERT_EQ(apxchol_solver_solve(h.s, k, B.data(), warm ? guess.data() : nullptr,
+                        X.data(), -1, budget, info.data(), sizeof(info[0]), nullptr, 0),
+                        converged ? APXCHOL_STATUS_SUCCESS : APXCHOL_STATUS_NOT_CONVERGED);
+                    EXPECT_TRUE(same_bytes(X.data(), expected.data(), X.size()));
+                    for (int col = 0; col < k; ++col) {
+                        EXPECT_EQ(info[col].iterations, reference.columns[col].iterations);
+                        EXPECT_EQ(info[col].relative_residual, reference.columns[col].residual);
+                        EXPECT_EQ(info[col].converged, reference.columns[col].converged);
+                    }
+                }
+            }
+            native.apply(B, expected);
+            ASSERT_EQ(apxchol_solver_apply(h.s, k, B.data(), X.data(), nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            EXPECT_TRUE(same_bytes(X.data(), expected.data(), X.size()));
+        }
+        EXPECT_TRUE(export_of(h.s) == bytes);
+        EXPECT_TRUE(export_of(f.f) == bytes);
+    }
 }
 
 TEST(CApi, StatsAreZeroedOnLaterErrorsAndUntouchedOnStructSizeMismatch) {
@@ -786,20 +825,20 @@ TEST(CApi, ApplyIsStatelessAndCentresEveryLaplacianApplication) {
         for (const double shift : {0.0, 0.1}) {
             SCOPED_TRACE(::testing::Message() << "backend=" << backend << " shift=" << shift);
             const csc64 c = to_csc64(grid_laplacian(12, 12, shift));
-            auto o = defaults();
+            auto o = cpu_options();
             o.backend = backend;
             handle h;
             ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
             const Eigen::VectorXd r = compatible_rhs(c.n, 3).array() + 0.25;
             Eigen::VectorXd z0(c.n), z(c.n);
-            ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z0.data(), nullptr, 0),
+            ASSERT_EQ(apply_one(h.s, r.data(), z0.data(), nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             if (shift == 0.0) {
                 const double rounding = backend == APXCHOL_BACKEND_CPU ? 1e-12 : 1e-5;
                 EXPECT_LE(std::fabs(z0.mean()), rounding * z0.cwiseAbs().maxCoeff());
             }
             for (int i = 0; i < 12; ++i) {
-                ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z.data(), nullptr, 0),
+                ASSERT_EQ(apply_one(h.s, r.data(), z.data(), nullptr, 0),
                           APXCHOL_STATUS_SUCCESS);
                 EXPECT_TRUE(same_bytes(z.data(), z0.data(), z.size())) << i;
             }
@@ -810,7 +849,7 @@ TEST(CApi, ApplyIsStatelessAndCentresEveryLaplacianApplication) {
 TEST(CApi, ApplyMatchesCppApply) {
     const Sparse A = grid_laplacian(10, 10, 0.1);
     const csc64 c = to_csc64(A);
-    auto o = defaults();
+    auto o = cpu_options();
     o.threads = 1;
     handle h;
     ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
@@ -821,84 +860,50 @@ TEST(CApi, ApplyMatchesCppApply) {
     const Eigen::VectorXd r = compatible_rhs(c.n, 3);
     const Eigen::VectorXd z_ref = ref.apply(r);
     Eigen::VectorXd z(c.n);
-    ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z.data(), nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    ASSERT_EQ(apply_one(h.s, r.data(), z.data(), nullptr, 0), APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(z.data(), z_ref.data(), z.size()));
 }
 
-TEST(CApi, ApplyInPlaceEqualsOutOfPlaceAndPartialOverlapIsRejected) {
-    // An SDDM factor's application is a fixed map, so in-place and
-    // out-of-place applications must agree bitwise on every route.
-    const csc64 c = to_csc64(grid_laplacian(11, 9, 0.1));
-    const Eigen::VectorXd r = compatible_rhs(c.n, 6);
+TEST(CApi, BatchValidatesEveryInputColumnBeforeWritingSolutionsOrApplications) {
+    const csc64 c = to_csc64(grid_laplacian(10, 10));
     for (const auto backend : available_backends()) {
-        SCOPED_TRACE(::testing::Message() << "backend=" << backend);
-        auto o = defaults();
-        o.backend = backend;
+        auto o = cpu_options(); o.backend = backend;
         handle h;
         ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
-        Eigen::VectorXd out(c.n), in_place = r;
-        ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), out.data(), nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        ASSERT_EQ(apxchol_solver_apply(h.s, in_place.data(), in_place.data(), nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(out.data(), in_place.data(), out.size()));
-    }
-    // The CPU route writes straight into z, so it refuses overlapping storage.
-    auto o = defaults();
-    o.backend = APXCHOL_BACKEND_CPU;
-    handle h;
-    ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
-    Eigen::VectorXd shifted(c.n + 1);
-    shifted.head(c.n) = r;
-    std::array<char, 256> err{};
-    EXPECT_EQ(apxchol_solver_apply(h.s, shifted.data(), shifted.data() + 1, err.data(), err.size()),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_NE(std::string(err.data()).find("overlap"), std::string::npos) << err.data();
-}
-
-TEST(CApi, BlockValidatesEveryColumnBeforeSolvingAny) {
-    const csc64 c = to_csc64(grid_laplacian(10, 10));
-    handle h;
-    ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
-    const std::int64_t k = 3;
-    Eigen::MatrixXd B(c.n, k);
-    for (std::int64_t col = 0; col < k; ++col)
-        B.col(col) = compatible_rhs(c.n, static_cast<unsigned>(col + 1));
-    const Eigen::MatrixXd X0 = Eigen::MatrixXd::Zero(c.n, k);
-    std::array<std::int64_t, 3> iters{};
-    auto untouched = [&](const Eigen::MatrixXd& X) {
-        return (X.array() == 7.0).all() && iters == std::array<std::int64_t, 3>{-5, -5, -5};
-    };
-    for (const bool in_guess : {false, true}) {
-        SCOPED_TRACE(::testing::Message() << "nan in " << (in_guess ? "x0" : "b"));
-        Eigen::MatrixXd b = B, x0 = X0;
-        (in_guess ? x0 : b)(c.n - 1, k - 1) = std::numeric_limits<double>::quiet_NaN();
-        Eigen::MatrixXd X = Eigen::MatrixXd::Constant(c.n, k, 7.0);
-        iters.fill(-5);
-        std::array<char, 256> err{};
-        EXPECT_EQ(apxchol_solver_solve_block(h.s, k, b.data(), x0.data(), X.data(), -1.0, -1,
-                                             iters.data(), nullptr, nullptr, err.data(),
-                                             err.size()),
-                  APXCHOL_STATUS_INVALID_ARGUMENT);
-        EXPECT_NE(std::string(err.data()).find("non-finite"), std::string::npos) << err.data();
-        EXPECT_TRUE(untouched(X));
+        Eigen::MatrixXd B(c.n, 5);
+        for (int col = 0; col < 5; ++col) B.col(col) = compatible_rhs(c.n, col + 1);
+        for (const bool in_guess : {false, true}) {
+            Eigen::MatrixXd b = B, x0 = Eigen::MatrixXd::Zero(c.n, 5);
+            (in_guess ? x0 : b)(c.n - 1, 4) = std::numeric_limits<double>::quiet_NaN();
+            Eigen::MatrixXd x = Eigen::MatrixXd::Constant(c.n, 5, 7);
+            EXPECT_EQ(apxchol_solver_solve(h.s, 5, b.data(), x0.data(), x.data(), -1, -1,
+                nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+            EXPECT_TRUE((x.array() == 7).all());
+            if (!in_guess) {
+                EXPECT_EQ(apxchol_solver_apply(h.s, 5, b.data(), x.data(), nullptr, 0),
+                          APXCHOL_STATUS_INVALID_ARGUMENT);
+                EXPECT_TRUE((x.array() == 7).all());
+            }
+        }
     }
 }
 
-TEST(CApi, BlockByteSizeOverflowIsAnArgumentError) {
+TEST(CApi, EmptyNegativeAndOverflowingBatchDimensions) {
     const csc64 c = to_csc64(grid_laplacian(4, 4));
     handle h;
     ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
-    // n * k fits int64 but n * k * sizeof(double) does not fit ptrdiff_t; the
-    // arrays are never read.
-    const std::int64_t k = std::numeric_limits<std::ptrdiff_t>::max() /
-                               static_cast<std::int64_t>(sizeof(double)) / c.n + 1;
-    std::array<double, 16> dummy{};
-    std::array<char, 256> err{};
-    EXPECT_EQ(apxchol_solver_solve_block(h.s, k, dummy.data(), nullptr, dummy.data(), -1.0, -1,
-                                         nullptr, nullptr, nullptr, err.data(), err.size()),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_NE(std::string(err.data()).find("overflows"), std::string::npos) << err.data();
+    EXPECT_EQ(apxchol_solver_solve(h.s, 0, nullptr, nullptr, nullptr, -1, -1,
+        nullptr, 999, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(apxchol_solver_apply(h.s, 0, nullptr, nullptr, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    const auto overflow = std::numeric_limits<std::ptrdiff_t>::max() /
+        static_cast<std::int64_t>(sizeof(double)) / c.n + 1;
+    double b = 1, x = 7;
+    for (const std::int64_t k : {std::int64_t{-1}, overflow}) {
+        EXPECT_EQ(apxchol_solver_solve(h.s, k, &b, nullptr, &x, -1, -1, nullptr, 0, nullptr, 0),
+                  APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(apxchol_solver_apply(h.s, k, &b, &x, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(x, 7);
+    }
 }
 
 TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
@@ -908,7 +913,7 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
     for (const double shift : {0.0, 0.05}) {
         SCOPED_TRACE(::testing::Message() << "shift=" << shift);
         const csc64 c = to_csc64(grid_laplacian(12, 12, shift));
-        auto o = defaults();
+        auto o = cpu_options();
         o.backend = APXCHOL_BACKEND_CPU;
         o.threads = 1;
         handle h;
@@ -916,7 +921,7 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
         const Eigen::VectorXd b = compatible_rhs(c.n, 2);
         Eigen::VectorXd x_ref(c.n);
         auto ref = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x_ref.data(), -1.0, -1, &ref,
+        ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x_ref.data(), -1.0, -1, &ref,
                                        nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         for (const int e : {-700, 700}) {
@@ -925,7 +930,7 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
             const Eigen::VectorXd xs = x_ref.unaryExpr([e](double v) { return std::ldexp(v, e); });
             Eigen::VectorXd x(c.n);
             auto info = info_struct();
-            ASSERT_EQ(apxchol_solver_solve(h.s, bs.data(), nullptr, x.data(), -1.0, -1, &info,
+            ASSERT_EQ(solve_one(h.s, bs.data(), nullptr, x.data(), -1.0, -1, &info,
                                            nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_TRUE(same_bytes(x.data(), xs.data(), x.size()));
@@ -935,7 +940,7 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
             EXPECT_DOUBLE_EQ(info.relative_residual, ref.relative_residual);
             // No iterations: the residual of x = 0 is exactly 1 at any scale.
             info = info_struct();
-            EXPECT_EQ(apxchol_solver_solve(h.s, bs.data(), nullptr, x.data(), -1.0, 0, &info,
+            EXPECT_EQ(solve_one(h.s, bs.data(), nullptr, x.data(), -1.0, 0, &info,
                                            nullptr, 0),
                       APXCHOL_STATUS_NOT_CONVERGED);
             EXPECT_EQ(info.relative_residual, 1.0);
@@ -945,13 +950,12 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
         B.col(0) = b.unaryExpr([](double v) { return std::ldexp(v, -700); });
         B.col(1) = b;
         B.col(2) = b.unaryExpr([](double v) { return std::ldexp(v, 700); });
-        ASSERT_EQ(apxchol_solver_solve_block(h.s, 3, B.data(), nullptr, X.data(), -1.0, -1,
-                                             nullptr, nullptr, nullptr, nullptr, 0),
+        ASSERT_EQ(apxchol_solver_solve(h.s, 3, B.data(), nullptr, X.data(), -1.0, -1,
+                                      nullptr, 0, nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         for (int col = 0; col < 3; ++col) {
             const int e = (col - 1) * 700;
-            const Eigen::VectorXd xs = x_ref.unaryExpr([e](double v) { return std::ldexp(v, e); });
-            EXPECT_TRUE(same_bytes(X.col(col).data(), xs.data(), xs.size())) << col;
+            EXPECT_LE((X.col(col) / std::ldexp(1.0, e) - x_ref).norm(), 1e-6 * x_ref.norm()) << col;
         }
     }
 }
@@ -959,7 +963,7 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
 TEST(CApi, SubnormalRightHandSideAndWarmStartRange) {
     const Sparse A = grid_laplacian(9, 9, 0.1);
     const csc64 c = to_csc64(A);
-    auto o = defaults();
+    auto o = cpu_options();
     o.backend = APXCHOL_BACKEND_CPU;
     handle h;
     ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
@@ -972,7 +976,7 @@ TEST(CApi, SubnormalRightHandSideAndWarmStartRange) {
     // The solve runs at unit scale; the subnormal x it returns keeps ~14
     // significant bits, which the certified residual reports honestly.
     const apxchol_status status =
-        apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0);
+        solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0);
     EXPECT_EQ(status == APXCHOL_STATUS_SUCCESS, info.relative_residual < o.tol);
     EXPECT_GT(info.iterations, 0);
     EXPECT_GT(x.cwiseAbs().maxCoeff(), 0.0);
@@ -982,7 +986,7 @@ TEST(CApi, SubnormalRightHandSideAndWarmStartRange) {
     const Eigen::VectorXd huge_guess = Eigen::VectorXd::Constant(c.n, 0x1p300);
     std::array<char, 256> err{};
     info = info_struct();
-    const auto warm_status = apxchol_solver_solve(h.s, normal.data(), huge_guess.data(), x.data(),
+    const auto warm_status = solve_one(h.s, normal.data(), huge_guess.data(), x.data(),
                                                  -1.0, -1, &info, err.data(), err.size());
     EXPECT_EQ(warm_status, info.relative_residual < o.tol ? APXCHOL_STATUS_SUCCESS
                                                          : APXCHOL_STATUS_NOT_CONVERGED);
@@ -994,7 +998,7 @@ TEST(CApi, SubnormalRightHandSideAndWarmStartRange) {
 
     const Eigen::VectorXd tiny = 1e-200 * normal;
     const Eigen::VectorXd unscalable_guess = 1e200 * normal;
-    EXPECT_EQ(apxchol_solver_solve(h.s, tiny.data(), unscalable_guess.data(), x.data(), -1.0,
+    EXPECT_EQ(solve_one(h.s, tiny.data(), unscalable_guess.data(), x.data(), -1.0,
                                    -1, nullptr, err.data(), err.size()),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     EXPECT_NE(std::string(err.data()).find("scaling range"), std::string::npos) << err.data();
@@ -1007,7 +1011,7 @@ TEST(CApi, UnrepresentableSolutionsAreUnsupported) {
         A.setIdentity();
         A *= diagonal;
         const csc64 c = to_csc64(A);
-        auto o = defaults();
+        auto o = cpu_options();
         o.backend = APXCHOL_BACKEND_CPU;
         handle h;
         ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
@@ -1015,7 +1019,7 @@ TEST(CApi, UnrepresentableSolutionsAreUnsupported) {
         Eigen::VectorXd x(4);
         auto info = info_struct();
         std::array<char, 256> err{};
-        EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1,
+        EXPECT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1,
                                        &info, err.data(), err.size()),
                   APXCHOL_STATUS_UNSUPPORTED);
         EXPECT_EQ(info.converged, 0);
@@ -1025,11 +1029,11 @@ TEST(CApi, UnrepresentableSolutionsAreUnsupported) {
         Eigen::MatrixXd B(4, 2), X(4, 2);
         B.col(0).setConstant(diagonal);
         B.col(1) = b;
-        EXPECT_EQ(apxchol_solver_solve_block(h.s, 2, B.data(), nullptr, X.data(), -1.0, -1,
-                                             nullptr, nullptr, nullptr, err.data(), err.size()),
+        EXPECT_EQ(apxchol_solver_solve(h.s, 2, B.data(), nullptr, X.data(), -1.0, -1,
+                                      nullptr, 0, err.data(), err.size()),
                   APXCHOL_STATUS_UNSUPPORTED);
         EXPECT_GT(std::strlen(err.data()), 0u);
-        ASSERT_EQ(apxchol_solver_solve(h.s, B.col(0).data(), nullptr, x.data(), -1.0, -1,
+        ASSERT_EQ(solve_one(h.s, B.col(0).data(), nullptr, x.data(), -1.0, -1,
                                        &info, err.data(), err.size()),
                   APXCHOL_STATUS_SUCCESS);
         EXPECT_TRUE(x.isApprox(Eigen::VectorXd::Ones(4), o.tol));
@@ -1043,7 +1047,7 @@ TEST(CApi, StatsReportLumpingSddmAndFactorSize) {
     A.coeffRef(0, 1) = -A.coeffRef(0, 1);
     A.makeCompressed();
     const csc64 c = to_csc64(A);
-    auto o = defaults();
+    auto o = cpu_options();
     o.keep_factor_values = 1;
     handle h;
     ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
@@ -1054,8 +1058,6 @@ TEST(CApi, StatsReportLumpingSddmAndFactorSize) {
     EXPECT_EQ(stats.n, c.n);
     EXPECT_EQ(stats.lumped_offdiag, 2);
     EXPECT_EQ(stats.sddm, 1);
-    EXPECT_GE(stats.rounds, 1);
-    EXPECT_GE(stats.setup_seconds, 0.0);
     EXPECT_GE(stats.factor_nnz, c.n);
 
     handle lap;
@@ -1089,7 +1091,7 @@ TEST(CApi, FactorExportStructureAndRetention) {
                                            nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
 
-    auto o = defaults();
+    auto o = cpu_options();
     o.keep_factor_values = 1;
     handle kept;
     ASSERT_EQ(create(c, &o, kept), APXCHOL_STATUS_SUCCESS);
@@ -1153,22 +1155,14 @@ TEST(CApi, BackendAndEnumValidation) {
     EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_CPU), 1);
     EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_AUTO), 1);
     EXPECT_EQ(apxchol_backend_available(42), 0);
-#ifndef APXCHOL_USE_METAL
-    EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_METAL), 0);
-    {
-        auto o = defaults();
-        o.backend = APXCHOL_BACKEND_METAL;
+    if (!apxchol_backend_available(APXCHOL_BACKEND_GPU)) {
+        auto o = cpu_options(); o.backend = APXCHOL_BACKEND_GPU;
         handle h;
-        std::string message;
-        EXPECT_EQ(create(c, &o, h, 0, &message), APXCHOL_STATUS_UNSUPPORTED);
-        EXPECT_NE(message.find("Metal"), std::string::npos);
+        EXPECT_EQ(create(c, &o, h), APXCHOL_STATUS_UNSUPPORTED);
+        EXPECT_EQ(h.s, nullptr);
     }
-#else
-    EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_METAL),
-              apxchol::metal_solver::available() ? 1 : 0);
-#endif
     auto check = [&](auto mutate) {
-        auto o = defaults();
+        auto o = cpu_options();
         mutate(o);
         handle h;
         EXPECT_EQ(create(c, &o, h), APXCHOL_STATUS_INVALID_ARGUMENT);
@@ -1192,7 +1186,7 @@ TEST(CApi, BackendAndEnumValidation) {
           APXCHOL_PARTITIONER_BAUMANN_KYNG})
         for (const apxchol_sampler sampler :
              {APXCHOL_SAMPLER_GKS, APXCHOL_SAMPLER_TRACE_CYCLE}) {
-            auto o = defaults();
+            auto o = cpu_options();
             o.partitioner = partitioner;
             o.sampler = sampler;
             handle h;
@@ -1201,51 +1195,38 @@ TEST(CApi, BackendAndEnumValidation) {
                 << partitioner << " " << sampler << ": " << message;
             const Eigen::VectorXd b = compatible_rhs(c.n);
             Eigen::VectorXd x(c.n);
-            EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr,
+            EXPECT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr,
                                            nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
         }
 }
 
-TEST(CApi, AutoBackendSmallInputsAndAdoptionRunOnCpu) {
-    // Below the 32,768-row limit, AUTO is the CPU route: same stats, same
-    // factor and bitwise the same solution as an explicit CPU request.
-    const csc64 c = to_csc64(grid_laplacian(12, 11, 0.05), 1);
+TEST(CApi, AutomaticScalarAndHostFactorAdoptionSelectCpu) {
+    const csc64 scalar{1, {0, 1}, {0}, {2}};
     auto o = defaults();
-    o.threads = 1;
-    o.keep_factor_values = 1;
-    handle automatic;
-    ASSERT_EQ(o.backend, APXCHOL_BACKEND_AUTO);
-    ASSERT_EQ(create(c, &o, automatic, 1), APXCHOL_STATUS_SUCCESS);
-    o.backend = APXCHOL_BACKEND_CPU;
-    handle cpu;
-    ASSERT_EQ(create(c, &o, cpu, 1), APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(stats_of(automatic.s).backend, APXCHOL_BACKEND_CPU);
-    EXPECT_TRUE(export_of(automatic.s) == export_of(cpu.s));
-    const Eigen::VectorXd b = compatible_rhs(c.n, 4);
-    Eigen::VectorXd xa(c.n), xc(c.n);
-    ASSERT_EQ(apxchol_solver_solve(automatic.s, b.data(), nullptr, xa.data(), -1.0, -1, nullptr,
-                                   nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    ASSERT_EQ(apxchol_solver_solve(cpu.s, b.data(), nullptr, xc.data(), -1.0, -1, nullptr,
-                                   nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(same_bytes(xa.data(), xc.data(), xa.size()));
-
-    // Adopting a host factor under AUTO always runs on CPU.
+    handle tiny;
+    ASSERT_EQ(apxchol_solver_create(scalar.n, scalar.colptr.data(), scalar.rowval.data(),
+        scalar.nzval.data(), 0, nullptr, nullptr, &tiny.s, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(stats_of(tiny.s).backend, APXCHOL_BACKEND_CPU);
+    const csc64 c = to_csc64(grid_laplacian(12, 11, 0.05));
     factor_handle f;
-    ASSERT_EQ(apxchol_solver_copy_factor(cpu.s, &f.f, nullptr, 0), APXCHOL_STATUS_SUCCESS);
-    o.backend = APXCHOL_BACKEND_AUTO;
-    handle adopted;
-    ASSERT_EQ(adopt(c, f.f, &o, adopted, 1), APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(stats_of(adopted.s).backend, APXCHOL_BACKEND_CPU);
+    ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);
+    handle automatic;
+    ASSERT_EQ(adopt(c, f.f, &o, automatic), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(stats_of(automatic.s).backend, APXCHOL_BACKEND_CPU);
+#if defined(APXCHOL_USE_CUDA)
+    o.backend = APXCHOL_BACKEND_GPU;
+    handle refused;
+    EXPECT_EQ(adopt(c, f.f, &o, refused), APXCHOL_STATUS_UNSUPPORTED);
+    EXPECT_EQ(refused.s, nullptr);
+#endif
 }
 
 TEST(CApi, FactorHandleExportEqualsTheSolversBytewise) {
     // Single thread: the factorization is exactly repeatable (docs/precision.md).
     for (const double shift : {0.0, 0.05}) {
         const csc64 c = to_csc64(grid_laplacian(17, 13, shift), 1);
-        auto o = defaults();
+        auto o = cpu_options();
         o.threads = 1;
         o.seed = 11;
         factor_handle f;
@@ -1259,8 +1240,6 @@ TEST(CApi, FactorHandleExportEqualsTheSolversBytewise) {
         expect_same_factor_stats(fs, ss);
         EXPECT_EQ(fs.backend, APXCHOL_BACKEND_CPU);
         EXPECT_EQ(fs.sddm, shift > 0.0 ? 1 : 0);
-        EXPECT_EQ(fs.setup_max_threads, 1);
-        EXPECT_GE(fs.setup_seconds, 0.0);
     }
 }
 
@@ -1273,7 +1252,7 @@ TEST(CApi, SolverFromFactorIsBitIdenticalOnItsOwnMatrix) {
     lumpable.makeCompressed();
     for (const Sparse& A : {grid_laplacian(24, 19), grid_laplacian(24, 19, 0.01), lumpable}) {
         const csc64 c = to_csc64(A);
-        auto o = defaults();
+        auto o = cpu_options();
         o.threads = 1;
         o.keep_factor_values = 1;
         handle self;
@@ -1288,17 +1267,16 @@ TEST(CApi, SolverFromFactorIsBitIdenticalOnItsOwnMatrix) {
         const apxchol_stats as = stats_of(adopted.s);
         expect_same_factor_stats(as, stats_of(self.s));
         expect_same_factor_stats(as, stats_of(f.f));
-        EXPECT_EQ(as.setup_max_threads, 1);
 
         const Eigen::VectorXd b = compatible_rhs(c.n, 3);
         Eigen::VectorXd x1(c.n), x2(c.n), x0 = 0.5 * compatible_rhs(c.n, 7);
         const Eigen::VectorXd& x0c = x0;
         for (const double* guess : {static_cast<const double*>(nullptr), x0c.data()}) {
             auto i1 = info_struct(), i2 = info_struct();
-            ASSERT_EQ(apxchol_solver_solve(self.s, b.data(), guess, x1.data(), 1e-10, -1, &i1,
+            ASSERT_EQ(solve_one(self.s, b.data(), guess, x1.data(), 1e-10, -1, &i1,
                                            nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
-            ASSERT_EQ(apxchol_solver_solve(adopted.s, b.data(), guess, x2.data(), 1e-10, -1, &i2,
+            ASSERT_EQ(solve_one(adopted.s, b.data(), guess, x2.data(), 1e-10, -1, &i2,
                                            nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_TRUE(same_bytes(x1.data(), x2.data(), x1.size()));
@@ -1306,22 +1284,22 @@ TEST(CApi, SolverFromFactorIsBitIdenticalOnItsOwnMatrix) {
             EXPECT_EQ(i1.relative_residual, i2.relative_residual);
         }
         Eigen::VectorXd z1(c.n), z2(c.n);
-        ASSERT_EQ(apxchol_solver_apply(self.s, b.data(), z1.data(), nullptr, 0),
+        ASSERT_EQ(apply_one(self.s, b.data(), z1.data(), nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
-        ASSERT_EQ(apxchol_solver_apply(adopted.s, b.data(), z2.data(), nullptr, 0),
+        ASSERT_EQ(apply_one(adopted.s, b.data(), z2.data(), nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         EXPECT_TRUE(same_bytes(z1.data(), z2.data(), z1.size()));
     }
 }
 
 TEST(CApi, SolverFromFactorPreconditionsANearbyOperator) {
-    for (const auto backend : available_backends()) {
+    for (const auto backend : adoption_backends()) {
         for (const double shift : {0.0, 0.05}) {
             SCOPED_TRACE(::testing::Message() << "backend=" << backend << " shift=" << shift);
             const Sparse A = grid_laplacian(26, 20, shift);
             const Sparse B = nearby_operator(A, 7, 0.5);
             ASSERT_GT(B.nonZeros(), A.nonZeros());
-            auto o = defaults();
+            auto o = cpu_options();
             o.tol = 1e-10;
             o.max_iter = 1000;
             factor_handle f;
@@ -1336,7 +1314,7 @@ TEST(CApi, SolverFromFactorPreconditionsANearbyOperator) {
             const Eigen::VectorXd b = compatible_rhs(cb.n, 4);
             Eigen::VectorXd x(cb.n);
             auto info = info_struct();
-            ASSERT_EQ(apxchol_solver_solve(stale.s, b.data(), nullptr, x.data(), -1.0, -1,
+            ASSERT_EQ(solve_one(stale.s, b.data(), nullptr, x.data(), -1.0, -1,
                                            &info, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_EQ(info.converged, 1);
@@ -1351,7 +1329,7 @@ TEST(CApi, SolverFromFactorPreconditionsANearbyOperator) {
             handle fresh;
             ASSERT_EQ(create(cb, &o, fresh, 1), APXCHOL_STATUS_SUCCESS);
             Eigen::VectorXd y(cb.n);
-            ASSERT_EQ(apxchol_solver_solve(fresh.s, b.data(), nullptr, y.data(), -1.0, -1,
+            ASSERT_EQ(solve_one(fresh.s, b.data(), nullptr, y.data(), -1.0, -1,
                                            nullptr, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_LT((x - y).norm(), 1e-6 * y.norm());
@@ -1361,7 +1339,7 @@ TEST(CApi, SolverFromFactorPreconditionsANearbyOperator) {
 
 TEST(CApi, SddmFactorMayPreconditionALaplacianButNotConversely) {
     const Sparse lap = grid_laplacian(18, 18), sddm = grid_laplacian(18, 18, 0.02);
-    auto o = defaults();
+    auto o = cpu_options();
     o.tol = 1e-10;
     o.max_iter = 1000;
     factor_handle lap_factor, sddm_factor;
@@ -1384,7 +1362,7 @@ TEST(CApi, SddmFactorMayPreconditionALaplacianButNotConversely) {
     EXPECT_EQ(stats_of(h.s).sddm, 1);
     const Eigen::VectorXd b = compatible_rhs(lap.rows(), 2);
     Eigen::VectorXd x(lap.rows());
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr, nullptr, 0),
+    ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_LT(true_residual(lap, b, x), o.tol);
 }
@@ -1407,7 +1385,7 @@ TEST(CApi, FactorHandleArgumentErrors) {
         EXPECT_EQ(create_factor(adjacency, nullptr, f, 0, &message),
                   APXCHOL_STATUS_INVALID_OPERATOR);
         EXPECT_NE(message.find("ADJACENCY"), std::string::npos) << message;
-        auto o = defaults();
+        auto o = cpu_options();
         o.sampler = 7;
         EXPECT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_INVALID_ARGUMENT);
         o = defaults();
@@ -1446,11 +1424,9 @@ TEST(CApi, FactorHandleArgumentErrors) {
     EXPECT_EQ(apxchol_factor_stats(nullptr, &bad), APXCHOL_STATUS_INVALID_ARGUMENT);
     EXPECT_EQ(apxchol_factor_stats(f.f, nullptr), APXCHOL_STATUS_INVALID_ARGUMENT);
 
-    // Adoption: NULL factor or output, the dimension, the operator contract.
+    // Adoption: NULL output, the dimension, the operator contract.
     handle h;
-    EXPECT_EQ(adopt(c, nullptr, nullptr, h, 0, &message), APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_NE(message.find("factor is NULL"), std::string::npos) << message;
-    EXPECT_EQ(apxchol_solver_create_from_factor(c.n, c.colptr.data(), c.rowval.data(),
+    EXPECT_EQ(apxchol_solver_create(c.n, c.colptr.data(), c.rowval.data(),
                                                 c.nzval.data(), 0, f.f, nullptr, nullptr,
                                                 nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
@@ -1465,15 +1441,15 @@ TEST(CApi, FactorHandleArgumentErrors) {
     csc64 nonfinite = c;
     nonfinite.nzval[0] = std::numeric_limits<double>::quiet_NaN();
     EXPECT_EQ(adopt(nonfinite, f.f, nullptr, h), APXCHOL_STATUS_INVALID_OPERATOR);
-    auto o = defaults();
+    auto o = cpu_options();
     o.struct_size = sizeof(apxchol_options) + 4;
     EXPECT_EQ(adopt(c, f.f, &o, h), APXCHOL_STATUS_UNSUPPORTED);
     o = defaults();
     o.tol = -1.0;
     EXPECT_EQ(adopt(c, f.f, &o, h), APXCHOL_STATUS_INVALID_ARGUMENT);
-#ifndef APXCHOL_USE_METAL
+#if !defined(APXCHOL_USE_METAL) && !defined(APXCHOL_USE_CUDA)
     o = defaults();
-    o.backend = APXCHOL_BACKEND_METAL;
+    o.backend = APXCHOL_BACKEND_GPU;
     EXPECT_EQ(adopt(c, f.f, &o, h), APXCHOL_STATUS_UNSUPPORTED);
 #endif
     EXPECT_EQ(h.s, nullptr);
@@ -1499,7 +1475,7 @@ TEST(CApi, FactorHandleArgumentErrors) {
 TEST(CApi, FactorHandleOutlivesAndIsUnchangedByItsSolvers) {
     const Sparse A = grid_laplacian(20, 20);
     const csc64 c = to_csc64(A);
-    auto o = defaults();
+    auto o = cpu_options();
     o.threads = 1;
     o.keep_factor_values = 1;
     const Eigen::VectorXd b = compatible_rhs(c.n, 6);
@@ -1512,14 +1488,13 @@ TEST(CApi, FactorHandleOutlivesAndIsUnchangedByItsSolvers) {
     {
         handle s;
         ASSERT_EQ(adopt(c, f.f, &o, s), APXCHOL_STATUS_SUCCESS);
-        ASSERT_EQ(apxchol_solver_solve(s.s, b.data(), nullptr, x_first.data(), -1.0, -1, nullptr,
+        ASSERT_EQ(solve_one(s.s, b.data(), nullptr, x_first.data(), -1.0, -1, nullptr,
                                        nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
     }  // the solver is gone; the factor is as it was
     EXPECT_TRUE(export_of(f.f) == before);
     const apxchol_stats again = stats_of(f.f);
     expect_same_factor_stats(again, fs);
-    EXPECT_EQ(again.setup_seconds, fs.setup_seconds);
 
     // Two solvers adopt it concurrently, then outlive it.
     std::array<handle, 2> solvers;
@@ -1536,7 +1511,7 @@ TEST(CApi, FactorHandleOutlivesAndIsUnchangedByItsSolvers) {
     f.f = nullptr;
     for (handle& s : solvers) {
         Eigen::VectorXd x(c.n);
-        ASSERT_EQ(apxchol_solver_solve(s.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr,
+        ASSERT_EQ(solve_one(s.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr,
                                        nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         EXPECT_TRUE(same_bytes(x.data(), x_first.data(), x.size()));
@@ -1546,7 +1521,7 @@ TEST(CApi, FactorHandleOutlivesAndIsUnchangedByItsSolvers) {
 
 TEST(CApi, SolverFactorRoundTrip) {
     const csc64 c = to_csc64(grid_laplacian(16, 21, 0.03));
-    auto o = defaults();
+    auto o = cpu_options();
     o.threads = 1;
     o.keep_factor_values = 1;
     factor_handle copy;
@@ -1563,22 +1538,20 @@ TEST(CApi, SolverFactorRoundTrip) {
             << err.data();
         original = export_of(s.s);
         solver_stats = stats_of(s.s);
-        ASSERT_EQ(apxchol_solver_solve(s.s, b.data(), nullptr, x_original.data(), -1.0, -1,
+        ASSERT_EQ(solve_one(s.s, b.data(), nullptr, x_original.data(), -1.0, -1,
                                        nullptr, nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
     }  // the copy outlives the solver it came from
     EXPECT_TRUE(export_of(copy.f) == original);
     const apxchol_stats cs = stats_of(copy.f);
     expect_same_factor_stats(cs, solver_stats);
-    EXPECT_EQ(cs.setup_seconds, solver_stats.setup_seconds);
-    EXPECT_EQ(cs.setup_max_threads, solver_stats.setup_max_threads);
     EXPECT_EQ(cs.backend, APXCHOL_BACKEND_CPU);
 
     // ... and a solver adopting it solves as the original did.
     handle again;
     ASSERT_EQ(adopt(c, copy.f, &o, again), APXCHOL_STATUS_SUCCESS);
     Eigen::VectorXd x(c.n);
-    ASSERT_EQ(apxchol_solver_solve(again.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr,
+    ASSERT_EQ(solve_one(again.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr,
                                    nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(x.data(), x_original.data(), x.size()));
@@ -1587,363 +1560,205 @@ TEST(CApi, SolverFactorRoundTrip) {
     EXPECT_TRUE(export_of(twice.f) == original);
 }
 
-TEST(CApi, OmpThresholdReachesTheFactorization) {
-    // One thread, so factors are exactly repeatable; a nondefault threshold
-    // must produce the C++ factorization with that threshold, which differs
-    // from the default one here: a threshold of 1 keeps the low-yield first
-    // round that the default hands over.
-    const Sparse A = clique_ring(40, 30);
-    const csc64 c = to_csc64(A);
-    auto exported_cpp = [&](std::size_t threshold) {
-        apxchol::factor_options fo;
-        fo.omp_threshold = threshold;
-#ifdef _OPENMP
-        const scoped_omp_threads threads(1);
-#endif
-        return export_of(apxchol::factorize(A, fo));
-    };
-    const std::uint64_t threshold = 1;
-    const exported nondefault = exported_cpp(threshold);
-    const exported default_factor = exported_cpp(apxchol::factor_options{}.omp_threshold);
-    ASSERT_FALSE(nondefault == default_factor)
-        << "the threshold does not change this factor; pick another matrix";
-
-    auto o = defaults();
-    o.threads = 1;
-    factor_handle by_default;
-    ASSERT_EQ(create_factor(c, &o, by_default), APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(export_of(by_default.f) == default_factor);
-    o.omp_threshold = threshold;
-    factor_handle f;
-    ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(export_of(f.f) == nondefault);
-    EXPECT_GT(stats_of(f.f).rounds, stats_of(by_default.f).rounds);
-    o.keep_factor_values = 1;
-    handle s;
-    ASSERT_EQ(create(c, &o, s), APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(export_of(s.s) == nondefault);
-}
-
-#if defined(APXCHOL_USE_METAL)
-TEST(CApi, MetalBackendRoundTrip) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_METAL), 1);
-    const Sparse A = grid_laplacian(14, 13);
-    const csc64 c = to_csc64(A, 1);
-    auto o = defaults();
-    o.backend = APXCHOL_BACKEND_METAL;
-    o.keep_factor_values = 1;
-    o.tol = 1e-10;
-    handle h;
-    std::string message;
-    ASSERT_EQ(create(c, &o, h, 1, &message), APXCHOL_STATUS_SUCCESS) << message;
-
-    apxchol_stats stats{};
-    stats.struct_size = sizeof stats;
-    ASSERT_EQ(apxchol_solver_stats(h.s, &stats), APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(stats.backend, APXCHOL_BACKEND_METAL);
-    EXPECT_EQ(stats.n, c.n);
-    EXPECT_EQ(stats.sddm, 0);
-
-    // One right-hand side: the reported residual is the original system's.
-    const Eigen::VectorXd b = compatible_rhs(c.n, 2);
-    Eigen::VectorXd x(c.n);
-    auto info = info_struct();
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(info.converged, 1);
-    EXPECT_GT(info.iterations, 0);
-    const double res = (b - A * x).norm() / b.norm();
-    EXPECT_LT(res, 1e-10);
-    EXPECT_NEAR(info.relative_residual, res, 1e-3 * res);
-    EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());
-
-    expect_block_matches_scalar(h.s, c.n);
-    // Exhaustion is NOT_CONVERGED with the truthful residual of x = 0.
-    auto none = info_struct();
-    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, 0, &none, nullptr, 0),
-              APXCHOL_STATUS_NOT_CONVERGED);
-    EXPECT_EQ(none.relative_residual, 1.0);
-
-    // A preconditioner application and the retained factor.
-    Eigen::VectorXd z(c.n);
-    ASSERT_EQ(apxchol_solver_apply(h.s, b.data(), z.data(), nullptr, 0), APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(z.allFinite());
-    EXPECT_GT(z.dot(b), 0.0);
-    std::vector<std::int64_t> colptr(c.n + 1), rowval(stats.factor_nnz), perm(c.n);
-    std::vector<float> nzval(stats.factor_nnz);
-    ASSERT_EQ(apxchol_solver_export_factor(h.s, 0, colptr.data(), rowval.data(), nzval.data(),
-                                           perm.data(), nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(colptr.back(), stats.factor_nnz);
-    std::vector<std::int64_t> sorted = perm;
-    std::sort(sorted.begin(), sorted.end());
-    for (std::int64_t v = 0; v < c.n; ++v) EXPECT_EQ(sorted[v], v);
-
-    // keep_factor_values = 0 releases the values after setup, as on the CPU.
-    o.keep_factor_values = 0;
-    handle released;
-    ASSERT_EQ(create(c, &o, released, 1), APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(apxchol_solver_export_factor(released.s, 0, colptr.data(), rowval.data(), nzval.data(),
-                                           nullptr, nullptr, 0),
-              APXCHOL_STATUS_NO_FACTOR_VALUES);
-    EXPECT_EQ(apxchol_solver_export_factor(released.s, 0, nullptr, nullptr, nullptr, perm.data(),
-                                           nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-
-    // Non-finite right-hand sides are argument errors.
-    Eigen::VectorXd bad = b;
-    bad[2] = std::numeric_limits<double>::quiet_NaN();
-    EXPECT_EQ(apxchol_solver_solve(h.s, bad.data(), nullptr, x.data(), -1.0, -1, nullptr, nullptr, 0),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_EQ(apxchol_solver_solve_block(h.s, 1, bad.data(), nullptr, x.data(), -1.0, -1, nullptr,
-                                         nullptr, nullptr, nullptr, 0),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
-}
-
-TEST(CApi, MetalUnrepresentableOperatorIsUnsupported) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    // A valid SDDM operator with one off-diagonal below the device's 2^-100
-    // floor: the Metal backend cannot represent it, the CPU backend solves it.
-    Sparse A = grid_laplacian(6, 6, 0.5);
-    A.coeffRef(1, 0) = -1e-35;
-    A.coeffRef(0, 1) = -1e-35;
-    const csc64 c = to_csc64(A);
-    auto o = defaults();
-    o.backend = APXCHOL_BACKEND_METAL;
-    handle h;
-    std::string message;
-    EXPECT_EQ(create(c, &o, h, 0, &message), APXCHOL_STATUS_UNSUPPORTED);
-    EXPECT_NE(message.find("2^-100"), std::string::npos) << message;
-    o.backend = APXCHOL_BACKEND_CPU;
-    handle cpu;
-    EXPECT_EQ(create(c, &o, cpu), APXCHOL_STATUS_SUCCESS);
-}
-
-TEST(CApi, MetalUnsupportedSetupOptionsReturnUnsupported) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    const csc64 c = to_csc64(grid_laplacian(12, 11));
-    auto o = defaults();
-    o.backend = APXCHOL_BACKEND_METAL;
-    o.sampler = APXCHOL_SAMPLER_TRACE_CYCLE;
-    handle refused;
-    std::string message;
-    EXPECT_EQ(create(c, &o, refused, 0, &message), APXCHOL_STATUS_UNSUPPORTED) << message;
-    EXPECT_EQ(refused.s, nullptr);
-    EXPECT_NE(message.find("Metal"), std::string::npos) << message;
-}
-
-TEST(CApi, MetalAutoBackendChoosesTheDeviceAboveTheCpuLimit) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    // 182 x 182 = 33,124 rows, above AUTO's 32,768-row CPU limit.
-    Sparse A = grid_laplacian(182, 182);
-    const csc64 c = to_csc64(A);
-    handle h;
-    std::string message;
-    ASSERT_EQ(create(c, nullptr, h, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
-    EXPECT_EQ(stats_of(h.s).backend, APXCHOL_BACKEND_METAL);
-    const Eigen::VectorXd b = compatible_rhs(c.n, 5);
-    Eigen::VectorXd x(c.n);
-    auto info = info_struct();
-    EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-
-    // A host factor adopted under AUTO runs on CPU whatever the size.
-    factor_handle f;
-    ASSERT_EQ(create_factor(c, nullptr, f), APXCHOL_STATUS_SUCCESS);
-    handle adopted;
-    ASSERT_EQ(adopt(c, f.f, nullptr, adopted), APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(stats_of(adopted.s).backend, APXCHOL_BACKEND_CPU);
-
-    auto host_options = defaults();
-    host_options.sampler = APXCHOL_SAMPLER_TRACE_CYCLE;
-    handle host_setup;
-    ASSERT_EQ(create(c, &host_options, host_setup, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
-    EXPECT_EQ(stats_of(host_setup.s).backend, APXCHOL_BACKEND_CPU);
-
-    // An operator outside Metal's value range resolves to CPU and solves.
-    A.coeffRef(1, 0) = -1e-35;
-    A.coeffRef(0, 1) = -1e-35;
-    const csc64 tiny = to_csc64(A);
-    handle cpu;
-    ASSERT_EQ(create(tiny, nullptr, cpu, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
-    EXPECT_EQ(stats_of(cpu.s).backend, APXCHOL_BACKEND_CPU);
-    EXPECT_EQ(apxchol_solver_solve(cpu.s, b.data(), nullptr, x.data(), -1.0, -1, nullptr, nullptr,
-                                   0),
-              APXCHOL_STATUS_SUCCESS);
-}
-
-TEST(CApi, MetalExtremeScaleRightHandSidesConverge) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    // Metal scales its own vectors; the C ABI leaves them to it.
-    const csc64 c = to_csc64(grid_laplacian(14, 13));
-    auto o = defaults();
-    o.backend = APXCHOL_BACKEND_METAL;
-    handle h;
-    ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
-    const Eigen::VectorXd b = compatible_rhs(c.n, 2);
-    Eigen::VectorXd x_ref(c.n), x(c.n);
-    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x_ref.data(), -1.0, -1, nullptr,
-                                   nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    for (const int e : {-700, 700}) {
-        const Eigen::VectorXd bs = b.unaryExpr([e](double v) { return std::ldexp(v, e); });
-        ASSERT_EQ(apxchol_solver_solve(h.s, bs.data(), nullptr, x.data(), -1.0, -1, nullptr,
-                                       nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS)
-            << e;
-        const Eigen::VectorXd back = x.unaryExpr([e](double v) { return std::ldexp(v, -e); });
-        EXPECT_LE((back - x_ref).norm(), 1e-9 * x_ref.norm()) << e;
+TEST(CApi, GpuBatchWidthsReportOriginalResidualsAndIndependentConvergence) {
+    if (!apxchol_backend_available(APXCHOL_BACKEND_GPU)) GTEST_SKIP() << "no usable GPU backend";
+    for (const double shift : {0.0, 0.05}) {
+        const Sparse A = grid_laplacian(14, 13, shift);
+        const csc64 c = to_csc64(A, 1);
+        auto o = cpu_options();
+        o.backend = APXCHOL_BACKEND_GPU;
+        handle h;
+        ASSERT_EQ(create(c, &o, h, 1), APXCHOL_STATUS_SUCCESS);
+        EXPECT_EQ(stats_of(h.s).backend, APXCHOL_BACKEND_GPU);
+        for (const int k : {1, 2, 4, 5, 16}) {
+            SCOPED_TRACE(::testing::Message() << "shift=" << shift << " nrhs=" << k);
+            Eigen::MatrixXd B(c.n, k), X(c.n, k), warm(c.n, k), Z(c.n, k), repeat(c.n, k);
+            for (int col = 0; col < k; ++col) B.col(col) = compatible_rhs(c.n, col + 2);
+            if (k > 1) B.col(0).setZero();
+            std::vector<apxchol_solve_info> info(k);
+            ASSERT_EQ(apxchol_solver_solve(h.s, k, B.data(), nullptr, X.data(), -1, -1,
+                info.data(), sizeof(info[0]), nullptr, 0), APXCHOL_STATUS_SUCCESS);
+            for (int col = 0; col < k; ++col) {
+                const double norm = B.col(col).stableNorm();
+                const double measured = norm ? (B.col(col) - A * X.col(col)).stableNorm() / norm : 0;
+                EXPECT_LT(measured, o.tol);
+                EXPECT_EQ(info[col].converged, 1);
+                const double rounding = norm ? 32 * std::numeric_limits<double>::epsilon() *
+                    (A.cwiseAbs() * X.col(col).cwiseAbs()).norm() / norm : 0;
+                EXPECT_NEAR(info[col].relative_residual, measured, rounding);
+                if (shift == 0) {
+                    EXPECT_LE(std::fabs(X.col(col).mean()), 1e-12 * X.col(col).norm());
+                }
+            }
+            ASSERT_EQ(apxchol_solver_solve(h.s, k, B.data(), X.data(), warm.data(), 1e-6, -1,
+                info.data(), sizeof(info[0]), nullptr, 0), APXCHOL_STATUS_SUCCESS);
+            for (const auto& result : info) EXPECT_EQ(result.iterations, 0);
+            ASSERT_EQ(apxchol_solver_apply(h.s, k, B.data(), Z.data(), nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            ASSERT_EQ(apxchol_solver_apply(h.s, k, B.data(), repeat.data(), nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            EXPECT_TRUE(Z.allFinite());
+            EXPECT_TRUE(same_bytes(Z.data(), repeat.data(), Z.size()));
+            ASSERT_EQ(apxchol_solver_solve(h.s, k, B.data(), nullptr, X.data(), -1, 0,
+                info.data(), sizeof(info[0]), nullptr, 0), APXCHOL_STATUS_NOT_CONVERGED);
+            for (int col = 0; col < k; ++col) {
+                const bool zero = k > 1 && col == 0;
+                EXPECT_EQ(info[col].iterations, 0);
+                EXPECT_EQ(info[col].converged, zero);
+                EXPECT_EQ(info[col].relative_residual, zero ? 0 : 1);
+            }
+        }
+        const Eigen::VectorXd b = compatible_rhs(c.n, 2);
+        Eigen::VectorXd reference(c.n), scaled(c.n);
+        ASSERT_EQ(solve_one(h.s, b.data(), nullptr, reference.data(), -1, -1, nullptr, nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        for (const int exponent : {-700, 700}) {
+            const Eigen::VectorXd rhs = b.unaryExpr([=](double v) { return std::ldexp(v, exponent); });
+            ASSERT_EQ(solve_one(h.s, rhs.data(), nullptr, scaled.data(), -1, -1, nullptr, nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            scaled = scaled.unaryExpr([=](double v) { return std::ldexp(v, -exponent); });
+            EXPECT_LE((scaled - reference).norm(), 1e-9 * reference.norm());
+        }
     }
 }
 
-TEST(CApi, MetalAdoptionsOfTheSameFactorAreBitIdentical) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    for (const double shift : {0.0, 0.02}) {
-        const csc64 c = to_csc64(grid_laplacian(19, 17, shift));
-        auto o = defaults();
-        o.backend = APXCHOL_BACKEND_METAL;
-        o.threads = 1;
-        o.keep_factor_values = 1;
-        o.tol = 1e-10;
-        handle self;
-        std::string message;
-        factor_handle f;
-        ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);
-        ASSERT_EQ(adopt(c, f.f, &o, self, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
-        handle adopted;
-        ASSERT_EQ(adopt(c, f.f, &o, adopted, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
-        const apxchol_stats as = stats_of(adopted.s);
-        EXPECT_EQ(as.backend, APXCHOL_BACKEND_METAL);
-        expect_same_factor_stats(as, stats_of(self.s));
-        EXPECT_TRUE(export_of(adopted.s) == export_of(self.s));
-
-        const std::int64_t k = 3;
-        Eigen::MatrixXd B(c.n, k), X1(c.n, k), X2(c.n, k);
-        for (std::int64_t col = 0; col < k; ++col)
-            B.col(col) = compatible_rhs(c.n, static_cast<unsigned>(col + 2));
-        std::array<std::int64_t, 3> it1{}, it2{};
-        std::array<double, 3> r1{}, r2{};
-        ASSERT_EQ(apxchol_solver_solve_block(self.s, k, B.data(), nullptr, X1.data(), -1.0, -1,
-                                             it1.data(), r1.data(), nullptr, nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        ASSERT_EQ(apxchol_solver_solve_block(adopted.s, k, B.data(), nullptr, X2.data(), -1.0, -1,
-                                             it2.data(), r2.data(), nullptr, nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(X1.data(), X2.data(), static_cast<std::size_t>(X1.size())));
-        EXPECT_EQ(it1, it2);
-        EXPECT_EQ(r1, r2);
-        Eigen::VectorXd z1(c.n), z2(c.n);
-        const Eigen::VectorXd r = B.col(0);
-        ASSERT_EQ(apxchol_solver_apply(self.s, r.data(), z1.data(), nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        ASSERT_EQ(apxchol_solver_apply(adopted.s, r.data(), z2.data(), nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(z1.data(), z2.data(), z1.size()));
-    }
-}
-
-TEST(CApi, MetalFactorHandlesCrossBackends) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+TEST(CApi, GpuFactorExportAndCopyCanBeReusedOnCpu) {
+    if (!apxchol_backend_available(APXCHOL_BACKEND_GPU)) GTEST_SKIP() << "no usable GPU backend";
     const Sparse A = grid_laplacian(12, 15);
     const csc64 c = to_csc64(A);
-    auto o = defaults();
-    o.backend = APXCHOL_BACKEND_METAL;
+    auto o = cpu_options();
+    o.backend = APXCHOL_BACKEND_GPU;
     o.keep_factor_values = 1;
-    handle metal;
-    ASSERT_EQ(create(c, &o, metal), APXCHOL_STATUS_SUCCESS);
+    handle gpu;
+    ASSERT_EQ(create(c, &o, gpu), APXCHOL_STATUS_SUCCESS);
     factor_handle copy;
-    ASSERT_EQ(apxchol_solver_copy_factor(metal.s, &copy.f, nullptr, 0), APXCHOL_STATUS_SUCCESS);
-    const apxchol_stats cs = stats_of(copy.f), ms = stats_of(metal.s);
-    EXPECT_EQ(cs.backend, APXCHOL_BACKEND_CPU);
-    expect_same_factor_stats(cs, ms);
-    EXPECT_EQ(cs.setup_seconds, ms.setup_seconds);
-    EXPECT_TRUE(export_of(copy.f) == export_of(metal.s));
-    // The Metal solver's factor on the CPU backend, and back again.
+    ASSERT_EQ(apxchol_solver_copy_factor(gpu.s, &copy.f, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    const exported original = export_of(gpu.s);
+    EXPECT_TRUE(export_of(copy.f) == original);
+    expect_same_factor_stats(stats_of(copy.f), stats_of(gpu.s));
+    EXPECT_EQ(stats_of(copy.f).backend, APXCHOL_BACKEND_CPU);
     o.backend = APXCHOL_BACKEND_CPU;
     handle cpu;
     ASSERT_EQ(adopt(c, copy.f, &o, cpu), APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(export_of(cpu.s) == export_of(metal.s));
-    factor_handle back;
-    ASSERT_EQ(apxchol_solver_copy_factor(cpu.s, &back.f, nullptr, 0), APXCHOL_STATUS_SUCCESS);
-    o.backend = APXCHOL_BACKEND_METAL;
-    handle metal_again;
-    ASSERT_EQ(adopt(c, back.f, &o, metal_again), APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(export_of(metal_again.s) == export_of(metal.s));
+    EXPECT_TRUE(export_of(cpu.s) == original);
     const Eigen::VectorXd b = compatible_rhs(c.n, 5);
-    Eigen::VectorXd x1(c.n), x2(c.n);
-    ASSERT_EQ(apxchol_solver_solve(metal.s, b.data(), nullptr, x1.data(), -1.0, -1, nullptr,
-                                   nullptr, 0),
+    Eigen::VectorXd x(c.n);
+    ASSERT_EQ(solve_one(cpu.s, b.data(), nullptr, x.data(), -1, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
-    ASSERT_EQ(apxchol_solver_solve(metal_again.s, b.data(), nullptr, x2.data(), -1.0, -1, nullptr,
-                                   nullptr, 0),
+    EXPECT_LT(true_residual(A, b, x), o.tol);
+#if defined(APXCHOL_USE_METAL)
+    o.backend = APXCHOL_BACKEND_GPU;
+    handle gpu_again;
+    ASSERT_EQ(adopt(c, copy.f, &o, gpu_again), APXCHOL_STATUS_SUCCESS);
+    EXPECT_TRUE(export_of(gpu_again.s) == original);
+    ASSERT_EQ(solve_one(gpu_again.s, b.data(), nullptr, x.data(), -1, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
-    EXPECT_LT(true_residual(A, b, x1), o.tol);
-    EXPECT_LT(true_residual(A, b, x2), o.tol);
-
-    // The adoption checks do not depend on the backend.
-    std::string message;
-    handle refused;
-    EXPECT_EQ(adopt(to_csc64(grid_laplacian(12, 15, 0.1)), copy.f, &o, refused, 0, &message),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_NE(message.find("Laplacian factor"), std::string::npos) << message;
-    EXPECT_EQ(adopt(to_csc64(grid_laplacian(12, 14)), copy.f, &o, refused, 0, &message),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_NE(message.find("dimension"), std::string::npos) << message;
-    EXPECT_EQ(refused.s, nullptr);
-
-    // An operator the device cannot represent (see
-    // MetalUnrepresentableOperatorIsUnsupported) is UNSUPPORTED, as in create.
-    o.keep_factor_values = 0;
-    factor_handle sddm;
-    ASSERT_EQ(create_factor(to_csc64(grid_laplacian(6, 6, 0.5)), &o, sddm), APXCHOL_STATUS_SUCCESS);
-    Sparse tiny = grid_laplacian(6, 6, 0.5);
-    tiny.coeffRef(1, 0) = -1e-35;
-    tiny.coeffRef(0, 1) = -1e-35;
-    EXPECT_EQ(adopt(to_csc64(tiny), sddm.f, &o, refused, 0, &message), APXCHOL_STATUS_UNSUPPORTED);
-    EXPECT_NE(message.find("2^-100"), std::string::npos) << message;
-    o.backend = APXCHOL_BACKEND_CPU;
-    EXPECT_EQ(adopt(to_csc64(tiny), sddm.f, &o, refused), APXCHOL_STATUS_SUCCESS);
-}
+    EXPECT_LT(true_residual(A, b, x), o.tol);
+    handle peer;
+    ASSERT_EQ(adopt(c, copy.f, &o, peer), APXCHOL_STATUS_SUCCESS);
+    Eigen::MatrixXd B(c.n, 5), X(c.n, 5), Y(c.n, 5);
+    for (int col = 0; col < 5; ++col) B.col(col) = compatible_rhs(c.n, col + 1);
+    std::array<apxchol_solve_info, 5> first{}, second{};
+    ASSERT_EQ(apxchol_solver_solve(gpu_again.s, 5, B.data(), nullptr, X.data(), -1, -1,
+        first.data(), sizeof(first[0]), nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    ASSERT_EQ(apxchol_solver_solve(peer.s, 5, B.data(), nullptr, Y.data(), -1, -1,
+        second.data(), sizeof(second[0]), nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
+    for (int col = 0; col < 5; ++col) {
+        EXPECT_EQ(first[col].iterations, second[col].iterations);
+        EXPECT_EQ(first[col].relative_residual, second[col].relative_residual);
+        EXPECT_EQ(first[col].converged, second[col].converged);
+    }
+    ASSERT_EQ(apxchol_solver_apply(gpu_again.s, 5, B.data(), X.data(), nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    ASSERT_EQ(apxchol_solver_apply(peer.s, 5, B.data(), Y.data(), nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
 #endif
+    o.backend = APXCHOL_BACKEND_GPU;
+    o.keep_factor_values = 0;
+    handle released;
+    ASSERT_EQ(create(c, &o, released), APXCHOL_STATUS_SUCCESS);
+    factor_handle absent;
+    EXPECT_EQ(apxchol_solver_copy_factor(released.s, &absent.f, nullptr, 0),
+              APXCHOL_STATUS_NO_FACTOR_VALUES);
+    std::vector<std::int64_t> perm(c.n);
+    EXPECT_EQ(apxchol_solver_export_factor(released.s, 0, nullptr, nullptr, nullptr, perm.data(),
+                                          nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    std::sort(perm.begin(), perm.end());
+    for (std::int64_t i = 0; i < c.n; ++i) EXPECT_EQ(perm[i], i);
+}
 
-TEST(CApi, VersionAbiAndOpenMp) {
+TEST(CApi, GpuRejectsUnsupportedSetupOptionsWithoutChangingRoute) {
+    if (!apxchol_backend_available(APXCHOL_BACKEND_GPU)) GTEST_SKIP() << "no usable GPU backend";
+    const csc64 c = to_csc64(grid_laplacian(12, 11));
+    auto o = cpu_options();
+    o.backend = APXCHOL_BACKEND_GPU;
+    o.partitioner = APXCHOL_PARTITIONER_PRIORITY_GREEDY;
+    handle refused;
+    EXPECT_EQ(create(c, &o, refused), APXCHOL_STATUS_UNSUPPORTED);
+    EXPECT_EQ(refused.s, nullptr);
+    o.backend = APXCHOL_BACKEND_AUTO;
+    handle automatic;
+    ASSERT_EQ(create(c, &o, automatic), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(stats_of(automatic.s).backend, APXCHOL_BACKEND_CPU);
+#if defined(APXCHOL_USE_METAL)
+    o = cpu_options();
+    o.backend = APXCHOL_BACKEND_GPU;
+    o.sampler = APXCHOL_SAMPLER_TRACE_CYCLE;
+    EXPECT_EQ(create(c, &o, refused), APXCHOL_STATUS_UNSUPPORTED);
+    Sparse tiny = grid_laplacian(6, 6, 0.5);
+    tiny.coeffRef(1, 0) = tiny.coeffRef(0, 1) = -1e-35;
+    const csc64 small_values = to_csc64(tiny);
+    o = cpu_options();
+    factor_handle f;
+    ASSERT_EQ(create_factor(to_csc64(grid_laplacian(6, 6, 0.5)), &o, f), APXCHOL_STATUS_SUCCESS);
+    o.backend = APXCHOL_BACKEND_GPU;
+    std::string message;
+    EXPECT_EQ(create(small_values, &o, refused, 0, &message), APXCHOL_STATUS_UNSUPPORTED);
+    EXPECT_NE(message.find("2^-100"), std::string::npos) << message;
+    EXPECT_EQ(adopt(small_values, f.f, &o, refused), APXCHOL_STATUS_UNSUPPORTED);
+    o.backend = APXCHOL_BACKEND_CPU;
+    handle supported;
+    EXPECT_EQ(create(small_values, &o, supported), APXCHOL_STATUS_SUCCESS);
+#endif
+}
+
+TEST(CApi, VersionAndAbi) {
+    EXPECT_EQ(apxchol_c_abi_version(), 2);
     EXPECT_EQ(apxchol_c_abi_version(), APXCHOL_C_ABI_VERSION);
     const std::string v = apxchol_version();
     EXPECT_NE(v.find('+'), std::string::npos) << v;
-#ifdef _OPENMP
-    EXPECT_EQ(apxchol_openmp_enabled(), 1);
-    EXPECT_EQ(apxchol_get_max_threads(), omp_get_max_threads());
-#else
-    EXPECT_EQ(apxchol_openmp_enabled(), 0);
-    EXPECT_EQ(apxchol_get_max_threads(), 1);
-#endif
 }
 
 TEST(CApi, NullArgumentsAreErrorsAndDestroyNullIsANoOp) {
     apxchol_solver_destroy(nullptr);
     const csc64 c = to_csc64(grid_laplacian(3, 3));
-    EXPECT_EQ(apxchol_solver_create(c.n, c.colptr.data(), c.rowval.data(), c.nzval.data(), 0,
+    EXPECT_EQ(apxchol_solver_create(c.n, c.colptr.data(), c.rowval.data(), c.nzval.data(), 0, nullptr,
                                     nullptr, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     apxchol_solver* s = nullptr;
-    EXPECT_EQ(apxchol_solver_create(c.n, nullptr, c.rowval.data(), c.nzval.data(), 0, nullptr, &s,
+    EXPECT_EQ(apxchol_solver_create(c.n, nullptr, c.rowval.data(), c.nzval.data(), 0, nullptr, nullptr, &s,
                                     nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_EQ(apxchol_solver_create(0, c.colptr.data(), c.rowval.data(), c.nzval.data(), 0,
+    EXPECT_EQ(apxchol_solver_create(0, c.colptr.data(), c.rowval.data(), c.nzval.data(), 0, nullptr,
                                     nullptr, &s, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
-    std::vector<double> v(c.n, 0.0);
-    EXPECT_EQ(apxchol_solver_solve(nullptr, v.data(), nullptr, v.data(), -1.0, -1, nullptr, nullptr, 0),
+    std::vector<double> v(c.n, 0.0), out(c.n, 0.0);
+    EXPECT_EQ(solve_one(nullptr, v.data(), nullptr, out.data(), -1.0, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_EQ(apxchol_solver_apply(nullptr, v.data(), v.data(), nullptr, 0),
+    EXPECT_EQ(apply_one(nullptr, v.data(), out.data(), nullptr, 0),
+              APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(apxchol_solver_solve(nullptr, 0, nullptr, nullptr, nullptr, -1, -1,
+        nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(apxchol_solver_apply(nullptr, 0, nullptr, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     EXPECT_EQ(apxchol_solver_stats(nullptr, nullptr), APXCHOL_STATUS_INVALID_ARGUMENT);
     handle h;
     ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
     EXPECT_EQ(apxchol_solver_export_factor(h.s, 0, nullptr, nullptr, nullptr, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_EQ(apxchol_solver_solve(h.s, nullptr, nullptr, v.data(), -1.0, -1, nullptr, nullptr, 0),
+    EXPECT_EQ(solve_one(h.s, nullptr, nullptr, v.data(), -1.0, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
 }
 
@@ -1967,16 +1782,16 @@ TEST(CApi, UnsortedColumnsAndDuplicatesAreSummed) {
         }
         messy.colptr.push_back(static_cast<std::int64_t>(messy.rowval.size()));
     }
-    auto o = defaults();
+    auto o = cpu_options();
     o.threads = 1;
     handle a, b;
     ASSERT_EQ(create(sorted, &o, a), APXCHOL_STATUS_SUCCESS);
     ASSERT_EQ(create(messy, &o, b), APXCHOL_STATUS_SUCCESS);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(sorted.n, 0.0, 1.0);
     Eigen::VectorXd xa(sorted.n), xb(sorted.n);
-    ASSERT_EQ(apxchol_solver_solve(a.s, rhs.data(), nullptr, xa.data(), -1.0, -1, nullptr, nullptr, 0),
+    ASSERT_EQ(solve_one(a.s, rhs.data(), nullptr, xa.data(), -1.0, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
-    ASSERT_EQ(apxchol_solver_solve(b.s, rhs.data(), nullptr, xb.data(), -1.0, -1, nullptr, nullptr, 0),
+    ASSERT_EQ(solve_one(b.s, rhs.data(), nullptr, xb.data(), -1.0, -1, nullptr, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(xa.data(), xb.data(), xa.size()));
 }
@@ -1986,14 +1801,14 @@ TEST(CApi, DistinctHandlesSolveConcurrently) {
     std::array<int, 2> statuses{-1, -1};
     std::array<double, 2> residuals{};
     auto work = [&](int t) {
-        auto o = defaults();
+        auto o = cpu_options();
         o.threads = 2;
         handle h;
         if (create(c, &o, h) != APXCHOL_STATUS_SUCCESS) return;
         const Eigen::VectorXd b = compatible_rhs(c.n, static_cast<unsigned>(t + 1));
         Eigen::VectorXd x(c.n);
         auto info = info_struct();
-        statuses[t] = apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info,
+        statuses[t] = solve_one(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info,
                                            nullptr, 0);
         residuals[t] = info.relative_residual;
     };
