@@ -424,8 +424,8 @@ inline std::size_t gpu_round_shadow_checked_mul(
 }
 
 /// Validate the scalar capacities consumed by CUB and by packed 32-bit device
-/// keys.  This function is intentionally separate and unit-testable: no CUDA
-/// allocation is attempted until every count and the free-memory fit pass.
+/// keys. Device allocations are checked separately as each stage discovers
+/// its required sizes.
 inline void gpu_round_shadow_validate_capacity_counts(
         node_index vertex_count, std::size_t incidence_count,
         std::size_t pivot_count, const gpu_round_shadow_report& shape) {
@@ -1302,10 +1302,13 @@ public:
 
     void advance_selector(gpu_block_frontend& frontend);
     void reject_device_generation(std::uint64_t generation) noexcept;
+    // consume_factor_log releases the device factor log once the finalizer has
+    // read it; that owner cannot finalize or download the log again.
     std::shared_ptr<cuda_sptrsv_device_factor> finalize_device_factor(
         std::span<const node_index> permutation, node_index m,
         factor_storage_type storage = factor_storage_type::automatic,
-        double drop_tolerance = factor_options{}.drop_tolerance);
+        double drop_tolerance = factor_options{}.drop_tolerance,
+        bool consume_factor_log = false);
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
     void inject_failure_after_cuda_operation_for_test();
     void set_selection_audit_for_test(bool enabled);
@@ -1506,7 +1509,8 @@ public:
         if (!active_ || !owned_complete_ || !device_state_ ||
             permutation.size() != factor_log_columns_)
             throw std::logic_error("GPU finalizer requires complete owned factor coverage");
-        return device_state_->finalize_device_factor(permutation, m, storage, drop_tolerance);
+        // The session's single finalization consumes its factor log.
+        return device_state_->finalize_device_factor(permutation, m, storage, drop_tolerance, true);
     }
 
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)

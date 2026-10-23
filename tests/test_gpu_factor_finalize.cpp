@@ -206,6 +206,9 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 }
                 EXPECT_EQ(fixture.state.encode_finalized_factor_for_test(*factor), expected);
                 EXPECT_EQ(retained.state.encode_finalized_factor_for_test(*retained_factor), expected);
+                complete_factor consumed(n, edges, order);
+                auto consumed_factor = consumed.state.finalize_device_factor(reference.perm, m, storage, rel, true);
+                EXPECT_EQ(consumed.state.encode_finalized_factor_for_test(*consumed_factor), expected);
                 adopted.setup_adopting_device_factor_for_research(std::move(*factor), options);
                 EXPECT_EQ(adopted.fp16(), half);
                 const auto& want = ordinary.drop_stats(); const auto& got = adopted.drop_stats();
@@ -258,6 +261,12 @@ TEST(GpuFactorFinalize, InvalidPermutationAndExtentFailClosed) {
     // The existing Compute Sanitizer CTest checks these repeated allocations.
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     for (int i = 0; i < 8; ++i) EXPECT_NO_THROW(state.finalize_device_factor(perm, 3, options.factor_storage, options.drop_tolerance));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto factor = state.finalize_device_factor(
+        perm, 3, options.factor_storage, options.drop_tolerance, true);
+    ASSERT_FALSE(factor->empty());
+    EXPECT_THROW(state.finalize_device_factor(perm, 3), std::logic_error);
+    EXPECT_THROW(state.download_factor_log(), std::logic_error);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 }
 
