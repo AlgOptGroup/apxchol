@@ -129,9 +129,7 @@
 #include <utility>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -173,7 +171,7 @@ public:
     void add(node_index v) {
         if (!mask_[v]) {
             mask_[v] = 1;
-            per_thread_[thread_id()].push_back(v);
+            per_thread_[omp_get_thread_num()].push_back(v);
         }
     }
     void remove(node_index v) { mask_[v] = 0; }
@@ -182,10 +180,7 @@ public:
     // ── Orchestrator side ──
     void reset(node_index n) {
         if (mask_.size() < static_cast<size_t>(n)) mask_.assign(n, 0);
-        int nt = 1;
-#ifdef _OPENMP
-        nt = omp_get_max_threads();
-#endif
+        const int nt = omp_get_max_threads();
         if (per_thread_.size() < static_cast<size_t>(nt)) per_thread_.resize(nt);
         for (auto& l : per_thread_) l.clear();
         result_.clear();
@@ -203,13 +198,6 @@ public:
     }
 
 private:
-    static int thread_id() {
-#ifdef _OPENMP
-        return omp_get_thread_num();
-#else
-        return 0;
-#endif
-    }
     std::vector<char> mask_;
     std::vector<std::vector<node_index>> per_thread_;
     partition_result result_;
@@ -278,5 +266,21 @@ template<typename F>
 callable_partitioner<std::decay_t<F>, true> as_prepass_partitioner(F&& fn) {
     return callable_partitioner<std::decay_t<F>, true>(std::forward<F>(fn));
 }
+
+namespace detail {
+
+/// Per-round seed and vertex priority hash shared by the built-in hash-priority
+/// partitioners (priority_greedy, baumann_kyng).
+inline std::uint64_t partition_round_seed(std::uint64_t seed,
+                                          std::uint64_t round) noexcept {
+    return seed ^ (round * 6364136223846793005ULL + 1442695040888963407ULL);
+}
+
+inline std::uint64_t fibonacci_vertex_hash(node_index v,
+                                           std::uint64_t round_seed) noexcept {
+    return (std::uint64_t(v) ^ round_seed) * 0x9E3779B97F4A7C15ULL;
+}
+
+} // namespace detail
 
 } // namespace apxchol

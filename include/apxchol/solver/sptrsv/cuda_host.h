@@ -237,13 +237,13 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     return out;
 }
 
-/// Transpose a square m x m CSR (values of any trivially copyable V). The
+/// Transpose a square m x m CSR (values of any trivially copyable V).
 /// The dataflow forward solve needs CSR of L (row access) while setup
 /// builds CSR of L^T (== the factor's CSC); this produces the one from the
 /// other. THE shared transpose (transpose.h -- the very code omp_sptrsv::setup
 /// runs for its CSC -> CSR): the blocked counting-sort parallel path, O(nnz)
-/// total work, for m > kParTransposeMinRows (APXCHOL_PAR_TRANSPOSE=0 disables
-/// it), the serial column-order scatter below; within each output row the
+/// total work, for m > kParTransposeMinRows with multiple OpenMP threads,
+/// and serial column-order scatter otherwise; within each output row the
 /// input-row order is preserved on both paths, and the three arrays are
 /// byte-identical to the serial result at ANY thread count
 /// (SpTRSVTranspose.GpuHostTransposeIsByteIdenticalToSerialReference).

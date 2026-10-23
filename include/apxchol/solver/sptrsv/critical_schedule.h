@@ -293,7 +293,7 @@ inline critical_schedule_plan flatten_critical_schedule(
         const node_index local_v = v - first_row;
         const unsigned processor = schedule.processor[local_v];
         const std::size_t step = schedule.step[local_v];
-        ++forward_count[static_cast<std::size_t>(processor) * out.steps + step];
+        ++forward_count[out.slot(processor, step)];
     }
 
     auto prefix = [](const std::vector<std::size_t>& count) {
@@ -309,9 +309,7 @@ inline critical_schedule_plan flatten_critical_schedule(
         const node_index local_v = v - first_row;
         const unsigned processor = schedule.processor[local_v];
         const std::size_t step = schedule.step[local_v];
-        const std::size_t slot =
-            static_cast<std::size_t>(processor) * out.steps + step;
-        out.forward_rows[forward_next[slot]++] = v;
+        out.forward_rows[forward_next[out.slot(processor, step)]++] = v;
     }
     // Rows are ascending inside every forward (processor, step) slot. The
     // backward executor maps step -> steps-1-step and traverses that same slot

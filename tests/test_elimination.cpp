@@ -82,6 +82,15 @@ TEST(EliminatorBounds, BoundIsSafeForRandomInput) {
     }
 }
 
+TEST(TreeSampler, RejectsUnknownSampler) {
+    std::vector<weighted_neighbor> neighbors{{0, 1.0}, {1, 2.0}, {2, 3.0}};
+    std::vector<deferred_edge> edges;
+    tree_elimination rule{.sampler = static_cast<clique_sampler>(-1)};
+    EXPECT_THROW(rule.sample_clique(neighbors, 6.0, 42, edge_emitter(edges)),
+                 std::invalid_argument);
+    EXPECT_TRUE(edges.empty());
+}
+
 TEST(TreeSampler, MatchesIndependentExactReference) {
     // Retain coverage around the removed degree-512 directory/radix and
     // degree-2048 radix boundaries to guard the byte-identical cleanup.

@@ -114,10 +114,7 @@ struct random_stream {
     std::uint64_t state;
 
     std::uint64_t next() {
-        std::uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        return z ^ (z >> 31);
+        return detail::splitmix64_mix(state += 0x9E3779B97F4A7C15ULL);
     }
     /// Uniform double in [0, 1).
     double next_unit() { return double(next() >> 11) * 0x1.0p-53; }
@@ -170,9 +167,9 @@ inline std::size_t suffix_upper_bound(std::span<const double> values,
 
 // Input is canonically sorted and degree >= 3. Implemented below.
 inline void sample_cycle_clique(std::span<weighted_neighbor>, double,
-                               std::uint64_t, edge_emitter, clique_sampler,
-                         std::size_t exact_core_max_h = 0,
-                         std::size_t double_cycle_min_h = 0);
+                                std::uint64_t, edge_emitter,
+                                std::size_t exact_core_max_h = 0,
+                                std::size_t double_cycle_min_h = 0);
 
 } // namespace detail
 
@@ -218,14 +215,12 @@ struct tree_elimination {
         const size_t d = static_cast<size_t>(deg);
         if (exact_clique_max_degree > 0 && d <= exact_clique_max_degree)
             return d * (d - 1) / 2;
-        if (sampler != clique_sampler::gks && d >= 3) {
+        if (sampler == clique_sampler::trace_cycle && d >= 3) {
+            // Exact core adds at most h(h-1)/2 - h edges with h <= exact_core_max_h;
+            // a second cycle adds at most h <= d edges. Upper bounds, never exact.
             size_t bound = d;
-            if (sampler == clique_sampler::trace_cycle) {
-                // Exact core adds at most h(h-1)/2 - h edges with h <= exact_core_max_h;
-                // a second cycle adds at most h <= d edges. Upper bounds, never exact.
-                if (exact_core_max_h > 0) bound += exact_core_max_h * (exact_core_max_h - 1) / 2;
-                if (double_cycle_min_h > 0) bound += d;
-            }
+            if (exact_core_max_h > 0) bound += exact_core_max_h * (exact_core_max_h - 1) / 2;
+            if (double_cycle_min_h > 0) bound += d;
             return bound;
         }
         return d == 0 ? 0 : d - 1;
@@ -260,7 +255,9 @@ struct tree_elimination {
                   });
 
         if (sampler != clique_sampler::gks && d >= 3) {
-            detail::sample_cycle_clique(neighbors, deg, seed, out, sampler,
+            if (sampler != clique_sampler::trace_cycle)
+                throw std::invalid_argument("unknown clique sampler");
+            detail::sample_cycle_clique(neighbors, deg, seed, out,
                                         exact_core_max_h, double_cycle_min_h);
             return;
         }
@@ -292,12 +289,6 @@ struct tree_elimination {
 };
 
 static_assert(eliminator<tree_elimination>);
-
-/// Back-compat aliases: these types predate the public eliminator seam.
-namespace detail {
-using apxchol::deferred_edge;
-using apxchol::tree_elimination;
-} // namespace detail
 
 } // namespace apxchol
 

@@ -15,9 +15,7 @@
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 #include <cmath>
 #include <cstring>
@@ -585,7 +583,6 @@ TEST(SpmvLrmBuild, BitIdenticalFastPathAndWorkSplitApplyTheExactOperator) {
     for (int v = 0; v < n; ++v) x0[v] = static_cast<double>((v * 37) % 17 - 8);
     const Eigen::VectorXd b = A.selfadjointView<Eigen::Lower>() * x0;
 
-#ifdef _OPENMP
     const int prior = omp_get_max_threads();
     for (int threads : {1, 3, 16}) {
         omp_set_num_threads(threads);
@@ -596,10 +593,6 @@ TEST(SpmvLrmBuild, BitIdenticalFastPathAndWorkSplitApplyTheExactOperator) {
         EXPECT_EQ(res.residual, 0.0);
     }
     omp_set_num_threads(prior);
-#else
-    const apxchol::cpu_solver slv(A);
-    EXPECT_EQ(slv.solve(b, 1e-15, 0, &x0).residual, 0.0);
-#endif
 }
 
 TEST(SpmvLrmBuild, OwnedFp32CopySurvivesCallerMutationAndDestruction) {

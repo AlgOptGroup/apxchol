@@ -51,7 +51,8 @@ int main(int argc, char* argv[]) try {
             spdlog::error("RHS length {} does not match n = {}", b.size(), L.rows());
             return 2;
         }
-    } else if (cfg.random_rhs) {
+    } else {
+        // parse_args requires exactly one of --rhs / --random-rhs.
         spdlog::debug("generating random test RHS");
         std::srand(cfg.solve_opts.factor_opts.seed);  // Eigen::Random uses rand()
         b = generate_test_rhs(L.rows());
@@ -64,10 +65,6 @@ int main(int argc, char* argv[]) try {
                     "projected random RHS independently over {} connected components",
                     components);
         }
-    } else {
-        spdlog::error("no right-hand side: pass --rhs <file.mtx>, or --random-rhs "
-                      "to solve against a random test vector");
-        return 2;
     }
 
     auto res = solve(L, b, cfg.solve_opts);
