@@ -148,8 +148,7 @@ jobs:
   cuda:
     name: Linux (CUDA 13.4, GCC 14, compile only)
     runs-on: ubuntu-24.04
-    # Hosted runners have no GPU: build the CUDA library, CLI and unit tests
-    # without running them. CUDA C++23 needs CMake 4.4+.
+    # Compile only; native CUDA validation runs separately. C++23 needs CMake 4.4+.
     env:
       CC: gcc-14
       CXX: g++-14
