@@ -6,17 +6,15 @@ if (APXCHOL_DEVICE STREQUAL "METAL")
     message(FATAL_ERROR "The competitor benchmark supports CPU or CUDA; use the root project for Metal")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+# The shipped core configuration: C++23, Eigen, OpenMP, the architecture flag,
+# index/pool options and, for CUDA, static cudart. apxchol_v1 below is built by
+# the same apxchol_configure_core() as the root library and Python module.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_core.cmake)
+set(CMAKE_CXX_STANDARD 17) # The apxchol targets request C++23 explicitly.
 
-# The machine-tuning flags actually put on the command line below. Recorded into
+# Competitors get the same machine-tuning flag as the core. It is recorded into
 # the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
 # cell records the native tuning or portable baseline used by that build.
-set(APXCHOL_BENCH_ARCH_FLAGS "")
-option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
-
-include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_arch.cmake)
 add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
 set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_ARCH_FLAG}")
 
@@ -25,15 +23,9 @@ include(FetchContent)
 # ── Path to benchmark sources ────────────────────────
 set(BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# ── Shared sources from parent project ───────────────
-set(PARENT_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-set(PARENT_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
-
 # ── Legacy v0 baseline sources (graphs, simple_solver, mmio) ──
 set(ARCHIVE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
 set(ARCHIVE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
-
-include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_eigen.cmake)
 
 # ── Core library (legacy v0 solver) ───────────────────
 add_library(laplacian_core STATIC
@@ -147,8 +139,7 @@ endif()
 # ── RCHOL (FetchContent — replaces former git submodule) ─
 FetchContent_Declare(rchol
     GIT_REPOSITORY https://github.com/ut-padas/rchol.git
-    GIT_TAG        master
-    GIT_SHALLOW    TRUE
+    GIT_TAG        cff22c967562c43047a19ee68f3f7e6bbb1779f1  # master as of 2026-10
 )
 FetchContent_GetProperties(rchol)
 if (NOT rchol_POPULATED)
@@ -233,10 +224,7 @@ if (HAVE_METIS)
     target_compile_definitions(rchol_lib PUBLIC HAVE_METIS)
     target_include_directories(rchol_lib PUBLIC ${METIS_INCLUDE})
     target_link_libraries(rchol_lib PUBLIC ${METIS_LIB})
-    find_package(OpenMP QUIET)
-    if (OpenMP_CXX_FOUND)
-        target_link_libraries(rchol_lib PUBLIC OpenMP::OpenMP_CXX)
-    endif()
+    target_link_libraries(rchol_lib PUBLIC OpenMP::OpenMP_CXX)
 endif()
 if (HAVE_MKL AND NOT APXCHOL_RCHOL_PORTABLE_PCG)
     target_compile_definitions(rchol_lib PUBLIC HAVE_MKL HAVE_RCHOL_PCG)
@@ -279,47 +267,6 @@ option(BENCH_HYPRE_USE_CUDA "Enable Hypre CUDA support (requires CUDA 13.x; need
 if (APXCHOL_DEVICE STREQUAL "CUDA" AND BENCH_HYPRE_USE_CUDA)
     set(HYPRE_ENABLE_CUDA ON CACHE BOOL "" FORCE)
 endif()
-# Pre-enable CUDA language before FetchContent_MakeAvailable(hypre) so that
-# Hypre's internal enable_language(CUDA) call is a no-op (avoids re-running
-# the compiler ID test, which fails with GCC 16 + CUDA 13.2 stdlib headers).
-# Also set CMAKE_CUDA_ARCHITECTURES so CMake's internal try_compile tests
-# don't fail with "CUDA_ARCHITECTURES is empty".
-if (APXCHOL_DEVICE STREQUAL "CUDA" OR BENCH_HYPRE_USE_CUDA)
-    include(CheckLanguage)
-    # Remember the requested CUDA host compiler BEFORE check_language runs. check_language()
-    # executes a sub-CMake and writes `set(CMAKE_CUDA_HOST_COMPILER "<what the sub-build
-    # resolved>")` into its result file (CheckLanguage.cmake:111), which SHADOWS the cache
-    # entry in this scope. So -DCMAKE_CUDA_HOST_COMPILER was silently discarded and nvcc fell
-    # back to its own default -- every benchmarks/build*-cuda configured this way was hosted
-    # by whatever nvcc picked (g++-15 here) no matter what was requested, with no diagnostic.
-    set(_apxchol_requested_cuda_host "${CMAKE_CUDA_HOST_COMPILER}")
-    check_language(CUDA)
-    if (_apxchol_requested_cuda_host AND
-        NOT "${CMAKE_CUDA_HOST_COMPILER}" STREQUAL "${_apxchol_requested_cuda_host}")
-        message(STATUS "Restoring requested CUDA host compiler: ${_apxchol_requested_cuda_host}")
-        set(CMAKE_CUDA_HOST_COMPILER "${_apxchol_requested_cuda_host}"
-            CACHE FILEPATH "Host compiler nvcc drives" FORCE)
-    endif()
-    if (CMAKE_CUDA_COMPILER)
-        if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-            # Auto-detect via nvidia-smi, fallback to native (CMake 3.18+ keyword)
-            execute_process(
-                COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits
-                OUTPUT_VARIABLE _gpu_caps OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_QUIET RESULT_VARIABLE _smi_ok
-            )
-            if (_smi_ok EQUAL 0 AND _gpu_caps)
-                string(REGEX MATCH "[0-9]+\\.[0-9]+" _cap "${_gpu_caps}")
-                string(REPLACE "." "" _arch "${_cap}")
-                set(CMAKE_CUDA_ARCHITECTURES "${_arch}" CACHE STRING "CUDA architectures")
-                message(STATUS "Auto-detected CUDA architecture: sm_${_arch}")
-            else()
-                set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures")
-            endif()
-        endif()
-        enable_language(CUDA)
-    endif()
-endif()
 FetchContent_MakeAvailable(hypre)
 
 # ── GPU RCHOL — Liang et al. (2025) ──────────────────
@@ -348,7 +295,7 @@ if (BUILD_GPU_RCHOL)
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
-        GIT_TAG        main
+        GIT_TAG        v1.7.6  # same release as the root project
         GIT_SHALLOW    TRUE
     )
     FetchContent_GetProperties(gpu_rchol)
@@ -359,8 +306,6 @@ if (BUILD_GPU_RCHOL)
     if (NOT fast_matrix_market_POPULATED)
         FetchContent_Populate(fast_matrix_market)
     endif()
-
-    find_package(OpenMP QUIET)
 
     # A SOURCE_DIR override skips FetchContent's PATCH_COMMAND. Fail closed rather
     # than build a driver whose partial timers our parser would silently accept.
@@ -387,7 +332,7 @@ if (BUILD_GPU_RCHOL)
 
     # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
     # this driver uses MKL's default 32-bit MKL_INT, so it must NOT get the ILP64 layer.
-    if (OpenMP_CXX_FOUND AND HAVE_MKL AND MKL_LP64)
+    if (HAVE_MKL AND MKL_LP64)
         add_executable(gpu_rchol_cpu_driver
             ${gpu_rchol_SOURCE_DIR}/experiment/driver_local.cpp
         )
@@ -409,7 +354,7 @@ if (BUILD_GPU_RCHOL)
             -O3 -w "SHELL:-include climits" "SHELL:-include cstdint")
         message(STATUS "GPU RCHOL CPU driver enabled (experiment/driver_local.cpp)")
     else()
-        message(STATUS "GPU RCHOL CPU driver needs OpenMP + MKL (LP64) — skipped")
+        message(STATUS "GPU RCHOL CPU driver needs MKL (LP64) — skipped")
     endif()
 
     # GPU driver (needs CUDA). The convergence test remains upstream: the runner
@@ -467,9 +412,7 @@ if (BUILD_GPU_RCHOL)
         target_link_libraries(gpu_rchol_gpu_driver PRIVATE
             cusparse cublas
         )
-        if (OpenMP_CXX_FOUND)
-            target_link_libraries(gpu_rchol_gpu_driver PRIVATE OpenMP::OpenMP_CXX)
-        endif()
+        target_link_libraries(gpu_rchol_gpu_driver PRIVATE OpenMP::OpenMP_CXX)
         target_compile_options(gpu_rchol_gpu_driver PRIVATE -O3 -w)
         message(STATUS "GPU RCHOL GPU driver enabled (gpu_implementation/driver.cu)")
 
@@ -488,9 +431,7 @@ if (BUILD_GPU_RCHOL)
             ${fast_matrix_market_SOURCE_DIR}/include
         )
         target_link_libraries(gpu_rchol_gpu_driver_physics PRIVATE cusparse cublas)
-        if (OpenMP_CXX_FOUND)
-            target_link_libraries(gpu_rchol_gpu_driver_physics PRIVATE OpenMP::OpenMP_CXX)
-        endif()
+        target_link_libraries(gpu_rchol_gpu_driver_physics PRIVATE OpenMP::OpenMP_CXX)
         target_compile_options(gpu_rchol_gpu_driver_physics PRIVATE -O3 -w)
         message(STATUS "GPU RCHOL GPU physics driver enabled (gpu_implementation/driver_physics.cu)")
     else()
@@ -501,55 +442,9 @@ endif()
 # ══════════════════════════════════════════════════════
 # ApxChol v1 (C++23 solver — multiple IS × elimination combos)
 # ══════════════════════════════════════════════════════
-find_package(OpenMP QUIET)
+add_library(apxchol_v1 STATIC)
+apxchol_configure_core(apxchol_v1)
 
-add_library(apxchol_v1 STATIC
-    ${PARENT_SRC}/factorization.cpp
-    # The operator class the factorization asserts its input against
-    # (include/apxchol/operator_class.h). factorization.cpp constructs an
-    # operator_view, and benchmark.cpp calls require_operator/describe_operator
-    # directly for --kind operator, so both need this translation unit.
-    ${PARENT_SRC}/operator_class.cpp
-    ${PARENT_SRC}/solve.cpp
-)
-target_compile_features(apxchol_v1 PUBLIC cxx_std_23)
-target_link_libraries(apxchol_v1 PUBLIC Eigen3::Eigen)
-target_include_directories(apxchol_v1 PUBLIC ${PARENT_INCLUDE})
-if (OpenMP_CXX_FOUND)
-    target_link_libraries(apxchol_v1 PUBLIC OpenMP::OpenMP_CXX)
-endif()
-# Match the root project's two unsigned index-width knobs. The default uint32
-# edge_index already handles com-Orkut's roughly 2.15e9-entry raw factor; widen
-# only when a factor or residual pool can exceed 2^32-1 entries. Definitions are
-# PUBLIC so benchmark.cpp and the linked library always agree on their ABI.
-option(APXCHOL_64BIT_EDGE_INDICES "64-bit apxchol edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
-option(APXCHOL_64BIT_NODE_INDICES "64-bit apxchol vertex indices (implies 64-bit edge indices)" OFF)
-option(APXCHOL_64BIT_INDICES "Deprecated alias for APXCHOL_64BIT_EDGE_INDICES" OFF)
-if (APXCHOL_64BIT_INDICES)
-    message(DEPRECATION "APXCHOL_64BIT_INDICES is deprecated; use APXCHOL_64BIT_EDGE_INDICES")
-    set(APXCHOL_64BIT_EDGE_INDICES ON)
-endif()
-if (APXCHOL_64BIT_EDGE_INDICES)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_EDGE_INDICES)
-endif()
-if (APXCHOL_64BIT_NODE_INDICES)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_64BIT_NODE_INDICES)
-endif()
-option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to FP64. OFF selects the FP64 reference." ON)
-if (APXCHOL_POOL_FP32)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_POOL_FP32)
-endif()
-if (APXCHOL_DEVICE STREQUAL "CUDA")
-    enable_language(CUDA)
-    find_package(CUDAToolkit 13.3 REQUIRED)
-    target_compile_definitions(apxchol_v1 PUBLIC APXCHOL_USE_CUDA)
-    target_sources(apxchol_v1 PRIVATE
-        ${PARENT_SRC}/cuda_dataflow.cu
-        ${PARENT_SRC}/cuda_block_frontend.cu ${PARENT_SRC}/cuda_round_shadow.cu
-        ${PARENT_SRC}/cuda_pcg_kernels.cu)
-    target_link_libraries(apxchol_v1 PUBLIC CUDA::cudart)
-    set_target_properties(apxchol_v1 PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON)
-endif()
 # Boost headers are needed only by AMGCL (HAVE_AMGCL gate below); the apxchol
 # core itself is Boost-free.
 find_package(Boost CONFIG QUIET)
@@ -590,8 +485,8 @@ if (APXCHOL_DEVICE STREQUAL "CUDA" AND Boost_FOUND)
     # with `#pragma omp parallel for` (smoothed_aggregation coarsening, SpMV,
     # transpose). Without -fopenmp in THIS nvcc TU those pragmas are no-ops and
     # the setup runs single-threaded — which made amgcl_cuda's setup 2-10x slower
-    # than BoomerAMG-GPU (e.g. G3_circuit 2.1s vs 0.5s). libgomp is already linked
-    # transitively via apxchol_v1.
+    # than BoomerAMG-GPU (e.g. G3_circuit 2.1s vs 0.5s). The OpenMP runtime is
+    # already linked transitively via apxchol_v1.
     set_source_files_properties(src/amgcl_cuda.cu PROPERTIES
         LANGUAGE CUDA
         COMPILE_OPTIONS "--extended-lambda;--expt-relaxed-constexpr;-Xcompiler=-fopenmp")
@@ -599,8 +494,8 @@ if (APXCHOL_DEVICE STREQUAL "CUDA" AND Boost_FOUND)
         CUDA_STANDARD 23
         CUDA_STANDARD_REQUIRED ON)
     # AMGCL uses cuSPARSE. This dependency belongs to the competitor driver;
-    # our apxchol library links cudart only.
-    target_link_libraries(benchmark PRIVATE CUDA::cudart CUDA::cusparse)
+    # our apxchol library links static cudart only, which also serves AMGCL.
+    target_link_libraries(benchmark PRIVATE CUDA::cusparse)
 endif()
 
 if (Boost_FOUND)

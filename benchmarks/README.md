@@ -1,6 +1,6 @@
 # Benchmarks
 
-This separate project compares apxchol with other sparse solvers using common inputs, stopping criteria and timing boundaries. The maintained runners write results and plots outside tracked source. Every published comparison must identify its measured revisions and protocol; it is not automatically a result for the current checkout.
+This separate project compares apxchol with other sparse solvers using common inputs, stopping criteria and timing boundaries. The maintained runners write results and plots outside tracked source. A published comparison must name the source revisions and protocol it measured; its numbers do not describe later checkouts.
 
 ## Measurement contract
 
@@ -55,7 +55,8 @@ This separate project compares apxchol with other sparse solvers using common in
 - Whole-cell deadlines may cover calibration and all repetitions: a timeout is **not**
   a lower bound on one solve. Preserve failure, nonconvergence, timeout, unsupported,
   unattempted and missing statuses. Unknown memory is not zero.
-- Pin CPU affinity; record requested/effective threads, placement, source/binary hashes, compiler/runtime, warmups and retained receipts. See [threads and placement](../README.md#threads-and-placement). Never poll `nvidia-smi` inside timed C++ or ParAC calls.
+- Pin CPU affinity; record requested/effective threads, placement, source/binary hashes, compiler/runtime, warmups and retained receipts. See [threads and placement](../README.md#threads-and-placement).
+- Measure GPU memory in separate runs: polling `nvidia-smi` during a timed C++ or ParAC call perturbs its setup.
 
 ## Solvers
 
@@ -87,7 +88,7 @@ includes generated hierarchy destruction. Build `benchmarks/cmg/native` with
 ```sh
 cmake -S benchmarks -B benchmarks/build -DCMAKE_BUILD_TYPE=Release
 cmake --build benchmarks/build -j6 --target benchmark
-python3 benchmarks/sweep_fair.py --threads 72 --store results/cells
+python3 benchmarks/sweep_fair.py --threads N --store results/cells
 ```
 
 For CUDA, use a separate build directory and add `-DAPXCHOL_DEVICE=CUDA
@@ -148,11 +149,11 @@ Publication requires an explicitly selected, audited store:
 
 ```sh
 PYTHONPATH=benchmarks python3 benchmarks/render_snapshot.py \
-  --cells STORE --out OUTPUT --threads 72 --platform Daint --sampler-comparison
+  --cells STORE --out OUTPUT --threads N --platform NAME --sampler-comparison
 PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compact \
   --store SCALING_STORE --matrices grid_2000,iter0040,as-Skitter \
   --series 'apxchol bg+tree,apxchol trace-cycle,AMGCL,BoomerAMG,ParAC' \
-  --thread-counts 1,2,4,8,16,36,72 --out results/plots
+  --thread-counts 1,2,4,8,16 --out results/plots
 ```
 
 Add `--fill-cells FILL_STORE` to include the explicit factor-fill observations.
