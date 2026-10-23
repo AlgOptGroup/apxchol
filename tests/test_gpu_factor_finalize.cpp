@@ -314,7 +314,9 @@ TEST(GpuFactorFinalize, PreconditionerInstallsAndReplacesOwnedCapsules) {
             ASSERT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
             ASSERT_EQ(factor.L.rows(), 64);
             EXPECT_EQ(preconditioner.trsv().fp16(), storage == apxchol::factor_storage_type::fp16);
-            if (!factor.sddm) EXPECT_EQ(factor.L.vals_[factor.L.outer_[63]], 1.0f);
+            if (!factor.sddm) {
+                EXPECT_EQ(factor.L.vals_[factor.L.outer_[63]], 1.0f);
+            }
         }
     }
 }

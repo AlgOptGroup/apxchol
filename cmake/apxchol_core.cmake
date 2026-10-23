@@ -54,6 +54,9 @@ function(apxchol_configure_core target)
     )
 
     if (APXCHOL_DEVICE STREQUAL "CUDA")
+        # nvcc's serial host pass also parses OpenMP pragmas in shared headers.
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-Xcompiler=-Wno-unknown-pragmas>")
         target_sources(${target} PRIVATE ${root}/src/cuda_dataflow.cu
             ${root}/src/cuda_block_frontend.cu ${root}/src/cuda_round_shadow.cu ${root}/src/cuda_pcg_kernels.cu)
         target_compile_definitions(${target} PUBLIC APXCHOL_USE_CUDA)

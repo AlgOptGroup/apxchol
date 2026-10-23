@@ -1,18 +1,17 @@
 # Pick the compiler flag that means "tune for the machine we are building on".
 #
 # `-march=native` is the x86 spelling. On aarch64 the ISA spelling is
-# `-mcpu=native`, and clang/aarch64 ACCEPTS `-march=native` while silently
-# falling back to `-target-cpu generic` — so an ARM clang build passing
-# `-march=native` is untuned, and any number taken from it is measuring the wrong
-# binary. Ask for `-mcpu=native` first on ARM. (Whether GCC/aarch64 also rejects
-# `-march=native` is NOT established here — our own Daint builds used it — which
-# is why both candidates are probed rather than assumed.)
+# `-mcpu=native`; clang/aarch64 accepts `-march=native` but silently falls back
+# to `-target-cpu generic`, producing an untuned binary. So ARM tries
+# `-mcpu=native` first and other targets try `-march=native` first; the second
+# spelling is only a fallback.
 #
 # The flags are probed, not assumed: a toolchain that accepts neither (a cross
 # build, an exotic target) gets no tuning flag rather than a hard failure.
 #
 # Sets APXCHOL_NATIVE_ARCH_FLAG to the flag to use, or to "" if there is none.
-# Included by both the root project and the separate benchmarks/ project.
+# Included through cmake/apxchol_arch.cmake by the root, Python and benchmark
+# projects.
 
 include_guard(GLOBAL)
 include(CheckCXXCompilerFlag)
