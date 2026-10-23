@@ -4,8 +4,7 @@ representative matrices, then emit total/setup/solve speedup charts and a
 portable CSV. Cells go to results/scaling_cells/ (separate from the fair cells).
 Run from repo root, ALONE: python3 benchmarks/thread_scaling.py
 """
-import argparse, csv, json, math, os, re, subprocess, time
-import chart_cells
+import argparse, csv, json, math, os, pathlib, re, subprocess, time
 
 from sweep_fair import UNKNOWN_TOOLCHAIN
 import parac_runner as parac
@@ -90,49 +89,58 @@ def emit(mid, family, lab, solver, config, t, m, status, prov=None):
 def done(mid, solver, config, t):
     tag = _cell_tag(solver, config)
     p = f"{CELLS}/{mid}__{tag}__t{t}{'__gpu' if DEVICE == 'gpu' else ''}.json"
-    if not os.path.exists(p):
+    try:
+        with open(p) as handle:
+            record = json.load(handle)
+    except (OSError, json.JSONDecodeError):
         return False
-    with open(p) as handle:
-        record = json.load(handle)
-    if record.get("schema") != SCALING_SCHEMA:
+    if (not rc.cell_is_current(record, PROV.get("git_sha"))
+            or record.get("schema") != SCALING_SCHEMA):
         return False
-    provenance = record.get("provenance", {})
+    expected = {"matrix_id": mid, "solver": solver, "config": config,
+                "threads": t, "device": DEVICE}
+    if any(record["cell"].get(key) != value for key, value in expected.items()):
+        return False
+    provenance = record["provenance"]
     if any(provenance.get(key) != PROV.get(key) for key in
-           ("git_sha", "repeat", "warmup", "timing_protocol")):
+           ("repeat", "warmup", "timing_protocol")):
         return False
-    status = record.get("status")
-    if status in {"complete", "not_converged"} and (record.get("metrics") or {}).get("stop_contract") != "original-v1":
-        return False
-    if (solver == "apxchol_v1" and status in {"complete", "not_converged"}
-            and (record.get("metrics") or {}).get("execution_route") != DEVICE):
-        return False
-    if status == "timeout" and not record.get("timeout_cap_s"):
-        return False
+    status = record["status"]
     return status not in RERUN_STATUSES and status in (
         "complete", "not_converged", "timeout", "failed", "oom", "n/a")
 
 
 def _scaling_records():
-    """Load only records that satisfy the current publication schema."""
-    entries, _ = chart_cells.load_current_entries(
-        CELLS,
-        pattern="*.json",
-        include=lambda record: (record.get("cell", {}).get("device", "cpu") == DEVICE
-            and (not SCOPE_FILTER or (record.get("cell", {}).get("matrix_id") in {m[0] for m in MATS}
-                 and (record.get("cell", {}).get("solver"), record.get("cell", {}).get("config", ""))
-                 in {(solver, config) for _, solver, config in CPP + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])}))),
-        stale_policy="reject",
-        source="thread_scaling render/export input",
-    )
+    """Require the selected source revision, measurement contract and scaling
+    schema for every record in this exact-denominator input."""
+    wanted = {(solver, config) for _, solver, config in
+              CPP + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])}
+    matrices = {m[0] for m in MATS}
     records = []
-    for entry in entries:
-        filename, record = str(entry.path), entry.record
+    for path in sorted(pathlib.Path(CELLS).glob("*.json")):
+        filename = str(path)
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"invalid JSON cell {filename}: {error}") from error
+        if not isinstance(record, dict) or "cell" not in record or "status" not in record:
+            continue
+        cell = record.get("cell", {})
+        if not isinstance(cell, dict):
+            raise RuntimeError(f"invalid cell identity in {filename}")
+        if cell.get("device", "cpu") != DEVICE:
+            continue
+        if SCOPE_FILTER and (cell.get("matrix_id") not in matrices or
+                             (cell.get("solver"), cell.get("config", "")) not in wanted):
+            continue
+        if not rc.cell_is_current(record, PROV.get("git_sha")):
+            raise RuntimeError(
+                f"cell {filename} does not meet the measurement contract "
+                f"for source revision {PROV.get('git_sha')}")
         if record.get("schema") != SCALING_SCHEMA:
             raise RuntimeError(
                 f"stale scaling schema in {filename}: "
                 f"{record.get('schema')!r} != {SCALING_SCHEMA}")
-        if record.get("status") == "timeout" and not record.get("timeout_cap_s"):
-            raise RuntimeError(f"timeout without exact cap in {filename}")
         records.append((filename, record))
     return records
 

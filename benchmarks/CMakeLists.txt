@@ -23,18 +23,10 @@ include(FetchContent)
 # ── Path to benchmark sources ────────────────────────
 set(BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# ── Legacy v0 baseline sources (graphs, simple_solver, mmio) ──
-set(ARCHIVE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
-set(ARCHIVE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/v0)
-
-# ── Core library (legacy v0 solver) ───────────────────
-add_library(laplacian_core STATIC
-    ${ARCHIVE_SRC}/graphs.cpp
-    ${ARCHIVE_SRC}/simple_solver.cpp
-    ${ARCHIVE_SRC}/mmio.cpp
-)
-target_link_libraries(laplacian_core PUBLIC Eigen3::Eigen)
-target_include_directories(laplacian_core PUBLIC ${ARCHIVE_INCLUDE})
+# ── Matrix input and graph generators shared by the harness ──
+add_library(bench_input STATIC ${BENCH_SRC}/graphs.cpp ${BENCH_SRC}/mmio.cpp)
+target_link_libraries(bench_input PUBLIC Eigen3::Eigen)
+target_include_directories(bench_input PUBLIC ${BENCH_SRC})
 
 # ══════════════════════════════════════════════════════
 # External solver dependencies (all fetched at configure time)
@@ -453,7 +445,7 @@ find_package(Boost CONFIG QUIET)
 # Benchmark executable
 # ══════════════════════════════════════════════════════
 add_executable(benchmark src/benchmark.cpp)
-target_link_libraries(benchmark PRIVATE laplacian_core rchol_lib apxchol_v1)
+target_link_libraries(benchmark PRIVATE bench_input rchol_lib apxchol_v1)
 target_include_directories(benchmark PRIVATE ${AMGCL_INCLUDE})
 target_compile_definitions(benchmark PRIVATE HAVE_RCHOL HAVE_APXCHOL_V1)
 target_compile_features(benchmark PRIVATE cxx_std_23)
@@ -549,6 +541,7 @@ function(test_solver_rejection name solver)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_solver_rejection.cmake)
 endfunction()
 test_solver_rejection(contract_rejects_unknown_solver unknown_solver)
+test_solver_rejection(contract_rejects_retired_solver apxchol)
 test_solver_rejection(contract_rejects_no_solver none)
 test_solver_rejection(contract_all_rejects_unknown_solver "all,unknown_solver")
 add_test(NAME contract_rejects_retired_storage
@@ -581,5 +574,5 @@ add_test(NAME contract_original_stopping COMMAND original_stop_tests)
 
 add_executable(split_components_tests tests/test_split_components.cpp)
 target_compile_features(split_components_tests PRIVATE cxx_std_23)
-target_link_libraries(split_components_tests PRIVATE laplacian_core apxchol_v1 ${CMAKE_DL_LIBS})
+target_link_libraries(split_components_tests PRIVATE bench_input apxchol_v1 ${CMAKE_DL_LIBS})
 add_test(NAME contract_split_components COMMAND split_components_tests)

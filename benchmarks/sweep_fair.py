@@ -2,9 +2,9 @@
 """Single fair runner for ALL matrix families (grids + SuiteSparse + IPM), on
 either device (--device cpu | gpu). Both write the SAME per-cell JSON store
 (results/cells/<family>/<mid>__<solver>__<cfg>__t16__<device>.json) and are
-RESUME-SAFE: a reusable terminal cell is skipped, while a terminal cell invalidated
-by the current stale rules is re-run and replaced only after its runner finishes.
-fair_charts.py / gpu_charts.py / combined_charts.py all read this one store.
+RESUME-SAFE: a terminal cell from this revision under the current contract is
+skipped; any other cell is re-run and replaced only after its runner finishes
+(runner_common.cell_is_current).
 
 Every matrix DECLARES how it is to be read (runner_common: kind=graph|operator),
 and the binary requires that declaration on the command line — nothing here
@@ -46,10 +46,9 @@ CSV parse, VRAM sidecar) lives in runner_common.py. Schema-2 timeout cells persi
 the exact wall-clock cap as `timeout_cap_s`; the charting pipeline never reconstructs
 that lower bound from later timings.
 """
-import argparse, contextlib, json, os, re, shlex, shutil, subprocess, sys, time
+import argparse, json, os, re, shlex, shutil, subprocess, sys, time
 
 import runner_common as rc
-import stale_cells
 import parac_runner
 import cmg_matlab_runner
 from runner_common import BIN, CELLS, matrix_args, sh
@@ -396,20 +395,18 @@ def run_parac(mid):
 
 _CMG_STATE = {"probed": False, "ok": False, "why": ""}
 
-def run_cmg(mid):
-    """CMG (canonical MATLAB CMG in the matlab-deps container), in-process via
-    cmg_matlab_runner — resume-safe, and it emits its own cell.
-
-    Availability (MATLAB tree + cmg-solver checkout + container image) is probed
-    ONCE per sweep. On a machine without them the sweep says so in one line
-    naming exactly what is missing, instead of failing 27 times."""
+def cmg_preflight():
+    """Report an unavailable CMG adapter once, before starting the sweep."""
     if not _CMG_STATE["probed"]:
         _CMG_STATE["ok"], _CMG_STATE["why"] = cmg_matlab_runner.available()
         _CMG_STATE["probed"] = True
         if not _CMG_STATE["ok"]:
             print(f"   {'cmg':24} UNAVAILABLE — no cmg cells this run: {_CMG_STATE['why']}",
                   flush=True)
-    if not _CMG_STATE["ok"]:
+    return _CMG_STATE["ok"]
+
+def run_cmg(mid):
+    if not cmg_preflight():
         return
     try:
         print(f"   {'cmg':24} {cmg_matlab_runner.run_one(mid)}", flush=True)
@@ -490,79 +487,16 @@ def planned_cell_count(matrices, device):
         total += 1 if RUN_CMG else 0
     return total
 
-def _stored_cell(family, mid, solver, config, threads, device):
-    """Load the cell at one exact key, rejecting malformed/mismatched records."""
-    path = rc.cell_path(family, mid, solver, config, threads, device)
-    try:
-        with open(path) as handle:
-            cell = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(cell, dict) or not isinstance(cell.get("cell"), dict):
-        return None
-    expected = {
-        "family": family,
-        "matrix_id": mid,
-        "solver": solver,
-        "config": config,
-        "threads": threads,
-        "device": device,
-    }
-    if any(cell["cell"].get(key) != value for key, value in expected.items()):
-        return None
-    matrix = rc.MATRICES.get(mid, {})
-    if "input_sha256" in matrix:
-        expected_meta = rc.matrix_meta_for(mid)
-        actual_meta = cell.get("matrix_meta") or {}
-        if not isinstance(actual_meta, dict):
-            return None
-        for key in ("input_sha256", "input_manifest_sha256", "kind", "class"):
-            if actual_meta.get(key) != expected_meta.get(key):
-                return None
-    return cell
-
-
-def stored_cell_done(family, mid, solver, config, threads, device,
-                     terminal=rc.DEFAULT_TERMINAL, *, rerun_timeouts=False):
-    """Whether one stored cell is terminal, well-formed, and still reusable."""
-    cell = _stored_cell(family, mid, solver, config, threads, device)
-    if cell is None:
-        return False
-    st = cell.get("status")
-    # --no-cap: a previously CLAMPED 'timeout' cell is NOT terminal -- re-run it
-    # uncapped for an honest wall time. complete/oom/failed stay terminal (no point).
-    if rerun_timeouts and st == "timeout":
-        return False
-    if st not in terminal:
-        return False
-    return not stale_cells.cell_is_stale(cell)
-
-
 def cell_done(family, mid, solver, config):
-    return stored_cell_done(
+    return rc.cell_done(
         family, mid, solver, config, THREADS, DEVICE,
         terminal=rc.DEFAULT_TERMINAL, rerun_timeouts=NO_CAP,
     )
 
 
-@contextlib.contextmanager
-def _stale_aware_embedded_resume():
-    """Give direct-emitting embedded runners the same stale-aware done check.
-
-    ParAC and CMG call ``runner_common.cell_done`` internally. Patch that read-only
-    decision only while a fair sweep is running, and always restore it afterward;
-    importing this module therefore changes no shared runner state.
-    """
-    original = rc.cell_done
-    rc.cell_done = stored_cell_done
-    try:
-        yield
-    finally:
-        rc.cell_done = original
-
 def cell_metrics(family, mid, solver, config):
     """(status, metrics) from an existing cell, or (None, None)."""
-    cell = _stored_cell(family, mid, solver, config, THREADS, DEVICE)
+    cell = rc.stored_cell(family, mid, solver, config, THREADS, DEVICE)
     return ((cell.get("status"), cell.get("metrics"))
             if cell is not None else (None, None))
 
@@ -587,10 +521,10 @@ def gpu_apx_total(family, mid):
     This is intentionally one fixed configuration, not the fastest selector in the
     store. None means the CPU pass must fall back to the same declared default on
     its own device."""
-    cell = _stored_cell(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG,
+    cell = rc.stored_cell(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG,
                         THREADS, "gpu")
     if (cell is not None and cell.get("status") == "complete"
-            and not stale_cells.cell_is_stale(cell)):
+            and rc.cell_is_current(cell, rc.git_sha())):
         return cell.get("metrics", {}).get("total_s")
     return None
 
@@ -705,10 +639,8 @@ def main():
     ap.add_argument("--no-parac", action="store_true",
                     help="skip ParAC (run in-process via parac_runner.py).")
     ap.add_argument("--no-cmg", action="store_true",
-                    help="skip CMG (canonical MATLAB CMG in the matlab-deps container, run "
-                         "in-process via cmg_matlab_runner.py). It is skipped automatically "
-                         "on --device gpu (serial MATLAB) and on a machine where MATLAB, the "
-                         "cmg-solver checkout or the container image is missing.")
+                    help="skip the retained CMG adapter, currently unavailable for "
+                         "shared original-operator/RHS comparisons.")
     ap.add_argument("--parac-only", action="store_true",
                     help="run ONLY ParAC (skip apxchol / competitors / AC); for filling the "
                          "ParAC giant-matrix cells without touching the rest.")
@@ -743,6 +675,8 @@ def main():
     if a.no_cap: NO_CAP = True
     # CMG is serial MATLAB: it has no GPU axis, so its cells are device=cpu only.
     if a.no_cmg or DEVICE == "gpu": RUN_CMG = False
+    if RUN_CMG:
+        cmg_preflight()
     if DEVICE == "cpu" and JULIA:
         julia_ok, julia_reason = julia_preflight()
         if not julia_ok:
@@ -764,8 +698,7 @@ def main():
               "(needs: julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').",
               flush=True)
     if not RUN_CMG and DEVICE == "cpu":
-        print("    NOTE: CMG is OFF -> its cells stay empty. Fill them with "
-              "`python3 benchmarks/cmg_matlab_runner.py`.", flush=True)
+        print("    NOTE: CMG is OFF; no CMG cells are planned.", flush=True)
     # Resume-safe: reusable terminal cells skip; stale terminal cells rerun while
     # their old JSON stays in place until the replacement runner has finished.
     # MATRICES is the canonical, named registry view; do not unpack the backing
@@ -773,10 +706,9 @@ def main():
     selected = list(selected_matrices(fams, only))
     print(f"    planned denominator: {planned_cell_count(selected, DEVICE)} cells "
           f"across {len(selected)} matrices", flush=True)
-    with _stale_aware_embedded_resume():
-        for mid, matrix in selected:
-            do_matrix(mid, matrix["family"], matrix["source"], matrix["spec"],
-                      matrix["is2d"], matrix["n"], None)
+    for mid, matrix in selected:
+        do_matrix(mid, matrix["family"], matrix["source"], matrix["spec"],
+                  matrix["is2d"], matrix["n"], None)
     print("FAIR sweep done")
 
 if __name__=="__main__":
