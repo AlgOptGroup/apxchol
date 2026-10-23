@@ -333,6 +333,50 @@ TEST(Solver, CpuExitCheckPreservesSmallComponentsAndOverflowingNorms) {
     }
 }
 
+TEST(Solver, CpuExitCheckReducesStridedPanelsAcrossWorkerTeams) {
+    // Cross both platform-specific SpMV team thresholds. Budget zero isolates
+    // the exit check, including panel tails and columns requiring stable norms.
+    constexpr Eigen::Index n = 33001;
+    using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+    using View = Eigen::Map<Eigen::MatrixXd, 0, Stride>;
+    for (int workers : {1, 4}) {
+        const scoped_omp_threads threads(workers);
+        for (double diagonal : {1.0, 1.1}) {
+            Sparse matrix(n, n);
+            matrix.setIdentity();
+            matrix *= diagonal;
+            const apxchol::cpu_solver owner(matrix, cpu_options());
+            for (int columns : {1, 4, 17}) {
+                Eigen::MatrixXd rhs(n, columns), guess(n, columns), output(n, columns);
+                for (int c = 0; c < columns; ++c) {
+                    const double scale[] = {1.0, 1e-160, 1e160, 0.0};
+                    rhs.col(c) = scale[c % 4] * Eigen::VectorXd::LinSpaced(n, 1.0, 2.0);
+                    guess.col(c) = (c % 5 == 0 ? 1.0 : 0.25) * rhs.col(c) / diagonal;
+                }
+                const apxchol::const_matrix_view initial(guess);
+                for (int row_stride : {2, -2}) {
+                    Eigen::MatrixXd stored = Eigen::MatrixXd::Constant(2 * n, columns, 91.0);
+                    const Eigen::Index offset = row_stride < 0 ? 2 * n - 2 : 0;
+                    View strided(stored.data() + offset, n, columns, Stride(2 * n, row_stride));
+                    strided = rhs;
+                    const auto result = owner.solve(strided, output, 1e-8, 0, &initial);
+                    for (int c = 0; c < columns; ++c) {
+                        SCOPED_TRACE(::testing::Message() << workers << ' ' << diagonal
+                                     << ' ' << columns << ' ' << row_stride << ' ' << c);
+                        const double expected = rhs.col(c).isZero(0.0) ? 0.0
+                            : (rhs.col(c) - diagonal * guess.col(c)).stableNorm()
+                                / rhs.col(c).stableNorm();
+                        EXPECT_NEAR(result.columns[c].residual, expected, 1e-13);
+                        EXPECT_EQ(result.columns[c].converged, expected < 1e-8);
+                        EXPECT_EQ(result.columns[c].iterations, 0);
+                        EXPECT_TRUE((output.col(c).array() == guess.col(c).array()).all());
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();

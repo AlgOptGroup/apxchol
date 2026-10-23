@@ -294,38 +294,48 @@ bool copy_symmetric_csc_as_owned_csr(
 using detail::omp_ids;
 
 // RHS lanes are contiguous within a row. Scalar calls use the same loops with C=1.
-template <int C, class S>
-std::array<double, C> panel_spmv(const Eigen::SparseMatrix<S, Eigen::RowMajor> &A, const double *x,
-                                 double *y, double *part) {
+template <int C, int R, class S, class Entry>
+std::array<double, R> panel_spmv_reduce(const Eigen::SparseMatrix<S, Eigen::RowMajor> &A,
+                                      const double *x, double *y, double *part, Entry entry) {
+    constexpr int stride = std::max(R, detail::kPartStride);
     const Eigen::Index n = A.rows();
     const auto *ptr = A.outerIndexPtr();
     const auto *col = A.innerIndexPtr();
     const auto *val = A.valuePtr();
     int nt_used = 1;
     const int workers = detail::cpu_spmv_threads(n, ptr[n] - ptr[0]);
-#pragma omp parallel if (workers > 1) num_threads(workers)
+#pragma omp parallel if (workers > 1) num_threads(workers) firstprivate(entry)
     {
         int tid, nt;
         detail::omp_ids(tid, nt);
         if (tid == 0)
             nt_used = nt;
         const auto [lo, hi] = detail::work_balanced_range(ptr, n, tid, nt);
-        std::array<double, C> xy{};
+        std::array<double, R> reduced{};
         for (Eigen::Index i = lo; i < hi; i++) {
             const auto sum = detail::sparse_row_product<C>(col, val, ptr[i], ptr[i + 1],
                 [x](int row, int q) { return x[Eigen::Index(row) * C + q]; });
-            for (int q = 0; q < C; q++) {
+            for (int q = 0; q < C; q++)
                 y[i * C + q] = sum[q];
-                xy[q] += x[i * C + q] * sum[q];
-            }
+            entry(i, x + i * C, sum, reduced);
         }
-        for (int q = 0; q < C; q++)
-            part[std::size_t(tid) * detail::kPartStride + q] = xy[q];
+        for (int q = 0; q < R; q++)
+            part[std::size_t(tid) * stride + q] = reduced[q];
     }
-    std::array<double, C> xy{};
-    for (int q = 0; q < C; q++)
-        xy[q] = detail::reduce_parts(part, nt_used, q);
-    return xy;
+    std::array<double, R> reduced{};
+    for (int q = 0; q < R; q++)
+        reduced[q] = detail::reduce_parts(part, nt_used, q, stride);
+    return reduced;
+}
+
+template <int C, class S>
+std::array<double, C> panel_spmv(const Eigen::SparseMatrix<S, Eigen::RowMajor> &A, const double *x,
+                                 double *y, double *part) {
+    return panel_spmv_reduce<C, C>(A, x, y, part,
+        [](Eigen::Index, const double* input, const std::array<double, C>& product,
+           std::array<double, C>& xy) {
+            for (int q = 0; q < C; q++) xy[q] += input[q] * product[q];
+        });
 }
 
 // Transform four rows together, then accumulate their squared norms and sums.
@@ -635,16 +645,29 @@ void cpu_solver::check_solution(const_matrix_view B, const double* x,
                                 double tol) const {
     if (opts_.collect_timings) { timings.descend("pcg"); timings.tick(); }
     auto* product = Ap_.data();
-    if (op_fp32_) (void)panel_spmv<C>(Lrm_f_, x, product, part_.data());
-    else         (void)panel_spmv<C>(Lrm_, x, product, part_.data());
     using Panel = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     Eigen::Map<Panel> residual(r_.data(), n_, C);
     const Eigen::Map<const Panel> Ax(product, n_, C);
-    const int workers = detail::cpu_solve_threads(n_);
-#pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-    for (Eigen::Index i = 0; i < n_; ++i)
-        for (int c = 0; c < C; ++c) residual(i, c) = B(i, c) - Ax(i, c);
+    // Recompute the original-system residual and both norms during SpMV.
+    // Retain Ax and r for the stable fallback when squared norms under/overflow.
+    const auto entry = [&](Eigen::Index i, const double*, const std::array<double, C>& row,
+                           std::array<double, 2 * C>& squares) {
+        for (int c = 0; c < C; ++c) {
+            const double b = B(i, c), r = b - row[c];
+            residual(i, c) = r;
+            squares[2 * c] += b * b;
+            squares[2 * c + 1] += r * r;
+        }
+    };
+    const auto squares = op_fp32_
+        ? panel_spmv_reduce<C, 2 * C>(Lrm_f_, x, product, part_.data(), entry)
+        : panel_spmv_reduce<C, 2 * C>(Lrm_, x, product, part_.data(), entry);
     for (int c = 0; c < C; ++c) {
+        if (std::isnormal(squares[2 * c]) && std::isnormal(squares[2 * c + 1])) {
+            results[c].residual = std::sqrt(squares[2 * c + 1]) / std::sqrt(squares[2 * c]);
+            results[c].converged = results[c].residual < tol;
+            continue;
+        }
         const detail::gpu_scaling::norm_reference reference(B.col(c));
         double relative = reference.value == 0
             ? (residual.col(c).isZero(0.0) ? 0.0 : std::numeric_limits<double>::infinity())
