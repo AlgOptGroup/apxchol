@@ -16,7 +16,6 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -1425,13 +1424,12 @@ void copy_to_host(T* destination, const T* source, std::size_t count,
 
 class cub_workspace {
 public:
-    // Without fit, storage is a preflighted fixed capacity. With fit, storage
-    // grows to a call's exact query once fit(bytes) accepts the new capacity;
-    // growth releases the old capacity first.
+    // Without a preflight, storage has fixed capacity. Otherwise, it grows
+    // to each call's exact query after checking available memory.
     cub_workspace(device_buffer<std::byte>& storage,
                   device_buffer<int>& count,
-                  std::function<void(std::size_t)> fit = {})
-        : storage_(storage), count_(count), fit_(std::move(fit)) {}
+                  staged_preflight* preflight = nullptr)
+        : storage_(storage), count_(count), preflight_(preflight) {}
 
     template<class Input, class T>
     int select(Input input, const std::uint8_t* flags, T* output,
@@ -1481,10 +1479,10 @@ private:
         std::size_t bytes = 0;
         cuda_check(operation(nullptr, bytes, n), what);
         if (bytes > storage_.count()) {
-            if (!fit_)
+            if (!preflight_)
                 throw std::logic_error(
                     "GPU round shadow: preflight underestimated CUB workspace");
-            fit_(bytes);
+            preflight_->require(bytes, "CUB workspace growth");
             storage_.reset("replace CUB workspace");
             storage_.allocate(bytes, "grow CUB workspace");
         }
@@ -1493,7 +1491,7 @@ private:
 
     device_buffer<std::byte>& storage_;
     device_buffer<int>& count_;
-    std::function<void(std::size_t)> fit_;
+    staged_preflight* preflight_;
 };
 
 #include "cuda_owned_sparsify.cuh"
@@ -1896,9 +1894,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     // Staged preflight; a preserved growth keeps its old capacity resident.
     staged_preflight preflight(tracker, "GPU round shadow: ");
-    const auto require_fit = [&](std::size_t additional, const char* stage) {
-        preflight.require(additional, stage);
-    };
     // Bytes that ensure_state_buffer/prepare allocate for count elements.
     const auto growth = [](const auto& buffer, std::size_t count) {
         return buffer.count() < count
@@ -1918,7 +1913,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     auto& common = owned_common_scratch;
     const std::size_t factor_column_required = factor_column_count + p;
-    require_fit(sum({
+    preflight.require(sum({
         factor_columns.count() < factor_column_required
             ? bytes_of(std::max<std::size_t>(n, factor_column_required),
                        sizeof(gpu_round_shadow_factor_column))
@@ -2002,8 +1997,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             "GPU round shadow: common allocations exceeded the preflight plan");
 
     // CUB scratch grows to each call's exact query; the capacity is retained.
-    cub_workspace cub(cub_temp, selected_count,
-                      [&](std::size_t bytes) { require_fit(bytes, "CUB workspace growth"); });
+    cub_workspace cub(cub_temp, selected_count, &preflight);
     event_timer timer;
     const bool total_diagnostics = gpu_setup_diagnostics();
     cuda_event total_begin("create total start event", total_diagnostics);
@@ -2136,7 +2130,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         // The existing D2H completes all descriptor writes. Every batch
         // consumes at least one normal pivot, so B<=p (already CUB-bounded).
         normal_batch_count = static_cast<std::size_t>(report.normal_batch.batches);
-        require_fit(bytes_of(sort_g, sizeof(work_record)), "oversized gather");
+        preflight.require(bytes_of(sort_g, sizeof(work_record)), "oversized gather");
         second.allocate(sort_g, "allocate oversized gathered records");
         if (sort_g) {
             gather_oversized_raw<<<oversized_blocks, kBlock>>>(
@@ -2151,7 +2145,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     auto& keys_b = sort_keys_b;
     // Keep the original g capacity bound: excess reduction still needs keys for
     // the full canonical stream, even if no oversized row exists this round.
-    require_fit(sum({growth(keys_a, g), growth(keys_b, g),
+    preflight.require(sum({growth(keys_a, g), growth(keys_b, g),
                      bytes_of(sort_g, 3 * sizeof(work_record))}),
                 "neighbor deduplication");
     ensure_state_buffer(keys_a, g, "allocate radix keys A", "grow radix keys A");
@@ -2194,7 +2188,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     const std::size_t factor_entry_base = factor_entry_count;
     const std::size_t factor_entry_required = gpu_round_shadow_checked_add(
         factor_entry_base, u, "factor append entries");
-    require_fit(factor_entries.count() < factor_entry_required
+    preflight.require(factor_entries.count() < factor_entry_required
                     ? bytes_of(geometric_capacity(factor_entry_required),
                                sizeof(gpu_round_shadow_factor_entry))
                     : std::size_t{0},
@@ -2231,7 +2225,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                     u, sampler_components, "cycle sampler workspace")),
                 growth(cycle_plan_cut, p ? p : 1), growth(cycle_plan_state, p ? p : 1),
                 growth(cycle_status, 2)});
-        require_fit(sample_bytes, "fill sampling");
+        preflight.require(sample_bytes, "fill sampling");
     }
     device_buffer<std::byte> canonical(tracker);
     canonical.allocate(canonical_bytes, "allocate canonical neighbors and sampling scratch");
@@ -2434,7 +2428,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     auto& degrees = owned_degrees;
     // Survivors and directed fill share the input bound: s + 2f <= input is
     // checked below before any fill is appended.
-    require_fit(sum({bytes_of(std::max<std::size_t>(input_count, 1),
+    preflight.require(sum({bytes_of(std::max<std::size_t>(input_count, 1),
                               sizeof(gpu_round_shadow_incidence)),
                      growth(degrees, n)}), "residual mutation");
     residual.allocate(std::max<std::size_t>(input_count, 1),
@@ -2486,7 +2480,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     const std::size_t directed_fill = gpu_round_shadow_checked_mul(
         f, 2, "directed fill owner sort");
-    require_fit(sum({growth(this->residual(next_slot), std::max<std::size_t>(l, 1)),
+    preflight.require(sum({growth(this->residual(next_slot), std::max<std::size_t>(l, 1)),
                      growth(keys_a, directed_fill), growth(keys_b, directed_fill)}),
                 "residual publication");
     ensure_state_buffer(
@@ -2576,14 +2570,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         throw std::logic_error(
             "GPU round shadow: actual peak exceeded the preflight plan");
 
-    // The synchronous semantic download completed every degree consumer.
-    // Retire scratch on the last round before factor installation; no selector
-    // borrows degrees. A failed release is still covered by the generation
-    // guard and the existing device-aware state teardown.
-    // Elimination is complete: release the round-only state before factor
-    // finalization and fit the factor-entry log to its final size. The empty
-    // published residual keeps its active/excess/offset view; any later round
-    // reallocates what it needs through the usual growth paths.
+    // The semantic download completed every scratch consumer. On the last
+    // round, release scratch and compact the factor log before finalization,
+    // retaining the active/excess/offset view for the empty published residual.
     if (report.active_count == 0 && l == 0) {
         owned_degrees.reset("release completed owned degrees");
         owned_common_scratch.release();
