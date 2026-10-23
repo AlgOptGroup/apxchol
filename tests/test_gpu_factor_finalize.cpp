@@ -213,6 +213,9 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 }
                 EXPECT_EQ(fixture.state.encode_finalized_factor_for_test(*factor), expected);
                 EXPECT_EQ(retained.state.encode_finalized_factor_for_test(*retained_factor), expected);
+                complete_factor consumed(n, edges, order);
+                auto consumed_factor = consumed.state.finalize_device_factor(reference.perm, m, requested, true);
+                EXPECT_EQ(consumed.state.encode_finalized_factor_for_test(*consumed_factor), expected);
                 adopted.setup_adopting_device_factor_for_research(std::move(*factor), requested);
                 EXPECT_EQ(adopted.fp16(), std::string_view(fp16) == "float16");
                 const auto& want = ordinary.drop_stats(); const auto& got = adopted.drop_stats();

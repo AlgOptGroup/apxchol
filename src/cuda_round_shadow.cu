@@ -2158,7 +2158,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     ensure_state_buffer(keys_b, g, "allocate radix keys B", "grow radix keys B");
     first.allocate(sort_g, "allocate sorted gathered records");
     device_buffer<work_record> candidates(tracker);
-    flags.allocate(sort_g, "allocate dedup flags");
     candidates.allocate(sort_g, "allocate dedup candidates");
     oversized_unique.allocate(sort_g, "allocate oversized unique neighbors");
 
@@ -2264,7 +2263,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     // unique <= gathered, so the existing key capacity already covers this
     // stage and its excess-update sorts without another allocation.
     device_buffer<work_record> fills(tracker);
-    flags.allocate(u, "allocate sample flags");
     if (sampler_components) {
         ensure_state_buffer(cycle_workspace, gpu_round_shadow_checked_mul(u, sampler_components,
             "cycle sampler workspace"), "allocate cycle sampler moments", "grow cycle sampler moments");
@@ -2434,7 +2432,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     device_buffer<gpu_round_shadow_incidence> residual(tracker);
     auto& degrees = owned_degrees;
-    flags.allocate(input_count, "allocate surviving-incidence flags");
     // Survivors and directed fill share the input bound: s + 2f <= input is
     // checked below before any fill is appended.
     require_fit(sum({bytes_of(std::max<std::size_t>(input_count, 1),
